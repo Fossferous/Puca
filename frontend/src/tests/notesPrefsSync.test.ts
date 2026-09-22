@@ -1,5 +1,6 @@
 /**
- * Colour, labels and archive follow the account (notes/model/notesPrefsSync.ts).
+ * Colour, labels, archive and the four reminder times follow the account
+ * (notes/model/notesPrefsSync.ts).
  *
  * Two "devices" share one in-memory server that implements the real
  * compare-and-swap (src/sealed_blob_handlers.rs), and every document goes
@@ -18,8 +19,9 @@ import { makeIdentity, openAccountBlob, sealAccountBlob, type Identity } from '.
 import type { GetBlobResult, PutBlobResult, SealedBlobDoc } from '../api/sealedBlobs';
 import type { NotesNoteState } from '../notes/model/notesModel';
 const {
-    createPrefsSync, threeWayMerge, unionMerge, encodePrefsDoc, decodePrefsDoc, EMPTY_NOTE_STATE, sameNoteState,
+    createPrefsSync, threeWayMerge, unionMerge, mergeTimes, encodePrefsDoc, decodePrefsDoc, EMPTY_NOTE_STATE, sameNoteState,
 } = await import('../notes/model/notesPrefsSync');
+import { DEFAULT_REMINDER_TIMES, type ReminderTimes } from '../api/reminderTimes';
 type SyncRecord = import('../notes/model/notesPrefsSync').SyncRecord;
 
 const UID = 7;
@@ -374,5 +376,134 @@ describe('the envelope', () => {
         const text = encodePrefsDoc(1, { colors: {}, labels: {}, archived: {}, view: 'list', sort: 'title' } as unknown as NotesNoteState);
         expect(text).not.toContain('view');
         expect(text).not.toContain('sort');
+    });
+});
+
+// THE REMINDER TIMES ride in the same document. Two things have to hold or the
+// setting is worse than not shipping it: a changed time must actually PUSH
+// (sameNoteState is what decides that, and what a sign-out warns from), and a
+// document written by a build that predates the setting — which drops the key
+// on its own next write — must never be read as "the user cleared them".
+const times = (o: Partial<ReminderTimes>): ReminderTimes => ({ ...DEFAULT_REMINDER_TIMES, ...o });
+
+describe('the reminder times follow the account', () => {
+    it('a changed time is a difference worth pushing; the defaults are not', () => {
+        expect(sameNoteState(st({}), st({ times: DEFAULT_REMINDER_TIMES }))).toBe(true);
+        expect(sameNoteState(st({}), st({ times: times({ morning: '07:30' }) }))).toBe(false);
+        expect(sameNoteState(st({ times: times({ morning: '07:30' }) }), st({ times: times({ morning: '07:30' }) }))).toBe(true);
+    });
+
+    it('mergeTimes keeps what this device changed and takes the server for the rest', () => {
+        const base = times({});
+        const local = times({ morning: '07:30' });                    // we changed Morning
+        const server = times({ evening: '22:00', morning: '10:00' }); // they changed Evening (and Morning)
+        expect(mergeTimes(base, local, server)).toEqual(times({ morning: '07:30', evening: '22:00' }));
+        // A server that carries none changes nothing — and one absent locally
+        // (only possible from an old stored record) takes the server's.
+        expect(mergeTimes(base, local, undefined)).toEqual(local);
+        expect(mergeTimes(base, undefined, server)).toEqual(server);
+        expect(mergeTimes(undefined, undefined, undefined)).toBeUndefined();
+    });
+
+    it('a document that carries no times decodes as ABSENT, not as the defaults', async () => {
+        const withNone = encodePrefsDoc(1, st({ colors: { 'list:1': 'mint' } }));
+        expect(JSON.parse(withNone).prefs.times).toBeUndefined();
+        expect(decodePrefsDoc(withNone)!.state.times).toBeUndefined();
+        // Positive control: one that carries them decodes them.
+        const withSome = encodePrefsDoc(1, st({ times: times({ morning: '07:30' }) }));
+        expect(decodePrefsDoc(withSome)!.state.times).toEqual(times({ morning: '07:30' }));
+        // And a malformed times survives validation rather than throwing.
+        expect(decodePrefsDoc(JSON.stringify({ v: 1, rev: 1, prefs: { times: 'nope' } }))!.state.times).toBeUndefined();
+        // An OBJECT with not one usable field is unreadable too, not "the
+        // user chose the defaults": parsed it is all-defaults and would
+        // overwrite another device's real times on the fields it never
+        // carried.
+        expect(decodePrefsDoc(JSON.stringify({ v: 1, rev: 1, prefs: { times: { morning: 'x', evening: 25 } } }))!.state.times).toBeUndefined();
+        expect(decodePrefsDoc(JSON.stringify({ v: 1, rev: 1, prefs: { times: {} } }))!.state.times).toBeUndefined();
+        // Positive control: ONE usable field is a document that carries them,
+        // and the rest fall back to the defaults as they always did.
+        expect(decodePrefsDoc(JSON.stringify({ v: 1, rev: 1, prefs: { times: { morning: 'x', evening: '22:00' } } }))!.state.times)
+            .toEqual(times({ evening: '22:00' }));
+    });
+
+    it('a corrupt times does not overwrite another device’s real ones', async () => {
+        // The merge is what the decode protects: server.times absent means
+        // UNKNOWN, so the local value stands (and heals the document on the
+        // next push). Server.times present-and-default would win instead.
+        const base = times({ morning: '07:30' });
+        const local = times({ morning: '07:30' });
+        const corrupt = decodePrefsDoc(JSON.stringify({ v: 1, rev: 1, prefs: { times: { morning: 'half-typed' } } }))!.state.times;
+        expect(mergeTimes(base, local, corrupt)).toEqual(times({ morning: '07:30' }));
+        // Positive control: a READABLE server change to the same field wins,
+        // because this device did not touch it since `base`.
+        const real = decodePrefsDoc(JSON.stringify({ v: 1, rev: 1, prefs: { times: { morning: '10:00' } } }))!.state.times;
+        expect(mergeTimes(base, base, real)).toEqual(times({ morning: '10:00' }));
+    });
+
+    it('a time set on A reaches B', async () => {
+        const server = new FakeServer();
+        const a = device(server);
+        await a.sync.pull();
+        const b = device(server);
+        await b.sync.pull();
+
+        a.edit(s => ({ ...s, times: times({ morning: '07:30' }) }));
+        expect(await a.sync.push()).toBe('synced');
+        expect(await b.sync.pull()).toBe('synced');
+        expect(b.local.times).toEqual(times({ morning: '07:30' }));
+    });
+
+    it('a 409 replays a time change onto the newer document', async () => {
+        const server = new FakeServer();
+        const a = device(server);
+        await a.sync.pull();
+        const b = device(server);
+        await b.sync.pull();
+
+        b.edit(s => ({ ...s, colors: { 'list:1': 'mint' } }));
+        await b.sync.push();                                        // B gets in first
+        a.edit(s => ({ ...s, times: times({ evening: '22:00' }) }));
+        expect(await a.sync.push()).toBe('synced');                 // A conflicts, replays
+
+        const final = (await server.state())!;
+        expect(final.times).toEqual(times({ evening: '22:00' }));
+        expect(final.colors).toEqual({ 'list:1': 'mint' });          // and B's change survived
+    });
+
+    it('unsynced() is true when only a reminder time differs — a sign-out must warn', async () => {
+        const server = new FakeServer();
+        const a = device(server);
+        await a.sync.pull();
+        expect(a.sync.unsynced()).toBe(false);                       // positive control
+        a.edit(s => ({ ...s, times: times({ afternoon: '13:00' }) }));
+        expect(a.sync.unsynced()).toBe(true);
+        await a.sync.push();
+        expect(a.sync.unsynced()).toBe(false);
+    });
+
+    it('a document written by a build that does not know the times does NOT wipe them', async () => {
+        const server = new FakeServer();
+        const a = device(server, st({ times: times({ morning: '07:30' }) }));
+        await a.sync.pull();
+        expect((await server.state())!.times).toEqual(times({ morning: '07:30' }));
+
+        // An older Notes build pulls, drops what it cannot parse, and writes
+        // its own colour change back — a document with NO times at all.
+        server.doc = { rev: 9, blob: await sealAccountBlob(identity, UID, 'notes-prefs', encodePrefsDoc(9, st({ colors: { 'list:1': 'mint' } }))) };
+
+        expect(await a.sync.pull()).toBe('synced');
+        expect(a.local.times).toEqual(times({ morning: '07:30' }));  // kept, not reset
+        expect(a.local.colors).toEqual({ 'list:1': 'mint' });        // and the old build's change applied
+        expect((await server.state())!.times).toEqual(times({ morning: '07:30' }));   // healed on the way back
+    });
+
+    it('an account that never set a time keeps the document free of them', async () => {
+        const server = new FakeServer();
+        const a = device(server, st({ colors: { 'list:1': 'mint' } }));
+        await a.sync.pull();
+        server.doc = { rev: 9, blob: await sealAccountBlob(identity, UID, 'notes-prefs', encodePrefsDoc(9, st({ colors: { 'list:2': 'sage' } }))) };
+        const puts = server.puts;
+        expect(await a.sync.pull()).toBe('synced');
+        expect(server.puts).toBe(puts);                              // nothing to heal: no write at all
     });
 });

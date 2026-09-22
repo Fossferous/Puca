@@ -21,6 +21,7 @@ import {
  *  tree's own 24px per-level padding (TaskTree.css .tt-children), so the
  *  gesture distance IS the visual indent it produces. */
 const INDENT_PX = 24;
+import { DEFAULT_REMINDER_TIMES, REMINDER_PRESETS, presetInstant, type ReminderTimes } from '../api/reminderTimes';
 import { PERM, hasPerm } from '../api/permissionBits';
 import { encryptAndUploadRef } from '../api/attachments';
 import { ApiError } from '../api/client';
@@ -231,11 +232,17 @@ interface TaskTreeProps {
      *  view (which has no search) is untouched. Read-only rows only: the
      *  inline editor is a real input. */
     renderDescription?: (text: string) => ReactNode;
+    /** What Morning / Afternoon / Evening mean to this person, for the
+     *  one-tap row in the due editor. Notes passes the account's setting;
+     *  anywhere else falls back to 09:00 / 14:00 / 19:00, which is what the
+     *  product always did. */
+    reminderTimes?: ReminderTimes;
 }
 
 export function TaskTree({
     tasks, onToggle, onDelete, onDeleteSubtree, onEdit, onAddSubtask, onMove, onReorder, onSetDue, onSetSchedule, onSnooze, onSetAttachments,
     myPerms, currentUserId, resolveUserName, channelId, flashTaskId = null, renderDescription,
+    reminderTimes = DEFAULT_REMINDER_TIMES,
 }: TaskTreeProps) {
     const [showCompleted, setShowCompleted] = useState(true);
     const [subtaskFor, setSubtaskFor] = useState<number | null>(null);
@@ -373,6 +380,16 @@ export function TaskTree({
     // red live while the list is open. The reminder LOOP, not this component,
     // is what fires notifications.
     const now = useSyncExternalStore(subscribeHalfMinute, halfMinuteNow, halfMinuteNow);
+
+    /** One tap: the preset's next instant, set and closed. The date form is
+     *  never opened, which is the whole point on a phone. `now` is the
+     *  half-minute store above, not a bare Date.now() (an impure render
+     *  call); a preset is a wall-clock time, so 30s of staleness cannot
+     *  change which day it lands on by more than that boundary. */
+    const setDuePreset = (task: Task, time: string) => {
+        setDueFor(null);
+        onSetDue?.(task, new Date(presetInstant(time, now)).toISOString());
+    };
 
     const commitDue = (task: Task) => {
         setDueFor(null);
@@ -662,6 +679,15 @@ export function TaskTree({
             {renderRow(node.task, depth)}
             {dueFor === node.task.id && (
                 <div className="tt-due-edit">
+                    <div className="tt-due-presets" role="group" aria-label="Remind">
+                        {REMINDER_PRESETS.map(p => (
+                            <button key={p.value} type="button" className="tt-btn tt-due-preset"
+                                title={`${p.label} — ${reminderTimes[p.value]}`}
+                                onClick={() => setDuePreset(node.task, reminderTimes[p.value])}>
+                                {p.label}
+                            </button>
+                        ))}
+                    </div>
                     <input
                         type="datetime-local"
                         value={dueDraft}
@@ -695,6 +721,7 @@ export function TaskTree({
             {scheduleFor === node.task.id && onSetSchedule && (
                 <ScheduleEditor
                     task={node.task}
+                    times={reminderTimes}
                     onClose={() => setScheduleFor(null)}
                     onSave={(schedule, dueAt) => { setScheduleFor(null); onSetSchedule(node.task, schedule, dueAt); }}
                 />

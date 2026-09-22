@@ -1,6 +1,7 @@
 /**
  * Snooze for a reminder row (both Reminders views): 10 minutes, an hour, or
- * tomorrow at 09:00. The snooze record is sealed on the device; an editor's
+ * tomorrow at the person's own morning time (api/reminderTimes.ts — 09:00
+ * unless they changed it; Púca's own tab uses the standard one). The snooze record is sealed on the device; an editor's
  * snooze also moves the plaintext due_at to the snooze instant
  * (taskSchedule.snoozePatch, docs/SECURITY_MODEL.md §2). Only an item whose
  * reminder has a time on the server (due_at) can be snoozed: a private-timing
@@ -24,6 +25,7 @@ import './Reminders.css';
 import { type SnoozePreset, snoozeUntil } from '../../api/taskSchedule';
 import { type ReminderSlot } from '../../api/reminderSlots';
 import { type Task } from '../../api/tasks';
+import { DEFAULT_REMINDER_TIMES, type ReminderTimes } from '../../api/reminderTimes';
 import { CalendarIcon, RepeatIcon, SnoozeIcon } from '../Icons';
 
 const PRESETS: { value: SnoozePreset; label: string }[] = [
@@ -32,12 +34,14 @@ const PRESETS: { value: SnoozePreset; label: string }[] = [
     { value: 'tomorrow', label: 'Tomorrow' },
 ];
 
-export function SnoozeControl({ task, snoozed = false, now, onSnooze, className = '', buttonClass = 'notes-iconbtn small' }: {
+export function SnoozeControl({ task, snoozed = false, now, onSnooze, times = DEFAULT_REMINDER_TIMES, className = '', buttonClass = 'notes-iconbtn small' }: {
     task: Task;
     /** A snooze is in force (the menu then offers Unsnooze). */
     snoozed?: boolean;
     now: number;
     onSnooze: (until: number | null) => void;
+    /** What Morning means to this person — 'Tomorrow' lands on it. */
+    times?: ReminderTimes;
     /** Extra class on the wrapper — an item row positions its menu. */
     className?: string;
     buttonClass?: string;
@@ -86,7 +90,7 @@ export function SnoozeControl({ task, snoozed = false, now, onSnooze, className 
                 <span className="notes-snooze-menu" role="group" aria-label="Snooze for">
                     {PRESETS.map(p => (
                         <button key={p.value} type="button" className="notes-textbtn"
-                            onClick={() => { setOpen(false); onSnooze(snoozeUntil(p.value, now)); }}>
+                            onClick={() => { setOpen(false); onSnooze(snoozeUntil(p.value, now, undefined, times.morning)); }}>
                             {p.label}
                         </button>
                     ))}

@@ -5,6 +5,7 @@
  */
 import { parseRRule, serializeRRule, type RRule } from './recurrence';
 import { type EventSchedule, type ScheduleKind, type ScheduleState, newUid, nextOccurrence } from './taskSchedule';
+import { DEFAULT_REMINDER_TIMES, isReminderTime } from './reminderTimes';
 import { addDays, daysInMonth, instantToWall, parseWall, viewerZone, wallToInstant, weekdayOf, type Wall } from '../utils/calendarMath';
 
 export type RepeatPreset = 'none' | 'daily' | 'weekdays' | 'weekly' | 'monthly-day' | 'monthly-nth' | 'monthly-last' | 'yearly' | 'custom';
@@ -84,6 +85,10 @@ export const TIMED_ALERTS: { value: string; label: string }[] = [
     { value: '60', label: '1 hour before' },
     { value: '1440', label: '1 day before' },
 ];
+/** The all-day offsets are a CLOSED list on purpose: an item carrying an
+ *  offset outside it would render a <select> with no matching <option>, and a
+ *  Save would silently rewrite its alert. They stay at 09:00 even when the
+ *  morning time is something else — changing them is its own piece of work. */
 export const ALLDAY_ALERTS: { value: string; label: string }[] = [
     { value: 'none', label: 'No reminder' },
     { value: '-540', label: 'On the day at 09:00' },
@@ -94,12 +99,16 @@ function pad(n: number): string {
     return String(n).padStart(2, '0');
 }
 
-/** A fresh form for a new schedule on `date` (defaults: 09:00, the next full
- *  hour when the date is today). */
-export function newForm(kind: ScheduleKind, date: string, nowMs: number, time?: string, tz: string = viewerZone()): ScheduleForm {
+/** A fresh form for a new schedule on `date`. Defaults: the account's "new
+ *  reminders start at" time (09:00 unless it was changed — api/reminderTimes.ts),
+ *  or the next full hour when the date is today. */
+export function newForm(
+    kind: ScheduleKind, date: string, nowMs: number, time?: string, tz: string = viewerZone(),
+    defaultTime: string = DEFAULT_REMINDER_TIMES.default,
+): ScheduleForm {
     const now = instantToWall(nowMs, tz);
     const today = `${now.y}-${pad(now.m)}-${pad(now.d)}`;
-    const start = time ?? (date === today ? `${pad(Math.min(23, now.hh + 1))}:00` : '09:00');
+    const start = time ?? (date === today ? `${pad(Math.min(23, now.hh + 1))}:00` : (isReminderTime(defaultTime) ? defaultTime : DEFAULT_REMINDER_TIMES.default));
     const [hh, mm] = start.split(':').map(Number);
     const end = `${pad(Math.min(23, hh + 1))}:${pad(mm)}`;
     return {
@@ -109,8 +118,10 @@ export function newForm(kind: ScheduleKind, date: string, nowMs: number, time?: 
     };
 }
 
-/** An existing schedule as a form. */
-export function formFromSchedule(s: EventSchedule): ScheduleForm {
+/** An existing schedule as a form. An ALL-DAY schedule has no time of its
+ *  own, so the time row shows `defaultTime` for the moment the user unticks
+ *  "All day" — it is never read back for an all-day save. */
+export function formFromSchedule(s: EventSchedule, defaultTime: string = DEFAULT_REMINDER_TIMES.default): ScheduleForm {
     const start = parseWall(s.start)!;
     const date = s.start.slice(0, 10);
     const det = detectPreset(s.rrule, date);
@@ -125,7 +136,7 @@ export function formFromSchedule(s: EventSchedule): ScheduleForm {
     const alert = alerts.length === 0 ? 'none' : alerts.length === 1 ? String(alerts[0]) : 'keep';
     return {
         kind: s.kind, date, allDay: s.allDay,
-        startTime: s.allDay ? '09:00' : `${pad(start.wall.hh)}:${pad(start.wall.mm)}`,
+        startTime: s.allDay ? (isReminderTime(defaultTime) ? defaultTime : DEFAULT_REMINDER_TIMES.default) : `${pad(start.wall.hh)}:${pad(start.wall.mm)}`,
         endTime, endDate,
         repeat: det.preset, customRule: det.preset === 'custom' ? (s.rrule ?? '') : '',
         ends: det.ends, count: det.count, until: det.untilKey,
@@ -136,6 +147,26 @@ export function formFromSchedule(s: EventSchedule): ScheduleForm {
 
 function formatKey(w: Pick<Wall, 'y' | 'm' | 'd'>): string {
     return `${w.y}-${pad(w.m)}-${pad(w.d)}`;
+}
+
+/**
+ * Where an event's END lands when its START moves to `next`: the same length
+ * of event, not the same end time. A one-tap preset (Morning / Afternoon /
+ * Evening) moves only the start, and scheduleFromForm reads an end at or
+ * before the start as running past midnight — so leaving a 09:00–10:00
+ * standup's end alone while the start jumps to 21:45 silently turns it into a
+ * 12h15 event, with no error, because that form is perfectly valid.
+ *
+ * An end equal to the start is a 24h event and stays one. Anything
+ * unparseable is left exactly as it was, which is what the editor already did.
+ */
+export function endTimeAfterMovingStart(startTime: string, endTime: string, next: string): string {
+    const hhmm = /^([01]\d|2[0-3]):[0-5]\d$/;
+    if (!hhmm.test(startTime) || !hhmm.test(endTime) || !hhmm.test(next)) return endTime;
+    const mins = (t: string) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3));
+    const span = ((mins(endTime) - mins(startTime)) % 1440 + 1440) % 1440;
+    const at = (mins(next) + span) % 1440;
+    return `${pad(Math.floor(at / 60))}:${pad(at % 60)}`;
 }
 
 /**

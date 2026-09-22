@@ -1,0 +1,284 @@
+// The one-tap reminder times, where a person actually meets them: the row in
+// the item's due editor, the row in the date & repeat dialog, and the four
+// controls in the account menu that say what they mean.
+//
+// A stored setting with no control is a feature nobody can use, so the menu
+// rows are tested as hard as the presets themselves.
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { TaskTree } from '../components/TaskTree';
+import { ScheduleEditor } from '../components/schedule/ScheduleEditor';
+import { AccountMenu } from '../notes/components/AccountMenu';
+import { DEFAULT_REMINDER_TIMES, presetInstant, type ReminderTimes } from '../api/reminderTimes';
+import { serializeSchedule } from '../api/taskSchedule';
+import type { Task } from '../api/tasks';
+
+const TIMES: ReminderTimes = { morning: '07:30', afternoon: '13:15', evening: '21:45', default: '08:00' };
+const NOW = Date.parse('2030-10-07T05:00:00Z');
+
+const task: Task = {
+    id: 3, channel_id: null, list_id: 1, parent_id: null, description: 'Bins out', is_completed: false, position: 1,
+    created_at: '2030-09-01T00:00:00Z', created_by: 1, attachments: null, due_at: null,
+};
+
+let root: Root | null = null;
+let host: HTMLDivElement | null = null;
+afterEach(() => {
+    act(() => root?.unmount());
+    document.body.innerHTML = '';
+    root = null;
+    host = null;
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+});
+
+function mount(node: React.ReactNode) {
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+    act(() => root!.render(node));
+    return host;
+}
+
+const buttons = (el: ParentNode) => [...el.querySelectorAll('button')];
+const byText = (el: ParentNode, text: string) => buttons(el).find(b => b.textContent === text);
+
+function openDueEditor(reminderTimes?: ReminderTimes) {
+    const onSetDue = vi.fn();
+    const el = mount(
+        <TaskTree
+            tasks={[task]} onToggle={() => {}} onDelete={() => {}} onEdit={() => {}} onAddSubtask={() => {}}
+            onMove={() => {}} onSetDue={onSetDue} onSetAttachments={() => {}} reminderTimes={reminderTimes}
+        />,
+    );
+    const clock = buttons(el).find(b => b.getAttribute('title') === 'Add due time');
+    expect(clock).toBeTruthy();
+    act(() => clock!.click());
+    return { el, onSetDue };
+}
+
+describe('the due editor offers the three times', () => {
+    it('shows Morning, Afternoon and Evening, and one tap sets the reminder without a date form', () => {
+        vi.useFakeTimers({ now: NOW });
+        const { el, onSetDue } = openDueEditor(TIMES);
+        const presets = el.querySelectorAll('.tt-due-presets button');
+        expect([...presets].map(b => b.textContent)).toEqual(['Morning', 'Afternoon', 'Evening']);
+
+        act(() => (presets[0] as HTMLButtonElement).click());
+        expect(onSetDue).toHaveBeenCalledTimes(1);
+        expect(onSetDue.mock.calls[0][1]).toBe(new Date(presetInstant('07:30', NOW)).toISOString());
+        // The editor closed: one tap, no date form left open.
+        expect(el.querySelector('.tt-due-edit')).toBeNull();
+    });
+
+    it('uses the account’s times, not 09:00', () => {
+        vi.useFakeTimers({ now: NOW });
+        const mine = openDueEditor(TIMES);
+        act(() => (mine.el.querySelectorAll('.tt-due-presets button')[2] as HTMLButtonElement).click());
+        expect(mine.onSetDue.mock.calls[0][1]).toBe(new Date(presetInstant('21:45', NOW)).toISOString());
+        expect(mine.onSetDue.mock.calls[0][1]).not.toBe(new Date(presetInstant(DEFAULT_REMINDER_TIMES.evening, NOW)).toISOString());
+
+        act(() => root?.unmount());
+        document.body.innerHTML = '';
+        // Positive control: a caller with no setting (Púca's own Tasks view)
+        // still gets the row, at the defaults.
+        const theirs = openDueEditor(undefined);
+        act(() => (theirs.el.querySelectorAll('.tt-due-presets button')[2] as HTMLButtonElement).click());
+        expect(theirs.onSetDue.mock.calls[0][1]).toBe(new Date(presetInstant(DEFAULT_REMINDER_TIMES.evening, NOW)).toISOString());
+    });
+
+    it('the typed date field is still there for anything else', () => {
+        const { el } = openDueEditor(TIMES);
+        expect(el.querySelectorAll('.tt-due-edit input[type="datetime-local"]').length).toBe(1);
+    });
+});
+
+describe('the date & repeat dialog offers them too — with the privacy switch still on it', () => {
+    it('a preset fills the date and time, and does not hide "Keep the time private from the server"', () => {
+        const onSave = vi.fn();
+        mount(<ScheduleEditor task={task} onSave={onSave} onClose={() => {}} now={NOW} times={TIMES} />);
+        const dialog = document.body.querySelector('.sched-dialog')!;
+        const presets = dialog.querySelectorAll('.sched-presets button');
+        expect([...presets].map(b => b.textContent)).toEqual(['Morning', 'Afternoon', 'Evening']);
+
+        act(() => (presets[1] as HTMLButtonElement).click());
+        const at = dialog.querySelector<HTMLInputElement>('input[aria-label="Start time"]')!;
+        expect(at.value).toBe('13:15');
+        const date = dialog.querySelector<HTMLInputElement>('input[aria-label="Date"]')!;
+        const want = new Date(presetInstant('13:15', Date.now()));
+        expect(date.value).toBe(`${want.getFullYear()}-${String(want.getMonth() + 1).padStart(2, '0')}-${String(want.getDate()).padStart(2, '0')}`);
+        expect(dialog.querySelectorAll('input[type="checkbox"]').length).toBeGreaterThan(0);
+
+        // And a Save writes that time, not the old 09:00 default.
+        act(() => byText(dialog, 'Save')!.click());
+        expect(onSave).toHaveBeenCalledTimes(1);
+        expect(String(onSave.mock.calls[0][0])).not.toContain('T09:00');
+    });
+
+    it('coming off all-day leaves the reminder choice on an offset the timed list actually offers', () => {
+        const onSave = vi.fn();
+        mount(<ScheduleEditor task={task} onSave={onSave} onClose={() => {}} now={NOW} times={TIMES} />);
+        const dialog = document.body.querySelector('.sched-dialog')!;
+        const allDay = dialog.querySelector<HTMLInputElement>('.sched-check input[type="checkbox"]')!;
+        act(() => { allDay.click(); });
+        const alert = dialog.querySelector<HTMLSelectElement>('select[aria-label="Reminder"]')!;
+        expect(alert.value).toBe('-540');                       // the all-day offset
+        act(() => (dialog.querySelectorAll('.sched-presets button')[0] as HTMLButtonElement).click());
+        expect(dialog.querySelector<HTMLInputElement>('.sched-check input[type="checkbox"]')!.checked).toBe(false);
+        expect([...alert.options].some(o => o.value === alert.value)).toBe(true);
+        expect(alert.value).toBe('0');
+    });
+
+    it('an explicit "No reminder" survives a preset, the all-day switch and the kind switch', () => {
+        // Those resets exist to move the reminder off an offset the list it is
+        // switching to does not carry. "No reminder" is in BOTH lists
+        // (scheduleForm.TIMED_ALERTS / ALLDAY_ALERTS), so none of them has a
+        // reason to overwrite it — and switching a notification back on is the
+        // one direction a person cannot see until it fires at them.
+        mount(<ScheduleEditor task={task} onSave={() => {}} onClose={() => {}} now={NOW} times={TIMES} />);
+        const dialog = document.body.querySelector('.sched-dialog')!;
+        const alert = dialog.querySelector<HTMLSelectElement>('select[aria-label="Reminder"]')!;
+        const choose = (value: string) => act(() => {
+            const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!;
+            setter.call(alert, value);
+            alert.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        const allDay = () => dialog.querySelector<HTMLInputElement>('.sched-check input[type="checkbox"]')!;
+
+        // All day, "No reminder", then one tap on a preset.
+        act(() => { allDay().click(); });
+        choose('none');
+        expect(alert.value).toBe('none');
+        act(() => (dialog.querySelectorAll('.sched-presets button')[0] as HTMLButtonElement).click());
+        expect(allDay().checked).toBe(false);            // the preset still did its job
+        expect(alert.value).toBe('none');
+
+        // The all-day switch itself, both ways.
+        act(() => { allDay().click(); });
+        expect(alert.value).toBe('none');
+        act(() => { allDay().click(); });
+        expect(alert.value).toBe('none');
+
+        // Event ⇄ To-do.
+        act(() => byText(dialog, 'Event')!.click());
+        expect(alert.value).toBe('none');
+        act(() => byText(dialog, 'To-do')!.click());
+        expect(alert.value).toBe('none');
+
+        // Positive control: from a real offset those same controls DO still
+        // reset, or this would pass against a dialog that never changes it.
+        choose('30');
+        act(() => { allDay().click(); });
+        expect(alert.value).toBe('-540');
+    });
+
+    it('the dialog opened from INSIDE a note gets them too — the commonest way in', () => {
+        // The due-editor row above it already uses the setting, so a dialog
+        // still on 09:00 would be the same account contradicting itself.
+        const el = mount(
+            <TaskTree
+                tasks={[task]} onToggle={() => {}} onDelete={() => {}} onEdit={() => {}} onAddSubtask={() => {}}
+                onMove={() => {}} onSetDue={() => {}} onSetSchedule={() => {}} onSetAttachments={() => {}}
+                reminderTimes={TIMES}
+            />,
+        );
+        act(() => buttons(el).find(b => b.getAttribute('aria-label') === 'Add date & repeat')!.click());
+        const dialog = document.body.querySelector('.sched-dialog')!;
+        expect(dialog).not.toBeNull();
+        // The presets say what they mean, and tapping one lands on it. (The
+        // start time itself is not the tell here: a dialog opened on TODAY
+        // starts at the next full hour, setting or no setting.)
+        expect([...dialog.querySelectorAll('.sched-presets button')].map(b => b.getAttribute('title')))
+            .toEqual(['Morning — 07:30', 'Afternoon — 13:15', 'Evening — 21:45']);
+        act(() => (dialog.querySelectorAll('.sched-presets button')[0] as HTMLButtonElement).click());
+        expect(dialog.querySelector<HTMLInputElement>('input[aria-label="Start time"]')!.value).toBe('07:30');
+
+        act(() => root?.unmount());
+        document.body.innerHTML = '';
+        // Positive control: Púca's own Tasks view passes no setting and still
+        // gets a working dialog, at the defaults.
+        const plain = mount(
+            <TaskTree
+                tasks={[task]} onToggle={() => {}} onDelete={() => {}} onEdit={() => {}} onAddSubtask={() => {}}
+                onMove={() => {}} onSetDue={() => {}} onSetSchedule={() => {}} onSetAttachments={() => {}}
+            />,
+        );
+        act(() => buttons(plain).find(b => b.getAttribute('aria-label') === 'Add date & repeat')!.click());
+        const theirs = document.body.querySelector('.sched-dialog')!;
+        act(() => (theirs.querySelectorAll('.sched-presets button')[0] as HTMLButtonElement).click());
+        expect(theirs.querySelector<HTMLInputElement>('input[aria-label="Start time"]')!.value)
+            .toBe(DEFAULT_REMINDER_TIMES.morning);
+    });
+
+    it('a preset moves an event without stretching it', () => {
+        // scheduleFromForm reads an end at or before the start as running past
+        // midnight, so moving ONLY the start turns a 09:00–10:00 standup into a
+        // 12h15 event — valid, silent, and not what the tap meant.
+        const onSave = vi.fn();
+        const event: Task = { ...task, schedule: serializeSchedule({ v: 1, kind: 'event', uid: 'uid-preset-len01', allDay: false, start: '2030-10-07T09:00', end: '2030-10-07T10:00', tz: 'UTC', alerts: [10] }) };
+        mount(<ScheduleEditor task={event} onSave={onSave} onClose={() => {}} now={NOW} times={TIMES} />);
+        const dialog = document.body.querySelector('.sched-dialog')!;
+        expect(dialog.querySelector<HTMLInputElement>('input[aria-label="End time"]')!.value).toBe('10:00');
+
+        act(() => (dialog.querySelectorAll('.sched-presets button')[2] as HTMLButtonElement).click());   // Evening, 21:45
+        expect(dialog.querySelector<HTMLInputElement>('input[aria-label="Start time"]')!.value).toBe('21:45');
+        expect(dialog.querySelector<HTMLInputElement>('input[aria-label="End time"]')!.value).toBe('22:45');
+
+        act(() => byText(dialog, 'Save')!.click());
+        const saved = JSON.parse(String(onSave.mock.calls[0][0])) as { start: string; end: string };
+        expect(saved.start.slice(11)).toBe('21:45');
+        expect(saved.end.slice(11)).toBe('22:45');
+        expect(saved.end.slice(0, 10)).toBe(saved.start.slice(0, 10));   // the same day, not past midnight
+    });
+
+    it('a to-do has no end to keep, and a preset leaves it that way (control)', () => {
+        const onSave = vi.fn();
+        mount(<ScheduleEditor task={task} onSave={onSave} onClose={() => {}} now={NOW} times={TIMES} />);
+        const dialog = document.body.querySelector('.sched-dialog')!;
+        expect(dialog.querySelector('input[aria-label="End time"]')).toBeNull();
+        act(() => (dialog.querySelectorAll('.sched-presets button')[2] as HTMLButtonElement).click());
+        act(() => byText(dialog, 'Save')!.click());
+        expect(JSON.parse(String(onSave.mock.calls[0][0])).end).toBeUndefined();
+    });
+
+    it('a new schedule with no preset tapped starts at the account’s "new reminders at" time', () => {
+        mount(<ScheduleEditor task={task} onSave={() => {}} onClose={() => {}} now={NOW} defaultDate="2030-10-09" times={TIMES} />);
+        expect(document.body.querySelector<HTMLInputElement>('input[aria-label="Start time"]')!.value).toBe('08:00');
+    });
+});
+
+describe('the account menu is where the times are set', () => {
+    const menu = (times: ReminderTimes, onTimes = vi.fn()) => ({
+        el: mount(
+            <AccountMenu
+                username="mick" sort="puca" onSort={() => {}} times={times} onTimes={onTimes}
+                onExportMarkdown={() => {}} onExportJson={() => {}} onHelp={() => {}}
+                onSignOut={() => {}} onSignOutEverywhere={() => {}}
+            />,
+        ),
+        onTimes,
+    });
+
+    it('has all four controls, showing the stored values', () => {
+        const { el } = menu(TIMES);
+        const ids = ['notes-remind-morning', 'notes-remind-afternoon', 'notes-remind-evening', 'notes-remind-default'];
+        expect(ids.every(id => el.querySelector(`#${id}`))).toBe(true);
+        expect(ids.map(id => el.querySelector<HTMLInputElement>(`#${id}`)!.value)).toEqual(['07:30', '13:15', '21:45', '08:00']);
+        expect(ids.every(id => el.querySelector<HTMLInputElement>(`#${id}`)!.type === 'time')).toBe(true);
+        // Labelled, not a bare box.
+        expect(el.querySelector(`label[for="notes-remind-morning"]`)?.textContent).toBe('Morning');
+    });
+
+    it('a change reports just that field', () => {
+        const { el, onTimes } = menu(TIMES);
+        const input = el.querySelector<HTMLInputElement>('#notes-remind-evening')!;
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!;
+        act(() => {
+            setter.call(input, '22:30');
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        expect(onTimes).toHaveBeenCalledTimes(1);
+        expect(onTimes.mock.calls[0][0]).toEqual({ evening: '22:30' });
+    });
+});

@@ -61,7 +61,13 @@ Púca's reminders. Anything you do in one is what you see in the other.
   Upcoming: every open item with a due time, and **every note that reminds
   you by itself** — a note needs no checklist item to hang a time on (*A
   reminder on the note itself*, below). Tick an item done from there; a note
-  row has nothing to tick, so it offers *clear this reminder* instead. In a browser, Notes runs Púca's reminder
+  row has nothing to tick, so it offers *clear this reminder* instead. Or
+  move it: a clock on the row changes when it is due without opening the
+  note, and an item that repeats or is an event opens the same *Date &
+  repeat* editor the calendar uses. That is offered only to people who may
+  edit the item's time — its creator, a task manager, anything in a personal
+  note — which is what the server enforces; on a server that stores no
+  schedules only a plain due time can be moved this way. In a browser, Notes runs Púca's reminder
   loop, so a due item notifies while the Notes tab is open (allow
   notifications from the Reminders view). The Android app notifies whether it
   is open or closed (see *The Android app*), and adds an **At a place**
@@ -230,7 +236,8 @@ Grid/list and sort stay Notes' own, per device.
 
 ## What follows the account
 
-Colour, labels and the archive flag are one document, sealed to your own key
+Colour, labels, the archive flag and your four **reminder times** are one
+document, sealed to your own key
 (`sealAccountBlob` in `frontend/src/api/e2ee.ts`: its own HKDF key, and an AAD
 naming your account and the document, so the server cannot swap it for another
 sealed field) and stored as ciphertext with a revision number
@@ -1377,6 +1384,29 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   the note editor it sits inside does not close with it — the editor's own
   Escape skips a `defaultPrevented` one, and its `escapeBlocked` hatch covers
   popovers and context menus, not this layer. When the snoozer may also
+- **Reminder times**: what *Morning*, *Afternoon* and *Evening* mean to you,
+  and the time a new reminder starts at. Set them in the account menu
+  (09:00 / 14:00 / 19:00, new reminders at 09:00, until you change them). An
+  item's clock button then offers those three as one tap, the *Date & repeat*
+  dialog offers the same row wherever it is opened from (a Reminders row, the
+  calendar, or the item inside its note), and Snooze's *Tomorrow* means your
+  morning. A preset lands on today if that time is still ahead and on tomorrow
+  if it has gone, by wall clock, so the day the clocks change still gives you
+  the time you asked for. On an **event** a preset moves the start and keeps
+  the length: a 09:00-10:00 hour tapped to *Evening* is 21:45-22:45, not an
+  event running to 10:00 the next day. A preset also takes the item off
+  all-day, which moves its reminder onto an offset the timed list actually
+  offers (the all-day 09:00 offsets are not in it) — but **No reminder** is a
+  choice rather than a default, and it is in both lists, so a preset, the
+  **All day** switch and the Event/To-do switch all leave it alone instead of
+  switching a notification back on. The times follow your account in the sealed document above —
+  the server never sees them — but a preset writes the same plaintext `due_at`
+  any reminder does, so the per-item *Keep the time private from the server*
+  switch is still the way to hide when something is. Púca's own Tasks view
+  shows the same three buttons at the standard times; the setting lives in
+  Púca Notes.
+- **Snooze**: 10 minutes, 1 hour or tomorrow at your morning time, from Reminders and from
+  the calendar, for anyone who may tick the item. When the snoozer may also
   edit the item's time (its creator, a task manager, any personal note), the
   snooze **moves the plaintext `due_at` to the snooze instant** — the server,
   and a phone reminding with Notes closed, see the next reminder — and the
@@ -1388,6 +1418,17 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   the one question (`taskSchedule.maySnooze` over `snoozeLocked`): putting
   `due_at` back needs the edit right, and a sealed-only re-snooze would
   either not apply or overwrite the time Unsnooze restores.
+- **Retime** (from the Reminders row): writes the same plaintext `due_at`, or
+  the same sealed `schedule`, that the editor inside the note writes, through
+  the same optimistic path and the same outbox — so a retime made offline
+  queues and replays like any other change, and the reminder feed is poked
+  either way. An active snooze **lapses by itself** when the time moves
+  (`activeSnooze` matches neither `forDue` nor `until` any more) and nothing
+  clears it explicitly: a snooze rides the completion right while a retime
+  rides the edit right, so sending both would 403 for a channel-task creator
+  without COMPLETE_TASKS. A retime carries **no** `expect_due_at`, so two
+  devices retiming at once is last-writer-wins — exactly as it already is
+  from the calendar and from inside a note.
   Every reminder engine reads the same entries, `{id, at, mark, due}`
   (`frontend/src/api/reminderFeed.ts`): `at` is the snooze time while one is in
   force, `mark` changes whenever the item must fire again, and `due` is the raw

@@ -16,6 +16,7 @@ import { effectiveWeekStart, setCalendarPrefs, useCalendarPrefs } from '../../co
 import { useCoarseCalendar } from '../../components/calendar/calendarGate';
 import { ScheduleEditor } from '../../components/schedule/ScheduleEditor';
 import { type CalendarEntry, type CalendarSource, noteAsCalendarItem } from '../../api/taskCalendar';
+import { useReminderTimes } from '../model/notesPrefs';
 import { newItemTiming, planMove, planSkip } from '../../api/calendarActions';
 import { parseSchedule, snoozeUntil } from '../../api/taskSchedule';
 import { buildIcs, parseIcs, type IcsItem, type IcsParseResult } from '../../api/ics';
@@ -56,6 +57,7 @@ export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled
     const prefs = useCalendarPrefs();
     const coarse = useCoarseCalendar();
     const scheduleOn = useTaskFeature('schedule') === true;
+    const times = useReminderTimes();
     const snoozeOn = useTaskFeature('snooze') === true;
     const today = localDayKey(now);
     const v = params.get('v');
@@ -146,6 +148,9 @@ export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled
     const onSnooze = (e: CalendarEntry, preset: 'tomorrow' | '10m' | '1h') => {
         const note = noteOf(e);
         if (note && !e.source.isNote) void actions.snoozeTask(note, e.source.task, snoozeUntil(preset, Date.now()));
+        // Tomorrow is the person's morning here too, so the calendar and
+        // Reminders never disagree about what Tomorrow means.
+        if (note) void actions.snoozeTask(note, e.source.task, snoozeUntil(preset, Date.now(), undefined, times.morning));
     };
 
     // --- Tap-to-add ------------------------------------------------------------------
@@ -288,6 +293,7 @@ export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled
                     targets={addTargets}
                     defaultTarget={prefs.lastNote}
                     scheduleSupported={scheduleOn}
+                    defaultTime={times.default}
                     onSubmit={submitAdd}
                     onClose={() => setAdding(null)}
                 />
@@ -295,6 +301,7 @@ export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled
             {editing && editingTask && (
                 <ScheduleEditor
                     task={editingTask}
+                    times={times}
                     onClose={() => setEditing(null)}
                     onSave={(schedule, dueAt) => { void actions.setSchedule(editing.note, editingTask, schedule, dueAt); setEditing(null); }}
                 />

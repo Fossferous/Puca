@@ -34,6 +34,7 @@ import { findRanges, searchTerms } from '../model/noteSearch';
 import { Highlight } from './Highlight';
 import { MARK_SELECTOR, useMarkCount } from './useMarkCount';
 import { type NoteActions, useNoteTasks } from '../model/notesQueries';
+import { useReminderTimes } from '../model/notesPrefs';
 import { NoteContentSection } from './NoteContentSection';
 import { ListActionsMenu } from './ListActionsMenu';
 import { PastedLinesDialog } from './PastedLinesDialog';
@@ -138,6 +139,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
         setMatchAt(at);
     }, []);
     const currentUserId = currentUserIdFromToken() ?? undefined;
+    const reminderTimes = useReminderTimes();
     const isChannel = ref.kind === 'channel';
     const canCreate = !isChannel || hasPerm(card.myPerms, PERM.CREATE_TASKS);
     const titleUnreadable = isUndecryptable(card.title);
@@ -353,6 +355,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                             onSetSchedule={onSetSchedule}
                             onSnooze={onSnooze}
                             onSetAttachments={(t, refs) => void actions.setAttachments(ref, t, refs)}
+                            reminderTimes={reminderTimes}
                             myPerms={card.myPerms}
                             currentUserId={currentUserId}
                             resolveUserName={card.resolveUserName}
@@ -376,6 +379,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                             onSetAttachments={(t, refs) => void actions.setAttachments(ref, t, refs)}
                             flashTaskId={flashTaskId}
                             renderDescription={renderDescription}
+                            reminderTimes={reminderTimes}
                         />
                     )}
                 </div>

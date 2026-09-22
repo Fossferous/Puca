@@ -204,6 +204,24 @@ one-line summary; this file is the full story. Versions follow
   in a note or a list: 10 minutes, an hour, or tomorrow morning. The reminder
   time the server holds moves with the snooze, so a phone reminding with Púca
   Notes closed goes off at the snoozed time. Snooze
+- **Change a reminder's time from the Reminders list.** Moving a reminder is
+  the commonest thing to do with one, and it no longer means opening the note
+  and finding the item: a clock on the row changes when it is due, and an item
+  that repeats or is an event opens the same date-and-repeat editor as the
+  calendar. It is offered only to people allowed to edit that item's time. A
+  snooze on an item you move simply lapses.
+- **Reminder times that are yours.** Give an item a time with one tap —
+  *Morning*, *Afternoon* or *Evening* — instead of filling in a date and a
+  time. What those three mean, and the time a new reminder starts at, is
+  yours to set in the account menu, and it follows your account to your other
+  devices, encrypted like everything else. If the time has already gone
+  today, the tap means tomorrow. Snooze's *Tomorrow* now means your morning
+  rather than 09:00. The server still only ever sees when an item is due,
+  never what it is — and the per-item *Keep the time private from the server*
+  switch is still there for the ones it should not see at all.
+- **Snooze.** From Reminders or the calendar: 10 minutes, an hour, or tomorrow
+  morning. The reminder time the server holds moves with the snooze, so a
+  phone reminding with Púca Notes closed goes off at the snoozed time. Snooze
   is only offered to people allowed to tick the item, and a snooze set by
   someone who may edit the item cannot be changed or undone by someone who
   may only tick it.

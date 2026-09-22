@@ -24,8 +24,8 @@ import {
 } from '../model/notesModel';
 import { type ComposeIntent, type ComposeMode, takeShare } from '../model/composeIntent';
 import { useNativeShareIn, type SharedIntoNotes } from '../native/useNativeShareIn';
-import { setNotesSort, setNotesView, type NotesSortMode } from '../model/notesPrefs';
 import { restoreLabels } from '../model/notesBulk';
+import { setNotesSort, setNotesView, setReminderTimes, type NotesSortMode } from '../model/notesPrefs';
 import { useNotesPrefs, useNoteActions, useNoteCards } from '../model/notesQueries';
 import { copyBlockersOf, copyPlanOf, copyRefusal, noteToMarkdown } from '../model/noteText';
 import { AccountMenu } from './AccountMenu';
@@ -132,6 +132,8 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     const now = useSyncExternalStore(subscribeHalfMinute, halfMinuteNow, halfMinuteNow);
     const coarse = useSyncExternalStore(subscribeCoarse, isCoarse, () => false);
     const canSnooze = useTaskFeature('snooze') === true;
+    /** A Reminders row has the Date & repeat dialog open. */
+    const [reminderModal, setReminderModal] = useState(false);
     const scheduleOnServer = useTaskFeature('schedule') === true;
     // What the composer can offer against THIS server. Read by the share
     // intake below as well as by the composer itself, so it is computed here
@@ -543,7 +545,10 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
         onNew: () => { if (isCoarse()) setSheet(true); else setQuickSignal(n => n + 1); },
         onHelp: () => setHelp(true),
         onRefresh: () => { void actions.refreshAll(); },
-    }, !openCard && !popup && !help && !sheet && !contextMenu && !labelMgr);
+        // A dialog opened from a Reminders row is none of the shell's own
+        // popups, and hotkeys.isEditableTarget says false for a <select> —
+        // without this, `c` and `r` fire behind the open schedule editor.
+    }, !openCard && !popup && !help && !sheet && !contextMenu && !labelMgr && !reminderModal);
 
     // --- Account -------------------------------------------------------------------------------------
     const username = (() => {
@@ -631,6 +636,8 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                                 placeItems={placeItems}
                                 canSnooze={canSnooze}
                                 flashTaskId={flashItem}
+                                canSchedule={scheduleOnServer}
+                                onModal={setReminderModal}
                             />
                         ) : calendarView ? (
                             <CalendarView
@@ -716,6 +723,8 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                         username={username}
                         sort={local.sort}
                         onSort={s => setNotesSort(s)}
+                        times={local.times}
+                        onTimes={patch => setReminderTimes(patch)}
                         onExportMarkdown={() => { setPopup(null); exportMd(); }}
                         onExportJson={() => { setPopup(null); exportJson(); }}
                         onShare={canShareNotes() ? () => { setPopup(null); void shareNotes(cards); } : undefined}

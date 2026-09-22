@@ -16,6 +16,7 @@ import { useEffect, useRef, type ReactNode } from 'react';
 import './Reminders.css';
 import { formatDueShort } from '../../api/tasks';
 import { type DueRow, type ReminderRowGroups, mayChangeSnooze, remindsSomeoneElse } from '../../api/reminderGroups';
+import { type ReminderTimes } from '../../api/reminderTimes';
 import { BellIcon, CloseIcon } from '../Icons';
 import { ReminderTimingMarks, SnoozeControl } from './SnoozeControl';
 
@@ -40,6 +41,12 @@ export interface RemindersListProps {
     extraCount?: number;
     /** Shown when there is nothing at all. */
     empty: ReactNode;
+    /** The host's own control on every row, before the snooze — Púca Notes
+     *  puts its retime clock there. Returning null leaves the row as it was. */
+    rowExtra?: (row: DueRow) => ReactNode;
+    /** What Morning / Afternoon / Evening mean to this person (Púca Notes'
+     *  sealed prefs); Púca's own tab uses the standard times. */
+    times?: ReminderTimes;
     /** Clear a NOTE'S OWN reminder (source.isNote): the only thing such a row
      *  can do besides being moved, so it replaces the snooze. Omitted where
      *  the host has no note reminders — then no note row offers one. */
@@ -50,7 +57,7 @@ export interface RemindersListProps {
     flashTaskId?: number | null;
 }
 
-function Row({ row, now, currentUserId, onOpen, onToggle, onSnooze, onClearNote, flash = false }: {
+function Row({ row, now, currentUserId, onOpen, onToggle, onSnooze, onClearNote, rowExtra, times, flash = false }: {
     row: DueRow;
     now: number;
     currentUserId?: number;
@@ -58,6 +65,8 @@ function Row({ row, now, currentUserId, onOpen, onToggle, onSnooze, onClearNote,
     onToggle: (row: DueRow) => void;
     onSnooze?: (row: DueRow, until: number | null) => void;
     onClearNote?: (row: DueRow) => void;
+    rowExtra?: (row: DueRow) => ReactNode;
+    times?: ReminderTimes;
     flash?: boolean;
 }) {
     const task = row.source.task;
@@ -95,8 +104,9 @@ function Row({ row, now, currentUserId, onOpen, onToggle, onSnooze, onClearNote,
             <ReminderTimingMarks slot={row.slot} />
             {!isNote && <span className="notes-reminder-note">{row.source.noteTitle}</span>}
             <span className="notes-reminder-when" title={new Date(row.at).toLocaleString()}>{formatDueShort(new Date(row.at).toISOString(), now)}</span>
+            {rowExtra?.(row)}
             {onSnooze && mayChangeSnooze(row.source) && (
-                <SnoozeControl task={task} snoozed={row.slot?.snoozed === true} now={now} onSnooze={until => onSnooze(row, until)} />
+                <SnoozeControl task={task} snoozed={row.slot?.snoozed === true} now={now} times={times} onSnooze={until => onSnooze(row, until)} />
             )}
             {isNote && onClearNote && (
                 <button
@@ -113,11 +123,12 @@ function Row({ row, now, currentUserId, onOpen, onToggle, onSnooze, onClearNote,
     );
 }
 
-export function RemindersList({ groups, now, currentUserId, onOpen, onToggle, onSnooze, onClearNote, header, middle, extraCount = 0, empty, flashTaskId = null }: RemindersListProps) {
+export function RemindersList({ groups, now, currentUserId, onOpen, onToggle, onSnooze, onClearNote, rowExtra, times, header, middle, extraCount = 0, empty, flashTaskId = null }: RemindersListProps) {
     const total = groups.overdue.length + groups.today.length + groups.upcoming.length + extraCount;
     const rows = (list: DueRow[]) => list.map(row => (
         <Row key={`${row.source.noteKey}/${row.source.task.id}`} row={row} now={now} currentUserId={currentUserId}
-            onOpen={onOpen} onToggle={onToggle} onSnooze={onSnooze} onClearNote={onClearNote} flash={row.source.task.id === flashTaskId} />
+            onOpen={onOpen} onToggle={onToggle} onSnooze={onSnooze} onClearNote={onClearNote} rowExtra={rowExtra} times={times}
+            flash={row.source.task.id === flashTaskId} />
     ));
     return (
         <div className="notes-reminders">

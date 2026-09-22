@@ -188,11 +188,23 @@ body.drag-reorder-active {
 .tt-place svg { width: 0.9em; height: 0.9em; flex-shrink: 0; }
 
 /* Inline due editor, aligned with the item text like the attach strip. */
+/* The due editor wraps: the one-tap preset row sits above the date input on
+   a phone and beside it on a wide row, and neither may push the other out. */
 .tt-due-edit {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 6px;
     padding: 2px 12px 6px 36px;
+}
+.tt-due-presets {
+    display: flex;
+    gap: 6px;
+}
+.tt-due-preset {
+    padding: 4px 10px;
+    font-size: 12px;
+    background: var(--bg-tertiary, #40444b);
 }
 .tt-due-edit input {
     padding: 4px 8px;
@@ -401,6 +413,13 @@ body.drag-reorder-active {
     .tt-place-edit input,
     .tt-place-edit select {
         font-size: 16px;
+    }
+
+    /* DESIGN_PHILOSOPHY §7: a real button is 44px under a coarse pointer. */
+    .tt-due-preset {
+        min-height: 44px;
+        padding: 4px 14px;
+        font-size: 14px;
     }
 
     /* Five levels of indent must still leave text room at 390px. */

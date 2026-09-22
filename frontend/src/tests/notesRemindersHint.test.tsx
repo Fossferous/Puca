@@ -56,7 +56,12 @@ describe('"Reminds whoever set it"', () => {
         expect(hint(rows[0])).toBe('Reminds whoever set it');
         expect(hint(rows[1])).toBeNull(); // shared, but mine
         expect(hint(rows[2])).toBeNull(); // personal note
-        // a second line inside the text cell, not an extra flex column
-        for (const r of rows) expect(r.children).toHaveLength(4);
+        // A second line INSIDE the text cell, not an extra flex column: the
+        // hinted row has exactly as many cells as the rows beside it. (A fixed
+        // count would only measure whatever the row happens to carry today —
+        // it went red the day the rows grew a retime button.)
+        const cells = rows.map(r => r.children.length);
+        expect(new Set(cells).size).toBe(1);
+        expect(rows[0].querySelector('.notes-reminder-sub')!.parentElement!.className).toBe('notes-reminder-text');
     });
 });

@@ -1,5 +1,6 @@
 /**
- * Púca Notes — colour, labels and archive follow the account.
+ * Púca Notes — colour, labels, archive and the reminder times follow the
+ * account.
  *
  * The UI reads a synchronous snapshot (notesPrefs.ts, localStorage-backed).
  * This module keeps that snapshot in step with ONE sealed-to-self document on
@@ -34,6 +35,15 @@
  * chooses the server's copy (acceptServer) or this device's
  * (overwriteServer), and either restarts the floor at the server's revision.
  *
+ * THE REMINDER TIMES ride in the same document, merged per field the same
+ * three-way way. One asymmetry, deliberate: a document with NO `times` at all
+ * is a document written by a build that predates the setting (or by one
+ * today, since `parseNotesPrefs` in an older build drops what it does not
+ * know). Absent therefore means UNKNOWN, never "cleared" — the local times
+ * survive it, and the next push puts them back. That is why the document
+ * version stays 1: bumping it would only make every shipped build show the
+ * unreadable banner.
+ *
  * NOT SYNCED: grid/list and sort are per device, on purpose.
  *
  * FAILURE IS LOUD, DATA IS KEPT. Too large, unreadable, a refused rollback:
@@ -45,6 +55,7 @@ import { getActiveIdentity, openAccountBlob, sealAccountBlob, type Identity } fr
 import { isNetworkError } from '../../api/client';
 import { getSealedBlob, putSealedBlob, type GetBlobResult, type PutBlobResult } from '../../api/sealedBlobs';
 import { writeNotesUnsynced, writeNotesUnsyncedPrefs } from '../../api/notesCacheScrub';
+import { DEFAULT_REMINDER_TIMES, REMINDER_TIME_KEYS, isReminderTime, type ReminderTimes } from '../../api/reminderTimes';
 import { MAX_LABELS_PER_NOTE, type NotesNoteState } from './notesModel';
 import { dedupeLabels, getNotesPrefs, parseNotesPrefs, replaceNoteState, subscribeNotesPrefs } from './notesPrefs';
 
@@ -58,12 +69,19 @@ export const EMPTY_NOTE_STATE: NotesNoteState = Object.freeze({ colors: {}, labe
 // --- Pure: shape, compare, merge ---------------------------------------------------
 
 export function noteStateOf(p: NotesNoteState): NotesNoteState {
-    return { colors: p.colors, labels: p.labels, archived: p.archived };
+    const out: NotesNoteState = { colors: p.colors, labels: p.labels, archived: p.archived };
+    if (p.times) out.times = p.times;
+    return out;
 }
 
 function canon(s: NotesNoteState): string {
     const sortObj = <T,>(o: Record<string, T>) => Object.fromEntries(Object.keys(o).sort().map(k => [k, o[k]]));
-    return JSON.stringify({ c: sortObj(s.colors), l: sortObj(s.labels), a: sortObj(s.archived) });
+    // Absent times compare EQUAL to the defaults: a document that predates
+    // the setting is not a difference worth pushing, while a time the user
+    // actually changed is (which is what heals a document an older build
+    // stripped).
+    const t = s.times ?? DEFAULT_REMINDER_TIMES;
+    return JSON.stringify({ c: sortObj(s.colors), l: sortObj(s.labels), a: sortObj(s.archived), t: REMINDER_TIME_KEYS.map(k => t[k]) });
 }
 
 export function sameNoteState(a: NotesNoteState, b: NotesNoteState): boolean {
@@ -85,7 +103,18 @@ export function decodePrefsDoc(text: string): { rev: number; state: NotesNoteSta
     const d = o as { v?: unknown; rev?: unknown; prefs?: unknown };
     if (d.v !== 1 || typeof d.rev !== 'number' || !Number.isSafeInteger(d.rev) || d.rev < 1) return null;
     if (typeof d.prefs !== 'object' || d.prefs === null) return null;
-    return { rev: d.rev, state: noteStateOf(parseNotesPrefs(JSON.stringify(d.prefs))) };
+    const state = noteStateOf(parseNotesPrefs(JSON.stringify(d.prefs)));
+    // parseNotesPrefs fills the times in; a document that CARRIED none must
+    // stay carrying none, or the merge cannot tell unknown from cleared. A
+    // present-but-unreadable `times` (not an object, or an object with not one
+    // usable field) counts as carrying none too: parsed it is indistinguishable
+    // from "the user chose the defaults", and that would let a corrupt document
+    // overwrite another device's real times.
+    const raw = (d.prefs as { times?: unknown }).times;
+    const carried = typeof raw === 'object' && raw !== null && !Array.isArray(raw)
+        && REMINDER_TIME_KEYS.some(k => isReminderTime((raw as Record<string, unknown>)[k]));
+    if (!carried) delete state.times;
+    return { rev: d.rev, state };
 }
 
 const lower = (l: string) => l.toLocaleLowerCase();
@@ -93,13 +122,25 @@ const lower = (l: string) => l.toLocaleLowerCase();
 /** The ONE-TIME merge of a never-synced local copy into the server's. */
 export function unionMerge(local: NotesNoteState, server: NotesNoteState): NotesNoteState {
     const colors = { ...local.colors, ...server.colors };
+    const times = server.times ?? local.times;
     const labels: Record<string, string[]> = {};
     for (const k of new Set([...Object.keys(local.labels), ...Object.keys(server.labels)])) {
         const merged = dedupeLabels([...(server.labels[k] ?? []), ...(local.labels[k] ?? [])]);
         if (merged.length > 0) labels[k] = merged;
     }
     const archived = { ...local.archived, ...server.archived };
-    return { colors, labels, archived };
+    return { colors, labels, archived, ...(times ? { times } : {}) };
+}
+
+/** Per field: what this device changed since `base` wins, else the server's —
+ *  and a server that carries no times at all changes nothing. */
+export function mergeTimes(base: ReminderTimes | undefined, local: ReminderTimes | undefined, server: ReminderTimes | undefined): ReminderTimes | undefined {
+    if (!local) return server;
+    if (!server) return local;
+    const b = base ?? DEFAULT_REMINDER_TIMES;
+    const out = {} as ReminderTimes;
+    for (const k of REMINDER_TIME_KEYS) out[k] = local[k] !== b[k] ? local[k] : server[k];
+    return out;
 }
 
 /** Three-way, per note and field: what this device changed since `base`
@@ -124,10 +165,12 @@ export function threeWayMerge(base: NotesNoteState, local: NotesNoteState, serve
         const merged = dedupeLabels([...kept, ...added]).slice(0, MAX_LABELS_PER_NOTE);
         if (merged.length > 0) labels[k] = merged;
     }
+    const times = mergeTimes(base.times, local.times, server.times);
     return {
         colors: scalar(base.colors, local.colors, server.colors),
         labels,
         archived: scalar(base.archived, local.archived, server.archived),
+        ...(times ? { times } : {}),
     };
 }
 
@@ -197,8 +240,8 @@ export interface PrefsSync {
      *  restored a backup) — this device's copy is replaced by it. A user
      *  action. */
     acceptServer(): Promise<PrefsSyncStatus>;
-    /** Whether this device holds colours, labels or archive flags the
-     *  account's document does not (a sign-out would lose them). */
+    /** Whether this device holds colours, labels, archive flags or reminder
+     *  times the account's document does not (a sign-out would lose them). */
     unsynced(): boolean;
     status(): PrefsSyncStatus;
     subscribe(cb: () => void): () => void;
