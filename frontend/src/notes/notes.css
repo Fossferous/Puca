@@ -1336,7 +1336,12 @@
     text-overflow: ellipsis;
     cursor: pointer;
 }
-.notes-pages-tab:hover { color: var(--text-normal); }
+/* Hover only where there IS hover: on a touch screen :hover sticks to the
+   last tab tapped, which then reads as selected after a swipe elsewhere
+   (seen in the phone walk's screenshot). */
+@media (hover: hover) {
+    .notes-pages-tab:hover { color: var(--text-normal); }
+}
 .notes-pages-tab.active { color: var(--brand-primary); border-bottom-color: var(--brand-primary); }
 .notes-pages-tab:focus-visible { outline: 2px solid var(--brand-primary); outline-offset: -2px; border-radius: 6px 6px 0 0; }
 
@@ -1349,7 +1354,12 @@
     overflow-y: hidden;
     scroll-snap-type: x mandatory;
     /* A swipe that runs past the last list must not become the browser's
-       "go back" gesture. */
+       "go back" gesture. HERE, on the pager — never on .notes-page: a page is
+       a scroll container in both axes (overflow-y: auto makes overflow-x auto
+       too), and `overscroll-behavior-x: contain` on it stops a sideways swipe
+       from ever chaining out to the pager. Measured with real touch events at
+       390x844: with it on the page the same swipe moved nothing; without it,
+       one list along. */
     overscroll-behavior-x: contain;
     scrollbar-width: none;
 }
@@ -1358,15 +1368,15 @@
     flex: 0 0 100%;
     min-width: 0;
     overflow-y: auto;
-    overscroll-behavior-y: contain;
     scroll-snap-align: start;
     /* What .notes-main carries on every other route. */
     padding: 16px 24px 120px;
     -webkit-overflow-scrolling: touch;
 }
-/* Neither the page you are on nor one being swiped past: out of the
-   accessibility tree and out of the tab order, the way the closed rail
-   drawer is. It keeps its slot in the scroller either way. */
+/* A page holding no grid (not the one you are on, not on screen, nothing
+   being typed in it): out of the accessibility tree and out of the tab
+   order, the way the closed rail drawer is. It keeps its slot in the
+   scroller either way. */
 .notes-page:not(.live) { visibility: hidden; }
 
 @media (pointer: coarse) and (max-width: 1024px) {
@@ -1374,6 +1384,6 @@
     .notes-pages-tabs { padding: 0 8px; gap: 2px; }
     /* A thumb's target (docs/DESIGN_PHILOSOPHY.md §5), and wide enough that a
        long label still ellipsises rather than shrinking the tab. */
-    .notes-pages-tab { min-height: 44px; padding: 10px 12px; font-size: 15px; }
+    .notes-pages-tab { min-height: 44px; min-width: 44px; padding: 10px 12px; font-size: 15px; }
     .notes-page { padding: 12px 12px 120px; }
 }
