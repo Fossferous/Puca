@@ -19,7 +19,7 @@ import type { NoteCard } from '../notes/model/notesModel';
 import type { NoteActions } from '../notes/model/notesQueries';
 import { PERM } from '../api/permissionBits';
 import { serializeSchedule, serializeSnooze, type EventSchedule } from '../api/taskSchedule';
-import { reminderSlotOf } from '../notes/model/notesTiming';
+import { reminderSlotOf } from '../api/reminderSlots';
 
 const NOW = Date.parse('2030-10-01T00:00:00Z');
 const DUE = '2030-10-07T09:00:00.000Z';
@@ -52,7 +52,7 @@ function reminders(c: NoteCard, t: Task = task, opts: { canSchedule?: boolean; o
     root = createRoot(host);
     const view = (empty: boolean) => (
         <RemindersView
-            groups={{ overdue: [], today: [], upcoming: empty ? [] : [{ task: t, note: c, at: Date.parse(t.due_at ?? DUE), slot: reminderSlotOf(t, NOW) ?? undefined }] }}
+            groups={{ overdue: [], today: [], upcoming: empty ? [] : [{ kind: 'task' as const, task: t, note: c, at: Date.parse(t.due_at ?? DUE), slot: reminderSlotOf(t, NOW) ?? undefined }] }}
             actions={actions} now={NOW} onOpen={opts.onOpen ?? (() => {})}
             notificationsState="granted" onEnableNotifications={() => {}} canSnooze
             canSchedule={opts.canSchedule ?? true} onModal={opts.onModal}

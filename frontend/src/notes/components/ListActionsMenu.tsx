@@ -42,7 +42,7 @@ import { type NoteRef } from '../model/notesModel';
 import { pendingOutboxCount } from '../model/notesOutbox';
 import { recreationOrder } from '../model/noteContent';
 import { checkedCount, checkedRoots, deadSeriesAmong, describeUncheckWarning, uncheckOrder } from '../model/noteItemBulk';
-import { Popover } from './Popover';
+import { Popover } from '../../components/notes/Popover';
 import { UndoBar } from './UndoBar';
 
 const sleep = (ms: number) => new Promise<void>(r => { setTimeout(r, ms); });

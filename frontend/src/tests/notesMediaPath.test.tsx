@@ -115,7 +115,10 @@ describe('a picture added while the connection is there', () => {
         expect(H.uploadNoteMedia).toHaveBeenCalledTimes(1);
         expect(H.sealNoteMedia).not.toHaveBeenCalled();
         expect(H.park).not.toHaveBeenCalled();
-        expect(H.setTaskListAttachments).toHaveBeenCalledWith(1, [uploaded]);
+        // The third argument is the base revision the sidecar was read from
+        // (migration 069): undefined here, because this fixture's server has
+        // no content_rev to name.
+        expect(H.setTaskListAttachments).toHaveBeenCalledWith(1, [uploaded], undefined);
     });
 
     it('POSITIVE CONTROL: with no connection the same call seals and parks instead', async () => {

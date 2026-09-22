@@ -181,7 +181,7 @@ a.note-link { cursor: pointer; }
     margin-top: 4px;
     padding: 6px 8px;
     border-radius: 4px;
-    background: var(--bg-secondary, rgba(127, 127, 127, 0.12));
+    background: var(--bg-secondary);
     color: var(--text-normal);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
