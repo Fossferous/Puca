@@ -201,6 +201,14 @@ describe('Snooze on the item row', () => {
     // it. Dispatched from BODY, not from document: that is where a keypress
     // starts, and it is the only path where the capture-phase listener runs
     // before the editor's.
+    //
+    // MEASURED, and worth knowing before reading this as a severe bug: while
+    // the snooze BUTTON holds focus the wrapper's React onKeyDown already
+    // stops the native event, so the note survives even without the fix. The
+    // hole is the menu open with focus elsewhere — which is the ordinary
+    // state after a tap in WebKit, where a button takes no focus. The second
+    // case below pins the wrapper's half so neither guard can be deleted as
+    // redundant.
     it('the open menu consumes Escape — a surface above it does not also close', () => {
         const reached: string[] = [];
         // NoteEditor's listener, to the letter.
@@ -233,6 +241,16 @@ describe('Snooze on the item row', () => {
             act(() => { document.body.dispatchEvent(esc()); });
             expect(menu()).toBeNull();
             expect(reached).toEqual(['editor']);   // still one: the menu ate this one
+
+            // The other half: with the button focused the wrapper's React
+            // onKeyDown stops the native event before it reaches document.
+            act(() => btn().click());
+            expect(menu()).not.toBeNull();
+            btn().focus();
+            expect(document.activeElement).toBe(btn());
+            act(() => { btn().dispatchEvent(esc()); });
+            expect(menu()).toBeNull();
+            expect(reached).toEqual(['editor']);
         } finally {
             document.removeEventListener('keydown', editorEscape);
         }
