@@ -4,6 +4,31 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Added
+- **Stay signed in on this device.** Púca Notes' own sign-in now has a tick
+  box, on by default, that keeps this device signed in for up to a year rather
+  than a day, as long as it is opened at least once a month. It is what stops
+  the app asking for your password after a weekend with the phone off: until
+  now a session lasted 24 hours and only stretched when you used it, so time
+  away — not inactivity in the app — was what sent you back to the sign-in
+  form. Nothing about signing out changes: Sign out ends it immediately on
+  this device, signing out everywhere or changing your password ends it on
+  all of them, and a revoked device takes its sessions with it. Clear the box
+  before you sign in on a shared or borrowed machine and that sign-in behaves
+  exactly as before. The choice is remembered per device, including after you
+  sign out.
+
+### Changed
+- **Sessions can be long now, if you ask.** The server understands the new
+  request: a session opened with the box ticked carries a 30-day pass that
+  renews as you use it, up to a year from the day you signed in, after which
+  it asks for your password again. Every session opened without it is
+  unchanged — 24 hours, renewed as you go, one month at the outside. Púca's
+  own sign-in does not offer the box yet; it keeps the ordinary session and
+  can adopt the same option later.
+
 ## 0.9.817 — 2026-09-22
 
 Púca Notes grows up: share into it from any app, voice notes, a reminder on a note itself, text and pictures while offline, undo in the editor, a label manager, links, drag ordering, search that shows its matches, and its tools in Púca too; remote control no longer freezes on a screen that is not changing; Keep RNNoise keeps RNNoise; clip sound stays in step with the picture.

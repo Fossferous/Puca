@@ -586,6 +586,38 @@ has a separate server-side registry and none of the socket's side effects;
 without it, from refetch on focus, a 30-second poll while a shared note is
 open, and the refresh button.
 
+### Staying signed in
+
+Notes' own sign-in form carries **Stay signed in on this device**, ticked by
+default. With it, the token this device holds lives **30 days and renews as you
+use it, for up to a year** from the sign-in; without it, the ordinary **24
+hours, renewed as you go, for up to 30 days**. An ordinary session does not end
+because you stopped using the app: it ends because the token's day ran out, so a
+phone that was off for a weekend comes back to the sign-in form however much it
+was used before. With the box ticked it opens straight into the notes. Even then
+a device left untouched for more than 30 days asks again — the year is the outer
+limit for a device that keeps coming back, after which the password is asked
+for whatever the box says. When a session does expire, the form says so and
+suggests the box.
+
+It is a choice about the DEVICE, not the account: sign in on a phone with it
+ticked and a borrowed laptop with it cleared, and each keeps its own length.
+The tick is remembered on the device (`STAY_SIGNED_IN_KEY` in
+`frontend/src/api/auth.ts`) and deliberately survives signing out, so the form
+comes up with the answer you last gave. The request is one optional field on
+the step-2 sign-in body, sent only when ticked; the flag then travels in the
+token itself (`ls` in `src/auth.rs`) — no column, nothing stored server-side
+about it, and a renewal carries it forward.
+
+**Ending one early is exactly what it always was.** *Sign out* drops the token
+here and revokes this session by its id, so the server refuses it on the next
+request; signing out everywhere, changing your password or resetting with a
+recovery code ends every session on every device at once; and revoking the
+device in Púca ends the sessions that device proved. A long session is a longer
+*idle* life, not a weaker one. Púca's own sign-in does not offer the box — it
+opens the ordinary session — though the server accepts the request from any
+client that sends it.
+
 ## Building and serving
 
 `npm run build` builds Notes after the main bundle (`vite.notes.config.ts` →
@@ -1646,4 +1678,8 @@ second browser context as a second device it also checks sync: a note and a
 label made on one appear on the other with no refresh, a bulk colour change
 lands as one write, labels survive a sign-out, the page reloads offline from the
 worker and the sealed cache, an offline edit replays when the network returns,
-and the sign-out revokes the browser's device row.
+and the sign-out revokes the browser's device row. Signing in from Notes' own
+form reads the token the server minted: ticked, about 30 days with `ls: true`;
+cleared, about 24 hours and no `ls` — each the other's control — and the
+cleared answer is still there after a sign-out; on the phone the row is a
+44px, 16px target that toggles from anywhere along it.
