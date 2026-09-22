@@ -365,6 +365,12 @@ describe('the label a route names', () => {
         expect(labelFromPath('/label/Errands')).toBe('Errands');
         expect(labelFromPath(`/label/${encodeURIComponent('Work & home')}`)).toBe('Work & home');
         expect(labelFromPath(`/label/${encodeURIComponent('a/b')}`)).toBe('a/b');
+        // A malformed escape (a truncated address) must not throw: it runs in
+        // the filter's render, where a throw is the crash screen. The raw
+        // segment comes back, which names no label. POSITIVE CONTROL: the
+        // same escape really is malformed for decodeURIComponent.
+        expect(() => decodeURIComponent('%E0%A4%A')).toThrow();
+        expect(labelFromPath('/label/%E0%A4%A')).toBe('%E0%A4%A');
     });
 
     it('is null for every route that is not a label', () => {

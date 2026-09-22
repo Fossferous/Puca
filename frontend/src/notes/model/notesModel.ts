@@ -204,7 +204,16 @@ export function countProgress(tasks: Task[]): { total: number; completed: number
  */
 export function labelFromPath(path: string): string | null {
     const m = /^\/label\/(.+)$/.exec(path);
-    return m ? decodeURIComponent(m[1]) : null;
+    if (!m) return null;
+    // A hand-typed or truncated address can carry a malformed escape, and
+    // decodeURIComponent THROWS on it. This runs inside the filter's render
+    // (useMemo) and in onLabelChanged, where a throw is the crash screen for
+    // the whole app; the raw segment names no label, so the grid is empty.
+    try {
+        return decodeURIComponent(m[1]);
+    } catch {
+        return m[1];
+    }
 }
 
 /** Is `path` the route for `label`? Names are compared the way the label
