@@ -27,7 +27,10 @@ vi.mock('../api/auth', () => ({
     STAY_SIGNED_IN_KEY: STAY_KEY,
 }));
 vi.mock('../api/client', () => ({ isNetworkError: () => false }));
-vi.mock('../api/platform', () => ({ isMobile: () => false, isTauri: () => false }));
+// A browser by default. NotesLogin reads isMobile() once, at import, so the
+// phone-shell case below flips this and imports a FRESH copy of the module.
+const platform = vi.hoisted(() => ({ mobile: false }));
+vi.mock('../api/platform', () => ({ isMobile: () => platform.mobile, isTauri: () => false }));
 
 const { NotesLogin } = await import('../notes/components/NotesLogin');
 
@@ -86,11 +89,46 @@ describe('NotesLogin: stay signed in on this device', () => {
         expect(box()).toBeTruthy();
         expect(box()!.checked).toBe(true);
         expect(container.textContent).toMatch(/Stay signed in on this device/);
-        expect(container.textContent).toMatch(/lasts up to a year without a check-in, instead of a day/);
+        // What the server does: a year at most, and only while the device
+        // keeps coming back — a 30-day token, renewed on use. The first copy
+        // promised "a year without a check-in", which a month in a drawer
+        // disproves.
+        expect(container.textContent).toMatch(/for up to a year instead of a day, as long as it is used at least once a month\./);
+        expect(container.textContent).not.toMatch(/without a check-in/);
         // ...and a screen reader hears that line with the box, not somewhere
         // after it: the input names the hint as its description.
         const hint = document.getElementById(box()!.getAttribute('aria-describedby') ?? '');
         expect(hint?.textContent).toMatch(/Sign out to end it early\./);
+    });
+
+    it('in a browser, says the long session is Púca\'s too', async () => {
+        // One origin, one token: a Notes sign-in in a browser signs Púca in
+        // there as well, for exactly as long. The line must not hide that.
+        await mount();
+        expect(document.getElementById('stay-signed-in-hint')?.textContent)
+            .toMatch(/^This browser then stays signed in to Notes and to Púca /);
+    });
+
+    it('in the phone app, speaks of the device and does not mention Púca', async () => {
+        // The Notes APK runs at its own origin: nothing is shared with the
+        // Púca app, so naming it there would be wrong. A fresh import, since
+        // the component decides at import time.
+        platform.mobile = true;
+        vi.resetModules();
+        try {
+            const { NotesLogin: PhoneLogin } = await import('../notes/components/NotesLogin');
+            container = document.createElement('div');
+            document.body.appendChild(container);
+            root = createRoot(container);
+            await act(async () => {
+                root.render(<MemoryRouter><PhoneLogin onSuccess={() => {}} /></MemoryRouter>);
+            });
+            const hint = document.getElementById('stay-signed-in-hint')?.textContent ?? '';
+            expect(hint).toMatch(/^This device then stays signed in for up to a year instead of a day, as long as Notes is used at least once a month\./);
+            expect(hint).not.toMatch(/Púca/);
+        } finally {
+            platform.mobile = false;
+        }
     });
 
     it('passes the tick to login()', async () => {
@@ -123,7 +161,7 @@ describe('NotesLogin: stay signed in on this device', () => {
         expect(box()!.checked).toBe(true);
     });
 
-    it('tells an expired session how to stop it happening again', async () => {
+    async function mountExpired() {
         // The message only appears when the router carried `expired`.
         await act(async () => {
             container = document.createElement('div');
@@ -135,6 +173,25 @@ describe('NotesLogin: stay signed in on this device', () => {
                 </MemoryRouter>,
             );
         });
-        expect(container.querySelector('.login-message')?.textContent).toMatch(/Tick Stay signed in to avoid this\./);
+    }
+    const expiredMessage = () => container.querySelector('.login-message')?.textContent ?? '';
+
+    it('tells an expired session with the box clear how to stop it happening again', async () => {
+        store.set(STAY_KEY, 'false');
+        await mountExpired();
+        expect(expiredMessage()).toMatch(/^Your session expired\./);
+        expect(expiredMessage()).toMatch(/Tick Stay signed in to avoid this\./);
+    });
+
+    it('does not tell a device that already ticked the box to tick it', async () => {
+        // The default, and exactly the case of a long session that went a
+        // month unused or reached its year: the advice is already taken.
+        await mountExpired();
+        expect(box()!.checked).toBe(true);
+        expect(expiredMessage()).toMatch(/^Your session expired\. Sign in again to continue/);
+        expect(expiredMessage()).not.toMatch(/Tick Stay signed in/);
+        // ...and it follows the box: clearing it brings the tip back.
+        await act(async () => { box()!.click(); });
+        expect(expiredMessage()).toMatch(/Tick Stay signed in to avoid this\./);
     });
 });

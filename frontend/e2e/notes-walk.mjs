@@ -2719,6 +2719,12 @@ async function notesSignOut(pg) {
 ck('stay signed in: the row is on Notes\' sign-in, ticked by default',
     await page.locator(stayBox).count() === 1 && await page.locator(stayBox).isChecked(),
     await page.locator(stayBox).count() === 1 ? `checked=${await page.locator(stayBox).isChecked()}` : 'no checkbox');
+// In a browser, Notes and Púca share one origin and one token, so the long
+// session is Púca's too here: the line under the box has to say so, and say
+// "once a month" (a 30-day token), not a year without a visit.
+const stayHint = await page.locator('#stay-signed-in-hint').textContent({ timeout: 5000 }).catch(() => null);
+ck('stay signed in: in a browser the hint says Púca stays signed in too, if used monthly',
+    !!stayHint && stayHint.includes('to Notes and to Púca') && stayHint.includes('at least once a month'), JSON.stringify(stayHint));
 const longBody = await notesSignIn(page);
 ck('sign in: Notes signs in with the Púca account and the notes are back', await page.locator('.notes-card').count() >= 1);
 ck('stay signed in: ticked, the step-2 request asks for it', longBody?.stay_signed_in === true, longBody ? `keys=${Object.keys(longBody).sort().join(',')}` : 'no step-2 request seen');
