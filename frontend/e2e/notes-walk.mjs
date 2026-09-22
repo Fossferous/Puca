@@ -3601,7 +3601,12 @@ function installFakeAndroid() {
     };
     const answers = {
         NotesNative: {
-            info: () => ({ api: 2, features: ['reminders', 'backgroundRefresh', 'exactAlarm', 'battery', 'share', 'calendar', 'launchNav', 'shareIn', 'navItem', 'tile'] }),
+            // THE UNION THE REAL PLUGIN ANSWERS (NotesNativePlugin.info).
+            // A fake bridge that under-reports is worse than no bridge: with
+            // 'transcribe' missing, canTranscribe() was false here, so the
+            // one place the walk can reach the on-device write-down path —
+            // this section — silently skipped it and stayed green.
+            info: () => ({ api: 2, features: ['reminders', 'backgroundRefresh', 'exactAlarm', 'battery', 'share', 'calendar', 'launchNav', 'shareIn', 'navItem', 'tile', 'transcribe'] }),
             syncReminders: o => ({ count: (o.entries || []).length }),
             clearAll: () => ({}),
             setBackgroundRefresh: () => ({ scheduled: true }),
@@ -3617,8 +3622,24 @@ function installFakeAndroid() {
             addToPhoneCalendar: () => ({ ok: true }),
             consumeLaunchNav: () => takeParked('__walkNav') || { target: null, item: -1 },
             consumeLaunchShare: () => takeParked('__walkShare') || { text: null, subject: null, files: [] },
+            // Android's ON-DEVICE recogniser, answering the way the real one
+            // does: {text} or {text: null, reason}. The walk swaps in the
+            // refusal for the negative control. It is handed a cache PATH
+            // and never audio — which the section below asserts.
+            transcribePcm: () => ({ text: 'walk transcript one two three' }),
             requestAddTile: () => ({ ok: true }),
             removeListener: () => ({}),
+        },
+        // The cache round trip transcribeClip makes before it calls the
+        // recogniser. Faked so the call goes NATIVE (the web Filesystem would
+        // answer from IndexedDB and getUri would hand back a path no
+        // recogniser could open), and so the walk can prove the temporary
+        // plaintext PCM is deleted on every exit path, refusals included.
+        Filesystem: {
+            writeFile: o => ({ uri: `file:///cache/${o.path}` }),
+            appendFile: () => ({}),
+            getUri: o => ({ uri: `file:///cache/${o.path}` }),
+            deleteFile: () => ({}),
         },
         SovereignLocation: {
             status: () => ({ foreground: false, precise: false, background: false, locationOn: true }),
@@ -3769,7 +3790,7 @@ try {
     // start the real ones produce.
     const info = await a.evaluate(() => window.Capacitor.nativePromise('NotesNative', 'info', {}));
     ck('android shell: the bridge reports the new entry points (control for every check below)',
-        info.api === 2 && ['shareIn', 'navItem', 'tile'].every(f => info.features.includes(f)), JSON.stringify(info));
+        info.api === 2 && ['shareIn', 'navItem', 'tile', 'transcribe'].every(f => info.features.includes(f)), JSON.stringify(info));
 
     const park = async (key, value) => {
         await a.evaluate(([k, v]) => sessionStorage.setItem(k, JSON.stringify(v)), [key, value]);
@@ -3888,6 +3909,81 @@ try {
     const afterCalls = await a.evaluate(() => JSON.stringify(window.__fakeAndroid.calls));
     ck('share-in / reminder tap: the native side was handed no note content back',
         !/Eggs|Milk|Bread|Groceries|Shared errand/.test(afterCalls), (afterCalls.match(/Eggs|Milk|Bread|Groceries/) || [''])[0]);
+
+    // --- 7. Writing a recording down, on this phone or not at all -------------
+    // The browser half of this is section 4's refusal. THIS is the only place
+    // the walk can reach the other branch at all: the transcriber lives
+    // behind the plugin's 'transcribe' feature, so a regression in the
+    // write-down path, in its refusal copy or in the deletion of the
+    // temporary plaintext PCM left every gate green. The microphone is
+    // Chromium's fake device and the page is muted — nothing is played and
+    // no real microphone is opened.
+    await actx.grantPermissions(['microphone'], { origin: baseURL });
+    const offMachineA = [];
+    a.on('request', rq => {
+        const u = rq.url();
+        if (u.startsWith('data:') || u.startsWith('blob:')) return;
+        if (!LOCAL.has(hostOf(u))) offMachineA.push(u);
+    });
+    await toGrid();
+    await a.locator('.notes-card', { hasText: 'Sketch' }).tap();
+    await a.waitForSelector('.notes-editor .ni-actions button[aria-label="Voice note"]', { timeout: 15000 });
+    const recordOnce = async () => {
+        await a.tap('.notes-editor .ni-actions button[aria-label="Voice note"]');
+        await a.waitForSelector('.notes-recorder', { timeout: 10000 });
+        await sleep(1200);
+        await a.tap('.notes-recorder button[aria-label="Stop recording"]');
+        await a.waitForSelector('.notes-recorder audio', { timeout: 10000 });
+        await a.getByRole('button', { name: 'Keep' }).tap();
+    };
+    /** The note's text, whichever way the field is showing it. */
+    const bodyOfA = () => a.evaluate(() => {
+        const t = document.querySelector('.notes-editor textarea.nb-text');
+        if (t) return t.value;
+        const r = document.querySelector('.notes-editor .nb-rendered');
+        return r ? r.textContent : '';
+    });
+    const audioBefore = await a.locator('.notes-editor .ni-item.audio').count();
+    await recordOnce();
+    await a.waitForFunction(() => {
+        const t = document.querySelector('.notes-editor textarea.nb-text');
+        const r = document.querySelector('.notes-editor .nb-rendered');
+        return /walk transcript/.test((t ? t.value : (r ? r.textContent : '')) || '');
+    }, null, { timeout: 30000 }).catch(() => {});
+    ck('voice note (app): what the phone heard is written into the note’s text',
+        /walk transcript one two three/.test(await bodyOfA()), String(await bodyOfA()).slice(0, 140));
+    ck('voice note (app): the recording is kept as well as written down',
+        await a.locator('.notes-editor .ni-item.audio').count() === audioBefore + 1);
+    const fsCalls = (await a.evaluate(() => window.__fakeAndroid.calls)).filter(c => c.plugin === 'Filesystem');
+    const tCall = (await a.evaluate(() => window.__fakeAndroid.calls)).filter(c => c.method === 'transcribePcm').pop();
+    ck('voice note (app): the recogniser is handed a cache PATH and a rate — never the audio',
+        !!tCall && /^file:\/\/\/cache\//.test(tCall.options.path) && tCall.options.sampleRate === 16000
+        && Object.keys(tCall.options).sort().join(',') === 'path,sampleRate', JSON.stringify(tCall && tCall.options));
+    ck('voice note (app): the temporary plaintext PCM is written to the cache and deleted again',
+        fsCalls.some(c => c.method === 'writeFile') && fsCalls.some(c => c.method === 'deleteFile'),
+        JSON.stringify(fsCalls.map(c => c.method)));
+    await shotOf(a)('voice-note-transcribed');
+
+    // The refusal branch, on a phone with no on-device model: words, and the
+    // recording kept. (Also the positive control for the check above — the
+    // transcript lands only when the recogniser answers with one.)
+    await a.evaluate(() => {
+        window.__fakeAndroid.answers.NotesNative.transcribePcm = () => ({ text: null, reason: 'no-on-device-model' });
+    });
+    const bodyBefore = await bodyOfA();
+    const audioBefore2 = await a.locator('.notes-editor .ni-item.audio').count();
+    await recordOnce();
+    await a.waitForSelector('.notes-editor .notes-transcribe-notice', { timeout: 30000 }).catch(() => {});
+    const refusal = await a.locator('.notes-editor .notes-transcribe-notice').count() === 1
+        ? (await a.locator('.notes-editor .notes-transcribe-notice').innerText()).trim() : '';
+    ck('voice note (app): a phone with no on-device model says so, in words',
+        /on-device speech model/i.test(refusal) && /recording is saved/i.test(refusal), refusal.slice(0, 140));
+    ck('voice note (app): the refused recording is still kept, and nothing was written into the text',
+        await a.locator('.notes-editor .ni-item.audio').count() === audioBefore2 + 1 && (await bodyOfA()) === bodyBefore);
+    ck('voice note (app): nothing left this machine either way — the only transcriber is this phone',
+        offMachineA.length === 0, offMachineA.slice(0, 3).join(','));
+    await a.keyboard.press('Escape');
+    await a.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 }).catch(() => {});
 
     ck('android shell: no page errors', errors.length === aErrors, errors[aErrors]);
     await actx.close();

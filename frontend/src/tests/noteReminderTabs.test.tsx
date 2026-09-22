@@ -80,16 +80,20 @@ async function flush() {
 
 // ---- the shared projection, which is what BOTH tabs read --------------------
 
-function Probe({ lists, noteReminders, out }: { lists: TaskList[]; noteReminders: boolean; out: { sources: CalendarSource[] } }) {
-    out.sources = useTaskSources(lists, [], 2, { noteReminders }).sources;
-    return null;
+/** The hook's answer, rendered so the test can read it without writing to a
+ *  prop or a module slot from inside a render (react-hooks/immutability and
+ *  react-hooks/globals both refuse that, rightly). */
+function Probe({ lists, noteReminders }: { lists: TaskList[]; noteReminders: boolean }) {
+    const { sources } = useTaskSources(lists, [], 2, { noteReminders });
+    return <i data-sources={JSON.stringify(sources)} />;
 }
 
 async function sourcesFor(lists: TaskList[], noteReminders: boolean): Promise<CalendarSource[]> {
-    const out = { sources: [] as CalendarSource[] };
-    mount(<Probe lists={lists} noteReminders={noteReminders} out={out} />);
+    mount(<Probe lists={lists} noteReminders={noteReminders} />);
     await flush();
-    return out.sources;
+    const el = document.querySelector('[data-sources]');
+    expect(el, 'the probe never rendered').not.toBeNull();
+    return JSON.parse(el!.getAttribute('data-sources')!) as CalendarSource[];
 }
 
 describe('a list that carries its own reminder reaches the dated tabs', () => {
