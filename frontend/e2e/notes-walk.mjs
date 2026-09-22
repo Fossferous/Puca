@@ -570,6 +570,18 @@ page.off('request', watchForeign);
 // The text's own undo/redo (the browser's native stack is wiped by every
 // sync, so the field keeps its own). A paste-sized change is ONE step.
 const bodyText = () => page.locator('.notes-editor textarea.nb-text').inputValue();
+// The text above HOLDS A LINK, so blurring it swapped the field for the read
+// view (NoteBodyField's showRead). Click the text back into a field before
+// typing in it — the two features meet here and nowhere else.
+if (await page.locator('.notes-editor-content textarea.nb-text').count() === 0) {
+    await page.locator('.notes-editor-content .nb-rendered').click({ position: { x: 4, y: 4 } });
+    await page.waitForSelector('.notes-editor-content textarea.nb-text', { timeout: 5000 });
+}
+// A link-free baseline, saved, so the steps below are a plain two-step
+// history: with a link in the text every blur swaps the field for the read
+// view and there would be no textarea to read back.
+await page.fill('.notes-editor-content textarea.nb-text', 'Buy before Friday');
+await sleep(1500);
 await page.fill('.notes-editor-content textarea.nb-text', 'Buy before Friday, and flowers');
 await page.waitForSelector('.notes-editor .nb-histbtn[aria-label="Undo"]', { timeout: 5000 });
 await page.click('.notes-editor .nb-histbtn[aria-label="Undo"]');
@@ -579,6 +591,11 @@ ck('text redo: and forward again', (await bodyText()) === 'Buy before Friday, an
 await page.click('.notes-editor .nb-histbtn[aria-label="Undo"]');
 await sleep(1500);   // the undone text is what gets saved
 ck('text undo: the undone text saves, with no failure', (await bodyText()) === 'Buy before Friday' && await page.locator('.notes-editor .nb-status.failed').count() === 0);
+// Put the LINK back, saved: the card and the phone pass below both read this
+// note's text expecting an address in it.
+await page.fill('.notes-editor-content textarea.nb-text', 'Buy before Friday https://example.com/a');
+await page.locator('.notes-editor-sub').click();
+await sleep(1500);
 // toggle Milk. click(), not check(): the box is a CONTROLLED input whose DOM
 // state React restores until the optimistic update commits a frame later,
 // and check() asserts the flip synchronously — the completed section is the
@@ -1413,7 +1430,12 @@ await webGroceries.locator('button[aria-label="More actions"]').click();
 await page.locator('.context-menu-item', { hasText: 'Make a copy' }).click();
 await page.waitForSelector('.notes-editor .task-tree', { timeout: 25000 });
 ck('copy: the copy opens, titled "Groceries (copy)"', (await page.locator('.notes-editor-title').inputValue()) === 'Groceries (copy)');
-ck('copy: the note text came too', (await page.locator('.notes-editor textarea.nb-text').inputValue()) === 'Buy before Friday');
+// The text holds a link, so the closed field is the READ view, not a
+// textarea (NoteBodyField's showRead): read whichever is on screen.
+const copiedBody = await page.locator('.notes-editor textarea.nb-text').count() === 1
+    ? await page.locator('.notes-editor textarea.nb-text').inputValue()
+    : (await page.locator('.notes-editor .nb-rendered').innerText()).trim();
+ck('copy: the note text came too', copiedBody === 'Buy before Friday https://example.com/a', copiedBody);
 ck('copy: the TICKED item came too, still ticked', await page.locator('.notes-editor .tt-completed-section .tt-item', { hasText: 'Milk' }).count() === 1);
 ck('copy: nesting survived', await page.locator('.notes-editor .tt-nest .tt-item', { hasText: 'Sourdough' }).count() === 1);
 ck('copy: a due time came with its item', await page.locator('.notes-editor .tt-item', { hasText: 'Eggs' }).first().locator('.tt-due').count() === 1);
@@ -1500,7 +1522,9 @@ await page.waitForSelector('.checklist-card:has-text("Poem") .tasks-card-body', 
 // Parity: the ONE sealed document, seen through the other front door.
 // Groceries was coloured mint and labelled Errands in Notes (§5-6); Packing
 // was archived there (§10).
-const barTabs = () => page.locator('.tasks-tab-scroll .tasks-tab:not(.tasks-tab-all):not(.tasks-tab-calendar)');
+// The NOTE tabs: everything on the bar that is not one of the three pinned
+// views (All tasks, Calendar, Reminders — Reminders arrived with this release).
+const barTabs = () => page.locator('.tasks-tab-scroll .tasks-tab:not(.tasks-tab-all):not(.tasks-tab-calendar):not(.tasks-tab-reminders)');
 ck('púca: a note coloured in Notes tints its tab here', await page.locator('.tasks-tab[data-color="mint"]').count() === 1);
 ck('púca: …and its board card', await page.locator('.checklist-card[data-color="mint"]').count() === 1);
 ck('púca: the label set in Notes is on the tab', /Errands/.test(await page.locator('.tasks-tab', { hasText: 'Groceries' }).locator('.tasks-tab-labels').innerText().catch(() => '')));
@@ -2736,11 +2760,13 @@ ck('phone calendar: a note’s own reminder has a bell, not a tick box',
     && await calNoteRow.locator('input[type="checkbox"]').count() === 0
     && await calNoteRow.locator('.cal-row-mark').count() === 1,
     JSON.stringify({ rows: await calNoteRow.count() }));
-// Positive control on the same list, one day earlier: "Eggs" is a real item
-// with a due time, and it keeps the tick box this walk would otherwise never
-// have proved the day list draws at all.
-const mTom = new Date(); mTom.setDate(mTom.getDate() + 1);
-await m.goto(`/notes/#/calendar?v=day&d=${mTom.getFullYear()}-${mpad(mTom.getMonth() + 1)}-${mpad(mTom.getDate())}`);
+// Positive control: "Eggs" is a real item with a due time, and it keeps the
+// tick box this walk would otherwise never have proved the day list draws at
+// all. It is THREE days out, not tomorrow: the Reminders section above
+// retimed it from its row (18:45, +3 days), which is the point of that
+// check — so this one follows it rather than looking where it used to be.
+const mEggs = new Date(); mEggs.setDate(mEggs.getDate() + 3);
+await m.goto(`/notes/#/calendar?v=day&d=${mEggs.getFullYear()}-${mpad(mEggs.getMonth() + 1)}-${mpad(mEggs.getDate())}`);
 await m.waitForSelector('.cal-daylist', { timeout: 10000 });
 const calItemRow = m.locator('.cal-daylist .cal-row', { hasText: 'Eggs' });
 await calItemRow.first().waitFor({ timeout: 10000 }).catch(() => {});
@@ -3191,13 +3217,20 @@ await m.keyboard.press('Escape');
 await new Promise(res => setTimeout(res, 200));
 ck('phone: Escape in the item edit keeps the note open', await m.locator('.notes-editor').count() === 1);
 // The note text's undo is the only way to reach it here — there is no Ctrl key.
+// The text holds a link, so the closed field is the read view: tap it first.
+if (await m.locator('.notes-editor-content textarea.nb-text').count() === 0) {
+    await m.locator('.notes-editor-content .nb-rendered').tap({ position: { x: 4, y: 4 } });
+    await m.waitForSelector('.notes-editor-content textarea.nb-text', { timeout: 5000 });
+}
+await m.fill('.notes-editor-content textarea.nb-text', 'Buy before Friday https://example.com/a');
+await sleep(1200);
 await m.fill('.notes-editor-content textarea.nb-text', 'Buy before Friday and flowers');
 await m.waitForSelector('.notes-editor .nb-histbtn[aria-label="Undo"]', { timeout: 5000 });
 const undoBtnBox = await m.locator('.notes-editor .nb-histbtn[aria-label="Undo"]').boundingBox();
 ck('phone: the note text undo is a real tap target', undoBtnBox && undoBtnBox.width >= 43.5 && undoBtnBox.height >= 43.5, JSON.stringify(undoBtnBox));
 await m.tap('.notes-editor .nb-histbtn[aria-label="Undo"]');
 await new Promise(res => setTimeout(res, 1500));
-ck('phone: tapping Undo puts the text back', (await m.locator('.notes-editor textarea.nb-text').inputValue()) === 'Buy before Friday');
+ck('phone: tapping Undo puts the text back', (await m.locator('.notes-editor textarea.nb-text').inputValue()) === 'Buy before Friday https://example.com/a');
 // An item delete offers the same snackbar, inside the viewport. The item is
 // one this section adds itself: what the sections above left in this note has
 // been through a trash, a plaintext injection and two edits, and the check is
