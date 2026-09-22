@@ -8,7 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import { bodyToItems, itemsToBody, conversionLosses, describeLosses, deriveContentTitle, readableBody, recreationOrder } from '../notes/model/noteContent';
 import { galleryItems, withoutItem, nextDrawingName, heroItems, slotsNeeded, DRAWING_STROKES_MIME } from '../api/noteMedia';
-import { emptyDrawing, parseDrawing, serializeDrawing, toCanvasPoint, DRAWING_WIDTH, MAX_DRAWING_SIDE } from '../notes/model/drawing';
+import { emptyDrawing, parseDrawing, serializeDrawing, toCanvasPoint, DRAWING_WIDTH, MAX_DRAWING_SIDE } from '../api/drawing';
 import { fitWithin, shouldShrink } from '../api/imagePrep';
 import { buildNoteCards, noteMatches, type NoteSource } from '../notes/model/notesModel';
 import { noteToMarkdown, notesToJson } from '../notes/model/noteText';

@@ -1,49 +1,18 @@
-/* Púca Notes — snooze controls, timing marks and the "Edited" stamp
- * (SnoozeControl.tsx, EditedStamp.tsx). Phone rules at the bottom. */
-.notes-snooze { position: relative; display: inline-flex; align-items: center; flex-shrink: 0; }
-.notes-snooze-menu {
-    display: inline-flex;
-    gap: 2px;
-    margin-left: 4px;
-    padding: 2px;
-    border-radius: 8px;
-    background: var(--bg-floating);
-    border: 1px solid var(--border-subtle);
-}
-.notes-snooze-menu .notes-textbtn { padding: 4px 8px; font-size: 12px; }
-.notes-reminder-marks { display: inline-flex; gap: 2px; color: var(--text-muted); flex-shrink: 0; }
+/* Púca Notes — the "Edited" stamp (EditedStamp.tsx), the calendar view and
+ * the .ics import dialog. Phone rules at the bottom. */
 .notes-edited { color: var(--text-muted); }
-
-@media (pointer: coarse) and (max-width: 1024px) {
-    .notes-snooze-menu {
-        position: absolute;
-        right: 0;
-        top: calc(100% + 4px);
-        z-index: 20;
-        flex-direction: column;
-        margin-left: 0;
-        max-width: calc(100vw - 16px);
-    }
-    .notes-snooze-menu .notes-textbtn { min-height: 44px; min-width: 96px; font-size: 15px; }
-}
+/* Snooze and the reminder-row marks moved to
+   components/reminders/Reminders.css with the shared list. */
 
 /* ---- Calendar (CalendarView.tsx) and .ics import -------------------------------- */
 .notes-calendar { display: flex; flex-direction: column; gap: 10px; padding-bottom: 88px; }
 .cal-weekstart { font-size: 12px; color: var(--text-muted); }
 .cal-weekstart label { display: inline-flex; align-items: center; gap: 6px; }
 .cal-weekstart select { background: var(--bg-tertiary); color: var(--text-normal); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 2px 6px; font: inherit; }
-.ics-import { display: flex; flex-direction: column; gap: 10px; max-width: 520px; }
-.ics-import p { margin: 0; }
-.ics-notes { font-size: 13px; color: var(--text-warning, #f0b232); max-height: 200px; overflow-y: auto; }
-.ics-notes ul, .ics-failed { margin: 4px 0 0; padding-left: 18px; color: var(--text-muted); }
-.ics-row { display: flex; align-items: center; gap: 10px; }
-.ics-row > span { width: 64px; color: var(--text-muted); font-size: 13px; }
-.ics-row select, .ics-row input { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid var(--border-subtle); border-radius: 6px; background: var(--bg-tertiary); color: var(--text-normal); font: inherit; }
-.ics-actions { display: flex; justify-content: flex-end; gap: 8px; }
-.ics-progress progress { width: 100%; }
+/* The .ics import dialog's own rules moved to
+   components/calendar/IcsImport.css with the component. */
 .notes-textbtn.primary { color: var(--brand-primary); font-weight: 600; }
 
 @media (pointer: coarse) and (max-width: 1024px) {
-    .cal-weekstart select, .ics-row select, .ics-row input { font-size: 16px; min-height: 44px; }
-    .ics-actions .notes-textbtn { min-height: 44px; }
+    .cal-weekstart select { font-size: 16px; min-height: 44px; }
 }

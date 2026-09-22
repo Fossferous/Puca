@@ -489,6 +489,21 @@ export function snoozeLocked(task: { due_at: string | null; snooze?: string | nu
 }
 
 /**
+ * May THIS viewer snooze or unsnooze this item? The one rule, for every
+ * surface that offers the control (the calendar menu, both Reminders lists,
+ * an item row): a snooze rides the completion right on the server, and an
+ * editor's MOVED snooze is further off-limits to someone who may not edit the
+ * item's time. An item with no reminder time on the server has nothing to
+ * push back.
+ */
+export function maySnooze(
+    task: { due_at: string | null; snooze?: string | null }, canComplete: boolean, canEditTime: boolean,
+): boolean {
+    if (!canComplete || !task.due_at) return false;
+    return !snoozeLocked(task, canEditTime);
+}
+
+/**
  * The PATCH a snooze (untilMs) or an unsnooze (null) sends. With `canMoveDue`
  * (the snoozer may edit the item's time: its creator, a task manager, any
  * personal list) the plaintext due_at moves to the snooze instant — and back

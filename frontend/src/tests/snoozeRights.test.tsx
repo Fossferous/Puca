@@ -1,11 +1,13 @@
 // A snooze rides the COMPLETE_TASKS right on the server. A member without it
-// must not be offered Snooze (the calendar's item menu, Notes' Reminders row),
-// and every server refusal in the calendars/Notes is toasted with the
-// server's own words (toastRefusal) — a 403 used to vanish silently.
+// must not be offered Snooze (the calendar's item menu, either Reminders row,
+// an item row inside a list), and every server refusal in the calendars/Notes
+// is toasted with the server's own words (toastRefusal) — a 403 used to
+// vanish silently.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { Calendar } from '../components/calendar/Calendar';
+import { TaskTree } from '../components/TaskTree';
 import { RemindersView } from '../notes/components/RemindersView';
 import type { CalendarSource } from '../api/taskCalendar';
 import type { Task } from '../api/tasks';
@@ -16,6 +18,21 @@ import { toastRefusal } from '../api/refusalToast';
 import { setMessageToastSink } from '../components/messageToastBus';
 import { PERM } from '../api/permissionBits';
 import { serializeSnooze } from '../api/taskSchedule';
+
+// The item ROW's snooze (TaskTree), the third surface: same rule, one
+// implementation (taskSchedule.maySnooze).
+const row = (over: { t?: Task; myPerms?: number; me?: number; on?: boolean } = {}) => {
+    const el = mount(
+        <TaskTree
+            tasks={[over.t ?? task]}
+            onToggle={() => {}} onDelete={() => {}} onEdit={() => {}} onAddSubtask={() => {}} onMove={() => {}}
+            onSetDue={() => {}} onSetAttachments={() => {}}
+            onSnooze={over.on === false ? undefined : () => {}}
+            myPerms={over.myPerms} currentUserId={over.me ?? 3}
+        />,
+    );
+    return el.querySelector('.tt-item .notes-snooze');
+};
 
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
@@ -117,6 +134,141 @@ describe('an editor’s moved snooze is not a tick-only member’s to change', (
         act(() => root?.unmount());
         document.body.innerHTML = '';
         expect(reminders(card(undefined, 'list', moved), moved).querySelector('.notes-snooze')).not.toBeNull();
+    });
+});
+
+describe('Snooze on the item row', () => {
+    it('is offered to a member who may complete, and to the owner of a personal list', () => {
+        expect(row({ myPerms: PERM.VIEW_CHANNEL | PERM.COMPLETE_TASKS })).not.toBeNull();
+        act(() => root?.unmount());
+        document.body.innerHTML = '';
+        expect(row({ myPerms: undefined })).not.toBeNull();
+    });
+    it('is hidden without COMPLETE_TASKS, on an item with no reminder time, and on a server with no snooze', () => {
+        expect(row({ myPerms: PERM.VIEW_CHANNEL })).toBeNull();
+        act(() => root?.unmount());
+        document.body.innerHTML = '';
+        expect(row({ t: { ...task, due_at: null } })).toBeNull();
+        act(() => root?.unmount());
+        document.body.innerHTML = '';
+        expect(row({ on: false })).toBeNull();
+    });
+    it('an editor’s moved snooze is not a tick-only member’s to change', () => {
+        const MOVED = '2030-10-07T10:00:00.000Z';
+        const moved: Task = { ...task, due_at: MOVED, snooze: serializeSnooze({ forDue: DUE, until: MOVED }) };
+        expect(row({ t: moved, myPerms: PERM.VIEW_CHANNEL | PERM.COMPLETE_TASKS })).toBeNull();
+        act(() => root?.unmount());
+        document.body.innerHTML = '';
+        // Positive control: a task manager may, and so may the same member on
+        // an item nobody has snoozed.
+        expect(row({ t: moved, myPerms: PERM.VIEW_CHANNEL | PERM.MANAGE_TASKS })).not.toBeNull();
+        act(() => root?.unmount());
+        document.body.innerHTML = '';
+        expect(row({ t: { ...moved, snooze: null }, myPerms: PERM.VIEW_CHANNEL | PERM.COMPLETE_TASKS })).not.toBeNull();
+    });
+    // The row's menu is absolutely positioned OVER the next item
+    // (Reminders.css), so one left open would swallow that row's clicks.
+    it('the menu closes on Escape and on a press outside it', () => {
+        const el = mount(
+            <TaskTree
+                tasks={[task]}
+                onToggle={() => {}} onDelete={() => {}} onEdit={() => {}} onAddSubtask={() => {}} onMove={() => {}}
+                onSetDue={() => {}} onSetAttachments={() => {}} onSnooze={() => {}}
+                myPerms={PERM.VIEW_CHANNEL | PERM.MANAGE_TASKS} currentUserId={3}
+            />,
+        );
+        const btn = () => el.querySelector('.tt-item .notes-snooze button') as HTMLButtonElement;
+        const menu = () => el.querySelector('.notes-snooze-menu');
+
+        act(() => btn().click());
+        expect(menu()).not.toBeNull();
+        act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+        expect(menu()).toBeNull();
+
+        act(() => btn().click());
+        expect(menu()).not.toBeNull();
+        // Inside it first — a press on the menu itself must NOT close it.
+        act(() => { menu()!.dispatchEvent(new Event('pointerdown', { bubbles: true })); });
+        expect(menu()).not.toBeNull();
+        act(() => { document.body.dispatchEvent(new Event('pointerdown', { bubbles: true })); });
+        expect(menu()).toBeNull();
+    });
+
+    // ...and the key must not travel past it. In Púca Notes this control sits
+    // inside the note editor, whose own Escape is a bubble-phase document
+    // listener that bails only on `defaultPrevented` (NoteEditor.tsx), so a
+    // menu that closed without consuming the key closed the whole note with
+    // it. Dispatched from BODY, not from document: that is where a keypress
+    // starts, and it is the only path where the capture-phase listener runs
+    // before the editor's.
+    //
+    // MEASURED, and worth knowing before reading this as a severe bug: while
+    // the snooze BUTTON holds focus the wrapper's React onKeyDown already
+    // stops the native event, so the note survives even without the fix. The
+    // hole is the menu open with focus elsewhere — which is the ordinary
+    // state after a tap in WebKit, where a button takes no focus. The second
+    // case below pins the wrapper's half so neither guard can be deleted as
+    // redundant.
+    it('the open menu consumes Escape — a surface above it does not also close', () => {
+        const reached: string[] = [];
+        // NoteEditor's listener, to the letter.
+        const editorEscape = (e: KeyboardEvent) => {
+            if (e.key !== 'Escape' || e.defaultPrevented) return;
+            reached.push('editor');
+        };
+        document.addEventListener('keydown', editorEscape);
+        const esc = () => new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+        try {
+            const el = mount(
+                <TaskTree
+                    tasks={[task]}
+                    onToggle={() => {}} onDelete={() => {}} onEdit={() => {}} onAddSubtask={() => {}} onMove={() => {}}
+                    onSetDue={() => {}} onSetAttachments={() => {}} onSnooze={() => {}}
+                    myPerms={PERM.VIEW_CHANNEL | PERM.MANAGE_TASKS} currentUserId={3}
+                />,
+            );
+            const btn = () => el.querySelector('.tt-item .notes-snooze button') as HTMLButtonElement;
+            const menu = () => el.querySelector('.notes-snooze-menu');
+
+            // POSITIVE CONTROL: with no menu open the very same keypress does
+            // reach the editor — so "not reached" below is the menu, not a
+            // listener that never fires.
+            act(() => { document.body.dispatchEvent(esc()); });
+            expect(reached).toEqual(['editor']);
+
+            act(() => btn().click());
+            expect(menu()).not.toBeNull();
+            act(() => { document.body.dispatchEvent(esc()); });
+            expect(menu()).toBeNull();
+            expect(reached).toEqual(['editor']);   // still one: the menu ate this one
+
+            // The other half: with the button focused the wrapper's React
+            // onKeyDown stops the native event before it reaches document.
+            act(() => btn().click());
+            expect(menu()).not.toBeNull();
+            btn().focus();
+            expect(document.activeElement).toBe(btn());
+            act(() => { btn().dispatchEvent(esc()); });
+            expect(menu()).toBeNull();
+            expect(reached).toEqual(['editor']);
+        } finally {
+            document.removeEventListener('keydown', editorEscape);
+        }
+    });
+
+    it('offers Unsnooze only while a snooze is in force', () => {
+        const el = mount(
+            <TaskTree
+                tasks={[{ ...task, snooze: serializeSnooze({ forDue: DUE, until: '2030-10-07T10:00:00.000Z' }) }]}
+                onToggle={() => {}} onDelete={() => {}} onEdit={() => {}} onAddSubtask={() => {}} onMove={() => {}}
+                onSetDue={() => {}} onSetAttachments={() => {}} onSnooze={() => {}}
+                myPerms={PERM.VIEW_CHANNEL | PERM.MANAGE_TASKS} currentUserId={3}
+            />,
+        );
+        const btn = el.querySelector('.tt-item .notes-snooze button');
+        act(() => (btn as HTMLButtonElement).click());
+        const labels = [...el.querySelectorAll('.notes-snooze-menu button')].map(b => b.textContent);
+        expect(labels).toEqual(['10 min', '1 hour', 'Tomorrow', 'Unsnooze']);
     });
 });
 

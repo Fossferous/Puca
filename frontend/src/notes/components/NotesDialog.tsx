@@ -1,43 +1,8 @@
 /**
- * A small centred dialog (shortcuts help, confirmations). Portaled to body;
- * Escape closes it and stops there, like Popover.
+ * Púca Notes' keyboard-shortcut sheet. The dialog shell itself is
+ * components/NotesDialog.tsx (the .ics import uses it in Púca too).
  */
-import { useEffect, type ReactNode } from 'react';
-import { createPortal } from 'react-dom';
-import { CloseIcon } from '../../components/Icons';
-
-interface NotesDialogProps {
-    title: string;
-    onClose: () => void;
-    children: ReactNode;
-}
-
-export function NotesDialog({ title, onClose, children }: NotesDialogProps) {
-    useEffect(() => {
-        const onKey = (e: KeyboardEvent) => {
-            if (e.key !== 'Escape') return;
-            e.preventDefault();
-            e.stopPropagation();
-            onClose();
-        };
-        document.addEventListener('keydown', onKey, true);
-        return () => document.removeEventListener('keydown', onKey, true);
-    }, [onClose]);
-    return createPortal(
-        <div className="notes-dialog-backdrop" onClick={onClose}>
-            <div className="notes-dialog" role="dialog" aria-modal="true" aria-label={title} onClick={e => e.stopPropagation()}>
-                <div className="notes-dialog-head">
-                    <h3>{title}</h3>
-                    <button type="button" className="notes-iconbtn small" aria-label="Close" title="Close" onClick={onClose}>
-                        <CloseIcon size={18} />
-                    </button>
-                </div>
-                <div className="notes-dialog-body">{children}</div>
-            </div>
-        </div>,
-        document.body,
-    );
-}
+import { NotesDialog } from '../../components/NotesDialog';
 
 export function ShortcutsHelp({ onClose }: { onClose: () => void }) {
     return (

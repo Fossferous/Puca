@@ -41,7 +41,19 @@ Púca's reminders. Anything you do in one is what you see in the other.
   section for items with a place saved on that phone. A due item in a shared
   note that someone else created says **Reminds whoever set it**: the
   reminder feed covers the shared items *you* created, so that one never
-  alerts you.
+  alerts you. **Púca's own Tasks view pins the same view as a Reminders
+  tab**, over every personal list and checklist channel, and a due-item
+  notification opens it — whether Tasks was closed or already on screen: the
+  tap and the web notification click both raise one window event, which a
+  mounted Tasks view answers by switching tabs. That tab and the Calendar tab
+  read every scope through one cached query (`components/taskSources.ts`) with
+  a 30-second staleness window, while a list tab keeps its items in its own
+  state and writes straight to the API — so every writer outside those two
+  tabs calls `invalidateTaskScope` once the server has answered, or a date set
+  in a list is missing from Reminders for up to half a minute. So this is not
+  a Notes-only surface, and the
+  "Reminds whoever set it" line matters more there, because Púca's rows
+  include items every other member set.
 - **Calendar, repeats, snooze, Edited** — a Calendar in the rail, dates and
   repeat rules on items, snoozing reminders, and an Edited time on every note
   (see *Calendar, repeats and snooze* below).
@@ -94,7 +106,7 @@ Púca's reminders. Anything you do in one is what you see in the other.
 | Note order (`Move to top / up / down`) | `task_tab_prefs` order — the Tasks tab bar's order |
 | An item's date, repeat, place and alerts; its snooze | `channel_tasks.schedule` / `.snooze` (066), sealed like attachments |
 | Edited | `updated_at` on the list and its items (066) |
-| Reminders | `due_at` + `frontend/src/api/taskReminders.ts` |
+| Reminders | `due_at` + `frontend/src/api/taskReminders.ts`; the grouping and the timing rules are `frontend/src/api/reminderGroups.ts` + `reminderSlots.ts`, the list itself `frontend/src/components/reminders/` (both front doors) |
 | Colour, labels, archive | One sealed-to-self document per account (`/sealed-blobs/notes-prefs`, below) |
 | Grid/list, sort | Device-local (below) |
 
@@ -563,7 +575,8 @@ Migration 065 gives a personal list three nullable columns, and
   uploads. Photos are shrunk on the device before encryption
   (`api/imagePrep.ts`, long edge 2048 px). A drawing is uploaded twice: a PNG
   that every card and Púca's gallery show, and its strokes, so it can be
-  edited again (`notes/model/drawing.ts`). On a phone, *Photo* offers the
+  edited again (`frontend/src/api/drawing.ts`; the editor is
+  `frontend/src/components/DrawingCanvas.tsx`, shared by both apps). On a phone, *Photo* offers the
   camera (`<input accept="image/*" capture>`); on Android that needs the
   `IMAGE_CAPTURE` entry under `<queries>` in each app's manifest, so the
   camera arrives with a new APK of each app, not with an OTA.
@@ -576,8 +589,12 @@ Migration 065 gives a personal list three nullable columns, and
   trash).
 
 **Both front doors agree.** Púca's Tasks view shows and edits a personal
-list's text and photos, and its *Delete list* becomes *Move to trash* on a
-server that has one. A client decides all of this from
+list's text, photos AND drawings — a drawing made in either app opens in the
+other's editor, and saving one replaces the pair (the picture and its
+strokes) so nothing is orphaned — and its *Delete list* becomes *Move to
+trash* on a server that has one. A sidecar this device cannot read still
+refuses every edit, in both apps, rather than writing over refs it cannot
+see. A client decides all of this from
 `GET /task-lists/features`, which does not depend on having any lists; an
 older server answers it with an error and every client behaves exactly as it
 did before 065. An older client on a newer server keeps working: it never
@@ -694,8 +711,15 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   whose subtree holds an open item that still repeats (or whose schedule it
   cannot read) says so and changes nothing — tick the repeating item on its
   own, or remove its repeat.
-- **Snooze**: 10 minutes, 1 hour or tomorrow at 09:00, from Reminders and from
-  the calendar, for anyone who may tick the item. When the snoozer may also
+- **Snooze**: 10 minutes, 1 hour or tomorrow at 09:00, from either Reminders
+  view, from the calendar, and from the item's own row inside a note or a list
+  (one control, `components/reminders/SnoozeControl.tsx`), for anyone who may
+  tick the item. Its menu closes on Escape or a press outside it: on an item
+  row it floats over the row below, which it would otherwise swallow clicks
+  for. It **consumes** that Escape (`preventDefault` + `stopPropagation`), so
+  the note editor it sits inside does not close with it — the editor's own
+  Escape skips a `defaultPrevented` one, and its `escapeBlocked` hatch covers
+  popovers and context menus, not this layer. When the snoozer may also
   edit the item's time (its creator, a task manager, any personal note), the
   snooze **moves the plaintext `due_at` to the snooze instant** — the server,
   and a phone reminding with Notes closed, see the next reminder — and the
@@ -703,7 +727,8 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   member who may only tick gets a sealed snooze alone, which applies while
   `due_at` is unchanged. Either way it lapses by itself when the item moves.
   Once an editor's snooze has moved `due_at`, such a member is not offered
-  Snooze or Unsnooze on that item (`taskSchedule.snoozeLocked`): putting
+  Snooze or Unsnooze on that item — on any of those surfaces, which all ask
+  the one question (`taskSchedule.maySnooze` over `snoozeLocked`): putting
   `due_at` back needs the edit right, and a sealed-only re-snooze would
   either not apply or overwrite the time Unsnooze restores.
   Every reminder engine reads the same entries, `{id, at, mark, due}`
@@ -725,10 +750,15 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   in one request. *Skip this time* skips one occurrence. *Show completed* and
   *Show plain reminders* are switches. Shared notes on the calendar refresh
   every 30 seconds. Púca's Tasks view pins the same component as a
-  **Calendar** tab.
+  **Calendar** tab, and the Reminders list as a **Reminders** tab beside it —
+  the two shared hosts read the same per-list/per-channel queries under the
+  same cache keys (`frontend/src/components/taskSources.ts`), so switching
+  between them costs no extra requests.
 - **Reminders** lists events by their next occurrence and never calls them
   overdue, so a calendar of past appointments does not flood Overdue or the
-  badge. The server's `/task-reminders` returns recent past items and upcoming
+  badge. Neither Reminders view is built on `/task-reminders`: that feed is
+  ids and times only (it is what FIRES a reminder), so the rows come from the
+  ordinary per-list and per-channel reads and are decrypted on the device. The server's `/task-reminders` returns recent past items and upcoming
   ones separately, so old items cannot push future ones out.
 - **.ics**: export writes RFC 5545 (VERSION, PRODID, DTSTAMP, CRLF, folding,
   VTIMEZONE). Its UIDs are deterministic: the schedule's own uid, or an HMAC of
@@ -737,7 +767,18 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   plaintext, and the app says so first. It goes out through the share sheet in
   Púca Notes on Android (when the installed app has `NotesNative.shareText`),
   through the Save As dialog on the desktop, or as a download in a browser.
-  **Import** is into personal notes only. It shows a preview that lists
+  **Import** is offered in Púca Notes' calendar and in Púca's own Calendar
+  tab, and is into personal notes only — an import into a shared checklist
+  would notify every member for every item, so the picker is built from
+  personal lists and cannot be handed a channel
+  (`api/icsImport.ts`'s `icsImportTargets`). A note whose items this device
+  has not read yet is shown as *still loading* and cannot be chosen: with no
+  items in hand there is nothing to skip against, so a second import of the
+  same file would bring every event in twice, and the per-note cap would be
+  counted from zero. A file over 5 MB is refused
+  before it is parsed (`icsPickRefusal`, one cap and one wording shared by both
+  front doors — parsing a large calendar in order to then reject it costs
+  exactly what accepting it would). It shows a preview that lists
   everything it cannot represent. It skips events whose UID is already there,
   and paces itself under the rate limiter, retrying after a 429 and able to
   resume. It starts a new note before one reaches the 2000-item cap. **Add to

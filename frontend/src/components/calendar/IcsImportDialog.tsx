@@ -7,14 +7,19 @@
 import { useMemo, useRef, useState } from 'react';
 import { type IcsParseResult } from '../../api/ics';
 import { type ImportIO, type ImportState, importSummary, runImport } from '../../api/icsImport';
-import { WarningIcon } from '../../components/Icons';
-import { NotesDialog } from './NotesDialog';
+import './IcsImport.css';
+import { WarningIcon } from '../Icons';
+import { NotesDialog } from '../NotesDialog';
 
 export interface ImportTargetOption {
     listId: number;
     title: string;
     count: number;
     uids: ReadonlySet<string>;
+    /** Its items have been read on this device. A note that has not been read
+     *  cannot be imported into: there is nothing to dedupe against and no
+     *  count to keep under the cap (icsImport.icsImportTargets). */
+    loaded: boolean;
 }
 
 export function IcsImportDialog({ fileName, parsed, targets, io, onClose, onImported }: {
@@ -39,8 +44,13 @@ export function IcsImportDialog({ fileName, parsed, targets, io, onClose, onImpo
         withNotes: parsed.items.filter(i => i.notes.length > 0),
     }), [parsed]);
 
+    // The chosen note, when it is an existing one (rather than "A new note…").
+    const chosen = targets.find(x => String(x.listId) === target) ?? null;
+    const waiting = !!chosen && !chosen.loaded;
+
     const start = async (resume?: ImportState) => {
         const t = targets.find(x => String(x.listId) === target);
+        if (t && !t.loaded) return;
         signal.current = { cancelled: false };
         setRunning(true);
         const result = await runImport(parsed.items, {
@@ -76,7 +86,11 @@ export function IcsImportDialog({ fileName, parsed, targets, io, onClose, onImpo
                             <span>Into</span>
                             <select value={target} onChange={e => setTarget(e.target.value)} aria-label="Import into">
                                 <option value="new">A new note…</option>
-                                {targets.map(t => <option key={t.listId} value={String(t.listId)}>{t.title}</option>)}
+                                {targets.map(t => (
+                                    <option key={t.listId} value={String(t.listId)} disabled={!t.loaded}>
+                                        {t.loaded ? t.title : `${t.title} — still loading…`}
+                                    </option>
+                                ))}
                             </select>
                         </label>
                         {target === 'new' && (
@@ -85,10 +99,11 @@ export function IcsImportDialog({ fileName, parsed, targets, io, onClose, onImpo
                                 <input type="text" value={title} maxLength={100} onChange={e => setTitle(e.target.value)} aria-label="New note name" />
                             </label>
                         )}
+                        {waiting && <p className="notes-labels-hint">Still reading what that note already holds — a moment, or the import would bring everything in twice.</p>}
                         <p className="notes-labels-hint">Only into your own notes — an import into a shared checklist would notify every member for every item. Items already in the note (same event UID) are skipped, and a very large calendar is split across notes.</p>
                         <div className="ics-actions">
                             <button type="button" className="notes-textbtn" onClick={onClose}>Cancel</button>
-                            <button type="button" className="notes-textbtn primary" onClick={() => void start()}>Import {total}</button>
+                            <button type="button" className="notes-textbtn primary" disabled={waiting} onClick={() => void start()}>Import {total}</button>
                         </div>
                     </>
                 )}

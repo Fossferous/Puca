@@ -74,6 +74,12 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
     const onSetSchedule = useTaskFeature('schedule')
         ? (t: Task, schedule: string | null, due: string | null) => void actions.setSchedule(ref, t, schedule, due)
         : undefined;
+    // Snooze on the item itself, the same control the Reminders list and the
+    // calendar offer (NoteActions.snoozeTask already resolves who may move
+    // the plaintext due_at).
+    const onSnooze = useTaskFeature('snooze')
+        ? (t: Task, until: number | null) => void actions.snoozeTask(ref, t, until)
+        : undefined;
 
     // useLayoutEffect, not useEffect: the listener must exist the moment the
     // dialog is in the DOM. A keyboard user who opened the note with Enter can
@@ -185,6 +191,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                             onReorder={(t, afterId, reparent) => void actions.reorderTaskIn(ref, t, afterId, reparent)}
                             onSetDue={(t, due) => void actions.setDue(ref, t, due)}
                             onSetSchedule={onSetSchedule}
+                            onSnooze={onSnooze}
                             onSetAttachments={(t, refs) => void actions.setAttachments(ref, t, refs)}
                             myPerms={card.myPerms}
                             currentUserId={currentUserId}
@@ -202,6 +209,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                             onReorder={(t, afterId, reparent) => void actions.reorderTaskIn(ref, t, afterId, reparent)}
                             onSetDue={(t, due) => void actions.setDue(ref, t, due)}
                             onSetSchedule={onSetSchedule}
+                            onSnooze={onSnooze}
                             onSetAttachments={(t, refs) => void actions.setAttachments(ref, t, refs)}
                         />
                     )}

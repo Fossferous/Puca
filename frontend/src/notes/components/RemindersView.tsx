@@ -1,16 +1,24 @@
 /**
- * Every open item with a due time, across every note: Overdue / Today /
- * Upcoming. Ticking one completes it (the same cascade as everywhere else);
- * clicking a row opens its note.
+ * Púca Notes' Reminders view: every open item with a due time, across every
+ * note — Overdue / Today / Upcoming. Ticking one completes it (the same
+ * cascade as everywhere else); clicking a row opens its note.
+ *
+ * A THIN HOST since Púca's Tasks view grew the same view: the markup, the
+ * rights checks and the "Reminds whoever set it" line are
+ * components/reminders/RemindersList.tsx, exactly as the calendar is
+ * components/calendar/Calendar.tsx. What stays here is what only Notes has —
+ * the browser-notification banner, the Android status lines and place
+ * reminders — plus the mapping from note cards to the shared source type.
  */
-import { type ReactNode } from 'react';
+import { useMemo, type ReactNode } from 'react';
 import { currentUserIdFromToken } from '../../api/auth';
-import { canCompleteTasks, canEditTask, formatDueShort } from '../../api/tasks';
-import { snoozeLocked } from '../../api/taskSchedule';
+import { canCompleteTasks, canEditTask } from '../../api/tasks';
+import { type DueRow } from '../../api/reminderGroups';
+import { type CalendarSource } from '../../api/taskCalendar';
 import { PlaceReminders } from '../native/PlaceReminders';
 import { type PlaceItem } from '../native/useNotesPlaces';
 import { BellIcon } from '../../components/Icons';
-import { ReminderTimingMarks, SnoozeControl } from './SnoozeControl';
+import { RemindersEmpty, RemindersList } from '../../components/reminders/RemindersList';
 import { type DueItem, type NoteCard, type ReminderGroups } from '../model/notesModel';
 import { type NoteActions } from '../model/notesQueries';
 
@@ -30,88 +38,60 @@ interface RemindersViewProps {
     canSnooze?: boolean;
 }
 
-/** A due item in a SHARED note that someone else created: GET /task-reminders
- *  covers only the channel tasks the caller created, so it reminds whoever
- *  set it — never this user. Said on the row rather than implied. */
-function remindsSomeoneElse(item: DueItem, me: number | null): boolean {
-    return item.note.ref.kind === 'channel' && me !== null && item.task.created_by !== me;
-}
-
-/** Snooze rides the completion right; an editor's MOVED snooze is further
- *  off-limits to a member who may not edit the item's time
- *  (taskSchedule.snoozeLocked). A personal note is always yours. */
-function mayChangeSnooze(item: DueItem): boolean {
-    if (item.note.ref.kind === 'list') return true;
-    if (!canCompleteTasks(item.note.myPerms)) return false;
-    return !snoozeLocked(item.task, canEditTask(item.task, currentUserIdFromToken() ?? undefined, item.note.myPerms));
-}
-
-function Row({ item, actions, now, onOpen, canSnooze = false }: { item: DueItem; actions: NoteActions; now: number; onOpen: (c: NoteCard) => void; canSnooze?: boolean }) {
-    return (
-        <div className="notes-reminder-row" role="button" tabIndex={0}
-            onClick={() => onOpen(item.note)}
-            onKeyDown={e => { if (e.key === 'Enter') onOpen(item.note); }}
-        >
-            <input
-                type="checkbox"
-                checked={false}
-                aria-label={`Complete: ${item.task.description}`}
-                onClick={e => e.stopPropagation()}
-                onChange={() => void actions.toggleTask(item.note.ref, item.task, true)}
-            />
-            <span className="notes-reminder-text">
-                {item.task.description}
-                {/* A second line under the item, not a third column: the row
-                    keeps its shape at 390 px and on desktop. */}
-                {remindsSomeoneElse(item, currentUserIdFromToken()) && <span className="notes-reminder-sub">Reminds whoever set it</span>}
-            </span>
-            <ReminderTimingMarks slot={item.slot} />
-            <span className="notes-reminder-note">{item.note.title}</span>
-            <span className="notes-reminder-when" title={new Date(item.at).toLocaleString()}>{formatDueShort(new Date(item.at).toISOString(), now)}</span>
-            {canSnooze && mayChangeSnooze(item) && <SnoozeControl item={item} actions={actions} now={now} />}
-        </div>
-    );
+/** One note's item as the shared list's source. The permission answers are
+ *  the note card's, resolved here so the list never sees a NoteCard. */
+function sourceOf(item: DueItem, me: number | undefined): CalendarSource {
+    const note = item.note;
+    return {
+        task: item.task,
+        noteKey: note.key,
+        noteTitle: note.title,
+        serverName: note.serverName,
+        canEdit: note.ref.kind === 'list' || canEditTask(item.task, me, note.myPerms),
+        canComplete: note.ref.kind === 'list' || canCompleteTasks(note.myPerms),
+    };
 }
 
 export function RemindersView({ groups, actions, now, onOpen, notificationsState, onEnableNotifications, nativeBanner, placeItems = [], canSnooze = false }: RemindersViewProps) {
-    const total = groups.overdue.length + groups.today.length + groups.upcoming.length + placeItems.length;
+    const me = currentUserIdFromToken() ?? undefined;
+    // The note each row belongs to, so a click, a tick and a snooze can name
+    // it again: the shared list only carries the note KEY.
+    const cards = useMemo(() => {
+        const m = new Map<string, NoteCard>();
+        for (const g of [groups.overdue, groups.today, groups.upcoming]) for (const i of g) m.set(i.note.key, i.note);
+        return m;
+    }, [groups]);
+    const rows = useMemo(() => {
+        const map = (list: DueItem[]): DueRow[] => list.map(i => ({ task: i.task, source: sourceOf(i, me), at: i.at, slot: i.slot }));
+        return { overdue: map(groups.overdue), today: map(groups.today), upcoming: map(groups.upcoming) };
+    }, [groups, me]);
+    const noteOf = (row: DueRow): NoteCard | undefined => cards.get(row.source.noteKey);
+
     return (
-        <div className="notes-reminders">
-            {nativeBanner}
-            {notificationsState === 'default' && (
-                <div className="notes-status offline">
-                    <BellIcon /> Get a notification when an item comes due while Notes is open.
-                    <button type="button" onClick={onEnableNotifications}>Enable</button>
-                </div>
-            )}
-            {notificationsState === 'denied' && (
-                <div className="notes-status offline"><BellIcon /> Notifications are blocked for this site in the browser; due items still show here.</div>
-            )}
-            {total === 0 ? (
-                <div className="notes-empty"><BellIcon size={48} /><p>No reminders. Give any item a due time from its clock button inside a note.</p></div>
-            ) : (
+        <RemindersList
+            groups={rows}
+            now={now}
+            currentUserId={me}
+            extraCount={placeItems.length}
+            onOpen={row => { const c = noteOf(row); if (c) onOpen(c); }}
+            onToggle={row => { const c = noteOf(row); if (c) void actions.toggleTask(c.ref, row.source.task, true); }}
+            onSnooze={canSnooze ? ((row, until) => { const c = noteOf(row); if (c) void actions.snoozeTask(c.ref, row.source.task, until); }) : undefined}
+            header={(
                 <>
-                    {groups.overdue.length > 0 && (
-                        <section className="notes-reminder-group overdue" aria-label="Overdue">
-                            <h2 className="notes-section-title">Overdue</h2>
-                            {groups.overdue.map(i => <Row key={i.task.id} item={i} actions={actions} now={now} onOpen={onOpen} canSnooze={canSnooze} />)}
-                        </section>
+                    {nativeBanner}
+                    {notificationsState === 'default' && (
+                        <div className="notes-status offline">
+                            <BellIcon /> Get a notification when an item comes due while Notes is open.
+                            <button type="button" onClick={onEnableNotifications}>Enable</button>
+                        </div>
                     )}
-                    {groups.today.length > 0 && (
-                        <section className="notes-reminder-group" aria-label="Today">
-                            <h2 className="notes-section-title">Today</h2>
-                            {groups.today.map(i => <Row key={i.task.id} item={i} actions={actions} now={now} onOpen={onOpen} canSnooze={canSnooze} />)}
-                        </section>
-                    )}
-                    <PlaceReminders items={placeItems} actions={actions} onOpen={onOpen} />
-                    {groups.upcoming.length > 0 && (
-                        <section className="notes-reminder-group" aria-label="Upcoming">
-                            <h2 className="notes-section-title">Upcoming</h2>
-                            {groups.upcoming.map(i => <Row key={i.task.id} item={i} actions={actions} now={now} onOpen={onOpen} canSnooze={canSnooze} />)}
-                        </section>
+                    {notificationsState === 'denied' && (
+                        <div className="notes-status offline"><BellIcon /> Notifications are blocked for this site in the browser; due items still show here.</div>
                     )}
                 </>
             )}
-        </div>
+            middle={<PlaceReminders items={placeItems} actions={actions} onOpen={onOpen} />}
+            empty={<RemindersEmpty>No reminders. Give any item a due time from its clock button inside a note.</RemindersEmpty>}
+        />
     );
 }

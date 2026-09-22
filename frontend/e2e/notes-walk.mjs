@@ -136,6 +136,14 @@ await page.fill('#password', password);
 await page.click('button[type="submit"]');
 await page.waitForURL('**/chat', { timeout: 30000 });
 try { await page.click('.recovery-done-btn', { timeout: 8000 }); } catch { /* no modal */ }
+/** Púca asks, a few seconds after the app mounts, about a recovery code
+ *  generated at sign-up and never confirmed. Its overlay swallows clicks, so
+ *  every landing on /chat answers it first (it is not under test here). */
+async function dismissRecoveryReminder(pg) {
+    await pg.waitForSelector('.recovery-reminder-actions .recovery-done-btn', { timeout: 4000 })
+        .then(() => pg.click('.recovery-reminder-actions .recovery-done-btn'))
+        .catch(() => { /* not shown */ });
+}
 try { await page.click('.welcome-popup-close', { timeout: 3000 }); } catch { /* no popup */ }
 await shot('main-app-signed-in');
 
@@ -266,6 +274,31 @@ await page.fill('.tt-due-edit input', `${d.getFullYear()}-${p(d.getMonth() + 1)}
 await page.click('.tt-due-set');
 await page.waitForSelector('.notes-editor .tt-due', { timeout: 10000 });
 ck('editor: a due time renders its chip', true);
+// The snooze menu on that row is a layer INSIDE the editor, and Escape must
+// close the menu WITHOUT closing the note. Two different things stop the key:
+// the wrapper's React onKeyDown (which also stops the native event) covers a
+// keypress while the snooze button holds focus, and the menu's own
+// capture-phase listener covers one while focus is anywhere else. Only the
+// second is this control's doing, and MEASURED: with the button focused the
+// note survives either way, so the check below BLURS first — which is the
+// real state after a tap in WebKit, where a button takes no focus. Without
+// the capture-phase preventDefault the editor's document Escape
+// (NoteEditor.tsx) then closes the whole note.
+const eggsSnooze = eggsRow.locator('.notes-snooze button').first();
+if (await eggsSnooze.count() === 1) {
+    await eggsRow.hover();
+    await eggsSnooze.click();
+    await page.waitForSelector('.notes-snooze-menu', { timeout: 5000 });
+    await page.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur());
+    ck('editor: the open snooze menu holds no focus (the state this checks)',
+        await page.evaluate(() => !document.activeElement?.closest?.('.notes-snooze')));
+    await page.keyboard.press('Escape');
+    await sleep(200);
+    ck('editor: Escape closes the row’s snooze menu and leaves the note open',
+        await page.locator('.notes-snooze-menu').count() === 0 && await page.locator('.notes-editor').count() === 1);
+} else {
+    skip('editor: snooze is off on this server (taskFeatures)');
+}
 // Escape INSIDE an inline item edit must not close the note
 await page.locator('.notes-editor .tt-item', { hasText: 'Butter' }).first().locator('.tt-description').click();
 await page.waitForSelector('.notes-editor .tt-edit-input', { timeout: 5000 });
@@ -526,6 +559,7 @@ try { await page.click('.welcome-popup-close', { timeout: 2000 }); } catch { /* 
 await page.click('.server-icon.home-button');
 await page.locator('.sidebar-nav .nav-item', { hasText: 'Tasks' }).click();
 await page.waitForSelector('.tasks-tabbar', { timeout: 15000 });
+await dismissRecoveryReminder(page);
 await page.waitForSelector('.checklist-card:has-text("Poem") .tasks-card-body', { timeout: 10000 }).catch(() => {});
 ck('púca: the board card shows a text note\'s text', /Roses are red/.test(await page.locator('.checklist-card', { hasText: 'Poem' }).locator('.tasks-card-body').innerText().catch(() => '')));
 ck('púca: the board card says a photo note has a picture', /1 picture/.test(await page.locator('.checklist-card', { hasText: 'Holiday photo' }).locator('.tasks-card-body').innerText().catch(() => '')));
@@ -539,6 +573,99 @@ await page.waitForFunction(() => document.querySelector('.list-content-block .ni
     .then(() => ck('púca: a photo note shows its photo', true))
     .catch(() => ck('púca: a photo note shows its photo', false));
 await shot('puca-tasks-photo-note');
+// Púca's own Reminders tab: the SAME grouped list Notes shows, over every
+// personal list and checklist channel — and where a due-item notification
+// lands (api/desktopNotify dispatches 'sovereign:open-reminders').
+await page.locator('.tasks-tab-reminders').click();
+await page.waitForSelector('.tasks-reminders .notes-reminders', { timeout: 10000 });
+ck('púca reminders: the tab mounts the shared list', await page.locator('.tasks-reminders .notes-reminders').count() === 1);
+// The rows arrive with the per-list reads, not with the tab.
+await page.waitForSelector('.tasks-reminders .notes-reminder-row', { timeout: 15000 }).catch(() => {});
+ck('púca reminders: the due item from a personal note is listed', await page.locator('.tasks-reminders .notes-reminder-row', { hasText: 'Eggs' }).count() === 1);
+ck('púca reminders: it is grouped, not a flat list', await page.locator('.tasks-reminders .notes-reminder-group .notes-section-title').count() >= 1);
+// The styles came with the shared component: Púca never loads notes.css, so
+// an unstyled row here is the failure this catches.
+ck('púca reminders: the row is laid out (the shared CSS reached Púca)',
+    await page.locator('.tasks-reminders .notes-reminder-row').first().evaluate(el => getComputedStyle(el).display) === 'flex');
+await shot('puca-tasks-reminders');
+await page.locator('.tasks-tab-all').click();
+await page.waitForSelector('.tasks-tab-all.active', { timeout: 5000 });
+await page.evaluate(() => window.dispatchEvent(new CustomEvent('sovereign:open-reminders')));
+const landed = await page.waitForSelector('.tasks-tab-reminders.active', { timeout: 5000 }).then(() => true, () => false);
+ck('púca reminders: a clicked due-item notification lands on the Reminders tab', landed);
+// A drawing made in Púca Notes, opened and changed in PÚCA's own Tasks view
+// (the editor is shared now, and so is its stylesheet — an unstyled or
+// missing canvas here is exactly what this catches).
+await page.locator('.tasks-tab', { hasText: 'Sketch' }).click();
+await page.waitForSelector('.list-content-block .ni-item.drawing button[aria-label="Edit drawing"]', { timeout: 15000 })
+    .then(() => ck('púca: a drawing made in Notes can be edited in the Tasks view', true))
+    .catch(() => ck('púca: a drawing made in Notes can be edited in the Tasks view', false));
+ck('púca: a new drawing can be started there too', await page.locator('.list-content-block .ni-action', { hasText: 'Draw' }).count() === 1);
+await page.click('.list-content-block .ni-item.drawing button[aria-label="Edit drawing"]');
+await page.waitForSelector('.notes-draw-canvas', { timeout: 10000 });
+await sleep(300);
+const pucaInked = await page.evaluate(() => {
+    const c = document.querySelector('.notes-draw-canvas');
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let dark = 0;
+    for (let i = 0; i < d.length; i += 16) if (d[i] < 128 && d[i + 1] < 128 && d[i + 2] < 128) dark++;
+    return dark;
+});
+ck('púca: reopening the drawing restores the strokes', pucaInked > 50, `dark samples=${pucaInked}`);
+// DrawingCanvas.css sets .notes-draw's radius to 12px. An unstyled block
+// computes to '0px' — never '' — so the value itself is the assertion.
+const drawRadius = await page.locator('.notes-draw').evaluate(el => getComputedStyle(el).borderRadius);
+ck('púca: the editor is the full-size modal, not an unstyled block (its stylesheet travelled with it)',
+    drawRadius === '12px', drawRadius);
+await shot('puca-drawing-editor');
+// Draw a second stroke and save: ONE drawing remains (both old refs replaced).
+const pcb = await page.locator('.notes-draw-canvas').boundingBox();
+await page.mouse.move(pcb.x + pcb.width * 0.5, pcb.y + pcb.height * 0.6);
+await page.mouse.down();
+for (let i = 1; i <= 8; i++) await page.mouse.move(pcb.x + pcb.width * (0.5 + i * 0.03), pcb.y + pcb.height * (0.6 - i * 0.02));
+await page.mouse.up();
+await page.getByRole('button', { name: 'Save drawing' }).click();
+await page.waitForSelector('.notes-draw-canvas', { state: 'detached', timeout: 20000 });
+await sleep(1200);
+ck('púca: saving the edited drawing keeps ONE drawing in the note (the pair was replaced)',
+    await page.locator('.list-content-block .ni-item.drawing').count() === 1,
+    String(await page.locator('.list-content-block .ni-item').count()));
+// Snooze on the item ROW: the same control the calendar and Reminders offer.
+await page.locator('.tasks-tab', { hasText: 'Groceries' }).click();
+await page.waitForSelector('.tt-item', { timeout: 10000 });
+const eggsPuca = page.locator('.tt-item', { hasText: 'Eggs' }).first();
+await eggsPuca.hover();
+const snoozeBtn = eggsPuca.locator('.notes-snooze button').first();
+if (await snoozeBtn.count() === 1) {
+    await snoozeBtn.click();
+    await page.locator('.notes-snooze-menu button', { hasText: '1 hour' }).click();
+    await page.waitForSelector('.tt-item .tt-snoozed', { timeout: 10000 })
+        .then(() => ck('púca: Snooze on an item row pushes the reminder back', true))
+        .catch(() => ck('púca: Snooze on an item row pushes the reminder back', false));
+    // The menu floats over the NEXT row, so it has to be dismissible without
+    // picking anything: Escape, and a press anywhere outside it.
+    await eggsPuca.hover();
+    await eggsPuca.locator('.notes-snooze button').first().click();
+    await page.waitForSelector('.notes-snooze-menu', { timeout: 5000 });
+    await page.keyboard.press('Escape');
+    ck('púca: Escape closes the row’s snooze menu', await page.locator('.notes-snooze-menu').count() === 0);
+    await eggsPuca.hover();
+    await eggsPuca.locator('.notes-snooze button').first().click();
+    await page.waitForSelector('.notes-snooze-menu', { timeout: 5000 });
+    // On the tab BAR's own background — not on another tab, which would
+    // unmount the rows and hide the menu whatever this handler did.
+    await page.locator('.tasks-tabbar').click({ position: { x: 2, y: 2 } });
+    ck('púca: a press outside closes it too (it would otherwise swallow the next row’s clicks)',
+        await page.locator('.notes-snooze-menu').count() === 0 && await page.locator('.tt-item').count() > 0);
+    await eggsPuca.hover();
+    await eggsPuca.locator('.notes-snooze button').first().click();
+    await page.locator('.notes-snooze-menu button', { hasText: 'Unsnooze' }).click();
+    await page.waitForSelector('.tt-item .tt-snoozed', { state: 'detached', timeout: 10000 })
+        .then(() => ck('púca: Unsnooze on the row clears it', true))
+        .catch(() => ck('púca: Unsnooze on the row clears it', false));
+} else {
+    skip('púca: snooze on an item row (this server has no snooze — taskFeatures)');
+}
 // Move to trash from Púca: the list leaves the bar and the Trash section offers it back.
 await page.locator('.tasks-tab', { hasText: 'Packing' }).click({ button: 'right' });
 await page.locator('.context-menu-item', { hasText: 'Move to trash' }).click();
@@ -560,11 +687,7 @@ await sleep(1500);   // the prune (and any fresh read of the trash it asks for) 
 const archivedWhileTrashed = await np.locator('.notes-rail-item', { hasText: 'Archive' }).locator('.notes-rail-count').innerText().catch(() => '?');
 ck('notes (second tab): opened while Púca holds Packing in the trash — it is in the Notes trash, not counted as archived', packingInNotesTrash && archivedWhileTrashed === '0', `inTrash=${packingInNotesTrash} archived=${archivedWhileTrashed}`);
 await np.close();
-// Púca asks, 3 s after it mounts, about a recovery code generated at sign-up and
-// never confirmed; the walk above outlasts that. Answer it (it is not under test).
-await page.waitForSelector('.recovery-reminder-actions .recovery-done-btn', { timeout: 4000 })
-    .then(() => page.click('.recovery-reminder-actions .recovery-done-btn'))
-    .catch(() => { /* not shown */ });
+await dismissRecoveryReminder(page);
 await page.locator('.tasks-trash-row', { hasText: 'Packing' }).getByRole('button', { name: 'Restore' }).click();
 await page.waitForSelector('.tasks-tab:has-text("Packing")', { timeout: 10000 })
     .then(() => ck('púca: Restore puts it back in the bar', true))
@@ -1147,6 +1270,26 @@ if (!psqlDsn) {
 // work added the last two, so a fixed count would only measure that).
 ck('desktop hint: a second line inside the item cell, not a new column', !!hinted && !!mine && !!hinted.sub && hinted.cells === mine.cells && hinted.sub.t >= hinted.text.t + 4 && hinted.sub.b <= hinted.row.b + 0.5, JSON.stringify({ hinted, mineCells: mine?.cells }));
         await shotOf(h)('hint-desktop');
+        // ---- 15b. The SAME rule in Púca's own Reminders tab -------------------
+        // Púca's sources are every member's items in that checklist, not just
+        // the caller's, so this line matters MORE here: /task-reminders' channel
+        // arm is `created_by = $1` and will never alert this user for it.
+        await h.goto('/chat');
+        await h.waitForSelector('.chat-container', { timeout: 20000 });
+        try { await h.click('.welcome-popup-close', { timeout: 2000 }); } catch { /* no popup */ }
+        await h.click('.server-icon.home-button');
+        await h.locator('.sidebar-nav .nav-item', { hasText: 'Tasks' }).click();
+        await h.waitForSelector('.tasks-tabbar', { timeout: 15000 });
+        await dismissRecoveryReminder(h);
+        await h.locator('.tasks-tab-reminders').click();
+        await h.waitForSelector('.tasks-reminders .notes-reminder-row:has-text("Shared errand")', { timeout: 15000 });
+        const prows = await rowFacts(h);
+        const phinted = prows.find(x => x.label === 'Shared errand');
+        const pmine = prows.find(x => x.label === 'My shared errand');
+        ck('púca reminders: the item someone else set says "Reminds whoever set it"', !!phinted && phinted.hint === 'Reminds whoever set it', JSON.stringify(phinted));
+        ck('púca reminders: my own shared item does not (control)', !!pmine && pmine.hint === null, JSON.stringify(pmine));
+        ck('púca reminders: a second line inside the item cell, not a new column', !!phinted && !!pmine && !!phinted.sub && phinted.cells === pmine.cells && phinted.sub.t >= phinted.text.t + 4, JSON.stringify(phinted));
+        await shotOf(h)('puca-reminders-hint-desktop');
         await hctx.close();
 
         const pctx = await browser.newContext({ ...devices['iPhone 13'], defaultBrowserType: undefined, baseURL, storageState: state });
@@ -1171,6 +1314,70 @@ ck('desktop hint: a second line inside the item cell, not a new column', !!hinte
             JSON.stringify({ vw, overflow, hinted }));
         ck('phone hint: nothing covers it', await onTop(pg, '.notes-reminder-sub'));
         await shotOf(pg)('hint-phone');
+        // The same view in PÚCA at 390x844: the tab is a whole tap target, the
+        // rows fit, and the snooze button is not a 32 px dot on a phone.
+        // The phone route into Púca's Tasks view is the bottom nav plus the
+        // self-note server icon (the desktop sidebar is not on screen at
+        // 390 px) — the same steps section 14's phone pass uses.
+        await pg.goto('/chat');
+        await pg.waitForSelector('.chat-container', { timeout: 20000 }).catch(() => {});
+        try { await pg.click('.welcome-popup-close', { timeout: 2000 }); } catch { /* no popup */ }
+        await pg.locator('.mobile-nav-btn').nth(0).tap().catch(() => {});
+        await pg.locator('.server-icon.notes-self').tap({ timeout: 5000 }).catch(() => {});
+        await pg.waitForSelector('.tasks-tabbar', { timeout: 15000 });
+        await dismissRecoveryReminder(pg);
+        await pg.locator('.tasks-tab-reminders').tap();
+        await pg.waitForSelector('.tasks-reminders .notes-reminder-row:has-text("Shared errand")', { timeout: 15000 });
+        // The LAYOUT box, not the rendered one: a tab that has just been
+        // tapped is still under the press effect (measured at 0.98 of its
+        // size — the shipped Calendar tab does the same), and a momentary
+        // animation is not the size of the thing a finger has to hit. The
+        // Calendar tab is the positive control for the convention.
+        const tapBoxes = await pg.evaluate(() => {
+            const box = sel => {
+                const el = document.querySelector(sel);
+                if (!el) return null;
+                const r = el.getBoundingClientRect();
+                return { w: el.offsetWidth, h: el.offsetHeight, drawnW: Math.round(r.width * 100) / 100, drawnH: Math.round(r.height * 100) / 100 };
+            };
+            return { reminders: box('.tasks-tab-reminders'), calendar: box('.tasks-tab-calendar') };
+        });
+        ck('púca reminders (phone): the tab is a whole tap target, like the Calendar tab beside it',
+            !!tapBoxes.reminders && !!tapBoxes.calendar
+            && tapBoxes.reminders.w >= 44 && tapBoxes.reminders.h >= 44
+            && tapBoxes.calendar.w >= 44 && tapBoxes.calendar.h >= 44,
+            JSON.stringify(tapBoxes));
+        const pucaPhone = await pg.evaluate(() => ({
+            overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+            vw: window.innerWidth,
+            rows: [...document.querySelectorAll('.tasks-reminders .notes-reminder-row')].map(r => r.getBoundingClientRect().right),
+            box: (() => { const b = document.querySelector('.tasks-reminders input[type="checkbox"]'); return b ? b.getBoundingClientRect().width : 0; })(),
+        }));
+        ck('púca reminders (phone): no horizontal overflow and every row fits', !pucaPhone.overflow && pucaPhone.rows.length > 0 && pucaPhone.rows.every(r => r <= pucaPhone.vw + 0.5), JSON.stringify(pucaPhone));
+        ck('púca reminders (phone): the tick box grew for a finger', pucaPhone.box >= 20, String(pucaPhone.box));
+        const snoozeBtn = pg.locator('.tasks-reminders .notes-snooze button').first();
+        if (await snoozeBtn.count() === 1) {
+            const sb = await snoozeBtn.boundingBox();
+            ck('púca reminders (phone): the snooze button is a 44 px target', !!sb && sb.width >= 44 && sb.height >= 44, JSON.stringify(sb));
+            await snoozeBtn.tap();
+            const presets = await pg.locator('.notes-snooze-menu .notes-textbtn').evaluateAll(els => els.map(e => { const b = e.getBoundingClientRect(); return { h: b.height, r: b.right }; }));
+            ck('púca reminders (phone): every snooze preset is 44 px and inside the viewport', presets.length >= 3 && presets.every(p => p.h >= 44 && p.r <= pucaPhone.vw + 0.5), JSON.stringify(presets));
+        } else {
+            skip('púca reminders (phone): snooze is off on this server (taskFeatures)');
+        }
+        await shotOf(pg)('puca-reminders-phone');
+        // The same 44 px rule on the item ROW's snooze. Reminders.css scopes
+        // it to .notes-snooze.tt-snooze: the 30 px siblings beside it in
+        // .tt-actions are that row's own long-standing convention.
+        await pg.locator('.tasks-tab', { hasText: 'Groceries' }).tap();
+        await pg.waitForSelector('.tt-item', { timeout: 15000 });
+        const rowSnooze = pg.locator('.tt-item .notes-snooze button').first();
+        if (await rowSnooze.count() === 1) {
+            const rb = await rowSnooze.boundingBox();
+            ck('púca tasks (phone): the item row’s snooze is a 44 px target too', !!rb && rb.width >= 44 && rb.height >= 44, JSON.stringify(rb));
+        } else {
+            skip('púca tasks (phone): no snoozable item row here (taskFeatures, or nothing dated)');
+        }
         await pctx.close();
     } catch (e) {
         ck('shared-item hint walk ran', false, String(e).slice(0, 300));

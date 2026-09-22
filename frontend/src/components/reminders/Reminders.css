@@ -1,0 +1,134 @@
+/* The Reminders list (RemindersList.tsx, SnoozeControl.tsx) — shared by Púca
+   Notes' Reminders view and Púca's Reminders tab.
+
+   The rules moved here from notes/notes.css and notes/timing.css when the
+   component became shared, class names unchanged so Notes' tests and walks
+   still name the same things. Púca's bundle never loads notes.css, so the few
+   Notes utility classes the markup leans on (.notes-section-title,
+   .notes-empty, .notes-iconbtn, .notes-textbtn) are repeated here SCOPED to
+   the list — same values, so Notes looks identical and its own copies keep
+   serving the rest of that app. */
+
+/* Púca's Reminders tab wraps the list; Notes' shell supplies its own padding. */
+.tasks-reminders { padding: 12px 16px 24px; min-width: 0; }
+
+.notes-reminders { max-width: 760px; margin: 0 auto; }
+.notes-reminder-group { margin-bottom: 20px; }
+.notes-reminder-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+}
+.notes-reminder-row:hover { background: var(--bg-modifier-hover); }
+.notes-reminder-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--brand-primary); flex-shrink: 0; }
+.notes-reminder-text { flex: 1; min-width: 0; font-size: 14px; word-break: break-word; }
+.notes-reminder-sub { display: block; font-size: 12px; color: var(--text-muted); }
+.notes-reminder-note { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40%; }
+.notes-reminder-when { font-size: 12px; color: var(--text-muted); white-space: nowrap; flex-shrink: 0; }
+.notes-reminder-when .svrn-icon { vertical-align: -2px; }
+.notes-reminder-group.overdue .notes-reminder-when { color: var(--text-danger); font-weight: 600; }
+
+/* Snooze + the timing marks (were notes/timing.css). */
+.notes-snooze { position: relative; display: inline-flex; align-items: center; flex-shrink: 0; }
+.notes-snooze-menu {
+    display: inline-flex;
+    gap: 2px;
+    margin-left: 4px;
+    padding: 2px;
+    border-radius: 8px;
+    background: var(--bg-floating);
+    border: 1px solid var(--border-subtle);
+}
+/* The menu's own buttons carry the full look: this control also renders on a
+   TASK ROW, where none of the .notes-* utilities below are in scope. */
+.notes-snooze-menu .notes-textbtn {
+    background: none;
+    border: none;
+    color: var(--text-normal);
+    font-weight: 600;
+    border-radius: 6px;
+    cursor: pointer;
+    white-space: nowrap;
+    padding: 4px 8px;
+    font-size: 12px;
+}
+.notes-snooze-menu .notes-textbtn:hover { background: var(--bg-modifier-hover); }
+.notes-reminder-marks { display: inline-flex; gap: 2px; color: var(--text-muted); flex-shrink: 0; }
+/* On an item row (TaskTree) the menu always floats: the action cluster is a
+   tight flex row with nowhere to put three buttons inline. */
+.notes-snooze.tt-snooze .notes-snooze-menu {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 4px);
+    z-index: 20;
+    margin-left: 0;
+    max-width: calc(100vw - 16px);
+}
+
+/* The Notes utilities this markup uses, scoped so Púca gets them too. */
+.notes-reminders .notes-section-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    margin: 18px 0 8px 4px;
+}
+.notes-reminders .notes-empty {
+    text-align: center;
+    color: var(--text-muted);
+    padding: 72px 16px;
+    line-height: 1.6;
+}
+.notes-reminders .notes-empty .svrn-icon { font-size: 48px; color: var(--text-faint); display: block; margin: 0 auto 12px; }
+.notes-reminder-row .notes-iconbtn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    width: 40px;
+    height: 40px;
+    border: none;
+    border-radius: 50%;
+    background: none;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+.notes-reminder-row .notes-iconbtn:hover, .notes-reminder-row .notes-iconbtn:focus-visible { background: var(--bg-modifier-hover); color: var(--text-normal); }
+.notes-reminder-row .notes-iconbtn.small { width: 32px; height: 32px; font-size: 16px; }
+.notes-reminder-row .notes-textbtn {
+    background: none;
+    border: none;
+    color: var(--text-normal);
+    font-size: 13px;
+    font-weight: 600;
+    padding: 8px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+.notes-reminder-row .notes-textbtn:hover { background: var(--bg-modifier-hover); }
+
+/* Phone: a 44px tap target on every control, and a taller row. */
+@media (pointer: coarse) and (max-width: 1024px) {
+    .notes-reminder-row { padding: 12px 10px; }
+    .notes-reminder-row input[type="checkbox"] { width: 20px; height: 20px; }
+    .notes-reminder-row .notes-iconbtn.small { width: 44px; height: 44px; }
+    .notes-snooze-menu {
+        position: absolute;
+        right: 0;
+        top: calc(100% + 4px);
+        z-index: 20;
+        flex-direction: column;
+        margin-left: 0;
+        max-width: calc(100vw - 16px);
+    }
+    .notes-snooze-menu .notes-textbtn { min-height: 44px; min-width: 96px; font-size: 15px; }
+    /* The item row's own snooze button. Its siblings in .tt-actions are 30px
+       (TaskTree.css) — the row's long-standing convention — but this one is
+       new, and it opens a menu rather than toggling something recoverable, so
+       it gets the 44px target DESIGN_PHILOSOPHY §7 asks for. */
+    .notes-snooze.tt-snooze .tt-btn { min-width: 44px; min-height: 44px; }
+}

@@ -19,6 +19,7 @@ import { type CalendarEntry, type CalendarSource } from '../../api/taskCalendar'
 import { newItemTiming, planMove, planSkip } from '../../api/calendarActions';
 import { parseSchedule, snoozeUntil } from '../../api/taskSchedule';
 import { buildIcs, parseIcs, type IcsItem, type IcsParseResult } from '../../api/ics';
+import { icsPickRefusal } from '../../api/icsImport';
 import { currentIcsUid } from '../../api/icsUid';
 import { addToPhoneCalendar, canAddToPhoneCalendar, deliverIcs, phoneCalendarArgs } from '../../api/icsDelivery';
 import { canCompleteTasks, canEditTask, createListTask, createTaskList } from '../../api/tasks';
@@ -31,7 +32,7 @@ import { PlusIcon } from '../../components/Icons';
 import { type NoteCard, type NoteRef, parseNoteKey } from '../model/notesModel';
 import { type NoteActions, SHARED_NOTE_POLL_MS, notesKeys } from '../model/notesQueries';
 import { CalendarAddSheet, type AddSheetResult } from '../../components/calendar/CalendarAddSheet';
-import { IcsImportDialog } from './IcsImportDialog';
+import { IcsImportDialog } from '../../components/calendar/IcsImportDialog';
 import { fileStamp } from '../model/noteText';
 import '../timing.css';
 
@@ -174,13 +175,20 @@ export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled
     const pickImport = () => fileRef.current?.click();
     const onFile = async (f: File | undefined) => {
         if (!f) return;
-        if (f.size > 5 * 1024 * 1024) { pushMessageToast({ title: 'That file is over 5 MB — too big to import here' }); return; }
+        // The same cap and the same words as Púca's Calendar tab: one
+        // constant, checked before the file is read (api/icsImport).
+        const refusal = icsPickRefusal(f.size);
+        if (refusal) { pushMessageToast({ title: refusal }); return; }
         const text = await f.text();
         setImporting({ name: f.name, parsed: parseIcs(text) });
     };
     const importTargets = personal.map(c => ({
         listId: c.ref.id,
         title: c.title,
+        // Not read yet = not a target: with no items in hand there is nothing
+        // to dedupe against, so a second import of the same file would bring
+        // every event in twice (icsImport.icsImportTargets).
+        loaded: c.tasks !== null && c.tasks !== undefined,
         count: c.tasks?.length ?? c.total,
         uids: new Set((c.tasks ?? []).map(t => parseSchedule(t.schedule)).flatMap(p => (p.state === 'ok' ? [p.schedule.uid] : []))),
     }));

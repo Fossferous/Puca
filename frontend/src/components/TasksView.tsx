@@ -47,9 +47,11 @@ import {
 } from '../api/tasks';
 import { useServers, keys } from '../hooks/queries';
 import { pokeTaskReminders } from '../api/taskReminders';
+import { invalidateTaskScope } from './taskSources';
+import { consumeTasksTab, peekTasksTab } from '../api/tasksViewIntent';
 import { planToggle } from '../api/taskCompletion';
 import { useTaskFeature } from '../api/taskFeatures';
-import { useScheduleSetter } from './schedule/useScheduleSetter';
+import { useScheduleSetter, useSnoozeSetter } from './schedule/useScheduleSetter';
 import { listChannels, listMembersWithRoles, type Channel, type MemberWithRoles, type Server } from '../api/servers';
 import { getToken } from '../api/auth';
 import { isMobile, isTauri } from '../api/platform';
@@ -57,8 +59,9 @@ import { TaskTree } from './TaskTree';
 import { ChecklistBody } from './ChecklistBody';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { useContextMenu } from './contextMenuUtils';
-import { CalendarIcon, ChecklistIcon, FileTextIcon, NoteIcon, PlusIcon, StarIcon, TasksIcon, TrashIcon } from './Icons';
+import { BellIcon, CalendarIcon, ChecklistIcon, FileTextIcon, NoteIcon, PlusIcon, StarIcon, TasksIcon, TrashIcon } from './Icons';
 import { TasksCalendar } from './calendar/TasksCalendar';
+import { TasksReminders } from './reminders/TasksReminders';
 import { useSwipe } from '../hooks/useSwipe';
 import { useDragReorder } from '../hooks/useDragReorder';
 import { ListContentBlock, TasksTrash } from './ListContentBlock';
@@ -100,6 +103,10 @@ function tokenUserId(): number | undefined {
     }
 }
 
+/** A personal list's items are all the owner's: nothing to ask. Module-level
+ *  so the snooze handler's identity does not change every render. */
+const alwaysEditable = () => true;
+
 /** One bar tab: a personal list or a channel checklist. */
 interface BarTab {
     kind: TaskTabKind;
@@ -111,12 +118,15 @@ interface BarTab {
     resolveUserName?: (id: number) => string | undefined;
 }
 
-/** 'calendar' = the pinned Calendar tab (TasksCalendar), beside All tasks. */
-type Selected = { kind: TaskTabKind | 'calendar'; id: number } | null;
+/** 'calendar' and 'reminders' = the pinned tabs beside All tasks
+ *  (TasksCalendar, TasksReminders). */
+type Selected = { kind: TaskTabKind | 'calendar' | 'reminders'; id: number } | null;
 
 export function TasksView() {
-    // null = the pinned "All tasks" board (the default view).
-    const [selected, setSelected] = useState<Selected>(null);
+    // null = the pinned "All tasks" board (the default view) — unless
+    // something asked for a tab on the way in (a due-item notification asks
+    // for Reminders, api/tasksViewIntent.ts).
+    const [selected, setSelected] = useState<Selected>(() => (peekTasksTab() === 'reminders' ? { kind: 'reminders', id: 0 } : null));
     const [lists, setLists] = useState<TaskList[]>([]);
     const [prefs, setPrefs] = useState<TaskTabPref[]>([]);
     const [tasks, setTasks] = useState<Task[]>([]);
@@ -138,6 +148,23 @@ export function TasksView() {
     // effect uses a per-run `cancelled` flag for the same stale-reply hole.
     const selectedRef = useRef<Selected>(null);
     useEffect(() => { selectedRef.current = selected; }, [selected]);
+
+    // Already on screen when a due-item notification is clicked: switch to
+    // Reminders (the initial state above covers a cold open).
+    useEffect(() => {
+        // Spend the one-slot request now that the view exists. The initial
+        // state only PEEKED at it, so a second render of this same mount
+        // (StrictMode, in development) still opened on Reminders — but
+        // leaving it unspent would make some later, unrelated mount of this
+        // view jump to Reminders out of nowhere.
+        consumeTasksTab();
+        const onOpenReminders = () => {
+            consumeTasksTab();
+            setSelected({ kind: 'reminders', id: 0 });
+        };
+        window.addEventListener('sovereign:open-reminders', onOpenReminders);
+        return () => window.removeEventListener('sovereign:open-reminders', onOpenReminders);
+    }, []);
 
     // --- Server checklist channels (same cache keys the main app populates) ---
     const { data: servers = [] } = useServers();
@@ -423,6 +450,9 @@ export function TasksView() {
         syncListCounts(selectedList.id, next);
         try {
             await plan.send();
+            // A ticked item leaves Reminders, and a repeating one reappears at
+            // its next time: the dated tabs read a cache this view does not write.
+            invalidateTaskScope(qc, task);
         } catch (err) {
             console.error('Failed to update task:', err);
             if (err instanceof ApiError && err.status === 409) pushMessageToast({ title: err.message });
@@ -490,6 +520,9 @@ export function TasksView() {
             // due_at is plaintext metadata ('' clears server-side).
             await updateListTask(task.id, { due_at: dueAt ?? '' });
             pokeTaskReminders(); // arm a near deadline now, not at the next poll
+            // ...and tell the Calendar and Reminders tabs, which read a
+            // cache this view does not write to (taskSources).
+            invalidateTaskScope(qc, task);
         } catch (err) {
             console.error('Failed to set due time:', err);
             setTasks(original);
@@ -499,6 +532,10 @@ export function TasksView() {
     // Date & repeat: only against a server that stores it (taskFeatures).
     const scheduleOn = useTaskFeature('schedule') === true;
     const handleSetSchedule = useScheduleSetter(tasks, setTasks);
+    // Snooze: same gate, its own feature. A personal list is always yours,
+    // so the snoozer may always move its due_at.
+    const snoozeOn = useTaskFeature('snooze') === true;
+    const handleSnooze = useSnoozeSetter(tasks, setTasks, alwaysEditable);
 
     const handleSetAttachments = async (task: Task, refs: TaskAttachmentRef[]) => {
         const original = tasks;
@@ -682,6 +719,15 @@ export function TasksView() {
                         <CalendarIcon className="tasks-tab-kind" />
                         <span className="tasks-tab-title">Calendar</span>
                     </button>
+                    <button
+                        className={`tasks-tab tasks-tab-reminders ${selected?.kind === 'reminders' ? 'active' : ''}`}
+                        onClick={() => setSelected({ kind: 'reminders', id: 0 })}
+                        title="Reminders — everything due"
+                        aria-label="Reminders"
+                    >
+                        <BellIcon className="tasks-tab-kind" />
+                        <span className="tasks-tab-title">Reminders</span>
+                    </button>
                     {orderedTabs.map(renderTab)}
                     {addingList && (
                         <form className="tasks-tab-newform" onSubmit={handleCreateList}>
@@ -725,6 +771,15 @@ export function TasksView() {
             {selected?.kind === 'calendar' ? (
                 <div className="server-tasks-scroll tasks-calendar-scroll">
                     <TasksCalendar
+                        lists={lists}
+                        channels={channelTabs.map(c => ({ id: c.id, label: c.label, serverName: c.serverName, myPerms: c.myPerms }))}
+                        currentUserId={currentUserId}
+                        onOpen={(kind, id) => setSelected({ kind, id })}
+                    />
+                </div>
+            ) : selected?.kind === 'reminders' ? (
+                <div className="server-tasks-scroll">
+                    <TasksReminders
                         lists={lists}
                         channels={channelTabs.map(c => ({ id: c.id, label: c.label, serverName: c.serverName, myPerms: c.myPerms }))}
                         currentUserId={currentUserId}
@@ -833,6 +888,7 @@ export function TasksView() {
                         onReorder={handleReorder}
                         onSetDue={handleSetDue}
                         onSetSchedule={scheduleOn ? handleSetSchedule : undefined}
+                        onSnooze={snoozeOn ? handleSnooze : undefined}
                         onSetAttachments={handleSetAttachments}
                     />
                 </div>

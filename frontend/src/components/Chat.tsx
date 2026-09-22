@@ -160,6 +160,7 @@ import { registerPress, unregisterPress } from '../api/hotkeys';
 import { loadSettings } from './settingsStore';
 import { notifyNewMessage } from '../api/desktopNotify';
 import { startTaskReminders } from '../api/taskReminders';
+import { requestTasksTab } from '../api/tasksViewIntent';
 import {
     clearMobileNotifications, consumePendingNav, deferNav, mobileAppAvailable,
     syncConversationShortcuts, reportConversationShortcutUsed, initialsIconPng,
@@ -3260,20 +3261,43 @@ export function Chat({ onLogout }: ChatProps) {
         if (isMobile) setMobilePanel('chat');
     };
 
+    // The Tasks view, opened on its Reminders tab: what a clicked due-item
+    // notification wants. The tab is asked for BEFORE the view opens, because
+    // opening it is what mounts it (api/tasksViewIntent.ts); the event the
+    // dispatcher also fires covers a Tasks view already on screen.
+    //
+    // ONLY when it is not already up: a mounted TasksView answers that event
+    // itself, and the handover is a one-slot module — a request nobody is
+    // about to read would sit there until some unrelated later open of Tasks
+    // spent it and jumped to Reminders out of nowhere.
+    const openRemindersView = () => {
+        if (!(showFriendsPanel && friendsTab === 'tasks')) requestTasksTab('reminders');
+        openTasksView();
+    };
+
     // Due-time task reminders: the loop lives for the whole session (Chat is
-    // the app shell), and a clicked reminder toast lands on the Tasks view.
+    // the app shell), and a clicked reminder toast lands on the Reminders tab
+    // — the grouped list of what is due, not the All-tasks board.
     // The handler goes through a ref so the mount-only effect never holds a
     // stale closure. See api/taskReminders.ts for why reminders are
     // client-side (no push transport; content is E2EE).
+    // 'sovereign:open-tasks' stays listened for as well as
+    // 'sovereign:open-reminders': the board is still where a caller that
+    // wants "all my tasks" should land, and a window event costs nothing.
     const openTasksViewRef = useRef(openTasksView);
     useEffect(() => { openTasksViewRef.current = openTasksView; });
+    const openRemindersViewRef = useRef(openRemindersView);
+    useEffect(() => { openRemindersViewRef.current = openRemindersView; });
     useEffect(() => {
         const stopReminders = startTaskReminders();
         const onOpenTasks = () => openTasksViewRef.current();
+        const onOpenReminders = () => openRemindersViewRef.current();
         window.addEventListener('sovereign:open-tasks', onOpenTasks);
+        window.addEventListener('sovereign:open-reminders', onOpenReminders);
         return () => {
             stopReminders();
             window.removeEventListener('sovereign:open-tasks', onOpenTasks);
+            window.removeEventListener('sovereign:open-reminders', onOpenReminders);
         };
     }, []);
 
@@ -3659,6 +3683,19 @@ export function Chat({ onLogout }: ChatProps) {
             } else if (target === 'tasks' || target === 'notes') {
                 // 'notes' is the launcher shortcut's name for the same view.
                 openTasksView();
+            } else if (target === 'reminders') {
+                // A due-item notification tapped on the phone: the grouped
+                // list, not the board. An APK older than this target simply
+                // passes the string through (it is opaque in Java), so the
+                // web bundle is the only place that has to know it.
+                //
+                // The EVENT, not openRemindersView() directly — the same door
+                // the web notification click uses (api/desktopNotify.ts). Our
+                // own listener below opens Tasks for a cold tap, and a Tasks
+                // view ALREADY on screen (tapped with the board open) hears it
+                // too and switches tabs; calling the helper would only refill
+                // a slot nothing is about to read.
+                window.dispatchEvent(new CustomEvent('sovereign:open-reminders'));
             } else if (target === 'dms') {
                 // The launcher's "Messages" shortcut: the home view, where the
                 // sidebar is the DM list (HomeSidebar renders only with no

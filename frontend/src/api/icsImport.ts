@@ -15,10 +15,22 @@
  */
 import { ApiError } from './client';
 import { type IcsImportItem } from './ics';
-import { deriveDueAt, serializeSchedule } from './taskSchedule';
-import { type NewTaskTiming } from './tasks';
+import { deriveDueAt, parseSchedule, serializeSchedule } from './taskSchedule';
+import { type NewTaskTiming, type Task } from './tasks';
 
 export const PACE_MS = 50;
+/** An .ics bigger than this is refused before it is parsed. */
+export const MAX_ICS_BYTES = 5 * 1024 * 1024;
+/** What the refusal says. It names the cap, so it lives beside it: the two
+ *  front doors (Notes' /calendar, Púca's Calendar tab) must refuse the same
+ *  file with the same words, and a cap that existed twice would drift. */
+export const ICS_TOO_BIG = `That file is over ${MAX_ICS_BYTES / (1024 * 1024)} MB — too big to import here`;
+/** The picked file's verdict, BEFORE it is read and parsed: the toast to
+ *  show, or null to go ahead. Parsing a 20 MB calendar to then reject it
+ *  would block the main thread for exactly as long as accepting it. */
+export function icsPickRefusal(size: number): string | null {
+    return size > MAX_ICS_BYTES ? ICS_TOO_BIG : null;
+}
 /** Leave headroom under the server's MAX_TASKS_PER_CHECKLIST (2000). */
 export const MAX_PER_LIST = 1900;
 const MAX_RETRIES = 6;
@@ -185,4 +197,34 @@ export function importSummary(s: ImportState, total: number): string {
     if (s.cancelled && left > 0) parts.push(`${left} not imported (cancelled)`);
     if (s.stoppedBy) parts.push(s.stoppedBy);
     return parts.join(' · ');
+}
+
+
+/**
+ * The notes an import may go into, for the dialog's picker. It takes PERSONAL
+ * lists and nothing else: that is the personal-only rule, made structural at
+ * the one place both calendars build the list, rather than a check each host
+ * remembers to make.
+ *
+ * The UID set is what makes a second import of the same file a no-op — it
+ * comes from the schedules already in the note, read on this device.
+ *
+ * A note whose items have NOT been read yet is reported with `loaded: false`
+ * rather than as an empty one: importing into it would dedupe against nothing
+ * (a second run of the same file would duplicate every event) and would count
+ * the per-list cap from zero. The picker waits for it instead.
+ */
+export function icsImportTargets(
+    lists: { id: number; title: string }[], tasksIn: (listId: number) => Task[] | undefined,
+): { listId: number; title: string; count: number; uids: ReadonlySet<string>; loaded: boolean }[] {
+    return lists.map(l => {
+        const items = tasksIn(l.id);
+        return {
+            listId: l.id,
+            title: l.title,
+            loaded: items !== undefined,
+            count: items?.length ?? 0,
+            uids: new Set((items ?? []).map(t => parseSchedule(t.schedule)).flatMap(p => (p.state === 'ok' ? [p.schedule.uid] : []))),
+        };
+    });
 }

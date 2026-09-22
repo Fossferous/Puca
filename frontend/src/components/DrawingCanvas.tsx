@@ -1,23 +1,27 @@
 /**
- * The drawing editor: a fixed logical canvas (notes/model/drawing.ts) scaled
+ * The drawing editor: a fixed logical canvas (api/drawing.ts) scaled
  * to fit, drawn with pointer events so mouse, pen and finger all work, and
  * `touch-action: none` on the canvas so a stroke on a phone draws instead of
  * scrolling the page. Pen, eraser, six ink colours, three widths, undo and
  * clear. Save hands the owner a PNG and the strokes; the owner uploads both
  * (encrypted) as the note's picture and the file that makes it editable.
  *
- * A modal: centred on desktop, full-screen on a phone (noteContent.css),
+ * A modal: centred on desktop, full-screen on a phone (DrawingCanvas.css),
  * portaled to body so no transformed ancestor traps it.
+ *
+ * SHARED: Púca Notes' editor and quick-add open it, and so does a personal
+ * list in Púca's own Tasks view — which is why it and its stylesheet live
+ * here rather than under notes/, a tree Púca's bundles strip out.
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { type DrawingFiles } from '../../api/noteMedia';
+import { type DrawingFiles } from '../api/noteMedia';
 import {
     type DrawingDoc, type Stroke,
     DRAWING_BACKGROUND, PEN_COLORS, PEN_WIDTHS,
     drawStroke, emptyDrawing, renderDrawing, serializeDrawing, toCanvasPoint,
-} from '../model/drawing';
-import '../noteContent.css';
+} from '../api/drawing';
+import './DrawingCanvas.css';
 
 const COLOR_NAMES: Record<string, string> = {
     '#202124': 'Black', '#d93025': 'Red', '#1a73e8': 'Blue', '#188038': 'Green', '#f29900': 'Orange', '#9334e6': 'Purple',

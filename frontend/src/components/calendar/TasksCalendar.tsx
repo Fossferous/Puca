@@ -5,38 +5,34 @@
  * panel-system work. Channel checklists stay live through the socket's
  * ChecklistUpdate, like their tabs.
  */
-import { useEffect, useMemo, useState } from 'react';
-import { useQueries, useQueryClient } from '@tanstack/react-query';
-import { Calendar, type CalView } from './Calendar';
+import { useEffect, useRef, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import { Calendar, type CalendarAction, type CalView } from './Calendar';
+import { IcsImportDialog } from './IcsImportDialog';
 import { CalendarAddSheet, type AddSheetResult } from './CalendarAddSheet';
 import { effectiveWeekStart, setCalendarPrefs, useCalendarPrefs } from './calendarPrefs';
 import { useCoarseCalendar } from './calendarGate';
 import { ScheduleEditor } from '../schedule/ScheduleEditor';
-import {
-    type Task, type TaskList, canCompleteTasks, canEditTask, createListTask, createTask, listListTasks, listTasks, patchTaskTiming,
-} from '../../api/tasks';
-import { type CalendarEntry, type CalendarSource } from '../../api/taskCalendar';
+import { type TaskList, createListTask, createTask, createTaskList, patchTaskTiming } from '../../api/tasks';
+import { type CalendarEntry } from '../../api/taskCalendar';
+import { taskScopeKey, type TasksScopeChannel, useTaskSources } from '../taskSources';
 import { newItemTiming, planMove, planSkip } from '../../api/calendarActions';
 import { parseSchedule, snoozePatch, snoozeUntil } from '../../api/taskSchedule';
+import { icsImportTargets, icsPickRefusal } from '../../api/icsImport';
 import { planToggle } from '../../api/taskCompletion';
 import { pokeTaskReminders } from '../../api/taskReminders';
 import { useTaskFeature } from '../../api/taskFeatures';
-import { buildIcs, type IcsItem } from '../../api/ics';
+import { buildIcs, parseIcs, type IcsItem, type IcsParseResult } from '../../api/ics';
 import { currentIcsUid } from '../../api/icsUid';
 import { deliverIcs } from '../../api/icsDelivery';
-import { wsClient, type ServerMessage } from '../../api/websocket';
 import { toastRefusal } from '../../api/refusalToast';
 import { pushMessageToast } from '../messageToastBus';
 import { localDayKey } from '../../utils/calendarMath';
 
-export interface TasksCalendarChannel {
-    id: number;
-    label: string;
-    serverName?: string;
-    myPerms?: number;
-}
+/** The Calendar tab's channels — the shape every dated view takes. */
+export type TasksCalendarChannel = TasksScopeChannel;
 
-const key = (kind: 'list' | 'channel', id: number) => ['tasks-calendar', kind, id] as const;
+const key = taskScopeKey;
 
 // Shared 30-second clock (TaskTree's pattern).
 function useHalfMinute(): number {
@@ -64,37 +60,17 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen }: {
     const [date, setDate] = useState(() => localDayKey(Date.now()));
     const [adding, setAdding] = useState<{ dayKey: string; time?: string } | null>(null);
     const [editing, setEditing] = useState<{ kind: 'list' | 'channel'; scope: number; taskId: number } | null>(null);
+    const [importing, setImporting] = useState<{ name: string; parsed: IcsParseResult } | null>(null);
+    const fileRef = useRef<HTMLInputElement>(null);
 
-    const listQ = useQueries({ queries: lists.map(l => ({ queryKey: key('list', l.id), queryFn: () => listListTasks(l.id), staleTime: 30_000 })) });
-    const chanQ = useQueries({ queries: channels.map(c => ({ queryKey: key('channel', c.id), queryFn: () => listTasks(c.id), staleTime: 30_000 })) });
-
-    // Live: another member changed a checklist → refetch it.
-    useEffect(() => {
-        const handler = (msg: ServerMessage) => {
-            const cid = (msg.payload as { channel_id?: number } | undefined)?.channel_id;
-            if (typeof cid === 'number') void qc.invalidateQueries({ queryKey: key('channel', cid) });
-        };
-        wsClient.on('ChecklistUpdate', handler);
-        return () => wsClient.off('ChecklistUpdate', handler);
-    }, [qc]);
-
-    const listData = listQ.map(q => q.data);
-    const chanData = chanQ.map(q => q.data);
-    const sources: CalendarSource[] = useMemo(() => [
-        ...lists.flatMap((l, i) => ((listData[i] as Task[] | undefined) ?? []).map(t => ({ task: t, noteKey: `list:${l.id}`, noteTitle: l.title, canEdit: true }))),
-        ...channels.flatMap((c, i) => ((chanData[i] as Task[] | undefined) ?? []).map(t => ({
-            task: t, noteKey: `channel:${c.id}`, noteTitle: `#${c.label}`, serverName: c.serverName, canEdit: canEditTask(t, currentUserId, c.myPerms),
-            canComplete: canCompleteTasks(c.myPerms),
-        }))),
-        // The query result arrays are new every render; their data is what matters.
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    ], [lists, channels, currentUserId, ...listData, ...chanData]);
+    // The same read the Reminders tab makes, under the same keys.
+    const { sources, tasksIn, refetch: refetchScope } = useTaskSources(lists, channels, currentUserId);
 
     const scopeOf = (e: CalendarEntry): { kind: 'list' | 'channel'; id: number } => {
         const [kind, id] = e.source.noteKey.split(':');
         return { kind: kind as 'list' | 'channel', id: Number(id) };
     };
-    const refetch = (e: { kind: 'list' | 'channel'; id: number }) => qc.invalidateQueries({ queryKey: key(e.kind, e.id) });
+    const refetch = (e: { kind: 'list' | 'channel'; id: number }) => refetchScope(e.kind, e.id);
     const run = async (e: CalendarEntry, fn: () => Promise<void>) => {
         try {
             await fn();
@@ -119,7 +95,7 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen }: {
     };
     const onToggleDone = (e: CalendarEntry) => {
         const s = scopeOf(e);
-        const all = (s.kind === 'list' ? listData[lists.findIndex(l => l.id === s.id)] : chanData[channels.findIndex(c => c.id === s.id)]) as Task[] | undefined;
+        const all = tasksIn(s.kind, s.id);
         const plan = planToggle(all ?? [e.source.task], e.source.task, !e.source.task.is_completed, { canEdit: e.source.canEdit });
         void run(e, plan.send);
     };
@@ -174,9 +150,19 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen }: {
         }
     };
 
-    const editingTask = editing
-        ? ((editing.kind === 'list' ? listData[lists.findIndex(l => l.id === editing.scope)] : chanData[channels.findIndex(c => c.id === editing.scope)]) as Task[] | undefined)?.find(t => t.id === editing.taskId) ?? null
-        : null;
+    // .ics import. Into a PERSONAL list only — an import into a shared
+    // checklist would notify every member for every item — which the target
+    // list below enforces by construction: `channels` are never offered.
+    const pickImport = () => fileRef.current?.click();
+    const onFile = async (f: File | undefined) => {
+        if (!f) return;
+        const refusal = icsPickRefusal(f.size);
+        if (refusal) { pushMessageToast({ title: refusal }); return; }
+        setImporting({ name: f.name, parsed: parseIcs(await f.text()) });
+    };
+    const importTargets = icsImportTargets(lists, id => tasksIn('list', id));
+
+    const editingTask = editing ? tasksIn(editing.kind, editing.scope)?.find(t => t.id === editing.taskId) ?? null : null;
 
     return (
         <div className="tasks-calendar">
@@ -199,9 +185,14 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen }: {
                 onSnooze={snoozeOn ? onSnooze : undefined}
                 onSkip={scheduleOn ? onSkip : undefined}
                 onEditSchedule={scheduleOn ? (e => { const s = scopeOf(e); setEditing({ kind: s.kind, scope: s.id, taskId: e.source.task.id }); }) : undefined}
-                headerActions={[{ id: 'export', label: 'Export .ics…', onClick: () => { void exportIcs(); } }]}
+                headerActions={[
+                    { id: 'export', label: 'Export .ics…', onClick: () => { void exportIcs(); } },
+                    ...(scheduleOn ? [{ id: 'import', label: 'Import .ics…', onClick: pickImport }] : []),
+                ] as CalendarAction[]}
                 shortcutsEnabled={false}
             />
+            <input ref={fileRef} type="file" accept=".ics,text/calendar" style={{ display: 'none' }}
+                onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; void onFile(f); }} />
             {adding && (
                 <CalendarAddSheet
                     dayKey={adding.dayKey}
@@ -212,6 +203,20 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen }: {
                     onSubmit={submitAdd}
                     onClose={() => setAdding(null)}
                     allowNew={false}
+                />
+            )}
+            {importing && (
+                <IcsImportDialog
+                    fileName={importing.name}
+                    parsed={importing.parsed}
+                    targets={importTargets}
+                    io={{
+                        createList: title => createTaskList(title),
+                        createTask: (listId, text, parentId, timing) => createListTask(listId, text, parentId, timing),
+                        sleep: ms => new Promise(r => setTimeout(r, ms)),
+                    }}
+                    onClose={() => setImporting(null)}
+                    onImported={() => { for (const l of lists) void refetchScope('list', l.id); }}
                 />
             )}
             {editing && editingTask && (

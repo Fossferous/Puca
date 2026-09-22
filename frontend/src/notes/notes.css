@@ -697,7 +697,6 @@
     cursor: pointer;
 }
 .notes-link-btn:disabled { color: var(--text-faint); text-decoration: none; cursor: default; }
-.notes-reminder-when .svrn-icon { vertical-align: -2px; }
 
 /* ---------- Editor (modal on desktop) ----------------------------------------- */
 .notes-editor-backdrop {
@@ -818,23 +817,8 @@
 }
 
 /* ---------- Reminders ----------------------------------------------------- */
-.notes-reminders { max-width: 760px; margin: 0 auto; }
-.notes-reminder-group { margin-bottom: 20px; }
-.notes-reminder-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 10px;
-    border-radius: 8px;
-    cursor: pointer;
-}
-.notes-reminder-row:hover { background: var(--bg-modifier-hover); }
-.notes-reminder-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--brand-primary); flex-shrink: 0; }
-.notes-reminder-text { flex: 1; min-width: 0; font-size: 14px; word-break: break-word; }
-.notes-reminder-sub { display: block; font-size: 12px; color: var(--text-muted); }
-.notes-reminder-note { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40%; }
-.notes-reminder-when { font-size: 12px; color: var(--text-muted); white-space: nowrap; flex-shrink: 0; }
-.notes-reminder-group.overdue .notes-reminder-when { color: var(--text-danger); font-weight: 600; }
+/* The list itself is components/reminders/Reminders.css now — the view is
+   shared with Púca's own Reminders tab, and Púca never loads this file. */
 
 /* ---------- Shortcuts help -------------------------------------------------- */
 .notes-kbd-grid { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; font-size: 13px; }
@@ -980,8 +964,6 @@
     .notes-menu-item { padding: 12px 10px; font-size: 15px; }
     /* <select> is a form control too: below 16px iOS zooms the page. */
     .notes-menu-row select, .notes-menu-row label { font-size: 16px; }
-    .notes-reminder-row { padding: 12px 10px; }
-    .notes-reminder-row input[type="checkbox"] { width: 20px; height: 20px; }
 }
 
 /* Reduced motion: the app-level [data-animations="false"] kills these too,
@@ -1013,36 +995,8 @@
 .notes-undo-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .notes-undo .notes-textbtn { color: var(--brand-primary); }
 
-/* ---------- Dialog (shortcuts help) ---------------------------------------------- */
-.notes-dialog-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 1100;
-    background: var(--bg-overlay);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 16px;
-}
-.notes-dialog {
-    width: min(480px, 100%);
-    max-height: 90dvh;
-    overflow: auto;
-    background: var(--bg-floating);
-    border: 1px solid var(--border-subtle);
-    border-radius: 12px;
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
-    color: var(--text-normal);
-}
-.notes-dialog-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 12px 8px 16px;
-    border-bottom: 1px solid var(--border-faint);
-}
-.notes-dialog-head h3 { margin: 0; font-size: 15px; }
-.notes-dialog-body { padding: 14px 16px 16px; }
+/* ---------- Dialog ----------------------------------------------------------------
+   The dialog shell moved to components/NotesDialog.css with its component. */
 
 /* ---------- Composer as a phone sheet --------------------------------------------- */
 .notes-quickadd-sheet { padding: 8px; overflow-y: auto; -webkit-overflow-scrolling: touch; }
