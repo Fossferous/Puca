@@ -11,7 +11,7 @@ import {
     nearestDue, groupReminders, reminderBadgeCount, deriveQuickTitle, cleanQuickItems,
     allLabels, noteKey, parseNoteKey, normalizeLabel, normalizeForSearch, isNoteColor,
     moveNoteInOrder, applyVisibleOrder,
-    countProgress, noteRoute, MAX_LABEL_LENGTH, QUICK_TITLE_FROM_ITEM_LENGTH,
+    countProgress, noteRoute, isLabelRoute, labelFromPath, MAX_LABEL_LENGTH, QUICK_TITLE_FROM_ITEM_LENGTH,
     type NoteSource, type NoteCard, type NotesNoteState,
 } from '../notes/model/notesModel';
 
@@ -351,5 +351,32 @@ describe('labels and colours', () => {
 
     it('countProgress', () => {
         expect(countProgress([task(1), task(2, { is_completed: true })])).toEqual({ total: 2, completed: 1 });
+    });
+});
+
+/**
+ * "Which label am I looking at" is a question about the ROUTE. The grid's
+ * NoteFilter cannot answer it: the moment the search box has text the filter
+ * is kind 'search', even though the URL is still that label's — which is how
+ * a rename made with a search active left the user on a dead route.
+ */
+describe('the label a route names', () => {
+    it('reads the label out of the path, percent-decoded', () => {
+        expect(labelFromPath('/label/Errands')).toBe('Errands');
+        expect(labelFromPath(`/label/${encodeURIComponent('Work & home')}`)).toBe('Work & home');
+        expect(labelFromPath(`/label/${encodeURIComponent('a/b')}`)).toBe('a/b');
+    });
+
+    it('is null for every route that is not a label', () => {
+        for (const p of ['/', '/archive', '/trash', '/reminders', '/calendar', '/label/']) {
+            expect(labelFromPath(p), p).toBeNull();
+        }
+    });
+
+    it('matches a label case-insensitively, as the label manager does', () => {
+        expect(isLabelRoute('/label/Errands', 'errands')).toBe(true);
+        expect(isLabelRoute('/label/errands', 'ERRANDS')).toBe(true);
+        expect(isLabelRoute('/label/Errands', 'Work')).toBe(false);
+        expect(isLabelRoute('/archive', 'Errands')).toBe(false);
     });
 });

@@ -193,6 +193,27 @@ export function countProgress(tasks: Task[]): { total: number; completed: number
     return { total: tasks.length, completed };
 }
 
+/**
+ * The label a Notes ROUTE names, or null — `/label/Errands` → `Errands`.
+ *
+ * Read the route, never the filter, when the question is "which label am I
+ * looking at". A search overlays the view without changing the URL, so
+ * `NoteFilter` reports kind 'search' the moment the box has text even while
+ * the address is still that label's — and a rename decided on the filter left
+ * the user parked on a route naming a label that no longer exists.
+ */
+export function labelFromPath(path: string): string | null {
+    const m = /^\/label\/(.+)$/.exec(path);
+    return m ? decodeURIComponent(m[1]) : null;
+}
+
+/** Is `path` the route for `label`? Names are compared the way the label
+ *  manager compares them: case-insensitively. */
+export function isLabelRoute(path: string, label: string): boolean {
+    const on = labelFromPath(path);
+    return on !== null && on.toLocaleLowerCase() === label.toLocaleLowerCase();
+}
+
 /** What the grid is showing. */
 export type NoteFilter =
     | { kind: 'all' }

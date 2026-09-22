@@ -1284,6 +1284,44 @@ await sleep(200);
 await page.locator('.notes-rail-item', { hasText: 'Notes' }).first().click();
 await sleep(300);
 
+// A SEARCH on top of a label route is still the label route. The search text
+// lives in component state, not in the URL, so /label/<name> is where we are
+// — but the grid's filter reports 'search' the moment the box has text, and
+// a rename decided on that filter moved nothing: the view stayed on a route
+// naming a label that had just ceased to exist, and Undo could not bring it
+// back either (NotesShell's isLabelRoute).
+await page.locator('.notes-rail-item', { hasText: 'Errands' }).click();
+await page.waitForSelector('h1.notes-section-title', { timeout: 5000 });
+await page.fill('.notes-search input', 'e');
+await sleep(300);
+const searchedLabelUrl = page.url();
+ck('label manager: a search on a label route leaves the route alone',
+    /\/label\/Errands/.test(searchedLabelUrl), searchedLabelUrl);
+await openLabelMgr();
+await page.click('.notes-labelmgr-row button[aria-label="Rename Errands"]');
+await page.fill('.notes-labelmgr-row.editing input', 'Chores');
+await page.press('.notes-labelmgr-row.editing input', 'Enter');
+await sleep(400);
+const followedWithSearch = page.url();
+ck('label manager: the route follows the rename even with a search on top',
+    /\/label\/Chores/.test(followedWithSearch), followedWithSearch);
+// ...and Undo puts both the map and the route back.
+await page.keyboard.press('Escape');
+await sleep(200);
+await page.locator('.notes-undo button').click();
+await sleep(400);
+const returnedWithSearch = page.url();
+ck('label manager: Undo returns to the label route with a search on top',
+    /\/label\/Errands/.test(returnedWithSearch), returnedWithSearch);
+// Clear the search: the heading proves the route is a live label view and
+// not an empty grid under a stale name.
+await page.fill('.notes-search input', '');
+await sleep(300);
+const headingAfter = await page.locator('h1.notes-section-title').textContent();
+ck('label manager: the returned route is the real label view',
+    /Label: Errands/.test(headingAfter) && await page.locator('.notes-card').count() >= 1, headingAfter);
+await page.locator('.notes-rail-item', { hasText: 'Notes' }).first().click();
+await sleep(300);
 // ---- 11. Move to trash with undo (the server keeps it restorable) ------------------------------------
 const reading = () => page.locator('.notes-card', { hasText: 'Reading' });
 await reading().hover();

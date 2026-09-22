@@ -19,7 +19,7 @@ import { pushMessageToast } from '../../components/messageToastBus';
 import { PlusIcon, WarningIcon } from '../../components/Icons';
 import {
     type NoteCard, type NoteFilter, type NoteRef,
-    allLabels, applyVisibleOrder, canDragReorder, canReorder, filterNotes, groupReminders, moveNoteInOrder,
+    allLabels, applyVisibleOrder, canDragReorder, canReorder, filterNotes, groupReminders, isLabelRoute, labelFromPath, moveNoteInOrder,
     reminderBadgeCount, splitPinned,
 } from '../model/notesModel';
 import { type ComposeIntent, type ComposeMode, takeShare } from '../model/composeIntent';
@@ -184,8 +184,8 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     const filter: NoteFilter = useMemo(() => {
         if (query.trim() && !remindersView) return { kind: 'search', query };
         if (path === '/archive') return { kind: 'archive' };
-        const labelMatch = /^\/label\/(.+)$/.exec(path);
-        if (labelMatch) return { kind: 'label', label: decodeURIComponent(labelMatch[1]) };
+        const onLabel = labelFromPath(path);
+        if (onLabel !== null) return { kind: 'label', label: onLabel };
         return { kind: 'all' };
     }, [path, query, remindersView]);
 
@@ -391,7 +391,13 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
         // Without this, Undo leaves you on /label/<new name> after the new
         // name has ceased to exist: an empty grid under a heading naming a
         // label that is no longer in the rail.
-        const leaving = filter.kind === 'label' && filter.label.toLocaleLowerCase() === from.toLocaleLowerCase();
+        // From the ROUTE, not from `filter`: `filter` reports kind 'search'
+        // the moment the search box has text, even while the URL is still
+        // /label/<name>. Read through the filter, a rename made with a search
+        // active moved nothing — and the user was left on a route naming a
+        // label that had just ceased to exist, with Undo unable to bring the
+        // view back either.
+        const leaving = isLabelRoute(path, from);
         setPending({
             kind: 'labels',
             message: to === null ? `Removed “${from}” from every note` : `Renamed “${from}” to “${to}”`,
@@ -400,7 +406,7 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
             token: ++tokenSeq.current,
         });
         if (leaving) go(to === null ? '/' : `/label/${encodeURIComponent(to)}`);
-    }, [commitPending, filter, go, path]);
+    }, [commitPending, go, path]);
 
     const undoPending = () => {
         const p = pendingRef.current;
