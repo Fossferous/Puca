@@ -32,6 +32,37 @@ export interface CalendarSource {
     /** May this viewer tick or snooze it (COMPLETE_TASKS or MANAGE_TASKS)?
      *  Omitted = yes (a personal list). */
     canComplete?: boolean;
+    /** This entry is a NOTE'S OWN reminder (migration 068), not an item in
+     *  it: `task` carries the note's title and timing under the negative id
+     *  `-list_id`, the same namespace the reminder feed uses. There is
+     *  nothing to tick and nothing to snooze, so the day menu offers neither
+     *  — a note's reminder is changed from the note (docs/NOTES.md). */
+    isNote?: boolean;
+}
+
+/**
+ * A NOTE'S OWN reminder as a calendar item. It is not a task and is never
+ * stored as one: this is a projection built for the pure entry maths, which
+ * reads exactly these fields. The id is NEGATIVE, so it can never collide
+ * with a task id in an entry id or in any per-id map (src/task_handlers.rs,
+ * list_task_reminders).
+ */
+export function noteAsCalendarItem(note: { id: number; title: string; dueAt?: string | null; schedule?: string | null }): Task {
+    return {
+        id: -note.id,
+        channel_id: null,
+        list_id: note.id,
+        parent_id: null,
+        description: note.title,
+        is_completed: false,
+        position: 0,
+        created_at: '',
+        created_by: 0,
+        due_at: note.dueAt ?? null,
+        schedule: note.schedule ?? null,
+        snooze: null,
+        attachments: null,
+    };
 }
 
 export type EntryKind = 'event' | 'task' | 'plain';

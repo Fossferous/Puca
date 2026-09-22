@@ -651,6 +651,11 @@
 .notes-editor-add button:disabled { opacity: 0.5; cursor: not-allowed; }
 .notes-editor-foot {
     display: flex;
+    /* Wraps at EVERY width, not only on a phone: the note's own due editor
+       (.note-due-edit, components/schedule/NoteReminderControl.css) asks for
+       a whole row with `flex: 1 0 100%`, and in a nowrap row nothing here can
+       shrink to make space for it — the footer would simply overflow. */
+    flex-wrap: wrap;
     align-items: center;
     gap: 2px;
     padding: 6px 8px;
@@ -659,6 +664,15 @@
 }
 .notes-editor-foot .spacer { flex: 1; }
 .notes-editor-foot .notes-textbtn { padding: 8px 12px; }
+/* Every footer button keeps its tap target: the row grew when a note gained
+   its own reminder (two more buttons), and a flex row would rather squeeze
+   them to 22px wide than wrap — which is exactly what the 390x844 walk
+   caught (docs/DESIGN_PHILOSOPHY.md §7: 44px, coarse pointer). */
+.notes-editor-foot .notes-iconbtn { flex: 0 0 auto; }
+/* The note's own due editor takes a row of its own under the footer; the
+   rule that does it travels with the control, in
+   components/schedule/NoteReminderControl.css, because Púca's Tasks view
+   mounts the same control and never loads this file. */
 .notes-editor-locked {
     margin: 12px 20px;
     padding: 10px 12px;
@@ -811,6 +825,12 @@
     .notes-editor-title { font-size: 20px; }
     .notes-editor-add input, .notes-quickadd-title, .notes-quickadd-item input { font-size: 16px; }
     .notes-editor-foot .notes-textbtn { padding: 10px 12px; }
+    /* At 390 the footer holds colour, labels, archive, refresh, the note's
+       own reminder (two buttons), more and Close: it wraps (the base rule)
+       rather than shrinking anything below 44px, and the wrapped rows need
+       a little air between them. */
+    .notes-editor-foot { row-gap: 2px; }
+    .notes-editor-foot .notes-iconbtn { min-width: 44px; min-height: 44px; }
 
     .notes-menu-item { padding: 12px 10px; font-size: 15px; }
     /* <select> is a form control too: below 16px iOS zooms the page. */

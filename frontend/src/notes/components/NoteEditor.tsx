@@ -14,7 +14,7 @@
  * propagation (its other three editors do), so a window-level close would
  * swallow that cancel. isEditableTarget is the guard.
  */
-import { useLayoutEffect, useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { type Task } from '../../api/tasks';
 import { currentUserIdFromToken } from '../../api/auth';
@@ -30,6 +30,8 @@ import { MAX_TITLE_LENGTH, type NoteCard } from '../model/notesModel';
 import { type NoteActions, useNoteTasks } from '../model/notesQueries';
 import { NoteContentSection } from './NoteContentSection';
 import { useTaskFeature } from '../../api/taskFeatures';
+import { NoteDueChip, NoteReminderControl } from '../../components/schedule/NoteReminderControl';
+import { halfMinuteNow, subscribeHalfMinute } from '../../components/schedule/halfMinuteClock';
 import { EditedStamp } from './EditedStamp';
 
 interface NoteEditorProps {
@@ -67,13 +69,17 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
         setTitleDraft(card.title);
     }
     const addRef = useRef<HTMLInputElement>(null);
+    // Not Date.now() in render: the chip must flip to "overdue" while the
+    // note is open, and an impure render call fails the lint gate.
+    const now = useSyncExternalStore(subscribeHalfMinute, halfMinuteNow, halfMinuteNow);
     const currentUserId = currentUserIdFromToken() ?? undefined;
     const isChannel = ref.kind === 'channel';
     const canCreate = !isChannel || hasPerm(card.myPerms, PERM.CREATE_TASKS);
     const titleUnreadable = isUndecryptable(card.title);
     // Date & repeat only against a server that stores it (an older one would
     // drop the field silently); unknown = hidden.
-    const onSetSchedule = useTaskFeature('schedule')
+    const canSchedule = useTaskFeature('schedule') === true;
+    const onSetSchedule = canSchedule
         ? (t: Task, schedule: string | null, due: string | null) => void actions.setSchedule(ref, t, schedule, due)
         : undefined;
     // Snooze on the item itself, the same control the Reminders list and the
@@ -82,6 +88,9 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
     const onSnooze = useTaskFeature('snooze')
         ? (t: Task, until: number | null) => void actions.snoozeTask(ref, t, until)
         : undefined;
+    // The NOTE's own reminder, on a server that stores one. Personal notes
+    // only: a channel checklist has no list row to hang a time on.
+    const noteReminders = !isChannel && actions.content.features.noteReminders;
 
     // useLayoutEffect, not useEffect: the listener must exist the moment the
     // dialog is in the DOM. A keyboard user who opened the note with Enter can
@@ -154,6 +163,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                         <span className="tt-not-encrypted" title="Not encrypted — this title is stored as plaintext."><WarningIcon /> Title not encrypted</span>
                     )}
                     {card.archived && <span className="notes-chip archived"><ArchiveIcon /> archived</span>}
+                    {noteReminders && <NoteDueChip note={{ title: card.title, dueAt: card.dueAt, schedule: card.schedule }} now={now} />}
                     {card.labels.map(l => <span key={l} className="notes-chip"><TagIcon /> {l}</span>)}
                     {card.createdAt && <span>Created {new Date(card.createdAt).toLocaleDateString()}</span>}
                     <EditedStamp createdAt={card.createdAt} updatedAt={card.updatedAt} />
@@ -223,6 +233,13 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                     <button type="button" className="notes-iconbtn" aria-label="Colour" title="Colour" onClick={e => onPickColor(card, e.currentTarget)}><PaletteIcon /></button>
                     <button type="button" className="notes-iconbtn" aria-label="Labels" title="Labels" onClick={e => onPickLabels(card, e.currentTarget)}><TagIcon /></button>
                     <button type="button" className="notes-iconbtn" aria-label={card.archived ? 'Unarchive' : 'Archive'} title={card.archived ? 'Unarchive' : 'Archive'} onClick={() => onArchive(card, !card.archived)}><ArchiveIcon /></button>
+                    {noteReminders && (
+                        <NoteReminderControl
+                            note={{ title: card.title, dueAt: card.dueAt, schedule: card.schedule }}
+                            canSchedule={canSchedule}
+                            onSave={patch => void actions.setNoteTiming(ref, patch)}
+                        />
+                    )}
                     <button type="button" className="notes-iconbtn" aria-label="Refresh this note" title="Refresh" onClick={() => void actions.refreshNote(ref)}><RefreshIcon /></button>
                     {pucaHref && (
                         <a className="notes-iconbtn" href={pucaHref} target="_blank" rel="noopener" aria-label="Open in Púca" title="Open in Púca"><PopOutIcon /></a>

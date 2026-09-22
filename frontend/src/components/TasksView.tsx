@@ -94,7 +94,9 @@ import { useSwipe } from '../hooks/useSwipe';
 import { useDragReorder } from '../hooks/useDragReorder';
 import { ListContentBlock, TasksTrash } from './ListContentBlock';
 import { listBodySnippet, listContentQueryKeys, useListContentSupport } from './useListContentSupport';
-import { fetchListFeatures, flushBodySave, keepHiddenSlots, toggleFavoriteKeepingHidden, trashTaskList } from '../api/listContent';
+import { fetchListFeatures, flushBodySave, keepHiddenSlots, setTaskListTiming, toggleFavoriteKeepingHidden, trashTaskList } from '../api/listContent';
+import { NoteDueChip, NoteReminderControl } from './schedule/NoteReminderControl';
+import { halfMinuteNow, subscribeHalfMinute } from './schedule/halfMinuteClock';
 import { useQueryClient } from '@tanstack/react-query';
 import './TasksView.css';
 import './AllChecklistsView.css';
@@ -182,7 +184,9 @@ export function TasksView() {
     const [newListTitle, setNewListTitle] = useState('');
     const [addingList, setAddingList] = useState(false);
     const [newTaskText, setNewTaskText] = useState('');
-    const [editingTitle, setEditingTitle] = useState(false);
+    /** The list whose title is being edited, not a bare flag: the editor and
+     *  its draft must not survive a change of tab and rename the next list. */
+    const [editingTitle, setEditingTitle] = useState<number | null>(null);
     const [titleDraft, setTitleDraft] = useState('');
     // Right-click / long-press menu on the tabs and board cards.
     const { contextMenu, showContextMenu, hideContextMenu } = useContextMenu();
@@ -444,6 +448,28 @@ export function TasksView() {
      *  it), so where there is a trash it is not offered for that list. */
     const canDeleteList = (list: TaskList) => !(support.trashEnabled && list.is_self === true);
 
+    /** The list as the shared reminder control reads it. */
+    const noteTimingOf = (list: TaskList) => ({ title: list.title, dueAt: list.due_at, schedule: list.schedule });
+
+    /** Set the LIST's own reminder (migration 068). Optimistic over the same
+     *  local rows a rename patches, rolled back on a refusal, and it pokes
+     *  the reminder loop so a time minutes away gets a timer now. */
+    const saveListTiming = async (list: TaskList, patch: { dueAt?: string | null; schedule?: string | null }) => {
+        const before = { due_at: list.due_at, schedule: list.schedule };
+        patchList(list.id, {
+            ...(patch.dueAt !== undefined ? { due_at: patch.dueAt } : {}),
+            ...(patch.schedule !== undefined ? { schedule: patch.schedule } : {}),
+        });
+        try {
+            await setTaskListTiming(list.id, patch);
+            pokeTaskReminders();
+        } catch (err) {
+            console.error('Failed to set the list reminder:', err);
+            patchList(list.id, before);
+            pushMessageToast({ title: err instanceof ApiError && (err.status === 400 || err.status === 409) ? err.message : 'Couldn’t save the reminder — check your connection' });
+        }
+    };
+
     const handleDeleteList = async (list: TaskList) => {
         // Only a server KNOWN to have no trash gets the permanent delete.
         let features = support.features;
@@ -496,9 +522,10 @@ export function TasksView() {
     };
 
     const commitTitle = async () => {
-        setEditingTitle(false);
+        const editing = editingTitle;
+        setEditingTitle(null);
         const title = titleDraft.trim();
-        if (!selectedList || !title || title === selectedList.title) return;
+        if (!selectedList || editing !== selectedList.id || !title || title === selectedList.title) return;
         const original = lists;
         setLists(prev => prev.map(l => l.id === selectedList.id ? { ...l, title } : l));
         try {
@@ -628,6 +655,9 @@ export function TasksView() {
 
     // Date & repeat: only against a server that stores it (taskFeatures).
     const scheduleOn = useTaskFeature('schedule') === true;
+    // The list reminder chip flips to "overdue" on its own; Date.now() in
+    // render is an impure call the lint gate refuses.
+    const listNow = useSyncExternalStore(subscribeHalfMinute, halfMinuteNow, halfMinuteNow);
     const handleSetSchedule = useScheduleSetter(tasks, setTasks);
     // Snooze: same gate, its own feature. A personal list is always yours,
     // so the snoozer may always move its due_at.
@@ -707,7 +737,7 @@ export function TasksView() {
                     onClick: () => {
                         setSelected({ kind: 'list', id: list.id });
                         setTitleDraft(list.title);
-                        setEditingTitle(true);
+                        setEditingTitle(list.id);
                     },
                 });
                 if (canDeleteList(list)) {
@@ -1000,7 +1030,7 @@ export function TasksView() {
             ) : selectedList ? (
                 <div className="tasks-editor" {...contentSwipe}>
                     <div className="tasks-editor-header">
-                        {editingTitle ? (
+                        {editingTitle === selectedList.id ? (
                             <input
                                 className="tasks-title-input"
                                 value={titleDraft}
@@ -1009,7 +1039,7 @@ export function TasksView() {
                                 onBlur={commitTitle}
                                 onKeyDown={e => {
                                     if (e.key === 'Enter') commitTitle();
-                                    if (e.key === 'Escape') setEditingTitle(false);
+                                    if (e.key === 'Escape') setEditingTitle(null);
                                 }}
                             />
                         ) : (
@@ -1018,11 +1048,26 @@ export function TasksView() {
                                 title="Click to rename"
                                 onClick={() => {
                                     setTitleDraft(selectedList.title);
-                                    setEditingTitle(true);
+                                    setEditingTitle(selectedList.id);
                                 }}
                             >
                                 {selectedList.title}
                             </h2>
+                        )}
+                        {/* The LIST's own reminder (migration 068) — the same
+                            control Púca Notes puts in a note's footer, so the
+                            two front doors cannot disagree. */}
+                        {support.features.noteReminders && (
+                            <>
+                                <NoteDueChip note={noteTimingOf(selectedList)} now={listNow} />
+                                <NoteReminderControl
+                                    key={selectedList.id}
+                                    note={noteTimingOf(selectedList)}
+                                    canSchedule={scheduleOn}
+                                    buttonClass="tasks-editor-iconbtn"
+                                    onSave={patch => { void saveListTiming(selectedList, patch); }}
+                                />
+                            </>
                         )}
                         {canDeleteList(selectedList) && (
                             <button

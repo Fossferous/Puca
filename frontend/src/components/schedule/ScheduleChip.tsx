@@ -10,7 +10,9 @@ import { describeSchedule, formatDayShort, formatTime } from '../../api/schedule
 import { localDayKey } from '../../utils/calendarMath';
 import { CalendarIcon, EyeOffIcon, LockIcon, MapPinIcon, RepeatIcon, SnoozeIcon } from '../Icons';
 
-export function ScheduleChip({ task, now }: { task: Task; now: number }) {
+/** A NOTE's own reminder has no completion, so the chip takes only what it
+ *  reads (migration 068; components/schedule/NoteReminderControl.tsx). */
+export function ScheduleChip({ task, now }: { task: Pick<Task, 'schedule' | 'is_completed'>; now: number }) {
     const parsed = parseSchedule(task.schedule);
     if (parsed.state === 'none') return null;
     if (parsed.state === 'readonly') {

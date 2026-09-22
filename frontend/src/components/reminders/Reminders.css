@@ -76,6 +76,9 @@
 }
 .notes-snooze-menu .notes-textbtn:hover { background: var(--bg-modifier-hover); }
 .notes-reminder-marks { display: inline-flex; gap: 2px; color: var(--text-muted); flex-shrink: 0; }
+/* A NOTE'S OWN reminder stands where an item's checkbox would: nothing to
+   tick, so a bell in the same 16px slot keeps the column aligned. */
+.notes-reminder-mark { display: inline-flex; align-items: center; justify-content: center; width: 16px; color: var(--text-muted); flex-shrink: 0; }
 /* On an item row (TaskTree) the menu always floats: the action cluster is a
    tight flex row with nowhere to put three buttons inline. */
 .notes-snooze.tt-snooze .notes-snooze-menu {

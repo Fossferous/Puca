@@ -183,7 +183,17 @@ pub struct TaskListResponse {
     /// Last edit of the list or any of its items (migration 066 triggers);
     /// created_at for a list untouched since before it.
     pub updated_at: String,
+    /// The NOTE's own reminder (migration 068), independent of its items:
+    /// the next reminder instant in plaintext, exactly what an item's due_at
+    /// costs, and the sealed EventSchedule it was derived from. Always
+    /// serialized (null = none), so every list a 068+ server returns carries
+    /// both keys and a client can tell them from an older server's silence.
+    pub due_at: Option<String>,
+    pub schedule: Option<String>,
 }
+
+/// due_at as every task-list query renders it (the same shape as created_at).
+const LIST_DUE_AT: &str = "(replace((due_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS due_at";
 
 /// updated_at as every task-list query renders it.
 const LIST_UPDATED_AT: &str = "(replace((COALESCE(updated_at, created_at) AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS updated_at";
@@ -203,6 +213,21 @@ pub struct TaskListRequest {
     /// See UpdateTaskRequest::reads_up_to.
     #[serde(default)]
     pub reads_up_to: Option<u64>,
+    /// The NOTE's own reminder time (migration 068). The same three-state
+    /// contract as everything else here: absent = keep, "" = clear,
+    /// RFC3339 = set.
+    #[serde(default)]
+    pub due_at: Option<String>,
+    /// The note's sealed EventSchedule; three-state, sealed to self
+    /// (task_timing::validate_sealed — a personal list has no channel to
+    /// bind, so NOT validate_sealed_scoped).
+    #[serde(default)]
+    pub schedule: Option<String>,
+    /// Compare-and-swap on the note's due_at, exactly as
+    /// UpdateTaskRequest::expect_due_at is for an item: "" = expect NULL,
+    /// RFC3339 = expect that instant, absent = no check.
+    #[serde(default)]
+    pub expect_due_at: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1367,14 +1392,17 @@ pub async fn list_task_lists(
                 l.body, l.attachments, \
                 (replace((l.trashed_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS trashed_at, \
                 l.is_self, \
-                (replace((COALESCE(l.updated_at, l.created_at) AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS updated_at \
+                (replace((COALESCE(l.updated_at, l.created_at) AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS updated_at, \
+                (replace((l.due_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS due_at, \
+                l.schedule \
          FROM task_lists l \
          LEFT JOIN channel_tasks t ON t.list_id = l.id \
          WHERE l.owner_id = $1 AND (l.trashed_at IS NOT NULL) = $2 \
          GROUP BY l.id \
          ORDER BY {order}"
     );
-    type ListRow = (i64, String, String, i64, i64, Option<String>, Option<String>, Option<String>, bool, String);
+    #[allow(clippy::type_complexity)]
+    type ListRow = (i64, String, String, i64, i64, Option<String>, Option<String>, Option<String>, bool, String, Option<String>, Option<String>);
     let rows: Result<Vec<ListRow>, _> = sqlx::query_as(&sql)
         .bind(claims.sub)
         .bind(trashed)
@@ -1384,7 +1412,7 @@ pub async fn list_task_lists(
     match rows {
         Ok(rows) => Json(
             rows.into_iter()
-                .map(|(id, title, created_at, total, done, body, attachments, trashed_at, is_self, updated_at)| TaskListResponse {
+                .map(|(id, title, created_at, total, done, body, attachments, trashed_at, is_self, updated_at, due_at, schedule)| TaskListResponse {
                     id,
                     title,
                     created_at,
@@ -1395,6 +1423,8 @@ pub async fn list_task_lists(
                     trashed_at,
                     is_self,
                     updated_at,
+                    due_at,
+                    schedule,
                 })
                 .collect::<Vec<_>>(),
         )
@@ -1428,23 +1458,40 @@ pub async fn create_task_list(
     {
         return e.into_response();
     }
+    // The note's own reminder, so a composer creates a reminding note in ONE
+    // request (a second PATCH could fail and leave a note with no time).
+    let due_at = match parse_due(payload.due_at.as_deref().unwrap_or("")) {
+        Ok(d) => d,
+        Err(e) => return e.into_response(),
+    };
+    let schedule = match crate::task_timing::validate_sealed(
+        payload.schedule.as_deref().unwrap_or(""),
+        MAX_SCHEDULE_LEN,
+        "schedule",
+    ) {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
     // Empty on create means "none" — store NULL, not "".
     let body = payload.body.as_deref().filter(|b| !b.is_empty());
     let attachments = payload.attachments.as_deref().filter(|a| !a.is_empty());
 
     let sql = format!(
-        "INSERT INTO task_lists (owner_id, title, body, attachments) VALUES ($1, $2, $3, $4) RETURNING id, title, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at, body, attachments, {LIST_UPDATED_AT}"
+        "INSERT INTO task_lists (owner_id, title, body, attachments, due_at, schedule) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, title, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at, body, attachments, {LIST_UPDATED_AT}, {LIST_DUE_AT}, schedule"
     );
-    let row: Result<(i64, String, String, Option<String>, Option<String>, String), _> = sqlx::query_as(&sql)
+    #[allow(clippy::type_complexity)]
+    let row: Result<(i64, String, String, Option<String>, Option<String>, String, Option<String>, Option<String>), _> = sqlx::query_as(&sql)
         .bind(claims.sub)
         .bind(title)
         .bind(body)
         .bind(attachments)
+        .bind(due_at)
+        .bind(schedule)
         .fetch_one(&state.pool)
         .await;
 
     match row {
-        Ok((id, title, created_at, body, attachments, updated_at)) => Json(TaskListResponse {
+        Ok((id, title, created_at, body, attachments, updated_at, due_at, schedule)) => Json(TaskListResponse {
             id,
             title,
             created_at,
@@ -1455,6 +1502,8 @@ pub async fn create_task_list(
             trashed_at: None,
             is_self: false,
             updated_at,
+            due_at,
+            schedule,
         })
         .into_response(),
         Err(e) => {
@@ -1478,10 +1527,11 @@ pub async fn get_self_checklist(
     Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
     let select_self = format!(
-        "SELECT id, title, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at, body, attachments, {LIST_UPDATED_AT} FROM task_lists WHERE owner_id = $1 AND is_self = TRUE"
+        "SELECT id, title, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at, body, attachments, {LIST_UPDATED_AT}, {LIST_DUE_AT}, schedule FROM task_lists WHERE owner_id = $1 AND is_self = TRUE"
     );
     // Try to fetch the existing one first.
-    let existing: Option<(i64, String, String, Option<String>, Option<String>, String)> = sqlx::query_as(&select_self)
+    #[allow(clippy::type_complexity)]
+    let existing: Option<(i64, String, String, Option<String>, Option<String>, String, Option<String>, Option<String>)> = sqlx::query_as(&select_self)
     .bind(claims.sub)
     .fetch_optional(&state.pool)
     .await
@@ -1508,7 +1558,7 @@ pub async fn get_self_checklist(
     };
 
     match row {
-        Ok((id, title, created_at, body, attachments, updated_at)) => {
+        Ok((id, title, created_at, body, attachments, updated_at, due_at, schedule)) => {
             let counts: (i64, i64) = sqlx::query_as(
                 "SELECT COUNT(*), COUNT(*) FILTER (WHERE is_completed) FROM channel_tasks WHERE list_id = $1",
             )
@@ -1528,6 +1578,8 @@ pub async fn get_self_checklist(
                 trashed_at: None,
                 is_self: true,
                 updated_at,
+                due_at,
+                schedule,
             })
             .into_response()
         }
@@ -1542,8 +1594,9 @@ pub async fn get_self_checklist(
     }
 }
 
-/// Rename a personal task list, and/or replace its sealed body or
-/// attachments sidecar (list_content.rs).
+/// Rename a personal task list, replace its sealed body or attachments
+/// sidecar (list_content.rs), and/or set the NOTE's own reminder — its
+/// plaintext due_at and its sealed schedule (migration 068).
 pub async fn rename_task_list(
     State(state): State<Arc<AppState>>,
     Path(list_id): Path<i64>,
@@ -1553,9 +1606,16 @@ pub async fn rename_task_list(
     if let Err(e) = check_list_writable(&state, list_id, &claims).await {
         return e.into_response();
     }
-    // Title, body and attachments are each optional here (a body-only edit
-    // sends no title); an empty PATCH is a client bug, not a no-op to hide.
-    if payload.title.is_none() && payload.body.is_none() && payload.attachments.is_none() {
+    // Title, body, attachments and the note's own timing are each optional
+    // here (a body-only edit sends no title); an empty PATCH is a client bug,
+    // not a no-op to hide. `expect_due_at` alone is NOT an update: a bare
+    // compare-and-swap with nothing to write would 200 having done nothing.
+    if payload.title.is_none()
+        && payload.body.is_none()
+        && payload.attachments.is_none()
+        && payload.due_at.is_none()
+        && payload.schedule.is_none()
+    {
         return (StatusCode::BAD_REQUEST, "Nothing to update").into_response();
     }
     let title = payload.title.as_deref().map(str::trim);
@@ -1572,6 +1632,26 @@ pub async fn rename_task_list(
     {
         return e.into_response();
     }
+    // The note's own timing, validated before the transaction opens.
+    let due_at = match payload.due_at.as_deref().map(parse_due).transpose() {
+        Ok(d) => d,
+        Err(e) => return e.into_response(),
+    };
+    let expect_due = match payload.expect_due_at.as_deref().map(parse_due).transpose() {
+        Ok(d) => d,
+        Err(e) => return e.into_response(),
+    };
+    // A personal list is sealed to self and has no channel to bind, so this
+    // is validate_sealed, never validate_sealed_scoped (task_timing.rs).
+    let schedule = match payload
+        .schedule
+        .as_deref()
+        .map(|s| crate::task_timing::validate_sealed(s, MAX_SCHEDULE_LEN, "schedule"))
+        .transpose()
+    {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
 
     // Titles, bodies and sidecars are sealed encrypt-to-self values with no
     // history: the same downgrade rule as descriptions (envelope_version.rs),
@@ -1585,8 +1665,9 @@ pub async fn rename_task_list(
             return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to rename task list").into_response();
         }
     };
-    let current: Option<(String, Option<String>, Option<String>, bool)> = match sqlx::query_as(
-        "SELECT title, body, attachments, trashed_at IS NOT NULL FROM task_lists WHERE id = $1 FOR UPDATE",
+    #[allow(clippy::type_complexity)]
+    let current: Option<(String, Option<String>, Option<String>, bool, Option<String>)> = match sqlx::query_as(
+        "SELECT title, body, attachments, trashed_at IS NOT NULL, schedule FROM task_lists WHERE id = $1 FOR UPDATE",
     )
     .bind(list_id)
     .fetch_optional(&mut *tx)
@@ -1598,7 +1679,7 @@ pub async fn rename_task_list(
             return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to rename task list").into_response();
         }
     };
-    let Some((cur_title, cur_body, cur_att, trashed)) = current else {
+    let Some((cur_title, cur_body, cur_att, trashed, cur_sched)) = current else {
         return (StatusCode::NOT_FOUND, "List not found").into_response();
     };
     if trashed {
@@ -1611,14 +1692,20 @@ pub async fn rename_task_list(
     if downgrade(Some(&cur_title), title)
         || downgrade(cur_body.as_deref(), payload.body.as_deref())
         || downgrade(cur_att.as_deref(), payload.attachments.as_deref())
+        || downgrade(cur_sched.as_deref(), payload.schedule.as_deref())
     {
         return (StatusCode::CONFLICT, crate::envelope_version::DOWNGRADE_MESSAGE).into_response();
     }
+    // The compare-and-swap rides the same statement, as it does for an item
+    // (update_task): two devices advancing the same note reminder cannot
+    // both win, and a loser writes nothing.
     let result = sqlx::query(
         "UPDATE task_lists SET title = COALESCE($1, title), \
          body = CASE WHEN $2 THEN $3 ELSE body END, \
-         attachments = CASE WHEN $4 THEN $5 ELSE attachments END \
-         WHERE id = $6",
+         attachments = CASE WHEN $4 THEN $5 ELSE attachments END, \
+         due_at = CASE WHEN $7 THEN $8 ELSE due_at END, \
+         schedule = CASE WHEN $9 THEN $10 ELSE schedule END \
+         WHERE id = $6 AND (NOT $11 OR due_at IS NOT DISTINCT FROM $12)",
     )
     .bind(title)
     .bind(payload.body.is_some())
@@ -1626,9 +1713,20 @@ pub async fn rename_task_list(
     .bind(payload.attachments.is_some())
     .bind(payload.attachments.as_deref().filter(|a| !a.is_empty()))
     .bind(list_id)
+    .bind(due_at.is_some())
+    .bind(due_at.flatten())
+    .bind(payload.schedule.is_some())
+    .bind(schedule.flatten())
+    .bind(expect_due.is_some())
+    .bind(expect_due.flatten())
     .execute(&mut *tx)
     .await;
     let result = match result {
+        // The row is locked and known to exist, so the only way to match
+        // nothing is the compare-and-swap losing.
+        Ok(r) if r.rows_affected() == 0 && expect_due.is_some() => {
+            return (StatusCode::CONFLICT, crate::task_timing::DUE_CHANGED_MESSAGE).into_response();
+        }
         Ok(_) => tx.commit().await,
         Err(e) => Err(e),
     };
@@ -1877,6 +1975,10 @@ pub struct TaskReminderResponse {
     pub schedule: Option<String>,
     /// Sealed {forDue, until}; the effective reminder time when it matches.
     pub snooze: Option<String>,
+    /// This row is the NOTE's own reminder (migration 068), not an item's.
+    /// The load-bearing part is the NEGATIVE `id` (see list_task_reminders);
+    /// this flag only spares a reader having to know that.
+    pub is_list: bool,
 }
 
 /// Newest overdue reminders kept in the feed, and upcoming ones. Split so a
@@ -1895,6 +1997,12 @@ const REMINDERS_FUTURE_LIMIT: i64 = 400;
 /// means 404 everywhere in this codebase). Deliberately content-free: ids and
 /// times only; the notification never includes content anyway (same
 /// lock-screen rule as messages).
+///
+/// A NOTE's own reminder (migration 068) rides the SAME array, with
+/// `id = -list_id`. Task ids are always positive, so the two namespaces
+/// cannot collide in any engine's per-id map — the web loop's fired markers,
+/// Púca Notes' ReminderPlan/ReminderMerge — and one feed means one poll and
+/// no new native code for the Android app to fetch it with.
 pub async fn list_task_reminders(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
@@ -1913,6 +2021,10 @@ pub async fn list_task_reminders(
              FROM channel_tasks t \
              WHERE t.created_by = $1 AND t.channel_id IS NOT NULL \
                AND t.due_at IS NOT NULL AND t.is_completed = FALSE \
+             UNION ALL \
+             SELECT -l.id, NULL::BIGINT, l.id, l.due_at, $1::BIGINT, l.schedule, NULL::TEXT \
+             FROM task_lists l \
+             WHERE l.owner_id = $1 AND l.due_at IS NOT NULL AND l.trashed_at IS NULL \
          ), past AS ( \
              SELECT * FROM mine WHERE due_at <= NOW() ORDER BY due_at DESC, id DESC LIMIT $2 \
          ), future AS ( \
@@ -1962,6 +2074,7 @@ pub async fn list_task_reminders(
             }
         }
         out.push(TaskReminderResponse {
+            is_list: id < 0,
             id,
             channel_id,
             list_id,

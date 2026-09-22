@@ -49,11 +49,14 @@ export async function openSelfField(stored: string): Promise<string> {
     }
 }
 
-/** The list fields migration 065 added, as the server sends them. */
+/** The list fields migrations 065 and 068 added, as the server sends them. */
 export interface ListContentWire {
     body?: string | null;
     attachments?: string | null;
     trashed_at?: string | null;
+    /** The note's own sealed EventSchedule (068). `due_at` beside it is
+     *  plaintext and needs no opening. */
+    schedule?: string | null;
 }
 
 /** The same fields opened. Each is `undefined` when the server did not send
@@ -63,6 +66,7 @@ export interface ListContentOpened {
     body?: string | null;
     attachments?: string | null;
     trashed_at?: string | null;
+    schedule?: string | null;
 }
 
 export async function openListContent(wire: ListContentWire): Promise<ListContentOpened> {
@@ -70,5 +74,8 @@ export async function openListContent(wire: ListContentWire): Promise<ListConten
     if ('body' in wire) out.body = wire.body ? await openSelfField(wire.body) : null;
     if ('attachments' in wire) out.attachments = wire.attachments ? await openSelfField(wire.attachments) : null;
     if ('trashed_at' in wire) out.trashed_at = wire.trashed_at ?? null;
+    // Strict like the rest: a schedule never held plaintext either, and an
+    // unreadable one becomes a marker that parseSchedule reads as readonly.
+    if ('schedule' in wire) out.schedule = wire.schedule ? await openSelfField(wire.schedule) : null;
     return out;
 }

@@ -58,7 +58,7 @@ import {
     updateTask, updateChannelTask, updateListTask, deleteTask, moveTask, reorderTask, patchTaskTiming,
     getTaskTabPrefs, putTaskTabPrefs, isFavoriteTab, toggleFavoritePrefs, buildPrefsForOrder, taskTabKey,
 } from '../../api/tasks';
-import { keepHiddenSlots, restoreTaskList, trashOrDeleteList } from '../../api/listContent';
+import { keepHiddenSlots, restoreTaskList, setTaskListTiming, trashOrDeleteList } from '../../api/listContent';
 import { pokeTaskReminders } from '../../api/taskReminders';
 import { pushMessageToast } from '../../components/messageToastBus';
 import { beginNoteWrite, LISTS_KEY, PREFS_KEY, setQueuedNotes } from './noteBusy';
@@ -94,6 +94,10 @@ type OpBody =
     | { k: 'moveTask'; note: NoteRef; taskId: number; direction: 'up' | 'down' }
     | { k: 'reorderTask'; note: NoteRef; taskId: number; afterId: number | null; reparent?: { parentId: number | null } }
     | { k: 'deleteTask'; note: NoteRef; taskId: number }
+    // The NOTE's own reminder (migration 068): a date set on a phone with
+    // no signal is queued like every item date, not lost. Three-state, the
+    // same patch api/listContent.ts sends.
+    | { k: 'listTiming'; listId: number; patch: { dueAt?: string | null; schedule?: string | null } }
     | { k: 'prefs'; prefs: TaskTabPref[]; intent: PrefsIntent };
 
 export type NoteOp = OpBody & {
@@ -135,6 +139,8 @@ export const ops = {
         withMeta({ k: 'deleteTask', note, taskId }, `delete ${q(description)}`),
     timing: (note: NoteRef, task: Task, patch: TaskTimingPatch, what: string) =>
         withMeta({ k: 'timing', note, taskId: task.id, createdBy: task.created_by, patch }, `${what} ${q(task.description)}`),
+    setListTiming: (listId: number, title: string, patch: { dueAt?: string | null; schedule?: string | null }, what: string) =>
+        withMeta({ k: 'listTiming', listId, patch }, `${what} ${q(title)}`),
     prefs: (prefs: TaskTabPref[], intent: PrefsIntent) =>
         withMeta({ k: 'prefs', prefs, intent }, intent.type === 'order' ? 'reorder notes' : `${intent.favorite ? 'pin' : 'unpin'} ${intent.type === 'pins' ? `${intent.tabs.length} notes` : 'a note'}`),
 };
@@ -143,6 +149,7 @@ export const ops = {
 export function busyKeyOf(op: OpBody): string {
     switch (op.k) {
         case 'createList': case 'renameList': case 'deleteList': case 'restoreList': return LISTS_KEY;
+        case 'listTiming': return noteKey({ kind: 'list', id: op.listId });
         case 'prefs': return PREFS_KEY;
         default: return noteKey(op.note);
     }
@@ -152,7 +159,7 @@ export function busyKeyOf(op: OpBody): string {
 function idsOf(op: OpBody): number[] {
     switch (op.k) {
         case 'createList': return [];
-        case 'renameList': case 'deleteList': case 'restoreList': return [op.listId];
+        case 'renameList': case 'deleteList': case 'restoreList': case 'listTiming': return [op.listId];
         case 'createTask': return [op.note.id, ...(op.parentId !== undefined ? [op.parentId] : [])];
         case 'editTask': case 'updateTask': case 'moveTask': case 'deleteTask': case 'timing': return [op.note.id, op.taskId];
         case 'reorderTask': return [op.note.id, op.taskId, ...(op.afterId !== null ? [op.afterId] : []), ...(op.reparent?.parentId != null ? [op.reparent.parentId] : [])];
@@ -193,6 +200,11 @@ export async function execOp(op: OpBody, idMap: IdMap, fromQueue: boolean): Prom
             return list;
         }
         case 'renameList': return renameTaskList(r(op.listId), op.title);
+        // No expect_due_at on a replay: the compare-and-swap exists so two
+        // devices advancing one reminder cannot both win, and a queued edit
+        // the user made deliberately is not an advance. It is last-write-wins
+        // like every other queued edit (this file's header).
+        case 'listTiming': return setTaskListTiming(r(op.listId), op.patch);
         // The trash where the server has one (api/listContent.ts), probed at
         // the moment it runs — a queued delete replays against whatever
         // server answers then.
@@ -487,7 +499,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
                             const real = ids[String(head.tempId)];
                             if (real !== undefined) summary.created[String(head.tempId)] = real;
                         }
-                        if ((head.k === 'updateTask' && head.updates.due_at !== undefined) || head.k === 'timing' || (head.k === 'createTask' && head.timing)) summary.touchedDue = true;
+                        if ((head.k === 'updateTask' && head.updates.due_at !== undefined) || head.k === 'timing' || head.k === 'listTiming' || (head.k === 'createTask' && head.timing)) summary.touchedDue = true;
                         await mutate(s => ({ ...s, ids: { ...s.ids, ...ids }, queue: s.queue.filter(o => o.oid !== head.oid) }));
                         backoffMs = 2_000;
                     } catch (err) {

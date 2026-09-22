@@ -432,6 +432,17 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                 { id: 'sep3', label: '', separator: true },
                 { id: 'rename', label: 'Rename', icon: 'pencil', onClick: () => openNote(card) },
             );
+            // The note's own reminder lives in its footer (a date needs a
+            // picker, which a context menu has nowhere to put), so this is a
+            // signpost to it — the same shape as Rename above.
+            if (actions.content.features.noteReminders) {
+                items.push({
+                    id: 'remind',
+                    label: card.dueAt || card.schedule ? 'Reminder…' : 'Remind me…',
+                    icon: 'clock',
+                    onClick: () => openNote(card),
+                });
+            }
             // Notes to self cannot go to the trash (the server refuses it), so
             // it is not offered rather than offered and failing.
             if (!(actions.content.trashEnabled && actions.content.isSelfList(card.ref.id))) {

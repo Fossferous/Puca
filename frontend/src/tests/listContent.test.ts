@@ -130,7 +130,9 @@ describe('capability detection does not depend on having lists', () => {
 
     it('parses the answer field by field, never assuming support', async () => {
         get.mockResolvedValueOnce({ body: true, attachments: true, trash: true, trash_retention_days: 30, max_body_len: 65536 });
-        expect(await fetchListFeatures()).toEqual({ body: true, attachments: true, trash: true, trashRetentionDays: 30, maxBodyLen: 65536, serverClockOffsetMs: null });
+        // A 067 server sends no note_reminders key at all: it must read as
+        // false, never as support (migration 068).
+        expect(await fetchListFeatures()).toEqual({ body: true, attachments: true, trash: true, trashRetentionDays: 30, maxBodyLen: 65536, serverClockOffsetMs: null, noteReminders: false });
         expect(parseListFeatures('nonsense')).toEqual(NO_LIST_FEATURES);
         expect(parseListFeatures({ body: 'yes', trash: true, trash_retention_days: -3 })).toEqual({ ...NO_LIST_FEATURES, trash: true });
     });

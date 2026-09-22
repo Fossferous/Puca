@@ -570,6 +570,79 @@ ck('reminders (web): no "At a place" section', await page.locator('section[aria-
 await shot('reminders');
 await page.locator('.notes-rail-item', { hasText: 'Notes' }).first().click();
 
+// ---- 9b. A reminder on the NOTE itself (migration 068) -----------------------------------------
+// "Poem" is a TEXT note: no items at all. That is the whole point — before
+// 068 the only way to be reminded about it was to invent a to-do.
+await page.waitForSelector('.notes-card:has-text("Poem")', { timeout: 10000 });
+await poem().click();
+await page.waitForSelector('.notes-editor', { timeout: 5000 });
+ck('note reminder: the note really has no items', await page.locator('.notes-editor .tt-item').count() === 0);
+const remindBtn = () => page.locator('.notes-editor-foot button[aria-label="Remind me"]');
+ck('note reminder: the footer offers a reminder', await remindBtn().count() === 1);
+await remindBtn().click();
+await page.waitForSelector('.notes-editor input[aria-label="Remind me at"]', { timeout: 5000 });
+// Far enough ahead to land in Upcoming whatever hour the walk runs at.
+const noteDue = new Date(Date.now() + 3 * 86400000);
+const pad = n => String(n).padStart(2, '0');
+const noteDueLocal = `${noteDue.getFullYear()}-${pad(noteDue.getMonth() + 1)}-${pad(noteDue.getDate())}T09:00`;
+await page.fill('.notes-editor input[aria-label="Remind me at"]', noteDueLocal);
+await page.locator('.notes-editor .tt-due-set').click();
+await sleep(600);
+ck('note reminder: setting a time creates NO item', await page.locator('.notes-editor .tt-item').count() === 0);
+ck('note reminder: the open note shows its own chip', await page.locator('.notes-editor-sub .note-due-chip').count() === 1);
+await page.keyboard.press('Escape');
+await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
+ck('note reminder: the card shows the note\u2019s own due chip', await poem().locator('.notes-card-foot .note-due-chip').count() === 1);
+// Its own stylesheet travels with the control (NoteReminderControl.css): it is
+// a real chip here, and it does NOT read as the chip beside it, which is the
+// soonest ITEM due. Two identical clock pills would be one claim made twice.
+const noteChipLook = await page.evaluate(() => {
+    const el = document.querySelector('.notes-card-foot .note-due-chip');
+    if (!el) return null;
+    const cs = getComputedStyle(el);
+    const items = [...document.querySelectorAll('.notes-card-foot .notes-chip:not(.unsynced)')]
+        .map(c => parseFloat(getComputedStyle(c).borderTopWidth) || 0);
+    return {
+        border: parseFloat(cs.borderTopWidth) || 0,
+        radius: cs.borderTopLeftRadius,
+        pad: cs.paddingLeft,
+        itemChips: items.length,
+        widestItemBorder: items.length ? Math.max(...items) : 0,
+    };
+});
+ck('note reminder: the chip is styled by its own stylesheet and reads apart from an item chip',
+    noteChipLook && noteChipLook.border >= 1 && noteChipLook.radius === '999px'
+    && noteChipLook.itemChips > 0 && noteChipLook.widestItemBorder < 1,
+    JSON.stringify(noteChipLook));
+
+await page.locator('.notes-rail-item', { hasText: 'Reminders' }).click();
+await page.waitForSelector('.notes-reminders', { timeout: 5000 });
+const poemRow = () => page.locator('.notes-reminder-row', { hasText: 'Poem' });
+ck('note reminder: Reminders lists the note itself', await poemRow().count() === 1);
+ck('note reminder: it is a note row, not an item row', await page.locator('.notes-reminder-row.note').count() === 1);
+ck('note reminder: the note row has no tick box and no Snooze',
+    await page.locator('.notes-reminder-row.note input[type="checkbox"]').count() === 0
+    && await page.locator('.notes-reminder-row.note .notes-snooze').count() === 0);
+ck('note reminder: an ITEM row still has its tick box (positive control)',
+    await page.locator('.notes-reminder-row:not(.note) input[type="checkbox"]').count() >= 1);
+await shot('note-reminder');
+// Clicking the row opens the NOTE, not an item editor.
+await poemRow().click();
+await page.waitForSelector('.notes-editor', { timeout: 5000 });
+ck('note reminder: clicking the row opens the note', /Poem/.test(await page.locator('.notes-editor-title').inputValue()));
+// The Close button, not Escape: a note with no items autofocuses its
+// "Add an item" field, and the editor deliberately leaves Escape to whatever
+// input holds the focus (NoteEditor's isEditableTarget guard).
+await page.locator('.notes-editor button[aria-label="Close note"]').click();
+await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
+// Clearing it from the row takes it out of the list.
+await poemRow().locator('.notes-reminder-clear').click();
+await sleep(700);
+ck('note reminder: clearing it removes the row', await poemRow().count() === 0);
+await page.locator('.notes-rail-item', { hasText: 'Notes' }).first().click();
+await sleep(300);
+ck('note reminder: and the card chip goes with it', await poem().locator('.notes-card-foot .note-due-chip').count() === 0);
+
 // ---- 10. Archive with undo -----------------------------------------------------------------------------
 const packing = () => page.locator('.notes-card', { hasText: 'Packing' });
 await packing().hover();
@@ -743,6 +816,52 @@ await page.waitForSelector('.list-content-block textarea.nb-text', { timeout: 10
 ck('púca: the list editor shows the note text', /Roses are red/.test(await page.locator('.list-content-block textarea.nb-text').inputValue()));
 await page.fill('.list-content-block textarea.nb-text', 'Roses are red\nViolets are blue\nEdited in Púca');
 await sleep(1500);
+// The NOTE's own reminder, from Púca's side: the same control, the same chip.
+const pucaRemind = page.locator('.tasks-editor-header button[aria-label="Remind me"]');
+ck('púca: the list header offers the note\u2019s own reminder', await pucaRemind.count() === 1);
+await pucaRemind.click();
+await page.waitForSelector('.tasks-editor-header input[aria-label="Remind me at"]', { timeout: 5000 });
+// Púca never loads notes.css, so a control that borrowed `.notes-chip` from it
+// rendered here as bare inline text with the item editor's 36px indent. Its own
+// stylesheet is what makes this a row of its own under the title.
+const pucaEdit = await page.evaluate(() => {
+    const el = document.querySelector('.tasks-editor-header .note-due-edit');
+    const hdr = document.querySelector('.tasks-editor-header');
+    const title = document.querySelector('.tasks-editor-title');
+    if (!el || !hdr || !title) return null;
+    const b = el.getBoundingClientRect(), h = hdr.getBoundingClientRect(), t = title.getBoundingClientRect();
+    return {
+        ownRow: b.top >= t.bottom - 0.5,
+        inside: b.left >= h.left - 0.5 && b.right <= h.right + 0.5,
+        width: Math.round(b.width),
+        padLeft: getComputedStyle(el).paddingLeft,
+        overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+    };
+});
+ck('púca: the due editor takes its own row in the header, not the title' + '\u2019' + 's width',
+    pucaEdit && pucaEdit.ownRow && pucaEdit.inside && pucaEdit.width > 150 && !pucaEdit.overflow,
+    JSON.stringify(pucaEdit));
+const pucaDue = new Date(Date.now() + 4 * 86400000);
+const ppad = n => String(n).padStart(2, '0');
+await page.fill('.tasks-editor-header input[aria-label="Remind me at"]', `${pucaDue.getFullYear()}-${ppad(pucaDue.getMonth() + 1)}-${ppad(pucaDue.getDate())}T09:00`);
+await page.locator('.tasks-editor-header .tt-due-set').click();
+await sleep(800);
+ck('púca: the chip appears beside the list title', await page.locator('.tasks-editor-header .note-due-chip').count() === 1);
+const pucaChipLook = await page.evaluate(() => {
+    const el = document.querySelector('.tasks-editor-header .note-due-chip');
+    if (!el) return null;
+    const cs = getComputedStyle(el);
+    return { border: parseFloat(cs.borderTopWidth) || 0, radius: cs.borderTopLeftRadius, pad: cs.paddingLeft };
+});
+ck('púca: and it is a real chip there, not bare text (notes.css is not loaded in Púca)',
+    pucaChipLook && pucaChipLook.border >= 1 && pucaChipLook.radius === '999px' && pucaChipLook.pad !== '0px',
+    JSON.stringify(pucaChipLook));
+// Put it back: later sections (and Notes) expect the fixture unchanged.
+await page.locator('.tasks-editor-header button[aria-label="Edit this note\u2019s reminder"]').click();
+await page.waitForSelector('.tasks-editor-header input[aria-label="Remind me at"]', { timeout: 5000 });
+await page.locator('.tasks-editor-header .tt-delete').click();
+await sleep(800);
+ck('púca: clearing it from there removes the chip', await page.locator('.tasks-editor-header .note-due-chip').count() === 0);
 await page.locator('.tasks-tab', { hasText: 'Holiday photo' }).click();
 await page.waitForFunction(() => document.querySelector('.list-content-block .ni-open img')?.naturalWidth > 0, null, { timeout: 15000 })
     .then(() => ck('púca: a photo note shows its photo', true))
@@ -1116,6 +1235,16 @@ ck('sign in: the colour came back too', await page.locator('.notes-card[data-col
 await shot('signed-in-again');
 ck('desktop: no page errors', errors.length === 0, errors[0]);
 
+/** Is the element's centre really showing IT (not a drawer or scrim on top)?
+ *  Defined here because both passes use it, desktop and phone alike. */
+const onTop = (pg, sel) => pg.evaluate(sel => {
+    const el = document.querySelector(sel);
+    if (!el) return false;
+    const b = el.getBoundingClientRect();
+    const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+    return !!hit && (hit === el || el.contains(hit));
+}, sel);
+
 // =============================================================================
 // Phone — 390x844, coarse pointer, signed in via the same origin storage
 // =============================================================================
@@ -1196,6 +1325,119 @@ ck('phone: Done stays reachable under a 15-item list (the sheet scrolls)', db &&
 await done.tap();
 await m.waitForSelector('.notes-card:has-text("Phone note")', { timeout: 15000 });
 ck('phone: the FAB composer creates a note', true);
+// A note's OWN reminder at 390x844, coarse pointer (docs/DESIGN_PHILOSOPHY
+// §7): the footer control is a real tap target, its popover fits, and the
+// Reminders row keeps its shape.
+await m.locator('.notes-card', { hasText: 'Poem' }).tap();
+await m.waitForSelector('.notes-editor', { timeout: 8000 });
+const mRemind = m.locator('.notes-editor-foot button[aria-label="Remind me"]');
+const mRemindBox = await mRemind.boundingBox();
+ck('phone: the note\u2019s Remind me button is a 44px target', mRemindBox && mRemindBox.width >= 43.5 && mRemindBox.height >= 43.5, JSON.stringify(mRemindBox));
+await mRemind.tap();
+await m.waitForSelector('.notes-editor input[aria-label="Remind me at"]', { timeout: 5000 });
+const mDue = new Date(Date.now() + 2 * 86400000);
+const mpad = n => String(n).padStart(2, '0');
+await m.fill('.notes-editor input[aria-label="Remind me at"]', `${mDue.getFullYear()}-${mpad(mDue.getMonth() + 1)}-${mpad(mDue.getDate())}T09:00`);
+r = await audit();
+const dueBox = await m.locator('.notes-editor .note-due-edit').boundingBox();
+ck('phone: the reminder popover fits the viewport and nothing is undersized',
+    dueBox && dueBox.x >= -0.5 && dueBox.x + dueBox.width <= 390.5 && !r.bodyScrollsHorizontally && r.under.length === 0,
+    JSON.stringify({ dueBox, u: r.under }));
+await m.locator('.notes-editor .tt-due-set').tap();
+await m.waitForTimeout(600);
+await mshot('phone-note-reminder');
+await m.locator('.notes-editor button[aria-label="Close note"]').tap();
+await m.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 }).catch(() => {});
+await m.goto('/notes/#/reminders');
+await m.waitForSelector('.notes-reminders', { timeout: 10000 });
+await m.waitForSelector('.notes-reminder-row.note', { timeout: 10000 }).catch(() => {});
+r = await audit();
+const noteRowBox = await m.locator('.notes-reminder-row.note').boundingBox();
+ck('phone: the note reminder row keeps its shape at 390 and is not covered',
+    noteRowBox && noteRowBox.x >= -0.5 && noteRowBox.x + noteRowBox.width <= 390.5
+    && !r.bodyScrollsHorizontally && r.under.length === 0 && await onTop(m, '.notes-reminder-row.note'),
+    JSON.stringify({ noteRowBox, u: r.under }));
+
+// The calendar's day list is the ONLY body a coarse pointer gets, and it is
+// where a note's reminder stands beside items. A note has nothing to tick
+// (CalendarView's onToggleDone refuses it), so the row carries a bell — a
+// checkbox here would be a control that silently does nothing, on the one
+// surface a phone meets first.
+const mDay = `${mDue.getFullYear()}-${mpad(mDue.getMonth() + 1)}-${mpad(mDue.getDate())}`;
+await m.goto(`/notes/#/calendar?v=day&d=${mDay}`);
+await m.waitForSelector('.cal-daylist', { timeout: 10000 });
+const calNoteRow = m.locator('.cal-daylist .cal-row', { hasText: 'Poem' });
+await calNoteRow.first().waitFor({ timeout: 10000 }).catch(() => {});
+ck('phone calendar: a note’s own reminder has a bell, not a tick box',
+    await calNoteRow.count() === 1
+    && await calNoteRow.locator('input[type="checkbox"]').count() === 0
+    && await calNoteRow.locator('.cal-row-mark').count() === 1,
+    JSON.stringify({ rows: await calNoteRow.count() }));
+// Positive control on the same list, one day earlier: "Eggs" is a real item
+// with a due time, and it keeps the tick box this walk would otherwise never
+// have proved the day list draws at all.
+const mTom = new Date(); mTom.setDate(mTom.getDate() + 1);
+await m.goto(`/notes/#/calendar?v=day&d=${mTom.getFullYear()}-${mpad(mTom.getMonth() + 1)}-${mpad(mTom.getDate())}`);
+await m.waitForSelector('.cal-daylist', { timeout: 10000 });
+const calItemRow = m.locator('.cal-daylist .cal-row', { hasText: 'Eggs' });
+await calItemRow.first().waitFor({ timeout: 10000 }).catch(() => {});
+ck('phone calendar: an ITEM row still has its tick box (positive control)',
+    await calItemRow.count() === 1
+    && await calItemRow.locator('input[type="checkbox"]').count() === 1
+    && await calItemRow.locator('.cal-row-mark').count() === 0,
+    JSON.stringify({ rows: await calItemRow.count() }));
+await mshot('phone-calendar-note-reminder');
+await m.goto('/notes/#/reminders');
+await m.waitForSelector('.notes-reminders', { timeout: 10000 });
+await m.waitForSelector('.notes-reminder-row.note', { timeout: 10000 }).catch(() => {});
+
+// Put it back as the walk found it, so later sections see the same fixture.
+await m.locator('.notes-reminder-row.note .notes-reminder-clear').tap();
+await m.waitForTimeout(600);
+ck('phone: clearing it from the row works with a coarse pointer', await m.locator('.notes-reminder-row.note').count() === 0);
+
+// The OTHER front door at 390x844: Púca's Tasks view mounts the same control,
+// and notes-walk exercised it on desktop only. Its buttons are new UI, so they
+// take the 44px rule, and its date editor must take a row of its own here too.
+await m.goto('/');
+await m.waitForSelector('.mobile-nav-btn', { timeout: 20000 });
+await m.waitForSelector('.recovery-reminder-actions .recovery-done-btn', { timeout: 4000 })
+    .then(() => m.tap('.recovery-reminder-actions .recovery-done-btn'))
+    .catch(() => { /* already answered on this profile */ });
+await m.tap('.welcome-popup-close', { timeout: 2000 }).catch(() => { /* not shown */ });
+await m.locator('.mobile-nav-btn').nth(0).tap();
+await m.waitForTimeout(400);
+await m.locator('.server-icon.notes-self').tap();
+await m.waitForSelector('.tasks-tabbar', { timeout: 20000 });
+await m.locator('.tasks-tab', { hasText: 'Poem' }).first().tap();
+await m.waitForSelector('.tasks-editor-header', { timeout: 10000 });
+const mPucaRemind = m.locator('.tasks-editor-header button[aria-label="Remind me"]');
+const mPucaBox = await mPucaRemind.boundingBox();
+ck('phone: Púca' + '\u2019' + 's list header offers the reminder, at a 44px target',
+    mPucaBox && mPucaBox.width >= 43.5 && mPucaBox.height >= 43.5, JSON.stringify(mPucaBox));
+await mPucaRemind.tap();
+await m.waitForSelector('.tasks-editor-header input[aria-label="Remind me at"]', { timeout: 5000 });
+const mPucaEdit = await m.evaluate(() => {
+    const el = document.querySelector('.tasks-editor-header .note-due-edit');
+    const title = document.querySelector('.tasks-editor-title');
+    if (!el || !title) return null;
+    const b = el.getBoundingClientRect(), t = title.getBoundingClientRect();
+    const input = el.querySelector('input');
+    return {
+        ownRow: b.top >= t.bottom - 0.5,
+        inside: b.left >= -0.5 && b.right <= window.innerWidth + 0.5,
+        font: input ? parseFloat(getComputedStyle(input).fontSize) : 0,
+        overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+    };
+});
+ck('phone: the Púca due editor fits 390, takes its own row, and its input is 16px',
+    mPucaEdit && mPucaEdit.ownRow && mPucaEdit.inside && mPucaEdit.font >= 16 && !mPucaEdit.overflow,
+    JSON.stringify(mPucaEdit));
+await mshot('phone-puca-note-reminder');
+
+await m.goto('/notes/');
+await m.waitForSelector('.notes-card', { timeout: 10000 });
+
 // The composer's text mode, camera and drawing on a phone.
 await m.tap('.notes-fab');
 await m.waitForSelector('.notes-quickadd.sheet', { timeout: 5000 });
@@ -1447,14 +1689,6 @@ async function closedDrawer(pg) {
     await pg.waitForSelector('.notes-rail.open', { state: 'detached', timeout: 5000 }).catch(() => {});
     await sleep(350);
 }
-/** Is the element's centre really showing IT (not a drawer or scrim on top)? */
-const onTop = (pg, sel) => pg.evaluate(sel => {
-    const el = document.querySelector(sel);
-    if (!el) return false;
-    const b = el.getBoundingClientRect();
-    const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
-    return !!hit && (hit === el || el.contains(hit));
-}, sel);
 
 // ---- 15. "Reminds whoever set it": a shared item someone else set -----------------------------------
 // GET /task-reminders covers only the caller's own channel tasks, so an item in

@@ -27,6 +27,15 @@
  * Several entries share an id, so a planner must fire only the LATEST past
  * entry per id (planEntries does).
  *
+ * TWO ID NAMESPACES IN ONE FEED. A row whose id is NEGATIVE is a NOTE'S OWN
+ * reminder (migration 068): `id = -list_id`, `list_id` names the note,
+ * `channel_id` is null. Task ids are always positive, so `5` and `-5` are
+ * different reminders and no per-id map here, in planEntries' fired markers,
+ * or in Púca Notes' Java engine can confuse them. Everything in this file is
+ * id-agnostic on purpose; the ONE place the difference matters is
+ * applyAdvances, which must PATCH the list rather than a task that does not
+ * exist.
+ *
  * Opening FAILS OPEN: a snooze that cannot be read means "remind at due_at",
  * never "stay quiet".
  *
@@ -37,7 +46,8 @@
  * first; their loops poll every 5 minutes), and only through
  * expect_due_at so two devices advancing at once cannot both win.
  */
-import { type TaskReminder, openReminderTiming, patchTaskTiming } from './tasks';
+import { type TaskReminder, isNoteReminderId, openReminderTiming, patchTaskTiming } from './tasks';
+import { setTaskListTiming } from './listContent';
 import { activeSnooze, nextReminderAfter, parseSchedule, snoozeMovedDue } from './taskSchedule';
 import { parseServerTimestamp } from '../utils/serverTime';
 import { ApiError } from './client';
@@ -191,15 +201,23 @@ export function planAdvances(rows: OpenedReminder[], now: number, graceMs = ADVA
 }
 
 /** Send the advances. A 409 means another device advanced (or someone edited)
- *  first — nothing to do. */
+ *  first — nothing to do.
+ *
+ *  A NOTE'S OWN event (a negative id) is advanced on the LIST, through the
+ *  same compare-and-swap: `/tasks/-5` is not a route to a note, and a client
+ *  that sent one would get a 404 on every cycle for ever. */
 export async function applyAdvances(advances: Advance[]): Promise<number> {
     let done = 0;
     for (const a of advances) {
         try {
-            await patchTaskTiming(
-                { id: a.row.id, channel_id: a.row.channel_id, created_by: a.row.created_by ?? -1 },
-                { due_at: a.nextDue, expect_due_at: a.row.due_at },
-            );
+            if (isNoteReminderId(a.row.id)) {
+                await setTaskListTiming(-a.row.id, { dueAt: a.nextDue, expectDueAt: a.row.due_at });
+            } else {
+                await patchTaskTiming(
+                    { id: a.row.id, channel_id: a.row.channel_id, created_by: a.row.created_by ?? -1 },
+                    { due_at: a.nextDue, expect_due_at: a.row.due_at },
+                );
+            }
             done++;
         } catch (err) {
             if (!(err instanceof ApiError && err.status === 409)) console.warn('[reminders] advance failed:', err);

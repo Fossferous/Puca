@@ -102,6 +102,13 @@ pub struct ListFeatures {
     pub attachments: bool,
     /// `/trash`, `/restore` and `?trashed=true` exist.
     pub trash: bool,
+    /// The NOTE itself can carry a reminder (migration 068): `due_at` and
+    /// the sealed `schedule` are accepted on create and PATCH, returned by
+    /// the listing, and a note with a `due_at` appears in `/task-reminders`
+    /// under the negative id `-list_id`. A client reads this rather than
+    /// guessing from a listing, because a listing of notes with no reminder
+    /// looks the same on a 067 server and a 068 one.
+    pub note_reminders: bool,
     /// The purge window; 0 = the operator keeps trash forever.
     pub trash_retention_days: i64,
     pub max_body_len: usize,
@@ -119,6 +126,7 @@ pub fn features_for(retention_days: Option<i64>, now_ms: i64) -> ListFeatures {
         body: true,
         attachments: true,
         trash: true,
+        note_reminders: true,
         trash_retention_days: retention_days.unwrap_or(0),
         max_body_len: MAX_LIST_BODY_LEN,
         server_now_ms: now_ms,
@@ -333,6 +341,22 @@ mod db_tests {
             body: body.map(String::from),
             attachments: attachments.map(String::from),
             reads_up_to,
+            due_at: None,
+            schedule: None,
+            expect_due_at: None,
+        }
+    }
+
+    /// The note's OWN reminder (migration 068), three-state like the rest.
+    fn timing(due_at: Option<&str>, schedule: Option<&str>, expect_due_at: Option<&str>) -> TaskListRequest {
+        TaskListRequest {
+            title: None,
+            body: None,
+            attachments: None,
+            reads_up_to: None,
+            due_at: due_at.map(String::from),
+            schedule: schedule.map(String::from),
+            expect_due_at: expect_due_at.map(String::from),
         }
     }
 
@@ -492,6 +516,115 @@ mod db_tests {
         let _ = sqlx::query("DELETE FROM users WHERE id = $1 OR id = $2").bind(alice.sub as i32).bind(bob.sub as i32).execute(&pool).await;
     }
 
+    /// A NOTE with no items at all can remind (migration 068). Written the
+    /// way the trash test is: a positive control BEFORE the feature, then
+    /// the feature, then every way it must stop.
+    #[tokio::test]
+    async fn a_note_with_no_items_can_remind() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "nremind").await;
+        let mallory = user(&pool, "nrem_mal").await;
+        let id = create(&state, &alice, V2, None).await;
+        let feed = |c: Claims| {
+            let state = state.clone();
+            async move { json_of(th::list_task_reminders(State(state), Extension(c)).await.into_response()).await }
+        };
+        let ids = |v: &Value| v.as_array().unwrap().iter().map(|r| r["id"].as_i64().unwrap()).collect::<Vec<_>>();
+
+        // Positive control: a note with no items and no time is invisible to
+        // the feed, so anything found later came from the reminder.
+        let tasks = th::list_list_tasks(State(state.clone()), Path(id), Extension(alice.clone())).await.into_response();
+        assert_eq!(json_of(tasks).await.as_array().map(Vec::len), Some(0), "the note really has no items");
+        assert!(!ids(&feed(alice.clone()).await).contains(&-id), "before: nothing about this note in the feed");
+        assert!(listing(&state, &alice, false).await.iter().find(|r| r["id"] == id).unwrap()["due_at"].is_null());
+
+        // Give the NOTE a time. It appears under the negative id, with the
+        // list named and no channel - the namespacing a task id can never hit.
+        assert_eq!(patch(&state, &alice, id, timing(Some("2030-01-01T09:00:00Z"), Some(V2), None)).await, StatusCode::OK);
+        let v = feed(alice.clone()).await;
+        let row = v.as_array().unwrap().iter().find(|r| r["id"] == -id).expect("the note reminds").clone();
+        assert_eq!(row["list_id"].as_i64(), Some(id));
+        assert!(row["channel_id"].is_null(), "a personal note has no channel");
+        assert_eq!(row["is_list"], Value::Bool(true));
+        assert_eq!(row["created_by"].as_i64(), Some(alice.sub), "the owner, so the sealed schedule opens");
+        assert_eq!(row["schedule"], V2, "the sealed schedule rides the feed");
+        assert_eq!(row["due_at"].as_str(), Some("2030-01-01T09:00:00Z"));
+        assert!(!ids(&v).iter().any(|i| *i > 0), "no task row appeared: this is the note's own reminder");
+        // The listing carries it too, so a client that never polls the feed
+        // still draws the chip.
+        let listed = listing(&state, &alice, false).await;
+        let mine = listed.iter().find(|r| r["id"] == id).unwrap();
+        assert_eq!(mine["due_at"].as_str(), Some("2030-01-01T09:00:00Z"));
+        assert_eq!(mine["schedule"], V2);
+
+        // Refusals, none of which may change the stored row.
+        assert_eq!(patch(&state, &alice, id, timing(Some("tomorrow"), None, None)).await, StatusCode::BAD_REQUEST);
+        assert_eq!(patch(&state, &alice, id, timing(None, Some("every Tuesday"), None)).await, StatusCode::BAD_REQUEST, "a plaintext schedule is refused");
+        assert_eq!(patch(&state, &mallory, id, timing(Some("2031-01-01T09:00:00Z"), None, None)).await, StatusCode::NOT_FOUND);
+        assert!(!ids(&feed(mallory.clone()).await).contains(&-id), "and it is not in anyone else's feed");
+        let stored_due: (Option<chrono::DateTime<chrono::Utc>>,) = sqlx::query_as("SELECT due_at FROM task_lists WHERE id = $1").bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!(stored_due.0.map(|d| d.to_rfc3339()), Some("2030-01-01T09:00:00+00:00".to_string()), "no refused write moved it");
+
+        // Compare-and-swap: a device that thinks the time is something else
+        // loses, and writes nothing.
+        assert_eq!(patch(&state, &alice, id, timing(Some("2032-01-01T09:00:00Z"), None, Some("2029-01-01T09:00:00Z"))).await, StatusCode::CONFLICT);
+        assert!(ids(&feed(alice.clone()).await).contains(&-id));
+        assert_eq!(patch(&state, &alice, id, timing(Some("2032-01-01T09:00:00Z"), None, Some("2030-01-01T09:00:00Z"))).await, StatusCode::OK, "positive control: the right expectation wins");
+
+        // Trash: the note stops reminding, and comes back when restored -
+        // the same property the item arm has.
+        let _ = trash_list(State(state.clone()), Path(id), Extension(alice.clone())).await.into_response();
+        assert!(!ids(&feed(alice.clone()).await).contains(&-id), "a trashed note must not remind");
+        assert_eq!(patch(&state, &alice, id, timing(Some("2033-01-01T09:00:00Z"), None, None)).await, StatusCode::CONFLICT, "and its time cannot be changed while it is there");
+        let _ = restore_list(State(state.clone()), Path(id), Extension(alice.clone())).await.into_response();
+        assert!(ids(&feed(alice.clone()).await).contains(&-id));
+
+        // "" clears it: out of the feed, out of the listing, note intact.
+        assert_eq!(patch(&state, &alice, id, timing(Some(""), Some(""), None)).await, StatusCode::OK);
+        assert!(!ids(&feed(alice.clone()).await).contains(&-id));
+        let listed = listing(&state, &alice, false).await;
+        let mine = listed.iter().find(|r| r["id"] == id).expect("the note itself is still there");
+        assert!(mine["due_at"].is_null() && mine["schedule"].is_null());
+
+        // A time given at CREATE, so a composer needs one request.
+        let r = th::create_task_list(
+            State(state.clone()), Extension(alice.clone()),
+            Json(TaskListRequest { title: Some(V2B.into()), body: None, attachments: None, reads_up_to: None,
+                                   due_at: Some("2030-02-02T08:00:00Z".into()), schedule: None, expect_due_at: None }),
+        ).await.into_response();
+        assert_eq!(r.status(), StatusCode::OK);
+        let born = json_of(r).await;
+        assert_eq!(born["due_at"].as_str(), Some("2030-02-02T08:00:00Z"));
+        assert!(ids(&feed(alice.clone()).await).contains(&-born["id"].as_i64().unwrap()));
+
+        // Notes to self accepts one like any other note.
+        let s = th::get_self_checklist(State(state.clone()), Extension(alice.clone())).await.into_response();
+        let self_id = json_of(s).await["id"].as_i64().unwrap();
+        assert_eq!(patch(&state, &alice, self_id, timing(Some("2030-03-03T07:00:00Z"), None, None)).await, StatusCode::OK);
+        assert!(ids(&feed(alice.clone()).await).contains(&-self_id));
+        let s = th::get_self_checklist(State(state.clone()), Extension(alice.clone())).await.into_response();
+        assert_eq!(json_of(s).await["due_at"].as_str(), Some("2030-03-03T07:00:00Z"), "and get_self_checklist reports it");
+
+        // An empty PATCH is still a 400, and expect_due_at ALONE is not an
+        // update - a bare compare-and-swap must not 200 having done nothing.
+        assert_eq!(patch(&state, &alice, id, timing(None, None, Some(""))).await, StatusCode::BAD_REQUEST);
+
+        let _ = sqlx::query("DELETE FROM task_lists WHERE owner_id = $1 OR owner_id = $2").bind(alice.sub).bind(mallory.sub).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1 OR id = $2").bind(alice.sub as i32).bind(mallory.sub as i32).execute(&pool).await;
+    }
+
+    /// The features route is the only way a client can tell a 068 server
+    /// from a 067 one for an account whose notes have no reminders yet.
+    #[tokio::test]
+    async fn the_features_route_announces_note_reminders() {
+        assert!(features_for(Some(30), 0).note_reminders);
+        assert_eq!(
+            serde_json::to_value(features_for(Some(30), 0)).unwrap()["note_reminders"],
+            Value::Bool(true),
+            "under this exact key: api/listContent.ts parses it"
+        );
+    }
+
     #[tokio::test]
     async fn the_sweep_purges_only_lists_past_the_window() {
         let Some((state, pool)) = setup().await else { return };
@@ -527,6 +660,7 @@ mod db_tests {
             seven,
             serde_json::json!({
                 "body": true, "attachments": true, "trash": true,
+                "note_reminders": true,
                 "trash_retention_days": 7, "max_body_len": MAX_LIST_BODY_LEN,
                 "server_now_ms": 1_700_000_000_123_i64,
             })

@@ -1,7 +1,15 @@
 /**
- * Púca Notes' Reminders view: every open item with a due time, across every
- * note — Overdue / Today / Upcoming. Ticking one completes it (the same
- * cascade as everywhere else); clicking a row opens its note.
+ * Púca Notes' Reminders view: everything due, across every note — Overdue /
+ * Today / Upcoming. Two kinds of row, and the difference matters —
+ *
+ *  - an ITEM inside a note: ticking it completes it (the same cascade as
+ *    everywhere else), and it can be snoozed;
+ *  - the NOTE'S OWN reminder (migration 068): there is nothing to tick, so
+ *    it has no checkbox and no Snooze (068 has no snooze column). Its action
+ *    is "Clear reminder", which is the only thing a note reminder can do
+ *    besides being moved.
+ *
+ * Clicking either opens the note.
  *
  * A THIN HOST since Púca's Tasks view grew the same view: the markup, the
  * rights checks and the "Reminds whoever set it" line are
@@ -14,7 +22,7 @@ import { useMemo, type ReactNode } from 'react';
 import { currentUserIdFromToken } from '../../api/auth';
 import { canCompleteTasks, canEditTask } from '../../api/tasks';
 import { type DueRow } from '../../api/reminderGroups';
-import { type CalendarSource } from '../../api/taskCalendar';
+import { type CalendarSource, noteAsCalendarItem } from '../../api/taskCalendar';
 import { PlaceReminders } from '../native/PlaceReminders';
 import { type PlaceItem } from '../native/useNotesPlaces';
 import { BellIcon } from '../../components/Icons';
@@ -42,10 +50,28 @@ interface RemindersViewProps {
     flashTaskId?: number | null;
 }
 
-/** One note's item as the shared list's source. The permission answers are
- *  the note card's, resolved here so the list never sees a NoteCard. */
+/** One reminder row as the shared list's source. An ITEM carries the note
+ *  card's permission answers; the NOTE'S OWN reminder (068) is projected
+ *  through api/taskCalendar.noteAsCalendarItem — the same negative-id
+ *  projection the calendar uses — and marked `isNote`, which is what tells
+ *  the shared row to drop the checkbox, the snooze and the note column and
+ *  to offer Clear instead. Resolved here so the list never sees a NoteCard. */
 function sourceOf(item: DueItem, me: number | undefined): CalendarSource {
     const note = item.note;
+    if (item.kind === 'note') {
+        return {
+            task: noteAsCalendarItem({ id: note.ref.id, title: note.title, dueAt: note.dueAt, schedule: note.schedule }),
+            noteKey: note.key,
+            noteTitle: note.title,
+            serverName: note.serverName,
+            // A note's own reminder exists on personal notes only (a channel
+            // checklist has no list row to hang a time on), so it is always
+            // this user's to move — and there is nothing to complete.
+            canEdit: true,
+            canComplete: false,
+            isNote: true,
+        };
+    }
     return {
         task: item.task,
         noteKey: note.key,
@@ -66,7 +92,10 @@ export function RemindersView({ groups, actions, now, onOpen, notificationsState
         return m;
     }, [groups]);
     const rows = useMemo(() => {
-        const map = (list: DueItem[]): DueRow[] => list.map(i => ({ task: i.task, source: sourceOf(i, me), at: i.at, slot: i.slot }));
+        const map = (list: DueItem[]): DueRow[] => list.map(i => {
+            const source = sourceOf(i, me);
+            return { task: source.task, source, at: i.at, slot: i.slot };
+        });
         return { overdue: map(groups.overdue), today: map(groups.today), upcoming: map(groups.upcoming) };
     }, [groups, me]);
     const noteOf = (row: DueRow): NoteCard | undefined => cards.get(row.source.noteKey);
@@ -81,6 +110,7 @@ export function RemindersView({ groups, actions, now, onOpen, notificationsState
             onOpen={row => { const c = noteOf(row); if (c) onOpen(c); }}
             onToggle={row => { const c = noteOf(row); if (c) void actions.toggleTask(c.ref, row.source.task, true); }}
             onSnooze={canSnooze ? ((row, until) => { const c = noteOf(row); if (c) void actions.snoozeTask(c.ref, row.source.task, until); }) : undefined}
+            onClearNote={row => { const c = noteOf(row); if (c) void actions.setNoteTiming(c.ref, { dueAt: null, schedule: null }, 'clear the reminder on'); }}
             header={(
                 <>
                     {nativeBanner}
@@ -96,7 +126,7 @@ export function RemindersView({ groups, actions, now, onOpen, notificationsState
                 </>
             )}
             middle={<PlaceReminders items={placeItems} actions={actions} onOpen={onOpen} />}
-            empty={<RemindersEmpty>No reminders. Give any item a due time from its clock button inside a note.</RemindersEmpty>}
+            empty={<RemindersEmpty>No reminders. Give a note its own reminder from the clock in its footer, or any item a due time from its clock button.</RemindersEmpty>}
         />
     );
 }

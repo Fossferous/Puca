@@ -7,6 +7,9 @@
  *    behind it, so the note ends up where the user left it;
  *  - a calendar timing op and a timed create reach patchTaskTiming /
  *    createListTask with the temporary ids rewritten;
+ *  - a reminder set on the NOTE itself while offline (migration 068) replays
+ *    in order, reaches the list by its REAL id, sends no compare-and-swap,
+ *    and marks the replay as one that touched a reminder;
  *  - an order saved offline keeps a trashed note's slot when it replays.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -140,6 +143,45 @@ describe('the calendar\'s ops at replay', () => {
     it('a shared checklist item\'s timing op is sealed for THAT channel (scope from the note, not guessed)', async () => {
         await execOp(ops.timing({ kind: 'channel', id: 12 }, task(3, { channel_id: 12, created_by: 99 }), { snooze: null }, 'unsnooze'), {}, true);
         expect(patchTaskTiming).toHaveBeenCalledWith({ id: 3, channel_id: 12, created_by: 99 }, { snooze: null });
+    });
+});
+
+describe('the note\'s own reminder through the outbox (migration 068)', () => {
+    it('a time set offline replays in order, by the REAL id, without the compare-and-swap, and pokes the reminder loop', async () => {
+        const s = server();
+        s.setReachable(false);
+        const temp = -2001;
+        await s.ob.send(ops.createList(temp, 'Call the vet'));
+        await s.ob.send(ops.deleteList(5, 'Groceries'));
+        vi.mocked(createTaskList).mockResolvedValue({ id: 40, title: 'Call the vet', created_at: '', total_tasks: 0, completed_tasks: 0 });
+        s.setReachable(true);
+        await s.ob.replay();
+        // POSITIVE CONTROL, taken before the reminder exists: creating a note
+        // and trashing another is a replay that touched NO reminder, so the
+        // assertion further down cannot pass by the flag always being set.
+        expect(s.summaries.at(-1)!.touchedDue).toBe(false);
+        expect(apiClient.patch).not.toHaveBeenCalled();
+        expect(s.trashed).toEqual([5]);
+
+        // Now the same note is given a reminder while the connection is gone.
+        s.setReachable(false);
+        await s.ob.send(ops.setListTiming(temp, 'Call the vet', { dueAt: '2026-09-22T09:00:00Z' }, 'remind about'));
+        expect(s.ob.pending()).toBe(1);
+        s.setReachable(true);
+        await s.ob.replay();
+        // execOp's 'listTiming' arm ran: ONE PATCH, at the id the create
+        // resolved the temporary one to, never at -2001.
+        const calls = vi.mocked(apiClient.patch).mock.calls;
+        expect(calls.map(c => c[0])).toEqual(['/task-lists/40']);
+        const body = calls[0][1] as Record<string, unknown>;
+        expect(body.due_at).toBe('2026-09-22T09:00:00Z');
+        // A queued edit is the user's own deliberate change, not an advance:
+        // a replay never sends expect_due_at (notesOutbox.ts, execOp).
+        expect(Object.keys(body)).not.toContain('expect_due_at');
+        // And the replay reports that a reminder moved, which is what makes
+        // the reminder loop re-read instead of waiting out its 5-minute poll.
+        expect(s.summaries.at(-1)!.touchedDue).toBe(true);
+        expect(s.ob.pending()).toBe(0);
     });
 });
 

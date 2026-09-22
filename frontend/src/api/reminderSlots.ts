@@ -22,6 +22,12 @@ import {
 } from './taskSchedule';
 import { parseServerTimestamp } from '../utils/serverTime';
 
+/** Everything reminderSlotOf needs. A task has all four; a NOTE's own
+ *  reminder (Púca Notes, migration 068) has a due_at and a schedule, is never
+ *  "completed", and has no snooze column yet — so it passes the same rule
+ *  through this shape rather than a second copy of it. */
+export type TimingLike = Pick<Task, 'is_completed' | 'due_at' | 'schedule' | 'snooze'>;
+
 export interface ReminderSlot {
     /** Epoch ms the row sorts and reads by. */
     at: number;
@@ -33,7 +39,7 @@ export interface ReminderSlot {
 
 const RECENT_EVENT_MS = 60 * 60_000;
 
-export function reminderSlotOf(task: Task, now: number): ReminderSlot | null {
+export function reminderSlotOf(task: TimingLike, now: number): ReminderSlot | null {
     if (task.is_completed) return null;
     const parsed = parseSchedule(task.schedule);
     const snooze = activeSnooze(task.due_at, task.snooze);

@@ -165,15 +165,26 @@ by a real client** (see §3 and §4 for what that proviso is doing).
 Item text, attachments, and (since migration 066) each item's **schedule**
 (event or to-do, all-day, start/end, time zone, repeat rule, skipped dates,
 place, alerts) and **snooze record** are sealed on the device. The server
-stores them and cannot read them. What it CAN see, per task:
+stores them and cannot read them. Since migration 068 a **note itself** may
+carry a reminder, with its own `due_at` and its own sealed `schedule`, and
+everything below applies to it word for word. What the server CAN see, per
+task and per note:
 
 - **`due_at`, in plaintext.** For a plain dated item that is its due time, as it
   always was. For an item with a schedule it is the **next reminder instant**,
-  so reminders reach your other devices. A calendar full of events is therefore
+  so reminders reach your other devices. **A note may carry one too** (068),
+  so a set of notes with reminders is likewise a server-visible list of
+  timestamps, and the server can see that *this* note reminds you at *that*
+  moment — never what the note says. A calendar full of events is therefore
   a server-visible list of timestamps — and a round local time such as 09:00
-  also reveals your UTC offset. The per-item switch **Keep the time private from
-  the server** (off by default) keeps `due_at` NULL. The item then shows in the
-  calendar but cannot notify from the server's reminder feed.
+  also reveals your UTC offset. The switch **Keep the time private from
+  the server** (off by default) keeps `due_at` NULL. It works per item and
+  per note alike — a note has its own sealed schedule for the time to live
+  in — and what it hides then shows in the calendar but cannot notify from
+  the server's reminder feed.
+- **Which reminders are a note's own.** They ride the same feed under a
+  negative id (`-list_id`), which tells the server nothing it did not write
+  itself: it already holds the row the time is on.
 - **That a schedule exists, and its size bucket.** The client pads the sealed
   plaintext to 256, 1024, 4096 or 8192 bytes, so the server learns roughly how
   large it is (for example, many skipped dates or a long place name), not what is in it.

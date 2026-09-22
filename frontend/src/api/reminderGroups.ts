@@ -12,12 +12,20 @@ import { type ReminderSlot, reminderSlotOf } from './reminderSlots';
 import { maySnooze } from './taskSchedule';
 import { type CalendarSource } from './taskCalendar';
 
-/** The least a row needs to be sorted and bucketed. */
+/** The least a row needs to be sorted and bucketed.
+ *
+ *  `task` is OPTIONAL because Púca Notes has one row that is not an item: a
+ *  NOTE'S OWN reminder (migration 068) has a due time and nothing to tick.
+ *  Such a row hands in `key` instead, so two of them still sort stably, and
+ *  it sorts BEFORE any item it shares an instant with — the order Notes had
+ *  before the shared bucketer existed. Púca's own rows always carry a task. */
 export interface DueLike {
-    task: Task;
+    task?: Task;
     /** Epoch ms the row sorts and reads by (slot.at). */
     at: number;
     slot?: ReminderSlot;
+    /** Stable tie-break for a row with no item id. */
+    key?: string;
 }
 
 export interface Grouped<T> {
@@ -30,6 +38,7 @@ export interface Grouped<T> {
  *  only because a host may hand in a row it worked out itself;
  *  groupReminderSources always fills it. */
 export interface DueRow extends DueLike {
+    task: Task;
     source: CalendarSource;
 }
 
@@ -48,14 +57,24 @@ function sameLocalDay(a: number, b: number): boolean {
  * existed, kept so a hand-built group reads the same.
  */
 export function bucketDue<T extends DueLike>(items: T[], now: number): Grouped<T> {
-    const sorted = [...items].sort((a, b) => a.at - b.at || a.task.id - b.task.id);
+    const sorted = [...items].sort((a, b) => a.at - b.at || tieBreak(a, b));
     const groups: Grouped<T> = { overdue: [], today: [], upcoming: [] };
     for (const it of sorted) {
-        if (it.slot ? it.slot.overdue : isTaskOverdue(it.task, now)) groups.overdue.push(it);
+        // No slot AND no task is a note's own reminder with nothing to judge
+        // by — never "overdue", because there is no to-do nobody ticked.
+        if (it.slot ? it.slot.overdue : it.task !== undefined && isTaskOverdue(it.task, now)) groups.overdue.push(it);
         else if (sameLocalDay(it.at, now)) groups.today.push(it);
         else groups.upcoming.push(it);
     }
     return groups;
+}
+
+/** Two rows at the same instant: by item id where both are items; a taskless
+ *  row (a note's own reminder) leads; otherwise by the key it handed in. */
+function tieBreak(a: DueLike, b: DueLike): number {
+    if (a.task && b.task) return a.task.id - b.task.id;
+    if (!a.task && !b.task) return (a.key ?? '').localeCompare(b.key ?? '');
+    return a.task ? 1 : -1;
 }
 
 /**
@@ -94,5 +113,8 @@ export function remindsSomeoneElse(source: CalendarSource, me: number | undefine
  *  (taskSchedule.snoozeLocked). A personal list (canComplete omitted) is
  *  always yours. */
 export function mayChangeSnooze(source: CalendarSource): boolean {
+    // A NOTE'S OWN reminder (migration 068) has no snooze column behind it,
+    // so it gets no button rather than one that would be refused.
+    if (source.isNote) return false;
     return maySnooze(source.task, source.canComplete !== false, source.canEdit);
 }
