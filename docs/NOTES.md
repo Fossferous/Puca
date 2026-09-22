@@ -20,7 +20,8 @@ Púca's reminders. Anything you do in one is what you see in the other.
 ## What it does
 
 - **Grid of notes** — pinned first, masonry on desktop, one column on a phone,
-  grid/list toggle. Each card shows the open items with live checkboxes,
+  grid/list toggle. One grid per **page**: *All notes* and then a page per
+  label, swiped or tabbed between (see *Pages* below). Each card shows the open items with live checkboxes,
   progress, the next due time, image thumbnails, labels and (for a shared note)
   the server it belongs to.
 - **Take a note…** — a title and items, Enter for the next item; on a phone the
@@ -190,6 +191,43 @@ Púca's reminders. Anything you do in one is what you see in the other.
   `/notes/` opens it with no network (see *Offline* below).
 - **Live** — an edit on one device shows on the others within a second or so,
   with no refresh (see *Live updates* below).
+
+## Pages: All notes, then one per label
+
+The grid is a row of **pages** you move sideways between — Google Tasks'
+lists, with Google Keep's scrolling inside each one. The first page is **All
+notes**; after it comes one page per **label**, in the same order the rail
+lists them. A **tab strip** sits above the grid, below the status banners:
+tap or click a tab, or use Left/Right once a tab has focus.
+
+- **Swipe** on a phone, **flick the trackpad** or **drag the scrollbar** on a
+  desktop. The gesture is the browser's own — the pager is a CSS scroll-snap
+  container, not a JavaScript animation — so the fling, the rubber band at the
+  ends and an interrupted swipe all behave the way everything else on the
+  device does, and a screen with animations turned off simply jumps.
+- **Down inside a page** is what it always was: pinned notes, then the rest.
+  Each page keeps its own place in the list, so coming back to one does not
+  throw away where you were reading.
+- **The addresses do not change.** *All notes* is `/`, a label page is
+  `/label/<name>` — the same routes the rail, the label chips and every
+  existing link already use, so `…/notes/#/label/Errands` still lands on that
+  label, with no animation, and a swipe to the next list updates the address.
+  A swipe REPLACES the address rather than pushing it, so flicking through
+  four lists leaves the back button one step to take, not four.
+- **The rail is unchanged**: Notes and every label still navigate, and now
+  move the pager with them.
+- **Only where there is something to swipe.** With no labels there is one page
+  and neither the strip nor the pager appears. Reminders, the Calendar, the
+  Archive, the Trash and any view with something in the search box are not
+  pages: they look and behave exactly as they always have. So does a
+  `/label/<name>` address whose label no longer exists — it shows the same
+  empty "No notes labelled …" it always did rather than silently sitting on
+  All under someone else's name.
+
+Only the page you are on holds a real grid; the one you are swiping towards is
+built as the pager starts moving and let go of once it stops. That keeps a
+note that carries a label from being decrypted and drawn twice — once on its
+label page and once on All — for every note in the account.
 
 ## How it maps onto Púca
 

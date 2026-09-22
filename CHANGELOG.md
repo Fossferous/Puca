@@ -4,6 +4,18 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Added
+- **Swipe between your lists.** The notes grid is now a row of pages: *All
+  notes* first, then one page per label, with a tab strip above it. Swipe
+  sideways on a phone, flick the trackpad or click a tab on a desktop, and
+  scroll down inside a page as before. The rail still works, the addresses are
+  the same ones (`/` and `/label/<name>`), so a link to a label still lands on
+  it, and the back button walks the lists you came through. With no labels
+  there is nothing to swipe between, so neither the strip nor the pager
+  appears.
+
 ## 0.9.817 — 2026-09-22
 
 Púca Notes grows up: share into it from any app, voice notes, a reminder on a note itself, text and pictures while offline, undo in the editor, a label manager, links, drag ordering, search that shows its matches, and its tools in Púca too; remote control no longer freezes on a screen that is not changing; Keep RNNoise keeps RNNoise; clip sound stays in step with the picture.
