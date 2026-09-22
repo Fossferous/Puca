@@ -1228,6 +1228,13 @@ records the same deletion for chat.
   preview at 390px.
 - Púca's Tasks view shows the same links, because it renders the same text
   through the same components.
+- A search inside the open note marks its hits in the link renderer's PLAIN
+  stretches, never inside an anchor. The item row has to compose the two by
+  hand (`NoteEditor`'s `renderDescription`, exactly as a card's preview does),
+  because `TaskTree` prefers a caller's renderer over its own link renderer:
+  a highlighter handed in on its own silently takes every link in the open
+  note away while the same item keeps them in Púca's Tasks view, which hands
+  in nothing.
 
 ## Sending a note into Púca, and keeping a message as a note
 

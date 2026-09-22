@@ -24,6 +24,7 @@ import { assignTaskPlace } from '../../api/taskPlaces';
 import { deleteFiles } from '../../api/listContent';
 import { fileIdsOf } from '../../api/noteMedia';
 import { TaskTree } from '../../components/TaskTree';
+import { NoteLinkText } from '../../components/NoteLinkText';
 import {
     ArchiveIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, LockIcon, MembersIcon, MoreVerticalIcon, PaletteIcon, PinIcon, PlusIcon, PopOutIcon,
     RefreshIcon, SearchIcon, SendIcon, TagIcon, WarningIcon,
@@ -128,8 +129,20 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
     const terms = useMemo(() => (query ? searchTerms(query) : []), [query]);
     const matchCount = useMarkCount(bodyRef, terms.length > 0);
     const [matchAt, setMatchAt] = useState(0);
+    // An item's row has to render BOTH things: the web addresses in it as
+    // links, and this search's marks. TaskTree.describe PREFERS a caller's
+    // renderDescription and never reaches its own NoteLinkText, so a renderer
+    // that only highlighted took the links away — in the open note only,
+    // because Púca's Tasks view passes no renderer and kept them. Composed
+    // exactly as the card does (NoteCardContent.NoteBodyPreview): the marks
+    // go in the link renderer's PLAIN stretches, never inside an anchor.
     const renderDescription = useCallback(
-        (text: string) => <Highlight text={text} ranges={terms.length > 0 && !isUndecryptable(text) ? findRanges(text, terms) : undefined} />,
+        (text: string) => (
+            <NoteLinkText
+                text={text}
+                renderText={value => <Highlight text={value} ranges={terms.length > 0 && !isUndecryptable(value) ? findRanges(value, terms) : undefined} />}
+            />
+        ),
         [terms],
     );
     /** Scroll the nth mark into view and flag it, imperatively — the marks
