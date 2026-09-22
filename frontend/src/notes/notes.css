@@ -196,6 +196,15 @@
     text-transform: uppercase;
     color: var(--text-faint);
 }
+.notes-rail-section.with-action {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding-right: 8px;
+}
+.notes-rail-section.with-action .notes-iconbtn { color: var(--text-faint); }
+.notes-rail-section.with-action .notes-iconbtn:hover { color: var(--text-normal); }
 .notes-rail-spacer { flex: 1; }
 .notes-rail-foot {
     padding: 8px 14px;
@@ -491,6 +500,26 @@
 .notes-card-tools .notes-iconbtn { width: 34px; height: 34px; font-size: 16px; }
 .notes-card-tools .spacer { flex: 1; }
 
+/* Drag to reorder (NoteGrid). The grip is the ONLY handle: a whole-card touch
+   drag would fight the long press that starts a bulk selection, and
+   touch-action: none is what keeps Android's WebView from claiming the
+   gesture as a scroll. */
+.notes-card-grip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    flex-shrink: 0;
+    color: var(--text-muted);
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    opacity: 0;
+}
+.notes-card:hover .notes-card-grip,
+.notes-card:focus-within .notes-card-grip { opacity: 1; }
+.notes-card-grip svg { width: 14px; height: 14px; }
 .notes-card.dragging { opacity: 0.6; }
 .notes-grid-drop-indicator {
     position: absolute;
@@ -500,6 +529,187 @@
     z-index: 6;
 }
 .notes-grid.list { position: relative; }
+
+/* ---------- Search highlighting ---------------------------------------------
+   A bare <mark> takes the user agent's yellow-on-black, which ignores all
+   eight themes and sits on eleven card tints. Tokened explicitly, like every
+   other colour here; under [data-contrast="high"] the tint becomes an edge
+   stripe on the card, so the mark needs its own readable pairing there. */
+.notes-hl {
+    background: var(--brand-primary);
+    color: #fff;
+    border-radius: 3px;
+    padding: 0 1px;
+    /* The text keeps the card's own weight: a heavier mark reflows the line
+       as you type, and the colour is signal enough. */
+    font-weight: inherit;
+}
+[data-contrast="high"] .notes-hl {
+    background: var(--text-normal);
+    color: var(--bg-primary);
+}
+/* The match the editor's prev/next is sitting on. */
+.notes-hl.current { outline: 2px solid var(--text-normal); outline-offset: 1px; }
+
+/* The open note's match bar: "3 of 9" with prev/next. */
+.notes-editor-matches {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 16px 0;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.notes-editor-matches .svrn-icon { color: var(--text-faint); }
+
+/* "Also matched" — what the card structurally cannot show (a ticked item, an
+   item past the eighth, a place on a date). Without it those cards look as
+   though they matched nothing at all. */
+.notes-card-found {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px dashed var(--border-faint);
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.notes-card-found-row { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.notes-card-found-row .svrn-icon { flex-shrink: 0; color: var(--text-faint); font-size: 12px; }
+.notes-card-found-what { flex-shrink: 0; color: var(--text-faint); font-style: italic; }
+.notes-card-found-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- Popovers (colour / labels / account) ---------------------------- */
+.notes-popover-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+}
+.notes-popover {
+    position: fixed;
+    z-index: 1001;
+    background: var(--bg-floating);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    padding: 10px;
+    min-width: 200px;
+    max-width: calc(100vw - 16px);
+    max-height: calc(100dvh - 16px);
+    overflow: auto;
+    color: var(--text-normal);
+}
+.notes-popover h4 {
+    margin: 0 0 8px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+}
+
+.notes-swatches {
+    display: grid;
+    grid-template-columns: repeat(6, 32px);
+    gap: 6px;
+}
+.notes-swatch {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: 2px solid var(--border-faint);
+    background: linear-gradient(var(--tint, transparent), var(--tint, transparent)), var(--bg-secondary);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--header-primary);
+    font-size: 14px;
+    padding: 0;
+}
+.notes-swatch:hover, .notes-swatch:focus-visible { border-color: var(--text-normal); }
+.notes-swatch.selected { border-color: var(--brand-primary); }
+.notes-swatch[data-color="coral"] { --tint: var(--notes-tint-coral); }
+.notes-swatch[data-color="peach"] { --tint: var(--notes-tint-peach); }
+.notes-swatch[data-color="sand"] { --tint: var(--notes-tint-sand); }
+.notes-swatch[data-color="mint"] { --tint: var(--notes-tint-mint); }
+.notes-swatch[data-color="sage"] { --tint: var(--notes-tint-sage); }
+.notes-swatch[data-color="fog"] { --tint: var(--notes-tint-fog); }
+.notes-swatch[data-color="storm"] { --tint: var(--notes-tint-storm); }
+.notes-swatch[data-color="dusk"] { --tint: var(--notes-tint-dusk); }
+.notes-swatch[data-color="blossom"] { --tint: var(--notes-tint-blossom); }
+.notes-swatch[data-color="clay"] { --tint: var(--notes-tint-clay); }
+.notes-swatch[data-color="chalk"] { --tint: var(--notes-tint-chalk); }
+
+.notes-labels-list { display: flex; flex-direction: column; gap: 2px; max-height: 240px; overflow-y: auto; }
+.notes-labels-list label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 4px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+}
+.notes-labels-list label:hover { background: var(--bg-modifier-hover); }
+.notes-labels-list input[type="checkbox"] { accent-color: var(--brand-primary); }
+.notes-labels-new {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-faint);
+}
+.notes-labels-new input {
+    flex: 1;
+    min-width: 0;
+    padding: 7px 10px;
+    border: none;
+    border-radius: 6px;
+    background: var(--bg-quaternary);
+    color: var(--text-normal);
+    font-size: 13px;
+}
+.notes-labels-hint { font-size: 11px; color: var(--text-faint); margin-top: 6px; line-height: 1.4; }
+
+/* ---------- Label manager (Edit labels) ------------------------------------
+   Rows are 44px even on a mouse: they carry two destructive-adjacent buttons
+   and the list can be long (docs/DESIGN_PHILOSOPHY.md §5). The body scrolls so
+   forty labels still fit a 390x844 screen. */
+.notes-labelmgr-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: min(52dvh, 420px);
+    overflow-y: auto;
+}
+.notes-labelmgr-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 44px;
+    padding: 2px 4px;
+    border-radius: 6px;
+    font-size: 13px;
+}
+.notes-labelmgr-row:hover { background: var(--bg-modifier-hover); }
+.notes-labelmgr-row > .svrn-icon { color: var(--text-muted); flex-shrink: 0; }
+.notes-labelmgr-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.notes-labelmgr-count { font-size: 12px; color: var(--text-faint); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.notes-labelmgr-row .notes-iconbtn.danger { color: var(--text-danger); }
+.notes-labelmgr-row.editing input {
+    flex: 1;
+    min-width: 0;
+    padding: 7px 10px;
+    border: none;
+    border-radius: 6px;
+    background: var(--bg-quaternary);
+    color: var(--text-normal);
+    font-size: 13px;
+}
+.notes-labelmgr-row.confirm { flex-wrap: wrap; background: var(--bg-modifier-selected); padding: 8px 10px; }
+.notes-labelmgr-ask { flex: 1 1 100%; line-height: 1.4; color: var(--text-normal); }
 
 .notes-menu { display: flex; flex-direction: column; min-width: 220px; }
 .notes-menu-head {
@@ -808,9 +1018,16 @@
     .notes-rail-item { padding: 13px 14px; font-size: 15px; }
 
     .notes-main { padding: 12px 12px 120px; }
-    .notes-grid { column-width: auto; column-count: 1; }
+    .notes-grid { column-width: auto; column-count: 1; position: relative; }
+    /* Touch: the grip is always visible and a full 44px target. */
+    .notes-card-grip { opacity: 0.6; width: 44px; min-height: 44px; }
+    .notes-card-grip svg { width: 18px; height: 18px; }
     .notes-quickadd { display: none; }   /* the FAB is the phone's composer */
     .notes-fab { display: inline-flex; }
+
+    /* The label manager: 16px inputs (no iOS zoom), rows already 44px. */
+    .notes-labelmgr-row.editing input { font-size: 16px; }
+    .notes-labelmgr-row { min-height: 48px; }
 
     .notes-card { padding: 14px 14px 8px; }
     .notes-card-pin { opacity: 1; }

@@ -10,6 +10,7 @@ import {
     buildNoteCards, filterNotes, splitPinned, searchNotes, noteMatches, previewRows,
     nearestDue, groupReminders, reminderBadgeCount, deriveQuickTitle, cleanQuickItems,
     allLabels, noteKey, parseNoteKey, normalizeLabel, normalizeForSearch, isNoteColor,
+    moveNoteInOrder, applyVisibleOrder,
     countProgress, noteRoute, MAX_LABEL_LENGTH, QUICK_TITLE_FROM_ITEM_LENGTH,
     type NoteSource, type NoteCard, type NotesNoteState,
 } from '../notes/model/notesModel';
@@ -273,6 +274,57 @@ describe('quick add', () => {
     it('falls back to "Untitled note" and cleans items', () => {
         expect(deriveQuickTitle('', [])).toBe('Untitled note');
         expect(cleanQuickItems(['  a  b ', '', '   ', 'c'])).toEqual(['a b', 'c']);
+    });
+});
+
+describe('note order', () => {
+    // The FULL order the prefs hold, with two notes the current view hides
+    // (archived, filtered out, or in the trash) sitting between visible ones.
+    const full = ['list:1', 'list:H1', 'list:2', 'list:3', 'list:H2', 'list:4', 'list:5'];
+    const vis = ['list:1', 'list:2', 'list:3', 'list:4', 'list:5'];
+    /** What the visible notes ended up as, in order. */
+    const visibleOf = (order: string[] | null) => (order === null ? null : order.filter(k => vis.includes(k)));
+
+    it('moves a note to the top, up, down and to the BOTTOM', () => {
+        expect(visibleOf(moveNoteInOrder(full, vis, 'list:4', 'top'))).toEqual(['list:4', 'list:1', 'list:2', 'list:3', 'list:5']);
+        expect(visibleOf(moveNoteInOrder(full, vis, 'list:4', 'up'))).toEqual(['list:1', 'list:2', 'list:4', 'list:3', 'list:5']);
+        expect(visibleOf(moveNoteInOrder(full, vis, 'list:2', 'down'))).toEqual(['list:1', 'list:3', 'list:2', 'list:4', 'list:5']);
+        // The branch the menu could not reach until 'Move to bottom' existed.
+        expect(visibleOf(moveNoteInOrder(full, vis, 'list:2', 'bottom'))).toEqual(['list:1', 'list:3', 'list:4', 'list:5', 'list:2']);
+    });
+
+    it('a hidden note keeps its EXACT index, whichever move is made', () => {
+        for (const target of ['top', 'up', 'down', 'bottom'] as const) {
+            const next = moveNoteInOrder(full, vis, 'list:4', target);
+            expect(next).not.toBeNull();
+            expect(next!.indexOf('list:H1')).toBe(1);
+            expect(next!.indexOf('list:H2')).toBe(4);
+            expect(next!.length).toBe(full.length);
+        }
+    });
+
+    it('a move that changes nothing returns null (no needless full-replace PUT)', () => {
+        expect(moveNoteInOrder(full, vis, 'list:1', 'top')).toBeNull();
+        expect(moveNoteInOrder(full, vis, 'list:1', 'up')).toBeNull();
+        expect(moveNoteInOrder(full, vis, 'list:5', 'down')).toBeNull();
+        expect(moveNoteInOrder(full, vis, 'list:5', 'bottom')).toBeNull();
+        expect(moveNoteInOrder(full, vis, 'list:nope', 'top')).toBeNull();
+    });
+
+    it('applyVisibleOrder splices a dragged order back, hidden notes in place', () => {
+        const next = applyVisibleOrder(full, vis, ['list:5', 'list:1', 'list:2', 'list:3', 'list:4']);
+        expect(next).toEqual(['list:5', 'list:H1', 'list:1', 'list:2', 'list:H2', 'list:3', 'list:4']);
+    });
+
+    it('applyVisibleOrder refuses anything that is not a rearrangement', () => {
+        expect(applyVisibleOrder(full, vis, vis)).toBeNull();                                  // identity
+        expect(applyVisibleOrder(full, vis, ['list:1', 'list:2', 'list:3', 'list:4'])).toBeNull();   // one dropped
+        expect(applyVisibleOrder(full, vis, ['list:1', 'list:1', 'list:2', 'list:3', 'list:4'])).toBeNull();   // duplicated
+        // A key the view has but the prefs do not (a note created a moment
+        // ago elsewhere): saving would drop a real note from Puca's tab bar.
+        expect(applyVisibleOrder(full, vis, ['list:9', 'list:2', 'list:3', 'list:4', 'list:5'])).toBeNull();
+        // ...and a hidden key smuggled into the visible set is not visible.
+        expect(applyVisibleOrder(full, vis, ['list:H1', 'list:2', 'list:3', 'list:4', 'list:5'])).toBeNull();
     });
 });
 

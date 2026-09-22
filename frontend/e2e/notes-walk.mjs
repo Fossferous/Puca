@@ -822,12 +822,150 @@ await page.locator('.context-menu-item', { hasText: 'Move to top' }).click();
 await sleep(400);
 ck('move: "Move to top" reorders the others (and never touches the pinned one)', (await othersTitles()).join(',') === 'Reading,Poem,Holiday photo,Sketch,Packing' && await page.locator('section[aria-label="Pinned notes"] .notes-card').count() === 1);
 await shot('three-cards');
+// Move to bottom — the model has had the branch since ordering landed; until
+// now the menu stopped at 'Move down', so sending a note 200 places took 199
+// menu invocations.
+await page.locator('.notes-card', { hasText: 'Poem' }).hover();
+await page.locator('.notes-card', { hasText: 'Poem' }).locator('button[aria-label="More actions"]').click();
+await page.waitForSelector('.context-menu', { timeout: 5000 });
+await page.locator('.context-menu-item', { hasText: 'Move to bottom' }).click();
+await sleep(400);
+ck('move: "Move to bottom" sends the note to the end of the others',
+    (await othersTitles()).join(',') === 'Reading,Holiday photo,Sketch,Packing,Poem', (await othersTitles()).join(','));
+ck('move: the pinned section is untouched by a bottom move', await page.locator('section[aria-label="Pinned notes"] .notes-card').count() === 1);
+
+// Drag to reorder, in LIST view (one column — masonry has no one-axis order).
+ck('grid view (fine pointer): no drag grips, masonry is two-dimensional', await page.locator('.notes-card-grip').count() === 0);
+await page.click('button[aria-label="Switch to list view"]');
+await page.waitForSelector('.notes-grid.list', { timeout: 5000 });
+// The PINNED section holds one card, which cannot be reordered among
+// anything — so the grips belong to the Others section, one per card.
+const otherCard = i => page.locator('section[aria-label="Other notes"] .notes-card').nth(i);
+const othersSel = 'section[aria-label="Other notes"] .notes-grid.list';
+ck('list view: every card in a reorderable section shows a drag grip',
+    await page.locator(`${othersSel} .notes-card-grip`).count() === await page.locator(`${othersSel} .notes-card`).count()
+    && await page.locator(`${othersSel} .notes-card-grip`).count() > 1);
+ck('list view: the one-card pinned section offers no grip (nothing to reorder it among)',
+    await page.locator('section[aria-label="Pinned notes"] .notes-card-grip').count() === 0);
+// A real Pointer Events drag: press the grip, move past the NEXT card's
+// midpoint in steps, release. Playwright's drag helpers do not drive this.
+// One slot only, and scrolled into view first: a long drag reaches the
+// viewport edge, where the hook's auto-scroll moves the content under the
+// pointer and the landing slot stops being predictable from the boxes.
+// cardAt(i) is the nth card of ONE section: the drag never leaves it.
+const dragOneSlotDown = async cardAt => {
+    await cardAt(0).scrollIntoViewIfNeeded();
+    await sleep(200);
+    const gripBox = await cardAt(0).locator('.notes-card-grip').boundingBox();
+    const nextBox = await cardAt(1).boundingBox();
+    if (!gripBox || !nextBox) return false;
+    const gx = gripBox.x + gripBox.width / 2;
+    const gy = gripBox.y + gripBox.height / 2;
+    await page.mouse.move(gx, gy);
+    await page.mouse.down();
+    const targetY = nextBox.y + nextBox.height * 0.75;
+    for (let i = 1; i <= 10; i++) {
+        await page.mouse.move(gx, gy + (targetY - gy) * (i / 10));
+        await sleep(20);
+    }
+    const seen = await page.locator('.notes-grid-drop-indicator').count() === 1;
+    await page.mouse.up();
+    await sleep(600);
+    return seen;
+};
+const indicatorSeen = await dragOneSlotDown(otherCard);
+ck('drag: the insertion line appears while dragging', indicatorSeen);
+ck('drag: dropping a card one slot down reorders the others',
+    (await othersTitles()).join(',') === 'Holiday photo,Reading,Sketch,Packing,Poem', (await othersTitles()).join(','));
+ck('drag: the drop did not open the note (the ghost click is swallowed)', await page.locator('.notes-editor').count() === 0);
+ck('drag: the pinned card kept its section', await page.locator('section[aria-label="Pinned notes"] .notes-card').count() === 1);
+await shot('list-drag');
+// The order must have REACHED task_tab_prefs, not just the local cache.
+await page.reload();
+await page.waitForSelector('.notes-card', { timeout: 20000 });
+await sleep(1000);
+ck('drag: the new order survived a reload (it reached the saved tab order)',
+    (await othersTitles()).join(',') === 'Holiday photo,Reading,Sketch,Packing,Poem', (await othersTitles()).join(','));
+// The PINNED section has its own hook instance, its own drag group and its
+// own arm of the shell's section -> visible-keys lookup. Invert that one
+// ternary and every pinned drop hands applyVisibleOrder a list that is not a
+// permutation of the visible set: it returns null and the card silently snaps
+// back. Nothing below the shell can see that, so it is checked here, with two
+// pinned cards — the fixture has one the rest of the time.
+const pinnedTitles = async () => (await page.locator('section[aria-label="Pinned notes"] .notes-card-title').allInnerTexts()).map(t => t.trim());
+const pinnedCard = i => page.locator('section[aria-label="Pinned notes"] .notes-card').nth(i);
+await page.locator('section[aria-label="Other notes"] .notes-card', { hasText: 'Sketch' }).hover();
+await page.locator('section[aria-label="Other notes"] .notes-card', { hasText: 'Sketch' }).locator('.notes-card-pin').click();
+await page.waitForFunction(() => document.querySelectorAll('section[aria-label="Pinned notes"] .notes-card').length === 2, null, { timeout: 10000 });
+const pinnedBefore = (await pinnedTitles()).join(',');
+const othersBeforePinnedDrag = (await othersTitles()).join(',');
+ck('drag: a two-card pinned section offers grips', await page.locator('section[aria-label="Pinned notes"] .notes-card-grip').count() === 2);
+await dragOneSlotDown(pinnedCard);
+const pinnedAfter = (await pinnedTitles()).join(',');
+ck('drag: a drop INSIDE the pinned section reorders the pinned cards',
+    pinnedAfter === pinnedBefore.split(',').reverse().join(','), `${pinnedBefore} -> ${pinnedAfter}`);
+ck('drag: a pinned drop leaves the other notes exactly as they were',
+    (await othersTitles()).join(',') === othersBeforePinnedDrag, (await othersTitles()).join(','));
+await page.reload();
+await page.waitForSelector('.notes-card', { timeout: 20000 });
+await sleep(1000);
+ck('drag: the pinned order survived a reload too',
+    (await pinnedTitles()).join(',') === pinnedAfter, (await pinnedTitles()).join(','));
+// Put the fixture back: swap again (the inverse of a one-slot drag in a
+// two-card section), then unpin. WHERE an unpinned note lands is pin
+// behaviour, not the drag's — it does not keep its old slot — so only the
+// section it lands in is asserted here.
+await dragOneSlotDown(pinnedCard);
+await page.locator('section[aria-label="Pinned notes"] .notes-card', { hasText: 'Sketch' }).hover();
+await page.locator('section[aria-label="Pinned notes"] .notes-card', { hasText: 'Sketch' }).locator('.notes-card-pin').click();
+await page.waitForFunction(() => document.querySelectorAll('section[aria-label="Pinned notes"] .notes-card').length === 1, null, { timeout: 10000 });
+await sleep(400);
+ck('drag: unpinning puts the note back among the others',
+    (await othersTitles()).includes('Sketch') && (await othersTitles()).length === 5, (await othersTitles()).join(','));
+
+await page.fill('.notes-search input', 'a');
+await sleep(300);
+ck('drag: a search removes the grips (a result is not a section of the order)', await page.locator('.notes-card-grip').count() === 0);
+await page.click('button[aria-label="Clear search"]');
+await sleep(200);
+await page.click('button[aria-label="Switch to grid view"]');
+await page.waitForSelector('.notes-grid:not(.list)', { timeout: 5000 });
+
 await page.fill('.notes-search input', 'bread');
 await sleep(300);
 ck('search: matches an item inside a note', await page.locator('.notes-card').count() === 1 && /Groceries/.test(await page.locator('.notes-card-title').first().innerText()));
 await page.fill('.notes-search input', 'violets');
 await sleep(300);
 ck('search: matches a note\'s text', await page.locator('.notes-card').count() === 1 && /Poem/.test(await page.locator('.notes-card-title').first().innerText()));
+// A result must say WHERE it matched. 'Milk' is the item ticked back in
+// section 5, and previewRows never renders a completed row — so without the
+// "also matched" line that card would show nothing at all to explain itself.
+await page.fill('.notes-search input', 'bread');
+await sleep(300);
+ck('search: the matching words are highlighted on the card',
+    await page.locator('.notes-card mark.notes-hl').count() >= 1
+    && /bread/i.test(await page.locator('.notes-card mark.notes-hl').first().innerText()),
+    await page.locator('.notes-card mark.notes-hl').first().innerText().catch(() => 'none'));
+await page.fill('.notes-search input', 'milk');
+await sleep(300);
+const foundRow = await page.locator('.notes-card-found-row').first().innerText().catch(() => '');
+ck('search: a match on a TICKED item is still explained', /ticked/.test(foundRow) && /Milk/i.test(foundRow), foundRow);
+ck('search: the ticked item is not in the card\u2019s item list', await page.locator('.notes-card-item-text', { hasText: 'Milk' }).count() === 0);
+// Opening a result steps through its matches.
+await page.fill('.notes-search input', 'bread');
+await sleep(300);
+await page.locator('.notes-card', { hasText: 'Groceries' }).click();
+await page.waitForSelector('.notes-editor .task-tree', { timeout: 15000 });
+const matchBar = await page.locator('.notes-editor-matches').innerText().catch(() => '');
+ck('search: the open note counts its matches', /\d+ of \d+/.test(matchBar), matchBar);
+ck('search: the open note highlights the matching item', await page.locator('.notes-editor mark.notes-hl').count() >= 1);
+await page.click('.notes-editor button[aria-label="Next match"]');
+await sleep(300);
+ck('search: Next match marks exactly one as the current match', await page.locator('.notes-editor mark.notes-hl.current').count() === 1);
+await shot('search-highlight');
+await page.locator('.notes-editor-foot').getByRole('button', { name: 'Close', exact: true }).click();
+await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
+
 await page.fill('.notes-search input', 'zzzz');
 await sleep(300);
 ck('search: no match shows the empty state', await page.locator('.notes-empty').count() === 1);
@@ -936,6 +1074,121 @@ await page.locator('.notes-rail-item', { hasText: 'Archive' }).click();
 await sleep(300);
 ck('archive view: the archived card is there with its chip', await packing().count() === 1 && /archived/.test(await packing().locator('.notes-card-foot').innerText()));
 await page.locator('.notes-rail-item', { hasText: 'Notes' }).first().click();
+
+// ---- 10b. Edit labels: rename, merge, delete everywhere --------------------------------------------
+// The POINT of this dialog is the note no other surface can reach: Packing is
+// archived now, and a label view excludes archived notes (filterNotes), so a
+// label stuck on it could not be renamed from the grid or the selection bar.
+// Label it here first, then prove the rename followed it.
+await page.locator('.notes-rail-item', { hasText: 'Archive' }).click();
+await sleep(300);
+await packing().click();
+await page.waitForSelector('.notes-editor-foot', { timeout: 10000 });
+await page.click('.notes-editor-foot button[aria-label="Labels"]');
+await page.waitForSelector('.notes-labels-new input', { timeout: 5000 });
+await page.fill('.notes-labels-new input', 'Trip');
+await page.press('.notes-labels-new input', 'Enter');
+await sleep(200);
+await page.keyboard.press('Escape');
+await page.locator('.notes-editor-foot').getByRole('button', { name: 'Close', exact: true }).click();
+await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
+await page.locator('.notes-rail-item', { hasText: 'Notes' }).first().click();
+await sleep(300);
+
+ck('rail: the Labels heading offers Edit labels', await page.locator('.notes-rail button[aria-label="Edit labels"]').count() === 1);
+const openLabelMgr = async () => {
+    await page.click('.notes-rail button[aria-label="Edit labels"]');
+    await page.waitForSelector('.notes-labelmgr-row', { timeout: 5000 });
+};
+const mgrRows = () => page.locator('.notes-labelmgr-row').allInnerTexts();
+const mgrText = async () => (await mgrRows()).join(' | ');
+await openLabelMgr();
+// Trip is on an ARCHIVED note only — it is listed, and counted, here alone.
+ck('label manager: lists every label with its note count, archived included',
+    /Errands/.test(await mgrText()) && /Trip/.test(await mgrText())
+    && (await mgrRows()).filter(t => /1 note(?!s)/.test(t)).length >= 2,
+    await mgrText());
+await page.click('.notes-labelmgr-row button[aria-label="Rename Errands"]');
+await page.fill('.notes-labelmgr-row.editing input', 'Chores');
+await page.press('.notes-labelmgr-row.editing input', 'Enter');
+await sleep(300);
+ck('label manager: a rename rewrites the card chip',
+    await page.locator('.notes-card', { hasText: 'Groceries' }).locator('.notes-chip', { hasText: 'Chores' }).count() === 1);
+ck('label manager: a rename rewrites the rail',
+    await page.locator('.notes-rail-item', { hasText: 'Chores' }).count() === 1
+    && await page.locator('.notes-rail-item', { hasText: 'Errands' }).count() === 0);
+ck('label manager: a rename offers an Undo', await page.locator('.notes-undo-text:has-text("Renamed")').count() === 1);
+// Merge: rename Trip onto Chores. It must ASK first, and must not have written.
+await page.click('.notes-labelmgr-row button[aria-label="Rename Trip"]');
+await page.fill('.notes-labelmgr-row.editing input', 'chores');
+await page.press('.notes-labelmgr-row.editing input', 'Enter');
+await sleep(200);
+ck('label manager: merging asks first', /Merge into/.test(await mgrText()), await mgrText());
+ck('label manager: the merge has not happened yet', await page.locator('.notes-rail-item', { hasText: 'Trip' }).count() === 1);
+await page.locator('.notes-labelmgr-row.confirm button', { hasText: 'Merge' }).click();
+await sleep(300);
+ck('label manager: merging leaves one label and one rail row',
+    await page.locator('.notes-rail-item', { hasText: 'Chores' }).count() === 1
+    && await page.locator('.notes-rail-item', { hasText: 'Trip' }).count() === 0);
+await shot('label-manager');
+// Delete everywhere, then Undo. The archived note is the one to watch.
+await page.click('.notes-labelmgr-row button[aria-label="Delete Chores"]');
+await sleep(150);
+ck('label manager: deleting asks first', /Remove/.test(await mgrText()), await mgrText());
+await page.locator('.notes-labelmgr-row.confirm button', { hasText: 'Remove' }).click();
+await sleep(300);
+ck('label manager: deleting removes the rail row and every chip',
+    await page.locator('.notes-rail-item', { hasText: 'Chores' }).count() === 0
+    && await page.locator('.notes-chip', { hasText: 'Chores' }).count() === 0);
+await page.locator('.notes-undo button').click();
+await sleep(400);
+ck('label manager: Undo brings the label back on every note',
+    await page.locator('.notes-card', { hasText: 'Groceries' }).locator('.notes-chip', { hasText: 'Chores' }).count() === 1);
+// Escape while a row is open belongs to the ROW. NotesDialog listens for it on
+// document in the CAPTURE phase, so an onKeyDown on the input could never have
+// beaten it there: the dialog took `escapeBlocked` and LabelManager now listens
+// the same way (LabelManager.tsx).
+await page.click('.notes-labelmgr-row button[aria-label="Rename Chores"]');
+await page.fill('.notes-labelmgr-row.editing input', 'Nonsense');
+await page.keyboard.press('Escape');
+await sleep(200);
+ck('label manager: Escape cancels the rename and leaves the dialog open',
+    await page.locator('.notes-labelmgr-row.editing').count() === 0
+    && await page.locator('.notes-labelmgr-row').count() > 0
+    && await page.locator('.notes-rail-item', { hasText: 'Nonsense' }).count() === 0,
+    await mgrText());
+await page.keyboard.press('Escape');
+await sleep(200);
+ck('label manager: Escape closes the dialog', await page.locator('.notes-labelmgr-row').count() === 0);
+// The open label VIEW must follow a rename, or the grid empties under a stale heading.
+await page.locator('.notes-rail-item', { hasText: 'Chores' }).click();
+await page.waitForSelector('h1.notes-section-title', { timeout: 5000 });
+await openLabelMgr();
+await page.click('.notes-labelmgr-row button[aria-label="Rename Chores"]');
+await page.fill('.notes-labelmgr-row.editing input', 'Errands');
+await page.press('.notes-labelmgr-row.editing input', 'Enter');
+await sleep(400);
+const followed = await page.locator('h1.notes-section-title').textContent();
+ck('label manager: the open label view follows the rename',
+    /Label: Errands/.test(followed) && await page.locator('.notes-card').count() >= 1, followed);
+// ...and Undo has to bring the ROUTE back with the map. Restoring the labels
+// un-makes the name this view is filtered by, so staying here would leave an
+// empty grid under a heading naming a label that is no longer in the rail.
+await page.locator('.notes-undo button').click();
+await sleep(400);
+const restored = await page.locator('h1.notes-section-title').textContent();
+ck('label manager: Undo of a rename brings the label view back too',
+    /Label: Chores/.test(restored) && await page.locator('.notes-card').count() >= 1, restored);
+// Put the rename back: the rest of the walk (and the ciphertext check) names Errands.
+await page.click('.notes-labelmgr-row button[aria-label="Rename Chores"]');
+await page.fill('.notes-labelmgr-row.editing input', 'Errands');
+await page.press('.notes-labelmgr-row.editing input', 'Enter');
+await sleep(400);
+ck('label manager: the rename is back on', /Label: Errands/.test(await page.locator('h1.notes-section-title').textContent()));
+await page.keyboard.press('Escape');
+await sleep(200);
+await page.locator('.notes-rail-item', { hasText: 'Notes' }).first().click();
+await sleep(300);
 
 // ---- 11. Move to trash with undo (the server keeps it restorable) ------------------------------------
 const reading = () => page.locator('.notes-card', { hasText: 'Reading' });
@@ -1147,11 +1400,17 @@ await page.waitForSelector('.tasks-tabbar', { timeout: 15000 });
 await dismissRecoveryReminder(page);
 // Púca asks, 3 s after it mounts, about a recovery code generated at sign-up
 // and never confirmed. It is a FULL-SCREEN overlay that swallows every click,
-// so it is answered here, before the board is driven, rather than after (it is
-// not under test; the later dismissal stays for a tab that mounted later).
-await page.waitForSelector('.recovery-modal-overlay .recovery-done-btn', { timeout: 8000 })
+// so it is answered here, before the board is driven, rather than after. The
+// helper above answers it if it is already up; this waits out the 3 s for the
+// one that has not appeared yet, and then waits for the overlay to go.
+await sleep(3500);
+await page.waitForSelector('.recovery-reminder-actions .recovery-done-btn', { timeout: 2000 })
+    .then(() => page.click('.recovery-reminder-actions .recovery-done-btn'))
+    .catch(() => { /* not shown */ });
+await page.waitForSelector('.recovery-modal-overlay .recovery-done-btn', { timeout: 2000 })
     .then(() => page.click('.recovery-modal-overlay .recovery-done-btn'))
     .catch(() => { /* not shown */ });
+await page.waitForSelector('.recovery-modal-overlay', { state: 'detached', timeout: 5000 }).catch(() => {});
 await page.waitForSelector('.checklist-card:has-text("Poem") .tasks-card-body', { timeout: 10000 }).catch(() => {});
 // Parity: the ONE sealed document, seen through the other front door.
 // Groceries was coloured mint and labelled Errands in Notes (§5-6); Packing
@@ -1588,7 +1847,7 @@ if (psqlDsn) {
         const att = sql(`SELECT coalesce(string_agg(l.attachments, '|'), '') FROM task_lists l JOIN users u ON u.id = l.owner_id WHERE u.username = '${username}' AND l.attachments IS NOT NULL`);
         ck('database: no local puca-parked ref was ever sealed for the server', !/puca-parked/.test(att), att.slice(0, 60));
         const blob = sql(`SELECT blob FROM user_sealed_blobs b JOIN users u ON u.id = b.user_id WHERE u.username = '${username}' AND b.name = 'notes-prefs'`);
-        ck('database: the colour/label blob is ciphertext only', blob.length > 0 && !/Synced|Errands|sage|mint/.test(blob), blob.slice(0, 60));
+        ck('database: the colour/label blob is ciphertext only', blob.length > 0 && !/Synced|Errands|Chores|Trip|sage|mint/.test(blob), blob.slice(0, 60));
     } catch (e) {
         ck('database sync checks ran', false, String(e).slice(0, 200));
     }
@@ -2383,6 +2642,66 @@ const selPx = await m.evaluate(() => parseFloat(getComputedStyle(document.queryS
 ck('phone: account-menu selects ≥ 16px', selPx >= 16, `${selPx}px`);
 await m.keyboard.press('Escape');
 await m.waitForSelector('.notes-popover', { state: 'detached', timeout: 5000 });
+
+// The label manager on a phone: reached through the drawer, which must get
+// out of the way (it is a fixed overlay at this width), and rows big enough
+// to tap without hitting Delete by mistake.
+await m.tap('.notes-menu-btn');
+await m.waitForSelector('.notes-rail.open', { timeout: 5000 });
+await m.tap('.notes-rail button[aria-label="Edit labels"]');
+await m.waitForSelector('.notes-labelmgr-row', { timeout: 5000 });
+ck('phone: opening the label manager closes the rail drawer', await m.locator('.notes-rail.open').count() === 0);
+const lmBox = await m.locator('.notes-dialog').boundingBox();
+ck('phone: the label manager fits the screen', !!lmBox && lmBox.x >= 0 && lmBox.x + lmBox.width <= 390.5, JSON.stringify(lmBox));
+const lmRow = await m.locator('.notes-labelmgr-row').first().boundingBox();
+ck('phone: label rows are tappable', !!lmRow && lmRow.height >= 44, JSON.stringify(lmRow));
+await m.tap('.notes-labelmgr-row button[aria-label="Rename Errands"]');
+await m.waitForSelector('.notes-labelmgr-row.editing input', { timeout: 5000 });
+const lmFont = await m.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.notes-labelmgr-row.editing input')).fontSize));
+ck('phone: the rename field is >= 16px (no iOS zoom)', lmFont >= 16, lmFont + 'px');
+r = await audit();
+ck('phone: label manager — no overflow, targets at size', !r.bodyScrollsHorizontally && r.under.length === 0, JSON.stringify({ widest: r.widest, under: r.under }));
+await mshot('phone-label-manager');
+await m.keyboard.press('Escape');
+await m.keyboard.press('Escape');
+await m.waitForSelector('.notes-dialog', { state: 'detached', timeout: 5000 });
+
+// A highlight must not push the card sideways at 390px.
+await m.fill('.notes-search input', 'bread');
+await sleep(400);
+r = await audit();
+ck('phone: a search highlight does not overflow the card',
+    await m.locator('mark.notes-hl').count() >= 1 && !r.bodyScrollsHorizontally && r.widest <= r.vw + 1,
+    JSON.stringify({ widest: r.widest, vw: r.vw }));
+await mshot('phone-search-highlight');
+await m.tap('button[aria-label="Clear search"]');
+await sleep(300);
+
+// Ordering on a phone: notes.css forces ONE column in both views there, so
+// the grip is offered in grid view too — and it must be a real tap target
+// that does not scroll the page when dragged.
+ck('phone: cards carry a grip in grid view too (one column there)', await m.locator('.notes-card-grip').count() > 1);
+const pg = await m.locator('.notes-card-grip').first().boundingBox();
+ck('phone: the grip is a 44px tap target', !!pg && pg.width >= 44 && pg.height >= 44, JSON.stringify(pg));
+ck('phone: the grip declares touch-action none (no scroll to fight)',
+    await m.locator('.notes-card-grip').first().evaluate(el => getComputedStyle(el).touchAction) === 'none');
+
+// A press that STARTS on the grip is a drag, and nothing else. Android fires
+// `contextmenu` after ~500 ms of a still finger; useDragReorder only swallows
+// that once a drag is LIVE (5px of movement), so a press-and-hold on the grip
+// used to open a bulk selection nobody asked for — the timer was cancelled,
+// the contextmenu was not.
+const gripCard = m.locator('.notes-card', { hasText: 'Poem' });
+const gcb = await gripCard.locator('.notes-card-grip').boundingBox();
+await gripCard.locator('.notes-card-grip').dispatchEvent('pointerdown',
+    { pointerType: 'touch', isPrimary: true, clientX: gcb.x + gcb.width / 2, clientY: gcb.y + gcb.height / 2, bubbles: true });
+await sleep(700);
+await gripCard.dispatchEvent('contextmenu', { bubbles: true, cancelable: true });
+await sleep(250);
+ck('phone: holding the grip starts NO selection (that press is a drag)', await m.locator('.notes-selectbar').count() === 0);
+await gripCard.dispatchEvent('pointerup',
+    { pointerType: 'touch', isPrimary: true, clientX: gcb.x + gcb.width / 2, clientY: gcb.y + gcb.height / 2, bubbles: true });
+await sleep(150);
 
 // bulk selection by LONG PRESS (the phone's way in), then the bar at 390px.
 // Poem, not Phone note: that one is in the trash by now (the Trash section above).

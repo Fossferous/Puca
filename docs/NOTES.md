@@ -27,25 +27,36 @@ Púca's reminders. Anything you do in one is what you see in the other.
   `+` button opens the same composer as a sheet. Where the server has
   migration 065 the composer also takes free text, photos (the camera on a
   phone) and a drawing.
-- **Open a note** — Púca's own task tree: inline edit, subtasks, drag to reorder
-  and to nest, due times, attachments, the collapsible Completed section. It is
-  the same component Púca renders, so a note lays out exactly as it does in the
-  Tasks view. A **List actions** button appears in its foot as soon
-  as something is ticked, with *Uncheck all* and *Delete checked* — what a
-  weekly shopping list needs to start again. Both offer Undo, and Undo after a
-  delete brings the items back with their dates, repeats, pictures, their
-  ticks and their nesting — a ticked subtask under a parent that was not
-  ticked goes back under that parent, not to the top of the list. *Uncheck
-  all* asks first when a ticked repeating to-do whose series has already
-  finished is among them, because unticking that one reopens a repeat with no
-  next time. Both are refused while offline or while changes are
-  waiting to sync, for the same reason *Show checkboxes* is — a hundred writes
-  that replay later is not what the button looked like when it was tapped. And
-  there is deliberately no "move checked to bottom": ticked items are always in
-  the Completed section at the bottom, here and on the server, so there is
-  nowhere else for them to be.
+- **Open a note** — Púca's own task tree: inline edit, subtasks, drag an item
+  to reorder it and to nest it, due times, attachments, the collapsible
+  Completed section. It is the same component Púca renders, so a note lays out
+  exactly as it does in the Tasks view. (Dragging a whole NOTE into place is a
+  different thing — see *How it maps onto Púca*.) A **List actions** button
+  appears in its foot as soon as something is ticked, with *Uncheck all* and
+  *Delete checked* — what a weekly shopping list needs to start again. Both
+  offer Undo, and Undo after a delete brings the items back with their dates,
+  repeats, pictures, their ticks and their nesting — a ticked subtask under a
+  parent that was not ticked goes back under that parent, not to the top of
+  the list. *Uncheck all* asks first when a ticked repeating to-do whose
+  series has already finished is among them, because unticking that one
+  reopens a repeat with no next time. Both are refused while offline or while
+  changes are waiting to sync, for the same reason *Show checkboxes* is — a
+  hundred writes that replay later is not what the button looked like when it
+  was tapped. And there is deliberately no "move checked to bottom": ticked
+  items are always in the Completed section at the bottom, here and on the
+  server, so there is nowhere else for them to be.
 - **Search** — over decrypted titles, items, labels and server names, on the
-  device; nothing about the query leaves it.
+  device; nothing about the query leaves it. Matches are **highlighted** in a
+  card's title, its text and its items. A long note shows a piece of itself
+  around the match instead of its opening lines, and a card says so when it
+  matched something it cannot show — a ticked item, an item past the eighth,
+  or a place on a date, all of which the card normally folds away. Opening a
+  result steps through its matches. The marking up is worked out in memory
+  from text this device has already decrypted: it is never stored, never
+  cached and never sent, the query still never reaches the address bar, and
+  text that cannot be decrypted is neither searched nor highlighted.
+  Each "also matched" line is windowed around its own match: the row is a
+  single ellipsised line, and the match is the only thing it exists to show.
 - **Reminders** — everything with a time, grouped Overdue / Today /
   Upcoming: every open item with a due time, and **every note that reminds
   you by itself** — a note needs no checklist item to hang a time on (*A
@@ -76,7 +87,9 @@ Púca's reminders. Anything you do in one is what you see in the other.
 - **Colour, labels, archive** — shared organisation, sealed to your own key
   and synced across your devices (see *What follows the account* below).
   Púca's Tasks view shows and sets the same three (see *Both front doors
-  agree* below).
+  agree* below). *Edit labels* beside **Labels** in the rail renames, merges
+  or deletes a label across every note, the archived ones included (see
+  *Managing labels* below).
 - **Select several** — a checkbox on hover, Shift/Ctrl-click and Ctrl+A on a
   desktop, a long press on a phone (then taps add to the selection); `Esc`
   clears. The bar pins or unpins, colours, labels, archives, moves to the
@@ -175,7 +188,7 @@ Púca's reminders. Anything you do in one is what you see in the other.
 | Items, nesting, completed, due times, attachments | The tasks (`channel_tasks`), through `frontend/src/api/tasks.ts` |
 | A note's text, photos and drawings; the Trash | `task_lists.body` / `.attachments` (encrypt-to-self) and `.trashed_at` — personal notes only (below) |
 | Pin | `task_tab_prefs.is_favorite` — the same favourite as the Tasks tab bar |
-| Note order (`Move to top / up / down`) | `task_tab_prefs` order — the Tasks tab bar's order |
+| Note order (drag in one-column views; `Move to top / up / down / to bottom`) | `task_tab_prefs` order — the Tasks tab bar's order |
 | An item's date, repeat, place and alerts; its snooze | `channel_tasks.schedule` / `.snooze` (066), sealed like attachments |
 | Edited | `updated_at` on the list and its items (066) |
 | Reminders | `due_at` on `channel_tasks` (an item) **and** on `task_lists` (a note's own, 068) + `frontend/src/api/taskReminders.ts`; the grouping and the timing rules are `frontend/src/api/reminderGroups.ts` + `reminderSlots.ts`, the list itself `frontend/src/components/reminders/` (both front doors) |
@@ -186,7 +199,20 @@ Púca's reminders. Anything you do in one is what you see in the other.
 Pin and order are shared **by design**: pinning in Notes pulls that tab to the
 front of Púca's bar, as favouriting does there. A reorder made while notes
 are filtered or archived keeps every hidden note in place (the saved order is
-always the full set — `moveNoteInOrder` in `frontend/src/notes/model/notesModel.ts`).
+always the full set — `applyVisibleOrder` in
+`frontend/src/notes/model/notesModel.ts`, which both the menu's moves and the
+grid drag go through).
+
+**Reordering a note.** The card menu always offers *Move to top*, *Move up*,
+*Move down* and *Move to bottom* — the tap and keyboard path, on every
+layout. Where a section really is one column — list view, or either view on
+a phone — a note can also be **dragged by the grip beside its title**, with a
+line showing where it will land. Pinned notes reorder among the pinned ones
+and others among the others: the two sections are two drag groups, so a card
+cannot cross between them (nothing visible would change, yet Púca's tab bar
+would be rewritten). The grid's masonry on a mouse is two-dimensional and the
+drag is one-axis, so it keeps the menu alone. Ordering is offered only against
+the saved order, never a display sort or a search result.
 
 **Colour, labels and archive are shared too.** They are not Notes' private
 state: Púca's Tasks view reads the same sealed document and writes it through
@@ -260,6 +286,60 @@ out, with no new kind of request and no new field. They are not free of
 signal, though, and it is worth saying plainly: a run of them inside a few
 seconds tells the operator that a list was reset in one go, and how many items
 were ticked. Pacing blunts that; it does not remove it.
+### What a search highlights
+
+The highlighting runs over the same decrypted strings the boolean search
+already reads, so there is no second source of truth: `noteMatches` decides
+WHETHER a card is a result, and `frontend/src/notes/model/noteSearch.ts`
+decides WHERE, from the same normalisation. That normalisation changes the
+text's length three ways — accents are folded, letters lowercased, runs of
+whitespace collapsed — so a match's position in the normalised string is not
+its position in the note. `noteSearch.ts` keeps an index map back to the
+original for exactly that reason; without it a highlight drifts by one
+character per accent and several per run of spaces.
+
+One thing is deliberately NOT highlighted: a note's own text while the note
+is **open**. That field is a real `<textarea>` the user is about to type in,
+and marked-up text cannot live inside one. It is highlighted on the card,
+where it is read rather than edited; in the open note, the counter and the
+next/previous buttons step through the item matches.
+
+The counter counts the marks that are actually **on screen**, because those
+are the ones the arrows can reach: collapse the *Completed* section and its
+matches leave the count and the walk together.
+
+Nothing about any of this reaches the server, which holds ciphertext for
+every field a search reads (`docs/SECURITY_MODEL.md`): searching, matching
+and marking up all happen on the device, and the query is deliberately kept
+out of the address bar and history too.
+
+### Managing labels
+
+The per-note pickers only reach notes the grid is showing, and a label view
+hides archived notes — so a label left on an archived note could not be
+renamed or cleared from anywhere. **Edit labels** (the pencil beside
+*Labels* in the rail) lists every label with how many notes carry it,
+**archived notes included**, and offers three things:
+
+- **Rename** it everywhere. A pure respelling counts: *home* to *Home*
+  rewrites every note.
+- **Merge**: renaming onto a label you already have asks first, then folds
+  the two together under the existing label's own spelling, so the account
+  is never left with two casings of one name.
+- **Delete** it from every note, after a confirmation that says how many
+  notes it will change. One **Undo** puts the whole label list back.
+
+`Esc` belongs to whatever is open innermost: it cancels the name you are
+typing, or the confirmation you are being asked, and only closes the dialog
+when neither is up.
+
+Each of the three is a SINGLE change to the sealed document — one
+compare-and-swap write, the same write the server already sees when you
+tick a label on one note. Nothing new reaches the server: it learns that
+you organised, never what into. No migration and no new route were needed.
+If you are looking at the label you renamed, the view follows it — and an
+Undo brings both the labels and that view back, because the name the view
+was filtered by stops existing again.
 
 ## Live updates
 

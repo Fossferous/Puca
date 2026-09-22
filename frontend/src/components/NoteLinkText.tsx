@@ -18,6 +18,7 @@
  * grid uses that on purpose: the card's own tap opens the note, and a 44px
  * tap target cannot live inside a line-clamped card preview at 390px.
  */
+import { type ReactNode } from 'react';
 import { linkSegments } from '../utils/linkSegments';
 import { openExternalUrl } from '../api/openExternal';
 
@@ -25,14 +26,23 @@ interface NoteLinkTextProps {
     text: string;
     /** False = styled as a link, but not a link (see the header). */
     interactive?: boolean;
+    /**
+     * Render the PLAIN stretches between links as something other than the
+     * bare string — Púca Notes marks a search's hits inside them. Per
+     * segment, so the ranges a caller works out are the segment's own and no
+     * offset arithmetic can drift. A link's own text is never re-rendered:
+     * it is already an element, and a <mark> inside an anchor would make the
+     * tap target ambiguous.
+     */
+    renderText?: (value: string) => ReactNode;
 }
 
-export function NoteLinkText({ text, interactive = true }: NoteLinkTextProps) {
+export function NoteLinkText({ text, interactive = true, renderText }: NoteLinkTextProps) {
     const segments = linkSegments(text);
     return (
         <>
             {segments.map((s, i) => {
-                if (s.kind === 'text') return s.value;
+                if (s.kind === 'text') return renderText ? <span key={i}>{renderText(s.value)}</span> : s.value;
                 if (!interactive) return <span key={i} className="note-link">{s.text}</span>;
                 return (
                     <a

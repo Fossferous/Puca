@@ -14,6 +14,8 @@ import { type GalleryItem } from '../../api/noteMedia';
 import { parseParkedRef } from '../../api/parkedMedia';
 import { parkedObjectUrl } from '../../api/parkedPreview';
 import { NoteLinkText } from '../../components/NoteLinkText';
+import { findRanges, snippetAround } from '../model/noteSearch';
+import { Highlight } from './Highlight';
 import '../noteContent.css';
 
 function HeroImage({ item, visible }: { item: GalleryItem; visible: boolean }) {
@@ -42,10 +44,31 @@ export function NoteHero({ items, visible }: { items: GalleryItem[]; visible: bo
     );
 }
 
-export function NoteBodyPreview({ body }: { body: string | null | undefined }) {
+/**
+ * The note's text under the title, clamped to its first lines by CSS.
+ *
+ * During a search the clamp is the problem: a note holds up to 48 KB and a hit
+ * at character 30,000 was rendered nowhere, so a matching card looked empty.
+ * `snippetAround` moves the window to the first match instead of the head of
+ * the text, and the clamp still applies to the window.
+ */
+export function NoteBodyPreview({ body, terms = [] }: { body: string | null | undefined; terms?: readonly string[] }) {
     if (!body) return null;
+    // A marker is never searched and never marked up (noteMatches' rule).
     if (isUndecryptable(body)) return <p className="notes-card-body unreadable">{body}</p>;
-    // Marked, not tappable: the card's own tap opens the note, and a 44px tap
-    // target cannot live inside a line-clamped preview at 390px.
-    return <p className="notes-card-body"><NoteLinkText text={body} interactive={false} /></p>;
+    // Links are marked, not tappable: the card's own tap opens the note, and a
+    // 44px tap target cannot live inside a line-clamped preview at 390px.
+    if (terms.length === 0) {
+        return <p className="notes-card-body"><NoteLinkText text={body} interactive={false} /></p>;
+    }
+    // Searching: the window moves to the first hit, and the hits are marked
+    // inside the link renderer's plain stretches, so a card keeps both.
+    const snippet = snippetAround(body, findRanges(body, terms));
+    return <p className="notes-card-body">
+        <NoteLinkText
+            text={snippet.text}
+            interactive={false}
+            renderText={v => <Highlight text={v} ranges={findRanges(v, terms)} />}
+        />
+    </p>;
 }

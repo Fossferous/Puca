@@ -19,11 +19,13 @@ import { pushMessageToast } from '../../components/messageToastBus';
 import { PlusIcon, WarningIcon } from '../../components/Icons';
 import {
     type NoteCard, type NoteFilter, type NoteRef,
-    allLabels, filterNotes, groupReminders, moveNoteInOrder, reminderBadgeCount, splitPinned,
+    allLabels, applyVisibleOrder, canDragReorder, canReorder, filterNotes, groupReminders, moveNoteInOrder,
+    reminderBadgeCount, splitPinned,
 } from '../model/notesModel';
 import { type ComposeIntent, type ComposeMode, takeShare } from '../model/composeIntent';
 import { useNativeShareIn, type SharedIntoNotes } from '../native/useNativeShareIn';
 import { setNotesSort, setNotesView, type NotesSortMode } from '../model/notesPrefs';
+import { restoreLabels } from '../model/notesBulk';
 import { useNotesPrefs, useNoteActions, useNoteCards } from '../model/notesQueries';
 import { copyBlockersOf, copyPlanOf, copyRefusal, noteToMarkdown } from '../model/noteText';
 import { AccountMenu } from './AccountMenu';
@@ -33,8 +35,9 @@ import { NotesRail } from './NotesRail';
 import { NotesTopBar } from './NotesTopBar';
 import { NotesUpdateStripSlot } from './NotesUpdateGate';
 import { LabelPicker } from '../../components/notes/LabelPicker';
+import { LabelManager } from './LabelManager';
 import { NoteEditor } from './NoteEditor';
-import { NoteGrid } from './NoteGrid';
+import { NoteGrid, type GridSection } from './NoteGrid';
 import { Popover } from '../../components/notes/Popover';
 import { QuickAdd } from './QuickAdd';
 import { RemindersView } from './RemindersView';
@@ -84,7 +87,12 @@ type Popup =
 type Pending =
     | { kind: 'delete'; key: string; ref: NoteRef; title: string; token: number }
     | { kind: 'trash'; key: string; ref: NoteRef; title: string; token: number }
-    | { kind: 'archive'; key: string; ref: NoteRef; title: string; token: number };
+    | { kind: 'archive'; key: string; ref: NoteRef; title: string; token: number }
+    // A label rename/merge/delete rewrote every note at once, so its Undo is
+    // the whole label map as it was, not one note's (notesBulk.restoreLabels).
+    // `returnTo` is the label route the change forced us OFF, if any: putting
+    // the map back has to put the view back with it.
+    | { kind: 'labels'; message: string; snapshot: Record<string, string[]>; returnTo: string | null; token: number };
 
 function sortCards(cards: NoteCard[], sort: NotesSortMode): NoteCard[] {
     if (sort === 'puca') return cards;
@@ -138,6 +146,7 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     const [drawer, setDrawer] = useState(false);
     const [popup, setPopup] = useState<Popup | null>(null);
     const [help, setHelp] = useState(false);
+    const [labelMgr, setLabelMgr] = useState(false);
     const [sheet, setSheet] = useState(false);
     const [quickSignal, setQuickSignal] = useState(0);
     // What a shortcut, the quick tile, the widget or a share asked the
@@ -188,6 +197,16 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     const visible = useMemo(() => sortCards(filterNotes(cards, filter), local.sort), [cards, filter, local.sort]);
     const { pinned, others } = useMemo(() => splitPinned(visible), [visible]);
     const labels = useMemo(() => allLabels(cards), [cards]);
+    // How many notes carry each label, ARCHIVED INCLUDED — the label manager
+    // exists because a filtered view can never reach those (filterNotes).
+    const labelCounts = useMemo(() => {
+        const m = new Map<string, number>();
+        for (const c of cards) for (const l of c.labels) {
+            const k = l.toLocaleLowerCase();
+            m.set(k, (m.get(k) ?? 0) + 1);
+        }
+        return m;
+    }, [cards]);
     // Bulk selection over what the grid shows, in the order it shows it.
     const gridOrder = useMemo(() => [...pinned, ...others], [pinned, others]);
     const selection = useNoteSelection({ visible: gridOrder, actions, labels, bulk, grid: isGridPath(path), enabled: !openKey });
@@ -355,11 +374,36 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
         if (archived) setPending({ kind: 'archive', key: card.key, ref: card.ref, title: card.title, token: ++tokenSeq.current });
         else setPending(null);
     }, [actions, commitPending]);
+    // The label manager rewrote the whole label map in one write. Undo puts
+    // the snapshot back; and if the view we are looking at WAS that label, the
+    // route has to follow, or the grid silently empties under a stale heading.
+    const onLabelChanged = useCallback((from: string, to: string | null, before: Record<string, string[]>) => {
+        commitPending(pendingRef.current);
+        // Undo restores the map, so the label we were looking at exists again
+        // — and the route we were moved off is the only one that shows it.
+        // Without this, Undo leaves you on /label/<new name> after the new
+        // name has ceased to exist: an empty grid under a heading naming a
+        // label that is no longer in the rail.
+        const leaving = filter.kind === 'label' && filter.label.toLocaleLowerCase() === from.toLocaleLowerCase();
+        setPending({
+            kind: 'labels',
+            message: to === null ? `Removed “${from}” from every note` : `Renamed “${from}” to “${to}”`,
+            snapshot: before,
+            returnTo: leaving ? path : null,
+            token: ++tokenSeq.current,
+        });
+        if (leaving) go(to === null ? '/' : `/label/${encodeURIComponent(to)}`);
+    }, [commitPending, filter, go, path]);
+
     const undoPending = () => {
         const p = pendingRef.current;
         if (!p) return;
         if (p.kind === 'archive') actions.setArchived(p.ref, false);
         if (p.kind === 'trash') void actions.restoreNote(p.ref);
+        if (p.kind === 'labels') {
+            restoreLabels(p.snapshot);
+            if (p.returnTo) go(p.returnTo);
+        }
         setPending(null);
     };
     const expirePending = () => {
@@ -406,8 +450,8 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
         const section = card.pinned ? pinned : others;
         const visibleKeys = section.map(c => c.key);
         const fullKeys = allCards.map(c => c.key);
-        const canMove = local.sort === 'puca' && filter.kind !== 'search' && section.length > 1;
-        const move = (target: 'top' | 'up' | 'down') => {
+        const canMove = canReorder(local.sort, filter.kind) && section.length > 1;
+        const move = (target: 'top' | 'up' | 'down' | 'bottom') => {
             const next = moveNoteInOrder(fullKeys, visibleKeys, card.key, target);
             if (next) actions.reorderNotes(next);
         };
@@ -424,6 +468,7 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                 { id: 'move-top', label: 'Move to top', icon: 'arrow-up-circle', onClick: () => move('top') },
                 { id: 'move-up', label: 'Move up', icon: 'chevron-up', onClick: () => move('up') },
                 { id: 'move-down', label: 'Move down', icon: 'chevron-down', onClick: () => move('down') },
+                { id: 'move-bottom', label: 'Move to bottom', icon: 'arrow-down-circle', onClick: () => move('bottom') },
                 { id: 'sep2', label: '', separator: true },
             );
         }
@@ -459,6 +504,18 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
         }
         return items;
     };
+    // Drag to reorder, same three conditions as the menu's Move items plus
+    // "this section is one column": list view, or any view on a coarse
+    // pointer (notes.css forces column-count: 1 there). The drop goes through
+    // actions.reorderNotes like the menu does, so it inherits the two refusals
+    // in savePrefs (prefs not read, trash not settled) and keepHiddenSlots.
+    const canDrag = canDragReorder(local.sort, filter.kind, local.view, coarse);
+    const onDropReorder = useCallback((section: GridSection, nextVisible: string[]) => {
+        const visible = (section === 'pinned' ? pinned : others).map(c => c.key);
+        const next = applyVisibleOrder(allCards.map(c => c.key), visible, nextVisible);
+        if (next) actions.reorderNotes(next);
+    }, [allCards, pinned, others, actions]);
+
     // Stable identities, so memo(NoteCard) can actually skip renders: the
     // menu builder closes over the current view and is read through a ref.
     const menuForRef = useRef(menuFor);
@@ -486,7 +543,7 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
         onNew: () => { if (isCoarse()) setSheet(true); else setQuickSignal(n => n + 1); },
         onHelp: () => setHelp(true),
         onRefresh: () => { void actions.refreshAll(); },
-    }, !openCard && !popup && !help && !sheet && !contextMenu);
+    }, !openCard && !popup && !help && !sheet && !contextMenu && !labelMgr);
 
     // --- Account -------------------------------------------------------------------------------------
     const username = (() => {
@@ -540,6 +597,7 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                     open={drawer}
                     onClose={() => setDrawer(false)}
                     onNavigate={to => { setQuery(''); go(to); }}
+                    onEditLabels={() => setLabelMgr(true)}
                     version={__APP_VERSION__}
                 />
                 <main className="notes-main">
@@ -580,7 +638,7 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                                 actions={actions}
                                 now={now}
                                 onOpenNote={key => setParams(p => { p.set('note', key); return p; })}
-                                shortcutsEnabled={!openCard && !popup && !help && !sheet && !contextMenu}
+                                shortcutsEnabled={!openCard && !popup && !help && !sheet && !contextMenu && !labelMgr}
                             />
                         ) : (
                             <>
@@ -606,6 +664,8 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                                     onLabelClick={onLabelClick}
                                     onArchive={archiveWithUndo}
                                     registerEl={registerEl}
+                                    canDrag={canDrag}
+                                    onDropReorder={onDropReorder}
                                     selected={selection.selected}
                                     onSelect={selection.onSelect}
                                 />
@@ -633,8 +693,9 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                     onPickLabels={onPickLabels}
                     onArchive={archiveWithUndo}
                     pucaHref={pucaHref}
-                    escapeBlocked={!!popup || !!contextMenu || help}
+                    escapeBlocked={!!popup || !!contextMenu || help || labelMgr}
                     flashTaskId={flashItem}
+                    query={filter.kind === 'search' ? filter.query : undefined}
                 />
             )}
 
@@ -665,6 +726,14 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                 </Popover>
             )}
             {help && <ShortcutsHelp onClose={() => setHelp(false)} />}
+            {labelMgr && (
+                <LabelManager
+                    labels={labels}
+                    counts={labelCounts}
+                    onClose={() => setLabelMgr(false)}
+                    onChanged={onLabelChanged}
+                />
+            )}
 
             {contextMenu && (
                 <ContextMenu items={contextMenu.items} position={contextMenu.position} onClose={hideContextMenu} />
@@ -673,7 +742,10 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
             {pending && (
                 <UndoBar
                     token={pending.token}
-                    message={pending.kind === 'delete' ? `Deleted “${pending.title}”` : pending.kind === 'trash' ? `Moved “${pending.title}” to the trash` : `Archived “${pending.title}”`}
+                    message={pending.kind === 'labels' ? pending.message
+                        : pending.kind === 'delete' ? `Deleted “${pending.title}”`
+                            : pending.kind === 'trash' ? `Moved “${pending.title}” to the trash`
+                                : `Archived “${pending.title}”`}
                     onUndo={undoPending}
                     onExpire={expirePending}
                 />

@@ -12,16 +12,19 @@
  * check and the channel plumbing). Thumbnails decrypt only once the card is
  * on screen, image types only, at most three per card.
  */
-import { memo, useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { type Task, isAttachmentsLocked, parseTaskAttachments, isTaskOverdue, formatDueShort, type TaskAttachmentRef } from '../../api/tasks';
 import { parseEncAttachment, decryptToBlobUrl } from '../../api/attachments';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { PERM, hasPerm } from '../../api/permissionBits';
 import {
-    ArchiveIcon, CheckboxCheckedIcon, CheckboxIcon, ClockIcon, LockIcon, MembersIcon, MoreVerticalIcon, PaletteIcon, PinIcon, TagIcon, WarningIcon,
+    ArchiveIcon, CheckboxCheckedIcon, CheckboxIcon, ClockIcon, GripIcon, LockIcon, MembersIcon, MoreVerticalIcon, PaletteIcon, PinIcon, SearchIcon, TagIcon, WarningIcon,
 } from '../../components/Icons';
 import { NoteLinkText } from '../../components/NoteLinkText';
 import { type NoteCard as NoteCardModel, previewRows, nearestDue } from '../model/notesModel';
+import { findRanges, searchTerms, snippetAround, type Range } from '../model/noteSearch';
+import { scheduleSearchText } from '../model/notesTiming';
+import { Highlight } from './Highlight';
 import { type NoteActions } from '../model/notesQueries';
 import { NoteBodyPreview, NoteHero } from './NoteCardContent';
 import { galleryItems, heroItems } from '../../api/noteMedia';
@@ -32,6 +35,9 @@ import { useLongPress } from './useLongPress';
 
 export const PREVIEW_ROWS = 8;
 const MAX_THUMBS = 3;
+/** Characters of context around a match in an "also matched" row, which is one
+ *  ellipsised line — much tighter than the body preview's window. */
+const FOUND_RADIUS = 40;
 
 interface NoteCardProps {
     card: NoteCardModel;
@@ -48,6 +54,15 @@ interface NoteCardProps {
     compactTools: boolean;
     /** The card registers its element so menus opened elsewhere can anchor to it. */
     registerEl: (key: string, el: HTMLElement | null) => void;
+    /** The live search text, when a search is what put this card here.
+     *  Only for marking up what matched: the query is never stored or sent.
+     */
+    query?: string;
+    /** Drag to reorder is on for this section (NoteGrid decides): show the
+     *  grip and mark the article for useDragReorder. */
+    draggable?: boolean;
+    /** The key currently being dragged, so this card can dim itself. */
+    draggingKey?: string | null;
     /** Bulk selection (useNoteSelection.tsx): absent = no selection UI. */
     selected?: boolean;
     selecting?: boolean;
@@ -75,10 +90,68 @@ function ImageThumb({ refItem, visible }: { refItem: TaskAttachmentRef; visible:
 
 function NoteCardImpl({
     card, actions, now, onOpen, onMenu, onPickColor, onPickLabels, onLabelClick, onArchive, compactTools, registerEl,
-    selected = false, selecting = false, onSelect,
+    query, draggable = false, draggingKey = null, selected = false, selecting = false, onSelect,
 }: NoteCardProps) {
     const elRef = useRef<HTMLElement | null>(null);
     const press = useLongPress(onSelect ? () => onSelect(card, { shiftKey: false }) : undefined);
+    // A press that STARTS on the grip is a drag (useDragReorder), never the
+    // long press that opens bulk selection. Cancelling immediately rather than
+    // skipping the handler keeps press.wasTouch() honest, which is what turns
+    // Android's long-press `contextmenu` into a selection instead of the menu.
+    // BOTH routes into that selection have to go: cancelling kills the timer,
+    // and this ref kills the contextmenu below. Android fires `contextmenu`
+    // after ~500 ms of a still finger, and useDragReorder only swallows it
+    // once a drag is live — which takes 5px of movement that a press-and-hold
+    // has not made yet, so a held grip opened a selection nobody asked for.
+    const gripPress = useRef(false);
+    const pressHandlers = {
+        ...press.handlers,
+        onPointerDown: (e: React.PointerEvent) => {
+            press.handlers.onPointerDown(e);
+            gripPress.current = !!(e.target as Element | null)?.closest?.('.notes-card-grip');
+            if (gripPress.current) press.handlers.onPointerCancel();
+        },
+        onPointerUp: () => { gripPress.current = false; press.handlers.onPointerUp(); },
+        onPointerCancel: () => { gripPress.current = false; press.handlers.onPointerCancel(); },
+    };
+    // Where the search matched. Derived at render and never attached to the
+    // card: notesCache.ts seals and stores whatever a NoteCard carries, and a
+    // plaintext snippet has no business in that store. A decrypt-failure
+    // marker is blanked first, exactly as noteMatches blanks it, so searching
+    // "encrypted" never marks up a note you cannot read.
+    const terms = useMemo(() => (query ? searchTerms(query) : []), [query]);
+    const readable = (t: string) => (isUndecryptable(t) ? '' : t);
+    const titleRanges = useMemo(() => findRanges(readable(card.title), terms), [card.title, terms]);
+    const tasksForHits = card.tasks;
+    // Matches the card structurally cannot show: a ticked item (previewRows
+    // folds those away), an item past the eighth, or a place on a date, which
+    // ScheduleChip draws as a bare pin with no text. Without this the card
+    // looks as though it matched nothing at all.
+    const foundElsewhere = useMemo<{ what: string; text: string; ranges: Range[] }[]>(() => {
+        if (terms.length === 0 || !tasksForHits) return [];
+        const shown = new Set(previewRows(tasksForHits, PREVIEW_ROWS).rows.map(r => r.task.id));
+        const out: { what: string; text: string; ranges: Range[] }[] = [];
+        // One line each, clipped with an ellipsis by CSS — so the row is
+        // windowed AROUND its match first. A long item whose match sits past
+        // the card's width otherwise rendered its opening words and hid the
+        // <mark>, which is the only thing the row exists to show.
+        const row = (what: string, text: string, ranges: Range[]) => {
+            const s = snippetAround(text, ranges, FOUND_RADIUS);
+            out.push({ what, text: s.text, ranges: s.ranges });
+        };
+        for (const t of tasksForHits) {
+            if (!shown.has(t.id)) {
+                const desc = isUndecryptable(t.description) ? '' : t.description;
+                const r = findRanges(desc, terms);
+                if (r.length > 0) row(t.is_completed ? 'ticked' : 'further down', desc, r);
+            }
+            const place = scheduleSearchText(t);
+            const pr = place ? findRanges(place, terms) : [];
+            if (pr.length > 0) row('a place', place, pr);
+        }
+        return out.slice(0, 3);
+    }, [terms, tasksForHits]);
+
     const unsynced = useNoteUnsynced(card.key);
     // No observer (an old WebView, jsdom) → decrypt right away rather than never.
     const [onScreen, setOnScreen] = useState(() => typeof IntersectionObserver === 'undefined');
@@ -131,10 +204,12 @@ function NoteCardImpl({
     return (
         <article
             ref={el => { elRef.current = el; registerEl(card.key, el); }}
-            className={`notes-card ${card.pinned ? 'pinned' : ''} ${selected ? 'selected' : ''}`}
+            className={`notes-card ${card.pinned ? 'pinned' : ''} ${selected ? 'selected' : ''} ${draggingKey === card.key ? 'dragging' : ''}`}
             data-selected={selected ? 'true' : undefined}
             data-color={card.color}
             data-note-key={card.key}
+            data-drag-key={draggable ? card.key : undefined}
+            data-drag-group={draggable ? (card.pinned ? 'pinned' : 'others') : undefined}
             tabIndex={0}
             role="button"
             aria-label={`${untitled ? 'Untitled note' : card.title}${card.pinned ? ', pinned' : ''}${card.archived ? ', archived' : ''}${colorName}`}
@@ -145,7 +220,7 @@ function NoteCardImpl({
                 if (onSelect && (selecting || e.shiftKey || e.ctrlKey || e.metaKey)) { onSelect(card, { shiftKey: e.shiftKey }); return; }
                 onOpen(card);
             }}
-            {...press.handlers}
+            {...pressHandlers}
             // The card itself only: Enter/Space on a control INSIDE it (pin,
             // a checkbox, a chip, the tools) bubbles here too, and must keep
             // its native activation rather than open the note.
@@ -154,6 +229,9 @@ function NoteCardImpl({
                 if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen(card); }
             }}
             onContextMenu={e => {
+                // ...unless the finger came down on the grip: that press is a
+                // drag, and Android's contextmenu for it is nobody's menu.
+                if (gripPress.current) { e.preventDefault(); return; }
                 // A long press on a touch screen is a selection, not the menu
                 // (the More button still opens that).
                 if (press.wasTouch()) { e.preventDefault(); press.fire(); return; }
@@ -174,8 +252,12 @@ function NoteCardImpl({
             )}
             <NoteHero items={hero} visible={onScreen} />
             <div className="notes-card-head">
+                {/* aria-hidden: the keyboard and screen-reader route to reordering is the
+                    card menu's Move items, as the design rules require. The title is a
+                    mouse tooltip only — inert for assistive tech on this node, by design. */}
+                {draggable && <span className="notes-card-grip" title="Drag to reorder" aria-hidden="true"><GripIcon /></span>}
                 <h3 className={`notes-card-title ${untitled ? 'untitled' : ''}`}>
-                    {untitled ? 'Untitled note' : card.title}
+                    {untitled ? 'Untitled note' : <Highlight text={card.title} ranges={titleRanges} />}
                     {card.titleEncState === 'legacy' && !titleUnreadable && (
                         <span className="tt-not-encrypted" title="Not encrypted — this title is stored as plaintext, not end-to-end encrypted."> <WarningIcon /> Not encrypted</span>
                     )}
@@ -192,7 +274,7 @@ function NoteCardImpl({
                 </button>
             </div>
 
-            <NoteBodyPreview body={card.body} />
+            <NoteBodyPreview body={card.body} terms={terms} />
             {preview === null ? (
                 <div className="notes-card-empty">Loading…</div>
             ) : preview.rows.length === 0 && preview.completedCount === 0 ? (
@@ -210,7 +292,13 @@ function NoteCardImpl({
                                 onClick={e => e.stopPropagation()}
                                 onChange={e => toggle(task, e)}
                             />
-                            <span className="notes-card-item-text"><NoteLinkText text={task.description} interactive={false} /></span>
+                            <span className="notes-card-item-text">
+                                <NoteLinkText
+                                    text={task.description}
+                                    interactive={false}
+                                    renderText={v => <Highlight text={v} ranges={findRanges(readable(v), terms)} />}
+                                />
+                            </span>
                             {task.descEncState === 'legacy' && (
                                 <span className="tt-not-encrypted" title="Not encrypted — this item was stored as plaintext, not end-to-end encrypted."><WarningIcon /> Not encrypted</span>
                             )}
@@ -231,6 +319,17 @@ function NoteCardImpl({
                     {preview.completedCount > 0 && `${preview.completedCount} completed`}
                 </div>
             )}
+            {foundElsewhere.length > 0 && (
+                <div className="notes-card-found">
+                    {foundElsewhere.map((f, i) => (
+                        <span key={i} className="notes-card-found-row">
+                            <SearchIcon />
+                            <span className="notes-card-found-what">{f.what}</span>
+                            <span className="notes-card-found-text"><Highlight text={f.text} ranges={f.ranges} /></span>
+                        </span>
+                    ))}
+                </div>
+            )}
 
             {(thumbs.length > 0 || fileCount > 0) && (
                 <div className="notes-card-thumbs">
@@ -241,7 +340,7 @@ function NoteCardImpl({
 
             <div className="notes-card-foot">
                 {card.serverName && (
-                    <span className="notes-chip shared" title={`Shared checklist in ${card.serverName}`}><MembersIcon /> {card.serverName}</span>
+                    <span className="notes-chip shared" title={`Shared checklist in ${card.serverName}`}><MembersIcon /> <Highlight text={card.serverName} ranges={findRanges(card.serverName, terms)} /></span>
                 )}
                 {/* The NOTE's own reminder first, then the soonest ITEM
                     due: two different things, so two chips. */}
@@ -265,7 +364,7 @@ function NoteCardImpl({
                         onClick={e => { e.stopPropagation(); onLabelClick(l); }}
                         onKeyDown={e => { if (e.key === 'Enter') { e.stopPropagation(); onLabelClick(l); } }}
                     >
-                        <TagIcon /> {l}
+                        <TagIcon /> <Highlight text={l} ranges={findRanges(l, terms)} />
                     </span>
                 ))}
             </div>

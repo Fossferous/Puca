@@ -3,7 +3,7 @@
  * label, Archive, and the way back to Púca. A drawer on narrow windows and
  * phones (notes.css); the owner passes `open` and the scrim closes it.
  */
-import { ArchiveIcon, BellIcon, CalendarIcon, NoteIcon, PopOutIcon, TagIcon, TrashIcon } from '../../components/Icons';
+import { ArchiveIcon, BellIcon, CalendarIcon, NoteIcon, PencilIcon, PopOutIcon, TagIcon, TrashIcon } from '../../components/Icons';
 import { isMobile } from '../../api/platform';
 import { type NoteFilter } from '../model/notesModel';
 
@@ -21,10 +21,12 @@ interface NotesRailProps {
     open: boolean;
     onClose: () => void;
     onNavigate: (to: string) => void;
+    /** Open the label manager. Absent = the Labels heading stays plain text. */
+    onEditLabels?: () => void;
     version: string;
 }
 
-export function NotesRail({ filter, labels, reminderBadge, counts, open, onClose, onNavigate, version, trashEnabled = false }: NotesRailProps) {
+export function NotesRail({ filter, labels, reminderBadge, counts, open, onClose, onNavigate, onEditLabels, version, trashEnabled = false }: NotesRailProps) {
     const go = (to: string) => { onNavigate(to); onClose(); };
     const is = (k: string) => filter.kind === k;
     return (
@@ -42,7 +44,23 @@ export function NotesRail({ filter, labels, reminderBadge, counts, open, onClose
                 <button type="button" className={`notes-rail-item ${is('calendar') ? 'active' : ''}`} onClick={() => go('/calendar')}>
                     <CalendarIcon /><span className="notes-rail-label">Calendar</span>
                 </button>
-                {labels.length > 0 && <div className="notes-rail-section">Labels</div>}
+                {labels.length > 0 && (
+                    <div className="notes-rail-section with-action">
+                        <span>Labels</span>
+                        {onEditLabels && (
+                            <button
+                                type="button"
+                                className="notes-iconbtn small"
+                                aria-label="Edit labels"
+                                title="Rename, merge or delete a label"
+                                /* Close the drawer too: on a phone the rail sits OVER the dialog. */
+                                onClick={() => { onEditLabels(); onClose(); }}
+                            >
+                                <PencilIcon />
+                            </button>
+                        )}
+                    </div>
+                )}
                 {labels.map(l => (
                     <button
                         key={l}

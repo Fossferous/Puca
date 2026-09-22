@@ -225,11 +225,17 @@ interface TaskTreeProps {
      *  absent the rendered tree is what it always was, so Púca's own Tasks
      *  view is untouched. */
     flashTaskId?: number | null;
+    /** Render an item's text as something other than the linkified default —
+     *  Púca Notes passes a search highlighter that linkifies too. Optional,
+     *  and the default renders exactly what it did before, so Púca's Tasks
+     *  view (which has no search) is untouched. Read-only rows only: the
+     *  inline editor is a real input. */
+    renderDescription?: (text: string) => ReactNode;
 }
 
 export function TaskTree({
     tasks, onToggle, onDelete, onDeleteSubtree, onEdit, onAddSubtask, onMove, onReorder, onSetDue, onSetSchedule, onSnooze, onSetAttachments,
-    myPerms, currentUserId, resolveUserName, channelId, flashTaskId = null,
+    myPerms, currentUserId, resolveUserName, channelId, flashTaskId = null, renderDescription,
 }: TaskTreeProps) {
     const [showCompleted, setShowCompleted] = useState(true);
     const [subtaskFor, setSubtaskFor] = useState<number | null>(null);
@@ -326,8 +332,14 @@ export function TaskTree({
      *  NOT text to linkify: it is shown exactly as it is. A legacy PLAINTEXT
      *  item is linkified like any other — it keeps its "Not encrypted"
      *  warning beside the link, which is the point. */
-    const describe = (task: Task) =>
-        (isUndecryptable(task.description) ? task.description : <NoteLinkText text={task.description} />);
+    // A failure marker is shown as it is; otherwise the caller's renderer
+     // wins (Púca Notes highlights a search inside the links), and with none
+     // the default is the shared link renderer both front doors use.
+    const describe = (task: Task) => {
+        if (isUndecryptable(task.description)) return task.description;
+        if (renderDescription) return renderDescription(task.description);
+        return <NoteLinkText text={task.description} />;
+    };
 
     const startEdit = (task: Task) => {
         // A failure marker is not text to edit: the editor would prefill with it

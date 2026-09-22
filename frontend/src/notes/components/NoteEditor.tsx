@@ -14,7 +14,7 @@
  * propagation (its other three editors do), so a window-level close would
  * swallow that cancel. isEditableTarget is the guard.
  */
-import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { type Task } from '../../api/tasks';
 import { currentUserIdFromToken } from '../../api/auth';
@@ -25,11 +25,14 @@ import { deleteFiles } from '../../api/listContent';
 import { fileIdsOf } from '../../api/noteMedia';
 import { TaskTree } from '../../components/TaskTree';
 import {
-    ArchiveIcon, CloseIcon, LockIcon, MembersIcon, MoreVerticalIcon, PaletteIcon, PinIcon, PlusIcon, PopOutIcon,
-    RefreshIcon, TagIcon, WarningIcon,
+    ArchiveIcon, ChevronDownIcon, ChevronUpIcon, CloseIcon, LockIcon, MembersIcon, MoreVerticalIcon, PaletteIcon, PinIcon, PlusIcon, PopOutIcon,
+    RefreshIcon, SearchIcon, TagIcon, WarningIcon,
 } from '../../components/Icons';
 import { PERM, hasPerm } from '../../api/permissionBits';
 import { MAX_ITEM_LENGTH, MAX_TITLE_LENGTH, type NoteCard } from '../model/notesModel';
+import { findRanges, searchTerms } from '../model/noteSearch';
+import { Highlight } from './Highlight';
+import { MARK_SELECTOR, useMarkCount } from './useMarkCount';
 import { type NoteActions, useNoteTasks } from '../model/notesQueries';
 import { NoteContentSection } from './NoteContentSection';
 import { ListActionsMenu } from './ListActionsMenu';
@@ -63,13 +66,18 @@ interface NoteEditorProps {
     escapeBlocked?: boolean;
     /** The one item a due notification came for: TaskTree flashes that row. */
     flashTaskId?: number | null;
+    /** The search that led here, so the note can say where it matched and
+     *  step through its matches. Display only — never stored or sent. */
+    query?: string;
 }
 
-export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPickLabels, onArchive, pucaHref, escapeBlocked = false, flashTaskId = null }: NoteEditorProps) {
+export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPickLabels, onArchive, pucaHref, escapeBlocked = false, flashTaskId = null, query }: NoteEditorProps) {
     const ref = card.ref;
     // Its own query subscription with `live` so a shared note polls while open.
     const tasksQuery = useNoteTasks(ref, { live: true });
-    const tasks: Task[] = tasksQuery.data ?? card.tasks ?? [];
+    // Memoised, not a fresh `?? []` per render: a new empty array each render
+    // would break every child memo below it (TaskTree and its rows) forever.
+    const tasks: Task[] = useMemo(() => tasksQuery.data ?? card.tasks ?? [], [tasksQuery.data, card.tasks]);
     const [newItem, setNewItem] = useState('');
     const [titleDraft, setTitleDraft] = useState(card.title);
     // A rename that landed from elsewhere (another device, a refetch) replaces
@@ -106,6 +114,29 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
     // The items as they are NOW, for a commit that runs after they changed.
     const tasksRef = useRef(tasks);
     useEffect(() => { tasksRef.current = tasks; });
+    const bodyRef = useRef<HTMLDivElement>(null);
+    // Search marks inside the open note. The count is a count of the MARKS the
+    // stepper walks, not of the ranges the model finds: collapsing TaskTree's
+    // Completed section unmounts those rows, and a model count then promised
+    // matches that prev/next could not reach.
+    const terms = useMemo(() => (query ? searchTerms(query) : []), [query]);
+    const matchCount = useMarkCount(bodyRef, terms.length > 0);
+    const [matchAt, setMatchAt] = useState(0);
+    const renderDescription = useCallback(
+        (text: string) => <Highlight text={text} ranges={terms.length > 0 && !isUndecryptable(text) ? findRanges(text, terms) : undefined} />,
+        [terms],
+    );
+    /** Scroll the nth mark into view and flag it, imperatively — the marks
+     *  are already in the DOM, so no state has to travel down to find them. */
+    const goToMatch = useCallback((index: number) => {
+        const marks = bodyRef.current?.querySelectorAll<HTMLElement>(MARK_SELECTOR);
+        if (!marks || marks.length === 0) return;
+        const at = ((index % marks.length) + marks.length) % marks.length;
+        marks.forEach(m => m.classList.remove('current'));
+        marks[at].classList.add('current');
+        marks[at].scrollIntoView({ block: 'center', behavior: 'smooth' });
+        setMatchAt(at);
+    }, []);
     const currentUserId = currentUserIdFromToken() ?? undefined;
     const isChannel = ref.kind === 'channel';
     const canCreate = !isChannel || hasPerm(card.myPerms, PERM.CREATE_TASKS);
@@ -277,11 +308,19 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                     {tasksQuery.isFetching && <span className="notes-spinner" aria-label="Refreshing" />}
                 </div>
 
+                {matchCount > 0 && (
+                    <div className="notes-editor-matches" role="status">
+                        <SearchIcon />
+                        <span>{Math.min(matchAt, matchCount - 1) + 1} of {matchCount}</span>
+                        <button type="button" className="notes-iconbtn small" aria-label="Previous match" title="Previous match" onClick={() => goToMatch(matchAt - 1)}><ChevronUpIcon /></button>
+                        <button type="button" className="notes-iconbtn small" aria-label="Next match" title="Next match" onClick={() => goToMatch(matchAt + 1)}><ChevronDownIcon /></button>
+                    </div>
+                )}
                 {titleUnreadable && (
                     <div className="notes-editor-locked"><LockIcon /> This note's title can't be read yet: {card.title}</div>
                 )}
 
-                <div className="notes-editor-body">
+                <div className="notes-editor-body" ref={bodyRef}>
                     <NoteContentSection card={card} actions={actions} tasks={tasks} tasksLoaded={!tasksQuery.isPending} undo={undo} />
                     {canCreate && (
                         <form className="notes-editor-add" onSubmit={addItem}>
@@ -319,6 +358,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                             resolveUserName={card.resolveUserName}
                             channelId={ref.id}
                             flashTaskId={flashTaskId}
+                            renderDescription={renderDescription}
                         />
                     ) : (
                         <TaskTree
@@ -335,6 +375,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                             onSnooze={onSnooze}
                             onSetAttachments={(t, refs) => void actions.setAttachments(ref, t, refs)}
                             flashTaskId={flashTaskId}
+                            renderDescription={renderDescription}
                         />
                     )}
                 </div>

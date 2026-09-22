@@ -141,6 +141,29 @@ one-line summary; this file is the full story. Versions follow
   lives only on the page you are typing on: it is never written to the
   offline copy, it starts again when an edit arrives from another device, and
   it goes when you close the note.
+- **Search shows you where it matched.** Púca Notes now highlights the words
+  you searched for in a note's title, its text and its items, shows a piece
+  of a long note around the match instead of its opening lines, and tells you
+  when a note matched something the card does not show — a ticked item, an
+  item further down the list, or a place on a date. Opening a result counts
+  its matches and steps through them. Searching still happens only on your
+  device, and a note that cannot be decrypted is never searched.
+- **Drag a note into place, and *Move to bottom*.** In list view — and on a
+  phone in either view — a note can be dragged by the grip beside its title
+  to reorder it, with a line showing where it will land. Pinned notes
+  reorder among the pinned ones. The card menu keeps *Move to top*, *Move
+  up*, *Move down* and now *Move to bottom* as well, so ordering still works
+  without a drag, on any screen. The order is the same one Púca's Tasks tab
+  bar uses, and notes hidden by a filter, by the archive or sitting in the
+  trash keep their places.
+- **Rename, merge or delete a label everywhere.** *Edit labels*, beside
+  Labels in Púca Notes' sidebar, lists your labels with how many notes
+  carry each one — archived notes included — and lets you fix a typo,
+  fold one label into another, or take one off every note at once, with
+  an Undo that puts the list — and the label view you were reading — back. Until now a label could only be changed one note at a time,
+  and a label left on an archived note could not be reached at all.
+  Labels stay encrypted with your own key: the change is one write of
+  the same sealed list, and the server still cannot read a single name.
 - **Text notes, photo notes and drawings in Púca Notes.** A note can now hold
   free text as well as (or instead of) items, and its own photos and
   drawings: take a picture with the phone's camera or pick one, or draw with

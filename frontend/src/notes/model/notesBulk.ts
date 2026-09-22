@@ -54,6 +54,12 @@ const apply = (fn: (s: NotesNoteState) => NotesNoteState) => {
 export const setColorOf = (keys: readonly string[], color: NoteColor) => apply(s => withColor(s, keys, color));
 export const setLabelOn = (keys: readonly string[], label: string, on: boolean) => apply(s => withLabel(s, keys, label, on));
 export const setArchivedOf = (keys: readonly string[], archived: boolean) => apply(s => withArchived(s, keys, archived));
+/** Put the WHOLE label map back — the Undo of a rename, merge or delete made
+ *  from the label manager. One write, one push, like every other bulk op. A
+ *  whole snapshot is right here (and wrong for lists, see reinsertList): a
+ *  rename touches every note at once, so there is no per-note rollback. */
+export const restoreLabels = (labels: Record<string, string[]>) => apply(s => ({ ...s, labels }));
+
 /** Put back exactly these notes' archive flags (Undo). */
 export const restoreArchived = (flags: Record<string, boolean>) => apply(s => {
     const next = { ...s.archived };

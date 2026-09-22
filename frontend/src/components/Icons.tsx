@@ -110,6 +110,7 @@ const LEGACY_GLYPHS: Record<string, string> = {
     PlusIcon: '➕', MinusIcon: '➖', SettingsIcon: '⚙️', LogoutIcon: '🚪',
     RefreshIcon: '🔄', ChevronDownIcon: '▼', ChevronUpIcon: '▲',
     ChevronRightIcon: '▶', ArrowLeftIcon: '←', ArrowUpCircleIcon: '🚀',
+    ArrowDownCircleIcon: '⬇️',
     CheckboxIcon: '☐', CheckboxCheckedIcon: '☑', MoreIcon: '⋯', MoreVerticalIcon: '⋮',
 
     // settings sections, templates, emoji-picker categories
@@ -1003,6 +1004,15 @@ export const ArrowUpCircleIcon = makeIcon('ArrowUpCircleIcon', <>
     <path d="m8.5 11.25 3.5-3.5 3.5 3.5" />
 </>);
 
+/** Down into the end of a list — "Move to bottom", the mirror of
+    ArrowUpCircleIcon. A plain chevron-down is already "Move down" in the same
+    menu; the two must not read as the same action. */
+export const ArrowDownCircleIcon = makeIcon('ArrowDownCircleIcon', <>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 7.75v8.5" />
+    <path d="m8.5 12.75 3.5 3.5 3.5-3.5" />
+</>);
+
 export const CheckboxIcon = makeIcon('CheckboxIcon', <>
     <rect x="3.75" y="3.75" width="16.5" height="16.5" rx="3" />
 </>);
@@ -1294,6 +1304,7 @@ export const ICONS = {
     'chevron-right': ChevronRightIcon,
     'arrow-left': ArrowLeftIcon,
     'arrow-up-circle': ArrowUpCircleIcon,
+    'arrow-down-circle': ArrowDownCircleIcon,
     checkbox: CheckboxIcon,
     'checkbox-checked': CheckboxCheckedIcon,
     more: MoreIcon,
