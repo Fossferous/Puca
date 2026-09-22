@@ -2543,6 +2543,36 @@ mod tests {
     }
 }
 
+/// The step-2 body's wire contract for "Stay signed in on this device". There
+/// is no harness that drives `login_step_2` end to end (the Notes walk does, in
+/// a browser); what can be pinned here is the part the shipping order rests on
+/// — that the flag is OPTIONAL on the wire, so every client that never sends
+/// it keeps working and gets the ordinary session.
+#[cfg(test)]
+mod login_step2_wire_tests {
+    use super::LoginStep2Request;
+
+    #[test]
+    fn a_step2_body_without_the_flag_decodes_as_an_ordinary_sign_in() {
+        // Exactly what every client before this release sends, and what the
+        // new client still sends when the box is clear (it omits the key
+        // rather than sending false). Without `#[serde(default)]` this is a
+        // 422 and nobody on an older client can sign in at all.
+        let body = r#"{"username":"alice","m_hex":"00ff","attempt_id":"att-1"}"#;
+        let r: LoginStep2Request = serde_json::from_str(body).expect("an old client's step-2 body must still decode");
+        assert!(!r.stay_signed_in, "no flag means the ordinary 24-hour session");
+    }
+
+    #[test]
+    fn a_step2_body_that_asks_for_a_long_session_gets_one() {
+        // The positive control for the test above: a decoder that ignored the
+        // key (a renamed field, a typo in the client) would read false here too.
+        let body = r#"{"username":"alice","m_hex":"00ff","attempt_id":"att-1","stay_signed_in":true}"#;
+        let r: LoginStep2Request = serde_json::from_str(body).unwrap();
+        assert!(r.stay_signed_in);
+    }
+}
+
 #[cfg(test)]
 mod path_user_id_tests {
     use super::path_user_id;
