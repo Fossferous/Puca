@@ -427,16 +427,11 @@ pub async fn receive_loop<S: NoticeSource>(
     overflow: Arc<AtomicBool>,
     stats: Arc<PipelineStats>,
 ) {
-    let mut backoff = Duration::from_millis(500);
-    // Two losses in a row with no notification between them: the connection
-    // is flapping, so pace the retries instead of spinning.
-    let mut lost_last_time = false;
+    let mut pace = LossPacing::default();
     loop {
         match src.next_payload().await {
             Ok(Some(payload)) => {
                 stats.received.fetch_add(1, Ordering::Relaxed);
-                backoff = Duration::from_millis(500);
-                lost_last_time = false;
                 match tx.try_send(payload) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => {
@@ -456,11 +451,13 @@ pub async fn receive_loop<S: NoticeSource>(
                 if tx.is_closed() {
                     return;
                 }
-                if lost_last_time {
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                // Listening already works again: sleep only when the
+                // connection is flapping, never on a loss minutes after the
+                // last (every notification waits out the sleep).
+                if let Some(wait) = pace.lost() {
+                    tokio::time::sleep(wait).await;
                 }
-                lost_last_time = true;
+                pace.listening();
             }
             Err(e) => {
                 stats.listener_errors.fetch_add(1, Ordering::Relaxed);
@@ -468,29 +465,80 @@ pub async fn receive_loop<S: NoticeSource>(
                 // once LISTEN is back costs a refetch; one never told costs a
                 // stale screen.
                 overflow.store(true, Ordering::SeqCst);
-                tracing::warn!("task events: listener error ({e}); reconnecting in {backoff:?}");
+                // Always a pause before rebuilding (the database may be
+                // down); how long depends on how recently it last failed.
+                let mut wait = pace.lost().unwrap_or(FIRST_BACKOFF);
+                tracing::warn!("task events: listener error ({e}); reconnecting in {wait:?}");
                 loop {
                     if tx.is_closed() {
                         return;
                     }
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                    tokio::time::sleep(wait).await;
                     match src.reconnect().await {
                         Ok(()) => {
                             // Everything committed before THIS point may have
                             // been missed; everything after it will be heard.
                             overflow.store(true, Ordering::SeqCst);
                             tracing::info!("task events: listening again on {EVENT_CHANNEL}");
+                            pace.listening();
                             break;
                         }
                         Err(e) => {
                             stats.listener_errors.fetch_add(1, Ordering::Relaxed);
-                            tracing::warn!("task events: reconnect failed ({e}); retrying in {backoff:?}");
+                            wait = pace.failed_again(wait);
+                            tracing::warn!("task events: reconnect failed ({e}); retrying in {wait:?}");
                         }
                     }
                 }
             }
         }
+    }
+}
+
+const FIRST_BACKOFF: Duration = Duration::from_millis(500);
+const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// A loss this soon after listening resumed means the connection is
+/// flapping. Longer apart, each loss is its own event and starts afresh.
+const FLAP_WINDOW: Duration = Duration::from_secs(30);
+
+/// Pacing for the receive loop's reconnects, judged on TIME since listening
+/// last resumed — not on whether a notification arrived in between, which on
+/// a quiet server with periodic connection cuts (idle_session_timeout, a
+/// proxy's idle cut) never happens, so every cut used to wait longer than
+/// the last, up to 30 s after LISTEN was already back.
+#[derive(Default)]
+struct LossPacing {
+    /// When listening last resumed after a loss (None: never lost).
+    resumed_at: Option<tokio::time::Instant>,
+    /// The wait the next loss inside the window gets.
+    next: Duration,
+}
+
+impl LossPacing {
+    /// A loss: how long to wait before listening again — None when this is
+    /// the first loss in a while (nothing to pace).
+    fn lost(&mut self) -> Option<Duration> {
+        let flapping = self.resumed_at.is_some_and(|t| t.elapsed() < FLAP_WINDOW);
+        if !flapping {
+            self.next = FIRST_BACKOFF;
+            return None;
+        }
+        let wait = self.next;
+        self.next = (self.next * 2).min(MAX_BACKOFF);
+        Some(wait)
+    }
+
+    /// A reconnect attempt failed after waiting `waited`: the wait before
+    /// the next one (doubling), and a later loss in the window waits longer.
+    fn failed_again(&mut self, waited: Duration) -> Duration {
+        let wait = (waited * 2).min(MAX_BACKOFF);
+        self.next = (wait * 2).min(MAX_BACKOFF);
+        wait
+    }
+
+    /// Listening again: the window starts now.
+    fn listening(&mut self) {
+        self.resumed_at = Some(tokio::time::Instant::now());
     }
 }
 
@@ -797,17 +845,48 @@ mod tests {
         reconnects: std::collections::VecDeque<Result<(), ()>>,
         reconnect_calls: Arc<AtomicU64>,
         clear_on_reconnect: Option<Arc<AtomicBool>>,
+        /// Waited out on the tokio clock before each step is answered: time
+        /// passing between one loss and the next.
+        gaps: std::collections::VecDeque<Duration>,
+        /// (asked, answered) per step, and when each reconnect was tried.
+        log: Arc<std::sync::Mutex<ScriptLog>>,
+    }
+
+    #[derive(Default)]
+    struct ScriptLog {
+        asked: Vec<tokio::time::Instant>,
+        answered: Vec<tokio::time::Instant>,
+        reconnected: Vec<tokio::time::Instant>,
+    }
+
+    fn scripted(steps: Vec<Result<Option<String>, ()>>, reconnects: Vec<Result<(), ()>>, gaps: Vec<Duration>) -> Scripted {
+        Scripted {
+            steps: steps.into(),
+            reconnects: reconnects.into(),
+            reconnect_calls: Arc::new(AtomicU64::new(0)),
+            clear_on_reconnect: None,
+            gaps: gaps.into(),
+            log: Default::default(),
+        }
     }
 
     #[async_trait::async_trait]
     impl NoticeSource for Scripted {
         async fn next_payload(&mut self) -> Result<Option<String>, sqlx::Error> {
+            self.log.lock().unwrap().asked.push(tokio::time::Instant::now());
+            if let Some(g) = self.gaps.pop_front() {
+                tokio::time::sleep(g).await;
+            }
+            if !self.steps.is_empty() {
+                self.log.lock().unwrap().answered.push(tokio::time::Instant::now());
+            }
             match self.steps.pop_front() {
                 Some(s) => s.map_err(|_| sqlx::Error::PoolTimedOut),
                 None => std::future::pending().await,
             }
         }
         async fn reconnect(&mut self) -> Result<(), sqlx::Error> {
+            self.log.lock().unwrap().reconnected.push(tokio::time::Instant::now());
             self.reconnect_calls.fetch_add(1, Ordering::SeqCst);
             if let Some(f) = &self.clear_on_reconnect {
                 f.store(false, Ordering::SeqCst);
@@ -833,6 +912,8 @@ mod tests {
             reconnects: Default::default(),
             reconnect_calls: Arc::new(AtomicU64::new(0)),
             clear_on_reconnect: None,
+            gaps: Default::default(),
+            log: Default::default(),
         };
         let calls = src.reconnect_calls.clone();
         let recv = tokio::spawn(receive_loop(src, tx, overflow.clone(), stats.clone()));
@@ -873,6 +954,8 @@ mod tests {
             reconnects: [Err(()), Ok(())].into(),
             reconnect_calls: Arc::new(AtomicU64::new(0)),
             clear_on_reconnect: Some(overflow.clone()),
+            gaps: Default::default(),
+            log: Default::default(),
         };
         let calls = src.reconnect_calls.clone();
         let recv = tokio::spawn(receive_loop(src, tx, overflow.clone(), stats.clone()));
@@ -885,6 +968,77 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2, "a failed reconnect is retried");
         assert!(overflow.load(Ordering::SeqCst), "a resync is raised AFTER listening resumed (the early one was consumed)");
         assert_eq!(stats.listener_errors.load(Ordering::Relaxed), 2, "the error and the failed reconnect");
+        recv.abort();
+    }
+
+    /// How long the loop paused between answering step `i` and asking again.
+    fn pauses(log: &ScriptLog) -> Vec<Duration> {
+        log.answered.iter().zip(log.asked.iter().skip(1)).map(|(a, b)| *b - *a).collect()
+    }
+
+    /// A server whose listening connection is cut every five minutes with
+    /// nothing written in between (idle_session_timeout, a proxy's idle cut)
+    /// is not flapping: each loss is announced and listening goes on AT
+    /// ONCE. Pacing used to count "lost twice with no notification between",
+    /// so on a quiet server every cut after the first slept 0.5 s, 1 s, 2 s
+    /// ... up to 30 s after LISTEN was already back — notifications waiting
+    /// in the socket reached streams that late, with the resync already
+    /// spent. Paused clock: the five-minute gaps cost no real time.
+    #[tokio::test(start_paused = true)]
+    async fn losses_minutes_apart_are_not_paced() {
+        let stats = Arc::new(PipelineStats::default());
+        let overflow = Arc::new(AtomicBool::new(false));
+        let (tx, _rx) = mpsc::channel::<String>(8);
+        let five = Duration::from_secs(300);
+        let src = scripted(vec![Ok(None), Ok(None), Ok(None), Ok(None)], vec![], vec![Duration::ZERO, five, five, five]);
+        let log = src.log.clone();
+        let recv = tokio::spawn(receive_loop(src, tx, overflow.clone(), stats.clone()));
+        while log.lock().unwrap().asked.len() < 5 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let p = pauses(&log.lock().unwrap());
+        assert_eq!(p, vec![Duration::ZERO; 4], "no loss minutes after the last one is slept on");
+        assert_eq!(stats.listener_errors.load(Ordering::Relaxed), 4, "every loss still counted");
+        recv.abort();
+    }
+
+    /// POSITIVE CONTROL for the one above: losses back to back ARE a
+    /// flapping connection, and the loop still paces them (0.5 s, 1 s, 2 s),
+    /// so the fix did not just delete the pacing.
+    #[tokio::test(start_paused = true)]
+    async fn losses_back_to_back_are_still_paced() {
+        let stats = Arc::new(PipelineStats::default());
+        let overflow = Arc::new(AtomicBool::new(false));
+        let (tx, _rx) = mpsc::channel::<String>(8);
+        let src = scripted(vec![Ok(None), Ok(None), Ok(None), Ok(None)], vec![], vec![]);
+        let log = src.log.clone();
+        let recv = tokio::spawn(receive_loop(src, tx, overflow.clone(), stats.clone()));
+        while log.lock().unwrap().asked.len() < 5 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let ms = |n| Duration::from_millis(n);
+        assert_eq!(pauses(&log.lock().unwrap()), vec![ms(0), ms(500), ms(1000), ms(2000)]);
+        recv.abort();
+    }
+
+    /// The same for errors: the backoff before rebuilding the listener starts
+    /// again at 0.5 s for an error that comes long after the last one, instead
+    /// of carrying on from where a failure days earlier left it.
+    #[tokio::test(start_paused = true)]
+    async fn an_error_long_after_the_last_one_starts_the_backoff_again() {
+        let stats = Arc::new(PipelineStats::default());
+        let overflow = Arc::new(AtomicBool::new(false));
+        let (tx, _rx) = mpsc::channel::<String>(8);
+        let src = scripted(vec![Err(()), Err(())], vec![Ok(()), Ok(())], vec![Duration::ZERO, Duration::from_secs(3600)]);
+        let log = src.log.clone();
+        let recv = tokio::spawn(receive_loop(src, tx, overflow.clone(), stats.clone()));
+        while log.lock().unwrap().reconnected.len() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let l = log.lock().unwrap();
+        let waited: Vec<Duration> = l.answered.iter().zip(l.reconnected.iter()).map(|(a, r)| *r - *a).collect();
+        assert_eq!(waited, vec![Duration::from_millis(500); 2], "an hour later is a fresh start");
+        drop(l);
         recv.abort();
     }
 
