@@ -22,6 +22,13 @@ one-line summary; this file is the full story. Versions follow
   instead of making another. The same holds for *Make a copy*, for pictures
   added to a note, for pictures waiting to sync, and for *Save to Notes* in
   Púca.
+- **Text typed offline no longer silently replaces newer text from another
+  device.** If you edited a note's text with no connection while the same
+  note's text was changed on another device, your offline version used to
+  overwrite theirs when the connection came back, with nothing to say so. Now
+  the note keeps the other device's text, and yours is kept as a new note
+  beside it, "*title* (offline copy)", with a message telling you. Your own
+  earlier changes to the note on the same device never count as a clash.
 - **Two devices adding pictures to one note at the same moment no longer lose
   one of them.** When two phones synced pictures into the same note at once,
   or a picture was removed on one device while another added one, the second

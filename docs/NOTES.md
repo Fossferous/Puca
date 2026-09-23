@@ -467,6 +467,11 @@ back the copy it holds (migration 069, `expect_rev` on
   add yours again on top of it. A **title** is one line and works the same way.
 - **A title being typed is no longer wiped** by a rename arriving from another
   device — it used to vanish mid-keystroke.
+- **Text typed with no connection** is judged the same way when it is finally
+  sent, but there is nobody at the field to ask any more: if the other copy
+  won, your words are kept as a new note, "*title* (offline copy)", and a
+  message says so (see *Offline*). The same happens to text that waited only
+  behind another queued change while you were online.
 - Against a server older than migration 069 nothing here appears and the last
   save wins, exactly as before.
 
@@ -506,7 +511,20 @@ back the copy it holds (migration 069, `expect_rev` on
   same item made elsewhere. A note's own text, title and pictures do not work
   that way any more — see *Two devices, one note*; a rename replayed off the
   queue is the one exception, and deliberately still wins, because refusing it
-  would throw away work done offline that nobody can get back. **A create is
+  would throw away work done offline that nobody can get back. **Text typed
+  offline is never written over newer text, and never thrown away.** It is
+  sent naming the revision you started typing on, and if the note's text was
+  changed on another device in the meantime, the note keeps that device's
+  text and yours becomes a new note beside it, called "*title* (offline
+  copy)", with a message saying so — made once, however many times the change
+  is retried. Text that is already exactly what the note holds simply counts
+  as saved. Clearing a note's text offline is the one change that cannot be
+  kept that way (there are no words to keep, and clearing theirs is what the
+  check is there to stop): it is not applied, and it is listed in the message
+  of changes that could not be saved. Your own device's changes do not count
+  as "another device" — text queued behind your own rename, picture or earlier
+  text on the same note is sent on top of them, and the device remembers them
+  across a reload (`revs` in the queue's record). **A create is
   made once.** Each create carries a random id made on this device when you
   act and repeated on every retry, so a create the server committed whose
   answer was lost (the connection dropped mid-response) is recognised when it

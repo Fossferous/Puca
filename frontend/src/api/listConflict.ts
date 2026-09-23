@@ -72,6 +72,28 @@ async function conflictFrom(err: unknown): Promise<NoteConflictError | null> {
     );
 }
 
+/** One content write this tab made and the server accepted: the revision it
+ *  named (undefined = none) and the one it produced. */
+export interface ContentWrite {
+    listId: number;
+    expectRev?: number;
+    rev: number;
+}
+
+const writeWatchers = new Set<(w: ContentWrite) => void>();
+
+/**
+ * Be told of every content write THIS tab lands (title, text or pictures).
+ * The offline outbox (notes/model/notesOutbox.ts) uses it to tell its own
+ * revision bumps from another device's: text queued on revision N, behind the
+ * device's own rename that moved the note to N+1, must not be refused as
+ * though someone else had written. Carries ids and counters only.
+ */
+export function watchContentWrites(fn: (w: ContentWrite) => void): () => void {
+    writeWatchers.add(fn);
+    return () => { writeWatchers.delete(fn); };
+}
+
 /**
  * PATCH a note's own content. Resolves to the note's NEW revision, so a run
  * of saves chains without a refetch between them — or null from a server
@@ -87,7 +109,12 @@ export async function patchListContent(listId: number, payload: Record<string, u
             { ...payload, reads_up_to: MAX_READABLE_ENVELOPE_VERSION },
         );
         const rev = answer && typeof answer === 'object' ? (answer as { content_rev?: unknown }).content_rev : undefined;
-        return typeof rev === 'number' ? rev : null;
+        if (typeof rev !== 'number') return null;
+        const expectRev = typeof payload.expect_rev === 'number' ? payload.expect_rev : undefined;
+        for (const w of writeWatchers) {
+            try { w({ listId, expectRev, rev }); } catch { /* a watcher never fails the save */ }
+        }
+        return rev;
     } catch (err) {
         const conflict = await conflictFrom(err);
         if (conflict) throw conflict;

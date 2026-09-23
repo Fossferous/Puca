@@ -27,13 +27,29 @@
  * too (the session is over; the queue waits for the same account to sign in
  * again). 5xx/429 retry a few times. Anything else — 403, 404, 409 (lost
  * access, a note deleted elsewhere, an envelope refusal) — drops the op, and
- * one toast lists what did not save, in the words the user typed.
+ * one toast lists what did not save, in the words the user typed. Two
+ * exceptions, both a note's own content losing a race with another device
+ * (a STALE 409, NoteConflictError, which is not an ApiError): a picture add
+ * or removal stays queued and retries, because an intent re-applied to the
+ * newer sidecar always converges; and text is kept as a new note (below).
  *
  * LAST WRITE WINS for item edits: the task API has no revision field, so a
  * change replayed hours later overwrites a newer edit of the SAME field made
- * elsewhere in the meantime (docs/NOTES.md says so). Pins and order are
- * replayed as intents against the server's CURRENT set, never as a stale
- * full replace.
+ * elsewhere in the meantime (docs/NOTES.md says so). A RENAME replayed off
+ * the queue is last-write-wins too, deliberately (see `renameList`). Pins
+ * and order are replayed as intents against the server's CURRENT set, never
+ * as a stale full replace.
+ *
+ * A NOTE'S TEXT IS NOT LAST-WRITE-WINS, queued or not. A replayed `setBody`
+ * names the revision the typing started from (migration 069), and when
+ * another device wrote the text in between, BOTH are kept: the note keeps
+ * the other device's text, and the words typed here become a new note beside
+ * it, "<title> (offline copy)", made once however often the op replays (its
+ * create key, `copyKey`, is minted with the op). The toast names it. The device's
+ * OWN writes are not "another device": every content write this tab lands
+ * is watched (api/listConflict.ts `watchContentWrites`), and a queued text's
+ * revision is carried forward over them before it is sent (`revs`, kept in
+ * the queue's record so it survives a reload).
  *
  * CREATES CARRY A KEY. A create the server COMMITTED whose answer was lost
  * (the connection dropped mid-response) looks exactly like one that never
@@ -70,14 +86,16 @@ import { ApiError, isDefiniteRefusal, isNetworkError } from '../../api/client';
 import { getActiveIdentity, openLocal, sealLocal, seedMatchesCurrentAccount, type Identity } from '../../api/e2ee';
 import {
     type NewTaskTiming, type Task, type TaskList, type TaskTabPref, type TaskTabRef, type TaskTimingPatch,
-    createTask, createListTask, createTaskList, renameTaskList,
+    createTask, createListTask, createTaskList, renameTaskList, openSelfTaskText,
     updateTask, updateChannelTask, updateListTask, deleteTask, moveTask, reorderTask, patchTaskTiming,
     getTaskTabPrefs, putTaskTabPrefs, isFavoriteTab, toggleFavoritePrefs, buildPrefsForOrder, taskTabKey,
 } from '../../api/tasks';
 import {
-    NoteConflictError, deleteFiles, keepHiddenSlots, restoreTaskList,
+    NoteConflictError, createTaskListWithContent, deleteFiles, keepHiddenSlots, restoreTaskList,
     setTaskListBody, setTaskListTiming, trashOrDeleteList,
 } from '../../api/listContent';
+import { type ContentWrite, watchContentWrites } from '../../api/listConflict';
+import { isUndecryptable } from '../../api/decryptMarkers';
 import { newOpKey } from '../../api/opKey';
 import { type TaskAttachmentRef } from '../../api/tasks';
 import { addNoteRefs, fileIdsOf, removeNoteRefs, uploadParkedMedia } from '../../api/noteMedia';
@@ -86,7 +104,7 @@ import { pokeTaskReminders } from '../../api/taskReminders';
 import { pushMessageToast } from '../../components/messageToastBus';
 import { beginNoteWrite, LISTS_KEY, PREFS_KEY, setQueuedNotes } from './noteBusy';
 import { idbStore, type KV } from './notesCache';
-import { noteKey, type NoteRef } from './notesModel';
+import { MAX_TITLE_LENGTH, noteKey, type NoteRef } from './notesModel';
 
 // --- Ops --------------------------------------------------------------------------
 
@@ -132,11 +150,16 @@ type OpBody =
     // NoteBodyField saves a pause after every keystroke, so a paragraph
     // typed with no connection would otherwise be dozens of ops racing to
     // overwrite each other.
-    // `expectRev` is the revision the typing STARTED from (migration 069).
-    // It is named only when the op runs INLINE: a replay off the queue drops
-    // it, exactly as `renameList` does, because refusing work done offline
-    // would throw away words nobody can get back.
-    | { k: 'setBody'; listId: number; body: string; expectRev?: number }
+    // `expectRev` is the revision the typing STARTED from (migration 069),
+    // named inline AND on replay. A replay that loses to another device's
+    // text does not throw the offline words away: they become a new note
+    // (execOp below). Absent (an older server, a note made offline, an op
+    // queued before 069) there is no check, as before.
+    // `copyKey` is that note's create key, minted with the op (random, like
+    // every create key — api/opKey.ts), so the copy is made once however
+    // often the op replays. Optional: an op queued before it existed gets a
+    // fresh key per attempt.
+    | { k: 'setBody'; listId: number; body: string; expectRev?: number; copyKey?: string }
     // Pictures and files sealed on this device (notesBlobs.ts) that still
     // have to go up. Running it uploads them, then adds the real refs to
     // whatever the server's sidecar holds THEN, naming the revision it read
@@ -191,7 +214,7 @@ export const ops = {
     setListTiming: (listId: number, title: string, patch: { dueAt?: string | null; schedule?: string | null }, what: string) =>
         withMeta({ k: 'listTiming', listId, patch }, `${what} ${q(title)}`),
     setBody: (listId: number, body: string, expectRev?: number) =>
-        withMeta({ k: 'setBody', listId, body, expectRev }, body === '' ? 'clear a note’s text' : `text ${q(body)}`),
+        withMeta({ k: 'setBody', listId, body, expectRev, copyKey: newOpKey() }, body === '' ? 'clear a note’s text' : `text ${q(body)}`),
     addMedia: (listId: number, blobIds: string[], replacing: string[], refs: TaskAttachmentRef[], what: string) =>
         withMeta({ k: 'addMedia', listId, blobIds, replacing, refs }, what),
     removeMedia: (listId: number, removing: string[], refs: TaskAttachmentRef[], what: string) =>
@@ -302,7 +325,17 @@ export async function execOp(op: OpBody, idMap: IdMap, fromQueue: boolean, parke
             const n = note(op.note);
             return patchTaskTiming({ id: r(op.taskId), channel_id: n.kind === 'channel' ? n.id : null, created_by: op.createdBy }, op.patch);
         }
-        case 'setBody': return setTaskListBody(r(op.listId), op.body, fromQueue ? undefined : op.expectRev);
+        case 'setBody': {
+            const listId = r(op.listId);
+            try {
+                return await setTaskListBody(listId, op.body, op.expectRev);
+            } catch (err) {
+                // Inline, a conflict is the editor's to show (Keep mine / Use
+                // theirs). Off the queue there is no editor to ask.
+                if (!fromQueue || !(err instanceof NoteConflictError)) throw err;
+                return keepOfflineText(op, err);
+            }
+        }
         case 'addMedia': {
             const listId = r(op.listId);
             const records = await parked.read(op.blobIds);
@@ -349,6 +382,80 @@ export async function execOp(op: OpBody, idMap: IdMap, fromQueue: boolean, parke
             return next === null ? undefined : putTaskTabPrefs(next);
         }
     }
+}
+
+/** What a replayed `setBody` answers when it kept the offline words as a
+ *  new note: that note's title, for the toast. */
+export interface OfflineCopy { offlineCopy: string }
+
+export function isOfflineCopy(v: unknown): v is OfflineCopy {
+    return typeof v === 'object' && v !== null && typeof (v as OfflineCopy).offlineCopy === 'string';
+}
+
+const COPY_SUFFIX = ' (offline copy)';
+
+/**
+ * A replayed text save lost to another device's text. Never throw the words
+ * typed here away, and never write them over theirs:
+ *  - the same text already there: nothing to do, it is saved;
+ *  - a CLEAR: there are no words to keep, and clearing theirs is what the
+ *    check exists to stop — refused, and listed in the replay's toast;
+ *  - otherwise the offline words become a NEW note beside it, under the
+ *    create key minted with the op (`copyKey`: random, never derived from
+ *    what was typed or when — api/opKey.ts), so a replay whose answer was
+ *    lost, run again, is answered with the copy already made rather than
+ *    making a second.
+ */
+async function keepOfflineText(op: Extract<OpBody, { k: 'setBody' }>, err: NoteConflictError): Promise<number | OfflineCopy> {
+    if ((err.body ?? '') === op.body) return err.contentRev;
+    if (op.body === '') throw err;
+    const opened = err.sealedTitle === null ? '' : await openSelfTaskText(err.sealedTitle);
+    const base = !opened || isUndecryptable(opened) ? 'Note' : opened;
+    const title = `${base.slice(0, MAX_TITLE_LENGTH - COPY_SUFFIX.length).trimEnd()}${COPY_SUFFIX}`;
+    await createTaskListWithContent(title, { body: op.body }, op.copyKey ?? newOpKey());
+    return { offlineCopy: title };
+}
+
+// --- The device's own revisions -----------------------------------------------------
+
+/** `l<listId>` -> [from, to] pairs: revisions THIS device moved the note
+ *  between. Keys are not integer-like, so insertion order is kept (and the
+ *  oldest note is the one trimmed). */
+export type OwnRevs = Record<string, Array<[number, number]>>;
+const OWN_REVS_PER_NOTE = 8;
+const OWN_REVS_NOTES = 64;
+
+/** Record content writes this device landed. A write that named no
+ *  revision moved the note by one, as every content write does (a sealed
+ *  value is never byte-identical twice). */
+export function addOwnRevs(revs: OwnRevs, writes: ContentWrite[]): OwnRevs {
+    if (writes.length === 0) return revs;
+    const next: OwnRevs = { ...revs };
+    for (const w of writes) {
+        const from = w.expectRev ?? w.rev - 1;
+        if (from === w.rev) continue;
+        const k = `l${w.listId}`;
+        const pairs = (next[k] ?? []).filter(([f]) => f !== from);
+        delete next[k];
+        next[k] = [...pairs, [from, w.rev] as [number, number]].slice(-OWN_REVS_PER_NOTE);
+    }
+    const keys = Object.keys(next);
+    for (const k of keys.slice(0, Math.max(0, keys.length - OWN_REVS_NOTES))) delete next[k];
+    return next;
+}
+
+/** The revision `expectRev` became through this device's OWN writes. A gap
+ *  another device made stops the walk, so a real conflict stays one. */
+export function rebaseOnOwnRevs(revs: OwnRevs[], listId: number, expectRev: number): number {
+    const step = new Map<number, number>();
+    for (const r of revs) for (const [from, to] of r[`l${listId}`] ?? []) step.set(from, to);
+    let rev = expectRev;
+    const seen = new Set<number>();
+    while (step.has(rev) && !seen.has(rev)) {
+        seen.add(rev);
+        rev = step.get(rev)!;
+    }
+    return rev;
 }
 
 /** A pin or order intent against the server's CURRENT set; null = nothing to do. */
@@ -401,9 +508,13 @@ export interface OutboxState {
     ids: IdMap;
     /** Temp ids whose create was dropped: ops naming them are dropped too. */
     dead: number[];
+    /** Revisions this device's own replayed writes moved notes between
+     *  (`rebaseOnOwnRevs`). Optional: a record saved before this existed
+     *  has none. */
+    revs?: OwnRevs;
 }
 
-const EMPTY: OutboxState = { queue: [], ids: {}, dead: [] };
+const EMPTY: OutboxState = { queue: [], ids: {}, dead: [], revs: {} };
 const RECORD = 'outbox';
 
 export interface OutboxDeps {
@@ -419,11 +530,18 @@ export interface OutboxDeps {
     /** Ciphertext waiting to be uploaded (notesBlobs.ts): a dropped op's
      *  records are deleted with it, and load() sweeps what no op names. */
     parked: ParkedStore;
+    /** Every content write this tab lands (api/listConflict.ts
+     *  `watchContentWrites`), so the device's own revision bumps are not
+     *  taken for another device's. Optional: without it nothing is rebased. */
+    watchWrites?: (fn: (w: ContentWrite) => void) => () => void;
 }
 
 export interface ReplaySummary {
     sent: number;
     dropped: NoteOp[];
+    /** Titles of the notes text typed offline was kept as, because the
+     *  note's text had been changed elsewhere meanwhile. */
+    copies: string[];
     /** Temp id -> real id, for everything created in this replay. */
     created: IdMap;
     touchedDue: boolean;
@@ -493,7 +611,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
         if (text === null) return EMPTY;
         try {
             const s = JSON.parse(text) as OutboxState;
-            return Array.isArray(s.queue) ? { queue: s.queue, ids: s.ids ?? {}, dead: s.dead ?? [] } : EMPTY;
+            return Array.isArray(s.queue) ? { queue: s.queue, ids: s.ids ?? {}, dead: s.dead ?? [], revs: s.revs ?? {} } : EMPTY;
         } catch {
             return EMPTY;
         }
@@ -554,6 +672,18 @@ export function createOutbox(deps: OutboxDeps): Outbox {
      *  and evicting one can at worst cost what this whole block prevents. */
     const sentAs = new Map<string, { listId: number; href: string }>();
     const SENT_AS_MAX = 256;
+
+    // The device's own content writes: every one this tab lands, in memory
+    // (a text save typed online, a picture added directly), and the ones a
+    // REPLAY lands, which are also persisted with the queue so a reload
+    // cannot forget them — text queued after a replay, on the revision the
+    // cache still held, is judged against them too.
+    let liveRevs: OwnRevs = {};
+    let collecting: ContentWrite[] | null = null;
+    deps.watchWrites?.(w => {
+        liveRevs = addOwnRevs(liveRevs, [w]);
+        collecting?.push(w);
+    });
 
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let backoffMs = 2_000;
@@ -713,7 +843,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
             const c = ctx();
             if (!c || !deps.online()) return undefined;
             return deps.lock(`pucaNotesOutboxReplay:${c.sub}`, async () => {
-                const summary: ReplaySummary = { sent: 0, dropped: [], created: {}, touchedDue: false };
+                const summary: ReplaySummary = { sent: 0, dropped: [], copies: [], created: {}, touchedDue: false };
                 for (;;) {
                     const state = await mutate(s => s);   // re-read: another tab may have changed it
                     const head = state.queue[0];
@@ -737,16 +867,40 @@ export function createOutbox(deps: OutboxDeps): Outbox {
                         continue;
                     }
                     const ids = { ...state.ids };
+                    // Text queued on revision N, behind this device's own
+                    // writes that moved the note to N+k, is sent as N+k: only
+                    // another device's write is a conflict.
+                    let run: NoteOp = head;
+                    if (head.k === 'setBody' && head.expectRev !== undefined) {
+                        const real = head.listId < 0 ? ids[String(head.listId)] : head.listId;
+                        if (real !== undefined) {
+                            const rebased = rebaseOnOwnRevs([state.revs ?? {}, liveRevs], real, head.expectRev);
+                            if (rebased !== head.expectRev) run = { ...head, expectRev: rebased };
+                        }
+                    }
                     const done = beginNoteWrite(busyKeyOf(head));
+                    const writes: ContentWrite[] = [];
                     try {
-                        await execTracked(head, ids, true);
+                        collecting = writes;
+                        let value: unknown;
+                        try {
+                            value = await execTracked(run, ids, true);
+                        } finally {
+                            collecting = null;
+                        }
                         summary.sent++;
+                        if (isOfflineCopy(value)) summary.copies.push(value.offlineCopy);
                         if (head.k === 'createTask' || head.k === 'createList') {
                             const real = ids[String(head.tempId)];
                             if (real !== undefined) summary.created[String(head.tempId)] = real;
                         }
                         if ((head.k === 'updateTask' && head.updates.due_at !== undefined) || head.k === 'timing' || head.k === 'listTiming' || (head.k === 'createTask' && head.timing)) summary.touchedDue = true;
-                        await mutate(s => ({ ...s, ids: { ...s.ids, ...ids }, queue: s.queue.filter(o => o.oid !== head.oid) }));
+                        await mutate(s => ({
+                            ...s,
+                            ids: { ...s.ids, ...ids },
+                            queue: s.queue.filter(o => o.oid !== head.oid),
+                            revs: addOwnRevs(s.revs ?? {}, writes),
+                        }));
                         backoffMs = 2_000;
                     } catch (err) {
                         const status = err instanceof ApiError ? err.status : undefined;
@@ -834,6 +988,11 @@ function onReplayed(summary: ReplaySummary): void {
         const what = summary.dropped.map(o => o.label).join('; ');
         pushMessageToast({ title: `${n} change${n === 1 ? '' : 's'} made offline couldn’t be saved: ${what.slice(0, 160)}` });
     }
+    if (summary.copies.length > 0) {
+        // Nothing was lost, but the user must be told where their words went.
+        const names = summary.copies.map(q).join(', ');
+        pushMessageToast({ title: `Text you wrote offline had been changed on another device meanwhile, so yours was kept as a new note: ${names.slice(0, 160)}` });
+    }
     // Re-read the truth: temp ids become real ones, and whatever the server
     // refused disappears from the screen.
     void appQc?.invalidateQueries({ queryKey: ['notes'] });
@@ -857,6 +1016,7 @@ export const appOutbox = createOutbox({
     lock: webLock,
     onReplayed,
     parked: appParkedStore,
+    watchWrites: watchContentWrites,
 });
 
 /** Run (or queue) one note op. See the module header. */
