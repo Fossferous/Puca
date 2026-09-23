@@ -215,6 +215,7 @@ node e2e/mobile-walk2.mjs <outdir> <user> <pass>      # server/channel/checklist
 node e2e/mobile-walk3.mjs <outdir> <user> <pass>      # content surfaces, emoji, settings
 node e2e/mobile-voice-test.mjs <outdir>               # voice panel + drawer behavior (+ asserts NO clip controls on phones)
 node e2e/clips-mobile-walk.mjs <outdir> [baseURL]     # clip approval prompt / posted clip / owner block at 390x844 (fixture harness, no login)
+node e2e/devices-mobile-walk.mjs <outdir> [baseURL]   # Devices view, both tabs, at 390x844 (fixture harness, no login)
 node e2e/desktop-regression-check.mjs <outdir>        # desktop must be unchanged
 ```
 

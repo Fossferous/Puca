@@ -1,6 +1,6 @@
 <!doctype html>
 <!--
-  390x844 coarse-pointer harness for Settings ▸ Devices.
+  390x844 coarse-pointer harness for the Devices view (DevicesView).
 
   docs/DESIGN_PHILOSOPHY.md requires new UI to survive the mobile walk, and a
   jsdom test cannot see layout at all — it has no box model, so a row that
@@ -8,14 +8,20 @@
   component in a real browser at the real width, against fixture data, so the
   CSS is what is being checked rather than the markup.
 
-  This is a LAYOUT check only. Every row renders as "could not verify" because
-  the fixtures are not really signed — there is no account seed here. That is
-  the harness, not a defect; signature behaviour is covered by
+  DevicesView replaced DevicesModal + DevicesSettings. This page imported the
+  deleted DevicesSettings.tsx for a long time afterwards: Vite answered it with
+  a 500, #root stayed empty and nothing noticed, because nothing drove it.
+  e2e/devices-mobile-walk.mjs drives it now, and fails when the view does not
+  mount.
+
+  This is a LAYOUT check only. Every row renders as unverified because the
+  fixtures are not really signed — there is no account seed here. That is the
+  harness, not a defect; signature behaviour is covered by
   src/tests/deviceIdentity.test.ts and e2e/device-attest.mjs.
 
-  Serve with the dev server, then open /e2e/devices-mobile.html and evaluate
-  `window.__devicesHarness()`. Expected: bodyScrollsHorizontally false,
-  widestElement <= viewportWidth, buttonsUnder44px empty.
+  Serve with the dev server (`npx vite --port 5175 --strictPort` in frontend/)
+  and run `node e2e/devices-mobile-walk.mjs`, or open /e2e/devices-mobile.html
+  and evaluate `window.__devicesHarness()`.
 -->
 <html lang="en">
 <head>
@@ -23,13 +29,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Devices — 390x844 harness</title>
     <style>
-        html, body { margin: 0; background: #313338; color: #dcddde;
-            font-family: system-ui, sans-serif; }
-        /* Mimic the settings panel's content column so overflow is measured
-           against the real constraint, not against an unbounded body. */
-        #root { width: 100%; max-width: 390px; padding: 12px; box-sizing: border-box; }
-        .settings-card { background: #2b2d31; border-radius: 8px; padding: 12px; }
-        .settings-description { color: #b9bbbe; font-size: 13px; }
+        html, body { margin: 0; }
     </style>
 </head>
 <body>
@@ -40,14 +40,14 @@
         const DEVICES = [
             {
                 id: 'thisDev', device_pub: 'x25519:AAA', sign_pub: 'ed25519:BBB',
-                name: 'Zeus-PC', platform: 'windows', auth_record: '{}', auth_sig: 's',
+                name: 'Desk PC', platform: 'windows', auth_record: '{}', auth_sig: 's',
                 host_enabled: false, host_policy: null, host_sig: null, lan_info: null,
                 created_at: '2026-07-28T00:00:00Z', last_seen_at: null, online: true,
             },
             {
                 id: 'phone1', device_pub: 'x25519:CCC', sign_pub: 'ed25519:DDD',
                 // A deliberately long name — the row must not push the panel wider.
-                name: 'Oppo Find X8 Pro belonging to Zeus, in the living room',
+                name: 'Oppo Find X8 Pro that lives on the charger in the living room',
                 platform: 'android', auth_record: '{}', auth_sig: 's',
                 host_enabled: false, host_policy: null, host_sig: null, lan_info: null,
                 created_at: '2026-07-28T00:00:00Z',
@@ -62,15 +62,25 @@
             },
         ];
 
+        // Every request to another origin is the API: answered here, never
+        // sent. The device list and the incoming shares are fixtures; anything
+        // else is a 404 and is RECORDED, so a view that starts depending on a
+        // new endpoint shows up in the report instead of silently rendering an
+        // error state.
+        const unstubbed = [];
+        const json = (body, status = 200) => new Response(JSON.stringify(body), {
+            status, headers: { 'content-type': 'application/json' },
+        });
         const realFetch = window.fetch.bind(window);
         window.fetch = async (input, init) => {
-            const url = typeof input === 'string' ? input : input.url;
-            if (url.includes('/devices')) {
-                return new Response(JSON.stringify({ devices: DEVICES }), {
-                    status: 200, headers: { 'content-type': 'application/json' },
-                });
-            }
-            return realFetch(input, init);
+            const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+            if (url.origin === location.origin) return realFetch(input, init);
+            if (url.pathname.endsWith('/devices')) return json({ devices: DEVICES });
+            if (url.pathname.endsWith('/shares/incoming')) return json([]);
+            // The view warms the ICE config for a faster Connect; none is needed here.
+            if (url.pathname.endsWith('/ice-config')) return json({ iceServers: [], iceTransportPolicy: 'all' });
+            unstubbed.push(`${init?.method || 'GET'} ${url.pathname}`);
+            return json({ error: 'not stubbed in devices-mobile.html' }, 404);
         };
 
         // A syntactically valid JWT so currentUserId() resolves; never sent
@@ -80,29 +90,46 @@
             sub: 42, username: 'harness', exp: Math.floor(Date.now() / 1000) + 3600,
         })}.sig`);
 
-        const [{ createRoot }, React, { DevicesSettings }] = await Promise.all([
-            import('/node_modules/react-dom/client.js').catch(() => import('react-dom/client')),
+        // The app's stylesheets in the app's order: mobile.css is imported last
+        // (main.tsx), so its coarse-pointer rules — the 44px touch targets
+        // among them — win over the component's own at equal specificity.
+        await import('/src/index.css');
+        await import('/src/App.css');
+        const [{ createRoot }, React, { DevicesView }] = await Promise.all([
+            import('react-dom/client'),
             import('react'),
-            import('/src/components/DevicesSettings.tsx'),
+            import('/src/components/DevicesView.tsx'),
         ]);
+        await import('/src/mobile.css');
 
-        createRoot(document.getElementById('root')).render(React.createElement(DevicesSettings));
+        createRoot(document.getElementById('root')).render(
+            React.createElement(DevicesView, { onClose: () => {}, onOpenSettings: () => {} }));
 
-        // Report the two things the walk actually cares about, so a checker can
-        // read them without pixel-peeping.
+        // Report what the walk checks, so it can read it without pixel-peeping.
         window.__devicesHarness = () => {
             const root = document.getElementById('root');
-            const small = [...root.querySelectorAll('button')]
-                .map(b => ({ label: b.textContent.trim(), h: Math.round(b.getBoundingClientRect().height) }))
+            const shown = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+            const small = [...root.querySelectorAll('button')].filter(shown)
+                .map(b => {
+                    const r = b.getBoundingClientRect();
+                    return { label: (b.textContent.trim() || b.getAttribute('aria-label') || b.className), w: Math.round(r.width), h: Math.round(r.height) };
+                })
                 .filter(b => b.h < 44);
+            // clientWidth, never innerWidth: under phone emulation (isMobile) a
+            // page wider than the screen WIDENS innerWidth to fit it (a 460px
+            // element: innerWidth 461, scrollWidth 461, clientWidth 390), so a
+            // check against innerWidth compares the page with itself.
+            const vw = document.documentElement.clientWidth;
             return {
-                bodyScrollsHorizontally: document.documentElement.scrollWidth > window.innerWidth,
-                widestElement: Math.max(...[...root.querySelectorAll('*')]
+                bodyScrollsHorizontally: document.documentElement.scrollWidth > vw,
+                widestElement: Math.max(0, ...[...root.querySelectorAll('*')].filter(shown)
                     .map(e => Math.round(e.getBoundingClientRect().right))),
-                viewportWidth: window.innerWidth,
+                viewportWidth: vw,
                 buttonsUnder44px: small,
+                mounted: !!root.querySelector('.devices-dashboard'),
                 unverifiedFlagged: !!root.querySelector('.device-row-unverified'),
                 deviceRows: root.querySelectorAll('.device-row').length,
+                unstubbed: [...unstubbed],
             };
         };
     </script>
