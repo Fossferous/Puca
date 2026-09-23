@@ -224,10 +224,11 @@ export function NotesPager({ pages, index, onSettle, children }: PagerProps) {
     // The page whose composer or text field holds the focus (its key).
     const [held, setHeld] = useState<string | null>(null);
     // Each page's vertical scroll position, so coming back to a list does not
-    // throw away where you were reading. Written on every vertical scroll
-    // (a plain map, so it costs nothing) rather than on unmount, whose
-    // ordering against the DOM removal that zeroes scrollTop is not ours to
-    // assume.
+    // throw away where you were reading. Written on every vertical scroll of
+    // a page that holds its grid (a plain map, so it costs nothing) rather
+    // than on unmount, whose ordering against the DOM removal that zeroes
+    // scrollTop is not ours to assume — and NOT from the scroll event that
+    // zeroing fires (see Page).
     const [tops] = useState(() => new Map<string, number>());
 
     useEffect(() => { indexRef.current = index; }, [index]);
@@ -430,7 +431,13 @@ function Page({ page, active, live, tops, children }: PageProps) {
                against the other. */
             aria-label={page.label}
             data-page={page.key}
-            onScroll={e => { tops.set(page.key, e.currentTarget.scrollTop); }}
+            /* Only a page holding its grid has a reading position. When the
+               grid goes, the emptied page is clamped to scrollTop 0 and the
+               browser reports that with a scroll event of its own, a frame
+               after React committed `live` false — recording it replaced the
+               real position with 0 every time, so a list always came back at
+               its top (measured: 240 saved, 0 restored). */
+            onScroll={e => { if (live) tops.set(page.key, e.currentTarget.scrollTop); }}
         >
             {children}
         </div>
