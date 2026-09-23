@@ -236,11 +236,16 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         photos: File[],
         drawings: { files: DrawingFiles; base: string }[],
         entries: { text: string; timing: NewTaskTiming | undefined }[],
+        // Recordings, already named voice-<n> (nameAudioFiles). Sealed and
+        // parked beside the pictures: a voice note made with no signal used
+        // to be queued WITHOUT its recording, report success, and let the
+        // composer drop the only copy of the clip.
+        audio: File[],
     ): Promise<NoteRef | null> => {
         let records: SealedMedia[] = [];
-        if (photos.length > 0 || drawings.length > 0) {
+        if (photos.length > 0 || drawings.length > 0 || audio.length > 0) {
             try {
-                records = await sealNoteMedia(photos, drawings, 0);
+                records = await sealNoteMedia(photos, drawings, 0, audio);
                 await appParkedStore.park(records);
             } catch (err) {
                 explain('keeping the picture failed', err);
@@ -266,7 +271,7 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         }
         if (records.length > 0) {
             try {
-                await sendNoteOp(ops.addMedia(list.id, records.map(r => r.id), [], [], `${mediaCountLabel(photos, drawings.length)} on a new note`));
+                await sendNoteOp(ops.addMedia(list.id, records.map(r => r.id), [], [], `${mediaCountLabel([...photos, ...audio], drawings.length)} on a new note`));
             } catch (err) {
                 explain('upload failed', err);
                 await forgetParkedMedia(records.map(r => r.id));
@@ -306,8 +311,9 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         const drawings = extra.drawing ? [{ files: extra.drawing, base: nextDrawingName([]) }] : [];
         const noteTitle = deriveContentTitle(title, {
             body, items: cleanItems, images: extra.photos?.length ?? 0, drawing: !!extra.drawing,
-            fileNames: files.map(f => f.name),
+            audio: extra.audio?.length ?? 0, fileNames: files.map(f => f.name),
         });
+        const audio = nameAudioFiles(extra.audio ?? [], []);
         // Offline, or behind a queue this must not overtake: the note is made
         // through the outbox instead. It briefly exists without its picture
         // (three ops, not one request) — which is the price of a photo note
@@ -319,12 +325,21 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         // previous page left waiting.
         await ensureOutboxLoaded();
         if (!navigator.onLine || pendingOutboxCount() > 0) {
-            return queueContentNote(noteTitle, body, photos, drawings, entries);
+            // Refs that are ALREADY uploaded cannot ride the queue: an
+            // `addMedia` op names bytes parked on this device, not files on
+            // the server. No caller passes them today; one that ever does is
+            // told so here, rather than getting a note without them.
+            if ((extra.refs?.length ?? 0) > 0) {
+                console.error('[notes] a note with already-uploaded refs cannot be queued');
+                pushMessageToast({ title: 'Couldn’t make the note without a connection — try again once you’re online' });
+                return null;
+            }
+            return queueContentNote(noteTitle, body, photos, drawings, entries, audio);
         }
         let refs: TaskAttachmentRef[] = [];
         try {
             refs = [
-                ...await uploadNoteMedia(photos, drawings, 0, nameAudioFiles(extra.audio ?? [], [])),
+                ...await uploadNoteMedia(photos, drawings, 0, audio),
                 // Already uploaded and sealed by the caller: they go into the
                 // sidecar as they are, and into the rollback below.
                 ...(extra.refs ?? []),
@@ -646,7 +661,9 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         }
         let records: SealedMedia[];
         try {
-            records = await sealNoteMedia(photos, named, kept.length, audio);
+            // Named voice-<n> against this note's sidecar, exactly as the
+            // online branch above names it.
+            records = await sealNoteMedia(photos, named, kept.length, nameAudioFiles(audio, names));
             await appParkedStore.park(records);
         } catch (err) {
             explain('keeping the picture failed', err);

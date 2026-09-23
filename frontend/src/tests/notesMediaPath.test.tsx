@@ -29,15 +29,29 @@ const H = vi.hoisted(() => ({
     forgetParkedMedia: vi.fn(async () => undefined),
     pendingOutboxCount: vi.fn(() => 0),
     ensureOutboxLoaded: vi.fn(async () => undefined),
+    sendCreateList: vi.fn(),
+    sendCreateTask: vi.fn(),
+    createTaskListWithContent: vi.fn(),
+    resealRefs: vi.fn(),
+    createListTask: vi.fn(),
 }));
 
 vi.mock('../api/noteMedia', async (orig) => {
     const real = await orig<typeof import('../api/noteMedia')>();
-    return { ...real, uploadNoteMedia: H.uploadNoteMedia, sealNoteMedia: H.sealNoteMedia };
+    return { ...real, uploadNoteMedia: H.uploadNoteMedia, sealNoteMedia: H.sealNoteMedia, resealRefs: H.resealRefs };
 });
 vi.mock('../api/listContent', async (orig) => {
     const real = await orig<typeof import('../api/listContent')>();
-    return { ...real, setTaskListAttachments: H.setTaskListAttachments, deleteFiles: H.deleteFiles };
+    return {
+        ...real,
+        setTaskListAttachments: H.setTaskListAttachments,
+        deleteFiles: H.deleteFiles,
+        createTaskListWithContent: H.createTaskListWithContent,
+    };
+});
+vi.mock('../api/tasks', async (orig) => {
+    const real = await orig<typeof import('../api/tasks')>();
+    return { ...real, createListTask: H.createListTask };
 });
 vi.mock('../notes/model/notesBlobs', async (orig) => {
     const real = await orig<typeof import('../notes/model/notesBlobs')>();
@@ -51,6 +65,8 @@ vi.mock('../notes/model/notesOutbox', async (orig) => {
         forgetParkedMedia: H.forgetParkedMedia,
         pendingOutboxCount: H.pendingOutboxCount,
         ensureOutboxLoaded: H.ensureOutboxLoaded,
+        sendCreateList: H.sendCreateList,
+        sendCreateTask: H.sendCreateTask,
     };
 });
 
@@ -58,6 +74,7 @@ import { useListContentActions, type ListContentActions } from '../notes/model/u
 import { setMessageToastSink } from '../components/messageToastBus';
 import type { NoteRef } from '../notes/model/notesModel';
 import type { TaskList } from '../api/tasks';
+import { nextAudioName } from '../api/noteMedia';
 
 const LISTS_KEY = ['notes', 'lists'];
 const keys = { lists: LISTS_KEY, tasks: (ref: NoteRef) => ['notes', 'tasks', ref.kind, ref.id] };
@@ -97,6 +114,8 @@ beforeEach(() => {
     H.sendNoteOp.mockResolvedValue({ queued: true });
     H.pendingOutboxCount.mockReturnValue(0);
     H.ensureOutboxLoaded.mockResolvedValue(undefined);
+    H.sendCreateList.mockImplementation(async (title: string) => ({ id: -5, title, created_at: '', total_tasks: 0, completed_tasks: 0 }));
+    H.createTaskListWithContent.mockImplementation(async (title: string) => ({ id: 9, title, created_at: '', total_tasks: 0, completed_tasks: 0 }));
     spy = vi.spyOn(navigator, 'onLine', 'get').mockImplementation(() => onLine);
     setMessageToastSink(() => {});
 });
@@ -166,5 +185,54 @@ describe('the count that decides is read only once the queue has loaded', () => 
         expect(H.ensureOutboxLoaded).toHaveBeenCalled();
         expect(H.uploadNoteMedia).not.toHaveBeenCalled();
         expect(H.park).toHaveBeenCalledTimes(1);
+    });
+});
+
+/**
+ * A VOICE note made offline, or behind a queue (finding 5). The queued path
+ * had no way to receive the recording: the note was queued without it,
+ * reported success, and the composer dropped the clip — gone for good.
+ */
+describe('a voice note that has to wait for the connection', () => {
+    const clip = () => new File(['rec-bytes'], 'rec.webm', { type: 'audio/webm' });
+
+    it('seals and queues the RECORDING, and the note is called a voice note', async () => {
+        onLine = false;
+        const c = await actionsFor();
+        const ref = await c.createContentNote('', [], { audio: [clip()] });
+        expect(ref).not.toBeNull();
+        expect(H.sealNoteMedia).toHaveBeenCalledTimes(1);
+        const audio = H.sealNoteMedia.mock.calls[0][3] as File[];
+        expect(audio.map(f => f.name)).toEqual([`${nextAudioName([])}.webm`]);
+        expect(H.park).toHaveBeenCalledWith([sealed]);
+        const queued = H.sendNoteOp.mock.calls.map(call => (call[0] as { k: string }).k);
+        expect(queued).toContain('addMedia');
+        expect(H.sendCreateList).toHaveBeenCalledWith('Voice note');
+    });
+
+    it('...and the same ONLINE, behind a queue it must not overtake', async () => {
+        H.pendingOutboxCount.mockReturnValue(2);
+        const c = await actionsFor();
+        expect(await c.createContentNote('', [], { audio: [clip()] })).not.toBeNull();
+        expect(H.sealNoteMedia).toHaveBeenCalledTimes(1);
+        expect((H.sealNoteMedia.mock.calls[0][3] as File[])).toHaveLength(1);
+        expect(H.uploadNoteMedia).not.toHaveBeenCalled();
+    });
+
+    it('online with nothing queued, a voice-only note is titled "Voice note" too', async () => {
+        const c = await actionsFor();
+        expect(await c.createContentNote('', [], { audio: [clip()] })).not.toBeNull();
+        expect(H.createTaskListWithContent.mock.calls[0][0]).toBe('Voice note');
+    });
+
+    it('refuses LOUDLY rather than queue a note without refs it was handed', async () => {
+        onLine = false;
+        const toasts: string[] = [];
+        setMessageToastSink(t => { toasts.push(t.title); });
+        const c = await actionsFor();
+        const ref = await c.createContentNote('Copy', [], { refs: [uploaded] });
+        expect(ref).toBeNull();
+        expect(H.sendCreateList).not.toHaveBeenCalled();
+        expect(toasts.length).toBeGreaterThan(0);
     });
 });
