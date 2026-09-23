@@ -621,16 +621,16 @@ pub async fn get_member_keys(
 #[cfg(test)]
 mod current_epoch_tests {
     use super::CURRENT_EPOCH_FOR_CALLER_SQL;
-    use sqlx::{postgres::PgPoolOptions, PgPool};
+    use sqlx::PgPool;
 
-    /// Self-skips when no throwaway database is configured, like the harnesses
-    /// in `tests/`. NEVER point this at a real database: it inserts users,
-    /// a server, a channel and channel keys, then deletes them.
+    /// Self-skips only when TEST_DATABASE_URL is unset, and fails when it is
+    /// set but unreachable (migrator::test_pool). NEVER point this at a real
+    /// database: it inserts users, a server, a channel and channel keys,
+    /// then deletes them.
     ///
     ///   TEST_DATABASE_URL=postgres://postgres@localhost:5434/db cargo test
     async fn pool() -> Option<PgPool> {
-        let url = std::env::var("TEST_DATABASE_URL").ok()?;
-        PgPoolOptions::new().max_connections(2).connect(&url).await.ok()
+        crate::migrator::test_pool(2).await
     }
 
     async fn make_user(pool: &PgPool, tag: &str) -> i32 {
@@ -681,10 +681,7 @@ mod current_epoch_tests {
     /// handler binds.
     #[tokio::test]
     async fn an_epoch_minted_for_one_member_does_not_freeze_the_others() {
-        let Some(pool) = pool().await else {
-            eprintln!("skipping: TEST_DATABASE_URL not set");
-            return;
-        };
+        let Some(pool) = pool().await else { return };
         let squatter = make_user(&pool, "squat").await;
         let victim = make_user(&pool, "victim").await;
         let newcomer = make_user(&pool, "new").await;

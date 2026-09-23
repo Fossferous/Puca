@@ -1061,19 +1061,11 @@ mod uncapped_file_tests {
     /// The real decision against a real database: strangers refused, the
     /// uploader / co-members / friends / public-server browsers / clip
     /// viewers admitted, and access ENDING when the relationship does (the
-    /// post-ban case). Skips (prints) without TEST_DATABASE_URL /
-    /// DATABASE_URL, like auth::session_tests.
+    /// post-ban case). Skips (prints) only without TEST_DATABASE_URL
+    /// (migrator::test_pool).
     #[tokio::test]
     async fn a_stranger_cannot_fetch_an_uncapped_file_but_the_people_it_is_for_can() {
-        dotenv::dotenv().ok();
-        let url = match std::env::var("TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL")) {
-            Ok(u) => u,
-            Err(_) => { println!("skipping: no database"); return; }
-        };
-        let pool = match sqlx::postgres::PgPoolOptions::new().max_connections(2).connect(&url).await {
-            Ok(p) => p,
-            Err(_) => { println!("skipping: database unreachable"); return; }
-        };
+        let Some(pool) = crate::migrator::test_pool(2).await else { return };
         // Under FILES_ENFORCE_CAP=0 every branch below admits; the pure test
         // pins that switch, this one needs the default.
         std::env::remove_var("FILES_ENFORCE_CAP");

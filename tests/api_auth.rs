@@ -3,8 +3,9 @@
 //! These tests use a real test database to verify the full auth flow.
 //! Run with: cargo test --test api_auth
 //!
-//! Note: Requires DATABASE_URL environment variable pointing to a test database.
-//! The test database should be separate from production!
+//! Needs TEST_DATABASE_URL pointing at an already-migrated THROWAWAY database
+//! (never DATABASE_URL, never a .env): skipped when it is unset, FAILED when it
+//! is set but unreachable (tests/common/mod.rs).
 
 use axum::{
     body::Body,
@@ -12,21 +13,14 @@ use axum::{
     routing::get,
     Router,
 };
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use sqlx::PgPool;
 use tower::ServiceExt;
 
-/// Create a test database pool
-/// Uses TEST_DATABASE_URL env var to avoid touching production
-async fn create_test_pool() -> Option<PgPool> {
-    let db_url = std::env::var("TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .ok()?;
+mod common;
 
-    PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&db_url)
-        .await
-        .ok()
+/// The test database pool: TEST_DATABASE_URL only (tests/common/mod.rs).
+async fn create_test_pool() -> Option<PgPool> {
+    common::test_pool(2).await
 }
 
 /// Clean up test user by username
@@ -40,15 +34,7 @@ async fn cleanup_test_user(pool: &PgPool, username: &str) {
 /// Test that we can connect to the database
 #[tokio::test]
 async fn test_database_connection() {
-    dotenv::dotenv().ok();
-
-    let pool = match create_test_pool().await {
-        Some(p) => p,
-        None => {
-            println!("Skipping test: no database connection");
-            return;
-        }
-    };
+    let Some(pool) = create_test_pool().await else { return };
 
     // Simple query to verify connection (cast so the type matches i64/INT8).
     let result: (i64,) = sqlx::query_as("SELECT 1::bigint")
@@ -62,15 +48,7 @@ async fn test_database_connection() {
 /// Test that the users table exists
 #[tokio::test]
 async fn test_users_table_exists() {
-    dotenv::dotenv().ok();
-
-    let pool = match create_test_pool().await {
-        Some(p) => p,
-        None => {
-            println!("Skipping test: no database connection");
-            return;
-        }
-    };
+    let Some(pool) = create_test_pool().await else { return };
 
     // Check if users table exists
     let result: (bool,) = sqlx::query_as(
@@ -86,15 +64,7 @@ async fn test_users_table_exists() {
 /// Test user creation and verification in database
 #[tokio::test]
 async fn test_create_and_query_user() {
-    dotenv::dotenv().ok();
-
-    let pool = match create_test_pool().await {
-        Some(p) => p,
-        None => {
-            println!("Skipping test: no database connection");
-            return;
-        }
-    };
+    let Some(pool) = create_test_pool().await else { return };
 
     let test_username = format!("test_user_{}", uuid::Uuid::new_v4());
     let test_email = format!("{}@test.com", test_username);
@@ -141,15 +111,7 @@ async fn test_create_and_query_user() {
 /// Test that duplicate usernames are rejected
 #[tokio::test]
 async fn test_duplicate_username_rejected() {
-    dotenv::dotenv().ok();
-
-    let pool = match create_test_pool().await {
-        Some(p) => p,
-        None => {
-            println!("Skipping test: no database connection");
-            return;
-        }
-    };
+    let Some(pool) = create_test_pool().await else { return };
 
     let test_username = format!("dup_test_{}", uuid::Uuid::new_v4());
 
@@ -188,8 +150,6 @@ async fn test_duplicate_username_rejected() {
 /// This demonstrates how to set up a complete test with router
 #[tokio::test]
 async fn test_api_integration_template() {
-    dotenv::dotenv().ok();
-
     // This is a placeholder showing how to set up full API tests
     // In a real test, you would:
     // 1. Create a test database
@@ -337,14 +297,7 @@ fn nothing_reads_or_writes_the_sessions_table() {
 /// succeeding rather than only on the rows' contents.
 #[tokio::test]
 async fn a_hard_user_delete_anonymises_moderation_rows_instead_of_aborting() {
-    dotenv::dotenv().ok();
-    let pool = match create_test_pool().await {
-        Some(p) => p,
-        None => {
-            println!("Skipping test: no database connection");
-            return;
-        }
-    };
+    let Some(pool) = create_test_pool().await else { return };
 
     let tag = uuid::Uuid::new_v4().to_string();
     let mk_user = |name: String| {

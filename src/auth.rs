@@ -580,18 +580,11 @@ mod session_tests {
     }
 
     /// The decision the middleware and the WS upgrade share, against a real
-    /// database. Skips (prints) without TEST_DATABASE_URL / DATABASE_URL.
+    /// database. Skips (prints) only without TEST_DATABASE_URL, and fails if
+    /// it is set but unreachable (migrator::test_pool).
     #[tokio::test]
     async fn a_revoked_session_is_refused_while_its_siblings_and_legacy_tokens_live() {
-        dotenv::dotenv().ok();
-        let url = match std::env::var("TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL")) {
-            Ok(u) => u,
-            Err(_) => { println!("skipping: no database"); return; }
-        };
-        let pool = match sqlx::postgres::PgPoolOptions::new().max_connections(2).connect(&url).await {
-            Ok(p) => p,
-            Err(_) => { println!("skipping: database unreachable"); return; }
-        };
+        let Some(pool) = crate::migrator::test_pool(2).await else { return };
         let name = format!("sess_test_{}", uuid::Uuid::new_v4());
         let (uid,): (i32,) = sqlx::query_as("INSERT INTO users (username, email, salt, verifier, created_at) VALUES ($1, $2, $3, $4, NOW()) RETURNING id")
             .bind(&name).bind(format!("{name}@test.invalid")).bind(b"s".as_ref()).bind(b"v".as_ref())

@@ -217,9 +217,10 @@ mod tests {
 }
 
 /// The handlers and the migration-066 triggers against a REAL database.
-/// Self-skips (prints "skipping") without TEST_DATABASE_URL / DATABASE_URL,
-/// like auth::session_tests; the migrator runs first so a fresh database
-/// works. Run with TEST_DATABASE_URL pointing at a THROWAWAY cluster.
+/// Self-skips (prints "skipping") only without TEST_DATABASE_URL, and fails
+/// when it is set but unreachable; migrator::test_pool migrates first so a
+/// fresh database works. Run with TEST_DATABASE_URL pointing at a THROWAWAY
+/// cluster.
 #[cfg(test)]
 mod db_tests {
     use crate::auth::Claims;
@@ -243,23 +244,7 @@ mod db_tests {
     const SNZ: &str = r#"{"v":2,"t":"self","ct":"c25vb3pl"}"#;
 
     async fn pool() -> Option<PgPool> {
-        dotenv::dotenv().ok();
-        let url = match std::env::var("TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL")) {
-            Ok(u) => u,
-            Err(_) => {
-                println!("skipping: no database");
-                return None;
-            }
-        };
-        let pool = match sqlx::postgres::PgPoolOptions::new().max_connections(4).connect(&url).await {
-            Ok(p) => p,
-            Err(_) => {
-                println!("skipping: database unreachable");
-                return None;
-            }
-        };
-        sqlx::migrate!("./migrations").run(&pool).await.expect("migrations apply");
-        Some(pool)
+        crate::migrator::test_pool(4).await
     }
 
     async fn user(pool: &PgPool, prefix: &str) -> (i64, Claims) {

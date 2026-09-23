@@ -23,29 +23,18 @@
 //!  - THE PIN: the matched-width sequence the fixed handlers now perform is
 //!    clean on the same connection.
 //!
-//! Self-skips without DATABASE_URL, like every DB test here (the Windows CI
-//! box has no Postgres). Uses a TEMP table on a single-connection pool, so it
+//! Self-skips without TEST_DATABASE_URL, like every DB test here (the Windows
+//! CI box has no Postgres), and fails when it is set but unreachable
+//! (tests/common/mod.rs). Uses a TEMP table on a single-connection pool, so it
 //! needs no migrations and cannot touch real data.
 
-use sqlx::postgres::PgPoolOptions;
-
-fn database_url() -> Option<String> {
-    std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty())
-}
+mod common;
 
 #[tokio::test]
 async fn same_sql_text_with_mismatched_widths_is_the_cold_boot_500() {
-    let Some(url) = database_url() else {
-        eprintln!("bind_width_cache: skipped (no DATABASE_URL)");
-        return;
-    };
     // ONE connection: the statement cache is per connection, and the
     // collision needs the second caller to inherit the first's statement.
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&url)
-        .await
-        .expect("connect");
+    let Some(pool) = common::test_pool(1).await else { return };
 
     // TEMP tables are per-connection, which the single-connection pool makes
     // stable — and nothing of the real schema is touched.

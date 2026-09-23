@@ -1,21 +1,17 @@
 //! Integration tests for E2EE channel-key storage and the member-generation
 //! rotation trigger (migration 015).
 //!
-//! These use a real database and self-skip when none is configured, matching
-//! the style of `api_auth.rs`. Run with a test DB:
+//! These use a real, already-migrated THROWAWAY database: skipped when
+//! TEST_DATABASE_URL is unset, FAILED when it is set but unreachable
+//! (tests/common/mod.rs). Run with a test DB:
 //!   TEST_DATABASE_URL=postgres://... cargo test --test e2ee_keys
 
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use sqlx::PgPool;
+
+mod common;
 
 async fn create_test_pool() -> Option<PgPool> {
-    let db_url = std::env::var("TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .ok()?;
-    PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&db_url)
-        .await
-        .ok()
+    common::test_pool(2).await
 }
 
 /// Create a throwaway user and return its id.
@@ -61,14 +57,7 @@ async fn generation(pool: &PgPool, server_id: &str) -> i32 {
 
 #[tokio::test]
 async fn membership_change_bumps_generation_and_purges_keys() {
-    dotenv::dotenv().ok();
-    let pool = match create_test_pool().await {
-        Some(p) => p,
-        None => {
-            println!("Skipping: no database connection");
-            return;
-        }
-    };
+    let Some(pool) = create_test_pool().await else { return };
 
     let owner = make_user(&pool, "owner").await;
     let member = make_user(&pool, "member").await;
@@ -138,14 +127,7 @@ async fn membership_change_bumps_generation_and_purges_keys() {
 
 #[tokio::test]
 async fn channel_key_upsert_round_trips() {
-    dotenv::dotenv().ok();
-    let pool = match create_test_pool().await {
-        Some(p) => p,
-        None => {
-            println!("Skipping: no database connection");
-            return;
-        }
-    };
+    let Some(pool) = create_test_pool().await else { return };
 
     let owner = make_user(&pool, "owner").await;
     let (server_id, channel_id) = make_server_channel(&pool, owner).await;
@@ -200,14 +182,7 @@ async fn channel_key_upsert_round_trips() {
 /// rotation can target a free epoch instead of colliding with the squatted one.
 #[tokio::test]
 async fn a_squatted_epoch_is_not_the_victims_current_epoch() {
-    dotenv::dotenv().ok();
-    let pool = match create_test_pool().await {
-        Some(p) => p,
-        None => {
-            println!("Skipping: no database connection");
-            return;
-        }
-    };
+    let Some(pool) = create_test_pool().await else { return };
 
     let owner = make_user(&pool, "squat_owner").await;
     let victim = make_user(&pool, "squat_victim").await;

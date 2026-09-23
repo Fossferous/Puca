@@ -707,23 +707,7 @@ mod tests {
     // --- Against a real database (skip without one) ------------------------------
 
     async fn test_pool() -> Option<(sqlx::PgPool, String)> {
-        dotenv::dotenv().ok();
-        let url = match std::env::var("TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL")) {
-            Ok(u) => u,
-            Err(_) => {
-                println!("skipping: no database");
-                return None;
-            }
-        };
-        let pool = match sqlx::postgres::PgPoolOptions::new().max_connections(8).connect(&url).await {
-            Ok(p) => p,
-            Err(_) => {
-                println!("skipping: database unreachable");
-                return None;
-            }
-        };
-        sqlx::migrate!("./migrations").run(&pool).await.expect("migrations apply");
-        Some((pool, url))
+        crate::migrator::test_database(8).await
     }
 
     async fn mk_user(pool: &sqlx::PgPool, tag: &str) -> i64 {

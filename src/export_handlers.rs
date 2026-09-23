@@ -332,20 +332,11 @@ mod tests {
     /// The whole handler against a real database: the gate, the throttle, and
     /// — the part no unit test can check — that every section's SQL is valid
     /// against the migrated schema and returns THIS user's rows and nobody
-    /// else's. Skips (prints) without TEST_DATABASE_URL / DATABASE_URL, like
-    /// auth::session_tests; the migrator is run first so a fresh database works.
+    /// else's. Skips (prints) only without TEST_DATABASE_URL; migrator::test_pool
+    /// migrates first, so a fresh database works.
     #[tokio::test]
     async fn the_export_carries_the_users_own_rows_and_only_theirs() {
-        dotenv::dotenv().ok();
-        let url = match std::env::var("TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL")) {
-            Ok(u) => u,
-            Err(_) => { println!("skipping: no database"); return; }
-        };
-        let pool = match sqlx::postgres::PgPoolOptions::new().max_connections(2).connect(&url).await {
-            Ok(p) => p,
-            Err(_) => { println!("skipping: database unreachable"); return; }
-        };
-        sqlx::migrate!("./migrations").run(&pool).await.expect("migrations apply");
+        let Some(pool) = crate::migrator::test_pool(2).await else { return };
         let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
 
         let tag = uuid::Uuid::new_v4().simple().to_string();
