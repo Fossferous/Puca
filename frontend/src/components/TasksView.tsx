@@ -574,6 +574,20 @@ export function TasksView() {
         }
     };
 
+    /** Re-read one list's items into the editor, quietly (no "Loading…"),
+     *  GUARDED like the load effect: a reply for a list the user has since
+     *  left must not land in the new list's editor. */
+    const rereadList = async (forList: number) => {
+        try {
+            const fetched = await listListTasks(forList);
+            if (selectedRef.current?.kind !== 'list' || selectedRef.current.id !== forList) return;
+            setTasks(fetched);
+            syncListCounts(forList, fetched);
+        } catch (err) {
+            console.error('Failed to reload tasks:', err);
+        }
+    };
+
     const handleToggle = async (task: Task, completed: boolean) => {
         if (selectedList === null) return;
         const original = tasks;
@@ -589,9 +603,16 @@ export function TasksView() {
             invalidateTaskScope(qc, task);
         } catch (err) {
             console.error('Failed to update task:', err);
-            if (err instanceof ApiError && err.status === 409) pushMessageToast({ title: err.message });
             setTasks(original);
             syncListCounts(selectedList.id, original);
+            if (err instanceof ApiError && err.status === 409) {
+                pushMessageToast({ title: err.message });
+                // Refused because the server holds something newer (another
+                // device's date or repeat, an advance that won the race):
+                // show it, or every retry is judged on the same stale copy
+                // and refused the same way until the user switches lists.
+                void rereadList(selectedList.id);
+            }
         }
     };
 

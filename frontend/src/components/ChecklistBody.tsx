@@ -100,6 +100,24 @@ export function ChecklistBody({
 
     useEffect(() => { loadTasks(); }, [loadTasks]);
 
+    // The latest scope, read when a quiet re-read answers: a reply for a
+    // list or channel this body no longer shows must not land in it.
+    const scopeRef = useRef({ isChannel, channelId, listId });
+    useEffect(() => { scopeRef.current = { isChannel, channelId, listId }; });
+    /** Re-read from truth WITHOUT loadTasks' "Loading…" swap (which resets
+     *  collapse and edit state — review W4-F5). */
+    const rereadQuietly = async () => {
+        const asked = { isChannel, channelId, listId };
+        try {
+            const fresh = isChannel ? await listTasks(channelId!) : await listListTasks(listId!);
+            const now = scopeRef.current;
+            if (now.isChannel !== asked.isChannel || now.channelId !== asked.channelId || now.listId !== asked.listId) return;
+            setTasks(fresh);
+        } catch (err) {
+            console.error('Failed to reload tasks:', err);
+        }
+    };
+
     // Live sync: another viewer changed this CHANNEL's checklist → refetch.
     // Personal lists are owner-only, so they get no broadcast (nothing to sync).
     useEffect(() => {
@@ -162,8 +180,14 @@ export function ChecklistBody({
             invalidateTaskScope(qc, task);
         } catch (err) {
             console.error('Failed to update task:', err);
-            if (err instanceof ApiError && err.status === 409) pushMessageToast({ title: err.message });
             setTasks(original);
+            if (err instanceof ApiError && err.status === 409) {
+                pushMessageToast({ title: err.message });
+                // Refused because the server holds something newer: show
+                // it, or every retry is judged on the same stale copy (a
+                // personal list gets no live refresh at all).
+                void rereadQuietly();
+            }
         }
     };
 
