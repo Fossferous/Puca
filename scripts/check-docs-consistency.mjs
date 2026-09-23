@@ -250,8 +250,14 @@ for (const f of ['docs/USER_GUIDE.md', 'docs/GETTING_STARTED.md']) {
 //     section, and all three shipped to users. These are the greps.
 {
     const lines = read('CHANGELOG.md').split('\n');
-    const start = lines.findIndex((l) => /^## Unreleased/.test(l));
-    if (start === -1) fail('CHANGELOG.md', 'no "## Unreleased" section — update this check if the heading changed');
+    // The NEWEST section: "## Unreleased" while a release is being assembled,
+    // and the release's own "## x.y.z — date" once the release commit has
+    // stamped it — there is no Unreleased section between that commit and the
+    // next change, and the stamped section is exactly the prose the release
+    // page is built from. Looking for Unreleased alone failed every release
+    // commit (0.9.818 was the first to run this check on one).
+    const start = lines.findIndex((l) => /^## (Unreleased|\d+\.\d+\.\d+ )/.test(l));
+    if (start === -1) fail('CHANGELOG.md', 'no "## Unreleased" or "## <version>" section — update this check if the heading changed');
     else {
         let end = lines.findIndex((l, i) => i > start && /^## /.test(l));
         if (end === -1) end = lines.length;
