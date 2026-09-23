@@ -20,7 +20,8 @@ Púca's reminders. Anything you do in one is what you see in the other.
 ## What it does
 
 - **Grid of notes** — pinned first, masonry on desktop, one column on a phone,
-  grid/list toggle. Each card shows the open items with live checkboxes,
+  grid/list toggle. One grid per **page**: *All notes* and then a page per
+  label, swiped or tabbed between (see *Pages* below). Each card shows the open items with live checkboxes,
   progress, the next due time, image thumbnails, labels and (for a shared note)
   the server it belongs to.
 - **Take a note…** — a title and items, Enter for the next item; on a phone the
@@ -190,6 +191,61 @@ Púca's reminders. Anything you do in one is what you see in the other.
   `/notes/` opens it with no network (see *Offline* below).
 - **Live** — an edit on one device shows on the others within a second or so,
   with no refresh (see *Live updates* below).
+
+## Pages: All notes, then one per label
+
+The grid is a row of **pages** you move sideways between — Google Tasks'
+lists, with Google Keep's scrolling inside each one. The first page is **All
+notes**; after it comes one page per **label**, in the same order the rail
+lists them. A **tab strip** sits above the grid, below the status banners:
+tap or click a tab, or use Left/Right (Home/End) once a tab has focus. On a
+phone every tab is a full 44px target and the strip scrolls sideways on its
+own when there are more lists than fit, keeping the selected one in view.
+
+- **Swipe** on a phone, **flick sideways on the trackpad** (or shift-scroll)
+  on a desktop. The gesture is the browser's own — the pager is a CSS
+  scroll-snap container, not a JavaScript animation — so the fling, the rubber
+  band at the ends and an interrupted swipe all behave the way everything else
+  on the device does, and a screen with animations turned off simply jumps.
+  Nothing changes while a finger is still on the glass: the list you land on
+  is decided when you let go.
+- **Dragging a note by its grip** (the dotted handle) still reorders it, and
+  never swipes: the grip claims the whole gesture, sideways drift included.
+- **Down inside a page** is what it always was: pinned notes, then the rest.
+  Each page keeps its own place in the list, so coming back to one does not
+  throw away where you were reading — even though a list you have swiped
+  away from is taken down while it is off screen (below), it is put back at
+  the same scroll position before it is drawn.
+- **The addresses do not change.** *All notes* is `/`, a label page is
+  `/label/<name>` — the same routes the rail, the label chips and every
+  existing link already use, so `…/notes/#/label/Errands` still lands on that
+  label, with no animation, and a swipe to the next list updates the address.
+  A swipe REPLACES the address rather than pushing it, so flicking through
+  four lists leaves the back button one step to take, not four. It changes
+  only which list the address names: a note tapped open while a swipe is
+  still snapping into place stays open when it lands.
+- **The rail is unchanged**: Notes and every label still navigate, and now
+  move the pager with them.
+- **Only where there is something to swipe.** With no labels there is one page
+  and neither the strip nor the pager appears. Reminders, the Calendar, the
+  Archive, the Trash and any view with something in the search box are not
+  pages: they look and behave exactly as they always have. So does a
+  `/label/<name>` address whose label no longer exists — it shows the same
+  empty "No notes labelled …" it always did rather than silently sitting on
+  All under someone else's name.
+
+Only the page you are on holds a real grid at rest. While the pager moves,
+every page that is at least partly on screen holds one too — the list you are
+swiping towards from its first sliver, and the list a tapped tab is taking you
+away from until it has slid out (it does not go blank first). A page whose
+*Take a note…* is half-typed also keeps its grid, so a trackpad flick away
+from All and back does not lose the draft. Keeping every neighbour built at
+rest would draw a note that carries a label twice — on its label page and on
+All — and decrypt its picture thumbnails twice, for every such note in the
+account. "On screen" is measured against the pager's true width, fractions of
+a pixel included: most phones and any scaled desktop are not a whole number
+of pixels wide, and a width rounded to one drifts by that fraction per page
+until, a few lists along, a neighbour counts as on screen at rest.
 
 ## How it maps onto Púca
 
@@ -1712,4 +1768,8 @@ form reads the token the server minted: ticked, about 30 days with `ls: true`;
 cleared, about 24 hours and no `ls` — each the other's control — and the
 cleared answer is still there after a sign-out; the line under the box says, in
 a browser, that Púca stays signed in too and that it takes a visit a month; on
-the phone the row is a 44px, 16px target that toggles from anywhere along it.
+the phone the row is a 44px, 16px target that toggles from anywhere along it. Its last section, the label
+pager (`frontend/e2e/notes-walk-pager.mjs`, which also runs on its own against
+a fresh user), drives the tabs, the rail and a deep link on a desktop, and on
+the phone scrolls the pager, swipes it with real touch events (held still
+mid-way, then lifted), drags a card by its grip and scrolls a page down.

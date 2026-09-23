@@ -7,6 +7,17 @@ one-line summary; this file is the full story. Versions follow
 ## Unreleased
 
 ### Added
+- **Swipe between your lists.** The notes grid is now a row of pages: *All
+  notes* first, then one page per label, with a tab strip above it. Swipe
+  sideways on a phone, flick the trackpad or click a tab on a desktop, and
+  scroll down inside a page as before, and each list keeps your place when
+  you swipe away and back. The rail still works and the addresses
+  are the same ones (`/` and `/label/<name>`), so a link to a label still
+  lands on it. A tab or the rail adds a step to the back button; a swipe does
+  not. A half-typed *Take a note…* survives a flick away and back, and
+  dragging a note by its grip still reorders it rather than swiping. With no
+  labels there is nothing to swipe between, so neither the strip nor the
+  pager appears.
 - **Stay signed in on this device.** Púca Notes' own sign-in now has a tick
   box, on by default, that keeps this device signed in for up to a year rather
   than a day, as long as it is used at least once a month. On the Notes phone

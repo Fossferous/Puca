@@ -22,6 +22,9 @@ import {
     allLabels, applyVisibleOrder, canDragReorder, canReorder, filterNotes, groupReminders, isLabelRoute, labelFromPath, moveNoteInOrder,
     reminderBadgeCount, splitPinned,
 } from '../model/notesModel';
+import {
+    ALL_PAGE_KEY, hasPageForPath, pageIndexForPath, pageRoutes, routeForIndex, type NotesPage,
+} from '../model/notesPages';
 import { type ComposeIntent, type ComposeMode, takeShare } from '../model/composeIntent';
 import { useNativeShareIn, type SharedIntoNotes } from '../native/useNativeShareIn';
 import { restoreLabels } from '../model/notesBulk';
@@ -39,6 +42,7 @@ import { LabelPicker } from '../../components/notes/LabelPicker';
 import { LabelManager } from './LabelManager';
 import { NoteEditor } from './NoteEditor';
 import { NoteGrid, type GridSection } from './NoteGrid';
+import { NotesPager, NotesPagesTabs } from './NotesPager';
 import { Popover } from '../../components/notes/Popover';
 import { QuickAdd } from './QuickAdd';
 import { RemindersView } from './RemindersView';
@@ -103,6 +107,20 @@ function sortCards(cards: NoteCard[], sort: NotesSortMode): NoteCard[] {
     else if (sort === 'edited') out.sort((a, b) => (Date.parse(b.updatedAt ?? b.createdAt ?? '') || 0) - (Date.parse(a.updatedAt ?? a.createdAt ?? '') || 0));
     else out.sort((a, b) => (Date.parse(b.createdAt ?? '') || 0) - (Date.parse(a.createdAt ?? '') || 0));
     return out;
+}
+
+/**
+ * The query of the route as the HISTORY holds it right now. NotesApp is a
+ * HashRouter, so the route, query included, is the hash. Not
+ * `useLocation().search`: React Router renders every navigation inside
+ * startTransition, so a note opened a moment ago is already in the history
+ * but not yet in the last render. Measured: with the render's query, a card
+ * clicked in the same task as a snap's end lost its note 12 times out of 12.
+ */
+function liveRouteQuery(): string {
+    const hash = window.location.hash;
+    const q = hash.indexOf('?');
+    return q < 0 ? '' : hash.slice(q);
 }
 
 interface NotesShellProps {
@@ -175,6 +193,9 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
         if (el) cardEls.current.set(key, el);
         else cardEls.current.delete(key);
     }, []);
+    /** What a pager page that is NOT the active one registers with: nothing.
+     *  A stable identity, so memo(NoteCard) can still skip renders. */
+    const forgetEl = useCallback(() => { /* not the active page */ }, []);
 
     // --- View --------------------------------------------------------------------
     const path = location.pathname;
@@ -201,6 +222,31 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     const visible = useMemo(() => sortCards(filterNotes(cards, filter), local.sort), [cards, filter, local.sort]);
     const { pinned, others } = useMemo(() => splitPinned(visible), [visible]);
     const labels = useMemo(() => allLabels(cards), [cards]);
+    // --- Pages: All notes, then one per label (model/notesPages.ts) ----------------
+    // The pager IS the grid on the routes it has pages for — `/` and
+    // `/label/<name>`. Everywhere else (Reminders, Calendar, Archive, Trash,
+    // a label that no longer exists, and any view with something in the
+    // search box) the layout is exactly what it was, because none of those is
+    // a page you can swipe to. With no labels there is one page and nothing
+    // to swipe between, so the strip and the scroller stay out of the way.
+    const pages = useMemo(() => pageRoutes(labels), [labels]);
+    const pageIndex = useMemo(() => pageIndexForPath(path, labels), [path, labels]);
+    const pagerOn = (filter.kind === 'all' || filter.kind === 'label')
+        && pages.length > 1
+        && hasPageForPath(path, labels);
+    const goToPage = useCallback((i: number) => {
+        setQueryState('');
+        navigate(routeForIndex(i, labels));
+    }, [navigate, labels]);
+    // A swipe that settled on another page: REPLACE, so a flick through four
+    // lists leaves one history entry, not four for the back button to undo.
+    // It moves the PAGE and nothing else, so the query comes along: a card
+    // tapped while the snap is still running opens its note (?note=, pushed)
+    // before the scroll settles, and a bare label address here closed that
+    // note again the moment the settle landed.
+    const onPagerSettle = useCallback((i: number) => {
+        navigate(routeForIndex(i, labels) + liveRouteQuery(), { replace: true });
+    }, [navigate, labels]);
     // How many notes carry each label, ARCHIVED INCLUDED — the label manager
     // exists because a filtered view can never reach those (filterNotes).
     const labelCounts = useMemo(() => {
@@ -252,14 +298,18 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     const openCompose = useCallback((intent: Omit<ComposeIntent, 'seq'>) => {
         composeSeq.current += 1;
         setComposeIntent({ ...intent, seq: composeSeq.current });
-        // The inline composer only exists on the grid; the phone's sheet is a
-        // portal and works from anywhere.
+        // The inline composer only exists at the top of the ALL page; the
+        // phone's sheet is a portal and works from anywhere.
         if (isCoarse()) setSheet(true);
         else {
-            if (!isGridPath(path)) { setQueryState(''); navigate('/'); }
+            // Any other view — Reminders, a label page, a search — would open
+            // a composer nobody can see, so go to All first. (Before the
+            // pager this read `!isGridPath(path)`, which let a label route
+            // through to a QuickAdd that was not rendered there at all.)
+            if (path !== '/' || query.trim()) { setQueryState(''); navigate('/'); }
             setQuickSignal(n => n + 1);
         }
-    }, [navigate, path]);
+    }, [navigate, path, query]);
     const onNativeCompose = useCallback((mode: ComposeMode) => { openCompose({ mode }); }, [openCompose]);
     const composeTaken = useCallback(() => setComposeIntent(null), []);
 
@@ -585,6 +635,53 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     const exportMd = () => { void exportNotes(cards, 'md'); };
     const exportJson = () => { void exportNotes(cards, 'json'); };
 
+    // --- One page of the pager ---------------------------------------------------------
+    // The same pipeline the single grid has always used — filterNotes, the
+    // shell's sort, splitPinned — run for the page's own filter. The ACTIVE
+    // page reuses what the shell already computed for the route, so nothing
+    // is filtered twice and the selection, the drag and the card menu keep
+    // reading exactly one list.
+    //
+    // A page that is not active is a passenger: it registers no card elements
+    // (one map, keyed by note — a neighbour would overwrite the active page's
+    // entry and anchor the colour popover to an off-screen card), offers no
+    // drag and shows no selection.
+    const pageContent = (page: NotesPage, live: boolean, active: boolean) => {
+        if (!live) return null;
+        const pageFilter: NoteFilter = page.key === ALL_PAGE_KEY ? { kind: 'all' } : { kind: 'label', label: page.label };
+        const split = active ? { pinned, others } : splitPinned(sortCards(filterNotes(cards, pageFilter), local.sort));
+        return (
+            <>
+                {page.key === ALL_PAGE_KEY
+                    /* The sheet takes the payload when it is open; the inline
+                       card is still mounted behind it on a phone. */
+                    ? <QuickAdd onCreate={createNote} openSignal={quickSignal} content={composerContent} initial={sheet ? null : composeIntent} onInitialUsed={composeTaken} />
+                    : <h1 className="notes-section-title">Label: {page.label}</h1>}
+                <NoteGrid
+                    pinned={split.pinned}
+                    others={split.others}
+                    filter={pageFilter}
+                    view={local.view}
+                    loading={loading}
+                    actions={actions}
+                    now={now}
+                    compactTools={coarse}
+                    onOpen={openNote}
+                    onMenu={onMenu}
+                    onPickColor={onPickColor}
+                    onPickLabels={onPickLabels}
+                    onLabelClick={onLabelClick}
+                    onArchive={archiveWithUndo}
+                    registerEl={active ? registerEl : forgetEl}
+                    canDrag={active && canDrag}
+                    onDropReorder={active ? onDropReorder : undefined}
+                    selected={active ? selection.selected : undefined}
+                    onSelect={active ? selection.onSelect : undefined}
+                />
+            </>
+        );
+    };
+
     const popupCard = popup && popup.kind !== 'account' ? cardsByKey.get(popup.key) ?? null : null;
     const offline = error !== null && error !== undefined && isNetworkError(error);
 
@@ -620,23 +717,29 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                     onEditLabels={() => setLabelMgr(true)}
                     version={__APP_VERSION__}
                 />
-                <main className="notes-main">
+                <main className={`notes-main ${pagerOn ? 'pager' : ''}`}>
                     <div className="notes-main-inner">
-                        {offline && (
-                            <div className="notes-status offline" role="status">
-                                <WarningIcon /> You appear to be offline — showing what was loaded last.
-                                <button type="button" onClick={() => { void actions.refreshAll(); }}>Retry</button>
-                            </div>
-                        )}
-                        <PrefsSyncBanner status={prefsSync} />
-                        {expiredOffline && <ExpiredOfflineBanner />}
-                        <OutboxBanner />
-                        {error != null && !offline && (
-                            <div className="notes-status error" role="alert">
-                                <WarningIcon /> Couldn’t load your notes: {error instanceof Error ? error.message : String(error)}
-                                <button type="button" onClick={() => { void actions.refreshAll(); }}>Retry</button>
-                            </div>
-                        )}
+                        {/* The status area, above the tab strip and outside the
+                            pager: it is about the whole account, not one list.
+                            Wrapped so it can keep the side padding the pager
+                            takes off .notes-main (notes.css). */}
+                        <div className="notes-banners">
+                            {offline && (
+                                <div className="notes-status offline" role="status">
+                                    <WarningIcon /> You appear to be offline — showing what was loaded last.
+                                    <button type="button" onClick={() => { void actions.refreshAll(); }}>Retry</button>
+                                </div>
+                            )}
+                            <PrefsSyncBanner status={prefsSync} />
+                            {expiredOffline && <ExpiredOfflineBanner />}
+                            <OutboxBanner />
+                            {error != null && !offline && (
+                                <div className="notes-status error" role="alert">
+                                    <WarningIcon /> Couldn’t load your notes: {error instanceof Error ? error.message : String(error)}
+                                    <button type="button" onClick={() => { void actions.refreshAll(); }}>Retry</button>
+                                </div>
+                            )}
+                        </div>
                         {trashView ? (
                             <TrashView content={actions.content} restoreNote={actions.restoreNote} queuedDeletes={queuedDeletes} />
                         ) : remindersView ? (
@@ -662,6 +765,13 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                                 onOpenNote={key => setParams(p => { p.set('note', key); return p; })}
                                 shortcutsEnabled={!openCard && !popup && !help && !sheet && !contextMenu && !labelMgr}
                             />
+                        ) : pagerOn ? (
+                            <>
+                                <NotesPagesTabs pages={pages} index={pageIndex} onSelect={goToPage} />
+                                <NotesPager pages={pages} index={pageIndex} onSettle={onPagerSettle}>
+                                    {pageContent}
+                                </NotesPager>
+                            </>
                         ) : (
                             <>
                                 {/* The sheet takes the payload when it is open; the inline
