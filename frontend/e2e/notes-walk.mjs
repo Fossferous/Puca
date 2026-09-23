@@ -2266,8 +2266,14 @@ await closeNote(pageB);
 // there must be ONE note.
 if (psqlDsn) {
     const countLists = () => Number(sql(`SELECT count(*) FROM task_lists l JOIN users u ON u.id = l.owner_id WHERE u.username = '${username}'`));
+    // Through the SETTLED opener (openComposerOn above), like every other
+    // composer in this walk. Waiting for the title field alone let the fill
+    // race the composer's first-frame focus: the typed title was lost and
+    // the notes were made as "Only once" and "A different intent" (read back
+    // off the grid, 2026-09-23), so the "Lost answer" card never appeared —
+    // three FAILs that said nothing about idempotent creates.
     const openComposer = async () => {
-        if (await page.locator('.notes-quickadd-collapsed').count() > 0) await page.click('.notes-quickadd-collapsed');
+        if (await page.locator('.notes-quickadd-collapsed').count() > 0) await openComposerOn(page)();
         await page.waitForSelector('.notes-quickadd-title', { timeout: 10000 });
     };
     // Back to a plain grid first: the composer is not reachable with the
