@@ -61,6 +61,12 @@ export interface Task {
      *  row sends no freshness stamp (taskCompletion.ts schedulesStamp). A
      *  refetch replaces the row and the mark with it. */
     localEdit?: boolean;
+    /** CLIENT-ONLY, never sent: which read of the server produced this row
+     *  (`<page session>:<n>`, set by listTasks/listListTasks). Tells the write
+     *  tracker whether the row can include this device's own writes
+     *  (ownWriteUnconfirmed). A row from a persisted cache carries an earlier
+     *  session's tag, which no write of this session is ever compared with. */
+    readAt?: string;
     /** E2EE state of `description`, set by listTasks/listListTasks. `legacy`
      *  (server stored plaintext) is flagged in the UI so an injected cleartext
      *  checklist item can't pose as an encrypted one (audit H-1). */
@@ -179,13 +185,72 @@ async function openChannel(channelId: number, stored: string, kind: ChannelAadKi
 export const openChannelTaskText = openChannel;
 export const openSelfTaskText = (stored: string): Promise<string> => openSelf(stored);
 
+// --- This device's own writes: the freshness stamp's blind spot ---
+//
+// A completion says how current its view is by the newest server
+// `updated_at` among the rows it sweeps (taskCompletion.ts schedulesStamp),
+// and the server refuses it when a dated row changed after that. Migration
+// 066's trigger stamps `updated_at` on almost every change — text, date,
+// repeat, attachments, a tick, a new parent — so after THIS device writes a
+// row, the copy a view holds (applied optimistically, never re-read by the
+// Tasks tab or a personal checklist) carries a stamp older than the server's,
+// and a tick sent with it reads as "this device missed a change": refused, as
+// "changed on another device", for the user's own edit.
+//
+// Every task write in the app goes through this file, so it is tracked here
+// rather than in each view: per row, how many writes are in flight and when
+// the last one finished. Every read of rows is tagged with the moment it
+// started. A row vouches for its `updated_at` again only once a read that
+// started AFTER all its writes finished has produced it. A write that failed
+// counts too (the server may have applied it and lost the answer).
+// Position-only moves are not tracked: the trigger ignores position.
+
+/** Tells this page load's read tags from a persisted cache's. */
+const PAGE_SESSION = Math.random().toString(36).slice(2, 10);
+let writeClock = 0;
+const ownWrites = new Map<number, { inFlight: number; settledAt: number }>();
+
+/** Run one write to `taskId`, recording it for ownWriteUnconfirmed. */
+function trackWrite<T>(taskId: number, send: () => Promise<T>): Promise<T> {
+    const w = ownWrites.get(taskId) ?? { inFlight: 0, settledAt: 0 };
+    w.inFlight += 1;
+    ownWrites.set(taskId, w);
+    const settle = () => { w.inFlight -= 1; w.settledAt = ++writeClock; };
+    let p: Promise<T>;
+    try {
+        p = send();
+    } catch (err) {
+        settle();
+        throw err;
+    }
+    return p.finally(settle);
+}
+
+/** Tag for rows from a read starting now (taken before the request leaves). */
+function readTag(): string {
+    return `${PAGE_SESSION}:${++writeClock}`;
+}
+
+/** Has this device written `t` since the read that produced this copy
+ *  started — or is a write of it still in flight? Then its `updated_at` may
+ *  be older than the server's for this device's own edit. */
+export function ownWriteUnconfirmed(t: Pick<Task, 'id' | 'readAt'>): boolean {
+    const w = ownWrites.get(t.id);
+    if (!w) return false;
+    if (w.inFlight > 0) return true;
+    const m = t.readAt ? /^(.*):(\d+)$/.exec(t.readAt) : null;
+    return !(m && m[1] === PAGE_SESSION && Number(m[2]) > w.settledAt);
+}
+
 export async function listTasks(channelId: number): Promise<Task[]> {
+    const readAt = readTag();
     const tasks: Task[] = await apiClient.get(`/channels/${channelId}/tasks`);
     return Promise.all(tasks.map(async (t) => {
         const wire = t.description;
         const description = await openChannel(channelId, wire, 'chan-task', t.created_by);
         return {
             ...t,
+            readAt,
             description,
             attachments: t.attachments ? await openChannel(channelId, t.attachments, 'chan-taskatt', t.created_by) : null,
             ...await openTaskTiming(t),
@@ -217,10 +282,12 @@ export async function updateChannelTask(
     /** The task's `created_by` — see sealChannel. */
     createdBy: number,
 ): Promise<void> {
-    const payload = updates.description === undefined
-        ? updates
-        : { ...updates, description: await sealChannel(channelId, updates.description, 'chan-task', createdBy) };
-    return apiClient.patch(`/tasks/${taskId}`, { ...payload, reads_up_to: MAX_READABLE_ENVELOPE_VERSION });
+    return trackWrite(taskId, async () => {
+        const payload = updates.description === undefined
+            ? updates
+            : { ...updates, description: await sealChannel(channelId, updates.description, 'chan-task', createdBy) };
+        return apiClient.patch(`/tasks/${taskId}`, { ...payload, reads_up_to: MAX_READABLE_ENVELOPE_VERSION });
+    });
 }
 
 /** Replace a channel task's attachment refs, sealed under the channel key.
@@ -232,20 +299,22 @@ export async function updateChannelTaskAttachments(
     /** The task's `created_by` — see sealChannel. */
     createdBy: number,
 ): Promise<void> {
-    const attachments = refs.length === 0
-        ? ''
-        : await sealChannel(channelId, serializeTaskAttachments(refs), 'chan-taskatt', createdBy);
-    return apiClient.patch(`/tasks/${taskId}`, { attachments, reads_up_to: MAX_READABLE_ENVELOPE_VERSION });
+    return trackWrite(taskId, async () => {
+        const attachments = refs.length === 0
+            ? ''
+            : await sealChannel(channelId, serializeTaskAttachments(refs), 'chan-taskatt', createdBy);
+        return apiClient.patch(`/tasks/${taskId}`, { attachments, reads_up_to: MAX_READABLE_ENVELOPE_VERSION });
+    });
 }
 
 // --- Shared (either scope) ---
 
 export function updateTask(taskId: number, updates: { is_completed?: boolean; description?: string; due_at?: string }): Promise<void> {
-    return apiClient.patch(`/tasks/${taskId}`, updates);
+    return trackWrite(taskId, () => apiClient.patch(`/tasks/${taskId}`, updates));
 }
 
 export function deleteTask(taskId: number): Promise<void> {
-    return apiClient.delete(`/tasks/${taskId}`);
+    return trackWrite(taskId, () => apiClient.delete(`/tasks/${taskId}`));
 }
 
 export function moveTask(taskId: number, direction: 'up' | 'down'): Promise<void> {
@@ -272,9 +341,11 @@ export function reorderTask(
     afterId: number | null,
     reparent?: { parentId: number | null },
 ): Promise<void> {
-    return apiClient.post(`/tasks/${taskId}/reorder`, reparent
+    const send = (): Promise<void> => apiClient.post(`/tasks/${taskId}/reorder`, reparent
         ? { after_id: afterId, reparent: true, parent_id: reparent.parentId }
         : { after_id: afterId });
+    // A new parent is content (the trigger stamps it); a slot is not.
+    return reparent ? trackWrite(taskId, send) : send();
 }
 
 // --- Tasks-view tab preferences (bar order + favourites) ---
@@ -410,12 +481,14 @@ export function deleteTaskList(listId: number): Promise<void> {
 }
 
 export async function listListTasks(listId: number): Promise<Task[]> {
+    const readAt = readTag();
     const tasks: Task[] = await apiClient.get(`/task-lists/${listId}/tasks`);
     return Promise.all(tasks.map(async t => {
         const wire = t.description;
         const description = await openSelf(wire);
         return {
             ...t,
+            readAt,
             description,
             attachments: t.attachments ? await openSelf(t.attachments) : null,
             ...await openTaskTiming(t),
@@ -436,20 +509,24 @@ export async function createListTask(listId: number, description: string, parent
 
 /** Update a personal-list task; descriptions are re-encrypted to self.
  *  `due_at` passes through in the clear (metadata; '' clears it). */
-export async function updateListTask(taskId: number, updates: { is_completed?: boolean; description?: string; due_at?: string }): Promise<void> {
-    const payload = updates.description === undefined
-        ? updates
-        : { ...updates, description: await sealSelf(updates.description) };
-    return apiClient.patch(`/tasks/${taskId}`, { ...payload, reads_up_to: MAX_READABLE_ENVELOPE_VERSION });
+export function updateListTask(taskId: number, updates: { is_completed?: boolean; description?: string; due_at?: string }): Promise<void> {
+    return trackWrite(taskId, async () => {
+        const payload = updates.description === undefined
+            ? updates
+            : { ...updates, description: await sealSelf(updates.description) };
+        return apiClient.patch(`/tasks/${taskId}`, { ...payload, reads_up_to: MAX_READABLE_ENVELOPE_VERSION });
+    });
 }
 
 /** Replace a personal-list task's attachment refs, sealed to self.
  *  An empty array clears the sidecar (the server maps "" to NULL). */
-export async function updateListTaskAttachments(taskId: number, refs: TaskAttachmentRef[]): Promise<void> {
-    const attachments = refs.length === 0
-        ? ''
-        : await sealSelf(serializeTaskAttachments(refs));
-    return apiClient.patch(`/tasks/${taskId}`, { attachments, reads_up_to: MAX_READABLE_ENVELOPE_VERSION });
+export function updateListTaskAttachments(taskId: number, refs: TaskAttachmentRef[]): Promise<void> {
+    return trackWrite(taskId, async () => {
+        const attachments = refs.length === 0
+            ? ''
+            : await sealSelf(serializeTaskAttachments(refs));
+        return apiClient.patch(`/tasks/${taskId}`, { attachments, reads_up_to: MAX_READABLE_ENVELOPE_VERSION });
+    });
 }
 
 // --- Pure helpers (shared by ChecklistPanel + TasksView, unit-tested) ---
@@ -994,7 +1071,13 @@ export interface TaskTimingPatch {
  * (this client understands schedules) and `reads_up_to`. A null/'' value
  * clears; an undefined one is left alone.
  */
-export async function patchTaskTiming(
+export function patchTaskTiming(
+    task: Pick<Task, 'id' | 'channel_id' | 'created_by'>, patch: TaskTimingPatch,
+): Promise<void> {
+    return trackWrite(task.id, () => sendTaskTiming(task, patch));
+}
+
+async function sendTaskTiming(
     task: Pick<Task, 'id' | 'channel_id' | 'created_by'>, patch: TaskTimingPatch,
 ): Promise<void> {
     const scope = timingScopeOf(task);

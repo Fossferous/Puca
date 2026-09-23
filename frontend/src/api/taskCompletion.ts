@@ -17,7 +17,7 @@
  * when its view is from (`expect_schedules_as_of`, see schedulesStamp), and
  * the server refuses it (409) if a dated row it depended on changed since.
  */
-import { type Task, type TaskTimingPatch, applyToggle, collectSubtreeIds, patchTaskTiming } from './tasks';
+import { type Task, type TaskTimingPatch, applyToggle, collectSubtreeIds, ownWriteUnconfirmed, patchTaskTiming } from './tasks';
 import { currentOccurrenceKey, parseSchedule, planCompletion, serializeSchedule } from './taskSchedule';
 import { ApiError } from './client';
 import { pokeTaskReminders } from './taskReminders';
@@ -58,15 +58,17 @@ function stampKey(s: string | undefined): string | null {
  * its own clock; a device clock never enters into it). undefined — send no
  * stamp, and the server does not check — when this device cannot vouch for
  * one of them: a row not created on the server yet, a row from a server
- * without stamps, or a row this device changed optimistically since the
- * server last sent it (`localEdit`), whose own write will move its stamp.
+ * without stamps, or a row this device changed since the server last sent it
+ * — optimistically in a plan (`localEdit`) or by ANY write through
+ * api/tasks.ts (ownWriteUnconfirmed: text, date, repeat, attachments, a new
+ * parent) — whose own write moved or will move its stamp.
  */
 export function schedulesStamp(tasks: Task[], ids: Iterable<number>): string | undefined {
     const byId = new Map(tasks.map(t => [t.id, t]));
     let best: { key: string; raw: string } | null = null;
     for (const id of ids) {
         const t = byId.get(id);
-        if (!t || t.id < 0 || t.localEdit) return undefined;
+        if (!t || t.id < 0 || t.localEdit || ownWriteUnconfirmed(t)) return undefined;
         const key = stampKey(t.updated_at);
         if (key === null || t.updated_at === undefined) return undefined;
         if (!best || key > best.key) best = { key, raw: t.updated_at };
@@ -86,11 +88,25 @@ function stampScope(tasks: Task[], id: number): number[] {
     return [...ids];
 }
 
+/** Did this device write a row in `scope` that the server has not sent back
+ *  since? The server's own side effects reach past the written row — a
+ *  completion sweeps down, an untick reopens every ancestor — so a write
+ *  anywhere above or below the item can have moved a stamp under it. */
+function ownWriteInScope(tasks: Task[], scope: number[]): boolean {
+    const byId = new Map(tasks.map(t => [t.id, t]));
+    return scope.some(id => {
+        const t = byId.get(id);
+        return t !== undefined && ownWriteUnconfirmed(t);
+    });
+}
+
 /** A completion's patch fields for `task`: the stamp over what its sweep
  *  reaches, and the scope that outdates it. Empty when there is no stamp. */
 export function completionStamp(tasks: Task[], task: Task): { stamp?: string; scope?: number[] } {
     const stamp = schedulesStamp(tasks, collectSubtreeIds(tasks, task.id));
-    return stamp === undefined ? {} : { stamp, scope: stampScope(tasks, task.id) };
+    if (stamp === undefined) return {};
+    const scope = stampScope(tasks, task.id);
+    return ownWriteInScope(tasks, scope) ? {} : { stamp, scope };
 }
 
 /** `next` with every row the plan changed marked as this device's edit. */
@@ -181,7 +197,8 @@ export function planToggle(
     // The advance rewrites the item's whole sealed rule from THIS device's
     // copy: the due_at swap below cannot see a rule edited elsewhere that
     // left due_at where it was, so the item's own stamp rides along too.
-    const stamp = schedulesStamp(tasks, [task.id]);
+    const ownScope = stampScope(tasks, task.id);
+    const stamp = ownWriteInScope(tasks, ownScope) ? undefined : schedulesStamp(tasks, [task.id]);
     const patch: TaskTimingPatch = {
         schedule: scheduleText,
         due_at: plan.dueAt,
@@ -196,7 +213,7 @@ export function planToggle(
         next,
         advanced: true,
         patch,
-        ...(stamp ? { scope: stampScope(tasks, task.id) } : {}),
+        ...(stamp ? { scope: ownScope } : {}),
         send: async () => {
             await patchTaskTiming(task, patch);
             pokeTaskReminders();
