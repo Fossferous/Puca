@@ -1137,7 +1137,11 @@ verify_migrations_against() {
 	local entry="$1" tarball="$2"
 	local label; label="$(label_of "$entry")"
 	local tmp; tmp="$(mktemp -d)"
-	tar xzf "$tarball" -C "$tmp" migrations
+	# Checked: this runs as an `if` condition, where errexit is off.
+	if ! tar xzf "$tarball" -C "$tmp" migrations; then
+		echo "FAIL  $label: could not extract migrations/ from $tarball"
+		rm -rf "$tmp"; return 1
+	fi
 	local tolerant=0 newest=0 v
 	if tarball_tolerates_newer_db "$tarball" "$tmp"; then tolerant=1; fi
 	for v in "$tmp"/migrations/[0-9]*_*.sql; do
@@ -1145,8 +1149,47 @@ verify_migrations_against() {
 		v="$(basename "$v")"; v="${v%%_*}"; v=$((10#$v))
 		if [ "$v" -gt "$newest" ]; then newest="$v"; fi
 	done
+	# Reading the history is a CHECKED step. It used to be a bare `$(ssh …)`
+	# whose status nothing read: this function runs as an `if` condition, so
+	# errexit is off in it, and a failed read (postgres down, a DB_NAME naming
+	# no database, sudo refused, ssh 255) left nothing on stdout, zero rows
+	# "matched", and the pre-flight printed PASS for a history nobody had seen
+	# (the rollback check, DUAL_SHIP_PREFLIGHT_ONLY, included). The remote side
+	# prints __END__ only after every step has succeeded, so a missing marker is
+	# the one signal, whatever failed and wherever.
+	#
+	# A database with no _sqlx_migrations table is its own case, on purpose: a
+	# freshly provisioned host (provision.sh makes an EMPTY database) that the
+	# backend will migrate from nothing on first start. That passes with a NOTE
+	# only where no backend is installed yet. Where one IS installed, a database
+	# with no migration history is not the one it runs on: DB_NAME is wrong, and
+	# the check would be comparing nothing.
 	local recorded
-	recorded="$(ssh_to "$entry" "sudo -u postgres psql -d $DB_NAME -t -A -c \"SELECT version, encode(checksum,'hex') FROM _sqlx_migrations ORDER BY version\"")"
+	recorded="$(ssh_to "$entry" "set -e
+		none=\$(sudo -u postgres psql -X -d $DB_NAME -v ON_ERROR_STOP=1 -t -A -c \"SELECT to_regclass('_sqlx_migrations') IS NULL\")
+		if [ \"\$none\" = t ]; then
+			if [ -e $INSTALL_DIR/$SERVICE_NAME ]; then echo __NO_TABLE_INSTALLED__; else echo __NO_TABLE__; fi
+		else
+			sudo -u postgres psql -X -d $DB_NAME -v ON_ERROR_STOP=1 -t -A -c \"SELECT version, encode(checksum,'hex') FROM _sqlx_migrations ORDER BY version\"
+		fi
+		echo __END__")" || recorded=""
+	if [ "${recorded##*$'\n'}" != "__END__" ]; then
+		echo "FAIL  $label: could not read _sqlx_migrations from database '$DB_NAME' (ssh or psql failed; its"
+		echo "      error is above). This host's migration history was NOT checked. Is postgres up, and does"
+		echo "      DB_NAME in hosts.conf name the database $SERVICE_NAME runs on?"
+		rm -rf "$tmp"; return 1
+	fi
+	recorded="${recorded%__END__}"
+	case "$recorded" in
+		__NO_TABLE__*)
+			echo "NOTE  $label: database '$DB_NAME' has no _sqlx_migrations table and no backend is installed at"
+			echo "      $INSTALL_DIR/$SERVICE_NAME: a fresh host, which the backend migrates from empty on first start."
+			rm -rf "$tmp"; return 0 ;;
+		__NO_TABLE_INSTALLED__*)
+			echo "FAIL  $label: database '$DB_NAME' has no _sqlx_migrations table, but a backend is installed at"
+			echo "      $INSTALL_DIR/$SERVICE_NAME, so it runs on some other database: fix DB_NAME in hosts.conf."
+			rm -rf "$tmp"; return 1 ;;
+	esac
 	local fails=0 ver sum f local_sum
 	while IFS='|' read -r ver sum; do
 		[ -n "$ver" ] || continue
@@ -1190,7 +1233,9 @@ cmd_backend() {
 		fi
 	done
 	if [ "$preflight_failed" -ne 0 ]; then
-		echo "REFUSING to ship: the backend would crash-loop at startup (VersionMismatch or VersionMissing)."
+		echo "REFUSING to ship: a host failed the pre-flight above. A history that could not be read"
+		echo "cannot be proved safe; one that does not match would crash-loop the backend at startup"
+		echo "(VersionMismatch or VersionMissing)."
 		echo "A checksum FAIL: build the tarball from a tree whose migrations byte-match"
 		echo "production (the long-lived main checkout — NOT a fresh clone/worktree, which"
 		echo "re-materialises line endings). A missing-version FAIL: see 'Rolling back the"

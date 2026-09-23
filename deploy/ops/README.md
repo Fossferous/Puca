@@ -228,7 +228,12 @@ on a database a newer release has already migrated:
   sets `set_ignore_missing(true)` and its `main.rs` uses `app_migrator()`. It
   still refuses a migration the tarball carries whose bytes differ from what
   the database recorded, and an applied version missing from BELOW the
-  tarball's newest (a different history, not a rollback).
+  tarball's newest (a different history, not a rollback). It also refuses a
+  host whose history it could not read at all (ssh or psql failed, postgres
+  down, a `DB_NAME` naming no database): an unread history is not a matching
+  one. A database with no `_sqlx_migrations` table passes with a `NOTE` only
+  where no backend is installed yet (a freshly provisioned host); where one
+  is, `DB_NAME` is naming the wrong database and the pre-flight refuses.
 - **0.9.815 or anything older.** Those binaries refuse to start on a newer
   database, and the pre-flight refuses them and says so. Going back to one
   means restoring the dump taken before the newer release shipped (`Restore`,
