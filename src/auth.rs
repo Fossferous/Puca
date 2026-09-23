@@ -482,7 +482,10 @@ mod tests {
         // Defence in depth: renew_if_stale is only reached AFTER validate_token
         // in the middleware, so an already-expired token can never be slid
         // forward — it must fail validation outright. (Well past the 60 s
-        // clock-skew leeway jsonwebtoken's Validation::default() allows.)
+        // clock-skew leeway jsonwebtoken's Validation::default() allows;
+        // INSIDE that minute validation passes and renew_if_stale itself
+        // refuses — see a_token_inside_the_skew_leeway_after_expiry_
+        // validates_but_is_not_renewed.)
         let c = claims_with(-3600, Utc::now().timestamp() - 7200);
         let token = jsonwebtoken::encode(
             &jsonwebtoken::Header::default(),
@@ -589,6 +592,8 @@ mod tests {
         // A month is long enough that "expired" will genuinely happen. The
         // middleware validates before it renews, so an expired long token is
         // an expired token — it cannot be slid forward by an hour or a month.
+        // (The minute of leeway before validation refuses it is covered by
+        // a_token_inside_the_skew_leeway_after_expiry_validates_but_is_not_renewed.)
         let c = long_claims_with(-3600, Utc::now().timestamp() - 7200);
         let token = jsonwebtoken::encode(
             &jsonwebtoken::Header::default(),
