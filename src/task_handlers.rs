@@ -2480,15 +2480,7 @@ mod db_tests {
     const V2: &str = r#"{"v":2,"t":"self","ct":"AAAA","n":"BBBB"}"#;
 
     async fn setup() -> Option<(Arc<AppState>, PgPool)> {
-        let Some(url) = crate::migrator::test_database_url() else {
-            println!("skipping: TEST_DATABASE_URL not set");
-            return None;
-        };
-        let pool = match sqlx::postgres::PgPoolOptions::new().max_connections(4).connect(&url).await {
-            Ok(p) => p,
-            Err(_) => { println!("skipping: database unreachable"); return None; }
-        };
-        crate::migrator::app_migrator().run(&pool).await.expect("migrations apply");
+        let pool = crate::migrator::test_pool(4).await?;
         let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
         Some((state, pool))
     }

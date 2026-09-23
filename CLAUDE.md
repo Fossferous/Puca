@@ -525,9 +525,23 @@ pointing at it (migrations apply at startup), then the harness with its env:
   `APP=http://localhost:5174` with vite started via `.claude/launch.json`'s
   `frontend-dev-alt`; the FIRST run against a cold dev server times out on
   `page.goto` (vite compiling) — rerun, do not debug.
-- `cargo test` has one DB-backed test (`auth::session_tests`) that **silently
-  passes without a database**: run it with `TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/<migrated db>`
-  once per change to the session code, and confirm it did not print "skipping".
+- `cargo test` has ~40 DB-backed tests (auth, notes/tasks, sealed blobs,
+  export, uploads, keys, `tests/*.rs`). They read **`TEST_DATABASE_URL` and
+  nothing else** — never `DATABASE_URL`, never `.env` — through
+  `migrator::test_pool` (`tests/common/mod.rs` for `tests/*.rs`). Unset, they
+  print "skipping: TEST_DATABASE_URL not set" and pass WITHOUT running; set
+  but unreachable, they FAIL. So a green run proves the database code only if
+  the variable was set: run the gate with
+  `TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/<db>` and the
+  backend stopped. A fresh database works for a FULL `cargo test`: the
+  in-crate suites migrate it through `test_pool`. `tests/common` does NOT
+  migrate, so `cargo test --test api_auth` (or any one `tests/*.rs`) on its
+  own needs a database the server or a full run has already migrated — on a
+  fresh one it fails with `relation "users" does not exist`. The tripwire
+  `no_test_reads_database_url_...` in `src/migrator.rs` fails `cargo test` if a
+  test region reads `DATABASE_URL`, calls dotenv, or opens a connection
+  without panicking on the error; product code outside `#[cfg(test)]` is
+  not scanned.
 
 ---
 

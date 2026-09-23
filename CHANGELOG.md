@@ -18,6 +18,28 @@ one-line summary; this file is the full story. Versions follow
   screen, including when the screen you were watching sleeps or is
   unplugged and another one takes its place.
 
+### For developers
+These change nothing in the app; they are about running the backend's own
+tests.
+- **A plain `cargo test` no longer touches your dev database.** Several
+  database-backed backend tests loaded `.env` and fell back to
+  `DATABASE_URL`, so in a checkout configured for a local dev database they
+  migrated it and wrote test rows into it. Every one of them now reads
+  `TEST_DATABASE_URL` and nothing else, and none loads `.env`: with only
+  `DATABASE_URL` set they skip without opening a connection. If you kept
+  `TEST_DATABASE_URL` in `.env`, export it in your shell instead.
+- **A test database that is down now fails the tests instead of skipping
+  them.** With `TEST_DATABASE_URL` set but the database stopped, misnamed or
+  refusing the password, every database-backed test used to print "skipping"
+  and pass, often after a 30-second wait each. They now fail at once and say
+  why. Unset `TEST_DATABASE_URL` to skip them on purpose. The tests inside
+  the server crate now also migrate the database first, so a full `cargo
+  test` against a fresh throwaway database no longer fails at random with
+  `relation "users" does not exist`. The separate test files in `tests/` do
+  not migrate: run one of them on its own (`cargo test --test api_auth`)
+  only against a database that the server or a full `cargo test` has
+  already migrated.
+
 ## 0.9.818 — 2026-09-23
 
 Púca Notes: swipe left and right between All notes and each label like Google Tasks' lists, and scroll each like Keep; "Stay signed in on this device" keeps the session alive for up to a year instead of a day; the Reminders tab reads properly on a phone.

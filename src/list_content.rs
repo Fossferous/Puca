@@ -301,11 +301,12 @@ mod tests {
 }
 
 /// The handlers against a real database: TEST_DATABASE_URL ONLY (skipped,
-/// with a printed line, without it). Never DATABASE_URL: these tests migrate
+/// with a printed line, without it; FAILED when it is set but unreachable).
+/// Never DATABASE_URL: these tests migrate
 /// the database, run the trash sweep (which purges expired trash for EVERY
 /// account in it) and create scratch rows, so a plain `cargo test` in a
 /// checkout configured for a dev database must not reach it
-/// (migrator::test_database_url).
+/// (migrator::test_pool).
 #[cfg(test)]
 mod db_tests {
     use super::*;
@@ -320,15 +321,7 @@ mod db_tests {
     const V3: &str = r#"{"v":3,"t":"self","ct":"EEEE","n":"FFFF"}"#;
 
     async fn setup() -> Option<(Arc<AppState>, PgPool)> {
-        let Some(url) = crate::migrator::test_database_url() else {
-            println!("skipping: TEST_DATABASE_URL not set");
-            return None;
-        };
-        let pool = match sqlx::postgres::PgPoolOptions::new().max_connections(4).connect(&url).await {
-            Ok(p) => p,
-            Err(_) => { println!("skipping: database unreachable"); return None; }
-        };
-        crate::migrator::app_migrator().run(&pool).await.expect("migrations apply");
+        let pool = crate::migrator::test_pool(4).await?;
         let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
         Some((state, pool))
     }

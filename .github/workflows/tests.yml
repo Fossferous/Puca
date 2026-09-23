@@ -268,7 +268,9 @@ jobs:
     env:
       # Only DATABASE_URL is strictly required to boot; the rest have defaults.
       # TEST_DATABASE_URL points the integration tests at the same CI DB so they
-      # actually run instead of self-skipping.
+      # actually run instead of self-skipping. It is the ONLY variable the
+      # DB-backed tests read (never DATABASE_URL): remove it and every one of
+      # them skips; point it at a database that is down and they FAIL.
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/puca
       TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/puca
       JWT_SECRET: ci-test-secret-not-for-production

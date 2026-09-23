@@ -707,23 +707,7 @@ mod tests {
     // --- Against a real database (skip without one) ------------------------------
 
     async fn test_pool() -> Option<(sqlx::PgPool, String)> {
-        dotenv::dotenv().ok();
-        let url = match std::env::var("TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL")) {
-            Ok(u) => u,
-            Err(_) => {
-                println!("skipping: no database");
-                return None;
-            }
-        };
-        let pool = match sqlx::postgres::PgPoolOptions::new().max_connections(8).connect(&url).await {
-            Ok(p) => p,
-            Err(_) => {
-                println!("skipping: database unreachable");
-                return None;
-            }
-        };
-        sqlx::migrate!("./migrations").run(&pool).await.expect("migrations apply");
-        Some((pool, url))
+        crate::migrator::test_database(8).await
     }
 
     async fn mk_user(pool: &sqlx::PgPool, tag: &str) -> i64 {
@@ -770,7 +754,8 @@ mod tests {
         sqlx::query("CREATE TRIGGER tl_probe_ev AFTER INSERT OR UPDATE OR DELETE ON tl_probe FOR EACH ROW EXECUTE FUNCTION puca_task_events_list()")
             .execute(&mut *c).await.unwrap();
         sqlx::query("INSERT INTO tl_probe VALUES (1, $1, 'secret title', NOW())").bind(owner).execute(&mut *c).await.unwrap();
-        let mine = |v: Vec<String>| v.into_iter().filter(|p| p.contains(&format!("\"u\" : {owner}")) || p.contains(&format!("\"u\":{owner}"))).collect::<Vec<_>>();
+        // "u" is the payload's last key: matching the closing brace keeps user 21 from also matching 213.
+        let mine = |v: Vec<String>| v.into_iter().filter(|p| p.contains(&format!("\"u\" : {owner}}}")) || p.contains(&format!("\"u\":{owner}}}"))).collect::<Vec<_>>();
         let got = mine(collect(&mut l, Duration::from_millis(800)).await);
         assert_eq!(got.len(), 1, "insert raises one event: {got:?}");
         assert!(!got[0].contains("secret"), "no content in a payload: {}", got[0]);
@@ -818,7 +803,9 @@ mod tests {
         }
         tx.commit().await.unwrap();
         let want = format!("{{\"l\" : {list_id}, \"u\" : {owner}}}");
-        let got: Vec<String> = collect(&mut l, Duration::from_millis(800)).await.into_iter().filter(|p| p.contains(&format!("{list_id}")) && p.contains("\"l\"")).collect();
+        // The whole id, comma included: on a fresh database list 14 must not
+        // also collect the events of lists 1428 and 1430 written by other tests.
+        let got: Vec<String> = collect(&mut l, Duration::from_millis(800)).await.into_iter().filter(|p| p.contains(&format!("\"l\" : {list_id},"))).collect();
         assert_eq!(got, vec![want.clone()], "twenty inserts in one transaction fold into one event");
         assert_eq!(parse_notice(&want), Some(Notice::ToUser(owner, TaskEvent::List(list_id))));
         let _ = sqlx::query("DELETE FROM task_lists WHERE id = $1").bind(list_id).execute(&pool).await;

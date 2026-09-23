@@ -1162,24 +1162,11 @@ mod edit_history_bound_tests {
     }
 
     /// The cap, against a REAL database, running the handler's own prune string.
-    /// Self-skips when no test database is configured (the `e2ee_keys.rs`
-    /// pattern); CI sets TEST_DATABASE_URL, so this runs there.
+    /// Self-skips only when TEST_DATABASE_URL is unset (migrator::test_pool);
+    /// CI sets it, so this runs there.
     #[tokio::test]
     async fn twenty_five_edits_leave_exactly_ten_history_rows() {
-        dotenv::dotenv().ok();
-        let Ok(url) = std::env::var("TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL"))
-        else {
-            println!("Skipping: no database connection");
-            return;
-        };
-        let Ok(pool) = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&url)
-            .await
-        else {
-            println!("Skipping: could not connect");
-            return;
-        };
+        let Some(pool) = crate::migrator::test_pool(2).await else { return };
 
         let tag = uuid::Uuid::new_v4().to_string();
         let user: (i32,) = sqlx::query_as(
