@@ -1702,7 +1702,7 @@ fn run(
                     // outstanding, so a perfectly still desktop still gets its
                     // IDR — the exact case a resumed Android controller needs.
                     eprintln!("[stream] keyframe requested by controller");
-                    want_keyframe = true;
+                    on_keyframe_request(&mut want_keyframe, switch_started.is_some(), last_frame.is_some(), &mut stranded_repaints);
                 }
             }
         }
@@ -1824,7 +1824,7 @@ fn run(
                     }
                     str0m::Event::KeyframeRequest(_) => {
                         eprintln!("[stream] keyframe requested by peer");
-                        want_keyframe = true;
+                        on_keyframe_request(&mut want_keyframe, switch_started.is_some(), last_frame.is_some(), &mut stranded_repaints);
                     }
                     str0m::Event::ChannelOpen(cid, name) => {
                         eprintln!("[stream] channel opened: {} (id: {:?})", name, cid);
@@ -2290,7 +2290,9 @@ fn run(
                     // not). The commit out of the composite provokes once at
                     // once; this is the net under it and under any other
                     // switch that landed on such a screen: three tries,
-                    // three quarters of a second apart, each in the log.
+                    // three quarters of a second apart, each in the log, and
+                    // a fresh round for a keyframe request that arrives
+                    // after them (on_keyframe_request).
                     if let Some(t0) = switch_started {
                         if stranded_net_due(t0, stranded_repainted_at, stranded_repaints, last_frame.is_some(), now) {
                             if matches!(capture, Some(AnyCapture::Single(_))) {
@@ -2754,6 +2756,30 @@ fn is_same_screen(from: usize, from_output: Option<isize>, to: usize, to_output:
     from == to
         && (from == crate::composite::ALL_DISPLAYS
             || (from_output.is_some() && from_output == to_output))
+}
+
+/// A keyframe was asked for: by the peer's PLI, or by the controller
+/// (`RequestKeyframe`, e.g. an Android controller resumed with a reset
+/// decoder).
+///
+/// Normally that is only `want_keyframe`: the pump answers it with the next
+/// present or the held still. A switch still waiting for its first picture
+/// holds NO still (adopt_new_capture dropped the old screen's), so once the
+/// stranded-switch net has spent its three tries such a request could not be
+/// answered at all until the screen repainted by itself. It starts a fresh
+/// round then, paced as before (750 ms after the last try), so each round is
+/// bounded by a request actually arriving. A round still running is not
+/// extended.
+fn on_keyframe_request(
+    want_keyframe: &mut bool,
+    switch_pending: bool,
+    have_last_frame: bool,
+    stranded_repaints: &mut u8,
+) {
+    *want_keyframe = true;
+    if switch_pending && !have_last_frame && *stranded_repaints >= 3 {
+        *stranded_repaints = 0;
+    }
 }
 
 /// Is the stranded-switch net (the event loop's `NoChange` arm) due to wake
@@ -4085,6 +4111,59 @@ mod tests {
         assert_eq!(screen_identity(&outs, 1), None, "an index missing from the walk");
         assert_eq!(screen_identity(&outs, 2), None, "a zero handle is unknown");
         assert_eq!(screen_identity(&outs, ALL_DISPLAYS), None);
+    }
+
+    /// A KEYFRAME REQUEST AFTER THE NET GAVE UP GETS ANOTHER ROUND.
+    ///
+    /// A switch onto a still screen holds no picture, so a keyframe request
+    /// can only be answered by the screen presenting. If all three of the
+    /// net's tries failed (the nudge window refused, a panel switched off by
+    /// hand), a later request — a resumed Android controller whose decoder
+    /// was reset — found nothing to re-send and nothing to provoke a present:
+    /// no picture until the screen repainted by itself. Before the switch
+    /// fix it would at least have got the old screen's (wrong) picture.
+    #[test]
+    fn a_keyframe_request_rearms_an_exhausted_stranded_switch_net() {
+        let t0 = Instant::now();
+        let last_try = t0 + Duration::from_millis(2250);
+        let later = t0 + Duration::from_secs(30);
+        let last_frame: Option<&str> = None;
+        let mut want_keyframe = false;
+        let mut stranded_repaints = 3u8;
+        let stranded_repainted_at = Some(last_try);
+        assert!(
+            !stranded_net_due(t0, stranded_repainted_at, stranded_repaints, last_frame.is_some(), later),
+            "precondition: the net has spent its three tries",
+        );
+
+        on_keyframe_request(&mut want_keyframe, true, last_frame.is_some(), &mut stranded_repaints);
+
+        assert!(want_keyframe);
+        assert!(
+            stranded_net_due(t0, stranded_repainted_at, stranded_repaints, last_frame.is_some(), later),
+            "a keyframe request with nothing to re-send must provoke a present again \
+             (tries so far: {stranded_repaints})",
+        );
+        // Paced like the net: never sooner than 750 ms after the last try.
+        assert!(!stranded_net_due(
+            t0, stranded_repainted_at, stranded_repaints, last_frame.is_some(),
+            last_try + Duration::from_millis(749),
+        ));
+
+        // A round still running is not extended by a request.
+        let mut running = 1u8;
+        on_keyframe_request(&mut want_keyframe, true, false, &mut running);
+        assert_eq!(running, 1, "a request mid-round does not restart the count");
+
+        // Holding a picture, the pump answers the request itself: no net.
+        let mut held = 3u8;
+        on_keyframe_request(&mut want_keyframe, true, true, &mut held);
+        assert_eq!(held, 3);
+        // No switch pending: a still screen that was captured once; the net
+        // is not this request's business.
+        let mut settled = 3u8;
+        on_keyframe_request(&mut want_keyframe, false, false, &mut settled);
+        assert_eq!(settled, 3);
     }
 
     /// A build that FAILS hands the live capture back, and the caller keeps
