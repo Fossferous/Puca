@@ -126,6 +126,17 @@ describe('pagesOnScreen', () => {
         expect(pagesOnScreen(-30, W)).toEqual([0, 0]);
     });
 
+    it('at a FRACTIONAL width, resting on a far page is that page alone', () => {
+        // A Pixel-class phone: the pager is 411.43 px and so is every page.
+        // Given that true width, page 4's offset is exactly one page.
+        const w = 411.4286;
+        expect(pagesOnScreen(4 * w, w)).toEqual([4, 4]);
+        expect(pagesOnScreen(9 * w, w)).toEqual([9, 9]);
+        // The pager must never be given clientWidth instead: rounded to 411,
+        // the same offset reads as two pages — the bug this width fixed.
+        expect(pagesOnScreen(4 * w, Math.round(w))).toEqual([4, 5]);
+    });
+
     it('no width yet (not laid out) answers nothing rather than dividing by zero', () => {
         expect(pagesOnScreen(100, 0)).toBeNull();
     });

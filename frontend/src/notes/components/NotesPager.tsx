@@ -80,6 +80,21 @@ const PROGRAMMATIC_MS = 600;
 const tabId = (key: string) => `notes-page-tab-${pageDomId(key)}`;
 const panelId = (key: string) => `notes-page-panel-${pageDomId(key)}`;
 
+/**
+ * The pager's width, FRACTIONAL — which is how wide every page is. Never
+ * clientWidth: that is rounded to a whole pixel, and a page's offset is
+ * index × the true width, so the error grows by the fraction on every page.
+ * Measured on a Pixel-class phone (411.43 px, clientWidth 411): from page 4
+ * on, the NEXT list counted as on screen at rest and held a real grid; at
+ * 125% scaling (clientWidth rounding up) the PREVIOUS one did, ahead of the
+ * active page in the tab order. The pager and its ancestors carry no
+ * transform, so the box's width is the layout width.
+ */
+function pagerWidth(el: HTMLElement): number {
+    const w = el.getBoundingClientRect().width;
+    return w > 0 ? w : el.clientWidth;
+}
+
 /** Move without animation? The OS preference, or Púca's own Animations
  *  setting (settingsStore writes `data-animations` on the root). */
 function instantOnly(): boolean {
@@ -175,7 +190,7 @@ interface PagerProps {
 /** The pages any part of which is on screen, as "first:last" (state wants
  *  a primitive, so an unchanged range is an unchanged value). */
 function onScreenOf(el: HTMLElement): string | null {
-    const r = pagesOnScreen(el.scrollLeft, el.clientWidth);
+    const r = pagesOnScreen(el.scrollLeft, pagerWidth(el));
     return r ? `${r[0]}:${r[1]}` : null;
 }
 
@@ -237,7 +252,7 @@ export function NotesPager({ pages, index, onSettle, children }: PagerProps) {
     const settle = useCallback(() => {
         const el = elRef.current;
         if (!el) return;
-        const w = el.clientWidth;
+        const w = pagerWidth(el);
         if (w <= 0) return;
         // Still held: the lift arms a settle of its own.
         if (touching.current) return;
@@ -280,7 +295,7 @@ export function NotesPager({ pages, index, onSettle, children }: PagerProps) {
     useLayoutEffect(() => {
         const el = elRef.current;
         if (!el) return;
-        const w = el.clientWidth;
+        const w = pagerWidth(el);
         if (w <= 0) return;
         const want = index * w;
         const instant = firstRef.current || shapeRef.current !== shape || instantOnly();
@@ -345,7 +360,7 @@ export function NotesPager({ pages, index, onSettle, children }: PagerProps) {
         const el = elRef.current;
         if (!el || typeof ResizeObserver === 'undefined') return;
         const ro = new ResizeObserver(() => {
-            const w = el.clientWidth;
+            const w = pagerWidth(el);
             if (w <= 0) return;
             const want = indexRef.current * w;
             if (Math.abs(el.scrollLeft - want) <= 1) return;
