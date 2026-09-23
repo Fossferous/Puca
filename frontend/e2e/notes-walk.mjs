@@ -2792,7 +2792,14 @@ await m.waitForSelector('.notes-paste-dialog', { state: 'detached', timeout: 500
 ck('phone: Cancel leaves the composer with its one empty item',
     await m.locator('.notes-quickadd-item input').count() === 1);
 await m.fill('.notes-quickadd-title', 'Phone note');
-await m.locator('.notes-quickadd-item input').first().fill('Charger');
+// Longer than a phone's line on purpose: the Reminders-row block below gives
+// this item a due time and then measures it. A 5-letter word like "Charger"
+// still fits on one line inside the 44px the broken layout left, so that
+// block's height check could not have failed on it; and only text WIDER than
+// the line (about 55 characters at 390) shows a content-basis layout putting
+// the text below its own tick box. Still starts with "Charger": the calendar
+// walk finds this item by that word.
+await m.locator('.notes-quickadd-item input').first().fill('Charger for the camping trip, and the spare batteries in the blue box');
 // A long list must keep Done reachable: the sheet scrolls, nothing is clipped.
 for (let i = 1; i <= 14; i++) {
     await m.locator('.notes-quickadd-item input').nth(i - 1).press('Enter');
@@ -2830,6 +2837,27 @@ await m.waitForTimeout(600);
 await mshot('phone-note-reminder');
 await m.locator('.notes-editor button[aria-label="Close note"]').tap();
 await m.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 }).catch(() => {});
+// One LONG item with a due time, so the Reminders rows below include a row
+// whose text really has to wrap. The items already dated here — "Bread",
+// "Eggs" — are single short words that still fitted on one line inside the
+// 44px the broken layout left them, so on their own they could not have made
+// the height check fail.
+const LONG_ITEM = 'Charger for the camping trip, and the spare batteries in the blue box';
+await m.locator('.notes-card', { hasText: 'Phone note' }).first().tap();
+await m.waitForSelector('.notes-editor .tt-item', { timeout: 10000 });
+const longItem = () => m.locator('.notes-editor .tt-item', { hasText: LONG_ITEM }).first();
+await longItem().locator('.tt-btn[title="Add due time"]').tap();
+await m.waitForSelector('.tt-due-edit input', { timeout: 5000 });
+const mLong = new Date(); mLong.setDate(mLong.getDate() + 1);
+await m.fill('.tt-due-edit input', `${mLong.getFullYear()}-${mpad(mLong.getMonth() + 1)}-${mpad(mLong.getDate())}T18:30`);
+// Scoped: the note's OWN reminder control carries a .tt-due-set of its own
+// (components/schedule/NoteReminderControl.tsx).
+await m.locator('.tt-due-edit .tt-due-set').first().tap();
+await m.waitForSelector(`.notes-editor .tt-item:has-text("${LONG_ITEM}") .tt-due`, { timeout: 10000 }).catch(() => {});
+ck('phone: a long item takes a due time, so the Reminders rows below have one that must wrap',
+    await longItem().locator('.tt-due').count() === 1);
+await m.locator('.notes-editor button[aria-label="Close note"]').tap();
+await m.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 }).catch(() => {});
 await m.goto('/notes/#/reminders');
 await m.waitForSelector('.notes-reminders', { timeout: 10000 });
 await m.waitForSelector('.notes-reminder-row.note', { timeout: 10000 }).catch(() => {});
@@ -2839,6 +2867,97 @@ ck('phone: the note reminder row keeps its shape at 390 and is not covered',
     noteRowBox && noteRowBox.x >= -0.5 && noteRowBox.x + noteRowBox.width <= 390.5
     && !r.bodyScrollsHorizontally && r.under.length === 0 && await onTop(m, '.notes-reminder-row.note'),
     JSON.stringify({ noteRowBox, u: r.under }));
+
+// ---- Reminders row at 390x844 keeps its text readable ----
+// The bug this block exists for (fixed in 0.9.818): under a coarse pointer
+// the row wrapped — it must, the actions alone are 88px — while
+// `.notes-reminder-text` was `flex: 1`, i.e. flex-BASIS 0. So the text's
+// share of the first line was only what the non-shrinking siblings left it:
+// the timing marks, the note title (up to 40%), the nowrap due time, the
+// 44px retime and snooze buttons and six 10px gaps. At 390 that is a few
+// pixels, and every item read ONE CHARACTER PER LINE. This block's first run
+// against the 0.9.817 CSS: "Bread" and "Eggs" 44.3px of a 366px row
+// (12.1%). Nothing above caught it: the row still fitted 390, nothing
+// overflowed and every button was still 44px.
+// The layout that replaced it (components/reminders/Reminders.css) puts the
+// text alone beside its tick box on line 1 and everything else on line 2.
+// Its first cut used a CONTENT basis, which drops a long item's text BELOW
+// the tick box onto a line of its own — so the text is also checked to sit
+// beside the box, and LONG_ITEM above is wider than the line.
+// EVERY row on screen is measured, and a view with no rows at all is a
+// FAIL, not a vacuous pass.
+const remRows = await m.evaluate(() => {
+    const r1 = n => Math.round(n * 10) / 10;
+    return [...document.querySelectorAll('.notes-reminder-row')].map(row => {
+        const t = row.querySelector('.notes-reminder-text');
+        const cs = t && getComputedStyle(t);
+        // `line-height: normal` computes to a keyword, not a length.
+        const lh = cs ? (parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.4) : 0;
+        const rb = row.getBoundingClientRect();
+        const tb = t ? t.getBoundingClientRect() : null;
+        // The tick box, or a note's bell: the row's first child either way.
+        const box = row.firstElementChild && row.firstElementChild !== t ? row.firstElementChild.getBoundingClientRect() : null;
+        return {
+            label: t && t.firstChild ? String(t.firstChild.textContent).trim().slice(0, 20) : '(no text cell)',
+            isNote: row.classList.contains('note'),
+            beside: !!(tb && box && tb.top < box.bottom && box.top < tb.bottom && tb.left >= box.right),
+            rowW: r1(rb.width), rowH: r1(rb.height),
+            textW: tb ? r1(tb.width) : 0, textH: tb ? r1(tb.height) : 0,
+            share: tb ? r1((tb.width / rb.width) * 100) : 0,
+            lines: tb && lh ? r1(tb.height / lh) : 0, lh: r1(lh),
+            retime: row.querySelectorAll('.notes-retime button').length,
+            snooze: row.querySelectorAll('.notes-snooze button').length,
+            clear: row.querySelectorAll('.notes-reminder-clear').length,
+        };
+    });
+});
+// The two WIDEST shapes have to be on screen or the measurement proves
+// nothing: an item row carrying both the retime clock and the snooze, and a
+// note's own row (a bell and Clear).
+const remItem = remRows.find(x => !x.isNote && x.retime === 1 && x.snooze === 1);
+const remNote = remRows.find(x => x.isNote && x.clear === 1);
+ck('phone reminders: an item row with BOTH retime and snooze is on screen (the widest item row)',
+    !!remItem, JSON.stringify(remRows.map(x => `${x.label} retime=${x.retime} snooze=${x.snooze} clear=${x.clear}`)));
+ck('phone reminders: a note’s own row with its bell and Clear is on screen (the widest note row)',
+    !!remNote, JSON.stringify(remRows.filter(x => x.isNote)));
+const remNarrow = remRows.filter(x => x.textW < x.rowW * 0.5);
+ck('phone reminders: every row gives its text at least half the row’s width',
+    remRows.length > 0 && remNarrow.length === 0,
+    JSON.stringify({ rows: remRows.length, narrow: remNarrow.map(x => `"${x.label}" text ${x.textW}px of a ${x.rowW}px row = ${x.share}%`) }));
+const remBelow = remRows.filter(x => !x.beside);
+ck('phone reminders: every row’s text sits beside its tick box or bell, not on a line below it',
+    remRows.length > 0 && remBelow.length === 0,
+    JSON.stringify(remBelow.map(x => `"${x.label}" ${x.textW}px wide, ${x.lines} lines`)));
+const remTall = remRows.filter(x => x.lh <= 0 || x.textH > 2.5 * x.lh);
+ck('phone reminders: each seeded item reads on a line or two, not one character per line',
+    remRows.length > 0 && remTall.length === 0,
+    JSON.stringify(remTall.map(x => `"${x.label}" ${x.lines} lines of ${x.lh}px (${x.textH}px tall)`)));
+const remDeep = remRows.filter(x => x.lh <= 0 || x.rowH > 3 * x.lh + 44 + 24);
+ck('phone reminders: the row stays inside about three text lines plus one 44px action line',
+    remRows.length > 0 && remDeep.length === 0,
+    JSON.stringify(remDeep.map(x => `"${x.label}" row ${x.rowH}px against a ${Math.round(3 * x.lh + 68)}px ceiling`)));
+// Against clientWidth, NOT innerWidth: under the phone emulation a page that
+// is wider than the screen WIDENS innerWidth to fit it (measured: a 451px-wide
+// page on the 390px iPhone 13 reports innerWidth 451, clientWidth 390), so
+// `scrollWidth > innerWidth` can never fire here. And every descendant is
+// held inside its row, which catches a row that overflows inside a clipped
+// container the page's own scrollWidth never sees.
+const remWide = await m.evaluate(() => {
+    const client = document.documentElement.clientWidth;
+    const out = [];
+    for (const row of document.querySelectorAll('.notes-reminder-row')) {
+        const rb = row.getBoundingClientRect();
+        for (const el of row.querySelectorAll('*')) {
+            const b = el.getBoundingClientRect();
+            if (b.width > 0 && (b.right > rb.right + 0.5 || b.right > client + 0.5)) out.push(`${String(el.getAttribute('class') || el.tagName).split(' ')[0]} r=${Math.round(b.right)} row r=${Math.round(rb.right)}`);
+        }
+    }
+    return { scroll: document.documentElement.scrollWidth, client, inner: window.innerWidth, out: out.slice(0, 6) };
+});
+ck('phone reminders: the rows add no sideways scroll, and nothing sticks out of a row',
+    remWide.client > 0 && remWide.scroll <= remWide.client + 1 && remWide.out.length === 0, JSON.stringify(remWide));
+await mshot('phone-reminders-rows');
+// ---- end of the Reminders row block ----
 
 // The calendar's day list is the ONLY body a coarse pointer gets, and it is
 // where a note's reminder stands beside items. A note has nothing to tick
@@ -3618,6 +3737,44 @@ ck('desktop hint: a second line inside the item cell, not a new column', !!hinte
         }));
         ck('púca reminders (phone): no horizontal overflow and every row fits', !pucaPhone.overflow && pucaPhone.rows.length > 0 && pucaPhone.rows.every(r => r <= pucaPhone.vw + 0.5), JSON.stringify(pucaPhone));
         ck('púca reminders (phone): the tick box grew for a finger', pucaPhone.box >= 20, String(pucaPhone.box));
+        // ---- Reminders row at 390x844 keeps its text readable (Púca's tab) ----
+        // The same rows as the Notes block in the phone pass, through Púca's
+        // own front door. This tab never had the wrap at all (it lived in
+        // notes.css), so its text was squeezed on ONE line instead: on the
+        // 0.9.817 CSS every row here failed, 25.5-30.2% ("Bread" 102.5px of
+        // a 358px row). It rides the shared Reminders.css now.
+        const pucaText = await pg.evaluate(() => [...document.querySelectorAll('.tasks-reminders .notes-reminder-row')].map(row => {
+            const r1 = n => Math.round(n * 10) / 10;
+            const t = row.querySelector('.notes-reminder-text');
+            const rb = row.getBoundingClientRect();
+            const tb = t ? t.getBoundingClientRect() : null;
+            const box = row.firstElementChild && row.firstElementChild !== t ? row.firstElementChild.getBoundingClientRect() : null;
+            return {
+                label: t && t.firstChild ? String(t.firstChild.textContent).trim().slice(0, 20) : '(no text cell)',
+                rowW: r1(rb.width), textW: tb ? r1(tb.width) : 0, share: tb ? r1(tb.width / rb.width * 100) : 0,
+                beside: !!(tb && box && tb.top < box.bottom && box.top < tb.bottom && tb.left >= box.right),
+            };
+        }));
+        const pucaNarrow = pucaText.filter(x => x.textW < x.rowW * 0.5 || !x.beside);
+        ck('púca reminders (phone): every row gives its text half the row or more, beside its tick box',
+            pucaText.length > 0 && pucaNarrow.length === 0,
+            JSON.stringify({ rows: pucaText.length, narrow: pucaNarrow.map(x => `"${x.label}" text ${x.textW}px of a ${x.rowW}px row = ${x.share}%${x.beside ? '' : ', below its box'}`) }));
+        // clientWidth, not innerWidth: see the Notes block in the phone pass.
+        const pucaWide = await pg.evaluate(() => {
+            const client = document.documentElement.clientWidth;
+            const out = [];
+            for (const row of document.querySelectorAll('.tasks-reminders .notes-reminder-row')) {
+                const rb = row.getBoundingClientRect();
+                if (rb.right > client + 0.5) out.push(`row r=${Math.round(rb.right)}`);
+                for (const el of row.querySelectorAll('*')) {
+                    const b = el.getBoundingClientRect();
+                    if (b.width > 0 && b.right > rb.right + 0.5) out.push(`${String(el.getAttribute('class') || el.tagName).split(' ')[0]} r=${Math.round(b.right)} row r=${Math.round(rb.right)}`);
+                }
+            }
+            return { scroll: document.documentElement.scrollWidth, client, out: out.slice(0, 6) };
+        });
+        ck('púca reminders (phone): no sideways scroll, and nothing sticks out of a row (against clientWidth)',
+            pucaWide.client > 0 && pucaWide.scroll <= pucaWide.client + 1 && pucaWide.out.length === 0, JSON.stringify(pucaWide));
         const snoozeBtn = pg.locator('.tasks-reminders .notes-snooze button').first();
         if (await snoozeBtn.count() === 1) {
             const sb = await snoozeBtn.boundingBox();
