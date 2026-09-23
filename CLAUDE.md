@@ -532,8 +532,16 @@ pointing at it (migrations apply at startup), then the harness with its env:
   print "skipping: TEST_DATABASE_URL not set" and pass WITHOUT running; set
   but unreachable, they FAIL. So a green run proves the database code only if
   the variable was set: run the gate with
-  `TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/<db>` (a fresh
-  database works; the in-crate suites migrate it) and the backend stopped.
+  `TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/<db>` and the
+  backend stopped. A fresh database works for a FULL `cargo test`: the
+  in-crate suites migrate it through `test_pool`. `tests/common` does NOT
+  migrate, so `cargo test --test api_auth` (or any one `tests/*.rs`) on its
+  own needs a database the server or a full run has already migrated — on a
+  fresh one it fails with `relation "users" does not exist`. The tripwire
+  `no_test_reads_database_url_...` in `src/migrator.rs` fails `cargo test` if a
+  test region reads `DATABASE_URL`, calls dotenv, or opens a connection
+  without panicking on the error; product code outside `#[cfg(test)]` is
+  not scanned.
 
 ---
 
