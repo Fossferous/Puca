@@ -13,16 +13,23 @@
 //     URI-encoding — LANDS on its page, every frame from the first; a search
 //     hides the strip and the pager (the negative control: the same selectors
 //     that must be absent here are present everywhere else) and clearing it
-//     brings them back; Archive is not a page; and a trackpad flick while
-//     "Take a note…" holds a draft does not throw the draft away.
+//     brings them back; Archive is not a page; a trackpad flick while
+//     "Take a note…" holds a draft does not throw the draft away; every
+//     tab's aria-controls names its own tabpanel, a label with spaces
+//     included; a note opened before a swipe settles is still open after the
+//     settle; and at a FRACTIONAL pager width whose clientWidth rounds up
+//     (125% scaling), resting on any page holds exactly one grid.
 //   phone (390 wide, coarse, touch) — the DOCUMENT never scrolls sideways;
 //     every tab is a 44px target; scrolling the pager one page along moves
 //     the active tab AND the route (with scrollend, and again with scrollend
-//     suppressed, the way an older WebView behaves); a REAL touch swipe (CDP
+//     suppressed, the way an older WebView behaves); a list swiped away from
+//     and back to opens where it was being read; a REAL touch swipe (CDP
 //     touch events, not scrollLeft) moves one list along and the incoming
 //     list has its notes while the finger is still down; dragging a card by
 //     its grip never moves the pager; a vertical swipe scrolls the page, not
 //     the pager and not the main column.
+//   Pixel-class phone (411.43 px at DPR 2.625, clientWidth rounds down) —
+//     resting on any page holds exactly one grid.
 //
 // Every check is ck(): a precondition that did not happen is a FAIL line,
 // never a silent pass.
@@ -65,7 +72,9 @@ async function labelNote(page, title, name) {
     await sleep(250);
 }
 
-/** Everything a check needs about the pager, in one read. */
+/** Everything a check needs about the pager, in one read. `w` is the TRUE
+ *  width (a page is exactly that wide); `cw`, clientWidth, is rounded to a
+ *  whole pixel and drifts from the page offsets by the fraction per page. */
 const pagerState = pg => pg.evaluate(() => {
     const p = document.querySelector('.notes-pager');
     const tabs = [...document.querySelectorAll('.notes-pages-tabs [role="tab"]')];
@@ -74,7 +83,8 @@ const pagerState = pg => pg.evaluate(() => {
         strip: !!document.querySelector('.notes-pages-tabs[role="tablist"]'),
         pager: !!p,
         sl: p ? p.scrollLeft : null,
-        w: p ? p.clientWidth : null,
+        w: p ? p.getBoundingClientRect().width : null,
+        cw: p ? p.clientWidth : null,
         hash: location.hash,
         tabs: tabs.map(t => t.textContent.trim()),
         selected: tabs.filter(t => t.getAttribute('aria-selected') === 'true').map(t => t.textContent.trim()),
@@ -101,9 +111,57 @@ const railLabels = pg => pg.evaluate(() => {
  *  check that follows say what it saw instead). */
 const settledOn = (pg, i, hash, timeout = 5000) => pg.waitForFunction(({ i, hash }) => {
     const p = document.querySelector('.notes-pager');
-    return !!p && location.hash === hash && Math.abs(p.scrollLeft - i * p.clientWidth) <= 2
+    return !!p && location.hash === hash && Math.abs(p.scrollLeft - i * p.getBoundingClientRect().width) <= 2
         && document.querySelectorAll('.notes-page.live').length === 1;
 }, { i, hash }, { timeout }).then(() => true, () => false);
+
+/**
+ * Make the pager's width FRACTIONAL, the way a real device does and a
+ * Playwright viewport (whole CSS pixels) cannot: a Pixel-class phone is
+ * 1080 px at DPR 2.625 = 411.43 CSS px, a desktop at 125% scaling is 1296 px
+ * = 1036.8. `margin-right` takes that fraction off the pager and nothing
+ * else; the pages (100% of it) follow. `null` puts it back.
+ */
+const fractionalWidth = (pg, px) => pg.evaluate(px => {
+    let st = document.getElementById('walk-fractional-pager');
+    if (px === null) { st?.remove(); return; }
+    if (!st) { st = document.createElement('style'); st.id = 'walk-fractional-pager'; document.head.appendChild(st); }
+    st.textContent = `.notes-pager { margin-right: ${px}px !important; }`;
+}, px);
+
+/**
+ * Rest on every page after All, reached by its ROUTE (what the rail and a deep
+ * link do), and say at each stop which pages hold a grid. At a fractional
+ * width a page's offset is index × the TRUE width; measured against the
+ * rounded clientWidth the error grows by the fraction on every page, and from
+ * the third or fourth page on a neighbour reads as on screen at rest (the
+ * first cut: onScreen 4:5 on page 4 at 411.43 px).
+ */
+async function restOnEveryPage(pg, tabs) {
+    const stops = [];
+    for (let i = 1; i < tabs.length; i++) {
+        const h = labelHash(tabs[i]);
+        await pg.evaluate(h => { location.hash = h; }, h);
+        const arrived = await pg.waitForFunction(({ i, h }) => {
+            const p = document.querySelector('.notes-pager');
+            return !!p && location.hash === h && Math.abs(p.scrollLeft - i * p.getBoundingClientRect().width) <= 2;
+        }, { i, h }, { timeout: 5000 }).then(() => true, () => false);
+        await sleep(800);   // past every settle timer (the longest is 600 ms)
+        stops.push({
+            i, arrived, ...await pg.evaluate(() => {
+                const p = document.querySelector('.notes-pager');
+                return {
+                    at: document.querySelector('.notes-page.active')?.dataset.page ?? null,
+                    live: [...document.querySelectorAll('.notes-page.live')].map(e => e.dataset.page),
+                    sl: p.scrollLeft, w: p.getBoundingClientRect().width, cw: p.clientWidth,
+                };
+            }),
+        });
+    }
+    return stops;
+}
+/** One grid at rest, and it is the page the route names. */
+const oneGridAtRest = x => x.arrived && x.live.length === 1 && x.live[0] === x.at;
 
 /**
  * @param {object} o
@@ -117,10 +175,16 @@ const settledOn = (pg, i, hash, timeout = 5000) => pg.waitForFunction(({ i, hash
  */
 export async function pagerWalk({ browser, baseURL, state, ck, watch, shotOf, errors }) {
     const errorsAtStart = errors.length;
-    // Two labels of our own, so the section never depends on what earlier
-    // sections left behind: one plain, one whose address needs encoding.
+    // Labels of our own, so the section never depends on what earlier
+    // sections left behind: one plain, one whose address needs encoding (and
+    // whose page key has spaces), and three that sort after L1 — so there is
+    // always a list after L1 to move to, and at least six pages, which the
+    // fractional-width checks need: the rounding error grows by under half a
+    // pixel per page, the 1 px slack absorbs the first two or three, and a
+    // neighbour can only be wrongly mounted if it exists.
     const L1 = 'Pager lists';
     const L2 = 'Pager & co';
+    const L3 = ['Pager zeta', 'Pager zeta 2', 'Pager zeta 3'];
     const L1_NOTES = ['Pager note 1', 'Pager note 2', 'Pager note 3', 'Pager note 4', 'Pager note 5'];
     // Shared by both halves; a half that throws is ONE FAIL line ("ran to the
     // end"), and the other half still runs.
@@ -144,13 +208,14 @@ export async function pagerWalk({ browser, baseURL, state, ck, watch, shotOf, er
         await makeNote(page, 'Pager extra', 'the & page');
         for (const t of L1_NOTES) await labelNote(page, t, L1);
         await labelNote(page, 'Pager extra', L2);
+        for (let i = 0; i < L3.length; i++) await labelNote(page, L1_NOTES[4 - i], L3[i]);
 
         // ---- the strip ------------------------------------------------------------
         await page.waitForFunction(names => names.every(n => [...document.querySelectorAll('.notes-pages-tab')].some(t => t.textContent.trim() === n)),
-            [L1, L2], { timeout: 10000 }).catch(() => {});
+            [L1, L2, ...L3], { timeout: 10000 }).catch(() => {});
         const rail = await railLabels(page);
         s = await pagerState(page);
-        ck('pager: the rail lists both new labels (precondition)', rail.includes(L1) && rail.includes(L2), JSON.stringify(rail));
+        ck('pager: the rail lists the five new labels (precondition)', [L1, L2, ...L3].every(l => rail.includes(l)), JSON.stringify(rail));
         ck('pager: the strip is All notes, then every label in the rail\'s order',
             s.strip && JSON.stringify(s.tabs) === JSON.stringify(['All notes', ...rail]), JSON.stringify({ tabs: s.tabs, rail }));
         ck('pager: on / the one selected tab is All notes, and only one page holds a grid',
@@ -159,6 +224,22 @@ export async function pagerWalk({ browser, baseURL, state, ck, watch, shotOf, er
         idx1 = s.tabs.indexOf(L1);
         idx2 = s.tabs.indexOf(L2);
         TABS = s.tabs;
+
+        // ---- tab ↔ panel: every aria-controls names ONE panel that exists -----------
+        // aria-controls is a space-separated LIST of ids. The first cut built
+        // the ids from the page key, which keeps a label's spaces, so the L2
+        // tab pointed at 'notes-page-panel-label:pager', '&' and 'co' — none
+        // of which exists (and an id may not contain whitespace at all).
+        const links = await page.evaluate(() => [...document.querySelectorAll('.notes-pages-tab')].map(t => {
+            const ac = t.getAttribute('aria-controls') ?? '';
+            const panel = ac ? document.getElementById(ac) : null;
+            return { tab: t.textContent.trim(), id: t.id, ac, role: panel?.getAttribute('role') ?? null, panel: panel?.getAttribute('aria-label') ?? null };
+        }));
+        const badLinks = links.filter(x => !x.id || /\s/.test(x.id) || !x.ac || /\s/.test(x.ac) || x.role !== 'tabpanel' || x.panel !== x.tab);
+        ck('pager: every tab\'s aria-controls names its own tabpanel — one id, no whitespace — a label with spaces included',
+            links.some(x => x.tab === L2) && links.length === s.tabs.length && badLinks.length === 0
+            && new Set(links.map(x => x.id)).size === links.length,
+            JSON.stringify(badLinks.length ? badLinks.slice(0, 3) : links.filter(x => x.tab === L2)));
 
         // ---- a tab click: sampled on EVERY frame of the slide -----------------------
         // The page being left must keep its notes while it slides out. (The first
@@ -177,7 +258,7 @@ export async function pagerWalk({ browser, baseURL, state, ck, watch, shotOf, er
                     const leaving = document.querySelector(`.notes-page[data-page="${CSS.escape(from)}"]`);
                     const arriving = document.querySelector('.notes-page.active');
                     samples.push({
-                        sl: pager.scrollLeft, w: pager.clientWidth,
+                        sl: pager.scrollLeft, w: pager.getBoundingClientRect().width,
                         leaving: leaving ? leaving.querySelectorAll('.notes-card').length : -1,
                         arriving: arriving ? arriving.querySelectorAll('.notes-card').length : -1,
                     });
@@ -210,6 +291,48 @@ export async function pagerWalk({ browser, baseURL, state, ck, watch, shotOf, er
             JSON.stringify({ selected: s.selected, activeLabel: s.activeLabel, cards: s.activeCards, live: s.live }));
         await shot('pager-desktop-label');
 
+        // ---- a settle moves the PAGE, never closes an open note -------------------------
+        // A card clicked while a flick is still snapping opens its note
+        // (…?note=KEY, pushed) BEFORE the scroll settles, and the settle then
+        // replaces the route with the page it landed on. The first cut replaced
+        // it with the bare label address: the note param went and the editor
+        // closed by itself. Made deterministic, and as tight as it gets: the
+        // click and the end of the snap in ONE task, so the settle lands before
+        // React has even rendered the navigation (it runs in a transition). A
+        // settle that copied the RENDER's query lost the note here too (12 of
+        // 12 in a probe); only the history's own query survives it.
+        const nTo = idx1 + 1;
+        const nHash = nTo < TABS.length ? labelHash(TABS[nTo]) : null;
+        // From an IDLE page, which is what a hand gets: measured against the
+        // render-query settle, a click 1.5 s after the pager last moved lost
+        // the note 3 times of 3, one straight after it kept it 3 times of 3.
+        await sleep(1500);
+        const opened = await page.evaluate(({ title, i }) => {
+            const card = [...document.querySelectorAll('.notes-page.active .notes-card')]
+                .find(c => c.querySelector('.notes-card-title')?.textContent.trim() === title);
+            const p = document.querySelector('.notes-pager');
+            if (!card || !p) return { hash: null };
+            card.click();                                   // openNote: pushed now
+            const hash = location.hash;
+            p.scrollTo({ left: i * p.getBoundingClientRect().width, behavior: 'instant' });   // the snap ends
+            return { hash };
+        }, { title: L1_NOTES[0], i: nTo });
+        const moved = nHash !== null && await page.waitForFunction(h => location.hash.split('?')[0] === h, nHash, { timeout: 5000 }).then(() => true, () => false);
+        await page.waitForSelector('.notes-editor-foot', { timeout: 5000 }).catch(() => {});
+        await sleep(400);
+        const afterSettle = await page.evaluate(() => ({ hash: location.hash, editor: !!document.querySelector('.notes-editor') }));
+        const q = opened.hash?.includes('?') ? opened.hash.slice(opened.hash.indexOf('?')) : '';
+        ck('pager: a note opened as a swipe settles is still open after it — the settle moves the page, and keeps ?note=',
+            opened.hash === `${labelHash(L1)}${q}` && /[?&]note=/.test(q) && moved && afterSettle.editor && afterSettle.hash === `${nHash}${q}`,
+            JSON.stringify({ opened, moved, afterSettle }));
+        if (afterSettle.editor) {
+            await page.locator('.notes-editor-foot').getByRole('button', { name: 'Close', exact: true }).click();
+            await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 }).catch(() => {});
+        }
+        await page.locator('.notes-pages-tab', { hasText: L1 }).first().click();
+        ok = await settledOn(page, idx1, labelHash(L1));
+        ck('pager: …and a tab click takes it back to the list it came from (precondition for what follows)', ok, (await pagerState(page)).hash);
+
         // ---- the keyboard on the strip, and the rail ----------------------------------
         await page.locator('.notes-pages-tab[aria-selected="true"]').focus({ timeout: 5000 });
         const kTo = idx1 + 1 < s.tabs.length ? idx1 + 1 : idx1 - 1;
@@ -231,7 +354,7 @@ export async function pagerWalk({ browser, baseURL, state, ck, watch, shotOf, er
             window.__pagerFrames = [];
             const step = () => {
                 const p = document.querySelector('.notes-pager');
-                if (p) window.__pagerFrames.push({ sl: p.scrollLeft, w: p.clientWidth });
+                if (p) window.__pagerFrames.push({ sl: p.scrollLeft, w: p.getBoundingClientRect().width });
                 if (performance.now() - t0 < 6000) requestAnimationFrame(step);
             };
             requestAnimationFrame(step);
@@ -295,6 +418,23 @@ export async function pagerWalk({ browser, baseURL, state, ck, watch, shotOf, er
             JSON.stringify({ keptAway, keptBack }));
         await page.keyboard.press('Escape');   // the composer saves what it holds
         await page.waitForSelector('.notes-quickadd-collapsed', { timeout: 10000 }).catch(() => {});
+
+        // ---- a fractional width (125% scaling): one grid at rest, on every page --------
+        // clientWidth rounding UP (1039.6 reads 1040): the PREVIOUS list then
+        // counts as on screen at rest — and it comes before the active page in
+        // the DOM, so Tab from the strip walked into a list nobody could see.
+        // (Rounding DOWN is the Pixel-class phone below.) Measured on the first
+        // cut: page 3 held 'pager lists' AND 'pager zeta'.
+        await page.evaluate(() => { location.hash = '#/'; });
+        await settledOn(page, 0, '#/');
+        await fractionalWidth(page, 0.4);
+        await sleep(300);
+        const f = await pagerState(page);
+        const stops = await restOnEveryPage(page, TABS);
+        ck("pager: at a fractional width whose clientWidth rounds UP, resting on any page holds ONE grid — that page's",
+            f.w % 1 !== 0 && f.cw > f.w && stops.length >= 3 && stops.every(oneGridAtRest),
+            JSON.stringify({ w: f.w, cw: f.cw, pages: stops.length, bad: stops.filter(x => !oneGridAtRest(x)) }));
+        await fractionalWidth(page, null);
     } catch (e) {
         ck('pager: the desktop half ran to the end', false, String(e).split('\n')[0]);
     } finally {
@@ -330,6 +470,16 @@ export async function pagerWalk({ browser, baseURL, state, ck, watch, shotOf, er
         }));
         ck('pager (phone): every tab is a 44px target', tabSizes.length >= 3 && tabSizes.length === s.tabs.length && tabSizes.every(t => t.h >= 44 && t.w >= 44), JSON.stringify(tabSizes));
 
+        // Where All is being read: some way down. Kept across the move below
+        // and checked when All comes back (after the old-WebView page).
+        const readAt = await m.evaluate(async () => {
+            const a = document.querySelector('.notes-page[data-page="all"]');
+            if (!a) return null;
+            a.scrollTop = 240;
+            await new Promise(r => setTimeout(r, 200));
+            return { top: a.scrollTop, sh: a.scrollHeight, ch: a.clientHeight };
+        });
+
         // Scroll the pager one page along, as a swipe would leave it.
         await m.evaluate(() => { const p = document.querySelector('.notes-pager'); p.scrollBy({ left: p.clientWidth, behavior: 'instant' }); });
         ok = await settledOn(m, 1, labelHash(s.tabs[1]));
@@ -337,6 +487,11 @@ export async function pagerWalk({ browser, baseURL, state, ck, watch, shotOf, er
         ck('pager (phone): scrolling the pager one page along moves the route AND the active tab',
             ok && ps.hash === labelHash(s.tabs[1]) && JSON.stringify(ps.selected) === JSON.stringify([s.tabs[1]]),
             JSON.stringify({ hash: ps.hash, selected: ps.selected }));
+        await sleep(300);
+        const allGone = await m.evaluate(() => {
+            const a = document.querySelector('.notes-page[data-page="all"]');
+            return !!a && !a.classList.contains('live') && a.querySelector('.notes-card') === null;
+        });
 
         // An older WebView: no scrollend at all (not even the property, which is
         // what the pager asks), so the debounce alone must carry the sync.
@@ -358,6 +513,21 @@ export async function pagerWalk({ browser, baseURL, state, ck, watch, shotOf, er
             noScrollEnd && ok && JSON.stringify(ps.selected) === JSON.stringify([s.tabs[2]]),
             JSON.stringify({ noScrollEnd, hash: ps.hash, selected: ps.selected }));
         await old.close();
+
+        // ---- each list keeps its place: back on All, where it was being read ----------
+        // All's grid was unmounted while it was off screen; an emptied page is
+        // clamped to scrollTop 0 and says so with a scroll event. The first cut
+        // saved THAT 0 as the reading position, so a list always came back at
+        // its top.
+        await m.locator('.notes-pages-tab', { hasText: 'All notes' }).first().tap({ timeout: 5000 });
+        ok = await settledOn(m, 0, '#/');
+        await sleep(300);
+        const backAt = await m.evaluate(() => document.querySelector('.notes-page[data-page="all"]')?.scrollTop ?? null);
+        ck('pager (phone): All was being read part-way down, and its grid really went while it was away (precondition)',
+            !!readAt && readAt.top >= 200 && allGone, JSON.stringify({ readAt, allGone }));
+        ck('pager (phone): …and coming back to All opens it where it was being read, not at the top',
+            ok && !!readAt && readAt.top >= 200 && backAt !== null && Math.abs(backAt - readAt.top) <= 2,
+            JSON.stringify({ was: readAt?.top, now: backAt, settled: ok }));
 
         // A tab TAP (before any synthetic swipe — see above).
         await m.locator('.notes-pages-tab', { hasText: L1 }).first().tap({ timeout: 5000 });
@@ -460,6 +630,37 @@ export async function pagerWalk({ browser, baseURL, state, ck, watch, shotOf, er
         ck('pager (phone): the phone half ran to the end', false, String(e).split('\n')[0]);
     } finally {
         await mctx.close();
+    }
+
+    // =========================================================================
+    // A Pixel-class phone: 1080 px at DPR 2.625 = 411.43 CSS px
+    // =========================================================================
+    // clientWidth reads 411, so every page is 0.43 px wider than the pager
+    // says, and the error adds up: on the first cut, from page 4 on the NEXT
+    // list counted as on screen at rest (onScreen 4:5) and held a real grid
+    // — every labelled note drawn twice, and a screen reader walking a list
+    // nobody can see. Both the DPR (scroll offsets snap to its device pixels)
+    // and a page AFTER the one that drifts are needed to see it: an iPhone-13
+    // context (DPR 3) or four pages both passed the first cut.
+    const pctx = await browser.newContext({
+        viewport: { width: 412, height: 915 }, deviceScaleFactor: 2.625, isMobile: true, hasTouch: true, baseURL, storageState: state,
+    });
+    const px = await pctx.newPage();
+    watch(px);
+    try {
+        await px.goto('/notes/');
+        await px.waitForSelector('.notes-page.active .notes-card', { timeout: 20000 }).catch(() => {});
+        await fractionalWidth(px, 0.5714);
+        await sleep(300);
+        const f = await pagerState(px);
+        const stops = await restOnEveryPage(px, f.tabs);
+        ck("pager (Pixel-class phone): at 411.43 px, resting on any page holds ONE grid — that page's",
+            Math.abs(f.w - 411.43) < 0.05 && f.cw === 411 && stops.length >= 5 && stops.every(oneGridAtRest),
+            JSON.stringify({ w: f.w, cw: f.cw, pages: stops.length, bad: stops.filter(x => !oneGridAtRest(x)) }));
+    } catch (e) {
+        ck('pager (Pixel-class phone): ran to the end', false, String(e).split('\n')[0]);
+    } finally {
+        await pctx.close();
     }
 
     ck('pager: no page errors', errors.length === errorsAtStart, errors[errorsAtStart]);
