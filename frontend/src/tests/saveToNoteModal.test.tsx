@@ -68,6 +68,7 @@ vi.mock('../api/listContent', async (orig) => {
         }),
         setTaskListBody: vi.fn(async () => undefined),
         setTaskListAttachments: vi.fn(async () => { if (attachFails) throw new Error('the pictures would not go in'); }),
+        addTaskListAttachments: vi.fn(async () => { if (attachFails) throw new Error('the pictures would not go in'); return []; }),
     };
 });
 vi.mock('../api/captureToNote', async (orig) => {
@@ -84,7 +85,8 @@ vi.mock('../api/captureToNote', async (orig) => {
 });
 
 import { SaveToNoteModal } from '../components/SaveToNoteModal';
-import { createTaskListWithContent, setTaskListAttachments, setTaskListBody } from '../api/listContent';
+import { addTaskListAttachments, createTaskListWithContent, setTaskListAttachments, setTaskListBody } from '../api/listContent';
+import { NoteConflictError } from '../api/listConflict';
 import { deleteTaskList } from '../api/tasks';
 import { discardCopies } from '../api/captureToNote';
 import { OP_KEY_SHAPE } from '../api/opKey';
@@ -238,6 +240,47 @@ describe('saving', () => {
         click(document.querySelector('.save-note-go'));
         for (let i = 0; i < 10; i++) await act(async () => { await new Promise(r => setTimeout(r, 0)); });
         expect(setTaskListAttachments).not.toHaveBeenCalled();
+        expect(addTaskListAttachments).not.toHaveBeenCalled();
+    });
+
+    /**
+     * Into an EXISTING note, both writes used to replace what the server holds
+     * with this modal's snapshot of it, taken when the sheet opened, with no
+     * revision (finding 7): a picture — or a paragraph — another device added
+     * meanwhile was silently dropped.
+     */
+    it('pictures go into an existing note as an INTENT against what the server holds now', async () => {
+        await mount('look ![a.png](sovereign-enc:SRC?k=K&m=image%2Fpng)');
+        click(rowNamed('Shopping'));
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        expect(addTaskListAttachments).toHaveBeenCalledWith(1, [{ href: 'sovereign-enc:COPY0?k=NEW0', name: 'a.png' }]);
+        expect(setTaskListAttachments).not.toHaveBeenCalled();
+    });
+
+    it('text appended to an existing note names the revision it read, and re-appends onto a newer copy', async () => {
+        lists = [{ ...list(1, 'Shopping', null, 'old words'), content_rev: 5 } as TaskList];
+        vi.mocked(setTaskListBody).mockRejectedValueOnce(new NoteConflictError(7, 'their words', null, null));
+        const { isClosed } = await mount('keep this\nand this');
+        click(rowNamed('Shopping'));
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        expect(vi.mocked(setTaskListBody).mock.calls).toEqual([
+            [1, 'old words\n\nkeep this\nand this', 5],
+            [1, 'their words\n\nkeep this\nand this', 7],
+        ]);
+        expect(isClosed()).toBe(true);
+    });
+
+    it('...but never appends onto a newer copy it cannot READ', async () => {
+        lists = [{ ...list(1, 'Shopping', null, 'old words'), content_rev: 5 } as TaskList];
+        vi.mocked(setTaskListBody).mockRejectedValueOnce(new NoteConflictError(7, ENC_KEY_UNAVAILABLE, null, null));
+        const { isClosed } = await mount('keep this\nand this');
+        click(rowNamed('Shopping'));
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        expect(setTaskListBody).toHaveBeenCalledTimes(1);
+        expect(isClosed()).toBe(false);
     });
 
     it('a new note that half-saved is undone, not left behind with broken pictures', async () => {

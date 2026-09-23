@@ -75,12 +75,12 @@ import {
     getTaskTabPrefs, putTaskTabPrefs, isFavoriteTab, toggleFavoritePrefs, buildPrefsForOrder, taskTabKey,
 } from '../../api/tasks';
 import {
-    deleteFiles, keepHiddenSlots, restoreTaskList,
-    setTaskListAttachments, setTaskListBody, setTaskListTiming, trashOrDeleteList,
+    NoteConflictError, deleteFiles, keepHiddenSlots, restoreTaskList,
+    setTaskListBody, setTaskListTiming, trashOrDeleteList,
 } from '../../api/listContent';
 import { newOpKey } from '../../api/opKey';
 import { type TaskAttachmentRef } from '../../api/tasks';
-import { addNoteRefs, fileIdsOf, fileIdsOfHrefs, removeNoteRefs, uploadParkedMedia } from '../../api/noteMedia';
+import { addNoteRefs, fileIdsOf, removeNoteRefs, uploadParkedMedia } from '../../api/noteMedia';
 import { appParkedStore, type ParkedStore } from './notesBlobs';
 import { pokeTaskReminders } from '../../api/taskReminders';
 import { pushMessageToast } from '../../components/messageToastBus';
@@ -138,13 +138,15 @@ type OpBody =
     // would throw away words nobody can get back.
     | { k: 'setBody'; listId: number; body: string; expectRev?: number }
     // Pictures and files sealed on this device (notesBlobs.ts) that still
-    // have to go up. Replay uploads them, then adds the real refs to
-    // whatever the server's sidecar holds THEN — an intent, so a picture
-    // added elsewhere in the meantime is not deleted by a stale replace.
-    // `refs` is this device's view of the finished sidecar, used only when
-    // the op runs inline (online, nothing queued), exactly as `prefs` does.
+    // have to go up. Running it uploads them, then adds the real refs to
+    // whatever the server's sidecar holds THEN, naming the revision it read
+    // — an intent, so a picture added elsewhere in the meantime is not
+    // deleted by a stale replace. `refs` is this device's view of the
+    // finished sidecar; it is no longer written anywhere (inline ran it as a
+    // blind replace, which is exactly what dropped another device's picture)
+    // and is kept only so ops already queued in a browser still parse.
     | { k: 'addMedia'; listId: number; blobIds: string[]; replacing: string[]; refs: TaskAttachmentRef[] }
-    // Removing a picture: the same intent/snapshot pair.
+    // Removing a picture: the same intent (and the same unused snapshot).
     | { k: 'removeMedia'; listId: number; removing: string[]; refs: TaskAttachmentRef[] };
 
 export type NoteOp = OpBody & {
@@ -310,15 +312,16 @@ export async function execOp(op: OpBody, idMap: IdMap, fromQueue: boolean, parke
             if (records.length === 0) return undefined;
             const added = await uploadParkedMedia(records);
             try {
+                // An INTENT, inline as on replay: added to the sidecar the
+                // server holds NOW, named by the revision it was read at
+                // (api/listContent.ts). `op.refs` — this device's snapshot —
+                // is no longer written: a snapshot replaced blind dropped a
+                // picture another device had added since it was taken.
                 // `addNoteRefs` also deletes the uploads behind whatever the
                 // replace dropped — nothing names those now, and leaving
                 // them would charge the owner's quota for a picture no note
                 // shows (api/noteMedia.ts holds that rule for both doors).
-                if (fromQueue) await addNoteRefs(listId, added, op.replacing);
-                else {
-                    await setTaskListAttachments(listId, [...op.refs, ...added]);
-                    if (op.replacing.length > 0) await deleteFiles(fileIdsOfHrefs(op.replacing));
-                }
+                await addNoteRefs(listId, added, op.replacing);
             } catch (err) {
                 // A DEFINITE refusal wrote nothing, so nothing names the
                 // uploads: do not leave them against the quota (the same
@@ -336,13 +339,9 @@ export async function execOp(op: OpBody, idMap: IdMap, fromQueue: boolean, parke
             // this upload was in flight (`forgetParked` below).
             return records.map((rec, i): AddedParked => ({ id: rec.id, ref: added[i] }));
         }
-        case 'removeMedia': {
-            const listId = r(op.listId);
-            if (fromQueue) return removeNoteRefs(listId, op.removing);
-            await setTaskListAttachments(listId, op.refs);
-            if (op.removing.length > 0) await deleteFiles(fileIdsOfHrefs(op.removing));
-            return undefined;
-        }
+        // The same intent inline and on replay (see addMedia): only what the
+        // server really held is taken out, and only its uploads deleted.
+        case 'removeMedia': return removeNoteRefs(r(op.listId), op.removing);
         case 'prefs': {
             if (!fromQueue) return putTaskTabPrefs(op.prefs);
             const current = await getTaskTabPrefs();
@@ -757,6 +756,17 @@ export function createOutbox(deps: OutboxDeps): Outbox {
                             break;
                         }
                         if (status === 401) break;   // the session ended; wait for this account to sign in
+                        // A picture add or removal that lost its race with
+                        // another device a few times running. An intent is
+                        // always safe to run again and always converges, so it
+                        // stays queued and is retried with backoff. Filed as
+                        // "refused" (NoteConflictError is not an ApiError) it
+                        // was dropped, and an add's parked picture with it.
+                        if (err instanceof NoteConflictError && (head.k === 'addMedia' || head.k === 'removeMedia')) {
+                            scheduleReplay(backoffMs);
+                            backoffMs = Math.min(backoffMs * 2, 60_000);
+                            break;
+                        }
                         if (status !== undefined && (status >= 500 || status === 429) && (head.attempts ?? 0) < 4) {
                             await mutate(s => ({ ...s, queue: s.queue.map(o => (o.oid === head.oid ? { ...o, attempts: (o.attempts ?? 0) + 1 } : o)) }));
                             scheduleReplay(backoffMs);

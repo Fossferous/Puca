@@ -16,7 +16,7 @@ import {
     NO_LIST_FEATURES, parseListFeatures, fetchListFeatures, listTrashedTaskLists, keepHiddenSlots, serverNowFrom, NoteFilesUnreadableError, purgeCountdown,
     trashPurgeAt, listsDueForClientPurge, toggleFavoriteKeepingHidden, noteFileIds, deleteListForever, setTaskListBody,
     setTaskListAttachments, createTaskListWithContent, bodyBytes, MAX_BODY_BYTES,
-    addTaskListAttachments, removeTaskListAttachments, fetchListSidecar,
+    addTaskListAttachments, removeTaskListAttachments, fetchListSidecar, NoteConflictError,
 } from '../api/listContent';
 import { parkedHref, withoutParked, parseParkedRef } from '../api/parkedMedia';
 import { openSelfField, openListContent, sealSelfField } from '../api/listSeal';
@@ -387,12 +387,82 @@ describe('adding and removing against what the server holds NOW', () => {
         expect(await removeTaskListAttachments(3, [ref('b').href])).toEqual([]);
     });
 
+    /**
+     * Two devices replaying at once (finding 7). Each read the sidecar, then
+     * wrote the whole thing back with no revision, so the second write
+     * silently dropped the first device's picture — and its key, which lives
+     * only in that ref, with it. The write now names the revision it read,
+     * and a stale refusal re-reads and re-applies the intent.
+     */
+    const listed = async (refs: Array<{ href: string; name: string }>, rev?: number) => ({
+        id: 3, title: await sealSelfField('Trip'), attachments: refs.length === 0 ? null : await sealSelfField(JSON.stringify(refs)),
+        created_at: '', total_tasks: 0, completed_tasks: 0, ...(rev === undefined ? {} : { content_rev: rev }),
+    });
+    const stale = (rev: number) => new ApiError('changed', 409, undefined, JSON.stringify({ conflict: 'stale', content_rev: rev, title: 'x', body: null, attachments: null }));
+    const sentRevs = () => patch.mock.calls.map(c => (c[1] as { expect_rev?: number }).expect_rev);
+
+    it('an add names the revision it read, and on a stale 409 re-reads and keeps the other device’s picture', async () => {
+        get.mockResolvedValueOnce([await listed([ref('x')], 5)]).mockResolvedValueOnce([await listed([ref('x'), ref('theirs')], 6)]);
+        patch.mockRejectedValueOnce(stale(6)).mockResolvedValueOnce({ content_rev: 7 });
+        await addTaskListAttachments(3, [ref('mine')]);
+        expect(sentRevs()).toEqual([5, 6]);
+        expect(await sealedRefs()).toEqual([ref('x'), ref('theirs'), ref('mine')]);
+    });
+
+    it('a remove does the same, and answers with what the WINNING attempt dropped', async () => {
+        // First read: `old` is there. By the retry another device has
+        // already taken it out — so this remove dropped nothing, and nothing
+        // may be deleted on its say-so.
+        get.mockResolvedValueOnce([await listed([ref('old'), ref('keep')], 5)]).mockResolvedValueOnce([await listed([ref('keep'), ref('theirs')], 6)]);
+        patch.mockRejectedValueOnce(stale(6));
+        expect(await removeTaskListAttachments(3, [ref('old').href])).toEqual([]);
+        expect(patch).toHaveBeenCalledTimes(1);   // the retry had nothing to write
+        // ...and a remove that wins its race names the revision it read.
+        patch.mockReset();
+        get.mockReset();
+        get.mockResolvedValueOnce([await listed([ref('a'), ref('b')], 9)]);
+        patch.mockResolvedValueOnce({ content_rev: 10 });
+        expect(await removeTaskListAttachments(3, [ref('b').href])).toEqual([ref('b')]);
+        expect(sentRevs()).toEqual([9]);
+    });
+
+    it('an add replayed after its first write landed does not add the same picture twice', async () => {
+        get.mockResolvedValueOnce([await listed([ref('x'), ref('mine')], 6)]);
+        expect(await addTaskListAttachments(3, [ref('mine')])).toEqual([]);
+        expect(patch).not.toHaveBeenCalled();
+    });
+
+    it('gives up after a few lost races with the conflict itself, never a blind write', async () => {
+        get.mockResolvedValue([await listed([ref('x')], 5)]);
+        patch.mockRejectedValue(stale(6));
+        await expect(addTaskListAttachments(3, [ref('mine')])).rejects.toBeInstanceOf(NoteConflictError);
+        expect(patch.mock.calls.length).toBeGreaterThanOrEqual(2);
+        expect(sentRevs().every(r => r === 5)).toBe(true);
+    });
+
+    it('a 409 that is NOT a stale revision (the note is in the trash) is not retried', async () => {
+        get.mockResolvedValue([await listed([ref('x')], 5)]);
+        patch.mockRejectedValue(new ApiError('This note is in the trash', 409, undefined, 'This note is in the trash'));
+        await expect(addTaskListAttachments(3, [ref('mine')])).rejects.toBeInstanceOf(ApiError);
+        expect(patch).toHaveBeenCalledTimes(1);
+    });
+
+    it('POSITIVE CONTROL: a server older than 069 lists no revision, so none is sent (last write wins, as before)', async () => {
+        get.mockResolvedValueOnce([await listed([ref('x')])]);
+        patch.mockResolvedValueOnce(undefined);
+        await addTaskListAttachments(3, [ref('mine')]);
+        expect(sentRevs()).toEqual([undefined]);
+    });
+
     it('refuses rather than guessing when the note is gone or its sidecar is locked', async () => {
         get.mockResolvedValue([]);
         await expect(addTaskListAttachments(3, [ref('mine')])).rejects.toBeInstanceOf(NoteFilesUnreadableError);
         expect(patch).not.toHaveBeenCalled();
         get.mockResolvedValue([{ id: 3, title: await sealSelfField('Trip'), attachments: 'not-an-envelope', created_at: '', total_tasks: 0, completed_tasks: 0 }]);
         expect(await fetchListSidecar(3)).toBeNull();
+        // ...and a readable one comes back WITH the revision it was read at.
+        get.mockResolvedValueOnce([await listed([ref('a')], 4)]);
+        expect(await fetchListSidecar(3)).toEqual({ refs: [ref('a')], rev: 4 });
         await expect(removeTaskListAttachments(3, [ref('a').href])).rejects.toBeInstanceOf(NoteFilesUnreadableError);
         expect(patch).not.toHaveBeenCalled();
     });

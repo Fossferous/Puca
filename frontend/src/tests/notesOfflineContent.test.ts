@@ -12,6 +12,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ApiError } from '../api/client';
+import { NoteConflictError } from '../api/listConflict';
 
 vi.mock('../api/auth', () => ({ currentUserIdFromToken: () => 7 }));
 vi.mock('../api/tasks', async () => {
@@ -562,6 +563,42 @@ describe('what replay does with parked media', () => {
     });
 });
 
+describe('a picture that keeps losing the race to another device (finding 7)', () => {
+    it('stays QUEUED on a stale conflict — it is not dropped, and its bytes are not freed', async () => {
+        // NoteConflictError is not an ApiError, so the replay loop used to
+        // file it under "refused" and drop the op — deleting the picture's
+        // only copy for losing a race an intent can always win on a retry.
+        const h = harness();
+        h.setOnline(false);
+        const ob = h.make();
+        await h.parked.park([media('a')]);
+        await ob.send(ops.addMedia(4, ['a'], [], [], 'a picture'));
+        await ob.send(ops.removeMedia(4, ['sovereign-enc:x?k=K&m=image%2Fpng'], [], 'remove a picture'));
+        h.failures.set('a picture', new NoteConflictError(9, null, null, null));
+        h.setOnline(true);
+        const summary = await ob.replay();
+        expect(summary?.dropped ?? []).toEqual([]);
+        expect(ob.pending()).toBe(2);
+        expect(await h.parked.read(['a'])).toHaveLength(1);
+        // POSITIVE CONTROL: the next replay, with the race won, sends both.
+        await ob.replay();
+        expect(h.ran.map(o => o.label)).toEqual(['a picture', 'remove a picture']);
+        expect(ob.pending()).toBe(0);
+    });
+
+    it('POSITIVE CONTROL: a plain refusal of the same op is still dropped and reported', async () => {
+        const h = harness();
+        h.setOnline(false);
+        const ob = h.make();
+        await h.parked.park([media('a')]);
+        await ob.send(ops.addMedia(4, ['a'], [], [], 'a picture'));
+        h.failures.set('a picture', new ApiError('This note is in the trash', 409));
+        h.setOnline(true);
+        const summary = await ob.replay();
+        expect(summary?.dropped.map(o => o.label)).toEqual(['a picture']);
+    });
+});
+
 describe('execOp inline (online, nothing queued)', () => {
     it('setBody goes straight through', async () => {
         vi.resetModules();
@@ -672,24 +709,60 @@ describe('execOp inline (online, nothing queued)', () => {
         vi.resetModules();
     });
 
-    it('the SAME rule inline: online with nothing queued, a removal still frees its upload', async () => {
+    it('INLINE (online, nothing queued) a removal is the same intent, against the sidecar the server holds NOW (finding 7)', async () => {
+        // It used to PATCH this device's cached snapshot (`op.refs`) with no
+        // revision: a picture another device had added since the cache was
+        // read was silently dropped, key and all.
         const gone = { href: 'sovereign-enc:gonefile?k=K&m=image%2Fpng', name: 'b.png' };
         const kept = { href: 'sovereign-enc:keptfile?k=K&m=image%2Fpng', name: 'a.png' };
-        const deleteFiles = vi.fn(async (_ids: string[]) => undefined);
+        const removeNoteRefs = vi.fn(async () => undefined);
         const setTaskListAttachments = vi.fn(async () => undefined);
-
         vi.resetModules();
+        vi.doMock('../api/noteMedia', async () => {
+            const real = await vi.importActual<typeof import('../api/noteMedia')>('../api/noteMedia');
+            return { ...real, removeNoteRefs };
+        });
         vi.doMock('../api/listContent', async () => {
             const real = await vi.importActual<typeof import('../api/listContent')>('../api/listContent');
-            return { ...real, deleteFiles, setTaskListAttachments };
+            return { ...real, setTaskListAttachments };
         });
-        const outbox = await import('../notes/model/notesOutbox');
+        try {
+            const outbox = await import('../notes/model/notesOutbox');
+            await outbox.execOp(outbox.ops.removeMedia(4, [gone.href], [kept], 'remove 1 picture'), {}, false);
+            expect(removeNoteRefs).toHaveBeenCalledWith(4, [gone.href]);
+            expect(setTaskListAttachments).not.toHaveBeenCalled();
+        } finally {
+            vi.doUnmock('../api/noteMedia');
+            vi.doUnmock('../api/listContent');
+            vi.resetModules();
+        }
+    });
 
-        await outbox.execOp(outbox.ops.removeMedia(4, [gone.href], [kept], 'remove 1 picture'), {}, false);
-        expect(setTaskListAttachments).toHaveBeenCalledWith(4, [kept]);
-        expect(deleteFiles.mock.calls.map(c => c[0])).toEqual([['gonefile']]);
-
-        vi.doUnmock('../api/listContent');
+    it('INLINE an add is the same intent too, never a replace from the snapshot (finding 7)', async () => {
+        const up = { href: 'sovereign-enc:up?k=K&m=image%2Fpng', name: 'u.png' };
+        const addNoteRefs = vi.fn(async () => undefined);
+        const setTaskListAttachments = vi.fn(async () => undefined);
+        const { parked } = parkedHarness();
+        await parked.park([media('a')]);
         vi.resetModules();
+        vi.doMock('../api/noteMedia', async () => {
+            const real = await vi.importActual<typeof import('../api/noteMedia')>('../api/noteMedia');
+            return { ...real, addNoteRefs, uploadParkedMedia: vi.fn(async () => [up]) };
+        });
+        vi.doMock('../api/listContent', async () => {
+            const real = await vi.importActual<typeof import('../api/listContent')>('../api/listContent');
+            return { ...real, setTaskListAttachments };
+        });
+        try {
+            const outbox = await import('../notes/model/notesOutbox');
+            const old = 'sovereign-enc:old?k=K&m=image%2Fpng';
+            await outbox.execOp(outbox.ops.addMedia(4, ['a'], [old], [], '1 picture'), {}, false, parked);
+            expect(addNoteRefs).toHaveBeenCalledWith(4, [up], [old]);
+            expect(setTaskListAttachments).not.toHaveBeenCalled();
+        } finally {
+            vi.doUnmock('../api/noteMedia');
+            vi.doUnmock('../api/listContent');
+            vi.resetModules();
+        }
     });
 });

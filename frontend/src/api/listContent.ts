@@ -31,7 +31,7 @@ import {
     taskTabKey,
 } from './tasks';
 import { openListContent, sealSelfField } from './listSeal';
-import { patchListContent } from './listConflict';
+import { NoteConflictError, patchListContent } from './listConflict';
 export { NoteConflictError } from './listConflict';
 import { MAX_READABLE_ENVELOPE_VERSION, messageEncState } from './e2ee';
 import { parseEncAttachment } from './attachments';
@@ -170,55 +170,111 @@ export async function setTaskListTiming(
  */
 export async function setTaskListAttachments(listId: number, refs: TaskAttachmentRef[], expectRev?: number): Promise<number | null> {
     const real = withoutParked(refs);
-    const sealed = real.length === 0 ? '' : await sealSelfField(serializeTaskAttachments(real));
+    let sealed: string;
+    try {
+        sealed = real.length === 0 ? '' : await sealSelfField(serializeTaskAttachments(real));
+    } catch (err) {
+        throw markNotSent(err);   // nothing has left this device
+    }
     return patchListContent(listId, {
         attachments: sealed,
         ...(expectRev === undefined ? {} : { expect_rev: expectRev }),
     });
 }
 
-/** A list's OWN sidecar as the SERVER holds it now, opened. Null when the
- *  list is gone, or its sidecar cannot be read on this device (a locked
- *  identity: writing over refs we cannot read would orphan them). */
-export async function fetchListSidecar(listId: number): Promise<TaskAttachmentRef[] | null> {
+/** A list's OWN sidecar as the SERVER holds it now, opened, and the
+ *  revision it was read at (`content_rev`, migration 069) — undefined from a
+ *  server older than 069, which lists none. Null when the list is gone, or
+ *  its sidecar cannot be read on this device (a locked identity: writing
+ *  over refs we cannot read would orphan them). */
+export async function fetchListSidecar(listId: number): Promise<{ refs: TaskAttachmentRef[]; rev: number | undefined } | null> {
     const list = (await listTaskLists()).find(l => l.id === listId);
     if (!list) return null;
     const opened = list.attachments ?? null;
     if (isAttachmentsLocked(opened)) return null;
-    return parseTaskAttachments(opened);
+    return { refs: parseTaskAttachments(opened), rev: typeof list.content_rev === 'number' ? list.content_rev : undefined };
+}
+
+/** Attempts an intent makes before it gives up on a note that keeps moving. */
+const SIDECAR_ATTEMPTS = 3;
+
+/**
+ * Read the sidecar, compute the next one from THAT read, and write it naming
+ * the revision it was read at — re-reading and re-applying when another
+ * device wrote in between (a stale 409, NoteConflictError). An intent is
+ * always safe to re-apply, so the race is simply run again.
+ *
+ * Without the revision, two devices replaying at once each read [x], and the
+ * second write of [x, b] silently dropped the first's [x, a] — and with it
+ * the key to `a`, which lives only in that ref.
+ *
+ * `plan` answers null when there is nothing to write. After the last lost
+ * race the conflict itself is thrown — never a blind write; the outbox keeps
+ * the op queued (notesOutbox.ts). Only a STALE revision is retried: a 409 for
+ * a trashed note or an envelope downgrade is not a NoteConflictError and
+ * goes straight back to the caller. A failure while READING is marked as not
+ * sent: no write of this intent has landed.
+ */
+async function applySidecarIntent<T>(
+    listId: number,
+    plan: (current: TaskAttachmentRef[]) => { next: TaskAttachmentRef[]; answer: T } | { next: null; answer: T },
+): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+        let read: Awaited<ReturnType<typeof fetchListSidecar>>;
+        try {
+            read = await fetchListSidecar(listId);
+        } catch (err) {
+            throw markNotSent(err);
+        }
+        if (read === null) throw markNotSent(new NoteFilesUnreadableError());
+        const step = plan(read.refs);
+        if (step.next === null) return step.answer;
+        try {
+            await setTaskListAttachments(listId, step.next, read.rev);
+            return step.answer;
+        } catch (err) {
+            // No revision was named (an older server): nothing to retry.
+            if (!(err instanceof NoteConflictError) || read.rev === undefined || attempt >= SIDECAR_ATTEMPTS) throw err;
+        }
+    }
 }
 
 /**
  * Add refs to whatever the server holds NOW, optionally dropping some — an
  * INTENT, not a snapshot. A replayed full replace would silently delete a
  * picture another device added in the meantime (and strand its upload); this
- * cannot, because it never names refs it did not just read.
+ * cannot, because it never names refs it did not just read, and it names the
+ * revision it read them at.
  *
  * Returns the refs it actually DROPPED — never the ones it was merely asked
- * to drop. Those uploads are nobody's now, and the caller deletes them
- * (api/noteMedia.ts `addNoteRefs`); a ref the server no longer held is not
- * among them, so a picture another device still names is never destroyed.
+ * to drop, and only those the WINNING attempt dropped. Those uploads are
+ * nobody's now, and the caller deletes them (api/noteMedia.ts
+ * `addNoteRefs`); a ref the server no longer held is not among them, so a
+ * picture another device still names is never destroyed.
+ *
+ * A ref that is ALREADY there (an earlier attempt of this same add landed
+ * but its answer was lost) is not added twice.
  */
 export async function addTaskListAttachments(listId: number, added: TaskAttachmentRef[], replacing: string[] = []): Promise<TaskAttachmentRef[]> {
-    const current = await fetchListSidecar(listId);
-    if (current === null) throw new NoteFilesUnreadableError();
-    const drop = new Set(replacing);
-    const dropped = current.filter(r => drop.has(r.href));
-    const next = [...current.filter(r => !drop.has(r.href)), ...added];
-    await setTaskListAttachments(listId, next);
-    return dropped;
+    return applySidecarIntent(listId, current => {
+        const drop = new Set(replacing);
+        const have = new Set(current.map(r => r.href));
+        const dropped = current.filter(r => drop.has(r.href));
+        const fresh = added.filter(r => !have.has(r.href));
+        if (dropped.length === 0 && fresh.length === 0) return { next: null, answer: [] };
+        return { next: [...current.filter(r => !drop.has(r.href)), ...fresh], answer: dropped };
+    });
 }
 
 /** Remove refs from whatever the server holds now — the same intent form,
  *  and the same answer: the refs actually taken out. */
 export async function removeTaskListAttachments(listId: number, removing: string[]): Promise<TaskAttachmentRef[]> {
-    const current = await fetchListSidecar(listId);
-    if (current === null) throw new NoteFilesUnreadableError();
-    const drop = new Set(removing);
-    const next = current.filter(r => !drop.has(r.href));
-    if (next.length === current.length) return [];   // already gone: nothing to say
-    await setTaskListAttachments(listId, next);
-    return current.filter(r => drop.has(r.href));
+    return applySidecarIntent(listId, current => {
+        const drop = new Set(removing);
+        const gone = current.filter(r => drop.has(r.href));
+        if (gone.length === 0) return { next: null, answer: [] };   // already gone: nothing to say
+        return { next: current.filter(r => !drop.has(r.href)), answer: gone };
+    });
 }
 
 /** Create a list with its title, and optionally its note text and refs, in

@@ -240,8 +240,8 @@ export interface ListContentActions {
      *  state. Never queued: its uploads cannot wait for a connection. */
     createNoteFromPlan: (plan: CopyPlan) => Promise<NoteRef | null>;
     /** Drop `dropped` from a note's sidecar (`next` is what is left). An
-     *  intent, applied to whatever the server holds — see the implementation
-     *  for why it needs no base revision. */
+     *  intent, applied to whatever the server holds and guarded by the
+     *  revision it was read at — see the implementation. */
     setNoteAttachments: (listId: number, next: TaskAttachmentRef[], dropped?: TaskAttachmentRef[]) => Promise<boolean>;
     addNoteMedia: (listId: number, photos: File[], drawings: DrawingFiles[], replacing?: TaskAttachmentRef[], audio?: File[]) => Promise<boolean>;
     deleteForever: (list: TaskList) => Promise<boolean>;
@@ -645,10 +645,15 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
      * removal itself, by the href the upload became (notesOutbox.ts,
      * `forgottenInFlight` and `sentAs`).
      *
-     * NO compare-and-swap here, deliberately: an intent that names the refs
-     * to drop is applied to whatever the server holds, so there is nothing a
-     * revision check could protect. The whole-sidecar replace that DOES need
-     * one is in `addNoteMedia` below, which names its base explicitly.
+     * No base revision from THIS cache: the removal is an intent, and the
+     * helper that runs it (api/listContent.ts `removeTaskListAttachments`,
+     * online and on replay alike) reads the sidecar the server holds, writes
+     * it back naming the revision it read, and re-reads and re-applies when
+     * another device wrote in between. It used to write this device's
+     * snapshot blind whenever it ran inline, dropping a picture added
+     * elsewhere since. The whole-sidecar replace that uses a cached base is
+     * `addNoteMedia` below, which names it explicitly. The conflict branch
+     * below is reached only when that re-apply keeps losing.
      */
     const setNoteAttachments = useCallback(async (listId: number, next: TaskAttachmentRef[], dropped: TaskAttachmentRef[] = []): Promise<boolean> => {
         const current = lists()?.find(l => l.id === listId);

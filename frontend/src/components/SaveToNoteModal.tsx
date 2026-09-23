@@ -25,7 +25,7 @@ import {
     discardCopies,
 } from '../api/captureToNote';
 import { isUndecryptable } from '../api/decryptMarkers';
-import { fetchListFeatures, createTaskListWithContent, setTaskListAttachments, setTaskListBody } from '../api/listContent';
+import { NoteConflictError, addTaskListAttachments, createTaskListWithContent, fetchListFeatures, setTaskListBody } from '../api/listContent';
 import {
     type TaskAttachmentRef,
     type TaskList,
@@ -50,6 +50,32 @@ interface SaveToNoteModalProps {
 }
 
 type Shape = 'item' | 'text';
+
+/**
+ * Append `addition` to a note's text, naming the revision the text was read
+ * at, so a paragraph another device wrote since the sheet opened is not
+ * replaced (migration 069). On a stale refusal the addition goes onto the
+ * copy that won, a few times at most. A newer copy this device cannot READ
+ * is never appended to: that would seal the capture over it. `rev` absent
+ * (a server older than 069) is the old last-write-wins.
+ */
+async function appendToNoteText(listId: number, current: string, rev: number | undefined, addition: string): Promise<void> {
+    let base = current;
+    let expect = typeof rev === 'number' ? rev : undefined;
+    for (let attempt = 1; ; attempt++) {
+        try {
+            await setTaskListBody(listId, base ? `${base}\n\n${addition}` : addition, expect);
+            return;
+        } catch (err) {
+            if (!(err instanceof NoteConflictError) || expect === undefined || attempt >= 3) throw err;
+            if (err.body !== null && isUndecryptable(err.body)) {
+                throw new Error('This note’s text was changed on another device and can’t be read here yet, so nothing was added.');
+            }
+            base = err.body ?? '';
+            expect = err.contentRev;
+        }
+    }
+}
 
 export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalProps) {
     const [filter, setFilter] = useState('');
@@ -203,14 +229,14 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
                     await createListTask(target, body);
                     landedInExisting = true;
                 } else if (body) {
-                    const existingBody = list?.body ?? '';
-                    await setTaskListBody(target, existingBody ? `${existingBody}\n\n${body}` : body);
+                    await appendToNoteText(target, list?.body ?? '', list?.content_rev, body);
                     landedInExisting = true;
                 }
-                if (copied.length) {
-                    const keep = parseTaskAttachments(list?.attachments ?? null);
-                    await setTaskListAttachments(target, [...keep, ...copied]);
-                }
+                // An intent against the sidecar the server holds NOW, named
+                // by the revision it was read at (api/listContent.ts) - not
+                // this sheet's snapshot, which would drop a picture another
+                // device added since it opened.
+                if (copied.length) await addTaskListAttachments(target, copied);
                 saved = list?.title ?? 'your note';
             }
         } catch (err) {
@@ -225,7 +251,9 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
                 heldNew.current = null;
                 try { await deleteTaskList(createdId); } catch { orphaned = true; }
             }
-            if (copied.length && !orphaned) await discardCopies(copied).catch(() => undefined);
+            // ...and only on a DEFINITE refusal: a sidecar write whose
+            // answer was lost may have landed, naming them.
+            if (copied.length && !orphaned && isDefiniteRefusal(err)) await discardCopies(copied).catch(() => undefined);
             setError(orphaned
                 ? 'The note was made, but the rest couldn’t be added — open Notes to finish it.'
                 : landedInExisting

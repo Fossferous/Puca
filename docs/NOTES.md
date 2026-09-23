@@ -566,11 +566,24 @@ back the copy it holds (migration 069, `expect_rev` on
   - **Uploads are added to the sidecar the server holds at that moment**, never
     to the copy this device last saw, so a picture added on another phone in
     the meantime is not deleted by a replay. Removing a picture works the same
-    way round. Whatever that add or remove ACTUALLY took out of the sidecar
-    has its upload deleted straight after — only what was really there, so a
-    ref another device still names is never destroyed — which is the same
-    rule Púca's own Tasks view follows, kept in one place
-    (`api/noteMedia.ts`: `addNoteRefs`, `removeNoteRefs`).
+    way round — online as well as off: an ordinary *remove* with a connection
+    goes the same way, where it used to write this device's copy of the list
+    back whole. The write names the revision it read the sidecar at (migration
+    069), so two devices replaying into one note at the same moment cannot
+    each write back what they read and drop the other's picture — and with it
+    the picture's key, which lives only in that list. The one that loses reads
+    again and adds (or removes) on top of the winner; after a few lost races
+    running it stays queued and tries again later rather than being dropped.
+    Against a server older than 069, which lists no revision, the last write
+    wins as before. Whatever that add or remove ACTUALLY took out of the
+    sidecar has its upload deleted straight after — only what was really
+    there, so a ref another device still names is never destroyed — which is
+    the same rule Púca's own Tasks view follows, kept in one place
+    (`api/noteMedia.ts`: `addNoteRefs`, `removeNoteRefs`). An upload is only
+    ever deleted after a DEFINITE refusal: when the answer to a write is lost
+    (the connection dropped, a gateway timed out) the server may have saved
+    it, and the upload is kept rather than leave that note pointing at a
+    deleted file.
 - **Not offline:** *Show checkboxes* (turning the text into items) — it
   clears the text and then creates one item per line, and a queue would put
   those halves hours apart, so it is refused with a message while offline or
@@ -1427,8 +1440,9 @@ device cannot decrypt is not offered, and neither is a clip post — its body
 carries the clip key, and a note outlives the window the clip was approved for.
 
 A note whose TEXT or whose pictures this device cannot read yet is not offered
-as a destination either. Every write here replaces what is stored — the note's
-text wholesale, the picture list wholesale — so saving into such a note would
+as a destination either. Both writes into an existing note rewrite what is
+stored — the note's text with the capture appended, the picture list with the
+copies added — so saving into such a note would
 seal the captured line over ciphertext the account still holds under a key this
 device has not got, and no device could ever read it again. That is the rule
 `isAttachmentsLocked` already carried for the picture list; it applies to the
@@ -1436,6 +1450,16 @@ text for exactly the same reason. The refusal survives changing your mind about
 pictures after picking a note, and a save that half-succeeds — the note made,
 the item refused — undoes the note rather than leaving it behind with pictures
 that nothing names.
+
+Neither write works from the copy of the note the sheet read when it opened:
+the pictures are added to the list the server holds at that moment, and the
+text is appended naming the revision it was read at, so a paragraph or a
+picture another device added while the sheet was open is kept (a text changed
+elsewhere that this device cannot read is left alone, and the save says so).
+A new note whose answer was lost — the connection dropped just as the server
+saved it — says it may or may not have been saved and keeps its picture
+copies; pressing Save again sends the same create again, so the server
+answers with the note it already made rather than making a second.
 
 Into a note you ALREADY have there is nothing to undo: the item, or the text
 appended to it, is in a note you keep. So a failure after that point says the

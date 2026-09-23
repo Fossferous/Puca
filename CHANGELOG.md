@@ -22,6 +22,14 @@ one-line summary; this file is the full story. Versions follow
   instead of making another. The same holds for *Make a copy*, for pictures
   added to a note, for pictures waiting to sync, and for *Save to Notes* in
   Púca.
+- **Two devices adding pictures to one note at the same moment no longer lose
+  one of them.** When two phones synced pictures into the same note at once,
+  or a picture was removed on one device while another added one, the second
+  save could silently drop the first device's picture for good. Each save now
+  checks that the note has not changed since it looked, and if it has, adds or
+  removes its picture on top of the other device's change. *Save to Notes* in
+  Púca no longer drops a picture or a paragraph added elsewhere while its sheet
+  was open.
 
 ## 0.9.818 — 2026-09-23
 
