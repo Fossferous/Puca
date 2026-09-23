@@ -4,6 +4,25 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+- **"Stay signed in" now ends when it says it does.** A session renewed in
+  its last month used to get a fresh 30 days, so a year-long sign-in could
+  last until about day 395 (and an ordinary 30-day one until about day 31).
+  Every renewal now stops at the cap: a year after you signed in with the box
+  ticked, or 30 days without it, the password is asked for.
+- **An expired session is no longer quietly extended.** A request that
+  arrived in the minute after your session expired could renew it for another
+  day (or month). That request is still served, but the session is not
+  renewed: it ends and the sign-in form appears, as it always said it would.
+- **Signing out one session, or revoking a device, always reaches it.** If
+  the server hit a database error at the exact moment of a sign-in (or of a
+  device's own sign-in), it used to let you in anyway with a session that
+  "Sign out" and "revoke device" could not reach, only "Sign out of every
+  device" or a password change. It now refuses that one sign-in instead; try
+  again and it goes through.
+
 ## 0.9.818 — 2026-09-23
 
 Púca Notes: swipe left and right between All notes and each label like Google Tasks' lists, and scroll each like Keep; "Stay signed in on this device" keeps the session alive for up to a year instead of a day; the Reminders tab reads properly on a phone.
