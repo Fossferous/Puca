@@ -4,6 +4,19 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+- **Signing out and in as someone else no longer mixes your note colours and
+  labels.** A colour/label sync still running when one person signed out of
+  Púca Notes or Púca (neither reloads the page) could finish after the next
+  person signed in on the same browser, copying the first person's labels,
+  colours, archive flags and reminder times into the second person's notes,
+  and from there to their other devices. It could also leave the first
+  person's last-synced labels in the browser's storage after the sign-out had
+  cleared them. A sync now stops as soon as the account it started for is no
+  longer the one signed in.
+
 ## 0.9.818 — 2026-09-23
 
 Púca Notes: swipe left and right between All notes and each label like Google Tasks' lists, and scroll each like Keep; "Stay signed in on this device" keeps the session alive for up to a year instead of a day; the Reminders tab reads properly on a phone.
