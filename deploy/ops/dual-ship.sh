@@ -1202,6 +1202,25 @@ cmd_backend() {
 		exit 0
 	fi
 
+	# The tarball must say which commit it is. build.rs takes PUCA_GIT_COMMIT,
+	# else a SOURCE_COMMIT file beside Cargo.toml, else git, and a tarball has
+	# no .git: without the file, GET /source (the AGPL section 13 offer) serves
+	# "commit":"unknown", a source offer that points at nothing. 0.9.8 shipped
+	# like that and was shipped again; 0.9.817 shipped like that and nobody
+	# noticed until the 0.9.818 ship read /source. So it is refused here,
+	# before anything is built, and checked on every host after the install.
+	local source_commit
+	source_commit="$(tar -xzOf "$src_tarball" SOURCE_COMMIT 2>/dev/null || tar -xzOf "$src_tarball" ./SOURCE_COMMIT 2>/dev/null || true)"
+	source_commit="$(printf '%s' "$source_commit" | tr -d '[:space:]')"
+	if ! [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]]; then
+		echo "REFUSING to ship: $src_tarball carries no SOURCE_COMMIT (a 40-hex commit id at its top level)."
+		echo "Without it the backend's GET /source says \"commit\":\"unknown\" and the AGPL source offer points at nothing."
+		echo "  git rev-parse HEAD > SOURCE_COMMIT      # gitignored; delete it after packing"
+		echo "  tar --exclude=target -czf src.tar.gz Cargo.toml Cargo.lock build.rs src migrations crates SOURCE_COMMIT"
+		exit 1
+	fi
+	echo "PASS  the tarball names its commit: $source_commit"
+
 	echo "=== building ONCE on $primary_label, then copying the binary ==="
 	echo "    (verified identical OS/glibc/arch across every host in hosts.conf —"
 	echo "     re-check that assumption before trusting this if a host ever changes.)"
@@ -1236,6 +1255,15 @@ cmd_backend() {
 		else
 			echo "FAIL  $label backend did not respond as expected: $health"
 			FAILED+=("$label:backend")
+		fi
+		# The binary actually running must name the commit it was built from.
+		local source_body
+		source_body="$(remote_body "$entry" "$API_HOST" /source)"
+		if printf '%s' "$source_body" | grep -qF "\"commit\":\"$source_commit\""; then
+			echo "PASS  $label GET /source names $source_commit"
+		else
+			echo "FAIL  $label GET /source does not name $source_commit: $source_body"
+			FAILED+=("$label:source")
 		fi
 	done
 	rm -f "$built"

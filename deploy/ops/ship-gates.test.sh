@@ -653,6 +653,25 @@ printf '1|%s\n2|%s\n3|%s\n' "$S1" "0000" "$S2" > "$TMP/sqlx_rows"
 out="$(preflight "$TMP/src-new.tgz")"; rc=$?
 check "a tolerant tarball still REFUSES a checksum mismatch" "$([ $rc -ne 0 ] && [ "$(has "$out" 'migration v2 (002_b.sql) does not byte-match')" = 1 ] && [ "$(has "$out" 'REFUSING to ship')" = 1 ] && echo 1 || echo 0)" "$out"
 
+# SOURCE_COMMIT: a tarball that does not say which commit it is ships a
+# backend whose GET /source says "unknown" (0.9.8, 0.9.817). A FULL run (not
+# pre-flight only) must refuse it before any upload; the same tarball with a
+# commit id gets past the guard (positive control). Nothing is built either
+# way: the stub scp never produces a binary, so the positive run stops at the
+# build, after the guard has spoken.
+printf '1|%s\n2|%s\n' "$S1" "$S2" > "$TMP/sqlx_rows"
+fullship() { : > "$LOG"; ( cd "$TMP/deploy/ops" && PATH="$TMP/bin:$PATH" bash ./dual-ship.sh backend "$1" 2>&1 ); }
+out="$(fullship "$TMP/src-new.tgz")"; rc=$?
+check "a backend tarball with no SOURCE_COMMIT is REFUSED" "$([ $rc -ne 0 ] && [ "$(has "$out" 'carries no SOURCE_COMMIT')" = 1 ] && echo 1 || echo 0)" "$out"
+check "and nothing was uploaded" "$([ "$(grep -c '^scp' "$LOG")" = 0 ] && echo 1 || echo 0)" "$(cat "$LOG")"
+printf 'not-a-commit\n' > "$TMP/src-new/SOURCE_COMMIT"; tar czf "$TMP/src-badcommit.tgz" -C "$TMP/src-new" migrations src SOURCE_COMMIT
+out="$(fullship "$TMP/src-badcommit.tgz")"; rc=$?
+check "and so is one whose SOURCE_COMMIT is not a commit id" "$([ $rc -ne 0 ] && [ "$(has "$out" 'carries no SOURCE_COMMIT')" = 1 ] && echo 1 || echo 0)" "$out"
+printf '0123456789abcdef0123456789abcdef01234567\n' > "$TMP/src-new/SOURCE_COMMIT"; tar czf "$TMP/src-withcommit.tgz" -C "$TMP/src-new" migrations src SOURCE_COMMIT
+out="$(fullship "$TMP/src-withcommit.tgz")"
+check "one that names its commit gets past the guard (positive control)" "$([ "$(has "$out" 'PASS  the tarball names its commit: 0123456789abcdef0123456789abcdef01234567')" = 1 ] && [ "$(has "$out" 'carries no SOURCE_COMMIT')" = 0 ] && echo 1 || echo 0)" "$out"
+rm -f "$TMP/src-new/SOURCE_COMMIT" /tmp/puca-dual-bin
+
 rm -f "$TMP/src-new/migrations/002_b.sql"
 printf '1|%s\n2|%s\n' "$S1" "$S2" > "$TMP/sqlx_rows"
 printf 'CREATE TABLE c (id INT);\n' > "$TMP/src-new/migrations/003_c.sql"; tar czf "$TMP/src-gap.tgz" -C "$TMP/src-new" migrations src
