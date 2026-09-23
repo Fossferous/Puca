@@ -1150,7 +1150,7 @@ verify_migrations_against() {
 	local entry="$1" tarball="$2"
 	local label; label="$(label_of "$entry")"
 	local tmp; tmp="$(mktemp -d)"
-	# Checked: this runs as an `if` condition, where errexit is off.
+	# Checked: this runs on the left of `||` (cmd_backend), where errexit is off.
 	if ! tar xzf "$tarball" -C "$tmp" migrations; then
 		echo "FAIL  $label: could not extract migrations/ from $tarball"
 		rm -rf "$tmp"; return 1
@@ -1163,7 +1163,7 @@ verify_migrations_against() {
 		if [ "$v" -gt "$newest" ]; then newest="$v"; fi
 	done
 	# Reading the history is a CHECKED step. It used to be a bare `$(ssh …)`
-	# whose status nothing read: this function runs as an `if` condition, so
+	# whose status nothing read: this function runs on the left of `||`, so
 	# errexit is off in it, and a failed read (postgres down, a DB_NAME naming
 	# no database, sudo refused, ssh 255) left nothing on stdout, zero rows
 	# "matched", and the pre-flight printed PASS for a history nobody had seen
@@ -1174,9 +1174,11 @@ verify_migrations_against() {
 	# A database with no _sqlx_migrations table is its own case, on purpose: a
 	# freshly provisioned host (provision.sh makes an EMPTY database) that the
 	# backend will migrate from nothing on first start. That passes with a NOTE
-	# only where no backend is installed yet. Where one IS installed, a database
-	# with no migration history is not the one it runs on: DB_NAME is wrong, and
-	# the check would be comparing nothing.
+	# only where no backend is installed yet, and returns 3, not 0: nothing was
+	# compared, so the caller must not print "byte-match". Where a backend IS
+	# installed, a database with no migration history is either not the one it
+	# runs on (DB_NAME is wrong) or one it has never managed to start against;
+	# either way the check would be comparing nothing, so it refuses.
 	local recorded
 	recorded="$(ssh_to "$entry" "set -e
 		none=\$(sudo -u postgres psql -X -d $DB_NAME -v ON_ERROR_STOP=1 -t -A -c \"SELECT to_regclass('_sqlx_migrations') IS NULL\")
@@ -1197,10 +1199,12 @@ verify_migrations_against() {
 		__NO_TABLE__*)
 			echo "NOTE  $label: database '$DB_NAME' has no _sqlx_migrations table and no backend is installed at"
 			echo "      $INSTALL_DIR/$SERVICE_NAME: a fresh host, which the backend migrates from empty on first start."
-			rm -rf "$tmp"; return 0 ;;
+			rm -rf "$tmp"; return 3 ;;
 		__NO_TABLE_INSTALLED__*)
 			echo "FAIL  $label: database '$DB_NAME' has no _sqlx_migrations table, but a backend is installed at"
-			echo "      $INSTALL_DIR/$SERVICE_NAME, so it runs on some other database: fix DB_NAME in hosts.conf."
+			echo "      $INSTALL_DIR/$SERVICE_NAME. Either DB_NAME in hosts.conf names some other database,"
+			echo "      or the backend installed there has never started against it: check its .env"
+			echo "      DATABASE_URL and \`journalctl -u $SERVICE_NAME\`. Once it has run and migrated, this passes."
 			rm -rf "$tmp"; return 1 ;;
 	esac
 	local fails=0 ver sum f local_sum
@@ -1238,12 +1242,15 @@ cmd_backend() {
 
 	echo "=== pre-flight: migration checksums vs every host's database ==="
 	local preflight_failed=0
+	local vrc
 	for entry in "${HOSTS[@]}"; do
-		if verify_migrations_against "$entry" "$src_tarball"; then
-			echo "PASS  $(label_of "$entry") migrations byte-match"
-		else
-			preflight_failed=1
-		fi
+		# `|| vrc=$?` keeps errexit off inside the check, as the old `if` did.
+		vrc=0; verify_migrations_against "$entry" "$src_tarball" || vrc=$?
+		case "$vrc" in
+			0) echo "PASS  $(label_of "$entry") migrations byte-match" ;;
+			3) echo "PASS  $(label_of "$entry") nothing to compare (fresh host, no migration history yet)" ;;
+			*) preflight_failed=1 ;;
+		esac
 	done
 	if [ "$preflight_failed" -ne 0 ]; then
 		echo "REFUSING to ship: a host failed the pre-flight above. A history that could not be read"

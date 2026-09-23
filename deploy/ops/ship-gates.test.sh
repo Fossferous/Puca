@@ -732,9 +732,12 @@ rm -f "$TMP/ssh_silent"
 rm -f "$TMP/sqlx_rows"; rm -rf "$TMP/remote-install"
 out="$(preflight "$TMP/src-new.tgz")"; rc=$?
 check "no _sqlx_migrations table and no backend installed (a fresh host) passes, with a NOTE" "$([ $rc -eq 0 ] && [ "$(has "$out" "NOTE  sandbox: database 'sandbox' has no _sqlx_migrations table and no backend is installed")" = 1 ] && [ "$(has "$out" 'REFUSING')" = 0 ] && echo 1 || echo 0)" "rc=$rc $out"
+# ...and says it compared nothing: a fresh host is not a byte-match, and the
+# pre-flight summary must not claim one.
+check "a fresh host reports 'nothing to compare', not 'migrations byte-match'" "$([ "$(has "$out" 'PASS  sandbox nothing to compare (fresh host, no migration history yet)')" = 1 ] && [ "$(has "$out" 'migrations byte-match')" = 0 ] && echo 1 || echo 0)" "rc=$rc $out"
 mkdir -p "$TMP/remote-install"; printf 'binary\n' > "$TMP/remote-install/sandbox"
 out="$(preflight "$TMP/src-new.tgz")"; rc=$?
-check "no _sqlx_migrations table on a host WITH a backend installed REFUSES (wrong DB_NAME)" "$([ $rc -ne 0 ] && [ "$(has "$out" "database 'sandbox' has no _sqlx_migrations table, but a backend is installed")" = 1 ] && [ "$(has "$out" 'REFUSING to ship')" = 1 ] && [ "$(has "$out" 'PASS  sandbox migrations byte-match')" = 0 ] && echo 1 || echo 0)" "rc=$rc $out"
+check "no _sqlx_migrations table on a host WITH a backend installed REFUSES (wrong DB_NAME)" "$([ $rc -ne 0 ] && [ "$(has "$out" "database 'sandbox' has no _sqlx_migrations table, but a backend is installed")" = 1 ] && [ "$(has "$out" 'or the backend installed there has never started against it')" = 1 ] && [ "$(has "$out" 'REFUSING to ship')" = 1 ] && [ "$(has "$out" 'PASS  sandbox migrations byte-match')" = 0 ] && echo 1 || echo 0)" "rc=$rc $out"
 # ...and with the history readable again, the installed host passes: the
 # end-marker parsing leaves the last real row intact.
 printf '1|%s\n2|%s\n' "$S1" "$S2" > "$TMP/sqlx_rows"
