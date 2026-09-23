@@ -3,8 +3,10 @@
 
    The rules moved here from notes/notes.css and notes/timing.css when the
    component became shared, class names unchanged so Notes' tests and walks
-   still name the same things. Púca's bundle never loads notes.css, so the few
-   Notes utility classes the markup leans on (.notes-section-title,
+   still name the same things. A second, DUPLICATE copy of them was left
+   behind in notes.css until 0.9.818; it is gone, and this file is the only
+   place a reminder row is laid out. Púca's bundle never loads notes.css, so
+   the few Notes utility classes the markup leans on (.notes-section-title,
    .notes-empty, .notes-iconbtn, .notes-textbtn) are repeated here SCOPED to
    the list — same values, so Notes looks identical and its own copies keep
    serving the rest of that app. */
@@ -133,11 +135,57 @@
 }
 .notes-reminder-row .notes-textbtn:hover { background: var(--bg-modifier-hover); }
 
-/* Phone: a 44px tap target on every control, and a taller row. */
+/* Phone: a 44px tap target on every control, a taller row, and the row laid
+   out over two lines instead of one. */
 @media (pointer: coarse) and (max-width: 1024px) {
     .notes-reminder-row { padding: 12px 10px; }
     .notes-reminder-row input[type="checkbox"] { width: 20px; height: 20px; }
+    /* Two icon buttons sit at the end of a reminder row (Notes' retime and
+       the snooze; a note row's Clear is the same button): DESIGN_PHILOSOPHY
+       §7's 44px applies to all of them. Scoped to the row — 40px is right
+       for a card's own tools, and widening every small icon button would
+       grow Notes' composer cluster too. */
     .notes-reminder-row .notes-iconbtn.small { width: 44px; height: 44px; }
+
+    /* LINE 1 is the tick box (or a note's bell) and the item's own text;
+       LINE 2 is the timing marks, the note title, the due time and then the
+       actions against the right edge.
+       Until 0.9.818 the text lost that line to its siblings:
+       `.notes-reminder-text` is `flex: 1`, i.e. flex-BASIS 0, so its share
+       was whatever the unshrinkable siblings left — the marks, the note title
+       (up to 40%), the nowrap due time, the 44px buttons and their 10px gaps.
+       Measured by the Notes walk at 390x844 on the 0.9.817 CSS: Púca Notes
+       (whose notes.css wrapped the row but did nothing else) gave "Bread"
+       44.3px of a 366px row, 12.1%, and a 69-character item 34.9px, 16
+       lines tall; Púca's own Reminders tab (no wrap at all) gave the same
+       items 102.5px and 91.2px of a 358px row.
+       Why each number:
+       - The text's basis is 0 and its floor is the line minus 34px, so the
+         line-breaker always sees box + gap + text = the line minus 4px (tick
+         box, 20px) or 8px (bell, 16px): the text stays BESIDE the box, and
+         the next sibling's own 10px gap no longer fits, so everything else
+         goes to line 2. A content basis (`auto`) put a long item's text
+         BELOW its box instead — its max-content is wider than the line —
+         and a 100% basis does that to every item. The window is
+         (line − 36px, line − 30px]; keep it if the box or the gap changes.
+       - The tick box's UA margin (4px left, 3px right) goes: with it the
+         sum is 3px past the line and the text drops below the box.
+       - Empty marks and an empty note title go: a 0-width item still brings
+         a 10px gap and started line 2 off the left edge.
+       - The note title has a 0 basis too, so a long one can never push the
+         buttons onto a THIRD line (it did: 40% + time + two buttons + marks
+         is more than 370px); it grows back to its own width at most
+         (`max-width: max-content`) and ellipsises when the line is full.
+       - flex-grow is resolved before auto margins, so the free space the
+         note title does not take is what the time's auto margin puts
+         between it and the buttons. The time is the one element on that
+         line every row has. */
+    .notes-reminder-row { flex-wrap: wrap; row-gap: 2px; }
+    .notes-reminder-row input[type="checkbox"] { margin: 0; }
+    .notes-reminder-text { flex: 1 1 0; min-width: calc(100% - 34px); }
+    .notes-reminder-marks:empty, .notes-reminder-note:empty { display: none; }
+    .notes-reminder-note { flex: 1 1 0; min-width: 0; max-width: max-content; }
+    .notes-reminder-when { margin-right: auto; }
     .notes-snooze-menu {
         position: absolute;
         right: 0;

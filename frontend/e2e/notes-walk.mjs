@@ -3524,8 +3524,18 @@ ck('desktop hint: a second line inside the item cell, not a new column', !!hinte
         const overflow = await pg.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
         ck('phone hint (390x844): shown under the item', !!hinted && hinted.hint === 'Reminds whoever set it' && !!hinted.sub && hinted.sub.t >= hinted.text.t + 4, JSON.stringify(hinted));
         ck('phone hint: my own shared item has none (control)', !!mine && mine.hint === null);
+        // The due time used to be asserted to start at or after the text's
+        // right edge — the desktop column order, read on a phone. Under a
+        // coarse pointer the row now wraps deliberately (Reminders.css): the
+        // text owns line 1 and the time sits on line 2, so what has to hold
+        // is that the time is BELOW the text, not beside it. The old form
+        // passed the 0.9.817 CSS, which squeezed this row's text into 60-105px
+        // beside the time (how narrow depends on the due label, i.e. on the
+        // hour the walk runs) — the one-character-per-line bug itself — and
+        // it fails the fixed row, whose text spans the row. This form fails
+        // 0.9.817: its time sits beside the text, above the text's bottom.
         ck('phone hint: the row, the hint and the due time stay inside 390 px', !!hinted && !!hinted.sub && !overflow
-            && hinted.row.r <= vw + 0.5 && hinted.sub.r <= hinted.row.r + 0.5 && hinted.when.r <= hinted.row.r + 0.5 && hinted.when.l >= hinted.text.r - 0.5,
+            && hinted.row.r <= vw + 0.5 && hinted.sub.r <= hinted.row.r + 0.5 && hinted.when.r <= hinted.row.r + 0.5 && hinted.when.t >= hinted.text.b - 0.5,
             JSON.stringify({ vw, overflow, hinted }));
         ck('phone hint: nothing covers it', await onTop(pg, '.notes-reminder-sub'));
         // Two icon buttons now sit at the end of a reminder row (retime and
