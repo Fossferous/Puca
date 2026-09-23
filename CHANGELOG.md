@@ -14,7 +14,8 @@ one-line summary; this file is the full story. Versions follow
   longer sent: the new screen appears as soon as it draws, and a screen that
   stays completely still is prompted to redraw within about a second. The
   same holds when a display change moves the session onto a different
-  screen.
+  screen, including when the screen you were watching sleeps or is
+  unplugged and another one takes its place.
 
 ## 0.9.818 — 2026-09-23
 

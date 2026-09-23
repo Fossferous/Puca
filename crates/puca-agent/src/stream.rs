@@ -1254,8 +1254,13 @@ fn run(
     // (a monitor detaching after an idle sleep, a GPU re-adding outputs on
     // wake). Refreshed after every (re)build/switch so it only ever fires on a
     // genuine change.
+    let built_outs = puca_capture::outputs();
     let mut built_output_sig: crate::topology::OutputSig =
-        crate::topology::outputs_signature(&puca_capture::outputs());
+        crate::topology::outputs_signature(&built_outs);
+    // Which physical screen current_monitor is (its HMONITOR), because the
+    // index alone is a position that another screen can shift into. Kept in
+    // step with current_monitor by adopt_new_capture.
+    let mut current_output: Option<isize> = screen_identity(&built_outs, current_monitor);
     let mut topology_checked: Option<Instant> = None;
     let mut pump_stats = PumpStats::default();
     let started_at = Instant::now();
@@ -1445,9 +1450,14 @@ fn run(
                             // refuses falls back to exactly the old
                             // drop-and-rebuild inside the pump; a same-size
                             // switch (cloned monitors) now costs only an IDR.
-                            mark_new_capture(
-                                from_monitor,
+                            //
+                            // This also moves current_monitor onto the target.
+                            let outs = puca_capture::outputs();
+                            adopt_new_capture(
+                                &mut current_monitor,
+                                &mut current_output,
                                 target_monitor,
+                                screen_identity(&outs, target_monitor),
                                 &mut last_frame,
                                 &mut want_keyframe,
                                 &mut switch_started,
@@ -1470,11 +1480,10 @@ fn run(
                             if from_monitor == crate::composite::ALL_DISPLAYS {
                                 crate::repaint::provoke_present(target_monitor);
                             }
-                            current_monitor = target_monitor;
                             // A switch re-enumerates DXGI too; refresh the
                             // self-heal baseline so it is not tripped by the
                             // switch we just performed.
-                            built_output_sig = crate::topology::outputs_signature(&puca_capture::outputs());
+                            built_output_sig = crate::topology::outputs_signature(&outs);
                             topology_checked = Some(Instant::now());
                             // The SAME caret is a different fraction of a
                             // different screen. The generation is bumped
@@ -1560,13 +1569,19 @@ fn run(
                             // has usually just changed, and the replacement
                             // sizes itself from the next frame.
                             encoder = None;
-                            // Read BEFORE current_monitor moves: a remap onto
-                            // another screen is a switch (drop the held
-                            // picture, arm the stranded-switch net), a rebuild
-                            // of the same screen keeps its picture.
-                            mark_new_capture(
-                                current_monitor,
+                            // A remap onto another screen is a switch (drop
+                            // the held picture, arm the stranded-switch net),
+                            // a rebuild of the same screen keeps its picture.
+                            // "Another screen" includes one that shifted into
+                            // the same index because the streamed output
+                            // detached (is_same_screen). This also moves
+                            // current_monitor onto the target.
+                            let outs = puca_capture::outputs();
+                            adopt_new_capture(
+                                &mut current_monitor,
+                                &mut current_output,
                                 target_monitor,
+                                screen_identity(&outs, target_monitor),
                                 &mut last_frame,
                                 &mut want_keyframe,
                                 &mut switch_started,
@@ -1574,11 +1589,10 @@ fn run(
                                 &mut stranded_repainted_at,
                                 Instant::now(),
                             );
-                            current_monitor = target_monitor;
                             // Rebuilt against the current enumeration: reset the
                             // self-heal baseline so it does not immediately fire
                             // again on the change that prompted this rebuild.
-                            built_output_sig = crate::topology::outputs_signature(&puca_capture::outputs());
+                            built_output_sig = crate::topology::outputs_signature(&outs);
                             topology_checked = Some(Instant::now());
                             eprintln!("[stream] capture rebuilt for a display-topology change -> monitor {target_monitor}");
                             // The SAME caret is a different fraction of a
@@ -1670,9 +1684,10 @@ fn run(
                     // update is not a picture), so the stream froze until the
                     // desktop repainted by itself. The capture can repaint the
                     // pointer on a repeated frame since 0.9.816, so the frame
-                    // is kept and corrected. A held frame is always of the
-                    // screen being captured: a switch onto another screen
-                    // drops it (mark_new_capture). The
+                    // is kept and corrected. A switch or a rebuild onto
+                    // another screen (another HMONITOR, not merely another
+                    // index) drops the held frame (adopt_new_capture), so it
+                    // is of the screen this stream last adopted. The
                     // keyframe makes the correction land on a decodable frame
                     // rather than a delta against a picture the controller no
                     // longer has.
@@ -2665,8 +2680,10 @@ fn should_resend_still(want_keyframe: bool, have_last_frame: bool) -> bool {
 }
 
 /// The bookkeeping for a stream that has just been handed a NEW capture of
-/// `to_monitor`, having shown `from_monitor`: a committed monitor switch, or a
-/// capture rebuilt after a display-topology change.
+/// `to_monitor`: a committed monitor switch, or a capture rebuilt after a
+/// display-topology change. Moves `current_monitor`/`current_output` onto the
+/// new capture ITSELF, after reading them, so a caller cannot hand it the
+/// destination as the origin by updating them first.
 ///
 /// ONTO ANOTHER SCREEN, the held still-frame is a picture of the screen being
 /// LEFT, so it is dropped. Kept, the pump answered the new keyframe on a still
@@ -2680,14 +2697,17 @@ fn should_resend_still(want_keyframe: bool, have_last_frame: bool) -> bool {
 /// ONTO THE SAME SCREEN (a rebuild after a display-mode change; a switch to
 /// the screen already shown never gets this far), the held frame IS the right
 /// picture and the only thing a still screen can feed the rebuilt encoder, so
-/// it is kept and no switch is armed.
+/// it is kept and no switch is armed. "The same screen" is decided by
+/// `is_same_screen`, not by the index alone: see there.
 ///
 /// Generic over the held frame so the rule can be tested without a display;
 /// the loop's own variables are passed in, so nothing else about them moves.
 #[allow(clippy::too_many_arguments)]
-fn mark_new_capture<F>(
-    from_monitor: usize,
+fn adopt_new_capture<F>(
+    current_monitor: &mut usize,
+    current_output: &mut Option<isize>,
     to_monitor: usize,
+    to_output: Option<isize>,
     last_frame: &mut Option<F>,
     want_keyframe: &mut bool,
     switch_started: &mut Option<Instant>,
@@ -2696,12 +2716,44 @@ fn mark_new_capture<F>(
     now: Instant,
 ) {
     *want_keyframe = true;
-    if from_monitor != to_monitor {
+    if !is_same_screen(*current_monitor, *current_output, to_monitor, to_output) {
         *last_frame = None;
         *switch_started = Some(now);
         *stranded_repaints = 0;
         *stranded_repainted_at = None;
     }
+    *current_monitor = to_monitor;
+    *current_output = to_output;
+}
+
+/// Which physical screen output `monitor` of this enumeration is: its HMONITOR,
+/// or None for the composite, an index not in the list, or an unknown handle.
+fn screen_identity(outs: &[puca_capture::OutputInfo], monitor: usize) -> Option<isize> {
+    outs.iter()
+        .find(|o| o.index == monitor)
+        .map(|o| o.hmonitor)
+        .filter(|&h| h != 0)
+}
+
+/// Does a new capture of `to` show the same screen the stream was showing as
+/// `from`?
+///
+/// NOT JUST THE INDEX. A monitor index is a position in the DXGI walk, so when
+/// the streamed output detaches (a panel sleeping after the user walks away),
+/// the next output shifts into its index and the topology remap keeps the
+/// index: the "same" index is now a different screen, and its held picture is
+/// of one that no longer exists. So a single screen is the same only when its
+/// HMONITOR also matches. When that cannot be shown (an unknown handle, or a
+/// handle Windows re-issued for the same screen) the answer is "different":
+/// the cost of that is a dropped still and the stranded-switch net's provoked
+/// present, bounded at 750 ms; the cost of the opposite is a vanished screen's
+/// picture on the viewer while every click lands on another one.
+///
+/// The composite has no single screen to compare, and never holds a still.
+fn is_same_screen(from: usize, from_output: Option<isize>, to: usize, to_output: Option<isize>) -> bool {
+    from == to
+        && (from == crate::composite::ALL_DISPLAYS
+            || (from_output.is_some() && from_output == to_output))
 }
 
 /// Is the stranded-switch net (the event loop's `NoChange` arm) due to wake
@@ -3856,18 +3908,21 @@ mod tests {
         let t = Instant::now();
         // A settled stream on screen 0 holding its picture, with a previous
         // switch's net long finished.
+        let mut current_monitor = 0usize;
+        let mut current_output = Some(0x10001isize);
         let mut last_frame = Some("screen 0's picture");
         let mut want_keyframe = false;
         let mut switch_started = None;
         let mut stranded_repaints = 3u8;
         let mut stranded_repainted_at = Some(t);
 
-        mark_new_capture(
-            0, 1,
+        adopt_new_capture(
+            &mut current_monitor, &mut current_output, 1, Some(0x10003),
             &mut last_frame, &mut want_keyframe, &mut switch_started,
             &mut stranded_repaints, &mut stranded_repainted_at, t,
         );
 
+        assert_eq!((current_monitor, current_output), (1, Some(0x10003)), "the stream is on screen 1 now");
         assert!(want_keyframe, "the new screen needs a keyframe");
         // The pump's still-screen tick on screen 1 (next_frame -> Timeout).
         assert!(
@@ -3903,14 +3958,17 @@ mod tests {
     fn a_rebuild_keeps_its_still_only_for_the_same_screen() {
         let t = Instant::now();
 
-        // Same screen: keep the picture, re-send it, no switch.
+        // Same screen (same index, same HMONITOR): keep the picture, re-send
+        // it, no switch.
+        let mut current_monitor = 2usize;
+        let mut current_output = Some(0x10005isize);
         let mut last_frame = Some("screen 2's picture");
         let mut want_keyframe = false;
         let mut switch_started = None;
         let mut stranded_repaints = 0u8;
         let mut stranded_repainted_at = None;
-        mark_new_capture(
-            2, 2,
+        adopt_new_capture(
+            &mut current_monitor, &mut current_output, 2, Some(0x10005),
             &mut last_frame, &mut want_keyframe, &mut switch_started,
             &mut stranded_repaints, &mut stranded_repainted_at, t,
         );
@@ -3924,11 +3982,12 @@ mod tests {
         let mut last_frame = Some("screen 2's picture");
         let mut want_keyframe = false;
         let mut switch_started = None;
-        mark_new_capture(
-            2, 0,
+        adopt_new_capture(
+            &mut current_monitor, &mut current_output, 0, Some(0x10001),
             &mut last_frame, &mut want_keyframe, &mut switch_started,
             &mut stranded_repaints, &mut stranded_repainted_at, t,
         );
+        assert_eq!(current_monitor, 0, "the rebuild moved the stream onto screen 0");
         assert!(
             !should_resend_still(want_keyframe, last_frame.is_some()),
             "a rebuild onto screen 0 must not send screen 2's picture",
@@ -3938,6 +3997,94 @@ mod tests {
             t0, stranded_repainted_at, stranded_repaints, last_frame.is_some(),
             t + Duration::from_millis(750),
         ));
+    }
+
+    /// THE SAME INDEX IS NOT THE SAME SCREEN.
+    ///
+    /// A monitor index is a position in the DXGI walk. Two screens, the
+    /// session streaming index 0; index 0 detaches (a panel sleeping after the
+    /// user walks away), so the other screen becomes index 0. The self-heal
+    /// remaps 0 -> 0 because index 0 is still present, and an index-only
+    /// comparison called that a same-screen rebuild: the VANISHED screen's
+    /// picture was kept and re-sent as the rebuilt encoder's IDR while input
+    /// went to the remaining screen, with no net armed. Walked with the
+    /// loop's own functions, from the two enumerations.
+    #[test]
+    fn a_rebuild_onto_a_screen_that_shifted_into_the_index_is_a_switch() {
+        let out = |index: usize, left: i32, hmonitor: isize| puca_capture::OutputInfo {
+            index,
+            left,
+            top: 0,
+            width: 1920,
+            height: 1080,
+            hmonitor,
+            rotation: puca_capture::Rotation::None,
+        };
+        let before = [out(0, 0, 0x10001), out(1, 1920, 0x10003)];
+        // Output 0 detached; the old output 1 is now the only one, at index 0
+        // (and, as Windows re-lays out the desktop, at the origin): the same
+        // index and the same rectangle, but not the same screen.
+        let after = [out(0, 0, 0x10003)];
+
+        let t = Instant::now();
+        let mut current_monitor = 0usize;
+        let mut current_output = screen_identity(&before, 0);
+        let mut last_frame = Some("the detached screen's picture");
+        let mut want_keyframe = false;
+        let mut switch_started = None;
+        let mut stranded_repaints = 0u8;
+        let mut stranded_repainted_at = None;
+
+        let present: Vec<usize> = after.iter().map(|o| o.index).collect();
+        let target = crate::topology::remap_monitor_for(current_monitor, &present);
+        assert_eq!(target, 0, "the remap keeps the index, which is the trap");
+        adopt_new_capture(
+            &mut current_monitor, &mut current_output, target, screen_identity(&after, target),
+            &mut last_frame, &mut want_keyframe, &mut switch_started,
+            &mut stranded_repaints, &mut stranded_repainted_at, t,
+        );
+
+        assert!(
+            !should_resend_still(want_keyframe, last_frame.is_some()),
+            "the rebuilt encoder must not be fed a screen that is gone (held: {last_frame:?})",
+        );
+        let t0 = switch_started.expect("landing on another screen arms the stranded-switch net");
+        assert!(stranded_net_due(
+            t0, stranded_repainted_at, stranded_repaints, last_frame.is_some(),
+            t + Duration::from_millis(750),
+        ));
+        assert_eq!(current_output, Some(0x10003), "the stream now knows it shows the other screen");
+    }
+
+    /// Which screens count as the same: index AND HMONITOR for a single
+    /// screen; an unknown handle is never proof of sameness; the composite is
+    /// itself.
+    #[test]
+    fn same_screen_needs_the_same_index_and_the_same_monitor() {
+        use crate::composite::ALL_DISPLAYS;
+        assert!(is_same_screen(1, Some(7), 1, Some(7)));
+        assert!(!is_same_screen(1, Some(7), 1, Some(9)), "another monitor shifted into the index");
+        assert!(!is_same_screen(1, Some(7), 2, Some(7)), "another index");
+        assert!(!is_same_screen(1, None, 1, Some(7)), "unknown before");
+        assert!(!is_same_screen(1, Some(7), 1, None), "unknown after");
+        assert!(!is_same_screen(1, None, 1, None), "unknown both: not proof");
+        assert!(is_same_screen(ALL_DISPLAYS, None, ALL_DISPLAYS, None));
+        assert!(!is_same_screen(ALL_DISPLAYS, None, 0, Some(7)));
+
+        let o = |index: usize, hmonitor: isize| puca_capture::OutputInfo {
+            index,
+            left: 0,
+            top: 0,
+            width: 1,
+            height: 1,
+            hmonitor,
+            rotation: puca_capture::Rotation::None,
+        };
+        let outs = [o(0, 7), o(2, 0)];
+        assert_eq!(screen_identity(&outs, 0), Some(7));
+        assert_eq!(screen_identity(&outs, 1), None, "an index missing from the walk");
+        assert_eq!(screen_identity(&outs, 2), None, "a zero handle is unknown");
+        assert_eq!(screen_identity(&outs, ALL_DISPLAYS), None);
     }
 
     /// A build that FAILS hands the live capture back, and the caller keeps
