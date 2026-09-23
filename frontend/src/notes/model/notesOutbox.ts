@@ -119,7 +119,13 @@ type OpBody =
     // `recurrence_aware`. A repeating tick carries `expect_due_at`, so a
     // replay that lost a race with another device's advance is refused
     // (409) and dropped with the usual toast, never applied twice.
-    | { k: 'timing'; note: NoteRef; taskId: number; createdBy: number; patch: TaskTimingPatch }
+    // A tick or advance also carries `expect_schedules_as_of` in its patch
+    // (api/taskCompletion.ts): replayed as is, so a tick queued before
+    // another device made the item repeat is refused (409, the same toast)
+    // instead of ending the series. `scope` names the rows whose edits by
+    // THIS device would outdate that stamp (see `enqueue`). Ops queued by an
+    // older client have neither and replay exactly as they always did.
+    | { k: 'timing'; note: NoteRef; taskId: number; createdBy: number; patch: TaskTimingPatch; scope?: number[] }
     | { k: 'moveTask'; note: NoteRef; taskId: number; direction: 'up' | 'down' }
     | { k: 'reorderTask'; note: NoteRef; taskId: number; afterId: number | null; reparent?: { parentId: number | null } }
     | { k: 'deleteTask'; note: NoteRef; taskId: number }
@@ -184,8 +190,8 @@ export const ops = {
         withMeta({ k: 'reorderTask', note, taskId: task.id, afterId, reparent }, `move ${q(task.description)}`),
     deleteTask: (note: NoteRef, taskId: number, description: string) =>
         withMeta({ k: 'deleteTask', note, taskId }, `delete ${q(description)}`),
-    timing: (note: NoteRef, task: Task, patch: TaskTimingPatch, what: string) =>
-        withMeta({ k: 'timing', note, taskId: task.id, createdBy: task.created_by, patch }, `${what} ${q(task.description)}`),
+    timing: (note: NoteRef, task: Task, patch: TaskTimingPatch, what: string, scope?: number[]) =>
+        withMeta({ k: 'timing', note, taskId: task.id, createdBy: task.created_by, patch, ...(scope ? { scope } : {}) }, `${what} ${q(task.description)}`),
     setListTiming: (listId: number, title: string, patch: { dueAt?: string | null; schedule?: string | null }, what: string) =>
         withMeta({ k: 'listTiming', listId, patch }, `${what} ${q(title)}`),
     setBody: (listId: number, body: string, expectRev?: number) =>
@@ -790,7 +796,38 @@ export function queuedBlobIds(s: OutboxState): Set<string> {
  * every keystroke; without this, a paragraph typed on a plane is dozens of
  * ops, each overwriting the last, and the queue count is nonsense.
  */
+/** Does this queued op change one of `ids` on the server — its text, tick,
+ *  date, place in the tree, or by hanging a new item under it? */
+function touchesAny(o: OpBody, ids: Set<number>): boolean {
+    switch (o.k) {
+        case 'editTask': case 'updateTask': case 'timing': case 'deleteTask': case 'moveTask':
+            return ids.has(o.taskId);
+        case 'reorderTask':
+            return ids.has(o.taskId) || (o.reparent?.parentId != null && ids.has(o.reparent.parentId));
+        case 'createTask':
+            return ids.has(o.tempId) || (o.parentId !== undefined && ids.has(o.parentId));
+        default:
+            return false;
+    }
+}
+
 export function enqueue(s: OutboxState, op: NoteOp): OutboxState {
+    // A freshness stamp (api/taskCompletion.ts) is this device's view as of
+    // the moment it was planned — which already includes its own edits still
+    // waiting in this queue. When those replay first they move the very
+    // stamps the server compares, and it cannot tell them from another
+    // device's: a queued untick-then-tick of a dated item, or a date set and
+    // then ticked, would be refused and lost. So the stamp goes when the
+    // queue already holds an edit of a row it covers; the tick replays
+    // unchecked, as every queued tick did before the stamp existed.
+    if (op.k === 'timing' && op.patch.expect_schedules_as_of !== undefined && op.scope) {
+        const scope = new Set(op.scope);
+        if (s.queue.some(o => touchesAny(o, scope))) {
+            const patch = { ...op.patch };
+            delete patch.expect_schedules_as_of;
+            op = { ...op, patch };
+        }
+    }
     if (op.k === 'setBody') {
         const i = s.queue.findIndex(o => o.k === 'setBody' && o.listId === op.listId);
         if (i >= 0) {

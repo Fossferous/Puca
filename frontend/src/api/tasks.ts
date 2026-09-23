@@ -55,6 +55,12 @@ export interface Task {
     snooze?: string | null;
     /** When the content last changed (066+ servers). */
     updated_at?: string;
+    /** CLIENT-ONLY, never sent: this device changed the row optimistically
+     *  since the server last sent it, so its `updated_at` no longer says how
+     *  fresh this device's view of it is. A completion planned over such a
+     *  row sends no freshness stamp (taskCompletion.ts schedulesStamp). A
+     *  refetch replaces the row and the mark with it. */
+    localEdit?: boolean;
     /** E2EE state of `description`, set by listTasks/listListTasks. `legacy`
      *  (server stored plaintext) is flagged in the UI so an injected cleartext
      *  checklist item can't pose as an encrypted one (audit H-1). */
@@ -973,6 +979,12 @@ export interface TaskTimingPatch {
     snooze?: string | null;
     due_at?: string | null;
     expect_due_at?: string | null;
+    /** The newest server `updated_at` this device saw on the rows a
+     *  completion or advance was decided on (taskCompletion.ts): a dated row
+     *  changed on the server since then makes it a 409 instead of ending a
+     *  series or overwriting a newer rule. Absent = no check; an older server
+     *  ignores it. */
+    expect_schedules_as_of?: string;
     is_completed?: boolean;
     reopen_subtree?: boolean;
 }
@@ -991,6 +1003,7 @@ export async function patchTaskTiming(
     if (patch.snooze !== undefined) body.snooze = patch.snooze ? await sealTiming(patch.snooze, 'chan-tasksnz', scope) : '';
     if (patch.due_at !== undefined) body.due_at = patch.due_at ?? '';
     if (patch.expect_due_at !== undefined) body.expect_due_at = patch.expect_due_at ?? '';
+    if (patch.expect_schedules_as_of) body.expect_schedules_as_of = patch.expect_schedules_as_of;
     if (patch.is_completed !== undefined) body.is_completed = patch.is_completed;
     if (patch.reopen_subtree) body.reopen_subtree = true;
     return apiClient.patch(`/tasks/${task.id}`, body);

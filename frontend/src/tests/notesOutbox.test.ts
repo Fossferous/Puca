@@ -14,7 +14,7 @@ vi.mock('../api/tasks', async () => {
         ...real,
         createTask: vi.fn(), createListTask: vi.fn(), createTaskList: vi.fn(), renameTaskList: vi.fn(), deleteTaskList: vi.fn(),
         updateTask: vi.fn(), updateChannelTask: vi.fn(), updateListTask: vi.fn(), deleteTask: vi.fn(), moveTask: vi.fn(), reorderTask: vi.fn(),
-        getTaskTabPrefs: vi.fn(), putTaskTabPrefs: vi.fn(),
+        getTaskTabPrefs: vi.fn(), putTaskTabPrefs: vi.fn(), patchTaskTiming: vi.fn(),
     };
 });
 vi.mock('../api/taskReminders', () => ({ pokeTaskReminders: vi.fn() }));
@@ -23,7 +23,7 @@ vi.mock('../components/messageToastBus', () => ({ pushMessageToast: vi.fn() }));
 import { makeIdentity } from '../api/e2ee';
 import { OP_KEY_SHAPE } from '../api/opKey';
 import * as realTasks from '../api/tasks';
-const { createOutbox, execOp, ops, applyPrefsIntent, referencesTemp } = await import('../notes/model/notesOutbox');
+const { createOutbox, execOp, ops, applyPrefsIntent, referencesTemp, enqueue } = await import('../notes/model/notesOutbox');
 const { memoryStore } = await import('../notes/model/notesCache');
 const { isNoteBusy, resetNoteBusy } = await import('../notes/model/noteBusy');
 type NoteOp = import('../notes/model/notesOutbox').NoteOp;
@@ -316,3 +316,69 @@ describe('a create carries the same key every time it is tried', () => {
     });
 });
 
+describe('a tick’s freshness stamp (finding 8)', () => {
+    const STAMP = '2026-10-01T10:00:00.12345Z';
+    /** A tick of item 5 as planToggle makes it: stamped, covering 5 and 6. */
+    const stamped = () => ops.timing(LIST, task(5), { is_completed: true, expect_schedules_as_of: STAMP }, 'tick', [5, 6]);
+    const empty = { queue: [] as NoteOp[], ids: {}, dead: [] as number[] };
+    const last = (s: { queue: NoteOp[] }) => s.queue[s.queue.length - 1] as Extract<NoteOp, { k: 'timing' }>;
+
+    it('replays exactly as it was queued, through the real executor', async () => {
+        vi.mocked(realTasks.patchTaskTiming).mockResolvedValue(undefined);
+        await execOp(stamped(), {}, true);
+        expect(realTasks.patchTaskTiming).toHaveBeenCalledWith(
+            { id: 5, channel_id: null, created_by: 7 }, { is_completed: true, expect_schedules_as_of: STAMP },
+        );
+    });
+
+    it('keeps the stamp when nothing queued before it touches what it covers', () => {
+        expect(last(enqueue(empty, stamped())).patch.expect_schedules_as_of).toBe(STAMP);
+        const unrelated = enqueue(empty, ops.editTask(LIST, task(9), 'other item'));
+        expect(last(enqueue(unrelated, stamped())).patch.expect_schedules_as_of).toBe(STAMP);
+    });
+
+    it('drops it when the queue already holds this device’s edit of a covered row (its replay moves the stamps)', () => {
+        const before: NoteOp[] = [
+            tick(LIST, task(6), false),                                  // an untick below it
+            ops.editTask(LIST, task(5), 'renamed'),                      // its own text
+            ops.timing(LIST, task(5), { schedule: null }, 'date'),       // its own date
+            ops.createTask(LIST, -4, 'new kid', 5),                      // a new item under it
+            ops.reorder(LIST, task(9), null, { parentId: 6 }),           // an item moved under it
+        ];
+        for (const op of before) {
+            const next = enqueue({ ...empty, queue: [op] }, stamped());
+            const t = last(next);
+            expect(t.patch).toEqual({ is_completed: true });
+            expect(t.patch).not.toHaveProperty('expect_schedules_as_of');
+        }
+    });
+
+    it('an op an older client queued (no stamp, no scope) is left exactly as it was', () => {
+        const old = ops.timing(LIST, task(5), { is_completed: true }, 'tick');
+        expect(old).not.toHaveProperty('scope');
+        const next = enqueue({ ...empty, queue: [tick(LIST, task(5), false)] }, old);
+        expect(last(next)).toEqual(old);
+    });
+
+    it('offline: an untick then a re-tick of the same item queue the re-tick without the stamp', async () => {
+        const h = harness();
+        h.setOnline(false);
+        const box = h.make();
+        await box.load();
+        await box.send(tick(LIST, task(5), false));
+        await box.send(stamped());
+        h.setOnline(true);
+        await box.replay();
+        const sent = h.exec.mock.calls.map(c => c[0] as NoteOp).filter(o => o.k === 'timing') as Array<Extract<NoteOp, { k: 'timing' }>>;
+        expect(sent.map(o => o.patch)).toEqual([{ is_completed: false }, { is_completed: true }]);
+        // Positive control: alone in the queue, the same tick keeps its stamp.
+        const h2 = harness();
+        h2.setOnline(false);
+        const box2 = h2.make();
+        await box2.load();
+        await box2.send(stamped());
+        h2.setOnline(true);
+        await box2.replay();
+        expect((h2.exec.mock.calls[0][0] as Extract<NoteOp, { k: 'timing' }>).patch.expect_schedules_as_of).toBe(STAMP);
+    });
+});

@@ -563,8 +563,8 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
     }, []);
     /** A timing PATCH through the outbox; pokes the reminders once it ran
      *  (a queued one pokes them at replay — notesOutbox.ts touchedDue). */
-    const sendTiming = useCallback(async (note: NoteRef, task: Task, patch: TaskTimingPatch, what: string) => {
-        const sent = await sendNoteOp(ops.timing(note, task, patch, what));
+    const sendTiming = useCallback(async (note: NoteRef, task: Task, patch: TaskTimingPatch, what: string, scope?: number[]) => {
+        const sent = await sendNoteOp(ops.timing(note, task, patch, what, scope));
         if (!sent.queued) pokeTaskReminders();
     }, []);
 
@@ -578,7 +578,9 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         try {
             // A refusal (no patch) rejects without the network; everything
             // else is a timing PATCH the outbox can queue.
-            if (plan.patch) await sendTiming(note, task, plan.patch, completed ? (plan.advanced ? 'tick (next time)' : 'tick') : 'untick');
+            // plan.scope rides with a freshness stamp (taskCompletion.ts), so
+            // the outbox can tell when this device's own queued edits outdate it.
+            if (plan.patch) await sendTiming(note, task, plan.patch, completed ? (plan.advanced ? 'tick (next time)' : 'tick') : 'untick', plan.scope);
             else await plan.send();
         } catch (err) {
             explain('toggle failed', err);
@@ -740,7 +742,11 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         // A timing patch, not a plain is_completed update: migration 066's
         // guard refuses the latter for a scheduled item. It carries no
         // schedule of its own, so the series stays exactly where the
-        // restored schedule put it.
+        // restored schedule put it. Nor a freshness stamp
+        // (expect_schedules_as_of): everything this sweeps was created by
+        // the same Undo a moment earlier (noteContent.ts recreateSubtree), so
+        // no other device can have dated any of it — and the Undo's own
+        // attachment and snooze writes would outdate a stamp and refuse it.
         const original = await snapshot(note);
         // applyToggle, not a one-item map: the server sweeps the whole
         // subtree when an item is completed (task_handlers.rs), and the
