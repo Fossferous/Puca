@@ -213,13 +213,17 @@ own when there are more lists than fit, keeping the selected one in view.
   never swipes: the grip claims the whole gesture, sideways drift included.
 - **Down inside a page** is what it always was: pinned notes, then the rest.
   Each page keeps its own place in the list, so coming back to one does not
-  throw away where you were reading.
+  throw away where you were reading — even though a list you have swiped
+  away from is taken down while it is off screen (below), it is put back at
+  the same scroll position before it is drawn.
 - **The addresses do not change.** *All notes* is `/`, a label page is
   `/label/<name>` — the same routes the rail, the label chips and every
   existing link already use, so `…/notes/#/label/Errands` still lands on that
   label, with no animation, and a swipe to the next list updates the address.
   A swipe REPLACES the address rather than pushing it, so flicking through
-  four lists leaves the back button one step to take, not four.
+  four lists leaves the back button one step to take, not four. It changes
+  only which list the address names: a note tapped open while a swipe is
+  still snapping into place stays open when it lands.
 - **The rail is unchanged**: Notes and every label still navigate, and now
   move the pager with them.
 - **Only where there is something to swipe.** With no labels there is one page
@@ -238,7 +242,10 @@ away from until it has slid out (it does not go blank first). A page whose
 from All and back does not lose the draft. Keeping every neighbour built at
 rest would draw a note that carries a label twice — on its label page and on
 All — and decrypt its picture thumbnails twice, for every such note in the
-account.
+account. "On screen" is measured against the pager's true width, fractions of
+a pixel included: most phones and any scaled desktop are not a whole number
+of pixels wide, and a width rounded to one drifts by that fraction per page
+until, a few lists along, a neighbour counts as on screen at rest.
 
 ## How it maps onto Púca
 

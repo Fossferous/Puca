@@ -4198,10 +4198,12 @@ const calendar = await calendarWalk({ browser, baseURL, state, username, ck, wat
 // All notes, then one page per label, with a tab strip above them
 // (components/NotesPager.tsx): the strip in the rail's order, tab/keyboard/
 // rail/deep-link navigation, search as the negative control, a draft kept
-// through a trackpad flick; and on the phone real touch swipes, a grip drag
-// that must not move the pager, and a vertical scroll inside a page. LAST on
-// purpose: it seeds two labels and seven notes of its own, and nothing after
-// it can be perturbed by them.
+// through a trackpad flick, an open note kept through a settle, tab/panel
+// ids; on the phone real touch swipes, a grip drag that must not move the
+// pager, a vertical scroll inside a page and a list's reading position kept;
+// and one grid at rest at fractional widths (125% desktop, Pixel-class
+// phone). LAST on purpose: it seeds five labels and seven notes of its own,
+// and nothing after it can be perturbed by them.
 await pagerWalk({ browser, baseURL, state, ck, watch, shotOf, errors });
 
 await browser.close();
