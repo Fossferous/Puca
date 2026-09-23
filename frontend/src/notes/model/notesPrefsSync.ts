@@ -289,9 +289,6 @@ export function createPrefsSync(deps: PrefsSyncDeps): PrefsSync {
         return next;
     };
     const fail = (err: unknown): PrefsSyncStatus => {
-        // The account changed under the operation: it did nothing, and the
-        // status belongs to the NEW session, not to this one.
-        if (err === ACCOUNT_CHANGED) return current;
         if (isNetworkError(err)) return set('offline');
         console.warn('[notes] syncing colours and labels failed:', err);
         return set('error');
@@ -389,7 +386,8 @@ export function createPrefsSync(deps: PrefsSyncDeps): PrefsSync {
      * the uid plus the sign-out epoch — never the Identity object:
      * getActiveIdentity may rebuild it for the SAME account (a stale seed
      * re-derived), and that must not abort a good operation. An aborted one
-     * leaves the status alone; the new session's own pull is already queued.
+     * leaves the status alone — and so does one whose request FAILED after the
+     * switch; the new session's own pull is already queued.
      */
     const guarded = (fn: (op: Op) => Promise<PrefsSyncStatus>) => serial(async () => {
         const uid = deps.uid();
@@ -397,8 +395,9 @@ export function createPrefsSync(deps: PrefsSyncDeps): PrefsSync {
         const id = deps.identity();
         if (!id) return set('locked');
         const epoch = deps.epoch?.() ?? 0;
+        const moved = () => deps.uid() !== uid || (deps.epoch?.() ?? 0) !== epoch;
         const check = () => {
-            if (deps.uid() !== uid || (deps.epoch?.() ?? 0) !== epoch) throw ACCOUNT_CHANGED;
+            if (moved()) throw ACCOUNT_CHANGED;
         };
         const after = async <T,>(p: Promise<T>): Promise<T> => {
             const v = await p;
@@ -408,6 +407,13 @@ export function createPrefsSync(deps: PrefsSyncDeps): PrefsSync {
         try {
             return await fn({ uid, id, check, after });
         } catch (err) {
+            // The account changed under the operation: it did nothing, and
+            // the status belongs to the NEW session, not to this one. That
+            // holds as much for a request that FAILED after the switch (its
+            // rejection never reaches `after`'s check) as for one stopped by
+            // the check: a stale 'offline' or 'error', and its console
+            // warning, would land in the new session's shell.
+            if (err === ACCOUNT_CHANGED || moved()) return current;
             return fail(err);
         } finally {
             for (const cb of settledListeners) cb();

@@ -523,8 +523,9 @@ describe('an operation that outlives its account does nothing', () => {
 
     function deferred<T>() {
         let resolve!: (v: T) => void;
-        const promise = new Promise<T>(r => { resolve = r; });
-        return { promise, resolve };
+        let reject!: (e: unknown) => void;
+        const promise = new Promise<T>((r, j) => { resolve = r; reject = j; });
+        return { promise, resolve, reject };
     }
 
     /** One page whose account the test switches under a running operation. */
@@ -534,15 +535,15 @@ describe('an operation that outlives its account does nothing', () => {
         const writes: Array<{ state: NotesNoteState; uid: number | undefined }> = [];
         const saves: Array<{ uid: number; rec: SyncRecord }> = [];
         const records = new Map<number, SyncRecord>();
-        const gets: Array<{ promise: Promise<GetBlobResult>; resolve: (v: GetBlobResult) => void }> = [];
-        const puts: Array<{ rev: number; blob: string; resolve: (v: PutBlobResult) => void }> = [];
+        const gets: Array<{ promise: Promise<GetBlobResult>; resolve: (v: GetBlobResult) => void; reject: (e: unknown) => void }> = [];
+        const puts: Array<{ rev: number; blob: string; resolve: (v: PutBlobResult) => void; reject: (e: unknown) => void }> = [];
         let onReadLocal: (() => void) | null = null;
         const sync = createPrefsSync({
             uid: () => acct.uid,
             identity: () => acct.id,
             epoch: () => acct.epoch,
             get: () => { const d = deferred<GetBlobResult>(); gets.push(d); return d.promise; },
-            put: (rev, blob) => { const d = deferred<PutBlobResult>(); puts.push({ rev, blob, resolve: d.resolve }); return d.promise; },
+            put: (rev, blob) => { const d = deferred<PutBlobResult>(); puts.push({ rev, blob, resolve: d.resolve, reject: d.reject }); return d.promise; },
             readLocal: () => { const f = onReadLocal; onReadLocal = null; f?.(); return local; },
             writeLocal: (s, uid) => { writes.push({ state: s, uid }); local = s; },
             records: {
@@ -678,6 +679,47 @@ describe('an operation that outlives its account does nothing', () => {
         await settle(op);
         expect(p.saves).toEqual([]);
         expect(p.puts).toEqual([]);
+    });
+
+    it('a GET that fails at the network AFTER the switch does not show the new session ‘offline’', async () => {
+        const p = page(B_STATE);
+        const op = p.sync.pull();
+        await until(() => p.gets.length > 0);
+        p.acct.uid = 2; p.acct.id = idB; p.acct.epoch++;            // B signed in; A's GET then fails
+        p.gets[0].reject(new TypeError('Failed to fetch'));
+        await op;
+        expect(p.sync.status()).toBe('idle');
+        // Positive control: the same failure with NO switch is reported.
+        const r = page(B_STATE);
+        const op2 = r.sync.pull();
+        await until(() => r.gets.length > 0);
+        r.gets[0].reject(new TypeError('Failed to fetch'));
+        expect(await op2).toBe('offline');
+    });
+
+    it('a PUT that fails AFTER the sign-out sets no ‘error’ and logs no warning', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+            const q = page(A_STATE);
+            q.records.set(1, { rev: 1, base: EMPTY_NOTE_STATE, maxRev: 1 });
+            const op = q.sync.push();
+            await until(() => q.puts.length > 0);
+            q.acct.uid = null; q.acct.id = null; q.acct.epoch++;
+            q.puts[0].reject(new Error('500 from the server'));
+            await op;
+            expect(q.sync.status()).toBe('idle');
+            expect(warn).not.toHaveBeenCalled();
+            // Positive control: the same failure with NO sign-out is reported.
+            const r = page(A_STATE);
+            r.records.set(1, { rev: 1, base: EMPTY_NOTE_STATE, maxRev: 1 });
+            const op2 = r.sync.push();
+            await until(() => r.puts.length > 0);
+            r.puts[0].reject(new Error('500 from the server'));
+            expect(await op2).toBe('error');
+            expect(warn).toHaveBeenCalledTimes(1);
+        } finally {
+            warn.mockRestore();
+        }
     });
 
     it('the app’s instance: every sign-out moves the epoch (a logout hook), and a record names its account', async () => {

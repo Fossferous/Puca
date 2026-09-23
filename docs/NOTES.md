@@ -605,7 +605,8 @@ back the copy it holds (migration 069, `expect_rev` on
   so a request can still be out when you confirm. Whatever it brings back is
   dropped: it is not merged into the next account's colours and labels on the
   same page, not sealed and sent under that account's sign-in, and it does not
-  re-create the sync record the sign-out just deleted. Every step of a sync
+  re-create the sync record the sign-out just deleted. If it fails instead,
+  the failure is not shown as the next account's sync status. Every step of a sync
   re-checks, after each wait, that the same account is still signed in — by
   account and by sign-out, so signing out and straight back in as the same
   person counts as a new session too (`frontend/src/notes/model/notesPrefsSync.ts`).

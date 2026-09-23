@@ -15,7 +15,8 @@ one-line summary; this file is the full story. Versions follow
   and from there to their other devices. It could also leave the first
   person's last-synced labels in the browser's storage after the sign-out had
   cleared them. A sync now stops as soon as the account it started for is no
-  longer the one signed in.
+  longer the one signed in, and one that fails after that no longer shows
+  the next person a false "offline" or error.
 
 ## 0.9.818 — 2026-09-23
 
