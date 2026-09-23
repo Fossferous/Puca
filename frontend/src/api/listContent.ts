@@ -296,8 +296,12 @@ async function applySidecarIntent<T>(
  * `addNoteRefs`); a ref the server no longer held is not among them, so a
  * picture another device still names is never destroyed.
  *
- * A ref that is ALREADY there (an earlier attempt of this same add landed
- * but its answer was lost) is not added twice.
+ * A ref whose href is ALREADY there is not added a second time. That only
+ * helps a caller that re-sends the SAME refs. No retry path in Notes does:
+ * a queued add whose first write landed but lost its answer uploads its
+ * parked bytes AGAIN when it replays (notesOutbox.ts `execOp` addMedia), so
+ * its hrefs are new and the note can show that picture twice. The two are
+ * separate uploads, so deleting either one is safe and loses nothing.
  */
 export async function addTaskListAttachments(listId: number, added: TaskAttachmentRef[], replacing: string[] = []): Promise<TaskAttachmentRef[]> {
     return applySidecarIntent(listId, current => {

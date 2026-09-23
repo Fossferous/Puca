@@ -454,7 +454,11 @@ describe('adding and removing against what the server holds NOW', () => {
         expect(sentRevs()).toEqual([9]);
     });
 
-    it('an add replayed after its first write landed does not add the same picture twice', async () => {
+    // The href guard only covers a caller re-sending the SAME refs. A queued
+    // add replayed after a lost answer re-uploads (new hrefs), so it is NOT
+    // covered: that note can show the picture twice (addTaskListAttachments'
+    // doc comment says so).
+    it('a ref whose href the note already holds is not added a second time', async () => {
         get.mockResolvedValueOnce([await listed([ref('x'), ref('mine')], 6)]);
         expect(await addTaskListAttachments(3, [ref('mine')])).toEqual([]);
         expect(patch).not.toHaveBeenCalled();
