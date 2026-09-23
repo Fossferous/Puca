@@ -21,7 +21,9 @@ one-line summary; this file is the full story. Versions follow
   device's own sign-in), it used to let you in anyway with a session that
   "Sign out" and "revoke device" could not reach, only "Sign out of every
   device" or a password change. It now refuses that one sign-in instead; try
-  again and it goes through.
+  again and it goes through. A computer signing itself in with its own key
+  retries on its own within a minute, and does not report the server as having
+  refused it.
 
 ## 0.9.818 — 2026-09-23
 
