@@ -1445,10 +1445,16 @@ fn run(
                             // refuses falls back to exactly the old
                             // drop-and-rebuild inside the pump; a same-size
                             // switch (cloned monitors) now costs only an IDR.
-                            want_keyframe = true;
-                            switch_started = Some(Instant::now());
-                            stranded_repaints = 0;
-                            stranded_repainted_at = None;
+                            mark_new_capture(
+                                from_monitor,
+                                target_monitor,
+                                &mut last_frame,
+                                &mut want_keyframe,
+                                &mut switch_started,
+                                &mut stranded_repaints,
+                                &mut stranded_repainted_at,
+                                Instant::now(),
+                            );
                             eprintln!("[switch] capture committed -> monitor {target_monitor}");
                             // OUT OF THE COMPOSITE the taken tile's duplication
                             // has long delivered its pictures, and a still
@@ -2257,8 +2263,7 @@ fn run(
                     // switch that landed on such a screen: three tries,
                     // three quarters of a second apart, each in the log.
                     if let Some(t0) = switch_started {
-                        let due = stranded_repainted_at.unwrap_or(t0) + Duration::from_millis(750);
-                        if last_frame.is_none() && stranded_repaints < 3 && now >= due {
+                        if stranded_net_due(t0, stranded_repainted_at, stranded_repaints, last_frame.is_some(), now) {
                             if matches!(capture, Some(AnyCapture::Single(_))) {
                                 stranded_repaints += 1;
                                 stranded_repainted_at = Some(now);
@@ -2643,6 +2648,43 @@ impl PumpStats {
 /// should cost nothing, which is the whole point of change-driven capture.
 fn should_resend_still(want_keyframe: bool, have_last_frame: bool) -> bool {
     want_keyframe && have_last_frame
+}
+
+/// The bookkeeping for a stream that has just been handed a NEW capture of
+/// `to_monitor`, having shown `from_monitor`: a committed monitor switch.
+///
+/// Generic over the held frame so the rule can be tested without a display;
+/// the loop's own variables are passed in, so nothing else about them moves.
+#[allow(clippy::too_many_arguments)]
+fn mark_new_capture<F>(
+    _from_monitor: usize,
+    _to_monitor: usize,
+    _last_frame: &mut Option<F>,
+    want_keyframe: &mut bool,
+    switch_started: &mut Option<Instant>,
+    stranded_repaints: &mut u8,
+    stranded_repainted_at: &mut Option<Instant>,
+    now: Instant,
+) {
+    *want_keyframe = true;
+    *switch_started = Some(now);
+    *stranded_repaints = 0;
+    *stranded_repainted_at = None;
+}
+
+/// Is the stranded-switch net (the event loop's `NoChange` arm) due to wake
+/// the panel and provoke a present on this tick? `t0` is when the switch was
+/// committed. It fires only while the stream holds NO picture to re-send —
+/// holding one means the pump already answered the keyframe with it.
+fn stranded_net_due(
+    t0: Instant,
+    stranded_repainted_at: Option<Instant>,
+    stranded_repaints: u8,
+    have_last_frame: bool,
+    now: Instant,
+) -> bool {
+    let due = stranded_repainted_at.unwrap_or(t0) + Duration::from_millis(750);
+    !have_last_frame && stranded_repaints < 3 && now >= due
 }
 
 /// How long the picture may sit frozen on a secure desktop before we say so.
