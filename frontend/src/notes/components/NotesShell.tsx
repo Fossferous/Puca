@@ -109,6 +109,20 @@ function sortCards(cards: NoteCard[], sort: NotesSortMode): NoteCard[] {
     return out;
 }
 
+/**
+ * The query of the route as the HISTORY holds it right now. NotesApp is a
+ * HashRouter, so the route, query included, is the hash. Not
+ * `useLocation().search`: React Router renders every navigation inside
+ * startTransition, so a note opened a moment ago is already in the history
+ * but not yet in the last render. Measured: with the render's query, a card
+ * clicked in the same task as a snap's end lost its note 12 times out of 12.
+ */
+function liveRouteQuery(): string {
+    const hash = window.location.hash;
+    const q = hash.indexOf('?');
+    return q < 0 ? '' : hash.slice(q);
+}
+
 interface NotesShellProps {
     onSignOut: () => void;
     /** The token expired while offline: keep showing the cached notes. */
@@ -226,8 +240,12 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     }, [navigate, labels]);
     // A swipe that settled on another page: REPLACE, so a flick through four
     // lists leaves one history entry, not four for the back button to undo.
+    // It moves the PAGE and nothing else, so the query comes along: a card
+    // tapped while the snap is still running opens its note (?note=, pushed)
+    // before the scroll settles, and a bare label address here closed that
+    // note again the moment the settle landed.
     const onPagerSettle = useCallback((i: number) => {
-        navigate(routeForIndex(i, labels), { replace: true });
+        navigate(routeForIndex(i, labels) + liveRouteQuery(), { replace: true });
     }, [navigate, labels]);
     // How many notes carry each label, ARCHIVED INCLUDED — the label manager
     // exists because a filtered view can never reach those (filterNotes).
