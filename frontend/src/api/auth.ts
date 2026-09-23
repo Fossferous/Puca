@@ -1109,8 +1109,8 @@ export const REMEMBER_ME_KEY = 'sovereign_remember';
  * statement about this device ("this is my phone, do not keep asking"), and
  * clearing it would silently re-arm the shorter session for someone who had
  * already said otherwise, on the one path where they are least likely to
- * notice. Absent means ticked: the box defaults on, and only `'false'` turns
- * it off.
+ * notice. Absent means the platform's default: ticked in the Notes phone
+ * app, clear in a browser (NotesLogin.tsx STAY_DEFAULT has why).
  */
 export const STAY_SIGNED_IN_KEY = 'pucaStaySignedIn';
 

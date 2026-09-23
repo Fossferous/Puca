@@ -2722,15 +2722,21 @@ async function notesSignOut(pg) {
     await pg.waitForSelector('.login-card', { timeout: 10000 });
     await sleep(1500);   // as above: let the device revoke finish before the next sign-in
 }
-ck('stay signed in: the row is on Notes\' sign-in, ticked by default',
-    await page.locator(stayBox).count() === 1 && await page.locator(stayBox).isChecked(),
-    await page.locator(stayBox).count() === 1 ? `checked=${await page.locator(stayBox).isChecked()}` : 'no checkbox');
+// A browser starts CLEAR (the long session there is Púca's too, and a browser
+// is what gets shared); the Android shell below starts ticked — each the
+// other's control.
+ck('stay signed in: the row is on Notes\' sign-in, clear by default in a browser',
+    await page.locator(stayBox).count() === 1 && !(await page.locator(stayBox).isChecked())
+        && await page.evaluate(() => localStorage.getItem('pucaStaySignedIn')) === null,
+    await page.locator(stayBox).count() === 1 ? `checked=${await page.locator(stayBox).isChecked()} stored=${await page.evaluate(() => localStorage.getItem('pucaStaySignedIn'))}` : 'no checkbox');
 // In a browser, Notes and Púca share one origin and one token, so the long
 // session is Púca's too here: the line under the box has to say so, and say
 // "once a month" (a 30-day token), not a year without a visit.
 const stayHint = await page.locator('#stay-signed-in-hint').textContent({ timeout: 5000 }).catch(() => null);
 ck('stay signed in: in a browser the hint says Púca stays signed in too, if used monthly',
     !!stayHint && stayHint.includes('to Notes and to Púca') && stayHint.includes('at least once a month'), JSON.stringify(stayHint));
+await page.locator(stayBox).check({ timeout: 5000 }).catch(e => console.log('[walk] tick:', String(e).slice(0, 200)));
+ck('stay signed in: ticking it is remembered on this browser', await page.evaluate(() => localStorage.getItem('pucaStaySignedIn')) === 'true');
 const longBody = await notesSignIn(page);
 ck('sign in: Notes signs in with the Púca account and the notes are back', await page.locator('.notes-card').count() >= 1);
 ck('stay signed in: ticked, the step-2 request asks for it', longBody?.stay_signed_in === true, longBody ? `keys=${Object.keys(longBody).sort().join(',')}` : 'no step-2 request seen');
@@ -2781,13 +2787,15 @@ ck('desktop: no page errors', errors.length === 0, errors[0]);
     ck('phone sign-in: the stay row is a ≥44px tap target', !!row && row.h >= 44 - 0.5, row ? `${Math.round(row.w)}x${Math.round(row.h)}` : 'no row');
     ck('phone sign-in: the row text is ≥16px', !!row && row.textPx >= 16, row ? `${row.textPx}px` : 'no row');
     ck('phone sign-in: the card and its hint fit the width (no sideways scroll)', !!row && row.hintInside && !row.scrolls, JSON.stringify(row));
-    ck('phone sign-in: ticked by default on a new device', await p.locator(stayBox).isChecked({ timeout: 5000 }).catch(() => false));
+    // A phone BROWSER is still a browser: clear by default (the Android
+    // app's own default is checked in the fake-shell section).
+    ck('phone sign-in: clear by default in a phone browser', await p.locator(stayBox).isChecked({ timeout: 5000 }).catch(() => null) === false);
     await p.tap('.notes-stay-row .checkbox-text', { timeout: 5000 }).catch(e => console.log('[walk] text tap:', String(e).slice(0, 200)));
     const afterText = await p.locator(stayBox).isChecked({ timeout: 5000 }).catch(() => null);
     const rb = await p.locator('.notes-stay-row').boundingBox({ timeout: 5000 }).catch(() => null);
     if (rb) await p.touchscreen.tap(rb.x + rb.width - 4, rb.y + rb.height / 2);
     const afterEnd = await p.locator(stayBox).isChecked({ timeout: 5000 }).catch(() => null);
-    ck('phone sign-in: a tap on the text, then one at the row\'s far end, each toggle the box', afterText === false && afterEnd === true, `after text tap=${afterText}, after far-end tap=${afterEnd}`);
+    ck('phone sign-in: a tap on the text, then one at the row\'s far end, each toggle the box', afterText === true && afterEnd === false, `after text tap=${afterText}, after far-end tap=${afterEnd}`);
     await shotOf(p)('phone-signin-stay-row');
     await pctx.close();
 }
@@ -4359,6 +4367,26 @@ try {
 
     ck('android shell: no page errors', errors.length === aErrors, errors[aErrors]);
     await actx.close();
+
+    // The sign-in the APP shows a new device: "Stay signed in" starts TICKED
+    // there (a phone is one person's) — the positive control for the
+    // browser's clear default checked at desktop size. No storage state, so
+    // this is the signed-out card.
+    const sctx = await browser.newContext({ ...devices['iPhone 13'], defaultBrowserType: undefined, baseURL });
+    await sctx.addInitScript(installFakeAndroid);
+    const s = await sctx.newPage();
+    watch(s);
+    await s.goto('/notes/');
+    const signedOutCard = await s.waitForSelector('.login-card', { timeout: 20000 }).then(() => true, () => false);
+    const appStay = signedOutCard ? {
+        checked: await s.locator(stayBox).isChecked({ timeout: 5000 }).catch(() => null),
+        hint: await s.locator('#stay-signed-in-hint').textContent({ timeout: 5000 }).catch(() => null),
+        app: await s.evaluate(() => window.Capacitor?.getPlatform?.() ?? null),
+    } : null;
+    ck('android shell: the app\'s sign-in starts with Stay signed in TICKED, and speaks of the device',
+        !!appStay && appStay.app === 'android' && appStay.checked === true && /^This device then stays signed in/.test(appStay.hint ?? ''),
+        JSON.stringify(appStay));
+    await sctx.close();
 } catch (e) {
     ck('android-shell walk ran', false, String(e).slice(0, 300));
 }

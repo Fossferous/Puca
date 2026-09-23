@@ -84,10 +84,13 @@ afterEach(async () => {
 });
 
 describe('NotesLogin: stay signed in on this device', () => {
-    it('offers the row, ticked, with one line saying what it does', async () => {
+    it('offers the row, CLEAR by default in a browser, with one line saying what it does', async () => {
+        // A browser starts clear: the long session there is Púca's too, and
+        // a browser is what gets shared. The phone app's default is the
+        // opposite (below) — this is the control for that one.
         await mount();
         expect(box()).toBeTruthy();
-        expect(box()!.checked).toBe(true);
+        expect(box()!.checked).toBe(false);
         expect(container.textContent).toMatch(/Stay signed in on this device/);
         // What the server does: a year at most, and only while the device
         // keeps coming back — a 30-day token, renewed on use. The first copy
@@ -126,19 +129,34 @@ describe('NotesLogin: stay signed in on this device', () => {
             const hint = document.getElementById('stay-signed-in-hint')?.textContent ?? '';
             expect(hint).toMatch(/^This device then stays signed in for up to a year instead of a day, as long as Notes is used at least once a month\./);
             expect(hint).not.toMatch(/Púca/);
+            // ...and on the phone the box starts TICKED: a phone is one
+            // person's, and the owner's complaint was being asked to sign
+            // in again after the phone had been off.
+            expect(container.querySelector<HTMLInputElement>('#stay-signed-in')!.checked).toBe(true);
         } finally {
             platform.mobile = false;
         }
     });
 
-    it('passes the tick to login()', async () => {
+    it('an untouched browser box reaches login() as false', async () => {
         await mount();
+        await signIn();
+        expect(loginSpy).toHaveBeenCalledWith('ash', 'Password123!', { staySignedIn: false });
+    });
+
+    it('ticking it is remembered on the device and reaches login() as true', async () => {
+        await mount();
+        await act(async () => { box()!.click(); });
+        expect(box()!.checked).toBe(true);
+        expect(store.get(STAY_KEY)).toBe('true');
         await signIn();
         expect(loginSpy).toHaveBeenCalledWith('ash', 'Password123!', { staySignedIn: true });
     });
 
     it('unticking it is remembered on the device and reaches login() as false', async () => {
+        store.set(STAY_KEY, 'true');
         await mount();
+        expect(box()!.checked).toBe(true);
         await act(async () => { box()!.click(); });
         expect(box()!.checked).toBe(false);
         expect(store.get(STAY_KEY)).toBe('false');
@@ -153,12 +171,18 @@ describe('NotesLogin: stay signed in on this device', () => {
         expect(box()!.checked).toBe(false);
     });
 
-    it('anything other than a stored "false" means ticked', async () => {
-        // A never-answered device, and a stored 'true', must both come up
-        // ticked — the default is not "whatever is in storage".
+    it('a browser that said yes last time opens with the box ticked', async () => {
+        // The stored answer beats the browser default — the control for the
+        // "clear by default" test above.
         store.set(STAY_KEY, 'true');
         await mount();
         expect(box()!.checked).toBe(true);
+    });
+
+    it('a stored value that is neither answer falls back to the default', async () => {
+        store.set(STAY_KEY, 'yes');
+        await mount();
+        expect(box()!.checked).toBe(false);
     });
 
     async function mountExpired() {
@@ -184,8 +208,9 @@ describe('NotesLogin: stay signed in on this device', () => {
     });
 
     it('does not tell a device that already ticked the box to tick it', async () => {
-        // The default, and exactly the case of a long session that went a
-        // month unused or reached its year: the advice is already taken.
+        // Exactly the case of a long session that went a month unused or
+        // reached its year: the advice is already taken.
+        store.set(STAY_KEY, 'true');
         await mountExpired();
         expect(box()!.checked).toBe(true);
         expect(expiredMessage()).toMatch(/^Your session expired\. Sign in again to continue/);

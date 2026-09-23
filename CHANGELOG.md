@@ -19,8 +19,9 @@ one-line summary; this file is the full story. Versions follow
   labels there is nothing to swipe between, so neither the strip nor the
   pager appears.
 - **Stay signed in on this device.** Púca Notes' own sign-in now has a tick
-  box, on by default, that keeps this device signed in for up to a year rather
-  than a day, as long as it is used at least once a month. On the Notes phone
+  box — already ticked in the Notes phone app, clear in a browser until you
+  tick it — that keeps this device signed in for up to a year rather than a
+  day, as long as it is used at least once a month. On the Notes phone
   app the background reminder check counts as use, so a phone that is switched
   on can stay signed in for the year even if Notes is never opened. It is what
   stops the app asking for your password after a weekend with the phone off: until
@@ -28,9 +29,9 @@ one-line summary; this file is the full story. Versions follow
   away — not inactivity in the app — was what sent you back to the sign-in
   form. **In a browser it covers Púca too:** Notes and the web app share one
   sign-in there, so a ticked Notes sign-in keeps Púca in that browser signed
-  in for as long, and the line under the box says so. Clear the box before you
-  sign in on a shared or borrowed computer and that sign-in behaves exactly as
-  before. Sign out ends the session immediately on this device. **To end it
+  in for as long, and the line under the box says so. That is why a browser
+  starts with the box clear: tick it on your own computer, and a shared or
+  borrowed one signs in exactly as before unless someone asks otherwise. Sign out ends the session immediately on this device. **To end it
   from anywhere else — a lost phone, a computer you left signed in — use Sign
   out of every device, or change your password.** Revoking the device under
   My Devices does not reach it: Notes never proves a device to the server, so

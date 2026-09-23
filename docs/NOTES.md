@@ -644,8 +644,9 @@ open, and the refresh button.
 
 ### Staying signed in
 
-Notes' own sign-in form carries **Stay signed in on this device**, ticked by
-default. With it, the token this device holds lives **30 days and renews as it
+Notes' own sign-in form carries **Stay signed in on this device** — ticked
+by default in the Notes phone app, clear by default in a browser (below). With
+it, the token this device holds lives **30 days and renews as it
 is used, for up to a year** from the sign-in; without it, the ordinary **24
 hours, renewed as you go, for up to 30 days**. An ordinary session does not end
 because you stopped using the app: it ends because the token's day ran out, so a
@@ -677,9 +678,11 @@ a Notes sign-in with the box ticked puts Púca in that browser — chat, direct
 messages, My Devices — on the same 30-day, up-to-a-year session, where Púca's
 own sign-in would have given it a day. In a browser the line under the box says
 so ("stays signed in to Notes and to Púca"); the phone app runs at its own
-origin, shares nothing with the Púca app, and says "this device". The box starts
-ticked in a browser as well, so on a shared or borrowed computer clear it before
-signing in, or sign out before you leave.
+origin, shares nothing with the Púca app, and says "this device". That is why
+the box starts CLEAR in a browser and ticked only in the phone app: a phone is
+one person's, a browser is what gets shared or borrowed, and a year-long Púca
+session on someone else's computer should have to be asked for. Tick it on your
+own computer once and the answer is remembered there.
 
 **Ending one early.** *Sign out* drops the token here and revokes this session
 by its id, so the server refuses it on the next request. **From anywhere else,

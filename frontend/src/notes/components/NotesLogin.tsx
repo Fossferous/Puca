@@ -35,16 +35,25 @@ interface NotesLoginProps {
     onSuccess: () => void;
 }
 
-/** This device's answer to "stay signed in". Absent means yes: the box is
- *  ticked by default, and only an explicit 'false' turns it off. Storage can
- *  throw (a locked-down profile), and a checkbox is not worth a blank screen —
- *  fall back to the default. */
+/** The answer before this device has given one. The Notes phone app starts
+ *  TICKED: a phone is one person's, and being sent to the sign-in form after
+ *  a weekend with it switched off is exactly what the box exists to stop. A
+ *  browser starts CLEAR: there the long session is Púca's too (one origin,
+ *  one token), and a browser is the thing that gets shared or borrowed — so
+ *  a year-long Púca session on someone else's computer has to be asked for,
+ *  never walked into. Either way the box is there and the answer sticks. */
+const STAY_DEFAULT = NATIVE;
+
+/** This device's answer to "stay signed in": a stored 'true' or 'false',
+ *  else STAY_DEFAULT. Storage can throw (a locked-down profile), and a
+ *  checkbox is not worth a blank screen — fall back to the default. */
 function readStaySignedIn(): boolean {
     try {
-        return localStorage.getItem(STAY_SIGNED_IN_KEY) !== 'false';
-    } catch {
-        return true;
-    }
+        const v = localStorage.getItem(STAY_SIGNED_IN_KEY);
+        if (v === 'true') return true;
+        if (v === 'false') return false;
+    } catch { /* fall through to the default */ }
+    return STAY_DEFAULT;
 }
 
 export function NotesLogin({ onSuccess }: NotesLoginProps) {
