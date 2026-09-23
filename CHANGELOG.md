@@ -4,6 +4,22 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+- **Reminders: on a phone the item text no longer collapses to one character
+  per line.** In the Reminders tab — Púca Notes' and the one in Púca's own
+  Tasks view — a phone gave an item's own words only the few pixels the due
+  time, the note's name and the buttons beside them left over, so the item
+  read downwards, one letter at a time. Each row now gives its text the whole
+  first line beside the tick box (or a note's bell), and puts the repeat and
+  snooze marks, the note's name, the time and the buttons on a second line
+  underneath; a long note name is shortened with "…" rather than pushing the
+  buttons onto a third line. The snooze button keeps to the right edge even
+  when it gets a line to itself — under an open time field, say — so its
+  menu no longer opens off the left of the screen. Nothing moved on a
+  desktop.
+
 ## 0.9.817 — 2026-09-22
 
 Púca Notes grows up: share into it from any app, voice notes, a reminder on a note itself, text and pictures while offline, undo in the editor, a label manager, links, drag ordering, search that shows its matches, and its tools in Púca too; remote control no longer freezes on a screen that is not changing; Keep RNNoise keeps RNNoise; clip sound stays in step with the picture.

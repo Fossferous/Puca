@@ -911,28 +911,19 @@
 }
 
 /* ---------- Reminders ----------------------------------------------------- */
-/* The list itself is components/reminders/Reminders.css now — the view is
-   shared with Púca's own Reminders tab, and Púca never loads this file. */
-.notes-reminders { max-width: 760px; margin: 0 auto; }
-.notes-reminder-group { margin-bottom: 20px; }
-.notes-reminder-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 10px;
-    border-radius: 8px;
-    cursor: pointer;
-}
-.notes-reminder-row:hover { background: var(--bg-modifier-hover); }
-.notes-reminder-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--brand-primary); flex-shrink: 0; }
-.notes-reminder-text { flex: 1; min-width: 0; font-size: 14px; word-break: break-word; }
-.notes-reminder-sub { display: block; font-size: 12px; color: var(--text-muted); }
-.notes-reminder-note { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40%; }
-.notes-reminder-when { font-size: 12px; color: var(--text-muted); white-space: nowrap; flex-shrink: 0; }
+/* The LIST is components/reminders/Reminders.css — the view is shared with
+   Púca's own Reminders tab, and Púca never loads this file. Nothing about the
+   row belongs here any more: a duplicate copy of those rules lived here until
+   0.9.818 and it is what let the phone layout drift, because only this copy
+   carried the coarse-pointer `flex-wrap: wrap` and Púca's tab therefore never
+   got it. Only the RETIME control below is Notes' own — Púca's tab passes no
+   `rowExtra` (components/reminders/TasksReminders.tsx), so no other surface
+   renders it. */
 /* Retime from the row. On a phone the OPEN cluster takes a line of its own
    inside the row rather than squeezing the item text out of 390px — see the
-   coarse-pointer block below, which is where `.open` earns its keep. (The
-   dialog path portals itself and is not laid out here at all.) */
+   coarse-pointer block below, which is where `.open` earns its keep. It
+   leans on the row wrapping, which Reminders.css now sets. (The dialog path
+   portals itself and is not laid out here at all.) */
 .notes-retime { position: relative; display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .notes-retime-edit { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .notes-retime-edit input {
@@ -946,7 +937,6 @@
     color-scheme: dark;
 }
 [data-theme="light"] .notes-retime-edit input { color-scheme: light; }
-.notes-reminder-group.overdue .notes-reminder-when { color: var(--text-danger); font-weight: 600; }
 
 /* ---------- Shortcuts help -------------------------------------------------- */
 .notes-kbd-grid { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; font-size: 13px; }
@@ -1113,15 +1103,15 @@
        16px iOS zooms the page. The input carries its own [type="time"]
        selector above, so this one has to match it or the 13px wins. */
     .notes-menu-row select, .notes-menu-row input[type="time"], .notes-menu-row label { font-size: 16px; }
-    .notes-reminder-row { padding: 12px 10px; flex-wrap: wrap; }
-    .notes-reminder-row input[type="checkbox"] { width: 20px; height: 20px; }
-    /* Two icon buttons now sit at the end of a reminder row (retime and
-       snooze): DESIGN_PHILOSOPHY §7's 44px applies to both. Scoped to the
-       row — the 40px above is right for a card's own tools, and widening
-       every small icon button would grow the composer's whole cluster. */
-    .notes-reminder-row .notes-iconbtn.small { width: 44px; height: 44px; }
-    /* The row wraps (above), so a full basis on the OPEN cluster moves it —
-       clock button and field together — onto a line of its own. The field
+    /* The row's own coarse-pointer rules — the taller padding, the 20px tick
+       box, the 44px icon buttons and the wrap — are all in
+       components/reminders/Reminders.css, so Púca's Reminders tab gets the
+       same row. Only the retime cluster below is Notes'.
+       The row wraps (Reminders.css), so a full basis on the OPEN cluster
+       moves it — clock button and field together — onto a line of its own,
+       below the marks, note title and time; the snooze after it starts the
+       next line, held to the right edge by Reminders.css's
+       `justify-content` so its menu opens on screen. The field
        itself is not a flex item of the ROW, so a basis on IT could never do
        that; it just fills what the button leaves. */
     .notes-retime.open { flex-basis: 100%; margin-top: 6px; }
