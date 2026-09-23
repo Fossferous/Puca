@@ -2429,8 +2429,9 @@ await ctxB.close();
     await spp.waitForSelector('.context-menu', { timeout: 5000 });
     await spp.locator('.context-menu-item', { hasText: 'Send to Púca' }).tap();
     await spp.waitForSelector('.notes-send-target', { timeout: 15000 });
-    const noOverflow = await spp.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1);
-    ck('phone send: no horizontal overflow at 390x844', noOverflow);
+    // clientWidth, not innerWidth: see audit() in the phone pass.
+    const sendWidth = await spp.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
+    ck('phone send: no horizontal overflow at 390x844', sendWidth.scrollWidth <= sendWidth.clientWidth + 1, JSON.stringify(sendWidth));
     const rowHeights = await spp.evaluate(() => [...document.querySelectorAll('.notes-send-target')].map(e => e.getBoundingClientRect().height));
     ck('phone send: every target is at least 44px tall', rowHeights.length > 0 && rowHeights.every(h => h >= 43.5), rowHeights.join(','));
     const filterPx = await spp.evaluate(() => {
@@ -2587,7 +2588,9 @@ await ctxB.close();
         await cpp.waitForSelector('.context-menu', { timeout: 5000 });
         await cpp.locator('.context-menu-item', { hasText: 'Save to Notes' }).tap();
         await cpp.waitForSelector('.save-note-row', { timeout: 15000 });
-        ck('phone capture: no horizontal overflow at 390x844', await cpp.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1));
+        // clientWidth, not innerWidth: see audit() in the phone pass.
+        const captureWidth = await cpp.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
+        ck('phone capture: no horizontal overflow at 390x844', captureWidth.scrollWidth <= captureWidth.clientWidth + 1, JSON.stringify(captureWidth));
         const rh = await cpp.evaluate(() => [...document.querySelectorAll('.save-note-row')].map(e => e.getBoundingClientRect().height));
         ck('phone capture: every row is at least 44px tall', rh.length > 0 && rh.every(h => h >= 43.5), rh.join(','));
         const fs2 = await cpp.evaluate(() => {
@@ -2714,8 +2717,14 @@ const m = await mctx.newPage();
 watch(m);
 const mshot = shotOf(m);
 
+// Every width below is measured against document.documentElement.clientWidth,
+// never window.innerWidth: under isMobile emulation a page wider than the
+// screen WIDENS innerWidth to fit it (a 451px row on this 390px device reads
+// innerWidth 451, scrollWidth 451, clientWidth 390), so "scrollWidth >
+// innerWidth" and "widest <= innerWidth" compare the page with itself and
+// cannot fail. clientWidth stays the device's 390.
 const audit = () => m.evaluate(() => {
-    const vw = window.innerWidth;
+    const vw = document.documentElement.clientWidth;
     const vis = el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
     let widest = 0;
     for (const el of document.querySelectorAll('body *')) { const r = el.getBoundingClientRect(); if (vis(el) && r.right > widest) widest = r.right; }
@@ -2733,7 +2742,8 @@ const audit = () => m.evaluate(() => {
         const el = document.querySelector(sel);
         if (el) fonts[sel] = parseFloat(getComputedStyle(el).fontSize);
     }
-    return { vw, widest, bodyScrollsHorizontally: document.documentElement.scrollWidth > vw + 1, under, ghosts, cards, fonts,
+    const scrollWidth = document.documentElement.scrollWidth;
+    return { vw, widest, scrollWidth, bodyScrollsHorizontally: scrollWidth > vw + 1, under, ghosts, cards, fonts,
         fabVisible: !!document.querySelector('.notes-fab') && vis(document.querySelector('.notes-fab')),
         inlineComposerHidden: !document.querySelector('.notes-quickadd') || !vis(document.querySelector('.notes-quickadd')) };
 });
@@ -2784,8 +2794,9 @@ ck('phone: the paste confirmation is inside the viewport',
 const pasteBtns = await m.locator('.notes-paste-actions button').all();
 const pasteHs = await Promise.all(pasteBtns.map(async b => (await b.boundingBox())?.height ?? 0));
 ck('phone: every paste-confirmation button is a full tap target', pasteHs.length === 3 && pasteHs.every(h => h >= 44), JSON.stringify(pasteHs));
+const pasteWidth = await m.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
 ck('phone: the paste confirmation does not scroll the page sideways',
-    await m.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+    pasteWidth.scrollWidth <= pasteWidth.clientWidth, JSON.stringify(pasteWidth));
 await mshot('phone-paste-confirm');
 await m.getByRole('button', { name: 'Cancel' }).tap();
 await m.waitForSelector('.notes-paste-dialog', { state: 'detached', timeout: 5000 }).catch(() => {});
@@ -2907,11 +2918,13 @@ const mPucaEdit = await m.evaluate(() => {
     if (!el || !title) return null;
     const b = el.getBoundingClientRect(), t = title.getBoundingClientRect();
     const input = el.querySelector('input');
+    const vw = document.documentElement.clientWidth;
     return {
         ownRow: b.top >= t.bottom - 0.5,
-        inside: b.left >= -0.5 && b.right <= window.innerWidth + 0.5,
+        inside: b.left >= -0.5 && b.right <= vw + 0.5,
         font: input ? parseFloat(getComputedStyle(input).fontSize) : 0,
-        overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+        overflow: document.documentElement.scrollWidth > vw + 1,
+        right: Math.round(b.right), vw,
     };
 });
 ck('phone: the Púca due editor fits 390, takes its own row, and its input is 16px',
@@ -2933,11 +2946,11 @@ ck('phone: the composer offers Add file, and its foot still fits 390 px',
     await m.locator('.notes-quickadd-foot button[aria-label="Add file"]').count() === 1
     && await m.evaluate(() => {
         const f = document.querySelector('.notes-quickadd-foot');
-        return !!f && f.scrollWidth <= f.clientWidth + 1 && f.getBoundingClientRect().right <= window.innerWidth + 1;
+        return !!f && f.scrollWidth <= f.clientWidth + 1 && f.getBoundingClientRect().right <= document.documentElement.clientWidth + 1;
     }),
     JSON.stringify(await m.evaluate(() => {
         const f = document.querySelector('.notes-quickadd-foot');
-        return f ? { scrollWidth: f.scrollWidth, clientWidth: f.clientWidth, right: Math.round(f.getBoundingClientRect().right) } : null;
+        return f ? { scrollWidth: f.scrollWidth, clientWidth: f.clientWidth, right: Math.round(f.getBoundingClientRect().right), vw: document.documentElement.clientWidth } : null;
     })));
 await m.tap('.notes-quickadd-foot button[aria-label="Text note"]');
 r = await audit();
@@ -3071,7 +3084,8 @@ const pucaAudit = scope => m.evaluate(sel => {
     const btns = [...root.querySelectorAll('button')].filter(vis).filter(b => !b.matches('.ni-open'));
     const under = btns.map(b => [b, b.getBoundingClientRect()]).filter(([, b]) => b.width < 43.5 || b.height < 43.5).map(([el, b]) => `${el.className || el.tagName} ${Math.round(b.width)}x${Math.round(b.height)}`);
     const ta = root.querySelector('textarea');
-    return { buttons: btns.length, under, textPx: ta ? parseFloat(getComputedStyle(ta).fontSize) : 0, overflow: document.documentElement.scrollWidth > window.innerWidth + 1 };
+    const docWidth = { scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth };
+    return { buttons: btns.length, under, textPx: ta ? parseFloat(getComputedStyle(ta).fontSize) : 0, overflow: docWidth.scrollWidth > docWidth.clientWidth + 1, docWidth };
 }, scope);
 await m.goto('/chat');
 await m.waitForSelector('.chat-container', { timeout: 20000 }).catch(() => {});
@@ -3100,11 +3114,13 @@ const fpop = await m.evaluate(() => {
     if (!p) return null;
     const b = p.getBoundingClientRect();
     const rows = [...p.querySelectorAll('button')].map(x => x.getBoundingClientRect());
+    const vw = document.documentElement.clientWidth;
     return {
         rows: rows.length,
-        inside: b.left >= -0.5 && b.right <= window.innerWidth + 0.5 && b.top >= -0.5 && b.bottom <= window.innerHeight + 0.5,
+        inside: b.left >= -0.5 && b.right <= vw + 0.5 && b.top >= -0.5 && b.bottom <= window.innerHeight + 0.5,
         small: rows.filter(i => i.height < 43.5).length,
-        overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+        overflow: document.documentElement.scrollWidth > vw + 1,
+        right: Math.round(b.right), vw,
     };
 });
 ck('phone púca: the filter popover fits, its rows at size, nothing overflows', !!fpop && fpop.rows >= 2 && fpop.inside && fpop.small === 0 && !fpop.overflow, JSON.stringify(fpop));
@@ -3368,8 +3384,9 @@ if (await m.locator('.notes-editor-foot button[aria-label="List actions"]').coun
     const laBox = await m.locator('.notes-popover').boundingBox();
     ck('phone: the list-actions popover is inside the viewport',
         laBox && laBox.x >= 0 && laBox.x + laBox.width <= 390.5 && laBox.y >= 0 && laBox.y + laBox.height <= vh + 0.5, JSON.stringify(laBox));
+    const laWidth = await m.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
     ck('phone: the editor foot still does not scroll sideways',
-        await m.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+        laWidth.scrollWidth <= laWidth.clientWidth, JSON.stringify(laWidth));
     await mshot('phone-list-actions');
     await m.keyboard.press('Escape');
     await m.waitForSelector('.notes-popover', { state: 'detached', timeout: 5000 }).catch(() => {});
@@ -3520,8 +3537,9 @@ ck('desktop hint: a second line inside the item cell, not a new column', !!hinte
         rows = await rowFacts(pg);
         hinted = rows.find(x => x.label === 'Shared errand');
         mine = rows.find(x => x.label === 'My shared errand');
-        const vw = await pg.evaluate(() => window.innerWidth);
-        const overflow = await pg.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+        // clientWidth, not innerWidth: see audit() in the phone pass.
+        const vw = await pg.evaluate(() => document.documentElement.clientWidth);
+        const overflow = await pg.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
         ck('phone hint (390x844): shown under the item', !!hinted && hinted.hint === 'Reminds whoever set it' && !!hinted.sub && hinted.sub.t >= hinted.text.t + 4, JSON.stringify(hinted));
         ck('phone hint: my own shared item has none (control)', !!mine && mine.hint === null);
         ck('phone hint: the row, the hint and the due time stay inside 390 px', !!hinted && !!hinted.sub && !overflow
@@ -3536,7 +3554,8 @@ ck('desktop hint: a second line inside the item cell, not a new column', !!hinte
         ck('phone: the retime and snooze buttons are both at least 44 px', !!retimeBox && !!snoozeBox
             && retimeBox.height >= 44 && retimeBox.width >= 44 && snoozeBox.height >= 44 && snoozeBox.width >= 44,
             JSON.stringify({ retimeBox, snoozeBox }));
-        ck('phone: they stay inside the row, which stays inside 390 px', !!retimeBox && retimeBox.x + retimeBox.width <= vw + 0.5);
+        ck('phone: they stay inside the row, which stays inside 390 px', !!retimeBox && retimeBox.x + retimeBox.width <= vw + 0.5,
+            JSON.stringify({ right: retimeBox && retimeBox.x + retimeBox.width, vw }));
         // The OPEN field, which the two closed buttons above never measure:
         // the cluster takes a line of its own inside the row rather than
         // squeezing the item out of 390 px, and the field is 16px so iOS does
@@ -3554,7 +3573,7 @@ ck('desktop hint: a second line inside the item cell, not a new column', !!hinte
                 row: box(row), text: box(row.querySelector('.notes-reminder-text')),
                 clock: box(row.querySelector('.notes-retime button')), field: box(field), input: box(input),
                 px: parseFloat(getComputedStyle(input).fontSize),
-                wide: document.documentElement.scrollWidth > window.innerWidth + 1,
+                wide: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
             };
         });
         ck('phone: the open retime field stays inside 390 px and adds no page scroll',
@@ -3601,8 +3620,8 @@ ck('desktop hint: a second line inside the item cell, not a new column', !!hinte
             && tapBoxes.calendar.w >= 44 && tapBoxes.calendar.h >= 44,
             JSON.stringify(tapBoxes));
         const pucaPhone = await pg.evaluate(() => ({
-            overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
-            vw: window.innerWidth,
+            overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
+            vw: document.documentElement.clientWidth,
             rows: [...document.querySelectorAll('.tasks-reminders .notes-reminder-row')].map(r => r.getBoundingClientRect().right),
             box: (() => { const b = document.querySelector('.tasks-reminders input[type="checkbox"]'); return b ? b.getBoundingClientRect().width : 0; })(),
         }));
@@ -4090,14 +4109,15 @@ const nm = await nctx.newPage();
 watch(nm);
 const nshot = shotOf(nm);
 const gateAudit = () => nm.evaluate(() => {
-    const vw = window.innerWidth, vh = window.innerHeight;
+    // clientWidth, not innerWidth: see audit() in the phone pass.
+    const vw = document.documentElement.clientWidth, vh = window.innerHeight;
     const vis = el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
     // At least one must be SHOWN: "every one of none is inside" passed when
     // the thing under test was not on screen at all.
     const within = sel => { const els = [...document.querySelectorAll(sel)].filter(vis); return els.length > 0 && els.every(el => { const r = el.getBoundingClientRect(); return r.left >= -0.5 && r.right <= vw + 0.5 && r.top >= -0.5 && r.bottom <= vh + 0.5; }); };
     const small = [...document.querySelectorAll('.notes-update-gate button, .notes-update-strip button')].filter(vis)
         .map(b => b.getBoundingClientRect()).filter(r => r.width < 43.5 || r.height < 43.5).map(r => `${Math.round(r.width)}x${Math.round(r.height)}`);
-    return { overflow: document.documentElement.scrollWidth > vw + 1, small,
+    return { overflow: document.documentElement.scrollWidth > vw + 1, scrollWidth: document.documentElement.scrollWidth, vw, small,
         gateInside: within('.notes-update-gate-content'), stripInside: within('.notes-update-strip') };
 });
 

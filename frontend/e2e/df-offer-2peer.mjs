@@ -141,7 +141,10 @@ const offer = (page) => page.evaluate(() => {
         text: el.querySelector('span')?.textContent || '', left: Math.round(r.left), right: Math.round(r.right),
         width: Math.round(r.width), visible: r.width > 0 && r.height > 0, buttons,
         collapsed: !!bar?.classList.contains('vp-collapsed'), barWidth: Math.round(bar?.getBoundingClientRect().width ?? 0),
-        vw: window.innerWidth, scrollW: document.documentElement.scrollWidth,
+        // clientWidth, never innerWidth: on the isMobile phone a page wider
+        // than the screen WIDENS innerWidth to fit it, and the checks below
+        // would compare the page with itself.
+        vw: document.documentElement.clientWidth, scrollW: document.documentElement.scrollWidth,
     };
 });
 

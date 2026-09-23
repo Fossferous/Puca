@@ -196,7 +196,10 @@ try {
             mounted: true,
             right: r.right, left: r.left, bottom: r.bottom, top: r.top,
             btnW: Math.round(btn.width), btnH: Math.round(btn.height),
-            vw: window.innerWidth, vh: window.innerHeight,
+            // clientWidth, never innerWidth: under isMobile a page wider than
+            // the screen WIDENS innerWidth (and the fixed toast with it), so
+            // "right <= innerWidth" could not fail.
+            vw: document.documentElement.clientWidth, vh: window.innerHeight,
             position: cs.position, zIndex: cs.zIndex,
         };
     });
