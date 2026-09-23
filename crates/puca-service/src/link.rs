@@ -984,10 +984,11 @@ pub async fn refresh_token(cfg: &LinkConfig, token: &str) -> Result<Option<Strin
 /// Trade this machine's own device key for a fresh session.
 ///
 /// THE ANSWER TO "EVEN IF IT'S BEEN OFF FOR A WHILE". A stored token dies two
-/// ways and neither can be repaired by retrying: it expires (and
-/// `validate_token` runs BEFORE `renew_if_stale`, so an expired one is never
-/// renewed), or it passes `MAX_SESSION_DAYS` from its original sign-in and the
-/// server refuses to renew it however fresh it looks. A machine switched off
+/// ways and neither can be repaired by retrying: it expires (and the server
+/// never renews an expired one — `renew_if_stale` refuses it even inside the
+/// 60 s skew leeway `validate_token` accepts), or it reaches `MAX_SESSION_DAYS`
+/// from its original sign-in, where renewal stops and every token's exp is
+/// clamped, however fresh it looks. A machine switched off
 /// past either point comes back unreachable exactly when someone wants it.
 ///
 /// This asks the server for a nonce, signs it with the Ed25519 key enrolment

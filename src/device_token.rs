@@ -4,10 +4,11 @@
 //! a human proves a password through SRP. That is right for people and useless
 //! for a machine sitting at its own Windows sign-in screen: nobody is there to
 //! type anything, and the copy of the owner's token it was given when it was
-//! enrolled is not a durable credential. `validate_token` runs BEFORE
-//! `renew_if_stale`, so an EXPIRED token can never be renewed — and renewal is
-//! bounded anyway by `MAX_SESSION_DAYS` from the original sign-in, which is
-//! preserved across every renewal.
+//! enrolled is not a durable credential. An EXPIRED token can never be renewed
+//! (`validate_token` refuses it past jsonwebtoken's 60 s skew leeway, and
+//! `renew_if_stale` refuses it inside that minute) — and renewal is bounded
+//! anyway by `MAX_SESSION_DAYS` from the original sign-in, which is preserved
+//! across every renewal and caps every renewed token's exp.
 //!
 //! So a machine switched off for longer than that comes back holding a
 //! credential it cannot repair, and is unreachable exactly when someone wanted
