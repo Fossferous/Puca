@@ -199,7 +199,12 @@ await mustStep('tasks-calendar-tab', async () => {
     await page.locator('.tasks-tab-calendar').tap({ timeout: 3000 });
     await page.locator('.tasks-calendar .cal-month').waitFor({ timeout: 5000 });
     const r = await page.evaluate(() => ({
-        overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+        // clientWidth, never innerWidth: under isMobile emulation a page wider
+        // than the screen WIDENS innerWidth to fit it (a 451px row on this
+        // 390px device reads innerWidth 451, scrollWidth 451, clientWidth 390),
+        // so "scrollWidth > innerWidth" compared the page with itself.
+        overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
+        scrollWidth: document.documentElement.scrollWidth, vw: document.documentElement.clientWidth,
         week: (() => { const b = document.querySelector('.tasks-calendar .cal-viewbtn.view-week'); return !!b && getComputedStyle(b).display !== 'none'; })(),
         // The pinned tab is a whole tap target, not squeezed to "C…".
         // offsetWidth, NOT the drawn box: the tab was tapped a moment ago and
@@ -216,7 +221,8 @@ await mustStep('tasks-calendar-tab', async () => {
     const d = await page.evaluate(() => ({
         list: !!document.querySelector('.tasks-calendar .cal-daylist'),
         grid: document.querySelectorAll('.tasks-calendar .cal-timegrid').length,
-        overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+        overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
+        scrollWidth: document.documentElement.scrollWidth, vw: document.documentElement.clientWidth,
     }));
     console.log('tasks calendar (phone Day): the list, no time grid, no overflow (should be true):', d.list && d.grid === 0 && !d.overflow, JSON.stringify(d));
     if (!d.list || d.grid !== 0 || d.overflow) throw new Error(`phone Day: ${JSON.stringify(d)}`);
@@ -250,7 +256,8 @@ await mustStep('tasks-reminders-tab', async () => {
         // convention.
         const box = sel => { const el = document.querySelector(sel); return el ? { w: el.offsetWidth, h: el.offsetHeight } : null; };
         return {
-            overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+            overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
+            scrollWidth: document.documentElement.scrollWidth, vw: document.documentElement.clientWidth,
             reminders: box('.tasks-tab-reminders'),
             calendar: box('.tasks-tab-calendar'),
             snooze: box('.tasks-reminders .notes-snooze button'),

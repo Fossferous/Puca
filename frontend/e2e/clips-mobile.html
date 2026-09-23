@@ -139,11 +139,15 @@
             const rect = (sel) => { const e = document.querySelector(sel); return e ? e.getBoundingClientRect() : null; };
             const decline = rect('.clip-approval-decline'), approve = rect('.clip-approval-approve');
             const widest = Math.max(0, ...[...document.querySelectorAll('#root *, .clip-approval *')].map(e => Math.round(e.getBoundingClientRect().right)));
+            // clientWidth, never innerWidth: under phone emulation (isMobile) a
+            // page wider than the screen WIDENS innerWidth to fit it, so both
+            // overflow checks compared the page with itself and could not fail.
+            const vw = document.documentElement.clientWidth;
             return {
                 view,
-                bodyScrollsHorizontally: document.documentElement.scrollWidth > window.innerWidth,
+                bodyScrollsHorizontally: document.documentElement.scrollWidth > vw,
                 widestElement: widest,
-                viewportWidth: window.innerWidth,
+                viewportWidth: vw,
                 buttonsUnder44px: small,
                 promptShown: !!document.querySelector('.clip-approval'),
                 queueChip: document.querySelector('.clip-approval-queue')?.textContent ?? null,

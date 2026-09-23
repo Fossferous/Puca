@@ -499,7 +499,10 @@ export async function calendarWalk({ browser, baseURL, state, username, ck, watc
     // The notes load after the grid renders: wait for the item before auditing.
     await m.locator('.cal-daylist .cal-row', { hasText: 'Gap check' }).waitFor({ timeout: 15000 }).catch(() => {});
     const audit = await m.evaluate(() => {
-        const vw = window.innerWidth;
+        // clientWidth, never innerWidth: under isMobile emulation a page wider
+        // than the screen WIDENS innerWidth to fit it, so "scrollWidth >
+        // innerWidth" compares the page with itself (see notes-walk's audit()).
+        const vw = document.documentElement.clientWidth;
         const vis = el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
         const under = [];
         for (const b of [...document.querySelectorAll('.cal button, .cal input, .notes-fab')].filter(vis)) {
@@ -510,13 +513,13 @@ export async function calendarWalk({ browser, baseURL, state, username, ck, watc
         const dot = document.querySelector('.cal-cell[data-drop-target="2026-03-08"] .cal-dots');
         const chips = document.querySelector('.cal-cell[data-drop-target="2026-03-08"] .cal-cell-chips');
         return {
-            overflow: document.documentElement.scrollWidth > vw + 1, under,
+            overflow: document.documentElement.scrollWidth > vw + 1, scrollWidth: document.documentElement.scrollWidth, vw, under,
             dots: !!dot && vis(dot), chipsHidden: !chips || !vis(chips),
             weekBtn: !!document.querySelector('.cal-viewbtn.view-week') && vis(document.querySelector('.cal-viewbtn.view-week')),
         };
     });
     await mshot('phone-calendar-month');
-    ck('phone calendar: no horizontal overflow', !audit.overflow);
+    ck('phone calendar: no horizontal overflow', !audit.overflow, `scrollWidth=${audit.scrollWidth} vw=${audit.vw}`);
     ck('phone calendar: every tap target at size', audit.under.length === 0, JSON.stringify(audit.under));
     ck('phone calendar: a day shows dots, not chips', audit.dots && audit.chipsHidden);
     ck('phone calendar: no Week button under the phone gate', !audit.weekBtn);
@@ -532,10 +535,11 @@ export async function calendarWalk({ browser, baseURL, state, username, ck, watc
     await m.locator('.cal-daylist .cal-row', { hasText: 'Gap check' }).waitFor({ timeout: 10000 }).catch(() => {});
     const phoneDay = await m.evaluate(() => ({
         grid: document.querySelectorAll('.cal-timegrid').length,
-        overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+        overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
+        scrollWidth: document.documentElement.scrollWidth, vw: document.documentElement.clientWidth,
     }));
     ck('phone Day (390x844): the day list, and NO time grid', phoneDay.grid === 0 && await m.locator('.cal-daylist .cal-row', { hasText: 'Gap check' }).count() === 1, JSON.stringify(phoneDay));
-    ck('phone Day: no horizontal overflow', !phoneDay.overflow);
+    ck('phone Day: no horizontal overflow', !phoneDay.overflow, `scrollWidth=${phoneDay.scrollWidth} vw=${phoneDay.vw}`);
     await mshot('phone-calendar-day');
     await mctx.close();
     ck('calendar: no page errors', errors.length === 0, errors[0]);
