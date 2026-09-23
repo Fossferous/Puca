@@ -15,7 +15,10 @@ one-line summary; this file is the full story. Versions follow
   first line beside the tick box (or a note's bell), and puts the repeat and
   snooze marks, the note's name, the time and the buttons on a second line
   underneath; a long note name is shortened with "…" rather than pushing the
-  buttons onto a third line. Nothing moved on a desktop.
+  buttons onto a third line. The snooze button keeps to the right edge even
+  when it gets a line to itself — under an open time field, say — so its
+  menu no longer opens off the left of the screen. Nothing moved on a
+  desktop.
 
 ## 0.9.817 — 2026-09-22
 

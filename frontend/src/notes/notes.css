@@ -1110,7 +1110,8 @@
        The row wraps (Reminders.css), so a full basis on the OPEN cluster
        moves it — clock button and field together — onto a line of its own,
        below the marks, note title and time; the snooze after it starts the
-       next line, as it did before the row had two lines. The field
+       next line, held to the right edge by Reminders.css's
+       `justify-content` so its menu opens on screen. The field
        itself is not a flex item of the ROW, so a basis on IT could never do
        that; it just fills what the button leaves. */
     .notes-retime.open { flex-basis: 100%; margin-top: 6px; }

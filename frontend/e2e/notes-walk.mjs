@@ -3696,6 +3696,54 @@ ck('desktop hint: a second line inside the item cell, not a new column', !!hinte
         await pg.keyboard.press('Escape');
         ck('phone: Escape closes it again', await pg.locator('.notes-retime-edit').count() === 0);
         await shotOf(pg)('hint-phone');
+        // ---- A snooze on a line of its own keeps to the right edge ----
+        // The OPEN retime takes a whole line of the row (above), so the
+        // snooze after it starts a line with no due time on it. The two-line
+        // row (Reminders.css) first pushed the actions right with the time's
+        // auto margin alone, which cannot reach that line: the snooze sat at
+        // the line's START, and its menu — anchored to the button's right
+        // edge and opening leftwards — hung off the left of the screen
+        // (measured in a fixture: x=-40..66). At 320 px an item with all
+        // three timing marks and a date in another year wraps its snooze
+        // alone the same way; this pass runs at 390, where the open retime
+        // is the shape it can reach. So: open the retime again, open THIS
+        // row's snooze, and hold the button to the row's right edge and the
+        // menu on screen with BOTH edges — the Púca preset check below looks
+        // only at the right one.
+        await mineRow.locator('button[aria-label^="Change the time"]').tap();
+        await pg.waitForSelector('.notes-retime-edit input[type="datetime-local"]', { timeout: 5000 }).catch(() => {});
+        const loneSnooze = mineRow.locator('.notes-snooze > button');
+        const hasLone = await loneSnooze.count() === 1;
+        ck('phone: the row with its retime open carries a snooze (precondition)',
+            hasLone && await pg.locator('.notes-retime-edit').count() === 1);
+        if (hasLone) {
+            await loneSnooze.tap();
+            await pg.waitForSelector('.notes-reminder-row .notes-snooze-menu', { timeout: 5000 }).catch(() => {});
+            const lone = await pg.evaluate(() => {
+                const r1 = n => Math.round(n * 10) / 10;
+                const row = [...document.querySelectorAll('.notes-reminder-row')].find(r => r.textContent.includes('My shared errand'));
+                const box = el => { if (!el) return null; const b = el.getBoundingClientRect(); return { l: r1(b.left), r: r1(b.right), t: r1(b.top), b: r1(b.bottom) }; };
+                const rb = row.getBoundingClientRect();
+                return {
+                    client: document.documentElement.clientWidth,
+                    contentR: r1(rb.right - parseFloat(getComputedStyle(row).paddingRight)),
+                    field: box(row.querySelector('.notes-retime-edit')),
+                    snooze: box(row.querySelector('.notes-snooze > button')),
+                    menu: box(row.querySelector('.notes-snooze-menu')),
+                };
+            });
+            ck('phone: with the retime open, the snooze keeps to the row’s right edge',
+                !!lone.snooze && Math.abs(lone.snooze.r - lone.contentR) <= 0.5, JSON.stringify(lone));
+            ck('phone: and its menu opens on screen, left edge included',
+                !!lone.menu && lone.menu.l >= -0.5 && lone.menu.r <= lone.client + 0.5, JSON.stringify(lone));
+            await shotOf(pg)('snooze-under-open-retime-phone');
+            await loneSnooze.tap();   // the button toggles its own menu shut
+        }
+        await mineRow.locator('button[aria-label^="Change the time"]').tap();   // and the clock its field
+        await pg.waitForSelector('.notes-retime-edit', { state: 'detached', timeout: 5000 }).catch(() => {});
+        ck('phone: the snooze menu and the retime field close again',
+            await pg.locator('.notes-snooze-menu').count() === 0 && await pg.locator('.notes-retime-edit').count() === 0);
+        // ---- end of the lone-snooze block ----
         // The same view in PÚCA at 390x844: the tab is a whole tap target, the
         // rows fit, and the snooze button is not a 32 px dot on a phone.
         // The phone route into Púca's Tasks view is the bottom nav plus the

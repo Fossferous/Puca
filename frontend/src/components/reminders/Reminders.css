@@ -179,8 +179,23 @@
        - flex-grow is resolved before auto margins, so the free space the
          note title does not take is what the time's auto margin puts
          between it and the buttons. The time is the one element on that
-         line every row has. */
-    .notes-reminder-row { flex-wrap: wrap; row-gap: 2px; }
+         line every row has.
+       - `justify-content: safe flex-end` is for a line that holds nothing
+         but actions, which the time's auto margin cannot reach: the snooze
+         under Notes' OPEN retime (a line of its own, notes.css), or at
+         320px the snooze of an item with all three timing marks and a date
+         in another year, which wraps alone. It used to sit at that line's
+         START, and its menu — anchored to the button's right edge (below)
+         — opened past the left of the screen, x=-40..66 in a fixture
+         (DESIGN_PHILOSOPHY §6, anchored popups). Lines 1 and 2 have no free
+         space left for it to move: the text and the time's margin take it.
+         Not `margin-left: auto` on the snooze: on line 2 that is a second
+         auto margin, which halves the space and floats Notes' retime clock
+         41px away from the snooze. `safe` keeps a line that overflows (the
+         open retime field at 320px) starting at the left edge as before,
+         instead of pushing its start off-screen; a browser without `safe`
+         drops the declaration and keeps the old placement. */
+    .notes-reminder-row { flex-wrap: wrap; row-gap: 2px; justify-content: safe flex-end; }
     .notes-reminder-row input[type="checkbox"] { margin: 0; }
     .notes-reminder-text { flex: 1 1 0; min-width: calc(100% - 34px); }
     .notes-reminder-marks:empty, .notes-reminder-note:empty { display: none; }
