@@ -327,17 +327,32 @@ pub async fn jwt_auth_middleware(
         let recorded = if claims.sid.is_empty() {
             sqlx::query("INSERT INTO token_sessions (sid, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
                 .bind(&renew_sid).bind(claims.sub as i32).execute(&state.pool).await
+                .map(|_| true)
         } else {
+            // Matching NO row is a failure too, not a success: a sid-bearing
+            // token whose row does not exist is a session nothing per-session
+            // can revoke, and sliding it would keep it alive for up to a year.
+            // Both mint sites now refuse to issue a token without its row, so
+            // this only stops a session minted row-less by an older release.
+            // Not an upsert: a recreated row would lose device_id and headless.
             sqlx::query("UPDATE token_sessions SET last_seen_at = NOW() WHERE sid = $1")
                 .bind(&renew_sid).execute(&state.pool).await
+                .map(|done| done.rows_affected() > 0)
         };
-        if let Err(e) = recorded {
-            // A renewed token whose session row could not be written would be
-            // a live session nothing can revoke. Keep the caller on its current
-            // token instead (it still expires on its own clock) and try again
-            // on a later request.
-            tracing::warn!("renewal: could not record session for user {}: {:?} — not renewing", claims.sub, e);
-            renewed = None;
+        match recorded {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!("renewal: session of user {} has no row — not renewing", claims.sub);
+                renewed = None;
+            }
+            Err(e) => {
+                // A renewed token whose session row could not be written would be
+                // a live session nothing can revoke. Keep the caller on its current
+                // token instead (it still expires on its own clock) and try again
+                // on a later request.
+                tracing::warn!("renewal: could not record session for user {}: {:?} — not renewing", claims.sub, e);
+                renewed = None;
+            }
         }
     }
     let user_id = claims.sub;
@@ -786,4 +801,82 @@ mod session_tests {
         assert!(!token_session_live(&pool, &claims("sid-live", tv + 1)).await.unwrap(), "token_version still rules");
         let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(uid).execute(&pool).await;
     }
+
+    /// Finding 3, defence in depth: a sid-bearing token whose session row does
+    /// not exist must not be slid forward. The UPDATE that "records" the
+    /// renewal matched 0 rows and was treated as success, so a row-less
+    /// session renewed for up to a year with nothing per-session able to
+    /// revoke it. Drives the real middleware; TEST_DATABASE_URL only.
+    #[tokio::test]
+    async fn the_middleware_does_not_renew_a_session_that_has_no_row() {
+        use axum::{body::Body, routing::get, Router};
+        use tower::ServiceExt;
+        let Some(url) = crate::migrator::test_database_url() else {
+            println!("skipping: TEST_DATABASE_URL not set");
+            return;
+        };
+        let pool = match sqlx::postgres::PgPoolOptions::new().max_connections(2).connect(&url).await {
+            Ok(p) => p,
+            Err(_) => { println!("skipping: database unreachable"); return; }
+        };
+        crate::migrator::app_migrator().run(&pool).await.expect("migrations apply");
+        let state = AppState::new(pool.clone(), SECRET.into(), None, Arc::new(crate::wake::NullWake));
+        let name = format!("renew_row_{}", uuid::Uuid::new_v4().simple());
+        let (uid, tv): (i32, i32) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id, token_version")
+            .bind(&name).bind(b"s".as_ref()).bind(b"v".as_ref())
+            .fetch_one(&pool).await.expect("insert user");
+        let with_row = format!("sid-row-{}", uuid::Uuid::new_v4().simple());
+        let without_row = format!("sid-none-{}", uuid::Uuid::new_v4().simple());
+        sqlx::query("INSERT INTO token_sessions (sid, user_id) VALUES ($1, $2)").bind(&with_row).bind(uid).execute(&pool).await.unwrap();
+
+        let app = Router::new()
+            .route("/x", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(state.clone(), jwt_auth_middleware));
+        // Five hours into an ordinary token's day: stale, so it renews.
+        let now = Utc::now().timestamp();
+        let bearer = |sid: &str| {
+            let c = Claims { sub: uid as UserId, username: name.clone(), exp: now + 19 * 3600, tv, sst: now - 5 * 3600, sid: sid.into(), ls: false };
+            let t = jsonwebtoken::encode(&jsonwebtoken::Header::default(), &c, &jsonwebtoken::EncodingKey::from_secret(SECRET.as_bytes())).unwrap();
+            axum::http::Request::get("/x").header(header::AUTHORIZATION, format!("Bearer {t}")).body(Body::empty()).unwrap()
+        };
+        let control = app.clone().oneshot(bearer(&with_row)).await.unwrap();
+        let rowless = app.clone().oneshot(bearer(&without_row)).await.unwrap();
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(uid).execute(&pool).await;
+
+        assert_eq!(control.status(), StatusCode::OK);
+        assert!(control.headers().contains_key(RENEWED_TOKEN_HEADER), "positive control: a session with its row renews");
+        assert_eq!(rowless.status(), StatusCode::OK, "the request itself is still served (the row-less case is judged on token_version)");
+        assert!(
+            !rowless.headers().contains_key(RENEWED_TOKEN_HEADER),
+            "a session with no row must not be renewed: nothing per-session could ever revoke it",
+        );
+    }
+}
+
+/// Make every INSERT into `token_sessions` for ONE user fail, the way a
+/// dropped connection or a pool timeout at that statement would. Scoped to
+/// the user so tests running beside it on the same database are untouched.
+/// Returns the name to hand to [`allow_session_rows`]. THROWAWAY DATABASE
+/// ONLY (TEST_DATABASE_URL).
+#[cfg(test)]
+pub(crate) async fn refuse_session_rows_for(pool: &sqlx::PgPool, uid: i32) -> String {
+    let name = format!("test_refuse_ts_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!(
+        "CREATE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql AS $f$ \
+         BEGIN IF NEW.user_id = {uid} THEN RAISE EXCEPTION 'test: the session store is unavailable'; END IF; RETURN NEW; END $f$"
+    ))
+    .execute(pool)
+    .await
+    .expect("create fault function");
+    sqlx::query(&format!("CREATE TRIGGER {name} BEFORE INSERT ON token_sessions FOR EACH ROW EXECUTE FUNCTION {name}()"))
+        .execute(pool)
+        .await
+        .expect("create fault trigger");
+    name
+}
+
+#[cfg(test)]
+pub(crate) async fn allow_session_rows(pool: &sqlx::PgPool, name: &str) {
+    let _ = sqlx::query(&format!("DROP TRIGGER IF EXISTS {name} ON token_sessions")).execute(pool).await;
+    let _ = sqlx::query(&format!("DROP FUNCTION IF EXISTS {name}()")).execute(pool).await;
 }
