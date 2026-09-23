@@ -4,6 +4,26 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+- **A tick made on an out-of-date screen no longer ends a repeating
+  reminder.** If you ticked an item while offline (or on a screen that had
+  missed an update) and meanwhile another device gave it — or something
+  under it — a repeat, the tick used to complete it and its reminders
+  silently stopped. Now the server refuses that tick: you see *refresh and
+  try again* (or, for a change queued offline, it is listed as not saved)
+  and can tick it again on the up-to-date note. The same goes for ticking a
+  repeating item on to its next time with an old copy of its repeat rule,
+  which could overwrite a change made on another device. Editing any dated
+  item under the one you tick counts as a change, since the server cannot
+  see which dates repeat.
+- **Live updates recover after a database restart.** When the server's
+  connection for change notifications dropped, Púca Notes kept showing a
+  "live" note that no longer updated — with the 30-second refresh off —
+  until you switched away and back. Every open note is now told to reload
+  as soon as the server is listening again.
+
 ## 0.9.818 — 2026-09-23
 
 Púca Notes: swipe left and right between All notes and each label like Google Tasks' lists, and scroll each like Keep; "Stay signed in on this device" keeps the session alive for up to a year instead of a day; the Reminders tab reads properly on a phone.

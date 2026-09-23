@@ -426,6 +426,14 @@ screen. On an older backend (404), or after repeated failures, Notes falls back
 to what it did before: refetch on focus and a 30-second poll while a shared note
 is open. The poll is off only while the stream is live.
 
+The server hears task changes through one listening database connection. When
+that connection drops — the database restarted, the connection was cut —
+whatever changed before it listens again is not announced, so it tells every
+open stream to re-read everything (`resync`) once it is listening again. It
+used to miss the common case entirely: the library reconnected quietly, no
+re-read was asked for, and a shared note stayed stale while the stream still
+looked live (so the poll stayed off).
+
 ## Two devices, one note
 
 Two people — or one person with a phone and a laptop — in the same note at the
@@ -494,7 +502,9 @@ back the copy it holds (migration 069, `expect_rev` on
   replays, so it is never made permanent because the server could not be
   asked; a repeating tick replays with the time this device showed, so if
   another device moved the item on meanwhile it is refused and reported
-  rather than applied twice. The card says *Not synced* and a banner counts
+  rather than applied twice, and any tick replays with how fresh this
+  device's view was, so one that would now end a series another device set
+  up meanwhile is refused and reported too (*Calendar, repeats and snooze*). The card says *Not synced* and a banner counts
   what is waiting. When the connection returns, the queue replays first-in
   first-out through the same task API (content is sealed for the server at that
   moment), under a lock so two tabs never send the same change. Notes created
@@ -1630,6 +1640,22 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   whose subtree holds an open item that still repeats (or whose schedule it
   cannot read) says so and changes nothing — tick the repeating item on its
   own, or remove its repeat.
+- **A tick decided on an old view is refused, not applied.** That check runs
+  on what this device has seen, so a tick queued offline — or made on a
+  screen that missed an update — could otherwise complete an item another
+  device had meanwhile made repeating, or sweep a child that became one, and
+  the series would silently stop reminding. So a tick also sends the newest
+  edit time the server gave it for the item and everything under it (an
+  advance sends the item's own, so it cannot overwrite a repeat rule edited
+  elsewhere), and the server refuses (409, *refresh and try again*; a queued
+  one is listed as not saved) when a dated, open item there changed after
+  that. The server cannot tell a one-off date from a repeat, or a text edit
+  from a date edit, so an edit of any dated item under it counts; undated
+  items and ticked ones never do. The time is the server's own, sent back
+  as it came, and says nothing new. Nothing is checked when this device
+  cannot vouch for what it shows: an item it changed and has not had back
+  from the server yet, one made offline, or a tick queued behind this
+  device's own edit of the same items (those replay unchecked, as before).
 - **Snooze**: 10 minutes, 1 hour or tomorrow at 09:00, from either Reminders
   view, from the calendar, and from the item's own row inside a note or a list
   (one control, `components/reminders/SnoozeControl.tsx`), for anyone who may

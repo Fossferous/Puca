@@ -232,7 +232,12 @@ task and per note:
   set, because the write is a PATCH at that moment.
 - **`updated_at`** on every task and personal list: when its content last
   changed (a reorder, a snooze or a reminder advancing does not count). The
-  server already saw these writes arrive. Now it also stores the time.
+  server already saw these writes arrive. Now it also stores the time. A tick
+  or a repeating item's advance sends one of these times back
+  (`expect_schedules_as_of`, the newest the device was given for the rows it
+  decided about) so a tick made on an old view is refused rather than ending
+  a series; it is the server's own value echoed, so it tells the server
+  nothing it did not have, beyond roughly how stale that device's copy was.
 - **`content_rev`** on every personal list: how many times that note's own
   text, title or pictures have been written (migration 069). Ticking or
   reordering an item does not move it. It is what lets a save say which copy
