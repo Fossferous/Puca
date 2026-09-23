@@ -1077,7 +1077,9 @@ export function enqueue(s: OutboxState, op: NoteOp): OutboxState {
 
 let appQc: QueryClient | null = null;
 
-function onReplayed(summary: ReplaySummary): void {
+/** What the app does after a replay: the toasts, the refetch, the temp ids.
+ *  Exported for its tests. */
+export function onReplayed(summary: ReplaySummary): void {
     if (summary.touchedDue) pokeTaskReminders();
     if (summary.dropped.length > 0) {
         const n = summary.dropped.length;
@@ -1085,9 +1087,12 @@ function onReplayed(summary: ReplaySummary): void {
         pushMessageToast({ title: `${n} change${n === 1 ? '' : 's'} made offline couldn’t be saved: ${what.slice(0, 160)}` });
     }
     if (summary.copies.length > 0) {
-        // Nothing was lost, but the user must be told where their words went.
+        // Nothing was lost, but the user must be told where their words went —
+        // and that it was the NOTE's text that changed elsewhere, not theirs.
+        const n = summary.copies.length;
         const names = summary.copies.map(q).join(', ');
-        pushMessageToast({ title: `Text you wrote offline had been changed on another device meanwhile, so yours was kept as a new note: ${names.slice(0, 160)}` });
+        const whose = n === 1 ? 'A note’s text was' : `${n} notes’ text was`;
+        pushMessageToast({ title: `${whose} changed on another device before what you typed here was saved, so your words were kept as ${n === 1 ? 'a new note' : 'new notes'}: ${names.slice(0, 160)}` });
     }
     // Re-read the truth: temp ids become real ones, and whatever the server
     // refused disappears from the screen.

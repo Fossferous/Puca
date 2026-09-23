@@ -29,7 +29,8 @@ vi.mock('../api/taskReminders', () => ({ pokeTaskReminders: vi.fn() }));
 vi.mock('../components/messageToastBus', () => ({ pushMessageToast: vi.fn() }));
 
 import { makeIdentity, sealLocal } from '../api/e2ee';
-const { createOutbox, enqueue, ops, queuedBlobIds, busyKeyOf } = await import('../notes/model/notesOutbox');
+const { createOutbox, enqueue, ops, queuedBlobIds, busyKeyOf, onReplayed } = await import('../notes/model/notesOutbox');
+const { pushMessageToast } = await import('../components/messageToastBus');
 const { createParkedStore, MAX_PARKED_MEDIA_BYTES, ParkedMediaFullError } = await import('../notes/model/notesBlobs');
 const { memoryStore } = await import('../notes/model/notesCache');
 const { resetNoteBusy } = await import('../notes/model/noteBusy');
@@ -757,6 +758,26 @@ describe('text replayed onto a note that changed elsewhere', () => {
         const summary = await ob.replay();
         expect(summary?.dropped).toEqual([]);
         expect(summary?.copies).toEqual(['Trip (offline copy)']);
+    });
+
+    /**
+     * The toast must say WHOSE text changed. "Text you wrote offline had been
+     * changed on another device" read as though the user's own words had
+     * been altered; it was the NOTE's text that changed elsewhere, and the
+     * user's words are intact, in the copy it names.
+     */
+    it('the toast says the NOTE changed elsewhere and the user’s words were kept', () => {
+        vi.mocked(pushMessageToast).mockClear();
+        onReplayed({ sent: 1, dropped: [], copies: ['Trip (offline copy)'], created: {}, touchedDue: false });
+        const titles = vi.mocked(pushMessageToast).mock.calls.map(c => (c[0] as { title: string }).title);
+        expect(titles).toHaveLength(1);
+        expect(titles[0]).toMatch(/^A note’s text was changed on another device/);
+        expect(titles[0]).toContain('your words were kept as a new note');
+        expect(titles[0]).toContain('“Trip (offline copy)”');
+        expect(titles[0]).not.toMatch(/text you wrote .* had been changed/i);
+        vi.mocked(pushMessageToast).mockClear();
+        onReplayed({ sent: 2, dropped: [], copies: ['Trip (offline copy)', 'Shop (offline copy)'], created: {}, touchedDue: false });
+        expect((vi.mocked(pushMessageToast).mock.calls[0][0] as { title: string }).title).toMatch(/^2 notes’ text was changed on another device.*kept as new notes: “Trip \(offline copy\)”, “Shop \(offline copy\)”$/);
     });
 
     /**
