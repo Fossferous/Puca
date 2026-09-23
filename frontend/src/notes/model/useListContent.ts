@@ -218,6 +218,18 @@ function objectId(o: object): number {
     return id;
 }
 
+/**
+ * Put a note the server just answered a create with into the listing. A
+ * retried create is answered with the note it ALREADY made, whose id the
+ * listing may hold by then (the create's live event refetched it while the
+ * composer still said "Couldn't save"): that row is replaced where it
+ * stands, never listed twice under one id.
+ */
+function withListed(prev: TaskList[] | undefined, row: TaskList): TaskList[] {
+    const all = prev ?? [];
+    return all.some(l => l.id === row.id) ? all.map(l => (l.id === row.id ? row : l)) : [...all, row];
+}
+
 /** Lists purged this session (a purge must not be retried in a loop). */
 const purgedThisSession = new Set<number>();
 
@@ -469,7 +481,7 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         }
         if (timed) pokeTaskReminders();
         qc.setQueryData<Task[]>(keysRef.current.tasks(ref), created);
-        qc.setQueryData<TaskList[]>(keysRef.current.lists, prev => [...(prev ?? []), { ...list, total_tasks: created.length, completed_tasks: 0 }]);
+        qc.setQueryData<TaskList[]>(keysRef.current.lists, prev => withListed(prev, { ...list, total_tasks: created.length, completed_tasks: 0 }));
         return ref;
     }, [qc, queueContentNote, mayResend]);
 
@@ -601,9 +613,9 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         }
         if (timed) pokeTaskReminders();
         qc.setQueryData<Task[]>(keysRef.current.tasks(ref), created);
-        qc.setQueryData<TaskList[]>(keysRef.current.lists, prev => [...(prev ?? []), {
+        qc.setQueryData<TaskList[]>(keysRef.current.lists, prev => withListed(prev, {
             ...list, total_tasks: created.length, completed_tasks: created.filter(t => t.is_completed).length,
-        }]);
+        }));
         if (missing > 0) {
             pushMessageToast({ title: `The copy is missing ${missing} item${missing === 1 ? '' : 's'} — check it against the original` });
         }

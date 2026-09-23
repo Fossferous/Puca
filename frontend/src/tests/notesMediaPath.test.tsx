@@ -91,11 +91,14 @@ let root: Root | null = null;
 let onLine = true;
 /** Whether the fixture's server de-duplicates creates (migration 070). */
 let serverDedupes = true;
+/** The query client the last `actionsFor` rendered with. */
+let lastQc: QueryClient | null = null;
 let spy: ReturnType<typeof vi.spyOn> | null = null;
 
 async function actionsFor(): Promise<ListContentActions> {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false, enabled: false } } });
     qc.setQueryData<TaskList[]>(LISTS_KEY, [list]);
+    lastQc = qc;
     qc.setQueryData(['notes', 'features'], { ...NO_LIST_FEATURES, idempotentCreates: serverDedupes });
     let got: ListContentActions | null = null;
     function Harness() {
@@ -315,6 +318,36 @@ describe('a note whose create answer was lost', () => {
         // The key is kept: if the server still has it, it answers with the
         // note it made (the fresh uploads are then merely unused).
         expect(keyOf(1)).toBe(keyOf(0));
+    });
+
+    /**
+     * The server answers the retry with the note it ALREADY made — whose id
+     * the listing may hold by then (the create's live event refetches it
+     * while the composer still says "Couldn't save"). It must be one card,
+     * not two with the same key.
+     */
+    it('a retry answered with a note the listing already shows is not listed twice', async () => {
+        const c = await actionsFor();
+        const extra = { photos: [photo()] };
+        H.createTaskListWithContent.mockRejectedValueOnce(lost());
+        expect(await c.createContentNote('Trip', [], extra)).toBeNull();
+        const made = { id: 9, title: 'Trip', created_at: '', total_tasks: 0, completed_tasks: 0 } as TaskList;
+        act(() => { lastQc!.setQueryData<TaskList[]>(LISTS_KEY, prev => [...(prev ?? []), made]); });
+        expect(await c.createContentNote('Trip', [], extra)).not.toBeNull();
+        const ids = lastQc!.getQueryData<TaskList[]>(LISTS_KEY)!.map(l => l.id);
+        expect(ids).toEqual([1, 9]);
+    });
+
+    it('...and the same for "Make a copy"', async () => {
+        const src = { href: 'sovereign-enc:src1?k=K&m=image%2Fpng', name: 'src.png' };
+        H.resealRefs.mockResolvedValue([uploaded]);
+        const plan = { title: 'Trip', body: 'text', noteRefs: [src], items: [], files: 1 };
+        const c = await actionsFor();
+        H.createTaskListWithContent.mockRejectedValueOnce(lost());
+        expect(await c.createNoteFromPlan(plan)).toBeNull();
+        act(() => { lastQc!.setQueryData<TaskList[]>(LISTS_KEY, prev => [...(prev ?? []), { ...list, id: 9 }]); });
+        expect(await c.createNoteFromPlan({ ...plan })).not.toBeNull();
+        expect(lastQc!.getQueryData<TaskList[]>(LISTS_KEY)!.map(l => l.id)).toEqual([1, 9]);
     });
 
     it('a 5xx from a gateway after the send is treated the same way', async () => {
