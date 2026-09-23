@@ -814,6 +814,10 @@ else
 #!/usr/bin/env bash
 echo "ssh \$*" >> "$LOG"
 case "\$*" in
+	# The download host's copy of an OTA bundle is \$TMP/served-bundle: its
+	# status, and what the remote \`curl … | sha256sum\` would print for it.
+	*curl*http_code*.enc.zip*) if [ -f "$TMP/served-bundle" ]; then echo 200; else echo 404; fi ;;
+	*curl*.enc.zip*sha256sum*) if [ -f "$TMP/served-bundle" ]; then sha256sum < "$TMP/served-bundle"; else sha256sum < /dev/null; fi | cut -d' ' -f1 ;;
 	*http_code*variant=notes*) if [ -f "$TMP/notes-code" ]; then cat "$TMP/notes-code"; elif [ -f "$TMP/notes-ota.json" ]; then echo 200; else echo 404; fi ;;
 	*variant=notes*) cat "$TMP/notes-ota.json" 2>/dev/null ;;
 	*'test -e '*mobile-update-notes.json*) if [ -f "$TMP/notes-file" ]; then echo present; else echo absent; fi ;;
@@ -986,6 +990,28 @@ STUB
 	check "and the unchanged endpoints PASS it (positive control)" "$([ "$(has "$out" 'PASS  sandbox full and lite OTA endpoints undisturbed')" = 1 ] && [ "$(has "$out" 'mobile-notes-isolation')" = 0 ] && echo 1 || echo 0)" "$out"
 	rm -f "$TMP/notes-ota.json" "$TMP/reads"
 
+	# THE BYTES, NOT JUST THE STATUS. The three OTA paths used to accept any
+	# 200 at the bundle's URL, so a download host serving OTHER bytes there (a
+	# hand-edited per-path reroot) read as shipped while every phone refused
+	# the update. The installer and APK paths already compared hashes. The
+	# stub serves $TMP/served-bundle at the bundle URL. (Every run here also
+	# FAILs SHA256SUMS.txt — this stub serves none — so the exit code proves
+	# nothing: the assertions are on the bundle lines.)
+	printf '{"version":"9.9.9","url":"x","variant":"notes","native":{"min":"9.9.8"}}\n' > "$TMP/notes-ota.json"
+	for sub in mobile mobile-lite mobile-notes; do
+		case "$sub" in
+			mobile)       b=puca-good;  b_sk="$puca_good_SK";  b_ck="$puca_good_CK";  what='bundle';       id=mobile-bundle ;;
+			mobile-lite)  b=puca-good;  b_sk="$puca_good_SK";  b_ck="$puca_good_CK";  what='lite bundle';  id=mobile-lite-bundle ;;
+			mobile-notes) b=notes-good; b_sk="$notes_good_SK"; b_ck="$notes_good_CK"; what='notes bundle'; id=mobile-notes-bundle ;;
+		esac
+		printf 'a stale bundle, not the one that was signed\n' > "$TMP/served-bundle"
+		out="$(ship "$sub" "$TMP/$b.enc.zip" 9.9.9 "$b_sk" "$b_ck")"
+		check "$sub: a bundle URL answering 200 with OTHER bytes FAILS $id" "$([ "$(has "$out" "=== mobile OTA")" = 1 ] && [ "$(has "$out" "FAIL  sandbox $what served sha256")" = 1 ] && [ "$(has "$out" "sandbox:$id")" = 1 ] && [ "$(has "$out" "PASS  sandbox $what ")" = 0 ] && echo 1 || echo 0)" "$out"
+		cp "$TMP/$b.enc.zip" "$TMP/served-bundle"
+		out="$(ship "$sub" "$TMP/$b.enc.zip" 9.9.9 "$b_sk" "$b_ck")"
+		check "$sub: the signed bundle's own bytes PASS (positive control)" "$([ "$(has "$out" "PASS  sandbox $what served byte-identical")" = 1 ] && [ "$(has "$out" "sandbox:$id")" = 0 ] && echo 1 || echo 0)" "$out"
+	done
+	rm -f "$TMP/served-bundle" "$TMP/notes-ota.json"
 fi
 
 if [ "$fails" -gt 0 ]; then

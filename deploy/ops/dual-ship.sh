@@ -332,6 +332,28 @@ remote_code() {
 	ssh_to "$entry" "curl -s $CURL_TLS -o /dev/null -w '%{http_code}' --resolve '${host}:443:127.0.0.1' 'https://${host}${path}' --max-time 20"
 }
 
+# The bytes a phone would download from the download host, hashed ON the host
+# and compared with the bundle that was signed. The three OTA paths used to
+# ask only for a 200, so a host answering the bundle's URL with OTHER bytes (a
+# per-path reroot or rewrite in a hand-edited Caddyfile, while SHA256SUMS.txt
+# still came from the right root) read as shipped while every phone refused
+# the update. The installer and APK paths already compared hashes; this is
+# the same check. The status is kept for the message: "HTTP 404" says more
+# than a mismatch against the hash of an empty body.
+#   verify_served_bundle <entry> <label> <what> <path under downloads> <local sha> <FAILED id>
+verify_served_bundle() {
+	local entry="$1" label="$2" what="$3" rel="$4" sha="$5" id="$6" served code
+	served="$(ssh_to "$entry" "curl -s $CURL_TLS --resolve '$DOWNLOAD_HOST:443:127.0.0.1' 'https://$DOWNLOAD_HOST/$rel' --max-time 120 | sha256sum | cut -d' ' -f1" || true)"
+	if [ "$served" = "$sha" ]; then
+		echo "PASS  $label $what served byte-identical ($sha)"
+	else
+		code="$(remote_code "$entry" "$DOWNLOAD_HOST" "/$rel" || true)"
+		echo "FAIL  $label $what served sha256 ${served:-<none>} (HTTP ${code:-?}), expected $sha:"
+		echo "      https://$DOWNLOAD_HOST/$rel is not the bundle that was signed, and every phone will refuse it"
+		FAILED+=("$label:$id")
+	fi
+}
+
 cmd_webapp() {
 	local tarball="${1:?usage: dual-ship.sh webapp <tarball>}"
 	# The API base is BAKED at build time from frontend/.env.production, which
@@ -539,10 +561,7 @@ MEOF
 			echo "FAIL  $label OTA endpoint reports '$seen_version', expected $version"
 			FAILED+=("$label:mobile")
 		fi
-		local bundle_code
-		bundle_code="$(remote_code "$entry" "$DOWNLOAD_HOST" "/mobile/$MOBILE_BUNDLE_PREFIX-$version.enc.zip")"
-		[ "$bundle_code" = "200" ] && echo "PASS  $label bundle downloadable" \
-			|| { echo "FAIL  $label bundle -> HTTP $bundle_code"; FAILED+=("$label:mobile-bundle"); }
+		verify_served_bundle "$entry" "$label" "bundle" "mobile/$MOBILE_BUNDLE_PREFIX-$version.enc.zip" "$bundle_sha" mobile-bundle
 	done
 }
 
@@ -629,10 +648,7 @@ MEOF
 			echo "FAIL  $label full OTA endpoint CHANGED during a lite ship (HTTP ${full_before%%:*} -> ${full_after%%:*}; bodies compared)"
 			FAILED+=("$label:mobile-lite-isolation")
 		fi
-		local bundle_code
-		bundle_code="$(remote_code "$entry" "$DOWNLOAD_HOST" "/mobile/$MOBILE_BUNDLE_PREFIX_LITE-$version.enc.zip")"
-		[ "$bundle_code" = "200" ] && echo "PASS  $label lite bundle downloadable" \
-			|| { echo "FAIL  $label lite bundle -> HTTP $bundle_code"; FAILED+=("$label:mobile-lite-bundle"); }
+		verify_served_bundle "$entry" "$label" "lite bundle" "mobile/$MOBILE_BUNDLE_PREFIX_LITE-$version.enc.zip" "$bundle_sha" mobile-lite-bundle
 	done
 }
 
@@ -832,10 +848,7 @@ MEOF
 			echo "FAIL  $label the full or lite OTA endpoint CHANGED during a Notes ship (bodies compared)"
 			FAILED+=("$label:mobile-notes-isolation")
 		fi
-		local bundle_code
-		bundle_code="$(remote_code "$entry" "$DOWNLOAD_HOST" "/mobile/$MOBILE_BUNDLE_PREFIX_NOTES-$version.enc.zip")"
-		[ "$bundle_code" = "200" ] && echo "PASS  $label notes bundle downloadable" \
-			|| { echo "FAIL  $label notes bundle -> HTTP $bundle_code"; FAILED+=("$label:mobile-notes-bundle"); }
+		verify_served_bundle "$entry" "$label" "notes bundle" "mobile/$MOBILE_BUNDLE_PREFIX_NOTES-$version.enc.zip" "$bundle_sha" mobile-notes-bundle
 	done
 }
 
