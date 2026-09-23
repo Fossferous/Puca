@@ -789,13 +789,6 @@ export function queuedBlobIds(s: OutboxState): Set<string> {
     return new Set(s.queue.flatMap(o => (o.k === 'addMedia' ? o.blobIds : [])));
 }
 
-/**
- * Append an op — EXCEPT a second `setBody` for the same note, which replaces
- * the queued one IN PLACE (keeping its position, so it still replays behind
- * the create of a note made offline). NoteBodyField saves a pause after
- * every keystroke; without this, a paragraph typed on a plane is dozens of
- * ops, each overwriting the last, and the queue count is nonsense.
- */
 /** Does this queued op change one of `ids` on the server — its text, tick,
  *  date, place in the tree, or by hanging a new item under it? */
 function touchesAny(o: OpBody, ids: Set<number>): boolean {
@@ -811,6 +804,13 @@ function touchesAny(o: OpBody, ids: Set<number>): boolean {
     }
 }
 
+/**
+ * Append an op — EXCEPT a second `setBody` for the same note, which replaces
+ * the queued one IN PLACE (keeping its position, so it still replays behind
+ * the create of a note made offline). NoteBodyField saves a pause after
+ * every keystroke; without this, a paragraph typed on a plane is dozens of
+ * ops, each overwriting the last, and the queue count is nonsense.
+ */
 export function enqueue(s: OutboxState, op: NoteOp): OutboxState {
     // A freshness stamp (api/taskCompletion.ts) is this device's view as of
     // the moment it was planned — which already includes its own edits still
