@@ -28,8 +28,12 @@ let lists: TaskList[] = [];
 let features = { attachments: true };
 let createFails = false;
 let addItemFails = false;
+/** The item request's answer is lost (a fetch TypeError, not a refusal). */
+let addItemLost = false;
 let deleteListFails = false;
 let attachFails = false;
+/** The picture write's answer is lost (it may have landed). */
+let attachLost = false;
 let copyFails = false;
 /** One create that the server COMMITS but whose answer never arrives. */
 let createAnswerLost = false;
@@ -49,6 +53,7 @@ vi.mock('../api/tasks', async (orig) => {
         listTaskLists: vi.fn(async () => { calls.urls.push('/task-lists'); return lists; }),
         createListTask: vi.fn(async (listId: number, description: string) => {
             if (addItemFails) throw new Error('the item would not go in');
+            if (addItemLost) throw new TypeError('Failed to fetch');
             calls.tasks.push({ listId, description });
             return {};
         }),
@@ -68,7 +73,11 @@ vi.mock('../api/listContent', async (orig) => {
         }),
         setTaskListBody: vi.fn(async () => undefined),
         setTaskListAttachments: vi.fn(async () => { if (attachFails) throw new Error('the pictures would not go in'); }),
-        addTaskListAttachments: vi.fn(async () => { if (attachFails) throw new Error('the pictures would not go in'); return []; }),
+        addTaskListAttachments: vi.fn(async () => {
+            if (attachFails) throw new Error('the pictures would not go in');
+            if (attachLost) throw new TypeError('Failed to fetch');
+            return [];
+        }),
     };
 });
 vi.mock('../api/captureToNote', async (orig) => {
@@ -122,8 +131,10 @@ beforeEach(() => {
     features = { attachments: true };
     createFails = false;
     addItemFails = false;
+    addItemLost = false;
     deleteListFails = false;
     attachFails = false;
+    attachLost = false;
     copyFails = false;
     createAnswerLost = false;
     copyGate = null;
@@ -294,6 +305,42 @@ describe('saving', () => {
         // ...and only then are the files safe to take back.
         expect(discardCopies).toHaveBeenCalledTimes(1);
         expect(document.querySelector('.save-note-error')!.textContent).toMatch(/would not go in/);
+    });
+
+    /**
+     * Kept copies are for a write that may have NAMED them. A lost answer on
+     * the ITEM names nothing: the new note it went into is undone, and into
+     * an existing note no picture write has been tried yet — so the copies
+     * still go back, whatever kind of failure it was.
+     */
+    it('a lost answer on the ITEM still takes the copies back: nothing names them', async () => {
+        addItemLost = true;
+        await mount('look ![a.png](sovereign-enc:SRC?k=K&m=image%2Fpng)');
+        click(rowNamed('New note'));
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        expect(deleteTaskList).toHaveBeenCalledWith(99);
+        expect(discardCopies).toHaveBeenCalledTimes(1);
+    });
+
+    it('POSITIVE CONTROL: a lost answer on the PICTURE write keeps the copies — the note may name them', async () => {
+        attachLost = true;
+        await mount('look ![a.png](sovereign-enc:SRC?k=K&m=image%2Fpng)');
+        click(rowNamed('Shopping'));
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        expect(addTaskListAttachments).toHaveBeenCalledTimes(1);
+        expect(discardCopies).not.toHaveBeenCalled();
+    });
+
+    it('...and the same into an EXISTING note, before any picture write was tried', async () => {
+        addItemLost = true;
+        await mount('look ![a.png](sovereign-enc:SRC?k=K&m=image%2Fpng)');
+        click(rowNamed('Shopping'));
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        expect(addTaskListAttachments).not.toHaveBeenCalled();
+        expect(discardCopies).toHaveBeenCalledTimes(1);
     });
 
     it('when the half-made note CANNOT be undone it keeps the files and says so', async () => {

@@ -183,6 +183,9 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
         // — so the failure message must not say "nothing was kept", or the
         // obvious retry writes the same line a second time.
         let landedInExisting = false;
+        // The picture write into an existing note has been SENT: from then
+        // on a lost answer may mean the sidecar names the copies.
+        let sidecarSent = false;
         let saved = '';
         try {
             // `target` is DERIVED past `lockedFor` (above), so by the time a
@@ -236,7 +239,10 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
                 // by the revision it was read at (api/listContent.ts) - not
                 // this sheet's snapshot, which would drop a picture another
                 // device added since it opened.
-                if (copied.length) await addTaskListAttachments(target, copied);
+                if (copied.length) {
+                    sidecarSent = true;
+                    await addTaskListAttachments(target, copied);
+                }
                 saved = list?.title ?? 'your note';
             }
         } catch (err) {
@@ -251,9 +257,11 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
                 heldNew.current = null;
                 try { await deleteTaskList(createdId); } catch { orphaned = true; }
             }
-            // ...and only on a DEFINITE refusal: a sidecar write whose
-            // answer was lost may have landed, naming them.
-            if (copied.length && !orphaned && isDefiniteRefusal(err)) await discardCopies(copied).catch(() => undefined);
+            // ...but not after a picture write whose answer was lost: it may
+            // have landed, and then the note names them. (A new note whose
+            // create answer was lost has already let go of `copied` above.)
+            const mayBeNamed = sidecarSent && !isDefiniteRefusal(err);
+            if (copied.length && !orphaned && !mayBeNamed) await discardCopies(copied).catch(() => undefined);
             setError(orphaned
                 ? 'The note was made, but the rest couldn’t be added — open Notes to finish it.'
                 : landedInExisting
