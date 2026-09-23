@@ -20,6 +20,13 @@
 //! decision (it advances a repeating item instead of completing it). A
 //! one-off event ticked from an old client is refused too — the cost of not
 //! leaking which schedules repeat.
+//!
+//! Taking over the decision is only safe if the decision was made on a
+//! current view: a tick queued offline, or planned on a cache that missed an
+//! update, can complete an item another device has since made repeating. So
+//! an aware client also says WHEN its view is from (`expect_schedules_as_of`,
+//! the newest server `updated_at` it saw on those rows), and a dated open row
+//! changed after that is a 409 (SCHEDULES_CHANGED_SINCE_SQL).
 
 use axum::{http::StatusCode, response::IntoResponse, Json};
 use serde::Serialize;
@@ -37,6 +44,10 @@ pub const SCHEDULE_COMPLETE_MESSAGE: &str =
 /// The compare-and-swap loser's answer.
 pub const DUE_CHANGED_MESSAGE: &str =
     "This item's time changed on another device — refresh and try again";
+/// A completion or advance decided on a stale view of the schedules
+/// (SCHEDULES_CHANGED_SINCE_SQL).
+pub const SCHEDULE_CHANGED_MESSAGE: &str =
+    "A date or repeat on this item, or on something under it, changed on another device — refresh and try again";
 
 /// Validate a sealed sidecar value from a request. `Ok(None)` = clear (the
 /// empty string), `Ok(Some(v))` = store `v`. Stricter than descriptions:
@@ -112,6 +123,46 @@ pub const SUBTREE_HAS_SCHEDULE_SQL: &str = "WITH RECURSIVE sub AS ( \
          JOIN sub s ON t.parent_id = s.id WHERE s.depth < 10 \
      ) SELECT EXISTS (SELECT 1 FROM sub WHERE schedule IS NOT NULL)";
 
+/// Has a schedule the client's decision depended on changed since the client
+/// looked? `$2` is the client's `expect_schedules_as_of`: the newest
+/// `updated_at` it had seen on these rows, echoed back exactly as the server
+/// rendered it (a server clock, never the device's). `$3` = include the
+/// subtree: a completion sweeps it, an advance only rewrites the item itself.
+///
+/// It counts only OPEN rows that carry a schedule — the rows a completion
+/// could end or an advance could overwrite. Migration 066's trigger stamps
+/// updated_at on every content change (a schedule set or cleared, a reopen, a
+/// reparent) and a new row is stamped at insert, so "made repeating", "a
+/// dated child added or moved under it" and "reopened" all show. What it
+/// cannot tell apart, because the rule is sealed: a one-off date from a
+/// repeat, and a text edit from a schedule edit. Those refuse too — a tick
+/// the user sees refused is recoverable; a series that silently stopped is
+/// not noticed.
+pub const SCHEDULES_CHANGED_SINCE_SQL: &str = "WITH RECURSIVE sub AS ( \
+         SELECT id, 0 AS depth FROM channel_tasks WHERE id = $1 \
+         UNION ALL \
+         SELECT t.id, s.depth + 1 FROM channel_tasks t \
+         JOIN sub s ON t.parent_id = s.id WHERE $3 AND s.depth < 10 \
+     ) SELECT EXISTS (SELECT 1 FROM sub JOIN channel_tasks t ON t.id = sub.id \
+         WHERE t.schedule IS NOT NULL AND NOT t.is_completed \
+           AND COALESCE(t.updated_at, t.created_at) > $2)";
+
+/// The completion sweep: everything under a task (not the task itself).
+/// `$2` is the completing client's `expect_schedules_as_of`, or NULL. When
+/// present, a dated row changed after it is left alone: the check above
+/// refused such a completion outright, so a row that is one here changed in
+/// the moment between that check and this statement (the sweep runs after
+/// the commit). Leaving it open costs a tick; sweeping it could end a series.
+pub const COMPLETE_SUBTREE_SQL: &str = "WITH RECURSIVE sub AS ( \
+         SELECT id, 1 AS depth FROM channel_tasks WHERE parent_id = $1 \
+         UNION ALL \
+         SELECT t.id, s.depth + 1 FROM channel_tasks t \
+         JOIN sub s ON t.parent_id = s.id WHERE s.depth < 10 \
+     ) \
+     UPDATE channel_tasks SET is_completed = TRUE WHERE id IN (SELECT id FROM sub) \
+       AND ($2::timestamptz IS NULL OR schedule IS NULL OR is_completed \
+            OR COALESCE(updated_at, created_at) <= $2::timestamptz)";
+
 /// Reopen everything under a task (not the task itself).
 pub const REOPEN_SUBTREE_SQL: &str = "WITH RECURSIVE sub AS ( \
          SELECT id, 1 AS depth FROM channel_tasks WHERE parent_id = $1 \
@@ -130,6 +181,11 @@ pub const TASK_FEATURES: &[&str] = &[
     "updated_at",
     "expect_due_at",
     "recurrence_aware",
+    // A completion or advance may carry the newest `updated_at` the client
+    // saw on the rows it decided about; a dated row changed since is a 409
+    // (SCHEDULES_CHANGED_SINCE_SQL). Advertised, not gated on: an older
+    // server ignores the field, which is exactly the behaviour before it.
+    "expect_schedules_as_of",
     "reopen_subtree",
     "reminder_feed_v2",
     // Migration 070: a create may carry a random `op_key`, and a replay of

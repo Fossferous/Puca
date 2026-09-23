@@ -260,6 +260,15 @@ pub struct UpdateTaskRequest {
     /// client would silently end a repeating series (task_timing.rs).
     #[serde(default)]
     pub recurrence_aware: bool,
+    /// When an aware client's view of the schedules is from: the newest
+    /// `updated_at` it saw on the item (and, for a completion, on everything
+    /// under it), RFC3339, echoed exactly as the server rendered it. A dated
+    /// open row changed after it is 409 and nothing is written
+    /// (task_timing::SCHEDULES_CHANGED_SINCE_SQL). Absent = no check, which
+    /// is what every older client sends and every op queued before it
+    /// replays as.
+    #[serde(default)]
+    pub expect_schedules_as_of: Option<String>,
     /// Reopen every task under this one (a repeating task that advanced to
     /// its next occurrence starts it with its subtasks unticked).
     #[serde(default)]
@@ -933,6 +942,15 @@ pub async fn update_task(
         },
         None => None,
     };
+    let schedules_as_of = match payload.expect_schedules_as_of.as_deref() {
+        Some(raw) => match chrono::DateTime::parse_from_rfc3339(raw) {
+            Ok(d) => Some(d.with_timezone(&chrono::Utc)),
+            Err(_) => {
+                return (StatusCode::BAD_REQUEST, "expect_schedules_as_of must be an RFC3339 timestamp").into_response()
+            }
+        },
+        None => None,
+    };
 
     // Attachments and due_at are three-state: absent = keep, "" = clear to
     // NULL, s = set. COALESCE can't express "clear", so gate on explicit
@@ -1009,6 +1027,32 @@ pub async fn update_task(
             }
         }
     }
+    // An aware client took the decision over (above), but only its view of
+    // the schedules makes that decision right: a tick queued offline, or
+    // planned on a cache that missed an update, would complete an item
+    // another device has since made repeating — or sweep a child that became
+    // one — and the series would silently stop reminding. When it says how
+    // fresh its view is, hold it to that. A completion is judged on the
+    // subtree it sweeps; anything else (an advance) on the item alone. Read
+    // in the transaction, fail CLOSED like the guards above.
+    if let Some(as_of) = schedules_as_of {
+        match sqlx::query_as::<_, (bool,)>(crate::task_timing::SCHEDULES_CHANGED_SINCE_SQL)
+            .bind(task_id)
+            .bind(as_of)
+            .bind(payload.is_completed == Some(true))
+            .fetch_one(&mut *tx)
+            .await
+        {
+            Ok((false,)) => {}
+            Ok((true,)) => {
+                return (StatusCode::CONFLICT, crate::task_timing::SCHEDULE_CHANGED_MESSAGE).into_response();
+            }
+            Err(e) => {
+                tracing::error!("Failed to read schedule stamps before update: {:?}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to update task").into_response();
+            }
+        }
+    }
     let set_due = payload.due_at.is_some();
     let new_due = match payload.due_at.as_deref() {
         Some(raw) => match parse_due(raw) {
@@ -1072,19 +1116,14 @@ pub async fn update_task(
     match payload.is_completed {
         // Completing a task sweeps its ENTIRE subtree along with it (tasks can
         // nest several levels; the bound guards against pathological cycles).
+        // With a stamp, a dated row that changed after it is skipped
+        // (COMPLETE_SUBTREE_SQL: the race between the check and here).
         Some(true) => {
-            let _ = sqlx::query(
-                "WITH RECURSIVE sub AS ( \
-                     SELECT id, 1 AS depth FROM channel_tasks WHERE parent_id = $1 \
-                     UNION ALL \
-                     SELECT t.id, s.depth + 1 FROM channel_tasks t \
-                     JOIN sub s ON t.parent_id = s.id WHERE s.depth < 10 \
-                 ) \
-                 UPDATE channel_tasks SET is_completed = TRUE WHERE id IN (SELECT id FROM sub)",
-            )
-            .bind(task_id)
-            .execute(&state.pool)
-            .await;
+            let _ = sqlx::query(crate::task_timing::COMPLETE_SUBTREE_SQL)
+                .bind(task_id)
+                .bind(schedules_as_of)
+                .execute(&state.pool)
+                .await;
         }
         // Re-activating a subtask means every ancestor above it is no longer done.
         Some(false) => {
@@ -2830,6 +2869,223 @@ mod db_tests {
         let (still,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM task_lists WHERE id = $1").bind(id).fetch_one(&pool).await.unwrap();
         assert_eq!(still, 1, "the sweep forgets the key, never the note");
 
+        cleanup(&pool, &[&alice]).await;
+    }
+
+    // --- Finding 8: an aware client's completion proves its view is fresh ---
+
+    const SCHED: &str = r#"{"v":2,"t":"self","ct":"c2NoZWR1bGUtb25l"}"#;
+    const SCHED2: &str = r#"{"v":2,"t":"self","ct":"c2NoZWR1bGUtdHdv"}"#;
+
+    async fn patch_item(state: &Arc<AppState>, c: &Claims, id: i64, v: Value) -> StatusCode {
+        update_task(State(state.clone()), Path(id), Extension(c.clone()), Json(serde_json::from_value(v).expect("update request")))
+            .await
+            .into_response()
+            .status()
+    }
+
+    /// updated_at exactly as every task query renders it to a client
+    /// (TASK_COLUMNS), so the stamp round-trips the way a real client's does.
+    async fn stamp_of(pool: &PgPool, ids: &[i64]) -> String {
+        let (s,): (String,) = sqlx::query_as(
+            "SELECT (replace((MAX(COALESCE(updated_at, created_at)) AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') \
+             FROM channel_tasks WHERE id = ANY($1)",
+        )
+        .bind(ids).fetch_one(pool).await.unwrap();
+        s
+    }
+
+    async fn is_done(pool: &PgPool, id: i64) -> bool {
+        let (d,): (bool,) = sqlx::query_as("SELECT is_completed FROM channel_tasks WHERE id = $1").bind(id).fetch_one(pool).await.unwrap();
+        d
+    }
+
+    async fn schedule_of(pool: &PgPool, id: i64) -> Option<String> {
+        let (s,): (Option<String>,) = sqlx::query_as("SELECT schedule FROM channel_tasks WHERE id = $1").bind(id).fetch_one(pool).await.unwrap();
+        s
+    }
+
+    async fn item_with(state: &Arc<AppState>, c: &Claims, list_id: i64, body: Value) -> i64 {
+        let r = create_list_task(State(state.clone()), Path(list_id), Extension(c.clone()), Json(serde_json::from_value(body).unwrap()))
+            .await.into_response();
+        assert_eq!(r.status(), StatusCode::OK);
+        json_of(r).await["id"].as_i64().unwrap()
+    }
+
+    async fn item(state: &Arc<AppState>, c: &Claims, list_id: i64, parent: Option<i64>) -> i64 {
+        let mut body = serde_json::json!({ "description": V2 });
+        if let Some(p) = parent { body["parent_id"] = Value::from(p); }
+        item_with(state, c, list_id, body).await
+    }
+
+    fn tick(as_of: &str) -> Value {
+        serde_json::json!({ "is_completed": true, "recurrence_aware": true, "reads_up_to": 4, "expect_schedules_as_of": as_of })
+    }
+
+    fn edit_text() -> Value {
+        serde_json::json!({ "description": r#"{"v":2,"t":"self","ct":"ZWRpdGVk","n":"BBBB"}"#, "reads_up_to": 4 })
+    }
+
+    /// Scenario 1 of the finding: device A queued a tick of a plain item
+    /// while offline; device B then made it repeat. A's replay carries the
+    /// stamp of what A saw, and must be refused instead of silently ending
+    /// the series B just set up.
+    #[tokio::test]
+    async fn a_stale_tick_of_an_item_that_became_scheduled_is_refused() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "stale").await;
+        let (_, list) = post_list(&state, &alice, V2, None).await;
+        let list_id = list["id"].as_i64().unwrap();
+
+        let x = item(&state, &alice, list_id, None).await;
+        let seen = stamp_of(&pool, &[x]).await;                       // what device A saw
+        // Device B gives it a repeat.
+        assert_eq!(patch_item(&state, &alice, x, serde_json::json!({ "schedule": SCHED, "reads_up_to": 4 })).await, StatusCode::OK);
+
+        assert_eq!(patch_item(&state, &alice, x, tick(&seen)).await, StatusCode::CONFLICT, "A's stale tick is refused");
+        assert!(!is_done(&pool, x).await, "and the series is still open");
+
+        // POSITIVE CONTROL: the same tick from a device that has seen the
+        // repeat (the exact stamp the server renders, so this is also the
+        // microsecond round trip) completes it.
+        let fresh = stamp_of(&pool, &[x]).await;
+        assert_eq!(patch_item(&state, &alice, x, tick(&fresh)).await, StatusCode::OK);
+        assert!(is_done(&pool, x).await);
+
+        // Garbage is a 400, never a silent pass.
+        assert_eq!(patch_item(&state, &alice, x, tick("yesterday")).await, StatusCode::BAD_REQUEST);
+        cleanup(&pool, &[&alice]).await;
+    }
+
+    /// Scenario 2: a parent's sweep would reach a descendant that became
+    /// scheduled — or was ADDED, scheduled — after the ticking device looked.
+    #[tokio::test]
+    async fn a_stale_parent_tick_never_sweeps_a_newly_scheduled_child() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "sweep8").await;
+        let (_, list) = post_list(&state, &alice, V2, None).await;
+        let list_id = list["id"].as_i64().unwrap();
+
+        let p = item(&state, &alice, list_id, None).await;
+        let c = item(&state, &alice, list_id, Some(p)).await;
+        let plain = item(&state, &alice, list_id, Some(p)).await;
+        let seen = stamp_of(&pool, &[p, c, plain]).await;
+
+        // Another device gives the child a repeat.
+        assert_eq!(patch_item(&state, &alice, c, serde_json::json!({ "schedule": SCHED, "reads_up_to": 4 })).await, StatusCode::OK);
+        assert_eq!(patch_item(&state, &alice, p, tick(&seen)).await, StatusCode::CONFLICT);
+        assert!(!is_done(&pool, p).await && !is_done(&pool, c).await, "neither the parent nor the child was completed");
+
+        // A scheduled child ADDED after the look is caught the same way.
+        assert_eq!(patch_item(&state, &alice, c, serde_json::json!({ "schedule": "" })).await, StatusCode::OK);
+        let seen2 = stamp_of(&pool, &[p, c, plain]).await;
+        let added = item_with(&state, &alice, list_id, serde_json::json!({ "description": V2, "parent_id": p, "schedule": SCHED })).await;
+        assert_eq!(patch_item(&state, &alice, p, tick(&seen2)).await, StatusCode::CONFLICT, "a new scheduled child");
+        assert!(!is_done(&pool, added).await);
+
+        // NOT over-refusing: an UNSCHEDULED child edited after the look is
+        // no reason to refuse (only open rows with a schedule count).
+        sqlx::query("DELETE FROM channel_tasks WHERE id = $1").bind(added).execute(&pool).await.unwrap();
+        let seen3 = stamp_of(&pool, &[p, c, plain]).await;
+        assert_eq!(patch_item(&state, &alice, plain, edit_text()).await, StatusCode::OK);
+        assert_eq!(patch_item(&state, &alice, p, tick(&seen3)).await, StatusCode::OK, "a plain child's edit does not block");
+        assert!(is_done(&pool, p).await && is_done(&pool, c).await && is_done(&pool, plain).await, "the sweep ran");
+
+        // The stated trade-off (the server cannot tell a one-off date from a
+        // repeat): ANY open dated row under the item changed after the look
+        // refuses the tick — a text edit of a one-off dated child included.
+        let q = item(&state, &alice, list_id, None).await;
+        let dated = item(&state, &alice, list_id, Some(q)).await;
+        assert_eq!(patch_item(&state, &alice, dated, serde_json::json!({ "schedule": SCHED, "reads_up_to": 4 })).await, StatusCode::OK);
+        let look = stamp_of(&pool, &[q, dated]).await;
+        assert_eq!(patch_item(&state, &alice, dated, edit_text()).await, StatusCode::OK);
+        assert_eq!(patch_item(&state, &alice, q, tick(&look)).await, StatusCode::CONFLICT, "visible refusal, never a silent end");
+        // ...but a DONE dated child is no reason: the sweep changes nothing for it.
+        let look2 = stamp_of(&pool, &[q, dated]).await;
+        assert_eq!(patch_item(&state, &alice, dated, serde_json::json!({ "is_completed": true, "recurrence_aware": true })).await, StatusCode::OK);
+        assert_eq!(patch_item(&state, &alice, q, tick(&look2)).await, StatusCode::OK);
+        cleanup(&pool, &[&alice]).await;
+    }
+
+    /// The sibling defect (the finding's other instance 1): a stale ADVANCE
+    /// rewrites the whole sealed rule from the device's cached copy. The
+    /// due_at compare-and-swap cannot see a rule edit that left due_at alone
+    /// (a skipped date, a changed end), so the advance carries the stamp too,
+    /// checked against the item's OWN row only — an advance sweeps nothing.
+    #[tokio::test]
+    async fn a_stale_advance_does_not_overwrite_a_newer_rule() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "adv").await;
+        let (_, list) = post_list(&state, &alice, V2, None).await;
+        let list_id = list["id"].as_i64().unwrap();
+        let x = item(&state, &alice, list_id, None).await;
+        let kid = item(&state, &alice, list_id, Some(x)).await;
+        assert_eq!(patch_item(&state, &alice, x, serde_json::json!({ "schedule": SCHED, "due_at": "2030-01-01T09:00:00Z", "reads_up_to": 4 })).await, StatusCode::OK);
+        let seen = stamp_of(&pool, &[x]).await;
+        // Another device edits the rule without moving due_at.
+        assert_eq!(patch_item(&state, &alice, x, serde_json::json!({ "schedule": SCHED2, "reads_up_to": 4 })).await, StatusCode::OK);
+
+        let advance = |as_of: &str| serde_json::json!({
+            "schedule": SCHED, "due_at": "2030-01-02T09:00:00Z", "expect_due_at": "2030-01-01T09:00:00Z",
+            "reopen_subtree": true, "recurrence_aware": true, "reads_up_to": 4, "expect_schedules_as_of": as_of,
+        });
+        assert_eq!(patch_item(&state, &alice, x, advance(&seen)).await, StatusCode::CONFLICT);
+        assert_eq!(schedule_of(&pool, x).await.as_deref(), Some(SCHED2), "the newer rule survives");
+
+        // Only the item's own row counts for an advance: a subtask dated
+        // since is not a reason to refuse it.
+        let fresh = stamp_of(&pool, &[x]).await;
+        assert_eq!(patch_item(&state, &alice, kid, serde_json::json!({ "schedule": SCHED, "reads_up_to": 4 })).await, StatusCode::OK);
+        assert_eq!(patch_item(&state, &alice, x, advance(&fresh)).await, StatusCode::OK, "positive control: a fresh advance lands");
+        assert_eq!(schedule_of(&pool, x).await.as_deref(), Some(SCHED));
+        cleanup(&pool, &[&alice]).await;
+    }
+
+    /// The sweep runs after the commit, so a child can become dated between
+    /// the freshness check and the sweep. Unreachable through the handler in
+    /// a test, so the statement is driven directly: with a stamp, a dated
+    /// open row changed after it is left open while everything else is
+    /// swept; with no stamp (an old client) the sweep is what it always was.
+    #[tokio::test]
+    async fn the_sweep_leaves_a_child_dated_after_the_stamp_open() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "race").await;
+        let (_, list) = post_list(&state, &alice, V2, None).await;
+        let list_id = list["id"].as_i64().unwrap();
+        let p = item(&state, &alice, list_id, None).await;
+        let plain = item(&state, &alice, list_id, Some(p)).await;
+        let old_dated = item_with(&state, &alice, list_id, serde_json::json!({ "description": V2, "parent_id": p, "schedule": SCHED })).await;
+        let seen = stamp_of(&pool, &[p, plain, old_dated]).await;
+        let late = item(&state, &alice, list_id, Some(plain)).await;
+        assert_eq!(patch_item(&state, &alice, late, serde_json::json!({ "schedule": SCHED, "reads_up_to": 4 })).await, StatusCode::OK);
+
+        let as_of = chrono::DateTime::parse_from_rfc3339(&seen).unwrap().with_timezone(&chrono::Utc);
+        sqlx::query(crate::task_timing::COMPLETE_SUBTREE_SQL).bind(p).bind(Some(as_of)).execute(&pool).await.unwrap();
+        assert!(is_done(&pool, plain).await, "an undated child is swept");
+        assert!(is_done(&pool, old_dated).await, "a dated child the client HAD seen is swept (its call)");
+        assert!(!is_done(&pool, late).await, "a child dated after the stamp is left open");
+
+        // POSITIVE CONTROL: without a stamp the same row is swept.
+        sqlx::query(crate::task_timing::COMPLETE_SUBTREE_SQL).bind(p).bind(None::<chrono::DateTime<chrono::Utc>>).execute(&pool).await.unwrap();
+        assert!(is_done(&pool, late).await, "no stamp, no exception: the old sweep");
+        cleanup(&pool, &[&alice]).await;
+    }
+
+    /// A PATCH with no stamp (every client older than this, and every op
+    /// queued before it) behaves exactly as before: an aware completion is
+    /// not checked at all.
+    #[tokio::test]
+    async fn a_tick_without_a_stamp_is_unchanged() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "nostamp").await;
+        let (_, list) = post_list(&state, &alice, V2, None).await;
+        let list_id = list["id"].as_i64().unwrap();
+        let x = item(&state, &alice, list_id, None).await;
+        let seen = stamp_of(&pool, &[x]).await;
+        assert_eq!(patch_item(&state, &alice, x, serde_json::json!({ "schedule": SCHED, "reads_up_to": 4 })).await, StatusCode::OK);
+        assert!(seen < stamp_of(&pool, &[x]).await, "the schedule really moved the stamp");
+        assert_eq!(patch_item(&state, &alice, x, serde_json::json!({ "is_completed": true, "recurrence_aware": true })).await, StatusCode::OK);
+        assert!(is_done(&pool, x).await);
         cleanup(&pool, &[&alice]).await;
     }
 }
