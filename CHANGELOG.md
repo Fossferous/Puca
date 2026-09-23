@@ -14,8 +14,10 @@ one-line summary; this file is the full story. Versions follow
   in `hosts.conf` naming no database, ssh unreachable), because a failed read
   looked like an empty history. They now refuse and say the history could not
   be read. A freshly provisioned host with no migrations yet still passes, with
-  a note; a host that already runs a backend but whose `DB_NAME` has no
-  migration history is refused, since that is the wrong database.
+  a note, and is reported as "nothing to compare" rather than a byte-match. A
+  host with a backend installed but no migration history in `DB_NAME` is
+  refused: either that is the wrong database or the backend has never started
+  against it, and the message names both.
 - **Self-hosting: a phone update is only reported shipped when the download
   host serves the signed bundle's exact bytes.** The three mobile update
   channels (`dual-ship.sh mobile`, `mobile-lite`, `mobile-notes`) accepted any
