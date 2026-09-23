@@ -23,6 +23,18 @@ export interface NotesPage {
     route: string;
 }
 
+/**
+ * A page key as a DOM id fragment (the tab's id, its panel's id, and the
+ * tab's aria-controls). The key itself will not do: a label's key keeps its
+ * spaces ('label:pager & co'), an id may not contain whitespace, and
+ * aria-controls is a space-separated LIST of ids — so a raw key there names
+ * three ids that do not exist. encodeURIComponent leaves no whitespace and
+ * maps different keys to different fragments.
+ */
+export function pageDomId(key: string): string {
+    return encodeURIComponent(key);
+}
+
 /** The label route for a name — the one the rail and the label chips use. */
 export function labelRoute(label: string): string {
     return `/label/${encodeURIComponent(label)}`;

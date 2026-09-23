@@ -60,7 +60,7 @@
  * so a screen reader and Tab never walk pages nobody asked for.
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import { pagesOnScreen, type NotesPage } from '../model/notesPages';
+import { pageDomId, pagesOnScreen, type NotesPage } from '../model/notesPages';
 
 /** Does this engine fire `scrollend`? Where it does, that event says
  *  "settled" (plus the armed backstop for a quiet end with none); where it
@@ -77,8 +77,8 @@ const SETTLE_MS = 120;
  *  Everywhere: the quiet time for the armed backstop (see `armed`). */
 const PROGRAMMATIC_MS = 600;
 
-const tabId = (key: string) => `notes-page-tab-${key}`;
-const panelId = (key: string) => `notes-page-panel-${key}`;
+const tabId = (key: string) => `notes-page-tab-${pageDomId(key)}`;
+const panelId = (key: string) => `notes-page-panel-${pageDomId(key)}`;
 
 /** Move without animation? The OS preference, or Púca's own Animations
  *  setting (settingsStore writes `data-animations` on the root). */

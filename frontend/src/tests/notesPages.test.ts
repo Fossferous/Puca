@@ -10,7 +10,7 @@
 // `return '/'` fails all of them; only the two fallback cases would pass.
 import { describe, it, expect } from 'vitest';
 import {
-    ALL_PAGE_KEY, hasPageForPath, labelRoute, pageIndexForPath, pageRoutes, pagesOnScreen, routeForIndex,
+    ALL_PAGE_KEY, hasPageForPath, labelRoute, pageDomId, pageIndexForPath, pageRoutes, pagesOnScreen, routeForIndex,
 } from '../notes/model/notesPages';
 
 // allLabels() hands these over sorted and de-duplicated, one casing each.
@@ -128,5 +128,25 @@ describe('pagesOnScreen', () => {
 
     it('no width yet (not laid out) answers nothing rather than dividing by zero', () => {
         expect(pagesOnScreen(100, 0)).toBeNull();
+    });
+});
+
+// The ids a tab and its panel are linked by. aria-controls is a
+// space-separated LIST of ids, so an id with a space in it links a tab to
+// ids that do not exist — which the raw key of any multi-word label did.
+describe('pageDomId', () => {
+    it('leaves no whitespace in an id, whatever the label', () => {
+        const pages = pageRoutes(['Pager & co', 'tab\there', 'new\nline', 'no\u00a0break', 'Trip']);
+        for (const p of pages) expect(pageDomId(p.key)).not.toMatch(/\s/);
+        // The control: those keys DO have whitespace in them.
+        expect(pages.filter(p => /\s/.test(p.key))).toHaveLength(4);
+    });
+
+    it('keeps different pages apart, including labels that differ only by an escape', () => {
+        const keys = pageRoutes(['x y', 'x%20y', 'x_y', 'all']).map(p => p.key);
+        expect(keys).toHaveLength(5);
+        const ids = keys.map(pageDomId);
+        expect(new Set(ids).size).toBe(keys.length);
+        expect(pageDomId('label:pager & co')).toBe('label%3Apager%20%26%20co');
     });
 });
