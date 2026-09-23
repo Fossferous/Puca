@@ -153,6 +153,32 @@ pub fn token_exp_at(now: i64, session_start: i64, long: bool) -> i64 {
         full
     }
 }
+/// Should this request log that its session has no row? Once per sid.
+///
+/// A row-less session (minted by a release that returned the token even when
+/// its row's INSERT failed) is refused renewal on EVERY request once its token
+/// is RENEW_AFTER_AGE_HOURS old, and nothing is written that would stop the
+/// next request finding the same thing. Logging each time would put a warning
+/// in the log per request for as long as the token lives (up to 30 days for a
+/// long session). One line per session says the same thing. `seen` is bounded:
+/// at `cap` it starts over, which at worst repeats a line, never grows.
+fn note_rowless(seen: &mut std::collections::HashSet<String>, sid: &str, cap: usize) -> bool {
+    if seen.contains(sid) {
+        return false;
+    }
+    if seen.len() >= cap {
+        seen.clear();
+    }
+    seen.insert(sid.to_string())
+}
+
+/// The process's `note_rowless` record.
+fn first_rowless_report(sid: &str) -> bool {
+    static SEEN: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+    let mut guard = SEEN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    note_rowless(guard.get_or_insert_with(Default::default), sid, 4096)
+}
+
 /// Response header carrying a renewed token. Must be in the CORS
 /// `expose_headers` list or browsers can't read it cross-origin.
 pub const RENEWED_TOKEN_HEADER: &str = "x-renewed-token";
@@ -342,7 +368,9 @@ pub async fn jwt_auth_middleware(
         match recorded {
             Ok(true) => {}
             Ok(false) => {
-                tracing::warn!("renewal: session of user {} has no row — not renewing", claims.sub);
+                if first_rowless_report(&renew_sid) {
+                    tracing::warn!("renewal: session of user {} has no row — not renewing (said once per session)", claims.sub);
+                }
                 renewed = None;
             }
             Err(e) => {
@@ -384,6 +412,22 @@ mod tests {
     use super::*;
 
     const SECRET: &str = "test-secret-for-renewal-rules";
+
+    /// A row-less session is refused renewal on every request past the 4 h
+    /// mark; the warning must not repeat with it. A local set, not the
+    /// process's, so the cap can be exercised without racing other tests.
+    #[test]
+    fn a_rowless_session_is_reported_once_not_on_every_request() {
+        let mut seen = std::collections::HashSet::new();
+        assert!(note_rowless(&mut seen, "sid-a", 3), "positive control: the first request of a session is reported");
+        assert!(!note_rowless(&mut seen, "sid-a", 3), "the same session's next request logs nothing");
+        assert!(!note_rowless(&mut seen, "sid-a", 3), "nor the one after");
+        assert!(note_rowless(&mut seen, "sid-b", 3), "a different session is still reported");
+        assert!(note_rowless(&mut seen, "sid-c", 3));
+        // Bounded: at the cap the record starts over rather than growing.
+        assert!(note_rowless(&mut seen, "sid-d", 3), "a new session past the cap is reported");
+        assert!(seen.len() <= 3, "the record never exceeds its cap ({} entries)", seen.len());
+    }
 
     fn claims_with(exp_offset_secs: i64, sst: i64) -> Claims {
         claims_of_kind(exp_offset_secs, sst, false)
