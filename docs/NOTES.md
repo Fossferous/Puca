@@ -1653,9 +1653,16 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   from a date edit, so an edit of any dated item under it counts; undated
   items and ticked ones never do. The time is the server's own, sent back
   as it came, and says nothing new. Nothing is checked when this device
-  cannot vouch for what it shows: an item it changed and has not had back
-  from the server yet, one made offline, or a tick queued behind this
+  cannot vouch for what it shows: an item it changed — ticked, edited, dated,
+  given attachments or moved under another item, anywhere above or below the
+  one ticked — and has not read back from the server since (every task write
+  goes through one tracker in `api/tasks.ts`; a read that started after the
+  write finished clears it), one made offline, or a tick queued behind this
   device's own edit of the same items (those replay unchecked, as before).
+  So your own edit followed by a tick is never mistaken for another device's.
+  A refused tick re-reads the note or list it was made in — Púca's Tasks tab
+  and a personal checklist included, which otherwise never re-read — so the
+  next try is judged on what the server holds now.
 - **Snooze**: 10 minutes, 1 hour or tomorrow at 09:00, from either Reminders
   view, from the calendar, and from the item's own row inside a note or a list
   (one control, `components/reminders/SnoozeControl.tsx`), for anyone who may
