@@ -61,7 +61,9 @@ function harness() {
     const failures = new Map<string, unknown>();
     const summaries: ReplaySummary[] = [];
     const answers = new Map<string, unknown>();
+    const execCalls: NoteOp[] = [];
     const exec = vi.fn(async (op: NoteOp) => {
+        execCalls.push(op);
         if (!online) throw new TypeError('Failed to fetch');
         const f = failures.get(op.label);
         if (f) { failures.delete(op.label); throw f; }
@@ -78,7 +80,7 @@ function harness() {
         onReplayed: s => summaries.push(s),
         parked,
     });
-    return { store, queue, parked, ran, failures, answers, summaries, make, setOnline: (v: boolean) => { online = v; } };
+    return { store, queue, parked, ran, execCalls, failures, answers, summaries, make, setOnline: (v: boolean) => { online = v; } };
 }
 
 /** A lock that behaves like the real one: `ifAvailable` gives up rather than
@@ -599,9 +601,11 @@ describe('text replayed onto a note that changed elsewhere', () => {
             const op = fresh.ops.setBody(4, 'A text', 7);
             const answer = await fresh.execOp(op, {}, true);
             expect(setTaskListBody).toHaveBeenCalledWith(4, 'A text', 7);
-            expect(answer).toEqual({ offlineCopy: 'Trip (offline copy)' });
             expect(createTaskListWithContent).toHaveBeenCalledTimes(1);
             const [title, content, key] = createTaskListWithContent.mock.calls[0] as unknown as [string, { body?: string }, string];
+            // The answer names the key the copy was made under, so the queue
+            // can make the next text of this same typing land in it.
+            expect(answer).toEqual({ offlineCopy: 'Trip (offline copy)', copyKey: key });
             expect(title).toBe('Trip (offline copy)');
             expect(content.body).toBe('A text');
             expect(key).toMatch(OP_KEY_SHAPE);
@@ -613,6 +617,104 @@ describe('text replayed onto a note that changed elsewhere', () => {
             await fresh.execOp(fresh.ops.setBody(4, 'A text', 7), {}, true);
             expect(createTaskListWithContent.mock.calls[2][2]).not.toBe(key);
         } finally { done(); }
+    });
+
+    /**
+     * ONE COPY PER TYPING, not one per lost answer (review of 7f023ecb). A
+     * copy whose answer was lost stays queued; the user types on, the queued
+     * text is replaced, and the replacement used to mint its own copy key —
+     * a second "(offline copy)". Re-using the key alone would be worse: the
+     * server answers with the OLDER copy and the newer words are lost. So the
+     * server's answer is compared with what this typing sent under that key.
+     */
+    it('a copy the server already made from THIS typing is brought up to date, not made again', async () => {
+        const setTaskListBody = vi.fn(async (id: number) => { if (id === 4) throw theirs('B text'); return 3; });
+        const createTaskListWithContent = vi.fn(async (title: string) => ({ id: 77, title, body: 'A text', content_rev: 2 }));
+        try {
+            const fresh = await withApi(setTaskListBody, createTaskListWithContent);
+            const op = { ...fresh.ops.setBody(4, 'A text and more', 7), copyKey: 'K-first', copySent: [await fresh.textDigest('A text')] };
+            const answer = await fresh.execOp(op, {}, true);
+            expect(createTaskListWithContent).toHaveBeenCalledTimes(1);
+            expect(createTaskListWithContent.mock.calls[0][2]).toBe('K-first');
+            expect(setTaskListBody).toHaveBeenLastCalledWith(77, 'A text and more', 2);
+            expect(answer).toEqual({ offlineCopy: 'Trip (offline copy)', copyKey: 'K-first' });
+        } finally { done(); }
+    });
+
+    it('POSITIVE CONTROL: a copy changed since — words this typing never sent — is never overwritten', async () => {
+        const setTaskListBody = vi.fn(async (id: number) => { if (id === 4) throw theirs('B text'); return 3; });
+        const createTaskListWithContent = vi.fn(async (title: string, content: { body?: string }, key: string) => (
+            key === 'K-first' ? { id: 77, title, body: 'edited by hand', content_rev: 5 } : { id: 78, title, body: content.body, content_rev: 1 }));
+        try {
+            const fresh = await withApi(setTaskListBody, createTaskListWithContent);
+            const op = { ...fresh.ops.setBody(4, 'A text and more', 7), copyKey: 'K-first', copySent: [await fresh.textDigest('A text')] };
+            const answer = await fresh.execOp(op, {}, true) as { copyKey: string };
+            expect(setTaskListBody).not.toHaveBeenCalledWith(77, expect.anything(), expect.anything());
+            expect(createTaskListWithContent).toHaveBeenCalledTimes(2);
+            const second = createTaskListWithContent.mock.calls[1] as unknown as [string, { body?: string }, string];
+            expect(second[1].body).toBe('A text and more');
+            expect(second[2]).not.toBe('K-first');
+            expect(answer.copyKey).toBe(second[2]);
+        } finally { done(); }
+    });
+
+    it('a copy since BINNED, or one that refuses the write, is left alone and the words go to a fresh copy', async () => {
+        for (const variant of ['trashed', 'refused'] as const) {
+            const setTaskListBody = vi.fn(async (id: number) => {
+                if (id === 4) throw theirs('B text');
+                throw new ApiError('Gone', 404);
+            });
+            const createTaskListWithContent = vi.fn(async (title: string, content: { body?: string }, key: string) => (key === 'K-first'
+                ? { id: 77, title, body: 'A text', content_rev: 2, trashed_at: variant === 'trashed' ? '2026-09-23T10:00:00Z' : null }
+                : { id: 78, title, body: content.body, content_rev: 1 }));
+            try {
+                const fresh = await withApi(setTaskListBody, createTaskListWithContent);
+                const op = { ...fresh.ops.setBody(4, 'A text and more', 7), copyKey: 'K-first', copySent: [await fresh.textDigest('A text')] };
+                await fresh.execOp(op, {}, true);
+                expect(setTaskListBody.mock.calls.filter(c => c[0] === 77)).toHaveLength(variant === 'trashed' ? 0 : 1);
+                expect(createTaskListWithContent).toHaveBeenCalledTimes(2);
+                expect((createTaskListWithContent.mock.calls[1] as unknown as [string, { body?: string }])[1].body).toBe('A text and more');
+            } finally { done(); }
+        }
+    });
+
+    it('text typed on after a copy whose answer was lost replays under the SAME copy key, naming what was sent', async () => {
+        const h = harness();
+        const ob = h.make();
+        h.setOnline(false);
+        await ob.send(ops.setBody(4, 'A text', 7));
+        h.setOnline(true);
+        h.failures.set('text “A text”', new TypeError('Failed to fetch'));
+        await ob.replay();                                   // the copy's answer is lost
+        h.setOnline(false);
+        await ob.send(ops.setBody(4, 'A text and more', 7)); // typing on: replaces the queued op
+        h.setOnline(true);
+        await ob.replay();
+        const run = h.ran.at(-1) as Extract<NoteOp, { k: 'setBody' }> & { copySent?: string[] };
+        expect(run.body).toBe('A text and more');
+        const { textDigest } = await import('../notes/model/notesOutbox');
+        expect(run.copySent).toContain(await textDigest('A text'));
+        const first = h.execCalls[0] as Extract<NoteOp, { k: 'setBody' }>;
+        expect(first.copyKey).toMatch(OP_KEY_SHAPE);
+        expect(run.copyKey).toBe(first.copyKey);
+    });
+
+    it('...and so does text queued on the same base AFTER a copy was made, so it lands in that copy', async () => {
+        const h = harness();
+        const ob = h.make();
+        h.setOnline(false);
+        await ob.send(ops.setBody(4, 'A text', 7));
+        h.setOnline(true);
+        h.answers.set('text “A text”', { offlineCopy: 'Trip (offline copy)', copyKey: 'K-made' });
+        await ob.replay();
+        h.setOnline(false);
+        await ob.send(ops.setBody(4, 'A text and more', 7));
+        await ob.send(ops.setBody(5, 'elsewhere', 7));      // POSITIVE CONTROL: another note
+        h.setOnline(true);
+        await ob.replay();
+        const [more, other] = h.ran.slice(-2) as Array<Extract<NoteOp, { k: 'setBody' }>>;
+        expect(more.copyKey).toBe('K-made');
+        expect(other.copyKey).not.toBe('K-made');
     });
 
     it('the SAME text already there is simply saved — no copy', async () => {

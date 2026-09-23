@@ -517,7 +517,11 @@ back the copy it holds (migration 069, `expect_rev` on
   changed on another device in the meantime, the note keeps that device's
   text and yours becomes a new note beside it, called "*title* (offline
   copy)", with a message saying so — made once, however many times the change
-  is retried. Text that is already exactly what the note holds simply counts
+  is retried, and once per stretch of typing: text you go on typing into the
+  same note before it catches up goes into that same copy (brought up to date
+  on top of what it holds), unless the copy has been edited, binned or deleted
+  since, in which case your newer words become another copy rather than
+  overwrite it. Text that is already exactly what the note holds simply counts
   as saved. Clearing a note's text offline is the one change that cannot be
   kept that way (there are no words to keep, and clearing theirs is what the
   check is there to stop): it is not applied, and it is listed in the message

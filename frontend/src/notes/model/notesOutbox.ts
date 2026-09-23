@@ -45,7 +45,10 @@
  * another device wrote the text in between, BOTH are kept: the note keeps
  * the other device's text, and the words typed here become a new note beside
  * it, "<title> (offline copy)", made once however often the op replays (its
- * create key, `copyKey`, is minted with the op). The toast names it. The device's
+ * create key, `copyKey`, is minted with the op), and ONE per typing: text
+ * typed on afterwards on the same revision of the same note goes into that
+ * copy while it still holds only words this typing sent (`copies`, kept in
+ * the queue's record — see `keepOfflineText`). The toast names it. The device's
  * OWN writes are not "another device": every content write this tab lands
  * is watched (api/listConflict.ts `watchContentWrites`), and a queued text's
  * revision is carried forward over them before it is sent (`revs`, kept in
@@ -157,9 +160,13 @@ type OpBody =
     // queued before 069) there is no check, as before.
     // `copyKey` is that note's create key, minted with the op (random, like
     // every create key — api/opKey.ts), so the copy is made once however
-    // often the op replays. Optional: an op queued before it existed gets a
-    // fresh key per attempt.
-    | { k: 'setBody'; listId: number; body: string; expectRev?: number; copyKey?: string }
+    // often the op replays. Replay swaps in the key this TYPING already used
+    // (`OutboxState.copies`), so text typed on after a copy lands in that
+    // copy rather than a new one. Optional: an op queued before it existed
+    // is given one when it replays.
+    // `copySent` is never stored: replay fills it in from the same record —
+    // digests of the texts this typing sent under that key (`keepOfflineText`).
+    | { k: 'setBody'; listId: number; body: string; expectRev?: number; copyKey?: string; copySent?: string[] }
     // Pictures and files sealed on this device (notesBlobs.ts) that still
     // have to go up. Running it uploads them, then adds the real refs to
     // whatever the server's sidecar holds THEN, naming the revision it read
@@ -385,14 +392,25 @@ export async function execOp(op: OpBody, idMap: IdMap, fromQueue: boolean, parke
 }
 
 /** What a replayed `setBody` answers when it kept the offline words as a
- *  new note: that note's title, for the toast. */
-export interface OfflineCopy { offlineCopy: string }
+ *  new note: that note's title, for the toast, and the create key it was
+ *  made under, for the next text of the same typing (`OutboxState.copies`). */
+export interface OfflineCopy { offlineCopy: string; copyKey?: string }
 
 export function isOfflineCopy(v: unknown): v is OfflineCopy {
     return typeof v === 'object' && v !== null && typeof (v as OfflineCopy).offlineCopy === 'string';
 }
 
 const COPY_SUFFIX = ' (offline copy)';
+
+/** A digest standing for a text this device sent into an offline copy, so
+ *  the queue's record can remember WHICH words without holding them twice
+ *  (it is sealed on this device either way, and never sent). */
+export async function textDigest(text: string): Promise<string> {
+    const d = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)));
+    let bin = '';
+    for (const b of d) bin += String.fromCharCode(b);
+    return btoa(bin);
+}
 
 /**
  * A replayed text save lost to another device's text. Never throw the words
@@ -405,6 +423,15 @@ const COPY_SUFFIX = ' (offline copy)';
  *    what was typed or when — api/opKey.ts), so a replay whose answer was
  *    lost, run again, is answered with the copy already made rather than
  *    making a second.
+ *
+ * ONE COPY PER TYPING. The user types on after the copy's answer was lost
+ * (or after the copy was made, on the same stale revision), and that text
+ * replays under the SAME key (the queue's `copies` record). The server then
+ * answers with the copy it already made — holding EARLIER words. Taking that
+ * as done would lose the newer ones, so the answer is compared: the copy is
+ * brought up to date (naming its revision) only while it still holds words
+ * this typing sent under that key (`copySent`); a copy changed since by
+ * anyone is left alone, and these words become a fresh copy.
  */
 async function keepOfflineText(op: Extract<OpBody, { k: 'setBody' }>, err: NoteConflictError): Promise<number | OfflineCopy> {
     if ((err.body ?? '') === op.body) return err.contentRev;
@@ -412,8 +439,46 @@ async function keepOfflineText(op: Extract<OpBody, { k: 'setBody' }>, err: NoteC
     const opened = err.sealedTitle === null ? '' : await openSelfTaskText(err.sealedTitle);
     const base = !opened || isUndecryptable(opened) ? 'Note' : opened;
     const title = `${base.slice(0, MAX_TITLE_LENGTH - COPY_SUFFIX.length).trimEnd()}${COPY_SUFFIX}`;
-    await createTaskListWithContent(title, { body: op.body }, op.copyKey ?? newOpKey());
-    return { offlineCopy: title };
+    const key = op.copyKey ?? newOpKey();
+    const copy = await createTaskListWithContent(title, { body: op.body }, key);
+    // Made now (or a server that says nothing about the text): done.
+    if (copy.body === undefined || (copy.body ?? '') === op.body) return { offlineCopy: title, copyKey: key };
+    // Binned since, or holding anything but this typing's own words: left
+    // alone. A write the server REFUSES (changed under us, trashed, gone)
+    // falls through to a fresh copy too — the words are never dropped; one
+    // whose answer is lost is retried, and lands in the same copy.
+    const inTrash = typeof copy.trashed_at === 'string' && copy.trashed_at !== '';
+    if (!inTrash && typeof copy.content_rev === 'number' && typeof copy.body === 'string'
+        && (op.copySent ?? []).includes(await textDigest(copy.body))) {
+        try {
+            await setTaskListBody(copy.id, op.body, copy.content_rev);
+            return { offlineCopy: title, copyKey: key };
+        } catch (e) {
+            if (!(e instanceof NoteConflictError) && !isDefiniteRefusal(e)) throw e;
+        }
+    }
+    const fresh = newOpKey();
+    await createTaskListWithContent(title, { body: op.body }, fresh);
+    return { offlineCopy: title, copyKey: fresh };
+}
+
+/** `l<listId>@<rev>` -> the copy key text typed on that revision of that note
+ *  went into, and digests of the texts sent under it (`keepOfflineText`). */
+export type OfflineCopies = Record<string, { key: string; sent: string[] }>;
+const COPIES_NOTES = 32;
+const COPIES_SENT = 8;
+
+/** Remember that the text with `digest` went (or may have gone) into the copy
+ *  made under `key` for text typed on `at`. Bounded, oldest first out. */
+export function recordCopy(copies: OfflineCopies, at: string, key: string, digest: string): OfflineCopies {
+    const prev = copies[at];
+    const sent = prev && prev.key === key ? [...prev.sent.filter(d => d !== digest), digest].slice(-COPIES_SENT) : [digest];
+    const next: OfflineCopies = { ...copies };
+    delete next[at];
+    next[at] = { key, sent };
+    const keys = Object.keys(next);
+    for (const k of keys.slice(0, Math.max(0, keys.length - COPIES_NOTES))) delete next[k];
+    return next;
 }
 
 // --- The device's own revisions -----------------------------------------------------
@@ -512,9 +577,13 @@ export interface OutboxState {
      *  (`rebaseOnOwnRevs`). Optional: a record saved before this existed
      *  has none. */
     revs?: OwnRevs;
+    /** The copy key each offline TYPING's text went into (`recordCopy`), so
+     *  a later text of the same typing lands in the same copy. Optional, like
+     *  `revs`. */
+    copies?: OfflineCopies;
 }
 
-const EMPTY: OutboxState = { queue: [], ids: {}, dead: [], revs: {} };
+const EMPTY: OutboxState = { queue: [], ids: {}, dead: [], revs: {}, copies: {} };
 const RECORD = 'outbox';
 
 export interface OutboxDeps {
@@ -611,7 +680,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
         if (text === null) return EMPTY;
         try {
             const s = JSON.parse(text) as OutboxState;
-            return Array.isArray(s.queue) ? { queue: s.queue, ids: s.ids ?? {}, dead: s.dead ?? [], revs: s.revs ?? {} } : EMPTY;
+            return Array.isArray(s.queue) ? { queue: s.queue, ids: s.ids ?? {}, dead: s.dead ?? [], revs: s.revs ?? {}, copies: s.copies ?? {} } : EMPTY;
         } catch {
             return EMPTY;
         }
@@ -871,13 +940,30 @@ export function createOutbox(deps: OutboxDeps): Outbox {
                     // writes that moved the note to N+k, is sent as N+k: only
                     // another device's write is a conflict.
                     let run: NoteOp = head;
+                    // Text typed on one revision of one note is ONE typing:
+                    // every text of it that loses goes into the same copy
+                    // (keepOfflineText), under the key recorded here.
+                    let copyAt: string | null = null;
                     if (head.k === 'setBody' && head.expectRev !== undefined) {
                         const real = head.listId < 0 ? ids[String(head.listId)] : head.listId;
                         if (real !== undefined) {
                             const rebased = rebaseOnOwnRevs([state.revs ?? {}, liveRevs], real, head.expectRev);
-                            if (rebased !== head.expectRev) run = { ...head, expectRev: rebased };
+                            copyAt = `l${real}@${head.expectRev}`;
+                            const prior = state.copies?.[copyAt];
+                            run = {
+                                ...head,
+                                expectRev: rebased,
+                                copyKey: prior?.key ?? head.copyKey ?? newOpKey(),
+                                ...(prior ? { copySent: prior.sent } : {}),
+                            };
                         }
                     }
+                    const noteCopy = async (key: string) => {
+                        if (copyAt === null || head.k !== 'setBody') return;
+                        const at = copyAt;
+                        const digest = await textDigest(head.body);
+                        await mutate(s => ({ ...s, copies: recordCopy(s.copies ?? {}, at, key, digest) }));
+                    };
                     const done = beginNoteWrite(busyKeyOf(head));
                     const writes: ContentWrite[] = [];
                     try {
@@ -889,7 +975,11 @@ export function createOutbox(deps: OutboxDeps): Outbox {
                             collecting = null;
                         }
                         summary.sent++;
-                        if (isOfflineCopy(value)) summary.copies.push(value.offlineCopy);
+                        if (isOfflineCopy(value)) {
+                            summary.copies.push(value.offlineCopy);
+                            const key = value.copyKey ?? (run.k === 'setBody' ? run.copyKey : undefined);
+                            if (key) await noteCopy(key);
+                        }
                         if (head.k === 'createTask' || head.k === 'createList') {
                             const real = ids[String(head.tempId)];
                             if (real !== undefined) summary.created[String(head.tempId)] = real;
@@ -904,6 +994,12 @@ export function createOutbox(deps: OutboxDeps): Outbox {
                         backoffMs = 2_000;
                     } catch (err) {
                         const status = err instanceof ApiError ? err.status : undefined;
+                        // Text that may have made (or updated) its copy before
+                        // the answer was lost: the next text of this typing
+                        // must go into that one, whatever becomes of this op.
+                        if (run.k === 'setBody' && run.copyKey && !isDefiniteRefusal(err)) {
+                            await noteCopy(run.copyKey).catch(() => undefined);
+                        }
                         if (isNetworkError(err)) {
                             scheduleReplay(backoffMs);
                             backoffMs = Math.min(backoffMs * 2, 60_000);
