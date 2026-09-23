@@ -1627,7 +1627,10 @@ const pucaEdit = await page.evaluate(() => {
         inside: b.left >= h.left - 0.5 && b.right <= h.right + 0.5,
         width: Math.round(b.width),
         padLeft: getComputedStyle(el).paddingLeft,
-        overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+        // clientWidth here too, though this page is the 1280 desktop one (no
+        // isMobile, so innerWidth does not widen): in a HEADED run innerWidth
+        // counts the vertical scrollbar, which would hide a 15px overflow.
+        overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
     };
 });
 ck('púca: the due editor takes its own row in the header, not the title' + '\u2019' + 's width',
@@ -2784,8 +2787,10 @@ ck('desktop: no page errors', errors.length === 0, errors[0]);
         const r = document.querySelector('.notes-stay-row')?.getBoundingClientRect();
         const txt = document.querySelector('.notes-stay-row .checkbox-text');
         const hint = document.querySelector('.notes-stay-hint')?.getBoundingClientRect();
+        // clientWidth, not innerWidth: see audit() in the phone pass.
+        const vw = document.documentElement.clientWidth, sw = document.documentElement.scrollWidth;
         return r && txt && hint ? { h: r.height, w: r.width, right: r.right, textPx: parseFloat(getComputedStyle(txt).fontSize),
-            hintInside: hint.left >= 0 && hint.right <= innerWidth, vw: innerWidth, scrolls: document.documentElement.scrollWidth > innerWidth + 1 } : null;
+            hintInside: hint.left >= 0 && hint.right <= vw, hintRight: hint.right, vw, scrollWidth: sw, scrolls: sw > vw + 1 } : null;
     });
     ck('phone sign-in: the stay row is a ≥44px tap target', !!row && row.h >= 44 - 0.5, row ? `${Math.round(row.w)}x${Math.round(row.h)}` : 'no row');
     ck('phone sign-in: the row text is ≥16px', !!row && row.textPx >= 16, row ? `${row.textPx}px` : 'no row');
