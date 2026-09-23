@@ -507,3 +507,204 @@ describe('the reminder times follow the account', () => {
         expect(server.puts).toBe(puts);                              // nothing to heal: no write at all
     });
 });
+
+/**
+ * A sync operation is async; the account is not. Notes' sign-out and Púca's
+ * handleLogout never reload the page, so an operation still in flight when A
+ * signs out (the 3 s sign-out flush that lost its race, a focus pull) resolves
+ * into whatever the page has become: signed out, or signed in as B. Nothing it
+ * learned about A may land after that — not in B's local copy, not in B's
+ * document, and not as a re-created plaintext `pucaNotesPrefsSync:A` record
+ * the sign-out had just scrubbed.
+ */
+describe('an operation that outlives its account does nothing', () => {
+    const idA = identity;
+    const idB = makeIdentity(new Uint8Array(32).fill(4));
+
+    function deferred<T>() {
+        let resolve!: (v: T) => void;
+        const promise = new Promise<T>(r => { resolve = r; });
+        return { promise, resolve };
+    }
+
+    /** One page whose account the test switches under a running operation. */
+    function page(initialLocal: NotesNoteState = EMPTY_NOTE_STATE) {
+        const acct = { uid: 1 as number | null, id: idA as Identity | null, epoch: 0 };
+        let local = initialLocal;
+        const writes: Array<{ state: NotesNoteState; uid: number | undefined }> = [];
+        const saves: Array<{ uid: number; rec: SyncRecord }> = [];
+        const records = new Map<number, SyncRecord>();
+        const gets: Array<{ promise: Promise<GetBlobResult>; resolve: (v: GetBlobResult) => void }> = [];
+        const puts: Array<{ rev: number; blob: string; resolve: (v: PutBlobResult) => void }> = [];
+        let onReadLocal: (() => void) | null = null;
+        const sync = createPrefsSync({
+            uid: () => acct.uid,
+            identity: () => acct.id,
+            epoch: () => acct.epoch,
+            get: () => { const d = deferred<GetBlobResult>(); gets.push(d); return d.promise; },
+            put: (rev, blob) => { const d = deferred<PutBlobResult>(); puts.push({ rev, blob, resolve: d.resolve }); return d.promise; },
+            readLocal: () => { const f = onReadLocal; onReadLocal = null; f?.(); return local; },
+            writeLocal: (s, uid) => { writes.push({ state: s, uid }); local = s; },
+            records: {
+                load: u => records.get(u) ?? null,
+                save: (u, r) => { saves.push({ uid: u, rec: r }); records.set(u, r); },
+            },
+        });
+        return {
+            sync, acct, writes, saves, records, gets, puts,
+            get local() { return local; },
+            set local(s: NotesNoteState) { local = s; },
+            /** Run `f` inside the next readLocal() — synchronously, just
+             *  before the operation's next await. */
+            atNextRead(f: () => void) { onReadLocal = f; },
+        };
+    }
+
+    const flush = () => new Promise(r => setTimeout(r, 0));
+    const until = async (cond: () => boolean) => { for (let i = 0; i < 100 && !cond(); i++) await flush(); };
+    /** Let the operation run to completion — or, where the unfixed code goes
+     *  on to a PUT nobody answers, as far as it gets — then assert. */
+    const settle = (op: Promise<unknown>) => Promise.race([op, until(() => false)]);
+    const aDoc = async (rev: number, s: NotesNoteState) =>
+        ({ rev, blob: await sealAccountBlob(idA, 1, 'notes-prefs', encodePrefsDoc(rev, s)) });
+    const A_STATE = st({ labels: { 'list:1': ['A-private'] }, colors: { 'list:1': 'coral' }, times: times({ morning: '05:15' }) });
+    const B_STATE = st({ labels: { 'list:9': ['B-own'] } });
+
+    it('pull: A signs out and B signs in while the GET is out — nothing of A lands anywhere', async () => {
+        const p = page(B_STATE);
+        const op = p.sync.pull();
+        await until(() => p.gets.length > 0);
+        expect(p.gets.length).toBe(1);                              // A's GET is in flight
+        p.acct.uid = 2; p.acct.id = idB; p.acct.epoch++;            // sign-out, then B signs in
+        p.gets[0].resolve({ kind: 'ok', doc: await aDoc(1, A_STATE) });
+        await settle(op);
+        expect(p.writes).toEqual([]);                               // B's copy untouched
+        expect(p.saves).toEqual([]);                                // no record for A (or B)
+        expect(p.puts).toEqual([]);                                 // nothing sealed under A with B's token
+        expect(p.local).toEqual(B_STATE);
+        expect(p.sync.status()).toBe('idle');                       // B's shell shows no bogus status
+    });
+
+    it('pull: A signs out (no one signs in) — the scrubbed record is NOT re-created', async () => {
+        const p = page();
+        const op = p.sync.pull();
+        await until(() => p.gets.length > 0);
+        p.acct.uid = null; p.acct.id = null; p.acct.epoch++;
+        p.gets[0].resolve({ kind: 'ok', doc: await aDoc(1, A_STATE) });
+        await settle(op);
+        expect(p.saves).toEqual([]);
+        expect(p.writes).toEqual([]);
+    });
+
+    it('pull: A signs out and straight back in as A — a new session all the same, the stale pull does nothing', async () => {
+        const p = page();
+        const op = p.sync.pull();
+        await until(() => p.gets.length > 0);
+        p.acct.epoch++;                                             // same uid, same key: only the epoch tells
+        p.gets[0].resolve({ kind: 'ok', doc: await aDoc(1, A_STATE) });
+        await settle(op);
+        expect(p.saves).toEqual([]);
+        expect(p.writes).toEqual([]);
+    });
+
+    it('pull: the identity re-derived for the SAME account (a new object) is not an account change', async () => {
+        const p = page();
+        const op = p.sync.pull();
+        await until(() => p.gets.length > 0);
+        p.acct.id = makeIdentity(new Uint8Array(32).fill(9));      // same seed as idA, a different object
+        p.gets[0].resolve({ kind: 'ok', doc: await aDoc(1, A_STATE) });
+        expect(await op).toBe('synced');
+        expect(p.local).toEqual(A_STATE);
+        expect(p.saves.map(s => s.uid)).toEqual([1]);
+        expect(p.writes.map(w => w.uid)).toEqual([1]);             // and the write names its account
+    });
+
+    it('push: the account changes while the blob is being sealed — the PUT is never sent', async () => {
+        const p = page(A_STATE);
+        p.records.set(1, { rev: 1, base: EMPTY_NOTE_STATE, maxRev: 1 });
+        p.atNextRead(() => { p.acct.uid = 2; p.acct.id = idB; p.acct.epoch++; });
+        const op = p.sync.push();
+        await until(() => p.puts.length > 0);
+        expect(p.puts).toEqual([]);                                 // B's token never carries A's blob
+        p.puts[0]?.resolve({ kind: 'written', rev: 2 });
+        await settle(op);
+        expect(p.saves).toEqual([]);
+    });
+
+    it('push: the account changes while the PUT is out — the written revision is not recorded', async () => {
+        const p = page(A_STATE);
+        p.records.set(1, { rev: 1, base: EMPTY_NOTE_STATE, maxRev: 1 });
+        const op = p.sync.push();
+        await until(() => p.puts.length > 0);
+        expect(p.puts.length).toBe(1);
+        p.acct.uid = null; p.acct.id = null; p.acct.epoch++;        // the sign-out flush lost its 3 s race
+        p.puts[0].resolve({ kind: 'written', rev: 2 });
+        await settle(op);
+        expect(p.saves).toEqual([]);
+    });
+
+    it('push: a 409 answered after the switch is not merged into the next account', async () => {
+        const p = page(A_STATE);
+        p.records.set(1, { rev: 1, base: EMPTY_NOTE_STATE, maxRev: 1 });
+        const op = p.sync.push();
+        await until(() => p.puts.length > 0);
+        p.acct.uid = 2; p.acct.id = idB; p.acct.epoch++;
+        p.local = B_STATE;                                          // B's copy is what readLocal sees now
+        p.puts[0].resolve({ kind: 'conflict', current: await aDoc(3, st({ colors: { 'list:2': 'sage' } })) });
+        await settle(op);
+        expect(p.writes).toEqual([]);
+        expect(p.saves).toEqual([]);
+        expect(p.local).toEqual(B_STATE);
+    });
+
+    it('acceptServer: the account changes while the GET is out — B’s copy is not replaced by A’s', async () => {
+        const p = page(B_STATE);
+        const op = p.sync.acceptServer();
+        await until(() => p.gets.length > 0);
+        p.acct.uid = 2; p.acct.id = idB; p.acct.epoch++;
+        p.gets[0].resolve({ kind: 'ok', doc: await aDoc(4, A_STATE) });
+        await settle(op);
+        expect(p.writes).toEqual([]);
+        expect(p.saves).toEqual([]);
+        expect(p.local).toEqual(B_STATE);
+    });
+
+    it('overwriteServer: the account changes while the GET is out — no record, no PUT', async () => {
+        const p = page(A_STATE);
+        const op = p.sync.overwriteServer();
+        await until(() => p.gets.length > 0);
+        p.acct.uid = null; p.acct.id = null; p.acct.epoch++;
+        p.gets[0].resolve({ kind: 'ok', doc: await aDoc(4, A_STATE) });
+        await settle(op);
+        expect(p.saves).toEqual([]);
+        expect(p.puts).toEqual([]);
+    });
+
+    it('the app’s instance: every sign-out moves the epoch (a logout hook), and a record names its account', async () => {
+        const mod = await import('../notes/model/notesPrefsSync');
+        const { runLogoutCleanups } = await import('../api/logoutHooks');
+        const before = mod.notesPrefsSignOutEpoch();
+        runLogoutCleanups();
+        expect(mod.notesPrefsSignOutEpoch()).toBe(before + 1);
+        // The app's record store refuses an account that is not the signed-in
+        // one (the mocked token says 7), so a stale operation cannot re-create
+        // a scrubbed record even past a missed check. (localStorage is a
+        // vi.fn() mock in this suite: assert on the calls.)
+        const setItem = vi.mocked(localStorage.setItem);
+        setItem.mockClear();
+        mod.accountRecordStore.save(1, { rev: 1, base: A_STATE, maxRev: 1 });
+        expect(setItem).not.toHaveBeenCalled();
+        mod.accountRecordStore.save(7, { rev: 1, base: EMPTY_NOTE_STATE, maxRev: 1 });
+        expect(setItem).toHaveBeenCalledWith('pucaNotesPrefsSync:7', expect.any(String));
+    });
+
+    it('replaceNoteState with an expected account refuses any other one', async () => {
+        const { replaceNoteState, getNotesPrefs } = await import('../notes/model/notesPrefs');
+        replaceNoteState(EMPTY_NOTE_STATE);
+        replaceNoteState(A_STATE, 1);                               // signed in as 7, not 1
+        expect(getNotesPrefs().labels).toEqual({});
+        replaceNoteState(B_STATE, 7);
+        expect(getNotesPrefs().labels).toEqual(B_STATE.labels);
+        replaceNoteState(EMPTY_NOTE_STATE);
+    });
+});

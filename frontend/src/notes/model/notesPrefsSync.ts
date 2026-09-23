@@ -53,6 +53,7 @@ import { useEffect, useSyncExternalStore } from 'react';
 import { currentUserIdFromToken } from '../../api/auth';
 import { getActiveIdentity, openAccountBlob, sealAccountBlob, type Identity } from '../../api/e2ee';
 import { isNetworkError } from '../../api/client';
+import { registerLogoutCleanup } from '../../api/logoutHooks';
 import { getSealedBlob, putSealedBlob, type GetBlobResult, type PutBlobResult } from '../../api/sealedBlobs';
 import { writeNotesUnsynced, writeNotesUnsyncedPrefs } from '../../api/notesCacheScrub';
 import { DEFAULT_REMINDER_TIMES, REMINDER_TIME_KEYS, isReminderTime, type ReminderTimes } from '../../api/reminderTimes';
@@ -223,10 +224,17 @@ export type PrefsSyncStatus =
 export interface PrefsSyncDeps {
     uid: () => number | null;
     identity: () => Identity | null;
+    /** Moves on every sign-out on this page. With the uid it is what an
+     *  operation checks after each await to know it still belongs to the
+     *  session that started it (a sign-out and back in as the SAME account
+     *  keeps the uid but moves this). Absent = never moves. */
+    epoch?: () => number;
     get: () => Promise<GetBlobResult>;
     put: (expectedRev: number, blob: string) => Promise<PutBlobResult>;
     readLocal: () => NotesNoteState;
-    writeLocal: (s: NotesNoteState) => void;
+    /** `uid` is the account the operation belongs to; the app's writer
+     *  refuses to file the state under any other one. */
+    writeLocal: (s: NotesNoteState, uid: number) => void;
     records: { load(uid: number): SyncRecord | null; save(uid: number, r: SyncRecord): void };
 }
 
@@ -251,6 +259,19 @@ export interface PrefsSync {
     subscribeSettled(cb: () => void): () => void;
 }
 
+/** Thrown by an operation's `after` when the session that started it is gone. */
+const ACCOUNT_CHANGED: unique symbol = Symbol('notes-prefs: account changed');
+
+/** One running operation: the session it belongs to, and the re-check. */
+interface Op {
+    uid: number;
+    id: Identity;
+    /** Throws ACCOUNT_CHANGED unless the starting session is still the one signed in. */
+    check: () => void;
+    /** Await `p`, then check(). EVERY await in an operation goes through this. */
+    after: <T>(p: Promise<T>) => Promise<T>;
+}
+
 export function createPrefsSync(deps: PrefsSyncDeps): PrefsSync {
     let current: PrefsSyncStatus = 'idle';
     const listeners = new Set<() => void>();
@@ -268,29 +289,37 @@ export function createPrefsSync(deps: PrefsSyncDeps): PrefsSync {
         return next;
     };
     const fail = (err: unknown): PrefsSyncStatus => {
+        // The account changed under the operation: it did nothing, and the
+        // status belongs to the NEW session, not to this one.
+        if (err === ACCOUNT_CHANGED) return current;
         if (isNetworkError(err)) return set('offline');
         console.warn('[notes] syncing colours and labels failed:', err);
         return set('error');
     };
 
     /** Open a server document and check it is a real, current one. */
-    const open = async (id: Identity, uid: number, rev: number, blob: string | null, rec: SyncRecord | null) => {
+    const open = async ({ uid, id, after }: Op, rev: number, blob: string | null, rec: SyncRecord | null) => {
         if (blob === null) return { bad: 'unreadable' as const };
-        const text = await openAccountBlob(id, uid, PREFS_BLOB_NAME, blob);
+        const text = await after(openAccountBlob(id, uid, PREFS_BLOB_NAME, blob));
         const doc = text === null ? null : decodePrefsDoc(text);
         if (!doc || doc.rev !== rev) return { bad: 'unreadable' as const };
         if (rec && rev < rec.maxRev) return { bad: 'rollback' as const };
         return { state: doc.state };
     };
 
-    const pushOnce = async (uid: number, id: Identity): Promise<PrefsSyncStatus> => {
+    const pushOnce = async (op: Op): Promise<PrefsSyncStatus> => {
+        const { uid, id, after } = op;
         let rec = deps.records.load(uid);
         for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-            if (!rec || rec.base === null) return pullOnce(uid, id);
+            op.check();
+            if (!rec || rec.base === null) return pullOnce(op);
             const local = deps.readLocal();
             if (sameNoteState(local, rec.base)) return set('synced');
-            const sealed = await sealAccountBlob(id, uid, PREFS_BLOB_NAME, encodePrefsDoc(rec.rev + 1, local));
-            const res = await deps.put(rec.rev, sealed);
+            // Checked after the seal and BEFORE the PUT: a PUT sent after a
+            // switch would carry the old account's copy, sealed under the old
+            // account's key, with the new account's token.
+            const sealed = await after(sealAccountBlob(id, uid, PREFS_BLOB_NAME, encodePrefsDoc(rec.rev + 1, local)));
+            const res = await after(deps.put(rec.rev, sealed));
             if (res.kind === 'unsupported') return set('local-only');
             if (res.kind === 'too-large') return set('too-large');
             if (res.kind === 'written') {
@@ -306,22 +335,23 @@ export function createPrefsSync(deps: PrefsSyncDeps): PrefsSync {
                 deps.records.save(uid, rec);
                 continue;
             }
-            const opened = await open(id, uid, cur.rev, cur.blob, rec);
+            const opened = await after(open(op, cur.rev, cur.blob, rec));
             if ('bad' in opened) return set(opened.bad!);
             // Re-read: `local` was taken before three awaits (seal, PUT,
             // open), and an edit made during that round trip must be merged,
             // not written over.
             const live = deps.readLocal();
             const merged = threeWayMerge(rec.base, live, opened.state);
-            if (!sameNoteState(merged, live)) deps.writeLocal(merged);
+            if (!sameNoteState(merged, live)) deps.writeLocal(merged, uid);
             rec = { rev: cur.rev, base: opened.state, maxRev: Math.max(rec.maxRev, cur.rev) };
             deps.records.save(uid, rec);
         }
         return set('error');
     };
 
-    const pullOnce = async (uid: number, id: Identity): Promise<PrefsSyncStatus> => {
-        const res = await deps.get();
+    const pullOnce = async (op: Op): Promise<PrefsSyncStatus> => {
+        const { uid } = op;
+        const res = await op.after(deps.get());
         if (res.kind === 'unsupported') return set('local-only');
         const rec = deps.records.load(uid);
         const { rev, blob } = res.doc;
@@ -329,26 +359,54 @@ export function createPrefsSync(deps: PrefsSyncDeps): PrefsSync {
             // Nothing on the server: this device's copy (never synced, or one
             // the server lost) goes up as revision 1.
             deps.records.save(uid, { rev: 0, base: EMPTY_NOTE_STATE, maxRev: rec?.maxRev ?? 0 });
-            return pushOnce(uid, id);
+            return pushOnce(op);
         }
-        const opened = await open(id, uid, rev, blob, rec);
+        const opened = await op.after(open(op, rev, blob, rec));
         if ('bad' in opened) return set(opened.bad!);
         const local = deps.readLocal();
         const merged = rec === null || rec.base === null
             ? unionMerge(local, opened.state)          // the one-time migration
             : threeWayMerge(rec.base, local, opened.state);
-        if (!sameNoteState(merged, local)) deps.writeLocal(merged);
+        if (!sameNoteState(merged, local)) deps.writeLocal(merged, uid);
         deps.records.save(uid, { rev, base: opened.state, maxRev: Math.max(rec?.maxRev ?? 0, rev) });
-        return sameNoteState(merged, opened.state) ? set('synced') : pushOnce(uid, id);
+        return sameNoteState(merged, opened.state) ? set('synced') : pushOnce(op);
     };
 
-    const guarded = (fn: (uid: number, id: Identity) => Promise<PrefsSyncStatus>) => serial(async () => {
+    /*
+     * THE ACCOUNT CAN CHANGE UNDER AN OPERATION. Neither app reloads on a
+     * sign-out (NotesApp signOut, App.tsx handleLogout), and nothing cancels
+     * a request in flight — the sign-out flush is only RACED against 3 s. So
+     * an operation started for A can resolve on a page that is signed out, or
+     * signed in as B, where readLocal/writeLocal and the request token all
+     * resolve to whoever is signed in NOW. Unchecked, it merged A's labels,
+     * colours and times into B's copy (and from there into B's document), and
+     * re-created A's plaintext sync record after the sign-out scrubbed it.
+     *
+     * So every await in an operation goes through `after`, which re-checks
+     * the session before handing control back; the synchronous side effects
+     * that follow it (record saves, local writes, the next request) run for
+     * the session that started the operation or not at all. The session is
+     * the uid plus the sign-out epoch — never the Identity object:
+     * getActiveIdentity may rebuild it for the SAME account (a stale seed
+     * re-derived), and that must not abort a good operation. An aborted one
+     * leaves the status alone; the new session's own pull is already queued.
+     */
+    const guarded = (fn: (op: Op) => Promise<PrefsSyncStatus>) => serial(async () => {
         const uid = deps.uid();
         if (uid === null) return set('idle');
         const id = deps.identity();
         if (!id) return set('locked');
+        const epoch = deps.epoch?.() ?? 0;
+        const check = () => {
+            if (deps.uid() !== uid || (deps.epoch?.() ?? 0) !== epoch) throw ACCOUNT_CHANGED;
+        };
+        const after = async <T,>(p: Promise<T>): Promise<T> => {
+            const v = await p;
+            check();
+            return v;
+        };
         try {
-            return await fn(uid, id);
+            return await fn({ uid, id, check, after });
         } catch (err) {
             return fail(err);
         } finally {
@@ -359,8 +417,9 @@ export function createPrefsSync(deps: PrefsSyncDeps): PrefsSync {
     return {
         pull: () => guarded(pullOnce),
         push: () => guarded(pushOnce),
-        overwriteServer: () => guarded(async (uid, id) => {
-            const res = await deps.get();
+        overwriteServer: () => guarded(async op => {
+            const { uid } = op;
+            const res = await op.after(deps.get());
             if (res.kind === 'unsupported') return set('local-only');
             // Adopt the server's revision with an EMPTY base, so the whole
             // local copy counts as this device's change and goes up as is.
@@ -368,22 +427,23 @@ export function createPrefsSync(deps: PrefsSyncDeps): PrefsSync {
             // this lineage, and keeping a higher one would refuse this very
             // write's successor as a rollback forever.
             deps.records.save(uid, { rev: res.doc.rev, base: EMPTY_NOTE_STATE, maxRev: res.doc.rev });
-            return pushOnce(uid, id);
+            return pushOnce(op);
         }),
-        acceptServer: () => guarded(async (uid, id) => {
-            const res = await deps.get();
+        acceptServer: () => guarded(async op => {
+            const { uid } = op;
+            const res = await op.after(deps.get());
             if (res.kind === 'unsupported') return set('local-only');
             const { rev, blob } = res.doc;
             if (rev === 0) {
                 // Nothing there at all: there is no "server's copy" to take.
                 deps.records.save(uid, { rev: 0, base: EMPTY_NOTE_STATE, maxRev: 0 });
-                return pushOnce(uid, id);
+                return pushOnce(op);
             }
             // Opened WITHOUT the rollback check (that is the point), but it
             // must still be a real, current document for this account.
-            const opened = await open(id, uid, rev, blob, null);
+            const opened = await op.after(open(op, rev, blob, null));
             if ('bad' in opened) return set(opened.bad!);
-            deps.writeLocal(opened.state);
+            deps.writeLocal(opened.state, uid);
             deps.records.save(uid, { rev, base: opened.state, maxRev: rev });
             return set('synced');
         }),
@@ -410,14 +470,38 @@ export function createPrefsSync(deps: PrefsSyncDeps): PrefsSync {
 
 // --- The app's instance + the hook the shell mounts ---------------------------------------
 
+// Moves on every sign-out ON THIS PAGE (logout() drains the hooks). A
+// sign-out in another tab changes the token this page reads, which the uid
+// half of the check sees.
+let signOutEpoch = 0;
+registerLogoutCleanup(() => { signOutEpoch++; });
+
+/** The sign-out epoch the app's instance checks (exported for the tests). */
+export function notesPrefsSignOutEpoch(): number {
+    return signOutEpoch;
+}
+
+/** The app's record store: it refuses to save a record for any account but
+ *  the signed-in one. Defence in depth behind the per-await check — a record
+ *  written after the sign-out scrub is the previous account's labels, in
+ *  plaintext, left behind in a shared browser. */
+export const accountRecordStore = {
+    load: (uid: number): SyncRecord | null => localRecordStore.load(uid),
+    save(uid: number, r: SyncRecord): void {
+        if (currentUserIdFromToken() !== uid) return;
+        localRecordStore.save(uid, r);
+    },
+};
+
 const appSync = createPrefsSync({
     uid: currentUserIdFromToken,
     identity: getActiveIdentity,
+    epoch: notesPrefsSignOutEpoch,
     get: () => getSealedBlob(PREFS_BLOB_NAME),
     put: (rev, blob) => putSealedBlob(PREFS_BLOB_NAME, rev, blob),
     readLocal: () => noteStateOf(getNotesPrefs()),
-    writeLocal: replaceNoteState,
-    records: localRecordStore,
+    writeLocal: (s, uid) => replaceNoteState(s, uid),
+    records: accountRecordStore,
 });
 
 /** Re-read the server's copy now (a live `blob` event, a manual refresh). */

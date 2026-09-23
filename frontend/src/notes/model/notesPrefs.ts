@@ -291,8 +291,13 @@ export function pruneNotesPrefs(liveKeys: ReadonlySet<string>): void {
 
 /** Replace the SYNCED part (colour, labels, archive) with what the account's
  *  sealed blob says — notesPrefsSync.ts's one write path. View and sort are
- *  per device and are left exactly as they are. */
-export function replaceNoteState(state: NotesNoteState): void {
+ *  per device and are left exactly as they are.
+ *
+ *  `expectUid`: the account this state belongs to. When given and it is not
+ *  the one signed in, nothing is written — a sync operation that outlived
+ *  its account must not file that account's labels under the next one. */
+export function replaceNoteState(state: NotesNoteState, expectUid?: number): void {
+    if (expectUid !== undefined && currentUid() !== String(expectUid)) return;
     const p = getNotesPrefs();
     // `times` absent means the account's document predates the setting: keep
     // this device's copy rather than resetting it (notesPrefsSync.ts).
