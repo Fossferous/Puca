@@ -240,8 +240,16 @@ pub async fn device_token(
     // session to the device, so it is what "revoke device" marks. A token whose
     // row failed to insert used to be returned anyway (the failure was only
     // logged) — a session the device's revocation could never reach, which the
-    // first request renewed into a 24 h token sliding for 30 days. A DB fault
-    // is now the endpoint's one refusal (`db_error`); the host retries.
+    // first request renewed into a 24 h token sliding for 30 days.
+    //
+    // A fault HERE is a 503, not `db_error`'s refusal. `db_error` answers like a
+    // bad signature so an anonymous prober cannot tell a DB fault from an
+    // unknown device — but nobody reaches this line without the device's own
+    // key, so there is nothing left to hide from the caller. And the refusal is
+    // not harmless to the host: puca-service's `is_refusal` reads that 400 as
+    // "the server refused this computer", records it in link health and waits
+    // 15 minutes, over what may be a one-second pool timeout. A 5xx puts it on
+    // its one-minute ladder instead. The body stays generic; the detail is logged.
     // `headless`: this session belongs to the host service, not to a client
     // that reads DMs — the v4 rollout gate leaves it out (migration 060).
     sqlx::query("INSERT INTO token_sessions (sid, user_id, device_id, headless) VALUES ($1, $2, $3, TRUE)")
@@ -250,10 +258,16 @@ pub async fn device_token(
         .bind(&payload.device_id)
         .execute(&state.pool)
         .await
-        .map_err(db_error)?;
-    // The mint error carries jsonwebtoken's own text. Same rule as the DB arm:
-    // an unauthenticated caller gets the endpoint's one refusal, the detail goes
-    // to the log. (A row left behind by a failed mint names no token: harmless.)
+        .map_err(|e| {
+            tracing::error!("device_token: could not record the session row: {e}");
+            (StatusCode::SERVICE_UNAVAILABLE, "could not start a session right now; try again".to_string())
+        })?;
+    // The mint error carries jsonwebtoken's own text, so it goes to the log and
+    // the caller gets the endpoint's one refusal. Unlike the row's transient
+    // fault above, a signing failure would be a configuration fault that
+    // retrying every minute cannot cure, so the host's 15-minute refusal wait
+    // is the right pace for it. (A row left behind by a failed mint names no
+    // token: harmless.)
     let token = mint_device_token(user_id, &username, token_version, &sid, &state.jwt_secret)
         .map_err(|e| {
             tracing::error!("device_token mint failed: {e}");
@@ -451,7 +465,16 @@ mod tests {
         assert_eq!(rows_while_down, 0, "the fault really did stop the row");
         match refused {
             Ok(r) => panic!("a device token was issued with no session row behind it (expires_in {})", r.0.expires_in),
-            Err(e) => assert_eq!(e, bad("that device could not be verified"), "the endpoint's one refusal, nothing more"),
+            Err((status, body)) => {
+                // NOT the refusal. The caller just proved it holds the device
+                // key, so a fault after that is a server fault: puca-service's
+                // `is_refusal` reads the 400 + this body as "the server refused
+                // this computer" and waits 15 minutes with a health warning.
+                // A 5xx puts it on the one-minute ladder instead.
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "a fault after the signature is the server's, not a refusal: {body}");
+                assert!(!body.contains("that device could not be verified"), "not the refusal's body: {body}");
+                assert!(!body.to_lowercase().contains("token_sessions"), "no DB detail to the caller: {body}");
+            }
         }
         // Positive control: the same device, the store healthy, gets its token
         // and the row that binds it to the device.
