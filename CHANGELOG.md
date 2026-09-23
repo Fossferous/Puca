@@ -21,7 +21,9 @@ one-line summary; this file is the full story. Versions follow
   pressing Done again on the same draft finishes the note that was saved
   instead of making another. The same holds for *Make a copy*, for pictures
   added to a note, for pictures waiting to sync, and for *Save to Notes* in
-  Púca.
+  Púca. On a server that has not been updated yet, pressing Done again still
+  makes a second note, as it always did, but the two never share pictures, so
+  deleting the extra one can never break the one you keep.
 - **Text typed offline no longer silently replaces newer text from another
   device.** If you edited a note's text with no connection while the same
   note's text was changed on another device, your offline version used to

@@ -531,7 +531,14 @@ back the copy it holds (migration 069, `expect_rev` on
   is sent again and answered with the note or item it already made, instead of
   making a second one. The id says nothing about what you wrote, and the
   server forgets it after a day (server owners:
-  `NOTES_OP_KEY_RETENTION_HOURS`, 0 keeps them). A change sent right after a
+  `NOTES_OP_KEY_RETENTION_HOURS`, 0 keeps them). A note made in the composer,
+  *Make a copy* and *Save to Notes* keep the pictures a lost attempt uploaded
+  (the saved note may name them), and pressing Done again re-sends those same
+  uploads only to a server that recognises the id, and only within 50 minutes
+  — shorter than the shortest window a server can be set to. Otherwise the
+  retry uploads the pictures again: a server that makes a second note must not
+  give two notes the same files, because deleting the extra one and emptying
+  the trash would then delete the pictures of the one you kept. A change sent right after a
   cold start waits for the queue a previous page left behind before it may
   run.
 - **A note's text and its pictures are queued too.** Type a note with no
@@ -1477,7 +1484,10 @@ elsewhere that this device cannot read is left alone, and the save says so).
 A new note whose answer was lost — the connection dropped just as the server
 saved it — says it may or may not have been saved and keeps its picture
 copies; pressing Save again sends the same create again, so the server
-answers with the note it already made rather than making a second.
+answers with the note it already made rather than making a second. The kept
+copies are re-sent only to a server that recognises the create (see
+*Offline*); anywhere else Save again copies the pictures afresh, so two notes
+never share one set of files.
 
 Into a note you ALREADY have there is nothing to undo: the item, or the text
 appended to it, is in a note you keep. So a failure after that point says the

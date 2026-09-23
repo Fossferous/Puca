@@ -17,6 +17,7 @@ import {
     trashPurgeAt, listsDueForClientPurge, toggleFavoriteKeepingHidden, noteFileIds, deleteListForever, setTaskListBody,
     setTaskListAttachments, createTaskListWithContent, bodyBytes, MAX_BODY_BYTES,
     addTaskListAttachments, removeTaskListAttachments, fetchListSidecar, NoteConflictError,
+    HELD_UPLOADS_MAX_AGE_MS, heldUploadsClock, mayReuseHeldUploads,
 } from '../api/listContent';
 import { parkedHref, withoutParked, parseParkedRef } from '../api/parkedMedia';
 import { openSelfField, openListContent, sealSelfField } from '../api/listSeal';
@@ -142,6 +143,33 @@ describe('capability detection does not depend on having lists', () => {
         expect(parseListFeatures({ trash: true, content_rev: true, idempotent_creates: true }))
             .toEqual({ ...NO_LIST_FEATURES, trash: true, contentRev: true, idempotentCreates: true });
         expect(parseListFeatures({ content_rev: 'yes', idempotent_creates: 1 })).toEqual(NO_LIST_FEATURES);
+    });
+});
+
+/**
+ * A retry re-sends a lost create's uploads only to a server that answers it
+ * with the note it already made (api/listContent.ts `mayReuseHeldUploads`).
+ * Anywhere else two notes would name the same files, and binning one would
+ * later destroy the other's pictures.
+ */
+describe('re-sending a lost create’s uploads', () => {
+    const dedupes = { idempotentCreates: true };
+
+    it('only to a server that de-duplicates creates, and only while it surely remembers the key', () => {
+        const held = heldUploadsClock();
+        expect(mayReuseHeldUploads(held, dedupes)).toBe(true);
+        expect(mayReuseHeldUploads(held, { idempotentCreates: false })).toBe(false);
+        expect(mayReuseHeldUploads(held, null)).toBe(false);
+        // Past the shortest key window any server can have (one hour).
+        const old = { ...held, heldAt: held.heldAt - HELD_UPLOADS_MAX_AGE_MS - 1 };
+        expect(mayReuseHeldUploads(old, dedupes)).toBe(false);
+        expect(HELD_UPLOADS_MAX_AGE_MS).toBeLessThan(60 * 60_000);
+    });
+
+    it('a wall clock set BACK does not make an old hold young (the monotonic clock still counts)', () => {
+        const held = heldUploadsClock();
+        const aged = { heldAt: held.heldAt + 24 * 60 * 60_000, heldAtMono: held.heldAtMono - HELD_UPLOADS_MAX_AGE_MS - 1 };
+        expect(mayReuseHeldUploads(aged, dedupes)).toBe(false);
     });
 });
 

@@ -44,7 +44,10 @@ import {
     deleteFiles,
     deleteListForever,
     fetchListFeatures,
+    heldUploadsClock,
+    type HeldUploadsClock,
     listTrashedTaskLists,
+    mayReuseHeldUploads,
     listsDueForClientPurge,
     serverNowFrom,
     setTaskListAttachments,
@@ -172,11 +175,14 @@ function mediaFailureMessage(err: unknown): string {
  * A create the server committed but could not answer looks exactly like one
  * that never arrived, and the composer keeps the draft so the user presses
  * Done again. That second press is the SAME intent: it must carry the SAME
- * op key (migration 070 answers it with the note already made) and the SAME
- * uploads (the first ones may be what that note's sealed sidecar names). So
- * both are held here, per hook, across attempts — never the text itself on
- * the wire: the key is random (api/opKey.ts), and `intent` never leaves this
- * device.
+ * op key (migration 070 answers it with the note already made), and — ONLY
+ * where the server de-duplicates creates and still remembers the key — the
+ * SAME uploads (the first ones may be what that note's sealed sidecar names).
+ * Anywhere else the retry uploads afresh: a server that makes a second note
+ * must not be handed files the first one names (`mayReuseHeldUploads`,
+ * api/listContent.ts, says why). So both are held here, per hook, across
+ * attempts — never the text itself on the wire: the key is random
+ * (api/opKey.ts), and `intent` never leaves this device.
  *
  * The intent covers everything the note would be made from — title, items,
  * dates, text, and WHICH files (by object identity: the draft keeps the same
@@ -184,15 +190,16 @@ function mediaFailureMessage(err: unknown): string {
  * and a new upload, and an earlier create that may have landed is left as a
  * separate note rather than silently re-served in place of the edit.
  */
-interface HeldCreate {
+interface HeldCreate extends Partial<HeldUploadsClock> {
     intent: string;
     key: string;
-    /** What was uploaded for it, once it has been; null until then. */
+    /** What was uploaded for it, once it has been (and when: the clock);
+     *  null until then. */
     refs: TaskAttachmentRef[] | null;
 }
 /** "Make a copy" held the same way: the copy's uploads, note-level and per
  *  item (in `flattenCopyItems` order). */
-interface HeldCopy {
+interface HeldCopy extends Partial<HeldUploadsClock> {
     intent: string;
     key: string;
     noteRefs: TaskAttachmentRef[] | null;
@@ -262,6 +269,18 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
 
     const heldCreate = useRef<HeldCreate | null>(null);
     const heldCopy = useRef<HeldCopy | null>(null);
+    /** May this retry re-send what `held` uploaded? Asks the server what it
+     *  supports only when that is not already known; unreachable = no. */
+    const mayResend = useCallback(async (held: Partial<HeldUploadsClock>): Promise<boolean> => {
+        if (held.heldAt === undefined || held.heldAtMono === undefined) return false;
+        let f: ListFeatures | null;
+        try {
+            f = await qc.fetchQuery({ queryKey: listContentKeys.features, queryFn: fetchListFeatures, staleTime: 10 * 60_000 });
+        } catch {
+            f = null;
+        }
+        return mayReuseHeldUploads({ heldAt: held.heldAt, heldAtMono: held.heldAtMono }, f);
+    }, [qc]);
 
     const lists = useCallback(() => qc.getQueryData<TaskList[]>(keysRef.current.lists), [qc]);
     const isSelfList = useCallback((listId: number) => lists()?.find(l => l.id === listId)?.is_self === true, [lists]);
@@ -402,9 +421,12 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
             : { intent, key: newOpKey(), refs: null };
         heldCreate.current = held;
         let refs: TaskAttachmentRef[];
-        if (held.refs) {
+        if (held.refs && await mayResend(held)) {
             refs = held.refs;   // a retry: the uploads the first attempt made
         } else {
+            // The first attempt — or a retry the server could not answer with
+            // the note it may have made: fresh uploads. The earlier ones are
+            // let go, never deleted (that note, if it exists, names them).
             try {
                 refs = [
                     ...await uploadNoteMedia(photos, drawings, 0, audio),
@@ -417,7 +439,7 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
                 pushMessageToast({ title: mediaFailureText(err) });
                 return null;
             }
-            held.refs = refs;
+            Object.assign(held, { refs }, heldUploadsClock());
         }
         let list: TaskList;
         try {
@@ -449,7 +471,7 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         qc.setQueryData<Task[]>(keysRef.current.tasks(ref), created);
         qc.setQueryData<TaskList[]>(keysRef.current.lists, prev => [...(prev ?? []), { ...list, total_tasks: created.length, completed_tasks: 0 }]);
         return ref;
-    }, [qc, queueContentNote]);
+    }, [qc, queueContentNote, mayResend]);
 
     /**
      * Make the copy. The pictures are re-encrypted FIRST and all-or-nothing:
@@ -488,7 +510,7 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         heldCopy.current = held;
         const itemRefs = new Map<CopyItem, TaskAttachmentRef[]>();
         let noteRefs: TaskAttachmentRef[];
-        if (held.noteRefs && held.itemRefs) {
+        if (held.noteRefs && held.itemRefs && await mayResend(held)) {
             // A retry: the uploads the first attempt made.
             noteRefs = held.noteRefs;
             uploaded.push(...noteRefs);
@@ -510,8 +532,10 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
                 await deleteFiles(fileIdsOf(uploaded));
                 return null;
             }
-            held.noteRefs = noteRefs;
-            held.itemRefs = flat.map(({ item }) => itemRefs.get(item) ?? null);
+            Object.assign(held, {
+                noteRefs,
+                itemRefs: flat.map(({ item }) => itemRefs.get(item) ?? null),
+            }, heldUploadsClock());
         }
         let list: TaskList;
         try {
@@ -584,7 +608,7 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
             pushMessageToast({ title: `The copy is missing ${missing} item${missing === 1 ? '' : 's'} — check it against the original` });
         }
         return ref;
-    }, [qc]);
+    }, [qc, mayResend]);
 
     // Through the outbox: online with nothing queued this simply runs, and
     // with no connection the typed text is kept on this device and replayed.

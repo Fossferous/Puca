@@ -25,7 +25,17 @@ import {
     discardCopies,
 } from '../api/captureToNote';
 import { isUndecryptable } from '../api/decryptMarkers';
-import { NoteConflictError, addTaskListAttachments, createTaskListWithContent, fetchListFeatures, setTaskListBody } from '../api/listContent';
+import {
+    type HeldUploadsClock,
+    type ListFeatures,
+    NoteConflictError,
+    addTaskListAttachments,
+    createTaskListWithContent,
+    fetchListFeatures,
+    heldUploadsClock,
+    mayReuseHeldUploads,
+    setTaskListBody,
+} from '../api/listContent';
 import {
     type TaskAttachmentRef,
     type TaskList,
@@ -94,6 +104,8 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
     // A one-line message reads as an item; several lines are the note's text.
     const [shape, setShape] = useState<Shape>(() => (captureTextFromMessage(content).includes('\n') ? 'text' : 'item'));
 
+    /** What the server said it supports, for `save` (null = not known). */
+    const featuresRef = useRef<ListFeatures | null>(null);
     useEffect(() => {
         let cancelled = false;
         void (async () => {
@@ -103,6 +115,7 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
             ]);
             if (cancelled) return;
             setLists(ls);
+            featuresRef.current = features;
             setAttachmentsSupported(!!features?.attachments);
             setCopyPictures(!!features?.attachments);
         })();
@@ -165,11 +178,14 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
      * before it answers, and its sealed sidecar names the copies. So those
      * copies are kept, and pressing Save again is the SAME intent — it
      * re-sends the same random create key (api/opKey.ts; the server answers
-     * with the note it already made) and the same copies. Anything that
+     * with the note it already made), and the same copies ONLY where the
+     * server de-duplicates creates and still remembers the key. Anywhere
+     * else it copies afresh: a server that makes a second note must not be
+     * handed files the first names (`mayReuseHeldUploads`). Anything that
      * changes what would be written (the target, the shape, the pictures) is
      * a new intent with a new key. `intent` never leaves this device.
      */
-    const heldNew = useRef<{ intent: string; key: string; copies: TaskAttachmentRef[] } | null>(null);
+    const heldNew = useRef<({ intent: string; key: string; copies: TaskAttachmentRef[] } & HeldUploadsClock) | null>(null);
 
     const save = async () => {
         if (target === null || saving) return;
@@ -202,9 +218,12 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
             const title = captureTitle(body);
             if (target === 'new') {
                 const intent = JSON.stringify([shape, body, wanted.map(r => r.href)]);
-                const held = heldNew.current?.intent === intent ? heldNew.current : null;
+                const prior = heldNew.current?.intent === intent ? heldNew.current : null;
+                const held = prior && mayReuseHeldUploads(prior, featuresRef.current) ? prior : null;
                 copied = held ? held.copies : wanted.length ? await copyRefsIntoMyNote(wanted, existing) : [];
-                const hold = held ?? { intent, key: newOpKey(), copies: copied };
+                // Not re-sending the copies still keeps the KEY: where the
+                // server remembers it, it answers with the note it made.
+                const hold = held ?? { intent, key: prior?.key ?? newOpKey(), copies: copied, ...heldUploadsClock() };
                 heldNew.current = hold;
                 let created: TaskList;
                 try {

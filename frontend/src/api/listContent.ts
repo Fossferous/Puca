@@ -63,14 +63,14 @@ export interface ListFeatures {
     /** Migration 070: a create may carry a random id, so a create whose
      *  answer was lost is not made twice.
      *
-     *  DELIBERATELY NOT GATED ON, unlike every other flag here. The key is a
-     *  short random field an older server drops on the floor, so sending it
-     *  unconditionally is byte-for-byte the old behaviour there and needs no
-     *  probe; gating would only add a way to stop sending it. It is parsed
-     *  and advertised so an operator (and the walk) can see whether the
-     *  server they are on de-duplicates creates — the server's matching
-     *  `op_key` entry in GET /task-features says the same for the item
-     *  routes. If a reader is ever added, it must not be "skip the key". */
+     *  The KEY is deliberately not gated on it, unlike every other flag
+     *  here. It is a short random field an older server drops on the floor,
+     *  so sending it unconditionally is byte-for-byte the old behaviour there
+     *  and needs no probe; gating would only add a way to stop sending it.
+     *  The one reader is `mayReuseHeldUploads` below: a retry re-sends the
+     *  uploads an earlier attempt made only to a server that de-duplicates
+     *  (the server's matching `op_key` entry in GET /task-features says the
+     *  same for the item routes). No reader may become "skip the key". */
     idempotentCreates: boolean;
 }
 
@@ -112,6 +112,50 @@ export function parseListFeatures(raw: unknown, receivedAt: number = Date.now())
 /** The server's "now", or null when the server has not told us its clock. */
 export function serverNowFrom(features: Pick<ListFeatures, 'serverClockOffsetMs'>, localNow: number = Date.now()): number | null {
     return features.serverClockOffsetMs === null ? null : localNow + features.serverClockOffsetMs;
+}
+
+/**
+ * RE-SENDING A CREATE'S UPLOADS. A create whose answer was lost keeps its
+ * uploads (the server may have made the note, and its sealed sidecar names
+ * them) and its key. Whether the user's retry may send those SAME uploads
+ * again depends on whether the server will answer it with the note it
+ * already made:
+ *  - a server that does not de-duplicate creates (older than 070) makes a
+ *    SECOND note. Two notes naming the same files is a delayed loss: binning
+ *    the duplicate and emptying the trash deletes the files, and the note
+ *    that was kept loses its pictures for good;
+ *  - a 070 server forgets a key after NOTES_OP_KEY_RETENTION_HOURS (at least
+ *    one hour, whatever the operator sets; 0 = never), and then does the same.
+ * So the uploads are re-sent only when the server says it de-duplicates AND
+ * the hold is younger than the shortest window any server can have. Anything
+ * else re-uploads — and deletes nothing, since the first attempt's uploads
+ * may still be named. The KEY is kept regardless: where the server still has
+ * it, it answers with the note it already made and the fresh uploads are
+ * merely unused.
+ *
+ * Why the hold's age bounds the key's: every note that could name the held
+ * uploads was created by a request sent AFTER they were held, and its key
+ * row is no older than that request — so a hold younger than an hour has no
+ * key row older than an hour. Measured on both clocks, so neither a wall
+ * clock set back nor a monotonic clock paused through sleep shortens it.
+ */
+export const HELD_UPLOADS_MAX_AGE_MS = 50 * 60_000;
+
+export interface HeldUploadsClock { heldAt: number; heldAtMono: number }
+
+const monoNow = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+/** Stamp a hold as made now. */
+export function heldUploadsClock(): HeldUploadsClock {
+    return { heldAt: Date.now(), heldAtMono: monoNow() };
+}
+
+/** May a retry re-send the uploads held since `held`? See above. `features`
+ *  null = not known, which is a no. */
+export function mayReuseHeldUploads(held: HeldUploadsClock, features: Pick<ListFeatures, 'idempotentCreates'> | null): boolean {
+    if (features?.idempotentCreates !== true) return false;
+    const age = Math.max(Date.now() - held.heldAt, monoNow() - held.heldAtMono);
+    return age >= 0 && age < HELD_UPLOADS_MAX_AGE_MS;
 }
 
 /** What the server supports. 404/405 = a server older than 065 (the path

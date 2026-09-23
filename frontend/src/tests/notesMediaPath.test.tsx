@@ -78,6 +78,7 @@ import { nextAudioName } from '../api/noteMedia';
 import { ApiError, markNotSent } from '../api/client';
 import { OP_KEY_SHAPE } from '../api/opKey';
 import { NoteConflictError } from '../api/listConflict';
+import { NO_LIST_FEATURES } from '../api/listContent';
 
 const LISTS_KEY = ['notes', 'lists'];
 const keys = { lists: LISTS_KEY, tasks: (ref: NoteRef) => ['notes', 'tasks', ref.kind, ref.id] };
@@ -88,11 +89,14 @@ const photo = () => new File(['bytes'], 'plane.png', { type: 'image/png' });
 
 let root: Root | null = null;
 let onLine = true;
+/** Whether the fixture's server de-duplicates creates (migration 070). */
+let serverDedupes = true;
 let spy: ReturnType<typeof vi.spyOn> | null = null;
 
 async function actionsFor(): Promise<ListContentActions> {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false, enabled: false } } });
     qc.setQueryData<TaskList[]>(LISTS_KEY, [list]);
+    qc.setQueryData(['notes', 'features'], { ...NO_LIST_FEATURES, idempotentCreates: serverDedupes });
     let got: ListContentActions | null = null;
     function Harness() {
         const a = useListContentActions(keys);
@@ -112,6 +116,10 @@ async function actionsFor(): Promise<ListContentActions> {
 beforeEach(() => {
     vi.clearAllMocks();
     onLine = true;
+    serverDedupes = true;
+    // A once-value a failing test left unconsumed must not leak into the next.
+    H.uploadNoteMedia.mockReset();
+    H.resealRefs.mockReset();
     H.uploadNoteMedia.mockResolvedValue([uploaded]);
     H.sealNoteMedia.mockResolvedValue([sealed]);
     H.sendNoteOp.mockResolvedValue({ queued: true });
@@ -267,6 +275,48 @@ describe('a note whose create answer was lost', () => {
         expect(refsOf(1)).toEqual(refsOf(0));
     });
 
+    /**
+     * Re-sending the SAME uploads is only safe where the server answers the
+     * retry with the note it already made. A server older than 070 ignores
+     * the key and makes a second note: both would then name the same files,
+     * and deleting either one (a duplicate, found and binned) would destroy
+     * the other's pictures when the trash is emptied. So there the retry
+     * uploads afresh — the old behaviour — and still deletes nothing.
+     */
+    it('on a server that cannot de-duplicate creates, the retry uploads AFRESH (two notes never share files)', async () => {
+        serverDedupes = false;
+        const second = { href: 'sovereign-enc:up2?k=K&m=image%2Fpng', name: 'plane.png' };
+        H.uploadNoteMedia.mockResolvedValueOnce([uploaded]).mockResolvedValueOnce([second]);
+        const c = await actionsFor();
+        const extra = { photos: [photo()] };
+        H.createTaskListWithContent.mockRejectedValueOnce(lost());
+        expect(await c.createContentNote('Trip', [], extra)).toBeNull();
+        expect(await c.createContentNote('Trip', [], extra)).not.toBeNull();
+        expect(H.uploadNoteMedia).toHaveBeenCalledTimes(2);
+        expect(refsOf(1)).toEqual([second]);
+        // Neither attempt's uploads are deleted: the first may be named.
+        expect(H.deleteFiles).not.toHaveBeenCalled();
+    });
+
+    it('...and neither is a hold older than the server can still remember its key', async () => {
+        const second = { href: 'sovereign-enc:up2?k=K&m=image%2Fpng', name: 'plane.png' };
+        H.uploadNoteMedia.mockResolvedValueOnce([uploaded]).mockResolvedValueOnce([second]);
+        const c = await actionsFor();
+        const extra = { photos: [photo()] };
+        H.createTaskListWithContent.mockRejectedValueOnce(lost());
+        expect(await c.createContentNote('Trip', [], extra)).toBeNull();
+        const now = Date.now();
+        const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 2 * 60 * 60_000);
+        try {
+            expect(await c.createContentNote('Trip', [], extra)).not.toBeNull();
+        } finally { clock.mockRestore(); }
+        expect(H.uploadNoteMedia).toHaveBeenCalledTimes(2);
+        expect(refsOf(1)).toEqual([second]);
+        // The key is kept: if the server still has it, it answers with the
+        // note it made (the fresh uploads are then merely unused).
+        expect(keyOf(1)).toBe(keyOf(0));
+    });
+
     it('a 5xx from a gateway after the send is treated the same way', async () => {
         const c = await actionsFor();
         H.createTaskListWithContent.mockRejectedValueOnce(new ApiError('Bad gateway', 502));
@@ -323,6 +373,21 @@ describe('a note whose create answer was lost', () => {
         expect(keyOf(0)).toMatch(OP_KEY_SHAPE);
         expect(keyOf(1)).toBe(keyOf(0));
         expect(refsOf(1)).toEqual([uploaded]);
+    });
+
+    it('"Make a copy" on a server that cannot de-duplicate creates re-copies for the retry', async () => {
+        serverDedupes = false;
+        const src = { href: 'sovereign-enc:src1?k=K&m=image%2Fpng', name: 'src.png' };
+        const second = { href: 'sovereign-enc:up2?k=K&m=image%2Fpng', name: 'src.png' };
+        H.resealRefs.mockResolvedValueOnce([uploaded]).mockResolvedValueOnce([second]);
+        const plan = { title: 'Trip', body: 'text', noteRefs: [src], items: [], files: 1 };
+        const c = await actionsFor();
+        H.createTaskListWithContent.mockRejectedValueOnce(lost());
+        expect(await c.createNoteFromPlan(plan)).toBeNull();
+        expect(await c.createNoteFromPlan({ ...plan })).not.toBeNull();
+        expect(H.resealRefs).toHaveBeenCalledTimes(2);
+        expect(refsOf(1)).toEqual([second]);
+        expect(H.deleteFiles).not.toHaveBeenCalled();
     });
 
     it('POSITIVE CONTROL: "Make a copy" refused outright deletes its copies', async () => {
