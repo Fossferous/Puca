@@ -18,7 +18,7 @@
  * that most needed clearing, and it was the one left behind.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { logout, softExpireSession, REMEMBER_ME_KEY } from '../api/auth';
+import { logout, softExpireSession, REMEMBER_ME_KEY, STAY_SIGNED_IN_KEY } from '../api/auth';
 
 // setup.ts replaces localStorage with vi.fn() stubs; track a real backing store
 // so we can assert on what survived each call.
@@ -92,5 +92,33 @@ describe('logout clears the remember-me credentials', () => {
         expect(() => logout()).not.toThrow();
         expect(store.auth_token).toBeUndefined();
         expect(store[REMEMBER_ME_KEY]).toBeUndefined();
+    });
+});
+
+/**
+ * The one sign-in key logout() must NOT clear: Púca Notes' "Stay signed in on
+ * this device" answer. It holds no account and no credential, only what this
+ * device's owner said last time — clear it and the next sign-in form silently
+ * re-arms the choice they had turned down. Asserted beside the token and the
+ * remember-me blob going, so a logout() that cleared nothing at all cannot
+ * pass it.
+ */
+describe('logout keeps the stay-signed-in device preference', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+    });
+
+    it('an unticked answer survives a sign-out, while the session does not', () => {
+        const store = useBackingStore({
+            auth_token: 'jwt-here',
+            [REMEMBER_ME_KEY]: btoa(JSON.stringify({ u: 'alice', p: 'hunter2' })),
+            [STAY_SIGNED_IN_KEY]: 'false',
+        });
+
+        logout();
+
+        expect(store.auth_token).toBeUndefined();
+        expect(store[REMEMBER_ME_KEY]).toBeUndefined();
+        expect(store[STAY_SIGNED_IN_KEY]).toBe('false');
     });
 });

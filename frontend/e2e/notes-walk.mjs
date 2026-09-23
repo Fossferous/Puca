@@ -2678,19 +2678,113 @@ await page2.waitForURL('**/login', { timeout: 8000 }).then(() => ck('sign out: t
 await page2.close();
 
 // ---- 14. Sign in from Notes' own form ------------------------------------------------------------
-await page.fill('#username', username);
-await page.fill('#password', password);
-await page.click('.login-button');
-await page.waitForSelector('.notes-app', { timeout: 20000 });
-await page.waitForSelector('.notes-card', { timeout: 15000 });
+// "Stay signed in on this device" rides this form: measured on the TOKEN the
+// server actually minted, not on the checkbox. The ticked sign-in and the
+// cleared one below read the same claim through the same code, so each is the
+// other's control — a server that ignored the request mints 24 h for both and
+// the ticked check fails; a client that always asked mints 30 days for both
+// and the cleared one fails.
+const stayBox = '#stay-signed-in';
+/** The session token's lifetime as the server minted it, read in-page from
+ *  the payload (base64url). No `iat` in these claims, so: exp - now. */
+const tokenLife = pg => pg.evaluate(() => {
+    const t = localStorage.getItem('auth_token');
+    if (!t || t.split('.').length !== 3) return null;
+    const b = t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const p = JSON.parse(atob(b + '='.repeat((4 - b.length % 4) % 4)));
+    const left = p.exp - Date.now() / 1000;
+    return { days: left / 86400, hours: left / 3600, ls: p.ls };
+});
+const lifeOf = l => l ? `${l.days.toFixed(2)} days (${l.hours.toFixed(1)} h), ls=${l.ls}` : 'no token';
+/** Sign in through the form and hand back the step-2 body's KEYS (values
+ *  stay out of the log: one of them is the password proof). */
+async function notesSignIn(pg) {
+    await pg.fill('#username', username);
+    await pg.fill('#password', password);
+    const step2 = pg.waitForRequest(rq => rq.url().endsWith('/auth/login/step2') && rq.method() === 'POST', { timeout: 20000 });
+    await pg.click('.login-button');
+    const body = await step2.then(rq => rq.postDataJSON(), () => null);
+    await pg.waitForSelector('.notes-app', { timeout: 20000 });
+    await pg.waitForSelector('.notes-card', { timeout: 15000 });
+    return body;
+}
+/** Account menu -> Sign out -> back on the login card, the revoke settled. */
+async function notesSignOut(pg) {
+    await pg.click('button[aria-label="Account and settings"]');
+    await pg.waitForSelector('.notes-menu', { timeout: 5000 });
+    await pg.getByRole('button', { name: 'Sign out', exact: true }).click();
+    await pg.waitForSelector('.login-card', { timeout: 10000 });
+    await sleep(1500);   // as above: let the device revoke finish before the next sign-in
+}
+ck('stay signed in: the row is on Notes\' sign-in, ticked by default',
+    await page.locator(stayBox).count() === 1 && await page.locator(stayBox).isChecked(),
+    await page.locator(stayBox).count() === 1 ? `checked=${await page.locator(stayBox).isChecked()}` : 'no checkbox');
+// In a browser, Notes and Púca share one origin and one token, so the long
+// session is Púca's too here: the line under the box has to say so, and say
+// "once a month" (a 30-day token), not a year without a visit.
+const stayHint = await page.locator('#stay-signed-in-hint').textContent({ timeout: 5000 }).catch(() => null);
+ck('stay signed in: in a browser the hint says Púca stays signed in too, if used monthly',
+    !!stayHint && stayHint.includes('to Notes and to Púca') && stayHint.includes('at least once a month'), JSON.stringify(stayHint));
+const longBody = await notesSignIn(page);
 ck('sign in: Notes signs in with the Púca account and the notes are back', await page.locator('.notes-card').count() >= 1);
+ck('stay signed in: ticked, the step-2 request asks for it', longBody?.stay_signed_in === true, longBody ? `keys=${Object.keys(longBody).sort().join(',')}` : 'no step-2 request seen');
+const longLife = await tokenLife(page);
+ck('stay signed in: ticked, the server minted a ~30-day token that says ls:true',
+    !!longLife && longLife.days >= 29 && longLife.days <= 31 && longLife.ls === true, lifeOf(longLife));
 // Colour and labels follow the ACCOUNT now (a sealed blob): the sign-out
 // scrubbed this browser's copy, and signing back in brings them back.
 const kept = await page.waitForSelector('.notes-card:has-text("Groceries") .notes-chip:has-text("Errands")', { timeout: 10000 }).then(() => true, () => false);
 ck('sign in: labels survive a sign-out and sign-in (synced, not device-local)', kept);
 ck('sign in: the colour came back too', await page.locator('.notes-card[data-color="sage"]').count() >= 1);
 await shot('signed-in-again');
+
+// The negative control, in the same walk: sign out, CLEAR the box, sign in.
+await notesSignOut(page);
+await page.locator(stayBox).uncheck({ timeout: 5000 }).catch(e => console.log('[walk] untick:', String(e).slice(0, 200)));
+const shortBody = await notesSignIn(page);
+ck('stay signed in: cleared, the step-2 request carries no stay_signed_in at all',
+    !!shortBody && !('stay_signed_in' in shortBody), shortBody ? `keys=${Object.keys(shortBody).sort().join(',')}` : 'no step-2 request seen');
+const shortLife = await tokenLife(page);
+ck('stay signed in: cleared, the ordinary ~24-hour token and no ls (the control)',
+    !!shortLife && shortLife.hours >= 23 && shortLife.hours <= 25 && shortLife.ls !== true, lifeOf(shortLife));
+// The answer belongs to the DEVICE: it must survive the real sign-out path
+// (logout() clears the remember-me blob beside it, and must not clear this).
+await notesSignOut(page);
+const remembered = { checked: await page.locator(stayBox).isChecked({ timeout: 5000 }).catch(() => null), stored: await page.evaluate(() => localStorage.getItem('pucaStaySignedIn')) };
+ck('stay signed in: a cleared box survives a sign-out (a device preference)', remembered.checked === false && remembered.stored === 'false', JSON.stringify(remembered));
+await notesSignIn(page);   // as it stands (cleared): the rest of the walk runs on an ordinary session
+ck('stay signed in: signed back in for the rest of the walk', await page.locator('.notes-card').count() >= 1);
 ck('desktop: no page errors', errors.length === 0, errors[0]);
+
+// The row on a phone (§5): a fresh context, so the card is the signed-out
+// one a new device sees. The WHOLE row toggles the box (a tap on its text and
+// one at its far end), it is a 44px target, and its text is 16px.
+{
+    const pctx = await browser.newContext({ ...devices['iPhone 13'], defaultBrowserType: undefined, baseURL });
+    const p = await pctx.newPage();
+    watch(p);
+    await p.goto('/notes/');
+    await p.waitForSelector('.login-card', { timeout: 15000 });
+    const row = await p.evaluate(() => {
+        const r = document.querySelector('.notes-stay-row')?.getBoundingClientRect();
+        const txt = document.querySelector('.notes-stay-row .checkbox-text');
+        const hint = document.querySelector('.notes-stay-hint')?.getBoundingClientRect();
+        return r && txt && hint ? { h: r.height, w: r.width, right: r.right, textPx: parseFloat(getComputedStyle(txt).fontSize),
+            hintInside: hint.left >= 0 && hint.right <= innerWidth, vw: innerWidth, scrolls: document.documentElement.scrollWidth > innerWidth + 1 } : null;
+    });
+    ck('phone sign-in: the stay row is a ≥44px tap target', !!row && row.h >= 44 - 0.5, row ? `${Math.round(row.w)}x${Math.round(row.h)}` : 'no row');
+    ck('phone sign-in: the row text is ≥16px', !!row && row.textPx >= 16, row ? `${row.textPx}px` : 'no row');
+    ck('phone sign-in: the card and its hint fit the width (no sideways scroll)', !!row && row.hintInside && !row.scrolls, JSON.stringify(row));
+    ck('phone sign-in: ticked by default on a new device', await p.locator(stayBox).isChecked({ timeout: 5000 }).catch(() => false));
+    await p.tap('.notes-stay-row .checkbox-text', { timeout: 5000 }).catch(e => console.log('[walk] text tap:', String(e).slice(0, 200)));
+    const afterText = await p.locator(stayBox).isChecked({ timeout: 5000 }).catch(() => null);
+    const rb = await p.locator('.notes-stay-row').boundingBox({ timeout: 5000 }).catch(() => null);
+    if (rb) await p.touchscreen.tap(rb.x + rb.width - 4, rb.y + rb.height / 2);
+    const afterEnd = await p.locator(stayBox).isChecked({ timeout: 5000 }).catch(() => null);
+    ck('phone sign-in: a tap on the text, then one at the row\'s far end, each toggle the box', afterText === false && afterEnd === true, `after text tap=${afterText}, after far-end tap=${afterEnd}`);
+    await shotOf(p)('phone-signin-stay-row');
+    await pctx.close();
+}
 
 /** Is the element's centre really showing IT (not a drawer or scrim on top)?
  *  Defined here because both passes use it, desktop and phone alike. */

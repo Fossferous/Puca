@@ -6,6 +6,37 @@ one-line summary; this file is the full story. Versions follow
 
 ## Unreleased
 
+### Added
+- **Stay signed in on this device.** Púca Notes' own sign-in now has a tick
+  box, on by default, that keeps this device signed in for up to a year rather
+  than a day, as long as it is used at least once a month. On the Notes phone
+  app the background reminder check counts as use, so a phone that is switched
+  on can stay signed in for the year even if Notes is never opened. It is what
+  stops the app asking for your password after a weekend with the phone off: until
+  now a session lasted 24 hours and only stretched when you used it, so time
+  away — not inactivity in the app — was what sent you back to the sign-in
+  form. **In a browser it covers Púca too:** Notes and the web app share one
+  sign-in there, so a ticked Notes sign-in keeps Púca in that browser signed
+  in for as long, and the line under the box says so. Clear the box before you
+  sign in on a shared or borrowed computer and that sign-in behaves exactly as
+  before. Sign out ends the session immediately on this device. **To end it
+  from anywhere else — a lost phone, a computer you left signed in — use Sign
+  out of every device, or change your password.** Revoking the device under
+  My Devices does not reach it: Notes never proves a device to the server, so
+  its session belongs to none. The choice is remembered per device, including
+  after you sign out, and an expired session suggests the box only when it is
+  clear.
+
+### Changed
+- **Sessions can be long now, if you ask.** The server understands the new
+  request: a session opened with the box ticked carries a 30-day pass that
+  renews as it is used, up to a year from the day you signed in, after which
+  it asks for your password again. Every session opened without it is
+  unchanged — 24 hours, renewed as you go, one month at the outside. Púca's
+  own sign-in does not offer the box yet: a sign-in there opens the ordinary
+  session, and the option can be adopted later. (In a browser Púca uses
+  whatever session Notes opened, long or not — they share one sign-in.)
+
 ### Fixed
 - **Reminders: on a phone the item text no longer collapses to one character
   per line.** In the Reminders tab — Púca Notes' and the one in Púca's own

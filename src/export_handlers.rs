@@ -411,6 +411,7 @@ mod tests {
             tv: 0,
             sst: 1_700_000_000,
             sid: sid.clone(),
+            ls: false,
         };
 
         // 1. A bare bearer token is refused: no recent password proof.

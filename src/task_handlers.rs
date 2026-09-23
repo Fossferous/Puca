@@ -2498,7 +2498,7 @@ mod db_tests {
         let (id,): (i32,) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id")
             .bind(&name).bind(b"s".as_ref()).bind(b"v".as_ref())
             .fetch_one(pool).await.expect("insert user");
-        Claims { sub: id as UserId, username: name, exp: 0, tv: 0, sst: 1_700_000_000, sid: String::new() }
+        Claims { sub: id as UserId, username: name, exp: 0, tv: 0, sst: 1_700_000_000, sid: String::new(), ls: false }
     }
 
     async fn json_of(r: Response) -> Value {

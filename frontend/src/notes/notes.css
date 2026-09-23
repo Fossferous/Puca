@@ -959,6 +959,35 @@
     line-height: 1.5;
     text-align: center;
 }
+/* "Stay signed in on this device". The row reuses Login.css's .checkbox-label
+   inside a .form-group (whose 0.5rem gap spaces the line under it); only the
+   line and the phone sizes are ours. Login.css is imported by the component,
+   so it can land AFTER this file: every rule that overrides one of its
+   selectors below carries one more class than the rule it overrides. */
+.notes-stay-hint {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text-muted);
+}
+@media (pointer: coarse) and (max-width: 1024px) {
+    /* §5: the whole row is one 44px tap target, and the label beside a real
+       input is 16px — below that iOS zooms the card on focus and the layout
+       does not come back. `align-items: center` keeps the box beside the text
+       rather than at the top of a wrapped line. */
+    .notes-stay-row {
+        min-height: 44px;
+        align-items: center;
+    }
+    .notes-stay-row .checkbox-text { font-size: 16px; }
+    /* (0,3,1) against Login.css's `.checkbox-label input[type="checkbox"]`
+       (0,2,1): at equal weight this measured 18px on a phone, not 22. */
+    .notes-stay-row.checkbox-label input[type="checkbox"] {
+        width: 22px;
+        height: 22px;
+    }
+    .notes-stay-hint { font-size: 13px; }
+}
 
 /* ---------- Loading ----------------------------------------------------------- */
 .notes-loading {

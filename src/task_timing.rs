@@ -272,7 +272,7 @@ mod db_tests {
             .fetch_one(pool)
             .await
             .expect("insert user");
-        let claims = Claims { sub: id as i64, username: name, exp: 0, tv: 0, sst: 1_700_000_000, sid: format!("sid-{tag}") };
+        let claims = Claims { sub: id as i64, username: name, exp: 0, tv: 0, sst: 1_700_000_000, sid: format!("sid-{tag}"), ls: false };
         (id as i64, claims)
     }
 

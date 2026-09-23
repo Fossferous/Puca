@@ -12,7 +12,7 @@
  */
 import { useState, type FormEvent } from 'react';
 import { useLocation } from 'react-router-dom';
-import { login, RetiredKeyFormatError } from '../../api/auth';
+import { login, RetiredKeyFormatError, STAY_SIGNED_IN_KEY } from '../../api/auth';
 import { isNetworkError } from '../../api/client';
 import { isMobile } from '../../api/platform';
 import '../../components/Login.css';
@@ -20,8 +20,31 @@ import '../../components/Login.css';
 /** In the Notes Android shell, "Púca" is the separate Púca app, not a link. */
 const NATIVE = isMobile();
 
+/** What "Stay signed in" buys, as the server does it: the token lives 30 days
+ *  (`LONG_TOKEN_TTL_DAYS`) and renews on use up to a year from the sign-in
+ *  (`LONG_MAX_SESSION_DAYS`) — so it is a month of silence that ends it, not a
+ *  year of it. In a browser, Notes and Púca share one origin and one token
+ *  (docs/NOTES.md, "Sessions: one origin, two pages"), so the long session is
+ *  Púca's there too and the line says so; the phone shell has its own origin
+ *  and nothing to share. */
+const STAY_HINT = NATIVE
+    ? 'This device then stays signed in for up to a year instead of a day, as long as Notes is used at least once a month. Sign out to end it early.'
+    : 'This browser then stays signed in to Notes and to Púca for up to a year instead of a day, as long as it is used at least once a month. Sign out to end it early.';
+
 interface NotesLoginProps {
     onSuccess: () => void;
+}
+
+/** This device's answer to "stay signed in". Absent means yes: the box is
+ *  ticked by default, and only an explicit 'false' turns it off. Storage can
+ *  throw (a locked-down profile), and a checkbox is not worth a blank screen —
+ *  fall back to the default. */
+function readStaySignedIn(): boolean {
+    try {
+        return localStorage.getItem(STAY_SIGNED_IN_KEY) !== 'false';
+    } catch {
+        return true;
+    }
 }
 
 export function NotesLogin({ onSuccess }: NotesLoginProps) {
@@ -31,6 +54,17 @@ export function NotesLogin({ onSuccess }: NotesLoginProps) {
     const [password, setPassword] = useState('');
     const [error, setError] = useState('');
     const [busy, setBusy] = useState(false);
+    const [stay, setStay] = useState(readStaySignedIn);
+
+    /** Remember the choice on the DEVICE, as soon as it is made — not on a
+     *  successful sign-in. Someone who unticks the box and then mistypes their
+     *  password should not have to untick it again. */
+    const chooseStay = (next: boolean) => {
+        setStay(next);
+        try {
+            localStorage.setItem(STAY_SIGNED_IN_KEY, next ? 'true' : 'false');
+        } catch { /* a profile that refuses storage still gets the session it asked for */ }
+    };
 
     const submit = async (e: FormEvent) => {
         e.preventDefault();
@@ -38,7 +72,7 @@ export function NotesLogin({ onSuccess }: NotesLoginProps) {
         setError('');
         setBusy(true);
         try {
-            await login(username.trim(), password);
+            await login(username.trim(), password, { staySignedIn: stay });
             setPassword('');
             onSuccess();
         } catch (err) {
@@ -62,8 +96,13 @@ export function NotesLogin({ onSuccess }: NotesLoginProps) {
             <div className="login-card">
                 <h1 className="login-title">Púca Notes</h1>
                 <p className="login-subtitle">Notes and checklists from your Púca account</p>
+                {/* The tip only while the box is clear. Ticked, the sign-in
+                    below already takes the advice, and when what ended was a
+                    long session (a month unused, its year up, or ended from
+                    another device) repeating it reads as a box that does not
+                    work. */}
                 {expired && (
-                    <p className="login-message">Your session expired. Sign in again to continue — your notes and keys are safe on this device.</p>
+                    <p className="login-message">Your session expired. Sign in again to continue — your notes and keys are safe on this device.{!stay && ' Tick Stay signed in to avoid this.'}</p>
                 )}
                 <form className="login-form" onSubmit={submit}>
                     <div className="form-group">
@@ -91,6 +130,20 @@ export function NotesLogin({ onSuccess }: NotesLoginProps) {
                             required
                             disabled={busy}
                         />
+                    </div>
+                    <div className="form-group notes-stay">
+                        <label className="checkbox-label notes-stay-row" htmlFor="stay-signed-in">
+                            <input
+                                id="stay-signed-in"
+                                type="checkbox"
+                                checked={stay}
+                                onChange={e => chooseStay(e.target.checked)}
+                                disabled={busy}
+                                aria-describedby="stay-signed-in-hint"
+                            />
+                            <span className="checkbox-text">Stay signed in on this device</span>
+                        </label>
+                        <p className="notes-stay-hint" id="stay-signed-in-hint">{STAY_HINT}</p>
                     </div>
                     {error && <div className="error-message" role="alert">{error}</div>}
                     <button type="submit" className="login-button" disabled={busy || !username.trim() || !password}>

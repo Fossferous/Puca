@@ -77,6 +77,14 @@ whether the tool fits your threat model.
 - **Personal notes' sealed fields are not bound to where they are stored.** The operator
   can move or replay your own note text and picture lists between your own notes without
   the client noticing, though never read them (§2, "Can do").
+- **A Púca Notes sign-in stays signed in for up to a year unless you say otherwise.**
+  Notes' sign-in ticks *Stay signed in on this device* by default: the token then lives
+  30 days and renews on use, up to a year from the sign-in, and on the Notes phone app the
+  background reminder check is use. In a browser Notes and Púca share one token, so the web
+  app gets the same session. A copied token is therefore good for up to 30 days, renewable
+  until the year is up, unless the session is ended. From another device that takes *Sign
+  out of every device* or a password change; revoking a device does not reach a Notes
+  session, which proves no device (`docs/NOTES.md`, *Staying signed in*).
 
 ---
 
@@ -113,8 +121,12 @@ by a real client** (see §3 and §4 for what that proviso is doing).
   asks `GET /task-reminders` about once an hour even while it is closed (and
   once more just before a reminder fires), so the operator sees that phone's
   requests, their timing and its IP, and the session keeps renewing while the
-  app is unopened — still bounded by the 30-day cap and killed by *Sign out of
-  every device*. The request carries nothing new: the feed is task ids and due
+  app is unopened — for up to **a year** from the sign-in when it was opened
+  with *Stay signed in on this device*, which Notes' sign-in ticks by default
+  (30 days without it), and killed by *Sign out of every device* or a password
+  change. Revoking the phone under My Devices does NOT end it: Notes never
+  proves a device, so its session is bound to none (`docs/NOTES.md`, *Staying
+  signed in*). The request carries nothing new: the feed is task ids and due
   times, which the server already holds in clear. The copy of the session
   token this needs lives in the app's private storage, excluded from backup
   and device transfer. Nothing about saved places is ever sent (they stay on

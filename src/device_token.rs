@@ -280,6 +280,11 @@ pub fn mint_device_token(
         tv: token_version,
         sst: now,
         sid: sid.to_string(),
+        // Never a "stay signed in" session: a device token is minted for a
+        // MACHINE against its own TTL and its own freshly stamped `sst` (see
+        // this function's doc comment), not for a browser someone ticked a box
+        // in, so the long-session lifetime and cap must not apply to it.
+        ls: false,
     };
     encode(&Header::default(), &claims, &EncodingKey::from_secret(secret.as_bytes()))
         .map_err(|e| format!("token creation failed: {e}"))
