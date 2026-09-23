@@ -1560,7 +1560,20 @@ fn run(
                             // has usually just changed, and the replacement
                             // sizes itself from the next frame.
                             encoder = None;
-                            want_keyframe = true;
+                            // Read BEFORE current_monitor moves: a remap onto
+                            // another screen is a switch (drop the held
+                            // picture, arm the stranded-switch net), a rebuild
+                            // of the same screen keeps its picture.
+                            mark_new_capture(
+                                current_monitor,
+                                target_monitor,
+                                &mut last_frame,
+                                &mut want_keyframe,
+                                &mut switch_started,
+                                &mut stranded_repaints,
+                                &mut stranded_repainted_at,
+                                Instant::now(),
+                            );
                             current_monitor = target_monitor;
                             // Rebuilt against the current enumeration: reset the
                             // self-heal baseline so it does not immediately fire
@@ -1657,8 +1670,9 @@ fn run(
                     // update is not a picture), so the stream froze until the
                     // desktop repainted by itself. The capture can repaint the
                     // pointer on a repeated frame since 0.9.816, so the frame
-                    // is kept and corrected; a frame from an earlier capture
-                    // is left as it is and replaced by the next real one. The
+                    // is kept and corrected. A held frame is always of the
+                    // screen being captured: a switch onto another screen
+                    // drops it (mark_new_capture). The
                     // keyframe makes the correction land on a decodable frame
                     // rather than a delta against a picture the controller no
                     // longer has.
@@ -2651,15 +2665,30 @@ fn should_resend_still(want_keyframe: bool, have_last_frame: bool) -> bool {
 }
 
 /// The bookkeeping for a stream that has just been handed a NEW capture of
-/// `to_monitor`, having shown `from_monitor`: a committed monitor switch.
+/// `to_monitor`, having shown `from_monitor`: a committed monitor switch, or a
+/// capture rebuilt after a display-topology change.
+///
+/// ONTO ANOTHER SCREEN, the held still-frame is a picture of the screen being
+/// LEFT, so it is dropped. Kept, the pump answered the new keyframe on a still
+/// destination with the old screen's picture, counted that as the switch's
+/// first frame, and so disarmed the stranded-switch net (which fires only
+/// while nothing is held): the viewer kept looking at the old screen while
+/// every click landed on the new one. Dropped, a still destination sends
+/// nothing until it presents, and the net armed here provokes that present
+/// at 750 ms (repaint.rs).
+///
+/// ONTO THE SAME SCREEN (a rebuild after a display-mode change; a switch to
+/// the screen already shown never gets this far), the held frame IS the right
+/// picture and the only thing a still screen can feed the rebuilt encoder, so
+/// it is kept and no switch is armed.
 ///
 /// Generic over the held frame so the rule can be tested without a display;
 /// the loop's own variables are passed in, so nothing else about them moves.
 #[allow(clippy::too_many_arguments)]
 fn mark_new_capture<F>(
-    _from_monitor: usize,
-    _to_monitor: usize,
-    _last_frame: &mut Option<F>,
+    from_monitor: usize,
+    to_monitor: usize,
+    last_frame: &mut Option<F>,
     want_keyframe: &mut bool,
     switch_started: &mut Option<Instant>,
     stranded_repaints: &mut u8,
@@ -2667,9 +2696,12 @@ fn mark_new_capture<F>(
     now: Instant,
 ) {
     *want_keyframe = true;
-    *switch_started = Some(now);
-    *stranded_repaints = 0;
-    *stranded_repainted_at = None;
+    if from_monitor != to_monitor {
+        *last_frame = None;
+        *switch_started = Some(now);
+        *stranded_repaints = 0;
+        *stranded_repainted_at = None;
+    }
 }
 
 /// Is the stranded-switch net (the event loop's `NoChange` arm) due to wake
@@ -3806,6 +3838,106 @@ mod tests {
             should_resend_still(true, true),
             "somebody is waiting for a keyframe and we are holding the picture",
         );
+    }
+
+    /// A SWITCH MUST NOT SEND THE SCREEN IT LEFT.
+    ///
+    /// The held still-frame is a picture of the capture it came from. Kept
+    /// across a committed switch, the pump answered the switch's keyframe on a
+    /// still destination screen with the OLD screen's picture (A), counted it
+    /// as the switch's first frame, and so disarmed the stranded-switch net —
+    /// which only fires while nothing is held. The viewer looked at A while
+    /// every click was aimed at B, until B repainted by itself.
+    ///
+    /// Walked here with the loop's own decision functions: the pump's still-
+    /// screen rule (`should_resend_still`) and the net (`stranded_net_due`).
+    #[test]
+    fn a_committed_switch_does_not_resend_the_previous_screens_still() {
+        let t = Instant::now();
+        // A settled stream on screen 0 holding its picture, with a previous
+        // switch's net long finished.
+        let mut last_frame = Some("screen 0's picture");
+        let mut want_keyframe = false;
+        let mut switch_started = None;
+        let mut stranded_repaints = 3u8;
+        let mut stranded_repainted_at = Some(t);
+
+        mark_new_capture(
+            0, 1,
+            &mut last_frame, &mut want_keyframe, &mut switch_started,
+            &mut stranded_repaints, &mut stranded_repainted_at, t,
+        );
+
+        assert!(want_keyframe, "the new screen needs a keyframe");
+        // The pump's still-screen tick on screen 1 (next_frame -> Timeout).
+        assert!(
+            !should_resend_still(want_keyframe, last_frame.is_some()),
+            "a still screen 1 must not be answered with screen 0's picture (held: {last_frame:?})",
+        );
+        // So the tick is NoChange, and the net is what gets screen 1 a picture.
+        let t0 = switch_started.expect("the switch arms the net");
+        assert!(
+            !stranded_net_due(t0, stranded_repainted_at, stranded_repaints, last_frame.is_some(), t),
+            "the net waits its 750 ms before the first try",
+        );
+        assert!(
+            stranded_net_due(
+                t0, stranded_repainted_at, stranded_repaints, last_frame.is_some(),
+                t + Duration::from_millis(750),
+            ),
+            "a still screen 1 must get the net's provoked present at 750 ms \
+             (held: {last_frame:?}, tries so far: {stranded_repaints})",
+        );
+    }
+
+    /// A REBUILD OF THE SAME SCREEN KEEPS ITS PICTURE; A REBUILD ONTO ANOTHER
+    /// SCREEN IS A SWITCH.
+    ///
+    /// RebuildCapture drops the encoder and is mostly a same-screen rebuild
+    /// after a display-mode change. There the held frame IS the right picture
+    /// and the only thing that can feed the new encoder on a still screen —
+    /// dropping it would bring back the ten-second freeze, with no net armed
+    /// to rescue it. When the topology remap lands on a different screen, the
+    /// held frame is the wrong screen's, exactly as in a switch.
+    #[test]
+    fn a_rebuild_keeps_its_still_only_for_the_same_screen() {
+        let t = Instant::now();
+
+        // Same screen: keep the picture, re-send it, no switch.
+        let mut last_frame = Some("screen 2's picture");
+        let mut want_keyframe = false;
+        let mut switch_started = None;
+        let mut stranded_repaints = 0u8;
+        let mut stranded_repainted_at = None;
+        mark_new_capture(
+            2, 2,
+            &mut last_frame, &mut want_keyframe, &mut switch_started,
+            &mut stranded_repaints, &mut stranded_repainted_at, t,
+        );
+        assert!(
+            should_resend_still(want_keyframe, last_frame.is_some()),
+            "a same-screen rebuild must re-send the held picture to the new encoder",
+        );
+        assert_eq!(switch_started, None, "a same-screen rebuild is not a switch");
+
+        // Another screen: exactly the switch rule.
+        let mut last_frame = Some("screen 2's picture");
+        let mut want_keyframe = false;
+        let mut switch_started = None;
+        mark_new_capture(
+            2, 0,
+            &mut last_frame, &mut want_keyframe, &mut switch_started,
+            &mut stranded_repaints, &mut stranded_repainted_at, t,
+        );
+        assert!(
+            !should_resend_still(want_keyframe, last_frame.is_some()),
+            "a rebuild onto screen 0 must not send screen 2's picture",
+        );
+        let t0 = switch_started.expect("a rebuild onto another screen arms the net");
+        assert!(stranded_net_due(
+            t0, stranded_repainted_at, stranded_repaints, last_frame.is_some(),
+            t + Duration::from_millis(750),
+        ));
     }
 
     /// A build that FAILS hands the live capture back, and the caller keeps

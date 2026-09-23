@@ -4,6 +4,18 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+- **Switching screens in remote control shows the new screen, not the old
+  one.** Switching to a screen where nothing was moving could keep showing
+  the screen you had just left, while your clicks already landed on the new
+  one, until something on it happened to redraw. The old picture is no
+  longer sent: the new screen appears as soon as it draws, and a screen that
+  stays completely still is prompted to redraw within about a second. The
+  same holds when a display change moves the session onto a different
+  screen.
+
 ## 0.9.818 — 2026-09-23
 
 Púca Notes: swipe left and right between All notes and each label like Google Tasks' lists, and scroll each like Keep; "Stay signed in on this device" keeps the session alive for up to a year instead of a day; the Reminders tab reads properly on a phone.
