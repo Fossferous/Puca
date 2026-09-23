@@ -4,6 +4,25 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+- **A voice note made with no signal keeps its recording.** Recording a clip
+  in *Take a note…* and pressing Done while offline (or while other changes
+  were still waiting to sync) saved the note without the recording and said
+  nothing; the clip was gone. It is now encrypted on the device and sent with
+  the note when the connection returns, like a photo. A note that is only a
+  recording is called "Voice note" rather than "Untitled note".
+- **A note whose save timed out is no longer made twice, or left with broken
+  pictures.** If the connection dropped just after the server had saved a new
+  note, Notes said it couldn't save it, deleted the uploaded pictures the saved
+  note still pointed to, and pressing Done again made a second copy. Now the
+  pictures are only deleted when the server definitely refused the note, and
+  pressing Done again on the same draft finishes the note that was saved
+  instead of making another. The same holds for *Make a copy*, for pictures
+  added to a note, for pictures waiting to sync, and for *Save to Notes* in
+  Púca.
+
 ## 0.9.818 — 2026-09-23
 
 Púca Notes: swipe left and right between All notes and each label like Google Tasks' lists, and scroll each like Keep; "Stay signed in on this device" keeps the session alive for up to a year instead of a day; the Reminders tab reads properly on a phone.

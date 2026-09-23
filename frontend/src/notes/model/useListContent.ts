@@ -58,7 +58,7 @@ import { ParkedMediaFullError, appParkedStore } from './notesBlobs';
 import { ensureOutboxLoaded, forgetParkedMedia, ops, pendingOutboxCount, sendCreateList, sendCreateTask, sendNoteOp } from './notesOutbox';
 import { newOpKey } from '../../api/opKey';
 import { LISTS_KEY, beginNoteWrite } from './noteBusy';
-import { ApiError } from '../../api/client';
+import { ApiError, isDefiniteRefusal } from '../../api/client';
 import { pushMessageToast } from '../../components/messageToastBus';
 import { pokeTaskReminders } from '../../api/taskReminders';
 import { type NoteRef, cleanQuickItems } from './notesModel';
@@ -166,6 +166,51 @@ function mediaFailureMessage(err: unknown): string {
     return 'Couldn’t add the picture';
 }
 
+/**
+ * THE USER'S OWN RETRY OF A CREATE (finding 4).
+ *
+ * A create the server committed but could not answer looks exactly like one
+ * that never arrived, and the composer keeps the draft so the user presses
+ * Done again. That second press is the SAME intent: it must carry the SAME
+ * op key (migration 070 answers it with the note already made) and the SAME
+ * uploads (the first ones may be what that note's sealed sidecar names). So
+ * both are held here, per hook, across attempts — never the text itself on
+ * the wire: the key is random (api/opKey.ts), and `intent` never leaves this
+ * device.
+ *
+ * The intent covers everything the note would be made from — title, items,
+ * dates, text, and WHICH files (by object identity: the draft keeps the same
+ * File objects across attempts). An edited draft is a new intent: a new key
+ * and a new upload, and an earlier create that may have landed is left as a
+ * separate note rather than silently re-served in place of the edit.
+ */
+interface HeldCreate {
+    intent: string;
+    key: string;
+    /** What was uploaded for it, once it has been; null until then. */
+    refs: TaskAttachmentRef[] | null;
+}
+/** "Make a copy" held the same way: the copy's uploads, note-level and per
+ *  item (in `flattenCopyItems` order). */
+interface HeldCopy {
+    intent: string;
+    key: string;
+    noteRefs: TaskAttachmentRef[] | null;
+    itemRefs: (TaskAttachmentRef[] | null)[] | null;
+}
+
+const objectIds = new WeakMap<object, number>();
+let objectSeq = 0;
+/** A number standing for one File/Blob object, for an intent string. */
+function objectId(o: object): number {
+    let id = objectIds.get(o);
+    if (id === undefined) {
+        id = ++objectSeq;
+        objectIds.set(o, id);
+    }
+    return id;
+}
+
 /** Lists purged this session (a purge must not be retried in a loop). */
 const purgedThisSession = new Set<number>();
 
@@ -214,6 +259,9 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
     const trashedKeys = useMemo(() => new Set((trashData ?? []).map(l => `list:${l.id}`)), [trashData]);
     const keysRef = useRef(keys);
     useEffect(() => { keysRef.current = keys; });
+
+    const heldCreate = useRef<HeldCreate | null>(null);
+    const heldCopy = useRef<HeldCopy | null>(null);
 
     const lists = useCallback(() => qc.getQueryData<TaskList[]>(keysRef.current.lists), [qc]);
     const isSelfList = useCallback((listId: number) => lists()?.find(l => l.id === listId)?.is_self === true, [lists]);
@@ -323,8 +371,18 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         // anything: a note made in the first moments after a reload would
         // otherwise be sent straight to the server, ahead of what the
         // previous page left waiting.
+        const intent = JSON.stringify([
+            title, cleanItems, entries.map(e => e.timing ?? null), body,
+            (extra.photos ?? []).map(objectId), files.map(objectId), (extra.audio ?? []).map(objectId),
+            extra.drawing ? [objectId(extra.drawing.png), extra.drawing.strokes.length] : null,
+            (extra.refs ?? []).map(r => r.href),
+        ]);
         await ensureOutboxLoaded();
         if (!navigator.onLine || pendingOutboxCount() > 0) {
+            // The queue mints its own key, sealed into the op. Whatever an
+            // earlier online attempt of this draft held is let go — not
+            // deleted: it may be what a note that did land names.
+            heldCreate.current = null;
             // Refs that are ALREADY uploaded cannot ride the queue: an
             // `addMedia` op names bytes parked on this device, not files on
             // the server. No caller passes them today; one that ever does is
@@ -336,30 +394,46 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
             }
             return queueContentNote(noteTitle, body, photos, drawings, entries, audio);
         }
-        let refs: TaskAttachmentRef[] = [];
-        try {
-            refs = [
-                ...await uploadNoteMedia(photos, drawings, 0, audio),
-                // Already uploaded and sealed by the caller: they go into the
-                // sidecar as they are, and into the rollback below.
-                ...(extra.refs ?? []),
-            ];
-        } catch (err) {
-            explain('upload failed', err);
-            pushMessageToast({ title: mediaFailureText(err) });
-            return null;
+        // One key for this one note: the SAME on every attempt of this
+        // draft, including the user's own retries (HeldCreate above), and
+        // different for every other.
+        const held: HeldCreate = heldCreate.current?.intent === intent
+            ? heldCreate.current
+            : { intent, key: newOpKey(), refs: null };
+        heldCreate.current = held;
+        let refs: TaskAttachmentRef[];
+        if (held.refs) {
+            refs = held.refs;   // a retry: the uploads the first attempt made
+        } else {
+            try {
+                refs = [
+                    ...await uploadNoteMedia(photos, drawings, 0, audio),
+                    // Already uploaded and sealed by the caller: they go into the
+                    // sidecar as they are, and into the rollback below.
+                    ...(extra.refs ?? []),
+                ];
+            } catch (err) {
+                explain('upload failed', err);
+                pushMessageToast({ title: mediaFailureText(err) });
+                return null;
+            }
+            held.refs = refs;
         }
         let list: TaskList;
-        // One key for this one note, minted here so it is the SAME on every
-        // attempt of this create and different for every other (api/opKey.ts).
-        const noteKey = newOpKey();
         try {
-            list = await createTaskListWithContent(noteTitle, { body: body || undefined, refs }, noteKey);
+            list = await createTaskListWithContent(noteTitle, { body: body || undefined, refs }, held.key);
         } catch (err) {
             explain('create failed', err);
-            await deleteFiles(fileIdsOf(refs));   // nothing names them now
+            // Only a DEFINITE refusal means nothing names the uploads. A lost
+            // answer, a 5xx or a timeout may be a note the server made: its
+            // sealed sidecar names these, and the retry re-sends them.
+            if (isDefiniteRefusal(err)) {
+                if (heldCreate.current === held) heldCreate.current = null;
+                await deleteFiles(fileIdsOf(refs));
+            }
             return null;
         }
+        if (heldCreate.current === held) heldCreate.current = null;   // landed: the next one is new
         const ref: NoteRef = { kind: 'list', id: list.id };
         const created: Task[] = [];
         let timed = false;
@@ -379,8 +453,12 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
 
     /**
      * Make the copy. The pictures are re-encrypted FIRST and all-or-nothing:
-     * if the list create then fails, every upload made for this copy is
-     * deleted again, so a failed copy never bills the owner for orphans.
+     * if the list create is then REFUSED, every upload made for this copy is
+     * deleted again, so a refused copy never bills the owner for orphans. A
+     * create whose answer was LOST keeps them instead — the server may have
+     * made the copy and its sealed sidecar names them — and a second "Make a
+     * copy" of the same note re-sends the same key and the same uploads
+     * (HeldCopy), so the server answers it with the copy it already made.
      * Items are created parents-first so a child lands under the copy's own
      * parent id; a subtree whose parent failed is skipped rather than raised
      * to the top level, and the count is reported.
@@ -394,34 +472,66 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
             return made;
         };
         const flat = flattenCopyItems(plan.items);
+        // What the copy is made FROM. Not an item's schedule: the plan
+        // re-seals it (a fresh uid) every time it is built, so it would make
+        // every attempt a new intent.
+        const intent = JSON.stringify([
+            plan.title, plan.body, plan.noteRefs.map(r => r.href),
+            flat.map(({ item, parent }) => [
+                item.text, item.completed, item.dueAt, item.schedule !== null, item.attachments.map(r => r.href),
+                parent === null ? -1 : flat.findIndex(f => f.item === parent),
+            ]),
+        ]);
+        const held: HeldCopy = heldCopy.current?.intent === intent
+            ? heldCopy.current
+            : { intent, key: newOpKey(), noteRefs: null, itemRefs: null };
+        heldCopy.current = held;
         const itemRefs = new Map<CopyItem, TaskAttachmentRef[]>();
         let noteRefs: TaskAttachmentRef[];
-        try {
-            noteRefs = await reseal(plan.noteRefs);
-            for (const { item } of flat) {
-                if (item.attachments.length > 0) itemRefs.set(item, await reseal(item.attachments));
+        if (held.noteRefs && held.itemRefs) {
+            // A retry: the uploads the first attempt made.
+            noteRefs = held.noteRefs;
+            uploaded.push(...noteRefs);
+            flat.forEach(({ item }, i) => {
+                const refs = held.itemRefs?.[i];
+                if (refs) { itemRefs.set(item, refs); uploaded.push(...refs); }
+            });
+        } else {
+            try {
+                noteRefs = await reseal(plan.noteRefs);
+                for (const { item } of flat) {
+                    if (item.attachments.length > 0) itemRefs.set(item, await reseal(item.attachments));
+                }
+            } catch (err) {
+                if (!explain('copying the pictures failed', err)) {
+                    pushMessageToast({ title: err instanceof Error && err.name === 'TooManyAttachmentsError' ? err.message : 'Couldn’t copy the pictures — check your connection' });
+                }
+                // No create was sent: nothing can name these.
+                await deleteFiles(fileIdsOf(uploaded));
+                return null;
             }
-        } catch (err) {
-            if (!explain('copying the pictures failed', err)) {
-                pushMessageToast({ title: err instanceof Error && err.name === 'TooManyAttachmentsError' ? err.message : 'Couldn’t copy the pictures — check your connection' });
-            }
-            await deleteFiles(fileIdsOf(uploaded));
-            return null;
+            held.noteRefs = noteRefs;
+            held.itemRefs = flat.map(({ item }) => itemRefs.get(item) ?? null);
         }
         let list: TaskList;
         try {
-            list = await createTaskListWithContent(plan.title, { body: plan.body || undefined, refs: noteRefs });
+            list = await createTaskListWithContent(plan.title, { body: plan.body || undefined, refs: noteRefs }, held.key);
         } catch (err) {
-            // Never queued (its uploads could not wait), and nothing names
-            // what was uploaded for it now. A copy is asked for from a menu
-            // with nowhere to report a null, so it says so itself — a
-            // failed copy must never look like a copy that happened.
+            // Never queued (its uploads could not wait). A copy is asked for
+            // from a menu with nowhere to report a null, so it says so itself
+            // — a failed copy must never look like a copy that happened.
             if (!explain('copy failed', err)) {
                 pushMessageToast({ title: 'Couldn’t copy the note — check your connection' });
             }
-            await deleteFiles(fileIdsOf(uploaded));
+            // Only a definite refusal means nothing names the uploads; a lost
+            // answer may be a copy the server made (see above).
+            if (isDefiniteRefusal(err)) {
+                if (heldCopy.current === held) heldCopy.current = null;
+                await deleteFiles(fileIdsOf(uploaded));
+            }
             return null;
         }
+        if (heldCopy.current === held) heldCopy.current = null;   // landed
         const ref: NoteRef = { kind: 'list', id: list.id };
         const created: Task[] = [];
         const newIdOf = new Map<CopyItem, number>();
@@ -649,7 +759,10 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
                 } else {
                     explain('saving the pictures failed', err);
                 }
-                await deleteFiles(fileIdsOf(added));   // nothing names them now
+                // A stale conflict and any other definite refusal wrote
+                // nothing, so nothing names the uploads. A lost answer may
+                // be a sidecar that DID land naming them: keep them.
+                if (isDefiniteRefusal(err)) await deleteFiles(fileIdsOf(added));
                 return false;
             } finally {
                 held();

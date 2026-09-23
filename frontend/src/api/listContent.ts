@@ -12,7 +12,7 @@
  * 5xx) throws, so a caller never mistakes a bad moment for an old server and
  * falls back to the permanent delete.
  */
-import { apiClient, ApiError } from './client';
+import { apiClient, ApiError, markNotSent } from './client';
 import {
     type Task,
     type TaskAttachmentRef,
@@ -230,9 +230,15 @@ export async function createTaskListWithContent(
     content: { body?: string; refs?: TaskAttachmentRef[] },
     opKey?: string,
 ): Promise<TaskList> {
-    const payload: Record<string, string> = { title: await sealSelfField(title) };
-    if (content.body) payload.body = await sealSelfField(content.body);
-    if (content.refs && content.refs.length > 0) payload.attachments = await sealSelfField(serializeTaskAttachments(content.refs));
+    const payload: Record<string, string> = {};
+    try {
+        payload.title = await sealSelfField(title);
+        if (content.body) payload.body = await sealSelfField(content.body);
+        if (content.refs && content.refs.length > 0) payload.attachments = await sealSelfField(serializeTaskAttachments(content.refs));
+    } catch (err) {
+        // Nothing has left this device: the caller may take its uploads back.
+        throw markNotSent(err);
+    }
     // POST /task-lists also accepts `due_at` and `schedule` (migration 068),
     // so a composer that offers a reminder can create a reminding note in ONE
     // request. Nothing offers that yet, so nothing sends them here.

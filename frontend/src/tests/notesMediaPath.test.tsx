@@ -75,6 +75,9 @@ import { setMessageToastSink } from '../components/messageToastBus';
 import type { NoteRef } from '../notes/model/notesModel';
 import type { TaskList } from '../api/tasks';
 import { nextAudioName } from '../api/noteMedia';
+import { ApiError, markNotSent } from '../api/client';
+import { OP_KEY_SHAPE } from '../api/opKey';
+import { NoteConflictError } from '../api/listConflict';
 
 const LISTS_KEY = ['notes', 'lists'];
 const keys = { lists: LISTS_KEY, tasks: (ref: NoteRef) => ['notes', 'tasks', ref.kind, ref.id] };
@@ -234,5 +237,114 @@ describe('a voice note that has to wait for the connection', () => {
         expect(ref).toBeNull();
         expect(H.sendCreateList).not.toHaveBeenCalled();
         expect(toasts.length).toBeGreaterThan(0);
+    });
+});
+
+/**
+ * A create whose ANSWER was lost (finding 4). The server commits before it
+ * answers, and it cannot tell which uploads a sealed sidecar names — so
+ * deleting "our" uploads on any failure broke a note that had in fact been
+ * made, and the user's retry minted a second key and made it twice. Uploads
+ * go only on a DEFINITE refusal, and a retry of the same draft re-sends the
+ * same key and the same uploads, so the server answers it with the note it
+ * already made.
+ */
+describe('a note whose create answer was lost', () => {
+    const lost = () => new TypeError('Failed to fetch');
+    const keyOf = (i: number) => H.createTaskListWithContent.mock.calls[i][2] as string | undefined;
+    const refsOf = (i: number) => (H.createTaskListWithContent.mock.calls[i][1] as { refs?: unknown[] }).refs;
+
+    it('keeps its uploads, and the retry re-sends the SAME key and the SAME uploads', async () => {
+        const c = await actionsFor();
+        const extra = { photos: [photo()] };
+        H.createTaskListWithContent.mockRejectedValueOnce(lost());
+        expect(await c.createContentNote('Trip', [], extra)).toBeNull();
+        expect(H.deleteFiles).not.toHaveBeenCalled();
+        expect(await c.createContentNote('Trip', [], extra)).not.toBeNull();
+        expect(H.uploadNoteMedia).toHaveBeenCalledTimes(1);
+        expect(keyOf(0)).toMatch(OP_KEY_SHAPE);
+        expect(keyOf(1)).toBe(keyOf(0));
+        expect(refsOf(1)).toEqual(refsOf(0));
+    });
+
+    it('a 5xx from a gateway after the send is treated the same way', async () => {
+        const c = await actionsFor();
+        H.createTaskListWithContent.mockRejectedValueOnce(new ApiError('Bad gateway', 502));
+        expect(await c.createContentNote('Trip', [], { photos: [photo()] })).toBeNull();
+        expect(H.deleteFiles).not.toHaveBeenCalled();
+    });
+
+    it('POSITIVE CONTROL: a definite refusal (400) deletes the uploads, and the next try starts afresh', async () => {
+        const c = await actionsFor();
+        const extra = { photos: [photo()] };
+        H.createTaskListWithContent.mockRejectedValueOnce(new ApiError('Nope', 400));
+        expect(await c.createContentNote('Trip', [], extra)).toBeNull();
+        expect(H.deleteFiles).toHaveBeenCalledWith(['up1']);
+        await c.createContentNote('Trip', [], extra);
+        expect(H.uploadNoteMedia).toHaveBeenCalledTimes(2);
+        expect(keyOf(1)).not.toBe(keyOf(0));
+    });
+
+    it('POSITIVE CONTROL: a failure BEFORE anything was sent deletes them too', async () => {
+        const c = await actionsFor();
+        H.createTaskListWithContent.mockRejectedValueOnce(markNotSent(new TypeError('identity locked')));
+        expect(await c.createContentNote('Trip', [], { photos: [photo()] })).toBeNull();
+        expect(H.deleteFiles).toHaveBeenCalledWith(['up1']);
+    });
+
+    it('a draft EDITED between the attempts is a new intent: a new key and a new upload', async () => {
+        const c = await actionsFor();
+        const pic = photo();
+        H.createTaskListWithContent.mockRejectedValueOnce(lost());
+        await c.createContentNote('Trip', [], { photos: [pic], body: 'first' });
+        await c.createContentNote('Trip', [], { photos: [pic], body: 'first, edited' });
+        expect(keyOf(1)).not.toBe(keyOf(0));
+        expect(H.uploadNoteMedia).toHaveBeenCalledTimes(2);
+    });
+
+    it('a create that LANDED is forgotten: the same draft again is a new note', async () => {
+        const c = await actionsFor();
+        const extra = { photos: [photo()] };
+        await c.createContentNote('Trip', [], extra);
+        await c.createContentNote('Trip', [], extra);
+        expect(keyOf(1)).not.toBe(keyOf(0));
+    });
+
+    it('"Make a copy" whose answer was lost keeps its copies and retries with the same key', async () => {
+        const src = { href: 'sovereign-enc:src1?k=K&m=image%2Fpng', name: 'src.png' };
+        H.resealRefs.mockResolvedValue([uploaded]);
+        const plan = { title: 'Trip', body: 'text', noteRefs: [src], items: [], files: 1 };
+        const c = await actionsFor();
+        H.createTaskListWithContent.mockRejectedValueOnce(lost());
+        expect(await c.createNoteFromPlan(plan)).toBeNull();
+        expect(H.deleteFiles).not.toHaveBeenCalled();
+        expect(await c.createNoteFromPlan({ ...plan })).not.toBeNull();
+        expect(H.resealRefs).toHaveBeenCalledTimes(1);
+        expect(keyOf(0)).toMatch(OP_KEY_SHAPE);
+        expect(keyOf(1)).toBe(keyOf(0));
+        expect(refsOf(1)).toEqual([uploaded]);
+    });
+
+    it('POSITIVE CONTROL: "Make a copy" refused outright deletes its copies', async () => {
+        const src = { href: 'sovereign-enc:src1?k=K&m=image%2Fpng', name: 'src.png' };
+        H.resealRefs.mockResolvedValue([uploaded]);
+        const c = await actionsFor();
+        H.createTaskListWithContent.mockRejectedValueOnce(new ApiError('Nope', 413));
+        expect(await c.createNoteFromPlan({ title: 'Trip', body: '', noteRefs: [src], items: [], files: 1 })).toBeNull();
+        expect(H.deleteFiles).toHaveBeenCalledWith(['up1']);
+    });
+
+    it('a picture added to a note whose save answer was lost keeps its upload', async () => {
+        const c = await actionsFor();
+        H.setTaskListAttachments.mockRejectedValueOnce(lost());
+        expect(await c.addNoteMedia(1, [photo()], [])).toBe(false);
+        expect(H.deleteFiles).not.toHaveBeenCalled();
+    });
+
+    it('POSITIVE CONTROL: a picture refused as STALE (nothing written) deletes its upload', async () => {
+        const c = await actionsFor();
+        H.setTaskListAttachments.mockRejectedValueOnce(new NoteConflictError(4, null, null, null));
+        expect(await c.addNoteMedia(1, [photo()], [])).toBe(false);
+        expect(H.deleteFiles).toHaveBeenCalledWith(['up1']);
     });
 });

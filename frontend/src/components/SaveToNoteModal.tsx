@@ -16,7 +16,7 @@
  * the captured line over content the user still has, somewhere, under a key
  * this device has not got yet. See `lockedFor`.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     attachmentRefsInMessage,
     captureTextFromMessage,
@@ -36,6 +36,8 @@ import {
     listTaskLists,
     parseTaskAttachments,
 } from '../api/tasks';
+import { isDefiniteRefusal } from '../api/client';
+import { newOpKey } from '../api/opKey';
 import { CloseIcon } from './Icons';
 import './SaveToNoteModal.css';
 
@@ -132,6 +134,17 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
      */
     const closeIfIdle = useCallback(() => { if (!saving) onClose(); }, [saving, onClose]);
 
+    /**
+     * A new note whose create ANSWER was lost may exist: the server commits
+     * before it answers, and its sealed sidecar names the copies. So those
+     * copies are kept, and pressing Save again is the SAME intent — it
+     * re-sends the same random create key (api/opKey.ts; the server answers
+     * with the note it already made) and the same copies. Anything that
+     * changes what would be written (the target, the shape, the pictures) is
+     * a new intent with a new key. `intent` never leaves this device.
+     */
+    const heldNew = useRef<{ intent: string; key: string; copies: TaskAttachmentRef[] } | null>(null);
+
     const save = async () => {
         if (target === null || saving) return;
         setSaving(true);
@@ -157,17 +170,35 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
             if (existing + wanted.length > MAX_TASK_ATTACHMENTS) {
                 throw new Error(`That note already holds ${existing} of ${MAX_TASK_ATTACHMENTS} pictures.`);
             }
-            copied = wanted.length ? await copyRefsIntoMyNote(wanted, existing) : [];
             const title = captureTitle(body);
             if (target === 'new') {
-                const created = await createTaskListWithContent(title, {
-                    ...(shape === 'text' && body ? { body } : {}),
-                    ...(copied.length ? { refs: copied } : {}),
-                });
+                const intent = JSON.stringify([shape, body, wanted.map(r => r.href)]);
+                const held = heldNew.current?.intent === intent ? heldNew.current : null;
+                copied = held ? held.copies : wanted.length ? await copyRefsIntoMyNote(wanted, existing) : [];
+                const hold = held ?? { intent, key: newOpKey(), copies: copied };
+                heldNew.current = hold;
+                let created: TaskList;
+                try {
+                    created = await createTaskListWithContent(title, {
+                        ...(shape === 'text' && body ? { body } : {}),
+                        ...(copied.length ? { refs: copied } : {}),
+                    }, hold.key);
+                } catch (err) {
+                    // A lost answer may be a note that exists: keep the
+                    // copies for the retry, and say only what is known.
+                    if (!isDefiniteRefusal(err)) {
+                        copied = [];
+                        throw new Error('Couldn’t reach the server, so it may or may not have been saved — press Save again to finish it.');
+                    }
+                    heldNew.current = null;
+                    throw err;
+                }
+                heldNew.current = null;   // landed: the next save is a new note
                 createdId = created.id;
                 if (shape === 'item' && body) await createListTask(created.id, body);
                 saved = created.title;
             } else {
+                copied = wanted.length ? await copyRefsIntoMyNote(wanted, existing) : [];
                 if (shape === 'item' && body) {
                     await createListTask(target, body);
                     landedInExisting = true;
@@ -190,6 +221,8 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
             // broken pictures, under a message that says nothing was kept.
             let orphaned = false;
             if (createdId !== null) {
+                // Undone: a later Save makes a new note under a new key.
+                heldNew.current = null;
                 try { await deleteTaskList(createdId); } catch { orphaned = true; }
             }
             if (copied.length && !orphaned) await discardCopies(copied).catch(() => undefined);

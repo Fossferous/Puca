@@ -66,7 +66,7 @@
 import { useEffect, useSyncExternalStore } from 'react';
 import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { currentUserIdFromToken } from '../../api/auth';
-import { ApiError, isNetworkError } from '../../api/client';
+import { ApiError, isDefiniteRefusal, isNetworkError } from '../../api/client';
 import { getActiveIdentity, openLocal, sealLocal, seedMatchesCurrentAccount, type Identity } from '../../api/e2ee';
 import {
     type NewTaskTiming, type Task, type TaskList, type TaskTabPref, type TaskTabRef, type TaskTimingPatch,
@@ -320,9 +320,13 @@ export async function execOp(op: OpBody, idMap: IdMap, fromQueue: boolean, parke
                     if (op.replacing.length > 0) await deleteFiles(fileIdsOfHrefs(op.replacing));
                 }
             } catch (err) {
-                // Nothing names the uploads now: do not leave them against
-                // the quota (the same rule as uploadNoteMedia).
-                await deleteFiles(fileIdsOf(added));
+                // A DEFINITE refusal wrote nothing, so nothing names the
+                // uploads: do not leave them against the quota (the same
+                // rule as uploadNoteMedia). A lost answer is different — the
+                // server may hold a sidecar naming them, and deleting them
+                // would leave that note a broken picture for good; the op
+                // stays queued, and at worst the retry adds a second copy.
+                if (isDefiniteRefusal(err)) await deleteFiles(fileIdsOf(added));
                 throw err;
             }
             await parked.remove(op.blobIds);

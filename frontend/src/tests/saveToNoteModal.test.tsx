@@ -31,6 +31,8 @@ let addItemFails = false;
 let deleteListFails = false;
 let attachFails = false;
 let copyFails = false;
+/** One create that the server COMMITS but whose answer never arrives. */
+let createAnswerLost = false;
 /** Holds `copyRefsIntoMyNote` open so a save can be observed IN FLIGHT. */
 let copyGate: { promise: Promise<void>; release: () => void } | null = null;
 function holdCopies(): () => void {
@@ -60,6 +62,7 @@ vi.mock('../api/listContent', async (orig) => {
         fetchListFeatures: vi.fn(async () => ({ ...real.NO_LIST_FEATURES, attachments: features.attachments, body: true })),
         createTaskListWithContent: vi.fn(async (title: string, content: unknown) => {
             if (createFails) throw new Error('server said no');
+            if (createAnswerLost) { createAnswerLost = false; throw new TypeError('Failed to fetch'); }
             calls.created.push({ title, content });
             return { id: 99, title } as TaskList;
         }),
@@ -84,6 +87,7 @@ import { SaveToNoteModal } from '../components/SaveToNoteModal';
 import { createTaskListWithContent, setTaskListAttachments, setTaskListBody } from '../api/listContent';
 import { deleteTaskList } from '../api/tasks';
 import { discardCopies } from '../api/captureToNote';
+import { OP_KEY_SHAPE } from '../api/opKey';
 
 const list = (id: number, title: string, attachments: string | null = null, body: string | null = null): TaskList =>
     ({ id, title, created_at: '', total_tasks: 0, completed_tasks: 0, attachments, body }) as TaskList;
@@ -119,6 +123,7 @@ beforeEach(() => {
     deleteListFails = false;
     attachFails = false;
     copyFails = false;
+    createAnswerLost = false;
     copyGate = null;
     lists = [
         list(1, 'Shopping'),
@@ -270,6 +275,31 @@ describe('saving', () => {
         expect(document.querySelector('.save-note-error')!.textContent).toMatch(/server said no/);
         expect(rowNamed('New note')!.className).toContain('picked');
         expect(discardCopies).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * A create whose ANSWER was lost (finding 4): the server may have made the
+     * note, and its sealed sidecar names the copies — so they must not be
+     * deleted, and pressing Save again must re-send the same create key and
+     * the same copies, so the server answers with the note it already made.
+     */
+    it('a new note whose answer was lost keeps its copies, and Save again re-sends the same key and copies', async () => {
+        createAnswerLost = true;
+        const { isClosed } = await mount('look ![a.png](sovereign-enc:SRC?k=K&m=image%2Fpng)');
+        click(rowNamed('New note'));
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        expect(isClosed()).toBe(false);
+        expect(discardCopies).not.toHaveBeenCalled();
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        expect(isClosed()).toBe(true);
+        const { copyRefsIntoMyNote } = await import('../api/captureToNote');
+        expect(copyRefsIntoMyNote).toHaveBeenCalledTimes(1);
+        const [first, second] = vi.mocked(createTaskListWithContent).mock.calls;
+        expect(first[2]).toMatch(OP_KEY_SHAPE);
+        expect(second[2]).toBe(first[2]);
+        expect(second[1]).toEqual(first[1]);
     });
 
     /**

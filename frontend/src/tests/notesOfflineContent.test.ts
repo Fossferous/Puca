@@ -521,6 +521,40 @@ describe('what replay does with parked media', () => {
         expect(h.ran.filter(o => o.k === 'removeMedia')).toHaveLength(1);
     });
 
+    it('an add whose sidecar write was LOST keeps its uploads; one REFUSED frees them (finding 4)', async () => {
+        const up = { href: 'sovereign-enc:upfile?k=K&m=image%2Fjpeg', name: 'a.jpg' };
+        const deleteFiles = vi.fn(async (_ids: string[]) => undefined);
+        const addNoteRefs = vi.fn();
+        const { parked } = parkedHarness();
+        await parked.park([media('a')]);
+        vi.resetModules();
+        vi.doMock('../api/noteMedia', async () => {
+            const real = await vi.importActual<typeof import('../api/noteMedia')>('../api/noteMedia');
+            return { ...real, uploadParkedMedia: vi.fn(async () => [up]), addNoteRefs };
+        });
+        vi.doMock('../api/listContent', async () => {
+            const real = await vi.importActual<typeof import('../api/listContent')>('../api/listContent');
+            return { ...real, deleteFiles };
+        });
+        try {
+            const fresh = await import('../notes/model/notesOutbox');
+            // The answer never came back: the server may hold the sidecar
+            // that names this upload, so deleting it would break the note.
+            addNoteRefs.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+            await expect(fresh.execOp(fresh.ops.addMedia(4, ['a'], [], [], '1 picture'), {}, true, parked)).rejects.toBeInstanceOf(TypeError);
+            expect(deleteFiles).not.toHaveBeenCalled();
+            // POSITIVE CONTROL: a definite refusal wrote nothing, so the
+            // upload is nobody's and goes.
+            addNoteRefs.mockRejectedValueOnce(new ApiError('Forbidden', 403));
+            await expect(fresh.execOp(fresh.ops.addMedia(4, ['a'], [], [], '1 picture'), {}, true, parked)).rejects.toBeInstanceOf(ApiError);
+            expect(deleteFiles.mock.calls.map(c => c[0])).toEqual([['upfile']]);
+        } finally {
+            vi.doUnmock('../api/noteMedia');
+            vi.doUnmock('../api/listContent');
+            vi.resetModules();
+        }
+    });
+
     it('queuedBlobIds names every parked record the queue still depends on', () => {
         const a = ops.addMedia(1, ['x', 'y'], [], [], 'two');
         const b = ops.setBody(1, 'text');
