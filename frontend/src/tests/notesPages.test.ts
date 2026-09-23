@@ -2,12 +2,14 @@
 // and which address a page index means (notes/model/notesPages.ts).
 //
 // DISTRUST GREEN TESTS: the one way this module can fail quietly is by
-// answering "the All page" to everything — index 0, route '/' — which is also
-// its deliberate fallback for an address naming a label that no longer
-// exists. So every case below asserts a page that is NOT All (a non-zero
-// index, a '/label/...' route), and the round-trip test walks every page. A
-// `pageIndexForPath` stubbed to `return 0` or a `routeForIndex` stubbed to
-// `return '/'` fails all of them; only the two fallback cases would pass.
+// answering "the All page" to everything — index 0, route '/', [All] — which
+// is also its deliberate answer for an address naming a label that no longer
+// exists, and for an account with no labels. So EVERY test below asserts at
+// least one page that is NOT All (a non-zero index, a '/label/...' route, a
+// second page), the fallback cases included: each of those carries its
+// positive control in the same test. Stubbed to answer All for everything
+// (pageRoutes -> [All], pageIndexForPath -> 0, routeForIndex -> '/',
+// pagesOnScreen -> [0, 0]), every test in this file fails.
 import { describe, it, expect } from 'vitest';
 import {
     ALL_PAGE_KEY, hasPageForPath, labelRoute, pageDomId, pageIndexForPath, pageRoutes, pagesOnScreen, routeForIndex,
@@ -26,6 +28,8 @@ describe('pageRoutes', () => {
 
     it('with no labels there is one page and nothing to swipe between', () => {
         expect(pageRoutes([])).toHaveLength(1);
+        // ...and it is the LABELS that were missing: one label is two pages.
+        expect(pageRoutes(['Trip']).map(p => p.route)).toEqual(['/', '/label/Trip']);
     });
 
     it('keys are unique and case-folded, so a label named "all" is not the All page', () => {
@@ -55,6 +59,8 @@ describe('pageIndexForPath', () => {
         expect(pageIndexForPath('/', LABELS)).toBe(0);
         expect(pageIndexForPath('/archive', LABELS)).toBe(0);
         expect(pageIndexForPath('/reminders', LABELS)).toBe(0);
+        // The control: the same call on a label address is not 0.
+        expect(pageIndexForPath('/label/Trip', LABELS)).toBe(3);
     });
 
     it('falls back to All for a label address that names no page', () => {
@@ -72,6 +78,10 @@ describe('pageIndexForPath', () => {
         expect(() => pageIndexForPath('/label/%E0%A4%A', LABELS)).not.toThrow();
         expect(pageIndexForPath('/label/%E0%A4%A', LABELS)).toBe(0);
         expect(hasPageForPath('/label/%E0%A4%A', LABELS)).toBe(false);
+        // The raw segment is really what is compared: a label literally named
+        // that (typed by hand) IS found, on its own page.
+        expect(pageIndexForPath('/label/%E0%A4%A', [...LABELS, '%E0%A4%A'])).toBe(4);
+        expect(hasPageForPath('/label/%E0%A4%A', [...LABELS, '%E0%A4%A'])).toBe(true);
     });
 });
 
@@ -124,6 +134,8 @@ describe('pagesOnScreen', () => {
 
     it('a rubber band past the first page is still page 0, not page -1', () => {
         expect(pagesOnScreen(-30, W)).toEqual([0, 0]);
+        // The clamp is at zero only: 30 px in from the start is two pages.
+        expect(pagesOnScreen(30, W)).toEqual([0, 1]);
     });
 
     it('at a FRACTIONAL width, resting on a far page is that page alone', () => {
@@ -139,6 +151,8 @@ describe('pagesOnScreen', () => {
 
     it('no width yet (not laid out) answers nothing rather than dividing by zero', () => {
         expect(pagesOnScreen(100, 0)).toBeNull();
+        // The control: the same offset with a width is a real answer.
+        expect(pagesOnScreen(W + 100, W)).toEqual([1, 2]);
     });
 });
 
