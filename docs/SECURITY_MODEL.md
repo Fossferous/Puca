@@ -83,7 +83,10 @@ whether the tool fits your threat model.
   30 days and renews on use, up to a year from the sign-in, and on the Notes phone app the
   background reminder check is use. In a browser Notes and Púca share one token, so the web
   app gets the same session. A copied token is therefore good for up to 30 days, renewable
-  until the year is up, unless the session is ended. From another device that takes *Sign
+  until the year is up, unless the session is ended. A renewal never extends a token past
+  the year: its expiry is clamped to it. (The one exception is transitional: a token that a
+  server from before that clamp renewed in the session's last month keeps the expiry it was
+  given, at most 30 days past the year.) From another device, ending the session takes *Sign
   out of every device* or a password change; revoking a device does not reach a Notes
   session, which proves no device (`docs/NOTES.md`, *Staying signed in*).
 

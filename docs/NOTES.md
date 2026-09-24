@@ -654,7 +654,10 @@ phone that was off for a weekend comes back to the sign-in form however much it
 was used before. With the box ticked it opens straight into the notes. Even then
 a device that sends no request for more than 30 days asks again — the year is
 the outer limit for a device that keeps coming back, after which the password is
-asked for whatever the box says. **On the Notes phone app the background
+asked for whatever the box says. It is a hard limit: a renewal in the last month
+only extends the token up to the year, never past it (and the same holds for an
+ordinary session's 30 days). An expired token is never renewed, even by a
+request that the server still accepts in the minute after expiry. **On the Notes phone app the background
 refresh counts as coming back** (*Background refresh* under *The Android app*):
 each `GET /task-reminders` it sends renews a token more than four hours old, so
 a phone that is switched on and signed in can stay signed in for the whole year

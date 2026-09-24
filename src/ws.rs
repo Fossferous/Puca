@@ -4432,10 +4432,12 @@ pub fn create_token_with_start(
     // token's lifetime and is stamped into the claims so renewal can carry it
     // forward — see crate::auth::Claims::ls for what it does and does not
     // change (revocation: nothing).
-    let expiration = Utc::now()
-        .checked_add_signed(chrono::Duration::seconds(crate::auth::token_ttl_secs(long)))
-        .expect("valid timestamp")
-        .timestamp();
+    //
+    // A full TTL from now, clamped to `session_start` + the session cap: the
+    // cap bounds how long the token is VALID, not only whether it may renew
+    // (see crate::auth::token_exp_at). Far from the cap this is the same
+    // `now + TTL` it has always been.
+    let expiration = crate::auth::token_exp_at(Utc::now().timestamp(), session_start, long);
 
     let claims = Claims {
         sub: user_id,

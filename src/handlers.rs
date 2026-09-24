@@ -789,9 +789,34 @@ pub async fn login_step_2(
         raw
     } else {
         let session_start = chrono::Utc::now().timestamp();
+        let sid = Uuid::new_v4().to_string();
+
+        // 5a. The session row FIRST, and no token without it. Per-session
+        // sign-out and device revocation both work by marking this row; a
+        // token whose row was never written is a session neither can reach,
+        // and renewal would slide it for up to a year. This used to mint, then
+        // INSERT and only log a failure, returning the token anyway — the
+        // comment promised "a renewal records it", and none ever did (the
+        // renewal UPDATE matched no row). A database fault here is now a 500
+        // the client retries, which is the honest answer: the session store
+        // is exactly what revocation depends on.
+        if let Err(e) = sqlx::query("INSERT INTO token_sessions (sid, user_id) VALUES ($1, $2)")
+            .bind(&sid)
+            .bind(user_id as i32)
+            .execute(&state.pool)
+            .await
+        {
+            tracing::error!("login: could not record session for user {}: {:?} — refusing to issue a token", user_id, e);
+            // This attempt's proof has been spent; do not leave it replayable.
+            let _ = sqlx::query("DELETE FROM login_attempts WHERE id = $1")
+                .bind(consumed_id)
+                .execute(&state.pool)
+                .await;
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
         state.record_password_proof(user_id, session_start);
 
-        // 5. Create JWT token instead of session, stamped with the current
+        // 5b. Create JWT token instead of session, stamped with the current
         // token_version (M1) so a later logout/reset can revoke it, and with a
         // fresh session id so THIS sign-in can be revoked on its own.
         //
@@ -802,19 +827,10 @@ pub async fn login_step_2(
         // re-proving their password for a key-custody write keeps the token it
         // already holds, so ticking a box on a re-proof cannot silently extend
         // a session that was not started that way.
-        let sid = Uuid::new_v4().to_string();
+        // (A mint failure after the row is written leaves a row no token
+        // names: harmless, nothing can present it.)
         let token = crate::ws::create_token_with_start(user_id, &username, token_version, session_start, &sid, payload.stay_signed_in, &state.jwt_secret)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        if let Err(e) = sqlx::query("INSERT INTO token_sessions (sid, user_id) VALUES ($1, $2)")
-            .bind(&sid)
-            .bind(user_id as i32)
-            .execute(&state.pool)
-            .await
-        {
-            // The token still works (no row = nothing to revoke); it just cannot be
-            // signed out on its own until a renewal records it.
-            tracing::warn!("login: could not record session for user {}: {:?}", user_id, e);
-        }
 
         // 6. NOTHING is written to the `sessions` table (L8-DATA-2).
         //
@@ -830,8 +846,10 @@ pub async fn login_step_2(
         // deployment, with no consumer — and it survived account deletion, since
         // the tombstone is an UPDATE and the table's ON DELETE CASCADE never fires.
         //
-        // Removing the write also removes a failure mode: the `?` on that query was
-        // the only way a healthy login could 500 on a database hiccup.
+        // Removing the write also removed a failure mode: the `?` on that query
+        // could 500 a healthy login on a database hiccup, for a table nothing
+        // read. (The token_sessions INSERT above can 500 too, deliberately:
+        // unlike this one, revocation depends on that row.)
         //
         // DROPPING THE TABLE IS A SEPARATE, LATER RELEASE. It must land only after
         // a release in which nothing writes it, or a rollback to the previous
@@ -2750,5 +2768,89 @@ mod srp_version_tests {
         for json in ["{\"srp_version\":0}", "{\"srp_version\":3}", "{\"srp_version\":-1}"] {
             assert!(serde_json::from_str::<Body>(json).is_err(), "{json}");
         }
+    }
+}
+
+/// Finding 3: a sign-in must never hand out a token whose `token_sessions`
+/// row was not written. Without the row, per-session sign-out and device
+/// revocation both miss the session, and renewal slides it for up to a year.
+/// A real SRP exchange through both steps; the INSERT is made to fail with a
+/// trigger scoped to this test's user. TEST_DATABASE_URL only.
+#[cfg(test)]
+mod login_session_row_tests {
+    use super::*;
+    use srp::client::SrpClient;
+
+    async fn sign_in(state: &Arc<AppState>, username: &str, password: &[u8]) -> Result<Json<LoginStep2Response>, StatusCode> {
+        let client = SrpClient::<Sha256>::new(&G_2048);
+        let mut a = [0u8; 64];
+        OsRng.fill_bytes(&mut a);
+        let step1 = login_step_1(
+            State(state.clone()),
+            Json(LoginStep1Request { username: username.to_string(), a_pub_hex: hex::encode(client.compute_public_ephemeral(&a)) }),
+        )
+        .await?
+        .0;
+        let salt = hex::decode(&step1.salt_hex).unwrap();
+        let b_pub = hex::decode(&step1.b_pub_hex).unwrap();
+        let proof = client.process_reply(&a, username.as_bytes(), password, &salt, &b_pub).expect("client side of SRP");
+        login_step_2(
+            State(state.clone()),
+            axum::http::HeaderMap::new(),
+            Json(LoginStep2Request {
+                username: username.to_string(),
+                m_hex: hex::encode(proof.proof()),
+                attempt_id: Some(step1.attempt_id),
+                new_salt_hex: None,
+                new_verifier_hex: None,
+                stay_signed_in: true,
+            }),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn no_token_is_issued_when_its_session_row_cannot_be_written() {
+        let Some(url) = crate::migrator::test_database_url() else {
+            println!("skipping: TEST_DATABASE_URL not set");
+            return;
+        };
+        let pool = match sqlx::postgres::PgPoolOptions::new().max_connections(2).connect(&url).await {
+            Ok(p) => p,
+            Err(_) => { println!("skipping: database unreachable"); return; }
+        };
+        crate::migrator::app_migrator().run(&pool).await.expect("migrations apply");
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+
+        let username = format!("rowless_{}", Uuid::new_v4().simple());
+        let password = b"correct horse battery staple";
+        let mut salt = [0u8; 32];
+        OsRng.fill_bytes(&mut salt);
+        let verifier = SrpClient::<Sha256>::new(&G_2048).compute_verifier(username.as_bytes(), password, &salt);
+        let (uid,): (i32,) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id")
+            .bind(&username).bind(&salt[..]).bind(&verifier)
+            .fetch_one(&pool).await.expect("insert user");
+
+        let fault = crate::auth::refuse_session_rows_for(&pool, uid).await;
+        let refused = sign_in(&state, &username, password).await;
+        crate::auth::allow_session_rows(&pool, &fault).await;
+        let (rows_while_down,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM token_sessions WHERE user_id = $1")
+            .bind(uid).fetch_one(&pool).await.unwrap();
+        let healthy = sign_in(&state, &username, password).await;
+        let sids: Vec<(String,)> = sqlx::query_as("SELECT sid FROM token_sessions WHERE user_id = $1")
+            .bind(uid).fetch_all(&pool).await.unwrap();
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(uid).execute(&pool).await;
+
+        assert_eq!(rows_while_down, 0, "the fault really did stop the row");
+        match refused {
+            Ok(r) => panic!("a token was issued with no session row behind it ({} bytes)", r.0.token.len()),
+            Err(code) => assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR, "the endpoint's generic server error"),
+        }
+        // Positive control: the same credentials, the store healthy, sign in
+        // and the token's sid is the row that was written.
+        let token = healthy.expect("a healthy sign-in still succeeds").0.token;
+        let claims = crate::auth::validate_token(&token, "test-secret").unwrap();
+        assert_eq!(sids, vec![(claims.sid.clone(),)], "exactly one row, and it is this token's session");
+        assert!(claims.ls, "stay_signed_in reached the mint");
     }
 }

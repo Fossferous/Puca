@@ -4,10 +4,11 @@
 //! a human proves a password through SRP. That is right for people and useless
 //! for a machine sitting at its own Windows sign-in screen: nobody is there to
 //! type anything, and the copy of the owner's token it was given when it was
-//! enrolled is not a durable credential. `validate_token` runs BEFORE
-//! `renew_if_stale`, so an EXPIRED token can never be renewed — and renewal is
-//! bounded anyway by `MAX_SESSION_DAYS` from the original sign-in, which is
-//! preserved across every renewal.
+//! enrolled is not a durable credential. An EXPIRED token can never be renewed
+//! (`validate_token` refuses it past jsonwebtoken's 60 s skew leeway, and
+//! `renew_if_stale` refuses it inside that minute) — and renewal is bounded
+//! anyway by `MAX_SESSION_DAYS` from the original sign-in, which is preserved
+//! across every renewal and caps every renewed token's exp.
 //!
 //! So a machine switched off for longer than that comes back holding a
 //! credential it cannot repair, and is unreachable exactly when someone wanted
@@ -235,25 +236,43 @@ pub async fn device_token(
     // The session is bound to the device at mint: this route just verified the
     // device's signature, so revoking the device revokes this token.
     let sid = uuid::Uuid::new_v4().to_string();
-    // The mint error carries jsonwebtoken's own text. Same rule as the DB arm:
-    // an unauthenticated caller gets the endpoint's one refusal, the detail goes
-    // to the log.
-    let token = mint_device_token(user_id, &username, token_version, &sid, &state.jwt_secret)
-        .map_err(|e| {
-            tracing::error!("device_token mint failed: {e}");
-            bad("that device could not be verified")
-        })?;
+    // The row FIRST, and no token without it: the row is what binds this
+    // session to the device, so it is what "revoke device" marks. A token whose
+    // row failed to insert used to be returned anyway (the failure was only
+    // logged) — a session the device's revocation could never reach, which the
+    // first request renewed into a 24 h token sliding for 30 days.
+    //
+    // A fault HERE is a 503, not `db_error`'s refusal. `db_error` answers like a
+    // bad signature so an anonymous prober cannot tell a DB fault from an
+    // unknown device — but nobody reaches this line without the device's own
+    // key, so there is nothing left to hide from the caller. And the refusal is
+    // not harmless to the host: puca-service's `is_refusal` reads that 400 as
+    // "the server refused this computer", records it in link health and waits
+    // 15 minutes, over what may be a one-second pool timeout. A 5xx puts it on
+    // its one-minute ladder instead. The body stays generic; the detail is logged.
     // `headless`: this session belongs to the host service, not to a client
     // that reads DMs — the v4 rollout gate leaves it out (migration 060).
-    if let Err(e) = sqlx::query("INSERT INTO token_sessions (sid, user_id, device_id, headless) VALUES ($1, $2, $3, TRUE)")
+    sqlx::query("INSERT INTO token_sessions (sid, user_id, device_id, headless) VALUES ($1, $2, $3, TRUE)")
         .bind(&sid)
         .bind(user_id as i32)
         .bind(&payload.device_id)
         .execute(&state.pool)
         .await
-    {
-        tracing::warn!("device token: could not record session for user {}: {:?}", user_id, e);
-    }
+        .map_err(|e| {
+            tracing::error!("device_token: could not record the session row: {e}");
+            (StatusCode::SERVICE_UNAVAILABLE, "could not start a session right now; try again".to_string())
+        })?;
+    // The mint error carries jsonwebtoken's own text, so it goes to the log and
+    // the caller gets the endpoint's one refusal. Unlike the row's transient
+    // fault above, a signing failure would be a configuration fault that
+    // retrying every minute cannot cure, so the host's 15-minute refusal wait
+    // is the right pace for it. (A row left behind by a failed mint names no
+    // token: harmless.)
+    let token = mint_device_token(user_id, &username, token_version, &sid, &state.jwt_secret)
+        .map_err(|e| {
+            tracing::error!("device_token mint failed: {e}");
+            bad("that device could not be verified")
+        })?;
 
     Ok(Json(TokenResponse { token, expires_in: DEVICE_TOKEN_TTL_HOURS * 3600 }))
 }
@@ -380,6 +399,87 @@ mod tests {
             life < crate::auth::TOKEN_TTL_HOURS * 3600,
             "a device token must be shorter than a person's"
         );
+    }
+
+    /// Finding 3: a device token must never be handed out without its
+    /// `token_sessions` row. Without the row, revoking the device (which marks
+    /// the rows bound to it) and per-session sign-out both miss the session,
+    /// and renewal slides it for 30 days. The INSERT is made to fail with a
+    /// trigger scoped to this test's user. TEST_DATABASE_URL only.
+    #[tokio::test]
+    async fn no_device_token_is_issued_when_its_session_row_cannot_be_written() {
+        use base64::Engine;
+        use ed25519_dalek::{Signer, SigningKey};
+        use rand::RngCore;
+        let Some(url) = crate::migrator::test_database_url() else {
+            println!("skipping: TEST_DATABASE_URL not set");
+            return;
+        };
+        let pool = match sqlx::postgres::PgPoolOptions::new().max_connections(2).connect(&url).await {
+            Ok(p) => p,
+            Err(_) => { println!("skipping: database unreachable"); return; }
+        };
+        crate::migrator::app_migrator().run(&pool).await.expect("migrations apply");
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let b64 = base64::engine::general_purpose::STANDARD;
+
+        let name = format!("devtok_{}", uuid::Uuid::new_v4().simple());
+        let (uid,): (i32,) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id")
+            .bind(&name).bind(b"s".as_ref()).bind(b"v".as_ref())
+            .fetch_one(&pool).await.expect("insert user");
+        let mut seed = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut seed);
+        let key = SigningKey::from_bytes(&seed);
+        let device_id = format!("dt-{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(
+            "INSERT INTO devices (id, user_id, device_pub, sign_pub, name, platform, auth_record, auth_sig) \
+             VALUES ($1, $2, 'x25519:AA', $3, 'test', 'windows', '{}', 'x')",
+        )
+        .bind(&device_id).bind(uid).bind(format!("ed25519:{}", b64.encode(key.verifying_key().to_bytes())))
+        .execute(&pool).await.expect("insert device");
+
+        async fn redeem(state: &Arc<AppState>, key: &SigningKey, device_id: &str, uid: i32) -> Result<Json<TokenResponse>, (StatusCode, String)> {
+            let b64 = base64::engine::general_purpose::STANDARD;
+            let mut raw = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut raw);
+            let nonce = b64.encode(raw);
+            state.device_challenges.issue(device_id, nonce.clone()).expect("issue");
+            let sig = key.sign(crate::ws::device_attest_message(&nonce, uid as UserId).as_bytes());
+            device_token(
+                State(state.clone()),
+                Json(TokenRequest { device_id: device_id.to_string(), nonce, sig: b64.encode(sig.to_bytes()) }),
+            )
+            .await
+        }
+
+        let fault = crate::auth::refuse_session_rows_for(&pool, uid).await;
+        let refused = redeem(&state, &key, &device_id, uid).await;
+        crate::auth::allow_session_rows(&pool, &fault).await;
+        let (rows_while_down,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM token_sessions WHERE user_id = $1")
+            .bind(uid).fetch_one(&pool).await.unwrap();
+        let healthy = redeem(&state, &key, &device_id, uid).await;
+        let bound: Option<(bool, Option<String>)> = sqlx::query_as("SELECT headless, device_id FROM token_sessions WHERE user_id = $1")
+            .bind(uid).fetch_optional(&pool).await.unwrap();
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(uid).execute(&pool).await;
+
+        assert_eq!(rows_while_down, 0, "the fault really did stop the row");
+        match refused {
+            Ok(r) => panic!("a device token was issued with no session row behind it (expires_in {})", r.0.expires_in),
+            Err((status, body)) => {
+                // NOT the refusal. The caller just proved it holds the device
+                // key, so a fault after that is a server fault: puca-service's
+                // `is_refusal` reads the 400 + this body as "the server refused
+                // this computer" and waits 15 minutes with a health warning.
+                // A 5xx puts it on the one-minute ladder instead.
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "a fault after the signature is the server's, not a refusal: {body}");
+                assert!(!body.contains("that device could not be verified"), "not the refusal's body: {body}");
+                assert!(!body.to_lowercase().contains("token_sessions"), "no DB detail to the caller: {body}");
+            }
+        }
+        // Positive control: the same device, the store healthy, gets its token
+        // and the row that binds it to the device.
+        assert!(healthy.is_ok(), "a healthy redeem still mints: {:?}", healthy.err());
+        assert_eq!(bound, Some((true, Some(device_id.clone()))), "headless and bound to the device that proved itself");
     }
 
     #[test]

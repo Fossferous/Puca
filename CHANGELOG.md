@@ -17,6 +17,23 @@ one-line summary; this file is the full story. Versions follow
   same holds when a display change moves the session onto a different
   screen, including when the screen you were watching sleeps or is
   unplugged and another one takes its place.
+- **"Stay signed in" now ends when it says it does.** A session renewed in
+  its last month used to get a fresh 30 days, so a year-long sign-in could
+  last until about day 395 (and an ordinary 30-day one until about day 31).
+  Every renewal now stops at the cap: a year after you signed in with the box
+  ticked, or 30 days without it, the password is asked for.
+- **An expired session is no longer quietly extended.** A request that
+  arrived in the minute after your session expired could renew it for another
+  day (or month). That request is still served, but the session is not
+  renewed: it ends and the sign-in form appears, as it always said it would.
+- **Signing out one session, or revoking a device, always reaches it.** If
+  the server hit a database error at the exact moment of a sign-in (or of a
+  device's own sign-in), it used to let you in anyway with a session that
+  "Sign out" and "revoke device" could not reach, only "Sign out of every
+  device" or a password change. It now refuses that one sign-in instead; try
+  again and it goes through. A computer signing itself in with its own key
+  retries on its own within a minute, and does not report the server as having
+  refused it.
 
 ### For developers
 These change nothing in the app; they are about running the backend's own
