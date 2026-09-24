@@ -279,6 +279,11 @@ describe('the checklist wrappers (tasks.ts) seal under the CREATOR, never the ed
         expect(String(body.schedule)).toContain('"v":3');
         await patchTaskTiming({ id: 1, channel_id: 7, created_by: 99 }, { schedule: null, snooze: '' });
         expect(patch.mock.calls.at(-1)![1]).toMatchObject({ schedule: '', snooze: '' });
+        expect(patch.mock.calls.at(-1)![1]).not.toHaveProperty('expect_schedules_as_of');
+        // The freshness stamp (finding 8) goes on the wire verbatim — the
+        // server compares it to its own clock at microsecond precision.
+        await patchTaskTiming({ id: 1, channel_id: 7, created_by: 99 }, { is_completed: true, expect_schedules_as_of: '2026-10-01T10:00:00.12345Z' });
+        expect(patch.mock.calls.at(-1)![1]).toMatchObject({ is_completed: true, recurrence_aware: true, expect_schedules_as_of: '2026-10-01T10:00:00.12345Z' });
         await expect(patchTaskTiming({ id: 1, channel_id: 7, created_by: 99 }, { schedule: ENC_KEY_UNAVAILABLE })).rejects.toThrow(/decrypt-failure marker/);
         patch.mockRestore();
 

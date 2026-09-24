@@ -355,15 +355,66 @@ pub struct PipelineStats {
 /// Where notification payloads come from. A trait so the receive loop's one
 /// rule — only ever await this — is testable against a real listener AND a
 /// scripted one.
+///
+/// A LOST CONNECTION IS AN EVENT. Postgres keeps no NOTIFY for a channel
+/// nobody is listening on, so everything committed while the listening
+/// connection is down is gone, and every stream has to be told to re-read.
+/// Both ways a source can report that are therefore part of the contract:
+///
+///  - `Ok(None)`: the connection was lost AND listening has already resumed
+///    (sqlx's `try_recv` with its default eager reconnect: it re-issues
+///    LISTEN before it returns). This is how the common deaths arrive — a
+///    terminated backend, a database restart, idle_session_timeout — as an
+///    EOF that `PgListener::recv()` used to swallow silently (it loops on
+///    this None), which is why the resync never happened (finding 9).
+///  - `Err`: anything else. The loop then calls `reconnect`, and raises the
+///    resync only once that has succeeded, so the re-read every client makes
+///    cannot land before LISTEN is back.
 #[async_trait::async_trait]
 pub trait NoticeSource: Send {
-    async fn next_payload(&mut self) -> Result<String, sqlx::Error>;
+    async fn next_payload(&mut self) -> Result<Option<String>, sqlx::Error>;
+    /// Drop whatever connection there is and listen again on a fresh one.
+    async fn reconnect(&mut self) -> Result<(), sqlx::Error>;
+}
+
+/// The production source: one `PgListener` on `EVENT_CHANNEL`, rebuilt from
+/// scratch by `reconnect`. Rebuilt, not retried: for an error sqlx forwards
+/// (a TCP reset — ConnectionReset is not in its list of "connection lost"
+/// kinds) it KEEPS the dead connection, and every later read fails the same
+/// way. Measured on Windows: a terminated backend arrives as WSAECONNRESET,
+/// and a listener that only retried never heard another notification.
+pub struct PgNoticeSource {
+    url: String,
+    listener: sqlx::postgres::PgListener,
+}
+
+impl PgNoticeSource {
+    pub async fn connect(url: &str) -> Result<Self, sqlx::Error> {
+        let mut listener = sqlx::postgres::PgListener::connect(url).await?;
+        listener.listen(EVENT_CHANNEL).await?;
+        Ok(Self { url: url.to_owned(), listener })
+    }
+
+    /// The listening connection itself (tests find its backend pid).
+    #[cfg(test)]
+    pub fn listener_mut(&mut self) -> &mut sqlx::postgres::PgListener {
+        &mut self.listener
+    }
 }
 
 #[async_trait::async_trait]
-impl NoticeSource for sqlx::postgres::PgListener {
-    async fn next_payload(&mut self) -> Result<String, sqlx::Error> {
-        self.recv().await.map(|n| n.payload().to_owned())
+impl NoticeSource for PgNoticeSource {
+    async fn next_payload(&mut self) -> Result<Option<String>, sqlx::Error> {
+        // try_recv, never recv: recv() loops over the None that says "the
+        // connection was lost", which is the one thing this loop must see.
+        self.listener.try_recv().await.map(|n| n.map(|n| n.payload().to_owned()))
+    }
+
+    async fn reconnect(&mut self) -> Result<(), sqlx::Error> {
+        // The old listener (and its possibly dead connection) is dropped
+        // only once a new one is listening.
+        self.listener = Self::connect(&self.url).await?.listener;
+        Ok(())
     }
 }
 
@@ -376,12 +427,11 @@ pub async fn receive_loop<S: NoticeSource>(
     overflow: Arc<AtomicBool>,
     stats: Arc<PipelineStats>,
 ) {
-    let mut backoff = Duration::from_millis(500);
+    let mut pace = LossPacing::default();
     loop {
         match src.next_payload().await {
-            Ok(payload) => {
+            Ok(Some(payload)) => {
                 stats.received.fetch_add(1, Ordering::Relaxed);
-                backoff = Duration::from_millis(500);
                 match tx.try_send(payload) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => {
@@ -391,19 +441,104 @@ pub async fn receive_loop<S: NoticeSource>(
                     Err(mpsc::error::TrySendError::Closed(_)) => return,
                 }
             }
-            Err(e) => {
-                // PgListener reconnects and re-LISTENs on the next call;
-                // whatever was raised meanwhile is lost, so resync everyone.
+            Ok(None) => {
+                // The connection died and LISTEN is already back (see the
+                // trait): what was raised in between is lost, so resync
+                // everyone — and it is safe to now, every later write is heard.
                 stats.listener_errors.fetch_add(1, Ordering::Relaxed);
                 overflow.store(true, Ordering::SeqCst);
-                tracing::warn!("task events: listener error ({e}); retrying in {backoff:?}");
+                tracing::warn!("task events: listening connection was lost and re-established; resyncing every stream");
                 if tx.is_closed() {
                     return;
                 }
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(30));
+                // Listening already works again: sleep only when the
+                // connection is flapping, never on a loss minutes after the
+                // last (every notification waits out the sleep).
+                if let Some(wait) = pace.lost() {
+                    tokio::time::sleep(wait).await;
+                }
+                pace.listening();
+            }
+            Err(e) => {
+                stats.listener_errors.fetch_add(1, Ordering::Relaxed);
+                // Resync now as well: a stream that re-reads early and again
+                // once LISTEN is back costs a refetch; one never told costs a
+                // stale screen.
+                overflow.store(true, Ordering::SeqCst);
+                // Always a pause before rebuilding (the database may be
+                // down); how long depends on how recently it last failed.
+                let mut wait = pace.lost().unwrap_or(FIRST_BACKOFF);
+                tracing::warn!("task events: listener error ({e}); reconnecting in {wait:?}");
+                loop {
+                    if tx.is_closed() {
+                        return;
+                    }
+                    tokio::time::sleep(wait).await;
+                    match src.reconnect().await {
+                        Ok(()) => {
+                            // Everything committed before THIS point may have
+                            // been missed; everything after it will be heard.
+                            overflow.store(true, Ordering::SeqCst);
+                            tracing::info!("task events: listening again on {EVENT_CHANNEL}");
+                            pace.listening();
+                            break;
+                        }
+                        Err(e) => {
+                            stats.listener_errors.fetch_add(1, Ordering::Relaxed);
+                            wait = pace.failed_again(wait);
+                            tracing::warn!("task events: reconnect failed ({e}); retrying in {wait:?}");
+                        }
+                    }
+                }
             }
         }
+    }
+}
+
+const FIRST_BACKOFF: Duration = Duration::from_millis(500);
+const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// A loss this soon after listening resumed means the connection is
+/// flapping. Longer apart, each loss is its own event and starts afresh.
+const FLAP_WINDOW: Duration = Duration::from_secs(30);
+
+/// Pacing for the receive loop's reconnects, judged on TIME since listening
+/// last resumed — not on whether a notification arrived in between, which on
+/// a quiet server with periodic connection cuts (idle_session_timeout, a
+/// proxy's idle cut) never happens, so every cut used to wait longer than
+/// the last, up to 30 s after LISTEN was already back.
+#[derive(Default)]
+struct LossPacing {
+    /// When listening last resumed after a loss (None: never lost).
+    resumed_at: Option<tokio::time::Instant>,
+    /// The wait the next loss inside the window gets.
+    next: Duration,
+}
+
+impl LossPacing {
+    /// A loss: how long to wait before listening again — None when this is
+    /// the first loss in a while (nothing to pace).
+    fn lost(&mut self) -> Option<Duration> {
+        let flapping = self.resumed_at.is_some_and(|t| t.elapsed() < FLAP_WINDOW);
+        if !flapping {
+            self.next = FIRST_BACKOFF;
+            return None;
+        }
+        let wait = self.next;
+        self.next = (self.next * 2).min(MAX_BACKOFF);
+        Some(wait)
+    }
+
+    /// A reconnect attempt failed after waiting `waited`: the wait before
+    /// the next one (doubling), and a later loss in the window waits longer.
+    fn failed_again(&mut self, waited: Duration) -> Duration {
+        let wait = (waited * 2).min(MAX_BACKOFF);
+        self.next = (wait * 2).min(MAX_BACKOFF);
+        wait
+    }
+
+    /// Listening again: the window starts now.
+    fn listening(&mut self) {
+        self.resumed_at = Some(tokio::time::Instant::now());
     }
 }
 
@@ -453,12 +588,9 @@ pub fn spawn_pipeline(db_url: String, hub: Arc<TaskEventHub>, pool: sqlx::PgPool
         tokio::spawn(async move {
             let mut backoff = Duration::from_secs(1);
             let listener = loop {
-                match sqlx::postgres::PgListener::connect(&db_url).await {
-                    Ok(mut l) => match l.listen(EVENT_CHANNEL).await {
-                        Ok(()) => break l,
-                        Err(e) => tracing::warn!("task events: LISTEN failed: {e}"),
-                    },
-                    Err(e) => tracing::warn!("task events: listener connect failed: {e}"),
+                match PgNoticeSource::connect(&db_url).await {
+                    Ok(l) => break l,
+                    Err(e) => tracing::warn!("task events: listener connect/LISTEN failed: {e}"),
                 }
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(60));
@@ -704,6 +836,212 @@ mod tests {
         assert!(hub.is_empty());
     }
 
+    /// A scripted source: plays its steps, then waits forever. `reconnect`
+    /// answers from its own script and, when `clear_on_reconnect` is set,
+    /// clears the overflow flag first — standing in for a dispatcher that
+    /// already turned the EARLY resync into a broadcast before LISTEN was back.
+    struct Scripted {
+        steps: std::collections::VecDeque<Result<Option<String>, ()>>,
+        reconnects: std::collections::VecDeque<Result<(), ()>>,
+        reconnect_calls: Arc<AtomicU64>,
+        clear_on_reconnect: Option<Arc<AtomicBool>>,
+        /// Waited out on the tokio clock before each step is answered: time
+        /// passing between one loss and the next.
+        gaps: std::collections::VecDeque<Duration>,
+        /// (asked, answered) per step, and when each reconnect was tried.
+        log: Arc<std::sync::Mutex<ScriptLog>>,
+    }
+
+    #[derive(Default)]
+    struct ScriptLog {
+        asked: Vec<tokio::time::Instant>,
+        answered: Vec<tokio::time::Instant>,
+        reconnected: Vec<tokio::time::Instant>,
+    }
+
+    fn scripted(steps: Vec<Result<Option<String>, ()>>, reconnects: Vec<Result<(), ()>>, gaps: Vec<Duration>) -> Scripted {
+        Scripted {
+            steps: steps.into(),
+            reconnects: reconnects.into(),
+            reconnect_calls: Arc::new(AtomicU64::new(0)),
+            clear_on_reconnect: None,
+            gaps: gaps.into(),
+            log: Default::default(),
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl NoticeSource for Scripted {
+        async fn next_payload(&mut self) -> Result<Option<String>, sqlx::Error> {
+            self.log.lock().unwrap().asked.push(tokio::time::Instant::now());
+            if let Some(g) = self.gaps.pop_front() {
+                tokio::time::sleep(g).await;
+            }
+            if !self.steps.is_empty() {
+                self.log.lock().unwrap().answered.push(tokio::time::Instant::now());
+            }
+            match self.steps.pop_front() {
+                Some(s) => s.map_err(|_| sqlx::Error::PoolTimedOut),
+                None => std::future::pending().await,
+            }
+        }
+        async fn reconnect(&mut self) -> Result<(), sqlx::Error> {
+            self.log.lock().unwrap().reconnected.push(tokio::time::Instant::now());
+            self.reconnect_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(f) = &self.clear_on_reconnect {
+                f.store(false, Ordering::SeqCst);
+            }
+            self.reconnects.pop_front().unwrap_or(Ok(())).map_err(|_| sqlx::Error::PoolTimedOut)
+        }
+    }
+
+    /// Finding 9: `Ok(None)` — the connection died and sqlx already
+    /// re-LISTENed — is a lost-event window like any error, and every stream
+    /// is told to re-read. The old trait could not even say this: its
+    /// PgListener impl called recv(), which loops over that None, so the
+    /// loop saw nothing at all and no resync was ever raised.
+    #[tokio::test]
+    async fn a_lost_connection_that_came_back_still_resyncs_every_stream() {
+        let hub = TaskEventHub::new();
+        let mut sub = hub.subscribe(3);
+        let stats = Arc::new(PipelineStats::default());
+        let overflow = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel::<String>(8);
+        let src = Scripted {
+            steps: [Ok(Some(r#"{"l":1,"u":3}"#.to_string())), Ok(None), Ok(Some(r#"{"l":2,"u":3}"#.to_string()))].into(),
+            reconnects: Default::default(),
+            reconnect_calls: Arc::new(AtomicU64::new(0)),
+            clear_on_reconnect: None,
+            gaps: Default::default(),
+            log: Default::default(),
+        };
+        let calls = src.reconnect_calls.clone();
+        let recv = tokio::spawn(receive_loop(src, tx, overflow.clone(), stats.clone()));
+        let none: Arc<dyn ChannelViewers> = Arc::new(FixedViewers(Ok(HashSet::new()), Duration::ZERO));
+        let disp = tokio::spawn(dispatch_loop(rx, hub.clone(), none, overflow.clone(), stats.clone()));
+        let mut got = Vec::new();
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            got.extend(drain(&mut sub));
+            if got.len() >= 3 {
+                break;
+            }
+        }
+        // Order is the dispatcher's business (it checks the flag before each
+        // item, so the resync may overtake List(1)); what matters is that it
+        // is there at all, next to both events.
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert!(got.contains(&TaskEvent::Resync), "the loss is announced: {got:?}");
+        assert!(got.contains(&TaskEvent::List(1)) && got.contains(&TaskEvent::List(2)), "{got:?}");
+        assert_eq!(stats.listener_errors.load(Ordering::Relaxed), 1, "and counted");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "no reconnect: the source already listens again");
+        recv.abort();
+        disp.abort();
+    }
+
+    /// On an ERROR the loop rebuilds the listener and raises the resync
+    /// AFTER that succeeded. The early resync alone is not enough: the
+    /// dispatcher broadcasts it within a second, clients re-read, and a write
+    /// committed after that re-read but before LISTEN is back would never be
+    /// announced. A failed reconnect is retried, not given up on.
+    #[tokio::test]
+    async fn an_error_rebuilds_the_listener_and_resyncs_once_it_listens_again() {
+        let stats = Arc::new(PipelineStats::default());
+        let overflow = Arc::new(AtomicBool::new(false));
+        let (tx, _rx) = mpsc::channel::<String>(8);
+        let src = Scripted {
+            steps: [Err(())].into(),
+            reconnects: [Err(()), Ok(())].into(),
+            reconnect_calls: Arc::new(AtomicU64::new(0)),
+            clear_on_reconnect: Some(overflow.clone()),
+            gaps: Default::default(),
+            log: Default::default(),
+        };
+        let calls = src.reconnect_calls.clone();
+        let recv = tokio::spawn(receive_loop(src, tx, overflow.clone(), stats.clone()));
+        // 0.5 s, then 1 s of backoff before the two reconnect attempts.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+        while calls.load(Ordering::SeqCst) < 2 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "a failed reconnect is retried");
+        assert!(overflow.load(Ordering::SeqCst), "a resync is raised AFTER listening resumed (the early one was consumed)");
+        assert_eq!(stats.listener_errors.load(Ordering::Relaxed), 2, "the error and the failed reconnect");
+        recv.abort();
+    }
+
+    /// How long the loop paused between answering step `i` and asking again.
+    fn pauses(log: &ScriptLog) -> Vec<Duration> {
+        log.answered.iter().zip(log.asked.iter().skip(1)).map(|(a, b)| *b - *a).collect()
+    }
+
+    /// A server whose listening connection is cut every five minutes with
+    /// nothing written in between (idle_session_timeout, a proxy's idle cut)
+    /// is not flapping: each loss is announced and listening goes on AT
+    /// ONCE. Pacing used to count "lost twice with no notification between",
+    /// so on a quiet server every cut after the first slept 0.5 s, 1 s, 2 s
+    /// ... up to 30 s after LISTEN was already back — notifications waiting
+    /// in the socket reached streams that late, with the resync already
+    /// spent. Paused clock: the five-minute gaps cost no real time.
+    #[tokio::test(start_paused = true)]
+    async fn losses_minutes_apart_are_not_paced() {
+        let stats = Arc::new(PipelineStats::default());
+        let overflow = Arc::new(AtomicBool::new(false));
+        let (tx, _rx) = mpsc::channel::<String>(8);
+        let five = Duration::from_secs(300);
+        let src = scripted(vec![Ok(None), Ok(None), Ok(None), Ok(None)], vec![], vec![Duration::ZERO, five, five, five]);
+        let log = src.log.clone();
+        let recv = tokio::spawn(receive_loop(src, tx, overflow.clone(), stats.clone()));
+        while log.lock().unwrap().asked.len() < 5 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let p = pauses(&log.lock().unwrap());
+        assert_eq!(p, vec![Duration::ZERO; 4], "no loss minutes after the last one is slept on");
+        assert_eq!(stats.listener_errors.load(Ordering::Relaxed), 4, "every loss still counted");
+        recv.abort();
+    }
+
+    /// POSITIVE CONTROL for the one above: losses back to back ARE a
+    /// flapping connection, and the loop still paces them (0.5 s, 1 s, 2 s),
+    /// so the fix did not just delete the pacing.
+    #[tokio::test(start_paused = true)]
+    async fn losses_back_to_back_are_still_paced() {
+        let stats = Arc::new(PipelineStats::default());
+        let overflow = Arc::new(AtomicBool::new(false));
+        let (tx, _rx) = mpsc::channel::<String>(8);
+        let src = scripted(vec![Ok(None), Ok(None), Ok(None), Ok(None)], vec![], vec![]);
+        let log = src.log.clone();
+        let recv = tokio::spawn(receive_loop(src, tx, overflow.clone(), stats.clone()));
+        while log.lock().unwrap().asked.len() < 5 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let ms = |n| Duration::from_millis(n);
+        assert_eq!(pauses(&log.lock().unwrap()), vec![ms(0), ms(500), ms(1000), ms(2000)]);
+        recv.abort();
+    }
+
+    /// The same for errors: the backoff before rebuilding the listener starts
+    /// again at 0.5 s for an error that comes long after the last one, instead
+    /// of carrying on from where a failure days earlier left it.
+    #[tokio::test(start_paused = true)]
+    async fn an_error_long_after_the_last_one_starts_the_backoff_again() {
+        let stats = Arc::new(PipelineStats::default());
+        let overflow = Arc::new(AtomicBool::new(false));
+        let (tx, _rx) = mpsc::channel::<String>(8);
+        let src = scripted(vec![Err(()), Err(())], vec![Ok(()), Ok(())], vec![Duration::ZERO, Duration::from_secs(3600)]);
+        let log = src.log.clone();
+        let recv = tokio::spawn(receive_loop(src, tx, overflow.clone(), stats.clone()));
+        while log.lock().unwrap().reconnected.len() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let l = log.lock().unwrap();
+        let waited: Vec<Duration> = l.answered.iter().zip(l.reconnected.iter()).map(|(a, r)| *r - *a).collect();
+        assert_eq!(waited, vec![Duration::from_millis(500); 2], "an hour later is a fresh start");
+        drop(l);
+        recv.abort();
+    }
+
     // --- Against a real database (skip without one) ------------------------------
 
     async fn test_pool() -> Option<(sqlx::PgPool, String)> {
@@ -816,19 +1154,22 @@ mod tests {
     /// other tests share the database and their notifications reach the same
     /// listener, so a bare `received` total could be topped up by them.
     struct CountingSource {
-        inner: sqlx::postgres::PgListener,
+        inner: PgNoticeSource,
         want: String,
         ours: Arc<AtomicU64>,
     }
 
     #[async_trait::async_trait]
     impl NoticeSource for CountingSource {
-        async fn next_payload(&mut self) -> Result<String, sqlx::Error> {
+        async fn next_payload(&mut self) -> Result<Option<String>, sqlx::Error> {
             let p = self.inner.next_payload().await?;
-            if p == self.want {
+            if p.as_deref() == Some(self.want.as_str()) {
                 self.ours.fetch_add(1, Ordering::Relaxed);
             }
             Ok(p)
+        }
+        async fn reconnect(&mut self) -> Result<(), sqlx::Error> {
+            self.inner.reconnect().await
         }
     }
 
@@ -860,7 +1201,7 @@ mod tests {
         let overflow = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel::<String>(16); // a small queue, so the burst overflows it
         let ours = Arc::new(AtomicU64::new(0));
-        let src = CountingSource { inner: listener(&url).await, want: format!("{{\"c\" : {cid}}}"), ours: ours.clone() };
+        let src = CountingSource { inner: PgNoticeSource::connect(&url).await.expect("listener"), want: format!("{{\"c\" : {cid}}}"), ours: ours.clone() };
         let recv = tokio::spawn(receive_loop(src, tx, overflow.clone(), stats.clone()));
         let slow: Arc<dyn ChannelViewers> = Arc::new(FixedViewers(Ok([owner].into_iter().collect()), Duration::from_millis(50)));
         let disp = tokio::spawn(dispatch_loop(rx, hub.clone(), slow, overflow.clone(), stats.clone()));
@@ -888,6 +1229,71 @@ mod tests {
         disp.abort();
         let _ = sqlx::query("DELETE FROM channels WHERE id = $1").bind(cid).execute(&pool).await;
         let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&server_id).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(owner).execute(&pool).await;
+    }
+
+    /// THE LOST-LISTENER TEST (finding 9). Postgres does not queue a NOTIFY
+    /// for a channel nobody is listening on, so whatever is committed while
+    /// the listening connection is gone is lost for good — every open stream
+    /// must be told to re-read. The common ways that connection dies (a
+    /// terminated backend, a database restart, idle_session_timeout) end in
+    /// an EOF that sqlx absorbs: it reconnects, re-issues LISTEN and hands
+    /// back `Ok(None)` from try_recv, which `recv()` loops over. This kills
+    /// the pipeline's OWN listening backend (found by its pid, so no other
+    /// test's listener is touched) and expects a resync, then a positive
+    /// control: a task write made afterwards still arrives, so LISTEN really
+    /// is back.
+    #[tokio::test]
+    async fn a_terminated_listener_connection_tells_every_stream_to_resync() {
+        let Some((pool, url)) = test_pool().await else { return };
+        let owner = mk_user(&pool, "lost").await;
+        let (list_id,): (i64,) = sqlx::query_as("INSERT INTO task_lists (owner_id, title) VALUES ($1, 't') RETURNING id")
+            .bind(owner).fetch_one(&pool).await.unwrap();
+
+        let mut l = PgNoticeSource::connect(&url).await.expect("listener");
+        let (pid,): (i32,) = sqlx::query_as("SELECT pg_backend_pid()").fetch_one(l.listener_mut()).await.expect("listener pid");
+        let hub = TaskEventHub::new();
+        let mut sub = hub.subscribe(owner);
+        let stats = Arc::new(PipelineStats::default());
+        let overflow = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel::<String>(RAW_QUEUE);
+        let recv = tokio::spawn(receive_loop(l, tx, overflow.clone(), stats.clone()));
+        let none: Arc<dyn ChannelViewers> = Arc::new(FixedViewers(Ok(HashSet::new()), Duration::ZERO));
+        let disp = tokio::spawn(dispatch_loop(rx, hub.clone(), none, overflow.clone(), stats.clone()));
+
+        // Nothing has gone wrong yet: no resync (else the one below proves nothing).
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert!(drain(&mut sub).is_empty(), "a healthy pipeline says nothing");
+
+        let (killed,): (bool,) = sqlx::query_as("SELECT pg_terminate_backend($1)").bind(pid).fetch_one(&pool).await.unwrap();
+        assert!(killed, "the listener's backend was terminated");
+
+        let mut got = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+        while !got.contains(&TaskEvent::Resync) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            got.extend(drain(&mut sub));
+        }
+        assert!(
+            got.contains(&TaskEvent::Resync),
+            "a lost listening connection must resync every stream (listener_errors={}): {got:?}",
+            stats.listener_errors.load(Ordering::Relaxed)
+        );
+
+        // Positive control: LISTEN is back, a later write is delivered.
+        sqlx::query("INSERT INTO channel_tasks (list_id, description, created_by, position) VALUES ($1, 'after', $2, 0)")
+            .bind(list_id).bind(owner).execute(&pool).await.unwrap();
+        let mut after = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+        while !after.contains(&TaskEvent::List(list_id)) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            after.extend(drain(&mut sub));
+        }
+        assert!(after.contains(&TaskEvent::List(list_id)), "events flow again after the reconnect (listener_errors={}): {after:?}", stats.listener_errors.load(Ordering::Relaxed));
+
+        recv.abort();
+        disp.abort();
+        let _ = sqlx::query("DELETE FROM task_lists WHERE id = $1").bind(list_id).execute(&pool).await;
         let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(owner).execute(&pool).await;
     }
 

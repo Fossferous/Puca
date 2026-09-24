@@ -135,3 +135,74 @@ describe('planToggle — the one completion path', () => {
         });
     });
 });
+
+describe('the freshness stamp (finding 8): a completion says how current its view of the schedules is', () => {
+    const NOW = T('2026-10-05T12:00:00Z');
+    // Stamps exactly as the server renders them: microseconds, trailing
+    // zeros dropped, sometimes no fraction at all.
+    const A = '2026-10-01T10:00:00.1234Z';
+    const B = '2026-10-01T10:00:00.12345Z';   // later than A by 10 µs, same millisecond
+    const C = '2026-10-01T09:59:59Z';
+
+    it('a plain tick sends the NEWEST server stamp of the item and everything under it, verbatim', async () => {
+        const parent = mk(1, { updated_at: A });
+        const kid = mk(2, { parent_id: 1, updated_at: B });
+        const grand = mk(3, { parent_id: 2, updated_at: C });
+        const other = mk(4, { updated_at: '2027-01-01T00:00:00Z' });   // not under it: never counts
+        const p = planToggle([parent, kid, grand, other], parent, true, { canEdit: true, now: NOW });
+        expect(p.patch).toEqual({ is_completed: true, expect_schedules_as_of: B });
+        await p.send();
+        expect(patchTaskTiming).toHaveBeenCalledWith(parent, { is_completed: true, expect_schedules_as_of: B });
+    });
+
+    it('an advance sends the item’s OWN stamp (it sweeps nothing)', () => {
+        const parent = mk(1, { schedule: serializeSchedule(daily), due_at: '2026-10-05T09:00:00.000Z', updated_at: A });
+        const kid = mk(2, { parent_id: 1, updated_at: B });
+        const p = planToggle([parent, kid], parent, true, { canEdit: true, now: NOW });
+        expect(p.advanced).toBe(true);
+        expect(p.patch?.expect_schedules_as_of).toBe(A);
+    });
+
+    it('an untick sends none (it ends nothing)', () => {
+        const t = mk(1, { is_completed: true, updated_at: A });
+        expect(planToggle([t], t, false, { canEdit: true }).patch).toEqual({ is_completed: false });
+    });
+
+    it('no stamp when this device cannot vouch for a row: not on the server yet, no stamp, or edited here since', () => {
+        const parent = mk(1, { updated_at: A });
+        for (const kid of [
+            mk(-5, { parent_id: 1 }),                                   // made offline, not created yet
+            mk(2, { parent_id: 1 }),                                    // an older server: no stamp
+            mk(2, { parent_id: 1, updated_at: B, localEdit: true }),    // changed here, server copy not back
+            mk(2, { parent_id: 1, updated_at: 'garbage' }),
+        ]) {
+            const p = planToggle([parent, kid], parent, true, { canEdit: true, now: NOW });
+            expect(p.patch).toEqual({ is_completed: true });
+        }
+        // Positive control: the same shapes with a stamped, untouched child do carry one.
+        const ok = planToggle([parent, mk(2, { parent_id: 1, updated_at: B })], parent, true, { canEdit: true, now: NOW });
+        expect(ok.patch?.expect_schedules_as_of).toBe(B);
+    });
+
+    it('the rows a plan changes are marked, so a quick second toggle does not send a stamp its own first one outdated', () => {
+        const parent = mk(1, { updated_at: A, schedule: serializeSchedule({ ...daily, rrule: undefined }) });
+        const kid = mk(2, { parent_id: 1, updated_at: B });
+        const lone = mk(3, { updated_at: C });
+        const first = planToggle([parent, kid, lone], parent, true, { canEdit: true, now: NOW });
+        expect(first.next.find(t => t.id === 1)?.localEdit).toBe(true);
+        expect(first.next.find(t => t.id === 2)?.localEdit).toBe(true);
+        expect(first.next.find(t => t.id === 3)).toBe(lone);            // untouched rows stay as they were
+        const undo = planToggle(first.next, first.next[0], false, { canEdit: true, now: NOW });
+        const again = planToggle(undo.next, undo.next[0], true, { canEdit: true, now: NOW });
+        expect(again.patch).toEqual({ is_completed: true });
+    });
+
+    it('names the rows whose edits outdate the stamp: the item, everything under it and everything above it', () => {
+        const top = mk(1, { updated_at: A });
+        const mid = mk(2, { parent_id: 1, updated_at: A });
+        const low = mk(3, { parent_id: 2, updated_at: A });
+        const side = mk(4, { parent_id: 1, updated_at: A });
+        const p = planToggle([top, mid, low, side], mid, true, { canEdit: true, now: NOW });
+        expect([...(p.scope ?? [])].sort()).toEqual([1, 2, 3]);
+    });
+});

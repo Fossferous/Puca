@@ -34,6 +34,25 @@ one-line summary; this file is the full story. Versions follow
   again and it goes through. A computer signing itself in with its own key
   retries on its own within a minute, and does not report the server as having
   refused it.
+- **A tick made on an out-of-date screen no longer ends a repeating
+  reminder.** If you ticked an item while offline (or on a screen that had
+  missed an update) and meanwhile another device gave it — or something
+  under it — a repeat, the tick used to complete it and its reminders
+  silently stopped. Now the server refuses that tick: you see *refresh and
+  try again* (or, for a change queued offline, it is listed as not saved)
+  and can tick it again on the up-to-date note. The same goes for ticking a
+  repeating item on to its next time with an old copy of its repeat rule,
+  which could overwrite a change made on another device. Another device
+  editing any dated item under the one you tick counts as a change, since
+  the server cannot see which dates repeat; your own edits on this device
+  never do, and after a refusal the list reloads so you can tick again.
+- **Live updates recover after a database restart.** When the server's
+  connection for change notifications dropped, Púca Notes kept showing a
+  "live" note that no longer updated — with the 30-second refresh off —
+  until you switched away and back. Every open note is now told to reload
+  as soon as the server is listening again — and on a server whose idle
+  connections are cut every few minutes, changes keep arriving at once
+  instead of up to 30 seconds late.
 
 ### For developers
 These change nothing in the app; they are about running the backend's own
