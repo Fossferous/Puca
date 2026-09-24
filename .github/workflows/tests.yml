@@ -134,6 +134,14 @@ jobs:
   # suites ask for. `xvfb-run -a` picks a free display number so parallel jobs
   # cannot collide on :99.
   #
+  # `-noreset` is required, not tuning. By default Xvfb resets itself whenever
+  # its LAST client disconnects, and each of these tests opens and closes its
+  # own connection. A test that connects while the previous one's close is
+  # still resetting the server fails with "cannot connect to the X server:
+  # Connection reset by peer" -- no test's fault, and no pixel was ever read.
+  # Measured by looping the capture suite: 1 failure in 80 runs without the
+  # flag, 0 in 80 with it. It is the failure linux-rc-live hit on PR #37.
+  #
   # These tests are STRONGER than their Windows counterparts, which is why they
   # are worth running rather than merely compiling: the Windows live capture test
   # asserts "the frame has varied pixels", which passes on any real desktop. A
@@ -150,9 +158,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y xvfb x11-utils
       - name: X11 capture, against a real display
-        run: xvfb-run -a -s "-screen 0 1280x1024x24" cargo test -p puca-capture --test live_capture_x11 --locked -- --ignored --test-threads=1 --nocapture
+        run: xvfb-run -a -s "-screen 0 1280x1024x24 -noreset" cargo test -p puca-capture --test live_capture_x11 --locked -- --ignored --test-threads=1 --nocapture
       - name: XTEST injection, against a real display
-        run: xvfb-run -a -s "-screen 0 1280x1024x24" cargo test -p puca-input --test live_inject_x11 --locked -- --ignored --test-threads=1 --nocapture
+        run: xvfb-run -a -s "-screen 0 1280x1024x24 -noreset" cargo test -p puca-input --test live_inject_x11 --locked -- --ignored --test-threads=1 --nocapture
 
   # THE LINUX DESKTOP BUILD, which nothing compiled until now.
   #
