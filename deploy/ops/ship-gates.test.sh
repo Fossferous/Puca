@@ -819,7 +819,7 @@ echo "ssh \$*" >> "$LOG"
 case "\$*" in
 	# The download host's copy of an OTA bundle is \$TMP/served-bundle: its
 	# status, and what the remote \`curl … | sha256sum\` would print for it.
-	*curl*http_code*.enc.zip*) if [ -f "$TMP/served-bundle" ]; then echo 200; else echo 404; fi ;;
+	*curl*http_code*.enc.zip*) if [ -f "$TMP/served-code" ]; then cat "$TMP/served-code"; elif [ -f "$TMP/served-bundle" ]; then echo 200; else echo 404; fi ;;
 	*curl*.enc.zip*sha256sum*) if [ -f "$TMP/served-bundle" ]; then sha256sum < "$TMP/served-bundle"; else sha256sum < /dev/null; fi | cut -d' ' -f1 ;;
 	*http_code*variant=notes*) if [ -f "$TMP/notes-code" ]; then cat "$TMP/notes-code"; elif [ -f "$TMP/notes-ota.json" ]; then echo 200; else echo 404; fi ;;
 	*variant=notes*) cat "$TMP/notes-ota.json" 2>/dev/null ;;
@@ -1013,8 +1013,16 @@ STUB
 		cp "$TMP/$b.enc.zip" "$TMP/served-bundle"
 		out="$(ship "$sub" "$TMP/$b.enc.zip" 9.9.9 "$b_sk" "$b_ck")"
 		check "$sub: the signed bundle's own bytes PASS (positive control)" "$([ "$(has "$out" "PASS  sandbox $what served byte-identical")" = 1 ] && [ "$(has "$out" "sandbox:$id")" = 0 ] && echo 1 || echo 0)" "$out"
+		# The RIGHT bytes under a failing status (a proxy that answers the
+		# archive with a 404 or 500 page code): the hash matches, and the
+		# first cut of this check stopped there and printed PASS, but the
+		# phone's downloader refuses anything but a 200.
+		echo 404 > "$TMP/served-code"
+		out="$(ship "$sub" "$TMP/$b.enc.zip" 9.9.9 "$b_sk" "$b_ck")"
+		check "$sub: the right bytes under HTTP 404 FAIL $id" "$([ "$(has "$out" "FAIL  sandbox $what answered HTTP 404")" = 1 ] && [ "$(has "$out" "sandbox:$id")" = 1 ] && [ "$(has "$out" "PASS  sandbox $what ")" = 0 ] && echo 1 || echo 0)" "$out"
+		rm -f "$TMP/served-code"
 	done
-	rm -f "$TMP/served-bundle" "$TMP/notes-ota.json"
+	rm -f "$TMP/served-bundle" "$TMP/served-code" "$TMP/notes-ota.json"
 fi
 
 if [ "$fails" -gt 0 ]; then

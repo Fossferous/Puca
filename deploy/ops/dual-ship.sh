@@ -338,17 +338,25 @@ remote_code() {
 # per-path reroot or rewrite in a hand-edited Caddyfile, while SHA256SUMS.txt
 # still came from the right root) read as shipped while every phone refused
 # the update. The installer and APK paths already compared hashes; this is
-# the same check. The status is kept for the message: "HTTP 404" says more
-# than a mismatch against the hash of an empty body.
+# the same check. BOTH must hold: the status first, because the hash alone
+# passed a proxy that answers the right archive under a 404 or 500 (the body
+# matches; the phone's downloader refuses anything but a 200), and the bytes,
+# because a 200 alone passed OTHER bytes.
 #   verify_served_bundle <entry> <label> <what> <path under downloads> <local sha> <FAILED id>
 verify_served_bundle() {
 	local entry="$1" label="$2" what="$3" rel="$4" sha="$5" id="$6" served code
+	code="$(remote_code "$entry" "$DOWNLOAD_HOST" "/$rel" || true)"
+	if [ "$code" != "200" ]; then
+		echo "FAIL  $label $what answered HTTP ${code:-<none>}, not 200, at https://$DOWNLOAD_HOST/$rel:"
+		echo "      a phone's downloader refuses anything but a 200, whatever the body is"
+		FAILED+=("$label:$id")
+		return
+	fi
 	served="$(ssh_to "$entry" "curl -s $CURL_TLS --resolve '$DOWNLOAD_HOST:443:127.0.0.1' 'https://$DOWNLOAD_HOST/$rel' --max-time 120 | sha256sum | cut -d' ' -f1" || true)"
 	if [ "$served" = "$sha" ]; then
 		echo "PASS  $label $what served byte-identical ($sha)"
 	else
-		code="$(remote_code "$entry" "$DOWNLOAD_HOST" "/$rel" || true)"
-		echo "FAIL  $label $what served sha256 ${served:-<none>} (HTTP ${code:-?}), expected $sha:"
+		echo "FAIL  $label $what served sha256 ${served:-<none>} (HTTP $code), expected $sha:"
 		echo "      https://$DOWNLOAD_HOST/$rel is not the bundle that was signed, and every phone will refuse it"
 		FAILED+=("$label:$id")
 	fi
