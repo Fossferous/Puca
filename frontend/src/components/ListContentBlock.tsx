@@ -25,6 +25,7 @@ import { listContentQueryKeys } from './useListContentSupport';
 import { type DrawingFiles, type GalleryItem, fileIdsOf, planDrawingReplace, readStrokes, refsOfItem, uploadNoteMedia, withoutItem } from '../api/noteMedia';
 import { type DrawingDoc, parseDrawing } from '../api/drawing';
 import { NoteBodyField, type BodySaveOutcome } from './NoteBodyField';
+import { isDefiniteRefusal } from '../api/client';
 import { NoteImages } from './NoteImages';
 import { DrawingCanvas } from './DrawingCanvas';
 import { pushMessageToast } from './messageToastBus';
@@ -70,7 +71,25 @@ export function ListContentBlock({ list, features, onPatch, coarse }: BlockProps
             return false;
         }
     };
-    const saveRefs = async (next: TaskAttachmentRef[], dropped: TaskAttachmentRef[]): Promise<boolean> => {
+    /**
+     * Write the sidecar. `dropped` (what the write takes out) is deleted only
+     * once the write has LANDED: until then the stored sidecar may still name
+     * it.
+     *
+     * What a failure means for THIS save's uploads is answered, not guessed.
+     * 'refused' is a DEFINITE refusal (api/client.ts `isDefiniteRefusal` — a
+     * stale conflict, a 4xx): nothing was written, nothing names them, and
+     * they may go. 'unsure' is a lost answer (the connection dropped, a
+     * gateway's 5xx, a timeout), and the server commits before it answers, so
+     * it may hold a sidecar naming them: deleting them then leaves a note that
+     * WAS saved pointing at files that are gone — a broken picture for good.
+     * So they are kept, as Púca Notes keeps them (notes/model/useListContent.ts
+     * `addNoteMedia`). An orphan costs quota; a deleted file a committed note
+     * names costs the picture. The OLD pair a redrawn drawing drops is kept on
+     * both failures too: after a refusal the sidecar still names it, and after
+     * a lost answer it may.
+     */
+    const saveRefs = async (next: TaskAttachmentRef[], dropped: TaskAttachmentRef[]): Promise<'saved' | 'refused' | 'unsure'> => {
         const before = list.attachments ?? null;
         onPatch(list.id, { attachments: next.length === 0 ? null : JSON.stringify(next) });
         try {
@@ -84,19 +103,28 @@ export function ListContentBlock({ list, features, onPatch, coarse }: BlockProps
                 // the copy that won and the user is told.
                 onPatch(list.id, { attachments: err.attachments, content_rev: err.contentRev });
                 pushMessageToast({ title: 'This note’s pictures were changed somewhere else, so this change wasn’t saved — the other copy is shown' });
-                return false;
+                return 'refused';
             }
             console.error('Failed to save note pictures:', err);
-            return false;
+            return isDefiniteRefusal(err) ? 'refused' : 'unsure';
         }
         if (dropped.length > 0) void deleteFiles(fileIdsOf(dropped));
-        return true;
+        return 'saved';
+    };
+    /** After a save that did not land for certain: a definite refusal takes
+     *  this save's uploads back; a lost answer keeps them, and says only what
+     *  is known — not "couldn't reach the server", which a gateway's 5xx or
+     *  a 429 is not. */
+    const afterFailedSave = async (outcome: 'refused' | 'unsure', added: TaskAttachmentRef[], what: 'picture' | 'pictures' | 'drawing') => {
+        if (outcome === 'refused') await deleteFiles(fileIdsOf(added));
+        else pushMessageToast({ title: `The ${what} may or may not have been saved — the server didn’t confirm the save` });
     };
     const addPhotos = async (files: File[]) => {
         setBusy(true);
         try {
             const added = await uploadNoteMedia(files, [], refs.length);
-            if (!await saveRefs([...refs, ...added], [])) await deleteFiles(fileIdsOf(added));
+            const outcome = await saveRefs([...refs, ...added], []);
+            if (outcome !== 'saved') await afterFailedSave(outcome, added, files.length === 1 ? 'picture' : 'pictures');
         } catch (err) {
             console.error('Failed to upload picture:', err);
             pushMessageToast({ title: err instanceof Error && err.name === 'TooManyAttachmentsError' ? err.message : 'Couldn’t upload the picture' });
@@ -106,15 +134,18 @@ export function ListContentBlock({ list, features, onPatch, coarse }: BlockProps
     };
     /** Save a drawing: the PNG and its strokes go up as one pair, and the
      *  pair being replaced is dropped from the sidecar and deleted — both
-     *  files, or an edit would leave the old strokes behind for good. */
+     *  files, or an edit would leave the old strokes behind for good — once
+     *  the new sidecar has landed (saveRefs). */
     const saveDrawing = async (files: DrawingFiles): Promise<boolean> => {
         setBusy(true);
         try {
             const { kept, dropped, base } = planDrawingReplace(refs, drawing?.item);
             const added = await uploadNoteMedia([], [{ files, base }], kept.length);
-            const ok = await saveRefs([...kept, ...added], dropped);
-            if (!ok) await deleteFiles(fileIdsOf(added));
-            return ok;
+            const outcome = await saveRefs([...kept, ...added], dropped);
+            if (outcome !== 'saved') await afterFailedSave(outcome, added, 'drawing');
+            // Not saved for certain: the canvas stays open on the drawing, so
+            // nothing drawn is lost and Cancel is still the user's to press.
+            return outcome === 'saved';
         } catch (err) {
             console.error('Failed to save the drawing:', err);
             pushMessageToast({ title: err instanceof Error && err.name === 'TooManyAttachmentsError' ? err.message : 'Couldn’t save the drawing' });

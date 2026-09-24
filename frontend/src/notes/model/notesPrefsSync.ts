@@ -226,7 +226,7 @@ export interface PrefsSyncDeps {
     identity: () => Identity | null;
     /** Moves on every sign-out on this page. With the uid it is what an
      *  operation checks after each await to know it still belongs to the
-     *  session that started it (a sign-out and back in as the SAME account
+     *  session that asked for it (a sign-out and back in as the SAME account
      *  keeps the uid but moves this). Absent = never moves. */
     epoch?: () => number;
     get: () => Promise<GetBlobResult>;
@@ -259,14 +259,14 @@ export interface PrefsSync {
     subscribeSettled(cb: () => void): () => void;
 }
 
-/** Thrown by an operation's `after` when the session that started it is gone. */
+/** Thrown by an operation's `after` when the session that asked for it is gone. */
 const ACCOUNT_CHANGED: unique symbol = Symbol('notes-prefs: account changed');
 
 /** One running operation: the session it belongs to, and the re-check. */
 interface Op {
     uid: number;
     id: Identity;
-    /** Throws ACCOUNT_CHANGED unless the starting session is still the one signed in. */
+    /** Throws ACCOUNT_CHANGED unless the asking session is still the one signed in. */
     check: () => void;
     /** Await `p`, then check(). EVERY await in an operation goes through this. */
     after: <T>(p: Promise<T>) => Promise<T>;
@@ -382,43 +382,59 @@ export function createPrefsSync(deps: PrefsSyncDeps): PrefsSync {
      * So every await in an operation goes through `after`, which re-checks
      * the session before handing control back; the synchronous side effects
      * that follow it (record saves, local writes, the next request) run for
-     * the session that started the operation or not at all. The session is
+     * the session that asked for the operation or not at all. The session is
      * the uid plus the sign-out epoch — never the Identity object:
      * getActiveIdentity may rebuild it for the SAME account (a stale seed
      * re-derived), and that must not abort a good operation. An aborted one
      * leaves the status alone — and so does one whose request FAILED after the
      * switch; the new session's own pull is already queued.
+     *
+     * The session is read when the operation is ASKED FOR, not when its turn
+     * in `serial` comes. Every entry waits behind whatever is already out, and
+     * a pull can hang for as long as the connection does: *Keep this device's*
+     * and *Use the server's copy* clicked on A's banner behind a stalled pull
+     * then STARTED after a sign-out, read the uid and epoch of whoever was
+     * signed in by then, and passed every check against them. As B, "keep
+     * this device's" PUT B's nearly empty copy with an EMPTY base — wiping
+     * B's colours, labels, archive flags and reminder times on every device.
+     * Sign-out cancels nothing in the queue (it only moves the epoch), so an
+     * operation whose asker is gone by its turn does nothing at all and
+     * answers with the status as it stands — the new session's own pull is
+     * already queued behind it.
      */
-    const guarded = (fn: (op: Op) => Promise<PrefsSyncStatus>) => serial(async () => {
+    const guarded = (fn: (op: Op) => Promise<PrefsSyncStatus>): Promise<PrefsSyncStatus> => {
         const uid = deps.uid();
-        if (uid === null) return set('idle');
-        const id = deps.identity();
-        if (!id) return set('locked');
         const epoch = deps.epoch?.() ?? 0;
         const moved = () => deps.uid() !== uid || (deps.epoch?.() ?? 0) !== epoch;
-        const check = () => {
-            if (moved()) throw ACCOUNT_CHANGED;
-        };
-        const after = async <T,>(p: Promise<T>): Promise<T> => {
-            const v = await p;
-            check();
-            return v;
-        };
-        try {
-            return await fn({ uid, id, check, after });
-        } catch (err) {
-            // The account changed under the operation: it did nothing, and
-            // the status belongs to the NEW session, not to this one. That
-            // holds as much for a request that FAILED after the switch (its
-            // rejection never reaches `after`'s check) as for one stopped by
-            // the check: a stale 'offline' or 'error', and its console
-            // warning, would land in the new session's shell.
-            if (err === ACCOUNT_CHANGED || moved()) return current;
-            return fail(err);
-        } finally {
-            for (const cb of settledListeners) cb();
-        }
-    });
+        return serial(async () => {
+            if (moved()) return current;
+            if (uid === null) return set('idle');
+            const id = deps.identity();
+            if (!id) return set('locked');
+            const check = () => {
+                if (moved()) throw ACCOUNT_CHANGED;
+            };
+            const after = async <T,>(p: Promise<T>): Promise<T> => {
+                const v = await p;
+                check();
+                return v;
+            };
+            try {
+                return await fn({ uid, id, check, after });
+            } catch (err) {
+                // The account changed under the operation: it did nothing, and
+                // the status belongs to the NEW session, not to this one. That
+                // holds as much for a request that FAILED after the switch (its
+                // rejection never reaches `after`'s check) as for one stopped by
+                // the check: a stale 'offline' or 'error', and its console
+                // warning, would land in the new session's shell.
+                if (err === ACCOUNT_CHANGED || moved()) return current;
+                return fail(err);
+            } finally {
+                for (const cb of settledListeners) cb();
+            }
+        });
+    };
 
     return {
         pull: () => guarded(pullOnce),

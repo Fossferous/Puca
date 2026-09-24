@@ -385,6 +385,80 @@ describe('a note whose create answer was lost', () => {
         expect(H.uploadNoteMedia).toHaveBeenCalledTimes(2);
     });
 
+    /**
+     * The retry comes with NO connection, or behind queued changes (finding
+     * 11). It used to let go of the held key and queue the draft as a new
+     * create under a NEW key — so when the first attempt HAD landed, replay
+     * made the note twice. Queuing it under the held key would not do either:
+     * the server would answer with the note it made, and the queued text and
+     * pictures would then be added to it a second time. So that retry is
+     * refused, in words that are true, and the draft stays for a retry online
+     * — which then carries the SAME key and the SAME uploads.
+     */
+    it('a retry OFFLINE of a draft whose create answer was lost is refused, not queued as another note', async () => {
+        const c = await actionsFor();
+        const extra = { photos: [photo()], body: 'Gate 12' };
+        H.createTaskListWithContent.mockRejectedValueOnce(lost());
+        expect(await c.createContentNote('Trip', [], extra)).toBeNull();
+        onLine = false;
+        await expect(c.createContentNote('Trip', [], extra)).rejects.toMatchObject({
+            name: 'NoteMayExistError',
+            message: expect.stringMatching(/may already have been saved.*when you’re back online.*still here/),
+        });
+        expect(H.sendCreateList).not.toHaveBeenCalled();
+        expect(H.sendNoteOp).not.toHaveBeenCalled();
+        expect(H.sealNoteMedia).not.toHaveBeenCalled();
+        expect(H.park).not.toHaveBeenCalled();
+        expect(H.deleteFiles).not.toHaveBeenCalled();
+        // Back online, the same draft finishes the note it may have made.
+        onLine = true;
+        expect(await c.createContentNote('Trip', [], extra)).not.toBeNull();
+        expect(keyOf(1)).toBe(keyOf(0));
+        expect(refsOf(1)).toEqual(refsOf(0));
+        expect(H.uploadNoteMedia).toHaveBeenCalledTimes(1);
+    });
+
+    it('...and so is one ONLINE behind queued changes, with words that fit that case', async () => {
+        const c = await actionsFor();
+        const extra = { photos: [photo()] };
+        H.createTaskListWithContent.mockRejectedValueOnce(new ApiError('Gateway timeout', 504));
+        expect(await c.createContentNote('Trip', [], extra)).toBeNull();
+        H.pendingOutboxCount.mockReturnValue(2);
+        await expect(c.createContentNote('Trip', [], extra)).rejects.toMatchObject({
+            name: 'NoteMayExistError',
+            message: expect.stringMatching(/may already have been saved.*once your other changes have synced/),
+        });
+        expect(H.sendCreateList).not.toHaveBeenCalled();
+    });
+
+    it('POSITIVE CONTROL: an EDITED draft is a new intent, and queues as before', async () => {
+        const c = await actionsFor();
+        const pic = photo();
+        H.createTaskListWithContent.mockRejectedValueOnce(lost());
+        expect(await c.createContentNote('Trip', [], { photos: [pic], body: 'first' })).toBeNull();
+        onLine = false;
+        expect(await c.createContentNote('Trip', [], { photos: [pic], body: 'first, edited' })).not.toBeNull();
+        expect(H.sendCreateList).toHaveBeenCalledTimes(1);
+    });
+
+    it('POSITIVE CONTROL: a draft DEFINITELY refused, or never sent, queues offline as before', async () => {
+        for (const first of ['refused', 'upload failed'] as const) {
+            vi.clearAllMocks();
+            H.uploadNoteMedia.mockResolvedValue([uploaded]);
+            const c = await actionsFor();
+            const extra = { photos: [photo()] };
+            if (first === 'refused') H.createTaskListWithContent.mockRejectedValueOnce(new ApiError('Nope', 400));
+            else H.uploadNoteMedia.mockRejectedValueOnce(lost());
+            expect(await c.createContentNote('Trip', [], extra)).toBeNull();
+            onLine = false;
+            expect(await c.createContentNote('Trip', [], extra), first).not.toBeNull();
+            expect(H.sendCreateList, first).toHaveBeenCalledTimes(1);
+            onLine = true;
+            act(() => { root?.unmount(); });
+            root = null;
+        }
+    });
+
     it('a create that LANDED is forgotten: the same draft again is a new note', async () => {
         const c = await actionsFor();
         const extra = { photos: [photo()] };

@@ -103,6 +103,25 @@ one-line summary; this file is the full story. Versions follow
   go on typing into that note goes into the same copy rather than a new one
   each time. Your own earlier changes to the note on the same device never
   count as a clash.
+- **A save that gets no answer no longer duplicates a note, loses your words
+  or breaks a picture.** When the connection dropped just as the server saved
+  something: a photo or drawing added in Púca's Tasks view had its upload
+  deleted although the note had saved it, leaving a broken picture for good
+  — it is now kept, and you are told it may or may not have been saved.
+  Pressing Done again on such a note in Notes with no connection (or while
+  other changes were still waiting) queued it as a new note, so it could be
+  made twice; that press now says the note may already have been saved and
+  keeps your draft for when it can be sent. Text typed offline whose earlier
+  "(offline copy)" had since been deleted for good was dropped; it now goes
+  into a new copy. And a new copy whose save got no answer was made again on
+  every retry; it is now made once.
+- **A colour-and-label choice left waiting at sign-out no longer touches the
+  next account.** Pressing *Keep this device's* or *Use the server's copy*
+  while an earlier sync was stuck, then signing out, could run that choice
+  for whoever signed in next on the same browser — and *Keep this device's*
+  then replaced their colours, labels, archived notes and reminder times on
+  every device with this browser's nearly empty copy. A sync now belongs to
+  the sign-in that asked for it, and does nothing once you have signed out.
 - **Two devices adding pictures to one note at the same moment no longer lose
   one of them.** When two phones synced pictures into the same note at once,
   or a picture was removed on one device while another added one, the second
