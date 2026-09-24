@@ -482,7 +482,9 @@ export interface NoteActions {
     setAttachments: (note: NoteRef, task: Task, refs: TaskAttachmentRef[]) => Promise<void>;
     /** Note-level. createNote resolves with the new note once the LIST exists
      *  — even if some items failed (they are reported; the note is real) —
-     *  and null only when nothing was saved. */
+     *  and null when it was not made. It REJECTS with NoteMayExistError
+     *  (useListContent.ts), whose message is for the user, when a draft whose
+     *  earlier save may have landed cannot be sent again yet. */
     createNote: (title: string, items: string[], extra?: NoteExtras, timing?: (NewTaskTiming | undefined)[]) => Promise<NoteRef | null>;
     /** "Make a copy" (noteText.ts copyPlanOf). Always the content path: a
      *  copy may carry pictures, which cannot wait for a connection, so it

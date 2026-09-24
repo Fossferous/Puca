@@ -681,6 +681,67 @@ describe('an operation that outlives its account does nothing', () => {
         expect(p.puts).toEqual([]);
     });
 
+    /**
+     * A CHOICE queued behind a stalled pull (finding 3). *Keep this device's*
+     * and *Use the server's copy* are clicked on A's banner, but each waits
+     * its turn behind the pull already out; A signs out, and B signs in (or A
+     * again, a new session), before that turn comes. The session used to be
+     * read when the operation STARTED — so "Keep this device's" ran as B and
+     * PUT B's nearly empty copy over B's document with an EMPTY base, wiping
+     * B's colours, labels, archive flags and times on every device. It is the
+     * session that ASKED that counts, for every entry through the queue.
+     */
+    const bDoc = async (rev: number, s: NotesNoteState) =>
+        ({ rev, blob: await sealAccountBlob(idB, 2, 'notes-prefs', encodePrefsDoc(rev, s)) });
+    const B_SERVER = st({ labels: { 'list:9': ['B-own'], 'list:8': ['B-trip'] }, colors: { 'list:8': 'sage' }, archived: { 'list:7': true }, times: times({ evening: '21:30' }) });
+    const B_LOCAL = st({ labels: { 'list:9': ['B-own'] } });
+
+    for (const entry of ['overwriteServer', 'acceptServer', 'push', 'pull'] as const) {
+        for (const who of ['B signs in', 'A signs straight back in'] as const) {
+            it(`${entry} asked for, then queued behind a stalled pull past a sign-out (${who}), does nothing`, async () => {
+                const p = page(A_STATE);
+                const stalled = p.sync.pull();
+                await until(() => p.gets.length > 0);
+                const asked = p.sync[entry]();                          // clicked while the pull hangs
+                if (who === 'B signs in') { p.acct.uid = 2; p.acct.id = idB; p.local = B_LOCAL; }
+                else p.local = EMPTY_NOTE_STATE;                        // the sign-out scrubbed the copy
+                p.acct.epoch++;
+                const before = p.local;
+                p.gets[0].resolve({ kind: 'ok', doc: await aDoc(1, A_STATE) });
+                await settle(stalled);
+                // Had the choice run as the new session, let it do its worst:
+                // its GET answered with that account's real document.
+                await until(() => p.gets.length > 1);
+                p.gets[1]?.resolve({ kind: 'ok', doc: who === 'B signs in' ? await bDoc(3, B_SERVER) : await aDoc(3, A_STATE) });
+                await until(() => p.puts.length > 0);
+                p.puts[0]?.resolve({ kind: 'written', rev: 4 });
+                await settle(asked);
+                expect(p.puts.map(x => x.rev)).toEqual([]);             // nothing written over the new session's document
+                expect(p.writes.map(w => w.uid)).toEqual([]);           // nor over its copy on this device
+                expect(p.saves.map(x => x.uid)).toEqual([]);
+                expect(p.gets).toHaveLength(1);                         // the choice never even asked the server
+                expect(p.local).toEqual(before);
+                expect(await asked).toBe(p.sync.status());              // answered with the status, untouched
+            });
+        }
+    }
+
+    it('POSITIVE CONTROL: with no sign-out the queued choice runs when its turn comes', async () => {
+        const p = page(A_STATE);
+        const stalled = p.sync.pull();
+        await until(() => p.gets.length > 0);
+        const keep = p.sync.overwriteServer();
+        p.gets[0].reject(new TypeError('Failed to fetch'));
+        expect(await stalled).toBe('offline');
+        await until(() => p.gets.length > 1);
+        p.gets[1].resolve({ kind: 'ok', doc: await aDoc(1, st({})) });
+        await until(() => p.puts.length > 0);
+        expect(p.puts[0].rev).toBe(1);
+        p.puts[0].resolve({ kind: 'written', rev: 2 });
+        expect(await keep).toBe('synced');
+        expect(p.saves.map(s => s.uid)).toEqual([1, 1]);
+    });
+
     it('a GET that fails at the network AFTER the switch does not show the new session ‘offline’', async () => {
         const p = page(B_STATE);
         const op = p.sync.pull();

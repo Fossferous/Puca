@@ -196,6 +196,9 @@ interface HeldCreate extends Partial<HeldUploadsClock> {
     /** What was uploaded for it, once it has been (and when: the clock);
      *  null until then. */
     refs: TaskAttachmentRef[] | null;
+    /** A create under `key` has gone out and neither landed nor was
+     *  definitely refused (either clears the hold): the note may exist. */
+    sent?: true;
 }
 /** "Make a copy" held the same way: the copy's uploads, note-level and per
  *  item (in `flattenCopyItems` order). */
@@ -204,6 +207,21 @@ interface HeldCopy extends Partial<HeldUploadsClock> {
     key: string;
     noteRefs: TaskAttachmentRef[] | null;
     itemRefs: (TaskAttachmentRef[] | null)[] | null;
+}
+
+/**
+ * A create this device will not make yet, carrying the words to tell the
+ * user: a retry of a draft whose earlier create may have landed (HeldCreate
+ * `sent`), with no way to send it as that same create right now. THROWN
+ * rather than answered with null, so the composer's owner (NotesShell.tsx)
+ * shows these words INSTEAD of its own "Couldn't save the note", which is not
+ * known to be true of a note that may already exist.
+ */
+export class NoteMayExistError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'NoteMayExistError';
+    }
 }
 
 const objectIds = new WeakMap<object, number>();
@@ -245,7 +263,10 @@ export interface ListContentActions {
     /** What the server supports, asking it now if that is not known yet;
      *  null when it cannot be reached. A delete must never guess. */
     ensureFeatures: () => Promise<ListFeatures | null>;
-    /** `timing[i]` is item i's date & repeat (a copy of a note keeps them). */
+    /** `timing[i]` is item i's date & repeat (a copy of a note keeps them).
+     *  Rejects with NoteMayExistError — its message is for the user — when
+     *  the draft's earlier save may have landed and it cannot be sent again
+     *  yet (offline, or behind queued changes). */
     createContentNote: (title: string, items: string[], extra: NoteExtras, timing?: (NewTaskTiming | undefined)[]) => Promise<NoteRef | null>;
     /** Save a note's text. `{ rev }` (or 'saved') = written, 'queued' = kept
      *  on this device and sent when the connection is back, 'failed' = it did
@@ -410,9 +431,22 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         ]);
         await ensureOutboxLoaded();
         if (!navigator.onLine || pendingOutboxCount() > 0) {
+            // THIS draft was sent already, and its answer was lost: the note
+            // may exist. Queued, it would be made again — the queue mints its
+            // own key — and queuing it under the held key is no better: the
+            // server would answer with the note it made, and the queued text
+            // and pictures would then be added to it a second time. So it is
+            // not queued. The draft stays, and a retry once nothing stands in
+            // the way goes out under the held key (and uploads) below, which
+            // finishes the note it made rather than making another. An
+            // EDITED draft is a new intent, and queues as any other.
+            if (heldCreate.current?.intent === intent && heldCreate.current.sent) {
+                const when = navigator.onLine ? 'once your other changes have synced' : 'when you’re back online';
+                throw new NoteMayExistError(`This note may already have been saved. Try again ${when} — your text is still here.`);
+            }
             // The queue mints its own key, sealed into the op. Whatever an
-            // earlier online attempt of this draft held is let go — not
-            // deleted: it may be what a note that did land names.
+            // earlier online attempt of a DIFFERENT draft held is let go —
+            // not deleted: it may be what a note that did land names.
             heldCreate.current = null;
             // Refs that are ALREADY uploaded cannot ride the queue: an
             // `addMedia` op names bytes parked on this device, not files on
@@ -454,6 +488,7 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
             Object.assign(held, { refs }, heldUploadsClock());
         }
         let list: TaskList;
+        held.sent = true;
         try {
             list = await createTaskListWithContent(noteTitle, { body: body || undefined, refs }, held.key);
         } catch (err) {

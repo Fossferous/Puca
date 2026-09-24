@@ -16,6 +16,7 @@
  * outbox op, or held by the caller across its own retries — never per
  * request.
  */
+import { ApiError } from './client';
 
 /** 22 url-safe characters of CSPRNG randomness (132 bits), inside the
  *  server's 16-64 shape check. `crypto.getRandomValues` exists in every
@@ -37,6 +38,22 @@ export function newOpKey(): string {
 /** What the server accepts (src/task_handlers.rs `validate_op_key`). Exported
  *  so a test can prove the minted shape and the server's agree. */
 export const OP_KEY_SHAPE = /^[A-Za-z0-9_-]{16,64}$/;
+
+/** The server's words for a key whose create DID happen, and whose row has
+ *  since been deleted for good (src/task_handlers.rs `REPLAY_GONE_MESSAGE`,
+ *  a plain-text 409). Byte for byte: a test holds the two together. */
+export const REPLAY_GONE_MESSAGE = 'That was already created, and has since been removed';
+
+/**
+ * Whether a create was refused because its key already made something that
+ * is gone now. Matched exactly — status AND words — because a 409 on a create
+ * means other things too (a key spent on another kind of thing, a note in the
+ * trash, an envelope refusal), and none of those may be mistaken for "that
+ * one is gone, make another".
+ */
+export function isReplayGone(err: unknown): boolean {
+    return err instanceof ApiError && err.status === 409 && err.message === REPLAY_GONE_MESSAGE;
+}
 
 /** One create key, held across the user's OWN retries. */
 export interface HeldOpKey {

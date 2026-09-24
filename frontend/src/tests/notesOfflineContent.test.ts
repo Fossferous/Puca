@@ -11,9 +11,11 @@
  *    bytes again.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { ApiError } from '../api/client';
 import { NoteConflictError } from '../api/listConflict';
-import { OP_KEY_SHAPE } from '../api/opKey';
+import { OP_KEY_SHAPE, REPLAY_GONE_MESSAGE, isReplayGone } from '../api/opKey';
 
 vi.mock('../api/auth', () => ({ currentUserIdFromToken: () => 7 }));
 vi.mock('../api/tasks', async () => {
@@ -677,6 +679,161 @@ describe('text replayed onto a note that changed elsewhere', () => {
                 expect((createTaskListWithContent.mock.calls[1] as unknown as [string, { body?: string }])[1].body).toBe('A text and more');
             } finally { done(); }
         }
+    });
+
+    /**
+     * A server for the copies, as migration 070 has it: a create key is
+     * claimed with the insert, and the same key again is answered with the
+     * note it made — or, once that note has been deleted forever, 409 with
+     * src/task_handlers.rs's REPLAY_GONE_MESSAGE (the server remembers the
+     * key, not the note). `loseNextNew` commits the next NEW copy and then
+     * loses its answer, as a dropped connection does.
+     */
+    const REPLAY_GONE = /const REPLAY_GONE_MESSAGE: &str = "([^"]+)";/.exec(readFileSync(resolve(process.cwd(), '../src/task_handlers.rs'), 'utf8'))![1];
+    function copyServer() {
+        type Row = { id: number; title: string; body: string; content_rev: number; trashed_at: string | null };
+        const rows = new Map<number, Row>();
+        const byKey = new Map<string, number>();
+        let nextId = 100;
+        let lose = 0;
+        let Refusal: new (m: string, s: number, r?: number, b?: string) => Error = ApiError;
+        const createTaskListWithContent = vi.fn(async (title: string, content: { body?: string }, key: string) => {
+            const had = byKey.get(key);
+            if (had !== undefined) {
+                const row = rows.get(had);
+                if (!row) throw new Refusal(REPLAY_GONE, 409, undefined, REPLAY_GONE);
+                return { ...row };
+            }
+            const row: Row = { id: nextId++, title, body: content.body ?? '', content_rev: 1, trashed_at: null };
+            rows.set(row.id, row);
+            byKey.set(key, row.id);
+            if (lose > 0) { lose--; throw new TypeError('Failed to fetch'); }
+            return { ...row };
+        });
+        const setTaskListBody = vi.fn(async (id: number, body: string) => {
+            if (id === 4) throw theirs('B text');             // the note: another device's text won
+            const row = rows.get(id);
+            if (!row) throw new Refusal('Not found', 404);
+            row.body = body;
+            return ++row.content_rev;
+        });
+        return {
+            rows, createTaskListWithContent, setTaskListBody,
+            /** The fresh module's ApiError, so `instanceof` in the code under test holds. */
+            use(cls: typeof Refusal) { Refusal = cls; },
+            loseNextNew() { lose = 1; },
+            holding: (body: string) => [...rows.values()].filter(r => r.body === body),
+        };
+    }
+    /** The REAL outbox and executor, over `srv`. */
+    async function copyOutbox(srv: ReturnType<typeof copyServer>) {
+        const fresh = await withApi(srv.setTaskListBody, srv.createTaskListWithContent);
+        srv.use((await import('../api/client')).ApiError);
+        let online = false;
+        const queue = memoryStore();
+        const ob = fresh.createOutbox({
+            sub: () => 7, identity: () => identity, store: () => queue, exec: fresh.execOp,
+            online: () => online, lock: (_n, fn) => fn(), onReplayed: () => {}, parked: parkedHarness().parked,
+        });
+        return { fresh, ob, go: (v: boolean) => { online = v; } };
+    }
+    /** The typing's first words lose to another device's text and are kept as
+     *  copy #100; the user types on, offline, on the same revision. */
+    async function firstCopyThenTypeOn(fresh: Awaited<ReturnType<typeof copyOutbox>>, srv: ReturnType<typeof copyServer>, meanwhile: () => void) {
+        const { ob, go } = fresh;
+        await ob.send(fresh.fresh.ops.setBody(4, 'A text', 7));
+        go(true);
+        await ob.replay();
+        expect(srv.holding('A text').map(r => r.id)).toEqual([100]);
+        meanwhile();
+        go(false);
+        await ob.send(fresh.fresh.ops.setBody(4, 'A text and more', 7));
+        go(true);
+    }
+
+    /**
+     * The copy the typing went into was DELETED FOREVER since (finding 5).
+     * Replayed, its key is answered 409 REPLAY_GONE — and that 409 fell
+     * through to the replay's generic refusal, which DROPPED the op: the words
+     * typed since were gone, with only a line in a toast to say so.
+     */
+    it('a copy since DELETED FOREVER (409 REPLAY_GONE) sends the words to a fresh copy — they are never dropped', async () => {
+        const srv = copyServer();
+        try {
+            const h = await copyOutbox(srv);
+            await firstCopyThenTypeOn(h, srv, () => { srv.rows.delete(100); });
+            const summary = await h.ob.replay();
+            expect(summary?.dropped.map(o => o.label)).toEqual([]);
+            expect(summary?.copies).toEqual(['Trip (offline copy)']);
+            expect(srv.holding('A text and more')).toHaveLength(1);
+            expect(h.ob.pending()).toBe(0);
+        } finally { done(); }
+    });
+
+    it('REPLAY_GONE is matched by the server’s own words, byte for byte, and by nothing else', () => {
+        expect(REPLAY_GONE_MESSAGE).toBe(REPLAY_GONE);
+        expect(isReplayGone(new ApiError(REPLAY_GONE, 409, undefined, REPLAY_GONE))).toBe(true);
+        expect(isReplayGone(new ApiError(REPLAY_GONE, 400))).toBe(false);                    // the words, another status
+        expect(isReplayGone(new ApiError('That create key was already used for something else', 409))).toBe(false);
+        expect(isReplayGone(new TypeError(REPLAY_GONE))).toBe(false);                         // not a server answer at all
+    });
+
+    it('POSITIVE CONTROL: any OTHER 409 from the copy’s create is not taken for REPLAY_GONE', async () => {
+        for (const message of ['That create key was already used for something else', 'This note is in the trash']) {
+            const setTaskListBody = vi.fn(async () => { throw theirs('B text'); });
+            const createTaskListWithContent = vi.fn();
+            try {
+                const fresh = await withApi(setTaskListBody, createTaskListWithContent);
+                const { ApiError: FreshApiError } = await import('../api/client');
+                createTaskListWithContent.mockRejectedValue(new FreshApiError(message, 409, undefined, message));
+                const op = { ...fresh.ops.setBody(4, 'A text and more', 7), copyKey: 'K-first', copySent: [await fresh.textDigest('A text')] };
+                await expect(fresh.execOp(op, {}, true)).rejects.toMatchObject({ status: 409, message });
+                expect(createTaskListWithContent).toHaveBeenCalledTimes(1);   // no fresh copy made on its back
+            } finally { done(); }
+        }
+    });
+
+    /**
+     * A FRESH copy (the old one binned, edited by hand, or gone) whose answer
+     * was lost (finding 10). Its key was minted and sent without being
+     * written down: the lost answer recorded the OLD key, so every retry took
+     * the fresh path again under yet another key — a second "(offline copy)",
+     * then a third. The key goes into the queue's record BEFORE the create is
+     * sent, so a retry is that same create and is answered with that copy.
+     */
+    it('a FRESH copy whose answer was lost is retried under the SAME key: one copy, however often it replays', async () => {
+        const srv = copyServer();
+        try {
+            const h = await copyOutbox(srv);
+            await firstCopyThenTypeOn(h, srv, () => { srv.rows.get(100)!.trashed_at = '2026-09-23T10:00:00Z'; });
+            srv.loseNextNew();
+            await h.ob.replay();                                  // the fresh copy is made; its answer is lost
+            expect(h.ob.pending()).toBe(1);
+            expect(srv.holding('A text and more')).toHaveLength(1);
+            await h.ob.replay();                                  // the retry
+            expect(h.ob.pending()).toBe(0);
+            expect(srv.holding('A text and more')).toHaveLength(1);
+        } finally { done(); }
+    });
+
+    it('...and so is one made after REPLAY_GONE, and the next words of the typing land in it', async () => {
+        const srv = copyServer();
+        try {
+            const h = await copyOutbox(srv);
+            await firstCopyThenTypeOn(h, srv, () => { srv.rows.delete(100); });
+            srv.loseNextNew();
+            await h.ob.replay();
+            await h.ob.replay();
+            expect(srv.holding('A text and more')).toHaveLength(1);
+            // Typing on, on the same revision: into that copy, not a new one.
+            const made = srv.holding('A text and more')[0].id;
+            h.go(false);
+            await h.ob.send(h.fresh.ops.setBody(4, 'A text and more still', 7));
+            h.go(true);
+            await h.ob.replay();
+            expect(srv.holding('A text and more still').map(r => r.id)).toEqual([made]);
+            expect(srv.rows.size).toBe(1);
+        } finally { done(); }
     });
 
     it('text typed on after a copy whose answer was lost replays under the SAME copy key, naming what was sent', async () => {

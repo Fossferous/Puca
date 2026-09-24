@@ -323,8 +323,12 @@ step:
   not open, or one older than a revision already seen (a rollback) is shown as a
   banner; the local copy is kept either way. A refused rollback (usually a
   restored server backup) offers *Use the server's copy* or *Keep this
-  device's*; either resumes syncing. A conflict re-reads this device's copy
-  after the round trip, so an edit made while it was out is merged, not lost.
+  device's*; either resumes syncing. Each sync waits its turn behind the one
+  already running, and belongs to the account that asked for it: a choice
+  still waiting when you sign out does nothing, so it can never replace the
+  next account's colours and labels with this browser's copy. A conflict
+  re-reads this device's copy after the round trip, so an edit made while it
+  was out is merged, not lost.
 - **Deleting a note forgets its colour and labels** when the delete is
   permanent, wherever the delete is made: Púca's Tasks view forgets them on
   its own *Delete List* and on *Delete forever* in its Trash section, rather
@@ -530,9 +534,11 @@ back the copy it holds (migration 069, `expect_rev` on
   is retried, and once per stretch of typing: text you go on typing into the
   same note before it catches up goes into that same copy (brought up to date
   on top of what it holds), unless the copy has been edited, binned or deleted
-  since, in which case your newer words become another copy rather than
-  overwrite it. Text that is already exactly what the note holds simply counts
-  as saved. Clearing a note's text offline is the one change that cannot be
+  since (deleted for good included), in which case your newer words become
+  another copy rather than overwrite it — and that copy, too, is made once
+  however many times the change is retried: its id is written down on this
+  device before it is sent. Text that is already exactly what the note holds
+  simply counts as saved. Clearing a note's text offline is the one change that cannot be
   kept that way (there are no words to keep, and clearing theirs is what the
   check is there to stop): it is not applied, and it is listed in the message
   of changes that could not be saved. Your own device's changes do not count
@@ -552,7 +558,12 @@ back the copy it holds (migration 069, `expect_rev` on
   — shorter than the shortest window a server can be set to. Otherwise the
   retry uploads the pictures again: a server that makes a second note must not
   give two notes the same files, because deleting the extra one and emptying
-  the trash would then delete the pictures of the one you kept. A change sent right after a
+  the trash would then delete the pictures of the one you kept. Pressing Done
+  again on that same draft with no connection, or while other changes are
+  still waiting to sync, is refused with a message saying the note may
+  already have been saved, and the draft stays: queued, it would be made a
+  second time. Once it can be sent again, Done finishes it as above; an
+  edited draft is a new note and queues as usual. A change sent right after a
   cold start waits for the queue a previous page left behind before it may
   run.
 - **A note's text and its pictures are queued too.** Type a note with no
@@ -1263,7 +1274,12 @@ Migration 065 gives a personal list three nullable columns, and
 list's text, photos AND drawings — a drawing made in either app opens in the
 other's editor, and saving one replaces the pair (the picture and its
 strokes) so nothing is orphaned — and its *Delete list* becomes *Move to
-trash* on a server that has one. A sidecar this device cannot read still
+trash* on a server that has one. Its uploads follow Notes' rule too: the pair
+a redrawn drawing replaces is deleted only once the new one is saved, and a
+photo or drawing whose save got no answer (the connection dropped, a gateway
+timed out) keeps its upload and says it may or may not have been saved —
+only a definite refusal deletes it, because a note that was saved must never
+point at a deleted file. A sidecar this device cannot read still
 refuses every edit, in both apps, rather than writing over refs it cannot
 see. It also wears the same organisation: a note's colour tints its tab and
 its board card, its labels show as chips, an archived note is off the bar and

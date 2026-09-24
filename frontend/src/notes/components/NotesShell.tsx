@@ -47,7 +47,7 @@ import { Popover } from '../../components/notes/Popover';
 import { QuickAdd } from './QuickAdd';
 import { RemindersView } from './RemindersView';
 import { TrashView } from './TrashView';
-import { type NoteExtras } from '../model/useListContent';
+import { NoteMayExistError, type NoteExtras } from '../model/useListContent';
 import { CalendarView } from './CalendarView';
 import { UndoBar } from './UndoBar';
 import { useNotesShortcuts } from './useNotesShortcuts';
@@ -596,7 +596,16 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
 
     // --- Composer --------------------------------------------------------------------------------
     const createNote = async (title: string, items: string[], extra?: NoteExtras): Promise<boolean> => {
-        const ref = await actions.createNote(title, items, extra);
+        let ref: NoteRef | null;
+        try {
+            ref = await actions.createNote(title, items, extra);
+        } catch (err) {
+            if (!(err instanceof NoteMayExistError)) throw err;
+            // Its own words, and only those: the line below says the note
+            // was not saved, which is not known of this one.
+            pushMessageToast({ title: err.message });
+            return false;
+        }
         if (!ref) {
             pushMessageToast({ title: 'Couldn’t save the note — check your connection. Your text is still here.' });
             return false;

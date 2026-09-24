@@ -99,7 +99,7 @@ import {
 } from '../../api/listContent';
 import { type ContentWrite, watchContentWrites } from '../../api/listConflict';
 import { isUndecryptable } from '../../api/decryptMarkers';
-import { newOpKey } from '../../api/opKey';
+import { isReplayGone, newOpKey } from '../../api/opKey';
 import { type TaskAttachmentRef } from '../../api/tasks';
 import { addNoteRefs, fileIdsOf, removeNoteRefs, uploadParkedMedia } from '../../api/noteMedia';
 import { appParkedStore, type ParkedStore } from './notesBlobs';
@@ -172,7 +172,10 @@ type OpBody =
     // is given one when it replays.
     // `copySent` is never stored: replay fills it in from the same record —
     // digests of the texts this typing sent under that key (`keepOfflineText`).
-    | { k: 'setBody'; listId: number; body: string; expectRev?: number; copyKey?: string; copySent?: string[] }
+    // Nor is `keepCopyKey`: replay hands it in so that a copy key minted
+    // DURING the op is written into that record before the create naming it
+    // is sent (a function never survives the JSON the queue is kept as).
+    | { k: 'setBody'; listId: number; body: string; expectRev?: number; copyKey?: string; copySent?: string[]; keepCopyKey?: (key: string) => Promise<void> }
     // Pictures and files sealed on this device (notesBlobs.ts) that still
     // have to go up. Running it uploads them, then adds the real refs to
     // whatever the server's sidecar holds THEN, naming the revision it read
@@ -438,6 +441,19 @@ export async function textDigest(text: string): Promise<string> {
  * brought up to date (naming its revision) only while it still holds words
  * this typing sent under that key (`copySent`); a copy changed since by
  * anyone is left alone, and these words become a fresh copy.
+ *
+ * A COPY DELETED FOREVER since is answered 409 REPLAY_GONE: the server
+ * remembers the key, not the note. The words then go to a fresh copy too.
+ * Unmatched, that 409 was a plain refusal to the replay, which DROPPED the
+ * op — the words typed since were gone. Only that 409 (`isReplayGone`): a
+ * key spent on something else, or any other refusal, is thrown as before.
+ *
+ * A FRESH KEY IS WRITTEN DOWN BEFORE IT IS SENT (`keepCopyKey`, from replay:
+ * the queue's `copies` record). Minted and sent unrecorded, a fresh copy
+ * whose answer was lost left the record naming the OLD key, so every retry
+ * took this path again under yet another key — a second "(offline copy)",
+ * then a third. Recorded first, the retry IS that create, and the server
+ * answers it with the copy it made; the next text of the typing goes into it.
  */
 async function keepOfflineText(op: Extract<OpBody, { k: 'setBody' }>, err: NoteConflictError): Promise<number | OfflineCopy> {
     if ((err.body ?? '') === op.body) return err.contentRev;
@@ -445,25 +461,37 @@ async function keepOfflineText(op: Extract<OpBody, { k: 'setBody' }>, err: NoteC
     const opened = err.sealedTitle === null ? '' : await openSelfTaskText(err.sealedTitle);
     const base = !opened || isUndecryptable(opened) ? 'Note' : opened;
     const title = `${base.slice(0, MAX_TITLE_LENGTH - COPY_SUFFIX.length).trimEnd()}${COPY_SUFFIX}`;
-    const key = op.copyKey ?? newOpKey();
-    const copy = await createTaskListWithContent(title, { body: op.body }, key);
-    // Made now (or a server that says nothing about the text): done.
-    if (copy.body === undefined || (copy.body ?? '') === op.body) return { offlineCopy: title, copyKey: key };
-    // Binned since, or holding anything but this typing's own words: left
-    // alone. A write the server REFUSES (changed under us, trashed, gone)
-    // falls through to a fresh copy too — the words are never dropped; one
-    // whose answer is lost is retried, and lands in the same copy.
-    const inTrash = typeof copy.trashed_at === 'string' && copy.trashed_at !== '';
-    if (!inTrash && typeof copy.content_rev === 'number' && typeof copy.body === 'string'
-        && (op.copySent ?? []).includes(await textDigest(copy.body))) {
-        try {
-            await setTaskListBody(copy.id, op.body, copy.content_rev);
-            return { offlineCopy: title, copyKey: key };
-        } catch (e) {
-            if (!(e instanceof NoteConflictError) && !isDefiniteRefusal(e)) throw e;
+    const mint = async (): Promise<string> => {
+        const k = newOpKey();
+        await op.keepCopyKey?.(k);
+        return k;
+    };
+    const key = op.copyKey ?? await mint();
+    let copy: TaskList | null = null;
+    try {
+        copy = await createTaskListWithContent(title, { body: op.body }, key);
+    } catch (e) {
+        if (!isReplayGone(e)) throw e;
+    }
+    if (copy) {
+        // Made now (or a server that says nothing about the text): done.
+        if (copy.body === undefined || (copy.body ?? '') === op.body) return { offlineCopy: title, copyKey: key };
+        // Binned since, or holding anything but this typing's own words: left
+        // alone. A write the server REFUSES (changed under us, trashed, gone)
+        // falls through to a fresh copy too — the words are never dropped; one
+        // whose answer is lost is retried, and lands in the same copy.
+        const inTrash = typeof copy.trashed_at === 'string' && copy.trashed_at !== '';
+        if (!inTrash && typeof copy.content_rev === 'number' && typeof copy.body === 'string'
+            && (op.copySent ?? []).includes(await textDigest(copy.body))) {
+            try {
+                await setTaskListBody(copy.id, op.body, copy.content_rev);
+                return { offlineCopy: title, copyKey: key };
+            } catch (e) {
+                if (!(e instanceof NoteConflictError) && !isDefiniteRefusal(e)) throw e;
+            }
         }
     }
-    const fresh = newOpKey();
+    const fresh = await mint();
     await createTaskListWithContent(title, { body: op.body }, fresh);
     return { offlineCopy: title, copyKey: fresh };
 }
@@ -970,6 +998,25 @@ export function createOutbox(deps: OutboxDeps): Outbox {
                         const digest = await textDigest(head.body);
                         await mutate(s => ({ ...s, copies: recordCopy(s.copies ?? {}, at, key, digest) }));
                     };
+                    // The key this text's copy was last SENT under: the one it
+                    // runs with, until keepOfflineText has to make a fresh copy.
+                    // That fresh key is written into the record BEFORE its
+                    // create goes out (`keepCopyKey`), so a lost answer is
+                    // retried as that same create — never as another one.
+                    let sentUnder: string | undefined = run.k === 'setBody' ? run.copyKey : undefined;
+                    if (run.k === 'setBody' && copyAt !== null) {
+                        run = {
+                            ...run,
+                            keepCopyKey: async (key: string) => {
+                                sentUnder = key;
+                                // A record that cannot be written is no reason
+                                // to drop the words: the create goes out anyway,
+                                // and at worst a lost answer then makes a second
+                                // copy, as it did before.
+                                await noteCopy(key).catch(() => undefined);
+                            },
+                        };
+                    }
                     const done = beginNoteWrite(busyKeyOf(head));
                     const writes: ContentWrite[] = [];
                     try {
@@ -1002,9 +1049,11 @@ export function createOutbox(deps: OutboxDeps): Outbox {
                         const status = err instanceof ApiError ? err.status : undefined;
                         // Text that may have made (or updated) its copy before
                         // the answer was lost: the next text of this typing
-                        // must go into that one, whatever becomes of this op.
-                        if (run.k === 'setBody' && run.copyKey && !isDefiniteRefusal(err)) {
-                            await noteCopy(run.copyKey).catch(() => undefined);
+                        // must go into that one, whatever becomes of this op —
+                        // the copy it was last SENT to, which after a fresh
+                        // copy is not the key it started with.
+                        if (sentUnder && !isDefiniteRefusal(err)) {
+                            await noteCopy(sentUnder).catch(() => undefined);
                         }
                         if (isNetworkError(err)) {
                             scheduleReplay(backoffMs);
