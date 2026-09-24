@@ -992,9 +992,11 @@ pub async fn refresh_token(cfg: &LinkConfig, token: &str) -> Result<Option<Strin
 /// past either point comes back unreachable exactly when someone wants it.
 ///
 /// This asks the server for a nonce, signs it with the Ed25519 key enrolment
-/// generated, and gets an hour-long session back. The key is on this machine's
-/// disk under a SYSTEM-only ACL and does not expire, so a machine that was off
-/// for a month recovers on its own.
+/// generated, and gets a fresh session back: a token minted for an hour, which
+/// the server renews like any other session (24 h at a time, sliding for up to
+/// `MAX_SESSION_DAYS` from this mint) until the device is revoked. The key is
+/// on this machine's disk under a SYSTEM-only ACL and does not expire, so a
+/// machine that was off for a month recovers on its own.
 ///
 /// Two round trips rather than a self-signed timestamp, because a timestamp is
 /// replayable by anyone who saw it inside the acceptance window — and that

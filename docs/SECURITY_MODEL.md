@@ -1247,6 +1247,33 @@ pairing `logout_session` uses). The operator-gated migration password reset
 every socket — before, it installed new SRP material and left every
 outstanding token and device valid — and it refuses a deleted account.
 
+**A revoked device's sessions are refused on every request, whatever the
+timing.** Revoking a device marks the sessions it proved, but that sweep can
+only reach rows that exist when it runs. An enrolled machine gets its session
+from `/devices/token` (it signs a server nonce with its device key), and a
+mint that read the device as live just before the revoke, then wrote its
+session row just after the sweep, came out with a live session for a device
+its owner had just revoked. That token was accepted on every request and
+renewed, and the owner could not revoke it again, because the Devices tab
+hides a revoked device. Now the check every REST request, socket upgrade and
+TURN-credential request makes refuses a session bound to a revoked device,
+whatever the session's own row says (`token_session_live`,
+[`src/auth.rs`](../src/auth.rs)). That check alone closes the hole. Behind
+it, the mint writes its row only while the device is live, holding a lock on
+the device row, and returns no token without the row
+(`INSERT_DEVICE_SESSION`, [`src/device_token.rs`](../src/device_token.rs)).
+The revoke also marks the device before it sweeps the device's sessions, in
+one transaction (`revoke_device`), so a racing mint either lands before the
+sweep, which then catches it, or waits and finds the device revoked.
+
+A device-minted token is minted for an hour
+(`DEVICE_TOKEN_TTL_HOURS`), but it is an ordinary session: the first request
+renews it into a 24-hour token that keeps sliding for up to 30 days from the
+mint (`MAX_SESSION_DAYS`). The short first expiry limits only a token nobody
+uses. A copied device token stops working when the device is revoked, or when
+anything bumps the account's token version (*Sign out of every device*, a
+password change or a recovery reset).
+
 **"Show online status" holds against file offers (0.9.5).** A file offered to
 someone hiding their presence used to be delivered silently when they were
 online and parked with a notice to the sender when they were not — a presence

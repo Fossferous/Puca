@@ -38,10 +38,11 @@ pub struct Claims {
     pub sst: i64,
     /// Session id (one per sign-in, one per device token). `tv` is per USER
     /// and cannot revoke one device; this can: revoking a device marks the
-    /// sessions it PROVED (token_sessions.device_id, set by DeviceAttest,
-    /// never by a client claim), signing out one session marks that row, and
-    /// the middleware + WebSocket upgrade refuse a token whose sid is revoked
-    /// while every other session keeps working. `#[serde(default)]`: tokens
+    /// sessions it PROVED (token_sessions.device_id, set by DeviceAttest or
+    /// the device-token mint, never by a client claim), signing out one
+    /// session marks that row, and the middleware + WebSocket upgrade refuse
+    /// a token whose sid is revoked, or is bound to a revoked device, while
+    /// every other session keeps working. `#[serde(default)]`: tokens
     /// minted before the claim decode as "" and stay accepted (no row can be
     /// revoked for them); their first sliding renewal mints one.
     #[serde(default)]
@@ -239,13 +240,35 @@ pub fn renew_if_stale(claims: &Claims, sid: &str, secret: &str) -> Option<String
 }
 
 /// Is this token still good: the user's token_version matches AND, when the
-/// token carries a session id, that session has not been revoked. ONE query
-/// (the middleware runs on every request): a LEFT JOIN, so a legacy token with
-/// no sid, or a sid with no row, is judged on token_version alone.
+/// token carries a session id, that session has not been revoked — and, when
+/// that session is BOUND to a device, the device has not been revoked either.
+/// ONE query (the middleware runs on every request): LEFT JOINs, so a legacy
+/// token with no sid, or a sid with no row, is judged on token_version alone,
+/// and an ordinary sign-in (no `device_id`) is never judged by a device.
+///
+/// WHY THE DEVICE, and not just the session row. `revoke_device` marks the
+/// rows bound to the device, but a row written by a mint that raced the revoke
+/// could land after that sweep: the device-token mint read the device as live,
+/// the revoke swept, then the mint's INSERT arrived with `revoked_at` NULL.
+/// This check read only that row, so the session was accepted on every request
+/// and renewed into a 24 h token sliding for 30 days — for a device its owner
+/// had revoked and could no longer see to revoke again. The mint and the
+/// revoke now close that race between themselves (`INSERT_DEVICE_SESSION`,
+/// `revoke_device`); this is the check that does not depend on them getting
+/// the timing right, and it also covers the WS `DeviceAttest` binding, which
+/// has the same read-then-write shape. A revoked device stays revoked (nothing
+/// clears `devices.revoked_at`), so refusing its sessions forever is correct.
+/// A binding to a device row that is GONE fails closed too: device rows are
+/// never hard-deleted outside the account's own cascade, so there is nothing
+/// left that could vouch for it.
 pub async fn token_session_live(pool: &sqlx::PgPool, claims: &Claims) -> Result<bool, sqlx::Error> {
     let row: Option<(i32, bool)> = sqlx::query_as(
-        "SELECT u.token_version, COALESCE(s.revoked_at IS NOT NULL, false) FROM users u \
+        "SELECT u.token_version, \
+                COALESCE(s.revoked_at IS NOT NULL, false) \
+                OR (s.device_id IS NOT NULL AND (d.id IS NULL OR d.revoked_at IS NOT NULL)) \
+         FROM users u \
          LEFT JOIN token_sessions s ON s.sid = $2 AND s.user_id = u.id \
+         LEFT JOIN devices d ON d.id = s.device_id \
          WHERE u.id = $1",
     )
     .bind(claims.sub as i32)
@@ -842,6 +865,65 @@ mod session_tests {
         assert!(token_session_live(&pool, &claims("sid-unknown", tv)).await.unwrap(), "an unknown sid has no row to be revoked");
         assert!(!token_session_live(&pool, &claims("sid-live", tv + 1)).await.unwrap(), "token_version still rules");
         let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(uid).execute(&pool).await;
+    }
+
+    /// A session BOUND to a device dies with the device, whatever its own row
+    /// says. The row's mark cannot be the only defence: a device-token mint
+    /// (or a DeviceAttest binding) that read the device as live before the
+    /// revoke and wrote its row after the revoke's sweep left a row with
+    /// `revoked_at` NULL, and this check used to accept it on every request —
+    /// and renew it into a 24 h token sliding for 30 days. Here the device is
+    /// revoked and its session row deliberately is NOT, which is exactly the
+    /// state that race produced. TEST_DATABASE_URL only.
+    #[tokio::test]
+    async fn a_session_bound_to_a_revoked_device_is_refused_even_if_its_row_was_missed() {
+        let Some(pool) = crate::migrator::test_pool(2).await else { return };
+        let name = format!("sess_dev_{}", uuid::Uuid::new_v4().simple());
+        let (uid, tv): (i32, i32) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id, token_version")
+            .bind(&name).bind(b"s".as_ref()).bind(b"v".as_ref())
+            .fetch_one(&pool).await.expect("insert user");
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let (live_dev, dead_dev, gone_dev) = (format!("ld-{tag}"), format!("rd-{tag}"), format!("gd-{tag}"));
+        for dev in [&live_dev, &dead_dev] {
+            sqlx::query(
+                "INSERT INTO devices (id, user_id, device_pub, sign_pub, name, platform, auth_record, auth_sig) \
+                 VALUES ($1, $2, 'x25519:' || $1, 'ed25519:' || $1, 'test', 'windows', '{}', 'x')",
+            )
+            .bind(dev).bind(uid).execute(&pool).await.expect("insert device");
+        }
+        let (plain, on_live, on_dead, on_gone) =
+            (format!("p-{tag}"), format!("l-{tag}"), format!("r-{tag}"), format!("g-{tag}"));
+        sqlx::query("INSERT INTO token_sessions (sid, user_id) VALUES ($1, $2)").bind(&plain).bind(uid).execute(&pool).await.unwrap();
+        for (sid, dev) in [(&on_live, &live_dev), (&on_dead, &dead_dev), (&on_gone, &gone_dev)] {
+            sqlx::query("INSERT INTO token_sessions (sid, user_id, device_id, headless) VALUES ($1, $2, $3, TRUE)")
+                .bind(sid).bind(uid).bind(dev).execute(&pool).await.unwrap();
+        }
+        // The device only — the session row is left live, as the race left it.
+        sqlx::query("UPDATE devices SET revoked_at = NOW() WHERE id = $1").bind(&dead_dev).execute(&pool).await.unwrap();
+
+        let claims = |sid: &str| Claims { sub: uid as UserId, username: name.clone(), exp: 0, tv, sst: 0, sid: sid.into(), ls: false };
+        let plain_ok = token_session_live(&pool, &claims(&plain)).await.unwrap();
+        let live_ok = token_session_live(&pool, &claims(&on_live)).await.unwrap();
+        let dead_ok = token_session_live(&pool, &claims(&on_dead)).await.unwrap();
+        let gone_ok = token_session_live(&pool, &claims(&on_gone)).await.unwrap();
+        let legacy_ok = token_session_live(&pool, &claims("")).await.unwrap();
+        let (dead_row_live,): (bool,) = sqlx::query_as("SELECT revoked_at IS NULL FROM token_sessions WHERE sid = $1")
+            .bind(&on_dead).fetch_one(&pool).await.unwrap();
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(uid).execute(&pool).await;
+
+        // Positive controls: an ordinary sign-in is bound to no device and must
+        // not be judged by one, and a session on a LIVE device is untouched —
+        // without these a query that refused everything would pass.
+        assert!(plain_ok, "an ordinary (deviceless) session is still accepted");
+        assert!(live_ok, "a session bound to a live device is still accepted");
+        assert!(legacy_ok, "a legacy token (no sid) is still judged on token_version alone");
+        assert!(dead_row_live, "fixture: the session row itself really is unrevoked");
+        assert!(!dead_ok, "a session bound to a REVOKED device must be refused though its row was missed");
+        // Devices are never hard-deleted (a revoked one stays, so it cannot
+        // re-enrol), so a binding to a row that is gone names a device nothing
+        // can vouch for any more: refused, the same fail-closed rule the WS
+        // delivery claim uses.
+        assert!(!gone_ok, "a session bound to a device row that no longer exists is refused");
     }
 
     /// Finding 3, defence in depth: a sid-bearing token whose session row does

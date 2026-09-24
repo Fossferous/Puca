@@ -21,11 +21,21 @@
 //! could drift. Possession of that key is what the account already treats as
 //! "this is that device".
 //!
-//! WHAT IT DOES NOT PROVE, and why the token is short. This is a key sitting on
-//! a disk, not a person. It cannot be revoked by a password change the way a
-//! session can, so the token it buys lives for an hour rather than a day and
-//! carries the user's CURRENT `token_version` — revoking the account still kills
-//! it at the next request, and deleting the device row stops it being reissued.
+//! WHAT IT DOES NOT PROVE, and what bounds the token instead. This is a key
+//! sitting on a disk, not a person. It cannot be revoked by a password change
+//! the way a session can, so the token it buys carries the user's CURRENT
+//! `token_version` and a session bound to THIS device (`token_sessions.device_id`,
+//! written only while the device is live — `INSERT_DEVICE_SESSION`). Revoking
+//! the account kills it at the next request; revoking the device refuses it at
+//! the next request whatever the timing (`auth::token_session_live` checks the
+//! device itself, not only the session row) and stops it being reissued.
+//!
+//! SHORT ONLY AT MINT. It is minted for `DEVICE_TOKEN_TTL_HOURS`, but it is an
+//! ordinary session token (`ls: false`): the first authenticated request renews
+//! it into a 24 h token (`TOKEN_TTL_HOURS`) that keeps sliding for up to
+//! `MAX_SESSION_DAYS` from this mint, and the host service renews it on
+//! purpose. So a copied token is good for that long unless the device is
+//! revoked — revocation is what ends it, not the mint's TTL.
 //!
 //! THE NONCE IS SERVER-ISSUED AND SINGLE-USE. A self-signed timestamp would be
 //! replayable by anyone who saw it inside the acceptance window, and that window
@@ -42,11 +52,12 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// How long a device token lives.
+/// How long a device token lives AS MINTED.
 ///
-/// SHORTER THAN A USER'S 24h ON PURPOSE — see the header. Long enough that a
-/// machine at a sign-in screen is not re-authenticating constantly, short enough
-/// that a stolen one is a narrow window rather than a day.
+/// Shorter than a user's 24 h, so a token nobody uses lapses soon. It is NOT
+/// the token's lifetime once used — see the header: any authenticated request
+/// renews it into an ordinary 24 h token sliding for up to `MAX_SESSION_DAYS`
+/// from the mint, so what ends a stolen one is revoking the device.
 pub const DEVICE_TOKEN_TTL_HOURS: i64 = 1;
 
 /// How long a challenge stays answerable.
@@ -167,6 +178,33 @@ pub async fn device_challenge(
     Ok(Json(ChallengeResponse { nonce }))
 }
 
+/// The mint's session row, written only if the device is still live — checked
+/// by the same statement that writes it.
+///
+/// The device was read and found live earlier, but that read is a plain
+/// SELECT; by the time the signature has been checked the owner may have
+/// revoked the device, and `revoke_device` sweeps only the rows that exist
+/// when it sweeps. An unconditional INSERT landing after that sweep wrote a
+/// LIVE row bound to a revoked device, and the token that came with it was
+/// accepted and renewed for up to 30 days, out of reach of the Devices tab
+/// (which hides a revoked device, so there was nothing left to revoke again).
+///
+/// `FOR SHARE` is what makes the check atomic rather than merely later. A
+/// plain `EXISTS` reads a snapshot, so against a revoke that has marked the
+/// device but not yet committed it still sees the device live and inserts
+/// (measured on PostgreSQL 16: `INSERT 0 1` without the lock clause, `INSERT
+/// 0 0` with it, same interleaving). The share lock conflicts with the
+/// revoke's row lock, so the two serialise on the device row: either the mint
+/// goes first and its row exists before `revoke_device` sweeps (the device is
+/// marked, then swept, in one transaction), or it waits for the revoke's
+/// commit, re-reads the row and finds it revoked — no row, no token.
+///
+/// `user_id` is matched too, so the statement stands on its own: it binds a
+/// session to a live device OF THIS ACCOUNT without leaning on the earlier read.
+pub(crate) const INSERT_DEVICE_SESSION: &str = "INSERT INTO token_sessions (sid, user_id, device_id, headless) \
+     SELECT $1, $2, $3, TRUE \
+     WHERE EXISTS (SELECT 1 FROM devices WHERE id = $3 AND user_id = $2 AND revoked_at IS NULL FOR SHARE)";
+
 /// Step two: present the signature, receive a short token.
 pub async fn device_token(
     State(state): State<Arc<AppState>>,
@@ -252,7 +290,7 @@ pub async fn device_token(
     // its one-minute ladder instead. The body stays generic; the detail is logged.
     // `headless`: this session belongs to the host service, not to a client
     // that reads DMs — the v4 rollout gate leaves it out (migration 060).
-    sqlx::query("INSERT INTO token_sessions (sid, user_id, device_id, headless) VALUES ($1, $2, $3, TRUE)")
+    let recorded = sqlx::query(INSERT_DEVICE_SESSION)
         .bind(&sid)
         .bind(user_id as i32)
         .bind(&payload.device_id)
@@ -262,6 +300,13 @@ pub async fn device_token(
             tracing::error!("device_token: could not record the session row: {e}");
             (StatusCode::SERVICE_UNAVAILABLE, "could not start a session right now; try again".to_string())
         })?;
+    // No row means the device was revoked after the read above: refused
+    // exactly as if the read had seen it, since to the host that is what it
+    // is — this computer was signed out. Not the 503: retrying cannot help.
+    if recorded.rows_affected() == 0 {
+        tracing::info!("device_token: device of user {user_id} was revoked while its token was being minted — refused");
+        return Err(bad("that device could not be verified"));
+    }
     // The mint error carries jsonwebtoken's own text, so it goes to the log and
     // the caller gets the endpoint's one refusal. Unlike the row's transient
     // fault above, a signing failure would be a configuration fault that
@@ -401,6 +446,49 @@ mod tests {
         );
     }
 
+    /// A user and one enrolled, live device whose signing key the test holds.
+    /// TEST_DATABASE_URL only; the caller deletes the user (the device and its
+    /// session rows cascade with it).
+    async fn enrolled_device(pool: &sqlx::PgPool) -> (i32, ed25519_dalek::SigningKey, String) {
+        use base64::Engine;
+        use rand::RngCore;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let name = format!("devtok_{}", uuid::Uuid::new_v4().simple());
+        let (uid,): (i32,) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id")
+            .bind(&name).bind(b"s".as_ref()).bind(b"v".as_ref())
+            .fetch_one(pool).await.expect("insert user");
+        let mut seed = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut seed);
+        let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let device_id = format!("dt-{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(
+            "INSERT INTO devices (id, user_id, device_pub, sign_pub, name, platform, auth_record, auth_sig) \
+             VALUES ($1, $2, 'x25519:AA', $3, 'test', 'windows', '{}', 'x')",
+        )
+        .bind(&device_id).bind(uid).bind(format!("ed25519:{}", b64.encode(key.verifying_key().to_bytes())))
+        .execute(pool).await.expect("insert device");
+        (uid, key, device_id)
+    }
+
+    /// The whole route as the host service drives it: a challenge, the
+    /// device's signature over it, the token request.
+    async fn redeem(state: &Arc<AppState>, key: &ed25519_dalek::SigningKey, device_id: &str, uid: i32) -> Result<Json<TokenResponse>, (StatusCode, String)> {
+        use base64::Engine;
+        use ed25519_dalek::Signer;
+        use rand::RngCore;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let mut raw = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut raw);
+        let nonce = b64.encode(raw);
+        state.device_challenges.issue(device_id, nonce.clone()).expect("issue");
+        let sig = key.sign(crate::ws::device_attest_message(&nonce, uid as UserId).as_bytes());
+        device_token(
+            State(state.clone()),
+            Json(TokenRequest { device_id: device_id.to_string(), nonce, sig: b64.encode(sig.to_bytes()) }),
+        )
+        .await
+    }
+
     /// Finding 3: a device token must never be handed out without its
     /// `token_sessions` row. Without the row, revoking the device (which marks
     /// the rows bound to it) and per-session sign-out both miss the session,
@@ -408,41 +496,9 @@ mod tests {
     /// trigger scoped to this test's user. TEST_DATABASE_URL only.
     #[tokio::test]
     async fn no_device_token_is_issued_when_its_session_row_cannot_be_written() {
-        use base64::Engine;
-        use ed25519_dalek::{Signer, SigningKey};
-        use rand::RngCore;
         let Some(pool) = crate::migrator::test_pool(2).await else { return };
         let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
-        let b64 = base64::engine::general_purpose::STANDARD;
-
-        let name = format!("devtok_{}", uuid::Uuid::new_v4().simple());
-        let (uid,): (i32,) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id")
-            .bind(&name).bind(b"s".as_ref()).bind(b"v".as_ref())
-            .fetch_one(&pool).await.expect("insert user");
-        let mut seed = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut seed);
-        let key = SigningKey::from_bytes(&seed);
-        let device_id = format!("dt-{}", uuid::Uuid::new_v4().simple());
-        sqlx::query(
-            "INSERT INTO devices (id, user_id, device_pub, sign_pub, name, platform, auth_record, auth_sig) \
-             VALUES ($1, $2, 'x25519:AA', $3, 'test', 'windows', '{}', 'x')",
-        )
-        .bind(&device_id).bind(uid).bind(format!("ed25519:{}", b64.encode(key.verifying_key().to_bytes())))
-        .execute(&pool).await.expect("insert device");
-
-        async fn redeem(state: &Arc<AppState>, key: &SigningKey, device_id: &str, uid: i32) -> Result<Json<TokenResponse>, (StatusCode, String)> {
-            let b64 = base64::engine::general_purpose::STANDARD;
-            let mut raw = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut raw);
-            let nonce = b64.encode(raw);
-            state.device_challenges.issue(device_id, nonce.clone()).expect("issue");
-            let sig = key.sign(crate::ws::device_attest_message(&nonce, uid as UserId).as_bytes());
-            device_token(
-                State(state.clone()),
-                Json(TokenRequest { device_id: device_id.to_string(), nonce, sig: b64.encode(sig.to_bytes()) }),
-            )
-            .await
-        }
+        let (uid, key, device_id) = enrolled_device(&pool).await;
 
         let fault = crate::auth::refuse_session_rows_for(&pool, uid).await;
         let refused = redeem(&state, &key, &device_id, uid).await;
@@ -472,6 +528,99 @@ mod tests {
         // and the row that binds it to the device.
         assert!(healthy.is_ok(), "a healthy redeem still mints: {:?}", healthy.err());
         assert_eq!(bound, Some((true, Some(device_id.clone()))), "headless and bound to the device that proved itself");
+    }
+
+    /// THE RACE. A device revoked while its token is being minted must not
+    /// come out of it holding a session. The mint reads the device (live),
+    /// verifies the signature, then writes its session row; `revoke_device`
+    /// marks the device and sweeps its rows. A mint whose read came before the
+    /// revoke and whose INSERT came after the sweep wrote a live row and got a
+    /// token no revocation had reached.
+    ///
+    /// Staged exactly, not hoped for: the revoke's UPDATE of the device row is
+    /// made and held UNCOMMITTED, so the handler's read (a plain SELECT) still
+    /// sees the device live and the signature verifies — the race's first
+    /// half — and the revoke commits only once the mint has reached its INSERT
+    /// and is waiting on that row, or has already finished (which is what the
+    /// unconditional INSERT did: it never looked at the device again). The
+    /// control rolls the same revoke back instead, so a refusal caused by the
+    /// waiting rather than by the revocation fails it. TEST_DATABASE_URL only.
+    #[tokio::test]
+    async fn a_device_revoked_between_the_read_and_the_insert_gets_no_token_and_no_row() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let (uid, key, device_id) = enrolled_device(&pool).await;
+
+        /// One redeem raced against a revocation of the device that is held
+        /// open until the mint is parked behind it. Returns the handler's
+        /// answer and whether the mint was seen waiting on the revoke.
+        async fn raced(
+            pool: &sqlx::PgPool,
+            state: &Arc<AppState>,
+            key: &ed25519_dalek::SigningKey,
+            device_id: &str,
+            uid: i32,
+            revoke_commits: bool,
+        ) -> (Result<Json<TokenResponse>, (StatusCode, String)>, bool) {
+            let mut revoke = pool.begin().await.expect("begin");
+            let (revoker,): (i32,) = sqlx::query_as("SELECT pg_backend_pid()").fetch_one(&mut *revoke).await.unwrap();
+            sqlx::query("UPDATE devices SET revoked_at = NOW() WHERE id = $1 AND revoked_at IS NULL")
+                .bind(device_id).execute(&mut *revoke).await.expect("mark the device, uncommitted");
+            let mint = tokio::spawn({
+                let (state, key, device_id) = (state.clone(), key.clone(), device_id.to_string());
+                async move { redeem(&state, &key, &device_id, uid).await }
+            });
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            let parked = loop {
+                let (waiting,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))")
+                    .bind(revoker).fetch_one(pool).await.unwrap();
+                if waiting > 0 {
+                    break true;
+                }
+                if mint.is_finished() {
+                    break false;
+                }
+                assert!(tokio::time::Instant::now() < deadline, "fixture: the mint neither finished nor waited within 10 s");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            };
+            if revoke_commits {
+                revoke.commit().await.expect("commit the revoke");
+            } else {
+                revoke.rollback().await.expect("roll the revoke back");
+            }
+            (mint.await.expect("mint task"), parked)
+        }
+
+        let (revoked, revoked_parked) = raced(&pool, &state, &key, &device_id, uid, true).await;
+        let (rows_after_revoke,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM token_sessions WHERE user_id = $1")
+            .bind(uid).fetch_one(&pool).await.unwrap();
+        // The control needs the device live again. Nothing in the product ever
+        // un-revokes a device; this is only the fixture resetting itself.
+        sqlx::query("UPDATE devices SET revoked_at = NULL WHERE id = $1").bind(&device_id).execute(&pool).await.unwrap();
+        let (control, control_parked) = raced(&pool, &state, &key, &device_id, uid, false).await;
+        let rows: Vec<(Option<String>, bool)> = sqlx::query_as("SELECT device_id, revoked_at IS NULL FROM token_sessions WHERE user_id = $1")
+            .bind(uid).fetch_all(&pool).await.unwrap();
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(uid).execute(&pool).await;
+
+        match revoked {
+            Ok(r) => panic!(
+                "a device token was issued for a device revoked mid-mint (expires_in {}, {rows_after_revoke} session row(s) written)",
+                r.0.expires_in,
+            ),
+            // The answer a device already revoked at the read gets. To the host
+            // this IS "the server refused this computer", and its 15-minute
+            // wait is the right pace for a machine its owner signed out.
+            Err((status, body)) => assert_eq!((status, body.as_str()), (StatusCode::BAD_REQUEST, "that device could not be verified")),
+        }
+        assert_eq!(rows_after_revoke, 0, "no session row may be written for a device revoked mid-mint");
+        // Positive control: the same staging with the revoke abandoned mints,
+        // with its row bound to the device — so the refusal above came from
+        // the revocation, not from the mint having had to wait.
+        assert!(control.is_ok(), "an abandoned revoke must not cost the device its token: {:?}", control.err());
+        assert_eq!(rows, vec![(Some(device_id.clone()), true)], "exactly the control's row, live and bound to the device");
+        // And the race really was run: both mints reached the INSERT while the
+        // revoke was uncommitted, after the read had seen the device live.
+        assert!(revoked_parked && control_parked, "fixture: the mint must have waited on the revoke (revoked {revoked_parked}, control {control_parked})");
     }
 
     #[test]

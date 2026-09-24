@@ -413,6 +413,29 @@ pub async fn revoke_device(
     // opened on a device-minted token, carries no in-memory device id and was
     // invisible to kill_device_sessions — it kept sending and receiving as
     // the user until the JWT's own expiry.
+    //
+    // MARK FIRST, SWEEP SECOND, ONE TRANSACTION. This used to sweep the
+    // sessions and then mark the device, as two autocommit statements, and a
+    // device-token mint landing between them read a live device, wrote a live
+    // session row the sweep had already passed, and walked away with a token
+    // for a device that was then marked revoked over its head. The mint's row
+    // is now conditional on the device being live under a share lock on its
+    // row (`INSERT_DEVICE_SESSION`), which this UPDATE's row lock excludes: a
+    // mint that got in first has its row in place before the sweep below
+    // reads, and one that arrives after waits for this commit and finds the
+    // device revoked. The same sweep also runs on a repeat revoke of an
+    // already-revoked device (the mark matches nothing, the sweep still runs),
+    // so a retry cleans up anything bound since.
+    let mut tx = state.pool.begin().await.map_err(db_error)?;
+    sqlx::query(
+        "UPDATE devices SET revoked_at = NOW() \
+         WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL",
+    )
+    .bind(&device_id)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_error)?;
     let revoked_sids: Vec<(String,)> = sqlx::query_as(
         "UPDATE token_sessions SET revoked_at = NOW() \
          WHERE user_id = $1 AND device_id = $2 AND revoked_at IS NULL \
@@ -420,18 +443,10 @@ pub async fn revoke_device(
     )
     .bind(user_id)
     .bind(&device_id)
-    .fetch_all(&state.pool)
+    .fetch_all(&mut *tx)
     .await
     .map_err(db_error)?;
-    sqlx::query(
-        "UPDATE devices SET revoked_at = NOW() \
-         WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL",
-    )
-    .bind(&device_id)
-    .bind(user_id)
-    .execute(&state.pool)
-    .await
-    .map_err(db_error)?;
+    tx.commit().await.map_err(db_error)?;
 
     // Grants naturally disappear with the row (ON DELETE CASCADE) only on a
     // hard delete, and this is a soft revoke — so drop them explicitly. A host
@@ -1696,6 +1711,86 @@ mod tests {
         assert!(
             !verify_device_signature(&sign_pub, record, "!!not-base64!!"),
             "garbage sig refuses rather than erroring"
+        );
+    }
+
+    /// THE ORDER OF THE REVOKE. A device-token mint that lands in the middle
+    /// of `revoke_device` must not leave a live session behind. The mint's row
+    /// is conditional on the device being live (`INSERT_DEVICE_SESSION`), so
+    /// what matters is what it sees when it lands: the revoke used to SWEEP the
+    /// device's sessions first and MARK the device second, as two separate
+    /// statements — a mint landing between them saw a live device, wrote a
+    /// live row the sweep had already passed, and the device was then marked
+    /// over its head. Marking first and sweeping second, in one transaction,
+    /// leaves no such gap.
+    ///
+    /// The mint is landed at exactly that point by a statement trigger on
+    /// `token_sessions` UPDATEs touching this test's user, which runs the
+    /// mint's OWN statement (`INSERT_DEVICE_SESSION`, not a copy). It fires
+    /// once before the revoke as a positive control, proving the rig really
+    /// writes a live row while the device is live. TEST_DATABASE_URL only.
+    #[tokio::test]
+    async fn a_mint_landing_inside_the_revoke_leaves_no_live_session() {
+        let Some(pool) = crate::migrator::test_pool(2).await else { return };
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let name = format!("revord_{}", uuid::Uuid::new_v4().simple());
+        let (uid, tv): (i32, i32) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id, token_version")
+            .bind(&name).bind(b"s".as_ref()).bind(b"v".as_ref())
+            .fetch_one(&pool).await.expect("insert user");
+        let device = format!("ro-{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(
+            "INSERT INTO devices (id, user_id, device_pub, sign_pub, name, platform, auth_record, auth_sig) \
+             VALUES ($1, $2, 'x25519:AA', 'ed25519:AA', 'test', 'windows', '{}', 'x')",
+        )
+        .bind(&device).bind(uid).execute(&pool).await.expect("insert device");
+        let sid = format!("ro-sid-{}", uuid::Uuid::new_v4().simple());
+        sqlx::query("INSERT INTO token_sessions (sid, user_id, device_id, headless) VALUES ($1, $2, $3, TRUE)")
+            .bind(&sid).bind(uid).bind(&device).execute(&pool).await.unwrap();
+
+        let rig = format!("test_racing_mint_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(&format!(
+            "CREATE FUNCTION {rig}() RETURNS trigger LANGUAGE plpgsql AS $f$ \
+             BEGIN \
+               IF EXISTS (SELECT 1 FROM touched WHERE user_id = {uid}) THEN \
+                 EXECUTE $q${mint}$q$ USING 'racer-' || gen_random_uuid()::text, {uid}, '{device}'::text; \
+               END IF; \
+               RETURN NULL; \
+             END $f$",
+            mint = crate::device_token::INSERT_DEVICE_SESSION,
+        ))
+        .execute(&pool).await.expect("create rig function");
+        sqlx::query(&format!(
+            "CREATE TRIGGER {rig} AFTER UPDATE ON token_sessions REFERENCING NEW TABLE AS touched \
+             FOR EACH STATEMENT EXECUTE FUNCTION {rig}()"
+        ))
+        .execute(&pool).await.expect("create rig trigger");
+
+        let live_bound = |pool: sqlx::PgPool, device: String| async move {
+            let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM token_sessions WHERE device_id = $1 AND revoked_at IS NULL")
+                .bind(&device).fetch_one(&pool).await.unwrap();
+            n
+        };
+        // Positive control: an UPDATE of this user's session while the device
+        // is live lands a mint, and its row is live.
+        sqlx::query("UPDATE token_sessions SET last_seen_at = NOW() WHERE sid = $1").bind(&sid).execute(&pool).await.unwrap();
+        let live_before = live_bound(pool.clone(), device.clone()).await;
+
+        let claims = Claims { sub: uid as crate::state::UserId, username: name.clone(), exp: 0, tv, sst: 0, sid: sid.clone(), ls: false };
+        let revoked = revoke_device(State(state.clone()), Extension(claims), Path(device.clone())).await;
+
+        let _ = sqlx::query(&format!("DROP TRIGGER IF EXISTS {rig} ON token_sessions")).execute(&pool).await;
+        let _ = sqlx::query(&format!("DROP FUNCTION IF EXISTS {rig}()")).execute(&pool).await;
+        let live_after = live_bound(pool.clone(), device.clone()).await;
+        let (device_revoked,): (bool,) = sqlx::query_as("SELECT revoked_at IS NOT NULL FROM devices WHERE id = $1")
+            .bind(&device).fetch_one(&pool).await.unwrap();
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(uid).execute(&pool).await;
+
+        assert_eq!(live_before, 2, "fixture: the rig lands a live mint while the device is live (the session plus one racer)");
+        assert!(revoked.is_ok(), "the revoke itself succeeds: {:?}", revoked.err());
+        assert!(device_revoked, "the device is marked");
+        assert_eq!(
+            live_after, 0,
+            "no session bound to the revoked device may be left live — a mint that landed inside the revoke escaped it",
         );
     }
 }
