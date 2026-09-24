@@ -94,6 +94,43 @@ export function isNetworkError(err: unknown): boolean {
     return /failed to fetch|networkerror|network request failed|load failed/i.test(msg);
 }
 
+/** Errors raised BEFORE any request left this device (sealing, a read that
+ *  had to come first). A WeakSet, not a wrapper class: the error keeps its
+ *  identity and type, so every other check (`instanceof ApiError`, a 401, a
+ *  5xx retry) still sees exactly what was thrown. */
+const notSent = new WeakSet<object>();
+
+/** Tag `err` as raised before anything was sent; returns it, so a caller can
+ *  write `throw markNotSent(err)`. */
+export function markNotSent<T>(err: T): T {
+    if (typeof err === 'object' && err !== null) notSent.add(err);
+    return err;
+}
+
+/**
+ * Whether a failed write was DEFINITELY not carried out, so what was uploaded
+ * for it may be deleted again.
+ *
+ * The server commits a create or a sidecar write BEFORE it answers, and it
+ * cannot tell which uploads a sealed sidecar names — so deleting "our"
+ * uploads after a write whose answer was merely LOST breaks a note that was
+ * in fact written. Only these are definite:
+ *  - an error raised before any request left (`markNotSent`), or a local
+ *    error that is not a network failure at all;
+ *  - an ApiError with a 4xx status, other than 408 (the request timed out
+ *    somewhere in between) and 429 (not "no" but "come back later": a retry
+ *    follows, and it should find the uploads still there).
+ * A fetch TypeError, a 5xx (a gateway's 502/504/524 included) and a timeout
+ * are "it may have landed": keep the uploads. An orphan costs quota; a
+ * deleted file a committed note names is a broken picture for good.
+ */
+export function isDefiniteRefusal(err: unknown): boolean {
+    if (typeof err === 'object' && err !== null && notSent.has(err)) return true;
+    if (err instanceof ApiError) return err.status >= 400 && err.status < 500 && err.status !== 408 && err.status !== 429;
+    if (typeof DOMException !== 'undefined' && err instanceof DOMException && (err.name === 'AbortError' || err.name === 'TimeoutError')) return false;
+    return !isNetworkError(err);
+}
+
 interface RequestOptions extends RequestInit {
     headers?: Record<string, string>;
 }

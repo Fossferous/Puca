@@ -16,7 +16,7 @@
  * the captured line over content the user still has, somewhere, under a key
  * this device has not got yet. See `lockedFor`.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     attachmentRefsInMessage,
     captureTextFromMessage,
@@ -25,7 +25,17 @@ import {
     discardCopies,
 } from '../api/captureToNote';
 import { isUndecryptable } from '../api/decryptMarkers';
-import { fetchListFeatures, createTaskListWithContent, setTaskListAttachments, setTaskListBody } from '../api/listContent';
+import {
+    type HeldUploadsClock,
+    type ListFeatures,
+    NoteConflictError,
+    addTaskListAttachments,
+    createTaskListWithContent,
+    fetchListFeatures,
+    heldUploadsClock,
+    mayReuseHeldUploads,
+    setTaskListBody,
+} from '../api/listContent';
 import {
     type TaskAttachmentRef,
     type TaskList,
@@ -36,6 +46,8 @@ import {
     listTaskLists,
     parseTaskAttachments,
 } from '../api/tasks';
+import { isDefiniteRefusal } from '../api/client';
+import { newOpKey } from '../api/opKey';
 import { CloseIcon } from './Icons';
 import './SaveToNoteModal.css';
 
@@ -48,6 +60,32 @@ interface SaveToNoteModalProps {
 }
 
 type Shape = 'item' | 'text';
+
+/**
+ * Append `addition` to a note's text, naming the revision the text was read
+ * at, so a paragraph another device wrote since the sheet opened is not
+ * replaced (migration 069). On a stale refusal the addition goes onto the
+ * copy that won, a few times at most. A newer copy this device cannot READ
+ * is never appended to: that would seal the capture over it. `rev` absent
+ * (a server older than 069) is the old last-write-wins.
+ */
+async function appendToNoteText(listId: number, current: string, rev: number | undefined, addition: string): Promise<void> {
+    let base = current;
+    let expect = typeof rev === 'number' ? rev : undefined;
+    for (let attempt = 1; ; attempt++) {
+        try {
+            await setTaskListBody(listId, base ? `${base}\n\n${addition}` : addition, expect);
+            return;
+        } catch (err) {
+            if (!(err instanceof NoteConflictError) || expect === undefined || attempt >= 3) throw err;
+            if (err.body !== null && isUndecryptable(err.body)) {
+                throw new Error('This note’s text was changed on another device and can’t be read here yet, so nothing was added.');
+            }
+            base = err.body ?? '';
+            expect = err.contentRev;
+        }
+    }
+}
 
 export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalProps) {
     const [filter, setFilter] = useState('');
@@ -66,6 +104,8 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
     // A one-line message reads as an item; several lines are the note's text.
     const [shape, setShape] = useState<Shape>(() => (captureTextFromMessage(content).includes('\n') ? 'text' : 'item'));
 
+    /** What the server said it supports, for `save` (null = not known). */
+    const featuresRef = useRef<ListFeatures | null>(null);
     useEffect(() => {
         let cancelled = false;
         void (async () => {
@@ -75,6 +115,7 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
             ]);
             if (cancelled) return;
             setLists(ls);
+            featuresRef.current = features;
             setAttachmentsSupported(!!features?.attachments);
             setCopyPictures(!!features?.attachments);
         })();
@@ -132,6 +173,20 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
      */
     const closeIfIdle = useCallback(() => { if (!saving) onClose(); }, [saving, onClose]);
 
+    /**
+     * A new note whose create ANSWER was lost may exist: the server commits
+     * before it answers, and its sealed sidecar names the copies. So those
+     * copies are kept, and pressing Save again is the SAME intent — it
+     * re-sends the same random create key (api/opKey.ts; the server answers
+     * with the note it already made), and the same copies ONLY where the
+     * server de-duplicates creates and still remembers the key. Anywhere
+     * else it copies afresh: a server that makes a second note must not be
+     * handed files the first names (`mayReuseHeldUploads`). Anything that
+     * changes what would be written (the target, the shape, the pictures) is
+     * a new intent with a new key. `intent` never leaves this device.
+     */
+    const heldNew = useRef<({ intent: string; key: string; copies: TaskAttachmentRef[] } & HeldUploadsClock) | null>(null);
+
     const save = async () => {
         if (target === null || saving) return;
         setSaving(true);
@@ -144,6 +199,9 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
         // — so the failure message must not say "nothing was kept", or the
         // obvious retry writes the same line a second time.
         let landedInExisting = false;
+        // The picture write into an existing note has been SENT: from then
+        // on a lost answer may mean the sidecar names the copies.
+        let sidecarSent = false;
         let saved = '';
         try {
             // `target` is DERIVED past `lockedFor` (above), so by the time a
@@ -157,28 +215,52 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
             if (existing + wanted.length > MAX_TASK_ATTACHMENTS) {
                 throw new Error(`That note already holds ${existing} of ${MAX_TASK_ATTACHMENTS} pictures.`);
             }
-            copied = wanted.length ? await copyRefsIntoMyNote(wanted, existing) : [];
             const title = captureTitle(body);
             if (target === 'new') {
-                const created = await createTaskListWithContent(title, {
-                    ...(shape === 'text' && body ? { body } : {}),
-                    ...(copied.length ? { refs: copied } : {}),
-                });
+                const intent = JSON.stringify([shape, body, wanted.map(r => r.href)]);
+                const prior = heldNew.current?.intent === intent ? heldNew.current : null;
+                const held = prior && mayReuseHeldUploads(prior, featuresRef.current) ? prior : null;
+                copied = held ? held.copies : wanted.length ? await copyRefsIntoMyNote(wanted, existing) : [];
+                // Not re-sending the copies still keeps the KEY: where the
+                // server remembers it, it answers with the note it made.
+                const hold = held ?? { intent, key: prior?.key ?? newOpKey(), copies: copied, ...heldUploadsClock() };
+                heldNew.current = hold;
+                let created: TaskList;
+                try {
+                    created = await createTaskListWithContent(title, {
+                        ...(shape === 'text' && body ? { body } : {}),
+                        ...(copied.length ? { refs: copied } : {}),
+                    }, hold.key);
+                } catch (err) {
+                    // A lost answer may be a note that exists: keep the
+                    // copies for the retry, and say only what is known.
+                    if (!isDefiniteRefusal(err)) {
+                        copied = [];
+                        throw new Error('Couldn’t reach the server, so it may or may not have been saved — press Save again to finish it.');
+                    }
+                    heldNew.current = null;
+                    throw err;
+                }
+                heldNew.current = null;   // landed: the next save is a new note
                 createdId = created.id;
                 if (shape === 'item' && body) await createListTask(created.id, body);
                 saved = created.title;
             } else {
+                copied = wanted.length ? await copyRefsIntoMyNote(wanted, existing) : [];
                 if (shape === 'item' && body) {
                     await createListTask(target, body);
                     landedInExisting = true;
                 } else if (body) {
-                    const existingBody = list?.body ?? '';
-                    await setTaskListBody(target, existingBody ? `${existingBody}\n\n${body}` : body);
+                    await appendToNoteText(target, list?.body ?? '', list?.content_rev, body);
                     landedInExisting = true;
                 }
+                // An intent against the sidecar the server holds NOW, named
+                // by the revision it was read at (api/listContent.ts) - not
+                // this sheet's snapshot, which would drop a picture another
+                // device added since it opened.
                 if (copied.length) {
-                    const keep = parseTaskAttachments(list?.attachments ?? null);
-                    await setTaskListAttachments(target, [...keep, ...copied]);
+                    sidecarSent = true;
+                    await addTaskListAttachments(target, copied);
                 }
                 saved = list?.title ?? 'your note';
             }
@@ -190,9 +272,15 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
             // broken pictures, under a message that says nothing was kept.
             let orphaned = false;
             if (createdId !== null) {
+                // Undone: a later Save makes a new note under a new key.
+                heldNew.current = null;
                 try { await deleteTaskList(createdId); } catch { orphaned = true; }
             }
-            if (copied.length && !orphaned) await discardCopies(copied).catch(() => undefined);
+            // ...but not after a picture write whose answer was lost: it may
+            // have landed, and then the note names them. (A new note whose
+            // create answer was lost has already let go of `copied` above.)
+            const mayBeNamed = sidecarSent && !isDefiniteRefusal(err);
+            if (copied.length && !orphaned && !mayBeNamed) await discardCopies(copied).catch(() => undefined);
             setError(orphaned
                 ? 'The note was made, but the rest couldn’t be added — open Notes to finish it.'
                 : landedInExisting

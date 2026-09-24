@@ -12,7 +12,7 @@
  * 5xx) throws, so a caller never mistakes a bad moment for an old server and
  * falls back to the permanent delete.
  */
-import { apiClient, ApiError } from './client';
+import { apiClient, ApiError, markNotSent } from './client';
 import {
     type Task,
     type TaskAttachmentRef,
@@ -31,7 +31,7 @@ import {
     taskTabKey,
 } from './tasks';
 import { openListContent, sealSelfField } from './listSeal';
-import { patchListContent } from './listConflict';
+import { NoteConflictError, patchListContent } from './listConflict';
 export { NoteConflictError } from './listConflict';
 import { MAX_READABLE_ENVELOPE_VERSION, messageEncState } from './e2ee';
 import { parseEncAttachment } from './attachments';
@@ -63,14 +63,14 @@ export interface ListFeatures {
     /** Migration 070: a create may carry a random id, so a create whose
      *  answer was lost is not made twice.
      *
-     *  DELIBERATELY NOT GATED ON, unlike every other flag here. The key is a
-     *  short random field an older server drops on the floor, so sending it
-     *  unconditionally is byte-for-byte the old behaviour there and needs no
-     *  probe; gating would only add a way to stop sending it. It is parsed
-     *  and advertised so an operator (and the walk) can see whether the
-     *  server they are on de-duplicates creates — the server's matching
-     *  `op_key` entry in GET /task-features says the same for the item
-     *  routes. If a reader is ever added, it must not be "skip the key". */
+     *  The KEY is deliberately not gated on it, unlike every other flag
+     *  here. It is a short random field an older server drops on the floor,
+     *  so sending it unconditionally is byte-for-byte the old behaviour there
+     *  and needs no probe; gating would only add a way to stop sending it.
+     *  The one reader is `mayReuseHeldUploads` below: a retry re-sends the
+     *  uploads an earlier attempt made only to a server that de-duplicates
+     *  (the server's matching `op_key` entry in GET /task-features says the
+     *  same for the item routes). No reader may become "skip the key". */
     idempotentCreates: boolean;
 }
 
@@ -112,6 +112,50 @@ export function parseListFeatures(raw: unknown, receivedAt: number = Date.now())
 /** The server's "now", or null when the server has not told us its clock. */
 export function serverNowFrom(features: Pick<ListFeatures, 'serverClockOffsetMs'>, localNow: number = Date.now()): number | null {
     return features.serverClockOffsetMs === null ? null : localNow + features.serverClockOffsetMs;
+}
+
+/**
+ * RE-SENDING A CREATE'S UPLOADS. A create whose answer was lost keeps its
+ * uploads (the server may have made the note, and its sealed sidecar names
+ * them) and its key. Whether the user's retry may send those SAME uploads
+ * again depends on whether the server will answer it with the note it
+ * already made:
+ *  - a server that does not de-duplicate creates (older than 070) makes a
+ *    SECOND note. Two notes naming the same files is a delayed loss: binning
+ *    the duplicate and emptying the trash deletes the files, and the note
+ *    that was kept loses its pictures for good;
+ *  - a 070 server forgets a key after NOTES_OP_KEY_RETENTION_HOURS (at least
+ *    one hour, whatever the operator sets; 0 = never), and then does the same.
+ * So the uploads are re-sent only when the server says it de-duplicates AND
+ * the hold is younger than the shortest window any server can have. Anything
+ * else re-uploads — and deletes nothing, since the first attempt's uploads
+ * may still be named. The KEY is kept regardless: where the server still has
+ * it, it answers with the note it already made and the fresh uploads are
+ * merely unused.
+ *
+ * Why the hold's age bounds the key's: every note that could name the held
+ * uploads was created by a request sent AFTER they were held, and its key
+ * row is no older than that request — so a hold younger than an hour has no
+ * key row older than an hour. Measured on both clocks, so neither a wall
+ * clock set back nor a monotonic clock paused through sleep shortens it.
+ */
+export const HELD_UPLOADS_MAX_AGE_MS = 50 * 60_000;
+
+export interface HeldUploadsClock { heldAt: number; heldAtMono: number }
+
+const monoNow = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+/** Stamp a hold as made now. */
+export function heldUploadsClock(): HeldUploadsClock {
+    return { heldAt: Date.now(), heldAtMono: monoNow() };
+}
+
+/** May a retry re-send the uploads held since `held`? See above. `features`
+ *  null = not known, which is a no. */
+export function mayReuseHeldUploads(held: HeldUploadsClock, features: Pick<ListFeatures, 'idempotentCreates'> | null): boolean {
+    if (features?.idempotentCreates !== true) return false;
+    const age = Math.max(Date.now() - held.heldAt, monoNow() - held.heldAtMono);
+    return age >= 0 && age < HELD_UPLOADS_MAX_AGE_MS;
 }
 
 /** What the server supports. 404/405 = a server older than 065 (the path
@@ -170,55 +214,115 @@ export async function setTaskListTiming(
  */
 export async function setTaskListAttachments(listId: number, refs: TaskAttachmentRef[], expectRev?: number): Promise<number | null> {
     const real = withoutParked(refs);
-    const sealed = real.length === 0 ? '' : await sealSelfField(serializeTaskAttachments(real));
+    let sealed: string;
+    try {
+        sealed = real.length === 0 ? '' : await sealSelfField(serializeTaskAttachments(real));
+    } catch (err) {
+        throw markNotSent(err);   // nothing has left this device
+    }
     return patchListContent(listId, {
         attachments: sealed,
         ...(expectRev === undefined ? {} : { expect_rev: expectRev }),
     });
 }
 
-/** A list's OWN sidecar as the SERVER holds it now, opened. Null when the
- *  list is gone, or its sidecar cannot be read on this device (a locked
- *  identity: writing over refs we cannot read would orphan them). */
-export async function fetchListSidecar(listId: number): Promise<TaskAttachmentRef[] | null> {
+/** A list's OWN sidecar as the SERVER holds it now, opened, and the
+ *  revision it was read at (`content_rev`, migration 069) — undefined from a
+ *  server older than 069, which lists none. Null when the list is gone, or
+ *  its sidecar cannot be read on this device (a locked identity: writing
+ *  over refs we cannot read would orphan them). */
+export async function fetchListSidecar(listId: number): Promise<{ refs: TaskAttachmentRef[]; rev: number | undefined } | null> {
     const list = (await listTaskLists()).find(l => l.id === listId);
     if (!list) return null;
     const opened = list.attachments ?? null;
     if (isAttachmentsLocked(opened)) return null;
-    return parseTaskAttachments(opened);
+    return { refs: parseTaskAttachments(opened), rev: typeof list.content_rev === 'number' ? list.content_rev : undefined };
+}
+
+/** Attempts an intent makes before it gives up on a note that keeps moving. */
+const SIDECAR_ATTEMPTS = 3;
+
+/**
+ * Read the sidecar, compute the next one from THAT read, and write it naming
+ * the revision it was read at — re-reading and re-applying when another
+ * device wrote in between (a stale 409, NoteConflictError). An intent is
+ * always safe to re-apply, so the race is simply run again.
+ *
+ * Without the revision, two devices replaying at once each read [x], and the
+ * second write of [x, b] silently dropped the first's [x, a] — and with it
+ * the key to `a`, which lives only in that ref.
+ *
+ * `plan` answers null when there is nothing to write. After the last lost
+ * race the conflict itself is thrown — never a blind write; the outbox keeps
+ * the op queued (notesOutbox.ts). Only a STALE revision is retried: a 409 for
+ * a trashed note or an envelope downgrade is not a NoteConflictError and
+ * goes straight back to the caller. A failure while READING is marked as not
+ * sent: no write of this intent has landed.
+ */
+async function applySidecarIntent<T>(
+    listId: number,
+    plan: (current: TaskAttachmentRef[]) => { next: TaskAttachmentRef[]; answer: T } | { next: null; answer: T },
+): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+        let read: Awaited<ReturnType<typeof fetchListSidecar>>;
+        try {
+            read = await fetchListSidecar(listId);
+        } catch (err) {
+            throw markNotSent(err);
+        }
+        if (read === null) throw markNotSent(new NoteFilesUnreadableError());
+        const step = plan(read.refs);
+        if (step.next === null) return step.answer;
+        try {
+            await setTaskListAttachments(listId, step.next, read.rev);
+            return step.answer;
+        } catch (err) {
+            // No revision was named (an older server): nothing to retry.
+            if (!(err instanceof NoteConflictError) || read.rev === undefined || attempt >= SIDECAR_ATTEMPTS) throw err;
+        }
+    }
 }
 
 /**
  * Add refs to whatever the server holds NOW, optionally dropping some — an
  * INTENT, not a snapshot. A replayed full replace would silently delete a
  * picture another device added in the meantime (and strand its upload); this
- * cannot, because it never names refs it did not just read.
+ * cannot, because it never names refs it did not just read, and it names the
+ * revision it read them at.
  *
  * Returns the refs it actually DROPPED — never the ones it was merely asked
- * to drop. Those uploads are nobody's now, and the caller deletes them
- * (api/noteMedia.ts `addNoteRefs`); a ref the server no longer held is not
- * among them, so a picture another device still names is never destroyed.
+ * to drop, and only those the WINNING attempt dropped. Those uploads are
+ * nobody's now, and the caller deletes them (api/noteMedia.ts
+ * `addNoteRefs`); a ref the server no longer held is not among them, so a
+ * picture another device still names is never destroyed.
+ *
+ * A ref whose href is ALREADY there is not added a second time. That only
+ * helps a caller that re-sends the SAME refs. No retry path in Notes does:
+ * a queued add whose first write landed but lost its answer uploads its
+ * parked bytes AGAIN when it replays (notesOutbox.ts `execOp` addMedia), so
+ * its hrefs are new and the note can show that picture twice. The two are
+ * separate uploads, so deleting either one is safe and loses nothing.
  */
 export async function addTaskListAttachments(listId: number, added: TaskAttachmentRef[], replacing: string[] = []): Promise<TaskAttachmentRef[]> {
-    const current = await fetchListSidecar(listId);
-    if (current === null) throw new NoteFilesUnreadableError();
-    const drop = new Set(replacing);
-    const dropped = current.filter(r => drop.has(r.href));
-    const next = [...current.filter(r => !drop.has(r.href)), ...added];
-    await setTaskListAttachments(listId, next);
-    return dropped;
+    return applySidecarIntent(listId, current => {
+        const drop = new Set(replacing);
+        const have = new Set(current.map(r => r.href));
+        const dropped = current.filter(r => drop.has(r.href));
+        const fresh = added.filter(r => !have.has(r.href));
+        if (dropped.length === 0 && fresh.length === 0) return { next: null, answer: [] };
+        return { next: [...current.filter(r => !drop.has(r.href)), ...fresh], answer: dropped };
+    });
 }
 
 /** Remove refs from whatever the server holds now — the same intent form,
  *  and the same answer: the refs actually taken out. */
 export async function removeTaskListAttachments(listId: number, removing: string[]): Promise<TaskAttachmentRef[]> {
-    const current = await fetchListSidecar(listId);
-    if (current === null) throw new NoteFilesUnreadableError();
-    const drop = new Set(removing);
-    const next = current.filter(r => !drop.has(r.href));
-    if (next.length === current.length) return [];   // already gone: nothing to say
-    await setTaskListAttachments(listId, next);
-    return current.filter(r => drop.has(r.href));
+    return applySidecarIntent(listId, current => {
+        const drop = new Set(removing);
+        const gone = current.filter(r => drop.has(r.href));
+        if (gone.length === 0) return { next: null, answer: [] };   // already gone: nothing to say
+        return { next: current.filter(r => !drop.has(r.href)), answer: gone };
+    });
 }
 
 /** Create a list with its title, and optionally its note text and refs, in
@@ -230,9 +334,15 @@ export async function createTaskListWithContent(
     content: { body?: string; refs?: TaskAttachmentRef[] },
     opKey?: string,
 ): Promise<TaskList> {
-    const payload: Record<string, string> = { title: await sealSelfField(title) };
-    if (content.body) payload.body = await sealSelfField(content.body);
-    if (content.refs && content.refs.length > 0) payload.attachments = await sealSelfField(serializeTaskAttachments(content.refs));
+    const payload: Record<string, string> = {};
+    try {
+        payload.title = await sealSelfField(title);
+        if (content.body) payload.body = await sealSelfField(content.body);
+        if (content.refs && content.refs.length > 0) payload.attachments = await sealSelfField(serializeTaskAttachments(content.refs));
+    } catch (err) {
+        // Nothing has left this device: the caller may take its uploads back.
+        throw markNotSent(err);
+    }
     // POST /task-lists also accepts `due_at` and `schedule` (migration 068),
     // so a composer that offers a reminder can create a reminding note in ONE
     // request. Nothing offers that yet, so nothing sends them here.

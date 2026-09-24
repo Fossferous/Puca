@@ -25,12 +25,18 @@ import type { TaskList } from '../api/tasks';
 
 const calls = { created: [] as unknown[], tasks: [] as unknown[], urls: [] as string[] };
 let lists: TaskList[] = [];
-let features = { attachments: true };
+let features = { attachments: true, dedupes: true };
 let createFails = false;
 let addItemFails = false;
+/** The item request's answer is lost (a fetch TypeError, not a refusal). */
+let addItemLost = false;
 let deleteListFails = false;
 let attachFails = false;
+/** The picture write's answer is lost (it may have landed). */
+let attachLost = false;
 let copyFails = false;
+/** One create that the server COMMITS but whose answer never arrives. */
+let createAnswerLost = false;
 /** Holds `copyRefsIntoMyNote` open so a save can be observed IN FLIGHT. */
 let copyGate: { promise: Promise<void>; release: () => void } | null = null;
 function holdCopies(): () => void {
@@ -47,6 +53,7 @@ vi.mock('../api/tasks', async (orig) => {
         listTaskLists: vi.fn(async () => { calls.urls.push('/task-lists'); return lists; }),
         createListTask: vi.fn(async (listId: number, description: string) => {
             if (addItemFails) throw new Error('the item would not go in');
+            if (addItemLost) throw new TypeError('Failed to fetch');
             calls.tasks.push({ listId, description });
             return {};
         }),
@@ -57,14 +64,20 @@ vi.mock('../api/listContent', async (orig) => {
     const real = await orig<typeof import('../api/listContent')>();
     return {
         ...real,
-        fetchListFeatures: vi.fn(async () => ({ ...real.NO_LIST_FEATURES, attachments: features.attachments, body: true })),
+        fetchListFeatures: vi.fn(async () => ({ ...real.NO_LIST_FEATURES, attachments: features.attachments, body: true, idempotentCreates: features.dedupes })),
         createTaskListWithContent: vi.fn(async (title: string, content: unknown) => {
             if (createFails) throw new Error('server said no');
+            if (createAnswerLost) { createAnswerLost = false; throw new TypeError('Failed to fetch'); }
             calls.created.push({ title, content });
             return { id: 99, title } as TaskList;
         }),
         setTaskListBody: vi.fn(async () => undefined),
         setTaskListAttachments: vi.fn(async () => { if (attachFails) throw new Error('the pictures would not go in'); }),
+        addTaskListAttachments: vi.fn(async () => {
+            if (attachFails) throw new Error('the pictures would not go in');
+            if (attachLost) throw new TypeError('Failed to fetch');
+            return [];
+        }),
     };
 });
 vi.mock('../api/captureToNote', async (orig) => {
@@ -81,9 +94,11 @@ vi.mock('../api/captureToNote', async (orig) => {
 });
 
 import { SaveToNoteModal } from '../components/SaveToNoteModal';
-import { createTaskListWithContent, setTaskListAttachments, setTaskListBody } from '../api/listContent';
+import { addTaskListAttachments, createTaskListWithContent, setTaskListAttachments, setTaskListBody } from '../api/listContent';
+import { NoteConflictError } from '../api/listConflict';
 import { deleteTaskList } from '../api/tasks';
 import { discardCopies } from '../api/captureToNote';
+import { OP_KEY_SHAPE } from '../api/opKey';
 
 const list = (id: number, title: string, attachments: string | null = null, body: string | null = null): TaskList =>
     ({ id, title, created_at: '', total_tasks: 0, completed_tasks: 0, attachments, body }) as TaskList;
@@ -113,12 +128,15 @@ beforeEach(() => {
     // PREVIOUS test's — a green assertion about the wrong save.
     vi.clearAllMocks();
     calls.created = []; calls.tasks = []; calls.urls = [];
-    features = { attachments: true };
+    features = { attachments: true, dedupes: true };
     createFails = false;
     addItemFails = false;
+    addItemLost = false;
     deleteListFails = false;
     attachFails = false;
+    attachLost = false;
     copyFails = false;
+    createAnswerLost = false;
     copyGate = null;
     lists = [
         list(1, 'Shopping'),
@@ -171,7 +189,7 @@ describe('the target list', () => {
     });
 
     it('says so instead of offering pictures when the server cannot hold them', async () => {
-        features = { attachments: false };
+        features = { attachments: false, dedupes: true };
         await mount('see this ![a.png](sovereign-enc:SRC?k=K&m=image%2Fpng)');
         expect(document.querySelector('.save-note-check')).toBeNull();
         expect(document.querySelector('.save-note-hint')!.textContent).toMatch(/only the text/i);
@@ -233,6 +251,47 @@ describe('saving', () => {
         click(document.querySelector('.save-note-go'));
         for (let i = 0; i < 10; i++) await act(async () => { await new Promise(r => setTimeout(r, 0)); });
         expect(setTaskListAttachments).not.toHaveBeenCalled();
+        expect(addTaskListAttachments).not.toHaveBeenCalled();
+    });
+
+    /**
+     * Into an EXISTING note, both writes used to replace what the server holds
+     * with this modal's snapshot of it, taken when the sheet opened, with no
+     * revision (finding 7): a picture — or a paragraph — another device added
+     * meanwhile was silently dropped.
+     */
+    it('pictures go into an existing note as an INTENT against what the server holds now', async () => {
+        await mount('look ![a.png](sovereign-enc:SRC?k=K&m=image%2Fpng)');
+        click(rowNamed('Shopping'));
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        expect(addTaskListAttachments).toHaveBeenCalledWith(1, [{ href: 'sovereign-enc:COPY0?k=NEW0', name: 'a.png' }]);
+        expect(setTaskListAttachments).not.toHaveBeenCalled();
+    });
+
+    it('text appended to an existing note names the revision it read, and re-appends onto a newer copy', async () => {
+        lists = [{ ...list(1, 'Shopping', null, 'old words'), content_rev: 5 } as TaskList];
+        vi.mocked(setTaskListBody).mockRejectedValueOnce(new NoteConflictError(7, 'their words', null, null));
+        const { isClosed } = await mount('keep this\nand this');
+        click(rowNamed('Shopping'));
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        expect(vi.mocked(setTaskListBody).mock.calls).toEqual([
+            [1, 'old words\n\nkeep this\nand this', 5],
+            [1, 'their words\n\nkeep this\nand this', 7],
+        ]);
+        expect(isClosed()).toBe(true);
+    });
+
+    it('...but never appends onto a newer copy it cannot READ', async () => {
+        lists = [{ ...list(1, 'Shopping', null, 'old words'), content_rev: 5 } as TaskList];
+        vi.mocked(setTaskListBody).mockRejectedValueOnce(new NoteConflictError(7, ENC_KEY_UNAVAILABLE, null, null));
+        const { isClosed } = await mount('keep this\nand this');
+        click(rowNamed('Shopping'));
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        expect(setTaskListBody).toHaveBeenCalledTimes(1);
+        expect(isClosed()).toBe(false);
     });
 
     it('a new note that half-saved is undone, not left behind with broken pictures', async () => {
@@ -246,6 +305,42 @@ describe('saving', () => {
         // ...and only then are the files safe to take back.
         expect(discardCopies).toHaveBeenCalledTimes(1);
         expect(document.querySelector('.save-note-error')!.textContent).toMatch(/would not go in/);
+    });
+
+    /**
+     * Kept copies are for a write that may have NAMED them. A lost answer on
+     * the ITEM names nothing: the new note it went into is undone, and into
+     * an existing note no picture write has been tried yet — so the copies
+     * still go back, whatever kind of failure it was.
+     */
+    it('a lost answer on the ITEM still takes the copies back: nothing names them', async () => {
+        addItemLost = true;
+        await mount('look ![a.png](sovereign-enc:SRC?k=K&m=image%2Fpng)');
+        click(rowNamed('New note'));
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        expect(deleteTaskList).toHaveBeenCalledWith(99);
+        expect(discardCopies).toHaveBeenCalledTimes(1);
+    });
+
+    it('POSITIVE CONTROL: a lost answer on the PICTURE write keeps the copies — the note may name them', async () => {
+        attachLost = true;
+        await mount('look ![a.png](sovereign-enc:SRC?k=K&m=image%2Fpng)');
+        click(rowNamed('Shopping'));
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        expect(addTaskListAttachments).toHaveBeenCalledTimes(1);
+        expect(discardCopies).not.toHaveBeenCalled();
+    });
+
+    it('...and the same into an EXISTING note, before any picture write was tried', async () => {
+        addItemLost = true;
+        await mount('look ![a.png](sovereign-enc:SRC?k=K&m=image%2Fpng)');
+        click(rowNamed('Shopping'));
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        expect(addTaskListAttachments).not.toHaveBeenCalled();
+        expect(discardCopies).toHaveBeenCalledTimes(1);
     });
 
     it('when the half-made note CANNOT be undone it keeps the files and says so', async () => {
@@ -270,6 +365,47 @@ describe('saving', () => {
         expect(document.querySelector('.save-note-error')!.textContent).toMatch(/server said no/);
         expect(rowNamed('New note')!.className).toContain('picked');
         expect(discardCopies).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * A create whose ANSWER was lost (finding 4): the server may have made the
+     * note, and its sealed sidecar names the copies — so they must not be
+     * deleted, and pressing Save again must re-send the same create key and
+     * the same copies, so the server answers with the note it already made.
+     */
+    it('a new note whose answer was lost keeps its copies, and Save again re-sends the same key and copies', async () => {
+        createAnswerLost = true;
+        const { isClosed } = await mount('look ![a.png](sovereign-enc:SRC?k=K&m=image%2Fpng)');
+        click(rowNamed('New note'));
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        expect(isClosed()).toBe(false);
+        expect(discardCopies).not.toHaveBeenCalled();
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        expect(isClosed()).toBe(true);
+        const { copyRefsIntoMyNote } = await import('../api/captureToNote');
+        expect(copyRefsIntoMyNote).toHaveBeenCalledTimes(1);
+        const [first, second] = vi.mocked(createTaskListWithContent).mock.calls;
+        expect(first[2]).toMatch(OP_KEY_SHAPE);
+        expect(second[2]).toBe(first[2]);
+        expect(second[1]).toEqual(first[1]);
+    });
+
+    it('...but on a server that cannot de-duplicate creates, Save again makes FRESH copies (two notes never share files)', async () => {
+        features = { attachments: true, dedupes: false };
+        createAnswerLost = true;
+        const { isClosed } = await mount('look ![a.png](sovereign-enc:SRC?k=K&m=image%2Fpng)');
+        click(rowNamed('New note'));
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        expect(isClosed()).toBe(true);
+        const { copyRefsIntoMyNote } = await import('../api/captureToNote');
+        expect(copyRefsIntoMyNote).toHaveBeenCalledTimes(2);
+        // The first attempt's copies are not deleted either: they may be named.
+        expect(discardCopies).not.toHaveBeenCalled();
     });
 
     /**

@@ -12,6 +12,8 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ApiError } from '../api/client';
+import { NoteConflictError } from '../api/listConflict';
+import { OP_KEY_SHAPE } from '../api/opKey';
 
 vi.mock('../api/auth', () => ({ currentUserIdFromToken: () => 7 }));
 vi.mock('../api/tasks', async () => {
@@ -27,7 +29,8 @@ vi.mock('../api/taskReminders', () => ({ pokeTaskReminders: vi.fn() }));
 vi.mock('../components/messageToastBus', () => ({ pushMessageToast: vi.fn() }));
 
 import { makeIdentity, sealLocal } from '../api/e2ee';
-const { createOutbox, enqueue, ops, queuedBlobIds, busyKeyOf } = await import('../notes/model/notesOutbox');
+const { createOutbox, enqueue, ops, queuedBlobIds, busyKeyOf, onReplayed } = await import('../notes/model/notesOutbox');
+const { pushMessageToast } = await import('../components/messageToastBus');
 const { createParkedStore, MAX_PARKED_MEDIA_BYTES, ParkedMediaFullError } = await import('../notes/model/notesBlobs');
 const { memoryStore } = await import('../notes/model/notesCache');
 const { resetNoteBusy } = await import('../notes/model/noteBusy');
@@ -58,12 +61,15 @@ function harness() {
     const ran: NoteOp[] = [];
     const failures = new Map<string, unknown>();
     const summaries: ReplaySummary[] = [];
+    const answers = new Map<string, unknown>();
+    const execCalls: NoteOp[] = [];
     const exec = vi.fn(async (op: NoteOp) => {
+        execCalls.push(op);
         if (!online) throw new TypeError('Failed to fetch');
         const f = failures.get(op.label);
         if (f) { failures.delete(op.label); throw f; }
         ran.push(op);
-        return {};
+        return answers.has(op.label) ? answers.get(op.label) : {};
     });
     const make = () => createOutbox({
         sub: () => 7,
@@ -75,7 +81,7 @@ function harness() {
         onReplayed: s => summaries.push(s),
         parked,
     });
-    return { store, queue, parked, ran, failures, summaries, make, setOnline: (v: boolean) => { online = v; } };
+    return { store, queue, parked, ran, execCalls, failures, answers, summaries, make, setOnline: (v: boolean) => { online = v; } };
 }
 
 /** A lock that behaves like the real one: `ifAvailable` gives up rather than
@@ -521,10 +527,361 @@ describe('what replay does with parked media', () => {
         expect(h.ran.filter(o => o.k === 'removeMedia')).toHaveLength(1);
     });
 
+    it('an add whose sidecar write was LOST keeps its uploads; one REFUSED frees them (finding 4)', async () => {
+        const up = { href: 'sovereign-enc:upfile?k=K&m=image%2Fjpeg', name: 'a.jpg' };
+        const deleteFiles = vi.fn(async (_ids: string[]) => undefined);
+        const addNoteRefs = vi.fn();
+        const { parked } = parkedHarness();
+        await parked.park([media('a')]);
+        vi.resetModules();
+        vi.doMock('../api/noteMedia', async () => {
+            const real = await vi.importActual<typeof import('../api/noteMedia')>('../api/noteMedia');
+            return { ...real, uploadParkedMedia: vi.fn(async () => [up]), addNoteRefs };
+        });
+        vi.doMock('../api/listContent', async () => {
+            const real = await vi.importActual<typeof import('../api/listContent')>('../api/listContent');
+            return { ...real, deleteFiles };
+        });
+        try {
+            const fresh = await import('../notes/model/notesOutbox');
+            // The answer never came back: the server may hold the sidecar
+            // that names this upload, so deleting it would break the note.
+            addNoteRefs.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+            await expect(fresh.execOp(fresh.ops.addMedia(4, ['a'], [], [], '1 picture'), {}, true, parked)).rejects.toBeInstanceOf(TypeError);
+            expect(deleteFiles).not.toHaveBeenCalled();
+            // POSITIVE CONTROL: a definite refusal wrote nothing, so the
+            // upload is nobody's and goes.
+            addNoteRefs.mockRejectedValueOnce(new ApiError('Forbidden', 403));
+            await expect(fresh.execOp(fresh.ops.addMedia(4, ['a'], [], [], '1 picture'), {}, true, parked)).rejects.toBeInstanceOf(ApiError);
+            expect(deleteFiles.mock.calls.map(c => c[0])).toEqual([['upfile']]);
+        } finally {
+            vi.doUnmock('../api/noteMedia');
+            vi.doUnmock('../api/listContent');
+            vi.resetModules();
+        }
+    });
+
     it('queuedBlobIds names every parked record the queue still depends on', () => {
         const a = ops.addMedia(1, ['x', 'y'], [], [], 'two');
         const b = ops.setBody(1, 'text');
         expect([...queuedBlobIds({ queue: [a, b], ids: {}, dead: [] })].sort()).toEqual(['x', 'y']);
+    });
+});
+
+/**
+ * Text typed offline, replayed onto a note another device changed meanwhile
+ * (finding 6). The replay used to drop its revision on purpose, so the words
+ * typed offline silently replaced the other device's — with nothing on
+ * either screen to say so. It now names the revision the typing started
+ * from; a replay that loses keeps BOTH: the note keeps the other device's
+ * text, and the words typed here become a new note beside it.
+ */
+describe('text replayed onto a note that changed elsewhere', () => {
+    /** The conflict the server answers with — built from the FRESH module
+     *  instance the outbox under test loads (vi.resetModules gives it a new
+     *  NoteConflictError class, and `instanceof` must match that one). */
+    let theirs: (body: string | null) => Error = () => new Error('not loaded');
+    async function withApi(setTaskListBody: ReturnType<typeof vi.fn>, createTaskListWithContent: ReturnType<typeof vi.fn>) {
+        vi.resetModules();
+        vi.doMock('../api/listContent', async () => {
+            const real = await vi.importActual<typeof import('../api/listContent')>('../api/listContent');
+            return { ...real, setTaskListBody, createTaskListWithContent };
+        });
+        const fresh = await import('../notes/model/notesOutbox');
+        const { NoteConflictError: Fresh } = await import('../api/listConflict');
+        theirs = body => new Fresh(8, body, null, 'Trip');
+        return { ...fresh, Fresh };
+    }
+    const done = () => { vi.doUnmock('../api/listContent'); vi.resetModules(); };
+
+    it('keeps the offline words as a new note beside it, made ONCE however often it replays', async () => {
+        const setTaskListBody = vi.fn(async () => { throw theirs('B text'); });
+        const createTaskListWithContent = vi.fn(async (title: string) => ({ id: 77, title }));
+        try {
+            const fresh = await withApi(setTaskListBody, createTaskListWithContent);
+            const op = fresh.ops.setBody(4, 'A text', 7);
+            const answer = await fresh.execOp(op, {}, true);
+            expect(setTaskListBody).toHaveBeenCalledWith(4, 'A text', 7);
+            expect(createTaskListWithContent).toHaveBeenCalledTimes(1);
+            const [title, content, key] = createTaskListWithContent.mock.calls[0] as unknown as [string, { body?: string }, string];
+            // The answer names the key the copy was made under, so the queue
+            // can make the next text of this same typing land in it.
+            expect(answer).toEqual({ offlineCopy: 'Trip (offline copy)', copyKey: key });
+            expect(title).toBe('Trip (offline copy)');
+            expect(content.body).toBe('A text');
+            expect(key).toMatch(OP_KEY_SHAPE);
+            // A replay whose copy's answer was lost runs again: the SAME key,
+            // so the server answers with the copy it already made.
+            await fresh.execOp(op, {}, true);
+            expect(createTaskListWithContent.mock.calls[1][2]).toBe(key);
+            // ...and a different op is a different copy.
+            await fresh.execOp(fresh.ops.setBody(4, 'A text', 7), {}, true);
+            expect(createTaskListWithContent.mock.calls[2][2]).not.toBe(key);
+        } finally { done(); }
+    });
+
+    /**
+     * ONE COPY PER TYPING, not one per lost answer (review of 7f023ecb). A
+     * copy whose answer was lost stays queued; the user types on, the queued
+     * text is replaced, and the replacement used to mint its own copy key —
+     * a second "(offline copy)". Re-using the key alone would be worse: the
+     * server answers with the OLDER copy and the newer words are lost. So the
+     * server's answer is compared with what this typing sent under that key.
+     */
+    it('a copy the server already made from THIS typing is brought up to date, not made again', async () => {
+        const setTaskListBody = vi.fn(async (id: number) => { if (id === 4) throw theirs('B text'); return 3; });
+        const createTaskListWithContent = vi.fn(async (title: string) => ({ id: 77, title, body: 'A text', content_rev: 2 }));
+        try {
+            const fresh = await withApi(setTaskListBody, createTaskListWithContent);
+            const op = { ...fresh.ops.setBody(4, 'A text and more', 7), copyKey: 'K-first', copySent: [await fresh.textDigest('A text')] };
+            const answer = await fresh.execOp(op, {}, true);
+            expect(createTaskListWithContent).toHaveBeenCalledTimes(1);
+            expect(createTaskListWithContent.mock.calls[0][2]).toBe('K-first');
+            expect(setTaskListBody).toHaveBeenLastCalledWith(77, 'A text and more', 2);
+            expect(answer).toEqual({ offlineCopy: 'Trip (offline copy)', copyKey: 'K-first' });
+        } finally { done(); }
+    });
+
+    it('POSITIVE CONTROL: a copy changed since — words this typing never sent — is never overwritten', async () => {
+        const setTaskListBody = vi.fn(async (id: number) => { if (id === 4) throw theirs('B text'); return 3; });
+        const createTaskListWithContent = vi.fn(async (title: string, content: { body?: string }, key: string) => (
+            key === 'K-first' ? { id: 77, title, body: 'edited by hand', content_rev: 5 } : { id: 78, title, body: content.body, content_rev: 1 }));
+        try {
+            const fresh = await withApi(setTaskListBody, createTaskListWithContent);
+            const op = { ...fresh.ops.setBody(4, 'A text and more', 7), copyKey: 'K-first', copySent: [await fresh.textDigest('A text')] };
+            const answer = await fresh.execOp(op, {}, true) as { copyKey: string };
+            expect(setTaskListBody).not.toHaveBeenCalledWith(77, expect.anything(), expect.anything());
+            expect(createTaskListWithContent).toHaveBeenCalledTimes(2);
+            const second = createTaskListWithContent.mock.calls[1] as unknown as [string, { body?: string }, string];
+            expect(second[1].body).toBe('A text and more');
+            expect(second[2]).not.toBe('K-first');
+            expect(answer.copyKey).toBe(second[2]);
+        } finally { done(); }
+    });
+
+    it('a copy since BINNED, or one that refuses the write, is left alone and the words go to a fresh copy', async () => {
+        for (const variant of ['trashed', 'refused'] as const) {
+            const setTaskListBody = vi.fn(async (id: number) => {
+                if (id === 4) throw theirs('B text');
+                throw new ApiError('Gone', 404);
+            });
+            const createTaskListWithContent = vi.fn(async (title: string, content: { body?: string }, key: string) => (key === 'K-first'
+                ? { id: 77, title, body: 'A text', content_rev: 2, trashed_at: variant === 'trashed' ? '2026-09-23T10:00:00Z' : null }
+                : { id: 78, title, body: content.body, content_rev: 1 }));
+            try {
+                const fresh = await withApi(setTaskListBody, createTaskListWithContent);
+                const op = { ...fresh.ops.setBody(4, 'A text and more', 7), copyKey: 'K-first', copySent: [await fresh.textDigest('A text')] };
+                await fresh.execOp(op, {}, true);
+                expect(setTaskListBody.mock.calls.filter(c => c[0] === 77)).toHaveLength(variant === 'trashed' ? 0 : 1);
+                expect(createTaskListWithContent).toHaveBeenCalledTimes(2);
+                expect((createTaskListWithContent.mock.calls[1] as unknown as [string, { body?: string }])[1].body).toBe('A text and more');
+            } finally { done(); }
+        }
+    });
+
+    it('text typed on after a copy whose answer was lost replays under the SAME copy key, naming what was sent', async () => {
+        const h = harness();
+        const ob = h.make();
+        h.setOnline(false);
+        await ob.send(ops.setBody(4, 'A text', 7));
+        h.setOnline(true);
+        h.failures.set('text “A text”', new TypeError('Failed to fetch'));
+        await ob.replay();                                   // the copy's answer is lost
+        h.setOnline(false);
+        await ob.send(ops.setBody(4, 'A text and more', 7)); // typing on: replaces the queued op
+        h.setOnline(true);
+        await ob.replay();
+        const run = h.ran.at(-1) as Extract<NoteOp, { k: 'setBody' }> & { copySent?: string[] };
+        expect(run.body).toBe('A text and more');
+        const { textDigest } = await import('../notes/model/notesOutbox');
+        expect(run.copySent).toContain(await textDigest('A text'));
+        const first = h.execCalls[0] as Extract<NoteOp, { k: 'setBody' }>;
+        expect(first.copyKey).toMatch(OP_KEY_SHAPE);
+        expect(run.copyKey).toBe(first.copyKey);
+    });
+
+    it('...and so does text queued on the same base AFTER a copy was made, so it lands in that copy', async () => {
+        const h = harness();
+        const ob = h.make();
+        h.setOnline(false);
+        await ob.send(ops.setBody(4, 'A text', 7));
+        h.setOnline(true);
+        h.answers.set('text “A text”', { offlineCopy: 'Trip (offline copy)', copyKey: 'K-made' });
+        await ob.replay();
+        h.setOnline(false);
+        await ob.send(ops.setBody(4, 'A text and more', 7));
+        await ob.send(ops.setBody(5, 'elsewhere', 7));      // POSITIVE CONTROL: another note
+        h.setOnline(true);
+        await ob.replay();
+        const [more, other] = h.ran.slice(-2) as Array<Extract<NoteOp, { k: 'setBody' }>>;
+        expect(more.copyKey).toBe('K-made');
+        expect(other.copyKey).not.toBe('K-made');
+    });
+
+    it('the SAME text already there is simply saved — no copy', async () => {
+        const setTaskListBody = vi.fn(async () => { throw theirs('A text'); });
+        const createTaskListWithContent = vi.fn();
+        try {
+            const fresh = await withApi(setTaskListBody, createTaskListWithContent);
+            expect(await fresh.execOp(fresh.ops.setBody(4, 'A text', 7), {}, true)).toBe(8);
+            expect(createTaskListWithContent).not.toHaveBeenCalled();
+        } finally { done(); }
+    });
+
+    it('a CLEAR that lost is refused and reported, never a copy of nothing (and never wiping theirs)', async () => {
+        const setTaskListBody = vi.fn(async () => { throw theirs('B text'); });
+        const createTaskListWithContent = vi.fn();
+        try {
+            const fresh = await withApi(setTaskListBody, createTaskListWithContent);
+            await expect(fresh.execOp(fresh.ops.setBody(4, '', 7), {}, true)).rejects.toBeInstanceOf(fresh.Fresh);
+            expect(createTaskListWithContent).not.toHaveBeenCalled();
+        } finally { done(); }
+    });
+
+    it('INLINE a conflict is still the caller’s to show (Keep mine / Use theirs), never a copy', async () => {
+        const setTaskListBody = vi.fn(async () => { throw theirs('B text'); });
+        const createTaskListWithContent = vi.fn();
+        try {
+            const fresh = await withApi(setTaskListBody, createTaskListWithContent);
+            await expect(fresh.execOp(fresh.ops.setBody(4, 'A text', 7), {}, false)).rejects.toBeInstanceOf(fresh.Fresh);
+            expect(createTaskListWithContent).not.toHaveBeenCalled();
+        } finally { done(); }
+    });
+
+    it('the replay reports the copy, and does not list the words as lost', async () => {
+        const h = harness();
+        h.setOnline(false);
+        const ob = h.make();
+        await ob.send(ops.setBody(4, 'A text', 7));
+        h.setOnline(true);
+        h.answers.set('text “A text”', { offlineCopy: 'Trip (offline copy)' });
+        const summary = await ob.replay();
+        expect(summary?.dropped).toEqual([]);
+        expect(summary?.copies).toEqual(['Trip (offline copy)']);
+    });
+
+    /**
+     * The toast must say WHOSE text changed. "Text you wrote offline had been
+     * changed on another device" read as though the user's own words had
+     * been altered; it was the NOTE's text that changed elsewhere, and the
+     * user's words are intact, in the copy it names.
+     */
+    it('the toast says the NOTE changed elsewhere and the user’s words were kept', () => {
+        vi.mocked(pushMessageToast).mockClear();
+        onReplayed({ sent: 1, dropped: [], copies: ['Trip (offline copy)'], created: {}, touchedDue: false });
+        const titles = vi.mocked(pushMessageToast).mock.calls.map(c => (c[0] as { title: string }).title);
+        expect(titles).toHaveLength(1);
+        expect(titles[0]).toMatch(/^A note’s text was changed on another device/);
+        expect(titles[0]).toContain('your words were kept as a new note');
+        expect(titles[0]).toContain('“Trip (offline copy)”');
+        expect(titles[0]).not.toMatch(/text you wrote .* had been changed/i);
+        vi.mocked(pushMessageToast).mockClear();
+        onReplayed({ sent: 2, dropped: [], copies: ['Trip (offline copy)', 'Shop (offline copy)'], created: {}, touchedDue: false });
+        expect((vi.mocked(pushMessageToast).mock.calls[0][0] as { title: string }).title).toMatch(/^2 notes’ text was changed on another device.*kept as new notes: “Trip \(offline copy\)”, “Shop \(offline copy\)”$/);
+    });
+
+    /**
+     * The device must not conflict with ITSELF. Its own earlier write to the
+     * same note (a rename, a picture, earlier text) moves the revision, and
+     * the queued text still names the one the typing started from.
+     */
+    function revHarness(onWrite: (op: NoteOp, emit: (w: { listId: number; expectRev?: number; rev: number }) => void) => unknown) {
+        const { parked } = parkedHarness();
+        const queue = memoryStore();
+        const sent: NoteOp[] = [];
+        const listeners = new Set<(w: { listId: number; expectRev?: number; rev: number }) => void>();
+        const emit = (w: { listId: number; expectRev?: number; rev: number }) => { for (const l of listeners) l(w); };
+        let online = false;
+        const make = () => createOutbox({
+            sub: () => 7, identity: () => identity, store: () => queue,
+            exec: (async (op: NoteOp) => { sent.push(op); return onWrite(op, emit); }) as never,
+            online: () => online, lock: (_n, fn) => fn(), onReplayed: () => {}, parked,
+            watchWrites: fn => { listeners.add(fn); return () => { listeners.delete(fn); }; },
+        });
+        return { sent, make, goOnline: () => { online = true; }, goOffline: () => { online = false; } };
+    }
+
+    it('a queued rename ahead of the text moves the revision, and the text follows it', async () => {
+        const h = revHarness((op, emit) => {
+            if (op.k === 'renameList') { emit({ listId: 4, rev: 6 }); return 6; }
+            return 7;
+        });
+        const ob = h.make();
+        await ob.send(ops.renameList(4, 'New title', 5));
+        await ob.send(ops.setBody(4, 'A text', 5));
+        h.goOnline();
+        await ob.replay();
+        const body = h.sent.find(o => o.k === 'setBody') as Extract<NoteOp, { k: 'setBody' }>;
+        expect(body.expectRev).toBe(6);
+    });
+
+    it('POSITIVE CONTROL: a gap the device did not write stays a conflict', async () => {
+        // The rename landed on 7 — so someone else wrote 5 -> 6 first.
+        const h = revHarness((op, emit) => {
+            if (op.k === 'renameList') { emit({ listId: 4, rev: 7 }); return 7; }
+            return 8;
+        });
+        const ob = h.make();
+        await ob.send(ops.renameList(4, 'New title', 5));
+        await ob.send(ops.setBody(4, 'A text', 5));
+        h.goOnline();
+        await ob.replay();
+        const body = h.sent.find(o => o.k === 'setBody') as Extract<NoteOp, { k: 'setBody' }>;
+        expect(body.expectRev).toBe(5);
+    });
+
+    it('what the device wrote is remembered across a reload, for text queued later on a stale base', async () => {
+        const h = revHarness((op, emit) => {
+            if (op.k === 'setBody') { emit({ listId: 4, expectRev: op.expectRev, rev: (op.expectRev ?? 0) + 1 }); return (op.expectRev ?? 0) + 1; }
+            return undefined;
+        });
+        const ob = h.make();
+        await ob.send(ops.setBody(4, 'first', 5));
+        h.goOnline();
+        await ob.replay();                               // 5 -> 6, the device's own
+        h.goOffline();
+        const later = h.make();                          // a reload, offline
+        await later.load();
+        await later.send(ops.setBody(4, 'first and more', 5));   // the cache never saw 6
+        h.goOnline();
+        await later.replay();
+        expect((h.sent.at(-1) as Extract<NoteOp, { k: 'setBody' }>).expectRev).toBe(6);
+    });
+});
+
+describe('a picture that keeps losing the race to another device (finding 7)', () => {
+    it('stays QUEUED on a stale conflict — it is not dropped, and its bytes are not freed', async () => {
+        // NoteConflictError is not an ApiError, so the replay loop used to
+        // file it under "refused" and drop the op — deleting the picture's
+        // only copy for losing a race an intent can always win on a retry.
+        const h = harness();
+        h.setOnline(false);
+        const ob = h.make();
+        await h.parked.park([media('a')]);
+        await ob.send(ops.addMedia(4, ['a'], [], [], 'a picture'));
+        await ob.send(ops.removeMedia(4, ['sovereign-enc:x?k=K&m=image%2Fpng'], [], 'remove a picture'));
+        h.failures.set('a picture', new NoteConflictError(9, null, null, null));
+        h.setOnline(true);
+        const summary = await ob.replay();
+        expect(summary?.dropped ?? []).toEqual([]);
+        expect(ob.pending()).toBe(2);
+        expect(await h.parked.read(['a'])).toHaveLength(1);
+        // POSITIVE CONTROL: the next replay, with the race won, sends both.
+        await ob.replay();
+        expect(h.ran.map(o => o.label)).toEqual(['a picture', 'remove a picture']);
+        expect(ob.pending()).toBe(0);
+    });
+
+    it('POSITIVE CONTROL: a plain refusal of the same op is still dropped and reported', async () => {
+        const h = harness();
+        h.setOnline(false);
+        const ob = h.make();
+        await h.parked.park([media('a')]);
+        await ob.send(ops.addMedia(4, ['a'], [], [], 'a picture'));
+        h.failures.set('a picture', new ApiError('This note is in the trash', 409));
+        h.setOnline(true);
+        const summary = await ob.replay();
+        expect(summary?.dropped.map(o => o.label)).toEqual(['a picture']);
     });
 });
 
@@ -541,9 +898,11 @@ describe('execOp inline (online, nothing queued)', () => {
         // Inline (fromQueue false), the base revision the field started from
         // rides along — undefined here because this op names none.
         expect(setTaskListBody).toHaveBeenCalledWith(4, 'hello', undefined);
-        // ...and a REPLAY drops it, so work done offline is never refused.
+        // ...and a REPLAY names it too (finding 6): dropping it let text
+        // typed offline silently overwrite a newer copy written elsewhere.
+        // What a replay does when it loses is its own test below.
         await fresh.execOp(fresh.ops.setBody(4, 'hello', 7), {}, true);
-        expect(setTaskListBody).toHaveBeenLastCalledWith(4, 'hello', undefined);
+        expect(setTaskListBody).toHaveBeenLastCalledWith(4, 'hello', 7);
         await fresh.execOp(fresh.ops.setBody(4, 'hello', 7), {}, false);
         expect(setTaskListBody).toHaveBeenLastCalledWith(4, 'hello', 7);
         vi.doUnmock('../api/listContent');
@@ -638,24 +997,60 @@ describe('execOp inline (online, nothing queued)', () => {
         vi.resetModules();
     });
 
-    it('the SAME rule inline: online with nothing queued, a removal still frees its upload', async () => {
+    it('INLINE (online, nothing queued) a removal is the same intent, against the sidecar the server holds NOW (finding 7)', async () => {
+        // It used to PATCH this device's cached snapshot (`op.refs`) with no
+        // revision: a picture another device had added since the cache was
+        // read was silently dropped, key and all.
         const gone = { href: 'sovereign-enc:gonefile?k=K&m=image%2Fpng', name: 'b.png' };
         const kept = { href: 'sovereign-enc:keptfile?k=K&m=image%2Fpng', name: 'a.png' };
-        const deleteFiles = vi.fn(async (_ids: string[]) => undefined);
+        const removeNoteRefs = vi.fn(async () => undefined);
         const setTaskListAttachments = vi.fn(async () => undefined);
-
         vi.resetModules();
+        vi.doMock('../api/noteMedia', async () => {
+            const real = await vi.importActual<typeof import('../api/noteMedia')>('../api/noteMedia');
+            return { ...real, removeNoteRefs };
+        });
         vi.doMock('../api/listContent', async () => {
             const real = await vi.importActual<typeof import('../api/listContent')>('../api/listContent');
-            return { ...real, deleteFiles, setTaskListAttachments };
+            return { ...real, setTaskListAttachments };
         });
-        const outbox = await import('../notes/model/notesOutbox');
+        try {
+            const outbox = await import('../notes/model/notesOutbox');
+            await outbox.execOp(outbox.ops.removeMedia(4, [gone.href], [kept], 'remove 1 picture'), {}, false);
+            expect(removeNoteRefs).toHaveBeenCalledWith(4, [gone.href]);
+            expect(setTaskListAttachments).not.toHaveBeenCalled();
+        } finally {
+            vi.doUnmock('../api/noteMedia');
+            vi.doUnmock('../api/listContent');
+            vi.resetModules();
+        }
+    });
 
-        await outbox.execOp(outbox.ops.removeMedia(4, [gone.href], [kept], 'remove 1 picture'), {}, false);
-        expect(setTaskListAttachments).toHaveBeenCalledWith(4, [kept]);
-        expect(deleteFiles.mock.calls.map(c => c[0])).toEqual([['gonefile']]);
-
-        vi.doUnmock('../api/listContent');
+    it('INLINE an add is the same intent too, never a replace from the snapshot (finding 7)', async () => {
+        const up = { href: 'sovereign-enc:up?k=K&m=image%2Fpng', name: 'u.png' };
+        const addNoteRefs = vi.fn(async () => undefined);
+        const setTaskListAttachments = vi.fn(async () => undefined);
+        const { parked } = parkedHarness();
+        await parked.park([media('a')]);
         vi.resetModules();
+        vi.doMock('../api/noteMedia', async () => {
+            const real = await vi.importActual<typeof import('../api/noteMedia')>('../api/noteMedia');
+            return { ...real, addNoteRefs, uploadParkedMedia: vi.fn(async () => [up]) };
+        });
+        vi.doMock('../api/listContent', async () => {
+            const real = await vi.importActual<typeof import('../api/listContent')>('../api/listContent');
+            return { ...real, setTaskListAttachments };
+        });
+        try {
+            const outbox = await import('../notes/model/notesOutbox');
+            const old = 'sovereign-enc:old?k=K&m=image%2Fpng';
+            await outbox.execOp(outbox.ops.addMedia(4, ['a'], [old], [], '1 picture'), {}, false, parked);
+            expect(addNoteRefs).toHaveBeenCalledWith(4, [up], [old]);
+            expect(setTaskListAttachments).not.toHaveBeenCalled();
+        } finally {
+            vi.doUnmock('../api/noteMedia');
+            vi.doUnmock('../api/listContent');
+            vi.resetModules();
+        }
     });
 });

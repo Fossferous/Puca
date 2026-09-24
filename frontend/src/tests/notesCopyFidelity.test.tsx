@@ -19,6 +19,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, useEffect } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { OP_KEY_SHAPE } from '../api/opKey';
 
 vi.mock('../api/auth', async (orig) => ({ ...(await orig<typeof import('../api/auth')>()), currentUserIdFromToken: () => 7 }));
 vi.mock('../api/e2ee', async (orig) => {
@@ -193,7 +194,11 @@ describe('copyNote', () => {
         expect(encryptAndUploadRef).not.toHaveBeenCalled();
         expect(decryptToBlobUrl).not.toHaveBeenCalled();
         expect(updateListTaskAttachments).not.toHaveBeenCalled();
-        expect(vi.mocked(createTaskListWithContent).mock.calls[0]).toEqual(['Groceries (copy)', { body: 'Before Friday', refs: [] }]);
+        const [title, content, key] = vi.mocked(createTaskListWithContent).mock.calls[0];
+        expect([title, content]).toEqual(['Groceries (copy)', { body: 'Before Friday', refs: [] }]);
+        // The copy carries a create key now, so a copy whose answer was lost
+        // and is asked for again is not made twice (finding 4).
+        expect(key).toMatch(OP_KEY_SHAPE);
         expect(vi.mocked(createListTask).mock.calls.map(c => c[1])).toEqual(['Milk']);
     });
 });

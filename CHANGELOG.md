@@ -63,6 +63,40 @@ one-line summary; this file is the full story. Versions follow
   cleared them. A sync now stops as soon as the account it started for is no
   longer the one signed in, and one that fails after that no longer shows
   the next person a false "offline" or error.
+- **A voice note made with no signal keeps its recording.** Recording a clip
+  in *Take a note…* and pressing Done while offline (or while other changes
+  were still waiting to sync) saved the note without the recording and said
+  nothing; the clip was gone. It is now encrypted on the device and sent with
+  the note when the connection returns, like a photo. A note that is only a
+  recording is called "Voice note" rather than "Untitled note".
+- **A note whose save timed out is no longer made twice, or left with broken
+  pictures.** If the connection dropped just after the server had saved a new
+  note, Notes said it couldn't save it, deleted the uploaded pictures the saved
+  note still pointed to, and pressing Done again made a second copy. Now the
+  pictures are only deleted when the server definitely refused the note, and
+  pressing Done again on the same draft finishes the note that was saved
+  instead of making another. The same holds for *Make a copy*, for pictures
+  added to a note, for pictures waiting to sync, and for *Save to Notes* in
+  Púca. On a server that has not been updated yet, pressing Done again still
+  makes a second note, as it always did, but the two never share pictures, so
+  deleting the extra one can never break the one you keep.
+- **Text typed offline no longer silently replaces newer text from another
+  device.** If you edited a note's text with no connection while the same
+  note's text was changed on another device, your offline version used to
+  overwrite theirs when the connection came back, with nothing to say so. Now
+  the note keeps the other device's text, and yours is kept as a new note
+  beside it, "*title* (offline copy)", with a message telling you. Text you
+  go on typing into that note goes into the same copy rather than a new one
+  each time. Your own earlier changes to the note on the same device never
+  count as a clash.
+- **Two devices adding pictures to one note at the same moment no longer lose
+  one of them.** When two phones synced pictures into the same note at once,
+  or a picture was removed on one device while another added one, the second
+  save could silently drop the first device's picture for good. Each save now
+  checks that the note has not changed since it looked, and if it has, adds or
+  removes its picture on top of the other device's change. *Save to Notes* in
+  Púca no longer drops a picture or a paragraph added elsewhere while its sheet
+  was open.
 
 ### For developers
 These change nothing in the app; they are about running the backend's own
