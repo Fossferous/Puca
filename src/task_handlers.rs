@@ -211,6 +211,13 @@ pub struct TaskResponse {
     /// When the item's content last changed (RFC3339; created_at for rows
     /// that predate migration 066).
     pub updated_at: String,
+    /// When the item was created or its schedule, tick or parent last
+    /// changed (migration 071; RFC3339, rendered like updated_at). The clock
+    /// `expect_schedules_as_of` is compared against — a text, attachment,
+    /// due-time or snooze edit does not move it. Always serialized, so every
+    /// task a 071+ server returns carries the key and a client can tell it
+    /// from an older server's silence.
+    pub schedule_changed_at: String,
 }
 
 #[derive(Deserialize)]
@@ -261,8 +268,9 @@ pub struct UpdateTaskRequest {
     #[serde(default)]
     pub recurrence_aware: bool,
     /// When an aware client's view of the schedules is from: the newest
-    /// `updated_at` it saw on the item (and, for a completion, on everything
-    /// under it), RFC3339, echoed exactly as the server rendered it. A dated
+    /// `schedule_changed_at` it saw on the item (and, for a completion, on
+    /// everything under it) — `updated_at` from a client or server older
+    /// than migration 071 — RFC3339, echoed exactly as the server rendered it. A dated
     /// open row changed after it is 409 and nothing is written
     /// (task_timing::SCHEDULES_CHANGED_SINCE_SQL). Absent = no check, which
     /// is what every older client sends and every op queued before it
@@ -415,6 +423,7 @@ type TaskRow = (
     Option<String>,
     Option<String>,
     String,
+    String,
 );
 
 fn task_row_to_response(row: TaskRow) -> TaskResponse {
@@ -433,6 +442,7 @@ fn task_row_to_response(row: TaskRow) -> TaskResponse {
         schedule,
         snooze,
         updated_at,
+        schedule_changed_at,
     ) = row;
     TaskResponse {
         id,
@@ -449,12 +459,13 @@ fn task_row_to_response(row: TaskRow) -> TaskResponse {
         schedule,
         snooze,
         updated_at,
+        schedule_changed_at,
     }
 }
 
 // NULL due_at stays NULL through the replace/concat (both are strict).
 const TASK_COLUMNS: &str =
-    "id, channel_id, list_id, parent_id, description, is_completed, position, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at, created_by, attachments, (replace((due_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS due_at, schedule, snooze, (replace((COALESCE(updated_at, created_at) AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS updated_at";
+    "id, channel_id, list_id, parent_id, description, is_completed, position, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at, created_by, attachments, (replace((due_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS due_at, schedule, snooze, (replace((COALESCE(updated_at, created_at) AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS updated_at, (replace((COALESCE(schedule_changed_at, updated_at, created_at) AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS schedule_changed_at";
 
 // --- Scope checks ---
 
@@ -2918,9 +2929,20 @@ mod db_tests {
             .status()
     }
 
-    /// updated_at exactly as every task query renders it to a client
-    /// (TASK_COLUMNS), so the stamp round-trips the way a real client's does.
+    /// The newest schedule_changed_at among `ids`, exactly as every task
+    /// query renders it to a client (TASK_COLUMNS), so the stamp round-trips
+    /// the way a current client's does (frontend/src/api/taskCompletion.ts).
     async fn stamp_of(pool: &PgPool, ids: &[i64]) -> String {
+        let (s,): (String,) = sqlx::query_as(
+            "SELECT (replace((MAX(COALESCE(schedule_changed_at, updated_at, created_at)) AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') \
+             FROM channel_tasks WHERE id = ANY($1)",
+        )
+        .bind(ids).fetch_one(pool).await.unwrap();
+        s
+    }
+
+    /// What a client older than migration 071 sends: the newest updated_at.
+    async fn old_stamp_of(pool: &PgPool, ids: &[i64]) -> String {
         let (s,): (String,) = sqlx::query_as(
             "SELECT (replace((MAX(COALESCE(updated_at, created_at)) AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') \
              FROM channel_tasks WHERE id = ANY($1)",
@@ -3026,13 +3048,15 @@ mod db_tests {
         assert!(is_done(&pool, p).await && is_done(&pool, c).await && is_done(&pool, plain).await, "the sweep ran");
 
         // The stated trade-off (the server cannot tell a one-off date from a
-        // repeat): ANY open dated row under the item changed after the look
-        // refuses the tick — a text edit of a one-off dated child included.
+        // repeat): ANY open dated row under the item whose date changed after
+        // the look refuses the tick — re-timing a one-off dated child
+        // included. (Its TEXT changing is no reason any more: see
+        // only_a_date_a_tick_a_move_or_a_new_item_outdates_a_stamp.)
         let q = item(&state, &alice, list_id, None).await;
         let dated = item(&state, &alice, list_id, Some(q)).await;
         assert_eq!(patch_item(&state, &alice, dated, serde_json::json!({ "schedule": SCHED, "reads_up_to": 4 })).await, StatusCode::OK);
         let look = stamp_of(&pool, &[q, dated]).await;
-        assert_eq!(patch_item(&state, &alice, dated, edit_text()).await, StatusCode::OK);
+        assert_eq!(patch_item(&state, &alice, dated, serde_json::json!({ "schedule": SCHED2, "reads_up_to": 4 })).await, StatusCode::OK);
         assert_eq!(patch_item(&state, &alice, q, tick(&look)).await, StatusCode::CONFLICT, "visible refusal, never a silent end");
         // ...but a DONE dated child is no reason: the sweep changes nothing for it.
         let look2 = stamp_of(&pool, &[q, dated]).await;
@@ -3167,6 +3191,88 @@ mod db_tests {
         assert!(seen < stamp_of(&pool, &[x]).await, "the schedule really moved the stamp");
         assert_eq!(patch_item(&state, &alice, x, serde_json::json!({ "is_completed": true, "recurrence_aware": true })).await, StatusCode::OK);
         assert!(is_done(&pool, x).await);
+        cleanup(&pool, &[&alice]).await;
+    }
+
+    /// The stamp is migration 071's schedule_changed_at, which moves only for
+    /// what can start or end a series: a new item, a schedule written, a tick
+    /// changed, a new parent. Against updated_at, ANY edit of a dated row
+    /// after the look refused the tick — another device fixing a typo in a
+    /// dated subtask included — and this device's own text edits had to drop
+    /// the stamp altogether (frontend api/tasks.ts trackWrite), leaving that
+    /// tick unchecked.
+    #[tokio::test]
+    async fn only_a_date_a_tick_a_move_or_a_new_item_outdates_a_stamp() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "clock").await;
+        let (_, list) = post_list(&state, &alice, V2, None).await;
+        let list_id = list["id"].as_i64().unwrap();
+        let dated_under = |q: i64| serde_json::json!({ "description": V2, "parent_id": q, "schedule": SCHED, "due_at": "2030-01-01T09:00:00Z" });
+
+        // Edits that cannot start or end a series, made after the look on
+        // another device: the tick still lands, and sweeps the dated child
+        // it was decided over.
+        let keep = [
+            ("text", edit_text()),
+            ("attachments", serde_json::json!({ "attachments": V2, "reads_up_to": 4 })),
+            ("snooze", serde_json::json!({ "snooze": SCHED2, "reads_up_to": 4 })),
+            ("derived due_at", serde_json::json!({ "due_at": "2030-01-08T09:00:00Z" })),
+        ];
+        for (what, write) in keep {
+            let q = item(&state, &alice, list_id, None).await;
+            let dated = item_with(&state, &alice, list_id, dated_under(q)).await;
+            let look = stamp_of(&pool, &[q, dated]).await;
+            let old_look = old_stamp_of(&pool, &[q, dated]).await;
+            assert_eq!(patch_item(&state, &alice, dated, write).await, StatusCode::OK, "{what}");
+            assert_eq!(patch_item(&state, &alice, q, tick(&look)).await, StatusCode::OK, "{what} after the look is no reason to refuse");
+            assert!(is_done(&pool, dated).await, "{what}: the sweep ran");
+            // A client older than 071 sends updated_at, which is never behind
+            // this clock: judged against it, it is refused no more often than
+            // before.
+            assert!(old_look >= look, "{what}: {old_look} < {look}");
+        }
+
+        // Negative controls: each of these still refuses — a current
+        // client's stamp and an older client's updated_at alike.
+        for what in ["re-dated", "reopened", "a dated item added", "a dated item moved in"] {
+            for old_client in [false, true] {
+                let q = item(&state, &alice, list_id, None).await;
+                let dated = item_with(&state, &alice, list_id, dated_under(q)).await;
+                let elsewhere = item_with(&state, &alice, list_id, serde_json::json!({ "description": V2, "schedule": SCHED })).await;
+                if what == "reopened" {
+                    assert_eq!(patch_item(&state, &alice, dated, serde_json::json!({ "is_completed": true, "recurrence_aware": true })).await, StatusCode::OK);
+                }
+                let look = if old_client { old_stamp_of(&pool, &[q, dated]).await } else { stamp_of(&pool, &[q, dated]).await };
+                match what {
+                    "re-dated" => assert_eq!(patch_item(&state, &alice, dated, serde_json::json!({ "schedule": SCHED2, "reads_up_to": 4 })).await, StatusCode::OK),
+                    "reopened" => assert_eq!(patch_item(&state, &alice, dated, serde_json::json!({ "is_completed": false, "recurrence_aware": true })).await, StatusCode::OK),
+                    "a dated item added" => {
+                        item_with(&state, &alice, list_id, serde_json::json!({ "description": V2, "parent_id": q, "schedule": SCHED })).await;
+                    }
+                    _ => {
+                        // A dated item that already existed, moved under q.
+                        let r = reorder_task(State(state.clone()), Path(elsewhere), Extension(alice.clone()), Json(ReorderTaskRequest { after_id: None, reparent: true, parent_id: Some(q) }))
+                            .await.into_response();
+                        assert_eq!(r.status(), StatusCode::OK);
+                    }
+                }
+                assert_eq!(patch_item(&state, &alice, q, tick(&look)).await, StatusCode::CONFLICT, "{what} (older client: {old_client})");
+                assert!(!is_done(&pool, q).await, "{what}: nothing completed");
+            }
+        }
+
+        // The stamp a client holds is the one the list serves, and a create
+        // answers with it too (TASK_COLUMNS).
+        let q = item(&state, &alice, list_id, None).await;
+        let created = create_list_task(State(state.clone()), Path(list_id), Extension(alice.clone()), Json(serde_json::from_value(dated_under(q)).unwrap()))
+            .await.into_response();
+        let created = json_of(created).await;
+        let dated = created["id"].as_i64().unwrap();
+        let served = json_of(list_list_tasks(State(state.clone()), Path(list_id), Extension(alice.clone())).await.into_response()).await;
+        let row = served.as_array().unwrap().iter().find(|t| t["id"].as_i64() == Some(dated)).unwrap().clone();
+        let want = stamp_of(&pool, &[dated]).await;
+        assert_eq!(row["schedule_changed_at"].as_str(), Some(want.as_str()), "{row}");
+        assert_eq!(created["schedule_changed_at"].as_str(), Some(want.as_str()), "{created}");
         cleanup(&pool, &[&alice]).await;
     }
 
