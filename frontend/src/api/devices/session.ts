@@ -997,7 +997,13 @@ async function sendSignal(s: Internal, obj: Record<string, unknown>): Promise<vo
     // the bug that shipped for an hour: a guard that leaves its mirror image
     // open is not a guard.
     await s.sigQueue.run(async () => {
-        const sealed = await sealControl(s.key!, JSON.stringify({ ...obj, sid: s.id, n: s.sendSigSeq++ }));
+        // Read the key again at this frame's turn: teardown nulls it, and a
+        // frame queued before that ran after it. Sealing with `null` threw out
+        // of importKey, and every fire-and-forget caller left it unhandled. A
+        // session that has ended has nowhere to send the frame anyway.
+        const key = s.key;
+        if (!key) return;
+        const sealed = await sealControl(key, JSON.stringify({ ...obj, sid: s.id, n: s.sendSigSeq++ }));
         wsClient.send({ type: 'DeviceSignal', payload: { session_id: s.id, payload: sealed } });
     });
 }

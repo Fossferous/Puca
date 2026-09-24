@@ -723,6 +723,65 @@ describe('a controller never waits forever for a screen', () => {
             vi.unstubAllGlobals();
         }
     }, 40_000);
+
+    it('a signal queued behind a seal is dropped, not sealed with no key, when the session ends meanwhile', async () => {
+        // sendSignal checks the key BEFORE it joins the per-session queue, and
+        // teardown nulls it. A frame that was waiting its turn then sealed with
+        // `null`: importKey threw, and every fire-and-forget caller (this one,
+        // set-privacy, power, the ICE candidates...) left it as an unhandled
+        // rejection. It failed CI's vitest run on PR 35 with the session's own
+        // stack (sealControl <- session.ts sendSignal) during a restart test.
+        vi.stubGlobal('RTCPeerConnection', StubPc);
+        const unhandled: unknown[] = [];
+        const onUnhandled = (e: unknown) => { unhandled.push(e); };
+        process.on('unhandledRejection', onUnhandled);
+        const realEncrypt = crypto.subtle.encrypt.bind(crypto.subtle);
+        let release!: () => void;
+        const gate = new Promise<void>(r => { release = r; });
+        let parked = false;
+        const encrypt = vi.spyOn(crypto.subtle, 'encrypt');
+        try {
+            const { installDeviceSessions, activeSessions, endAllSessions, connectToDevice, requestMonitor } =
+                await import('../api/devices/session');
+            installDeviceSessions();
+            endAllSessions('test reset');
+            sent.length = 0;
+            peerSigSeq = 0;
+
+            void connectToDevice('dev-peer').catch(() => { /* resolves on teardown */ });
+            await settle();
+            const sid = (sent.find(m => m.type === 'DeviceConnect') as
+                { payload?: { session_id?: string } } | undefined)?.payload?.session_id;
+            const hostEph = (await import('../api/e2ee')).generateControlEphemeral();
+            handlers.get('DeviceConnectAnswered')!({
+                payload: { session_id: sid, accepted: true, eph: hostEph.pubEncoded },
+            });
+            await settle();
+            expect(activeSessions().find(x => x.id === sid)?.phase, 'the premise: the controller is active').toBe('active');
+
+            // Park the NEXT seal. The per-session queue holds every later frame
+            // behind it, which is the window the teardown lands in.
+            encrypt.mockImplementation(async (...a: Parameters<SubtleCrypto['encrypt']>) => {
+                if (!parked) { parked = true; await gate; }
+                return realEncrypt(...a);
+            });
+            requestMonitor(sid!, 1);
+            requestMonitor(sid!, 2);
+            await settle();
+            expect(parked, 'the premise: the first frame is parked in its seal').toBe(true);
+
+            endAllSessions('test end');
+            release();
+            await settle();
+
+            expect(unhandled, 'a frame for a session that ended must not throw into nobody').toEqual([]);
+        } finally {
+            release?.();
+            encrypt.mockRestore();
+            process.off('unhandledRejection', onUnhandled);
+            vi.unstubAllGlobals();
+        }
+    });
 });
 
 
