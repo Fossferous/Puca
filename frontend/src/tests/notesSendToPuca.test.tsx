@@ -165,6 +165,20 @@ async function mountSheet(card: NoteCard) {
 
 const sendButton = () => document.querySelector('.notes-send-go') as HTMLButtonElement;
 const settle = async (n = 12) => { for (let i = 0; i < n; i++) await act(async () => { await new Promise(r => setTimeout(r, 0)); }); };
+/** Settle until `done()` holds, giving up after `ms` (the assertion that
+ *  follows then fails). A fixed tick count is not a wait for an outcome that
+ *  does come: the seal and the POST's Response body take event-loop turns a
+ *  busy machine stretches past any count. Measured with four cores busy: the
+ *  in-flight close missed 20 ticks in 6 of 15 runs on main, and a 5000-byte
+ *  send missed 12 once in 15. A miss also LEAKS: the unfinished send lands in
+ *  the next test, whose beforeEach has already reset `captured`, `hold` and
+ *  `failChannelPostWith` (a 413 test's late POST succeeded there as a second
+ *  post and took over `hold.release`). Only for things that DO happen; a
+ *  "nothing is posted" check still waits a fixed settle. */
+const settleUntil = async (done: () => boolean, ms = 3000) => {
+    const until = Date.now() + ms;
+    while (!done() && Date.now() < until) await settle(1);
+};
 
 function targets(): string[] {
     return [...document.querySelectorAll('.notes-send-target')].map(e => (e.textContent ?? '').trim());
@@ -296,7 +310,8 @@ describe('how long a note can be', () => {
         expect(document.querySelector('.notes-send-confirm')!.textContent).not.toMatch(/too long/i);
         expect(sendButton().disabled).toBe(false);
         clickSend();
-        await settle();
+        await settleUntil(() => captured.channelPosts.length > 0);
+        await settle(); // room for a second post, which "exactly one" must see
         expect(captured.channelPosts).toHaveLength(1);
     });
 
@@ -305,7 +320,7 @@ describe('how long a note can be', () => {
         await mountSheet(makeCard());
         clickTarget('general');
         clickSend();
-        await settle();
+        await settleUntil(() => document.querySelector('.notes-send-error') !== null);
         expect(document.querySelector('.notes-send-error')!.textContent).toMatch(/too long/i);
     });
 });
@@ -316,7 +331,12 @@ describe('while a send is in flight', () => {
         const { closes } = await mountSheet(makeCard());
         clickTarget('general');
         clickSend();
-        await settle(4);
+        // Until the POST is PARKED at the server, not merely started: "Sending…"
+        // shows before the seal, and a release that runs before the POST
+        // arrives is a no-op that leaves it parked for good (measured with
+        // four cores busy: 5 of 30 runs never closed).
+        await settleUntil(() => hold.release !== null);
+        expect(hold.release, 'the premise: the POST is parked at the server').not.toBeNull();
         expect(sendButton().textContent).toMatch(/Sending/);
 
         act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
@@ -326,7 +346,8 @@ describe('while a send is in flight', () => {
         expect(document.querySelector('.notes-dialog')).not.toBeNull();
 
         hold.release?.();
-        await settle(20);
+        await settleUntil(() => closes.count > 0);
+        await settle(); // room for a second post or close, which the counts below must see
         // Exactly one post, and the sheet closed itself when it was done.
         expect(captured.channelPosts).toHaveLength(1);
         expect(closes.count).toBe(1);
@@ -365,7 +386,8 @@ describe('sending', () => {
         expect(confirm).toContain('Home');
         expect(confirm).toMatch(/read it/);
         clickSend();
-        for (let i = 0; i < 12; i++) await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+        await settleUntil(() => captured.channelPosts.length > 0);
+        await settle(); // room for a second post, which "exactly one" must see
         expect(captured.channelPosts).toHaveLength(1);
     });
 
@@ -373,7 +395,7 @@ describe('sending', () => {
         await mountSheet(makeCard());
         clickTarget('general');
         clickSend();
-        for (let i = 0; i < 12; i++) await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+        await settleUntil(() => captured.channelPosts.length > 0);
         const body = captured.channelPosts[0].content;
         expect(body).not.toContain('Milk');
         expect(body).not.toContain('Groceries');
@@ -386,7 +408,10 @@ describe('sending', () => {
         await mountSheet(makeCard());
         clickTarget('general');
         clickSend();
-        for (let i = 0; i < 12; i++) await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+        // The refusal's message is the end of the attempt: wait for it, then
+        // check that nothing was posted on the way.
+        await settleUntil(() => document.querySelector('.notes-send-error') !== null);
+        await settle();
         expect(captured.channelPosts).toHaveLength(0);
         expect(document.querySelector('.notes-send-error')).not.toBeNull();
     });
@@ -395,7 +420,8 @@ describe('sending', () => {
         await mountSheet(makeCard());
         clickTarget('Sam');
         clickSend();
-        for (let i = 0; i < 20; i++) await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+        await settleUntil(() => captured.dmPosts.length > 0);
+        await settle(); // room for a second post, which "exactly one" must see
         expect(captured.dmPosts).toHaveLength(1);
         expect(captured.dmPosts[0].url).toBe('/dms/dm1/messages');
         expect(captured.dmPosts[0].content).not.toContain('Milk');
