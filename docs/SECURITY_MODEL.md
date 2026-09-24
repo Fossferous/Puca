@@ -169,7 +169,13 @@ by a real client** (see §3 and §4 for what that proviso is doing).
   it could serve an OLDER one it kept: Notes refuses any revision below the
   highest it has seen, and that memory is scrubbed at sign-out, so a replay
   aimed at a fresh sign-in would be accepted (it can only bring back your own
-  earlier colours and labels). A refused older copy is shown, not applied, and
+  earlier colours and labels). That memory holds the last synced document in
+  clear in localStorage, so a sync still in flight at sign-out must not write
+  it back after the scrub: every sync step re-checks the account and a
+  sign-out counter after each await and does nothing if either moved, and the
+  app's record store refuses any account but the signed-in one. The same check
+  keeps one account's colours and labels out of the next account's copy when
+  both sign in on the same page without a reload. A refused older copy is shown, not applied, and
   the user chooses: take it (a genuine restored backup) or overwrite it with
   this device's.
 - **On your device, not the server:** Notes keeps an offline copy of your

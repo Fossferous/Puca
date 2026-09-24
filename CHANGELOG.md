@@ -53,6 +53,16 @@ one-line summary; this file is the full story. Versions follow
   as soon as the server is listening again — and on a server whose idle
   connections are cut every few minutes, changes keep arriving at once
   instead of up to 30 seconds late.
+- **Signing out and in as someone else no longer mixes your note colours and
+  labels.** A colour/label sync still running when one person signed out of
+  Púca Notes or Púca (neither reloads the page) could finish after the next
+  person signed in on the same browser, copying the first person's labels,
+  colours, archive flags and reminder times into the second person's notes,
+  and from there to their other devices. It could also leave the first
+  person's last-synced labels in the browser's storage after the sign-out had
+  cleared them. A sync now stops as soon as the account it started for is no
+  longer the one signed in, and one that fails after that no longer shows
+  the next person a false "offline" or error.
 
 ### For developers
 These change nothing in the app; they are about running the backend's own
