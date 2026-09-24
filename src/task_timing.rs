@@ -126,31 +126,45 @@ pub const SUBTREE_HAS_SCHEDULE_SQL: &str = "WITH RECURSIVE sub AS ( \
 /// Has a schedule the client's decision depended on changed since the client
 /// looked? `$2` is the client's `expect_schedules_as_of`: the newest
 /// `updated_at` it had seen on these rows, echoed back exactly as the server
-/// rendered it (a server clock, never the device's). `$3` = include the
-/// subtree: a completion sweeps it, an advance only rewrites the item itself.
+/// rendered it (a server clock, never the device's). `$3` = a completion,
+/// judged on the subtree it sweeps; otherwise an advance, judged on the item
+/// alone (it rewrites that one row and sweeps nothing).
 ///
-/// It counts only OPEN rows that carry a schedule — the rows a completion
-/// could end or an advance could overwrite. Migration 066's trigger stamps
-/// updated_at on every content change (a schedule set or cleared, a reopen, a
-/// reparent) and a new row is stamped at insert, so "made repeating", "a
-/// dated child added or moved under it" and "reopened" all show. What it
-/// cannot tell apart, because the rule is sealed: a one-off date from a
-/// repeat, and a text edit from a schedule edit. Those refuse too — a tick
-/// the user sees refused is recoverable; a series that silently stopped is
-/// not noticed.
+/// A COMPLETION counts only OPEN rows that still carry a schedule — the rows
+/// it could end. Migration 066's trigger stamps updated_at on every content
+/// change and a new row is stamped at insert, so "made repeating", "a dated
+/// child added or moved under it" and "reopened" all show. A row whose
+/// schedule was removed does NOT count, and need not: completing an undated
+/// row ends no series. What it cannot tell apart, because the rule is sealed:
+/// a one-off date from a repeat, and a text edit from a schedule edit. Those
+/// refuse too — a tick the user sees refused is recoverable; a series that
+/// silently stopped is not noticed.
+///
+/// An ADVANCE counts its item whatever the item holds now. It writes the
+/// whole sealed rule back from the device's copy, so the one change that
+/// filter would hide — the repeat REMOVED on another device — is exactly the
+/// one it would undo, and the due_at compare-and-swap cannot see a removal
+/// that left due_at alone (NULL on a private item; unchanged when the default
+/// alert stays on the same start). A removal after the stamp is therefore a
+/// 409 like any other change, and an advance of an item with no schedule at
+/// all is refused inside the UPDATE (item_fresh_sql).
 pub const SCHEDULES_CHANGED_SINCE_SQL: &str = "WITH RECURSIVE sub AS ( \
          SELECT id, 0 AS depth FROM channel_tasks WHERE id = $1 \
          UNION ALL \
          SELECT t.id, s.depth + 1 FROM channel_tasks t \
          JOIN sub s ON t.parent_id = s.id WHERE $3 AND s.depth < 10 \
      ) SELECT EXISTS (SELECT 1 FROM sub JOIN channel_tasks t ON t.id = sub.id \
-         WHERE t.schedule IS NOT NULL AND NOT t.is_completed \
+         WHERE (NOT $3 OR (t.schedule IS NOT NULL AND NOT t.is_completed)) \
            AND COALESCE(t.updated_at, t.created_at) > $2)";
 
 /// The ITEM's own row, judged inside the statement that writes it: true when
 /// the request carries no stamp, or the row is one the stamp still vouches
 /// for. `stamp` names the statement's placeholder for the client's
-/// `expect_schedules_as_of` (NULL = no check).
+/// `expect_schedules_as_of` (NULL = no check), `completing` the one for "this
+/// is a completion" — the same split as SCHEDULES_CHANGED_SINCE_SQL's `$3`.
+/// A completion passes an undated or already-done item (it ends no series);
+/// an advance needs the item to STILL carry a schedule, because an advance of
+/// an item with none would write a removed repeat back.
 ///
 /// SCHEDULES_CHANGED_SINCE_SQL runs first and refuses most stale requests
 /// before anything is written, but it is a plain read: under READ COMMITTED
@@ -162,10 +176,11 @@ pub const SCHEDULES_CHANGED_SINCE_SQL: &str = "WITH RECURSIVE sub AS ( \
 /// the write: an UPDATE that finds its row locked waits for that writer, then
 /// re-evaluates its WHERE against the newest committed version of the row
 /// before it writes, so the item is judged on the row it actually changes.
-pub fn item_fresh_sql(stamp: &str) -> String {
+pub fn item_fresh_sql(stamp: &str, completing: &str) -> String {
     format!(
-        "({stamp}::timestamptz IS NULL OR schedule IS NULL OR is_completed \
-          OR COALESCE(updated_at, created_at) <= {stamp}::timestamptz)"
+        "({stamp}::timestamptz IS NULL OR CASE WHEN {completing}::boolean \
+           THEN (schedule IS NULL OR is_completed OR COALESCE(updated_at, created_at) <= {stamp}::timestamptz) \
+           ELSE (schedule IS NOT NULL AND COALESCE(updated_at, created_at) <= {stamp}::timestamptz) END)"
     )
 }
 

@@ -1068,7 +1068,7 @@ pub async fn update_task(
 
     // $14: the stamp again, now for the item's OWN row and atomically with
     // the write (task_timing::item_fresh_sql says why the check above is
-    // not enough for it).
+    // not enough for it); $15: a completion (else an advance).
     let update_sql = format!(
         "UPDATE channel_tasks SET is_completed = COALESCE($1, is_completed), description = COALESCE($2, description), \
          attachments = CASE WHEN $3 THEN $4 ELSE attachments END, \
@@ -1076,7 +1076,7 @@ pub async fn update_task(
          schedule = CASE WHEN $8 THEN $9 ELSE schedule END, \
          snooze = CASE WHEN $10 THEN $11 ELSE snooze END \
          WHERE id = $7 AND (NOT $12 OR due_at IS NOT DISTINCT FROM $13) AND {}",
-        crate::task_timing::item_fresh_sql("$14"),
+        crate::task_timing::item_fresh_sql("$14", "$15"),
     );
     let result = sqlx::query(&update_sql)
     .bind(payload.is_completed)
@@ -1093,6 +1093,7 @@ pub async fn update_task(
     .bind(expect_due.is_some())
     .bind(expect_due.flatten())
     .bind(schedules_as_of)
+    .bind(payload.is_completed == Some(true))
     .execute(&mut *tx)
     .await;
 
@@ -1108,11 +1109,12 @@ pub async fn update_task(
         Ok(r) if r.rows_affected() == 0 && schedules_as_of.is_some() => {
             let why = format!(
                 "SELECT {} FROM channel_tasks WHERE id = $1",
-                crate::task_timing::item_fresh_sql("$2"),
+                crate::task_timing::item_fresh_sql("$2", "$3"),
             );
             return match sqlx::query_as::<_, (bool,)>(&why)
                 .bind(task_id)
                 .bind(schedules_as_of)
+                .bind(payload.is_completed == Some(true))
                 .fetch_optional(&mut *tx)
                 .await
             {
@@ -3070,6 +3072,53 @@ mod db_tests {
         assert_eq!(patch_item(&state, &alice, kid, serde_json::json!({ "schedule": SCHED, "reads_up_to": 4 })).await, StatusCode::OK);
         assert_eq!(patch_item(&state, &alice, x, advance(&fresh)).await, StatusCode::OK, "positive control: a fresh advance lands");
         assert_eq!(schedule_of(&pool, x).await.as_deref(), Some(SCHED));
+        cleanup(&pool, &[&alice]).await;
+    }
+
+    /// An advance REWRITES the sealed rule from the device's copy. The check
+    /// counted only rows that still carry a schedule, so a repeat REMOVED on
+    /// another device was invisible to it; and the due_at swap cannot see a
+    /// removal either — a private item's due_at is NULL before and after, and
+    /// removing a repeat with the default alert leaves due_at on the same
+    /// start. The stale advance landed and put the removed repeat back.
+    #[tokio::test]
+    async fn a_stale_advance_never_resurrects_a_removed_repeat() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "unrep").await;
+        let (_, list) = post_list(&state, &alice, V2, None).await;
+        let list_id = list["id"].as_i64().unwrap();
+        let advance = |as_of: &str, due: Option<&str>| serde_json::json!({
+            "schedule": SCHED, "due_at": due.map(|_| "2030-01-08T09:00:00Z").unwrap_or(""), "expect_due_at": due.unwrap_or(""),
+            "reopen_subtree": true, "recurrence_aware": true, "reads_up_to": 4, "expect_schedules_as_of": as_of,
+        });
+
+        // A reminding item whose repeat is removed with due_at left where it
+        // was, and a private one (due_at NULL throughout).
+        for due in [Some("2030-01-01T09:00:00Z"), None] {
+            let x = item(&state, &alice, list_id, None).await;
+            let mut set = serde_json::json!({ "schedule": SCHED, "reads_up_to": 4 });
+            if let Some(d) = due { set["due_at"] = Value::from(d); }
+            assert_eq!(patch_item(&state, &alice, x, set).await, StatusCode::OK);
+            let seen = stamp_of(&pool, &[x]).await;                   // this device's view: repeating
+            // Another device removes the repeat; due_at does not move.
+            assert_eq!(patch_item(&state, &alice, x, serde_json::json!({ "schedule": "" })).await, StatusCode::OK);
+
+            assert_eq!(patch_item(&state, &alice, x, advance(&seen, due)).await, StatusCode::CONFLICT, "stale advance, due {due:?}");
+            assert_eq!(schedule_of(&pool, x).await, None, "the removed repeat stays removed (due {due:?})");
+
+            // Nor does a stamp taken AFTER the removal make it land: an advance
+            // moves a series on, and there is none. Refused in the UPDATE
+            // itself, so no commit between check and write can slip one past.
+            let fresh = stamp_of(&pool, &[x]).await;
+            assert_eq!(patch_item(&state, &alice, x, advance(&fresh, due)).await, StatusCode::CONFLICT, "no series to advance, due {due:?}");
+            assert_eq!(schedule_of(&pool, x).await, None);
+
+            // POSITIVE CONTROL: repeating again, and seen as such, it advances.
+            assert_eq!(patch_item(&state, &alice, x, serde_json::json!({ "schedule": SCHED2, "reads_up_to": 4 })).await, StatusCode::OK);
+            let current = stamp_of(&pool, &[x]).await;
+            assert_eq!(patch_item(&state, &alice, x, advance(&current, due)).await, StatusCode::OK, "a fresh advance lands (due {due:?})");
+            assert_eq!(schedule_of(&pool, x).await.as_deref(), Some(SCHED));
+        }
         cleanup(&pool, &[&alice]).await;
     }
 
