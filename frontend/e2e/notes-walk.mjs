@@ -2023,13 +2023,16 @@ ck('offline: back online, the queue replays', synced);
 const offlineOnB = await pageB.waitForSelector('.notes-card:has-text("Offline note")', { timeout: 15000 }).then(() => true, () => false);
 ck('offline: the edit made offline reached the server and device B sees it', offlineOnB);
 // 20 s, the budget its two neighbours already use, not the 10 s it shipped
-// with. Device B learns about a PERSONAL note's items by refetching on its
-// own schedule — a personal list never broadcasts, so there is no event to
-// ride — and 10 s was inside the jitter of that: adding ten seconds of walk
-// higher up (section 12c's note-reminder row) moved the phase and turned it
-// red twice running, with the note, its text and its picture all arriving.
-// The claim is unchanged: the item created offline must reach device B, which
-// is what proves its temp id was rewritten on replay.
+// with. Device B learns about a PERSONAL note's items from the live event
+// stream: the server sends the owner's other streams `{"t":"list","id":N}`
+// (src/task_events.rs, personal events go to their owner), and B invalidates
+// that note's items and refetches them (notes/model/taskEvents.ts). An
+// earlier version of this comment said a personal list never broadcasts; it
+// does. The claim is unchanged: the item created offline must reach device B,
+// which is what proves its temp id was rewritten on replay. If this goes red
+// while the neighbours pass, look in the DATABASE first: on 2026-09-24 it went
+// red once in seven full walks with the item on the server, top-level and
+// sealed (the replay was right), so the miss was B's event or refetch.
 const itemOnB = await pageB.waitForFunction(() => /Written on a plane/.test(document.body.innerText), null, { timeout: 20000 }).then(() => true, () => false);
 ck('offline: its item came through too (temp ids rewritten)', itemOnB);
 const bodyOnB = await pageB.waitForFunction(() => /Typed at 30,000 feet/.test(document.body.innerText), null, { timeout: 20000 }).then(() => true, () => false);
