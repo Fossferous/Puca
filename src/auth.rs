@@ -252,12 +252,13 @@ pub fn renew_if_stale(claims: &Claims, sid: &str, secret: &str) -> Option<String
 /// the revoke swept, then the mint's INSERT arrived with `revoked_at` NULL.
 /// This check read only that row, so the session was accepted on every request
 /// and renewed into a 24 h token sliding for 30 days — for a device its owner
-/// had revoked and could no longer see to revoke again. The mint and the
+/// had revoked and could no longer see to revoke again. The mint, the WS
+/// `DeviceAttest` binding (which had the same read-then-write shape) and the
 /// revoke now close that race between themselves (`INSERT_DEVICE_SESSION`,
-/// `revoke_device`); this is the check that does not depend on them getting
-/// the timing right, and it also covers the WS `DeviceAttest` binding, which
-/// has the same read-then-write shape. A revoked device stays revoked (nothing
-/// clears `devices.revoked_at`), so refusing its sessions forever is correct.
+/// `ws::bind_attested_device`, `revoke_device`); this is the check that does
+/// not depend on them getting the timing right. A revoked device stays
+/// revoked (nothing clears `devices.revoked_at`), so refusing its sessions
+/// forever is correct.
 /// A binding to a device row that is GONE fails closed too: device rows are
 /// never hard-deleted outside the account's own cascade, so there is nothing
 /// left that could vouch for it.

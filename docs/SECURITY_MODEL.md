@@ -1288,6 +1288,29 @@ The revoke also marks the device before it sweeps the device's sessions, in
 one transaction (`revoke_device`), so a racing mint either lands before the
 sweep, which then catches it, or waits and finds the device revoked.
 
+The same holds for a connection that proves which device it is. A socket
+attests by signing its connection's nonce with the device key, and the server
+then binds the socket's session to that device. The attestation used to read
+the device as live, check the signature, attest the socket and then bind the
+session, with no second look at the device. A revoke landing in between found
+no bound session to sweep and no attested socket to hang up. The socket then
+stayed attested as the revoked device, receiving that device's traffic
+(file offers waiting for it, remote-control signalling, presence) until it
+disconnected. Now the bind re-reads the device under the same lock on its row,
+and the socket is attested only after the bind has committed
+(`bind_attested_device`, [`src/ws.rs`](../src/ws.rs)). A revoke that got
+there first is seen and the attestation refused; one that comes after finds
+the session bound, revokes it and hangs up the socket. A socket whose session
+is not bound to this device (a legacy token with no session id, or a session
+an earlier attestation already bound to a different device) can be reached by
+a revoke only through the device it attested as, and a revoke landing in the
+instant between the bind's commit and the socket being marked as attested
+would miss it. So once the socket is marked, the device is read once more,
+before anything is delivered to it (`complete_attestation`). A revoke that
+committed before that read is seen, and the socket's attestation is taken back
+and the socket hung up. One that commits after it finds the socket already
+marked, and its own hang-up reaches it.
+
 A device-minted token is minted for an hour
 (`DEVICE_TOKEN_TTL_HOURS`), but it is an ordinary session: the first request
 renews it into a 24-hour token that keeps sliding for up to 30 days from the

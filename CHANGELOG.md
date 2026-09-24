@@ -54,6 +54,10 @@ one-line summary; this file is the full story. Versions follow
   again and it goes through. A computer signing itself in with its own key
   retries on its own within a minute, and does not report the server as having
   refused it.
+- **A device revoked while it was connecting is really signed out.** A
+  device you revoked at the moment its connection was identifying itself could
+  stay connected as that device until it disconnected; it is now refused or
+  hung up.
 - **A tick made on an out-of-date screen no longer ends a repeating
   reminder.** If you ticked an item while offline (or on a screen that had
   missed an update) and meanwhile another device gave it — or something

@@ -1581,6 +1581,28 @@ impl AppState {
         }
     }
 
+    /// Take back `attest_device` for ONE connection, if it is still attested
+    /// as `device_id`. Returns whether it was.
+    ///
+    /// For an attestation `ws::complete_attestation` cannot stand behind: its
+    /// device was revoked in the moment between the bind and `attest_device`,
+    /// or the re-check that would show it was not could not be made. Hanging
+    /// the socket up does not stop routing on its own: the socket leaves the
+    /// map only when its loop next wakes, and until then `conn_of_device`
+    /// would keep handing it that device's traffic. Taken back, it also sends
+    /// no "offline" presence when it closes, which matches: no "online" was
+    /// ever sent for it.
+    pub fn withdraw_attestation(&self, user_id: UserId, conn_id: u64, device_id: &str) -> bool {
+        let Some(mut sessions) = self.sessions.get_mut(&user_id) else { return false };
+        match sessions.iter_mut().find(|s| s.conn_id == conn_id && s.device_id.as_deref() == Some(device_id)) {
+            Some(s) => {
+                s.device_id = None;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The live connection attested as `device_id`, if any.
     ///
     /// A linear scan is correct here: a user holds at most MAX_SESSIONS_PER_USER
