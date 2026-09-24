@@ -1778,6 +1778,89 @@ pub fn verify_device_attestation(sign_pub: &str, nonce: &str, user_id: UserId, s
     .is_ok()
 }
 
+/// The database half of a DeviceAttest whose signature has verified: confirm
+/// the device is STILL a live device of this user, and bind the socket's
+/// session to it, as one transaction. `Ok(false)` means the device is not live
+/// at bind time and the attestation must be refused exactly as an unknown or
+/// revoked device is; nothing was written. `Ok(true)` means it was live, and
+/// the session (when there is one) is bound to it unless first-writer-wins
+/// kept an earlier binding.
+///
+/// WHY IT RE-READS. The handler's own read is a plain SELECT made before the
+/// signature check, and `revoke_device` can commit after it. That revoke
+/// sweeps only sessions already bound to the device and kills only sockets
+/// already attested as it or authenticated on a swept sid. This socket was
+/// neither yet, so it escaped: the old code then bound the session with an
+/// unconditional UPDATE and attested the socket in memory, leaving it
+/// attested as a revoked device, taking pinned parked offers, DeviceSignal
+/// and presence, until it disconnected. `token_session_live` refused the
+/// session's next REST call, but a socket is only checked at upgrade.
+///
+/// `FOR SHARE` is what makes the check atomic, the same way it does for the
+/// device-token mint (`device_token::INSERT_DEVICE_SESSION`). A plain read
+/// inside the transaction reads a snapshot, so against a revoke that has
+/// marked the device but not committed it still sees the device live. The
+/// share lock conflicts with the revoke's row lock, so the two serialise on
+/// the device row. Either this commits first, and the revoke's sweep (which
+/// marks, then sweeps, in one transaction) finds the session bound and the
+/// socket kill reaches it by sid; or the revoke marks the device first, and
+/// this read waits for its commit, re-reads the row and finds it revoked
+/// (measured by `a_device_revoked_between_the_read_and_the_bind_is_not_attested`:
+/// without `FOR SHARE` the same staging binds and attests). The caller attests
+/// the socket in memory only after this has committed and answered true, so
+/// a refused attestation leaves nothing behind, in memory or in the table.
+///
+/// Re-checking liveness is enough; `sign_pub` needs no second look. A device
+/// id is the hash of its two public keys (`derive_device_id`) and no path
+/// rewrites `sign_pub`, so the key the signature verified against is the one
+/// this row still holds.
+///
+/// `sid` is `None` for a socket on a legacy token that carries none. There is
+/// no row to bind, but the locked check still runs, so a revoke that marked
+/// the device first is still waited for and refused. Its one residual window:
+/// a revoke that commits after this transaction reaches such a socket only
+/// through its in-memory device id (`AppState::kill_device_sessions`), which
+/// the caller sets just after the commit. If the revoke commits and gets to
+/// its kill in that gap, the kill misses the socket. The same holds for a
+/// sid whose row is missing, or already bound to another device, because
+/// neither is bound to THIS device for the sweep to find.
+pub(crate) async fn bind_attested_device(
+    pool: &sqlx::PgPool,
+    user_id: UserId,
+    device_id: &str,
+    sid: Option<&str>,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let live: Option<(i32,)> = sqlx::query_as(
+        "SELECT 1 FROM devices \
+         WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL FOR SHARE",
+    )
+    .bind(device_id)
+    .bind(user_id as i32)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if live.is_none() {
+        let _ = tx.rollback().await;
+        return Ok(false);
+    }
+    if let Some(sid) = sid {
+        // First writer wins: a session proved by one device stays bound to
+        // it, so a token copied elsewhere cannot re-point its session away
+        // from the device the owner is about to revoke.
+        sqlx::query(
+            "UPDATE token_sessions SET device_id = $1 \
+             WHERE sid = $2 AND user_id = $3 AND (device_id IS NULL OR device_id = $1)",
+        )
+        .bind(device_id)
+        .bind(sid)
+        .bind(user_id as i32)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(true)
+}
+
 fn users_share_room(state: &Arc<AppState>, a: UserId, b: UserId) -> bool {
     state.rooms.iter().any(|room| {
         parse_voice_room(room.key()).is_some()
@@ -2853,6 +2936,10 @@ async fn handle_message(
             // Only a LIVE device of THIS user can attest. Checking user_id in
             // the query (rather than filtering after) means a valid signature
             // from someone else's device still cannot bind this connection.
+            // This read only fetches the key to verify against and turns away
+            // a device already revoked. It is a plain SELECT, so a revoke can
+            // commit right after it; the check that counts is the locked one
+            // in `bind_attested_device`, below.
             let row: Option<(String,)> = sqlx::query_as(
                 "SELECT sign_pub FROM devices \
                  WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL",
@@ -2869,21 +2956,37 @@ async fn handle_message(
             };
 
             if verify_device_attestation(&sign_pub, device_nonce, user_id, &sig) {
-                state.attest_device(user_id, conn_id, device_id.clone());
                 // Bind the SESSION to the device it just proved, so revoking the
                 // device revokes this token too (token_sessions.device_id) — from
                 // a proof, never from the `?device=` claim.
-                if let Some(sid) = state.session_sid(user_id, conn_id) {
-                    // First writer wins: a session proved by one device stays bound to it, so a
-                    // token copied elsewhere cannot re-point its session away from the device
-                    // the owner is about to revoke.
-                    let _ = sqlx::query("UPDATE token_sessions SET device_id = $1 WHERE sid = $2 AND user_id = $3 AND (device_id IS NULL OR device_id = $1)")
-                        .bind(&device_id)
-                        .bind(&sid)
-                        .bind(user_id as i32)
-                        .execute(&state.pool)
-                        .await;
+                //
+                // DATABASE FIRST, MEMORY SECOND. The bind re-checks, under a
+                // lock on the device row, that the device is still live, and
+                // only then is this socket attested in memory. It used to be
+                // the other way round, with an unconditional bind: a revoke
+                // committing between the read above and the bind found neither
+                // a bound session to sweep nor an attested socket to kill, and
+                // this socket then stayed attested as the revoked device until
+                // it disconnected. Now a revoke that committed first is seen
+                // and refused here, and one that commits after finds the
+                // session bound and kills this socket by its sid. (A socket
+                // with no sid has one narrow window left; see the function.)
+                //
+                // A database error refuses the attestation rather than
+                // attesting unbound. The bind's error used to be ignored,
+                // which attested the socket with its session left unbound:
+                // revoking the device then hung up the socket but left its
+                // token working. The socket stays up and unattested, the same
+                // as any refusal.
+                let sid = state.session_sid(user_id, conn_id);
+                let live = bind_attested_device(&state.pool, user_id, &device_id, sid.as_deref())
+                    .await
+                    .map_err(|e| ws_db_error("device_attest bind", e))?;
+                if !live {
+                    tracing::debug!("device attest: device {} was revoked during attestation", device_id);
+                    return Ok(());
                 }
+                state.attest_device(user_id, conn_id, device_id.clone());
                 // A parked offer PINNED to this device could not match until
                 // the id was proven; sweep again now that it is. Same
                 // delivery-time block/consent re-check as the connect path.
@@ -5167,4 +5270,259 @@ mod room_id_gate_tests {
         assert_eq!(parse_voice_room("voice_5"), Some(5));
     }
 
+}
+
+#[cfg(test)]
+mod device_attest_bind_tests {
+    use super::{bind_attested_device, device_attest_message, handle_message};
+    use crate::protocol::ServerMessage;
+    use crate::state::{AppState, UserId};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    /// A user with one live device whose signing key the test holds, and one
+    /// session row bound to nothing. TEST_DATABASE_URL only; the caller
+    /// deletes the user (its devices and session rows cascade with it).
+    async fn fixture(pool: &sqlx::PgPool) -> (i32, ed25519_dalek::SigningKey, String, String) {
+        let name = format!("attest_{}", uuid::Uuid::new_v4().simple());
+        let (uid,): (i32,) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id")
+            .bind(&name).bind(b"s".as_ref()).bind(b"v".as_ref())
+            .fetch_one(pool).await.expect("insert user");
+        let (key, device) = enrol(pool, uid).await;
+        let sid = format!("at-sid-{}", uuid::Uuid::new_v4().simple());
+        sqlx::query("INSERT INTO token_sessions (sid, user_id) VALUES ($1, $2)")
+            .bind(&sid).bind(uid).execute(pool).await.expect("insert session");
+        (uid, key, device, sid)
+    }
+
+    /// One more live device of `uid`, with a real signing key.
+    async fn enrol(pool: &sqlx::PgPool, uid: i32) -> (ed25519_dalek::SigningKey, String) {
+        use base64::Engine;
+        use rand::RngCore;
+        let mut seed = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut seed);
+        let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let device = format!("at-{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(
+            "INSERT INTO devices (id, user_id, device_pub, sign_pub, name, platform, auth_record, auth_sig) \
+             VALUES ($1, $2, 'x25519:' || $1, $3, 'test', 'windows', '{}', 'x')",
+        )
+        .bind(&device).bind(uid)
+        .bind(format!("ed25519:{}", base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_bytes())))
+        .execute(pool).await.expect("insert device");
+        (key, device)
+    }
+
+    /// Which device the session row is bound to. Panics if the row is gone,
+    /// so "bound to nothing" can never be a missing row read as NULL.
+    async fn bound_to(pool: &sqlx::PgPool, sid: &str) -> Option<String> {
+        let (device,): (Option<String>,) = sqlx::query_as("SELECT device_id FROM token_sessions WHERE sid = $1")
+            .bind(sid).fetch_one(pool).await.expect("the session row exists");
+        device
+    }
+
+    /// A device revoked after the handler's read but before the bind is
+    /// refused, and the session stays bound to nothing. This is the race run
+    /// in sequence: the old bind was an unconditional UPDATE that never looked
+    /// at the device again, so it bound the session to the revoked device. A
+    /// device of ANOTHER user is refused the same way, so the locked read
+    /// stands on its own rather than leaning on the handler's. The positive
+    /// controls (a live device does bind) are in the two tests below.
+    /// TEST_DATABASE_URL only.
+    #[tokio::test]
+    async fn a_device_revoked_before_the_bind_is_refused_and_binds_nothing() {
+        let Some(pool) = crate::migrator::test_pool(2).await else { return };
+        let (uid, _key, device, sid) = fixture(&pool).await;
+        let (other_uid, _other_key, other_device, _other_sid) = fixture(&pool).await;
+
+        sqlx::query("UPDATE devices SET revoked_at = NOW() WHERE id = $1").bind(&device).execute(&pool).await.unwrap();
+        let with_sid = bind_attested_device(&pool, uid as UserId, &device, Some(&sid)).await;
+        let without_sid = bind_attested_device(&pool, uid as UserId, &device, None).await;
+        let foreign = bind_attested_device(&pool, uid as UserId, &other_device, Some(&sid)).await;
+        let bound = bound_to(&pool, &sid).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(vec![uid, other_uid]).execute(&pool).await;
+
+        assert!(matches!(with_sid, Ok(false)), "a revoked device must be refused at the bind: {with_sid:?}");
+        assert!(matches!(without_sid, Ok(false)), "a socket with no sid gets the same locked check: {without_sid:?}");
+        assert!(matches!(foreign, Ok(false)), "another user's device is not this user's to attest as: {foreign:?}");
+        assert_eq!(bound, None, "the session must stay bound to nothing");
+    }
+
+    /// Everything one raced DeviceAttest left behind.
+    struct Raced {
+        answer: Result<(), String>,
+        /// The bind was seen waiting on the uncommitted revoke.
+        parked: bool,
+        /// The device this socket is attested as in memory afterwards.
+        attested: Option<String>,
+        /// The socket was sent DeviceAttested.
+        told: bool,
+    }
+
+    /// One DeviceAttest, through the real handler on a registered socket,
+    /// raced against a revoke of its device that is held UNCOMMITTED until the
+    /// attestation is parked behind it, or has finished. `sid` is "" for a
+    /// socket on a legacy token that carries none.
+    ///
+    /// Where it parks is what differs. The fixed handler waits in the bind's
+    /// locked read, before anything is bound or attested. The old one waited
+    /// too, but only at its closing `last_seen_at` touch of the device row,
+    /// after it had already bound the session and attested the socket; so
+    /// `parked` alone proves the race was staged, not that it was won.
+    async fn raced(
+        pool: &sqlx::PgPool,
+        state: &Arc<AppState>,
+        key: &ed25519_dalek::SigningKey,
+        device: &str,
+        uid: i32,
+        sid: &str,
+        revoke_commits: bool,
+    ) -> Raced {
+        use base64::Engine;
+        use ed25519_dalek::Signer;
+        use rand::RngCore;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let (tx, mut rx) = mpsc::channel::<ServerMessage>(64);
+        let (conn_id, _, _) = state.register_session(uid as UserId, "attester".into(), tx, false, None, sid.to_string());
+        let mut raw = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut raw);
+        let nonce = b64.encode(raw);
+        let sig = key.sign(device_attest_message(&nonce, uid as UserId).as_bytes());
+        let frame = serde_json::json!({
+            "type": "DeviceAttest",
+            "payload": { "device_id": device, "sig": b64.encode(sig.to_bytes()) },
+        })
+        .to_string();
+
+        let mut revoke = pool.begin().await.expect("begin");
+        let (revoker,): (i32,) = sqlx::query_as("SELECT pg_backend_pid()").fetch_one(&mut *revoke).await.unwrap();
+        sqlx::query("UPDATE devices SET revoked_at = NOW() WHERE id = $1 AND revoked_at IS NULL")
+            .bind(device).execute(&mut *revoke).await.expect("mark the device, uncommitted");
+        let attest = tokio::spawn({
+            let state = state.clone();
+            async move {
+                let mut joined = std::collections::HashSet::new();
+                handle_message(&state, uid as UserId, conn_id, "attester", &frame, &mut joined, &nonce).await
+            }
+        });
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let parked = loop {
+            let (waiting,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))")
+                .bind(revoker).fetch_one(pool).await.unwrap();
+            if waiting > 0 {
+                break true;
+            }
+            if attest.is_finished() {
+                break false;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "fixture: the attestation neither finished nor waited within 10 s");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        if revoke_commits {
+            revoke.commit().await.expect("commit the revoke");
+        } else {
+            revoke.rollback().await.expect("roll the revoke back");
+        }
+        let answer = attest.await.expect("attest task");
+        let attested = state.device_of_conn(uid as UserId, conn_id);
+        let mut told = false;
+        while let Ok(msg) = rx.try_recv() {
+            told |= matches!(msg, ServerMessage::DeviceAttested { .. });
+        }
+        state.unregister_session(uid as UserId, conn_id);
+        Raced { answer, parked, attested, told }
+    }
+
+    /// THE RACE. A device revoked while one of its sockets is attesting must
+    /// not come out of it attested. The handler reads the device (live),
+    /// verifies the signature, then binds; `revoke_device` marks the device
+    /// and sweeps the sessions bound to it, then kills the sockets attested as
+    /// it or on a swept sid. A revoke committing between the read and the bind
+    /// found this socket neither bound nor attested, so it reached nothing,
+    /// and the old handler then attested the socket and bound the session to
+    /// the revoked device over its head.
+    ///
+    /// Staged exactly, as the device-token mint's race test is: the revoke's
+    /// UPDATE of the device row is held UNCOMMITTED, so the handler's plain
+    /// read still sees the device live and the signature verifies, and the
+    /// revoke commits only once the attestation is waiting on that row. Run for a
+    /// socket with a sid and for a legacy one without (it has no row to bind,
+    /// but gets the same locked check). The control rolls the revoke back
+    /// instead, so a refusal caused by the waiting rather than by the
+    /// revocation fails it. TEST_DATABASE_URL only.
+    #[tokio::test]
+    async fn a_device_revoked_between_the_read_and_the_bind_is_not_attested() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let (uid, key, device, sid) = fixture(&pool).await;
+        // Nothing in the product ever un-revokes a device; this is only the
+        // fixture resetting itself between runs.
+        let unrevoke = || sqlx::query("UPDATE devices SET revoked_at = NULL WHERE id = $1").bind(&device).execute(&pool);
+
+        let with_sid = raced(&pool, &state, &key, &device, uid, &sid, true).await;
+        let bound_after_revoke = bound_to(&pool, &sid).await;
+        unrevoke().await.unwrap();
+        let legacy = raced(&pool, &state, &key, &device, uid, "", true).await;
+        unrevoke().await.unwrap();
+        let control = raced(&pool, &state, &key, &device, uid, &sid, false).await;
+        let bound_after_control = bound_to(&pool, &sid).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(uid).execute(&pool).await;
+
+        for (label, run) in [("with a sid", &with_sid), ("legacy, no sid", &legacy)] {
+            // Refused exactly as an unknown or revoked device is: no error on
+            // the wire, no DeviceAttested, no binding.
+            assert_eq!(run.answer, Ok(()), "{label}: a refusal is not an error");
+            assert_eq!(
+                run.attested, None,
+                "{label}: the socket was left attested in memory as a device revoked mid-attestation",
+            );
+            assert!(!run.told, "{label}: the socket was told it attested as a device revoked mid-attestation");
+        }
+        assert_eq!(bound_after_revoke, None, "the session was bound to a device revoked mid-attestation");
+        // Positive control: the same staging with the revoke abandoned
+        // attests and binds, so the refusals above came from the revocation.
+        assert_eq!(control.answer, Ok(()));
+        assert_eq!(control.attested.as_deref(), Some(device.as_str()), "an abandoned revoke must not cost the socket its attestation");
+        assert!(control.told, "the control socket is told it attested");
+        assert_eq!(bound_after_control.as_deref(), Some(device.as_str()), "the control binds the session to the device");
+        // And the race really was run: every attestation was held up by the
+        // uncommitted revoke, after the handler's read had seen the device
+        // live and the signature had verified.
+        assert!(
+            with_sid.parked && legacy.parked && control.parked,
+            "fixture: the bind must have waited on the revoke (sid {}, legacy {}, control {})",
+            with_sid.parked, legacy.parked, control.parked,
+        );
+    }
+
+    /// A live device binds, and first-writer-wins still holds: a session
+    /// already bound to device A cannot be re-pointed to device B, so a token
+    /// copied to another machine cannot move its session away from the device
+    /// its owner is about to revoke. B is still live, so its attestation is
+    /// not refused (the answer is about the device, not the session); what
+    /// it must not do is take the session. TEST_DATABASE_URL only.
+    #[tokio::test]
+    async fn a_live_device_binds_and_the_first_binding_stands() {
+        let Some(pool) = crate::migrator::test_pool(2).await else { return };
+        let (uid, _key, first, sid) = fixture(&pool).await;
+        let (_key_b, second) = enrol(&pool, uid).await;
+
+        let bind_first = bind_attested_device(&pool, uid as UserId, &first, Some(&sid)).await;
+        let after_first = bound_to(&pool, &sid).await;
+        let bind_second = bind_attested_device(&pool, uid as UserId, &second, Some(&sid)).await;
+        let after_second = bound_to(&pool, &sid).await;
+        let rebind_first = bind_attested_device(&pool, uid as UserId, &first, Some(&sid)).await;
+        let legacy = bind_attested_device(&pool, uid as UserId, &second, None).await;
+        let after_all = bound_to(&pool, &sid).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(uid).execute(&pool).await;
+
+        assert!(matches!(bind_first, Ok(true)), "a live device attests: {bind_first:?}");
+        assert_eq!(after_first.as_deref(), Some(first.as_str()), "and its session is bound to it");
+        assert!(matches!(bind_second, Ok(true)), "a second live device is still a live device: {bind_second:?}");
+        assert_eq!(after_second.as_deref(), Some(first.as_str()), "first writer wins: the session stays bound to the first device");
+        assert!(matches!(rebind_first, Ok(true)), "re-attesting as the bound device is fine: {rebind_first:?}");
+        assert!(matches!(legacy, Ok(true)), "a live device attests on a socket with no sid: {legacy:?}");
+        assert_eq!(after_all.as_deref(), Some(first.as_str()));
+    }
 }

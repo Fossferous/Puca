@@ -1288,6 +1288,27 @@ The revoke also marks the device before it sweeps the device's sessions, in
 one transaction (`revoke_device`), so a racing mint either lands before the
 sweep, which then catches it, or waits and finds the device revoked.
 
+The same holds for a connection that proves which device it is. A socket
+attests by signing its connection's nonce with the device key, and the server
+then binds the socket's session to that device. The attestation used to read
+the device as live, check the signature, attest the socket and then bind the
+session, with no second look at the device. A revoke landing in between found
+no bound session to sweep and no attested socket to hang up. The socket then
+stayed attested as the revoked device, receiving that device's traffic
+(file offers waiting for it, remote-control signalling, presence) until it
+disconnected. Now the bind re-reads the device under the same lock on its row,
+and the socket is attested only after the bind has committed
+(`bind_attested_device`, [`src/ws.rs`](../src/ws.rs)). A revoke that got
+there first is seen and the attestation refused; one that comes after finds
+the session bound, revokes it and hangs up the socket. One narrow window
+remains, for a socket whose session is not bound to this device: a legacy
+token with no session id, or a session an earlier attestation already bound to
+a different device. The revoke reaches such a socket only by the device it
+attested as, so a revoke that commits and gets to its hang-up in the instant
+between the bind's commit and the socket being marked as attested misses it.
+Every token issued since 0.9.0 carries a session id, and an older one has
+either been renewed into one or expired.
+
 A device-minted token is minted for an hour
 (`DEVICE_TOKEN_TTL_HOURS`), but it is an ordinary session: the first request
 renews it into a 24-hour token that keeps sliding for up to 30 days from the
