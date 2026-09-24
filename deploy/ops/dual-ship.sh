@@ -332,6 +332,28 @@ remote_code() {
 	ssh_to "$entry" "curl -s $CURL_TLS -o /dev/null -w '%{http_code}' --resolve '${host}:443:127.0.0.1' 'https://${host}${path}' --max-time 20"
 }
 
+# The bytes a phone would download from the download host, hashed ON the host
+# and compared with the bundle that was signed. The three OTA paths used to
+# ask only for a 200, so a host answering the bundle's URL with OTHER bytes (a
+# per-path reroot or rewrite in a hand-edited Caddyfile, while SHA256SUMS.txt
+# still came from the right root) read as shipped while every phone refused
+# the update. The installer and APK paths already compared hashes; this is
+# the same check. The status is kept for the message: "HTTP 404" says more
+# than a mismatch against the hash of an empty body.
+#   verify_served_bundle <entry> <label> <what> <path under downloads> <local sha> <FAILED id>
+verify_served_bundle() {
+	local entry="$1" label="$2" what="$3" rel="$4" sha="$5" id="$6" served code
+	served="$(ssh_to "$entry" "curl -s $CURL_TLS --resolve '$DOWNLOAD_HOST:443:127.0.0.1' 'https://$DOWNLOAD_HOST/$rel' --max-time 120 | sha256sum | cut -d' ' -f1" || true)"
+	if [ "$served" = "$sha" ]; then
+		echo "PASS  $label $what served byte-identical ($sha)"
+	else
+		code="$(remote_code "$entry" "$DOWNLOAD_HOST" "/$rel" || true)"
+		echo "FAIL  $label $what served sha256 ${served:-<none>} (HTTP ${code:-?}), expected $sha:"
+		echo "      https://$DOWNLOAD_HOST/$rel is not the bundle that was signed, and every phone will refuse it"
+		FAILED+=("$label:$id")
+	fi
+}
+
 cmd_webapp() {
 	local tarball="${1:?usage: dual-ship.sh webapp <tarball>}"
 	# The API base is BAKED at build time from frontend/.env.production, which
@@ -539,10 +561,7 @@ MEOF
 			echo "FAIL  $label OTA endpoint reports '$seen_version', expected $version"
 			FAILED+=("$label:mobile")
 		fi
-		local bundle_code
-		bundle_code="$(remote_code "$entry" "$DOWNLOAD_HOST" "/mobile/$MOBILE_BUNDLE_PREFIX-$version.enc.zip")"
-		[ "$bundle_code" = "200" ] && echo "PASS  $label bundle downloadable" \
-			|| { echo "FAIL  $label bundle -> HTTP $bundle_code"; FAILED+=("$label:mobile-bundle"); }
+		verify_served_bundle "$entry" "$label" "bundle" "mobile/$MOBILE_BUNDLE_PREFIX-$version.enc.zip" "$bundle_sha" mobile-bundle
 	done
 }
 
@@ -629,10 +648,7 @@ MEOF
 			echo "FAIL  $label full OTA endpoint CHANGED during a lite ship (HTTP ${full_before%%:*} -> ${full_after%%:*}; bodies compared)"
 			FAILED+=("$label:mobile-lite-isolation")
 		fi
-		local bundle_code
-		bundle_code="$(remote_code "$entry" "$DOWNLOAD_HOST" "/mobile/$MOBILE_BUNDLE_PREFIX_LITE-$version.enc.zip")"
-		[ "$bundle_code" = "200" ] && echo "PASS  $label lite bundle downloadable" \
-			|| { echo "FAIL  $label lite bundle -> HTTP $bundle_code"; FAILED+=("$label:mobile-lite-bundle"); }
+		verify_served_bundle "$entry" "$label" "lite bundle" "mobile/$MOBILE_BUNDLE_PREFIX_LITE-$version.enc.zip" "$bundle_sha" mobile-lite-bundle
 	done
 }
 
@@ -832,10 +848,7 @@ MEOF
 			echo "FAIL  $label the full or lite OTA endpoint CHANGED during a Notes ship (bodies compared)"
 			FAILED+=("$label:mobile-notes-isolation")
 		fi
-		local bundle_code
-		bundle_code="$(remote_code "$entry" "$DOWNLOAD_HOST" "/mobile/$MOBILE_BUNDLE_PREFIX_NOTES-$version.enc.zip")"
-		[ "$bundle_code" = "200" ] && echo "PASS  $label notes bundle downloadable" \
-			|| { echo "FAIL  $label notes bundle -> HTTP $bundle_code"; FAILED+=("$label:mobile-notes-bundle"); }
+		verify_served_bundle "$entry" "$label" "notes bundle" "mobile/$MOBILE_BUNDLE_PREFIX_NOTES-$version.enc.zip" "$bundle_sha" mobile-notes-bundle
 	done
 }
 
@@ -1137,7 +1150,11 @@ verify_migrations_against() {
 	local entry="$1" tarball="$2"
 	local label; label="$(label_of "$entry")"
 	local tmp; tmp="$(mktemp -d)"
-	tar xzf "$tarball" -C "$tmp" migrations
+	# Checked: this runs on the left of `||` (cmd_backend), where errexit is off.
+	if ! tar xzf "$tarball" -C "$tmp" migrations; then
+		echo "FAIL  $label: could not extract migrations/ from $tarball"
+		rm -rf "$tmp"; return 1
+	fi
 	local tolerant=0 newest=0 v
 	if tarball_tolerates_newer_db "$tarball" "$tmp"; then tolerant=1; fi
 	for v in "$tmp"/migrations/[0-9]*_*.sql; do
@@ -1145,8 +1162,51 @@ verify_migrations_against() {
 		v="$(basename "$v")"; v="${v%%_*}"; v=$((10#$v))
 		if [ "$v" -gt "$newest" ]; then newest="$v"; fi
 	done
+	# Reading the history is a CHECKED step. It used to be a bare `$(ssh …)`
+	# whose status nothing read: this function runs on the left of `||`, so
+	# errexit is off in it, and a failed read (postgres down, a DB_NAME naming
+	# no database, sudo refused, ssh 255) left nothing on stdout, zero rows
+	# "matched", and the pre-flight printed PASS for a history nobody had seen
+	# (the rollback check, DUAL_SHIP_PREFLIGHT_ONLY, included). The remote side
+	# prints __END__ only after every step has succeeded, so a missing marker is
+	# the one signal, whatever failed and wherever.
+	#
+	# A database with no _sqlx_migrations table is its own case, on purpose: a
+	# freshly provisioned host (provision.sh makes an EMPTY database) that the
+	# backend will migrate from nothing on first start. That passes with a NOTE
+	# only where no backend is installed yet, and returns 3, not 0: nothing was
+	# compared, so the caller must not print "byte-match". Where a backend IS
+	# installed, a database with no migration history is either not the one it
+	# runs on (DB_NAME is wrong) or one it has never managed to start against;
+	# either way the check would be comparing nothing, so it refuses.
 	local recorded
-	recorded="$(ssh_to "$entry" "sudo -u postgres psql -d $DB_NAME -t -A -c \"SELECT version, encode(checksum,'hex') FROM _sqlx_migrations ORDER BY version\"")"
+	recorded="$(ssh_to "$entry" "set -e
+		none=\$(sudo -u postgres psql -X -d $DB_NAME -v ON_ERROR_STOP=1 -t -A -c \"SELECT to_regclass('_sqlx_migrations') IS NULL\")
+		if [ \"\$none\" = t ]; then
+			if [ -e $INSTALL_DIR/$SERVICE_NAME ]; then echo __NO_TABLE_INSTALLED__; else echo __NO_TABLE__; fi
+		else
+			sudo -u postgres psql -X -d $DB_NAME -v ON_ERROR_STOP=1 -t -A -c \"SELECT version, encode(checksum,'hex') FROM _sqlx_migrations ORDER BY version\"
+		fi
+		echo __END__")" || recorded=""
+	if [ "${recorded##*$'\n'}" != "__END__" ]; then
+		echo "FAIL  $label: could not read _sqlx_migrations from database '$DB_NAME' (ssh or psql failed; its"
+		echo "      error is above). This host's migration history was NOT checked. Is postgres up, and does"
+		echo "      DB_NAME in hosts.conf name the database $SERVICE_NAME runs on?"
+		rm -rf "$tmp"; return 1
+	fi
+	recorded="${recorded%__END__}"
+	case "$recorded" in
+		__NO_TABLE__*)
+			echo "NOTE  $label: database '$DB_NAME' has no _sqlx_migrations table and no backend is installed at"
+			echo "      $INSTALL_DIR/$SERVICE_NAME: a fresh host, which the backend migrates from empty on first start."
+			rm -rf "$tmp"; return 3 ;;
+		__NO_TABLE_INSTALLED__*)
+			echo "FAIL  $label: database '$DB_NAME' has no _sqlx_migrations table, but a backend is installed at"
+			echo "      $INSTALL_DIR/$SERVICE_NAME. Either DB_NAME in hosts.conf names some other database,"
+			echo "      or the backend installed there has never started against it: check its .env"
+			echo "      DATABASE_URL and \`journalctl -u $SERVICE_NAME\`. Once it has run and migrated, this passes."
+			rm -rf "$tmp"; return 1 ;;
+	esac
 	local fails=0 ver sum f local_sum
 	while IFS='|' read -r ver sum; do
 		[ -n "$ver" ] || continue
@@ -1182,15 +1242,20 @@ cmd_backend() {
 
 	echo "=== pre-flight: migration checksums vs every host's database ==="
 	local preflight_failed=0
+	local vrc
 	for entry in "${HOSTS[@]}"; do
-		if verify_migrations_against "$entry" "$src_tarball"; then
-			echo "PASS  $(label_of "$entry") migrations byte-match"
-		else
-			preflight_failed=1
-		fi
+		# `|| vrc=$?` keeps errexit off inside the check, as the old `if` did.
+		vrc=0; verify_migrations_against "$entry" "$src_tarball" || vrc=$?
+		case "$vrc" in
+			0) echo "PASS  $(label_of "$entry") migrations byte-match" ;;
+			3) echo "PASS  $(label_of "$entry") nothing to compare (fresh host, no migration history yet)" ;;
+			*) preflight_failed=1 ;;
+		esac
 	done
 	if [ "$preflight_failed" -ne 0 ]; then
-		echo "REFUSING to ship: the backend would crash-loop at startup (VersionMismatch or VersionMissing)."
+		echo "REFUSING to ship: a host failed the pre-flight above. A history that could not be read"
+		echo "cannot be proved safe; one that does not match would crash-loop the backend at startup"
+		echo "(VersionMismatch or VersionMissing)."
 		echo "A checksum FAIL: build the tarball from a tree whose migrations byte-match"
 		echo "production (the long-lived main checkout — NOT a fresh clone/worktree, which"
 		echo "re-materialises line endings). A missing-version FAIL: see 'Rolling back the"

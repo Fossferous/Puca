@@ -29,7 +29,10 @@ const ck = (n, ok, detail) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${deta
 const browser = await chromium.launch({ args: ['--mute-audio'] });
 const ctx = await browser.newContext({ ...devices['iPhone 13'], defaultBrowserType: undefined, baseURL });
 const page = await ctx.newPage();
-page.on('pageerror', e => console.log('[pageerror]', String(e).slice(0, 300)));
+// Counted, not just logged: a render crash unmounts the whole root (no error
+// boundary here), and an empty page passes every layout check below.
+let pageErrors = 0;
+page.on('pageerror', e => { pageErrors++; console.log('[pageerror]', String(e).slice(0, 300)); });
 page.on('console', m => { if (m.type() === 'error') console.log('[console.error]', m.text().slice(0, 200)); });
 
 const shot = async (name) => { const f = `${outdir}/${name}.png`; await page.screenshot({ path: f, fullPage: true }); console.log('SHOT', f); };
@@ -64,10 +67,18 @@ if (r) {
     ck('control: …and removing it clears the report again', !back.bodyScrollsHorizontally && back.widestElement <= back.viewportWidth, overflowDetail(back));
 
     // ---- This device -------------------------------------------------------------
-    await page.getByRole('tab', { name: 'This device' }).tap();
+    const thisTab = page.getByRole('tab', { name: 'This device' });
+    await thisTab.tap();
+    const thisShown = await page.waitForSelector('.devices-setup', { timeout: 5000 }).then(() => true, () => false);
     await page.waitForTimeout(800);
     r = await report();
     await shot('02-this-device-phone');
+    // What is measured below must be the This-device panel, not an empty root
+    // or the devices tab again (a tap that switched nothing).
+    ck('this device: the panel mounts', thisShown && r.mounted, `panel=${thisShown} mounted=${r.mounted}`);
+    // A crashed root has no tab left to ask: that is a FAIL here, not a throw.
+    const selected = await thisTab.getAttribute('aria-selected', { timeout: 2000 }).catch(() => null);
+    ck('this device: its tab is selected', selected === 'true', String(selected));
     ck('this device: no horizontal overflow', !r.bodyScrollsHorizontally && r.widestElement <= r.viewportWidth, overflowDetail(r));
     ck('this device: every button ≥ 44 px tall', r.buttonsUnder44px.length === 0, JSON.stringify(r.buttonsUnder44px));
     // Last, so it covers both tabs: a request the fixtures do not answer means
@@ -75,6 +86,7 @@ if (r) {
     // layout above was measured over an error state.
     ck('devices: every API call the view made was answered by a fixture', r.unstubbed.length === 0, JSON.stringify(r.unstubbed));
 }
+ck('no uncaught page errors', pageErrors === 0, String(pageErrors));
 
 await browser.close();
 console.log(`\n${fail ? 'FAILED' : 'OK'}: ${fail} failing check(s)`);

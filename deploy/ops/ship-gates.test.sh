@@ -415,11 +415,41 @@ cat > "$TMP/bin/ssh" <<STUB
 #!/usr/bin/env bash
 echo "ssh \$*" >> "$LOG"
 case "\$*" in *SHA256SUMS.txt*curl*|*curl*SHA256SUMS.txt*) cat "$TMP/served-sums" 2>/dev/null ;; esac
-# ...and a backend pre-flight's migration query with $TMP/sqlx_rows.
-case "\$*" in *_sqlx_migrations*) cat "$TMP/sqlx_rows" 2>/dev/null ;; esac
+# ...and a backend pre-flight's migration read by RUNNING the remote command
+# here, against the fake sudo/psql in $TMP/remote-bin (below), so the remote
+# script's own error handling is what is under test, not a canned answer.
+# $TMP/ssh_down plays a host ssh cannot reach (exit 255, nothing on stdout);
+# $TMP/ssh_silent a session that ends at once with status 0 and no output.
+# The host's INSTALL_DIR maps to $TMP/remote-install.
+case "\$*" in *_sqlx_migrations*)
+	[ -f "$TMP/ssh_down" ] && { echo 'ssh: connect to host 127.0.0.1 port 22: Connection refused' >&2; exit 255; }
+	[ -f "$TMP/ssh_silent" ] && exit 0
+	remote="\${@: -1}"
+	PATH="$TMP/remote-bin:\$PATH" bash -c "\${remote//\/tmp\/sandbox-install/$TMP/remote-install}"
+	exit \$? ;;
+esac
 exit 0
 STUB
 chmod +x "$TMP/bin/ssh"
+# The host's \`sudo -u postgres psql -d <db> ... -c <sql>\`; the SQL is the last
+# argument. The history is $TMP/sqlx_rows; no such file is a database with no
+# _sqlx_migrations table at all (psql exits 1 on the query, as the real one
+# does), and $TMP/sqlx_fail a psql that cannot connect (exit 2, stderr only).
+mkdir -p "$TMP/remote-bin"
+cat > "$TMP/remote-bin/sudo" <<STUB
+#!/usr/bin/env bash
+sql="\${@: -1}"
+if [ -f "$TMP/sqlx_fail" ]; then
+	echo 'psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed: FATAL:  database "sandbox" does not exist' >&2
+	exit 2
+fi
+case "\$sql" in
+	*to_regclass*) if [ -f "$TMP/sqlx_rows" ]; then echo f; else echo t; fi ;;
+	*_sqlx_migrations*) if [ -f "$TMP/sqlx_rows" ]; then cat "$TMP/sqlx_rows"; else echo 'ERROR:  relation "_sqlx_migrations" does not exist' >&2; exit 1; fi ;;
+	*) echo "fake sudo: unexpected SQL: \$sql" >&2; exit 3 ;;
+esac
+STUB
+chmod +x "$TMP/remote-bin/sudo"
 cat > "$TMP/bin/scp" <<STUB
 #!/usr/bin/env bash
 echo "scp \$*" >> "$LOG"
@@ -672,6 +702,52 @@ out="$(fullship "$TMP/src-withcommit.tgz")"
 check "one that names its commit gets past the guard (positive control)" "$([ "$(has "$out" 'PASS  the tarball names its commit: 0123456789abcdef0123456789abcdef01234567')" = 1 ] && [ "$(has "$out" 'carries no SOURCE_COMMIT')" = 0 ] && echo 1 || echo 0)" "$out"
 rm -f "$TMP/src-new/SOURCE_COMMIT" /tmp/puca-dual-bin
 
+# AN UNREADABLE HISTORY IS NOT A MATCHING ONE. The query's exit status used to
+# be ignored: a failed read left nothing on stdout, zero rows "matched", and
+# the pre-flight printed PASS for a history nobody had seen — in the rollback
+# check (PREFLIGHT_ONLY) too. Each way the read can fail must now refuse.
+printf '1|%s\n2|%s\n' "$S1" "$S2" > "$TMP/sqlx_rows"
+unread_refused() { # <output> <rc>
+	[ "$2" -ne 0 ] && [ "$(has "$1" 'could not read _sqlx_migrations')" = 1 ] && [ "$(has "$1" 'REFUSING to ship')" = 1 ] \
+		&& [ "$(has "$1" 'PASS  sandbox migrations byte-match')" = 0 ] && [ "$(has "$1" 'PASS  pre-flight only')" = 0 ] && echo 1 || echo 0
+}
+touch "$TMP/sqlx_fail"
+out="$(preflight "$TMP/src-new.tgz")"; rc=$?
+check "a history psql cannot read (exit 2, no rows) REFUSES the pre-flight" "$(unread_refused "$out" $rc)" "rc=$rc $out"
+out="$(fullship "$TMP/src-withcommit.tgz")"; rc=$?
+check "and a full ship, before anything is uploaded" "$([ "$(unread_refused "$out" $rc)" = 1 ] && [ "$(grep -c '^scp' "$LOG")" = 0 ] && echo 1 || echo 0)" "rc=$rc $out"
+rm -f "$TMP/sqlx_fail"
+touch "$TMP/ssh_down"
+out="$(preflight "$TMP/src-new.tgz")"; rc=$?
+check "a host ssh cannot reach (exit 255) REFUSES the pre-flight" "$(unread_refused "$out" $rc)" "rc=$rc $out"
+rm -f "$TMP/ssh_down"
+touch "$TMP/ssh_silent"
+out="$(preflight "$TMP/src-new.tgz")"; rc=$?
+check "an answer with no end marker (status 0, nothing on stdout) REFUSES the pre-flight" "$(unread_refused "$out" $rc)" "rc=$rc $out"
+rm -f "$TMP/ssh_silent"
+# A database nothing has migrated yet is its own case, handled on purpose: a
+# freshly provisioned host (provision.sh makes an EMPTY database) passes with a
+# NOTE; the same answer from a host that already runs a backend means DB_NAME
+# names some other database, and the check would be comparing nothing.
+rm -f "$TMP/sqlx_rows"; rm -rf "$TMP/remote-install"
+out="$(preflight "$TMP/src-new.tgz")"; rc=$?
+check "no _sqlx_migrations table and no backend installed (a fresh host) passes, with a NOTE" "$([ $rc -eq 0 ] && [ "$(has "$out" "NOTE  sandbox: database 'sandbox' has no _sqlx_migrations table and no backend is installed")" = 1 ] && [ "$(has "$out" 'REFUSING')" = 0 ] && echo 1 || echo 0)" "rc=$rc $out"
+# ...and says it compared nothing: a fresh host is not a byte-match, and the
+# pre-flight summary must not claim one.
+check "a fresh host reports 'nothing to compare', not 'migrations byte-match'" "$([ "$(has "$out" 'PASS  sandbox nothing to compare (fresh host, no migration history yet)')" = 1 ] && [ "$(has "$out" 'migrations byte-match')" = 0 ] && echo 1 || echo 0)" "rc=$rc $out"
+mkdir -p "$TMP/remote-install"; printf 'binary\n' > "$TMP/remote-install/sandbox"
+out="$(preflight "$TMP/src-new.tgz")"; rc=$?
+check "no _sqlx_migrations table on a host WITH a backend installed REFUSES (wrong DB_NAME)" "$([ $rc -ne 0 ] && [ "$(has "$out" "database 'sandbox' has no _sqlx_migrations table, but a backend is installed")" = 1 ] && [ "$(has "$out" 'or the backend installed there has never started against it')" = 1 ] && [ "$(has "$out" 'REFUSING to ship')" = 1 ] && [ "$(has "$out" 'PASS  sandbox migrations byte-match')" = 0 ] && echo 1 || echo 0)" "rc=$rc $out"
+# ...and with the history readable again, the installed host passes: the
+# end-marker parsing leaves the last real row intact.
+printf '1|%s\n2|%s\n' "$S1" "$S2" > "$TMP/sqlx_rows"
+out="$(preflight "$TMP/src-new.tgz")"; rc=$?
+check "a readable history on the same host still passes (positive control)" "$([ $rc -eq 0 ] && [ "$(has "$out" 'PASS  sandbox migrations byte-match')" = 1 ] && [ "$(has "$out" 'REFUSING')" = 0 ] && echo 1 || echo 0)" "rc=$rc $out"
+printf '1|%s\n2|%s\n' "$S1" "0000" > "$TMP/sqlx_rows"
+out="$(preflight "$TMP/src-new.tgz")"; rc=$?
+check "and a mismatch in the LAST row, just above the end marker, is still caught" "$([ $rc -ne 0 ] && [ "$(has "$out" 'migration v2 (002_b.sql) does not byte-match')" = 1 ] && echo 1 || echo 0)" "rc=$rc $out"
+rm -rf "$TMP/remote-install"
+
 rm -f "$TMP/src-new/migrations/002_b.sql"
 printf '1|%s\n2|%s\n' "$S1" "$S2" > "$TMP/sqlx_rows"
 printf 'CREATE TABLE c (id INT);\n' > "$TMP/src-new/migrations/003_c.sql"; tar czf "$TMP/src-gap.tgz" -C "$TMP/src-new" migrations src
@@ -741,6 +817,10 @@ else
 #!/usr/bin/env bash
 echo "ssh \$*" >> "$LOG"
 case "\$*" in
+	# The download host's copy of an OTA bundle is \$TMP/served-bundle: its
+	# status, and what the remote \`curl … | sha256sum\` would print for it.
+	*curl*http_code*.enc.zip*) if [ -f "$TMP/served-bundle" ]; then echo 200; else echo 404; fi ;;
+	*curl*.enc.zip*sha256sum*) if [ -f "$TMP/served-bundle" ]; then sha256sum < "$TMP/served-bundle"; else sha256sum < /dev/null; fi | cut -d' ' -f1 ;;
 	*http_code*variant=notes*) if [ -f "$TMP/notes-code" ]; then cat "$TMP/notes-code"; elif [ -f "$TMP/notes-ota.json" ]; then echo 200; else echo 404; fi ;;
 	*variant=notes*) cat "$TMP/notes-ota.json" 2>/dev/null ;;
 	*'test -e '*mobile-update-notes.json*) if [ -f "$TMP/notes-file" ]; then echo present; else echo absent; fi ;;
@@ -912,6 +992,29 @@ STUB
 	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"
 	check "and the unchanged endpoints PASS it (positive control)" "$([ "$(has "$out" 'PASS  sandbox full and lite OTA endpoints undisturbed')" = 1 ] && [ "$(has "$out" 'mobile-notes-isolation')" = 0 ] && echo 1 || echo 0)" "$out"
 	rm -f "$TMP/notes-ota.json" "$TMP/reads"
+
+	# THE BYTES, NOT JUST THE STATUS. The three OTA paths used to accept any
+	# 200 at the bundle's URL, so a download host serving OTHER bytes there (a
+	# hand-edited per-path reroot) read as shipped while every phone refused
+	# the update. The installer and APK paths already compared hashes. The
+	# stub serves $TMP/served-bundle at the bundle URL. (Every run here also
+	# FAILs SHA256SUMS.txt — this stub serves none — so the exit code proves
+	# nothing: the assertions are on the bundle lines.)
+	printf '{"version":"9.9.9","url":"x","variant":"notes","native":{"min":"9.9.8"}}\n' > "$TMP/notes-ota.json"
+	for sub in mobile mobile-lite mobile-notes; do
+		case "$sub" in
+			mobile)       b=puca-good;  b_sk="$puca_good_SK";  b_ck="$puca_good_CK";  what='bundle';       id=mobile-bundle ;;
+			mobile-lite)  b=puca-good;  b_sk="$puca_good_SK";  b_ck="$puca_good_CK";  what='lite bundle';  id=mobile-lite-bundle ;;
+			mobile-notes) b=notes-good; b_sk="$notes_good_SK"; b_ck="$notes_good_CK"; what='notes bundle'; id=mobile-notes-bundle ;;
+		esac
+		printf 'a stale bundle, not the one that was signed\n' > "$TMP/served-bundle"
+		out="$(ship "$sub" "$TMP/$b.enc.zip" 9.9.9 "$b_sk" "$b_ck")"
+		check "$sub: a bundle URL answering 200 with OTHER bytes FAILS $id" "$([ "$(has "$out" "=== mobile OTA")" = 1 ] && [ "$(has "$out" "FAIL  sandbox $what served sha256")" = 1 ] && [ "$(has "$out" "sandbox:$id")" = 1 ] && [ "$(has "$out" "PASS  sandbox $what ")" = 0 ] && echo 1 || echo 0)" "$out"
+		cp "$TMP/$b.enc.zip" "$TMP/served-bundle"
+		out="$(ship "$sub" "$TMP/$b.enc.zip" 9.9.9 "$b_sk" "$b_ck")"
+		check "$sub: the signed bundle's own bytes PASS (positive control)" "$([ "$(has "$out" "PASS  sandbox $what served byte-identical")" = 1 ] && [ "$(has "$out" "sandbox:$id")" = 0 ] && echo 1 || echo 0)" "$out"
+	done
+	rm -f "$TMP/served-bundle" "$TMP/notes-ota.json"
 fi
 
 if [ "$fails" -gt 0 ]; then

@@ -97,6 +97,29 @@ one-line summary; this file is the full story. Versions follow
   removes its picture on top of the other device's change. *Save to Notes* in
   Púca no longer drops a picture or a paragraph added elsewhere while its sheet
   was open.
+- **Self-hosting: the backend migration check no longer passes a database it
+  could not read.** `dual-ship.sh backend`, and the rollback check
+  `DUAL_SHIP_PREFLIGHT_ONLY=1`, printed "migrations byte-match" when the read
+  of a host's migration history failed outright (postgres down, a `DB_NAME`
+  in `hosts.conf` naming no database, ssh unreachable), because a failed read
+  looked like an empty history. They now refuse and say the history could not
+  be read. A freshly provisioned host with no migrations yet still passes, with
+  a note, and is reported as "nothing to compare" rather than a byte-match. A
+  host with a backend installed but no migration history in `DB_NAME` is
+  refused: either that is the wrong database or the backend has never started
+  against it, and the message names both.
+- **Self-hosting: a phone update is only reported shipped when the download
+  host serves the signed bundle's exact bytes.** The three mobile update
+  channels (`dual-ship.sh mobile`, `mobile-lite`, `mobile-notes`) accepted any
+  HTTP 200 at the bundle's address, so a download host serving other bytes
+  there read as a successful ship while every phone refused the update. They
+  now compare the served file's SHA-256 with the bundle, as the installer and
+  APK uploads already did.
+- **Developers: the Devices phone walk fails when the This-device panel does
+  not render.** `frontend/e2e/devices-mobile-walk.mjs` logged page errors
+  without counting them and measured the This-device tab without checking it
+  was there, so a crash that emptied the page passed. It now requires the
+  panel, the selected tab and zero uncaught page errors.
 
 ### For developers
 These change nothing in the app; they are about running the backend's own
