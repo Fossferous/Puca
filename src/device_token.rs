@@ -411,15 +411,7 @@ mod tests {
         use base64::Engine;
         use ed25519_dalek::{Signer, SigningKey};
         use rand::RngCore;
-        let Some(url) = crate::migrator::test_database_url() else {
-            println!("skipping: TEST_DATABASE_URL not set");
-            return;
-        };
-        let pool = match sqlx::postgres::PgPoolOptions::new().max_connections(2).connect(&url).await {
-            Ok(p) => p,
-            Err(_) => { println!("skipping: database unreachable"); return; }
-        };
-        crate::migrator::app_migrator().run(&pool).await.expect("migrations apply");
+        let Some(pool) = crate::migrator::test_pool(2).await else { return };
         let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
         let b64 = base64::engine::general_purpose::STANDARD;
 

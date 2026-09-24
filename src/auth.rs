@@ -853,15 +853,7 @@ mod session_tests {
     async fn the_middleware_does_not_renew_a_session_that_has_no_row() {
         use axum::{body::Body, routing::get, Router};
         use tower::ServiceExt;
-        let Some(url) = crate::migrator::test_database_url() else {
-            println!("skipping: TEST_DATABASE_URL not set");
-            return;
-        };
-        let pool = match sqlx::postgres::PgPoolOptions::new().max_connections(2).connect(&url).await {
-            Ok(p) => p,
-            Err(_) => { println!("skipping: database unreachable"); return; }
-        };
-        crate::migrator::app_migrator().run(&pool).await.expect("migrations apply");
+        let Some(pool) = crate::migrator::test_pool(2).await else { return };
         let state = AppState::new(pool.clone(), SECRET.into(), None, Arc::new(crate::wake::NullWake));
         let name = format!("renew_row_{}", uuid::Uuid::new_v4().simple());
         let (uid, tv): (i32, i32) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id, token_version")

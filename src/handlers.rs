@@ -2811,15 +2811,7 @@ mod login_session_row_tests {
 
     #[tokio::test]
     async fn no_token_is_issued_when_its_session_row_cannot_be_written() {
-        let Some(url) = crate::migrator::test_database_url() else {
-            println!("skipping: TEST_DATABASE_URL not set");
-            return;
-        };
-        let pool = match sqlx::postgres::PgPoolOptions::new().max_connections(2).connect(&url).await {
-            Ok(p) => p,
-            Err(_) => { println!("skipping: database unreachable"); return; }
-        };
-        crate::migrator::app_migrator().run(&pool).await.expect("migrations apply");
+        let Some(pool) = crate::migrator::test_pool(2).await else { return };
         let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
 
         let username = format!("rowless_{}", Uuid::new_v4().simple());
