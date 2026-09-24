@@ -63,6 +63,11 @@ one-line summary; this file is the full story. Versions follow
   cleared them. A sync now stops as soon as the account it started for is no
   longer the one signed in, and one that fails after that no longer shows
   the next person a false "offline" or error.
+- **A fast swipe between Púca Notes' lists moves one list, not two.** A swipe
+  that went past half-way and was then flicked could carry on past the next
+  list and land on the one after it. Every swipe now stops on the next list,
+  however fast, the way Google Tasks moves between lists; tapping a tab or a
+  label in the rail still goes straight to that list.
 - **A voice note made with no signal keeps its recording.** Recording a clip
   in *Take a note…* and pressing Done while offline (or while other changes
   were still waiting to sync) saved the note without the recording and said

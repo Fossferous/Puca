@@ -7,7 +7,12 @@
  * must never be: the scroller is `overflow-x: auto` + `scroll-snap-type: x
  * mandatory`, so a swipe, a trackpad flick, a shift-wheel and a keyboard
  * scroll all behave exactly as the platform's own, including the rubber band
- * at the ends and the interrupted fling. All this component does is
+ * at the ends and the interrupted fling. Each page is also a `scroll-snap-stop:
+ * always` stop (notes.css), which is what holds a fast flick to ONE list: the
+ * browser, not this file, refuses to carry momentum past a page. The
+ * scrollTo/scrollLeft calls below are end-position scrolls, which that rule
+ * does not stop, so a tab still jumps straight to its list. All this
+ * component does is
  *
  *   route  -> scroll   (the rail, a tab, a deep link, the back button)
  *   scroll -> route    (a swipe that settled somewhere else)

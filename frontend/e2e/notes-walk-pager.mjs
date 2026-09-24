@@ -506,11 +506,14 @@ export async function pagerWalk({ browser, baseURL, state, ck, watch, shotOf, er
         await old.goto('/notes/');
         await old.waitForSelector('.notes-page.active .notes-card', { timeout: 20000 }).catch(() => {});
         const noScrollEnd = await old.evaluate(() => !('onscrollend' in window));
-        await old.evaluate(() => { const p = document.querySelector('.notes-pager'); p.scrollBy({ left: 2 * p.clientWidth, behavior: 'instant' }); });
-        ok = await settledOn(old, 2, labelHash(s.tabs[2]));
+        // ONE page along, as a swipe moves it. This was a two-page scrollBy,
+        // which scroll-snap-stop: always (one list per swipe) now stops after
+        // one page, as it would any directional scroll: a jump no swipe makes.
+        await old.evaluate(() => { const p = document.querySelector('.notes-pager'); p.scrollBy({ left: p.clientWidth, behavior: 'instant' }); });
+        ok = await settledOn(old, 1, labelHash(s.tabs[1]));
         ps = await pagerState(old);
         ck('pager (phone): in a WebView with no scrollend, the debounce still moves the route and the tab',
-            noScrollEnd && ok && JSON.stringify(ps.selected) === JSON.stringify([s.tabs[2]]),
+            noScrollEnd && ok && JSON.stringify(ps.selected) === JSON.stringify([s.tabs[1]]),
             JSON.stringify({ noScrollEnd, hash: ps.hash, selected: ps.selected }));
         await old.close();
 

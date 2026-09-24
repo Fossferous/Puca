@@ -208,7 +208,13 @@ own when there are more lists than fit, keeping the selected one in view.
   band at the ends and an interrupted swipe all behave the way everything else
   on the device does, and a screen with animations turned off simply jumps.
   Nothing changes while a finger is still on the glass: the list you land on
-  is decided when you let go.
+  is decided when you let go. **One list per swipe**, however fast the flick:
+  every page is a `scroll-snap-stop: always` stop, so momentum that would
+  have carried past the next list stops on it (a swipe held past half-way
+  and then flicked used to land two lists along). The tabs, the rail, a link
+  and the back button are not swipes and still jump straight to their list.
+  That is measured with real touch events on a phone; a desktop trackpad's
+  momentum is the browser's own and cannot be driven from the headless walk.
 - **Dragging a note by its grip** (the dotted handle) still reorders it, and
   never swipes: the grip claims the whole gesture, sideways drift included.
 - **Down inside a page** is what it always was: pinned notes, then the rest.
@@ -1877,4 +1883,5 @@ the phone the row is a 44px, 16px target that toggles from anywhere along it. It
 pager (`frontend/e2e/notes-walk-pager.mjs`, which also runs on its own against
 a fresh user), drives the tabs, the rail and a deep link on a desktop, and on
 the phone scrolls the pager, swipes it with real touch events (held still
-mid-way, then lifted), drags a card by its grip and scrolls a page down.
+past half-way, then flicked: it must land exactly one list along), drags a
+card by its grip and scrolls a page down.

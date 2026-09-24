@@ -1388,6 +1388,17 @@
     min-width: 0;
     overflow-y: auto;
     scroll-snap-align: start;
+    /* ONE list per swipe, however fast (Google Tasks). Without it a flick's
+       momentum may carry past a list: measured with real touch events at
+       390x844, a swipe held past half-way and then flicked landed TWO lists
+       along. `always` stops directional scrolls (a swipe and its fling,
+       scrollBy); scrollTo and scrollLeft still land exactly, so a tab, the
+       rail, a deep link and the back button jump straight to their list
+       (measured: scrollTo(3w) from 0 lands on 3, scrollBy(2w) on 1). A
+       desktop trackpad's momentum is the browser's own and was not
+       measurable headless: one synthetic wheel event of three widths still
+       jumped three lists with or without this rule. */
+    scroll-snap-stop: always;
     /* What .notes-main carries on every other route. */
     padding: 16px 24px 120px;
     -webkit-overflow-scrolling: touch;
