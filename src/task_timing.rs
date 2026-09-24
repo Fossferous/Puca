@@ -162,14 +162,28 @@ pub const SUBTREE_HAS_SCHEDULE_SQL: &str = "WITH RECURSIVE sub AS ( \
 /// alert stays on the same start). A removal after the stamp is therefore a
 /// 409 like any other change, and an advance of an item with no schedule at
 /// all is refused inside the UPDATE (item_fresh_sql).
+///
+/// A row under the item is judged by its PATH, not its own stamp alone:
+/// `path` is the newest clock of the row and every row between it and the
+/// item (the item's own clock is not on it — what happens to the item does
+/// not change what is under it). A reparent stamps only the row that moved,
+/// so a dated item carried in WITH ITS PARENT keeps a stamp older than the
+/// look, and read on its own it passed: a stale tick then swept a series its
+/// device had never seen. The path cannot be older than the look for a row
+/// whose ancestors this device saw unchanged, since the stamp is the newest
+/// clock over all of them. Its cost: a dated open row BELOW a row whose tick
+/// was changed elsewhere since the look refuses too (visible, and rare: a
+/// tick there usually swept the dated row with it, and a done row is not
+/// counted).
 pub const SCHEDULES_CHANGED_SINCE_SQL: &str = "WITH RECURSIVE sub AS ( \
-         SELECT id, 0 AS depth FROM channel_tasks WHERE id = $1 \
+         SELECT id, 0 AS depth, NULL::timestamptz AS path FROM channel_tasks WHERE id = $1 \
          UNION ALL \
-         SELECT t.id, s.depth + 1 FROM channel_tasks t \
+         SELECT t.id, s.depth + 1, GREATEST(s.path, COALESCE(t.schedule_changed_at, t.updated_at, t.created_at)) \
+         FROM channel_tasks t \
          JOIN sub s ON t.parent_id = s.id WHERE $3 AND s.depth < 10 \
      ) SELECT EXISTS (SELECT 1 FROM sub JOIN channel_tasks t ON t.id = sub.id \
          WHERE (NOT $3 OR (t.schedule IS NOT NULL AND NOT t.is_completed)) \
-           AND COALESCE(t.schedule_changed_at, t.updated_at, t.created_at) > $2)";
+           AND COALESCE(sub.path, t.schedule_changed_at, t.updated_at, t.created_at) > $2)";
 
 /// The ITEM's own row, judged inside the statement that writes it: true when
 /// the request carries no stamp, or the row is one the stamp still vouches
@@ -206,15 +220,23 @@ pub fn item_fresh_sql(stamp: &str, completing: &str) -> String {
 /// refused such a completion outright, so a row that is one here changed in
 /// the moment between that check and this statement (the sweep runs after
 /// the commit). Leaving it open costs a tick; sweeping it could end a series.
+/// "Changed after it" is judged on the row's PATH, exactly as in
+/// SCHEDULES_CHANGED_SINCE_SQL, so a dated row that arrived with a moved
+/// parent is left open too; the row's own clock is read again from the row
+/// being written, so a change committed while this statement waited on its
+/// lock still counts. `paths` folds the (acyclic in practice) walk to one
+/// row per id, keeping the newest path.
 pub const COMPLETE_SUBTREE_SQL: &str = "WITH RECURSIVE sub AS ( \
-         SELECT id, 1 AS depth FROM channel_tasks WHERE parent_id = $1 \
+         SELECT id, 1 AS depth, COALESCE(schedule_changed_at, updated_at, created_at) AS path \
+         FROM channel_tasks WHERE parent_id = $1 \
          UNION ALL \
-         SELECT t.id, s.depth + 1 FROM channel_tasks t \
+         SELECT t.id, s.depth + 1, GREATEST(s.path, COALESCE(t.schedule_changed_at, t.updated_at, t.created_at)) \
+         FROM channel_tasks t \
          JOIN sub s ON t.parent_id = s.id WHERE s.depth < 10 \
-     ) \
-     UPDATE channel_tasks SET is_completed = TRUE WHERE id IN (SELECT id FROM sub) \
-       AND ($2::timestamptz IS NULL OR schedule IS NULL OR is_completed \
-            OR COALESCE(schedule_changed_at, updated_at, created_at) <= $2::timestamptz)";
+     ), paths AS (SELECT id, MAX(path) AS path FROM sub GROUP BY id) \
+     UPDATE channel_tasks t SET is_completed = TRUE FROM paths WHERE t.id = paths.id \
+       AND ($2::timestamptz IS NULL OR t.schedule IS NULL OR t.is_completed \
+            OR GREATEST(paths.path, COALESCE(t.schedule_changed_at, t.updated_at, t.created_at)) <= $2::timestamptz)";
 
 /// Reopen everything under a task (not the task itself).
 pub const REOPEN_SUBTREE_SQL: &str = "WITH RECURSIVE sub AS ( \

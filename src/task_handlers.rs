@@ -3276,6 +3276,57 @@ mod db_tests {
         cleanup(&pool, &[&alice]).await;
     }
 
+    /// "A dated item moved under it" must include one moved in WITH ITS
+    /// PARENT. A reparent stamps only the row that moved; the dated row under
+    /// it keeps its old stamp, older than the ticking device's look, so a
+    /// check (or a sweep) that read each row's own stamp let a stale tick end
+    /// a series it had never seen. A row counts as changed when it, or any
+    /// row between it and the item, changed after the look.
+    #[tokio::test]
+    async fn a_dated_item_moved_in_with_its_parent_is_seen_too() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "path").await;
+        let (_, list) = post_list(&state, &alice, V2, None).await;
+        let list_id = list["id"].as_i64().unwrap();
+        let move_under = |id: i64, parent: i64| {
+            let (state, alice) = (state.clone(), alice.clone());
+            async move {
+                let r = reorder_task(State(state), Path(id), Extension(alice), Json(ReorderTaskRequest { after_id: None, reparent: true, parent_id: Some(parent) }))
+                    .await.into_response();
+                assert_eq!(r.status(), StatusCode::OK);
+            }
+        };
+
+        // Elsewhere, before the look: an undated item with a dated one under it.
+        let c = item(&state, &alice, list_id, None).await;
+        let g = item_with(&state, &alice, list_id, serde_json::json!({ "description": V2, "parent_id": c, "schedule": SCHED })).await;
+        let p = item(&state, &alice, list_id, None).await;
+        let look = stamp_of(&pool, &[p]).await;                        // device A saw p, alone
+        assert!(stamp_of(&pool, &[g]).await < look, "g is older than the look: its own stamp says nothing");
+        move_under(c, p).await;                                        // device B moves c (and g) under p
+
+        assert_eq!(patch_item(&state, &alice, p, tick(&look)).await, StatusCode::CONFLICT, "A's stale tick is refused");
+        assert!(!is_done(&pool, g).await && !is_done(&pool, p).await, "and g's series is still open");
+
+        // The sweep, which runs after the check has passed, holds to the same
+        // rule on its own: driven directly, g is left open, c is swept.
+        let as_of = chrono::DateTime::parse_from_rfc3339(&look).unwrap().with_timezone(&chrono::Utc);
+        sqlx::query(crate::task_timing::COMPLETE_SUBTREE_SQL).bind(p).bind(Some(as_of)).execute(&pool).await.unwrap();
+        assert!(is_done(&pool, c).await, "the undated row that moved is swept");
+        assert!(!is_done(&pool, g).await, "the dated row that came with it is left open");
+
+        // POSITIVE CONTROL: an undated item with an undated one under it,
+        // moved in the same way, is no reason to refuse the tick.
+        let q = item(&state, &alice, list_id, None).await;
+        let d = item(&state, &alice, list_id, None).await;
+        let e = item(&state, &alice, list_id, Some(d)).await;
+        let look2 = stamp_of(&pool, &[q]).await;
+        move_under(d, q).await;
+        assert_eq!(patch_item(&state, &alice, q, tick(&look2)).await, StatusCode::OK);
+        assert!(is_done(&pool, e).await, "swept with it");
+        cleanup(&pool, &[&alice]).await;
+    }
+
     /// Run `tick` for `x` while ANOTHER transaction holds `x` with `write`
     /// applied but not committed, and commit that write only once the tick is
     /// provably waiting on its row lock. The tick's freshness check has then
