@@ -34,6 +34,7 @@ interface TreeProps {
     onToggle: (task: Task, completed: boolean) => void | Promise<void>;
     onSetDue: (task: Task, dueAt: string | null) => void | Promise<void>;
     onEdit: (task: Task, description: string) => void | Promise<void>;
+    onAddSubtask: (parentId: number, text: string) => void | Promise<void>;
 }
 const trees: TreeProps[] = [];
 vi.mock('../components/TaskTree', () => ({
@@ -169,6 +170,28 @@ for (const [name, open] of [['the Tasks tab', openTasksView], ['a personal list�
             await act(async () => { await rows().onToggle(shown(), true); });
             expect(lastTick().expect_schedules_as_of, 'still checked: another device making it repeat meanwhile is refused').toBe(S0);
         });
+
+        // Both views append a create's answer to the rows they read and never
+        // re-read. That row carries the server's stamp from the moment of
+        // the create — newer than the read. Counted, it would vouch for a
+        // view of the OTHER rows as of the create, and a repeat another
+        // device gave one of them in between would be swept by the tick
+        // without a check.
+        for (const clock of ['updated_at', 'schedule_changed_at'] as const) {
+            it(`an item added here does not raise the stamp above what this device READ (${clock})`, async () => {
+                if (clock === 'schedule_changed_at') item = { ...item, schedule_changed_at: T0 };
+                await open();
+                const kid = nextId++;
+                post.mockImplementationOnce(async () => ({
+                    ...item, id: kid, parent_id: item.id, description: 'sealed', position: 2,
+                    updated_at: T1, ...(clock === 'schedule_changed_at' ? { schedule_changed_at: T1 } : {}),
+                }));
+                await act(async () => { await rows().onAddSubtask(item.id, 'Recycling too'); });
+                expect(rows().tasks.some(t => t.id === kid), 'the new item is shown').toBe(true);
+                await act(async () => { await rows().onToggle(shown(), true); });
+                expect(lastTick().expect_schedules_as_of, 'the stamp of the rows it read, not the create’s').toBe(T0);
+            });
+        }
 
         it('POSITIVE CONTROL: with no edit here, the tick carries the stamp it read', async () => {
             await open();

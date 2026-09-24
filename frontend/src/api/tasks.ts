@@ -67,6 +67,14 @@ export interface Task {
      *  row sends no freshness stamp (taskCompletion.ts schedulesStamp). A
      *  refetch replaces the row and the mark with it. */
     localEdit?: boolean;
+    /** CLIENT-ONLY, never sent: this copy is a CREATE's answer (createTask,
+     *  createListTask), which views append to the rows they read without
+     *  re-reading. Its stamps are the moment of the create, newer than the
+     *  read, so a freshness stamp does not count it as proof of how fresh
+     *  the rest is (taskCompletion.ts schedulesStamp). A plain property: a
+     *  spread copies it (it is still that copy), and a read replaces the
+     *  object and the mark with it. */
+    fromCreate?: boolean;
     /** CLIENT-ONLY, never sent: which read of the server produced this row
      *  (`<page session>:<n>`, set by listTasks/listListTasks). Tells the write
      *  tracker whether the row can include this device's own writes
@@ -308,8 +316,9 @@ export async function createTask(channelId: number, description: string, parentI
         ...(timing ? await timingForCreate(timing, { channelId, ownerId: me }) : {}),
         ...(opKey ? { op_key: opKey } : {}),
     });
-    // Show the plaintext locally — the timing too, never the sealed copy.
-    return { ...created, description, ...(timing?.schedule !== undefined ? { schedule: timing.schedule } : {}) };
+    // Show the plaintext locally — the timing too, never the sealed copy —
+    // marked as a create's answer (Task.fromCreate).
+    return { ...created, description, ...(timing?.schedule !== undefined ? { schedule: timing.schedule } : {}), fromCreate: true };
 }
 
 /** Update a channel checklist task; a changed description is re-encrypted under
@@ -546,7 +555,7 @@ export async function createListTask(listId: number, description: string, parent
         ...(timing ? await timingForCreate(timing, null) : {}),
         ...(opKey ? { op_key: opKey } : {}),
     });
-    return { ...created, description, ...(timing?.schedule !== undefined ? { schedule: timing.schedule } : {}) };
+    return { ...created, description, ...(timing?.schedule !== undefined ? { schedule: timing.schedule } : {}), fromCreate: true };
 }
 
 /** Update a personal-list task; descriptions are re-encrypted to self.

@@ -78,6 +78,30 @@ interface Stamp { raw: string; clock: StampClock }
  * a schedule, a tick or a parent counts there; a text, attachment, due-time
  * or snooze edit does not move it, so the stamp stays and the tick after it
  * is still checked. On `updated_at` every write counts.
+ *
+ * WHICH rows vouch for how fresh the view is: the ones a READ produced. A
+ * row from a create's answer (`fromCreate` — the views append it to what
+ * they read and do not re-read) carries the server's stamp from the moment
+ * of the create, which is NEWER than the read. Were it the maximum, the stamp
+ * would claim a view of every other row as of that moment, and a repeat
+ * another device gave one of them between the read and the create would be
+ * swept unchecked. So the stamp is the newest READ row's, and a created row
+ * can only lower it: the stamp must never exceed what this device knew of
+ * ANY row, and of a created row it knows exactly its own stamp, no later.
+ * That is `min(newest read, oldest created)` — in practice the newest read
+ * (a create comes after the read it is appended to), and for a subtree made
+ * entirely on this device, with nothing read to go by, its oldest create
+ * (not its newest: another device may have dated the first item while this
+ * one was still adding the rest).
+ *
+ * One exception, the device's own dated creates. The server's check counts
+ * every open, dated row newer than the stamp, and it cannot tell this
+ * device's create from another device's change: a stamp below an open,
+ * dated row made HERE would be refused, as "changed on another device", for
+ * the user's own item (an Undo that recreates a dated subtask, then a tick of
+ * its parent). So the stamp is raised to the newest such row — which gives
+ * back exactly the window it covers and nothing more; everything after it
+ * is still checked. Dropping the stamp instead would check nothing at all.
  */
 function stampOver(tasks: Task[], ids: Iterable<number>): Stamp | undefined {
     const byId = new Map(tasks.map(t => [t.id, t]));
@@ -88,14 +112,26 @@ function stampOver(tasks: Task[], ids: Iterable<number>): Stamp | undefined {
         rows.push(t);
     }
     const clock: StampClock = rows.length > 0 && rows.every(t => t.schedule_changed_at !== undefined) ? 'schedule' : 'content';
-    let best: { key: string; raw: string } | null = null;
+    type Key = { key: string; raw: string };
+    let newestRead: Key | null = null;
+    let oldestCreated: Key | null = null;
+    let newestDatedCreated: Key | null = null;
     for (const t of rows) {
         if (t.localEdit || ownWriteUnconfirmed(t, clock)) return undefined;
         const raw = clock === 'schedule' ? t.schedule_changed_at : t.updated_at;
         const key = stampKey(raw);
         if (key === null || raw === undefined) return undefined;
-        if (!best || key > best.key) best = { key, raw };
+        if (!t.fromCreate) {
+            if (!newestRead || key > newestRead.key) newestRead = { key, raw };
+            continue;
+        }
+        if (!oldestCreated || key < oldestCreated.key) oldestCreated = { key, raw };
+        if (!t.is_completed && t.schedule && (!newestDatedCreated || key > newestDatedCreated.key)) newestDatedCreated = { key, raw };
     }
+    let best = newestRead && oldestCreated
+        ? (oldestCreated.key < newestRead.key ? oldestCreated : newestRead)
+        : newestRead ?? oldestCreated;
+    if (best && newestDatedCreated && newestDatedCreated.key > best.key) best = newestDatedCreated;
     return best ? { raw: best.raw, clock } : undefined;
 }
 
