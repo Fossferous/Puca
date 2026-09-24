@@ -1300,14 +1300,16 @@ disconnected. Now the bind re-reads the device under the same lock on its row,
 and the socket is attested only after the bind has committed
 (`bind_attested_device`, [`src/ws.rs`](../src/ws.rs)). A revoke that got
 there first is seen and the attestation refused; one that comes after finds
-the session bound, revokes it and hangs up the socket. One narrow window
-remains, for a socket whose session is not bound to this device: a legacy
-token with no session id, or a session an earlier attestation already bound to
-a different device. The revoke reaches such a socket only by the device it
-attested as, so a revoke that commits and gets to its hang-up in the instant
-between the bind's commit and the socket being marked as attested misses it.
-Every token issued since 0.9.0 carries a session id, and an older one has
-either been renewed into one or expired.
+the session bound, revokes it and hangs up the socket. A socket whose session
+is not bound to this device (a legacy token with no session id, or a session
+an earlier attestation already bound to a different device) can be reached by
+a revoke only through the device it attested as, and a revoke landing in the
+instant between the bind's commit and the socket being marked as attested
+would miss it. So once the socket is marked, the device is read once more,
+before anything is delivered to it (`complete_attestation`). A revoke that
+committed before that read is seen, and the socket's attestation is taken back
+and the socket hung up. One that commits after it finds the socket already
+marked, and its own hang-up reaches it.
 
 A device-minted token is minted for an hour
 (`DEVICE_TOKEN_TTL_HOURS`), but it is an ordinary session: the first request

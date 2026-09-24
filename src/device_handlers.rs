@@ -426,11 +426,13 @@ pub async fn revoke_device(
     // device revoked. A WebSocket's DeviceAttest binds its session under the
     // same share lock (`ws::bind_attested_device`) and attests the socket only
     // after that commits, so a racing attestation is either swept and killed
-    // by sid below or refused. (A socket whose session it could not bind to
-    // this device, having no sid or one bound elsewhere, keeps a narrow
-    // window, described there.) The same sweep also runs on a repeat revoke
-    // of an already-revoked device (the mark matches nothing, the sweep still
-    // runs), so a retry cleans up anything bound since.
+    // by sid below or refused. A socket whose session it could not bind to
+    // this device (no sid, or bound elsewhere) is reached by the device kill
+    // below, or, if this lands before that socket is attested, by the
+    // re-check `ws::complete_attestation` makes after attesting it. The same
+    // sweep also runs on a repeat revoke of an already-revoked device (the
+    // mark matches nothing, the sweep still runs), so a retry cleans up
+    // anything bound since.
     let mut tx = state.pool.begin().await.map_err(db_error)?;
     sqlx::query(
         "UPDATE devices SET revoked_at = NOW() \

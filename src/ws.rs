@@ -1817,13 +1817,14 @@ pub fn verify_device_attestation(sign_pub: &str, nonce: &str, user_id: UserId, s
 ///
 /// `sid` is `None` for a socket on a legacy token that carries none. There is
 /// no row to bind, but the locked check still runs, so a revoke that marked
-/// the device first is still waited for and refused. Its one residual window:
-/// a revoke that commits after this transaction reaches such a socket only
-/// through its in-memory device id (`AppState::kill_device_sessions`), which
-/// the caller sets just after the commit. If the revoke commits and gets to
-/// its kill in that gap, the kill misses the socket. The same holds for a
-/// sid whose row is missing, or already bound to another device, because
-/// neither is bound to THIS device for the sweep to find.
+/// the device first is still waited for and refused. What this cannot cover
+/// alone: a revoke that commits after this transaction reaches such a socket
+/// only through its in-memory device id (`AppState::kill_device_sessions`),
+/// which the caller sets just after the commit, so a revoke that committed
+/// and got to its kill in that gap would miss it. The same holds for a sid
+/// whose row is missing, or already bound to another device, because neither
+/// is bound to THIS device for the sweep to find. `complete_attestation`
+/// closes that gap with a re-check after the in-memory attestation.
 pub(crate) async fn bind_attested_device(
     pool: &sqlx::PgPool,
     user_id: UserId,
@@ -1859,6 +1860,104 @@ pub(crate) async fn bind_attested_device(
     }
     tx.commit().await?;
     Ok(true)
+}
+
+/// The in-memory half of a DeviceAttest, after `bind_attested_device` has
+/// committed and answered true: attest the socket, check once more that the
+/// device is live, and only then deliver what an attested device gets (its
+/// pinned parked offers, `DeviceAttested`, presence to the user's other
+/// sockets).
+///
+/// WHY THE SECOND CHECK. The bind's lock covers a revoke that commits before
+/// the bind does, and a revoke that commits after it finds the session bound
+/// and hangs this socket up by its sid. It cannot cover a socket whose
+/// session is NOT bound to this device: one with no sid (a legacy token), or
+/// one whose session an earlier attestation bound to another device (first
+/// writer wins). The revoke reaches such a socket only by its in-memory
+/// device id (`kill_device_sessions`), which is set here, after the bind's
+/// commit. A revoke that committed and ran its kill in between missed it, and
+/// the socket was then attested as a device already revoked.
+///
+/// A plain read after `attest_device` is enough, because the two orders it
+/// can meet are both covered. A revoke that committed before this read is
+/// seen by it. One that commits after it runs its device kill after its
+/// commit, by which time this socket is attested, so that kill finds it. On
+/// a revoked (or vanished) device the attestation is taken back and the
+/// socket hung up, as the revoke would have done. The check runs before the
+/// parked-offer sweep, `DeviceAttested` and the presence broadcast, so a
+/// device revoked by then gets none of them. Once it has passed, a revoke can
+/// only commit after it, and that revoke's own kill ends the socket.
+///
+/// A database error on the re-check takes the attestation back too, and is
+/// reported like any other: the socket stays up, unattested.
+async fn complete_attestation(
+    state: &Arc<AppState>,
+    user_id: UserId,
+    conn_id: u64,
+    device_id: String,
+) -> Result<(), String> {
+    state.attest_device(user_id, conn_id, device_id.clone());
+    let still_live: Option<(bool,)> =
+        match sqlx::query_as("SELECT revoked_at IS NULL FROM devices WHERE id = $1 AND user_id = $2")
+            .bind(&device_id)
+            .bind(user_id as i32)
+            .fetch_optional(&state.pool)
+            .await
+        {
+            Ok(row) => row,
+            Err(e) => {
+                state.withdraw_attestation(user_id, conn_id, &device_id);
+                return Err(ws_db_error("device_attest recheck", e));
+            }
+        };
+    if still_live != Some((true,)) {
+        // The device kill finds this socket by the id just attested, so it
+        // runs before the attestation is taken back. It reaches the device's
+        // other sockets too, exactly as the revoke's own kill does.
+        let killed = state.kill_device_sessions(user_id, &device_id);
+        state.withdraw_attestation(user_id, conn_id, &device_id);
+        tracing::info!(
+            "device attest: device {} of user {} was revoked while conn {} attested; hung up {} socket(s)",
+            device_id, user_id, conn_id, killed
+        );
+        return Ok(());
+    }
+
+    // A parked offer PINNED to this device could not match until
+    // the id was proven; sweep again now that it is. Same
+    // delivery-time block/consent re-check as the connect path.
+    let ok = resolve_parked_senders_ok(state, user_id).await;
+    let parked = state.deliver_parked_offers(user_id, conn_id, move |from| ok.contains(&from));
+    for offer in parked.offers {
+        state.send_to_conn(user_id, conn_id, offer);
+    }
+    for (to_user, note) in parked.sender_notes {
+        state.send_to_user(to_user, note);
+    }
+    // Best-effort: a failed touch must not fail the attestation.
+    let _ = sqlx::query("UPDATE devices SET last_seen_at = NOW() WHERE id = $1")
+        .bind(&device_id)
+        .execute(&state.pool)
+        .await;
+    let _ = state.send_to_conn(
+        user_id,
+        conn_id,
+        ServerMessage::DeviceAttested {
+            device_id: device_id.clone(),
+        },
+    );
+    // Tell the user's OTHER devices this one is reachable now, so
+    // an open device list repaints at once rather than on its next
+    // poll. Except this conn: it just learned that itself.
+    let _ = state.send_to_user_except_conn(
+        user_id,
+        conn_id,
+        ServerMessage::DevicePresence {
+            device_id,
+            online: true,
+        },
+    );
+    Ok(())
 }
 
 fn users_share_room(state: &Arc<AppState>, a: UserId, b: UserId) -> bool {
@@ -2969,8 +3068,10 @@ async fn handle_message(
                 // this socket then stayed attested as the revoked device until
                 // it disconnected. Now a revoke that committed first is seen
                 // and refused here, and one that commits after finds the
-                // session bound and kills this socket by its sid. (A socket
-                // with no sid has one narrow window left; see the function.)
+                // session bound and kills this socket by its sid. A socket
+                // whose session cannot be bound to this device (no sid, or
+                // bound to another) is covered by the re-check that
+                // `complete_attestation` makes after attesting it in memory.
                 //
                 // A database error refuses the attestation rather than
                 // attesting unbound. The bind's error used to be ignored,
@@ -2986,42 +3087,7 @@ async fn handle_message(
                     tracing::debug!("device attest: device {} was revoked during attestation", device_id);
                     return Ok(());
                 }
-                state.attest_device(user_id, conn_id, device_id.clone());
-                // A parked offer PINNED to this device could not match until
-                // the id was proven; sweep again now that it is. Same
-                // delivery-time block/consent re-check as the connect path.
-                let ok = resolve_parked_senders_ok(state, user_id).await;
-                let parked =
-                    state.deliver_parked_offers(user_id, conn_id, move |from| ok.contains(&from));
-                for offer in parked.offers {
-                    state.send_to_conn(user_id, conn_id, offer);
-                }
-                for (to_user, note) in parked.sender_notes {
-                    state.send_to_user(to_user, note);
-                }
-                // Best-effort: a failed touch must not fail the attestation.
-                let _ = sqlx::query("UPDATE devices SET last_seen_at = NOW() WHERE id = $1")
-                    .bind(&device_id)
-                    .execute(&state.pool)
-                    .await;
-                let _ = state.send_to_conn(
-                    user_id,
-                    conn_id,
-                    ServerMessage::DeviceAttested {
-                        device_id: device_id.clone(),
-                    },
-                );
-                // Tell the user's OTHER devices this one is reachable now, so
-                // an open device list repaints at once rather than on its next
-                // poll. Except this conn: it just learned that itself.
-                let _ = state.send_to_user_except_conn(
-                    user_id,
-                    conn_id,
-                    ServerMessage::DevicePresence {
-                        device_id,
-                        online: true,
-                    },
-                );
+                complete_attestation(state, user_id, conn_id, device_id).await?;
             } else {
                 tracing::warn!(
                     "device attest: bad signature for device {} (user {})",
@@ -5494,6 +5560,118 @@ mod device_attest_bind_tests {
             "fixture: the bind must have waited on the revoke (sid {}, legacy {}, control {})",
             with_sid.parked, legacy.parked, control.parked,
         );
+    }
+
+    /// What one attestation left behind when a revoke was landed in the gap
+    /// between its bind's commit and its in-memory attestation.
+    struct InTheGap {
+        answer: Result<(), String>,
+        /// The revoke's own kill reached the socket (it cannot: that is the gap).
+        hung_up_by_revoke: bool,
+        attested: Option<String>,
+        told: bool,
+        hung_up: bool,
+        /// Another socket of the user was told the device came online.
+        presence_online: bool,
+    }
+
+    /// The handler's own sequence (`bind_attested_device`, then
+    /// `complete_attestation`) with the REAL `revoke_device` run, when
+    /// `revoke` is set, between the two: after the bind has committed, before
+    /// the socket is attested in memory. There is no await between those two
+    /// in the handler, so calling them in this order is the only way to put a
+    /// revoke there deterministically. A second, unattested socket of the same
+    /// user stands in for the owner's other devices, to see presence.
+    async fn in_the_gap(
+        pool: &sqlx::PgPool,
+        state: &Arc<AppState>,
+        uid: i32,
+        device: &str,
+        sid: &str,
+        revoke: bool,
+    ) -> InTheGap {
+        use axum::extract::{Extension, Path, State};
+        let (tx, mut rx) = mpsc::channel::<ServerMessage>(64);
+        let (conn_id, _, kill) = state.register_session(uid as UserId, "attester".into(), tx, false, None, sid.to_string());
+        let (otx, mut orx) = mpsc::channel::<ServerMessage>(64);
+        let (observer, _, _) = state.register_session(uid as UserId, "observer".into(), otx, false, None, String::new());
+        let hung = |kill: Arc<tokio::sync::Notify>| async move {
+            tokio::time::timeout(Duration::from_millis(50), kill.notified()).await.is_ok()
+        };
+
+        let bound = bind_attested_device(pool, uid as UserId, device, Some(sid).filter(|s| !s.is_empty())).await;
+        assert!(matches!(bound, Ok(true)), "fixture: the device is live at the bind: {bound:?}");
+        let mut hung_up_by_revoke = false;
+        if revoke {
+            let (tv,): (i32,) = sqlx::query_as("SELECT token_version FROM users WHERE id = $1").bind(uid).fetch_one(pool).await.unwrap();
+            let claims = crate::auth::Claims { sub: uid as UserId, username: "attester".into(), exp: 0, tv, sst: 0, sid: String::new(), ls: false };
+            let revoked = crate::device_handlers::revoke_device(State(state.clone()), Extension(claims), Path(device.to_string())).await;
+            assert!(revoked.is_ok(), "fixture: the revoke succeeds: {:?}", revoked.err());
+            hung_up_by_revoke = hung(kill.clone()).await;
+        }
+        let answer = super::complete_attestation(state, uid as UserId, conn_id, device.to_string()).await;
+
+        let attested = state.device_of_conn(uid as UserId, conn_id);
+        let hung_up = hung(kill.clone()).await;
+        let mut told = false;
+        while let Ok(msg) = rx.try_recv() {
+            told |= matches!(msg, ServerMessage::DeviceAttested { .. });
+        }
+        let mut presence_online = false;
+        while let Ok(msg) = orx.try_recv() {
+            presence_online |= matches!(msg, ServerMessage::DevicePresence { online: true, .. });
+        }
+        state.unregister_session(uid as UserId, conn_id);
+        state.unregister_session(uid as UserId, observer);
+        InTheGap { answer, hung_up_by_revoke, attested, told, hung_up, presence_online }
+    }
+
+    /// THE GAP THE BIND CANNOT CLOSE. A socket whose session is not bound to
+    /// the device it attests as (a legacy token with no sid, or a session an
+    /// earlier attestation bound to another device) is reachable by a revoke
+    /// only through its in-memory attestation. A revoke that commits after the
+    /// bind's commit but before `attest_device` sweeps no session of this
+    /// socket and finds nothing attested to kill; without the re-check in
+    /// `complete_attestation` the socket was then attested as the revoked
+    /// device, told so, and announced to the owner's other devices.
+    ///
+    /// The revoke is the real handler, and the test first proves it missed
+    /// the socket (`hung_up_by_revoke` false) so the gap is real. The control
+    /// runs the same sequence with no revoke and must attest, tell and
+    /// announce, so a check that refused everything fails it.
+    /// TEST_DATABASE_URL only.
+    #[tokio::test]
+    async fn a_revoke_landing_between_the_bind_and_the_attest_still_ends_the_attestation() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let (uid, _key, device, sid) = fixture(&pool).await;
+        let (_other_key, other) = enrol(&pool, uid).await;
+        sqlx::query("UPDATE token_sessions SET device_id = $1 WHERE sid = $2").bind(&other).bind(&sid).execute(&pool).await.unwrap();
+        let unrevoke = || sqlx::query("UPDATE devices SET revoked_at = NULL WHERE id = $1").bind(&device).execute(&pool);
+
+        let legacy_control = in_the_gap(&pool, &state, uid, &device, "", false).await;
+        let legacy = in_the_gap(&pool, &state, uid, &device, "", true).await;
+        unrevoke().await.unwrap();
+        let elsewhere_control = in_the_gap(&pool, &state, uid, &device, &sid, false).await;
+        let elsewhere = in_the_gap(&pool, &state, uid, &device, &sid, true).await;
+        let still_bound_to_other = bound_to(&pool, &sid).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(uid).execute(&pool).await;
+
+        for (label, run) in [("legacy, no sid", &legacy), ("session bound to another device", &elsewhere)] {
+            assert!(!run.hung_up_by_revoke, "fixture ({label}): the revoke's own kill must miss the socket, or there is no gap");
+            assert_eq!(run.answer, Ok(()), "{label}: a refusal is not an error");
+            assert_eq!(run.attested, None, "{label}: the socket was left attested as a device revoked in the gap");
+            assert!(!run.told, "{label}: the socket was told it attested as a device revoked in the gap");
+            assert!(!run.presence_online, "{label}: the owner's other devices were told a revoked device came online");
+            assert!(run.hung_up, "{label}: the socket must be hung up, as the revoke would have done had it seen it");
+        }
+        for (label, run) in [("legacy control", &legacy_control), ("bound-elsewhere control", &elsewhere_control)] {
+            assert_eq!(run.answer, Ok(()));
+            assert_eq!(run.attested.as_deref(), Some(device.as_str()), "{label}: with no revoke the socket attests");
+            assert!(run.told && run.presence_online, "{label}: told, and announced (told {}, presence {})", run.told, run.presence_online);
+            assert!(!run.hung_up, "{label}: and stays up");
+        }
+        assert_eq!(still_bound_to_other.as_deref(), Some(other.as_str()), "fixture: first writer wins kept the other device's binding");
     }
 
     /// A live device binds, and first-writer-wins still holds: a session
