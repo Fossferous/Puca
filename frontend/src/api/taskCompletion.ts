@@ -17,7 +17,7 @@
  * when its view is from (`expect_schedules_as_of`, see schedulesStamp), and
  * the server refuses it (409) if a dated row it depended on changed since.
  */
-import { type Task, type TaskTimingPatch, applyToggle, collectSubtreeIds, ownWriteUnconfirmed, patchTaskTiming } from './tasks';
+import { type StampClock, type Task, type TaskTimingPatch, applyToggle, collectSubtreeIds, ownWriteUnconfirmed, patchTaskTiming } from './tasks';
 import { currentOccurrenceKey, parseSchedule, planCompletion, serializeSchedule } from './taskSchedule';
 import { ApiError } from './client';
 import { pokeTaskReminders } from './taskReminders';
@@ -39,6 +39,10 @@ export interface TogglePlan {
      *  already holds an edit of one of these drops the stamp (notesOutbox.ts
      *  enqueue): the server cannot tell that edit from another device's. */
     scope?: number[];
+    /** With a stamp only: the clock it was read from, which decides WHICH
+     *  of those edits outdate it — on `schedule` only a schedule, a tick or
+     *  a new parent does, so a queued text edit leaves the stamp in place. */
+    stampClock?: StampClock;
 }
 
 /** A server stamp as a string that sorts in time order to the MICROSECOND:
@@ -52,28 +56,52 @@ function stampKey(s: string | undefined): string | null {
     return m ? `${m[1]}.${(m[2] ?? '').padEnd(6, '0')}` : null;
 }
 
+/** A stamp this device can send, and the server clock it was read from. */
+interface Stamp { raw: string; clock: StampClock }
+
 /**
- * How current this device's view of `ids` is: the newest `updated_at` the
- * server sent for any of them, returned VERBATIM (the server compares it to
- * its own clock; a device clock never enters into it). undefined — send no
- * stamp, and the server does not check — when this device cannot vouch for
- * one of them: a row not created on the server yet, a row from a server
- * without stamps, or a row this device changed since the server last sent it
- * — optimistically in a plan (`localEdit`) or by ANY write through
- * api/tasks.ts (ownWriteUnconfirmed: text, date, repeat, attachments, a new
- * parent) — whose own write moved or will move its stamp.
+ * How current this device's view of `ids` is: the newest server stamp for
+ * any of them, returned VERBATIM (the server compares it to its own clock; a
+ * device clock never enters into it).
+ *
+ * The clock is migration 071's `schedule_changed_at` when the server sent it
+ * on every one of these rows, which only a new row, a schedule, a tick or a
+ * new parent moves — exactly what the server compares. Otherwise (a server
+ * older than 071) it is `updated_at`, which that server compares instead.
+ *
+ * undefined — send no stamp, and the server does not check — when this
+ * device cannot vouch for one of them: a row not created on the server yet,
+ * a row from a server without stamps, or a row this device changed since the
+ * server last sent it in a way that moved that clock — optimistically in a
+ * plan (`localEdit`: a tick or an advance) or by a write through
+ * api/tasks.ts (ownWriteUnconfirmed). On the `schedule` clock only a write of
+ * a schedule, a tick or a parent counts there; a text, attachment, due-time
+ * or snooze edit does not move it, so the stamp stays and the tick after it
+ * is still checked. On `updated_at` every write counts.
  */
-export function schedulesStamp(tasks: Task[], ids: Iterable<number>): string | undefined {
+function stampOver(tasks: Task[], ids: Iterable<number>): Stamp | undefined {
     const byId = new Map(tasks.map(t => [t.id, t]));
-    let best: { key: string; raw: string } | null = null;
+    const rows: Task[] = [];
     for (const id of ids) {
         const t = byId.get(id);
-        if (!t || t.id < 0 || t.localEdit || ownWriteUnconfirmed(t)) return undefined;
-        const key = stampKey(t.updated_at);
-        if (key === null || t.updated_at === undefined) return undefined;
-        if (!best || key > best.key) best = { key, raw: t.updated_at };
+        if (!t || t.id < 0) return undefined;
+        rows.push(t);
     }
-    return best?.raw;
+    const clock: StampClock = rows.length > 0 && rows.every(t => t.schedule_changed_at !== undefined) ? 'schedule' : 'content';
+    let best: { key: string; raw: string } | null = null;
+    for (const t of rows) {
+        if (t.localEdit || ownWriteUnconfirmed(t, clock)) return undefined;
+        const raw = clock === 'schedule' ? t.schedule_changed_at : t.updated_at;
+        const key = stampKey(raw);
+        if (key === null || raw === undefined) return undefined;
+        if (!best || key > best.key) best = { key, raw };
+    }
+    return best ? { raw: best.raw, clock } : undefined;
+}
+
+/** The stamp over `ids` (stampOver), as it is sent. */
+export function schedulesStamp(tasks: Task[], ids: Iterable<number>): string | undefined {
+    return stampOver(tasks, ids)?.raw;
 }
 
 /** The item, everything under it and everything above it. */
@@ -88,25 +116,27 @@ function stampScope(tasks: Task[], id: number): number[] {
     return [...ids];
 }
 
-/** Did this device write a row in `scope` that the server has not sent back
- *  since? The server's own side effects reach past the written row — a
- *  completion sweeps down, an untick reopens every ancestor — so a write
- *  anywhere above or below the item can have moved a stamp under it. */
-function ownWriteInScope(tasks: Task[], scope: number[]): boolean {
+/** Did this device write a row in `scope`, in a way that moves `clock`, that
+ *  the server has not sent back since? The server's own side effects reach
+ *  past the written row — a completion sweeps down, an untick reopens every
+ *  ancestor — so a write anywhere above or below the item can have moved a
+ *  stamp under it. */
+function ownWriteInScope(tasks: Task[], scope: number[], clock: StampClock): boolean {
     const byId = new Map(tasks.map(t => [t.id, t]));
     return scope.some(id => {
         const t = byId.get(id);
-        return t !== undefined && ownWriteUnconfirmed(t);
+        return t !== undefined && ownWriteUnconfirmed(t, clock);
     });
 }
 
 /** A completion's patch fields for `task`: the stamp over what its sweep
- *  reaches, and the scope that outdates it. Empty when there is no stamp. */
-export function completionStamp(tasks: Task[], task: Task): { stamp?: string; scope?: number[] } {
-    const stamp = schedulesStamp(tasks, collectSubtreeIds(tasks, task.id));
-    if (stamp === undefined) return {};
+ *  reaches, the scope that outdates it and the clock that says which edits
+ *  of that scope do. Empty when there is no stamp. */
+export function completionStamp(tasks: Task[], task: Task): { stamp?: string; scope?: number[]; stampClock?: StampClock } {
+    const s = stampOver(tasks, collectSubtreeIds(tasks, task.id));
+    if (s === undefined) return {};
     const scope = stampScope(tasks, task.id);
-    return ownWriteInScope(tasks, scope) ? {} : { stamp, scope };
+    return ownWriteInScope(tasks, scope, s.clock) ? {} : { stamp: s.raw, scope, stampClock: s.clock };
 }
 
 /** `next` with every row the plan changed marked as this device's edit. */
@@ -168,13 +198,13 @@ export function planToggle(
     }
     if (plan.kind !== 'advance') {
         // Only a completion ends anything; an untick needs no stamp.
-        const { stamp, scope } = completed ? completionStamp(tasks, task) : {};
+        const { stamp, scope, stampClock } = completed ? completionStamp(tasks, task) : {};
         const patch: TaskTimingPatch = { is_completed: completed, ...(stamp ? { expect_schedules_as_of: stamp } : {}) };
         return {
             next: markLocal(tasks, applyToggle(tasks, task, completed)),
             advanced: false,
             patch,
-            ...(scope ? { scope } : {}),
+            ...(scope ? { scope, stampClock } : {}),
             send: async () => {
                 await patchTaskTiming(task, patch);
                 pokeTaskReminders();
@@ -198,7 +228,8 @@ export function planToggle(
     // copy: the due_at swap below cannot see a rule edited elsewhere that
     // left due_at where it was, so the item's own stamp rides along too.
     const ownScope = stampScope(tasks, task.id);
-    const stamp = ownWriteInScope(tasks, ownScope) ? undefined : schedulesStamp(tasks, [task.id]);
+    const own = stampOver(tasks, [task.id]);
+    const stamp = own && !ownWriteInScope(tasks, ownScope, own.clock) ? own.raw : undefined;
     const patch: TaskTimingPatch = {
         schedule: scheduleText,
         due_at: plan.dueAt,
@@ -213,7 +244,7 @@ export function planToggle(
         next,
         advanced: true,
         patch,
-        ...(stamp ? { scope: ownScope } : {}),
+        ...(stamp && own ? { scope: ownScope, stampClock: own.clock } : {}),
         send: async () => {
             await patchTaskTiming(task, patch);
             pokeTaskReminders();

@@ -88,8 +88,8 @@ import { currentUserIdFromToken } from '../../api/auth';
 import { ApiError, isDefiniteRefusal, isNetworkError } from '../../api/client';
 import { getActiveIdentity, openLocal, sealLocal, seedMatchesCurrentAccount, type Identity } from '../../api/e2ee';
 import {
-    type NewTaskTiming, type Task, type TaskList, type TaskTabPref, type TaskTabRef, type TaskTimingPatch,
-    createTask, createListTask, createTaskList, renameTaskList, openSelfTaskText,
+    type NewTaskTiming, type StampClock, type Task, type TaskList, type TaskTabPref, type TaskTabRef, type TaskTimingPatch,
+    timingPatchMovesClock, createTask, createListTask, createTaskList, renameTaskList, openSelfTaskText,
     updateTask, updateChannelTask, updateListTask, deleteTask, moveTask, reorderTask, patchTaskTiming,
     getTaskTabPrefs, putTaskTabPrefs, isFavoriteTab, toggleFavoritePrefs, buildPrefsForOrder, taskTabKey,
 } from '../../api/tasks';
@@ -144,9 +144,11 @@ type OpBody =
     // (api/taskCompletion.ts): replayed as is, so a tick queued before
     // another device made the item repeat is refused (409, the same toast)
     // instead of ending the series. `scope` names the rows whose edits by
-    // THIS device would outdate that stamp (see `enqueue`). Ops queued by an
-    // older client have neither and replay exactly as they always did.
-    | { k: 'timing'; note: NoteRef; taskId: number; createdBy: number; patch: TaskTimingPatch; scope?: number[] }
+    // THIS device would outdate that stamp, and `stampClock` which edits of
+    // them do (see `enqueue`; absent = `content`, what every op queued before
+    // it meant). Ops queued by an older client have none of these and replay
+    // exactly as they always did.
+    | { k: 'timing'; note: NoteRef; taskId: number; createdBy: number; patch: TaskTimingPatch; scope?: number[]; stampClock?: StampClock }
     | { k: 'moveTask'; note: NoteRef; taskId: number; direction: 'up' | 'down' }
     | { k: 'reorderTask'; note: NoteRef; taskId: number; afterId: number | null; reparent?: { parentId: number | null } }
     | { k: 'deleteTask'; note: NoteRef; taskId: number }
@@ -222,8 +224,8 @@ export const ops = {
         withMeta({ k: 'reorderTask', note, taskId: task.id, afterId, reparent }, `move ${q(task.description)}`),
     deleteTask: (note: NoteRef, taskId: number, description: string) =>
         withMeta({ k: 'deleteTask', note, taskId }, `delete ${q(description)}`),
-    timing: (note: NoteRef, task: Task, patch: TaskTimingPatch, what: string, scope?: number[]) =>
-        withMeta({ k: 'timing', note, taskId: task.id, createdBy: task.created_by, patch, ...(scope ? { scope } : {}) }, `${what} ${q(task.description)}`),
+    timing: (note: NoteRef, task: Task, patch: TaskTimingPatch, what: string, scope?: number[], stampClock?: StampClock) =>
+        withMeta({ k: 'timing', note, taskId: task.id, createdBy: task.created_by, patch, ...(scope ? { scope } : {}), ...(scope && stampClock ? { stampClock } : {}) }, `${what} ${q(task.description)}`),
     setListTiming: (listId: number, title: string, patch: { dueAt?: string | null; schedule?: string | null }, what: string) =>
         withMeta({ k: 'listTiming', listId, patch }, `${what} ${q(title)}`),
     setBody: (listId: number, body: string, expectRev?: number) =>
@@ -1053,9 +1055,32 @@ export function queuedBlobIds(s: OutboxState): Set<string> {
     return new Set(s.queue.flatMap(o => (o.k === 'addMedia' ? o.blobIds : [])));
 }
 
-/** Does this queued op change one of `ids` on the server — its text, tick,
- *  date, place in the tree, or by hanging a new item under it? */
-function touchesAny(o: OpBody, ids: Set<number>): boolean {
+/** Does this queued op move `clock` on one of `ids` on the server?
+ *
+ *  `content` (updated_at, a server older than migration 071): any change —
+ *  its text, tick, date, place in the tree, or a new item hung under it.
+ *
+ *  `schedule` (071's schedule_changed_at): only what moves that clock — a
+ *  schedule written, a tick changed (or a subtree reopened under it), a new
+ *  parent, a new item. Its text, a due time, a snooze, a slot among its
+ *  siblings and a delete (the row goes with its whole subtree, moving no
+ *  surviving row's clock) leave the stamp standing, so a tick queued behind
+ *  "edit its text offline" is still checked when it replays. */
+function touchesAny(o: OpBody, ids: Set<number>, clock: StampClock = 'content'): boolean {
+    if (clock === 'schedule') {
+        switch (o.k) {
+            case 'updateTask':
+                return o.updates.is_completed !== undefined && ids.has(o.taskId);
+            case 'timing':
+                return timingPatchMovesClock(o.patch) && ids.has(o.taskId);
+            case 'reorderTask':
+                return o.reparent !== undefined && (ids.has(o.taskId) || (o.reparent.parentId != null && ids.has(o.reparent.parentId)));
+            case 'createTask':
+                return ids.has(o.tempId) || (o.parentId !== undefined && ids.has(o.parentId));
+            default:
+                return false;
+        }
+    }
     switch (o.k) {
         case 'editTask': case 'updateTask': case 'timing': case 'deleteTask': case 'moveTask':
             return ids.has(o.taskId);
@@ -1082,11 +1107,16 @@ export function enqueue(s: OutboxState, op: NoteOp): OutboxState {
     // stamps the server compares, and it cannot tell them from another
     // device's: a queued untick-then-tick of a dated item, or a date set and
     // then ticked, would be refused and lost. So the stamp goes when the
-    // queue already holds an edit of a row it covers; the tick replays
-    // unchecked, as every queued tick did before the stamp existed.
+    // queue already holds an edit of a row it covers that moves the clock
+    // the stamp was read from (`stampClock`, touchesAny); the tick replays
+    // unchecked, as every queued tick did before the stamp existed. On a
+    // 071+ server that is only a schedule, tick or parent change, so "edit
+    // its text offline, then tick it" keeps its stamp and is still refused
+    // if another device made the item repeat meanwhile.
     if (op.k === 'timing' && op.patch.expect_schedules_as_of !== undefined && op.scope) {
         const scope = new Set(op.scope);
-        if (s.queue.some(o => touchesAny(o, scope))) {
+        const clock = op.stampClock ?? 'content';
+        if (s.queue.some(o => touchesAny(o, scope, clock))) {
             const patch = { ...op.patch };
             delete patch.expect_schedules_as_of;
             op = { ...op, patch };

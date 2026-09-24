@@ -197,6 +197,27 @@ describe('the freshness stamp (finding 8): a completion says how current its vie
         expect(again.patch).toEqual({ is_completed: true });
     });
 
+    it('reads migration 071’s schedule_changed_at when every covered row carries it, and updated_at otherwise', () => {
+        // The schedule clock is older than the edit clock on each row: a
+        // text edit moved updated_at and nothing else.
+        const parent = mk(1, { updated_at: B, schedule_changed_at: A });
+        const kid = mk(2, { parent_id: 1, updated_at: B, schedule_changed_at: C });
+        const p = planToggle([parent, kid], parent, true, { canEdit: true, now: NOW });
+        expect(p.patch?.expect_schedules_as_of, 'the newest schedule clock, verbatim').toBe(A);
+        expect(p.stampClock).toBe('schedule');
+        // One row from a server that does not send it: the whole stamp falls
+        // back to updated_at, which is the clock that server compares.
+        const older = planToggle([parent, mk(2, { parent_id: 1, updated_at: B })], parent, true, { canEdit: true, now: NOW });
+        expect(older.patch?.expect_schedules_as_of).toBe(B);
+        expect(older.stampClock).toBe('content');
+        // An advance reads its own row the same way.
+        const rep = mk(1, { schedule: serializeSchedule(daily), due_at: '2026-10-05T09:00:00.000Z', updated_at: B, schedule_changed_at: C });
+        const adv = planToggle([rep], rep, true, { canEdit: true, now: NOW });
+        expect(adv.advanced).toBe(true);
+        expect(adv.patch?.expect_schedules_as_of).toBe(C);
+        expect(adv.stampClock).toBe('schedule');
+    });
+
     it('names the rows whose edits outdate the stamp: the item, everything under it and everything above it', () => {
         const top = mk(1, { updated_at: A });
         const mid = mk(2, { parent_id: 1, updated_at: A });

@@ -158,6 +158,18 @@ for (const [name, open] of [['the Tasks tab', openTasksView], ['a personal listâ
             expect(lastTick().expect_schedules_as_of).toBeUndefined();
         });
 
+        it('on a 071+ server, text or a date edited here, then a tick, KEEPS the stamp â€” neither moved the clock it is read from', async () => {
+            const S0 = '2030-10-01T08:30:00.75Z';
+            item = { ...item, schedule_changed_at: S0 };
+            await open();
+            await act(async () => { await rows().onEdit(shown(), 'Bins out tonight'); });
+            expect(shown().description, 'the edit landed').toBe('Bins out tonight');
+            await act(async () => { await rows().onSetDue(shown(), '2030-10-09T09:00:00.000Z'); });
+            item = { ...item, description: 'Bins out tonight', due_at: '2030-10-09T09:00:00.000Z', updated_at: T1 };
+            await act(async () => { await rows().onToggle(shown(), true); });
+            expect(lastTick().expect_schedules_as_of, 'still checked: another device making it repeat meanwhile is refused').toBe(S0);
+        });
+
         it('POSITIVE CONTROL: with no edit here, the tick carries the stamp it read', async () => {
             await open();
             await act(async () => { await rows().onToggle(shown(), true); });

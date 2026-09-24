@@ -132,6 +132,67 @@ describe('a row this device wrote vouches for nothing until the server sends it 
         expect(stampOf(await read(), x)).toBe(T0);
     });
 
+    it('on a 071+ server the stamp is schedule_changed_at, and only a schedule, tick or new-parent write of its own outdates it', async () => {
+        // The schedule clock sits BEFORE updated_at on each row, as it does
+        // for any row whose text was edited after its date.
+        const S0 = '2030-10-01T08:00:00.25Z';
+        const w071 = (id: number, over: Partial<Task> = {}) => wire(id, { schedule_changed_at: S0, ...over });
+        const [fresh] = ids(1);
+        server = [w071(fresh)];
+        expect(stampOf(await read(), fresh), 'the schedule clock, not updated_at').toBe(S0);
+
+        // A text, attachment, due-time or snooze edit made HERE does not move
+        // the server's clock, so the tick after it keeps its stamp — and is
+        // still refused if another device made the item repeat meanwhile.
+        const keep: Array<(id: number) => Promise<unknown>> = [
+            id => updateTask(id, { description: 'x' }),
+            id => updateListTaskAttachments(id, []),
+            id => patchTaskTiming({ id, channel_id: null, created_by: 2 }, { due_at: '2030-10-09T09:00:00.000Z' }),
+            id => patchTaskTiming({ id, channel_id: null, created_by: 2 }, { snooze: null }),
+        ];
+        for (const write of keep) {
+            const [x] = ids(1);
+            server = [w071(x)];
+            const rows = await read();
+            await write(x);
+            expect(stampOf(rows, x), String(write)).toBe(S0);
+        }
+        // ...while a write that moves it still drops the stamp, as before.
+        const drop: Array<(id: number) => Promise<unknown>> = [
+            id => patchTaskTiming({ id, channel_id: null, created_by: 2 }, { schedule: null }),
+            id => patchTaskTiming({ id, channel_id: null, created_by: 2 }, { is_completed: false }),
+            id => patchTaskTiming({ id, channel_id: null, created_by: 2 }, { reopen_subtree: true }),
+            id => updateTask(id, { is_completed: false }),
+            id => reorderTask(id, null, { parentId: null }),
+        ];
+        for (const write of drop) {
+            const [x] = ids(1);
+            server = [w071(x)];
+            const rows = await read();
+            await write(x);
+            expect(stampOf(rows, x), String(write)).toBeUndefined();
+        }
+        // In flight counts for the schedule clock as it does for the other.
+        const [y] = ids(1);
+        server = [w071(y)];
+        const during = await read();
+        let finish!: () => void;
+        patch.mockImplementationOnce(() => new Promise<void>(r => { finish = r; }));
+        const writing = patchTaskTiming({ id: y, channel_id: null, created_by: 2 }, { schedule: null });
+        expect(stampOf(during, y)).toBeUndefined();
+        finish();
+        await writing;
+    });
+
+    it('a row from an older server among them (no schedule_changed_at) puts the whole stamp back on updated_at, and every write counts again', async () => {
+        const [x, kid] = ids(2);
+        server = [wire(x, { schedule_changed_at: '2030-10-01T08:00:00Z' }), wire(kid, { parent_id: x })];
+        const rows = await read();
+        expect(stampOf(rows, x)).toBe(T0);
+        await updateTask(x, { description: 'x' });
+        expect(stampOf(rows, x), 'a text edit moves updated_at').toBeUndefined();
+    });
+
     it('POSITIVE CONTROLS: an unrelated row’s write, a position-only move, and a row restored from an earlier session all keep the stamp', async () => {
         const [x, other] = ids(2);
         server = [wire(x), wire(other)];
