@@ -1265,7 +1265,8 @@ fn run(
     let mut pump_stats = PumpStats::default();
     let started_at = Instant::now();
     // The last picture captured from a single screen, kept so a still desktop
-    // can still feed a freshly rebuilt encoder.
+    // can still feed a freshly rebuilt encoder, and so a switch into All
+    // Displays can bring it along as that screen's tile.
     let mut last_frame: Option<puca_capture::Frame> = None;
     // When str0m's ICE went Disconnected and has not come back. Until
     // 2026-08-13 that event was LOGGED AND IGNORED: str0m never clears its
@@ -1405,9 +1406,17 @@ fn run(
                         generation, gen, &cancelled, deadline, target_monitor, &reply_tx,
                         capture.take().expect("the stream always holds a capture"),
                         |m, cur| match (m, cur) {
-                            // To the composite: hand it the screen we hold.
+                            // To the composite: hand it the screen we hold,
+                            // AND the last picture that screen delivered. Its
+                            // duplication has already handed that picture
+                            // over, so on a still screen it has nothing new
+                            // for the composite, whose tile would be black
+                            // until the screen repainted. Read here, before
+                            // adopt_new_capture drops the held frame below;
+                            // the composite keeps its own copy, and a refused
+                            // switch keeps streaming with this one.
                             (crate::composite::ALL_DISPLAYS, AnyCapture::Single(sc)) => {
-                                VirtualCapture::adopt(from_monitor, sc)
+                                VirtualCapture::adopt(from_monitor, sc, last_frame.as_ref())
                                     .map(AnyCapture::Virtual)
                                     .map_err(|(sc, e)| (AnyCapture::Single(sc), e.to_string()))
                             }
@@ -1702,7 +1711,12 @@ fn run(
                     // outstanding, so a perfectly still desktop still gets its
                     // IDR — the exact case a resumed Android controller needs.
                     eprintln!("[stream] keyframe requested by controller");
-                    on_keyframe_request(&mut want_keyframe, switch_started.is_some(), last_frame.is_some(), &mut stranded_repaints);
+                    on_keyframe_request(
+                        &mut want_keyframe,
+                        switch_started.is_some(),
+                        holds_whole_picture(capture.as_ref(), last_frame.is_some()),
+                        &mut stranded_repaints,
+                    );
                 }
             }
         }
@@ -1824,7 +1838,12 @@ fn run(
                     }
                     str0m::Event::KeyframeRequest(_) => {
                         eprintln!("[stream] keyframe requested by peer");
-                        on_keyframe_request(&mut want_keyframe, switch_started.is_some(), last_frame.is_some(), &mut stranded_repaints);
+                        on_keyframe_request(
+                            &mut want_keyframe,
+                            switch_started.is_some(),
+                            holds_whole_picture(capture.as_ref(), last_frame.is_some()),
+                            &mut stranded_repaints,
+                        );
                     }
                     str0m::Event::ChannelOpen(cid, name) => {
                         eprintln!("[stream] channel opened: {} (id: {:?})", name, cid);
@@ -2225,18 +2244,31 @@ fn run(
             if now > next_frame + frame_interval {
                 next_frame = now;
             }
-            match pump_frame(capture.as_mut().expect("checked is_some above"), &mut encoder, &mut sender, current_bitrate, current_fps, &mut want_keyframe, now, &mut pump_stats, &mut last_frame, frames_sent == 0, view_size, &mut fit) {
+            match pump_frame(capture.as_mut().expect("checked is_some above"), &mut encoder, &mut sender, current_bitrate, current_fps, &mut want_keyframe, now, &mut pump_stats, &mut last_frame, frames_sent == 0, switch_awaits_whole_picture(switch_started, now), view_size, &mut fit) {
                 Ok(sent) => {
                     frames_sent += u64::from(sent);
                     flushed_frame = sent;
                     if sent {
-                        if let Some(t0) = switch_started.take() {
+                        // Only a WHOLE picture ends a switch (on_frame_sent).
+                        // An All Displays frame can go out with a screen still
+                        // black, because the screens that did present are
+                        // worth showing; that switch stays pending, and its
+                        // net runs from here as well as from the still tick
+                        // below, since another screen that never stops
+                        // changing (a video) never lets the pump fall still.
+                        let whole = holds_whole_picture(capture.as_ref(), last_frame.is_some());
+                        if let Some(t0) = on_frame_sent(whole, &mut switch_started, &mut stranded_repainted_at) {
                             eprintln!(
                                 "[switch] first frame sent {} ms after commit",
                                 t0.elapsed().as_millis()
                             );
                         }
-                        stranded_repainted_at = None;
+                        if let Some(t0) = switch_started {
+                            stranded_net_tick(
+                                capture.as_ref(), current_monitor, last_frame.is_some(), t0, now,
+                                &mut stranded_repaints, &mut stranded_repainted_at, &mut want_keyframe,
+                            );
+                        }
                     }
                     skipped = 0;
                     if blocked_since.take().is_some() {
@@ -2292,26 +2324,17 @@ fn run(
                     // switch that landed on such a screen: three tries,
                     // three quarters of a second apart, each in the log, and
                     // a fresh round for a keyframe request that arrives
-                    // after them (on_keyframe_request).
+                    // after them (on_keyframe_request). A switch INTO All
+                    // Displays is covered too: its screens are fetched tile
+                    // by tile, and the net provokes each one still missing
+                    // (AnyCapture::awaited_screens). It used to be skipped
+                    // for the composite, whose picture it had no way to ask
+                    // about.
                     if let Some(t0) = switch_started {
-                        if stranded_net_due(t0, stranded_repainted_at, stranded_repaints, last_frame.is_some(), now) {
-                            if matches!(capture, Some(AnyCapture::Single(_))) {
-                                stranded_repaints += 1;
-                                stranded_repainted_at = Some(now);
-                                want_keyframe = true;
-                                #[cfg(windows)]
-                                crate::display_wake::nudge();
-                                #[cfg(windows)]
-                                let accepted = crate::repaint::provoke_present(current_monitor);
-                                #[cfg(not(windows))]
-                                let accepted = false;
-                                eprintln!(
-                                    "[switch] no picture {} ms after commit: woke the panel and provoked a present ({stranded_repaints}/3{})",
-                                    t0.elapsed().as_millis(),
-                                    if accepted { "" } else { ", the nudge window was refused" }
-                                );
-                            }
-                        }
+                        stranded_net_tick(
+                            capture.as_ref(), current_monitor, last_frame.is_some(), t0, now,
+                            &mut stranded_repaints, &mut stranded_repainted_at, &mut want_keyframe,
+                        );
                     }
                     // NO FIRST FRAME EVER is not a still screen — a still
                     // screen was captured once and is re-sent on demand; this
@@ -2694,7 +2717,9 @@ fn should_resend_still(want_keyframe: bool, have_last_frame: bool) -> bool {
 /// while nothing is held): the viewer kept looking at the old screen while
 /// every click landed on the new one. Dropped, a still destination sends
 /// nothing until it presents, and the net armed here provokes that present
-/// at 750 ms (repaint.rs).
+/// at 750 ms (repaint.rs). A switch INTO All Displays is the one place the
+/// picture is still of use, as the tile of the screen being left, and the
+/// composite has taken its own copy (VirtualCapture::adopt) before this runs.
 ///
 /// ONTO THE SAME SCREEN (a rebuild after a display-mode change; a switch to
 /// the screen already shown never gets this far), the held frame IS the right
@@ -2769,32 +2794,134 @@ fn is_same_screen(from: usize, from_output: Option<isize>, to: usize, to_output:
 /// answered at all until the screen repainted by itself. It starts a fresh
 /// round then, paced as before (750 ms after the last try), so each round is
 /// bounded by a request actually arriving. A round still running is not
-/// extended.
+/// extended. `have_picture` is `holds_whole_picture`: for All Displays, a
+/// picture of every screen.
 fn on_keyframe_request(
     want_keyframe: &mut bool,
     switch_pending: bool,
-    have_last_frame: bool,
+    have_picture: bool,
     stranded_repaints: &mut u8,
 ) {
     *want_keyframe = true;
-    if switch_pending && !have_last_frame && *stranded_repaints >= 3 {
+    if switch_pending && !have_picture && *stranded_repaints >= 3 {
         *stranded_repaints = 0;
     }
 }
 
-/// Is the stranded-switch net (the event loop's `NoChange` arm) due to wake
-/// the panel and provoke a present on this tick? `t0` is when the switch was
-/// committed. It fires only while the stream holds NO picture to re-send —
-/// holding one means the pump already answered the keyframe with it.
+/// Is the stranded-switch net (see `stranded_net_tick`) due to wake the
+/// panel and provoke a present on this tick? `t0` is when the switch was
+/// committed. It fires only while the stream holds no WHOLE picture to
+/// re-send (`holds_whole_picture`): holding one means the pump already
+/// answered the keyframe with it.
 fn stranded_net_due(
     t0: Instant,
     stranded_repainted_at: Option<Instant>,
     stranded_repaints: u8,
-    have_last_frame: bool,
+    have_picture: bool,
     now: Instant,
 ) -> bool {
     let due = stranded_repainted_at.unwrap_or(t0) + Duration::from_millis(750);
-    !have_last_frame && stranded_repaints < 3 && now >= due
+    !have_picture && stranded_repaints < 3 && now >= due
+}
+
+/// Does the stream hold a WHOLE picture of what it now shows? The capture
+/// answers (`AnyCapture::holds_whole_picture`: the held still of a single
+/// screen, a picture on every tile of All Displays); with no capture in hand
+/// (a failed rebuild left none) only a held still counts.
+fn holds_whole_picture<C: crate::composite::ScreenSource>(
+    capture: Option<&AnyCapture<C>>,
+    have_last_frame: bool,
+) -> bool {
+    capture.map_or(have_last_frame, |c| c.holds_whole_picture(have_last_frame))
+}
+
+/// A frame went out. Is it the switch's first picture? Only when it is a
+/// WHOLE picture of what the stream now shows (`holds_whole_picture`): then
+/// the switch is over, the net stands down, and the switch's start comes back
+/// for the `[switch] first frame` log.
+///
+/// An All Displays frame with a tile still black is not that picture. Taking
+/// it as one is how switching into All Displays on a still screen stayed black
+/// where the screen just left should be: the send ended the switch, and the
+/// net, which runs only while a switch is pending, never provoked that screen
+/// to present. Such a frame still goes out (the screens that did present are
+/// worth showing), but the switch stays pending, so the net keeps fetching
+/// the rest and a keyframe request can still re-arm it.
+fn on_frame_sent(
+    whole_picture: bool,
+    switch_started: &mut Option<Instant>,
+    stranded_repainted_at: &mut Option<Instant>,
+) -> Option<Instant> {
+    if !whole_picture {
+        return None;
+    }
+    *stranded_repainted_at = None;
+    switch_started.take()
+}
+
+/// How long a switch INTO All Displays holds out for a picture of every
+/// screen before the pump re-sends the canvas it has (`canvas_is_a_picture`):
+/// the stranded-switch net's three tries, 750 ms apart, and one more interval
+/// for the last one's present to land. Past it, a screen that has still not
+/// presented is shown black beside the others, rather than keeping All
+/// Displays off the viewer until some screen happens to repaint.
+const WHOLE_PICTURE_WAIT: Duration = Duration::from_millis(4 * 750);
+
+/// Is a switch still holding out for its whole first picture? Asked only of
+/// the composite, whose canvas can be partly painted; a single screen's
+/// picture is whole or absent.
+fn switch_awaits_whole_picture(switch_started: Option<Instant>, now: Instant) -> bool {
+    switch_started.is_some_and(|t0| now.duration_since(t0) < WHOLE_PICTURE_WAIT)
+}
+
+/// The stranded-switch net, looked at from the event loop (the still tick,
+/// and after a frame that went out without being the switch's whole
+/// picture). When `stranded_net_due`, it wakes the panels and provokes a
+/// present (repaint.rs) on every screen the switch is still waiting for
+/// (`AnyCapture::awaited_screens`): the one screen of a single-screen switch,
+/// or each All Displays tile still owing its first picture. Each try is
+/// counted, paced and logged.
+#[allow(clippy::too_many_arguments)]
+fn stranded_net_tick(
+    capture: Option<&AnyCapture>,
+    current_monitor: usize,
+    have_last_frame: bool,
+    t0: Instant,
+    now: Instant,
+    stranded_repaints: &mut u8,
+    stranded_repainted_at: &mut Option<Instant>,
+    want_keyframe: &mut bool,
+) {
+    let Some(capture) = capture else { return };
+    let have_picture = capture.holds_whole_picture(have_last_frame);
+    if !stranded_net_due(t0, *stranded_repainted_at, *stranded_repaints, have_picture, now) {
+        return;
+    }
+    let screens = capture.awaited_screens(current_monitor, have_last_frame);
+    if screens.is_empty() {
+        return;
+    }
+    *stranded_repaints += 1;
+    *stranded_repainted_at = Some(now);
+    *want_keyframe = true;
+    #[cfg(windows)]
+    crate::display_wake::nudge();
+    // One provoked present per screen still missing. Each holds this thread
+    // for repaint.rs's DWELL, and only on a try: at most three a round.
+    let refused = screens.iter().filter(|&&m| !crate::repaint::provoke_present(m)).count();
+    let tries = *stranded_repaints;
+    match capture {
+        AnyCapture::Single(_) => eprintln!(
+            "[switch] no picture {} ms after commit: woke the panel and provoked a present ({tries}/3{})",
+            t0.elapsed().as_millis(),
+            if refused == 0 { "" } else { ", the nudge window was refused" }
+        ),
+        AnyCapture::Virtual(_) => eprintln!(
+            "[switch] All Displays has no picture of screen(s) {screens:?} {} ms after commit: woke the panels and provoked a present on each ({tries}/3{})",
+            t0.elapsed().as_millis(),
+            if refused == 0 { String::new() } else { format!(", {refused} nudge window(s) refused") }
+        ),
+    }
 }
 
 /// How long the picture may sit frozen on a secure desktop before we say so.
@@ -3076,6 +3203,9 @@ fn pump_frame(
     stats: &mut PumpStats,
     last_frame: &mut Option<puca_capture::Frame>,
     session_cold: bool,
+    // A switch is still holding out for its whole first picture
+    // (switch_awaits_whole_picture). Only the composite's rule reads it.
+    switch_waiting: bool,
     // The viewer's stage (device px) or None, and the fit's state across
     // frames (composite::FitState).
     view: Option<(u32, u32)>,
@@ -3092,17 +3222,19 @@ fn pump_frame(
     let owned;
     let (fw, fh, fstride, fbytes): (u32, u32, usize, &[u8]) = match capture {
         AnyCapture::Virtual(v) => {
-            // What counts as "holding a picture" depends on session
-            // temperature. WARM (frames have been sent): the retained canvas
-            // is always a real picture — the constant-true that fixed
-            // "All Displays never appears after a switch", including the
-            // single-monitor adopt case where the adopted tile's duplication
-            // delivers nothing until the screen changes. COLD (no frame has
-            // ever been sent): the canvas may still be its birth zero-fill,
-            // and "re-sending" that encoded a BLACK keyframe which counted
-            // as delivery and disabled the sleeping-display wake escalation
-            // exactly when it was needed. Cold demands real tile content.
-            let holding = if session_cold { v.has_content() } else { true };
+            // What counts as "holding a picture": `canvas_is_a_picture`,
+            // which asks which tiles have one. Never a canvas no tile has
+            // painted: COLD, re-sending that birth zero-fill encoded a BLACK
+            // keyframe that counted as delivery and disabled the
+            // sleeping-display wake escalation exactly when it was needed;
+            // WARM, it used to be sent anyway (a constant `true`), and a
+            // switch into All Displays on a still screen showed black where
+            // the screen just left should be. That screen now brings its
+            // held picture into the composite (VirtualCapture::adopt), and
+            // while a switch waits for the whole picture a partly painted
+            // canvas is not re-sent either; the stranded-switch net fetches
+            // the screens still missing.
+            let holding = v.holds_picture(session_cold, switch_waiting);
             match v.refresh(5) {
                 Ok(()) => {}
                 // STILL SCREEN — see the long note on the Single arm below.
@@ -4164,6 +4296,157 @@ mod tests {
         let mut settled = 3u8;
         on_keyframe_request(&mut want_keyframe, false, false, &mut settled);
         assert_eq!(settled, 3);
+    }
+
+    /// A SWITCH INTO ALL DISPLAYS ON A STILL SCREEN IS ANSWERED WITH THE
+    /// PICTURE THAT SCREEN BROUGHT.
+    ///
+    /// The adopted duplication has already handed its picture to the
+    /// single-screen stream and has nothing new for the composite. Its tile
+    /// used to start black, the warm pump re-sent that canvas as the switch's
+    /// keyframe (its holding rule was a constant `true`), and the send ended
+    /// the switch. Walked with the loop's own functions over a scripted
+    /// one-screen composite, in the loop's order: the build reads the held
+    /// frame, then adopt_new_capture drops it.
+    #[test]
+    fn a_switch_into_all_displays_on_a_still_screen_is_answered_with_its_held_picture() {
+        use crate::composite::testing::{composite, output, picture, Scripted};
+        use crate::composite::ALL_DISPLAYS;
+        let t = Instant::now();
+        let mut current_monitor = 0usize;
+        let mut current_output = Some(0x10001isize);
+        let mut last_frame = Some(picture(4, 2, 0x80));
+        let mut want_keyframe = false;
+        let mut switch_started = None;
+        let mut stranded_repaints = 0u8;
+        let mut stranded_repainted_at = None;
+
+        let mut capture = AnyCapture::Virtual(composite(
+            vec![(output(0, 0, 0, 4, 2), Scripted::still())],
+            last_frame.as_ref().map(|f| (current_monitor, f)),
+        ));
+        adopt_new_capture(
+            &mut current_monitor, &mut current_output, ALL_DISPLAYS, None,
+            &mut last_frame, &mut want_keyframe, &mut switch_started,
+            &mut stranded_repaints, &mut stranded_repainted_at, t,
+        );
+        assert!(last_frame.is_none(), "the stream's own still goes, as on any switch");
+        let t0 = switch_started.expect("a switch into All Displays arms the net");
+
+        // The pump's still tick: nothing presents, so it is the holding rule.
+        let AnyCapture::Virtual(v) = &mut capture else { unreachable!() };
+        assert!(matches!(v.refresh(5), Err(CaptureError::Timeout)), "precondition: a still screen");
+        let holding = v.holds_picture(false, switch_awaits_whole_picture(switch_started, t));
+        assert!(
+            should_resend_still(want_keyframe, holding),
+            "the switch's keyframe must be answered with the picture the screen brought",
+        );
+        // That frame goes out, and it is the whole picture: the switch ends.
+        let whole = holds_whole_picture(Some(&capture), last_frame.is_some());
+        assert!(whole);
+        assert_eq!(on_frame_sent(whole, &mut switch_started, &mut stranded_repainted_at), Some(t0));
+        assert_eq!(switch_started, None);
+    }
+
+    /// A FRAME OF ALL DISPLAYS WITH A SCREEN MISSING DOES NOT END THE SWITCH.
+    ///
+    /// When there was no held picture to bring (none kept, or one from before
+    /// a display-mode change), the adopted screen's tile starts empty. The
+    /// other screens' first frames still go out, but that send used to end
+    /// the switch, and the stranded-switch net, which runs only while one is
+    /// pending and only ever asked a single screen, never provoked the one
+    /// missing: black until it repainted by itself. Walked with the loop's
+    /// own functions over a scripted two-screen composite: screen 1 presents
+    /// at once, the adopted screen 0 only when provoked.
+    #[test]
+    fn a_composite_frame_with_a_screen_missing_does_not_end_the_switch() {
+        use crate::composite::testing::{composite, output, picture, Scripted};
+        use crate::composite::ALL_DISPLAYS;
+        let t = Instant::now();
+        let mut current_monitor = 0usize;
+        let mut current_output = Some(0x10001isize);
+        let mut last_frame: Option<puca_capture::Frame> = None;
+        let mut want_keyframe = false;
+        let mut switch_started = None;
+        let mut stranded_repaints = 3u8; // a previous switch's net, long spent
+        let mut stranded_repainted_at = Some(t);
+
+        let mut capture = AnyCapture::Virtual(composite(
+            vec![
+                (output(0, 0, 0, 4, 2), Scripted::polls(vec![None, Some(picture(4, 2, 0x80))])),
+                (output(1, 4, 0, 4, 2), Scripted::polls(vec![Some(picture(4, 2, 0x20))])),
+            ],
+            last_frame.as_ref().map(|f| (current_monitor, f)),
+        ));
+        adopt_new_capture(
+            &mut current_monitor, &mut current_output, ALL_DISPLAYS, None,
+            &mut last_frame, &mut want_keyframe, &mut switch_started,
+            &mut stranded_repaints, &mut stranded_repainted_at, t,
+        );
+        let t0 = switch_started.expect("a switch into All Displays arms the net");
+
+        // Screen 1 presents; the canvas goes out with screen 0 still black.
+        let AnyCapture::Virtual(v) = &mut capture else { unreachable!() };
+        v.refresh(5).expect("screen 1 presented");
+        let whole = holds_whole_picture(Some(&capture), last_frame.is_some());
+        assert!(!whole, "screen 0 is still the canvas's zero-fill");
+        assert_eq!(on_frame_sent(whole, &mut switch_started, &mut stranded_repainted_at), None);
+        assert_eq!(switch_started, Some(t0), "a frame with a screen missing must not end the switch");
+
+        // So the net still works for it, paced as ever, aimed at screen 0.
+        assert!(!stranded_net_due(t0, stranded_repainted_at, stranded_repaints, whole, t + Duration::from_millis(749)));
+        assert!(
+            stranded_net_due(t0, stranded_repainted_at, stranded_repaints, whole, t + Duration::from_millis(750)),
+            "the missing screen must get the net's provoked present at 750 ms",
+        );
+        assert_eq!(capture.awaited_screens(current_monitor, last_frame.is_some()), vec![0]);
+        // And a keyframe request after a spent round re-arms it, as for a
+        // single screen.
+        let mut spent = 3u8;
+        on_keyframe_request(&mut want_keyframe, switch_started.is_some(), whole, &mut spent);
+        assert_eq!(spent, 0, "a request with a screen still missing starts a fresh round");
+
+        // Screen 0 presents (the provoked present): the next frame sent is the
+        // whole picture, and it ends the switch.
+        let AnyCapture::Virtual(v) = &mut capture else { unreachable!() };
+        v.refresh(5).expect("screen 0 presented");
+        let whole = holds_whole_picture(Some(&capture), last_frame.is_some());
+        assert!(whole);
+        assert_eq!(on_frame_sent(whole, &mut switch_started, &mut stranded_repainted_at), Some(t0));
+        assert_eq!(switch_started, None, "the switch is over");
+        assert!(!stranded_net_due(t0, stranded_repainted_at, stranded_repaints, whole, t + Duration::from_secs(10)));
+    }
+
+    /// A WARM PUMP DOES NOT RE-SEND ALL DISPLAYS WITH A SCREEN MISSING while
+    /// a switch waits for it, and it waits only as long as the net works: a
+    /// panel that never presents must not keep All Displays off the viewer.
+    #[test]
+    fn the_warm_pump_waits_for_a_missing_screen_only_as_long_as_the_net_does() {
+        use crate::composite::testing::{composite, output, picture, Scripted};
+        let t0 = Instant::now();
+        let held = picture(4, 2, 0x80);
+        let v = composite(
+            vec![(output(0, 0, 0, 4, 2), Scripted::still()), (output(1, 4, 0, 4, 2), Scripted::still())],
+            Some((1, &held)),
+        );
+        let waiting = switch_awaits_whole_picture(Some(t0), t0);
+        assert!(waiting);
+        assert!(
+            !should_resend_still(true, v.holds_picture(false, waiting)),
+            "warm, mid-switch, screen 0 missing: not a picture to re-send",
+        );
+        // The net's third try is at 2250 ms; the wait covers its landing.
+        assert!(switch_awaits_whole_picture(Some(t0), t0 + Duration::from_millis(2999)));
+        let waiting = switch_awaits_whole_picture(Some(t0), t0 + WHOLE_PICTURE_WAIT);
+        assert!(!waiting);
+        assert!(
+            should_resend_still(true, v.holds_picture(false, waiting)),
+            "past the wait, the screens that did present are shown",
+        );
+        assert!(!switch_awaits_whole_picture(None, t0), "no switch, nothing to wait for");
+        // And a canvas no screen has painted is never a picture, warm or not.
+        let bare = composite(vec![(output(0, 0, 0, 4, 2), Scripted::still())], None);
+        assert!(!should_resend_still(true, bare.holds_picture(false, false)));
     }
 
     /// A build that FAILS hands the live capture back, and the caller keeps
