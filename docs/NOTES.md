@@ -1714,21 +1714,35 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   screen that missed an update — could otherwise complete an item another
   device had meanwhile made repeating, or sweep a child that became one, and
   the series would silently stop reminding. So a tick also sends the newest
-  edit time the server gave it for the item and everything under it (an
-  advance sends the item's own, so it cannot overwrite a repeat rule edited
-  elsewhere), and the server refuses (409, *refresh and try again*; a queued
-  one is listed as not saved) when a dated, open item there changed after
-  that. The server cannot tell a one-off date from a repeat, or a text edit
-  from a date edit, so an edit of any dated item under it counts; undated
-  items and ticked ones never do. The time is the server's own, sent back
-  as it came, and says nothing new. Nothing is checked when this device
-  cannot vouch for what it shows: an item it changed — ticked, edited, dated,
-  given attachments or moved under another item, anywhere above or below the
-  one ticked — and has not read back from the server since (every task write
-  goes through one tracker in `api/tasks.ts`; a read that started after the
-  write finished clears it), one made offline, or a tick queued behind this
-  device's own edit of the same items (those replay unchecked, as before).
-  So your own edit followed by a tick is never mistaken for another device's.
+  time the server gave it for when the item, or anything under it, was
+  created or had its date, repeat, tick or parent changed
+  (`schedule_changed_at`, migration 071; an advance sends the item's own, so
+  it cannot overwrite a repeat rule edited elsewhere, or put back a repeat
+  removed elsewhere), and the server refuses (409, *refresh and try again*; a
+  queued one is listed as not saved) when a dated, open item there — or an
+  item it hangs from, such as one moved in carrying a dated item — changed
+  that way after it. Text, pictures, a due time and a snooze do not move
+  that time, so they never refuse a tick. The server cannot tell a one-off
+  date from a repeat, so re-timing any dated item under it counts; undated
+  items and ticked ones never do. The item's own row is judged again as it
+  is written, so a repeat another device saves in the same moment is refused
+  too. The time is the server's own, sent back as it came, and says nothing
+  new. Only a time the device READ counts: an item it has just added shows
+  the server's time of that add, which would vouch for the rest of the list
+  as of then, so it can lower the time sent but not raise it (except to cover
+  a dated item added here, which the server would otherwise refuse as
+  another device's). Nothing is checked when this device cannot vouch for
+  what it shows: an item it ticked, gave a date & repeat, or moved under
+  another item, anywhere above or below the one ticked, and has not read back
+  from the server since (every task write goes through one tracker in
+  `api/tasks.ts`; a read that started after the write finished clears it),
+  one made offline, or a tick queued behind this device's own tick, date,
+  repeat, move or new item among the same items (those replay unchecked, as
+  before). Its own text, pictures, due times and snoozes do not count — the
+  tick after them is still checked. Against a server older than 071 the
+  edit time is used instead, and every edit of this device's own counts, as
+  before. So your own edit followed by a tick is never mistaken for another
+  device's.
   A refused tick re-reads the note or list it was made in — Púca's Tasks tab
   and a personal checklist included, which otherwise never re-read — so the
   next try is judged on what the server holds now.

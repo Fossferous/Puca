@@ -247,6 +247,14 @@ task and per note:
   decided about) so a tick made on an old view is refused rather than ending
   a series; it is the server's own value echoed, so it tells the server
   nothing it did not have, beyond roughly how stale that device's copy was.
+- **`schedule_changed_at`** on every task (migration 071): when it was
+  created, or its sealed schedule written, its tick changed or its parent
+  changed — each a write the server saw arrive and could already tell apart
+  (a PATCH carrying `schedule` or `is_completed`, a reparent). It is the
+  time a tick sends back now (`expect_schedules_as_of`), because a text,
+  due-time or snooze edit cannot start or end a series; a client older than
+  it, or one talking to a server older than it, sends `updated_at` instead.
+  No content, and nothing that is not in the write.
 - **`content_rev`** on every personal list: how many times that note's own
   text, title or pictures have been written (migration 069). Ticking or
   reordering an item does not move it. It is what lets a save say which copy

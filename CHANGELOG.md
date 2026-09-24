@@ -7,6 +7,17 @@ one-line summary; this file is the full story. Versions follow
 ## Unreleased
 
 ### Fixed
+- **Ticks made on an out-of-date screen are caught in more cases.** A tick
+  could still end a repeat another device had just set up: if the repeat was
+  saved in the same moment as the tick, if you had edited the item's text
+  (or its pictures, due time or snooze) on this device first — offline, or
+  before the list reloaded — or if you had added an item to the list since
+  it last loaded. Each of those is now refused with *refresh and try again*
+  (or listed as not saved, for a change queued offline). The same goes for
+  moving a repeating item on to its next time after its repeat was removed
+  on another device, which used to put the repeat back, and for ticking an
+  item after another device moved something with a repeating item inside it
+  under it.
 - **Switching screens in remote control shows the new screen, not the old
   one.** Switching to a screen where nothing was moving could keep showing
   the screen you had just left, while your clicks already landed on the new
@@ -43,9 +54,11 @@ one-line summary; this file is the full story. Versions follow
   and can tick it again on the up-to-date note. The same goes for ticking a
   repeating item on to its next time with an old copy of its repeat rule,
   which could overwrite a change made on another device. Another device
-  editing any dated item under the one you tick counts as a change, since
-  the server cannot see which dates repeat; your own edits on this device
-  never do, and after a refusal the list reloads so you can tick again.
+  changing the date, repeat, tick or place of any dated item under the one
+  you tick counts as a change, since the server cannot see which dates
+  repeat; a change to its text, pictures, due time or snooze does not, your
+  own edits on this device never do, and after a refusal the list reloads
+  so you can tick again.
 - **Live updates recover after a database restart.** When the server's
   connection for change notifications dropped, Púca Notes kept showing a
   "live" note that no longer updated — with the 30-second refresh off —
