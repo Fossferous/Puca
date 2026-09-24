@@ -1729,9 +1729,10 @@ The server stores both fields and cannot read them (docs/SECURITY_MODEL.md
   too. The time is the server's own, sent back as it came, and says nothing
   new. Only a time the device READ counts: an item it has just added shows
   the server's time of that add, which would vouch for the rest of the list
-  as of then, so it can lower the time sent but not raise it (except to cover
-  a dated item added here, which the server would otherwise refuse as
-  another device's). Nothing is checked when this device cannot vouch for
+  as of then, so it can lower the time sent but never raise it. A dated item
+  added here under the one ticked (put back by Undo, or in a copied note) is
+  therefore refused once as another device's change; the note reloads and
+  the next tick lands. Nothing is checked when this device cannot vouch for
   what it shows: an item it ticked, gave a date & repeat, or moved under
   another item, anywhere above or below the one ticked, and has not read back
   from the server since (every task write goes through one tracker in

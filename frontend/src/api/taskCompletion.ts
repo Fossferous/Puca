@@ -94,14 +94,14 @@ interface Stamp { raw: string; clock: StampClock }
  * (not its newest: another device may have dated the first item while this
  * one was still adding the rest).
  *
- * One exception, the device's own dated creates. The server's check counts
- * every open, dated row newer than the stamp, and it cannot tell this
- * device's create from another device's change: a stamp below an open,
- * dated row made HERE would be refused, as "changed on another device", for
- * the user's own item (an Undo that recreates a dated subtask, then a tick of
- * its parent). So the stamp is raised to the newest such row — which gives
- * back exactly the window it covers and nothing more; everything after it
- * is still checked. Dropping the stamp instead would check nothing at all.
+ * No exception for a DATED row made here, although the server cannot tell
+ * it from another device's change and will refuse the tick once for it (an
+ * item put back by Notes' Undo, a note copied with a dated item under a
+ * parent). Raising the stamp to cover it would vouch for every other row as
+ * of that create, so a repeat another device gave a sibling in between
+ * would pass the check and be swept — a series ended without a word. The
+ * refusal is visible instead, and every view re-reads on it, so the next
+ * tick is judged on rows it read and lands.
  */
 function stampOver(tasks: Task[], ids: Iterable<number>): Stamp | undefined {
     const byId = new Map(tasks.map(t => [t.id, t]));
@@ -115,23 +115,20 @@ function stampOver(tasks: Task[], ids: Iterable<number>): Stamp | undefined {
     type Key = { key: string; raw: string };
     let newestRead: Key | null = null;
     let oldestCreated: Key | null = null;
-    let newestDatedCreated: Key | null = null;
     for (const t of rows) {
         if (t.localEdit || ownWriteUnconfirmed(t, clock)) return undefined;
         const raw = clock === 'schedule' ? t.schedule_changed_at : t.updated_at;
         const key = stampKey(raw);
         if (key === null || raw === undefined) return undefined;
-        if (!t.fromCreate) {
-            if (!newestRead || key > newestRead.key) newestRead = { key, raw };
-            continue;
+        if (t.fromCreate) {
+            if (!oldestCreated || key < oldestCreated.key) oldestCreated = { key, raw };
+        } else if (!newestRead || key > newestRead.key) {
+            newestRead = { key, raw };
         }
-        if (!oldestCreated || key < oldestCreated.key) oldestCreated = { key, raw };
-        if (!t.is_completed && t.schedule && (!newestDatedCreated || key > newestDatedCreated.key)) newestDatedCreated = { key, raw };
     }
-    let best = newestRead && oldestCreated
+    const best = newestRead && oldestCreated
         ? (oldestCreated.key < newestRead.key ? oldestCreated : newestRead)
         : newestRead ?? oldestCreated;
-    if (best && newestDatedCreated && newestDatedCreated.key > best.key) best = newestDatedCreated;
     return best ? { raw: best.raw, clock } : undefined;
 }
 

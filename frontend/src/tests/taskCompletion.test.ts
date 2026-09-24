@@ -235,20 +235,45 @@ describe('the freshness stamp (finding 8): a completion says how current its vie
         const newParent = mk(4, { updated_at: C, schedule_changed_at: C, fromCreate: true });
         const newKid = mk(5, { parent_id: 4, updated_at: N, schedule_changed_at: N, fromCreate: true });
         expect(planToggle([newParent, newKid], newParent, true, { canEdit: true, now: NOW }).patch?.expect_schedules_as_of).toBe(C);
-        // An open DATED row made here is one the server's check counts: a
-        // stamp below it would refuse the user's own item as "changed on
-        // another device". The stamp covers it — and no more than it.
+        // A DATED row made here is no exception: it too only lowers the
+        // stamp. The server will refuse this tick once, for the user's own
+        // item, and the refusal re-reads the list — a visible, recoverable
+        // cost, where raising the stamp to cover it would vouch for every
+        // other row as of the create (the next test).
         const onceSched = serializeSchedule({ ...daily, rrule: undefined });
         const datedKid = { ...newKid, schedule: onceSched };
-        expect(planToggle([newParent, datedKid], newParent, true, { canEdit: true, now: NOW }).patch?.expect_schedules_as_of).toBe(N);
+        expect(planToggle([newParent, datedKid], newParent, true, { canEdit: true, now: NOW }).patch?.expect_schedules_as_of).toBe(C);
         const recreated = { ...made, schedule: onceSched };      // under a READ parent (an Undo that recreates it)
-        expect(planToggle([parent, kid, recreated], parent, true, { canEdit: true, now: NOW }).patch?.expect_schedules_as_of).toBe(N);
-        // A done one is not counted by the server, so it lowers nothing and raises nothing.
+        expect(planToggle([parent, kid, recreated], parent, true, { canEdit: true, now: NOW }).patch?.expect_schedules_as_of).toBe(A);
         expect(planToggle([parent, kid, { ...recreated, is_completed: true }], parent, true, { canEdit: true, now: NOW }).patch?.expect_schedules_as_of).toBe(A);
         // POSITIVE CONTROL: the same row once a read has replaced it (the
         // mark goes with the object) counts like any other.
         const reread = { ...made, fromCreate: undefined };
         expect(planToggle([parent, kid, reread], parent, true, { canEdit: true, now: NOW }).patch?.expect_schedules_as_of).toBe(N);
+    });
+
+    it('a DATED child created here never raises the stamp past a read row (review of finding 6)', () => {
+        // Device A read the list at R. Device B then made sibling C repeat, at
+        // T_B > R — A's copy of C does not show it. A then adds a one-off
+        // dated child D (its answer stamped T_D > T_B) and ticks the parent.
+        // The server refuses the tick only if the stamp is below T_B; a stamp
+        // raised to T_D would pass its check and the sweep would silently
+        // end B's series.
+        const R = '2026-10-01T10:00:00.5Z';
+        const T_B = '2026-10-01T10:01:00Z';                 // on the server only
+        const T_D = '2026-10-01T10:02:00.25Z';
+        const once = serializeSchedule({ ...daily, rrule: undefined });
+        const p = mk(1, { updated_at: R, schedule_changed_at: R });
+        const c = mk(2, { parent_id: 1, updated_at: C, schedule_changed_at: C });   // as A last read it
+        const d = mk(3, { parent_id: 1, schedule: once, due_at: '2026-10-06T09:00:00.000Z', updated_at: T_D, schedule_changed_at: T_D, fromCreate: true });
+        const plan = planToggle([p, c, d], p, true, { canEdit: true, now: NOW });
+        expect(plan.patch?.expect_schedules_as_of, 'the stamp of what A READ').toBe(R);
+        // And that is a stamp the server's check refuses once B's change is in:
+        // SCHEDULES_CHANGED_SINCE_SQL counts an open dated row newer than it.
+        expect(T_B > plan.patch!.expect_schedules_as_of!, 'C changed after the stamp: 409, C stays open').toBe(true);
+        // The same on a server older than 071, read from updated_at.
+        const old = [mk(1, { updated_at: R }), mk(2, { parent_id: 1, updated_at: C }), { ...d, schedule_changed_at: undefined }];
+        expect(planToggle(old, old[0], true, { canEdit: true, now: NOW }).patch?.expect_schedules_as_of).toBe(R);
     });
 
     it('names the rows whose edits outdate the stamp: the item, everything under it and everything above it', () => {

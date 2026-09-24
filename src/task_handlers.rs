@@ -3327,6 +3327,39 @@ mod db_tests {
         cleanup(&pool, &[&alice]).await;
     }
 
+    /// The client half of finding 6 against the real server: device A read
+    /// the list, device B then made sibling C repeat, and A added a dated
+    /// child D. The stamp A sends is its READ one (taskCompletion.ts
+    /// stampOver): refused, and C's series survives. A stamp raised to cover
+    /// its own D — what the client once did for a dated create — is newer
+    /// than B's change, so the check passes and the sweep ends C's series
+    /// without a word: the case this pins.
+    #[tokio::test]
+    async fn a_dated_item_created_here_does_not_vouch_for_its_siblings() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "vouch").await;
+        let (_, list) = post_list(&state, &alice, V2, None).await;
+        let list_id = list["id"].as_i64().unwrap();
+
+        for raised in [false, true] {
+            let p = item(&state, &alice, list_id, None).await;
+            let c = item(&state, &alice, list_id, Some(p)).await;
+            let read = stamp_of(&pool, &[p, c]).await;                  // A reads
+            assert_eq!(patch_item(&state, &alice, c, serde_json::json!({ "schedule": SCHED, "reads_up_to": 4 })).await, StatusCode::OK); // B
+            let d = item_with(&state, &alice, list_id, serde_json::json!({ "description": V2, "parent_id": p, "schedule": SCHED2 })).await; // A
+            let stamp = if raised { stamp_of(&pool, &[d]).await } else { read };
+            let st = patch_item(&state, &alice, p, tick(&stamp)).await;
+            if raised {
+                assert_eq!(st, StatusCode::OK, "a stamp raised to A's own create passes the check…");
+                assert!(is_done(&pool, c).await, "…and the sweep silently ends B's series");
+            } else {
+                assert_eq!(st, StatusCode::CONFLICT, "A's read stamp is refused");
+                assert!(!is_done(&pool, c).await && !is_done(&pool, p).await, "and B's series is still open");
+            }
+        }
+        cleanup(&pool, &[&alice]).await;
+    }
+
     /// Run `tick` for `x` while ANOTHER transaction holds `x` with `write`
     /// applied but not committed, and commit that write only once the tick is
     /// provably waiting on its row lock. The tick's freshness check has then
