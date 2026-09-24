@@ -55,12 +55,26 @@ export interface Task {
     snooze?: string | null;
     /** When the content last changed (066+ servers). */
     updated_at?: string;
+    /** When the row was created or its schedule, tick or parent last changed
+     *  (migration 071+ servers): the clock a freshness stamp is read from
+     *  (taskCompletion.ts schedulesStamp). A text, attachment, due-time or
+     *  snooze edit does not move it. Absent from an older server, whose
+     *  stamps are read from `updated_at` instead. */
+    schedule_changed_at?: string;
     /** CLIENT-ONLY, never sent: this device changed the row optimistically
      *  since the server last sent it, so its `updated_at` no longer says how
      *  fresh this device's view of it is. A completion planned over such a
      *  row sends no freshness stamp (taskCompletion.ts schedulesStamp). A
      *  refetch replaces the row and the mark with it. */
     localEdit?: boolean;
+    /** CLIENT-ONLY, never sent: this copy is a CREATE's answer (createTask,
+     *  createListTask), which views append to the rows they read without
+     *  re-reading. Its stamps are the moment of the create, newer than the
+     *  read, so a freshness stamp does not count it as proof of how fresh
+     *  the rest is (taskCompletion.ts schedulesStamp). A plain property: a
+     *  spread copies it (it is still that copy), and a read replaces the
+     *  object and the mark with it. */
+    fromCreate?: boolean;
     /** CLIENT-ONLY, never sent: which read of the server produced this row
      *  (`<page session>:<n>`, set by listTasks/listListTasks). Tells the write
      *  tracker whether the row can include this device's own writes
@@ -187,15 +201,24 @@ export const openSelfTaskText = (stored: string): Promise<string> => openSelf(st
 
 // --- This device's own writes: the freshness stamp's blind spot ---
 //
-// A completion says how current its view is by the newest server
-// `updated_at` among the rows it sweeps (taskCompletion.ts schedulesStamp),
-// and the server refuses it when a dated row changed after that. Migration
-// 066's trigger stamps `updated_at` on almost every change — text, date,
-// repeat, attachments, a tick, a new parent — so after THIS device writes a
-// row, the copy a view holds (applied optimistically, never re-read by the
-// Tasks tab or a personal checklist) carries a stamp older than the server's,
-// and a tick sent with it reads as "this device missed a change": refused, as
-// "changed on another device", for the user's own edit.
+// A completion says how current its view is by the newest server stamp
+// among the rows it sweeps (taskCompletion.ts schedulesStamp), and the
+// server refuses it when a dated row changed after that. After THIS device
+// writes a row, the copy a view holds (applied optimistically, never re-read
+// by the Tasks tab or a personal checklist) carries a stamp older than the
+// server's, and a tick sent with it reads as "this device missed a change":
+// refused, as "changed on another device", for the user's own edit.
+//
+// WHICH writes do that depends on the clock the stamp was read from
+// (StampClock). Migration 066's `updated_at` moves on almost every change —
+// text, date, repeat, attachments, a tick, a new parent — so on a server
+// older than 071 every write counts. Migration 071's `schedule_changed_at`
+// moves only for a schedule written, a tick changed or a new parent, so on a
+// 071+ server only those count, and a text, attachment, due-time or snooze
+// edit keeps the stamp: the tick after it is still checked. Dropping the
+// stamp is not free — an unchecked tick can end a series another device set
+// up meanwhile — so it is dropped only where the server would otherwise
+// refuse the user's own edit.
 //
 // Every task write in the app goes through this file, so it is tracked here
 // rather than in each view: per row, how many writes are in flight and when
@@ -205,17 +228,40 @@ export const openSelfTaskText = (stored: string): Promise<string> => openSelf(st
 // counts too (the server may have applied it and lost the answer).
 // Position-only moves are not tracked: the trigger ignores position.
 
+/** Which server clock a freshness stamp was read from: `schedule` —
+ *  migration 071's `schedule_changed_at`, moved only by a new row, a
+ *  schedule, a tick or a new parent; `content` — `updated_at` (a server
+ *  older than 071), moved by nearly every edit. */
+export type StampClock = 'schedule' | 'content';
+
 /** Tells this page load's read tags from a persisted cache's. */
 const PAGE_SESSION = Math.random().toString(36).slice(2, 10);
 let writeClock = 0;
-const ownWrites = new Map<number, { inFlight: number; settledAt: number }>();
+interface WriteLog { inFlight: number; settledAt: number }
+/** Per row and per clock: how many writes that move it are in flight, and
+ *  when the last one finished. Every write moves `content`. */
+const ownWrites = new Map<number, Record<StampClock, WriteLog>>();
 
-/** Run one write to `taskId`, recording it for ownWriteUnconfirmed. */
-function trackWrite<T>(taskId: number, send: () => Promise<T>): Promise<T> {
-    const w = ownWrites.get(taskId) ?? { inFlight: 0, settledAt: 0 };
-    w.inFlight += 1;
+/** Does a timing PATCH move migration 071's clock: a schedule written or
+ *  removed, a tick changed, or a subtree reopened (the rows under it)? A due
+ *  time or a snooze alone does not. The outbox asks the same of a queued
+ *  one (notesOutbox.ts touchesAny). */
+export function timingPatchMovesClock(patch: TaskTimingPatch): boolean {
+    return patch.schedule !== undefined || patch.is_completed !== undefined || patch.reopen_subtree === true;
+}
+
+/** Run one write to `taskId`, recording it for ownWriteUnconfirmed.
+ *  `movesClock`: whether it can move the `schedule` clock (a schedule, a
+ *  tick, a new parent). */
+function trackWrite<T>(taskId: number, movesClock: boolean, send: () => Promise<T>): Promise<T> {
+    const w = ownWrites.get(taskId) ?? { content: { inFlight: 0, settledAt: 0 }, schedule: { inFlight: 0, settledAt: 0 } };
     ownWrites.set(taskId, w);
-    const settle = () => { w.inFlight -= 1; w.settledAt = ++writeClock; };
+    const logs = movesClock ? [w.content, w.schedule] : [w.content];
+    for (const l of logs) l.inFlight += 1;
+    const settle = () => {
+        const at = ++writeClock;
+        for (const l of logs) { l.inFlight -= 1; l.settledAt = at; }
+    };
     let p: Promise<T>;
     try {
         p = send();
@@ -232,11 +278,13 @@ function readTag(): string {
 }
 
 /** Has this device written `t` since the read that produced this copy
- *  started — or is a write of it still in flight? Then its `updated_at` may
- *  be older than the server's for this device's own edit. */
-export function ownWriteUnconfirmed(t: Pick<Task, 'id' | 'readAt'>): boolean {
-    const w = ownWrites.get(t.id);
-    if (!w) return false;
+ *  started — or is a write of it still in flight? Then its stamp on `clock`
+ *  may be older than the server's for this device's own edit. On the
+ *  `schedule` clock only the writes that move it count (a text edit does
+ *  not); the default, `content`, counts every write. */
+export function ownWriteUnconfirmed(t: Pick<Task, 'id' | 'readAt'>, clock: StampClock = 'content'): boolean {
+    const w = ownWrites.get(t.id)?.[clock];
+    if (!w || (w.inFlight === 0 && w.settledAt === 0)) return false;
     if (w.inFlight > 0) return true;
     const m = t.readAt ? /^(.*):(\d+)$/.exec(t.readAt) : null;
     return !(m && m[1] === PAGE_SESSION && Number(m[2]) > w.settledAt);
@@ -268,8 +316,9 @@ export async function createTask(channelId: number, description: string, parentI
         ...(timing ? await timingForCreate(timing, { channelId, ownerId: me }) : {}),
         ...(opKey ? { op_key: opKey } : {}),
     });
-    // Show the plaintext locally — the timing too, never the sealed copy.
-    return { ...created, description, ...(timing?.schedule !== undefined ? { schedule: timing.schedule } : {}) };
+    // Show the plaintext locally — the timing too, never the sealed copy —
+    // marked as a create's answer (Task.fromCreate).
+    return { ...created, description, ...(timing?.schedule !== undefined ? { schedule: timing.schedule } : {}), fromCreate: true };
 }
 
 /** Update a channel checklist task; a changed description is re-encrypted under
@@ -282,7 +331,7 @@ export async function updateChannelTask(
     /** The task's `created_by` — see sealChannel. */
     createdBy: number,
 ): Promise<void> {
-    return trackWrite(taskId, async () => {
+    return trackWrite(taskId, updates.is_completed !== undefined, async () => {
         const payload = updates.description === undefined
             ? updates
             : { ...updates, description: await sealChannel(channelId, updates.description, 'chan-task', createdBy) };
@@ -299,7 +348,7 @@ export async function updateChannelTaskAttachments(
     /** The task's `created_by` — see sealChannel. */
     createdBy: number,
 ): Promise<void> {
-    return trackWrite(taskId, async () => {
+    return trackWrite(taskId, false, async () => {
         const attachments = refs.length === 0
             ? ''
             : await sealChannel(channelId, serializeTaskAttachments(refs), 'chan-taskatt', createdBy);
@@ -310,11 +359,13 @@ export async function updateChannelTaskAttachments(
 // --- Shared (either scope) ---
 
 export function updateTask(taskId: number, updates: { is_completed?: boolean; description?: string; due_at?: string }): Promise<void> {
-    return trackWrite(taskId, () => apiClient.patch(`/tasks/${taskId}`, updates));
+    return trackWrite(taskId, updates.is_completed !== undefined, () => apiClient.patch(`/tasks/${taskId}`, updates));
 }
 
+/** A delete takes the row's whole subtree with it (ON DELETE CASCADE), so it
+ *  moves no surviving row's `schedule` clock. */
 export function deleteTask(taskId: number): Promise<void> {
-    return trackWrite(taskId, () => apiClient.delete(`/tasks/${taskId}`));
+    return trackWrite(taskId, false, () => apiClient.delete(`/tasks/${taskId}`));
 }
 
 export function moveTask(taskId: number, direction: 'up' | 'down'): Promise<void> {
@@ -344,8 +395,8 @@ export function reorderTask(
     const send = (): Promise<void> => apiClient.post(`/tasks/${taskId}/reorder`, reparent
         ? { after_id: afterId, reparent: true, parent_id: reparent.parentId }
         : { after_id: afterId });
-    // A new parent is content (the trigger stamps it); a slot is not.
-    return reparent ? trackWrite(taskId, send) : send();
+    // A new parent moves both clocks (the triggers stamp it); a slot neither.
+    return reparent ? trackWrite(taskId, true, send) : send();
 }
 
 // --- Tasks-view tab preferences (bar order + favourites) ---
@@ -504,13 +555,13 @@ export async function createListTask(listId: number, description: string, parent
         ...(timing ? await timingForCreate(timing, null) : {}),
         ...(opKey ? { op_key: opKey } : {}),
     });
-    return { ...created, description, ...(timing?.schedule !== undefined ? { schedule: timing.schedule } : {}) };
+    return { ...created, description, ...(timing?.schedule !== undefined ? { schedule: timing.schedule } : {}), fromCreate: true };
 }
 
 /** Update a personal-list task; descriptions are re-encrypted to self.
  *  `due_at` passes through in the clear (metadata; '' clears it). */
 export function updateListTask(taskId: number, updates: { is_completed?: boolean; description?: string; due_at?: string }): Promise<void> {
-    return trackWrite(taskId, async () => {
+    return trackWrite(taskId, updates.is_completed !== undefined, async () => {
         const payload = updates.description === undefined
             ? updates
             : { ...updates, description: await sealSelf(updates.description) };
@@ -521,7 +572,7 @@ export function updateListTask(taskId: number, updates: { is_completed?: boolean
 /** Replace a personal-list task's attachment refs, sealed to self.
  *  An empty array clears the sidecar (the server maps "" to NULL). */
 export function updateListTaskAttachments(taskId: number, refs: TaskAttachmentRef[]): Promise<void> {
-    return trackWrite(taskId, async () => {
+    return trackWrite(taskId, false, async () => {
         const attachments = refs.length === 0
             ? ''
             : await sealSelf(serializeTaskAttachments(refs));
@@ -1056,7 +1107,8 @@ export interface TaskTimingPatch {
     snooze?: string | null;
     due_at?: string | null;
     expect_due_at?: string | null;
-    /** The newest server `updated_at` this device saw on the rows a
+    /** The newest server stamp — `schedule_changed_at`, or `updated_at`
+     *  from a server older than 071 — this device saw on the rows a
      *  completion or advance was decided on (taskCompletion.ts): a dated row
      *  changed on the server since then makes it a 409 instead of ending a
      *  series or overwriting a newer rule. Absent = no check; an older server
@@ -1074,7 +1126,7 @@ export interface TaskTimingPatch {
 export function patchTaskTiming(
     task: Pick<Task, 'id' | 'channel_id' | 'created_by'>, patch: TaskTimingPatch,
 ): Promise<void> {
-    return trackWrite(task.id, () => sendTaskTiming(task, patch));
+    return trackWrite(task.id, timingPatchMovesClock(patch), () => sendTaskTiming(task, patch));
 }
 
 async function sendTaskTiming(

@@ -211,6 +211,13 @@ pub struct TaskResponse {
     /// When the item's content last changed (RFC3339; created_at for rows
     /// that predate migration 066).
     pub updated_at: String,
+    /// When the item was created or its schedule, tick or parent last
+    /// changed (migration 071; RFC3339, rendered like updated_at). The clock
+    /// `expect_schedules_as_of` is compared against — a text, attachment,
+    /// due-time or snooze edit does not move it. Always serialized, so every
+    /// task a 071+ server returns carries the key and a client can tell it
+    /// from an older server's silence.
+    pub schedule_changed_at: String,
 }
 
 #[derive(Deserialize)]
@@ -261,8 +268,9 @@ pub struct UpdateTaskRequest {
     #[serde(default)]
     pub recurrence_aware: bool,
     /// When an aware client's view of the schedules is from: the newest
-    /// `updated_at` it saw on the item (and, for a completion, on everything
-    /// under it), RFC3339, echoed exactly as the server rendered it. A dated
+    /// `schedule_changed_at` it saw on the item (and, for a completion, on
+    /// everything under it) — `updated_at` from a client or server older
+    /// than migration 071 — RFC3339, echoed exactly as the server rendered it. A dated
     /// open row changed after it is 409 and nothing is written
     /// (task_timing::SCHEDULES_CHANGED_SINCE_SQL). Absent = no check, which
     /// is what every older client sends and every op queued before it
@@ -415,6 +423,7 @@ type TaskRow = (
     Option<String>,
     Option<String>,
     String,
+    String,
 );
 
 fn task_row_to_response(row: TaskRow) -> TaskResponse {
@@ -433,6 +442,7 @@ fn task_row_to_response(row: TaskRow) -> TaskResponse {
         schedule,
         snooze,
         updated_at,
+        schedule_changed_at,
     ) = row;
     TaskResponse {
         id,
@@ -449,12 +459,13 @@ fn task_row_to_response(row: TaskRow) -> TaskResponse {
         schedule,
         snooze,
         updated_at,
+        schedule_changed_at,
     }
 }
 
 // NULL due_at stays NULL through the replace/concat (both are strict).
 const TASK_COLUMNS: &str =
-    "id, channel_id, list_id, parent_id, description, is_completed, position, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at, created_by, attachments, (replace((due_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS due_at, schedule, snooze, (replace((COALESCE(updated_at, created_at) AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS updated_at";
+    "id, channel_id, list_id, parent_id, description, is_completed, position, (replace((created_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS created_at, created_by, attachments, (replace((due_at AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS due_at, schedule, snooze, (replace((COALESCE(updated_at, created_at) AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS updated_at, (replace((COALESCE(schedule_changed_at, updated_at, created_at) AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') AS schedule_changed_at";
 
 // --- Scope checks ---
 
@@ -1034,7 +1045,11 @@ pub async fn update_task(
     // one — and the series would silently stop reminding. When it says how
     // fresh its view is, hold it to that. A completion is judged on the
     // subtree it sweeps; anything else (an advance) on the item alone. Read
-    // in the transaction, fail CLOSED like the guards above.
+    // in the transaction, fail CLOSED like the guards above. This read takes
+    // no lock, so it refuses what had changed by the time it ran and nothing
+    // later: the item's own row is judged again inside the UPDATE below
+    // (task_timing::item_fresh_sql), and every row under it inside the
+    // sweep's (COMPLETE_SUBTREE_SQL).
     if let Some(as_of) = schedules_as_of {
         match sqlx::query_as::<_, (bool,)>(crate::task_timing::SCHEDULES_CHANGED_SINCE_SQL)
             .bind(task_id)
@@ -1062,14 +1077,19 @@ pub async fn update_task(
         None => None,
     };
 
-    let result = sqlx::query(
+    // $14: the stamp again, now for the item's OWN row and atomically with
+    // the write (task_timing::item_fresh_sql says why the check above is
+    // not enough for it); $15: a completion (else an advance).
+    let update_sql = format!(
         "UPDATE channel_tasks SET is_completed = COALESCE($1, is_completed), description = COALESCE($2, description), \
          attachments = CASE WHEN $3 THEN $4 ELSE attachments END, \
          due_at = CASE WHEN $5 THEN $6 ELSE due_at END, \
          schedule = CASE WHEN $8 THEN $9 ELSE schedule END, \
          snooze = CASE WHEN $10 THEN $11 ELSE snooze END \
-         WHERE id = $7 AND (NOT $12 OR due_at IS NOT DISTINCT FROM $13)"
-    )
+         WHERE id = $7 AND (NOT $12 OR due_at IS NOT DISTINCT FROM $13) AND {}",
+        crate::task_timing::item_fresh_sql("$14", "$15"),
+    );
+    let result = sqlx::query(&update_sql)
     .bind(payload.is_completed)
     .bind(payload.description.as_deref().map(str::trim))
     .bind(set_attachments)
@@ -1083,10 +1103,43 @@ pub async fn update_task(
     .bind(new_snooze)
     .bind(expect_due.is_some())
     .bind(expect_due.flatten())
+    .bind(schedules_as_of)
+    .bind(payload.is_completed == Some(true))
     .execute(&mut *tx)
     .await;
 
     match result {
+        // A stamped request wrote nothing. Say which guard refused it, from
+        // the row as it is now (still inside the transaction, which rolls
+        // back on drop): gone is 404 — the item was deleted in the meantime,
+        // never "changed" — a stale stamp is the schedule refusal, and a
+        // fresh stamp with a moved due_at is the compare-and-swap's. A row
+        // that passes both NOW failed one of them at the moment of the write
+        // and has changed again since: nothing was written, so it is a
+        // refusal all the same, never a 200.
+        Ok(r) if r.rows_affected() == 0 && schedules_as_of.is_some() => {
+            let why = format!(
+                "SELECT {} FROM channel_tasks WHERE id = $1",
+                crate::task_timing::item_fresh_sql("$2", "$3"),
+            );
+            return match sqlx::query_as::<_, (bool,)>(&why)
+                .bind(task_id)
+                .bind(schedules_as_of)
+                .bind(payload.is_completed == Some(true))
+                .fetch_optional(&mut *tx)
+                .await
+            {
+                Ok(None) => (StatusCode::NOT_FOUND, "Task not found").into_response(),
+                Ok(Some((true,))) if expect_due.is_some() => {
+                    (StatusCode::CONFLICT, crate::task_timing::DUE_CHANGED_MESSAGE).into_response()
+                }
+                Ok(Some(_)) => (StatusCode::CONFLICT, crate::task_timing::SCHEDULE_CHANGED_MESSAGE).into_response(),
+                Err(e) => {
+                    tracing::error!("Failed to read a refused task update: {:?}", e);
+                    (StatusCode::INTERNAL_SERVER_ERROR, "Failed to update task").into_response()
+                }
+            };
+        }
         // The compare-and-swap lost: someone moved due_at first. Nothing was
         // written (the transaction rolls back on drop).
         Ok(r) if r.rows_affected() == 0 && expect_due.is_some() => {
@@ -2876,9 +2929,20 @@ mod db_tests {
             .status()
     }
 
-    /// updated_at exactly as every task query renders it to a client
-    /// (TASK_COLUMNS), so the stamp round-trips the way a real client's does.
+    /// The newest schedule_changed_at among `ids`, exactly as every task
+    /// query renders it to a client (TASK_COLUMNS), so the stamp round-trips
+    /// the way a current client's does (frontend/src/api/taskCompletion.ts).
     async fn stamp_of(pool: &PgPool, ids: &[i64]) -> String {
+        let (s,): (String,) = sqlx::query_as(
+            "SELECT (replace((MAX(COALESCE(schedule_changed_at, updated_at, created_at)) AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') \
+             FROM channel_tasks WHERE id = ANY($1)",
+        )
+        .bind(ids).fetch_one(pool).await.unwrap();
+        s
+    }
+
+    /// What a client older than migration 071 sends: the newest updated_at.
+    async fn old_stamp_of(pool: &PgPool, ids: &[i64]) -> String {
         let (s,): (String,) = sqlx::query_as(
             "SELECT (replace((MAX(COALESCE(updated_at, created_at)) AT TIME ZONE 'UTC')::text, ' ', 'T') || 'Z') \
              FROM channel_tasks WHERE id = ANY($1)",
@@ -2984,13 +3048,15 @@ mod db_tests {
         assert!(is_done(&pool, p).await && is_done(&pool, c).await && is_done(&pool, plain).await, "the sweep ran");
 
         // The stated trade-off (the server cannot tell a one-off date from a
-        // repeat): ANY open dated row under the item changed after the look
-        // refuses the tick — a text edit of a one-off dated child included.
+        // repeat): ANY open dated row under the item whose date changed after
+        // the look refuses the tick — re-timing a one-off dated child
+        // included. (Its TEXT changing is no reason any more: see
+        // only_a_date_a_tick_a_move_or_a_new_item_outdates_a_stamp.)
         let q = item(&state, &alice, list_id, None).await;
         let dated = item(&state, &alice, list_id, Some(q)).await;
         assert_eq!(patch_item(&state, &alice, dated, serde_json::json!({ "schedule": SCHED, "reads_up_to": 4 })).await, StatusCode::OK);
         let look = stamp_of(&pool, &[q, dated]).await;
-        assert_eq!(patch_item(&state, &alice, dated, edit_text()).await, StatusCode::OK);
+        assert_eq!(patch_item(&state, &alice, dated, serde_json::json!({ "schedule": SCHED2, "reads_up_to": 4 })).await, StatusCode::OK);
         assert_eq!(patch_item(&state, &alice, q, tick(&look)).await, StatusCode::CONFLICT, "visible refusal, never a silent end");
         // ...but a DONE dated child is no reason: the sweep changes nothing for it.
         let look2 = stamp_of(&pool, &[q, dated]).await;
@@ -3030,6 +3096,53 @@ mod db_tests {
         assert_eq!(patch_item(&state, &alice, kid, serde_json::json!({ "schedule": SCHED, "reads_up_to": 4 })).await, StatusCode::OK);
         assert_eq!(patch_item(&state, &alice, x, advance(&fresh)).await, StatusCode::OK, "positive control: a fresh advance lands");
         assert_eq!(schedule_of(&pool, x).await.as_deref(), Some(SCHED));
+        cleanup(&pool, &[&alice]).await;
+    }
+
+    /// An advance REWRITES the sealed rule from the device's copy. The check
+    /// counted only rows that still carry a schedule, so a repeat REMOVED on
+    /// another device was invisible to it; and the due_at swap cannot see a
+    /// removal either — a private item's due_at is NULL before and after, and
+    /// removing a repeat with the default alert leaves due_at on the same
+    /// start. The stale advance landed and put the removed repeat back.
+    #[tokio::test]
+    async fn a_stale_advance_never_resurrects_a_removed_repeat() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "unrep").await;
+        let (_, list) = post_list(&state, &alice, V2, None).await;
+        let list_id = list["id"].as_i64().unwrap();
+        let advance = |as_of: &str, due: Option<&str>| serde_json::json!({
+            "schedule": SCHED, "due_at": due.map(|_| "2030-01-08T09:00:00Z").unwrap_or(""), "expect_due_at": due.unwrap_or(""),
+            "reopen_subtree": true, "recurrence_aware": true, "reads_up_to": 4, "expect_schedules_as_of": as_of,
+        });
+
+        // A reminding item whose repeat is removed with due_at left where it
+        // was, and a private one (due_at NULL throughout).
+        for due in [Some("2030-01-01T09:00:00Z"), None] {
+            let x = item(&state, &alice, list_id, None).await;
+            let mut set = serde_json::json!({ "schedule": SCHED, "reads_up_to": 4 });
+            if let Some(d) = due { set["due_at"] = Value::from(d); }
+            assert_eq!(patch_item(&state, &alice, x, set).await, StatusCode::OK);
+            let seen = stamp_of(&pool, &[x]).await;                   // this device's view: repeating
+            // Another device removes the repeat; due_at does not move.
+            assert_eq!(patch_item(&state, &alice, x, serde_json::json!({ "schedule": "" })).await, StatusCode::OK);
+
+            assert_eq!(patch_item(&state, &alice, x, advance(&seen, due)).await, StatusCode::CONFLICT, "stale advance, due {due:?}");
+            assert_eq!(schedule_of(&pool, x).await, None, "the removed repeat stays removed (due {due:?})");
+
+            // Nor does a stamp taken AFTER the removal make it land: an advance
+            // moves a series on, and there is none. Refused in the UPDATE
+            // itself, so no commit between check and write can slip one past.
+            let fresh = stamp_of(&pool, &[x]).await;
+            assert_eq!(patch_item(&state, &alice, x, advance(&fresh, due)).await, StatusCode::CONFLICT, "no series to advance, due {due:?}");
+            assert_eq!(schedule_of(&pool, x).await, None);
+
+            // POSITIVE CONTROL: repeating again, and seen as such, it advances.
+            assert_eq!(patch_item(&state, &alice, x, serde_json::json!({ "schedule": SCHED2, "reads_up_to": 4 })).await, StatusCode::OK);
+            let current = stamp_of(&pool, &[x]).await;
+            assert_eq!(patch_item(&state, &alice, x, advance(&current, due)).await, StatusCode::OK, "a fresh advance lands (due {due:?})");
+            assert_eq!(schedule_of(&pool, x).await.as_deref(), Some(SCHED));
+        }
         cleanup(&pool, &[&alice]).await;
     }
 
@@ -3078,6 +3191,239 @@ mod db_tests {
         assert!(seen < stamp_of(&pool, &[x]).await, "the schedule really moved the stamp");
         assert_eq!(patch_item(&state, &alice, x, serde_json::json!({ "is_completed": true, "recurrence_aware": true })).await, StatusCode::OK);
         assert!(is_done(&pool, x).await);
+        cleanup(&pool, &[&alice]).await;
+    }
+
+    /// The stamp is migration 071's schedule_changed_at, which moves only for
+    /// what can start or end a series: a new item, a schedule written, a tick
+    /// changed, a new parent. Against updated_at, ANY edit of a dated row
+    /// after the look refused the tick — another device fixing a typo in a
+    /// dated subtask included — and this device's own text edits had to drop
+    /// the stamp altogether (frontend api/tasks.ts trackWrite), leaving that
+    /// tick unchecked.
+    #[tokio::test]
+    async fn only_a_date_a_tick_a_move_or_a_new_item_outdates_a_stamp() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "clock").await;
+        let (_, list) = post_list(&state, &alice, V2, None).await;
+        let list_id = list["id"].as_i64().unwrap();
+        let dated_under = |q: i64| serde_json::json!({ "description": V2, "parent_id": q, "schedule": SCHED, "due_at": "2030-01-01T09:00:00Z" });
+
+        // Edits that cannot start or end a series, made after the look on
+        // another device: the tick still lands, and sweeps the dated child
+        // it was decided over.
+        let keep = [
+            ("text", edit_text()),
+            ("attachments", serde_json::json!({ "attachments": V2, "reads_up_to": 4 })),
+            ("snooze", serde_json::json!({ "snooze": SCHED2, "reads_up_to": 4 })),
+            ("derived due_at", serde_json::json!({ "due_at": "2030-01-08T09:00:00Z" })),
+        ];
+        for (what, write) in keep {
+            let q = item(&state, &alice, list_id, None).await;
+            let dated = item_with(&state, &alice, list_id, dated_under(q)).await;
+            let look = stamp_of(&pool, &[q, dated]).await;
+            let old_look = old_stamp_of(&pool, &[q, dated]).await;
+            assert_eq!(patch_item(&state, &alice, dated, write).await, StatusCode::OK, "{what}");
+            assert_eq!(patch_item(&state, &alice, q, tick(&look)).await, StatusCode::OK, "{what} after the look is no reason to refuse");
+            assert!(is_done(&pool, dated).await, "{what}: the sweep ran");
+            // A client older than 071 sends updated_at, which is never behind
+            // this clock: judged against it, it is refused no more often than
+            // before.
+            assert!(old_look >= look, "{what}: {old_look} < {look}");
+        }
+
+        // Negative controls: each of these still refuses — a current
+        // client's stamp and an older client's updated_at alike.
+        for what in ["re-dated", "reopened", "a dated item added", "a dated item moved in"] {
+            for old_client in [false, true] {
+                let q = item(&state, &alice, list_id, None).await;
+                let dated = item_with(&state, &alice, list_id, dated_under(q)).await;
+                let elsewhere = item_with(&state, &alice, list_id, serde_json::json!({ "description": V2, "schedule": SCHED })).await;
+                if what == "reopened" {
+                    assert_eq!(patch_item(&state, &alice, dated, serde_json::json!({ "is_completed": true, "recurrence_aware": true })).await, StatusCode::OK);
+                }
+                let look = if old_client { old_stamp_of(&pool, &[q, dated]).await } else { stamp_of(&pool, &[q, dated]).await };
+                match what {
+                    "re-dated" => assert_eq!(patch_item(&state, &alice, dated, serde_json::json!({ "schedule": SCHED2, "reads_up_to": 4 })).await, StatusCode::OK),
+                    "reopened" => assert_eq!(patch_item(&state, &alice, dated, serde_json::json!({ "is_completed": false, "recurrence_aware": true })).await, StatusCode::OK),
+                    "a dated item added" => {
+                        item_with(&state, &alice, list_id, serde_json::json!({ "description": V2, "parent_id": q, "schedule": SCHED })).await;
+                    }
+                    _ => {
+                        // A dated item that already existed, moved under q.
+                        let r = reorder_task(State(state.clone()), Path(elsewhere), Extension(alice.clone()), Json(ReorderTaskRequest { after_id: None, reparent: true, parent_id: Some(q) }))
+                            .await.into_response();
+                        assert_eq!(r.status(), StatusCode::OK);
+                    }
+                }
+                assert_eq!(patch_item(&state, &alice, q, tick(&look)).await, StatusCode::CONFLICT, "{what} (older client: {old_client})");
+                assert!(!is_done(&pool, q).await, "{what}: nothing completed");
+            }
+        }
+
+        // The stamp a client holds is the one the list serves, and a create
+        // answers with it too (TASK_COLUMNS).
+        let q = item(&state, &alice, list_id, None).await;
+        let created = create_list_task(State(state.clone()), Path(list_id), Extension(alice.clone()), Json(serde_json::from_value(dated_under(q)).unwrap()))
+            .await.into_response();
+        let created = json_of(created).await;
+        let dated = created["id"].as_i64().unwrap();
+        let served = json_of(list_list_tasks(State(state.clone()), Path(list_id), Extension(alice.clone())).await.into_response()).await;
+        let row = served.as_array().unwrap().iter().find(|t| t["id"].as_i64() == Some(dated)).unwrap().clone();
+        let want = stamp_of(&pool, &[dated]).await;
+        assert_eq!(row["schedule_changed_at"].as_str(), Some(want.as_str()), "{row}");
+        assert_eq!(created["schedule_changed_at"].as_str(), Some(want.as_str()), "{created}");
+        cleanup(&pool, &[&alice]).await;
+    }
+
+    /// "A dated item moved under it" must include one moved in WITH ITS
+    /// PARENT. A reparent stamps only the row that moved; the dated row under
+    /// it keeps its old stamp, older than the ticking device's look, so a
+    /// check (or a sweep) that read each row's own stamp let a stale tick end
+    /// a series it had never seen. A row counts as changed when it, or any
+    /// row between it and the item, changed after the look.
+    #[tokio::test]
+    async fn a_dated_item_moved_in_with_its_parent_is_seen_too() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "path").await;
+        let (_, list) = post_list(&state, &alice, V2, None).await;
+        let list_id = list["id"].as_i64().unwrap();
+        let move_under = |id: i64, parent: i64| {
+            let (state, alice) = (state.clone(), alice.clone());
+            async move {
+                let r = reorder_task(State(state), Path(id), Extension(alice), Json(ReorderTaskRequest { after_id: None, reparent: true, parent_id: Some(parent) }))
+                    .await.into_response();
+                assert_eq!(r.status(), StatusCode::OK);
+            }
+        };
+
+        // Elsewhere, before the look: an undated item with a dated one under it.
+        let c = item(&state, &alice, list_id, None).await;
+        let g = item_with(&state, &alice, list_id, serde_json::json!({ "description": V2, "parent_id": c, "schedule": SCHED })).await;
+        let p = item(&state, &alice, list_id, None).await;
+        let look = stamp_of(&pool, &[p]).await;                        // device A saw p, alone
+        assert!(stamp_of(&pool, &[g]).await < look, "g is older than the look: its own stamp says nothing");
+        move_under(c, p).await;                                        // device B moves c (and g) under p
+
+        assert_eq!(patch_item(&state, &alice, p, tick(&look)).await, StatusCode::CONFLICT, "A's stale tick is refused");
+        assert!(!is_done(&pool, g).await && !is_done(&pool, p).await, "and g's series is still open");
+
+        // The sweep, which runs after the check has passed, holds to the same
+        // rule on its own: driven directly, g is left open, c is swept.
+        let as_of = chrono::DateTime::parse_from_rfc3339(&look).unwrap().with_timezone(&chrono::Utc);
+        sqlx::query(crate::task_timing::COMPLETE_SUBTREE_SQL).bind(p).bind(Some(as_of)).execute(&pool).await.unwrap();
+        assert!(is_done(&pool, c).await, "the undated row that moved is swept");
+        assert!(!is_done(&pool, g).await, "the dated row that came with it is left open");
+
+        // POSITIVE CONTROL: an undated item with an undated one under it,
+        // moved in the same way, is no reason to refuse the tick.
+        let q = item(&state, &alice, list_id, None).await;
+        let d = item(&state, &alice, list_id, None).await;
+        let e = item(&state, &alice, list_id, Some(d)).await;
+        let look2 = stamp_of(&pool, &[q]).await;
+        move_under(d, q).await;
+        assert_eq!(patch_item(&state, &alice, q, tick(&look2)).await, StatusCode::OK);
+        assert!(is_done(&pool, e).await, "swept with it");
+        cleanup(&pool, &[&alice]).await;
+    }
+
+    /// The client half of finding 6 against the real server: device A read
+    /// the list, device B then made sibling C repeat, and A added a dated
+    /// child D. The stamp A sends is its READ one (taskCompletion.ts
+    /// stampOver): refused, and C's series survives. A stamp raised to cover
+    /// its own D — what the client once did for a dated create — is newer
+    /// than B's change, so the check passes and the sweep ends C's series
+    /// without a word: the case this pins.
+    #[tokio::test]
+    async fn a_dated_item_created_here_does_not_vouch_for_its_siblings() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "vouch").await;
+        let (_, list) = post_list(&state, &alice, V2, None).await;
+        let list_id = list["id"].as_i64().unwrap();
+
+        for raised in [false, true] {
+            let p = item(&state, &alice, list_id, None).await;
+            let c = item(&state, &alice, list_id, Some(p)).await;
+            let read = stamp_of(&pool, &[p, c]).await;                  // A reads
+            assert_eq!(patch_item(&state, &alice, c, serde_json::json!({ "schedule": SCHED, "reads_up_to": 4 })).await, StatusCode::OK); // B
+            let d = item_with(&state, &alice, list_id, serde_json::json!({ "description": V2, "parent_id": p, "schedule": SCHED2 })).await; // A
+            let stamp = if raised { stamp_of(&pool, &[d]).await } else { read };
+            let st = patch_item(&state, &alice, p, tick(&stamp)).await;
+            if raised {
+                assert_eq!(st, StatusCode::OK, "a stamp raised to A's own create passes the check…");
+                assert!(is_done(&pool, c).await, "…and the sweep silently ends B's series");
+            } else {
+                assert_eq!(st, StatusCode::CONFLICT, "A's read stamp is refused");
+                assert!(!is_done(&pool, c).await && !is_done(&pool, p).await, "and B's series is still open");
+            }
+        }
+        cleanup(&pool, &[&alice]).await;
+    }
+
+    /// Run `tick` for `x` while ANOTHER transaction holds `x` with `write`
+    /// applied but not committed, and commit that write only once the tick is
+    /// provably waiting on its row lock. The tick's freshness check has then
+    /// already read the row as it was before `write` (READ COMMITTED sees only
+    /// committed rows, and a plain read takes no lock), so whatever the tick
+    /// does next is decided by its UPDATE alone — which is the window the
+    /// check used to leave open. Returns the tick's status.
+    async fn tick_racing(state: &Arc<AppState>, pool: &PgPool, c: &Claims, x: i64, as_of: &str, write: &str) -> StatusCode {
+        let mut other = pool.begin().await.unwrap();
+        let (other_pid,): (i32,) = sqlx::query_as("SELECT pg_backend_pid()").fetch_one(&mut *other).await.unwrap();
+        sqlx::query(write).bind(x).execute(&mut *other).await.unwrap();
+
+        let tick_task = tokio::spawn({
+            let (state, c, as_of) = (state.clone(), c.clone(), as_of.to_string());
+            async move { patch_item(&state, &c, x, tick(&as_of)).await }
+        });
+        // Only a backend blocked by `other` can be the tick: `other` locks x
+        // and nothing else.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let (blocked,): (bool,) = sqlx::query_as("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))")
+                .bind(other_pid).fetch_one(pool).await.unwrap();
+            if blocked { break; }
+            assert!(!tick_task.is_finished(), "the tick finished without ever waiting on the other write's row lock");
+            assert!(std::time::Instant::now() < deadline, "the tick never reached the other write's row lock");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        other.commit().await.unwrap();
+        tick_task.await.unwrap()
+    }
+
+    /// The stamp check of a plain tick was an unlocked read, and the UPDATE
+    /// after it did not look at the stamp again. Another device's commit
+    /// landing between the two ("make this repeat") was invisible to both, so
+    /// the tick completed the item it had just made repeating and the series
+    /// ended — the descendant sweep is guarded row by row, but it starts
+    /// BELOW the item, so it never covered the item itself. The item's own
+    /// freshness is now part of the UPDATE's WHERE, which READ COMMITTED
+    /// re-evaluates against the newest committed row after the lock wait.
+    #[tokio::test]
+    async fn a_repeat_committed_between_the_check_and_the_write_still_refuses_the_tick() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "atomic").await;
+        let (_, list) = post_list(&state, &alice, V2, None).await;
+        let list_id = list["id"].as_i64().unwrap();
+
+        let x = item(&state, &alice, list_id, None).await;
+        let seen = stamp_of(&pool, &[x]).await;
+        let make_it_repeat = format!("UPDATE channel_tasks SET schedule = '{SCHED}' WHERE id = $1");
+        assert_eq!(
+            tick_racing(&state, &pool, &alice, x, &seen, &make_it_repeat).await,
+            StatusCode::CONFLICT,
+            "the tick is refused even though its check ran before the repeat committed",
+        );
+        assert!(!is_done(&pool, x).await, "and the series the other device just set up is still open");
+        assert_eq!(schedule_of(&pool, x).await.as_deref(), Some(SCHED));
+
+        // POSITIVE CONTROL, the same race: a write that leaves the item
+        // undated is no reason to refuse, and the tick lands after it.
+        let y = item(&state, &alice, list_id, None).await;
+        let seen_y = stamp_of(&pool, &[y]).await;
+        let edit_text = format!("UPDATE channel_tasks SET description = '{V2}x' WHERE id = $1");
+        assert_eq!(tick_racing(&state, &pool, &alice, y, &seen_y, &edit_text).await, StatusCode::OK);
+        assert!(is_done(&pool, y).await);
         cleanup(&pool, &[&alice]).await;
     }
 }

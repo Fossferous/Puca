@@ -353,6 +353,66 @@ describe('a tick’s freshness stamp (finding 8)', () => {
         }
     });
 
+    /** The same tick, stamped from migration 071's schedule clock. */
+    const stamped071 = () => ops.timing(LIST, task(5), { is_completed: true, expect_schedules_as_of: STAMP }, 'tick', [5, 6], 'schedule');
+    const untickOf = (id: number) => ({ k: 'updateTask', note: LIST, taskId: id, updates: { is_completed: false }, oid: `u${id}`, label: 'untick' }) as NoteOp;
+
+    it('on the schedule clock (071+), a queued text, due-time, snooze, slot or delete of a covered row KEEPS the stamp', () => {
+        const before: NoteOp[] = [
+            ops.editTask(LIST, task(5), 'renamed'),                      // its own text, offline
+            ops.setDue(LIST, task(5), '2030-01-01T09:00:00.000Z'),       // a due time
+            ops.timing(LIST, task(6), { snooze: null }, 'unsnooze'),     // a snooze
+            ops.timing(LIST, task(6), { due_at: '2030-01-02T09:00:00.000Z' }, 'date'),
+            ops.move(LIST, task(6), 'up'),                               // a slot
+            ops.reorder(LIST, task(6), 9),                               // a slot, dragged
+            ops.deleteTask(LIST, 6, 'kid'),                              // gone with its subtree
+        ];
+        for (const op of before) {
+            const t = last(enqueue({ ...empty, queue: [op] }, stamped071()));
+            expect(t.patch.expect_schedules_as_of, op.label).toBe(STAMP);
+            expect(t.stampClock).toBe('schedule');
+        }
+    });
+
+    it('on the schedule clock, a queued schedule, tick, reopen, new parent or new item under it still DROPS it', () => {
+        const before: NoteOp[] = [
+            tick(LIST, task(6), false),                                  // an untick below it
+            untickOf(6),                                                 // the same, as a plain update
+            ops.timing(LIST, task(5), { schedule: null }, 'date'),       // its own repeat removed
+            ops.timing(LIST, task(5), { reopen_subtree: true }, 'reopen'),
+            ops.createTask(LIST, -4, 'new kid', 5),                      // a new item under it
+            ops.reorder(LIST, task(9), null, { parentId: 6 }),           // an item moved under it
+        ];
+        for (const op of before) {
+            const t = last(enqueue({ ...empty, queue: [op] }, stamped071()));
+            expect(t.patch, op.label).toEqual({ is_completed: true });
+        }
+    });
+
+    it('offline: edit its text, then tick it — on a 071+ server the tick still replays WITH its stamp', async () => {
+        const h = harness();
+        h.setOnline(false);
+        const box = h.make();
+        await box.load();
+        await box.send(ops.editTask(LIST, task(5), 'renamed'));
+        await box.send(stamped071());
+        h.setOnline(true);
+        await box.replay();
+        const sent = h.exec.mock.calls.map(c => c[0] as NoteOp).filter(o => o.k === 'timing') as Array<Extract<NoteOp, { k: 'timing' }>>;
+        expect(sent.map(o => o.patch)).toEqual([{ is_completed: true, expect_schedules_as_of: STAMP }]);
+        // The same queue on the content clock (an older server): dropped, as before.
+        const h2 = harness();
+        h2.setOnline(false);
+        const box2 = h2.make();
+        await box2.load();
+        await box2.send(ops.editTask(LIST, task(5), 'renamed'));
+        await box2.send(stamped());
+        h2.setOnline(true);
+        await box2.replay();
+        const sent2 = h2.exec.mock.calls.map(c => c[0] as NoteOp).filter(o => o.k === 'timing') as Array<Extract<NoteOp, { k: 'timing' }>>;
+        expect(sent2.map(o => o.patch)).toEqual([{ is_completed: true }]);
+    });
+
     it('an op an older client queued (no stamp, no scope) is left exactly as it was', () => {
         const old = ops.timing(LIST, task(5), { is_completed: true }, 'tick');
         expect(old).not.toHaveProperty('scope');

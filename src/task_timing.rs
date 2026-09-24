@@ -25,8 +25,19 @@
 //! current view: a tick queued offline, or planned on a cache that missed an
 //! update, can complete an item another device has since made repeating. So
 //! an aware client also says WHEN its view is from (`expect_schedules_as_of`,
-//! the newest server `updated_at` it saw on those rows), and a dated open row
-//! changed after that is a 409 (SCHEDULES_CHANGED_SINCE_SQL).
+//! the newest `schedule_changed_at` it saw on those rows — `updated_at` from a
+//! client or server older than migration 071), and a dated open row changed
+//! after that is a 409 (SCHEDULES_CHANGED_SINCE_SQL).
+//!
+//! The clock is migration 071's `schedule_changed_at` (read as
+//! `COALESCE(schedule_changed_at, updated_at, created_at)` everywhere, so a
+//! row written with its triggers bypassed still has one). It moves for a new
+//! item, a schedule written or removed, a tick changed and a new parent —
+//! what can start or end a series — and not for text, attachments, a due
+//! time or a snooze, so neither another device's typo fix nor this device's
+//! own queued text edit outdates a stamp any more. A client older than 071
+//! sends `updated_at`, which is never behind this clock (every event that
+//! moves it is also an edit), so it is refused no more often than before.
 
 use axum::{http::StatusCode, response::IntoResponse, Json};
 use serde::Serialize;
@@ -125,27 +136,83 @@ pub const SUBTREE_HAS_SCHEDULE_SQL: &str = "WITH RECURSIVE sub AS ( \
 
 /// Has a schedule the client's decision depended on changed since the client
 /// looked? `$2` is the client's `expect_schedules_as_of`: the newest
-/// `updated_at` it had seen on these rows, echoed back exactly as the server
-/// rendered it (a server clock, never the device's). `$3` = include the
-/// subtree: a completion sweeps it, an advance only rewrites the item itself.
+/// `schedule_changed_at` it had seen on these rows (`updated_at` from an
+/// older client), echoed back exactly as the server rendered it (a server
+/// clock, never the device's). `$3` = a completion,
+/// judged on the subtree it sweeps; otherwise an advance, judged on the item
+/// alone (it rewrites that one row and sweeps nothing).
 ///
-/// It counts only OPEN rows that carry a schedule — the rows a completion
-/// could end or an advance could overwrite. Migration 066's trigger stamps
-/// updated_at on every content change (a schedule set or cleared, a reopen, a
-/// reparent) and a new row is stamped at insert, so "made repeating", "a
-/// dated child added or moved under it" and "reopened" all show. What it
-/// cannot tell apart, because the rule is sealed: a one-off date from a
-/// repeat, and a text edit from a schedule edit. Those refuse too — a tick
-/// the user sees refused is recoverable; a series that silently stopped is
-/// not noticed.
+/// A COMPLETION counts only OPEN rows that still carry a schedule — the rows
+/// it could end. Migration 071's trigger stamps schedule_changed_at when a
+/// row is inserted or its schedule, tick or parent changes, so "made
+/// repeating", "a dated child added or moved under it" and "reopened" all
+/// show, while a text, attachment, due-time or snooze edit does not (the
+/// migration's header says why none of those can start or end a series). A
+/// row whose schedule was removed does NOT count, and need not: completing an
+/// undated row ends no series. What it cannot tell apart, because the rule is
+/// sealed: a one-off date from a repeat. Re-timing a one-off dated child
+/// refuses too — a tick the user sees refused is recoverable; a series that
+/// silently stopped is not noticed.
+///
+/// An ADVANCE counts its item whatever the item holds now. It writes the
+/// whole sealed rule back from the device's copy, so the one change that
+/// filter would hide — the repeat REMOVED on another device — is exactly the
+/// one it would undo, and the due_at compare-and-swap cannot see a removal
+/// that left due_at alone (NULL on a private item; unchanged when the default
+/// alert stays on the same start). A removal after the stamp is therefore a
+/// 409 like any other change, and an advance of an item with no schedule at
+/// all is refused inside the UPDATE (item_fresh_sql).
+///
+/// A row under the item is judged by its PATH, not its own stamp alone:
+/// `path` is the newest clock of the row and every row between it and the
+/// item (the item's own clock is not on it — what happens to the item does
+/// not change what is under it). A reparent stamps only the row that moved,
+/// so a dated item carried in WITH ITS PARENT keeps a stamp older than the
+/// look, and read on its own it passed: a stale tick then swept a series its
+/// device had never seen. The path cannot be older than the look for a row
+/// whose ancestors this device saw unchanged, since the stamp is the newest
+/// clock over all of them. Its cost: a dated open row BELOW a row whose tick
+/// was changed elsewhere since the look refuses too (visible, and rare: a
+/// tick there usually swept the dated row with it, and a done row is not
+/// counted).
 pub const SCHEDULES_CHANGED_SINCE_SQL: &str = "WITH RECURSIVE sub AS ( \
-         SELECT id, 0 AS depth FROM channel_tasks WHERE id = $1 \
+         SELECT id, 0 AS depth, NULL::timestamptz AS path FROM channel_tasks WHERE id = $1 \
          UNION ALL \
-         SELECT t.id, s.depth + 1 FROM channel_tasks t \
+         SELECT t.id, s.depth + 1, GREATEST(s.path, COALESCE(t.schedule_changed_at, t.updated_at, t.created_at)) \
+         FROM channel_tasks t \
          JOIN sub s ON t.parent_id = s.id WHERE $3 AND s.depth < 10 \
      ) SELECT EXISTS (SELECT 1 FROM sub JOIN channel_tasks t ON t.id = sub.id \
-         WHERE t.schedule IS NOT NULL AND NOT t.is_completed \
-           AND COALESCE(t.updated_at, t.created_at) > $2)";
+         WHERE (NOT $3 OR (t.schedule IS NOT NULL AND NOT t.is_completed)) \
+           AND COALESCE(sub.path, t.schedule_changed_at, t.updated_at, t.created_at) > $2)";
+
+/// The ITEM's own row, judged inside the statement that writes it: true when
+/// the request carries no stamp, or the row is one the stamp still vouches
+/// for. `stamp` names the statement's placeholder for the client's
+/// `expect_schedules_as_of` (NULL = no check), `completing` the one for "this
+/// is a completion" — the same split as SCHEDULES_CHANGED_SINCE_SQL's `$3`.
+/// A completion passes an undated or already-done item (it ends no series);
+/// an advance needs the item to STILL carry a schedule, because an advance of
+/// an item with none would write a removed repeat back.
+///
+/// SCHEDULES_CHANGED_SINCE_SQL runs first and refuses most stale requests
+/// before anything is written, but it is a plain read: under READ COMMITTED
+/// it takes no lock and sees only what had committed when it ran. A change
+/// committed between it and the UPDATE — another device making the item
+/// repeat — was invisible to both, and the completion ended the series it
+/// had just set up (the descendant sweep is guarded row by row, but it starts
+/// BELOW the item). Put in the UPDATE's WHERE, the same test is atomic with
+/// the write: an UPDATE that finds its row locked waits for that writer, then
+/// re-evaluates its WHERE against the newest committed version of the row
+/// before it writes, so the item is judged on the row it actually changes.
+pub fn item_fresh_sql(stamp: &str, completing: &str) -> String {
+    format!(
+        "({stamp}::timestamptz IS NULL OR CASE WHEN {completing}::boolean \
+           THEN (schedule IS NULL OR is_completed \
+                 OR COALESCE(schedule_changed_at, updated_at, created_at) <= {stamp}::timestamptz) \
+           ELSE (schedule IS NOT NULL \
+                 AND COALESCE(schedule_changed_at, updated_at, created_at) <= {stamp}::timestamptz) END)"
+    )
+}
 
 /// The completion sweep: everything under a task (not the task itself).
 /// `$2` is the completing client's `expect_schedules_as_of`, or NULL. When
@@ -153,15 +220,23 @@ pub const SCHEDULES_CHANGED_SINCE_SQL: &str = "WITH RECURSIVE sub AS ( \
 /// refused such a completion outright, so a row that is one here changed in
 /// the moment between that check and this statement (the sweep runs after
 /// the commit). Leaving it open costs a tick; sweeping it could end a series.
+/// "Changed after it" is judged on the row's PATH, exactly as in
+/// SCHEDULES_CHANGED_SINCE_SQL, so a dated row that arrived with a moved
+/// parent is left open too; the row's own clock is read again from the row
+/// being written, so a change committed while this statement waited on its
+/// lock still counts. `paths` folds the (acyclic in practice) walk to one
+/// row per id, keeping the newest path.
 pub const COMPLETE_SUBTREE_SQL: &str = "WITH RECURSIVE sub AS ( \
-         SELECT id, 1 AS depth FROM channel_tasks WHERE parent_id = $1 \
+         SELECT id, 1 AS depth, COALESCE(schedule_changed_at, updated_at, created_at) AS path \
+         FROM channel_tasks WHERE parent_id = $1 \
          UNION ALL \
-         SELECT t.id, s.depth + 1 FROM channel_tasks t \
+         SELECT t.id, s.depth + 1, GREATEST(s.path, COALESCE(t.schedule_changed_at, t.updated_at, t.created_at)) \
+         FROM channel_tasks t \
          JOIN sub s ON t.parent_id = s.id WHERE s.depth < 10 \
-     ) \
-     UPDATE channel_tasks SET is_completed = TRUE WHERE id IN (SELECT id FROM sub) \
-       AND ($2::timestamptz IS NULL OR schedule IS NULL OR is_completed \
-            OR COALESCE(updated_at, created_at) <= $2::timestamptz)";
+     ), paths AS (SELECT id, MAX(path) AS path FROM sub GROUP BY id) \
+     UPDATE channel_tasks t SET is_completed = TRUE FROM paths WHERE t.id = paths.id \
+       AND ($2::timestamptz IS NULL OR t.schedule IS NULL OR t.is_completed \
+            OR GREATEST(paths.path, COALESCE(t.schedule_changed_at, t.updated_at, t.created_at)) <= $2::timestamptz)";
 
 /// Reopen everything under a task (not the task itself).
 pub const REOPEN_SUBTREE_SQL: &str = "WITH RECURSIVE sub AS ( \
@@ -179,10 +254,16 @@ pub const TASK_FEATURES: &[&str] = &[
     "schedule",
     "snooze",
     "updated_at",
+    // Migration 071: every task carries `schedule_changed_at`, the clock the
+    // freshness check compares (SCHEDULES_CHANGED_SINCE_SQL). Advertised,
+    // not gated on: a client reads it off each row, and sends `updated_at`
+    // where a row has none (an older server), which that server compares.
+    "schedule_changed_at",
     "expect_due_at",
     "recurrence_aware",
-    // A completion or advance may carry the newest `updated_at` the client
-    // saw on the rows it decided about; a dated row changed since is a 409
+    // A completion or advance may carry the newest `schedule_changed_at`
+    // (`updated_at` before 071) the client saw on the rows it decided
+    // about; a dated row changed since is a 409
     // (SCHEDULES_CHANGED_SINCE_SQL). Advertised, not gated on: an older
     // server ignores the field, which is exactly the behaviour before it.
     "expect_schedules_as_of",
@@ -378,7 +459,7 @@ mod db_tests {
         let mut tx = pool.begin().await.unwrap();
         sqlx::query("SET LOCAL session_replication_role = replica").execute(&mut *tx).await.unwrap();
         if let Some(t) = task {
-            sqlx::query("UPDATE channel_tasks SET updated_at = NOW() - INTERVAL '1 day' WHERE id = $1")
+            sqlx::query("UPDATE channel_tasks SET updated_at = NOW() - INTERVAL '1 day', schedule_changed_at = NOW() - INTERVAL '1 day' WHERE id = $1")
                 .bind(t)
                 .execute(&mut *tx)
                 .await
@@ -396,6 +477,79 @@ mod db_tests {
 
     fn fresh(t: Option<chrono::DateTime<chrono::Utc>>) -> bool {
         t.map(|t| chrono::Utc::now() - t < chrono::Duration::hours(1)).unwrap_or(false)
+    }
+
+    /// Migration 071's clock for one row.
+    async fn clock(pool: &PgPool, id: i64) -> Option<chrono::DateTime<chrono::Utc>> {
+        let (c,): (Option<chrono::DateTime<chrono::Utc>>,) = sqlx::query_as("SELECT schedule_changed_at FROM channel_tasks WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("read task clock");
+        c
+    }
+
+    /// schedule_changed_at (migration 071) is the freshness stamp's clock, and
+    /// it moves for exactly the events that can start or end a series: a new
+    /// row, a schedule written or removed, a tick changed, a new parent.
+    /// Everything else — text, attachments, a due time, a snooze, a reorder,
+    /// a writer setting it by hand — leaves it where it was, even where
+    /// updated_at moves.
+    #[tokio::test]
+    async fn the_schedule_clock_moves_for_a_new_item_a_date_a_tick_or_a_move_only() {
+        let Some(pool) = pool().await else { return };
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let (me, claims) = user(&pool, "tt_c").await;
+        let list = new_list(&pool, me).await;
+        let (_, a) = add_list_task(&state, &claims, list, json!({ "description": "a" })).await;
+        let (_, b) = add_list_task(&state, &claims, list, json!({ "description": "b" })).await;
+        let (a, b) = (a["id"].as_i64().unwrap(), b["id"].as_i64().unwrap());
+        assert!(fresh(clock(&pool, a).await), "an insert stamps it");
+
+        // Not a series event: the clock stays put, whatever updated_at does.
+        age(&pool, Some(a), None).await;
+        let aged = clock(&pool, a).await;
+        let desc = "{\"v\":2,\"t\":\"self\",\"ct\":\"ZWRpdA==\"}";
+        let quiet: [(&str, Value); 4] = [
+            ("text", json!({ "description": desc })),
+            ("attachments", json!({ "attachments": desc })),
+            ("a due time", json!({ "due_at": "2030-01-01T09:00:00Z" })),
+            ("a snooze", json!({ "snooze": SNZ })),
+        ];
+        for (what, write) in quiet {
+            assert_eq!(patch(&state, &claims, a, write).await, StatusCode::OK, "{what}");
+            assert_eq!(clock(&pool, a).await, aged, "{what} left the clock alone");
+        }
+        assert!(fresh(row(&pool, a).await.4), "while updated_at DID move (the text edit): the two clocks differ");
+        let r = reorder_task(State(state.clone()), Path(a), Extension(claims.clone()), Json(ReorderTaskRequest { after_id: Some(b), reparent: false, parent_id: None }))
+            .await
+            .into_response();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(clock(&pool, a).await, aged, "a reorder left it alone");
+        sqlx::query("UPDATE channel_tasks SET schedule_changed_at = NOW() + INTERVAL '1 day' WHERE id = $1")
+            .bind(a).execute(&pool).await.unwrap();
+        assert_eq!(clock(&pool, a).await, aged, "a writer cannot set it by hand");
+
+        // Each series event moves it (positive controls, on the same row).
+        let events: [(&str, Value); 4] = [
+            ("a schedule set", json!({ "schedule": S1 })),
+            ("a schedule removed", json!({ "schedule": "" })),
+            ("a tick", json!({ "is_completed": true })),
+            ("an untick", json!({ "is_completed": false })),
+        ];
+        for (what, write) in events {
+            age(&pool, Some(a), None).await;
+            assert_eq!(patch(&state, &claims, a, write).await, StatusCode::OK, "{what}");
+            assert!(fresh(clock(&pool, a).await), "{what} moved the clock");
+        }
+        age(&pool, Some(a), None).await;
+        let r = reorder_task(State(state.clone()), Path(a), Extension(claims.clone()), Json(ReorderTaskRequest { after_id: None, reparent: true, parent_id: Some(b) }))
+            .await
+            .into_response();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(fresh(clock(&pool, a).await), "a new parent moved the clock");
+
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(me as i32).execute(&pool).await;
     }
 
     #[tokio::test]
