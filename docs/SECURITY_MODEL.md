@@ -1242,10 +1242,24 @@ the device minted, stayed up and kept sending and receiving. It now revokes the
 device's sessions and kills every socket authenticated on any of them
 (`revoke_device`, [`src/device_handlers.rs`](../src/device_handlers.rs) — the
 pairing `logout_session` uses). The operator-gated migration password reset
-(`ALLOW_MIGRATION_PASSWORD_RESET`) now does what `change_password` does: bumps
-`token_version`, revokes every session and every enrolled device, and hangs up
-every socket — before, it installed new SRP material and left every
-outstanding token and device valid — and it refuses a deleted account.
+(`ALLOW_MIGRATION_PASSWORD_RESET`) now does what *Sign out on all devices*
+(`logout`) does: bumps `token_version`, revokes every session and every
+enrolled device, and hangs up every socket — before, it installed new SRP
+material and left every outstanding token and device valid — and it refuses a
+deleted account. That path proves no identity at all, so it cannot leave
+anything standing.
+
+**A password change does NOT un-enrol devices — by design.** `change_password`,
+the recovery-code reset and the e-mail reset bump `token_version`, so every
+outstanding JWT dies and every browser and app asks for the new password. An
+enrolled My Devices machine is different: it holds its own signing key and
+mints a fresh token with it (`/devices/token`, which reads the current
+`token_version`), so it stays signed in and remote access keeps working —
+un-enrolling it would lock the owner out of every computer they reach remotely
+until they could stand in front of it. The consequence is stated where the
+password is changed: a lost or stolen *enrolled* machine is cut off by *Sign
+out on all devices* (or by revoking it under My Devices), not by a new
+password.
 
 **"Show online status" holds against file offers (0.9.5).** A file offered to
 someone hiding their presence used to be delivered silently when they were

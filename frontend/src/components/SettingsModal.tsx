@@ -1405,7 +1405,11 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                 <div className="settings-card">
                                     <p className="settings-hint">
                                         Changing your password keeps your message history and does not
-                                        change your recovery code. You'll stay logged in on this device.
+                                        change your recovery code. You'll stay logged in on this device;
+                                        everywhere else, Púca asks for the new password. Computers and
+                                        phones enrolled in My Devices are the exception: they stay
+                                        enrolled, so remote access keeps working. If one of them is lost
+                                        or stolen, also use <strong>Sign out on all devices</strong> below.
                                     </p>
                                     <form className="password-change-form" onSubmit={handleChangePassword} autoComplete="off">
                                         <input

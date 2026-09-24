@@ -119,7 +119,13 @@ one-line summary; this file is the full story. Versions follow
   HTTP 200 at the bundle's address, so a download host serving other bytes
   there read as a successful ship while every phone refused the update. They
   now compare the served file's SHA-256 with the bundle, as the installer and
-  APK uploads already did.
+  APK uploads already did — and the status too: the right bytes answered with
+  a 404 or 500 (which the phone's downloader refuses) no longer pass.
+- **Changing your password says what it does not do.** A new password signs
+  you out of Púca everywhere else, but computers and phones enrolled in My
+  Devices stay enrolled so that remote access keeps working. The password
+  settings now say so, and point to *Sign out on all devices* for a lost or
+  stolen machine; the security notes no longer claim the opposite.
 - **Developers: the Devices phone walk fails when the This-device panel does
   not render.** `frontend/e2e/devices-mobile-walk.mjs` logged page errors
   without counting them and measured the This-device tab without checking it

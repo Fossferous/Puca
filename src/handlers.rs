@@ -1077,11 +1077,14 @@ pub async fn reset_password(
                     .into_response();
             }
 
-            // A credential rewrite is a revocation, exactly as in `logout` above
-            // and every other salt+verifier rewrite in the tree: bump
-            // token_version (every outstanding JWT dies), revoke every session
-            // row and every enrolled device (or the devices keep minting fresh
-            // account tokens), in ONE transaction so no half applies. This
+            // This credential rewrite is a full revocation, exactly as in
+            // `logout` above: bump token_version (every outstanding JWT dies),
+            // revoke every session row and every enrolled device (or the
+            // devices keep minting fresh account tokens), in ONE transaction so
+            // no half applies. The owner's own rewrites (change_password, the
+            // recovery and e-mail resets) deliberately keep enrolled devices —
+            // docs/SECURITY_MODEL.md, "A password change does NOT un-enrol
+            // devices". This
             // path proves no identity at all, so whoever did NOT run it — the
             // owner holding a stolen-token attacker at bay, or the owner whose
             // account was just taken — must be signed out everywhere too.
