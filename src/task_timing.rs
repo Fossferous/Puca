@@ -147,6 +147,28 @@ pub const SCHEDULES_CHANGED_SINCE_SQL: &str = "WITH RECURSIVE sub AS ( \
          WHERE t.schedule IS NOT NULL AND NOT t.is_completed \
            AND COALESCE(t.updated_at, t.created_at) > $2)";
 
+/// The ITEM's own row, judged inside the statement that writes it: true when
+/// the request carries no stamp, or the row is one the stamp still vouches
+/// for. `stamp` names the statement's placeholder for the client's
+/// `expect_schedules_as_of` (NULL = no check).
+///
+/// SCHEDULES_CHANGED_SINCE_SQL runs first and refuses most stale requests
+/// before anything is written, but it is a plain read: under READ COMMITTED
+/// it takes no lock and sees only what had committed when it ran. A change
+/// committed between it and the UPDATE — another device making the item
+/// repeat — was invisible to both, and the completion ended the series it
+/// had just set up (the descendant sweep is guarded row by row, but it starts
+/// BELOW the item). Put in the UPDATE's WHERE, the same test is atomic with
+/// the write: an UPDATE that finds its row locked waits for that writer, then
+/// re-evaluates its WHERE against the newest committed version of the row
+/// before it writes, so the item is judged on the row it actually changes.
+pub fn item_fresh_sql(stamp: &str) -> String {
+    format!(
+        "({stamp}::timestamptz IS NULL OR schedule IS NULL OR is_completed \
+          OR COALESCE(updated_at, created_at) <= {stamp}::timestamptz)"
+    )
+}
+
 /// The completion sweep: everything under a task (not the task itself).
 /// `$2` is the completing client's `expect_schedules_as_of`, or NULL. When
 /// present, a dated row changed after it is left alone: the check above

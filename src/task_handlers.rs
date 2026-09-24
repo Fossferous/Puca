@@ -1034,7 +1034,11 @@ pub async fn update_task(
     // one — and the series would silently stop reminding. When it says how
     // fresh its view is, hold it to that. A completion is judged on the
     // subtree it sweeps; anything else (an advance) on the item alone. Read
-    // in the transaction, fail CLOSED like the guards above.
+    // in the transaction, fail CLOSED like the guards above. This read takes
+    // no lock, so it refuses what had changed by the time it ran and nothing
+    // later: the item's own row is judged again inside the UPDATE below
+    // (task_timing::item_fresh_sql), and every row under it inside the
+    // sweep's (COMPLETE_SUBTREE_SQL).
     if let Some(as_of) = schedules_as_of {
         match sqlx::query_as::<_, (bool,)>(crate::task_timing::SCHEDULES_CHANGED_SINCE_SQL)
             .bind(task_id)
@@ -1062,14 +1066,19 @@ pub async fn update_task(
         None => None,
     };
 
-    let result = sqlx::query(
+    // $14: the stamp again, now for the item's OWN row and atomically with
+    // the write (task_timing::item_fresh_sql says why the check above is
+    // not enough for it).
+    let update_sql = format!(
         "UPDATE channel_tasks SET is_completed = COALESCE($1, is_completed), description = COALESCE($2, description), \
          attachments = CASE WHEN $3 THEN $4 ELSE attachments END, \
          due_at = CASE WHEN $5 THEN $6 ELSE due_at END, \
          schedule = CASE WHEN $8 THEN $9 ELSE schedule END, \
          snooze = CASE WHEN $10 THEN $11 ELSE snooze END \
-         WHERE id = $7 AND (NOT $12 OR due_at IS NOT DISTINCT FROM $13)"
-    )
+         WHERE id = $7 AND (NOT $12 OR due_at IS NOT DISTINCT FROM $13) AND {}",
+        crate::task_timing::item_fresh_sql("$14"),
+    );
+    let result = sqlx::query(&update_sql)
     .bind(payload.is_completed)
     .bind(payload.description.as_deref().map(str::trim))
     .bind(set_attachments)
@@ -1083,10 +1092,41 @@ pub async fn update_task(
     .bind(new_snooze)
     .bind(expect_due.is_some())
     .bind(expect_due.flatten())
+    .bind(schedules_as_of)
     .execute(&mut *tx)
     .await;
 
     match result {
+        // A stamped request wrote nothing. Say which guard refused it, from
+        // the row as it is now (still inside the transaction, which rolls
+        // back on drop): gone is 404 — the item was deleted in the meantime,
+        // never "changed" — a stale stamp is the schedule refusal, and a
+        // fresh stamp with a moved due_at is the compare-and-swap's. A row
+        // that passes both NOW failed one of them at the moment of the write
+        // and has changed again since: nothing was written, so it is a
+        // refusal all the same, never a 200.
+        Ok(r) if r.rows_affected() == 0 && schedules_as_of.is_some() => {
+            let why = format!(
+                "SELECT {} FROM channel_tasks WHERE id = $1",
+                crate::task_timing::item_fresh_sql("$2"),
+            );
+            return match sqlx::query_as::<_, (bool,)>(&why)
+                .bind(task_id)
+                .bind(schedules_as_of)
+                .fetch_optional(&mut *tx)
+                .await
+            {
+                Ok(None) => (StatusCode::NOT_FOUND, "Task not found").into_response(),
+                Ok(Some((true,))) if expect_due.is_some() => {
+                    (StatusCode::CONFLICT, crate::task_timing::DUE_CHANGED_MESSAGE).into_response()
+                }
+                Ok(Some(_)) => (StatusCode::CONFLICT, crate::task_timing::SCHEDULE_CHANGED_MESSAGE).into_response(),
+                Err(e) => {
+                    tracing::error!("Failed to read a refused task update: {:?}", e);
+                    (StatusCode::INTERNAL_SERVER_ERROR, "Failed to update task").into_response()
+                }
+            };
+        }
         // The compare-and-swap lost: someone moved due_at first. Nothing was
         // written (the transaction rolls back on drop).
         Ok(r) if r.rows_affected() == 0 && expect_due.is_some() => {
@@ -3078,6 +3118,73 @@ mod db_tests {
         assert!(seen < stamp_of(&pool, &[x]).await, "the schedule really moved the stamp");
         assert_eq!(patch_item(&state, &alice, x, serde_json::json!({ "is_completed": true, "recurrence_aware": true })).await, StatusCode::OK);
         assert!(is_done(&pool, x).await);
+        cleanup(&pool, &[&alice]).await;
+    }
+
+    /// Run `tick` for `x` while ANOTHER transaction holds `x` with `write`
+    /// applied but not committed, and commit that write only once the tick is
+    /// provably waiting on its row lock. The tick's freshness check has then
+    /// already read the row as it was before `write` (READ COMMITTED sees only
+    /// committed rows, and a plain read takes no lock), so whatever the tick
+    /// does next is decided by its UPDATE alone — which is the window the
+    /// check used to leave open. Returns the tick's status.
+    async fn tick_racing(state: &Arc<AppState>, pool: &PgPool, c: &Claims, x: i64, as_of: &str, write: &str) -> StatusCode {
+        let mut other = pool.begin().await.unwrap();
+        let (other_pid,): (i32,) = sqlx::query_as("SELECT pg_backend_pid()").fetch_one(&mut *other).await.unwrap();
+        sqlx::query(write).bind(x).execute(&mut *other).await.unwrap();
+
+        let tick_task = tokio::spawn({
+            let (state, c, as_of) = (state.clone(), c.clone(), as_of.to_string());
+            async move { patch_item(&state, &c, x, tick(&as_of)).await }
+        });
+        // Only a backend blocked by `other` can be the tick: `other` locks x
+        // and nothing else.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let (blocked,): (bool,) = sqlx::query_as("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))")
+                .bind(other_pid).fetch_one(pool).await.unwrap();
+            if blocked { break; }
+            assert!(!tick_task.is_finished(), "the tick finished without ever waiting on the other write's row lock");
+            assert!(std::time::Instant::now() < deadline, "the tick never reached the other write's row lock");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        other.commit().await.unwrap();
+        tick_task.await.unwrap()
+    }
+
+    /// The stamp check of a plain tick was an unlocked read, and the UPDATE
+    /// after it did not look at the stamp again. Another device's commit
+    /// landing between the two ("make this repeat") was invisible to both, so
+    /// the tick completed the item it had just made repeating and the series
+    /// ended — the descendant sweep is guarded row by row, but it starts
+    /// BELOW the item, so it never covered the item itself. The item's own
+    /// freshness is now part of the UPDATE's WHERE, which READ COMMITTED
+    /// re-evaluates against the newest committed row after the lock wait.
+    #[tokio::test]
+    async fn a_repeat_committed_between_the_check_and_the_write_still_refuses_the_tick() {
+        let Some((state, pool)) = setup().await else { return };
+        let alice = user(&pool, "atomic").await;
+        let (_, list) = post_list(&state, &alice, V2, None).await;
+        let list_id = list["id"].as_i64().unwrap();
+
+        let x = item(&state, &alice, list_id, None).await;
+        let seen = stamp_of(&pool, &[x]).await;
+        let make_it_repeat = format!("UPDATE channel_tasks SET schedule = '{SCHED}' WHERE id = $1");
+        assert_eq!(
+            tick_racing(&state, &pool, &alice, x, &seen, &make_it_repeat).await,
+            StatusCode::CONFLICT,
+            "the tick is refused even though its check ran before the repeat committed",
+        );
+        assert!(!is_done(&pool, x).await, "and the series the other device just set up is still open");
+        assert_eq!(schedule_of(&pool, x).await.as_deref(), Some(SCHED));
+
+        // POSITIVE CONTROL, the same race: a write that leaves the item
+        // undated is no reason to refuse, and the tick lands after it.
+        let y = item(&state, &alice, list_id, None).await;
+        let seen_y = stamp_of(&pool, &[y]).await;
+        let edit_text = format!("UPDATE channel_tasks SET description = '{V2}x' WHERE id = $1");
+        assert_eq!(tick_racing(&state, &pool, &alice, y, &seen_y, &edit_text).await, StatusCode::OK);
+        assert!(is_done(&pool, y).await);
         cleanup(&pool, &[&alice]).await;
     }
 }
