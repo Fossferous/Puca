@@ -17,6 +17,15 @@ one-line summary; this file is the full story. Versions follow
   same holds when a display change moves the session onto a different
   screen, including when the screen you were watching sleeps or is
   unplugged and another one takes its place.
+- **Switching to All Displays no longer blacks out the screen you were
+  on.** Zooming back out to All Displays in remote control, or picking it
+  from the screen list, could show the screen you had just been watching
+  as a black rectangle beside the others, if nothing on it was moving,
+  until something there happened to redraw. It now keeps the picture you were already looking at. If that
+  picture cannot be used (just after a display change, say), the screen is
+  prompted to redraw within about a second, the same way a switch to a
+  still single screen is, instead of staying black until something on it
+  changes.
 - **"Stay signed in" now ends when it says it does.** A session renewed in
   its last month used to get a fresh 30 days, so a year-long sign-in could
   last until about day 395 (and an ordinary 30-day one until about day 31).
