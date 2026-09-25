@@ -317,22 +317,53 @@ needs no picker).
   clock accumulate, up to MAX_BACKLOG_S before a reset) is A/V error the
   anchor cannot see, because the worker only ever sees render times:
   `e2e/clip-av-emulation.mjs` measured audio 106-215 ms late with the
-  lead at 79-121 ms and the error tracking it packet for packet. Since
-  2026-09-21 nativeCapture reports each packet's lead with the wall time
-  it renders at (`onLead`), replayBuffer forwards changes (`audioLead`),
-  and seal() subtracts the lead in effect for each entry (`placeAudio`,
-  monotonic-clamped). The MIC leg of the mix reaches the graph live, so
-  it is delayed by the same lead (a DelayNode driven from the same
-  reports) and the one subtraction is right for the whole mix; without
-  that the mic would have been pulled early by the lead (caught in
-  review). After a lead CHANGE the mic converges on its new delay over
-  the size of the change (a linear ramp; the worker applies the change as
-  a step at the packet it was reported for), so the mic sits off by up to
-  that change for that long: 10-40 ms after an underrun re-prime. A drift
-  reset (rare: MAX_BACKLOG_S of clock drift, or a suspended context) drops
-  the backlog, so the clip's system audio has a gap of that size there and
+  lead at 79-121 ms and the error tracking it packet for packet. So
+  nativeCapture reports the lead (`onLead`), replayBuffer forwards it
+  (`audioLead`), and seal() subtracts it (`placeAudio`).
+
+  **The lead belongs to a SEGMENT, not a packet (2026-09-24).** The
+  first version (2026-09-21) reported every packet's `playhead - now` and
+  subtracted each audio entry's own figure, clamping an entry that landed
+  on its predecessor to 1 µs past it. But between two primes the playhead
+  advances by exactly each packet's duration, so render-minus-capture is
+  the same for the whole segment; what `playhead - now` adds from packet
+  to packet is IPC bunching (a busy main thread) and currentTime's steps.
+  That noise reached the clip as a different shift per audio frame, and
+  in an MP4 a sample lasts until the next one's timestamp: a field clip
+  came back with choppy audio, and `e2e/clip-av-emulation.mjs` found
+  ~60% of a clip's frames written too short or too long (0-48 ms for a
+  frame holding 20), with the mic delay re-ramped ~50 times a second (a
+  pitch wobble). Now:
+  - nativeCapture reports a segment's START — at a prime, an underrun
+    re-prime (from where the old content ended, i.e. where the underrun's
+    silence began) or a drift reset (from the cut) — and after that only
+    GROWTH of 5 ms or more. The segment's lead is the most seen: a packet
+    that arrived late shows less, never more.
+  - The worker reads an entry's segment lead as it stood 1 s after the
+    entry (`LEAD_LOOKAHEAD_MS`), since the lead is learnt over the packets
+    that bunch up behind a prime.
+  - `placeAudio` keeps each entry at its predecessor's offset (the
+    encoder's own spacing) while the target is within half a frame;
+    entries that would overlap what is placed by more are DROPPED whole
+    (an underrun's rendered silence, first), and a target further later is
+    a real hole (a drift reset's discarded backlog), kept as one. So a
+    clip's audio is one continuous timeline, and each entry sits within
+    half a frame (~11 ms) of its segment's lead.
+  - The mic delay moves only on those reports: a handful per segment.
+
+  The MIC leg of the mix reaches the graph live, so it is delayed by the
+  same lead (a DelayNode driven from the same reports) and the one
+  subtraction is right for the whole mix; without that the mic would
+  have been pulled early by the lead (caught in review). After a lead
+  CHANGE the mic converges on its new delay over the size of the change
+  (a linear ramp), so the mic sits off by up to that change for that
+  long: 10-40 ms after an underrun re-prime. A drift reset (rare:
+  MAX_BACKLOG_S of clock drift, or a suspended context) drops the
+  backlog, so the clip's system audio has a hole of that size there and
   the mic converges across it. Before the first report the lead is 0, so
-  system audio retried after a mic-only stretch is not applied backwards.
+  system audio retried after a mic-only stretch is not applied
+  backwards; the mic stretched by its delay's ramp at that seam is
+  dropped like an underrun's silence.
   Residual, not corrected: the WASAPI period and IPC
   on the Rust side and the mixing hop, minus the video stamp's lag behind
   the present (it is taken after acquire and readback, and the async MFT
@@ -539,6 +570,7 @@ Off per server until the owner turns it on.** spike numbers: `frontend/e2e/spike
 | A/V sync | flash/beep pairing, −42 ms → `AUDIO_OFFSET_US = 40_000` | 2026-08-18 (spike S4) |
 | native A/V anchor's clock assumptions | `e2e/clip-audio-clock-headless.mjs` (muted, never connected to an output): AudioData clock vs worker `performance.now` drift 0.0 ms over 60 s, median 1.4 ms above the min; AAC encoder output ts = input ts, decoded content 5-11 ms later than its ts (varies by run) | 2026-09-21, headless Edge on the owner's desktop |
 | native A/V sync end to end, EMULATED | `e2e/clip-av-emulation.mjs` (muted headless Edge): the real armNative -> nativeCapture -> worker -> seal -> upload against an emulated Rust side delivering a real H.264 flash stream and 10 ms WASAPI-shaped PCM on one clock; the sealed clip is decrypted, demuxed and decoded; a second flash+burst 300 ms apart in the same clip is the oracle's control (seen as 300.0 ms) | 2026-09-21, before the lead fix: audio 106 and 215 ms LATE in two runs, the error tracking the loopback context's scheduling lead (79-121 ms) packet for packet; after `onLead`/`placeAudio` and `NATIVE_AUDIO_OFFSET_US = -30 ms`: 21.5 to 36.4 ms late over four runs (the last: 24.1 and 21.5, the mic leg 5.8 and 9.4) with the lead at 50-90 ms (the modelled Rust side contributes ~15-25 ms of that) |
+| native clip audio is ONE continuous timeline, EMULATED | the same harness since 2026-09-24: a quiet continuous tone under the PCM (a gap in silence is silence, so the sync checks alone passed a chopped clip), a third run with the main thread stalled 30 ms every 200 ms, and a probe on the mic DelayNode. Every audio packet after the first must have a container duration equal to what it decodes to (misfits allowed only at a re-prime); the mic delay may ramp on fewer than 1 in 20 packets. `AV_BROWSER=chromium` runs it on Playwright's Chromium (Opus audio, video decoded by ffmpeg) | 2026-09-25, Linux Chromium: per-segment lead 0 misfits in 547/548/546 packets, 2-5 mic ramps over ~1360 packets; the per-packet code it replaced 322-365 misfits (worst 48 ms) and 663-724 ramps in the same runs. A/V: system audio 32.6-51.3 ms late and mic 19-43 ms with the fix, 32.6-52.6 and 9.3-61.7 ms before it (unchanged within run-to-run spread; Chromium on Linux, not the Edge calibration above) |
 | native A/V sync end to end, REAL | flash + click through the real app (the only way to add the real WASAPI and DXGI latencies to the number above) | — |
 | pointer moves on repeated native frames | old vs new agent side by side on the same screen and mouse | 2026-09-21: NOT exercised: the screen presented every slot (754 new pictures, 0 repeats in 30 s); needs a genuinely still screen |
 | 10-min ring memory plateau | ~500 MB renderer working set, flat through eviction | 2026-08-18 (spike S6) |

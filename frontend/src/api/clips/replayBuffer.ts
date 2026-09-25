@@ -151,10 +151,10 @@ interface Session {
     micSrc: MediaStreamAudioSourceNode | null;
     /** Native sessions: the mic leg is delayed by the loopback player's
      *  scheduling lead (leadReporter drives it), so the WHOLE mix is late
-     *  by the lead and the worker's per-sample subtraction of it
-     *  (replayWorker.ts placeAudio) is right for the mic too. Without it
-     *  the mic, which reaches the mix live, would be pulled EARLY by the
-     *  lead (the 2026-09-21 review). */
+     *  by the lead and the worker's subtraction of it (replayWorker.ts
+     *  placeAudio) is right for the mic too. Without it the mic, which
+     *  reaches the mix live, would be pulled EARLY by the lead (the
+     *  2026-09-21 review). */
     micDelay: DelayNode | null;
     unMic: (() => void) | null;
     resumeTimer: ReturnType<typeof setInterval> | null;
@@ -166,14 +166,10 @@ interface Session {
     previewSeq: number;
     /** The native A/V anchor last written to puca.log (logAvAnchor). */
     avLoggedShiftMs?: number;
-    /** The loopback scheduling lead last forwarded to the worker (leadReporter). */
-    leadSentMs?: number;
-    leadSentAt?: number;
-    /** The last lead reported: replayed to a consumer that appears after it
-     *  (the mic delay, the armed worker), so neither starts a second behind. */
+    /** The loopback's CURRENT SEGMENT: where it started and its lead so
+     *  far. Replayed, as a segment start, to a consumer that appears after
+     *  it (the mic delay, the armed worker), so neither starts behind. */
     lastLead?: { renderAtMs: number; leadMs: number };
-    /** The worker has its arm message (it drops audioLead messages before it). */
-    armed?: boolean;
     /** The lead last written to puca.log (logAvAnchor). */
     avLoggedLeadMs?: number | null;
     /** Native (no-picker) session teardown - stops the Rust-side capture
@@ -375,8 +371,7 @@ export async function armNative(): Promise<void> {
         const transfer: Transferable[] = audioReadable ? [audioReadable as unknown as Transferable] : [];
         const msg: ToWorker = { t: 'arm', cfg, video: null, audio: audioReadable };
         worker.postMessage(msg, transfer);
-        s.armed = true;
-        if (s.lastLead) applyLead(s, s.lastLead.renderAtMs, s.lastLead.leadMs);
+        if (s.lastLead) applyLead(s, s.lastLead.renderAtMs, s.lastLead.leadMs, true);
         // Flush the lead-in captured while audio was initialising, IN ORDER,
         // after the arm message (postMessage is FIFO per sender; the worker
         // additionally buffers chunks that interleave with arm()'s own awaits
@@ -464,21 +459,16 @@ export async function retrySystemAudio(): Promise<void> {
 }
 
 /** Forward the loopback context's scheduling lead (nativeCapture.ts) to the
- *  worker: every change of 2 ms or more, and at least once a second, so the
- *  worker's lookup has a point near every sample without a message per
- *  10 ms packet. */
-function leadReporter(s: Session): (renderAtMs: number, leadMs: number) => void {
-    return (renderAtMs, leadMs) => {
+ *  worker and the mic delay. nativeCapture reports once per SEGMENT (a
+ *  prime, an underrun re-prime, a drift reset) and then only when that
+ *  segment's lead grows by 5 ms or more, so every report is forwarded:
+ *  there is no per-packet stream left to thin out, and dropping a segment
+ *  start would put the worker's lookup on the wrong segment. */
+function leadReporter(s: Session): (renderAtMs: number, leadMs: number, newSegment: boolean) => void {
+    return (renderAtMs, leadMs, newSegment) => {
         if (session !== s) return;
-        s.lastLead = { renderAtMs, leadMs };
-        // Throttled only once both consumers exist (the mic delay is built
-        // after the audio leg, the worker armed after that): a report that
-        // reached neither must not silence the next one for a second.
-        const consumers = !!s.micDelay && s.armed === true;
-        const now = performance.now();
-        if (consumers && s.leadSentMs !== undefined && Math.abs(leadMs - s.leadSentMs) < 2 && s.leadSentAt !== undefined && now - s.leadSentAt < 1000) return;
-        if (consumers) { s.leadSentMs = leadMs; s.leadSentAt = now; }
-        applyLead(s, renderAtMs, leadMs);
+        s.lastLead = newSegment || !s.lastLead ? { renderAtMs, leadMs } : { renderAtMs: s.lastLead.renderAtMs, leadMs };
+        applyLead(s, renderAtMs, leadMs, newSegment);
     };
 }
 
@@ -486,10 +476,11 @@ function leadReporter(s: Session): (renderAtMs: number, leadMs: number) => void 
  *  so the mix is uniformly late by it: a LINEAR ramp over the size of the
  *  change (20 ms at least), during which the delay line reads at 0x or 2x,
  *  a brief pitch shift rather than a click (an exponential approach read at
- *  9x on a drift reset). The worker applies the change as a step at the
- *  packet it was reported for, so the mic sits off by up to the change for
- *  that long: 10-40 ms after an underrun re-prime (docs/CLIPS.md). */
-function applyLead(s: Session, renderAtMs: number, leadMs: number): void {
+ *  9x on a drift reset). Rare by construction — a segment start and the
+ *  few steps its lead is learnt in — which it has to be: fed a report per
+ *  packet (2026-09-21 to 2026-09-24) it ramped ~50 times a second and the
+ *  mic in every native clip wobbled in pitch. */
+function applyLead(s: Session, renderAtMs: number, leadMs: number, newSegment: boolean): void {
     if (s.micDelay && s.ctx) {
         const p = s.micDelay.delayTime;
         const target = Math.min(MIC_DELAY_MAX_S, Math.max(0, leadMs / 1000));
@@ -499,7 +490,7 @@ function applyLead(s: Session, renderAtMs: number, leadMs: number): void {
         p.setValueAtTime(cur, now);
         p.linearRampToValueAtTime(target, now + Math.max(0.02, Math.abs(target - cur)));
     }
-    const msg: ToWorker = { t: 'audioLead', renderAtMs, leadMs };
+    const msg: ToWorker = { t: 'audioLead', renderAtMs, leadMs, newSegment };
     try { s.worker.postMessage(msg); } catch { /* worker gone */ }
 }
 
@@ -510,7 +501,7 @@ function ensureMicDelay(s: Session, ctx: AudioContext, micGain: GainNode): Delay
         s.micDelay = ctx.createDelay(MIC_DELAY_MAX_S);
         s.micDelay.delayTime.value = 0;
         s.micDelay.connect(micGain);
-        if (s.lastLead) applyLead(s, s.lastLead.renderAtMs, s.lastLead.leadMs);
+        if (s.lastLead) applyLead(s, s.lastLead.renderAtMs, s.lastLead.leadMs, true);
     }
     return s.micDelay;
 }

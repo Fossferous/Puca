@@ -67,6 +67,12 @@ async function subject() {
     return await import('../api/clips/nativeCapture');
 }
 
+/** One 10 ms stereo f32 packet of silence, as clip_desktop_audio.rs emits it. */
+function packet(generation: number) {
+    const pcm = new Float32Array(480 * 2);
+    return { data: btoa(String.fromCharCode(...new Uint8Array(pcm.buffer))), sample_rate: 48000, channels: 2, bits_per_sample: 32, silent: false, generation };
+}
+
 describe('the clip-audio invoke wire', () => {
     test('start sends EXACTLY the args the Rust command reads, and parses the reply', async () => {
         invokeMock.mockResolvedValue({ device_name: 'Arctis 7', generation: 3 });
@@ -109,39 +115,78 @@ describe('the clip-audio invoke wire', () => {
     });
 
     /** The scheduling lead (playhead - currentTime) IS the A/V error the clip
-     *  worker subtracts, so what is reported must be exactly what start()
-     *  was given: JITTER_S at a prime, growing by each packet's duration
-     *  while the context's clock stands still (the loopback device running
-     *  ahead of it), back to JITTER_S after an underrun, and never past
-     *  MAX_BACKLOG_S (the drift reset). */
-    test('reports each packet\'s scheduling lead with the wall time it renders at', async () => {
+     *  worker subtracts, and it belongs to a SEGMENT, not a packet: between
+     *  two primes every packet is scheduled where the last one ended, so
+     *  each one's render-minus-capture time is the same. Reported: a segment
+     *  start (JITTER_S at a prime, with the render time it governs from),
+     *  then only growth of 5 ms or more; a fresh segment after an underrun
+     *  and after the drift reset (never past MAX_BACKLOG_S). */
+    test('reports the scheduling lead per segment, with the render time it governs from', async () => {
         invokeMock.mockResolvedValue({ device_name: 'Speakers', generation: 9 });
-        const leads: { renderAt: number; leadMs: number }[] = [];
+        const leads: { renderAt: number; leadMs: number; newSegment: boolean }[] = [];
         const { startNativeSystemAudioTrack } = await subject();
-        const h = await startNativeSystemAudioTrack(undefined, null, (renderAt, leadMs) => leads.push({ renderAt, leadMs }));
+        const h = await startNativeSystemAudioTrack(undefined, null, (renderAt, leadMs, newSegment) => leads.push({ renderAt, leadMs, newSegment }));
         const ctx = StubAudioContext.last!;
-        const pcm = new Float32Array(480 * 2); // one 10 ms stereo packet
-        const packet = () => ({ data: btoa(String.fromCharCode(...new Uint8Array(pcm.buffer))), sample_rate: 48000, channels: 2, bits_per_sample: 32, silent: false, generation: 9 });
+        const now = () => performance.timeOrigin + performance.now();
         ctx.currentTime = 0;
-        fire('clip-audio-data', packet()); // primes at now + 50 ms
-        fire('clip-audio-data', packet()); // appended: 60 ms ahead of a clock that did not move
-        ctx.currentTime = 1;               // the clock jumped past the playhead: an underrun
-        fire('clip-audio-data', packet()); // re-primed at now + 50 ms
-        expect(leads.map(l => Math.round(l.leadMs))).toEqual([50, 60, 50]);
+        fire('clip-audio-data', packet(9)); // primes at now + 50 ms: a segment from now
+        fire('clip-audio-data', packet(9)); // appended: 60 ms ahead of a clock that did not move: growth
+        expect(leads.map(l => [Math.round(l.leadMs), l.newSegment])).toEqual([[50, true], [60, false]]);
+        expect(Math.abs(leads[0].renderAt - now())).toBeLessThan(500);         // the first segment starts now
+        expect(Math.abs(leads[1].renderAt - 60 - now())).toBeLessThan(500);    // growth: the packet's render time
+        ctx.currentTime = 1;               // the clock jumped past the playhead (0.07 s): an underrun
+        fire('clip-audio-data', packet(9)); // re-primed at now + 50 ms
+        expect(leads[2].newSegment).toBe(true);
+        expect(Math.round(leads[2].leadMs)).toBe(50);
+        // The new segment governs from where the old content ENDED (0.07 s,
+        // 930 ms before this clock), which is where the underrun's silence began.
+        expect(Math.abs(leads[2].renderAt - (now() - 930))).toBeLessThan(500);
+        expect(leads[2].renderAt).toBeLessThan(now() - 400);
         expect(StubAudioContext.stopped, 'an underrun re-prime stops nothing (nothing is pending)').toBe(0);
-        // Epoch time, so a worker with its own time origin can look it up.
-        const now = performance.timeOrigin + performance.now();
-        for (const l of leads) expect(Math.abs(l.renderAt - l.leadMs - now)).toBeLessThan(500);
         // The drift reset: 60 more packets on a still clock push the playhead
         // 600 ms ahead; past MAX_BACKLOG_S (500) it re-primes at 50.
-        for (let i = 0; i < 60; i++) fire('clip-audio-data', packet());
-        const drift = leads.slice(3).map(l => Math.round(l.leadMs));
-        expect(Math.max(...drift)).toBeLessThanOrEqual(500);
-        expect(Math.max(...drift)).toBeGreaterThanOrEqual(490); // it really climbed to the cap before resetting
-        expect(drift[drift.length - 1]).toBeLessThanOrEqual(250); // and came back down (50 + a few 10 ms packets)
+        for (let i = 0; i < 60; i++) fire('clip-audio-data', packet(9));
+        const drift = leads.slice(3);
+        const grown = drift.filter(l => !l.newSegment).map(l => Math.round(l.leadMs));
+        expect(Math.max(...grown)).toBeLessThanOrEqual(500);
+        expect(Math.max(...grown)).toBeGreaterThanOrEqual(490); // it really climbed to the cap before resetting
+        const reset = drift.find(l => l.newSegment)!;
+        expect(Math.round(reset.leadMs)).toBe(50);
+        expect(Math.abs(reset.renderAt - now()), 'a reset cuts the backlog off NOW').toBeLessThan(500);
         // The reset DROPPED the backlog: every source still scheduled ahead was
         // stopped, not left to play over the re-primed packets.
         expect(StubAudioContext.stopped).toBeGreaterThanOrEqual(40);
+        await h.stop();
+    });
+
+    /** THE FIELD CASE (2026-09-24, a "decimated" clip): packets arriving
+     *  unevenly — bunched behind a busy main thread, and read against a
+     *  currentTime that moves in steps — make `playhead - now` swing by tens
+     *  of ms from packet to packet while nothing about the segment changed.
+     *  Reported per packet, every swing became a different shift for each
+     *  audio frame of the clip and a ramp of the mic delay. Only growth of
+     *  5 ms or more may be reported, and never a fall within a segment. */
+    test('uneven delivery does not become a report per packet', async () => {
+        invokeMock.mockResolvedValue({ device_name: 'Speakers', generation: 11 });
+        const leads: { leadMs: number; newSegment: boolean }[] = [];
+        const { startNativeSystemAudioTrack } = await subject();
+        const h = await startNativeSystemAudioTrack(undefined, null, (_r, leadMs, newSegment) => leads.push({ leadMs, newSegment }));
+        const ctx = StubAudioContext.last!;
+        // 400 packets (4 s): delivered in bunches of 1-4 behind stalls, the
+        // clock read in 10 ms steps, never falling behind the playhead.
+        let t = 0, sent = 0, k = 0;
+        const bunch = [1, 3, 2, 4, 1, 2];
+        while (sent < 400) {
+            const n = bunch[k++ % bunch.length];
+            ctx.currentTime = Math.floor((sent * 0.01 + 0.004 * (k % 5)) / 0.01) * 0.01;
+            for (let i = 0; i < n && sent < 400; i++, sent++) fire('clip-audio-data', packet(11));
+            t = ctx.currentTime;
+        }
+        expect(t).toBeGreaterThan(3.9);
+        expect(leads.length, `reports: ${leads.map(l => Math.round(l.leadMs)).join(', ')}`).toBeLessThanOrEqual(6);
+        expect(leads[0].newSegment).toBe(true);
+        expect(leads.filter(l => l.newSegment).length, 'no underrun, so one segment').toBe(1);
+        for (let i = 1; i < leads.length; i++) expect(leads[i].leadMs - leads[i - 1].leadMs).toBeGreaterThanOrEqual(5);
         await h.stop();
     });
 });

@@ -36,13 +36,15 @@ export interface ArmConfig {
 export type ToWorker =
     | { t: 'arm'; cfg: ArmConfig; video: ReadableStream<VideoFrame> | null; audio: ReadableStream<AudioData> | null }
     | { t: 'rebindAudio'; audio: ReadableStream<AudioData> | null }
-    /** Native captures: the loopback context's scheduling lead changed. The
-     *  packet scheduled now renders at `renderAtMs` (EPOCH ms:
-     *  performance.timeOrigin + performance.now on the main thread; the
-     *  worker's own performance.now has a different origin), `leadMs`
-     *  after it was captured. The worker subtracts the lead in effect for
-     *  each audio sample at seal (replayWorker.ts leadUsAt). */
-    | { t: 'audioLead'; renderAtMs: number; leadMs: number }
+    /** Native captures: the loopback context's scheduling lead, per
+     *  SEGMENT (nativeCapture.ts onLead). `newSegment`: the loopback
+     *  (re-)primed and `leadMs` governs render times from `renderAtMs` on;
+     *  otherwise the current segment's lead grew to `leadMs`, seen at a
+     *  packet rendering at `renderAtMs`. Render times are EPOCH ms
+     *  (performance.timeOrigin + performance.now on the main thread; the
+     *  worker's own performance.now has a different origin). The worker
+     *  subtracts each segment's lead at seal (replayWorker.ts leadUsAt). */
+    | { t: 'audioLead'; renderAtMs: number; leadMs: number; newSegment: boolean }
     /** One already-encoded Annex-B access unit from clip_capture.rs, in
      *  capture order. `bytes` is TRANSFERRED. `codec`/`codedWidth`/`codedHeight`
      *  are present only on the chunk that carries a fresh SPS (in practice the

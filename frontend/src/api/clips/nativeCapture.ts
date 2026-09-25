@@ -176,6 +176,8 @@ interface ClipAudioDataEvent {
 const JITTER_S = 0.05;
 const MAX_BACKLOG_S = 0.5;
 const RESUME_POLL_MS = 500;
+/** The smallest growth of a segment's lead worth reporting (see onLead). */
+const LEAD_STEP_MS = 5;
 
 export interface NativeAudioHandle {
     track: MediaStreamTrack;
@@ -217,13 +219,16 @@ export async function preferredLoopbackDeviceName(): Promise<string | null> {
 export async function startNativeSystemAudioTrack(
     onError?: (message: string) => void,
     deviceName?: string | null,
-    // Called per packet with the EPOCH time (performance.timeOrigin +
-    // performance.now, ms) its first sample will RENDER at and the scheduling
-    // lead that puts it there. Epoch, not performance.now: the worker that
-    // consumes this has its own time origin (its creation), so a plain
-    // performance.now would be off by however long the app had been open.
-    // The clip worker subtracts that lead: see the comment at src.start.
-    onLead?: (renderAtMs: number, leadMs: number) => void,
+    // The scheduling lead, PER SEGMENT, with an EPOCH time
+    // (performance.timeOrigin + performance.now, ms) on the render timeline.
+    // Epoch, not performance.now: the worker that consumes this has its own
+    // time origin (its creation), so a plain performance.now would be off by
+    // however long the app had been open. `newSegment` true: a (re-)prime
+    // or a drift reset, with the render time the new lead governs from.
+    // false: the current segment's lead grew by LEAD_STEP_MS or more, at the
+    // render time of the packet that showed it. The clip worker subtracts
+    // the lead and the mic leg is delayed by it: see the comment at src.start.
+    onLead?: (renderAtMs: number, leadMs: number, newSegment: boolean) => void,
 ): Promise<NativeAudioHandle> {
     if (!isTauri()) throw new Error('native capture is desktop only');
     const { invoke } = await import('@tauri-apps/api/core');
@@ -243,6 +248,8 @@ export async function startNativeSystemAudioTrack(
     const dest = ctx.createMediaStreamDestination();
     dest.channelCount = 2;
     let playhead = 0;
+    // The current segment's lead as last reported (see src.start).
+    let segLeadMs = 0;
     // Sources scheduled ahead of the clock. A drift reset DROPS the backlog
     // they hold: they are stopped rather than left to play over the
     // re-primed packets (a summed overlap of up to MAX_BACKLOG_S), so the
@@ -276,10 +283,17 @@ export async function startNativeSystemAudioTrack(
             src.buffer = buf;
             src.connect(dest);
             const now = ctx.currentTime;
-            if (playhead < now + 0.01) playhead = now + JITTER_S; // prime / recover from underrun
-            else if (playhead > now + MAX_BACKLOG_S) { // drift reset: the backlog is dropped
+            // Context time a NEW segment's lead governs from, when this packet
+            // starts one: where the old content ended (an underrun's silence
+            // began there), or now (a reset stops the backlog now).
+            let segmentFrom: number | null = null;
+            if (playhead < now + 0.01) { // prime / recover from underrun
+                segmentFrom = playhead > 0 ? playhead : now;
+                playhead = now + JITTER_S;
+            } else if (playhead > now + MAX_BACKLOG_S) { // drift reset: the backlog is dropped
                 for (const p of pending) { try { p.stop(); } catch { /* already ended */ } }
                 pending.clear();
+                segmentFrom = now;
                 playhead = now + JITTER_S;
             }
             pending.add(src);
@@ -292,11 +306,31 @@ export async function startNativeSystemAudioTrack(
             // clip pipeline downstream sees only render times, so without
             // this figure a clip's system audio lands late by the lead — 100
             // to 200 ms, and drifting within one session, measured 2026-09-21
-            // by e2e/clip-av-emulation.mjs. Reported with the wall time the
-            // packet renders at, which is what the worker can look up an
-            // audio sample by (replayWorker.ts leadUsAt).
+            // by e2e/clip-av-emulation.mjs.
+            //
+            // ONE LEAD PER SEGMENT, NOT PER PACKET. Between two primes the
+            // playhead advances by exactly each packet's duration, so render
+            // time minus capture time is the same for every packet in the
+            // segment. What `playhead - now` adds packet to packet is noise:
+            // IPC delivery (packets bunch up behind a busy main thread) and
+            // currentTime's own steps. Reported per packet (2026-09-21 to
+            // 2026-09-24), that noise reached the clip as a different shift
+            // for every audio frame — gaps and frames squeezed to nothing,
+            // ~60% of a clip's frames under emulation — and as a mic-delay
+            // ramp (pitch-shifted mic) ~50 times a second: the "decimated"
+            // field clip. The segment's lead is the MOST seen (packets that
+            // arrived late show less, never more), so after its start only
+            // growth is reported, which is also how a slowly drifting clock
+            // is followed.
             const leadMs = (playhead - now) * 1000;
-            onLead?.(performance.timeOrigin + performance.now() + leadMs, leadMs);
+            const epochNow = performance.timeOrigin + performance.now();
+            if (segmentFrom !== null) {
+                segLeadMs = leadMs;
+                onLead?.(epochNow + (segmentFrom - now) * 1000, leadMs, true);
+            } else if (leadMs >= segLeadMs + LEAD_STEP_MS) {
+                segLeadMs = leadMs;
+                onLead?.(epochNow + leadMs, leadMs, false);
+            }
             playhead += buf.duration;
         } catch (err) {
             console.warn('[nativeCapture] Dropped malformed desktop-audio chunk:', err);

@@ -51,6 +51,11 @@ const MAX_ENCODE_QUEUE = 4;
 /** If GOP sealing (crypto) falls this far behind, something is wrong — bail. */
 const MAX_PENDING_CLOSES = 4;
 const STATUS_INTERVAL_MS = 1000;
+/** How far past a native audio sample's render time its segment's lead is
+ *  read (leadUsAt): long enough to take in the packets that bunch up after
+ *  an underrun (tens to a few hundred ms), short enough that a lead
+ *  following a slowly drifting clock is applied at most this early. */
+const LEAD_LOOKAHEAD_MS = 1000;
 
 interface OpenGop {
     startUs: number;
@@ -140,13 +145,16 @@ export class Ring {
     vOriginMs = Infinity; aOriginMs = Infinity;
     vOriginSince: number | null = null; aOriginSince: number | null = null;
     lastNativeTsUs = -Infinity;
-    /** Native captures: the loopback context's scheduling lead over time
-     *  (main-thread `audioLead` messages; nativeCapture.ts explains the
-     *  lead). Each entry: the EPOCH time a packet renders at and the lead
-     *  it was scheduled with (epoch, because this worker's performance.now
-     *  starts at its own creation, not the page's). `leadUsAt` looks a sample up by its render
-     *  time. Bounded; the oldest half is dropped past the cap. */
-    audioLeads: { renderAtMs: number; leadUs: number }[] = [];
+    /** Native captures: the loopback context's scheduling lead, per
+     *  SEGMENT (main-thread `audioLead` messages; nativeCapture.ts explains
+     *  why a lead belongs to a segment, not to a packet). Entries are EPOCH
+     *  render times (this worker's performance.now starts at its own
+     *  creation, not the page's), sorted: a `start` entry opens a segment
+     *  at the render time its lead governs from, and the entries after it
+     *  are the points where that segment's lead grew (never shrank).
+     *  `leadUsAt` looks a sample up by its render time. Bounded; the
+     *  oldest half is dropped past the cap. */
+    audioLeads: { renderAtMs: number; leadUs: number; start: boolean }[] = [];
     /** Seals muxing right now. Eviction waits for them: it splices `gops`
      *  and zero-fills what it drops, which would pull units out from under
      *  a mux still reading them. The next close (or the last seal to
@@ -496,29 +504,43 @@ export class Ring {
         }
     }
 
-    noteAudioLead(m: { renderAtMs: number; leadMs: number }): void {
+    noteAudioLead(m: { renderAtMs: number; leadMs: number; newSegment: boolean }): void {
         // Kept whether or not the ring is configured yet: the report replayed
         // right after the arm message lands while arm() is still awaiting,
         // and placeAudio decides (a non-native session reports none).
-        // INVARIANT: sorted by renderAtMs (leadUsAt binary-searches it). The
-        // one thing that breaks it is nativeCapture's drift reset, which
-        // moves the playhead BACK by up to MAX_BACKLOG_S: the packets it
-        // had scheduled past the new playhead are now overlapped by the new
-        // schedule, so their entries are dropped and the new lead governs
-        // those render times.
-        while (this.audioLeads.length && this.audioLeads[this.audioLeads.length - 1].renderAtMs >= m.renderAtMs) this.audioLeads.pop();
-        this.audioLeads.push({ renderAtMs: m.renderAtMs, leadUs: Math.round(m.leadMs * 1000) });
-        if (this.audioLeads.length > 8192) this.audioLeads.splice(0, 4096);
+        const leads = this.audioLeads;
+        const leadUs = Math.round(m.leadMs * 1000);
+        const last = leads[leads.length - 1];
+        if (!m.newSegment && last) {
+            // Growth within the current segment: a point from which the
+            // bigger lead is known. Never a decrease, never before the
+            // segment's own start.
+            if (leadUs > last.leadUs) leads.push({ renderAtMs: Math.max(m.renderAtMs, last.renderAtMs), leadUs, start: false });
+        } else {
+            // INVARIANT: sorted by renderAtMs (leadUsAt binary-searches it).
+            // A drift reset starts its segment where the backlog was cut
+            // off, BEFORE render times already recorded for the packets it
+            // stopped: those entries go, and the new lead governs from here.
+            while (leads.length && leads[leads.length - 1].renderAtMs >= m.renderAtMs) leads.pop();
+            leads.push({ renderAtMs: m.renderAtMs, leadUs, start: true });
+        }
+        if (leads.length > 8192) leads.splice(0, 4096);
     }
 
     /** The scheduling lead a native audio entry was rendered with, in µs:
-     *  the last lead reported for a packet rendering at or before this
-     *  entry's render time (its raw timestamp mapped through the audio
-     *  clock's origin). Before the first report, 0: nothing with a lead had
-     *  rendered yet (a mic-only stretch before system audio was retried, or
-     *  the mic alone before the first packet), and the lookup key runs a
-     *  transport hop LATE, never early, so a sample of the first packet
-     *  itself still finds its report. */
+     *  its SEGMENT's (the last segment start at or before the entry's
+     *  render time — its raw timestamp mapped through the audio clock's
+     *  origin), as that lead stood LEAD_LOOKAHEAD_MS later. A segment's
+     *  lead is learnt over its first packets (the burst that follows an
+     *  underrun is where it shows), and every sample of the segment was
+     *  rendered with the same one, so the early samples take what was
+     *  learnt after them rather than each taking its own moment's
+     *  estimate: that is what kept the per-packet noise out. Before the
+     *  first segment, 0: nothing with a lead had rendered yet (a mic-only
+     *  stretch before system audio was retried, or the mic alone before
+     *  the first packet), and the lookup key runs a transport hop LATE,
+     *  never early, so a sample of the first packet itself still finds its
+     *  segment. */
     private leadUsAt(rawTsUs: number): number {
         const leads = this.audioLeads;
         if (leads.length === 0 || !Number.isFinite(this.aOriginMs)) return 0;
@@ -528,20 +550,55 @@ export class Ring {
             const mid = (lo + hi) >> 1;
             if (leads[mid].renderAtMs <= renderMs) { found = mid; lo = mid + 1; } else hi = mid - 1;
         }
-        return found < 0 ? 0 : leads[found].leadUs;
+        if (found < 0) return 0;
+        // Forward through this segment's growth, up to the lookahead.
+        let at = found;
+        while (at + 1 < leads.length && !leads[at + 1].start && leads[at + 1].renderAtMs <= renderMs + LEAD_LOOKAHEAD_MS) at++;
+        return leads[at].leadUs;
     }
 
     /** Native audio entries onto the video timeline: the clip's one shift,
-     *  minus each entry's own scheduling lead, kept monotonic (a lead that
-     *  grew between two packets would move the later one before the
-     *  earlier; mediabunny refuses a decreasing audio timestamp). `last`
-     *  carries the clamp across units. */
-    private placeAudio(entries: ChunkIndexEntry[], shiftUs: number, last: { tsUs: number }): ChunkIndexEntry[] {
+     *  minus each entry's segment lead (leadUsAt). Returns one slot per
+     *  entry, `null` for an entry dropped from the clip.
+     *
+     *  CONTINUITY FIRST. Every entry decodes to a fixed length (1024
+     *  samples of AAC), and in the MP4 a sample lasts until the next
+     *  one's timestamp, so an entry placed off its neighbour's end is
+     *  one a player must cut or pad. The first version placed each entry
+     *  at its own target and clamped it to 1 µs past the previous one:
+     *  with a per-packet lead that cut ~60% of a native clip's audio
+     *  frames short or long (the "decimated" field clip, 2026-09-24). So
+     *  an entry keeps the offset its predecessor was placed with — the
+     *  encoder's own spacing, exactly — while its target is within half
+     *  an entry of that. A target further EARLIER is where a re-prime's
+     *  larger lead begins: the entries overlapping what is already placed
+     *  (the underrun's rendered silence, first) are dropped whole, each
+     *  letting the next take its slot, until the target is reached. A
+     *  target further LATER is a real hole (a drift reset threw a backlog
+     *  away) and is kept as one. `last` carries this across units. */
+    private placeAudio(entries: ChunkIndexEntry[], shiftUs: number, last: { offsetUs: number | null; endUs: number }): (ChunkIndexEntry | null)[] {
         if (!this.cfg.nativeVideo) return shiftUs === 0 ? entries : entries.map(a => ({ ...a, tsUs: a.tsUs + shiftUs }));
         return entries.map(a => {
-            let tsUs = a.tsUs + shiftUs - this.leadUsAt(a.tsUs);
-            if (tsUs <= last.tsUs) tsUs = last.tsUs + 1;
-            last.tsUs = tsUs;
+            const targetOffset = shiftUs - this.leadUsAt(a.tsUs);
+            let offset = last.offsetUs ?? targetOffset;
+            const off = targetOffset - offset;
+            if (off >= a.durUs / 2) {
+                offset = targetOffset;
+            } else if (off <= -a.durUs / 2) {
+                if (a.tsUs + targetOffset < last.endUs - a.durUs / 2) {
+                    last.offsetUs = offset - a.durUs;
+                    return null;
+                }
+                // Earlier, but a gap in the entries' own timeline leaves room.
+                offset = targetOffset;
+            }
+            // Never into what is already placed: mediabunny refuses a
+            // decreasing timestamp, and an overlap is a cut. The encoder's
+            // clock does not run backwards, but nothing here relies on it.
+            if (a.tsUs + offset < last.endUs) offset = last.endUs - a.tsUs;
+            const tsUs = a.tsUs + offset;
+            last.offsetUs = offset;
+            last.endUs = tsUs + a.durUs;
             return { ...a, tsUs };
         });
     }
@@ -658,7 +715,7 @@ export class Ring {
         await output.start();
 
         let firstV = true, firstA = true;
-        const lastAudio = { tsUs: -Infinity };
+        const lastAudio: { offsetUs: number | null; endUs: number } = { offsetUs: null, endUs: -Infinity };
         for (const g of chosen) {
             // A disarm mid-seal zero-fills the ring and this seal's tail.
             if (!this.running) throw new Error('the buffer was disarmed');
@@ -672,15 +729,17 @@ export class Ring {
                     firstV = false;
                 }
                 // Native entries are on the audio clock until here: one shift
-                // per clip, minus each one's scheduling lead (placeAudio).
-                const audio = this.placeAudio(g.audio, shiftUs, lastAudio);
-                const audioEntries = g === chosen[0] ? trimLeadingAudio(audio, win.startUs) : audio;
+                // per clip, minus each one's segment lead (placeAudio).
+                const placed = this.placeAudio(g.audio, shiftUs, lastAudio);
+                const kept = placed.filter((a): a is ChunkIndexEntry => a !== null);
+                const audioEntries = g === chosen[0] ? trimLeadingAudio(kept, win.startUs) : kept;
                 // audio bytes follow the video bytes; walk the FULL index to keep offsets right
                 let aoff = off;
                 const keep = new Set(audioEntries);
-                for (const a of audio) {
-                    const bytes = plain.slice(aoff, aoff + a.len); aoff += a.len;
-                    if (!asrc || !keep.has(a)) continue;
+                for (let i = 0; i < g.audio.length; i++) {
+                    const a = placed[i];
+                    const bytes = plain.slice(aoff, aoff + g.audio[i].len); aoff += g.audio[i].len;
+                    if (!asrc || !a || !keep.has(a)) continue;
                     const ts = Math.max(0, (a.tsUs - win.startUs) / 1e6);
                     const pkt = new mb.EncodedPacket(bytes, 'key', ts, a.durUs / 1e6);
                     await asrc.add(pkt, firstA ? { decoderConfig: this.aDecoderConfig! } : undefined);
