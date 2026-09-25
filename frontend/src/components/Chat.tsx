@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, type FormEvent } from 'react';
+import { noteRender } from '../api/healthLog';
 import { createPortal } from 'react-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { wsClient, type ServerMessage } from '../api/websocket';
@@ -571,6 +572,7 @@ interface ChatProps {
 }
 
 export function Chat({ onLogout }: ChatProps) {
+    noteRender('chat');
     const queryClient = useQueryClient();
 
     // Data Queries

@@ -33,7 +33,7 @@ import type { EncodeSample } from './shareHealth';
 import { deriveSfuMediaKey } from '../e2ee';
 import { registerScreenReceiver } from './receiverLatency';
 import { loadSettings } from '../../components/settingsStore';
-import { receiverHints, summariseRtcStats, summariseRtcStatsDelta, type RtcLatencySummary } from './statsSummary';
+import { receiverHints, summariseInboundAudio, summariseRtcStats, summariseRtcStatsDelta, type InboundAudioHealth, type RtcLatencySummary } from './statsSummary';
 import type { MediaE2eeReason, MediaE2eeStatus, RemoteStreamCallback } from './types';
 
 interface SfuTokenResponse {
@@ -991,6 +991,40 @@ export class SfuManager {
      *   peer-unencrypted    — they are publishing in the clear
      *   encrypted           — working
      */
+    /** Last stats per remote audio receiver, so each health read is a window. */
+    private audioHealthPrev = new Map<string, RTCStatsReport>();
+
+    /**
+     * How every incoming voice is holding up since the previous call
+     * (healthLog.ts reads this once a minute). Keyed by user id; a receiver
+     * gone since the last read drops its baseline.
+     */
+    async inboundAudioHealth(): Promise<Array<InboundAudioHealth & { userId: string }>> {
+        const room = this.room;
+        if (!room) { this.audioHealthPrev.clear(); return []; }
+        const out: Array<InboundAudioHealth & { userId: string }> = [];
+        const seen = new Set<string>();
+        for (const p of room.remoteParticipants.values()) {
+            const uid = String(userIdFromIdentity(p.identity));
+            for (const pub of p.trackPublications.values()) {
+                if (pub.kind !== Track.Kind.Audio) continue;
+                const receiver = pub.track?.receiver;
+                if (!receiver) continue;
+                try {
+                    const stats = await receiver.getStats();
+                    const key = pub.trackSid;
+                    seen.add(key);
+                    for (const h of summariseInboundAudio(this.audioHealthPrev.get(key) ?? null, stats)) {
+                        out.push({ ...h, userId: pub.source === Track.Source.ScreenShareAudio ? `${uid}:share` : uid });
+                    }
+                    this.audioHealthPrev.set(key, stats);
+                } catch { /* receiver detached mid-iteration */ }
+            }
+        }
+        for (const k of [...this.audioHealthPrev.keys()]) if (!seen.has(k)) this.audioHealthPrev.delete(k);
+        return out;
+    }
+
     async voiceDiagnostics(windowMs?: number): Promise<Record<string, unknown>> {
         const room = this.room;
         // Windowed reads (see meshDiagnostics): first pass now, second after

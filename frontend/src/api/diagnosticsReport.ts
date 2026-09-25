@@ -27,12 +27,31 @@ import { h264SendProfilesLine } from './rtc/h264Profiles';
  *  long enough to be stable, short enough that nobody gives up waiting. */
 const WINDOW_MS = 4000;
 
+/** How long any one step may take before the report gives up on it and says
+ *  so. The windowed stats sections need WINDOW_MS plus the getStats calls on
+ *  either side; nothing else should take more than a moment. */
+export const STEP_TIMEOUT_MS = WINDOW_MS + 8000;
+/** Each WebCodecs question, and the clipboard write. */
+export const QUICK_TIMEOUT_MS = 3000;
+
+/** Rejects if `p` has not settled within `ms`. A step that never answers must
+ *  cost the report that step, never the whole report: on 2026-09-25 a
+ *  clipboard permission prompt nobody could see held `writeText` open, and
+ *  the menu said "Measuring for a few seconds…" for good. */
+export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error(`${label} gave no answer within ${Math.round(ms / 1000)} s`)), ms);
+        p.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
+    });
+}
+
 /** `undefined` rather than a throw: a diagnostics report that fails because one
  *  of its sections failed is worth less than a partial one, and the section
- *  that broke is itself a fact worth printing. */
-async function attempt<T>(label: string, fn: () => Promise<T>): Promise<T | string> {
+ *  that broke is itself a fact worth printing. A section that HANGS is the
+ *  same kind of fact, so it is bounded too. */
+async function attempt<T>(label: string, fn: () => Promise<T>, ms = STEP_TIMEOUT_MS): Promise<T | string> {
     try {
-        return await fn();
+        return await withTimeout(fn(), ms, label);
     } catch (e) {
         return `(${label} unavailable: ${e instanceof Error ? e.message : String(e)})`;
     }
@@ -137,10 +156,10 @@ export async function encodingSupportLines(): Promise<string[]> {
     ]) {
         for (const [w, h] of [[1920, 1080], [2560, 1440]]) {
             try {
-                const r = await VE.isConfigSupported({
+                const r = await withTimeout(VE.isConfigSupported({
                     codec, width: w, height: h, bitrate: 4_500_000, framerate: 30,
                     hardwareAcceleration: 'prefer-hardware',
-                });
+                }), QUICK_TIMEOUT_MS, 'the encoder query');
                 out.push(`encoding  ${label.padEnd(11)} ${w}x${h}  hardware=${r.supported === true}`);
             } catch (e) {
                 out.push(`encoding  ${label} ${w}x${h}  (asked and refused: ${e instanceof Error ? e.message : String(e)})`);
@@ -199,7 +218,9 @@ export async function copyDiagnostics(): Promise<string> {
         return `Could not gather diagnostics: ${e instanceof Error ? e.message : String(e)}`;
     }
     try {
-        await navigator.clipboard.writeText(text);
+        // Bounded: a permission prompt the person cannot see (it can open
+        // behind the window) holds writeText open indefinitely.
+        await withTimeout(navigator.clipboard.writeText(text), QUICK_TIMEOUT_MS, 'the clipboard');
         return `Diagnostics copied (${Math.round(text.length / 1024)} KB). Paste them into the chat.`;
     } catch {
         // A clipboard write can be refused (no focus, no permission). The

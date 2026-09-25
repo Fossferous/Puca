@@ -8,7 +8,7 @@ import { MediaManager } from './media';
 import { getActiveIdentity, deriveMediaKey, mediaReadyTag, deriveMediaSessionKey, generateControlEphemeral } from '../e2ee';
 import { resolvePinnedIdentityKey } from '../keyVerification';
 import { registerScreenReceiver } from './receiverLatency';
-import { receiverHints, summariseRtcStats, summariseRtcStatsDelta, type RtcLatencySummary } from './statsSummary';
+import { receiverHints, summariseInboundAudio, summariseRtcStats, summariseRtcStatsDelta, type InboundAudioHealth, type RtcLatencySummary } from './statsSummary';
 import { negotiatedH264Profile } from './h264Profiles';
 import type { EncodeSample } from './shareHealth';
 import { AnnouncedVideoGate } from './announcedVideo';
@@ -1680,6 +1680,26 @@ export class WebRTCManager {
      * window (two reads) instead of since the track started — use it while
      * it feels slow: `await __pucaMeshDiag(5000)`.
      */
+    /** Last stats per peer, so each health read is a window. */
+    private audioHealthPrev = new Map<UserId, RTCStatsReport>();
+
+    /** How every incoming voice is holding up since the previous call
+     *  (healthLog.ts, once a minute). Same shape as the SFU's. */
+    async inboundAudioHealth(): Promise<Array<InboundAudioHealth & { userId: string }>> {
+        const out: Array<InboundAudioHealth & { userId: string }> = [];
+        for (const [userId, peer] of this.peers) {
+            try {
+                const stats = await peer.connection.getStats();
+                for (const h of summariseInboundAudio(this.audioHealthPrev.get(userId) ?? null, stats)) {
+                    out.push({ ...h, userId: String(userId) });
+                }
+                this.audioHealthPrev.set(userId, stats);
+            } catch { /* closed mid-iteration */ }
+        }
+        for (const k of [...this.audioHealthPrev.keys()]) if (!this.peers.has(k)) this.audioHealthPrev.delete(k);
+        return out;
+    }
+
     async meshDiagnostics(windowMs?: number): Promise<Record<string, unknown>[]> {
         const out: Record<string, unknown>[] = [];
         const before = new Map<UserId, RTCStatsReport>();

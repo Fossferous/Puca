@@ -324,3 +324,62 @@ export function formatLatencyLine(s: RtcLatencySummary): string {
     }
     return parts.join(' | ');
 }
+
+/**
+ * How ONE incoming voice is holding up, over a window (two reads of the same
+ * receiver's stats). What "everyone's voice lags on my end, nobody else's"
+ * looks like from inside WebRTC:
+ *   - jbMs: average time each sample waited in the jitter buffer. A buffer
+ *     that grows over an evening and stays grown is lag that nothing on the
+ *     network explains.
+ *   - concealedPct: share of samples that were made up to cover a gap (the
+ *     robotic/stutter sound). Anything above ~1% is audible.
+ *   - accelPct / decelPct: samples removed to catch up / inserted to wait —
+ *     NetEq time-stretching. Sustained, it is the pitch wobble.
+ * Values are null when the window has no new samples to divide by.
+ */
+export interface InboundAudioHealth {
+    id: string;
+    jbMs: number | null;
+    concealedPct: number | null;
+    accelPct: number | null;
+    decelPct: number | null;
+    lost: number | null;
+}
+
+const pct = (part: number | null, whole: number | null): number | null =>
+    part === null || whole === null || whole <= 0 ? null : Math.round((1000 * part) / whole) / 10;
+const delta = (a: Row, b: Row | undefined, key: string): number | null => {
+    const now = num(a[key]);
+    if (now === null) return null;
+    const was = b ? num(b[key]) : 0;
+    return was === null ? now : now - was;
+};
+
+/** Every inbound AUDIO stream in `after`, measured against the same stream in
+ *  `before` (or since it started when `before` is null or lacks it). */
+export function summariseInboundAudio(before: RTCStatsReport | null, after: RTCStatsReport): InboundAudioHealth[] {
+    const prev = new Map<string, Row>();
+    before?.forEach((s) => {
+        const r = s as unknown as Row;
+        if (s.type === 'inbound-rtp' && r.kind === 'audio') prev.set(String(r.id), r);
+    });
+    const out: InboundAudioHealth[] = [];
+    after.forEach((s) => {
+        const r = s as unknown as Row;
+        if (s.type !== 'inbound-rtp' || r.kind !== 'audio') return;
+        const b = prev.get(String(r.id));
+        const emitted = delta(r, b, 'jitterBufferEmittedCount');
+        const jbSeconds = delta(r, b, 'jitterBufferDelay');
+        const samples = delta(r, b, 'totalSamplesReceived');
+        out.push({
+            id: String(r.id),
+            jbMs: jbSeconds === null || emitted === null || emitted <= 0 ? null : Math.round((1000 * jbSeconds) / emitted),
+            concealedPct: pct(delta(r, b, 'concealedSamples'), samples),
+            accelPct: pct(delta(r, b, 'removedSamplesForAcceleration'), samples),
+            decelPct: pct(delta(r, b, 'insertedSamplesForDeceleration'), samples),
+            lost: delta(r, b, 'packetsLost'),
+        });
+    });
+    return out;
+}

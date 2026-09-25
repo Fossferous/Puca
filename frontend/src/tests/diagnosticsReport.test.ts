@@ -20,7 +20,7 @@ vi.mock('../api/rtc/sfuManager', () => ({ sfuManager: { voiceDiagnostics } }));
 vi.mock('../api/webrtc', () => ({ webrtcManager: { meshDiagnostics } }));
 vi.mock('../api/appVersion', () => ({ currentAppVersion }));
 
-import { buildDiagnosticsReport, copyDiagnostics, environmentLines, encodingSupportLines } from '../api/diagnosticsReport';
+import { buildDiagnosticsReport, copyDiagnostics, environmentLines, encodingSupportLines, QUICK_TIMEOUT_MS, STEP_TIMEOUT_MS } from '../api/diagnosticsReport';
 
 beforeEach(() => {
     voiceDiagnostics.mockReset().mockResolvedValue({ connected: true, remoteRtp: [] });
@@ -177,5 +177,54 @@ describe('the diagnostics report', () => {
         const isConfigSupported = vi.fn().mockResolvedValue({ supported: true });
         Object.defineProperty(globalThis, 'VideoEncoder', { value: { isConfigSupported }, configurable: true });
         expect((await encodingSupportLines()).join('\n')).toContain('360 lines');
+    });
+
+    // THE HANG. 2026-09-25: a clipboard permission prompt nobody could see held
+    // writeText open, and the menu read "Measuring for a few seconds…" for good.
+    // A step that never answers must cost that step, not the whole report.
+    describe('a step that never answers', () => {
+        const never = () => new Promise<never>(() => { /* never settles */ });
+
+        it('bounds a hung stats section and still returns the rest', async () => {
+            vi.useFakeTimers();
+            try {
+                voiceDiagnostics.mockImplementation(never);
+                const done = buildDiagnosticsReport();
+                await vi.advanceTimersByTimeAsync(STEP_TIMEOUT_MS + 100);
+                const text = await done;
+                expect(text).toMatch(/sfu unavailable: sfu gave no answer/);
+                // POSITIVE CONTROL: the rest of the report is still there.
+                expect(text).toContain('no peer-to-peer connections');
+            } finally {
+                vi.useRealTimers();
+            }
+        });
+
+        it('bounds a clipboard write that never finishes', async () => {
+            vi.useFakeTimers();
+            try {
+                writeText.mockImplementation(never);
+                const note = copyDiagnostics();
+                await vi.advanceTimersByTimeAsync(QUICK_TIMEOUT_MS + 100);
+                await expect(note).resolves.toMatch(/clipboard/i);
+            } finally {
+                vi.useRealTimers();
+            }
+        });
+
+        it('bounds an encoder question that never answers', async () => {
+            vi.useFakeTimers();
+            try {
+                const isConfigSupported = vi.fn().mockImplementation(never);
+                Object.defineProperty(globalThis, 'VideoEncoder', { value: { isConfigSupported }, configurable: true });
+                const lines = encodingSupportLines();
+                await vi.advanceTimersByTimeAsync(20 * (QUICK_TIMEOUT_MS + 100));
+                const text = (await lines).join('\n');
+                expect(text).toMatch(/gave no answer/);
+                expect(text).not.toContain('hardware=');
+            } finally {
+                vi.useRealTimers();
+            }
+        });
     });
 });

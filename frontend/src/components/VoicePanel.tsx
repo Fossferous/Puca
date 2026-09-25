@@ -19,6 +19,7 @@ import {
 import { sampleShareEncode, applyShareQuality, shareCaptureSize } from '../api/rtc/shareHealthLive';
 import { ContextMenu } from './ContextMenu';
 import { copyDiagnostics } from '../api/diagnosticsReport';
+import { noteRender, startHealthLog, stopHealthLog } from '../api/healthLog';
 import { type NoiseSuppressionMode, type NoiseModeChange, NOISE_MODE_EVENT, getNoiseSuppressionMode, setNoiseSuppressionMode, changeNoiseModeLive, modeUsesWebAudio, rawInputHasHadSignal, hasLiveGainStage, isDeepFilterGateOpen, selectedInputDeviceId } from '../api/noiseFilter';
 import { registerHold, unregisterHold, registerPress, unregisterPress, startNativeFeed, stopNativeFeed, setNativeFeedHost } from '../api/hotkeys';
 import { computeNativeWatch } from '../api/hotkeyScope';
@@ -135,6 +136,7 @@ function clipPresence(roomId: string): number[] {
 }
 
 export function VoicePanel({ roomId, channelName, currentUserId, currentUsername, memberAvatars: _memberAvatars, memberSounds, onDisconnect, serverRequireMediaE2ee = false, isAfkChannel = false, afkTimeoutMs = DEFAULT_AFK_TIMEOUT_MS, onInactive, sfuMode = false, clipPolicy }: VoicePanelProps) {
+    noteRender('voicePanel');
     const [isInVoice, setIsInVoice] = useState(false);
     /** RIGHT-CLICK THE PANEL FOR DIAGNOSTICS.
      *
@@ -582,7 +584,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         // still in the foreground — the only moment the type can be taken.
         // A no-op everywhere else (and on APKs older than the extra).
         setVoiceKeepAlive(isInVoice);
-        return () => { setSelfInVoice(false); setVoiceKeepAlive(false); };
+        // One health line a minute in puca.log for the life of the call
+        // (healthLog.ts), so a call that degrades after hours leaves evidence.
+        if (isInVoice) startHealthLog(); else stopHealthLog();
+        return () => { setSelfInVoice(false); setVoiceKeepAlive(false); stopHealthLog(); };
     }, [isInVoice]);
 
     // Properly sync self-preview video srcObject when screen sharing

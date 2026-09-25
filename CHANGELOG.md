@@ -4,6 +4,25 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+- **"Copy diagnostics" no longer gets stuck on "Measuring…".** A step that
+  never answered — most often the clipboard, when its permission prompt
+  opened somewhere you could not see it — kept the report waiting forever.
+  Every step now gives up after a few seconds and the report says which one
+  did not answer, and the rest of it is still copied (or printed to the
+  developer console when the clipboard refuses).
+
+### Added
+- **A health line in the log during calls.** Once a minute while you are in
+  a call, Púca writes one line to its log file: how any stream you are
+  watching is arriving, how each incoming voice is holding up (buffering,
+  gaps, speed-ups), how responsive the app itself is, its memory, and the
+  noise filter's and clip buffer's state. It contains no names or message
+  content. If a call ever degrades after hours, the log already holds what
+  changed, instead of the evidence being gone by the time anyone looks.
+
 ## 0.9.819 — 2026-09-25
 
 Clips no longer come back with choppy audio; switching screens in remote control shows the new screen; and a round of fixes so offline and two-device edits in Púca Notes no longer duplicate, drop or overwrite notes, pictures, recordings or ticks, and sessions end when they say they do.
