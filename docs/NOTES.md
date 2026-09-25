@@ -19,8 +19,8 @@ Púca's reminders. Anything you do in one is what you see in the other.
 
 ## What it does
 
-- **Grid of notes** — pinned first, masonry on desktop, one column on a phone,
-  grid/list toggle. One grid per **page**: *All notes* and then a page per
+- **Grid of notes** — pinned first, masonry (two columns on a phone), and a
+  grid/list toggle; list view is one column. One grid per **page**: *All notes* and then a page per
   label, swiped or tabbed between (see *Pages* below). Each card shows the open items with live checkboxes,
   progress, the next due time, image thumbnails, labels and (for a shared note)
   the server it belongs to.
@@ -279,13 +279,14 @@ grid drag go through).
 
 **Reordering a note.** The card menu always offers *Move to top*, *Move up*,
 *Move down* and *Move to bottom* — the tap and keyboard path, on every
-layout. Where a section really is one column — list view, or either view on
-a phone — a note can also be **dragged by the grip beside its title**, with a
+layout. Where a section really is one column — list view, on any screen — a
+note can also be **dragged by the grip beside its title**, with a
 line showing where it will land. Pinned notes reorder among the pinned ones
 and others among the others: the two sections are two drag groups, so a card
 cannot cross between them (nothing visible would change, yet Púca's tab bar
-would be rewritten). The grid's masonry on a mouse is two-dimensional and the
-drag is one-axis, so it keeps the menu alone. Ordering is offered only against
+would be rewritten). Grid view is masonry — two columns on a phone, like
+Keep's — which is two-dimensional while the drag is one-axis, so it keeps the
+menu alone. Ordering is offered only against
 the saved order, never a display sort or a search result.
 
 **Colour, labels and archive are shared too.** They are not Notes' private

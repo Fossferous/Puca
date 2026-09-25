@@ -216,13 +216,12 @@ describe('when reordering is offered at all', () => {
 
     it('drag needs a one-column layout on top of that', () => {
         // list view: one column on any pointer.
-        expect(canDragReorder('puca', 'all', 'list', false)).toBe(true);
-        // grid view on a fine pointer is MASONRY — a y-axis drag is meaningless.
-        expect(canDragReorder('puca', 'all', 'grid', false)).toBe(false);
-        // ...but on a phone notes.css forces one column in BOTH views.
-        expect(canDragReorder('puca', 'all', 'grid', true)).toBe(true);
-        // and the saved-order/search rules still apply on a phone.
-        expect(canDragReorder('puca', 'search', 'grid', true)).toBe(false);
-        expect(canDragReorder('title', 'all', 'list', true)).toBe(false);
+        expect(canDragReorder('puca', 'all', 'list')).toBe(true);
+        // grid view is MASONRY — a y-axis drag is meaningless. That now holds
+        // on a phone too: grid view is two columns there, like Keep's.
+        expect(canDragReorder('puca', 'all', 'grid')).toBe(false);
+        // and the saved-order/search rules still apply in list view.
+        expect(canDragReorder('puca', 'search', 'list')).toBe(false);
+        expect(canDragReorder('title', 'all', 'list')).toBe(false);
     });
 });

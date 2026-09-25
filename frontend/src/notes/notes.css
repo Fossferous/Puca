@@ -1079,7 +1079,20 @@
     .notes-rail-item { padding: 13px 14px; font-size: 15px; }
 
     .notes-main { padding: 12px 12px 120px; }
-    .notes-grid { column-width: auto; column-count: 1; position: relative; }
+    /* Grid view is TWO columns here, like Google Keep's phone grid; list view
+       stays one (`.notes-grid.list` above outranks this rule). Forcing one
+       column in both views left the top bar's grid/list toggle changing only
+       its own icon. */
+    .notes-grid { column-width: auto; column-count: 2; column-gap: 8px; position: relative; }
+    /* A half-width card is ~175px: a due/repeat chip or the "Not encrypted"
+       flag beside an item's text squeezed the text to a few letters a line.
+       In the two-column grid the text takes the whole row and the chips wrap
+       onto their own line under it, lined up with the text (18px checkbox +
+       8px gap). List view is full width and keeps them inline. */
+    .notes-grid:not(.list) .notes-card-item { flex-wrap: wrap; row-gap: 1px; }
+    .notes-grid:not(.list) .notes-card-item-text { flex: 1 1 calc(100% - 26px); }
+    .notes-grid:not(.list) .notes-card-item .tt-due,
+    .notes-grid:not(.list) .notes-card-item .tt-not-encrypted { margin-left: 26px; }
     /* Touch: the grip is always visible and a full 44px target. */
     .notes-card-grip { opacity: 0.6; width: 44px; min-height: 44px; }
     .notes-card-grip svg { width: 18px; height: 18px; }

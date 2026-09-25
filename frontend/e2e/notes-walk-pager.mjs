@@ -557,6 +557,12 @@ export async function pagerWalk({ browser, baseURL, state, ck, watch, shotOf, er
         };
 
         // Drag a card by its grip — down AND sideways: a reorder, never a swipe.
+        // The grip lives in LIST view: grid view on a phone is two columns
+        // (like Keep) and offers none. The rest of this context stays in list
+        // view, the one-column layout these gestures were written against; the
+        // choice is per device, so it ends with this context.
+        await m.tap('button[aria-label="Switch to list view"]');
+        await sleep(300);
         await m.evaluate(() => { document.querySelector('.notes-page.active').scrollTop = 0; });
         await sleep(200);
         const grip = await m.locator('.notes-page.active .notes-card-grip').first().boundingBox({ timeout: 5000 }).catch(() => null);

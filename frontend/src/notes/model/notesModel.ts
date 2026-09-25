@@ -304,14 +304,12 @@ export function canReorder(sort: string, filterKind: NoteFilter['kind']): boolea
 /**
  * DRAGGING additionally needs the section to really be ONE COLUMN.
  * useDragReorder is one-axis and sorts items by their y-start, which across
- * the grid's CSS columns is meaningless — so drag is offered in list view, or
- * in any view on a coarse pointer, where notes.css forces `column-count: 1`
- * (the JS side of that media query is NotesShell's COARSE). Masonry on a fine
- * pointer keeps the card menu, which is the tap and keyboard path everywhere
- * anyway.
+ * the grid's CSS columns is meaningless — so drag is offered in list view
+ * only. Grid view is columns on every pointer (two on a phone, like Keep), and
+ * keeps the card menu, which is the tap and keyboard path everywhere anyway.
  */
-export function canDragReorder(sort: string, filterKind: NoteFilter['kind'], view: 'grid' | 'list', coarse: boolean): boolean {
-    return canReorder(sort, filterKind) && (view === 'list' || coarse);
+export function canDragReorder(sort: string, filterKind: NoteFilter['kind'], view: 'grid' | 'list'): boolean {
+    return canReorder(sort, filterKind) && view === 'list';
 }
 
 /**

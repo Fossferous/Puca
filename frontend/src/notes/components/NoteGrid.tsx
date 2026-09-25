@@ -1,9 +1,8 @@
 /**
  * The grid: PINNED first, then OTHERS, each a masonry of NoteCards (CSS
- * columns; single column in list view and on phones).
+ * columns, two on a phone; single column in list view).
  *
- * DRAG is offered only where the section really is ONE COLUMN — list view, or
- * any view on a coarse pointer, where notes.css forces `column-count: 1`.
+ * DRAG is offered only where the section really is ONE COLUMN — list view.
  * useDragReorder is one-axis and sorts items by their y-start, which across
  * CSS columns is meaningless, so masonry on a fine pointer keeps the card menu
  * alone (Move to top / up / down / to bottom), which is also the tap and

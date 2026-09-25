@@ -572,11 +572,11 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
         return items;
     };
     // Drag to reorder, same three conditions as the menu's Move items plus
-    // "this section is one column": list view, or any view on a coarse
-    // pointer (notes.css forces column-count: 1 there). The drop goes through
+    // "this section is one column", which is list view (grid view is columns
+    // on a phone too). The drop goes through
     // actions.reorderNotes like the menu does, so it inherits the two refusals
     // in savePrefs (prefs not read, trash not settled) and keepHiddenSlots.
-    const canDrag = canDragReorder(local.sort, filter.kind, local.view, coarse);
+    const canDrag = canDragReorder(local.sort, filter.kind, local.view);
     const onDropReorder = useCallback((section: GridSection, nextVisible: string[]) => {
         const visible = (section === 'pinned' ? pinned : others).map(c => c.key);
         const next = applyVisibleOrder(allCards.map(c => c.key), visible, nextVisible);

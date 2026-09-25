@@ -17,8 +17,8 @@
 // encrypted"; live updates reach a second device, colour and labels sync
 // (and survive a sign-out), bulk selection works by Ctrl-click and by long
 // press, the /notes/ worker plus the sealed cache open Notes offline and an
-// offline edit replays when the network returns; and on the phone — one
-// column, no horizontal overflow, every
+// offline edit replays when the network returns; and on the phone — two
+// columns in grid view and one in list view, no horizontal overflow, every
 // tap target at size, 16px inputs, the FAB composer, the drawer, a popover
 // inside the viewport, the full-screen editor with the grip and arrows.
 // And the Notes Android app's updates (NotesUpdateGate): in the browser no
@@ -2875,7 +2875,30 @@ await m.waitForSelector('.notes-card', { timeout: 20000 });
 let r = await audit();
 await mshot('phone-grid');
 ck('phone: no horizontal overflow', !r.bodyScrollsHorizontally && r.widest <= r.vw + 1, `widest=${r.widest} vw=${r.vw}`);
-ck('phone: single column', new Set(r.cards).size === 1, JSON.stringify(r.cards));
+// Grid view is TWO columns on a phone (like Keep), list view one: the top
+// bar's toggle once changed only its own icon here, because notes.css forced
+// one column in both views.
+ck('phone: grid view is two columns', new Set(r.cards).size === 2, JSON.stringify(r.cards));
+ck('phone: grid view offers no grip (masonry has no one-axis order)', await m.locator('.notes-card-grip').count() === 0);
+// At half width a due chip or the "Not encrypted" flag beside an item used to
+// squeeze its text to a few letters a line; the chips now wrap under it.
+const squeezed = await m.evaluate(() => [...document.querySelectorAll('.notes-card-item')].map(li => {
+    const t = li.querySelector('.notes-card-item-text');
+    const card = li.closest('.notes-card');
+    return { text: t?.textContent?.slice(0, 20), tw: Math.round(t?.getBoundingClientRect().width ?? 0), cw: Math.round(card?.getBoundingClientRect().width ?? 0),
+        chips: li.querySelectorAll('.tt-due, .tt-not-encrypted').length };
+}));
+ck('phone: grid cards have items with chips to measure (precondition)', squeezed.some(s => s.chips > 0), JSON.stringify(squeezed.slice(0, 4)));
+ck('phone: no item text is squeezed by its chips in the two-column grid',
+    squeezed.filter(s => s.chips > 0).every(s => s.tw >= s.cw * 0.6),
+    JSON.stringify(squeezed.filter(s => s.chips > 0 && s.tw < s.cw * 0.6)));
+await m.tap('button[aria-label="Switch to list view"]');
+await sleep(250);
+r = await audit();
+ck('phone: list view is one column', new Set(r.cards).size === 1, JSON.stringify(r.cards));
+await m.tap('button[aria-label="Switch to grid view"]');
+await sleep(250);
+r = await audit();
 ck('phone: every tap target at size', r.under.length === 0, JSON.stringify(r.under));
 ck('phone: no invisible-but-tappable controls', r.ghosts.length === 0, JSON.stringify(r.ghosts));
 ck('phone: FAB shown, inline composer hidden', r.fabVisible && r.inlineComposerHidden);
@@ -3455,10 +3478,12 @@ await mshot('phone-search-highlight');
 await m.tap('button[aria-label="Clear search"]');
 await sleep(300);
 
-// Ordering on a phone: notes.css forces ONE column in both views there, so
-// the grip is offered in grid view too — and it must be a real tap target
-// that does not scroll the page when dragged.
-ck('phone: cards carry a grip in grid view too (one column there)', await m.locator('.notes-card-grip').count() > 1);
+// Ordering on a phone: list view is one column, so the grip is offered there
+// — and it must be a real tap target that does not scroll the page when
+// dragged. (Grid view is two columns and has none; checked above.)
+await m.tap('button[aria-label="Switch to list view"]');
+await sleep(250);
+ck('phone: cards carry a grip in list view', await m.locator('.notes-card-grip').count() > 1);
 const pg = await m.locator('.notes-card-grip').first().boundingBox();
 ck('phone: the grip is a 44px tap target', !!pg && pg.width >= 44 && pg.height >= 44, JSON.stringify(pg));
 ck('phone: the grip declares touch-action none (no scroll to fight)',
@@ -3480,6 +3505,8 @@ ck('phone: holding the grip starts NO selection (that press is a drag)', await m
 await gripCard.dispatchEvent('pointerup',
     { pointerType: 'touch', isPrimary: true, clientX: gcb.x + gcb.width / 2, clientY: gcb.y + gcb.height / 2, bubbles: true });
 await sleep(150);
+await m.tap('button[aria-label="Switch to grid view"]');
+await sleep(250);
 
 // bulk selection by LONG PRESS (the phone's way in), then the bar at 390px.
 // Poem, not Phone note: that one is in the trash by now (the Trash section above).
