@@ -21,7 +21,7 @@ declare global {
         __AV_CODEC__: string;
         __AV_FLASH_FRAME__: number;
         __AV_TRUTH__: { bursts: { frame: number; flashAt: number; burstAt: number; offsetMs: number }[]; micBurstAt: number; v0: number; agentStart: number } | undefined;
-        __AV_EMU__: { log: string[]; diag: string[]; params: Record<string, unknown>; leads: { at: number; leadMs: number; state: string }[]; presented: () => { k: number; presentAt: number; tsUs: number }[] };
+        __AV_EMU__: { log: string[]; diag: string[]; params: Record<string, unknown>; leads: { at: number; leadMs: number; state: string; when: number; dur: number }[]; delayRamps: { at: number; value: number; endTime: number }[]; presented: () => { k: number; presentAt: number; tsUs: number }[] };
         __av: typeof api;
     }
 }
@@ -129,6 +129,11 @@ const api = {
         const vcfg = (await vt.getDecoderConfig())!;
         const lumas: { t: number; y: number }[] = [];
         const errors: string[] = [];
+        // A browser without an H.264 decoder (an open-source Chromium) still
+        // runs the whole pipeline — the native path never decodes video — but
+        // cannot find the flash itself: the clip goes back to the harness,
+        // which decodes its video with ffmpeg (clip-av-emulation.mjs).
+        const videoDecodable = !!(await VideoDecoder.isConfigSupported(vcfg)).supported;
         // Mean brightness from a 32x18 draw: synchronous, so every frame is
         // closed inside the callback and nothing piles up (400 open 720p
         // frames crashed the renderer in the first version).
@@ -144,15 +149,17 @@ const api = {
             },
             error: (e) => { errors.push('video: ' + e.message); },
         });
-        vdec.configure(vcfg);
-        for await (const p of new EncodedPacketSink(vt).packets()) {
-            while (vdec.decodeQueueSize > 8) await new Promise(r => setTimeout(r, 5));
-            vdec.decode(p.toEncodedVideoChunk());
+        if (videoDecodable) {
+            vdec.configure(vcfg);
+            for await (const p of new EncodedPacketSink(vt).packets()) {
+                while (vdec.decodeQueueSize > 8) await new Promise(r => setTimeout(r, 5));
+                vdec.decode(p.toEncodedVideoChunk());
+            }
+            await vdec.flush();
         }
-        await vdec.flush();
         vdec.close();
         lumas.sort((a, b) => a.t - b.t);
-        const yMax = Math.max(...lumas.map(l => l.y)), yMin = Math.min(...lumas.map(l => l.y));
+        const yMax = lumas.length ? Math.max(...lumas.map(l => l.y)) : 0, yMin = lumas.length ? Math.min(...lumas.map(l => l.y)) : 0;
         const flash = lumas.filter(l => l.y > (yMax + yMin) / 2);
 
         // Audio: decode, find the first sample above threshold.
@@ -164,12 +171,41 @@ const api = {
             error: (e) => { errors.push('audio: ' + e.message); },
         });
         adec.configure(acfg);
+        // The container's own timeline: each packet's timestamp and duration
+        // as a player reads them from the MP4 (a sample's duration there is
+        // the distance to the next sample's timestamp).
+        const packets: { t: number; d: number }[] = [];
         for await (const p of new EncodedPacketSink(at).packets()) {
+            packets.push({ t: p.timestamp, d: p.duration });
             while (adec.decodeQueueSize > 16) await new Promise(r => setTimeout(r, 5));
             adec.decode(p.toEncodedAudioChunk());
         }
         await adec.flush();
         adec.close();
+        // THE AUDIO TIMELINE. Every packet decodes to a fixed number of
+        // samples (1024 for AAC-LC, 960 for 20 ms Opus); a packet whose
+        // container duration is not that length is one a player must either
+        // cut (a duration shorter than its content: the rest overlaps the
+        // next packet) or pad with silence (longer). Either is audible, and
+        // a clip made of them is the "decimated" audio of the 2026-09-24
+        // field report. Decoder outputs are 1:1 with packets and in order.
+        // Packet 0 is not judged: its decoded length is the codec's priming
+        // (Opus's pre-skip takes 6.5 ms off the first output), and it is the
+        // one frame that straddles the clip start, which trimLeadingAudio
+        // keeps by design and the seal pins to t=0 — a pre-existing
+        // clip-start rule, not the timeline this checks. The last packet has
+        // no successor to measure its duration against.
+        const lengths = chunks.map(c => c.pcm.length / acfg.sampleRate);
+        let misfit = 0, misfitS = 0, worstMs = 0;
+        const where: string[] = [];
+        for (let i = 1; i + 1 < packets.length && i < lengths.length; i++) {
+            const off = packets[i].d - lengths[i];
+            if (Math.abs(off) > 0.001) {
+                misfit++; misfitS += Math.abs(off); worstMs = Math.max(worstMs, Math.abs(off) * 1000);
+                if (where.length < 5) where.push(`#${i}/${packets.length} at ${packets[i].t.toFixed(4)} s: lasts ${(packets[i].d * 1000).toFixed(2)} ms, holds ${(lengths[i] * 1000).toFixed(2)} ms`);
+            }
+        }
+        const timeline = { packets: packets.length, misfit, misfitMs: misfitS * 1000, worstMs, where };
         chunks.sort((a, b) => a.t - b.t);
         // Burst onsets: a loud sample after at least 200 ms of quiet.
         const onsets: number[] = [];
@@ -189,6 +225,8 @@ const api = {
         for (const f of flash) if (!flashes.length || f.t - flashes[flashes.length - 1] > 0.5) flashes.push(f.t);
         return {
             errors, durationMs: m.durationMs, videoFrames: lumas.length, yMin, yMax, hasMic: getReplayState().hasMic,
+            videoDecodable, timeline,
+            mp4B64: videoDecodable ? null : btoa(Array.from(all, b => String.fromCharCode(b)).join('')),
             flashes, brightFrames: flash.length, audioChunks: chunks.length, audioPeak: peak, onsets,
             // Per burst: audio onset minus its flash frame, ms (+ = audio late).
             errorsMs: flashes.map((t, i) => onsets[i] === undefined ? null : (onsets[i] - t) * 1000),
@@ -203,8 +241,16 @@ const api = {
         // The lead in effect around each burst (the packets scheduled within 200 ms after it).
         const around = (window.__AV_TRUTH__?.bursts ?? []).map(b => { const ls = window.__AV_EMU__.leads.filter(l => l.at >= b.burstAt && l.at < b.burstAt + 200).map(l => l.leadMs); return ls.length ? ls.reduce((x, y) => x + y, 0) / ls.length : null; });
         const suspendedStarts = window.__AV_EMU__.leads.filter(l => l.state !== 'running').length;
+        const ramps = window.__AV_EMU__.delayRamps;
+        const spanS = ramps.length > 1 ? (ramps[ramps.length - 1].at - ramps[0].at) / 1000 : 0;
         return { truth: window.__AV_TRUTH__, presented: window.__AV_EMU__.presented().length, invoked: window.__AV_EMU__.log, diag: window.__AV_EMU__.diag, params: window.__AV_EMU__.params,
-            lead: { n: leads.length, min: q(0), p50: q(0.5), max: q(0.999), first: leads[0] ?? null, aroundBursts: around, suspendedStarts, firstAtMs: (window.__AV_EMU__.leads[0]?.at ?? 0) - t0 } };
+            // Between primes each packet is scheduled exactly where the one
+            // before it ends (nativeCapture.ts); a break in that chain is a
+            // re-prime — an underrun or a drift reset, a genuine hole in the
+            // loopback's render timeline.
+            lead: { n: leads.length, min: q(0), p50: q(0.5), max: q(0.999), first: leads[0] ?? null, aroundBursts: around, suspendedStarts, firstAtMs: (window.__AV_EMU__.leads[0]?.at ?? 0) - t0,
+                primes: window.__AV_EMU__.leads.filter((l, i, all) => i > 0 && Math.abs(l.when - (all[i - 1].when + all[i - 1].dur)) > 1e-6).length },
+            micDelayRamps: { n: ramps.length, perS: spanS > 0 ? ramps.length / spanS : 0 } };
     },
 };
 window.__av = api;

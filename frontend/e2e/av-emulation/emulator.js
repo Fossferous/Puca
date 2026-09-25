@@ -40,6 +40,16 @@
         // The MIC leg (main.ts builds it): a burst at this flash's present.
         micBurstFrame: 330,
         burstMs: 30,
+        // A continuous tone UNDER everything (below the 0.1 onset threshold
+        // the harness uses for the bursts). Silence cannot show a broken
+        // timeline — a gap in silence is silence — so without this the
+        // sealed clip's audio could be chopped to pieces and every sync
+        // check here would still pass (it did: docs/CLIPS.md, 2026-09-24).
+        toneHz: 440, toneAmp: 0.05,
+        // A busy WebView main thread: every stallEveryMs, a long task of
+        // stallMs. Delivery and scheduling both run on that thread, so this
+        // is what bunches the 10 ms packets up. 0 = no stalls.
+        stallEveryMs: 0, stallMs: 0,
         // The first video frames sit in a queue for this long before the app's
         // worker is armed (the real WASAPI init wait) — modelled by the app
         // itself (replayBuffer's chunkQueue); nothing to emulate here.
@@ -58,11 +68,31 @@
     // (when - currentTime, ms) it was scheduled with. nativeCapture's loopback
     // context is the only caller, so this is its scheduling lead over time.
     const leads = [];
+    // PROBE: every ramp scheduled on a DelayNode's delayTime (replayBuffer's
+    // mic-leg delay is the only DelayNode in the page). Each ramp is a
+    // stretch where the mic is read faster or slower than real time — an
+    // audible pitch shift — so how often it happens is the finding.
+    const delayRamps = [];
+    const origRamp = AudioParam.prototype.linearRampToValueAtTime;
+    const delayParams = new WeakSet();
+    const origCreateDelay = BaseAudioContext.prototype.createDelay;
+    BaseAudioContext.prototype.createDelay = function () {
+        const d = origCreateDelay.apply(this, arguments);
+        delayParams.add(d.delayTime);
+        return d;
+    };
+    AudioParam.prototype.linearRampToValueAtTime = function (value, endTime) {
+        if (delayParams.has(this)) delayRamps.push({ at: performance.now(), value, endTime });
+        return origRamp.apply(this, arguments);
+    };
+    if (cfg.stallEveryMs > 0 && cfg.stallMs > 0) {
+        setInterval(() => { const until = performance.now() + cfg.stallMs; while (performance.now() < until) { /* a long task */ } }, cfg.stallEveryMs);
+    }
     const origStart = AudioBufferSourceNode.prototype.start;
     AudioBufferSourceNode.prototype.start = function (when) {
         // The harness's own mic context (main.ts installMic tags it) schedules
         // its burst seconds ahead; that is not a loopback lead.
-        if (typeof when === 'number' && !this.context.__avMic) leads.push({ at: performance.now(), leadMs: (when - this.context.currentTime) * 1000, state: this.context.state });
+        if (typeof when === 'number' && !this.context.__avMic) leads.push({ at: performance.now(), leadMs: (when - this.context.currentTime) * 1000, state: this.context.state, when, dur: this.buffer ? this.buffer.duration : 0 });
         return origStart.apply(this, arguments);
     };
 
@@ -118,7 +148,8 @@
                 for (let i = 0; i < packetFrames; i++) {
                     const t = firstAt + (i * 1000) / sampleRate;
                     const dt = inBurst(t);
-                    const v = dt >= 0 ? 0.5 * Math.sin(2 * Math.PI * 1000 * dt / 1000) : 0;
+                    const tone = cfg.toneAmp * Math.sin(2 * Math.PI * cfg.toneHz * (st.n * packetFrames + i) / sampleRate);
+                    const v = dt >= 0 ? 0.5 * Math.sin(2 * Math.PI * 1000 * dt / 1000) : tone;
                     for (let c = 0; c < channels; c++) pcm[i * channels + c] = v;
                 }
                 emit('clip-audio-data', {
@@ -188,5 +219,5 @@
             }
         },
     };
-    window.__AV_EMU__ = { log, diag, params: cfg, leads, presented: () => (video ? video.presented : []) };
+    window.__AV_EMU__ = { log, diag, params: cfg, leads, delayRamps, presented: () => (video ? video.presented : []) };
 })();

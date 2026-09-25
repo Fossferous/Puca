@@ -19,11 +19,24 @@
 // SILENT: msedge headless with --mute-audio; the app's graphs end in
 // MediaStreamAudioDestinationNodes; nothing is played, shown or captured.
 //
+// THE AUDIO TIMELINE (added 2026-09-24, after a field clip whose audio was
+// chopped to pieces while every check above passed): the PCM carries a quiet
+// continuous tone, and every audio packet in the sealed clip must have a
+// container duration equal to what it decodes to — a packet squeezed short
+// or stretched long is one a player cuts or pads, audibly. A third run
+// stalls the page's main thread (a busy WebView), which is what bunches the
+// packets up in the field. The mic leg's delay is probed too: every ramp of
+// it is a stretch of pitch-shifted mic.
+//
 //   cd frontend && node e2e/clip-av-emulation.mjs
+//   AV_BROWSER=chromium node e2e/clip-av-emulation.mjs   # no Edge: Playwright's
+//     Chromium, which cannot decode H.264 (the harness decodes the clip's
+//     video with ffmpeg instead) and has no AAC encoder (the clip carries
+//     Opus, whose 20 ms frames are held to the same timeline rule).
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { chromium } from '@playwright/test';
 
@@ -103,8 +116,8 @@ await new Promise(r => srv.listen(0, '127.0.0.1', r));
 const origin = `http://127.0.0.1:${srv.address().port}`;
 
 // 4. Drive it.
-const browser = await chromium.launch({ channel: 'msedge', headless: true, args: ['--mute-audio', '--autoplay-policy=no-user-gesture-required', '--use-fake-ui-for-media-stream'] });
-async function run(runIndex) {
+const browser = await chromium.launch({ channel: process.env.AV_BROWSER === 'chromium' ? undefined : 'msedge', headless: true, args: ['--mute-audio', '--autoplay-policy=no-user-gesture-required', '--use-fake-ui-for-media-stream'] });
+async function run(runIndex, stall = null) {
     const ctx = await browser.newContext();
     const page = await ctx.newPage();
     const errors = [];
@@ -131,7 +144,7 @@ async function run(runIndex) {
     // is the JS pipeline's own constant (what NATIVE_AUDIO_OFFSET_US can
     // correct); the default keeps the shell's measured-shape latencies.
     const rust = process.env.AV_RUST_MODEL === 'zero' ? { readbackLagMs: 0, videoIpcMs: [0, 0], audioDeliveryMs: [0, 0] } : {};
-    await page.addInitScript((p) => { window.__AV_PARAMS__ = p; }, { bursts: [{ frame: FLASHES[0], offsetMs: 0 }, { frame: FLASHES[1], offsetMs: CONTROL_MS }], ...rust });
+    await page.addInitScript((p) => { window.__AV_PARAMS__ = p; }, { bursts: [{ frame: FLASHES[0], offsetMs: 0 }, { frame: FLASHES[1], offsetMs: CONTROL_MS }], ...rust, ...(stall ?? {}) });
     await page.goto(origin + '/');
     await page.waitForFunction(() => !!window.__av, null, { timeout: 15000 });
     const loaded = await page.evaluate((f) => window.__av.load('/flash.h264', f), FLASHES[0]);
@@ -141,21 +154,67 @@ async function run(runIndex) {
     const sealed = await page.evaluate((o) => window.__av.sealAndUpload(11000, o + '/api'), origin);
     const partsB64 = Object.fromEntries([...parts.entries()].map(([id, buf]) => [id, buf.toString('base64')]));
     const m = await page.evaluate(([href, p]) => window.__av.measure(href, p), [sealed.href, partsB64]);
+    if (!m.videoDecodable && m.mp4B64) flashesByFfmpeg(m, runIndex);
     const truth = await page.evaluate(() => window.__av.truth());
     await page.evaluate(() => window.__av.disarm()).catch(() => { });
     await ctx.close();
     parts.clear();
-    return { runIndex, loaded, armed, buffered, sealed, m, truth, errors, offHost, requests, micState };
+    return { runIndex, stall, loaded, armed, buffered, sealed, m, truth, errors, offHost, requests, micState };
+}
+
+/** The browser could not decode the clip's H.264: find the flash frames with
+ *  ffmpeg, by the same rule the page uses (mean luma of a 32x18 scale, bright
+ *  = above the midpoint, one flash per 0.5 s), on the file's own timestamps. */
+function flashesByFfmpeg(m, runIndex) {
+    const file = path.join(art, `av-clip-run${runIndex}.mp4`);
+    fs.writeFileSync(file, Buffer.from(m.mp4B64, 'base64'));
+    delete m.mp4B64;
+    const out = spawnSync('ffmpeg', ['-hide_banner', '-nostdin', '-loglevel', 'info', '-copyts', '-i', file, '-map', '0:v:0', '-fps_mode', 'passthrough',
+        '-vf', 'scale=32:18,format=gray,showinfo', '-f', 'rawvideo', '-'], { maxBuffer: 64 * 1024 * 1024 });
+    const times = [...String(out.stderr).matchAll(/pts_time:([-\d.]+)/g)].map(x => Number(x[1]));
+    const px = 32 * 18, frames = Math.floor(out.stdout.length / px);
+    if (out.status !== 0 || frames === 0 || frames !== times.length) { m.errors.push(`ffmpeg video decode: status ${out.status}, ${frames} frames, ${times.length} timestamps`); return; }
+    const lumas = [];
+    for (let f = 0; f < frames; f++) { let sum = 0; for (let i = 0; i < px; i++) sum += out.stdout[f * px + i]; lumas.push({ t: times[f], y: sum / px }); }
+    lumas.sort((a, b) => a.t - b.t);
+    m.yMax = Math.max(...lumas.map(l => l.y)); m.yMin = Math.min(...lumas.map(l => l.y));
+    const bright = lumas.filter(l => l.y > (m.yMax + m.yMin) / 2);
+    m.flashes = [];
+    for (const f of bright) if (!m.flashes.length || f.t - m.flashes[m.flashes.length - 1] > 0.5) m.flashes.push(f.t);
+    m.videoFrames = lumas.length; m.brightFrames = bright.length;
+    m.errorsMs = m.flashes.map((t, i) => m.onsets[i] === undefined ? null : (m.onsets[i] - t) * 1000);
+    m.videoDecodable = 'ffmpeg';
 }
 
 try {
     const results = [];
     for (let i = 0; i < 2; i++) results.push(await run(i));
+    // A busy main thread: a 30 ms long task every 200 ms.
+    results.push(await run(2, { stallEveryMs: 200, stallMs: 30 }));
     const r0 = results[0];
     ck(r0.loaded.keyframes >= 6 && r0.loaded.accessUnits === FPS * SECONDS, "the stream has the agent's shape", `${r0.loaded.accessUnits} AUs, ${r0.loaded.keyframes} keys, ${r0.loaded.codec}`);
     ck(r0.armed.state.phase === 'armed' && r0.armed.state.hasSystemAudio === true && r0.armed.state.hasMic === true, 'the real pipeline armed with system audio AND a mic', JSON.stringify({ phase: r0.armed.state.phase, sys: r0.armed.state.hasSystemAudio, mic: r0.armed.state.hasMic, micCtx: r0.micState, notices: r0.armed.notices }));
+    const skip = (label, why) => console.log('SKIP  ' + label + '  — ' + why);
     for (const r of results) {
         const m = r.m;
+        const tag = r.stall ? ` (main thread stalled ${r.stall.stallMs} ms every ${r.stall.stallEveryMs} ms)` : '';
+        // THE AUDIO TIMELINE. A misfit is allowed only where the loopback
+        // genuinely re-primed (an underrun, or a drift reset): there the
+        // render timeline itself has a hole. Anywhere else it is the
+        // pipeline cutting the audio up.
+        const primes = r.truth.lead.primes;
+        const tl = m.timeline;
+        console.log(`  run ${r.runIndex}${tag}: audio timeline: ${tl.packets} packets, ${tl.misfit} whose container duration is not their length (${tl.misfitMs.toFixed(1)} ms in all, worst ${tl.worstMs.toFixed(1)} ms); loopback re-primes after the first: ${primes}; mic-delay ramps: ${r.truth.micDelayRamps.n} (${r.truth.micDelayRamps.perS.toFixed(1)}/s)`);
+        ck(tl.packets > 100 && tl.misfit <= primes, `run ${r.runIndex}${tag}: the clip's audio is one continuous timeline (misfits only at a re-prime)`, `${tl.misfit} misfit packets, ${primes} re-primes${tl.where.length ? ': ' + tl.where.join('; ') : ''}`);
+        // Per-packet reporting ramped the mic delay on about half of all
+        // packets (671 ramps over ~1300 packets); it should move only where
+        // the lead does — a segment start and the few 5 ms steps it is learnt in.
+        ck(r.truth.micDelayRamps.n < r.truth.lead.n / 20, `run ${r.runIndex}${tag}: the mic delay moves only with the lead, not per packet (each ramp is pitch-shifted mic)`, `${r.truth.micDelayRamps.n} ramps over ${r.truth.lead.n} packets`);
+        if (!m.videoDecodable) {
+            skip(`run ${r.runIndex}: A/V sync`, 'neither this browser nor ffmpeg decoded the video' + (m.errors.length ? ': ' + m.errors.join('; ') : ''));
+            ck(m.audioChunks > 100 && m.errors.length === 0, `run ${r.runIndex}: the sealed clip's audio decoded`, `${m.audioChunks} audio chunks, ${r.sealed.info.durationMs} ms${m.errors.length ? ', errors ' + m.errors.join('; ') : ''}`);
+            continue;
+        }
         ck(m.videoFrames > 250 && m.audioChunks > 100 && m.errors.length === 0, `run ${r.runIndex}: the sealed clip decoded`, `${m.videoFrames} frames, ${m.audioChunks} audio chunks, ${r.sealed.info.durationMs} ms${m.errors.length ? ', errors ' + m.errors.join('; ') : ''}`);
         ck(m.flashes.length === 3 && m.brightFrames <= 6 && m.yMax - m.yMin > 100, `run ${r.runIndex}: exactly three flash frames are bright`, `y ${m.yMin.toFixed(0)}..${m.yMax.toFixed(0)}, flashes at ${m.flashes.map(t => t.toFixed(4)).join(', ')} s`);
         ck(m.onsets.length === 3 && m.audioPeak > 0.3, `run ${r.runIndex}: all three bursts are in the clip (two system, one mic)`, `onsets ${m.onsets.map(t => t.toFixed(4)).join(', ')} s, peak ${m.audioPeak.toFixed(2)}`);
@@ -170,10 +229,14 @@ try {
         ck(r.offHost.length === 0 && r.requests > 0, `run ${r.runIndex}: nothing reached a real server (${r.requests} requests seen, all loopback)`, r.offHost.slice(0, 3).join(' '));
         ck(eMic !== null && eMic !== undefined && Math.abs(eMic) < 60 && Math.abs(eMic - e0) < 30, `run ${r.runIndex}: the mic leg is within 60 ms and within 30 ms of the system audio (it has no scheduling lead; without its delay it would sit a full lead, 50-90 ms here, earlier)`, `mic ${eMic?.toFixed(1)} ms, system ${e0?.toFixed(1)} ms`);
     }
-    const errs = results.map(r => r.m.errorsMs[0]);
-    console.log(`\nA/V ERROR of the JS pipeline under this emulation: system audio ${errs.map(e => e.toFixed(1)).join(' / ')} ms, mic ${results.map(r => r.m.errorsMs[2]?.toFixed(1)).join(' / ')} ms (+ = late)`);
-    console.log(`  modelled Rust side${process.env.AV_RUST_MODEL === 'zero' ? ' (ZEROED)' : ''}: agent head start ${r0.truth.params.agentHeadStartMs} ms, readback lag ${r0.truth.params.readbackLagMs} ms, video IPC ${r0.truth.params.videoIpcMs} ms, audio delivery ${r0.truth.params.audioDeliveryMs} ms after each 10 ms packet`);
-    ck(errs.every(e => Math.abs(e) < 250), 'A/V error under 250 ms (the number is the finding, not a pass/fail)', errs.map(e => e.toFixed(1)).join(' / '));
+    const synced = results.filter(r => r.m.videoDecodable);
+    const errs = synced.map(r => r.m.errorsMs[0]);
+    if (!synced.length) skip('A/V error summary', 'no run could decode H.264');
+    else {
+        console.log(`\nA/V ERROR of the JS pipeline under this emulation: system audio ${errs.map(e => e.toFixed(1)).join(' / ')} ms, mic ${synced.map(r => r.m.errorsMs[2]?.toFixed(1)).join(' / ')} ms (+ = late)`);
+        console.log(`  modelled Rust side${process.env.AV_RUST_MODEL === 'zero' ? ' (ZEROED)' : ''}: agent head start ${r0.truth.params.agentHeadStartMs} ms, readback lag ${r0.truth.params.readbackLagMs} ms, video IPC ${r0.truth.params.videoIpcMs} ms, audio delivery ${r0.truth.params.audioDeliveryMs} ms after each 10 ms packet`);
+        ck(errs.every(e => Math.abs(e) < 250), 'A/V error under 250 ms (the number is the finding, not a pass/fail)', errs.map(e => e.toFixed(1)).join(' / '));
+    }
 } finally {
     await browser.close();
     srv.close();
