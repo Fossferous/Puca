@@ -281,54 +281,81 @@ fn capture_loop(
 
     let mut silent_streak: u32 = 0;
     let mut warned_silent_streak = false;
+    let mut discontinuities: u64 = 0;
 
-    while !state.stop_signal.load(Ordering::SeqCst) {
+    'capture: while !state.stop_signal.load(Ordering::SeqCst) {
         if event_handle.wait_for_event(100).is_err() {
             continue; // timeout — nothing new, loop back and re-check stop_signal
         }
-        match capture_client.get_next_packet_size() {
-            Ok(Some(packet_size)) if packet_size > 0 => {
-                let bytes_needed = packet_size as usize * bytes_per_frame;
-                if buffer.len() < bytes_needed {
-                    buffer.resize(bytes_needed, 0);
+        // DRAIN every packet waiting, not one per wake-up. The event is
+        // auto-reset: two periods landing while this thread was busy (the
+        // base64 and the emit below, or a game holding the CPU) signal it
+        // ONCE, so reading one packet per wake-up leaves one behind for
+        // good, each time that happens, until the 200 ms buffer is full and
+        // WASAPI throws captured audio away. Chromium's own WASAPI capture
+        // loop drains the same way.
+        loop {
+            let packet_size = match capture_client.get_next_packet_size() {
+                Ok(Some(n)) if n > 0 => n,
+                Ok(_) => break, // nothing (more) pending
+                Err(e) => return Err(format!("Failed to query desktop audio packet size: {e:?}")),
+            };
+            let bytes_needed = packet_size as usize * bytes_per_frame;
+            if buffer.len() < bytes_needed {
+                buffer.resize(bytes_needed, 0);
+            }
+            let (frames_read, buffer_info) = capture_client
+                .read_from_device(&mut buffer[..bytes_needed])
+                .map_err(|e| format!("Failed to read desktop audio: {e:?}"))?;
+            let actual_bytes = frames_read as usize * bytes_per_frame;
+            if buffer_info.flags.silent {
+                // "Treat all of the data in the packet as silence and ignore
+                // the actual data values" (AUDCLNT_BUFFERFLAGS_SILENT): the
+                // bytes are not promised to be zero, and the JS side plays
+                // whatever it is sent.
+                buffer[..actual_bytes].fill(0);
+                silent_streak += 1;
+                if !warned_silent_streak && silent_streak >= 50 {
+                    warned_silent_streak = true;
+                    log::warn!(
+                        "WASAPI has flagged ~1s of continuous desktop audio as SILENT — \
+                         capture is alive and 'succeeding' but Windows says there is nothing \
+                         real to give right now (as opposed to no packets arriving at all)"
+                    );
                 }
-                match capture_client.read_from_device(&mut buffer[..bytes_needed]) {
-                    Ok((frames_read, buffer_info)) => {
-                        let actual_bytes = frames_read as usize * bytes_per_frame;
-                        if buffer_info.flags.silent {
-                            silent_streak += 1;
-                            if !warned_silent_streak && silent_streak >= 50 {
-                                warned_silent_streak = true;
-                                log::warn!(
-                                    "WASAPI has flagged ~1s of continuous desktop audio as SILENT — \
-                                     capture is alive and 'succeeding' but Windows says there is nothing \
-                                     real to give right now (as opposed to no packets arriving at all)"
-                                );
-                            }
-                        } else {
-                            silent_streak = 0;
-                        }
-                        let encoded = base64::engine::general_purpose::STANDARD.encode(&buffer[..actual_bytes]);
-                        if app
-                            .emit("clip-audio-data", ClipAudioDataEvent {
-                                data: encoded,
-                                sample_rate: 48000,
-                                channels: 2,
-                                bits_per_sample: 32,
-                                silent: buffer_info.flags.silent,
-                                generation,
-                            })
-                            .is_err()
-                        {
-                            break; // window gone
-                        }
-                    }
-                    Err(e) => return Err(format!("Failed to read desktop audio: {e:?}")),
+            } else {
+                silent_streak = 0;
+            }
+            if buffer_info.flags.data_discontinuity {
+                // WASAPI dropped captured audio before this packet: the
+                // clip has a hole here. Counted, so puca.log can say whether
+                // this ever happens in the field.
+                discontinuities += 1;
+                if discontinuities == 1 || discontinuities % 100 == 0 {
+                    log::warn!(
+                        "[clip-audio] WASAPI reported lost desktop audio ({discontinuities} time(s) \
+                         this capture): the capture thread fell behind"
+                    );
                 }
             }
-            Ok(_) => { /* nothing pending this tick */ }
-            Err(e) => return Err(format!("Failed to query desktop audio packet size: {e:?}")),
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&buffer[..actual_bytes]);
+            if app
+                .emit("clip-audio-data", ClipAudioDataEvent {
+                    data: encoded,
+                    sample_rate: 48000,
+                    channels: 2,
+                    bits_per_sample: 32,
+                    silent: buffer_info.flags.silent,
+                    generation,
+                })
+                .is_err()
+            {
+                break 'capture; // window gone
+            }
         }
+    }
+    if discontinuities > 0 {
+        log::info!("[clip-audio] capture ended; WASAPI reported lost audio {discontinuities} time(s)");
     }
     let _ = audio_client.stop_stream();
     Ok(())

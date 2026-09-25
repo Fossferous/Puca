@@ -7,6 +7,14 @@ one-line summary; this file is the full story. Versions follow
 ## Unreleased
 
 ### Fixed
+- **Clips no longer have choppy audio.** A clip saved while the buffer was
+  armed automatically could come back with its sound broken up: short
+  stretches cut out or padded all the way through, and your microphone
+  wavering in pitch, although it had all sounded fine live. Your computer's
+  sound and your microphone now play through a clip as one continuous
+  track, still lined up with the picture. The desktop sound capture also no
+  longer falls behind when the computer is busy (a game, say), which could
+  lose moments of sound outright.
 - **Ticks made on an out-of-date screen are caught in more cases.** A tick
   could still end a repeat another device had just set up: if the repeat was
   saved in the same moment as the tick, if you had edited the item's text
