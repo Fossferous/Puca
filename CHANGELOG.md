@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.819 — 2026-09-25
 
+Clips no longer come back with choppy audio; switching screens in remote control shows the new screen; and a round of fixes so offline and two-device edits in Púca Notes no longer duplicate, drop or overwrite notes, pictures, recordings or ticks, and sessions end when they say they do.
 ### Fixed
 - **Clips no longer have choppy audio.** A clip saved while the buffer was
   armed automatically could come back with its sound broken up: short
@@ -102,6 +103,12 @@ one-line summary; this file is the full story. Versions follow
   list and land on the one after it. Every swipe now stops on the next list,
   however fast, the way Google Tasks moves between lists; tapping a tab or a
   label in the rail still goes straight to that list.
+- **The grid/list button in Púca Notes now does something on a phone.** On a
+  phone or a small tablet the notes were always one column, so the button at
+  the top right only swapped its own icon. Grid view is now two columns, like
+  Google Keep, and list view one. Drag-to-reorder lives in list view there, as
+  it already did on a computer; in grid view the card menu's *Move* items do
+  the same job.
 - **A voice note made with no signal keeps its recording.** Recording a clip
   in *Take a note…* and pressing Done while offline (or while other changes
   were still waiting to sync) saved the note without the recording and said
