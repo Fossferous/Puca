@@ -18,17 +18,16 @@
 // say so while the encoder reports no limit — exactly the distinction the
 // health-send line's s=[...] section draws.
 //
-// PATH. Peer-to-peer (mesh) only: the SFU (LiveKit) is not available locally.
-// That is NOT the same chain as an SFU channel at the encoder, which is the part
-// usually under suspicion: mesh sends the browser's default codec (VP8/libvpx
-// here) capped at 8 Mbps (tuneScreenShareSender), with E2EE on a main-thread
-// transform; SFU channels publish H.264 (preferHardwareH264: the GPU's encoder
-// where available, else OpenH264) at SHARE_BITRATE 4.5 Mbps, optional simulcast
-// and LiveKit's worker E2EE, and the viewer then decodes H.264. So a PASS here
-// clears the app's capture path, the mesh encoder and the viewer's
-// decode-and-present on THIS machine — not an SFU channel's encoder, and not
-// anybody else's machine. The verdict carries the path and codec for that
-// reason.
+// PATH (TRANSPORT=mesh|sfu). The two are NOT the same chain at the encoder,
+// which is the part usually under suspicion: mesh sends the browser's default
+// codec (VP8/libvpx here) capped at 8 Mbps (tuneScreenShareSender), with E2EE on
+// a main-thread transform; SFU channels publish H.264 (preferHardwareH264: the
+// GPU's encoder where available, else OpenH264) at SHARE_BITRATE 4.5 Mbps,
+// optional simulcast and LiveKit's worker E2EE, and the viewer decodes H.264.
+// TRANSPORT=sfu needs a LiveKit server the backend is configured for
+// (LIVEKIT_URL / _API_KEY / _API_SECRET) and switches this run's channels to
+// sfu_mode through psql. Either way a PASS covers THIS machine only, not anybody
+// else's. The verdict carries the path and codec for that reason.
 //
 // Everything is headless and muted: nothing opens on the desktop, nothing plays.
 //
@@ -52,6 +51,7 @@ const WARM_MS = Number(process.env.WARM_MS || 15_000);
 const CHANNEL = process.env.CHANNEL || 'msedge';
 /** The viewer's GPU: the owner's app is pinned to the integrated GPU. */
 const ADAPTER_LUID = process.env.ADAPTER_LUID || '';
+const TRANSPORT = process.env.TRANSPORT === 'sfu' ? 'sfu' : 'mesh';
 const OUT = process.argv[2] || '';
 const PSQL = process.env.PSQL || 'C:/Program Files/PostgreSQL/16/bin/psql.exe';
 const PASS = 'Password123!';
@@ -66,6 +66,10 @@ const baseArgs = ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media
     // (the default-server helper), so it resolves to nothing here, and any
     // attempt is counted below and reported.
     '--host-resolver-rules=MAP svrn.lol ~NOTFOUND, MAP *.svrn.lol ~NOTFOUND'];
+// A LOCAL SFU listens on 127.0.0.1 only (so nothing is exposed and Windows
+// raises no firewall prompt), and Chromium leaves loopback out of its ICE
+// candidates unless told otherwise: without this every SFU join failed ICE.
+if (process.env.TRANSPORT === 'sfu') baseArgs.push('--allow-loopback-in-peer-connection');
 let liveAttempts = 0;
 const blockLive = async (ctx) => {
     await ctx.route(/https?:\/\/([^/]*\.)?svrn\.lol(\/|$)/, (route) => { liveAttempts++; return route.abort(); });
@@ -210,7 +214,7 @@ const viewerBrowser = await chromium.launch({
     args: [...baseArgs, ...(ADAPTER_LUID ? [`--use-adapter-luid=${ADAPTER_LUID}`] : [])],
 });
 const users = [`sf0_${stamp}`, `sf1_${stamp}`];
-const result = { app: APP, fps: FPS, changeFps: CHANGE_FPS, res: `${W}x${H}`, measureMs: MEASURE_MS, adapter: ADAPTER_LUID || 'default', path: 'mesh' };
+const result = { app: APP, fps: FPS, changeFps: CHANGE_FPS, res: `${W}x${H}`, measureMs: MEASURE_MS, adapter: ADAPTER_LUID || 'default', path: TRANSPORT };
 let failed = false;
 
 try {
@@ -237,6 +241,8 @@ try {
     const serverId = psql(`SELECT id FROM servers WHERE name='${serverName}'`);
     const vid = psql(`SELECT id FROM users WHERE username='${users[1]}'`);
     psql(`INSERT INTO server_members (server_id, user_id) VALUES ('${serverId}', ${vid}) ON CONFLICT DO NOTHING`);
+    // The SFU path: this run's channels are routed through LiveKit.
+    if (TRANSPORT === 'sfu') psql(`UPDATE channels SET sfu_mode = true WHERE server_id = '${serverId}'`);
     for (const p of [sharer, viewer]) {
         if (!await joinVoice(p)) throw new Error('could not find the voice channel to join');
     }
@@ -291,26 +297,32 @@ try {
     // What the APP ITSELF reports for the share (the rows healthLog.ts turns
     // into its s=[...] section): source, chosen/capped/captured/sent fps, size,
     // on/off and sender id, read through the app's own mesh diagnostics hook.
-    result.appSendRows = await sharer.evaluate(async () => {
-        const peers = await window.__pucaMeshDiag?.(3000);
-        const rows = [];
-        for (const p of peers ?? []) {
-            for (const r of p.rtp ?? []) {
-                if (r.dir !== 'outbound-rtp' || r.kind !== 'video') continue;
-                rows.push({ peer: p.userId, source: r.source ?? null, setFps: r.setFps ?? null, maxFps: r.maxFps ?? null,
-                    captureFps: r.captureFps ?? null, fps: r.fps ?? null, size: r.size ?? null, active: r.active ?? null,
-                    ssrc: r.ssrc ?? null, limit: r.limit ?? null, encoder: r.encoder ?? null });
+    const row = (r, peer) => ({ peer, rid: r.rid ?? null, source: r.source ?? null, setFps: r.setFps ?? null, maxFps: r.maxFps ?? null,
+        captureFps: r.captureFps ?? null, fps: r.fps ?? null, size: r.size ?? null, active: r.active ?? null,
+        ssrc: r.ssrc ?? null, limit: r.limit ?? null, encoder: r.encoder ?? null, hw: r.hwEncoder ?? null });
+    result.appSendRows = TRANSPORT === 'sfu'
+        ? await sharer.evaluate(async () => (await window.__pucaVoiceDiag?.(3000))?.localRtp ?? [])
+            .then(rows => rows.filter(r => r.kind === 'video').map(r => row(r, null)))
+        : await sharer.evaluate(async () => {
+            const peers = await window.__pucaMeshDiag?.(3000);
+            const rows = [];
+            for (const p of peers ?? []) {
+                for (const r of p.rtp ?? []) if (r.dir === 'outbound-rtp' && r.kind === 'video') rows.push({ ...r, peer: p.userId });
             }
-        }
-        return rows;
-    });
+            return rows;
+        }).then(rows => rows.map(r => row(r, r.peer)));
     // ...and how the viewer's app labels what it receives (healthLog's v=[...]).
-    result.appReceiveRows = await viewer.evaluate(async () => {
-        const peers = await window.__pucaMeshDiag?.(3000);
-        return (peers ?? []).flatMap(p => (p.latency?.inbound ?? []).map(i => ({
-            peer: p.userId, source: i.source ?? null, fps: i.fps ?? null, size: i.size ?? null, decoder: i.decoder ?? null,
-        })));
-    });
+    result.appReceiveRows = TRANSPORT === 'sfu'
+        ? await viewer.evaluate(async () => ((await window.__pucaVoiceDiag?.(3000))?.remoteRtp ?? []).map(r => {
+            const i = r.latency?.inbound?.[0] ?? {};
+            return { peer: r.userId ?? null, source: r.source ?? null, fps: i.fps ?? null, size: i.size ?? null, decoder: i.decoder ?? null };
+        }))
+        : await viewer.evaluate(async () => {
+            const peers = await window.__pucaMeshDiag?.(3000);
+            return (peers ?? []).flatMap(p => (p.latency?.inbound ?? []).map(i => ({
+                peer: p.userId, source: i.source ?? null, fps: i.fps ?? null, size: i.size ?? null, decoder: i.decoder ?? null,
+            })));
+        });
 
     const rate = (a, b, k) => (a && b && typeof a[k] === 'number' && typeof b[k] === 'number') ? Math.round(((b[k] - a[k]) / secs) * 10) / 10 : null;
     result.sender = s1.map((e, i) => {
@@ -346,7 +358,7 @@ try {
     const captured = top?.capturedFps ?? null;
     const shown = result.presented.fps ?? 0;
     result.verdict = {
-        path: 'mesh', encoder: top?.encoder ?? null, hwEncoder: top?.hw ?? null,
+        path: TRANSPORT, encoder: top?.encoder ?? null, hwEncoder: top?.hw ?? null,
         decoder: result.viewer[0]?.decoder ?? null,
         captured, sent, shown,
         viewerKeptUp: sent > 0 && shown >= 0.9 * sent,
