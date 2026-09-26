@@ -2943,17 +2943,26 @@ mod resync_tests {
         let (mesh,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type, sfu_mode) VALUES ($1, 'm', 1, false) RETURNING id")
             .bind(&sid).fetch_one(&pool).await.expect("mesh channel");
         let mesh_room = room_name_for_channel(mesh as i64);
+        // A voice channel with no owning server: it exists (the channels query
+        // confirms it), yet the permission lookup can only answer NotFound - the
+        // unanswered case, which must keep the session and mark it.
+        let (orphan,): (i32,) = sqlx::query_as("INSERT INTO channels (name, type, sfu_mode) VALUES ('o', 1, true) RETURNING id")
+            .fetch_one(&pool).await.expect("server-less channel");
+        let orphan_room = room_name_for_channel(orphan as i64);
 
         let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
         let room = room_name_for_channel(cid);
         let (id_m, id_x, id_mesh) = (format!("u{member}#m1"), format!("u{outsider}#x1"), format!("u{member}#m2"));
+        let id_orphan = format!("u{member}#m3");
         let (base, srv) = livekit_stand_in(
             vec![
-                ("/twirp/livekit.RoomService/ListRooms", 200, format!(r#"{{"rooms":[{{"name":"{room}"}},{{"name":"{mesh_room}"}}]}}"#)),
+                ("/twirp/livekit.RoomService/ListRooms", 200, format!(r#"{{"rooms":[{{"name":"{room}"}},{{"name":"{mesh_room}"}},{{"name":"{orphan_room}"}}]}}"#)),
                 ("/twirp/livekit.RoomService/ListParticipants", 200,
                  format!(r#"{{"participants":[{{"identity":"{id_m}","state":"ACTIVE","tracks":[]}},{{"identity":"{id_x}","state":"ACTIVE","tracks":[]}}]}}"#)),
                 ("/twirp/livekit.RoomService/ListParticipants", 200,
                  format!(r#"{{"participants":[{{"identity":"{id_mesh}","state":"ACTIVE","tracks":[]}}]}}"#)),
+                ("/twirp/livekit.RoomService/ListParticipants", 200,
+                 format!(r#"{{"participants":[{{"identity":"{id_orphan}","state":"ACTIVE","tracks":[]}}]}}"#)),
                 ("/twirp/livekit.RoomService/RemoveParticipant", 200, "{}".to_string()),
                 ("/twirp/livekit.RoomService/RemoveParticipant", 200, "{}".to_string()),
             ],
@@ -2962,7 +2971,7 @@ mod resync_tests {
         .await;
         let r = resync_once(&state, &cfg_for(&base), &client()).await.expect("resync");
         let seen = asked(srv).await;
-        let removed: std::collections::BTreeSet<String> = seen[3..]
+        let removed: std::collections::BTreeSet<String> = seen[4..]
             .iter()
             .map(|s| serde_json::from_str::<serde_json::Value>(&s.body).unwrap()["identity"].as_str().unwrap().to_string())
             .collect();
@@ -2972,6 +2981,11 @@ mod resync_tests {
         assert!(u.participants.contains_key(&id_m), "a member of an SFU channel stays");
         assert!(!u.participants.contains_key(&id_x));
         drop(u);
+        let o = state.sfu_rooms.get(&orphan_room).unwrap();
+        assert!(o.participants.contains_key(&id_orphan), "an unanswered lookup keeps the session");
+        assert_eq!(o.recheck.get(&id_orphan), Some(&Recheck::JoinCheck), "and marks it to be asked again");
+        drop(o);
+        let _ = sqlx::query("DELETE FROM channels WHERE id = $1").bind(orphan).execute(&pool).await;
         let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&sid).execute(&pool).await;
         let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(users.iter().map(|u| *u as i32).collect::<Vec<_>>()).execute(&pool).await;
     }
