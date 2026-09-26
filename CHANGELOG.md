@@ -17,6 +17,21 @@ one-line summary; this file is the full story. Versions follow
   found, certificate rejected, timed out), which the new library no longer
   does by itself. Server and waker only: no app update is needed for this.
 
+### Fixed
+- **A busy server is no longer mistaken for a broken or revoked machine.**
+  When the server was too busy to hand out a sign-in challenge, the LAN waker
+  and the sign-in-screen service both reported an unreadable reply, and the
+  waker told you to re-enrol it after any server error. They now say the
+  server was busy, give its reason, and try again. Re-enrolling is only
+  suggested when the server actually refuses the device.
+- **Log lines no longer contain long runs of spaces.** A handful of messages
+  (the waker's refusal lines, two server warnings, the app's version-mismatch
+  warning, a remote-control notice) had stray spacing in the middle.
+- **The server's log says whether removing someone from a call worked.**
+  After a kick, ban or permission change, it used to report the person as
+  removed from the voice server even when that failed. It now says so only
+  when the voice server confirms it.
+
 ## 0.9.823 — 2026-09-26
 
 Stream diagnostics now cover the sending side, and the sign-in-screen service moves to a current web library.
