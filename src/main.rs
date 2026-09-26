@@ -1032,8 +1032,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Learn who is ALREADY in each LiveKit room: a restart forgets them, and a
     // session this process does not know about can neither be ejected by a
-    // kick nor counted by admission. Now, then every few minutes (no-op without
-    // the SFU tier; see sfu::spawn_livekit_reconciler).
+    // kick nor counted by admission. Now, then every few minutes - only with
+    // LIVEKIT_API_URL set, and a no-op without the SFU tier (see
+    // sfu::spawn_livekit_reconciler).
     sfu::spawn_livekit_reconciler(app_state.clone());
 
     // Hourly clip-part sweep (upload_handlers::sweep_clip_parts): orphaned

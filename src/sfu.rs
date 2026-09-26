@@ -609,6 +609,14 @@ pub struct ResyncReport {
     pub moved: usize,
     /// Ejections requested during the fetch, re-applied to sessions it added.
     pub reapplied: usize,
+    /// Added sessions the join check refused (see [`reauthorize_added`]).
+    pub denied: usize,
+}
+
+/// A merge's result: its counts, and the (room, identity) sessions it ADDED.
+pub struct Merged {
+    pub report: ResyncReport,
+    pub added: Vec<(String, String)>,
 }
 
 /// Why a resync failed. Every failure leaves `sfu_rooms` exactly as it was.
@@ -795,8 +803,9 @@ fn merge_snapshot(
     journal: &SfuResyncJournal,
     started: Instant,
     now: Instant,
-) -> ResyncReport {
+) -> Merged {
     let mut report = ResyncReport::default();
+    let mut added = Vec::new();
     for room in snap {
         report.rooms += 1;
         report.participants += room.participants.len();
@@ -819,6 +828,7 @@ fn merge_snapshot(
                     report.moved += 1;
                 } else {
                     report.added += 1;
+                    added.push((room.name.clone(), id.clone()));
                 }
             }
         }
@@ -857,7 +867,7 @@ fn merge_snapshot(
             report.cleared += before - (u.participants.len() + u.screen_shares.len());
         }
     }
-    report
+    Merged { report, added }
 }
 
 /// One resync: open the journal, take the snapshot, merge it under the
@@ -875,24 +885,111 @@ async fn resync_once(state: &AppState, cfg: &SfuConfig, client: &reqwest::Client
         if journal.overflowed {
             return Err(ResyncError::Busy);
         }
-        let mut report = merge_snapshot(&state.sfu_rooms, &rooms, &listed, &journal, started, Instant::now());
+        let merged = merge_snapshot(&state.sfu_rooms, &rooms, &listed, &journal, started, Instant::now());
+        let mut report = merged.report;
         report.ignored = listed.len() - rooms.len();
-        (report, journal.evict_intents)
+        (report, (journal.evict_intents, merged.added))
     };
+    let (intents, added) = intents;
     prune(state);
-    // A kick, ban or transport change during the fetch found nothing to eject
-    // for a session only the snapshot knew; now the map knows it.
-    for (room, uid) in intents {
-        let Some(cid) = channel_id_from_room(&room) else { continue };
-        let prefix = format!("u{uid}#");
-        let known = state.sfu_rooms.get(&room).is_some_and(|u| {
-            u.participants.keys().chain(u.reservations.keys()).any(|i| i.starts_with(&prefix))
-        });
-        if known {
-            report.reapplied += evict_with(state, cfg, cid, uid).await.removed;
+    // An ejection requested during the fetch (a voice move, a transport change)
+    // found nothing to cut for a session only the snapshot knew. Apply it to
+    // THOSE sessions - the ones the merge added for that user in that room -
+    // and never to one that joined since.
+    let mut unchecked = Vec::new();
+    for (room, identity) in added {
+        let wanted_out = user_id_from_identity(&identity).is_some_and(|uid| intents.contains(&(room.clone(), uid)));
+        if wanted_out {
+            report.reapplied += remove_identities(state, cfg, &room, std::slice::from_ref(&identity)).await.removed;
+        } else {
+            unchecked.push((room, identity));
         }
     }
+    // Every other added session never went through this process's join check
+    // (its participant_joined never arrived here): run it now. This is what
+    // catches a kick, ban or permission change that happened while the session
+    // was unknown - during the fetch, or while this process was down.
+    report.denied += reauthorize_added(state, cfg, &unchecked).await;
     Ok(report)
+}
+
+/// The join check the `participant_joined` webhook runs, for sessions the
+/// resync added. It acts ONLY on answers the database gave: a channel it
+/// confirms is not (or no longer) an SFU voice channel, a user it confirms is
+/// not a member, permissions without VIEW_CHANNEL and CONNECT. A lookup that
+/// fails keeps the session: a database hiccup at boot must not drop calls. The
+/// resync only runs against this host's own LiveKit (LIVEKIT_API_URL), so this
+/// never judges another host's calls. Returns how many sessions it removed.
+async fn reauthorize_added(state: &AppState, cfg: &SfuConfig, added: &[(String, String)]) -> usize {
+    if added.is_empty() {
+        return 0;
+    }
+    let cids: Vec<i64> = added
+        .iter()
+        .filter_map(|(room, _)| channel_id_from_room(room))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let sfu_channels: HashSet<i64> = match sqlx::query_as::<_, (i64,)>(
+        "SELECT id::bigint FROM channels WHERE id::bigint = ANY($1) AND type = 1 AND COALESCE(sfu_mode, false)",
+    )
+    .bind(&cids)
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(rows) => rows.into_iter().map(|(id,)| id).collect(),
+        Err(e) => {
+            tracing::warn!(
+                "SFU resync: could not check the {} session(s) it learned ({e}); they stay until they next join",
+                added.len()
+            );
+            return 0;
+        }
+    };
+    let mut refused: HashMap<String, Vec<String>> = HashMap::new();
+    for (room, identity) in added {
+        let (Some(cid), Some(uid)) = (channel_id_from_room(room), user_id_from_identity(identity)) else {
+            continue;
+        };
+        let refuse = if !sfu_channels.contains(&cid) {
+            true
+        } else {
+            match get_user_channel_permissions(&state.pool, cid, uid).await {
+                a @ ChannelPermAccess::Allowed { .. } => !sfu_entitled(&a),
+                ChannelPermAccess::NotMember => true,
+                // The channel exists (checked above), so this is a failed lookup.
+                ChannelPermAccess::NotFound => false,
+            }
+        };
+        if refuse {
+            refused.entry(room.clone()).or_default().push(identity.clone());
+        }
+    }
+    let mut removed = 0;
+    for (room, identities) in refused {
+        removed += remove_identities(state, cfg, &room, &identities).await.removed;
+    }
+    removed
+}
+
+/// Who an `sfu_mode` change must still cut at the SFU: when LEAVING SFU mode,
+/// everyone in the channel's LiveKit room whose voice-room eviction did not
+/// already cut them (`cut`). Entering SFU mode cuts nobody: the room then holds
+/// the new call's first joiners.
+pub(crate) fn sfu_only_to_cut(was_sfu: bool, cut: &std::collections::BTreeSet<i64>, usage: Option<&SfuRoomUsage>) -> std::collections::BTreeSet<i64> {
+    if !was_sfu {
+        return Default::default();
+    }
+    usage
+        .map(|u| {
+            u.participants
+                .keys()
+                .chain(u.reservations.keys())
+                .filter_map(|i| user_id_from_identity(i))
+                .filter(|uid| !cut.contains(uid))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// SFU_RESYNC_SECS as a period: unset = [`RESYNC_EVERY`]; 0 = only until the
@@ -917,20 +1014,27 @@ fn resync_period(raw: Option<&str>) -> Result<Duration, String> {
 /// on its calls.
 pub fn spawn_livekit_reconciler(state: Arc<AppState>) {
     let Some(cfg) = sfu_config() else { return };
-    if cfg.api_url.is_none() {
-        tracing::warn!(
-            "SFU resync is off: LIVEKIT_API_URL is not set. Set it to this host's LiveKit (http://127.0.0.1:7880 in the standard deploy) so a restart does not forget who is already in a call - until then such a session cannot be ejected or counted. See .env.example."
-        );
-        return;
-    }
-    let every = match resync_period(std::env::var("SFU_RESYNC_SECS").ok().as_deref()) {
-        Ok(p) => p,
-        Err(e) => {
+    let every = match reconciler_plan(cfg.api_url.is_some(), std::env::var("SFU_RESYNC_SECS").ok().as_deref()) {
+        None => {
+            tracing::warn!(
+                "SFU resync is off: LIVEKIT_API_URL is not set. Set it to this host's LiveKit (http://127.0.0.1:7880 in the standard deploy) so a restart does not forget who is already in a call - until then such a session cannot be ejected or counted. See .env.example."
+            );
+            return;
+        }
+        Some(Ok(p)) => p,
+        Some(Err(e)) => {
             tracing::warn!("SFU resync: {e}; using {} s", RESYNC_EVERY.as_secs());
             RESYNC_EVERY
         }
     };
     tokio::spawn(run_reconciler(state, every, sfu_config));
+}
+
+/// Whether the reconciler runs, and how often: None without LIVEKIT_API_URL
+/// (see [`spawn_livekit_reconciler`]), else SFU_RESYNC_SECS as [`resync_period`]
+/// reads it.
+fn reconciler_plan(api_url_set: bool, raw_secs: Option<&str>) -> Option<Result<Duration, String>> {
+    api_url_set.then(|| resync_period(raw_secs))
 }
 
 /// The reconciler loop. `config` is read on every pass (`sfu_config` in
@@ -989,6 +1093,12 @@ where
                     tracing::info!(
                         "SFU resync: re-applied {} ejection(s) requested while LiveKit was being read",
                         r.reapplied
+                    );
+                }
+                if r.denied > 0 {
+                    tracing::info!(
+                        "SFU resync: removed {} session(s) the join check refuses (no longer a member, or no VIEW_CHANNEL/CONNECT)",
+                        r.denied
                     );
                 }
                 drifted = synced && drift;
@@ -1237,7 +1347,14 @@ async fn evict_with(state: &AppState, cfg: &SfuConfig, channel_id: i64, user_id:
     if identities.is_empty() {
         return Evicted::default();
     }
+    remove_identities(state, cfg, &room, &identities).await
+}
+
+/// RemoveParticipant for each identity in `room`; a confirmed removal is
+/// journaled and dropped from `sfu_rooms`.
+async fn remove_identities(state: &AppState, cfg: &SfuConfig, room: &str, identities: &[String]) -> Evicted {
     let tried = identities.len();
+    let room = room.to_string();
 
     let token = match mint_admin_token(cfg, &room) {
         Ok(t) => t,
@@ -1265,6 +1382,7 @@ async fn evict_with(state: &AppState, cfg: &SfuConfig, channel_id: i64, user_id:
     };
     let mut removed = 0;
     for identity in identities {
+        let identity = identity.as_str();
         let resp = client
             .post(&endpoint)
             .bearer_auth(&token)
@@ -1276,12 +1394,12 @@ async fn evict_with(state: &AppState, cfg: &SfuConfig, channel_id: i64, user_id:
                 removed += 1;
                 // Journal first: a resync whose snapshot still listed this
                 // session must not bring it back.
-                journal(state, JournalEntry::Left(&room, &identity));
+                journal(state, JournalEntry::Left(&room, identity));
                 // Drop from local usage so the egress projection frees the slot
                 // without waiting for the participant_left webhook.
                 if let Some(mut u) = state.sfu_rooms.get_mut(&room) {
-                    u.participants.remove(&identity);
-                    u.reservations.remove(&identity);
+                    u.participants.remove(identity);
+                    u.reservations.remove(identity);
                 }
             }
             Ok(r) => tracing::warn!("SFU evict {identity}: LiveKit returned {}", r.status()),
@@ -2168,6 +2286,8 @@ mod resync_tests {
     struct Seen {
         body: String,
         claims: serde_json::Value,
+        /// The User-Agent header, as sent.
+        ua: String,
     }
 
     /// Serve `script` in order, one connection each: (path it must be, status,
@@ -2213,6 +2333,10 @@ mod resync_tests {
                     &jsonwebtoken::DecodingKey::from_secret(RIG_SECRET.as_bytes()),
                     &jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256),
                 );
+                let ua = head
+                    .lines()
+                    .find_map(|l| l.to_ascii_lowercase().starts_with("user-agent:").then(|| l[11..].trim().to_string()))
+                    .unwrap_or_default();
                 let (claims, status) = match verified {
                     Ok(t) => (t.claims, status),
                     Err(_) => (serde_json::Value::Null, 401),
@@ -2220,7 +2344,7 @@ mod resync_tests {
                 if let Some(f) = &on_call {
                     f(path.rsplit('/').next().unwrap_or(""));
                 }
-                seen.push(Seen { body, claims });
+                seen.push(Seen { body, claims, ua });
                 let resp = format!(
                     "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
                     reply.len()
@@ -2294,8 +2418,11 @@ mod resync_tests {
         assert!(m.contains("LIVEKIT_API_KEY"), "{m}");
     }
 
+    /// An AppState whose database never answers - quickly: without the short
+    /// acquire timeout a lookup waits out sqlx's 30 s default.
     fn test_state() -> Arc<AppState> {
         let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(2))
             .connect_lazy("postgres://localhost/does_not_connect")
             .expect("lazy pool");
         AppState::new(pool, "test-secret".into(), None, Arc::new(crate::wake::NullWake))
@@ -2350,7 +2477,7 @@ mod resync_tests {
     /// merge_snapshot with every snapshot room counted as listed.
     fn merge(rooms: &DashMap<String, SfuRoomUsage>, snap: &[LkRoom], journal: &SfuResyncJournal, started: Instant, now: Instant) -> ResyncReport {
         let listed: HashSet<String> = snap.iter().map(|r| r.name.clone()).collect();
-        merge_snapshot(rooms, snap, &listed, journal, started, now)
+        merge_snapshot(rooms, snap, &listed, journal, started, now).report
     }
 
     #[test]
@@ -2381,7 +2508,7 @@ mod resync_tests {
         // LiveKit listed both; the snapshot kept neither sessions list for the
         // foreign one (it is not sfu_<channel>) and sfu_9 is simply absent.
         let listed_names: HashSet<String> = ["someone-elses".to_string()].into_iter().collect();
-        let r = merge_snapshot(&rooms, &[], &listed_names, &SfuResyncJournal::default(), Instant::now(), Instant::now());
+        let r = merge_snapshot(&rooms, &[], &listed_names, &SfuResyncJournal::default(), Instant::now(), Instant::now()).report;
         let other = rooms.get("someone-elses").unwrap();
         assert!(other.participants.contains_key("x#1") && other.screen_shares.contains("TR_x"), "LiveKit listed it: not gone");
         assert!(rooms.get("sfu_9").unwrap().participants.is_empty(), "control: a room LiveKit did not list IS cleared");
@@ -2463,7 +2590,7 @@ mod resync_tests {
     }
 
     #[tokio::test]
-    async fn every_webhook_arm_journals_before_it_touches_the_map() {
+    async fn every_webhook_arm_journals_its_event() {
         let state = test_state();
         *state.sfu_resync_journal.lock().unwrap() = Some(SfuResyncJournal::default());
         let ev = |v: serde_json::Value| v;
@@ -2497,6 +2624,7 @@ mod resync_tests {
         assert_eq!(out, Evicted { tried: 1, removed: 1 });
         let seen = asked(srv).await;
         assert_eq!(seen[0].claims["video"]["roomAdmin"], true, "a verified admin token");
+        assert_eq!(seen[0].ua, "puca-server", "a CDN in front of LiveKit challenges requests without one");
         let g = state.sfu_resync_journal.lock().unwrap();
         let j = g.as_ref().unwrap();
         assert!(j.evict_intents.contains(&("sfu_7".to_string(), 5)));
@@ -2505,7 +2633,8 @@ mod resync_tests {
     }
 
     #[tokio::test]
-    async fn a_kick_during_the_fetch_is_applied_to_what_the_merge_adds() {
+    async fn an_ejection_during_the_fetch_is_applied_to_what_the_merge_added_only() {
+        no_env_proxy();
         let state = test_state();
         let during = Arc::clone(&state);
         let (base, srv) = livekit_stand_in(
@@ -2515,11 +2644,14 @@ mod resync_tests {
                  r#"{"participants":[{"identity":"u5#aa","state":"ACTIVE","tracks":[]},{"identity":"u6#bb","state":"ACTIVE","tracks":[]}]}"#.to_string()),
                 ("/twirp/livekit.RoomService/RemoveParticipant", 200, "{}".to_string()),
             ],
-            // The kick lands while LiveKit is being read, and finds nothing:
-            // this process does not know u5 yet.
+            // While LiveKit is being read, user 5 is moved out of this room (the
+            // cut finds nothing: this process does not know u5#aa yet), and
+            // then joins again as u5#new - a session the ejection predates.
             Some(Box::new(move |m: &str| {
                 if m == "ListRooms" {
-                    journal(&during, JournalEntry::EvictIntent("sfu_7", 5))
+                    journal(&during, JournalEntry::EvictIntent("sfu_7", 5));
+                    journal(&during, JournalEntry::Joined("sfu_7", "u5#new"));
+                    during.sfu_rooms.entry("sfu_7".into()).or_default().participants.insert("u5#new".into(), Instant::now());
                 }
             })),
         )
@@ -2527,11 +2659,17 @@ mod resync_tests {
         let r = resync_once(&state, &cfg_for(&base), &client()).await.expect("resync");
         let seen = asked(srv).await;
         assert_eq!(r.reapplied, 1);
+        assert_eq!(seen.len(), 3, "exactly one removal");
         let body: serde_json::Value = serde_json::from_str(&seen[2].body).unwrap();
-        assert_eq!(body, serde_json::json!({ "room": "sfu_7", "identity": "u5#aa" }));
+        assert_eq!(body, serde_json::json!({ "room": "sfu_7", "identity": "u5#aa" }), "the session the merge added");
+        assert_eq!(seen[2].ua, "puca-server");
         let u = state.sfu_rooms.get("sfu_7").unwrap();
         assert!(!u.participants.contains_key("u5#aa"), "ejected after all");
-        assert!(u.participants.contains_key("u6#bb"), "control: the other session is learned and left alone");
+        assert!(u.participants.contains_key("u5#new"), "a session newer than the ejection is not its business");
+        // u6#bb is added and goes through the join check, whose database here
+        // cannot answer: a failed lookup keeps the session.
+        assert!(u.participants.contains_key("u6#bb"), "an unanswerable join check drops nobody");
+        assert_eq!(r.denied, 0);
     }
 
     #[tokio::test]
@@ -2578,6 +2716,116 @@ mod resync_tests {
         .expect("SFU_RESYNC_SECS=0 returns after its first success");
         assert!(started.elapsed() >= Duration::from_secs(RESYNC_RETRY_SECS[0]), "it waited before retrying");
         assert_eq!(asked(srv).await.len(), 2, "one failure, one success, then nothing");
+    }
+
+
+    /// Tests that reach the stand-in through the PRODUCTION clients (which
+    /// honour HTTP(S)_PROXY / ALL_PROXY) need 127.0.0.1 exempted; say so.
+    fn no_env_proxy() {
+        let no = std::env::var("NO_PROXY").or_else(|_| std::env::var("no_proxy")).unwrap_or_default();
+        for k in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
+            if std::env::var_os(k).is_some_and(|v| !v.is_empty()) {
+                assert!(no.split(',').any(|h| h.trim() == "127.0.0.1"), "{k} is set: add 127.0.0.1 to NO_PROXY to run the resync socket tests");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ejection_of_a_user_this_process_does_not_know_still_leaves_its_intent() {
+        let state = test_state();
+        *state.sfu_resync_journal.lock().unwrap() = Some(SfuResyncJournal::default());
+        // No stand-in: with nothing known there is nothing to call.
+        let out = evict_with(&state, &cfg_for("http://127.0.0.1:9"), 7, 5).await;
+        assert_eq!(out, Evicted::default());
+        let g = state.sfu_resync_journal.lock().unwrap();
+        assert!(g.as_ref().unwrap().evict_intents.contains(&("sfu_7".to_string(), 5)), "the case the intent exists for");
+    }
+
+    #[tokio::test]
+    async fn a_token_signed_with_another_secret_is_refused_by_the_stand_in() {
+        // The negative control for every signature check above.
+        let (base, srv) = livekit_stand_in(
+            vec![("/twirp/livekit.RoomService/ListRooms", 200, r#"{"rooms":[]}"#.to_string())],
+            None,
+        )
+        .await;
+        let mut cfg = cfg_for(&base);
+        cfg.api_secret = "some-other-secret-0123456789abcdef".into();
+        match fetch_snapshot(&cfg, &client()).await {
+            Err(ResyncError::Refused(401, _)) => {}
+            other => panic!("a wrongly signed token must be refused: {other:?}"),
+        }
+        asked(srv).await;
+    }
+
+    #[test]
+    fn the_reconciler_runs_only_with_livekit_api_url() {
+        assert!(reconciler_plan(false, None).is_none(), "off: the public URL may be another host's node");
+        assert!(reconciler_plan(false, Some("60")).is_none());
+        assert_eq!(reconciler_plan(true, None), Some(Ok(RESYNC_EVERY)));
+        assert_eq!(reconciler_plan(true, Some("60")), Some(Ok(Duration::from_secs(60))));
+        assert!(matches!(reconciler_plan(true, Some("x")), Some(Err(_))));
+    }
+
+    #[test]
+    fn only_leaving_sfu_mode_cuts_sessions_at_the_sfu() {
+        let usage = usage(&[("u5#aa", Instant::now()), ("u6#bb", Instant::now())], &["u7#cc"], &[]);
+        let cut: std::collections::BTreeSet<i64> = [5].into_iter().collect();
+        assert!(sfu_only_to_cut(false, &cut, Some(&usage)).is_empty(), "entering SFU mode: the room holds the new call");
+        assert_eq!(sfu_only_to_cut(true, &cut, Some(&usage)), [6, 7].into_iter().collect(), "leaving: all but those already cut");
+        assert!(sfu_only_to_cut(true, &cut, None).is_empty());
+    }
+
+    /// THE JOIN CHECK against a real database (TEST_DATABASE_URL; skips without
+    /// it). The resync learns a member and a non-member in an SFU channel; only
+    /// the non-member is removed, exactly as participant_joined would have done.
+    #[tokio::test]
+    async fn the_join_check_removes_only_whom_the_database_refuses() {
+        let Some(pool) = crate::migrator::test_pool(2).await else { return };
+        no_env_proxy();
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let mk = |n: &str| format!("rs_{n}_{}", &tag[..12]);
+        let mut users = Vec::new();
+        for n in ["owner", "member", "outsider"] {
+            let (id,): (i32,) = sqlx::query_as("INSERT INTO users (username, email, salt, verifier, created_at) VALUES ($1, $2, $3, $4, NOW()) RETURNING id")
+                .bind(mk(n)).bind(format!("{}@test.invalid", mk(n))).bind(b"s".as_ref()).bind(b"v".as_ref())
+                .fetch_one(&pool).await.expect("user");
+            users.push(id as i64);
+        }
+        let (owner, member, outsider) = (users[0], users[1], users[2]);
+        let sid = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, $2, $3)").bind(&sid).bind(mk("srv")).bind(owner as i32).execute(&pool).await.expect("server");
+        sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2), ($1, $3)").bind(&sid).bind(owner as i32).bind(member as i32).execute(&pool).await.expect("members");
+        let everyone = (Permissions::VIEW_CHANNEL | Permissions::CONNECT).bits() as i64;
+        sqlx::query("INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) VALUES ($1, '@everyone', '#99AAB5', $2, 0, true)")
+            .bind(&sid).bind(everyone).execute(&pool).await.expect("@everyone");
+        let (cid,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type, sfu_mode) VALUES ($1, 'v', 1, true) RETURNING id")
+            .bind(&sid).fetch_one(&pool).await.expect("channel");
+        let cid = cid as i64;
+
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = room_name_for_channel(cid);
+        let (id_m, id_x) = (format!("u{member}#m1"), format!("u{outsider}#x1"));
+        let (base, srv) = livekit_stand_in(
+            vec![
+                ("/twirp/livekit.RoomService/ListRooms", 200, format!(r#"{{"rooms":[{{"name":"{room}"}}]}}"#)),
+                ("/twirp/livekit.RoomService/ListParticipants", 200,
+                 format!(r#"{{"participants":[{{"identity":"{id_m}","state":"ACTIVE","tracks":[]}},{{"identity":"{id_x}","state":"ACTIVE","tracks":[]}}]}}"#)),
+                ("/twirp/livekit.RoomService/RemoveParticipant", 200, "{}".to_string()),
+            ],
+            None,
+        )
+        .await;
+        let r = resync_once(&state, &cfg_for(&base), &client()).await.expect("resync");
+        let seen = asked(srv).await;
+        let body: serde_json::Value = serde_json::from_str(&seen[2].body).unwrap();
+        assert_eq!(body["identity"], id_x.as_str(), "the non-member, and only the non-member");
+        assert_eq!(r.denied, 1);
+        let u = state.sfu_rooms.get(&room).unwrap();
+        assert!(u.participants.contains_key(&id_m) && !u.participants.contains_key(&id_x));
+        drop(u);
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&sid).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(users.iter().map(|u| *u as i32).collect::<Vec<_>>()).execute(&pool).await;
     }
 
 }

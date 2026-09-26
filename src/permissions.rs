@@ -763,8 +763,16 @@ pub async fn get_user_channel_permissions(
         };
     }
 
-    if !is_server_member(pool, &server_id, user_id).await {
-        return ChannelPermAccess::NotMember;
+    // A membership lookup that FAILS is not an answer: it is reported as
+    // NotFound ("not found or lookup failed"), never as NotMember. Every caller
+    // refuses on both alike; the difference matters where NotMember is acted on
+    // as a fact about the user - the eviction sweep with an unknown scope, the
+    // LiveKit resync's join check - and a database hiccup there must not read as
+    // "this person is not a member of that server".
+    match server_membership(pool, &server_id, user_id).await {
+        Some(true) => {}
+        Some(false) => return ChannelPermAccess::NotMember,
+        None => return ChannelPermAccess::NotFound,
     }
 
     // Base = OR of the member's roles + the @everyone (is_default) role.
@@ -1006,6 +1014,11 @@ pub async fn get_channel_viewer_ids(
 /// silent `unwrap_or(None)` here turned transient pool/decode failures into
 /// "not a member" with nothing in the logs.
 async fn is_server_member(pool: &sqlx::PgPool, server_id: &str, user_id: i64) -> bool {
+    server_membership(pool, server_id, user_id).await.unwrap_or(false)
+}
+
+/// Membership as the database answered it: None when the lookup failed.
+async fn server_membership(pool: &sqlx::PgPool, server_id: &str, user_id: i64) -> Option<bool> {
     match sqlx::query_as::<_, (i32,)>(
         "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2",
     )
@@ -1014,7 +1027,7 @@ async fn is_server_member(pool: &sqlx::PgPool, server_id: &str, user_id: i64) ->
     .fetch_optional(pool)
     .await
     {
-        Ok(row) => row.is_some(),
+        Ok(row) => Some(row.is_some()),
         Err(e) => {
             tracing::error!(
                 "is_server_member: membership lookup failed for server {} user {}: {}",
@@ -1022,7 +1035,7 @@ async fn is_server_member(pool: &sqlx::PgPool, server_id: &str, user_id: i64) ->
                 user_id,
                 e
             );
-            false
+            None
         }
     }
 }

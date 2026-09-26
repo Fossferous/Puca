@@ -147,9 +147,14 @@ curl -s -H "Authorization: Bearer $JWT" https://chat.example.com/channels/<id>/s
   from LiveKit's RoomService (`ListRooms` + `ListParticipants`) at startup and
   every `SFU_RESYNC_SECS` (180 s) - so a participant already in a call when
   the backend restarts is known, and ejectable, as soon as LiveKit answers.
-  The resync never ejects anyone itself; it restores knowledge (and clears a
-  session whose `participant_left` webhook was lost), and an ejection that
-  was requested while it was reading LiveKit is re-applied to what it adds.
+  What it adds goes through the same join check the `participant_joined`
+  webhook runs - acting only on what the database answers (not a member, no
+  VIEW_CHANNEL/CONNECT, not an SFU channel), never on a failed lookup - so a
+  kick, ban or permission change that happened while a session was unknown
+  (during the read, or while the backend was down) still removes it. A voice
+  move or transport change requested during the read is applied to the
+  sessions the read added. It also clears a session whose `participant_left`
+  webhook was lost.
   The sweep, and a switch OUT of `sfu_mode`, also reach sessions whose Púca
   socket never rejoined.
 
@@ -161,8 +166,8 @@ curl -s -H "Authorization: Bearer $JWT" https://chat.example.com/channels/<id>/s
   `SFU resync: LiveKit has N room(s) ...` line at startup, and
   `SFU resync: cannot read LiveKit's rooms (...)` once per outage. LiveKit
   itself logs each server-API call at INFO (`API RoomService.ListRooms`, and
-  one `ListParticipants` per room), so every resync adds 1 + rooms lines to
-  `journalctl -u livekit`.
+  one `ListParticipants` per `sfu_<channel>` room), so every resync adds
+  1 + (sfu rooms) lines to `journalctl -u livekit`, plus one per removal.
 
   In the log: a sweep writes `SFU perms eviction: user N removed ...` only
   when LiveKit confirmed every session, and `... NOT removed ... LiveKit

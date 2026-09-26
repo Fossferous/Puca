@@ -615,22 +615,13 @@ pub async fn update_channel(
                     // has; cut it at the SFU directly. Not on the way INTO SFU
                     // mode: the room then holds the new call's first joiners.
                     // Collected first: no map guard may live across the awaits.
-                    if was_sfu {
-                        let sfu_only: std::collections::BTreeSet<i64> = state
-                            .sfu_rooms
-                            .get(&crate::sfu::room_name_for_channel(channel_id))
-                            .map(|u| {
-                                u.participants
-                                    .keys()
-                                    .chain(u.reservations.keys())
-                                    .filter_map(|i| crate::sfu::user_id_from_identity(i))
-                                    .filter(|uid| !cut.contains(uid))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        for user_id in sfu_only {
-                            crate::sfu::evict_user_from_channel(&state, channel_id, user_id).await;
-                        }
+                    let sfu_only = crate::sfu::sfu_only_to_cut(
+                        was_sfu,
+                        &cut,
+                        state.sfu_rooms.get(&crate::sfu::room_name_for_channel(channel_id)).as_deref(),
+                    );
+                    for user_id in sfu_only {
+                        crate::sfu::evict_user_from_channel(&state, channel_id, user_id).await;
                     }
                 }
             }

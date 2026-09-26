@@ -895,8 +895,9 @@ pub struct AppState {
 
     /// Live + reserved usage of LiveKit SFU rooms, keyed by room name
     /// ("sfu_<channel id>"). Fed by the /livekit/webhook event stream, by
-    /// token-mint reservations, and by a resync from LiveKit's RoomService at
-    /// startup and every few minutes (sfu::spawn_livekit_reconciler), which is
+    /// token-mint reservations, and - with LIVEKIT_API_URL set - by a resync from
+    /// LiveKit's RoomService at startup and every few minutes
+    /// (sfu::spawn_livekit_reconciler), which is
     /// what makes a session that outlived a restart known here at all. Backs
     /// node-global egress admission control and every SFU ejection.
     pub sfu_rooms: DashMap<String, crate::sfu::SfuRoomUsage>,

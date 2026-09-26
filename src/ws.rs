@@ -4323,11 +4323,14 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
             // all), leave what cannot be resolved to a retry, and leave other
             // servers' rooms alone.
             tracing::error!(
-                "eviction sweep: channel scope query failed for server {}: {} — acting on what resolves, retrying in {} s ({} retries left)",
+                "eviction sweep: channel scope query failed for server {}: {} — acting on what resolves; {}",
                 server_id,
                 e,
-                sweep_backoff_secs(retries_left),
-                retries_left
+                if retries_left > 0 {
+                    format!("retrying in {} s ({} retries left)", sweep_backoff_secs(retries_left), retries_left)
+                } else {
+                    "no retry left".to_string()
+                }
             );
             if retries_left > 0 {
                 let state = Arc::clone(state);
@@ -4467,35 +4470,33 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
     // the media key doesn't rotate away from them. Eviction also fires
     // ParticipantDisconnected on remaining clients → immediate epoch re-key.
     //
-    // With the scope UNKNOWN the SFU pass is left to the scheduled retry.
-    // sweep_keeps evicts NotMember wherever the room belongs, and a membership
-    // lookup that fails reads as NotMember - on a node whose sfu_rooms the
-    // LiveKit resync fills with every server's sessions, one database hiccup
-    // would otherwise eject people from other servers' calls.
-    let sfu_targets: Vec<(i64, i64)> = match &scope {
-        None => Vec::new(),
-        Some(set) => {
-            let mut out = Vec::new();
-            for r in state.sfu_rooms.iter() {
-                let Some(cid) = crate::sfu::channel_id_from_room(r.key()) else {
-                    continue;
-                };
+    // With the scope UNKNOWN every SFU room is a candidate and sweep_keeps acts
+    // only on what resolves - NotMember is a fact here, never a failed lookup
+    // (see get_user_channel_permissions), so nobody is ejected from another
+    // server's call on a database hiccup.
+    let sfu_targets: Vec<(i64, i64)> = {
+        let mut out = Vec::new();
+        for r in state.sfu_rooms.iter() {
+            let Some(cid) = crate::sfu::channel_id_from_room(r.key()) else {
+                continue;
+            };
+            if let Some(set) = &scope {
                 if !set.contains(&cid) {
                     continue;
                 }
-                // Distinct user ids currently in this SFU room (identities are u<id>#<nonce>).
-                let mut uids: std::collections::HashSet<i64> = std::collections::HashSet::new();
-                for ident in r.participants.keys().chain(r.reservations.keys()) {
-                    if let Some(uid) = crate::sfu::user_id_from_identity(ident) {
-                        uids.insert(uid);
-                    }
-                }
-                for uid in uids {
-                    out.push((cid, uid));
+            }
+            // Distinct user ids currently in this SFU room (identities are u<id>#<nonce>).
+            let mut uids: std::collections::HashSet<i64> = std::collections::HashSet::new();
+            for ident in r.participants.keys().chain(r.reservations.keys()) {
+                if let Some(uid) = crate::sfu::user_id_from_identity(ident) {
+                    uids.insert(uid);
                 }
             }
-            out
+            for uid in uids {
+                out.push((cid, uid));
+            }
         }
+        out
     };
     for (cid, uid) in sfu_targets {
         // An SFU room is always voice: the token gate (sfu.rs get_sfu_token)
