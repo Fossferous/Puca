@@ -1228,6 +1228,18 @@ export function Chat({ onLogout }: ChatProps) {
         });
     }, []);
 
+    // ...and when a stream or a camera starts or stops. The sidebar's LIVE and
+    // camera badges and the "Live Stream — Click to Watch" button read the
+    // stream maps during render, and nothing re-rendered Chat for them: they
+    // only ever appeared because every speaking flip used to re-render the
+    // whole of Chat, several times a second. With speaking off that path
+    // (voiceState.ts's speaking store), a stream that started while nobody
+    // spoke never got its badge. This bus fires on stream/camera/selection
+    // changes only — a handful of times a call.
+    useEffect(() => subscribeToStreamState(() => {
+        setVoiceUpdateTrigger(prev => prev + 1);
+    }), []);
+
     // Typing indicators
     const [typingUsers, setTypingUsers] = useState<Map<number, { username: string; expiry: number }>>(new Map());
     const lastTypingSent = useRef<number>(0);

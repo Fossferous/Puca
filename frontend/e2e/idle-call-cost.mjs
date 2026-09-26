@@ -166,7 +166,6 @@ try {
     for (const p of pages) {
         if (!await joinVoice(p)) throw new Error('could not find the voice channel to join');
     }
-    if (SHARE) result.shareStarted = await startShare(pages[1]);
 
     // PRECONDITIONS: the measured client really is in a live call with the
     // others, and hears them (a fake-mic beep lights their speaking rings).
@@ -190,7 +189,26 @@ try {
         state: a.playState,
         iterations: a.effect?.getTiming?.().iterations,
     })));
-    if (SHARE) pre.liveBadge = await pages[0].evaluate(() => !!document.querySelector('.live-badge-mini, .live-streams-button, [class*="live-stream"]'));
+    if (SHARE) {
+        // The LIVE badge must appear on the measured client, which is not
+        // watching. It once depended on speaking flips re-rendering the whole
+        // app; a build where it never shows is a regression, not a cheaper
+        // number, so this run stops here. The stream starts only once the
+        // call has SETTLED (no joins still re-rendering the roster), and the
+        // badge gets 5 s: the case a missing stream-state subscription breaks.
+        await sleep(10_000);
+        result.shareStarted = await startShare(pages[1]);
+        let live = false;
+        for (let i = 0; i < 20 && !live; i++) {
+            live = await pages[0].evaluate(() => !!document.querySelector('.live-badge-mini'));
+            if (!live) await sleep(250);
+        }
+        pre.liveBadge = live;
+        if (!live) {
+            console.log('FAIL: a stream is live but the measured client never showed its LIVE badge');
+            process.exitCode = 1;
+        }
+    }
     result.pre = pre;
     console.log('pre', JSON.stringify(pre));
     if (pre.audioEls < N - 1 || !speakingSeen) console.log('WARNING: the call is not fully up; numbers below are not comparable');
