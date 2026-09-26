@@ -139,11 +139,25 @@ curl -s -H "Authorization: Bearer $JWT" https://chat.example.com/channels/<id>/s
     rejoin on the new one;
   - a REJOIN with a token minted earlier is caught by the `participant_joined`
     webhook, which re-runs the mint-time permission check and evicts again.
-  The sweep's SFU pass only reaches channels that also have a Púca room
-  (`voice_<id>` / `channel_<id>`), which every real client joins (next
-  bullet); a participant outside those is caught at the webhook instead.
-  A successful ejection logs nothing; a failed one logs `SFU evict <identity>:`
-  with LiveKit's status or the transport error and its cause.
+
+  Two limits, both by design of what the backend can see:
+  - it ejects only sessions it has SEEN since it last started - a token
+    minted in the last minute, or a `participant_joined` webhook. It never
+    asks LiveKit who is connected, so a participant already in a call when
+    the backend restarts cannot be ejected until they rejoin (where the
+    webhook re-check applies);
+  - the sweep's SFU pass only reaches channels that also have a Púca room
+    (`voice_<id>` / `channel_<id>`), which every real client joins (next
+    bullet). A participant outside those is not ejected by the sweep; if it
+    ever rejoins, the webhook refuses it.
+
+  In the log: a sweep writes `SFU perms eviction: user N removed ...` only
+  when LiveKit confirmed every session, and `... NOT removed ... LiveKit
+  confirmed X of Y sessions` otherwise. A participant from before a restart
+  produces no line at all: the sweep takes its targets from the same record,
+  so it never learns of them. The webhook path writes `SFU join re-auth: evicting user N ...`
+  before it tries. Each failed call writes `SFU evict <identity>:` with
+  LiveKit's status or the transport error and its cause.
 - **Remote control / voice status rely on the Puca WS room** — SFU
   clients still JoinRoom `voice_<id>`; only Offer/Answer/ICE stopped being
   used on the SFU path.

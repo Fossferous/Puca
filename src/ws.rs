@@ -4496,13 +4496,27 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
         if allowed {
             continue;
         }
-        crate::sfu::evict_user_from_channel(state, cid, uid).await;
-        tracing::info!(
-            "SFU perms eviction: user {} removed from sfu channel {} (VIEW denied, server {})",
-            uid,
-            cid,
-            server_id
-        );
+        // Say what LiveKit confirmed, not what was attempted: this line used to
+        // read "removed" after a refused or failed call as well.
+        let out = crate::sfu::evict_user_from_channel(state, cid, uid).await;
+        if out.tried > 0 && out.removed == out.tried {
+            tracing::info!(
+                "SFU perms eviction: user {} removed from sfu channel {} (VIEW denied, server {})",
+                uid,
+                cid,
+                server_id
+            );
+        } else {
+            tracing::warn!(
+                "SFU perms eviction: user {} NOT removed from sfu channel {} — LiveKit confirmed {} of {} \
+                 sessions (see the SFU evict lines above), server {}",
+                uid,
+                cid,
+                out.removed,
+                out.tried,
+                server_id
+            );
+        }
     }
 }
 

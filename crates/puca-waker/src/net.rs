@@ -422,15 +422,29 @@ pub async fn remint(cfg: &Config) -> Result<String, String> {
         .map_err(|e| format!("token request failed: {}", http_err(&e)))?;
     let status = resp.status();
     if !status.is_success() {
-        // A refusal here is terminal in a way a network error is not: the
-        // device row is revoked, or the account is gone. Say which, because the
-        // cure differs (re-enrol vs nothing to do).
+        // Only a refusal of the DEVICE is worth telling the operator to
+        // re-enrol for - the same split as puca-service's `is_refusal`
+        // (crates/puca-service/src/link.rs). A 5xx is the server's fault, a
+        // 408/429 is it being busy, and "that challenge is unknown or has
+        // expired" is a server restart between the two round trips: all of
+        // those pass. 401/403/404, and the 400 "that device could not be
+        // verified" (which a server database fault ALSO answers, on purpose),
+        // point at the device row - hence "if this persists".
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!(
-            "the server refused to mint a token ({status}): {} — this waker's device row is \
-             revoked or its account is gone; re-enrol it",
-            body.trim()
-        ));
+        let body = body.trim();
+        let about_device = match status.as_u16() {
+            401 | 403 | 404 => true,
+            400 => body.contains("that device could not be verified"),
+            _ => false,
+        };
+        return Err(if about_device {
+            format!(
+                "the server refused to mint a token ({status}): {body} — if this persists, this \
+                 waker's device row is revoked or its account is gone; re-enrol it"
+            )
+        } else {
+            format!("the server did not mint a token this time ({status}): {body}; will retry")
+        });
     }
     let body: serde_json::Value = resp
         .json()
@@ -1017,6 +1031,38 @@ mod tests {
         assert!(err.contains("too many challenges"), "the server's reason is reported: {err}");
         assert!(!err.contains("not JSON"), "not mistaken for a malformed reply: {err}");
         assert_eq!(finished(server).await, "/devices/token/challenge");
+    }
+
+    /// A busy or broken server at the TOKEN step is not a revoked device: it
+    /// must not send the operator off to re-enrol a waker that is fine.
+    #[tokio::test]
+    async fn a_server_error_minting_is_retried_not_blamed_on_the_device() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let (cfg, _) = minting_config(port);
+
+        let server = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let (mut s, _) = listener.accept().await.expect("accept challenge");
+            let _ = read_request(&mut s).await;
+            write_json(&mut s, r#"{"nonce":"N"}"#).await;
+            drop(s);
+            let (mut s, _) = listener.accept().await.expect("accept token");
+            let _ = read_request(&mut s).await;
+            let body = "could not start a session right now; try again";
+            let resp = format!(
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            s.write_all(resp.as_bytes()).await.expect("write");
+        });
+
+        let err = remint(&cfg).await.expect_err("a 503 is not a token");
+        assert!(err.contains("503"), "the status is reported: {err}");
+        assert!(err.contains("will retry"), "it is called transient: {err}");
+        assert!(!err.contains("re-enrol"), "the device is not blamed: {err}");
+        finished(server).await;
     }
 
     /// `Rejected` is a VARIANT, not a message prefix: the caller re-mints on it

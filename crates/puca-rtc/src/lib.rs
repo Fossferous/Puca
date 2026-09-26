@@ -575,6 +575,15 @@ a=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1
         let mut sender = VideoSender::new();
         sender.accept_offer(BROWSER_OFFER).expect("answer");
         let mdns = "candidate:1 1 udp 2113929471 9b36eaac-bb2e-49bb-bb78-21c41c499900.local 9000 typ host";
+        // The SAME line with an address where the name is must be accepted, so
+        // the name is the only thing the refusal below can be about. str0m's
+        // grammar takes exactly one space between fields: until 2026-09-26 this
+        // fixture carried a run of spaces before the name and was refused for
+        // THAT, so the control proved nothing about mDNS.
+        let numeric = mdns.replace("9b36eaac-bb2e-49bb-bb78-21c41c499900.local", "198.51.100.9");
+        sender
+            .add_remote_candidate(&numeric)
+            .expect("the identical candidate with an address is accepted");
         assert!(
             sender.add_remote_candidate(mdns).is_err(),
             "an mDNS candidate has no address; accepting it would mean the parser \

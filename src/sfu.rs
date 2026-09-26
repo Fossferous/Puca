@@ -610,8 +610,13 @@ fn mint_admin_token(cfg: &SfuConfig, room: &str) -> Result<String, jsonwebtoken:
 /// caller has already revoked membership in the DB). Also fires a
 /// ParticipantDisconnected on remaining clients, which drives an immediate media
 /// key rotation (closing the forward-secrecy latency window).
-pub async fn evict_user_from_channel(state: &Arc<AppState>, channel_id: i64, user_id: i64) {
-    let Some(cfg) = sfu_config() else { return };
+///
+/// Only identities this process has SEEN can be evicted: a mint reservation
+/// (60 s) or a `participant_joined` webhook since it last started. It does not
+/// ask LiveKit who is connected, so a session that outlived a backend restart
+/// is invisible here until it rejoins (where the webhook re-check applies).
+pub async fn evict_user_from_channel(state: &Arc<AppState>, channel_id: i64, user_id: i64) -> Evicted {
+    let Some(cfg) = sfu_config() else { return Evicted::default() };
     let room = room_name_for_channel(channel_id);
 
     // Which of this user's per-connection identities are live/reserved here?
@@ -624,17 +629,18 @@ pub async fn evict_user_from_channel(state: &Arc<AppState>, channel_id: i64, use
             .filter(|i| i.starts_with(&prefix))
             .cloned()
             .collect(),
-        None => return, // no SFU activity for this channel
+        None => return Evicted::default(), // no SFU activity for this channel
     };
     if identities.is_empty() {
-        return;
+        return Evicted::default();
     }
+    let tried = identities.len();
 
     let token = match mint_admin_token(&cfg, &room) {
         Ok(t) => t,
         Err(e) => {
             tracing::error!("SFU evict: admin token mint failed: {e}");
-            return;
+            return Evicted { tried, removed: 0 };
         }
     };
     // LiveKit twirp: POST {url}/twirp/livekit.RoomService/RemoveParticipant.
@@ -658,9 +664,10 @@ pub async fn evict_user_from_channel(state: &Arc<AppState>, channel_id: i64, use
         Ok(c) => c,
         Err(e) => {
             tracing::error!("SFU evict: could not build HTTP client: {}", crate::http_err::http_err(&e));
-            return;
+            return Evicted { tried, removed: 0 };
         }
     };
+    let mut removed = 0;
     for identity in identities {
         let resp = client
             .post(&endpoint)
@@ -670,6 +677,7 @@ pub async fn evict_user_from_channel(state: &Arc<AppState>, channel_id: i64, use
             .await;
         match resp {
             Ok(r) if r.status().is_success() => {
+                removed += 1;
                 // Drop from local usage so the egress projection frees the slot
                 // without waiting for the participant_left webhook.
                 if let Some(mut u) = state.sfu_rooms.get_mut(&room) {
@@ -684,6 +692,16 @@ pub async fn evict_user_from_channel(state: &Arc<AppState>, channel_id: i64, use
             ),
         }
     }
+    Evicted { tried, removed }
+}
+
+/// What an eviction achieved: how many of the user's LiveKit sessions it asked
+/// LiveKit to remove, and how many LiveKit confirmed. `tried == 0` means this
+/// process knew of no session to remove (see `evict_user_from_channel`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Evicted {
+    pub tried: usize,
+    pub removed: usize,
 }
 
 // --- Handlers -----------------------------------------------------------------

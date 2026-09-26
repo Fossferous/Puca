@@ -1026,20 +1026,8 @@ pub async fn obtain_device_token(cfg: &LinkConfig) -> Result<String, AttemptErro
         .build()
         .map_err(|e| format!("http client: {}", http_err(&e)))?;
 
-    let chal: serde_json::Value = client
-        .post(format!("{}/devices/token/challenge", cfg.api_base))
-        .json(&serde_json::json!({ "device_id": cfg.device_id }))
-        .send()
-        .await
-        .map_err(|e| format!("could not ask for a challenge: {}", http_err(&e)))?
-        .json()
-        .await
-        .map_err(|e| format!("the challenge was unreadable: {}", http_err(&e)))?;
-
-    let nonce = chal
-        .get("nonce")
-        .and_then(|x| x.as_str())
-        .ok_or("the server did not send a challenge")?;
+    let nonce = request_challenge(&client, cfg).await?;
+    let nonce = nonce.as_str();
 
     // The SAME transcript the WebSocket attestation signs. One signing format
     // for one meaning: a second one here would be another thing to keep in step
@@ -1254,6 +1242,38 @@ pub fn fold_health(prev: &LinkHealth, device_id: &str, ev: LinkEvent, now: i64) 
         }
     }
     next
+}
+
+/// Step one of `obtain_device_token`: a nonce to sign. Split out so the request
+/// path can be tested without this machine's key on disk.
+///
+/// A non-2xx is the server's reason, never a JSON parse of it: the challenge
+/// endpoint answers a plain-text 503 "too many challenges" (and the API rate
+/// limiter a 429), which used to surface as "the challenge was unreadable". It
+/// is never a verdict on this computer - a challenge is issued to anyone who
+/// names a device id - so it is `Other`, retried, and not recorded.
+async fn request_challenge(client: &reqwest::Client, cfg: &LinkConfig) -> Result<String, AttemptError> {
+    let resp = client
+        .post(format!("{}/devices/token/challenge", cfg.api_base))
+        .json(&serde_json::json!({ "device_id": cfg.device_id }))
+        .send()
+        .await
+        .map_err(|e| format!("could not ask for a challenge: {}", http_err(&e)))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        let snippet: String = body.trim().chars().take(200).collect();
+        return Err(AttemptError::Other(format!(
+            "the server would not issue a challenge right now ({status}); will retry: {snippet}"
+        )));
+    }
+    let chal: serde_json::Value =
+        resp.json().await.map_err(|e| format!("the challenge was unreadable: {}", http_err(&e)))?;
+    let nonce = chal
+        .get("nonce")
+        .and_then(|x| x.as_str())
+        .ok_or("the server did not send a challenge")?;
+    Ok(nonce.to_string())
 }
 
 /// Is this `/devices/token` failure the server refusing THIS COMPUTER, as
@@ -1847,6 +1867,65 @@ mod tests {
             .verifying_key()
             .verify(attestation_message("nonce-1", 8).as_bytes(), &sig)
             .is_err());
+    }
+
+    /// A refused CHALLENGE is the server's reason and a retry, not an
+    /// unreadable reply and never a refusal of this computer.
+    #[test]
+    fn a_refused_challenge_is_reported_as_the_servers_reason() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+        rt.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let port = listener.local_addr().expect("addr").port();
+            let cfg = LinkConfig {
+                api_base: format!("http://127.0.0.1:{port}"),
+                user_id: 1,
+                device_id: "d".into(),
+                device_pub: "x25519:AAAA".into(),
+                sign_pub: "ed25519:AAAA".into(),
+                account_sign_pub: "ed25519:BBBB".into(),
+            };
+            let server = tokio::spawn(async move {
+                let (mut s, _) = listener.accept().await.expect("accept");
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 1024];
+                // The request is small: read until its head and JSON body are in.
+                while !String::from_utf8_lossy(&buf).contains("device_id") {
+                    let n = s.read(&mut chunk).await.expect("read");
+                    assert!(n > 0, "the client closed before sending its request");
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                let body = "too many challenges";
+                let resp = format!(
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain; charset=utf-8\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                s.write_all(resp.as_bytes()).await.expect("write");
+                String::from_utf8_lossy(&buf).lines().next().unwrap_or("").to_string()
+            });
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .expect("client");
+            match request_challenge(&client, &cfg).await {
+                Err(AttemptError::Other(m)) => {
+                    assert!(m.contains("503"), "the status is reported: {m}");
+                    assert!(m.contains("too many challenges"), "the server's reason is reported: {m}");
+                    assert!(m.contains("will retry"), "{m}");
+                    assert!(!m.contains("unreadable"), "not mistaken for a malformed reply: {m}");
+                }
+                other => panic!("a refused challenge is Other, never Refused: {other:?}"),
+            }
+            let line = tokio::time::timeout(Duration::from_secs(10), server)
+                .await
+                .expect("the stand-in was never called")
+                .expect("server task");
+            assert_eq!(line, "POST /devices/token/challenge HTTP/1.1");
+        });
     }
 
     #[test]
