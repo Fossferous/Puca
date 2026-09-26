@@ -160,7 +160,7 @@ release, never edit by hand.
 | yauzl@2.10.0 | MIT | https://github.com/thejoshwolfe/yauzl |
 | zustand@5.0.15 | MIT | https://github.com/pmndrs/zustand |
 
-## Rust crates in the server, desktop shell, native helpers and the wasm (859)
+## Rust crates in the server, desktop shell, native helpers and the wasm (848)
 
 | crate | licence | used by | origin |
 |---|---|---|---|
@@ -196,7 +196,7 @@ release, never edit by hand.
 | atk-sys@0.18.2 | MIT | desktop | https://github.com/gtk-rs/gtk3-rs |
 | atk@0.18.2 | MIT | desktop | https://github.com/gtk-rs/gtk3-rs |
 | atoi@2.0.0 | MIT | backend | https://github.com/pacman82/atoi-rs |
-| atomic-waker@1.1.2 | Apache-2.0 OR MIT | backend, desktop, puca-service | https://github.com/smol-rs/atomic-waker |
+| atomic-waker@1.1.2 | Apache-2.0 OR MIT | backend, desktop, puca-service, puca-waker | https://github.com/smol-rs/atomic-waker |
 | auto-future@1.0.0 | MIT | backend | https://github.com/JosephLenton/auto-future |
 | auto-launch@0.5.0 | MIT | desktop | https://github.com/zzzgydi/auto-launch.git |
 | autocfg@1.5.1 | Apache-2.0 OR MIT | backend, desktop, puca-agent, puca-rtc, puca-spike-fswap, wasm | https://github.com/cuviper/autocfg |
@@ -206,7 +206,7 @@ release, never edit by hand.
 | axum-test@14.10.0 | MIT | backend | https://github.com/JosephLenton/axum-test |
 | axum@0.7.9 | MIT | backend | https://github.com/tokio-rs/axum |
 | base16ct@0.2.0 | Apache-2.0 OR MIT | backend, puca-agent, puca-rtc, puca-spike-fswap | https://github.com/RustCrypto/formats/tree/master/base16ct |
-| base64@0.21.7 | MIT OR Apache-2.0 | backend, desktop, puca-waker | https://github.com/marshallpierce/rust-base64 |
+| base64@0.21.7 | MIT OR Apache-2.0 | desktop | https://github.com/marshallpierce/rust-base64 |
 | base64@0.22.1 | MIT OR Apache-2.0 | backend, desktop, puca-service, puca-waker | https://github.com/marshallpierce/rust-base64 |
 | base64@0.23.1 | MIT OR Apache-2.0 | backend, puca-agent | https://github.com/marshallpierce/rust-base64 |
 | base64ct@1.8.3 | Apache-2.0 OR MIT | backend, desktop, puca-agent, puca-rtc, puca-service, puca-spike-fswap, puca-ua, puca-waker | https://github.com/RustCrypto/formats |
@@ -215,7 +215,7 @@ release, never edit by hand.
 | bit-vec@0.6.3 | MIT/Apache-2.0 | wasm | https://github.com/contain-rs/bit-vec |
 | bit-vec@0.8.0 | Apache-2.0 OR MIT | desktop | https://github.com/contain-rs/bit-vec |
 | bit-vec@0.9.1 | Apache-2.0 OR MIT | puca-agent, puca-rtc, puca-spike-fswap | https://github.com/contain-rs/bit-vec |
-| bitflags@1.3.2 | MIT/Apache-2.0 | backend, desktop, puca-waker | https://github.com/bitflags/bitflags |
+| bitflags@1.3.2 | MIT/Apache-2.0 | desktop | https://github.com/bitflags/bitflags |
 | bitflags@2.13.1 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker, wasm | https://github.com/bitflags/bitflags |
 | block-buffer@0.10.4 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-rtc, puca-service, puca-spike-fswap, puca-ua, puca-waker | https://github.com/RustCrypto/utils |
 | block2@0.6.2 | MIT | desktop | https://github.com/madsmtm/objc2 |
@@ -258,7 +258,7 @@ release, never edit by hand.
 | cookie@0.18.2 | MIT OR Apache-2.0 | backend, desktop | https://github.com/SergioBenitez/cookie-rs |
 | core-foundation-sys@0.8.7 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-input, puca-service, puca-spike-s5, puca-waker | https://github.com/servo/core-foundation-rs |
 | core-foundation@0.10.1 | MIT OR Apache-2.0 | backend, desktop, puca-service, puca-waker | https://github.com/servo/core-foundation-rs |
-| core-foundation@0.9.4 | MIT OR Apache-2.0 | backend, desktop, puca-waker | https://github.com/servo/core-foundation-rs |
+| core-foundation@0.9.4 | MIT OR Apache-2.0 | desktop | https://github.com/servo/core-foundation-rs |
 | core-graphics-types@0.2.0 | MIT OR Apache-2.0 | desktop | https://github.com/servo/core-foundation-rs |
 | core-graphics@0.25.0 | MIT OR Apache-2.0 | desktop | https://github.com/servo/core-foundation-rs |
 | cpufeatures@0.2.17 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-rtc, puca-service, puca-spike-fswap, puca-ua, puca-waker | https://github.com/RustCrypto/utils |
@@ -336,13 +336,13 @@ release, never edit by hand.
 | email-encoding@0.4.2 | MIT OR Apache-2.0 | backend | https://github.com/lettre/email-encoding |
 | embed_plist@1.2.2 | MIT OR Apache-2.0 | desktop | https://github.com/nvzqz/embed-plist-rs |
 | embed-resource@3.0.11 | MIT | desktop, puca-agent, puca-service | https://github.com/nabijaczleweli/rust-embed-resource |
-| encoding_rs@0.8.35 | (Apache-2.0 OR MIT) AND BSD-3-Clause | backend, puca-waker | https://github.com/hsivonen/encoding_rs |
+| encoding_rs@0.8.35 | (Apache-2.0 OR MIT) AND BSD-3-Clause | backend, puca-service, puca-waker | https://github.com/hsivonen/encoding_rs |
 | endi@1.1.1 | MIT | desktop | https://github.com/zeenix/endi |
 | enum-ordinalize@3.1.15 | MIT | wasm | https://github.com/magiclen/enum-ordinalize |
 | enumflags2_derive@0.7.12 | MIT OR Apache-2.0 | desktop | https://github.com/meithecatte/enumflags2 |
 | enumflags2@0.7.12 | MIT OR Apache-2.0 | desktop | https://github.com/meithecatte/enumflags2 |
 | env_filter@0.1.4 | MIT OR Apache-2.0 | desktop | https://github.com/rust-cli/env_logger |
-| equivalent@1.0.2 | Apache-2.0 OR MIT | backend, desktop, puca-agent, puca-service, puca-waker | https://github.com/indexmap-rs/equivalent |
+| equivalent@1.0.2 | Apache-2.0 OR MIT | backend, desktop, puca-agent, puca-service | https://github.com/indexmap-rs/equivalent |
 | erased-serde@0.4.10 | MIT OR Apache-2.0 | desktop | https://github.com/dtolnay/erased-serde |
 | errno@0.3.14 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker, wasm | https://github.com/lambda-fairy/rust-errno |
 | error-code@3.4.0 | BSL-1.0 | desktop | https://github.com/DoumanAsh/error-code |
@@ -360,7 +360,7 @@ release, never edit by hand.
 | flagset@0.4.7 | Apache-2.0 | backend, puca-agent, puca-rtc, puca-service, puca-spike-fswap, puca-ua, puca-waker | https://github.com/enarx/flagset |
 | flate2@1.1.9 | MIT OR Apache-2.0 | desktop, wasm | https://github.com/rust-lang/flate2-rs |
 | flume@0.11.1 | Apache-2.0/MIT | backend | https://github.com/zesterer/flume |
-| fnv@1.0.7 | Apache-2.0 / MIT | backend, desktop, puca-waker | https://github.com/servo/rust-fnv |
+| fnv@1.0.7 | Apache-2.0 / MIT | backend, desktop | https://github.com/servo/rust-fnv |
 | foldhash@0.1.5 | Zlib | backend | https://github.com/orlp/foldhash |
 | foldhash@0.2.0 | Zlib | desktop | https://github.com/orlp/foldhash |
 | foreign-types-macros@0.2.4 | MIT/Apache-2.0 | desktop | https://github.com/sfackler/foreign-types |
@@ -409,14 +409,13 @@ release, never edit by hand.
 | gtk-sys@0.18.2 | MIT | desktop | https://github.com/gtk-rs/gtk3-rs |
 | gtk@0.18.2 | MIT | desktop | https://github.com/gtk-rs/gtk3-rs |
 | gtk3-macros@0.18.2 | MIT | desktop | https://github.com/gtk-rs/gtk3-rs |
-| h2@0.3.27 | MIT | backend, puca-waker | https://github.com/hyperium/h2 |
 | half@2.7.1 | MIT OR Apache-2.0 | wasm | https://github.com/VoidStarKat/half-rs |
 | hashbrown@0.11.2 | Apache-2.0/MIT | wasm | https://github.com/rust-lang/hashbrown |
 | hashbrown@0.12.3 | MIT OR Apache-2.0 | desktop | https://github.com/rust-lang/hashbrown |
 | hashbrown@0.13.2 | MIT OR Apache-2.0 | wasm | https://github.com/rust-lang/hashbrown |
 | hashbrown@0.14.5 | MIT OR Apache-2.0 | backend | https://github.com/rust-lang/hashbrown |
 | hashbrown@0.15.5 | MIT OR Apache-2.0 | backend | https://github.com/rust-lang/hashbrown |
-| hashbrown@0.17.1 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-service, puca-waker | https://github.com/rust-lang/hashbrown |
+| hashbrown@0.17.1 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-service | https://github.com/rust-lang/hashbrown |
 | hashlink@0.10.0 | MIT OR Apache-2.0 | backend | https://github.com/kyren/hashlink |
 | heck@0.4.1 | MIT OR Apache-2.0 | desktop | https://github.com/withoutboats/heck |
 | heck@0.5.0 | MIT OR Apache-2.0 | backend, desktop | https://github.com/withoutboats/heck |
@@ -427,20 +426,17 @@ release, never edit by hand.
 | home@0.5.12 | MIT OR Apache-2.0 | backend | https://github.com/rust-lang/cargo |
 | hostname@0.4.2 | MIT | backend | https://github.com/djc/hostname |
 | html5ever@0.38.0 | MIT OR Apache-2.0 | desktop | https://github.com/servo/html5ever |
-| http-body-util@0.1.5 | MIT | backend, desktop, puca-service | https://github.com/hyperium/http-body |
-| http-body@0.4.6 | MIT | backend, puca-waker | https://github.com/hyperium/http-body |
-| http-body@1.1.0 | MIT | backend, desktop, puca-service | https://github.com/hyperium/http-body |
-| http-range-header@0.4.2 | MIT | backend, puca-service | https://github.com/MarcusGrass/parse-range-headers |
-| http@0.2.12 | MIT OR Apache-2.0 | backend, puca-waker | https://github.com/hyperium/http |
+| http-body-util@0.1.5 | MIT | backend, desktop, puca-service, puca-waker | https://github.com/hyperium/http-body |
+| http-body@1.1.0 | MIT | backend, desktop, puca-service, puca-waker | https://github.com/hyperium/http-body |
+| http-range-header@0.4.2 | MIT | backend, puca-service, puca-waker | https://github.com/MarcusGrass/parse-range-headers |
+| http@0.2.12 | MIT OR Apache-2.0 | backend | https://github.com/hyperium/http |
 | http@1.5.0 | MIT OR Apache-2.0 | backend, desktop, puca-service, puca-waker | https://github.com/hyperium/http |
 | httparse@1.10.1 | MIT OR Apache-2.0 | backend, desktop, puca-service, puca-waker | https://github.com/seanmonstar/httparse |
 | httpdate@1.0.3 | MIT OR Apache-2.0 | backend, puca-service, puca-waker | https://github.com/pyfisch/httpdate |
 | hyper-rustls@0.27.9 | Apache-2.0 OR ISC OR MIT | desktop | https://github.com/rustls/hyper-rustls |
-| hyper-tls@0.5.0 | MIT/Apache-2.0 | backend, puca-waker | https://github.com/hyperium/hyper-tls |
-| hyper-tls@0.6.0 | MIT/Apache-2.0 | desktop, puca-service | https://github.com/hyperium/hyper-tls |
-| hyper-util@0.1.20 | MIT | backend, desktop, puca-service | https://github.com/hyperium/hyper-util |
-| hyper@0.14.32 | MIT | backend, puca-waker | https://github.com/hyperium/hyper |
-| hyper@1.11.0 | MIT | backend, desktop, puca-service | https://github.com/hyperium/hyper |
+| hyper-tls@0.6.0 | MIT/Apache-2.0 | backend, desktop, puca-service, puca-waker | https://github.com/hyperium/hyper-tls |
+| hyper-util@0.1.20 | MIT | backend, desktop, puca-service, puca-waker | https://github.com/hyperium/hyper-util |
+| hyper@1.11.0 | MIT | backend, desktop, puca-service, puca-waker | https://github.com/hyperium/hyper |
 | iana-time-zone-haiku@0.1.2 | MIT OR Apache-2.0 | backend, desktop | https://github.com/strawlab/iana-time-zone |
 | iana-time-zone@0.1.65 | MIT OR Apache-2.0 | backend, desktop | https://github.com/strawlab/iana-time-zone |
 | ico@0.5.0 | MIT | desktop | https://github.com/mdsteele/rust-ico |
@@ -457,7 +453,7 @@ release, never edit by hand.
 | image@0.24.9 | MIT OR Apache-2.0 | desktop | https://github.com/image-rs/image |
 | image@0.25.10 | MIT OR Apache-2.0 | desktop | https://github.com/image-rs/image |
 | indexmap@1.9.3 | Apache-2.0 OR MIT | desktop | https://github.com/bluss/indexmap |
-| indexmap@2.14.0 | Apache-2.0 OR MIT | backend, desktop, puca-agent, puca-service, puca-waker | https://github.com/indexmap-rs/indexmap |
+| indexmap@2.14.0 | Apache-2.0 OR MIT | backend, desktop, puca-agent, puca-service | https://github.com/indexmap-rs/indexmap |
 | infer@0.19.0 | MIT | desktop | https://github.com/bojand/infer |
 | inout@0.1.4 | MIT OR Apache-2.0 | backend, puca-agent, puca-rtc, puca-spike-fswap | https://github.com/RustCrypto/utils |
 | ipnet@2.12.1 | MIT OR Apache-2.0 | backend, desktop, puca-service, puca-waker | https://github.com/krisprice/ipnet |
@@ -515,7 +511,7 @@ release, never edit by hand.
 | memchr@2.8.3 | Unlicense OR MIT | backend, desktop, puca-agent, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-ua, puca-waker, wasm | https://github.com/BurntSushi/memchr |
 | memmap2@0.5.10 | MIT OR Apache-2.0 | wasm | https://github.com/RazrFalcon/memmap2-rs |
 | memoffset@0.9.1 | MIT | desktop | https://github.com/Gilnaa/memoffset |
-| mime_guess@2.0.5 | MIT | backend, puca-service | https://github.com/abonander/mime_guess |
+| mime_guess@2.0.5 | MIT | backend, puca-service, puca-waker | https://github.com/abonander/mime_guess |
 | mime@0.3.17 | MIT OR Apache-2.0 | backend, desktop, puca-service, puca-waker | https://github.com/hyperium/mime |
 | minimal-lexical@0.2.1 | MIT/Apache-2.0 | puca-agent, puca-rtc, puca-spike-fswap, wasm | https://github.com/Alexhuszagh/minimal-lexical |
 | minisign-verify@0.2.5 | MIT | desktop | https://github.com/jedisct1/rust-minisign-verify |
@@ -661,8 +657,7 @@ release, never edit by hand.
 | regex-automata@0.4.18 | MIT OR Apache-2.0 | backend, desktop, wasm | https://github.com/rust-lang/regex |
 | regex-syntax@0.8.11 | MIT OR Apache-2.0 | backend, desktop, wasm | https://github.com/rust-lang/regex |
 | regex@1.13.1 | MIT OR Apache-2.0 | desktop, wasm | https://github.com/rust-lang/regex |
-| reqwest@0.11.27 | MIT OR Apache-2.0 | backend, puca-waker | https://github.com/seanmonstar/reqwest |
-| reqwest@0.12.28 | MIT OR Apache-2.0 | desktop, puca-service | https://github.com/seanmonstar/reqwest |
+| reqwest@0.12.28 | MIT OR Apache-2.0 | backend, desktop, puca-service, puca-waker | https://github.com/seanmonstar/reqwest |
 | reqwest@0.13.4 | MIT OR Apache-2.0 | desktop | https://github.com/seanmonstar/reqwest |
 | reserve-port@2.5.0 | MIT | backend | https://github.com/JosephLenton/reserve-port |
 | rfc6979@0.4.0 | Apache-2.0 OR MIT | backend | https://github.com/RustCrypto/signatures/tree/master/rfc6979 |
@@ -678,8 +673,7 @@ release, never edit by hand.
 | rusticata-macros@4.1.0 | MIT/Apache-2.0 | puca-agent, puca-rtc, puca-spike-fswap | https://github.com/rusticata/rusticata-macros.git |
 | rustix@1.1.4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker, wasm | https://github.com/bytecodealliance/rustix |
 | rustls-native-certs@0.8.4 | Apache-2.0 OR ISC OR MIT | desktop | https://github.com/rustls/rustls-native-certs |
-| rustls-pemfile@1.0.4 | Apache-2.0 OR ISC OR MIT | backend, puca-waker | https://github.com/rustls/pemfile |
-| rustls-pki-types@1.15.1 | MIT OR Apache-2.0 | desktop, puca-agent, puca-rtc, puca-service, puca-spike-fswap | https://github.com/rustls/pki-types |
+| rustls-pki-types@1.15.1 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-rtc, puca-service, puca-spike-fswap, puca-waker | https://github.com/rustls/pki-types |
 | rustls-platform-verifier-android@0.1.1 | MIT OR Apache-2.0 | desktop | https://github.com/rustls/rustls-platform-verifier |
 | rustls-platform-verifier@0.7.0 | MIT OR Apache-2.0 | desktop | https://github.com/rustls/rustls-platform-verifier |
 | rustls-webpki@0.103.14 | ISC | desktop | https://github.com/rustls/webpki |
@@ -729,7 +723,6 @@ release, never edit by hand.
 | siphasher@1.0.3 | MIT/Apache-2.0 | desktop | https://github.com/jedisct1/rust-siphash |
 | slab@0.4.12 | MIT | backend, desktop, puca-agent, puca-rtc, puca-service, puca-spike-fswap, puca-waker, wasm | https://github.com/tokio-rs/slab |
 | smallvec@1.15.2 | MIT OR Apache-2.0 | backend, desktop, puca-service, puca-waker, wasm | https://github.com/servo/rust-smallvec |
-| socket2@0.5.10 | MIT OR Apache-2.0 | backend, puca-waker | https://github.com/rust-lang/socket2 |
 | socket2@0.6.5 | MIT OR Apache-2.0 | backend, desktop, puca-service, puca-waker | https://github.com/rust-lang/socket2 |
 | softbuffer@0.4.8 | MIT OR Apache-2.0 | desktop | https://github.com/rust-windowing/softbuffer |
 | soup3-sys@0.5.0 | MIT | desktop | https://gitlab.gnome.org/World/Rust/soup3-rs |
@@ -762,13 +755,10 @@ release, never edit by hand.
 | syn@2.0.119 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-ua, puca-waker, wasm | https://github.com/dtolnay/syn |
 | syn@3.0.3 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-ua, puca-waker | https://github.com/dtolnay/syn |
 | syn@3.0.4 | MIT OR Apache-2.0 | wasm | https://github.com/dtolnay/syn |
-| sync_wrapper@0.1.2 | Apache-2.0 | backend, puca-waker | https://github.com/Actyx/sync_wrapper |
-| sync_wrapper@1.0.2 | Apache-2.0 | backend, desktop, puca-service | https://github.com/Actyx/sync_wrapper |
+| sync_wrapper@1.0.2 | Apache-2.0 | backend, desktop, puca-service, puca-waker | https://github.com/Actyx/sync_wrapper |
 | synstructure@0.13.2 | MIT | backend, desktop, puca-agent, puca-rtc, puca-service, puca-spike-fswap, puca-waker | https://github.com/mystor/synstructure |
 | sysinfo@0.32.1 | MIT | desktop, puca-agent, puca-input, puca-spike-s5 | https://github.com/GuillaumeGomez/sysinfo |
-| system-configuration-sys@0.5.0 | MIT OR Apache-2.0 | backend, puca-waker | https://github.com/mullvad/system-configuration-rs |
 | system-configuration-sys@0.6.0 | MIT OR Apache-2.0 | desktop | https://github.com/mullvad/system-configuration-rs |
-| system-configuration@0.5.1 | MIT OR Apache-2.0 | backend, puca-waker | https://github.com/mullvad/system-configuration-rs |
 | system-configuration@0.7.0 | MIT OR Apache-2.0 | desktop | https://github.com/mullvad/system-configuration-rs |
 | system-deps@6.2.2 | MIT OR Apache-2.0 | desktop | https://github.com/gdesmott/system-deps |
 | tao-macros@0.1.4 | MIT OR Apache-2.0 | desktop | https://github.com/tauri-apps/tao |
@@ -830,11 +820,11 @@ release, never edit by hand.
 | toml@1.1.4+spec-1.1.0 | MIT OR Apache-2.0 | desktop | https://github.com/toml-rs/toml |
 | toml@1.1.5+spec-1.1.0 | MIT OR Apache-2.0 | puca-agent, puca-service | https://github.com/toml-rs/toml |
 | tower_governor@0.4.3 | MIT OR Apache-2.0 | backend | https://github.com/benwis/tower-governor |
-| tower-http@0.6.11 | MIT | backend, desktop, puca-service | https://github.com/tower-rs/tower-http |
-| tower-layer@0.3.3 | MIT | backend, desktop, puca-service | https://github.com/tower-rs/tower |
+| tower-http@0.6.11 | MIT | backend, desktop, puca-service, puca-waker | https://github.com/tower-rs/tower-http |
+| tower-layer@0.3.3 | MIT | backend, desktop, puca-service, puca-waker | https://github.com/tower-rs/tower |
 | tower-service@0.3.3 | MIT | backend, desktop, puca-service, puca-waker | https://github.com/tower-rs/tower |
 | tower@0.4.13 | MIT | backend | https://github.com/tower-rs/tower |
-| tower@0.5.3 | MIT | backend, desktop, puca-service | https://github.com/tower-rs/tower |
+| tower@0.5.3 | MIT | backend, desktop, puca-service, puca-waker | https://github.com/tower-rs/tower |
 | tracing-attributes@0.1.31 | MIT | backend, desktop, puca-agent, puca-rtc, puca-service, puca-spike-fswap, puca-waker | https://github.com/tokio-rs/tracing |
 | tracing-core@0.1.36 | MIT | backend, desktop, puca-agent, puca-rtc, puca-service, puca-spike-fswap, puca-waker | https://github.com/tokio-rs/tracing |
 | tracing-log@0.2.0 | MIT | backend | https://github.com/tokio-rs/tracing |
@@ -863,7 +853,7 @@ release, never edit by hand.
 | unic-common@0.9.0 | MIT/Apache-2.0 | desktop | https://github.com/open-i18n/rust-unic/ |
 | unic-ucd-ident@0.9.0 | MIT/Apache-2.0 | desktop | https://github.com/open-i18n/rust-unic/ |
 | unic-ucd-version@0.9.0 | MIT/Apache-2.0 | desktop | https://github.com/open-i18n/rust-unic/ |
-| unicase@2.9.0 | MIT OR Apache-2.0 | backend, puca-service | https://github.com/seanmonstar/unicase |
+| unicase@2.9.0 | MIT OR Apache-2.0 | backend, puca-service, puca-waker | https://github.com/seanmonstar/unicase |
 | unicode-bidi@0.3.18 | MIT OR Apache-2.0 | backend | https://github.com/servo/unicode-bidi |
 | unicode-ident@1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-ua, puca-waker, wasm | https://github.com/dtolnay/unicode-ident |
 | unicode-normalization@0.1.25 | MIT OR Apache-2.0 | backend, wasm | https://github.com/unicode-rs/unicode-normalization |
@@ -911,34 +901,34 @@ release, never edit by hand.
 | winapi@0.3.9 | MIT/Apache-2.0 | backend, desktop, puca-agent, puca-input, puca-spike-s5 | https://github.com/retep998/winapi-rs |
 | window-vibrancy@0.6.0 | Apache-2.0 OR MIT | desktop | https://github.com/tauri-apps/tauri-plugin-vibrancy |
 | windows_aarch64_gnullvm@0.42.2 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
-| windows_aarch64_gnullvm@0.48.5 | MIT OR Apache-2.0 | backend, puca-waker | https://github.com/microsoft/windows-rs |
-| windows_aarch64_gnullvm@0.52.6 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker | https://github.com/microsoft/windows-rs |
+| windows_aarch64_gnullvm@0.48.5 | MIT OR Apache-2.0 | backend | https://github.com/microsoft/windows-rs |
+| windows_aarch64_gnullvm@0.52.6 | MIT OR Apache-2.0 | desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5 | https://github.com/microsoft/windows-rs |
 | windows_aarch64_gnullvm@0.53.1 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows_aarch64_msvc@0.42.2 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
-| windows_aarch64_msvc@0.48.5 | MIT OR Apache-2.0 | backend, puca-waker | https://github.com/microsoft/windows-rs |
-| windows_aarch64_msvc@0.52.6 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker | https://github.com/microsoft/windows-rs |
+| windows_aarch64_msvc@0.48.5 | MIT OR Apache-2.0 | backend | https://github.com/microsoft/windows-rs |
+| windows_aarch64_msvc@0.52.6 | MIT OR Apache-2.0 | desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5 | https://github.com/microsoft/windows-rs |
 | windows_aarch64_msvc@0.53.1 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows_i686_gnu@0.42.2 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
-| windows_i686_gnu@0.48.5 | MIT OR Apache-2.0 | backend, puca-waker | https://github.com/microsoft/windows-rs |
-| windows_i686_gnu@0.52.6 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker | https://github.com/microsoft/windows-rs |
+| windows_i686_gnu@0.48.5 | MIT OR Apache-2.0 | backend | https://github.com/microsoft/windows-rs |
+| windows_i686_gnu@0.52.6 | MIT OR Apache-2.0 | desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5 | https://github.com/microsoft/windows-rs |
 | windows_i686_gnu@0.53.1 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
-| windows_i686_gnullvm@0.52.6 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker | https://github.com/microsoft/windows-rs |
+| windows_i686_gnullvm@0.52.6 | MIT OR Apache-2.0 | desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5 | https://github.com/microsoft/windows-rs |
 | windows_i686_gnullvm@0.53.1 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows_i686_msvc@0.42.2 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
-| windows_i686_msvc@0.48.5 | MIT OR Apache-2.0 | backend, puca-waker | https://github.com/microsoft/windows-rs |
-| windows_i686_msvc@0.52.6 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker | https://github.com/microsoft/windows-rs |
+| windows_i686_msvc@0.48.5 | MIT OR Apache-2.0 | backend | https://github.com/microsoft/windows-rs |
+| windows_i686_msvc@0.52.6 | MIT OR Apache-2.0 | desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5 | https://github.com/microsoft/windows-rs |
 | windows_i686_msvc@0.53.1 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows_x86_64_gnu@0.42.2 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
-| windows_x86_64_gnu@0.48.5 | MIT OR Apache-2.0 | backend, puca-waker | https://github.com/microsoft/windows-rs |
-| windows_x86_64_gnu@0.52.6 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker | https://github.com/microsoft/windows-rs |
+| windows_x86_64_gnu@0.48.5 | MIT OR Apache-2.0 | backend | https://github.com/microsoft/windows-rs |
+| windows_x86_64_gnu@0.52.6 | MIT OR Apache-2.0 | desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5 | https://github.com/microsoft/windows-rs |
 | windows_x86_64_gnu@0.53.1 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows_x86_64_gnullvm@0.42.2 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
-| windows_x86_64_gnullvm@0.48.5 | MIT OR Apache-2.0 | backend, puca-waker | https://github.com/microsoft/windows-rs |
-| windows_x86_64_gnullvm@0.52.6 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker | https://github.com/microsoft/windows-rs |
+| windows_x86_64_gnullvm@0.48.5 | MIT OR Apache-2.0 | backend | https://github.com/microsoft/windows-rs |
+| windows_x86_64_gnullvm@0.52.6 | MIT OR Apache-2.0 | desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5 | https://github.com/microsoft/windows-rs |
 | windows_x86_64_gnullvm@0.53.1 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows_x86_64_msvc@0.42.2 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
-| windows_x86_64_msvc@0.48.5 | MIT OR Apache-2.0 | backend, puca-waker | https://github.com/microsoft/windows-rs |
-| windows_x86_64_msvc@0.52.6 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker | https://github.com/microsoft/windows-rs |
+| windows_x86_64_msvc@0.48.5 | MIT OR Apache-2.0 | backend | https://github.com/microsoft/windows-rs |
+| windows_x86_64_msvc@0.52.6 | MIT OR Apache-2.0 | desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5 | https://github.com/microsoft/windows-rs |
 | windows_x86_64_msvc@0.53.1 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows-collections@0.2.0 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows-collections@0.3.2 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
@@ -968,14 +958,14 @@ release, never edit by hand.
 | windows-strings@0.4.2 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows-strings@0.5.1 | MIT OR Apache-2.0 | backend, desktop | https://github.com/microsoft/windows-rs |
 | windows-sys@0.45.0 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
-| windows-sys@0.48.0 | MIT OR Apache-2.0 | backend, puca-waker | https://github.com/microsoft/windows-rs |
-| windows-sys@0.52.0 | MIT OR Apache-2.0 | backend, desktop, puca-service, puca-waker | https://github.com/microsoft/windows-rs |
+| windows-sys@0.48.0 | MIT OR Apache-2.0 | backend | https://github.com/microsoft/windows-rs |
+| windows-sys@0.52.0 | MIT OR Apache-2.0 | desktop, puca-service | https://github.com/microsoft/windows-rs |
 | windows-sys@0.59.0 | MIT OR Apache-2.0 | desktop, puca-agent, puca-service | https://github.com/microsoft/windows-rs |
 | windows-sys@0.60.2 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows-sys@0.61.2 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker, wasm | https://github.com/microsoft/windows-rs |
 | windows-targets@0.42.2 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
-| windows-targets@0.48.5 | MIT OR Apache-2.0 | backend, puca-waker | https://github.com/microsoft/windows-rs |
-| windows-targets@0.52.6 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5, puca-waker | https://github.com/microsoft/windows-rs |
+| windows-targets@0.48.5 | MIT OR Apache-2.0 | backend | https://github.com/microsoft/windows-rs |
+| windows-targets@0.52.6 | MIT OR Apache-2.0 | desktop, puca-agent, puca-capture, puca-encode, puca-input, puca-rtc, puca-service, puca-spike-fswap, puca-spike-s5 | https://github.com/microsoft/windows-rs |
 | windows-targets@0.53.5 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows-threading@0.1.0 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
 | windows-threading@0.2.1 | MIT OR Apache-2.0 | desktop | https://github.com/microsoft/windows-rs |
@@ -988,7 +978,6 @@ release, never edit by hand.
 | winnow@0.7.15 | MIT | desktop | https://github.com/winnow-rs/winnow |
 | winnow@1.0.4 | MIT | desktop, puca-agent, puca-service | https://github.com/winnow-rs/winnow |
 | winreg@0.10.1 | MIT | desktop | https://github.com/gentoo90/winreg-rs |
-| winreg@0.50.0 | MIT | backend, puca-waker | https://github.com/gentoo90/winreg-rs |
 | winreg@0.55.0 | MIT | desktop, puca-agent, puca-service | https://github.com/gentoo90/winreg-rs |
 | wit-bindgen@0.57.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | desktop, puca-agent, puca-rtc, puca-spike-fswap | https://github.com/bytecodealliance/wit-bindgen |
 | writeable@0.6.4 | Unicode-3.0 | backend, desktop, puca-service, puca-waker | https://github.com/unicode-org/icu4x |
