@@ -7,9 +7,9 @@ one-line summary; this file is the full story. Versions follow
 ## Unreleased
 
 ### Fixed
-- **Sitting in a voice call costs far less.** Measured in a six-person call:
-  the app's own processor use fell by about 40% and its graphics load by
-  about 45%. The speaking rings, the LIVE badges and the "watch" buttons
+- **Sitting in a voice call costs far less.** Measured in a six-person call
+  on the integrated graphics the desktop app uses: its graphics load fell
+  from about 18% to under 2%, and the processor time it needs by about 60%. The speaking rings, the LIVE badges and the "watch" buttons
   pulsed forever in a way the graphics card cannot do cheaply, redrawing the
   window 165 times a second on a 165 Hz screen for as long as anybody talked
   or streamed. Speaking rings are now a steady ring that switches with the
