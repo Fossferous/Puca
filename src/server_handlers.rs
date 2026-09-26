@@ -263,7 +263,7 @@ pub async fn create_server(
 ///
 /// FAIL CLOSED: NotFound, NotMember, a channel that belongs to another server,
 /// no VIEW bit and a resolver error (which get_user_channel_permissions maps
-/// to NotFound / empty perms, never a default-allow) all read as `None`.
+/// to NotFound, never a default-allow) all read as `None`.
 pub async fn visible_clip_channel_id(
     pool: &sqlx::PgPool,
     user_id: i32,

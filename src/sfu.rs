@@ -125,6 +125,20 @@ pub struct SfuRoomUsage {
     pub reservations: HashMap<String, Instant>,
     /// Live screen-share track SIDs (webhook `track_published`).
     pub screen_shares: HashSet<String>,
+    /// Participants the LiveKit resync must look at again on its next pass: a
+    /// removal LiveKit did not confirm (cut again) or a join check the database
+    /// could not answer (check again). They stay KNOWN meanwhile - counted by
+    /// admission, reachable by every ejection - which forgetting them was not.
+    pub recheck: HashMap<String, Recheck>,
+}
+
+/// What the next resync owes a participant in [`SfuRoomUsage::recheck`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recheck {
+    /// It was to be removed and LiveKit did not confirm it: remove it again.
+    Cut,
+    /// Its join check could not be answered: run the check again.
+    JoinCheck,
 }
 
 struct SfuConfig {
@@ -611,12 +625,17 @@ pub struct ResyncReport {
     pub reapplied: usize,
     /// Added sessions the join check refused (see [`reauthorize_added`]).
     pub denied: usize,
+    /// Participants still marked for the next pass (see [`Recheck`]).
+    pub pending: usize,
 }
 
-/// A merge's result: its counts, and the (room, identity) sessions it ADDED.
+/// A merge's result: its counts, the (room, identity) sessions it ADDED, and
+/// the marked sessions LiveKit still lists, with what each is owed (their
+/// marks are taken; a pass that fails for one marks it again).
 pub struct Merged {
     pub report: ResyncReport,
     pub added: Vec<(String, String)>,
+    pub due: Vec<(String, String, Recheck)>,
 }
 
 /// Why a resync failed. Every failure leaves `sfu_rooms` exactly as it was.
@@ -806,6 +825,7 @@ fn merge_snapshot(
 ) -> Merged {
     let mut report = ResyncReport::default();
     let mut added = Vec::new();
+    let mut due = Vec::new();
     for room in snap {
         report.rooms += 1;
         report.participants += room.participants.len();
@@ -837,6 +857,18 @@ fn merge_snapshot(
             listed.contains(id.as_str()) || *seen >= started || SfuResyncJournal::has(&journal.joined, name, id)
         });
         report.cleared += before - u.participants.len();
+        // Marks: only for participants still known; those LiveKit still lists
+        // are due now.
+        let known: HashSet<String> = u.participants.keys().cloned().collect();
+        u.recheck.retain(|id, _| known.contains(id));
+        let marked: Vec<(String, Recheck)> = u.recheck.drain().collect();
+        for (id, what) in marked {
+            if listed.contains(id.as_str()) {
+                due.push((room.name.clone(), id, what));
+            } else {
+                u.recheck.insert(id, what);
+            }
+        }
         for sid in &room.share_sids {
             if SfuResyncJournal::has(&journal.unpublished, name, sid) {
                 continue;
@@ -865,9 +897,11 @@ fn merge_snapshot(
             u.screen_shares
                 .retain(|sid| SfuResyncJournal::has(&journal.published, &name, sid));
             report.cleared += before - (u.participants.len() + u.screen_shares.len());
+            let known: HashSet<String> = u.participants.keys().cloned().collect();
+            u.recheck.retain(|id, _| known.contains(id));
         }
     }
-    Merged { report, added }
+    Merged { report, added, due }
 }
 
 /// One resync: open the journal, take the snapshot, merge it under the
@@ -888,19 +922,27 @@ async fn resync_once(state: &AppState, cfg: &SfuConfig, client: &reqwest::Client
         let merged = merge_snapshot(&state.sfu_rooms, &rooms, &listed, &journal, started, Instant::now());
         let mut report = merged.report;
         report.ignored = listed.len() - rooms.len();
-        (report, (journal.evict_intents, merged.added))
+        (report, (journal.evict_intents, merged.added, merged.due))
     };
-    let (intents, added) = intents;
+    let (intents, added, due) = intents;
     prune(state);
+    // What an earlier pass could not finish: cut again what LiveKit did not
+    // confirm, check again what the database could not answer.
+    let mut unchecked = Vec::new();
+    for (room, identity, what) in due {
+        match what {
+            Recheck::Cut => report.reapplied += remove_or_mark(state, cfg, &room, std::slice::from_ref(&identity), Recheck::Cut).await,
+            Recheck::JoinCheck => unchecked.push((room, identity)),
+        }
+    }
     // An ejection requested during the fetch (a voice move, a transport change)
     // found nothing to cut for a session only the snapshot knew. Apply it to
     // THOSE sessions - the ones the merge added for that user in that room -
     // and never to one that joined since.
-    let mut unchecked = Vec::new();
     for (room, identity) in added {
         let wanted_out = user_id_from_identity(&identity).is_some_and(|uid| intents.contains(&(room.clone(), uid)));
         if wanted_out {
-            report.reapplied += remove_or_forget(state, cfg, &room, std::slice::from_ref(&identity)).await;
+            report.reapplied += remove_or_mark(state, cfg, &room, std::slice::from_ref(&identity), Recheck::Cut).await;
         } else {
             unchecked.push((room, identity));
         }
@@ -910,6 +952,7 @@ async fn resync_once(state: &AppState, cfg: &SfuConfig, client: &reqwest::Client
     // catches a kick, ban or permission change that happened while the session
     // was unknown - during the fetch, or while this process was down.
     report.denied += reauthorize_added(state, cfg, &unchecked).await;
+    report.pending = state.sfu_rooms.iter().map(|r| r.recheck.len()).sum();
     Ok(report)
 }
 
@@ -940,9 +983,10 @@ async fn reauthorize_added(state: &AppState, cfg: &SfuConfig, added: &[(String, 
         Ok(rows) => rows.into_iter().map(|(id,)| id).collect(),
         Err(e) => {
             tracing::warn!(
-                "SFU resync: could not check the {} session(s) it learned ({e}); they stay until they next join",
+                "SFU resync: could not check the {} session(s) it learned ({e}); they are kept and checked again on the next pass",
                 added.len()
             );
+            mark(state, added, Recheck::JoinCheck);
             return 0;
         }
     };
@@ -956,13 +1000,28 @@ async fn reauthorize_added(state: &AppState, cfg: &SfuConfig, added: &[(String, 
         if let Some(reason) = join_check_refuses(is_sfu, access.as_ref()) {
             tracing::warn!("SFU resync: removing user {} from sfu channel {} ({})", uid, cid, reason);
             refused.entry(room.clone()).or_default().push(identity.clone());
+        } else if matches!(access, Some(ChannelPermAccess::NotFound)) {
+            // Unanswered, not allowed: kept, and asked again next pass.
+            mark(state, std::slice::from_ref(&(room.clone(), identity.clone())), Recheck::JoinCheck);
         }
     }
     let mut removed = 0;
     for (room, identities) in refused {
-        removed += remove_or_forget(state, cfg, &room, &identities).await;
+        removed += remove_or_mark(state, cfg, &room, &identities, Recheck::JoinCheck).await;
     }
     removed
+}
+
+/// Mark known participants for the next pass. One that is no longer known
+/// needs nothing: it is gone from the call as far as this process can tell.
+fn mark(state: &AppState, sessions: &[(String, String)], what: Recheck) {
+    for (room, identity) in sessions {
+        if let Some(mut u) = state.sfu_rooms.get_mut(room) {
+            if u.participants.contains_key(identity) {
+                u.recheck.insert(identity.clone(), what);
+            }
+        }
+    }
 }
 
 /// The join check's verdict on one session, as a reason to remove it or None
@@ -982,18 +1041,15 @@ fn join_check_refuses(channel_is_sfu: bool, access: Option<&ChannelPermAccess>) 
     }
 }
 
-/// Remove `identities` from `room` at LiveKit; any removal LiveKit did not
-/// confirm is FORGOTTEN (dropped from `sfu_rooms`) so the next resync learns it
-/// again and runs its check again, instead of keeping, for good, a session it
-/// was told to take out. Returns how many LiveKit confirmed.
-async fn remove_or_forget(state: &AppState, cfg: &SfuConfig, room: &str, identities: &[String]) -> usize {
+/// Remove `identities` from `room` at LiveKit. One LiveKit did not confirm
+/// stays KNOWN - still counted, still reachable by every ejection - and is
+/// marked `what`, so the next resync cuts or checks it again. Returns how many
+/// LiveKit confirmed.
+async fn remove_or_mark(state: &AppState, cfg: &SfuConfig, room: &str, identities: &[String], what: Recheck) -> usize {
     let removed = remove_identities(state, cfg, room, identities).await.removed;
     if removed < identities.len() {
-        if let Some(mut u) = state.sfu_rooms.get_mut(room) {
-            for id in identities {
-                u.participants.remove(id);
-            }
-        }
+        let left: Vec<(String, String)> = identities.iter().map(|i| (room.to_string(), i.clone())).collect();
+        mark(state, &left, what);
     }
     removed
 }
@@ -1061,6 +1117,17 @@ pub fn spawn_livekit_reconciler(state: Arc<AppState>) {
 /// reads it.
 fn reconciler_plan(api_url_set: bool, raw_secs: Option<&str>) -> Option<Result<Duration, String>> {
     api_url_set.then(|| resync_period(raw_secs))
+}
+
+/// How long the reconciler waits after a successful pass, or None to stop:
+/// SFU_RESYNC_SECS=0 stops after its first success - unless sessions are
+/// still marked for another look, which then come back at the retry pace.
+fn next_wait(every: Duration, pending: usize) -> Option<Duration> {
+    match (every.is_zero(), pending) {
+        (false, _) => Some(every),
+        (true, 0) => None,
+        (true, _) => Some(Duration::from_secs(RESYNC_RETRY_SECS[RESYNC_RETRY_SECS.len() - 1])),
+    }
 }
 
 /// The reconciler loop. `config` is read on every pass (`sfu_config` in
@@ -1134,10 +1201,13 @@ where
                 }
                 synced = true;
                 failures = 0;
-                if every.is_zero() {
-                    return;
+                if r.pending > 0 {
+                    tracing::info!("SFU resync: {} session(s) to cut or check again on the next pass", r.pending);
                 }
-                tokio::time::sleep(every).await;
+                match next_wait(every, r.pending) {
+                    Some(wait) => tokio::time::sleep(wait).await,
+                    None => return,
+                }
             }
             Err(ResyncError::Busy) => {
                 tracing::info!("SFU resync: a snapshot was overtaken by events and discarded; retrying");
@@ -1426,6 +1496,7 @@ async fn remove_identities(state: &AppState, cfg: &SfuConfig, room: &str, identi
                 if let Some(mut u) = state.sfu_rooms.get_mut(&room) {
                     u.participants.remove(identity);
                     u.reservations.remove(identity);
+                    u.recheck.remove(identity);
                 }
             }
             Ok(r) => tracing::warn!("SFU evict {identity}: LiveKit returned {}", r.status()),
@@ -1521,6 +1592,7 @@ fn apply_webhook_event(state: &Arc<AppState>, kind: &str, room: String, event: &
                 journal(&state, JournalEntry::Left(&room, identity));
                 if let Some(mut u) = state.sfu_rooms.get_mut(&room) {
                     u.participants.remove(identity);
+                    u.recheck.remove(identity);
                 }
             }
         }
@@ -2048,7 +2120,7 @@ mod sfu_entitled_tests {
     fn unresolvable_or_outsider_is_not_entitled() {
         assert!(!sfu_entitled(&ChannelPermAccess::NotFound));
         assert!(!sfu_entitled(&ChannelPermAccess::NotMember));
-        assert!(!sfu_entitled(&allowed(Permissions::empty())), "a role-fetch DB error resolves to Allowed with empty perms");
+        assert!(!sfu_entitled(&allowed(Permissions::empty())), "no permissions at all: refused");
     }
 }
 
@@ -2121,6 +2193,7 @@ mod resync_tests {
             participants: parts.iter().map(|(i, t)| (i.to_string(), *t)).collect(),
             reservations: res.iter().map(|i| (i.to_string(), Instant::now())).collect(),
             screen_shares: shares.iter().map(|s| s.to_string()).collect(),
+            recheck: HashMap::new(),
         }
     }
 
@@ -2323,15 +2396,23 @@ mod resync_tests {
     /// reply). `on_call` runs with the method name as each request arrives,
     /// before the reply. A token that does not verify under the rig secret is
     /// answered 401, as LiveKit would.
+    /// A running stand-in: its task, and the signal that the code under test
+    /// is done, until which any call beyond the script is caught.
+    struct StandIn {
+        task: tokio::task::JoinHandle<Vec<Seen>>,
+        stop: tokio::sync::oneshot::Sender<()>,
+    }
+
     async fn livekit_stand_in(
         script: Vec<(&'static str, u16, String)>,
         on_call: Option<Box<dyn Fn(&str) + Send>>,
-    ) -> (String, tokio::task::JoinHandle<Vec<Seen>>) {
+    ) -> (String, StandIn) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let base = format!("http://{}", listener.local_addr().expect("addr"));
+        let (stop, mut stopped) = tokio::sync::oneshot::channel::<()>();
         let task = tokio::spawn(async move {
             let mut seen = Vec::new();
-            // The scripted calls, then a short watch for any beyond them.
+            // The scripted calls, then a watch for any beyond them until stopped.
             let scripted = script.len();
             let mut script = script.into_iter().map(Some).collect::<Vec<_>>();
             script.push(None);
@@ -2342,7 +2423,10 @@ mod resync_tests {
                 let accepted = if entry.is_some() {
                     Some(listener.accept().await.expect("accept"))
                 } else {
-                    tokio::time::timeout(Duration::from_millis(300), listener.accept()).await.ok().map(|r| r.expect("accept"))
+                    tokio::select! {
+                        r = listener.accept() => Some(r.expect("accept")),
+                        _ = &mut stopped => None,
+                    }
                 };
                 let Some((mut s, _)) = accepted else { break };
                 let extra = entry.is_none();
@@ -2399,11 +2483,12 @@ mod resync_tests {
             }
             seen
         });
-        (base, task)
+        (base, StandIn { task, stop })
     }
 
-    async fn asked(task: tokio::task::JoinHandle<Vec<Seen>>) -> Vec<Seen> {
-        let seen = tokio::time::timeout(Duration::from_secs(10), task)
+    async fn asked(srv: StandIn) -> Vec<Seen> {
+        let _ = srv.stop.send(());
+        let seen = tokio::time::timeout(Duration::from_secs(10), srv.task)
             .await
             .expect("a scripted call never came")
             .expect("stand-in");
@@ -2904,7 +2989,7 @@ mod resync_tests {
     }
 
     #[tokio::test]
-    async fn a_removal_livekit_does_not_confirm_is_forgotten_to_be_checked_again() {
+    async fn a_removal_livekit_does_not_confirm_stays_known_and_is_cut_again_next_pass() {
         no_env_proxy();
         let state = test_state();
         state.sfu_rooms.insert("sfu_7".into(), usage(&[("u5#aa", Instant::now())], &[], &[]));
@@ -2913,13 +2998,58 @@ mod resync_tests {
             None,
         )
         .await;
-        let removed = remove_or_forget(&state, &cfg_for(&base), "sfu_7", &["u5#aa".to_string()]).await;
+        let removed = remove_or_mark(&state, &cfg_for(&base), "sfu_7", &["u5#aa".to_string()], Recheck::Cut).await;
         asked(srv).await;
         assert_eq!(removed, 0);
-        assert!(
-            !state.sfu_rooms.get("sfu_7").unwrap().participants.contains_key("u5#aa"),
-            "forgotten: the next resync lists it again, as ADDED, and checks it again"
-        );
+        {
+            let u = state.sfu_rooms.get("sfu_7").unwrap();
+            assert!(u.participants.contains_key("u5#aa"), "still KNOWN: counted by admission, reachable by a kick");
+            assert_eq!(u.recheck.get("u5#aa"), Some(&Recheck::Cut));
+        }
+        // The next pass: LiveKit still lists it, so it is cut again - and it is
+        // not drift, it was never unknown.
+        let (base, srv) = livekit_stand_in(
+            vec![
+                ("/twirp/livekit.RoomService/ListRooms", 200, r#"{"rooms":[{"name":"sfu_7"}]}"#.to_string()),
+                ("/twirp/livekit.RoomService/ListParticipants", 200, r#"{"participants":[{"identity":"u5#aa","state":"ACTIVE","tracks":[]}]}"#.to_string()),
+                ("/twirp/livekit.RoomService/RemoveParticipant", 200, "{}".to_string()),
+            ],
+            None,
+        )
+        .await;
+        let r = resync_once(&state, &cfg_for(&base), &client()).await.expect("resync");
+        asked(srv).await;
+        assert_eq!((r.reapplied, r.added, r.pending), (1, 0, 0));
+        assert!(!state.sfu_rooms.get("sfu_7").map(|u| u.participants.contains_key("u5#aa")).unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn an_unanswerable_join_check_is_asked_again_next_pass() {
+        no_env_proxy();
+        let state = test_state();
+        let (base, srv) = livekit_stand_in(
+            vec![
+                ("/twirp/livekit.RoomService/ListRooms", 200, r#"{"rooms":[{"name":"sfu_7"}]}"#.to_string()),
+                ("/twirp/livekit.RoomService/ListParticipants", 200, r#"{"participants":[{"identity":"u6#bb","state":"ACTIVE","tracks":[]}]}"#.to_string()),
+            ],
+            None,
+        )
+        .await;
+        // test_state's database never answers.
+        let r = resync_once(&state, &cfg_for(&base), &client()).await.expect("resync");
+        asked(srv).await;
+        let u = state.sfu_rooms.get("sfu_7").unwrap();
+        assert!(u.participants.contains_key("u6#bb"), "kept: nobody is dropped on a database that cannot answer");
+        assert_eq!(u.recheck.get("u6#bb"), Some(&Recheck::JoinCheck), "and asked about again");
+        assert_eq!(r.pending, 1);
+    }
+
+    #[test]
+    fn zero_period_keeps_going_only_while_something_is_owed() {
+        assert_eq!(next_wait(Duration::from_secs(180), 0), Some(Duration::from_secs(180)));
+        assert_eq!(next_wait(Duration::from_secs(180), 3), Some(Duration::from_secs(180)));
+        assert_eq!(next_wait(Duration::ZERO, 0), None, "SFU_RESYNC_SECS=0: done after the first success");
+        assert_eq!(next_wait(Duration::ZERO, 2), Some(Duration::from_secs(30)), "unless a cut or a check is still owed");
     }
 
 }

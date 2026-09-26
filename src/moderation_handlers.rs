@@ -1220,8 +1220,8 @@ pub async fn move_member_voice(
 }
 
 /// True when the caller's resolved access to a channel carries VIEW_CHANNEL
-/// (ADMINISTRATOR passes through `Permissions::has`). NotFound, NotMember and
-/// the fail-closed empty-perms shape all read as blind.
+/// (ADMINISTRATOR passes through `Permissions::has`). NotFound (which is also
+/// what a resolver error returns), NotMember and a missing VIEW all read as blind.
 fn actor_sees_channel(access: &crate::permissions::ChannelPermAccess) -> bool {
     matches!(
         access,
@@ -1922,7 +1922,7 @@ mod channel_scope_tests {
 
     /// C17: MOVE_MEMBERS (even with CONNECT) does not imply VIEW; a
     /// VIEW-denied actor is blind to the source, as are the non-member,
-    /// no-such-channel and fail-closed (empty perms) resolutions.
+    /// no-such-channel and fail-closed (NotFound on a DB error) resolutions.
     #[test]
     fn voice_move_view_denied_actor_is_blind_to_source() {
         assert!(!actor_sees_channel(&allowed(

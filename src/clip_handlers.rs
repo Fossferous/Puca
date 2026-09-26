@@ -115,8 +115,8 @@ fn approver_online(state: &AppState, uid: UserId, hidden: &HashSet<UserId>) -> b
 /// counts), casting a vote on it, or receiving its live frames over a socket
 /// that outlived the kick (kick never closes the socket, and nothing prunes
 /// the snapshot). Fails closed: a resolver error reads as no VIEW
-/// (get_user_channel_permissions answers NotFound / empty perms on a DB
-/// error, never a default-allow).
+/// (get_user_channel_permissions answers NotFound on a DB error, never a
+/// default-allow).
 ///
 /// The TARGET text channel is different: it decides what a participant may
 /// SEE, never whether they are a participant. propose_clip resolves the
