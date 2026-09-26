@@ -155,8 +155,11 @@ curl -s -H "Authorization: Bearer $JWT" https://chat.example.com/channels/<id>/s
   `SFU resync: removing user N from sfu channel C (<reason>)` line each. A
   removal LiveKit does not confirm, or a check the database cannot answer,
   stays known (counted, and reachable by any kick) and is marked for the next
-  pass, which cuts or checks it again; with `SFU_RESYNC_SECS=0` the resync
-  keeps going at the 30 s retry pace until nothing is owed. A voice
+  pass, which cuts or checks it again - up to 5 passes, then one
+  `SFU resync: gave up on ...` line (the session stays counted). The same
+  applies to a kick, ban or join re-check whose removal LiveKit did not
+  confirm. With `SFU_RESYNC_SECS=0` the resync keeps going at the 30 s retry
+  pace until nothing is owed. A voice
   move or transport change requested during the read is applied to the
   sessions the read added. It also clears a session whose `participant_left`
   webhook was lost.

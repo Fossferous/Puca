@@ -129,8 +129,21 @@ pub struct SfuRoomUsage {
     /// removal LiveKit did not confirm (cut again) or a join check the database
     /// could not answer (check again). They stay KNOWN meanwhile - counted by
     /// admission, reachable by every ejection - which forgetting them was not.
-    pub recheck: HashMap<String, Recheck>,
+    pub recheck: HashMap<String, Mark>,
 }
+
+/// A participant's outstanding [`Recheck`], and how many passes have tried it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mark {
+    pub what: Recheck,
+    pub passes: u8,
+}
+
+/// Passes a mark may fail before it is given up (one warn line; the session
+/// stays known and counted). Bounds a check that can never be answered and a
+/// cut LiveKit keeps refusing, which would otherwise keep SFU_RESYNC_SECS=0
+/// resyncing every 30 s for good.
+const MARK_PASSES: u8 = 5;
 
 /// What the next resync owes a participant in [`SfuRoomUsage::recheck`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -630,8 +643,8 @@ pub struct ResyncReport {
 }
 
 /// A merge's result: its counts, the (room, identity) sessions it ADDED, and
-/// the marked sessions LiveKit still lists, with what each is owed (their
-/// marks are taken; a pass that fails for one marks it again).
+/// the marked sessions LiveKit still lists, with what each is owed. Their
+/// marks stay in place: success clears one, failure counts another pass.
 pub struct Merged {
     pub report: ResyncReport,
     pub added: Vec<(String, String)>,
@@ -861,12 +874,9 @@ fn merge_snapshot(
         // are due now.
         let known: HashSet<String> = u.participants.keys().cloned().collect();
         u.recheck.retain(|id, _| known.contains(id));
-        let marked: Vec<(String, Recheck)> = u.recheck.drain().collect();
-        for (id, what) in marked {
+        for (id, m) in u.recheck.iter() {
             if listed.contains(id.as_str()) {
-                due.push((room.name.clone(), id, what));
-            } else {
-                u.recheck.insert(id, what);
+                due.push((room.name.clone(), id.clone(), m.what));
             }
         }
         for sid in &room.share_sids {
@@ -1003,6 +1013,9 @@ async fn reauthorize_added(state: &AppState, cfg: &SfuConfig, added: &[(String, 
         } else if matches!(access, Some(ChannelPermAccess::NotFound)) {
             // Unanswered, not allowed: kept, and asked again next pass.
             mark(state, std::slice::from_ref(&(room.clone(), identity.clone())), Recheck::JoinCheck);
+        } else {
+            // Answered, and allowed: nothing is owed any more.
+            clear_mark(state, room, identity);
         }
     }
     let mut removed = 0;
@@ -1012,15 +1025,37 @@ async fn reauthorize_added(state: &AppState, cfg: &SfuConfig, added: &[(String, 
     removed
 }
 
-/// Mark known participants for the next pass. One that is no longer known
-/// needs nothing: it is gone from the call as far as this process can tell.
+/// Mark known participants for the next pass, counting the passes a mark has
+/// failed; past [`MARK_PASSES`] it is given up with one warn line (the session
+/// stays known and counted). One that is no longer known needs nothing: it is
+/// gone from the call as far as this process can tell.
 fn mark(state: &AppState, sessions: &[(String, String)], what: Recheck) {
     for (room, identity) in sessions {
-        if let Some(mut u) = state.sfu_rooms.get_mut(room) {
-            if u.participants.contains_key(identity) {
-                u.recheck.insert(identity.clone(), what);
-            }
+        let Some(mut u) = state.sfu_rooms.get_mut(room) else { continue };
+        if !u.participants.contains_key(identity) {
+            continue;
         }
+        let passes = u.recheck.get(identity).map_or(1, |m| m.passes.saturating_add(1));
+        if passes > MARK_PASSES {
+            u.recheck.remove(identity);
+            drop(u);
+            tracing::warn!(
+                "SFU resync: gave up on user {:?}'s session in sfu channel {:?} after {} passes ({:?} could not be completed); it stays counted until it leaves",
+                user_id_from_identity(identity),
+                channel_id_from_room(room),
+                MARK_PASSES,
+                what
+            );
+            continue;
+        }
+        u.recheck.insert(identity.clone(), Mark { what, passes });
+    }
+}
+
+/// Nothing is owed for this participant any more.
+fn clear_mark(state: &AppState, room: &str, identity: &str) {
+    if let Some(mut u) = state.sfu_rooms.get_mut(room) {
+        u.recheck.remove(identity);
     }
 }
 
@@ -1121,7 +1156,8 @@ fn reconciler_plan(api_url_set: bool, raw_secs: Option<&str>) -> Option<Result<D
 
 /// How long the reconciler waits after a successful pass, or None to stop:
 /// SFU_RESYNC_SECS=0 stops after its first success - unless sessions are
-/// still marked for another look, which then come back at the retry pace.
+/// still marked for another look, which then come back at the retry pace
+/// (each mark for at most [`MARK_PASSES`] passes, so this always ends).
 fn next_wait(every: Duration, pending: usize) -> Option<Duration> {
     match (every.is_zero(), pending) {
         (false, _) => Some(every),
@@ -1443,7 +1479,15 @@ async fn evict_with(state: &AppState, cfg: &SfuConfig, channel_id: i64, user_id:
     if identities.is_empty() {
         return Evicted::default();
     }
-    remove_identities(state, cfg, &room, &identities).await
+    let out = remove_identities(state, cfg, &room, &identities).await;
+    if out.removed < out.tried {
+        // LiveKit did not confirm every removal. A kick, ban, re-auth or
+        // transport change must not end there: the next resync checks these
+        // sessions again (and cuts the ones still refused).
+        let left: Vec<(String, String)> = identities.iter().map(|i| (room.clone(), i.clone())).collect();
+        mark(state, &left, Recheck::JoinCheck);
+    }
+    out
 }
 
 /// RemoveParticipant for each identity in `room`; a confirmed removal is
@@ -1537,6 +1581,9 @@ fn apply_webhook_event(state: &Arc<AppState>, kind: &str, room: String, event: &
                     let mut u = state.sfu_rooms.entry(room.clone()).or_default();
                     u.reservations.remove(identity);
                     u.participants.insert(identity.to_string(), Instant::now());
+                    // The re-auth below is this session's check now; an older
+                    // mark (a cut or a check owed) must not act after it.
+                    u.recheck.remove(identity);
                 }
                 // Re-authorize the join. A join token is minted against the
                 // perms of that moment and LiveKit checks only its signature,
@@ -2977,13 +3024,15 @@ mod resync_tests {
             .collect();
         assert_eq!(removed, [id_x.clone(), id_mesh.clone()].into_iter().collect(), "the non-member, and the member in a non-SFU channel");
         assert_eq!(r.denied, 2);
+        assert_eq!(r.pending, 1, "only the server-less channel's session is owed another look");
         let u = state.sfu_rooms.get(&room).unwrap();
         assert!(u.participants.contains_key(&id_m), "a member of an SFU channel stays");
+        assert!(u.recheck.get(&id_m).is_none(), "answered and allowed: nothing owed");
         assert!(!u.participants.contains_key(&id_x));
         drop(u);
         let o = state.sfu_rooms.get(&orphan_room).unwrap();
         assert!(o.participants.contains_key(&id_orphan), "an unanswered lookup keeps the session");
-        assert_eq!(o.recheck.get(&id_orphan), Some(&Recheck::JoinCheck), "and marks it to be asked again");
+        assert_eq!(o.recheck.get(&id_orphan).map(|m| m.what), Some(Recheck::JoinCheck), "and marks it to be asked again");
         drop(o);
         let _ = sqlx::query("DELETE FROM channels WHERE id = $1").bind(orphan).execute(&pool).await;
         let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&sid).execute(&pool).await;
@@ -3018,7 +3067,7 @@ mod resync_tests {
         {
             let u = state.sfu_rooms.get("sfu_7").unwrap();
             assert!(u.participants.contains_key("u5#aa"), "still KNOWN: counted by admission, reachable by a kick");
-            assert_eq!(u.recheck.get("u5#aa"), Some(&Recheck::Cut));
+            assert_eq!(u.recheck.get("u5#aa"), Some(&Mark { what: Recheck::Cut, passes: 1 }));
         }
         // The next pass: LiveKit still lists it, so it is cut again - and it is
         // not drift, it was never unknown.
@@ -3052,10 +3101,80 @@ mod resync_tests {
         // test_state's database never answers.
         let r = resync_once(&state, &cfg_for(&base), &client()).await.expect("resync");
         asked(srv).await;
-        let u = state.sfu_rooms.get("sfu_7").unwrap();
-        assert!(u.participants.contains_key("u6#bb"), "kept: nobody is dropped on a database that cannot answer");
-        assert_eq!(u.recheck.get("u6#bb"), Some(&Recheck::JoinCheck), "and asked about again");
+        {
+            let u = state.sfu_rooms.get("sfu_7").unwrap();
+            assert!(u.participants.contains_key("u6#bb"), "kept: nobody is dropped on a database that cannot answer");
+            assert_eq!(u.recheck.get("u6#bb"), Some(&Mark { what: Recheck::JoinCheck, passes: 1 }), "and asked about again");
+        }
         assert_eq!(r.pending, 1);
+        // The next pass: it is DUE (not added - no drift), asked again, and
+        // still unanswered: one more pass counted.
+        let (base, srv) = livekit_stand_in(
+            vec![
+                ("/twirp/livekit.RoomService/ListRooms", 200, r#"{"rooms":[{"name":"sfu_7"}]}"#.to_string()),
+                ("/twirp/livekit.RoomService/ListParticipants", 200, r#"{"participants":[{"identity":"u6#bb","state":"ACTIVE","tracks":[]}]}"#.to_string()),
+            ],
+            None,
+        )
+        .await;
+        let r = resync_once(&state, &cfg_for(&base), &client()).await.expect("second pass");
+        asked(srv).await;
+        assert_eq!((r.added, r.pending), (0, 1));
+        assert_eq!(state.sfu_rooms.get("sfu_7").unwrap().recheck.get("u6#bb"), Some(&Mark { what: Recheck::JoinCheck, passes: 2 }));
+    }
+
+    #[tokio::test]
+    async fn a_mark_that_never_completes_is_given_up_and_the_session_kept() {
+        no_env_proxy();
+        let state = test_state();
+        let mut u = usage(&[("u6#bb", Instant::now())], &[], &[]);
+        u.recheck.insert("u6#bb".into(), Mark { what: Recheck::JoinCheck, passes: MARK_PASSES });
+        state.sfu_rooms.insert("sfu_7".into(), u);
+        let (base, srv) = livekit_stand_in(
+            vec![
+                ("/twirp/livekit.RoomService/ListRooms", 200, r#"{"rooms":[{"name":"sfu_7"}]}"#.to_string()),
+                ("/twirp/livekit.RoomService/ListParticipants", 200, r#"{"participants":[{"identity":"u6#bb","state":"ACTIVE","tracks":[]}]}"#.to_string()),
+            ],
+            None,
+        )
+        .await;
+        let r = resync_once(&state, &cfg_for(&base), &client()).await.expect("resync");
+        asked(srv).await;
+        let u = state.sfu_rooms.get("sfu_7").unwrap();
+        assert!(u.recheck.is_empty(), "past the bound: given up, so SFU_RESYNC_SECS=0 can stop");
+        assert!(u.participants.contains_key("u6#bb"), "given up is not forgotten: still counted");
+        assert_eq!(r.pending, 0);
+    }
+
+    #[tokio::test]
+    async fn any_ejection_livekit_does_not_confirm_is_marked_for_a_check() {
+        no_env_proxy();
+        let state = test_state();
+        state.sfu_rooms.insert("sfu_7".into(), usage(&[("u5#aa", Instant::now())], &[], &[]));
+        let (base, srv) = livekit_stand_in(
+            vec![("/twirp/livekit.RoomService/RemoveParticipant", 503, r#"{"code":"unavailable"}"#.to_string())],
+            None,
+        )
+        .await;
+        // What a kick, a ban or the join webhook's re-auth calls.
+        let out = evict_with(&state, &cfg_for(&base), 7, 5).await;
+        asked(srv).await;
+        assert_eq!(out, Evicted { tried: 1, removed: 0 });
+        assert_eq!(
+            state.sfu_rooms.get("sfu_7").unwrap().recheck.get("u5#aa"),
+            Some(&Mark { what: Recheck::JoinCheck, passes: 1 }),
+            "the next resync checks it again instead of the kick ending there"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_join_clears_an_older_mark() {
+        let state = test_state();
+        let mut u = usage(&[("u5#aa", Instant::now())], &[], &[]);
+        u.recheck.insert("u5#aa".into(), Mark { what: Recheck::Cut, passes: 2 });
+        state.sfu_rooms.insert("sfu_7".into(), u);
+        apply_webhook_event(&state, "participant_joined", "sfu_7".into(), &serde_json::json!({"participant": {"identity": "u5#aa"}}));
+        assert!(state.sfu_rooms.get("sfu_7").unwrap().recheck.is_empty(), "the webhook's own check supersedes it");
     }
 
     #[test]
