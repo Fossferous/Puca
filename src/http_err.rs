@@ -42,6 +42,8 @@ mod tests {
             .port();
         let e = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
+            // Straight to the closed port, whatever proxy the environment names.
+            .no_proxy()
             .build()
             .unwrap()
             .get(format!("http://127.0.0.1:{port}/"))

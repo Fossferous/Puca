@@ -682,9 +682,26 @@ mod tests {
         );
     }
 
+    /// The socket tests reach 127.0.0.1 through `remint`'s and `refresh`'s own
+    /// clients, which honour HTTP(S)_PROXY / ALL_PROXY with no implied
+    /// loopback exemption. A proxy in the environment would receive them; say
+    /// what to do instead of failing on its 502.
+    fn no_env_proxy() {
+        let no = std::env::var("NO_PROXY").or_else(|_| std::env::var("no_proxy")).unwrap_or_default();
+        for k in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
+            if std::env::var_os(k).is_some_and(|v| !v.is_empty()) {
+                assert!(
+                    no.split(',').any(|h| h.trim() == "127.0.0.1"),
+                    "{k} is set: add 127.0.0.1 to NO_PROXY to run the waker's socket tests"
+                );
+            }
+        }
+    }
+
     /// A config pointing at a throwaway local server, with a REAL key pair so
     /// the signature this test verifies is the one the server would verify.
     fn minting_config(port: u16) -> (Config, ed25519_dalek::VerifyingKey) {
+        no_env_proxy();
         let seed = [9u8; 32];
         let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
         let vk = sk.verifying_key();
@@ -891,7 +908,7 @@ mod tests {
         assert_eq!(renewed.as_deref(), Some("fresh.jwt.value"), "the renewed token is adopted");
         let (head, path) = finished(server).await;
         assert_eq!(path, "/devices");
-        assert!(head.starts_with("GET /devices HTTP/1.1\r\n"), "HTTP/1.1 GET, as on 0.11: {head}");
+        assert!(head.starts_with("GET /devices HTTP/1.1\r\n"), "the request line: {head}");
         assert!(
             head.to_ascii_lowercase().contains("\r\nauthorization: bearer old.jwt.value"),
             "the current token is presented: {head}"
@@ -946,7 +963,10 @@ mod tests {
 
         // THE POSITIVE CONTROL: reqwest's own Display must NOT carry the
         // cause, or the assertions above prove nothing about http_err.
-        let e = reqwest::Client::new()
+        let e = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client")
             .get(format!("http://127.0.0.1:{}/", closed_port()))
             .send()
             .await

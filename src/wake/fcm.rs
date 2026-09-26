@@ -355,17 +355,51 @@ mod tests {
         }
     }
 
-    /// An FcmWake whose token endpoint and send URL are the given stand-ins.
-    fn wake_against(token_base: &str, send_base: &str) -> FcmWake {
-        FcmWake {
-            send_url: format!("{send_base}/v1/projects/p/messages:send"),
-            account: ServiceAccount { token_uri: format!("{token_base}/token"), ..test_account() },
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .expect("client"),
-            cached: Arc::new(RwLock::new(None)),
+    /// The service-account file main.rs hands to `FcmWake::new`.
+    fn account_json(acct: &ServiceAccount) -> String {
+        serde_json::json!({
+            "client_email": acct.client_email,
+            "private_key": acct.private_key,
+            "token_uri": acct.token_uri,
+        })
+        .to_string()
+    }
+
+    /// These tests reach 127.0.0.1 through the PRODUCTION client, which
+    /// honours HTTP(S)_PROXY / ALL_PROXY from the environment as an operator's
+    /// proxy must be honoured - with no implied loopback exemption. A proxy in
+    /// the environment would receive these requests and fail them with its
+    /// own 502; say what to do instead.
+    fn no_env_proxy() {
+        let no = std::env::var("NO_PROXY").or_else(|_| std::env::var("no_proxy")).unwrap_or_default();
+        for k in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
+            if std::env::var_os(k).is_some_and(|v| !v.is_empty()) {
+                assert!(
+                    no.split(',').any(|h| h.trim() == "127.0.0.1"),
+                    "{k} is set: add 127.0.0.1 to NO_PROXY to run the FCM socket tests"
+                );
+            }
         }
+    }
+
+    /// An FcmWake built by `new` - its real client - with only the two
+    /// destinations moved onto the stand-ins.
+    fn wake_against(token_base: &str, send_base: &str) -> FcmWake {
+        no_env_proxy();
+        let acct = ServiceAccount { token_uri: format!("{token_base}/token"), ..test_account() };
+        let mut fcm = FcmWake::new("p".into(), &account_json(&acct)).expect("a valid account");
+        fcm.send_url = format!("{send_base}/v1/projects/p/messages:send");
+        fcm
+    }
+
+    /// The one destination the socket tests replace, pinned where it is made:
+    /// a wrong path here is a 404 from Google, which `classify` reads as
+    /// Unregistered - every phone's token pruned on its first wake.
+    #[test]
+    fn construction_targets_the_real_fcm_endpoint() {
+        let fcm = FcmWake::new("proj-123".into(), &account_json(&test_account())).expect("a valid account");
+        assert_eq!(fcm.send_url, "https://fcm.googleapis.com/v1/projects/proj-123/messages:send");
+        assert_eq!(fcm.account.token_uri, "https://oauth2.googleapis.com/token");
     }
 
     /// A port nobody listens on: bound, read, released.
@@ -392,7 +426,7 @@ mod tests {
         let seen = seen_by(token_srv, "token endpoint").await;
         assert_eq!(seen.len(), 1);
         let r = &seen[0];
-        assert_eq!(r.line, "POST /token HTTP/1.1", "HTTP/1.1, as on 0.11");
+        assert_eq!(r.line, "POST /token HTTP/1.1", "the request line");
         assert_eq!(r.header("content-type"), Some("application/x-www-form-urlencoded"));
         let assertion = r
             .body
