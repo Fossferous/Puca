@@ -51,6 +51,24 @@ pub const DEFAULT_TTL_MS: u64 = 180_000;
 /// answering cannot grow the pending map without bound.
 const MAX_PENDING: usize = 64;
 
+/// Wrong passphrases in a row before the gate starts making the caller wait.
+///
+/// WHY A LIMIT AT ALL. One attempt per challenge stops a captured nonce being
+/// ground offline, but nothing limited how fast challenges could be REQUESTED,
+/// so whoever held the account password (the first factor) could guess this
+/// second one online as fast as round trips allowed (0916 campaign, left open).
+/// Five is room for honest typos; after that each further miss doubles the
+/// wait, so a guesser gets about a hundred tries a day instead of thousands a
+/// minute.
+pub const FREE_FAILURES: u32 = 5;
+
+/// The first wait, once `FREE_FAILURES` misses in a row have happened.
+pub const FIRST_LOCKOUT_MS: u64 = 30_000;
+
+/// The longest wait. The owner locked out by a guesser must still get in the
+/// same day, and a wait this long already caps a guesser at ~100 tries a day.
+pub const MAX_LOCKOUT_MS: u64 = 15 * 60_000;
+
 /// What the host persists to recognise the passphrase WITHOUT knowing it.
 ///
 /// `salt` is the Argon2id salt the controller needs to reproduce the derivation;
@@ -91,6 +109,37 @@ pub enum UaError {
     BadSignature,
     /// The stored key or the supplied signature was structurally invalid.
     Malformed(&'static str),
+    /// Too many wrong passphrases in a row: nothing is checked until the wait
+    /// is over. Decided BEFORE any signature is looked at, so saying so leaks
+    /// nothing about the guess, and the controller can tell its user when to
+    /// try again.
+    Throttled { retry_after_ms: u64 },
+}
+
+impl std::fmt::Display for UaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UaError::NotArmed => f.write_str("unattended access is not armed on this computer"),
+            UaError::UnknownChallenge => f.write_str("that challenge is not known here"),
+            UaError::Expired => f.write_str("that challenge expired"),
+            UaError::BadSignature => f.write_str("wrong unattended passphrase"),
+            UaError::Malformed(why) => f.write_str(why),
+            UaError::Throttled { retry_after_ms } => {
+                // Rounded UP, so "try again in 30 seconds" is never too early.
+                let secs = retry_after_ms.div_ceil(1000).max(1);
+                let when = if secs < 120 {
+                    format!("{secs} seconds")
+                } else {
+                    format!("{} minutes", secs.div_ceil(60))
+                };
+                // The desktop app's host (session.ts) passes this on to the
+                // controller only if it starts with "too many wrong unattended
+                // passphrases"; keep that prefix, or the owner is told
+                // "could not verify" instead.
+                write!(f, "too many wrong unattended passphrases in a row; try again in {when}")
+            }
+        }
+    }
 }
 
 /// The bytes the controller signs and the host verifies. See the module doc.
@@ -118,6 +167,10 @@ pub struct UaGate {
     /// nonce -> the `now_ms` at which it was issued.
     pending: HashMap<[u8; 32], u64>,
     ttl_ms: u64,
+    /// Wrong passphrases in a row since the last right one.
+    failures: u32,
+    /// Nothing is checked before this `now_ms` (0: no wait).
+    locked_until_ms: u64,
 }
 
 impl Default for UaGate {
@@ -128,14 +181,23 @@ impl Default for UaGate {
 
 impl UaGate {
     pub fn new(ttl_ms: u64) -> Self {
-        Self { record: None, pending: HashMap::new(), ttl_ms }
+        Self { record: None, pending: HashMap::new(), ttl_ms, failures: 0, locked_until_ms: 0 }
     }
 
     /// Arm (or re-arm) the gate with a record the host loaded from disk or the
     /// user just set up. Re-arming with a new record invalidates every
     /// outstanding challenge — a passphrase change must not leave a challenge
     /// answerable under the old key.
+    ///
+    /// A DIFFERENT record also clears the wrong-passphrase count: that is the
+    /// owner, at this machine, setting a new passphrase. The SAME record
+    /// re-armed keeps it: the desktop app re-arms from disk before every
+    /// challenge, and resetting there would reset the limit on every attempt.
     pub fn arm(&mut self, record: UaRecord) {
+        if self.record.as_ref() != Some(&record) {
+            self.failures = 0;
+            self.locked_until_ms = 0;
+        }
         self.record = Some(record);
         self.pending.clear();
     }
@@ -145,6 +207,32 @@ impl UaGate {
     pub fn disarm(&mut self) {
         self.record = None;
         self.pending.clear();
+        self.failures = 0;
+        self.locked_until_ms = 0;
+    }
+
+    /// `Throttled` while a wait is running.
+    ///
+    /// No wait may run longer than `MAX_LOCKOUT_MS` from NOW: the agent's clock
+    /// is wall time, and Windows setting it back during a wait would otherwise
+    /// stretch 30 s into hours (a_clock_set_back_cannot_stretch_the_wait_past_the_cap).
+    fn check_lockout(&mut self, now_ms: u64) -> Result<(), UaError> {
+        self.locked_until_ms = self.locked_until_ms.min(now_ms.saturating_add(MAX_LOCKOUT_MS));
+        if now_ms < self.locked_until_ms {
+            return Err(UaError::Throttled { retry_after_ms: self.locked_until_ms - now_ms });
+        }
+        Ok(())
+    }
+
+    /// Count a wrong passphrase; from the `FREE_FAILURES`-th in a row on, start
+    /// a wait that doubles with each further miss, up to `MAX_LOCKOUT_MS`.
+    fn note_failure(&mut self, now_ms: u64) {
+        self.failures = self.failures.saturating_add(1);
+        if self.failures >= FREE_FAILURES {
+            let doublings = (self.failures - FREE_FAILURES).min(16);
+            let wait = FIRST_LOCKOUT_MS.saturating_mul(1u64 << doublings).min(MAX_LOCKOUT_MS);
+            self.locked_until_ms = now_ms.saturating_add(wait);
+        }
     }
 
     pub fn is_armed(&self) -> bool {
@@ -167,6 +255,7 @@ impl UaGate {
         if self.record.is_none() {
             return Err(UaError::NotArmed);
         }
+        self.check_lockout(now_ms)?;
         self.sweep_expired(now_ms);
         if self.pending.len() >= MAX_PENDING {
             if let Some(oldest) = self
@@ -203,23 +292,38 @@ impl UaGate {
         signature: &[u8],
         now_ms: u64,
     ) -> Result<(), UaError> {
-        let record = self.record.as_ref().ok_or(UaError::NotArmed)?;
+        // Copied out (32 bytes) so the lockout check below can take `&mut self`.
+        let verifying_key = self.record.as_ref().ok_or(UaError::NotArmed)?.verifying_key;
 
         // Look up and REMOVE atomically: one attempt per nonce, no matter the
         // outcome below.
         let issued_at = self.pending.remove(nonce).ok_or(UaError::UnknownChallenge)?;
+        // AFTER the nonce is consumed and BEFORE the signature is looked at.
+        // Checking only at issue would not be enough: up to MAX_PENDING
+        // challenges can be collected while no wait is running and then all
+        // answered at once, so a wait must also stop answers to challenges
+        // issued before it began.
+        self.check_lockout(now_ms)?;
         if now_ms.saturating_sub(issued_at) > self.ttl_ms {
             return Err(UaError::Expired);
         }
 
-        let vk = VerifyingKey::from_bytes(&record.verifying_key)
+        let vk = VerifyingKey::from_bytes(&verifying_key)
             .map_err(|_| UaError::Malformed("stored key is not a valid Ed25519 point"))?;
         let sig_arr: [u8; 64] =
             signature.try_into().map_err(|_| UaError::Malformed("signature is not 64 bytes"))?;
         let sig = Signature::from_bytes(&sig_arr);
 
-        vk.verify_strict(&challenge_message(context, nonce), &sig)
-            .map_err(|_| UaError::BadSignature)
+        match vk.verify_strict(&challenge_message(context, nonce), &sig) {
+            Ok(()) => {
+                self.failures = 0;
+                Ok(())
+            }
+            Err(_) => {
+                self.note_failure(now_ms);
+                Err(UaError::BadSignature)
+            }
+        }
     }
 
     /// Drop challenges whose TTL has elapsed. Called before issuing; also safe
@@ -441,5 +545,143 @@ mod tests {
         let mut n2 = [0u8; 32];
         n2[0] = 1;
         assert_ne!(challenge_message("a", &n), challenge_message("a", &n2));
+    }
+
+    // --- the wrong-passphrase limit ----------------------------------------
+
+    /// One wrong guess at `now`: a fresh challenge, answered by the wrong key.
+    fn miss(gate: &mut UaGate, now: u64) -> Result<(), UaError> {
+        let nonce = gate.issue_challenge(now)?;
+        gate.verify(&nonce, "ctx", &respond(&controller(99), "ctx", &nonce), now)
+    }
+
+    #[test]
+    fn five_wrong_passphrases_in_a_row_start_a_wait() {
+        let sk = controller(1);
+        let mut gate = armed_gate(&sk);
+        for i in 0..FREE_FAILURES {
+            assert_eq!(miss(&mut gate, 1000), Err(UaError::BadSignature), "miss {i} is still checked");
+        }
+        assert_eq!(
+            gate.issue_challenge(1000),
+            Err(UaError::Throttled { retry_after_ms: FIRST_LOCKOUT_MS }),
+            "the wait must begin at the FREE_FAILURES-th miss"
+        );
+        // Over when it says: a right answer then gets in.
+        let later = 1000 + FIRST_LOCKOUT_MS;
+        let nonce = gate.issue_challenge(later).expect("the wait is over");
+        assert_eq!(gate.verify(&nonce, "ctx", &respond(&sk, "ctx", &nonce), later), Ok(()));
+    }
+
+    #[test]
+    fn a_challenge_collected_before_the_wait_cannot_be_answered_during_it() {
+        // The stockpile: collect challenges while no wait runs, then answer them
+        // all. Checking only at issue would let every one of them be a guess.
+        let sk = controller(1);
+        let mut gate = armed_gate(&sk);
+        let stock: Vec<[u8; 32]> = (0..20).map(|_| gate.issue_challenge(1000).unwrap()).collect();
+        let wrong = controller(99);
+        for n in &stock[..FREE_FAILURES as usize] {
+            assert_eq!(gate.verify(n, "ctx", &respond(&wrong, "ctx", n), 1000), Err(UaError::BadSignature));
+        }
+        // Even the RIGHT answer is not looked at during the wait: no guess of
+        // any kind is evaluated, so the wait cannot be used to test guesses.
+        let n = &stock[FREE_FAILURES as usize];
+        assert!(matches!(
+            gate.verify(n, "ctx", &respond(&sk, "ctx", n), 1001),
+            Err(UaError::Throttled { .. })
+        ));
+    }
+
+    #[test]
+    fn each_further_miss_doubles_the_wait_up_to_the_cap() {
+        let sk = controller(1);
+        let mut gate = armed_gate(&sk);
+        let mut now = 1000;
+        for _ in 0..FREE_FAILURES {
+            miss(&mut gate, now).unwrap_err();
+        }
+        let mut expected = FIRST_LOCKOUT_MS;
+        for _ in 0..8 {
+            assert_eq!(gate.issue_challenge(now), Err(UaError::Throttled { retry_after_ms: expected }));
+            now += expected; // wait it out...
+            assert_eq!(miss(&mut gate, now), Err(UaError::BadSignature)); // ...and miss again
+            expected = (expected * 2).min(MAX_LOCKOUT_MS);
+        }
+        assert_eq!(expected, MAX_LOCKOUT_MS, "eight doublings from 30 s must have reached the cap");
+        assert_eq!(gate.issue_challenge(now), Err(UaError::Throttled { retry_after_ms: MAX_LOCKOUT_MS }));
+    }
+
+    #[test]
+    fn a_right_passphrase_clears_the_count() {
+        let sk = controller(1);
+        let mut gate = armed_gate(&sk);
+        for _ in 0..FREE_FAILURES - 1 {
+            miss(&mut gate, 1000).unwrap_err();
+        }
+        let nonce = gate.issue_challenge(1000).unwrap();
+        gate.verify(&nonce, "ctx", &respond(&sk, "ctx", &nonce), 1000).unwrap();
+        // A fresh run of typos gets the full allowance again.
+        for _ in 0..FREE_FAILURES - 1 {
+            assert_eq!(miss(&mut gate, 1000), Err(UaError::BadSignature));
+        }
+        assert!(gate.issue_challenge(1000).is_ok(), "four misses after a success must not lock");
+    }
+
+    #[test]
+    fn re_arming_the_same_record_keeps_the_wait_and_a_new_passphrase_clears_it() {
+        // The desktop app re-arms from disk before EVERY challenge
+        // (unattended_store.rs), so a reset on every arm would have reset the
+        // limit on every attempt there, and it would never have engaged.
+        let sk = controller(1);
+        let mut gate = armed_gate(&sk);
+        for _ in 0..FREE_FAILURES {
+            miss(&mut gate, 1000).unwrap_err();
+        }
+        gate.arm(UaRecord::new([7u8; 16], sk.verifying_key().to_bytes())); // the same record
+        assert!(
+            matches!(gate.issue_challenge(1000), Err(UaError::Throttled { .. })),
+            "re-arming the unchanged record must not lift the wait"
+        );
+        let new_sk = controller(2);
+        gate.arm(UaRecord::new([8u8; 16], new_sk.verifying_key().to_bytes())); // a new passphrase
+        assert!(gate.issue_challenge(1000).is_ok(), "the owner setting a new passphrase starts afresh");
+    }
+
+    #[test]
+    fn a_clock_set_back_cannot_stretch_the_wait_past_the_cap() {
+        // The agent's clock is wall time (SystemTime). Windows setting it back
+        // hours during a wait would otherwise turn a 30 s wait into hours.
+        let sk = controller(1);
+        let mut gate = armed_gate(&sk);
+        let t = 10_000_000_000;
+        for _ in 0..FREE_FAILURES {
+            miss(&mut gate, t).unwrap_err();
+        }
+        let back = t - 5 * 3_600_000; // five hours earlier
+        match gate.issue_challenge(back) {
+            Err(UaError::Throttled { retry_after_ms }) => {
+                assert!(retry_after_ms <= MAX_LOCKOUT_MS, "waited {retry_after_ms} ms after the clock went back")
+            }
+            other => panic!("still throttled, but no longer than the cap: {other:?}"),
+        }
+        assert!(gate.issue_challenge(back + MAX_LOCKOUT_MS).is_ok(), "over by the cap at the latest");
+    }
+
+    #[test]
+    fn the_wait_reads_as_a_sentence_the_controller_can_show() {
+        assert_eq!(
+            UaError::Throttled { retry_after_ms: 30_000 }.to_string(),
+            "too many wrong unattended passphrases in a row; try again in 30 seconds"
+        );
+        assert_eq!(
+            UaError::Throttled { retry_after_ms: 29_001 }.to_string(),
+            "too many wrong unattended passphrases in a row; try again in 30 seconds",
+            "rounded up, never too early"
+        );
+        assert_eq!(
+            UaError::Throttled { retry_after_ms: MAX_LOCKOUT_MS }.to_string(),
+            "too many wrong unattended passphrases in a row; try again in 15 minutes"
+        );
     }
 }

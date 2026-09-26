@@ -4,6 +4,32 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Security
+- **Guessing an unattended passphrase is now slow.** The passphrase is the
+  second lock on unattended access, after your account password. Each try
+  was already single-use, but nothing limited how quickly someone could keep
+  asking, so whoever had your account password could guess the passphrase as
+  fast as their connection allowed. Now, after five wrong passphrases in a
+  row, the computer makes them wait 30 seconds, and each further miss doubles
+  the wait, up to 15 minutes. The right passphrase clears the count. If it is
+  you who mistyped, the remote screen says how long to wait.
+- **A correct passphrase can no longer be lost on the way in.** Both ends of a
+  remote-control session share one key, so a relay could send the computer
+  one of its own messages back. The computer ignored it, but still counted it,
+  and could then discard the controller's real passphrase proof as a repeat.
+  It now refuses its own messages outright.
+- **Remote file access never offers the system's own `$` files.** The disk's
+  internal files (such as `$MFT`) and Windows' servicing folders at the top of
+  each drive are now refused, like the page file already was. And every
+  refused write now appears in the file-access log, including one refused
+  before any file was opened.
+- **The sign-in-screen service checks device signatures strictly.** It now
+  refuses the special "weak" keys that can appear to sign anything. The key
+  it checks against is made on your own device, so this closes a door nobody
+  could open today.
+
 ## 0.9.821 — 2026-09-26
 
 A clip buffer can no longer keep recording after it has been switched off: the app checks once a minute and stops any capture nothing owns.

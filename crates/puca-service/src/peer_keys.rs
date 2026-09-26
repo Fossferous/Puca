@@ -109,8 +109,6 @@ pub fn verify_device_row_diag(
     row: &DeviceRow,
     expected_user_id: i64,
 ) -> Result<(), &'static str> {
-    use ed25519_dalek::Verifier;
-
     let (Some(record), Some(sig_b64)) = (row.auth_record.as_ref(), row.auth_sig.as_ref()) else {
         // An unsigned row is not a trusted row. Older devices enrolled before
         // auth records existed land here, and refusing them is right: the whole
@@ -135,8 +133,9 @@ pub fn verify_device_row_diag(
     };
     let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
 
-    // 1. The account really signed these bytes.
-    if vk.verify(record.as_bytes(), &sig).is_err() {
+    // 1. The account really signed these bytes. STRICT: plain `verify` lets a
+    //    small-order key "sign" every message (a_weak_account_key_cannot_vouch_for_a_row).
+    if vk.verify_strict(record.as_bytes(), &sig).is_err() {
         return Err("signature does not verify under account_sign_pub");
     }
 
@@ -232,6 +231,29 @@ mod tests {
         let (account_pub, _, row) = honest(7);
         assert!(verify_device_row(&account_pub, &row, 7));
         assert_eq!(verify_device_row_diag(&account_pub, &row, 7), Ok(()));
+    }
+
+    /// A WEAK (small-order) account key signs everything. With A = the identity
+    /// point, R = the identity and s = 0, the cofactorless equation holds for
+    /// ANY message, so `verify` accepted a row nobody signed. `verify_strict`
+    /// refuses small-order keys and R, as puca-ua's gate already does. Today
+    /// the pinned key is derived on the owner's device (lockScreen.ts), so this
+    /// is defence in depth, not a live forgery (0916 campaign, left open).
+    #[test]
+    fn a_weak_account_key_cannot_vouch_for_a_row() {
+        let (_, _, mut row) = honest(7);
+        let mut identity = [0u8; 32];
+        identity[0] = 1; // the compressed encoding of the identity point
+        let weak_pub = format!("ed25519:{}", b64(&identity));
+        let mut forged = [0u8; 64];
+        forged[..32].copy_from_slice(&identity); // R = identity, s = 0
+        row.auth_sig = Some(b64(&forged));
+        assert_eq!(
+            verify_device_row_diag(&weak_pub, &row, 7),
+            Err("signature does not verify under account_sign_pub"),
+            "a small-order key must not verify a signature it never made"
+        );
+        assert!(!verify_device_row(&weak_pub, &row, 7));
     }
 
     #[test]

@@ -4058,7 +4058,7 @@ export function installDeviceSessions(): void {
                         }
                     }
                 }
-            } catch {
+            } catch (challengeFailure) {
                 if (s.share) {
                     // Could not even determine this machine's armed state —
                     // for a cross-user session nothing may proceed on a guess.
@@ -4071,8 +4071,18 @@ export function installDeviceSessions(): void {
                 // unauthenticated.
                 const { armed } = await unattendedState();
                 if (armed) {
-                    refuse('could not verify unattended access');
-                    teardown(s, 'could not verify unattended access', false);
+                    // One reason is passed on as-is: the wait after too many
+                    // wrong passphrases in a row (puca-ua UaError::Throttled).
+                    // It is decided before any guess is checked, so it tells
+                    // the controller nothing about one, and without it the
+                    // owner locked out by their own typos is told only "could
+                    // not verify". Everything else stays generic.
+                    const why = typeof challengeFailure === 'string'
+                        && challengeFailure.startsWith('too many wrong unattended passphrases')
+                        ? challengeFailure.slice(0, 200)
+                        : 'could not verify unattended access';
+                    refuse(why);
+                    teardown(s, why, false);
                     return;
                 }
             }

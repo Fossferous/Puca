@@ -189,8 +189,14 @@ vi.mock('../api/devices/hostConsent', () => ({
 // (the positive control that proves the harness can drive injection at all).
 let armed = true;
 const verifyUaResponse = vi.fn(async () => false);
+/** When set, issuing a challenge fails with this, the way a Tauri command's
+ *  `Err(String)` rejects `invoke`. */
+let challengeError: string | null = null;
 vi.mock('../api/devices/unattendedHost', () => ({
-    issueUaChallenge: async () => (armed ? { nonce: btoa('nonce-abc'), salt: btoa('salt-abc') } : null),
+    issueUaChallenge: async () => {
+        if (challengeError !== null) throw challengeError;
+        return armed ? { nonce: btoa('nonce-abc'), salt: btoa('salt-abc') } : null;
+    },
     verifyUaResponse: () => verifyUaResponse(),
     unattendedState: async () => ({ armed }),
 }));
@@ -354,6 +360,46 @@ describe('positive control: an UNARMED host', () => {
 
         expect(injectEvent, 'the rig must be able to inject, or nothing below means anything')
             .toHaveBeenCalled();
+    });
+});
+
+/**
+ * THE WAIT AFTER TOO MANY WRONG PASSPHRASES reaches the person at the
+ * controller. puca-ua refuses new challenges for a while after five misses in
+ * a row; the host must still fail closed, and should say WHY in that one case,
+ * or the owner locked out by their own typos is told only "could not verify".
+ * Every other challenge failure stays generic.
+ */
+describe('a challenge the gate refuses', () => {
+    async function connectRefusedWith(error: string): Promise<string | undefined> {
+        const { installDeviceSessions, endAllSessions } = await import('../api/devices/session');
+        installDeviceSessions();
+        endAllSessions('test reset');
+        sent.length = 0;
+        armed = true;
+        challengeError = error;
+        try {
+            const eph = (await import('../api/e2ee')).generateControlEphemeral();
+            handlers.get('DeviceConnectRequested')!({
+                payload: { session_id: 'ds-wait', from_device: 'dev-peer', eph: eph.pubEncoded },
+            });
+            await settle();
+        } finally {
+            challengeError = null;
+        }
+        const r = sent.find(m => m.type === 'DeviceConnectResponse') as
+            { payload?: { accepted?: boolean; reason?: string } } | undefined;
+        expect(r?.payload?.accepted, 'a gate that cannot issue a challenge must refuse').toBe(false);
+        return r?.payload?.reason;
+    }
+
+    it('passes the wait on to the controller, word for word', async () => {
+        const wait = 'too many wrong unattended passphrases in a row; try again in 30 seconds';
+        expect(await connectRefusedWith(wait)).toBe(wait);
+    });
+
+    it('keeps every other failure generic', async () => {
+        expect(await connectRefusedWith('gate poisoned')).toBe('could not verify unattended access');
     });
 });
 

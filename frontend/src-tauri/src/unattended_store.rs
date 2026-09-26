@@ -237,7 +237,10 @@ pub fn unattended_challenge(gate: tauri::State<'_, UaGateState>) -> Result<Optio
     // changed or removed while the app runs, and a cached gate would keep
     // honouring a passphrase the user has just revoked.
     g.arm(puca_ua::UaRecord::new(salt, key));
-    let nonce = g.issue_challenge(now_ms()).map_err(|e| format!("{e:?}"))?;
+    // A sentence, not `{:?}`: session.ts passes the wait after too many wrong
+    // passphrases on to the controller word for word (its "too many wrong
+    // unattended passphrases" prefix is what it looks for).
+    let nonce = g.issue_challenge(now_ms()).map_err(|e| e.to_string())?;
     Ok(Some(UaChallenge { nonce: b64(&nonce), salt: b64(&salt) }))
 }
 

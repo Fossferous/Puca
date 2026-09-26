@@ -599,6 +599,11 @@ mouse/keyboard control.
    tooltip as indicator. **Default is off; if you arm it, use a different passphrase.**
    (The mechanism itself is sound: Argon2id-derived Ed25519, the host stores only a salt and
    a *public* key, and the server is never consulted and cannot influence the result.)
+   Online guessing is limited on the host: after 5 wrong passphrases in a row it refuses
+   every challenge, and every answer to one already issued, for 30 s, doubling with each
+   further miss up to 15 minutes. A right passphrase clears the count
+   ([`crates/puca-ua/src/lib.rs`](../crates/puca-ua/src/lib.rs), `FREE_FAILURES`). The
+   count lives in the running agent and app, so restarting them resets it.
 4. **Use the desktop app, not the web app.** The desktop build loads bundled local assets
    and verifies updates against a pinned minisign key, so a malicious server cannot backdoor
    it. In a browser, the server serves the code that does your encryption — a hostile

@@ -34,6 +34,18 @@ ignore = [
     # attacker-chosen URL, so no third party can position itself as the peer;
     # doing so would mean breaking TLS to those two hosts.
     #
+    # The DESKTOP SHELL's lockfile (frontend/src-tauri) has it through
+    # puca-service (crates/puca-service/src/link.rs, which talks to the user's
+    # own server). There h2 cannot even be negotiated, checked 2026-09-26 against
+    # reqwest 0.11.27's src/async_impl/client.rs: over native-tls, ALPN is only
+    # requested under the `native-tls-alpn` feature, which puca-service and
+    # puca-waker do not enable (`native-tls` only), and neither calls
+    # http2_prior_knowledge(). So every TLS connection is HTTP/1.1 and the h2
+    # code is dead. Re-check if either crate ever enables `native-tls-alpn`,
+    # a rustls feature, or HTTP/2 prior knowledge. NOTE: run `cargo audit` from
+    # the repo root (or pass `-f frontend/src-tauri/Cargo.lock`); from inside
+    # frontend/src-tauri this file is not read and the advisory shows as new.
+    #
     # THE REAL FIX is reqwest 0.12, which uses hyper 1 + h2 0.4 and would also
     # align with the hyper axum already pulls, shrinking the tree. That is a
     # dependency upgrade with its own risk and belongs in its own change, not

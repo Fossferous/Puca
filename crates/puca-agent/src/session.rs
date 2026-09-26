@@ -1710,7 +1710,9 @@ impl Agent {
                         nonce: b64(&nonce),
                         salt: b64(&salt),
                     },
-                    Err(e) => Response::error(format!("{e:?}")),
+                    // A sentence, not `{:?}`: the controller shows it as-is, and
+                    // "Throttled { retry_after_ms: 30000 }" tells a person nothing.
+                    Err(e) => Response::error(e.to_string()),
                 }
             }
 
@@ -1737,7 +1739,10 @@ impl Agent {
                     },
                     // The reason is deliberately not echoed: a wrong passphrase
                     // and an expired nonce must look the same from outside, or
-                    // this becomes an oracle for which half was wrong.
+                    // this becomes an oracle for which half was wrong. The one
+                    // exception is the wait, which is decided before any
+                    // signature is looked at and so says nothing about a guess.
+                    Err(e @ puca_ua::UaError::Throttled { .. }) => Response::error(e.to_string()),
                     Err(_) => Response::error("unattended access was refused"),
                 }
             }
@@ -1754,7 +1759,7 @@ impl Agent {
                 }
                 let nonce = match self.ua.issue_challenge(now_ms()) {
                     Ok(n) => b64(&n),
-                    Err(e) => return Response::error(format!("{e:?}")),
+                    Err(e) => return Response::error(e.to_string()),
                 };
                 let Some(s) = self.sealed.get_mut(&session_id) else {
                     return Response::error("no sealed session with that id");
@@ -1796,6 +1801,18 @@ impl Agent {
                 // relayed into another that shares a key.
                 if v.get("sid").and_then(|x| x.as_str()) != Some(session_id.as_str()) {
                     return Response::error("that frame belongs to another session");
+                }
+                // A FRAME THIS AGENT SEALED, played back to it. Both directions
+                // share one key, so a relay can reflect the agent's own frames
+                // and they open. The agent acts on none of these kinds, but the
+                // sequence check below would still let one take a number and
+                // silently drop the controller's real frame that carries it
+                // (a_reflected_own_frame_is_refused_and_does_not_burn_the_controllers_sequence).
+                // Refused BEFORE that check, so it consumes nothing. Every kind
+                // this agent seals belongs here; no controller sends them.
+                const OWN_KINDS: [&str; 4] = ["answer", "ua-challenge", "power-ack", "power-failed"];
+                if v.get("kind").and_then(|x| x.as_str()).is_some_and(|k| OWN_KINDS.contains(&k)) {
+                    return Response::error("that frame was sent by this computer, not to it");
                 }
                 let Some(n) = v.get("n").and_then(|x| x.as_i64()) else {
                     return Response::error("that frame was not the expected shape");
@@ -1847,7 +1864,11 @@ impl Agent {
                                 }
                             }
                             // Not echoed: a wrong passphrase and an expired
-                            // nonce must look identical from outside.
+                            // nonce must look identical from outside. The wait
+                            // is the exception (see UaProve).
+                            Err(e @ puca_ua::UaError::Throttled { .. }) => {
+                                Response::error(e.to_string())
+                            }
                             Err(_) => Response::error("unattended access was refused"),
                         }
                     }
@@ -3806,6 +3827,89 @@ mod tests {
         // The useful candidates arrive first by ICE priority, so what is KEPT
         // must be the first 128, not the last 128.
         assert_eq!(a.sealed.get("s1").unwrap().pending_ice[0], "c0");
+    }
+
+    /// The wrong-passphrase limit (puca-ua) as the controller meets it: each
+    /// miss is the usual uninformative refusal, then the next challenge is
+    /// refused with a sentence saying when to try again. The service relays
+    /// this text to the controller verbatim (relay.rs Refusal::Agent).
+    #[test]
+    fn after_five_wrong_passphrases_the_agent_says_when_to_try_again() {
+        let mut a = headless_agent();
+        a.handle(hello("s3cret-token", PROTOCOL_VERSION));
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
+        let wrong = ed25519_dalek::SigningKey::from_bytes(&[6u8; 32]);
+        a.ua.arm(puca_ua::UaRecord::new([1u8; 16], sk.verifying_key().to_bytes()));
+        let _key = open_sealed(&mut a, "s1");
+        use base64::Engine as _;
+        let b64e = base64::engine::general_purpose::STANDARD;
+        for i in 0..puca_ua::FREE_FAILURES {
+            let nonce = match a.handle(Request::UaChallenge { session_id: "s1".into() }) {
+                Response::UaChallenge { nonce, .. } => nonce,
+                other => panic!("challenge {i} should still be issued, got {other:?}"),
+            };
+            let raw: [u8; 32] = b64e.decode(&nonce).unwrap().try_into().unwrap();
+            let sig = ed25519_dalek::Signer::sign(&wrong, &puca_ua::challenge_message("s1", &raw));
+            match a.handle(Request::UaProve { session_id: "s1".into(), nonce, sig: b64e.encode(sig.to_bytes()) }) {
+                Response::Error { message } => assert_eq!(message, "unattended access was refused"),
+                other => panic!("a wrong passphrase must be refused, got {other:?}"),
+            }
+        }
+        match a.handle(Request::UaChallenge { session_id: "s1".into() }) {
+            Response::Error { message } => assert!(
+                message.starts_with("too many wrong unattended passphrases in a row; try again in"),
+                "the wait must read as a sentence, got {message:?}"
+            ),
+            other => panic!("the next challenge must be refused with the wait, got {other:?}"),
+        }
+    }
+
+    /// Both directions share one session key, so a relay can play the agent's
+    /// OWN sealed frames back to it and they open. None is a kind the agent
+    /// acts on, but the sequence check ran first: the reflected frame took the
+    /// number, and the controller's real frame with that number was then
+    /// dropped as a replay, silently. Here that is the passphrase proof, so a
+    /// correct passphrase never unlocked the session (0916 campaign, left open).
+    #[test]
+    fn a_reflected_own_frame_is_refused_and_does_not_burn_the_controllers_sequence() {
+        let mut a = headless_agent();
+        a.handle(hello("s3cret-token", PROTOCOL_VERSION));
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
+        a.ua.arm(puca_ua::UaRecord::new([1u8; 16], sk.verifying_key().to_bytes()));
+        let key = open_sealed(&mut a, "s1");
+
+        // The agent's challenge — its frame n=0 — as the relay saw it.
+        let own = match a.handle(Request::SealedChallenge { session_id: "s1".into() }) {
+            Response::SealedSignals { mut payloads } => payloads.remove(0),
+            other => panic!("expected the challenge, got {other:?}"),
+        };
+        let challenge: serde_json::Value =
+            serde_json::from_str(&crate::control_key::open(&key, &own).expect("open")).unwrap();
+        let nonce_b64 = challenge["nonce"].as_str().unwrap().to_string();
+
+        // Played back to the agent.
+        let reflected = a.handle(Request::SealedSignal { session_id: "s1".into(), payload: own });
+        assert!(
+            matches!(reflected, Response::Error { .. }),
+            "the agent's own frame must be refused, got {reflected:?}"
+        );
+
+        // The controller's genuine proof, its own first frame: n=0.
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let nonce_raw: [u8; 32] = b64.decode(&nonce_b64).unwrap().try_into().unwrap();
+        let sig = ed25519_dalek::Signer::sign(&sk, &puca_ua::challenge_message("s1", &nonce_raw));
+        let proof = seal_signal(
+            &key,
+            "s1",
+            0,
+            serde_json::json!({ "kind": "ua-response", "nonce": nonce_b64, "sig": b64.encode(sig.to_bytes()) }),
+        );
+        a.handle(Request::SealedSignal { session_id: "s1".into(), payload: proof });
+        assert!(
+            a.sealed.get("s1").unwrap().ua_ok,
+            "the reflected frame consumed n=0, so the real passphrase proof was dropped as a replay"
+        );
     }
 
     #[test]

@@ -484,8 +484,12 @@ fn denied_by_shape(effective: &Path) -> Option<&'static str> {
         if DENIED_COMPONENTS.iter().any(|d| k.eq_ignore_ascii_case(d)) {
             return Some("a per-user secret directory");
         }
+        // A `$` name at a volume root is the system's, never a user's: the NTFS
+        // metafiles ($MFT, $LogFile, $Secure, $Extend and its journals) and
+        // Windows' servicing folders ($WinREAgent, $SysReset, $Windows.~BT).
+        // By prefix rather than by list, so the next one is covered too.
         if Some(i) == root_at.map(|r| r + 1)
-            && DENIED_AT_DRIVE_ROOT.iter().any(|d| k.eq_ignore_ascii_case(d))
+            && (DENIED_AT_DRIVE_ROOT.iter().any(|d| k.eq_ignore_ascii_case(d)) || k.starts_with('$'))
         {
             return Some("system volume metadata");
         }
@@ -905,6 +909,7 @@ pub fn handle_request(req: FsRequest, scope: &FileScope, audit: Option<&FileAudi
                 }
             };
             if let Err(e) = file.seek(SeekFrom::Start(offset)) {
+                log("read", &file_path.to_string_lossy(), 0, &format!("error: seek: {e}"));
                 return FsResponse::error(format!("could not seek: {e}"));
             }
             let mut buf = vec![0; len as usize];
@@ -936,7 +941,10 @@ pub fn handle_request(req: FsRequest, scope: &FileScope, audit: Option<&FileAudi
             // never even creates a file.
             let decoded = match BASE64_STANDARD.decode(&data) {
                 Ok(d) => d,
-                Err(e) => return FsResponse::error(format!("could not decode base64: {e}")),
+                Err(e) => {
+                    log("write", &path, 0, "denied: data is not base64");
+                    return FsResponse::error(format!("could not decode base64: {e}"));
+                }
             };
             if decoded.len() > MAX_WRITE_LEN {
                 log("write", &path, decoded.len() as u64, "denied: over limit");
@@ -977,9 +985,11 @@ pub fn handle_request(req: FsRequest, scope: &FileScope, audit: Option<&FileAudi
             }
             // Overflow would wrap in release and panic the stream thread in debug.
             let Some(end) = offset.checked_add(decoded.len() as u64) else {
+                log("write", &file_path.to_string_lossy(), offset, "denied: offset and length overflow");
                 return FsResponse::error("write offset and length overflow".to_string());
             };
             if let Err(e) = file.seek(SeekFrom::Start(offset)) {
+                log("write", &file_path.to_string_lossy(), 0, &format!("error: seek: {e}"));
                 return FsResponse::error(format!("could not seek: {e}"));
             }
             if let Err(e) = file.write_all(&decoded) {
@@ -989,6 +999,7 @@ pub fn handle_request(req: FsRequest, scope: &FileScope, audit: Option<&FileAudi
             if truncate {
                 // Cut at the current position, i.e. the end of this chunk.
                 if let Err(e) = file.set_len(end) {
+                    log("write", &file_path.to_string_lossy(), decoded.len() as u64, &format!("error: truncate: {e}"));
                     return FsResponse::error(format!("could not truncate file: {e}"));
                 }
             }
@@ -1028,6 +1039,57 @@ mod tests {
         }
         let ok = std::path::PathBuf::from(r"C:\Users\someone\notes.txt");
         assert!(denied_by_shape(&ok).is_none(), "an ordinary file stays browsable");
+    }
+
+    /// The NTFS metafiles live at every volume's root under `$` names, and so
+    /// do Windows' own servicing folders. None was in the drive-root list, so
+    /// an armed host offered them to a browse (0916 campaign, left open).
+    #[cfg(windows)]
+    #[test]
+    fn ntfs_metafiles_and_dollar_system_folders_at_a_drive_root_are_denied() {
+        for f in [
+            "$MFT", "$MFTMirr", "$LogFile", "$Volume", "$AttrDef", "$Bitmap", "$Boot",
+            "$BadClus", "$Secure", "$UpCase", "$Extend", "$WinREAgent", "$SysReset",
+            "$Windows.~BT", "$GetCurrent",
+        ] {
+            let at_root = std::path::PathBuf::from(format!(r"C:\{f}"));
+            assert!(denied_by_shape(&at_root).is_some(), "{f} at a drive root must be denied");
+            let inside = std::path::PathBuf::from(format!(r"D:\{f}\anything"));
+            assert!(denied_by_shape(&inside).is_some(), "anything under {f} must be denied too");
+        }
+        // Only at the root, like the rest of that list: a user's own `$budget`
+        // folder deeper down stays browsable.
+        let deeper = std::path::PathBuf::from(r"C:\Users\someone\$budget\q3.xlsx");
+        assert!(denied_by_shape(&deeper).is_none(), "a $ name below the root is ordinary");
+    }
+
+    /// Every refusal lands in the file-access log — including the one that
+    /// happens before anything is opened. A write whose data was not base64
+    /// returned an error and wrote no audit line, unlike the over-limit refusal
+    /// two lines below it (0916 campaign, left open).
+    #[test]
+    fn a_write_refused_before_the_open_is_still_audited() {
+        let dir = tempdir("audit-prefetch");
+        let audit = crate::file_log::FileAudit::new(dir.join("audit"), "s1".into());
+        let scope = FileScope::Jailed(dir.to_path_buf());
+        let target = dir.join("x.txt");
+        let resp = handle_request(
+            FsRequest::Write {
+                path: target.to_string_lossy().into_owned(),
+                offset: 0,
+                data: "this is not base64 !!".into(),
+                truncate: false,
+            },
+            &scope,
+            Some(&audit),
+        );
+        assert!(matches!(resp, FsResponse::Error { .. }), "{resp:?}");
+        assert!(!target.exists(), "a refused write must not create the file");
+        let log = fs::read_to_string(dir.join("audit").join("file-access.log")).unwrap_or_default();
+        assert!(
+            log.contains("\"op\":\"write\"") && log.contains("\"result\":\"denied"),
+            "the refusal must be audited, got: {log:?}"
+        );
     }
 
     fn root() -> PathBuf {
