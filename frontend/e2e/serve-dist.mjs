@@ -16,7 +16,9 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 
-const ROOT = new URL('../dist/', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
+// DIST=<dir> serves another build (a rig build against a local backend) without
+// overwriting the production bundle in dist/.
+const ROOT = process.env.DIST || new URL('../dist/', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
 const TYPES = {
     '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript',
     '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml',

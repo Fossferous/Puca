@@ -23,6 +23,9 @@
 /** The receiver side of one video stream. */
 export interface InboundVideoSummary {
     ssrc: number | null;
+    /** The receiving track's id (inbound-rtp trackIdentifier): lets a caller
+     *  that knows which track is a camera and which a screen label the row. */
+    trackId: string | null;
     framesReceived: number | null;
     framesDecoded: number | null;
     framesDropped: number | null;
@@ -134,6 +137,7 @@ function inboundOf(r: Row): InboundVideoSummary {
     const emitted = r.jitterBufferEmittedCount;
     return {
         ssrc: num(r.ssrc),
+        trackId: str(r.trackIdentifier),
         framesReceived: num(r.framesReceived),
         framesDecoded: num(decoded),
         framesDropped: num(r.framesDropped),
@@ -323,6 +327,70 @@ export function formatLatencyLine(s: RtcLatencySummary): string {
         parts.push(`pair=${s.pair.protocol ?? '?'} ${s.pair.local ?? '?'}->${s.pair.remote ?? '?'} rtt=${s.pair.rttMs ?? '?'}ms out=${s.pair.outKbps ?? '?'}kbps`);
     }
     return parts.join(' | ');
+}
+
+/** One configured encoding, as RTCRtpSender.getParameters() reports it. */
+export interface SendEncoding { rid?: string; maxFramerate?: number; active?: boolean }
+
+/**
+ * The numbers that say WHERE an outgoing video's frame rate went, added to one
+ * outbound-rtp entry (one per simulcast rung):
+ *   - setFps: what the person chose (the capture track's own setting);
+ *   - maxFps: this rung's configured cap (a lower simulcast rung is capped
+ *     below the chosen rate ON PURPOSE — its lower `fps` is not a drop);
+ *   - captureFps: what reached the encoder from the capture (the `media-source`
+ *     stats; one per track, so every rung of a track shows the same figure);
+ *   - size: what was sent (the encoder may shrink it to hold frame rate);
+ *   - active: false when the rung is switched off (the SFU pauses rungs nobody
+ *     is watching); its missing `fps` is then a pause, not a stall;
+ *   - ssrc: this sender's own stream id. A new publication (a restarted share,
+ *     a camera flip, a reconnect) is a NEW sender whose counters start at zero,
+ *     so anything that differences counters must key by this.
+ * Against the entry's `fps` (what was SENT), for an active rung whose maxFps
+ * does not bind: set 30, captured 22, sent 22 means only 22 frames a second
+ * reached the encoder (the screen changed that often, or the capture could not
+ * keep up); captured 30, sent 22 means frames were dropped between capture and
+ * send (encoder busy, congestion or rate control; WebRTC's stats do not say
+ * which). `limit` (qualityLimitationReason) is a SEPARATE signal: WebRTC's
+ * ADAPTATION state — for a maintain-framerate share, 'cpu' means the
+ * RESOLUTION was lowered to spare the encoder — and it does not explain dropped
+ * frames. A viewer saw 22 fps on 2026-09-25 and nothing on either side could
+ * say which of these it was. Empty for audio.
+ */
+export function videoSendExtras(
+    stats: RTCStatsReport,
+    outbound: Record<string, unknown>,
+    setFps: unknown,
+    encodings?: readonly SendEncoding[],
+): { setFps?: number; maxFps?: number; captureFps?: number; size?: string; active?: boolean; ssrc?: number } {
+    if (outbound.kind !== 'video') return {};
+    const src = typeof outbound.mediaSourceId === 'string'
+        ? stats.get(outbound.mediaSourceId) as Record<string, unknown> | undefined
+        : undefined;
+    // This rung's encoding: by rid, or the only one when the track has no ladder.
+    const rid = typeof outbound.rid === 'string' ? outbound.rid : undefined;
+    const enc = !encodings ? undefined
+        : rid !== undefined ? encodings.find(e => e.rid === rid)
+        : encodings.length === 1 ? encodings[0] : undefined;
+    const active = typeof outbound.active === 'boolean' ? outbound.active
+        : typeof enc?.active === 'boolean' ? enc.active : undefined;
+    return {
+        ...(typeof setFps === 'number' && Number.isFinite(setFps) && setFps > 0 && { setFps: Math.round(setFps) }),
+        ...(typeof enc?.maxFramerate === 'number' && Number.isFinite(enc.maxFramerate) && { maxFps: Math.round(enc.maxFramerate) }),
+        ...(typeof src?.framesPerSecond === 'number' && { captureFps: src.framesPerSecond }),
+        ...(typeof outbound.frameWidth === 'number' && typeof outbound.frameHeight === 'number'
+            && { size: `${outbound.frameWidth}x${outbound.frameHeight}` }),
+        ...(active !== undefined && { active }),
+        ...(typeof outbound.ssrc === 'number' && { ssrc: outbound.ssrc }),
+    };
+}
+
+/** The id of the track an outbound-rtp entry is sending, via its media-source
+ *  (`trackIdentifier` is the MediaStreamTrack's id). Null when unknown. */
+export function outboundTrackId(stats: RTCStatsReport, outbound: Record<string, unknown>): string | null {
+    if (typeof outbound.mediaSourceId !== 'string') return null;
+    const src = stats.get(outbound.mediaSourceId) as Record<string, unknown> | undefined;
+    return typeof src?.trackIdentifier === 'string' ? src.trackIdentifier : null;
 }
 
 /**

@@ -4,6 +4,21 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Improved
+- **A slow or choppy stream now explains itself in the log.** A stream that
+  arrives at 22 frames a second with nothing lost on the way was decided on
+  the streamer's computer, and until now nothing there said why. Once a
+  minute during a call, the desktop app's log now records, for each video you
+  send, the frame rate you chose, how many frames a second actually reached
+  the encoder, how many were sent, at what size, whether the computer was
+  lowering the picture to keep up, and whether the graphics card or the
+  processor was doing the encoding. So "the screen only changed 22 times a
+  second" and "the computer dropped frames" are no longer the same thing in
+  the log. Calls that go directly between people, not through the server, are
+  now covered too, for incoming video as well as outgoing.
+
 ## 0.9.822 — 2026-09-26
 
 Guessing an unattended passphrase is now slow, and remote file access never offers the disk's own system files.

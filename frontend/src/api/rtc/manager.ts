@@ -8,7 +8,7 @@ import { MediaManager } from './media';
 import { getActiveIdentity, deriveMediaKey, mediaReadyTag, deriveMediaSessionKey, generateControlEphemeral } from '../e2ee';
 import { resolvePinnedIdentityKey } from '../keyVerification';
 import { registerScreenReceiver } from './receiverLatency';
-import { receiverHints, summariseInboundAudio, summariseRtcStats, summariseRtcStatsDelta, type InboundAudioHealth, type RtcLatencySummary } from './statsSummary';
+import { outboundTrackId, receiverHints, summariseInboundAudio, summariseRtcStats, videoSendExtras, summariseRtcStatsDelta, type InboundAudioHealth, type RtcLatencySummary } from './statsSummary';
 import { negotiatedH264Profile } from './h264Profiles';
 import type { EncodeSample } from './shareHealth';
 import { AnnouncedVideoGate } from './announcedVideo';
@@ -501,7 +501,20 @@ export class WebRTCManager {
         this.releaseHeldVideo(userId);
     }
 
+    /** What each delivered incoming video track is, by track id, so the
+     *  diagnostics can label a peer's camera and share apart. Pruned by
+     *  meshDiagnostics to the tracks still being received. */
+    private inboundVideoKinds = new Map<string, 'camera' | 'screen'>();
+    /** Each peer's CURRENT camera track id. A mesh camera switched off keeps
+     *  its receiver on this side (the sender survives; turning it on again adds
+     *  a new one), so an older camera row from the same peer is a dead copy. */
+    private cameraTrackOf = new Map<UserId, string>();
+
     private deliverVideo(userId: UserId, kind: 'camera' | 'screen', stream: MediaStream, receiver: RTCRtpReceiver): void {
+        if (receiver.track) {
+            this.inboundVideoKinds.set(receiver.track.id, kind);
+            if (kind === 'camera') this.cameraTrackOf.set(userId, receiver.track.id);
+        }
         if (kind === 'camera') {
             this.onCameraStream?.(userId, stream);
             return;
@@ -1717,12 +1730,36 @@ export class WebRTCManager {
                 const stats = await pc.getStats();
                 const prev = before.get(userId);
                 latency = prev && windowMs ? summariseRtcStatsDelta(prev, stats, windowMs) : summariseRtcStats(stats);
+                const shareTrackId = this.getScreenShareStreamForPreview()?.getVideoTracks()[0]?.id ?? null;
                 stats.forEach((s) => {
                     if (s.type === 'outbound-rtp' || s.type === 'inbound-rtp') {
                         const r = s as unknown as Record<string, unknown>;
                         const profile = negotiatedH264Profile(stats, r.codecId);
+                        // Outgoing VIDEO: which track (a pc can carry the camera
+                        // and the share), and the same chosen/capped/captured
+                        // fps, size, on/off and sender id the SFU rows carry
+                        // (statsSummary.ts videoSendExtras), so healthLog reads
+                        // both paths alike. One entry PER PEER: mesh encodes the
+                        // same picture once for every peer.
+                        let sendExtras: Record<string, unknown> = {};
+                        if (s.type === 'outbound-rtp' && r.kind === 'video') {
+                            const trackId = outboundTrackId(stats, r);
+                            const sender = trackId ? pc.getSenders().find(x => x.track?.id === trackId) : undefined;
+                            // Turning a mesh camera off stops its track but keeps
+                            // the sender (turning it on adds a NEW one), and
+                            // Chromium keeps reporting the old one as active with
+                            // no frames: without this it reads as a camera whose
+                            // capture died, once more per off/on cycle.
+                            const ended = !!sender?.track && sender.track.readyState !== 'live';
+                            sendExtras = {
+                                ...(trackId !== null && { source: trackId === shareTrackId ? 'screen_share' : 'camera' }),
+                                ...videoSendExtras(stats, r, ended ? undefined : sender?.track?.getSettings?.().frameRate, sender?.getParameters?.().encodings),
+                                ...(ended && { ended: true }),
+                            };
+                        }
                         rtp.push({
                             dir: s.type, kind: r.kind,
+                            ...sendExtras,
                             bytes: r.bytesSent ?? r.bytesReceived,
                             frames: r.framesEncoded ?? r.framesDecoded,
                             fps: r.framesPerSecond,
@@ -1747,6 +1784,22 @@ export class WebRTCManager {
                     }
                 });
             } catch { /* pc closed mid-iteration */ }
+            // Label each incoming video row: this peer's camera or share, and
+            // whether it is a dead copy. A camera row is ended when it is not
+            // this peer's CURRENT camera (an off/on cycle adds a new receiver
+            // and leaves the old one), or when the camera is announced off and
+            // no frames are flowing. The frames test keeps a live camera from a
+            // peer too old to announce cameras from being called off.
+            for (const i of latency?.inbound ?? []) {
+                const kind = i.trackId ? this.inboundVideoKinds.get(i.trackId) : undefined;
+                const row = i as typeof i & { source?: string; ended?: boolean };
+                row.source = kind === 'screen' ? 'screen_share' : kind === 'camera' ? 'camera' : 'video';
+                const flowing = typeof i.fps === 'number' && i.fps > 0;
+                const current = kind !== 'camera' || this.cameraTrackOf.get(userId) === i.trackId;
+                const announced = kind === 'camera' ? this.videoGate.hasCamera(userId)
+                    : kind === 'screen' ? this.videoGate.isSharing(userId) : true;
+                if (!current || (!announced && !flowing)) row.ended = true;
+            }
             out.push({
                 userId,
                 connId: peer.connId.slice(0, 8),
@@ -1761,6 +1814,12 @@ export class WebRTCManager {
                 ...(windowMs ? { windowMs } : {}),
             });
         }
+        const live = new Set<string>();
+        for (const peer of this.peers.values()) {
+            for (const rcv of peer.connection.getReceivers()) if (rcv.track) live.add(rcv.track.id);
+        }
+        for (const id of [...this.inboundVideoKinds.keys()]) if (!live.has(id)) this.inboundVideoKinds.delete(id);
+        for (const u of [...this.cameraTrackOf.keys()]) if (!this.peers.has(u)) this.cameraTrackOf.delete(u);
         return out;
     }
 }

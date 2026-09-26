@@ -34,7 +34,7 @@ import type { EncodeSample } from './shareHealth';
 import { deriveSfuMediaKey } from '../e2ee';
 import { registerScreenReceiver } from './receiverLatency';
 import { loadSettings } from '../../components/settingsStore';
-import { receiverHints, summariseInboundAudio, summariseRtcStats, summariseRtcStatsDelta, type InboundAudioHealth, type RtcLatencySummary } from './statsSummary';
+import { receiverHints, summariseInboundAudio, videoSendExtras, summariseRtcStats, summariseRtcStatsDelta, type InboundAudioHealth, type RtcLatencySummary } from './statsSummary';
 import type { MediaE2eeReason, MediaE2eeStatus, RemoteStreamCallback } from './types';
 
 interface SfuTokenResponse {
@@ -1077,6 +1077,10 @@ export class SfuManager {
                 // The sender's delay fields (encode time, pacer delay, the
                 // publisher pair) ride on each entry as `latency`.
                 const latency = summarise(`local:${pub.trackSid}`, stats);
+                // The frame rate the person CHOSE (the capture's own setting),
+                // and each rung's configured cap and on/off state.
+                const setFps = pub.track?.mediaStreamTrack?.getSettings?.().frameRate;
+                const encodings = sender.getParameters?.().encodings;
                 stats.forEach((s) => {
                     if (s.type !== 'outbound-rtp') return;
                     const r = s as unknown as Record<string, unknown>;
@@ -1086,6 +1090,9 @@ export class SfuManager {
                         // Simulcast (camera) yields one entry per layer.
                         ...(r.rid !== undefined && { rid: r.rid }),
                         bytes: r.bytesSent, frames: r.framesEncoded, fps: r.framesPerSecond,
+                        // Chosen, capped and captured fps, sent size, on/off and
+                        // sender id (statsSummary.ts videoSendExtras).
+                        ...videoSendExtras(stats, r, setFps, encodings),
                         // undefined for audio (and pre-first-frame); the
                         // spread keeps audio entries free of noise keys.
                         ...(r.qualityLimitationReason !== undefined && {

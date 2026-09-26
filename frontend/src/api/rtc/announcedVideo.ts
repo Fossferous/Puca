@@ -69,6 +69,8 @@ export class AnnouncedVideoGate<T> {
     stopCamera(userId: number): void { this.cameras.delete(userId); }
 
     isSharing(userId: number): boolean { return this.shares.has(userId); }
+    /** Whether this peer's camera is announced as on (CameraStarted in effect). */
+    hasCamera(userId: number): boolean { return this.cameras.has(userId); }
     /** The announced share stream id — null when sharing without one, or not sharing. */
     shareId(userId: number): string | null { return this.shares.get(userId) ?? null; }
     heldCount(userId: number): number { return this.held.get(userId)?.length ?? 0; }
