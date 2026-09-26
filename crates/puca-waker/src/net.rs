@@ -390,6 +390,15 @@ pub async fn remint(cfg: &Config) -> Result<String, String> {
         .await
         .map_err(|e| format!("challenge request failed: {}", http_err(&e)))?;
     let status = resp.status();
+    if !status.is_success() {
+        // The server's reason, not a JSON parse of it. It issues a challenge to
+        // anyone naming a device id, so a refusal here is about the request
+        // (a malformed id: 400) or its own state (too many outstanding
+        // challenges: 503, which passes) - never a verdict on this device.
+        // Before this, a 503 was logged as "challenge response was not JSON".
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("the server would not issue a challenge ({status}): {}", body.trim()));
+    }
     let body: serde_json::Value = resp
         .json()
         .await
@@ -976,6 +985,38 @@ mod tests {
             "reqwest's own text now carries the cause; drop http_err: {e}"
         );
         assert!(http_err(&e).contains("tcp connect error"), "{}", http_err(&e));
+    }
+
+    /// A refused CHALLENGE is reported as the server's reason. The server
+    /// answers "too many challenges" as plain text with a 503; this used to
+    /// surface as "challenge response was not JSON", which sent the reader
+    /// looking for a protocol bug instead of a busy server.
+    #[tokio::test]
+    async fn a_refused_challenge_is_reported_as_the_servers_reason() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let (cfg, _) = minting_config(port);
+
+        let server = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let (mut s, _) = listener.accept().await.expect("accept challenge");
+            let (path, _) = read_request(&mut s).await;
+            let body = "too many challenges";
+            let resp = format!(
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain; charset=utf-8\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            s.write_all(resp.as_bytes()).await.expect("write");
+            path
+        });
+
+        let err = remint(&cfg).await.expect_err("a 503 is not a challenge");
+        assert!(err.contains("503"), "the status is reported: {err}");
+        assert!(err.contains("too many challenges"), "the server's reason is reported: {err}");
+        assert!(!err.contains("not JSON"), "not mistaken for a malformed reply: {err}");
+        assert_eq!(finished(server).await, "/devices/token/challenge");
     }
 
     /// `Rejected` is a VARIANT, not a message prefix: the caller re-mints on it

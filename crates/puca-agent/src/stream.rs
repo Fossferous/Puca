@@ -2465,7 +2465,9 @@ fn run(
                     if should_report_secure_desktop(Some(start), blocked_reported, now) {
                         blocked_reported = true;
                         eprintln!(
-                            "[stream] a Windows security screen owns the display (lock screen,                              sign-in screen, or an administrator prompt) — capture is blocked                              until it closes; the viewer is holding the last frame"
+                            "[stream] a Windows security screen owns the display (lock screen, \
+                            sign-in screen, or an administrator prompt) — capture is blocked \
+                            until it closes; the viewer is holding the last frame"
                         );
                     }
                 }

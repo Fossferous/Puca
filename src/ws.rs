@@ -114,7 +114,8 @@ pub async fn ws_handler(
         tracing::info!(
             user = %who,
             device = %query.device.as_deref().unwrap_or("-"),
-            "ws: refused a query-string token — this client is too old (retired in 0.9.1);              a native waker or service must be re-shipped, it does not update with the app"
+            "ws: refused a query-string token — this client is too old (retired in 0.9.1); \
+            a native waker or service must be re-shipped, it does not update with the app"
         );
     }
     let presented = match offered_protocol.as_deref() {

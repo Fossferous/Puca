@@ -99,7 +99,8 @@ impl DisplayPower {
             // the re-assert is missing, so injected input will wake them.
             .map_err(|e| {
                 format!(
-                    "displays turned off, but the keep-off ticker could not start ({e}) —                      remote input will wake them"
+                    "displays turned off, but the keep-off ticker could not start ({e}) — \
+                    remote input will wake them"
                 )
             })?;
         Ok(())

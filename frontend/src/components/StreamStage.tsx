@@ -327,7 +327,11 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
         };
         update(); // Initial load
         return subscribeToStreamState(update);
-    }, [focusedStream]);
+        // setFocusedStream is a zustand action: created once in the store's
+        // initializer, and every setState in this codebase MERGES, so its
+        // identity never changes (pinned in streamStore.test.ts). Listing it
+        // re-runs this effect exactly as often as before - on focusedStream.
+    }, [focusedStream, setFocusedStream]);
 
     // Attenuation: duck stream audio while anyone in voice is speaking. The
     // speaking store emits on every flip (voiceState.ts), so no poll is needed.

@@ -87,7 +87,8 @@ fn draw_marker(w: u16, h: u16) -> Marked {
     );
     assert!(
         depth >= 24 && class == Some(x11rb::protocol::xproto::VisualClass::TRUE_COLOR),
-        "this test needs a TrueColor display of depth 24+ (got depth {depth}, {class:?});          Xvfb defaults to 640x480x8 -- start it with `-screen 0 1280x1024x24`"
+        "this test needs a TrueColor display of depth 24+ (got depth {depth}, {class:?}); \
+        Xvfb defaults to 640x480x8 -- start it with `-screen 0 1280x1024x24`"
     );
     let (root, root_visual, black) = (screen.root, screen.root_visual, screen.black_pixel);
 

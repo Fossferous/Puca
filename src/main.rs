@@ -336,7 +336,9 @@ async fn main() -> anyhow::Result<()> {
             }
             _ => {
                 tracing::info!(
-                    "Wake signals not configured. Set FCM_PROJECT_ID and FCM_SERVICE_ACCOUNT_FILE                      to enable Doze-piercing delivery wakes; without them, background delivery                      relies on the native socket alone."
+                    "Wake signals not configured. Set FCM_PROJECT_ID and FCM_SERVICE_ACCOUNT_FILE \
+                    to enable Doze-piercing delivery wakes; without them, background delivery \
+                    relies on the native socket alone."
                 );
                 std::sync::Arc::new(wake::NullWake)
             }

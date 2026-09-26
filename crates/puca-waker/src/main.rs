@@ -407,7 +407,8 @@ fn run(cfg_path: Option<PathBuf>) -> i32 {
                 Err(e) if e.is_auth() => {
                     auth_refusals += 1;
                     eprintln!(
-                        "[waker] {e} (refusal {auth_refusals} of {}) — this waker is being turned away, not dropped;                          if this persists it is enrolment or an out-of-date binary, not the network",
+                        "[waker] {e} (refusal {auth_refusals} of {}) — this waker is being turned away, not dropped; \
+                        if this persists it is enrolment or an out-of-date binary, not the network",
                         net::AUTH_REFUSALS_BEFORE_EXIT
                     );
                     if auth_refusals >= net::AUTH_REFUSALS_BEFORE_EXIT {
@@ -418,7 +419,8 @@ fn run(cfg_path: Option<PathBuf>) -> i32 {
                         // threshold is ~15 minutes, far above systemd's default
                         // start limit, so this cannot wedge the unit dead.
                         eprintln!(
-                            "[waker] FATAL: refused {auth_refusals} times in a row; exiting so this shows up as a                              failed unit instead of a quiet retry loop"
+                            "[waker] FATAL: refused {auth_refusals} times in a row; exiting so this shows up as a \
+                            failed unit instead of a quiet retry loop"
                         );
                         std::process::exit(1);
                     }

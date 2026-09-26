@@ -511,7 +511,8 @@ mod tests {
                     assert_eq!(
                         ch.serves(),
                         accepted,
-                        "serves()={} but accept_frame accepted={} for                          flavour={flavour} granted={granted} ua_ok={ua}",
+                        "serves()={} but accept_frame accepted={} for \
+                        flavour={flavour} granted={granted} ua_ok={ua}",
                         ch.serves(),
                         accepted
                     );
@@ -537,7 +538,8 @@ mod tests {
         assert_eq!(HELLO_PLAINTEXT, r#"{"hello":1}"#);
         assert!(
             client.contains("hello?: unknown }).hello === 1"),
-            "session.ts no longer recognises the agent's input hello; the              controller would silently stay on the relay for ever"
+            "session.ts no longer recognises the agent's input hello; the \
+            controller would silently stay on the relay for ever"
         );
         // And the envelope field names it reads.
         assert!(client.contains("sid?: unknown; hello?: unknown"));

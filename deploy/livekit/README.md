@@ -127,11 +127,23 @@ curl -s -H "Authorization: Bearer $JWT" https://chat.example.com/channels/<id>/s
   and probes `http://127.0.0.1:7880/` every 5 minutes with a distinct
   "active but not answering" line. It does NOT check that the backend's
   `LIVEKIT_URL` matches a Caddy vhost; `deploy/migrate/verify.sh` does.
-- **Kick/ban mid-call (known gap, v1):** LiveKit authorizes at token mint
-  (20-min TTL). A user kicked from the server keeps receiving the CURRENT call
-  epoch until they disconnect or the key rotates; they cannot rejoin (token
-  refetch fails) and cannot read the next epoch. Server-side ejection
-  (RoomService.RemoveParticipant on kick events) is a scoped follow-up.
+- **Kick/ban mid-call:** LiveKit authorizes only at token mint (20-min TTL),
+  so the backend ejects server-side with `RoomService.RemoveParticipant`
+  (`evict_user_from_channel` in `src/sfu.rs`, a 5 s timeout per call):
+  - a kick, ban, leave, role or permission-overwrite change runs the perms
+    sweep (`evict_sweep` in `src/ws.rs`), which removes every member who no
+    longer has VIEW and CONNECT on an SFU channel. The remaining clients see
+    the participant leave and re-key the call epoch at once;
+  - a voice move cuts that user's SFU session, and changing a channel's
+    transport (`sfu_mode`, either way) puts everyone in its room out to
+    rejoin on the new one;
+  - a REJOIN with a token minted earlier is caught by the `participant_joined`
+    webhook, which re-runs the mint-time permission check and evicts again.
+  The sweep's SFU pass only reaches channels that also have a Púca room
+  (`voice_<id>` / `channel_<id>`), which every real client joins (next
+  bullet); a participant outside those is caught at the webhook instead.
+  A successful ejection logs nothing; a failed one logs `SFU evict <identity>:`
+  with LiveKit's status or the transport error and its cause.
 - **Remote control / voice status rely on the Puca WS room** — SFU
   clients still JoinRoom `voice_<id>`; only Offer/Answer/ICE stopped being
   used on the SFU path.

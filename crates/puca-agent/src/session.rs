@@ -2992,7 +2992,9 @@ mod tests {
             Response::SessionState { secure_desktop, cursor_clipped, .. } => {
                 assert!(
                     !secure_desktop,
-                    "a SYSTEM agent can reach the secure desktop, so it must never                  tell the viewer the screen is out of reach — that banner lands                  on top of the PIN box it is supposed to be showing",
+                    "a SYSTEM agent can reach the secure desktop, so it must never \
+                    tell the viewer the screen is out of reach — that banner lands \
+                    on top of the PIN box it is supposed to be showing",
                 );
                 // Same gate, same reason: the SYSTEM agent lives on whatever
                 // desktop Windows shows and its clip reading describes the
@@ -3032,7 +3034,8 @@ mod tests {
         match a.handle(Request::SessionStatus { session_id: "s1".into() }) {
             Response::SessionState { secure_desktop, .. } => assert!(
                 secure_desktop,
-                "a user-flavour agent genuinely cannot cross to Winlogon, and                  saying so is the whole feature",
+                "a user-flavour agent genuinely cannot cross to Winlogon, and \
+                saying so is the whole feature",
             ),
             other => panic!("expected SessionState, got {other:?}"),
         }

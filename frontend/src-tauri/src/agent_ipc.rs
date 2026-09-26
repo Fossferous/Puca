@@ -308,7 +308,9 @@ fn warn_on_build_skew(reply: &str) {
         return;
     }
     log::warn!(
-        "[agent] VERSION SKEW: this app is {ours} but the agent beside it is {theirs}. They ship          together, so one of them did not get replaced — usually an update that could not          overwrite a running helper. Reinstall with the app fully closed."
+        "[agent] VERSION SKEW: this app is {ours} but the agent beside it is {theirs}. They ship \
+        together, so one of them did not get replaced — usually an update that could not \
+        overwrite a running helper. Reinstall with the app fully closed."
     );
 }
 

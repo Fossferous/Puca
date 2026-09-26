@@ -558,7 +558,7 @@ a=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1
         // srflx is the shape that actually connects across networks.
         sender
             .add_remote_candidate(
-                "candidate:842163049 1 udp 1677729535 203.0.113.44 54321 typ srflx                  raddr 0.0.0.0 rport 0 generation 0 ufrag abcd network-cost 999",
+                "candidate:842163049 1 udp 1677729535 203.0.113.44 54321 typ srflx raddr 0.0.0.0 rport 0 generation 0 ufrag abcd network-cost 999",
             )
             .expect("a server-reflexive candidate must be accepted");
         sender
@@ -574,10 +574,11 @@ a=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1
     fn an_mdns_candidate_is_refused_not_silently_accepted() {
         let mut sender = VideoSender::new();
         sender.accept_offer(BROWSER_OFFER).expect("answer");
-        let mdns = "candidate:1 1 udp 2113929471                     9b36eaac-bb2e-49bb-bb78-21c41c499900.local 9000 typ host";
+        let mdns = "candidate:1 1 udp 2113929471 9b36eaac-bb2e-49bb-bb78-21c41c499900.local 9000 typ host";
         assert!(
             sender.add_remote_candidate(mdns).is_err(),
-            "an mDNS candidate has no address; accepting it would mean the parser              accepts anything and the sibling test proves nothing"
+            "an mDNS candidate has no address; accepting it would mean the parser \
+            accepts anything and the sibling test proves nothing"
         );
         assert!(sender.add_remote_candidate("total nonsense").is_err());
     }

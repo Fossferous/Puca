@@ -392,7 +392,8 @@ fn a_key_held_by_a_dead_process_is_cleared_on_recovery() {
     let after_release_all = conn.query_keymap().expect("km").reply().expect("km reply");
     assert!(
         after_release_all.keys.iter().any(|b| *b != 0),
-        "release_all cleared an untracked key -- if that is now true this test is          obsolete, but it also means the tracking assumption changed silently",
+        "release_all cleared an untracked key -- if that is now true this test is \
+        obsolete, but it also means the tracking assumption changed silently",
     );
 
     let cleared = clear_stuck_keys().expect("clear_stuck_keys");
