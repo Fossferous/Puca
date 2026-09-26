@@ -750,6 +750,16 @@ mod tests {
         (String::new(), String::new(), String::new())
     }
 
+    /// Await a stand-in server task, BOUNDED. If the code under test skips a
+    /// request the stand-in is waiting to accept, the test must fail rather
+    /// than hang CI on that accept for ever.
+    async fn finished<T>(server: tokio::task::JoinHandle<T>) -> T {
+        tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .expect("the stand-in's scripted requests never all arrived")
+            .expect("server task")
+    }
+
     async fn write_json(stream: &mut tokio::net::TcpStream, body: &str) {
         use tokio::io::AsyncWriteExt;
         let resp = format!(
@@ -812,7 +822,7 @@ mod tests {
 
         let got = remint(&cfg).await.expect("remint should succeed");
         assert_eq!(got, "header.payload.signature");
-        server.await.expect("server task");
+        finished(server).await;
     }
 
     /// A refusal must be reported, not silently treated as success — and it
@@ -844,7 +854,7 @@ mod tests {
         let err = remint(&cfg).await.expect_err("a 401 must not look like success");
         assert!(err.contains("401"), "the status is reported: {err}");
         assert!(err.contains("re-enrol"), "the cure is named: {err}");
-        server.await.expect("server task");
+        finished(server).await;
     }
 
     /// A port nobody listens on: bound, read, released.
@@ -879,7 +889,7 @@ mod tests {
 
         let renewed = refresh(&cfg, "old.jwt.value").await.expect("refresh succeeds");
         assert_eq!(renewed.as_deref(), Some("fresh.jwt.value"), "the renewed token is adopted");
-        let (head, path) = server.await.expect("server task");
+        let (head, path) = finished(server).await;
         assert_eq!(path, "/devices");
         assert!(head.starts_with("GET /devices HTTP/1.1\r\n"), "HTTP/1.1 GET, as on 0.11: {head}");
         assert!(
@@ -914,7 +924,7 @@ mod tests {
             Err(RefreshError::Other(m)) => assert!(m.contains("revoked"), "{m}"),
             other => panic!("a missing row is not a rejection: {other:?}"),
         }
-        server.await.expect("server task");
+        finished(server).await;
     }
 
     /// The journal must still say WHY a request failed. reqwest >= 0.12 keeps

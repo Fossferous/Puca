@@ -344,6 +344,17 @@ mod tests {
         (base, task)
     }
 
+    /// Everything a stand-in saw, once its script is used up. BOUNDED: if the
+    /// code under test skips a request the stand-in is waiting for (a 401 that
+    /// no longer re-mints, say), the test must FAIL, not hang CI on an accept
+    /// that never comes. Found by breaking the re-mint on purpose.
+    async fn seen_by(task: tokio::task::JoinHandle<Vec<Seen>>, what: &str) -> Vec<Seen> {
+        match tokio::time::timeout(Duration::from_secs(10), task).await {
+            Ok(r) => r.expect("stand-in panicked"),
+            Err(_) => panic!("{what}: fewer requests arrived than the stand-in was scripted for"),
+        }
+    }
+
     /// An FcmWake whose token endpoint and send URL are the given stand-ins.
     fn wake_against(token_base: &str, send_base: &str) -> FcmWake {
         FcmWake {
@@ -378,7 +389,7 @@ mod tests {
         // second fetch would fail: Ok here is the cache answering.
         assert_eq!(fcm.access_token().await.expect("cached"), "at-1");
 
-        let seen = token_srv.await.expect("stand-in");
+        let seen = seen_by(token_srv, "token endpoint").await;
         assert_eq!(seen.len(), 1);
         let r = &seen[0];
         assert_eq!(r.line, "POST /token HTTP/1.1", "HTTP/1.1, as on 0.11");
@@ -404,8 +415,8 @@ mod tests {
 
         fcm.wake("device-tok").await.expect("the retry succeeds");
 
-        assert_eq!(token_srv.await.expect("token stand-in").len(), 2, "one re-mint");
-        let sent = send_srv.await.expect("send stand-in");
+        assert_eq!(seen_by(token_srv, "token endpoint").await.len(), 2, "one re-mint");
+        let sent = seen_by(send_srv, "fcm send").await;
         assert_eq!(sent[0].line, "POST /v1/projects/p/messages:send HTTP/1.1");
         assert_eq!(sent[0].header("authorization"), Some("Bearer at-1"));
         assert_eq!(sent[1].header("authorization"), Some("Bearer at-2"));
@@ -436,8 +447,8 @@ mod tests {
         let e = fcm.wake("t").await.expect_err("503");
         assert!(!e.is_token_dead(), "a 503 must not prune a live device: {e:?}");
 
-        assert_eq!(token_srv.await.expect("token stand-in").len(), 1, "one mint, then cached");
-        assert_eq!(send_srv.await.expect("send stand-in").len(), 3);
+        assert_eq!(seen_by(token_srv, "token endpoint").await.len(), 1, "one mint, then cached");
+        assert_eq!(seen_by(send_srv, "fcm send").await.len(), 3);
     }
 
     #[tokio::test]
