@@ -826,6 +826,64 @@ export async function wireSystemSuspendHook(): Promise<void> {
         const { listen } = await import('@tauri-apps/api/event');
         await listen('system-suspend-or-lock', () => { if (session) { void disarm('system-suspend'); emit({ notice: 'The clip buffer was cleared because the system suspended or locked.' }); } });
     } catch { /* older shell without the event — nothing to wire */ }
+    // The orphan reaper, once a minute for the life of the app (see below).
+    if (reaperTimer === null) reaperTimer = setInterval(() => { void reapOrphanNativeCapture().catch(() => { /* next minute */ }); }, ORPHAN_REAP_MS);
+}
+
+/** How often the page checks for a native capture it does not own. */
+export const ORPHAN_REAP_MS = 60_000;
+let reaperTimer: ReturnType<typeof setInterval> | null = null;
+/** The generations the previous check found running unowned ("video:audio"). */
+let orphanSighting: string | null = null;
+
+/**
+ * Stops a native clip capture that is running while the page owns NO clip
+ * session, and says so in the log. Returns what it stopped (null: nothing).
+ *
+ * WHY. The native capture has no picker and no capture bar: the only signs
+ * that it runs are the page's own status and the roster badge, and both come
+ * from the session. If a capture ever outlives its session — a stop whose
+ * invoke failed (disarm swallows that as "already stopped"), a teardown that
+ * raced — it keeps a DXGI duplication, a hardware encode and a WASAPI
+ * loopback going with nothing on screen admitting to it, until the next page
+ * start runs reset_capture_state — and, holding the shell's singleton, it
+ * makes every re-arm fail with "Already capturing video". On 2026-09-25 a
+ * capture ran from 21:04 to 23:22 while its owner believed clips were off;
+ * whether that was this, the log could not say. Now it cannot last more than
+ * two minutes either way.
+ *
+ * SAFE by construction: it does nothing while a session exists (armed or
+ * still arming — `session` is set before the capture starts), re-checks after
+ * its one await, and stops by the GENERATION it saw, so even a capture started
+ * in the same instant (a new generation) is out of its reach. And it acts only
+ * on the SECOND consecutive sighting of the same generations: disarm() drops
+ * `session` BEFORE its native stop lands, so one sighting may be an ordinary
+ * teardown still in flight — two, a minute apart, cannot be.
+ */
+export async function reapOrphanNativeCapture(): Promise<{ video: number | null; audio: number | null } | null> {
+    if (!isTauri() || session) { orphanSighting = null; return null; }
+    const { invoke } = await import('@tauri-apps/api/core');
+    const st = await invoke<{ video?: number | null; audio?: number | null }>('clip_capture_status');
+    if (session) { orphanSighting = null; return null; } // armed while we asked: whatever runs is owned
+    const video = typeof st?.video === 'number' ? st.video : null;
+    const audio = typeof st?.audio === 'number' ? st.audio : null;
+    const seen = video === null && audio === null ? null : `${video}:${audio}`;
+    const confirmed = seen !== null && seen === orphanSighting;
+    orphanSighting = confirmed ? null : seen;
+    if (!confirmed) return null;
+    if (video !== null) await invoke('stop_clip_video_capture', { generation: video }).catch(() => { /* already stopping */ });
+    if (audio !== null) await invoke('stop_clip_desktop_audio', { generation: audio }).catch(() => { /* already stopping */ });
+    const line = `clips: stopped a native capture no clip session owned (video generation ${video ?? '-'}, audio generation ${audio ?? '-'})`;
+    console.warn(`[clips] ${line}`);
+    try { await invoke('log_stream_diag', { line }); } catch { /* best effort */ }
+    return { video, audio };
+}
+
+/** Test hook: the reaper's timer. */
+export function __stopOrphanReaperForTests(): void {
+    if (reaperTimer !== null) clearInterval(reaperTimer);
+    reaperTimer = null;
+    orphanSighting = null;
 }
 
 /** Test hook. */

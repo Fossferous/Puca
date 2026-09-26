@@ -151,6 +151,36 @@ fn stop_clip_video_capture(state: tauri::State<'_, Arc<ClipCaptureState>>, gener
 #[tauri::command]
 fn stop_clip_video_capture(_generation: Option<u64>) {}
 
+/// Which native clip captures are running right now, by generation (`null`
+/// for none). The page's orphan reaper (replayBuffer.ts
+/// `reapOrphanNativeCapture`) asks once a minute: a capture running while the
+/// page owns no clip session is load nothing on screen admits to — a
+/// picker-less DXGI + hardware encode and a WASAPI loopback — and until now
+/// only `reset_capture_state` at the next page start would have ended it.
+#[derive(serde::Serialize)]
+struct ClipCaptureStatus {
+    video: Option<u64>,
+    audio: Option<u64>,
+}
+#[cfg(windows)]
+#[tauri::command]
+fn clip_capture_status(
+    clip_video: tauri::State<'_, Arc<ClipCaptureState>>,
+    clip_audio: tauri::State<'_, Arc<ClipDesktopAudioState>>,
+) -> ClipCaptureStatus {
+    use std::sync::atomic::Ordering::SeqCst;
+    let running = |capturing: bool, stopping: bool, generation: u64| (capturing && !stopping).then_some(generation);
+    ClipCaptureStatus {
+        video: running(clip_video.is_capturing.load(SeqCst), clip_video.stop_signal.load(SeqCst), clip_video.generation.load(SeqCst)),
+        audio: running(clip_audio.is_capturing.load(SeqCst), clip_audio.stop_signal.load(SeqCst), clip_audio.generation.load(SeqCst)),
+    }
+}
+#[cfg(not(windows))]
+#[tauri::command]
+fn clip_capture_status() -> ClipCaptureStatus {
+    ClipCaptureStatus { video: None, audio: None }
+}
+
 /// `device_name` (JS: `deviceName`): capture the loopback of the render
 /// device whose friendly name best matches, instead of whatever the DEFAULT
 /// output happens to be — the user who picked a headset in Settings hears the
@@ -1451,6 +1481,7 @@ pub fn run() {
             hide_screen_capture_bar,
             start_clip_video_capture,
             stop_clip_video_capture,
+            clip_capture_status,
             start_clip_desktop_audio,
             stop_clip_desktop_audio,
             #[cfg(feature = "remote-control")]

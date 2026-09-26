@@ -92,6 +92,19 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
 - The ring is ciphertext under a non-extractable key; plaintext exists only in
   flight (the open GOP, a seal's copy of it, the seal's transient mux
   buffers) and is zero-filled.
+- **A native capture never outlives its session by more than two minutes.**
+  Nothing on screen admits to a native capture except the session's own
+  status and the roster badge, so one that outlived its session (a stop
+  whose invoke failed, a raced teardown) would run unseen until the next
+  page start's `reset_capture_state`. `replayBuffer.reapOrphanNativeCapture`
+  asks the shell once a minute (`clip_capture_status`: the running video and
+  audio GENERATIONS, `null` for none or stopping); with no session it stops
+  what it saw, by generation, on the SECOND consecutive identical sighting
+  (`disarm()` drops the session before its native stop lands, so one
+  sighting may be a teardown in flight), and logs a `[stream-diag] clips:
+  stopped a native capture …` line to puca.log. It never touches a capture
+  while a session exists, including one armed during its status call.
+  `clipOrphanReaper.test.ts` pins all of it, each guard positive-controlled.
 - Nothing is uploaded until every required approver has said yes (Phase 2:
   the server refuses `kind=clip` bytes for an unapproved proposal BEFORE it
   reads the body). The server never sees a frame; the clip key rides in the

@@ -4,6 +4,19 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+- **A clip buffer can no longer keep recording after it has been switched
+  off.** The desktop app records clips with a screen and sound capture that
+  has no "you are being recorded" bar of its own; the only signs that it is
+  running are the app's own clip status and the badge next to your name. If
+  that capture ever outlived the buffer that owned it, it kept using the
+  graphics card and the processor with nothing on screen to say so, and
+  switching the buffer back on failed with "Already capturing video", until
+  the app restarted. The app now checks once a minute, stops any such
+  capture within two minutes, and writes a line in its log saying it did.
+
 ## 0.9.820 — 2026-09-26
 
 Sitting in a voice call costs far less: no more redrawing the window 165 times a second for speaking rings and LIVE badges, and one person talking no longer redraws the whole app. The clip buffer hands frames over as raw bytes, and calls now keep a minute-by-minute health line in the log.
