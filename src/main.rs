@@ -25,6 +25,7 @@ mod envelope_version;
 mod export_handlers;
 mod friend_handlers;
 mod handlers;
+mod http_err;
 mod invite_handlers;
 mod logtag;
 mod source_offer;

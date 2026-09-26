@@ -13,6 +13,7 @@ use serde::Deserialize;
 use tokio::sync::RwLock;
 
 use super::{WakeError, WakeTransport};
+use crate::http_err::http_err;
 
 /// Refresh this far before actual expiry, so an in-flight wake never races the
 /// boundary and 401s.
@@ -70,7 +71,11 @@ pub fn classify(status: u16, body: &str) -> WakeError {
 }
 
 pub struct FcmWake {
-    project_id: String,
+    /// `https://fcm.googleapis.com/v1/projects/<project>/messages:send`,
+    /// fixed at construction. A field rather than a format! in `wake` so the
+    /// tests can drive the real request path against a local listener; no
+    /// configuration reaches it.
+    send_url: String,
     account: ServiceAccount,
     http: reqwest::Client,
     /// (access token, expires_at)
@@ -88,7 +93,7 @@ impl FcmWake {
             anyhow::anyhow!("FCM service account private_key is not a usable RSA PEM: {e}")
         })?;
         Ok(Self {
-            project_id,
+            send_url: format!("https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"),
             account,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
@@ -139,7 +144,7 @@ impl FcmWake {
             ])
             .send()
             .await
-            .map_err(|e| WakeError::Transient(format!("token endpoint unreachable: {e}")))?;
+            .map_err(|e| WakeError::Transient(format!("token endpoint unreachable: {}", http_err(&e))))?;
         let status = res.status().as_u16();
         let body = res.text().await.unwrap_or_default();
         if status != 200 {
@@ -179,21 +184,18 @@ impl FcmWake {
 #[async_trait::async_trait]
 impl WakeTransport for FcmWake {
     async fn wake(&self, token: &str) -> Result<(), WakeError> {
-        let url = format!(
-            "https://fcm.googleapis.com/v1/projects/{}/messages:send",
-            self.project_id
-        );
+        let url = &self.send_url;
         let body = Self::build_message(token);
         for attempt in 0..2 {
             let access = self.access_token().await?;
             let res = self
                 .http
-                .post(&url)
+                .post(url)
                 .bearer_auth(&access)
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| WakeError::Transient(format!("fcm unreachable: {e}")))?;
+                .map_err(|e| WakeError::Transient(format!("fcm unreachable: {}", http_err(&e))))?;
             let status = res.status().as_u16();
             if status == 200 {
                 return Ok(());
@@ -265,6 +267,202 @@ mod tests {
     fn a_malformed_private_key_fails_at_construction_not_at_wake_time() {
         let json = r#"{"client_email":"a@b.com","private_key":"-----BEGIN RSA PRIVATE KEY-----\nnope\n-----END RSA PRIVATE KEY-----"}"#;
         assert!(FcmWake::new("proj".into(), json).is_err());
+    }
+
+    // --- The request path itself, over a real socket ------------------------
+    //
+    // Everything above is pure. These drive the actual reqwest calls against a
+    // local listener standing in for Google, so a change of HTTP client (0.11
+    // -> 0.12 on 2026-09-26) is tested by more than "it compiles".
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// One request as the stand-in received it.
+    struct Seen {
+        /// "POST /token HTTP/1.1"
+        line: String,
+        /// Header names lower-cased.
+        headers: Vec<(String, String)>,
+        body: String,
+    }
+
+    impl Seen {
+        fn header(&self, name: &str) -> Option<&str> {
+            self.headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+        }
+    }
+
+    async fn read_request(sock: &mut tokio::net::TcpStream) -> Seen {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = sock.read(&mut chunk).await.expect("read");
+            assert!(n > 0, "the client closed before sending a whole request");
+            buf.extend_from_slice(&chunk[..n]);
+            let text = String::from_utf8_lossy(&buf).to_string();
+            let Some(end) = text.find("\r\n\r\n") else { continue };
+            let mut lines = text[..end].split("\r\n");
+            let line = lines.next().unwrap_or("").to_string();
+            let headers: Vec<(String, String)> = lines
+                .filter_map(|l| l.split_once(':'))
+                .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
+                .collect();
+            let len = headers
+                .iter()
+                .find(|(k, _)| k == "content-length")
+                .and_then(|(_, v)| v.parse::<usize>().ok())
+                .unwrap_or(0);
+            if buf.len() >= end + 4 + len {
+                let body = String::from_utf8_lossy(&buf[end + 4..end + 4 + len]).to_string();
+                return Seen { line, headers, body };
+            }
+        }
+    }
+
+    /// A stand-in server that answers each accepted connection with the next
+    /// scripted (status, body) and closes it. `connection: close` stops the
+    /// client pooling, so every request is its own accept and the script is
+    /// also a count: a request beyond it finds the listener gone.
+    async fn stand_in(script: Vec<(u16, &'static str)>) -> (String, tokio::task::JoinHandle<Vec<Seen>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        let task = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for (status, body) in script {
+                let (mut sock, _) = listener.accept().await.expect("accept");
+                seen.push(read_request(&mut sock).await);
+                let resp = format!(
+                    "HTTP/1.1 {status} Scripted\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                sock.write_all(resp.as_bytes()).await.expect("write");
+                let _ = sock.shutdown().await;
+            }
+            seen
+        });
+        (base, task)
+    }
+
+    /// An FcmWake whose token endpoint and send URL are the given stand-ins.
+    fn wake_against(token_base: &str, send_base: &str) -> FcmWake {
+        FcmWake {
+            send_url: format!("{send_base}/v1/projects/p/messages:send"),
+            account: ServiceAccount { token_uri: format!("{token_base}/token"), ..test_account() },
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .expect("client"),
+            cached: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// A port nobody listens on: bound, read, released.
+    fn closed_base() -> String {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        format!("http://127.0.0.1:{port}")
+    }
+
+    #[tokio::test]
+    async fn the_token_request_is_a_jwt_bearer_form_and_its_answer_is_cached() {
+        let (token_base, token_srv) =
+            stand_in(vec![(200, r#"{"access_token":"at-1","expires_in":3600}"#)]).await;
+        let fcm = wake_against(&token_base, &closed_base());
+
+        assert_eq!(fcm.access_token().await.expect("first mint"), "at-1");
+        // The stand-in answers ONE request and then drops its listener, so a
+        // second fetch would fail: Ok here is the cache answering.
+        assert_eq!(fcm.access_token().await.expect("cached"), "at-1");
+
+        let seen = token_srv.await.expect("stand-in");
+        assert_eq!(seen.len(), 1);
+        let r = &seen[0];
+        assert_eq!(r.line, "POST /token HTTP/1.1", "HTTP/1.1, as on 0.11");
+        assert_eq!(r.header("content-type"), Some("application/x-www-form-urlencoded"));
+        let assertion = r
+            .body
+            .strip_prefix(
+                "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=",
+            )
+            .unwrap_or_else(|| panic!("the form is grant_type then assertion: {}", r.body));
+        assert_eq!(assertion.split('.').count(), 3, "the assertion is a JWT: {assertion}");
+    }
+
+    #[tokio::test]
+    async fn a_401_re_mints_once_and_the_retry_carries_the_new_token() {
+        let (token_base, token_srv) = stand_in(vec![
+            (200, r#"{"access_token":"at-1","expires_in":3600}"#),
+            (200, r#"{"access_token":"at-2","expires_in":3600}"#),
+        ])
+        .await;
+        let (send_base, send_srv) = stand_in(vec![(401, "{}"), (200, "{}")]).await;
+        let fcm = wake_against(&token_base, &send_base);
+
+        fcm.wake("device-tok").await.expect("the retry succeeds");
+
+        assert_eq!(token_srv.await.expect("token stand-in").len(), 2, "one re-mint");
+        let sent = send_srv.await.expect("send stand-in");
+        assert_eq!(sent[0].line, "POST /v1/projects/p/messages:send HTTP/1.1");
+        assert_eq!(sent[0].header("authorization"), Some("Bearer at-1"));
+        assert_eq!(sent[1].header("authorization"), Some("Bearer at-2"));
+        for s in &sent {
+            assert_eq!(s.header("content-type"), Some("application/json"));
+            // THE WIRE CONTRACT, as it actually crosses: the constant body.
+            let v: serde_json::Value = serde_json::from_str(&s.body).expect("json body");
+            assert_eq!(v, FcmWake::build_message("device-tok"));
+        }
+    }
+
+    #[tokio::test]
+    async fn fcm_statuses_reach_the_classifier_over_the_wire() {
+        let (token_base, token_srv) = stand_in(vec![
+            (200, r#"{"access_token":"at-1","expires_in":3600}"#),
+        ])
+        .await;
+        let (send_base, send_srv) = stand_in(vec![
+            (404, "{}"),
+            (400, r#"{"error":{"status":"UNREGISTERED"}}"#),
+            (503, "{}"),
+        ])
+        .await;
+        let fcm = wake_against(&token_base, &send_base);
+
+        assert_eq!(fcm.wake("t").await, Err(WakeError::Unregistered));
+        assert_eq!(fcm.wake("t").await, Err(WakeError::Unregistered), "the 400 body is read");
+        let e = fcm.wake("t").await.expect_err("503");
+        assert!(!e.is_token_dead(), "a 503 must not prune a live device: {e:?}");
+
+        assert_eq!(token_srv.await.expect("token stand-in").len(), 1, "one mint, then cached");
+        assert_eq!(send_srv.await.expect("send stand-in").len(), 3);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_endpoint_is_transient_and_names_its_cause() {
+        let fcm = wake_against(&closed_base(), &closed_base());
+        match fcm.wake("t").await {
+            Err(WakeError::Transient(m)) => {
+                assert!(m.starts_with("token endpoint unreachable: "), "{m}");
+                assert!(m.contains("tcp connect error"), "the cause is kept: {m}");
+            }
+            other => panic!("an unreachable token endpoint is transient: {other:?}"),
+        }
+
+        let (token_base, _token_srv) = stand_in(vec![
+            (200, r#"{"access_token":"at-1","expires_in":3600}"#),
+        ])
+        .await;
+        let fcm = wake_against(&token_base, &closed_base());
+        match fcm.wake("t").await {
+            Err(WakeError::Transient(m)) => {
+                assert!(m.starts_with("fcm unreachable: "), "{m}");
+                assert!(m.contains("tcp connect error"), "the cause is kept: {m}");
+            }
+            other => panic!("an unreachable FCM is transient: {other:?}"),
+        }
     }
 
     #[test]

@@ -302,6 +302,23 @@ pub async fn run_socket(cfg: &Config, token: &str) -> Result<(), DialError> {
     Ok(())
 }
 
+/// A reqwest error WITH its cause. From reqwest 0.12 an error's Display is
+/// only "error sending request for url (..)": whether it was DNS, a refused
+/// connection, a TLS rejection or the timeout is in the source chain, and the
+/// journal is the only place an operator learns why this box went dark. 0.11
+/// printed the cause itself. Same helper as crates/puca-service/src/link.rs.
+fn http_err(e: &reqwest::Error) -> String {
+    use std::error::Error as _;
+    let mut s = e.to_string();
+    let mut src = e.source();
+    while let Some(c) = src {
+        s.push_str(": ");
+        s.push_str(&c.to_string());
+        src = c.source();
+    }
+    s
+}
+
 /// Why a refresh failed.
 ///
 /// A TYPE, not a string prefix. The caller re-mints on `Rejected` and only on
@@ -364,19 +381,19 @@ pub async fn remint(cfg: &Config) -> Result<String, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
-        .map_err(|e| format!("http client: {e}"))?;
+        .map_err(|e| format!("http client: {}", http_err(&e)))?;
 
     let resp = client
         .post(format!("{}/devices/token/challenge", cfg.api_base))
         .json(&serde_json::json!({ "device_id": cfg.device_id }))
         .send()
         .await
-        .map_err(|e| format!("challenge request failed: {e}"))?;
+        .map_err(|e| format!("challenge request failed: {}", http_err(&e)))?;
     let status = resp.status();
     let body: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| format!("challenge response was not JSON ({status}): {e}"))?;
+        .map_err(|e| format!("challenge response was not JSON ({status}): {}", http_err(&e)))?;
     let nonce = body
         .get("nonce")
         .and_then(|v| v.as_str())
@@ -393,7 +410,7 @@ pub async fn remint(cfg: &Config) -> Result<String, String> {
         }))
         .send()
         .await
-        .map_err(|e| format!("token request failed: {e}"))?;
+        .map_err(|e| format!("token request failed: {}", http_err(&e)))?;
     let status = resp.status();
     if !status.is_success() {
         // A refusal here is terminal in a way a network error is not: the
@@ -409,7 +426,7 @@ pub async fn remint(cfg: &Config) -> Result<String, String> {
     let body: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| format!("token response was not JSON: {e}"))?;
+        .map_err(|e| format!("token response was not JSON: {}", http_err(&e)))?;
     body.get("token")
         .and_then(|v| v.as_str())
         .map(str::to_string)
@@ -427,13 +444,13 @@ pub async fn refresh(cfg: &Config, token: &str) -> Result<Option<String>, Refres
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
-        .map_err(|e| RefreshError::Other(format!("http client: {e}")))?;
+        .map_err(|e| RefreshError::Other(format!("http client: {}", http_err(&e))))?;
     let resp = client
         .get(format!("{}/devices", cfg.api_base))
         .bearer_auth(token)
         .send()
         .await
-        .map_err(|e| RefreshError::Other(format!("GET /devices failed: {e}")))?;
+        .map_err(|e| RefreshError::Other(format!("GET /devices failed: {}", http_err(&e))))?;
 
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
         // The caller re-mints from the device identity rather than asking for a
@@ -454,7 +471,10 @@ pub async fn refresh(cfg: &Config, token: &str) -> Result<Option<String>, Refres
     if resp.content_length().is_some_and(|l| l > MAX_BODY) {
         return Err(RefreshError::Other("device list response is implausibly large — refusing to buffer it".into()));
     }
-    let bytes = resp.bytes().await.map_err(|e| RefreshError::Other(format!("bad device list: {e}")))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| RefreshError::Other(format!("bad device list: {}", http_err(&e))))?;
     if bytes.len() as u64 > MAX_BODY {
         return Err(RefreshError::Other("device list response is implausibly large — refusing to parse it".into()));
     }
@@ -690,6 +710,13 @@ mod tests {
 
     /// Read one HTTP request off the socket and return (path, body).
     async fn read_request(stream: &mut tokio::net::TcpStream) -> (String, String) {
+        let (_, path, body) = read_request_with_head(stream).await;
+        (path, body)
+    }
+
+    /// Read one HTTP request off the socket and return (head, path, body); the
+    /// head is the request line plus headers, as sent.
+    async fn read_request_with_head(stream: &mut tokio::net::TcpStream) -> (String, String, String) {
         use tokio::io::AsyncReadExt;
         let mut buf = Vec::new();
         let mut chunk = [0u8; 1024];
@@ -716,11 +743,11 @@ mod tests {
                         .and_then(|l| l.split_whitespace().nth(1))
                         .unwrap_or("")
                         .to_string();
-                    return (path, text[hdr_end + 4..].to_string());
+                    return (headers.to_string(), path, text[hdr_end + 4..].to_string());
                 }
             }
         }
-        (String::new(), String::new())
+        (String::new(), String::new(), String::new())
     }
 
     async fn write_json(stream: &mut tokio::net::TcpStream, body: &str) {
@@ -818,6 +845,107 @@ mod tests {
         assert!(err.contains("401"), "the status is reported: {err}");
         assert!(err.contains("re-enrol"), "the cure is named: {err}");
         server.await.expect("server task");
+    }
+
+    /// A port nobody listens on: bound, read, released.
+    fn closed_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    }
+
+    /// THE RENEWAL PATH, over a real socket. `refresh` is how this process
+    /// learns of a renewed token at all, and until 2026-09-26 no test sent it
+    /// a request: the bearer it presents, the header it adopts and the row it
+    /// looks for were pinned by nothing but production.
+    #[tokio::test]
+    async fn refresh_presents_its_bearer_and_adopts_the_renewed_token() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let (cfg, _) = minting_config(port);
+        let me = cfg.device_id.clone();
+
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.expect("accept");
+            let (head, path, _) = read_request_with_head(&mut s).await;
+            use tokio::io::AsyncWriteExt;
+            let body = format!(r#"{{"devices":[{{"id":"other","online":true}},{{"id":"{me}","online":true}}]}}"#);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nx-renewed-token: fresh.jwt.value\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            s.write_all(resp.as_bytes()).await.expect("write");
+            (head, path)
+        });
+
+        let renewed = refresh(&cfg, "old.jwt.value").await.expect("refresh succeeds");
+        assert_eq!(renewed.as_deref(), Some("fresh.jwt.value"), "the renewed token is adopted");
+        let (head, path) = server.await.expect("server task");
+        assert_eq!(path, "/devices");
+        assert!(head.starts_with("GET /devices HTTP/1.1\r\n"), "HTTP/1.1 GET, as on 0.11: {head}");
+        assert!(
+            head.to_ascii_lowercase().contains("\r\nauthorization: bearer old.jwt.value"),
+            "the current token is presented: {head}"
+        );
+    }
+
+    /// A 401 must come back as the `Rejected` VARIANT - the only thing that
+    /// makes the caller re-mint - and a missing row as `Other`, which must not.
+    #[tokio::test]
+    async fn refresh_tells_a_rejection_from_a_revoked_row() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let (cfg, _) = minting_config(port);
+
+        let server = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let (mut s, _) = listener.accept().await.expect("accept 1");
+            let _ = read_request(&mut s).await;
+            s.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("write");
+            drop(s);
+            let (mut s, _) = listener.accept().await.expect("accept 2");
+            let _ = read_request(&mut s).await;
+            write_json(&mut s, r#"{"devices":[{"id":"someone-else","online":true}]}"#).await;
+        });
+
+        assert!(matches!(refresh(&cfg, "t").await, Err(RefreshError::Rejected)));
+        match refresh(&cfg, "t").await {
+            Err(RefreshError::Other(m)) => assert!(m.contains("revoked"), "{m}"),
+            other => panic!("a missing row is not a rejection: {other:?}"),
+        }
+        server.await.expect("server task");
+    }
+
+    /// The journal must still say WHY a request failed. reqwest >= 0.12 keeps
+    /// the cause out of its Display; `http_err` puts it back.
+    #[tokio::test]
+    async fn a_transport_failure_is_logged_with_its_cause() {
+        let (cfg, _) = minting_config(closed_port());
+
+        match refresh(&cfg, "t").await {
+            Err(RefreshError::Other(m)) => {
+                assert!(m.starts_with("GET /devices failed: "), "{m}");
+                assert!(m.contains("tcp connect error"), "the cause is kept: {m}");
+            }
+            other => panic!("an unreachable API is Other, never Rejected: {other:?}"),
+        }
+        let m = remint(&cfg).await.expect_err("nothing listens");
+        assert!(m.starts_with("challenge request failed: "), "{m}");
+        assert!(m.contains("tcp connect error"), "the cause is kept: {m}");
+
+        // THE POSITIVE CONTROL: reqwest's own Display must NOT carry the
+        // cause, or the assertions above prove nothing about http_err.
+        let e = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{}/", closed_port()))
+            .send()
+            .await
+            .expect_err("nothing listens");
+        assert!(
+            !e.to_string().contains("tcp connect error"),
+            "reqwest's own text now carries the cause; drop http_err: {e}"
+        );
+        assert!(http_err(&e).contains("tcp connect error"), "{}", http_err(&e));
     }
 
     /// `Rejected` is a VARIANT, not a message prefix: the caller re-mints on it

@@ -90,9 +90,23 @@ async-trait = "0.1"
 hkdf = "0.12"
 # For email sending
 lettre = { version = "0.11", features = ["tokio1-native-tls", "builder", "smtp-transport"] }
-# Used by the SFU control plane for the LiveKit RemoveParticipant admin call
-# (src/sfu.rs), so it must be a real dependency, not dev-only.
-reqwest = { version = "0.11", features = ["json", "blocking"] }
+# The server's outbound HTTP: Google's OAuth + FCM endpoints (src/wake/fcm.rs)
+# and the operator's LiveKit node - its metrics and the RemoveParticipant admin
+# call (src/sfu.rs).
+#
+# 0.12 (hyper 1), which takes reqwest 0.11 / hyper 0.14 / h2 0.3 - and
+# RUSTSEC-2026-0258 with them - out of this lockfile. The features are chosen
+# to keep what 0.11 did on the wire:
+#   - native-tls: 0.11's default TLS; OpenSSL on Linux, as lettre already uses.
+#   - NO http2: 0.11 compiled h2 in but never negotiated it (ALPN is the
+#     separate `native-tls-alpn`), so every request was HTTP/1.1. Leaving the
+#     feature off keeps that and keeps h2 out of the lockfile entirely.
+#   - charset: `.text()` decodes the Content-Type charset (and strips a BOM) as
+#     0.11 always did; without it 0.12 falls back to lossy UTF-8.
+#   - json. `blocking` is gone: nothing here ever used it.
+# Error Display no longer carries the cause from 0.12 on: log through
+# src/http_err.rs, never `{e}` on a reqwest::Error.
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls", "charset"] }
 
 [dev-dependencies]
 axum-test = "14"

@@ -18,47 +18,6 @@ ignore = [
     # client-supplied input.
     "RUSTSEC-2023-0071",
 
-    # RUSTSEC-2026-0258 - "h2 unbounded empty DATA frames" (DoS), h2 0.3.27,
-    # fixed in >= 0.4.16. Present in the ROOT (backend) lockfile only since
-    # 2026-09-26: see the desktop-shell note below.
-    #
-    # Reachability, checked rather than assumed: `cargo tree --workspace -i
-    # h2@0.3.27` shows h2 entering ONLY through reqwest 0.11 -> hyper 0.14, used
-    # by TWO crates: the backend itself and crates/puca-waker. It is not in the
-    # server path at all - axum serves HTTP/1.1 behind the reverse proxy and no
-    # second h2 appears in the graph - so this is a CLIENT-side advisory, and
-    # the hostile party would have to be a server we deliberately connect TO.
-    #
-    # The backend has exactly two such peers, both fixed endpoints and neither
-    # user-supplied: Google (src/wake/fcm.rs - oauth2.googleapis.com and
-    # fcm.googleapis.com) and the operator's own LiveKit SFU (src/sfu.rs).
-    # The waker has one: the `api_base` it was enrolled against, i.e. its
-    # owner's own Púca server, and it never negotiates HTTP/2 (no ALPN with
-    # `native-tls` on 0.11).
-    # Púca has no link-preview fetcher and no route that fetches an
-    # attacker-chosen URL, so no third party can position itself as the peer;
-    # doing so would mean breaking TLS to those two hosts.
-    #
-    # The DESKTOP SHELL's lockfile (frontend/src-tauri) NO LONGER has it: on
-    # 2026-09-26 puca-service moved to reqwest 0.12 (hyper 1), which took
-    # reqwest 0.11, hyper 0.14 and h2 out of that lockfile entirely; `cargo
-    # audit -f frontend/src-tauri/Cargo.lock` is clean even with this ignore
-    # list off. Why 0.12 and not the 0.13 the updater already brings is in
-    # crates/puca-service/Cargo.toml (feature unification would move the
-    # auto-updater's TLS). The service still speaks only HTTP/1.1.
-    # NOTE: run `cargo audit` from the repo root (or pass `-f ...`); from
-    # inside frontend/src-tauri this file is not read.
-    #
-    # THE REAL FIX for the backend and the waker is the same move (reqwest
-    # 0.12+, hyper 1), which also aligns with the hyper axum already pulls. It
-    # changes the server's HTTP client for FCM and LiveKit and the waker's for
-    # its token refresh, so it belongs in a change that ships and verifies
-    # those, not in a client release. Note reqwest >= 0.12 no longer prints an
-    # error's cause in Display: carry puca-service's `http_err` across. Re-evaluate the
-    # moment the backend gains any outbound request to a host a user can
-    # influence.
-    "RUSTSEC-2026-0258",
-
     # RUSTSEC-2026-0217 - integer overflow in tract-nnef's NNEF tensor parser,
     # out-of-bounds read on MODEL LOAD; tract-nnef 0.19.16, fixed in 0.21.16+.
     # Present ONLY in frontend/df-wasm/Cargo.lock (the noise-suppression wasm),

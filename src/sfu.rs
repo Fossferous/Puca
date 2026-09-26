@@ -364,7 +364,7 @@ pub fn spawn_egress_sampler(state: Arc<AppState>) {
         {
             Ok(c) => c,
             Err(e) => {
-                tracing::error!("SFU egress sampler: client build failed: {e}");
+                tracing::error!("SFU egress sampler: client build failed: {}", crate::http_err::http_err(&e));
                 return;
             }
         };
@@ -657,7 +657,7 @@ pub async fn evict_user_from_channel(state: &Arc<AppState>, channel_id: i64, use
     {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!("SFU evict: could not build HTTP client: {e}");
+            tracing::error!("SFU evict: could not build HTTP client: {}", crate::http_err::http_err(&e));
             return;
         }
     };
@@ -678,7 +678,10 @@ pub async fn evict_user_from_channel(state: &Arc<AppState>, channel_id: i64, use
                 }
             }
             Ok(r) => tracing::warn!("SFU evict {identity}: LiveKit returned {}", r.status()),
-            Err(e) => tracing::warn!("SFU evict {identity}: request failed: {e}"),
+            Err(e) => tracing::warn!(
+                "SFU evict {identity}: request failed: {}",
+                crate::http_err::http_err(&e)
+            ),
         }
     }
 }

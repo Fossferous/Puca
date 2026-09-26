@@ -4,6 +4,19 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Security
+- **The server and the LAN waker use a current web library too.** 0.9.823
+  moved the sign-in-screen service off an old version of its web library
+  that carried a published denial-of-service flaw; the server's own outbound
+  requests (to Google for phone wake-ups, and to the voice server) and the
+  LAN waker's token renewals were still on it. Both now use the current one,
+  and the flaw is gone from every part of Púca. Nothing changes in how they
+  connect; their logs keep saying why a request failed (refused, name not
+  found, certificate rejected, timed out), which the new library no longer
+  does by itself. Server and waker only: no app update is needed for this.
+
 ## 0.9.823 — 2026-09-26
 
 Stream diagnostics now cover the sending side, and the sign-in-screen service moves to a current web library.

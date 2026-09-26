@@ -27,4 +27,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Shares the TLS stack with tokio-tungstenite's native-tls rather than pulling
 # in a second one.
-reqwest = { version = "0.11", default-features = false, features = ["json", "native-tls"] }
+#
+# 0.12 (hyper 1), which takes reqwest 0.11 / hyper 0.14 / h2 0.3 - and
+# RUSTSEC-2026-0258 with them - out of the workspace lockfile. `native-tls`
+# without `native-tls-alpn` and without `http2`: HTTP/1.1 only, exactly what
+# 0.11 spoke. `charset` keeps 0.11's `.text()` decoding. From 0.12 an error's
+# Display drops its cause: net.rs logs through `http_err`.
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls", "charset"] }
