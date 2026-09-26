@@ -28,6 +28,23 @@
 
 use std::time::Duration;
 
+/// A reqwest error WITH its cause. From reqwest 0.12 an error's Display is
+/// only "error sending request for url (..)": whether it was DNS, a refused
+/// connection, a TLS rejection or the timeout is in the source chain, and this
+/// service's log (the one way to learn why a locked machine is unreachable)
+/// would otherwise lose it. 0.11 printed the cause itself.
+fn http_err(e: &reqwest::Error) -> String {
+    use std::error::Error as _;
+    let mut s = e.to_string();
+    let mut src = e.source();
+    while let Some(c) = src {
+        s.push_str(": ");
+        s.push_str(&c.to_string());
+        src = c.source();
+    }
+    s
+}
+
 /// Reconnect backoff in seconds, by consecutive failure count.
 ///
 /// Bounded at a minute, and starting at zero, for the waker's reason: the usual
@@ -549,7 +566,7 @@ async fn fetch_device_row(
     let client = match reqwest::Client::builder().timeout(Duration::from_secs(20)).build() {
         Ok(c) => c,
         Err(e) => {
-            crate::log::line(&format!("[link] could not build an http client: {e}"));
+            crate::log::line(&format!("[link] could not build an http client: {}", http_err(&e)));
             return None;
         }
     };
@@ -557,7 +574,7 @@ async fn fetch_device_row(
     {
         Ok(r) => r,
         Err(e) => {
-            crate::log::line(&format!("[link] GET /devices failed: {e}"));
+            crate::log::line(&format!("[link] GET /devices failed: {}", http_err(&e)));
             return None;
         }
     };
@@ -577,7 +594,7 @@ async fn fetch_device_row(
     let text = match resp.text().await {
         Ok(t) => t,
         Err(e) => {
-            crate::log::line(&format!("[link] GET /devices body unreadable: {e}"));
+            crate::log::line(&format!("[link] GET /devices body unreadable: {}", http_err(&e)));
             return None;
         }
     };
@@ -958,13 +975,13 @@ pub async fn refresh_token(cfg: &LinkConfig, token: &str) -> Result<Option<Strin
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
-        .map_err(|e| format!("http client: {e}"))?;
+        .map_err(|e| format!("http client: {}", http_err(&e)))?;
     let resp = client
         .get(format!("{}/devices", cfg.api_base))
         .bearer_auth(token)
         .send()
         .await
-        .map_err(|e| format!("GET /devices failed: {e}"))?;
+        .map_err(|e| format!("GET /devices failed: {}", http_err(&e)))?;
 
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
         return Err("the token was rejected — this machine needs enrolling again".into());
@@ -1007,17 +1024,17 @@ pub async fn obtain_device_token(cfg: &LinkConfig) -> Result<String, AttemptErro
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
-        .map_err(|e| format!("http client: {e}"))?;
+        .map_err(|e| format!("http client: {}", http_err(&e)))?;
 
     let chal: serde_json::Value = client
         .post(format!("{}/devices/token/challenge", cfg.api_base))
         .json(&serde_json::json!({ "device_id": cfg.device_id }))
         .send()
         .await
-        .map_err(|e| format!("could not ask for a challenge: {e}"))?
+        .map_err(|e| format!("could not ask for a challenge: {}", http_err(&e)))?
         .json()
         .await
-        .map_err(|e| format!("the challenge was unreadable: {e}"))?;
+        .map_err(|e| format!("the challenge was unreadable: {}", http_err(&e)))?;
 
     let nonce = chal
         .get("nonce")
@@ -1038,7 +1055,7 @@ pub async fn obtain_device_token(cfg: &LinkConfig) -> Result<String, AttemptErro
         }))
         .send()
         .await
-        .map_err(|e| format!("could not redeem the challenge: {e}"))?;
+        .map_err(|e| format!("could not redeem the challenge: {}", http_err(&e)))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -1080,7 +1097,7 @@ pub async fn obtain_device_token(cfg: &LinkConfig) -> Result<String, AttemptErro
     }
 
     let body: serde_json::Value =
-        resp.json().await.map_err(|e| format!("the token was unreadable: {e}"))?;
+        resp.json().await.map_err(|e| format!("the token was unreadable: {}", http_err(&e)))?;
     let token = body
         .get("token")
         .and_then(|x| x.as_str())
@@ -1909,6 +1926,28 @@ value").is_err());
         // `true` that preceded it. This is why it is an atomic and not a queue.
         gate.set(false);
         assert!(!copy.wants_up());
+    }
+
+    #[test]
+    fn a_failed_request_is_logged_with_its_cause() {
+        // THE POSITIVE CONTROL is the second assertion: reqwest's own Display
+        // must NOT carry the cause, or this test proves nothing about http_err.
+        // A port nobody listens on: bound, read, released.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+        let e = rt.block_on(async {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap()
+                .get(format!("http://127.0.0.1:{port}/"))
+                .send()
+                .await
+                .expect_err("nothing listens there")
+        });
+        let full = http_err(&e);
+        assert!(full.contains("tcp connect error"), "the cause must be in the log line: {full}");
+        assert!(!e.to_string().contains("tcp connect error"), "reqwest's own text now carries the cause; drop http_err: {e}");
     }
 
     #[test]

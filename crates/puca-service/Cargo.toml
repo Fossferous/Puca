@@ -36,7 +36,16 @@ tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 # Shares the TLS stack with tokio-tungstenite's native-tls rather than pulling
 # in a second one.
-reqwest = { version = "0.11", default-features = false, features = ["json", "native-tls"] }
+#
+# 0.12 (hyper 1), which takes hyper 0.14 / h2 0.3 (and RUSTSEC-2026-0258 with
+# them) out of the desktop shell's lockfile. NOT 0.13, although
+# tauri-plugin-updater already brings 0.13 into the shell: sharing that crate
+# version would UNIFY FEATURES with the updater, and this crate's native-tls
+# would switch the desktop auto-updater's TLS from rustls to schannel in the
+# full build. In 0.12 `native-tls` never turns ALPN on (that is the separate
+# `native-tls-alpn`) and HTTP/2 is only the default `http2` feature, off here:
+# this client speaks HTTP/1.1 to the user's server, exactly as it did on 0.11.
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
 
 [lib]
 name = "puca_service"

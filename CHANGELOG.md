@@ -19,6 +19,17 @@ one-line summary; this file is the full story. Versions follow
   the log. Calls that go directly between people, not through the server, are
   now covered too, for incoming video as well as outgoing.
 
+### Security
+- **The sign-in-screen service uses a current web library.** The Windows
+  service that keeps a computer reachable at its sign-in screen talked to
+  your server through an old version of its web library, which carried a
+  published denial-of-service flaw in a part it never used. It now uses the
+  current one, and the flaw is gone from the desktop app entirely. Nothing
+  changes in how it connects. When it cannot reach your server, its log now
+  says why (refused, name not found, certificate rejected, timed out)
+  instead of only that it failed. After updating, open Púca and choose
+  **Update the service** when it asks.
+
 ## 0.9.822 — 2026-09-26
 
 Guessing an unattended passphrase is now slow, and remote file access never offers the disk's own system files.
