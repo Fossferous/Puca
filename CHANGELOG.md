@@ -24,9 +24,10 @@ one-line summary; this file is the full story. Versions follow
   by a kick, a ban or a permission change, and the call counted as empty
   when deciding whether more people could join. It now asks the voice server
   who is there at startup, and again every few minutes (which also repairs
-  any update it missed). Self-hosters running the voice server on the same
-  machine should set `LIVEKIT_API_URL=http://127.0.0.1:7880`; see
-  `.env.example`.
+  any update it missed). This needs `LIVEKIT_API_URL` set to the voice server
+  the server should manage - `http://127.0.0.1:7880` when it runs on the same
+  machine, as in the standard setup; the server says so at startup if it is
+  missing. See `.env.example`.
 - **A busy server is no longer mistaken for a broken or revoked machine.**
   When the server was too busy to hand out a sign-in challenge, the LAN waker
   and the sign-in-screen service both reported an unreadable reply, and the

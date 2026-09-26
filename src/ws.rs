@@ -4293,18 +4293,14 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
         .iter()
         .filter_map(|r| crate::sfu::channel_id_from_room(r.key()))
         .collect();
-    if snapshot.is_empty() && sfu_ids.is_empty() {
+    let mesh_ids: Vec<i64> = snapshot.iter().map(|(_, cid, _)| *cid).collect();
+    let Some(candidate_ids) = sweep_candidate_ids(&mesh_ids, &sfu_ids) else {
         return;
-    }
+    };
 
     // Restrict to rooms whose channel belongs to THIS server (one query).
     // `None` = the query failed and the scope is UNKNOWN; see sweep_keeps for
     // what the sweep then does with each member, and the retry below.
-    let candidate_ids: Vec<i64> = snapshot
-        .iter()
-        .map(|(_, cid, _)| *cid)
-        .chain(sfu_ids.iter().copied())
-        .collect();
     let scope: Option<std::collections::HashSet<i64>> = match sqlx::query_as::<_, (i32,)>(
         "SELECT id FROM channels WHERE server_id = $1 AND id::bigint = ANY($2)",
     )
@@ -4470,29 +4466,36 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
     // keeps publishing+subscribing media on the SFU path until they leave, and
     // the media key doesn't rotate away from them. Eviction also fires
     // ParticipantDisconnected on remaining clients → immediate epoch re-key.
-    let sfu_targets: Vec<(i64, i64)> = {
-        let mut out = Vec::new();
-        for r in state.sfu_rooms.iter() {
-            let Some(cid) = crate::sfu::channel_id_from_room(r.key()) else {
-                continue;
-            };
-            if let Some(set) = &scope {
+    //
+    // With the scope UNKNOWN the SFU pass is left to the scheduled retry.
+    // sweep_keeps evicts NotMember wherever the room belongs, and a membership
+    // lookup that fails reads as NotMember - on a node whose sfu_rooms the
+    // LiveKit resync fills with every server's sessions, one database hiccup
+    // would otherwise eject people from other servers' calls.
+    let sfu_targets: Vec<(i64, i64)> = match &scope {
+        None => Vec::new(),
+        Some(set) => {
+            let mut out = Vec::new();
+            for r in state.sfu_rooms.iter() {
+                let Some(cid) = crate::sfu::channel_id_from_room(r.key()) else {
+                    continue;
+                };
                 if !set.contains(&cid) {
                     continue;
                 }
-            }
-            // Distinct user ids currently in this SFU room (identities are u<id>#<nonce>).
-            let mut uids: std::collections::HashSet<i64> = std::collections::HashSet::new();
-            for ident in r.participants.keys().chain(r.reservations.keys()) {
-                if let Some(uid) = crate::sfu::user_id_from_identity(ident) {
-                    uids.insert(uid);
+                // Distinct user ids currently in this SFU room (identities are u<id>#<nonce>).
+                let mut uids: std::collections::HashSet<i64> = std::collections::HashSet::new();
+                for ident in r.participants.keys().chain(r.reservations.keys()) {
+                    if let Some(uid) = crate::sfu::user_id_from_identity(ident) {
+                        uids.insert(uid);
+                    }
+                }
+                for uid in uids {
+                    out.push((cid, uid));
                 }
             }
-            for uid in uids {
-                out.push((cid, uid));
-            }
+            out
         }
-        out
     };
     for (cid, uid) in sfu_targets {
         // An SFU room is always voice: the token gate (sfu.rs get_sfu_token)
@@ -4550,6 +4553,30 @@ fn sweep_backoff_secs(retries_left: u8) -> u64 {
         3 => 2,
         2 => 8,
         _ => 30,
+    }
+}
+
+/// Every channel the sweep must scope: its mesh rooms' and its SFU rooms'. An
+/// SFU session whose Púca socket is not in voice_<id> holds no mesh room, and
+/// after a restart that is exactly the session the LiveKit resync makes known.
+/// None when there is neither, and nothing to sweep.
+fn sweep_candidate_ids(mesh: &[i64], sfu: &[i64]) -> Option<Vec<i64>> {
+    if mesh.is_empty() && sfu.is_empty() {
+        return None;
+    }
+    Some(mesh.iter().chain(sfu.iter()).copied().collect())
+}
+
+#[cfg(test)]
+mod sweep_candidate_tests {
+    use super::sweep_candidate_ids;
+
+    #[test]
+    fn an_sfu_room_alone_is_in_scope() {
+        assert_eq!(sweep_candidate_ids(&[], &[7]), Some(vec![7]), "no Púca room at all, one LiveKit room");
+        assert_eq!(sweep_candidate_ids(&[3], &[7]), Some(vec![3, 7]));
+        assert_eq!(sweep_candidate_ids(&[3], &[]), Some(vec![3]));
+        assert_eq!(sweep_candidate_ids(&[], &[]), None, "nothing to sweep");
     }
 }
 

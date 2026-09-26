@@ -36,7 +36,8 @@ room:
   # backend mints them only for real sfu_mode voice channels (VIEW-gated +
   # admission control), tokens carry roomCreate:false, and room names are
   # deterministic (sfu_<channel id>) — there is no room-churn path around the
-  # egress budget. Keeping it on avoids a RoomService client in the backend.
+  # egress budget. (The backend does call RoomService - RemoveParticipant, and
+  # ListRooms/ListParticipants for its resync - but never to create rooms.)
   auto_create: true
   # Belt-and-braces participant ceiling behind the backend's own admission
   # control. Keep >= SFU_ROOM_MAX_PARTICIPANTS (which also counts unjoined

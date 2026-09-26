@@ -366,6 +366,9 @@ else
 		echo "LIVEKIT_URL=wss://sfu.${REALM}"
 		echo "LIVEKIT_API_KEY=$LK_KEY"
 		echo "LIVEKIT_API_SECRET=$LK_SECRET"
+		# This host's own node, for removals and the room resync: the public
+		# LIVEKIT_URL would reach whichever host DNS points at.
+		echo "LIVEKIT_API_URL=http://127.0.0.1:7880"
 		echo "SFU_METRICS_URL=http://127.0.0.1:6789/metrics"
 		echo "SFU_ROOM_MAX_PARTICIPANTS=8"
 		echo "SFU_MAX_SCREEN_SHARES=0" # 0 = unlimited; egress budget governs shares

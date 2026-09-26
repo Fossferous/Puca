@@ -79,6 +79,9 @@ Then:
    LIVEKIT_URL=wss://sfu.example.com
    LIVEKIT_API_KEY=puca-sfu
    LIVEKIT_API_SECRET=<the same secret as livekit.yaml>
+   # This host's own node, for the server API: removals and the room resync
+   # (see "Kick/ban mid-call" below). Without it there is no resync.
+   LIVEKIT_API_URL=http://127.0.0.1:7880
    # Node-global projected-egress ceiling for ALL SFU rooms combined.
    # ~30 on the 50 Mbps uplink profile, ~60 on the 100 Mbps one — leaves
    # bufferbloat headroom (no router AQM at this site) plus room for coturn,
@@ -144,14 +147,22 @@ curl -s -H "Authorization: Bearer $JWT" https://chat.example.com/channels/<id>/s
   from LiveKit's RoomService (`ListRooms` + `ListParticipants`) at startup and
   every `SFU_RESYNC_SECS` (180 s) - so a participant already in a call when
   the backend restarts is known, and ejectable, as soon as LiveKit answers.
-  The resync never ejects anyone itself; it only restores knowledge (and
-  clears a session whose `participant_left` webhook was lost). The sweep and a
-  transport change also reach sessions whose Púca socket never rejoined.
-  Set `LIVEKIT_API_URL=http://127.0.0.1:7880` on every host that runs its own
-  LiveKit: without it these calls use the public `LIVEKIT_URL`, and a standby
-  host reaches the live node rather than its own. Startup logs one
-  `SFU resync: LiveKit has N room(s) ...` line; a failure logs
-  `SFU resync: cannot read LiveKit's rooms (...)` once per outage.
+  The resync never ejects anyone itself; it restores knowledge (and clears a
+  session whose `participant_left` webhook was lost), and an ejection that
+  was requested while it was reading LiveKit is re-applied to what it adds.
+  The sweep, and a switch OUT of `sfu_mode`, also reach sessions whose Púca
+  socket never rejoined.
+
+  **The resync runs only with `LIVEKIT_API_URL` set** - to this host's node,
+  `http://127.0.0.1:7880`. Without it, removals use the public `LIVEKIT_URL`,
+  which on a standby host reaches the live node rather than its own, and
+  mirroring that node's rooms would be wrong; the server says so once at
+  startup (`SFU resync is off: ...`). With it: one
+  `SFU resync: LiveKit has N room(s) ...` line at startup, and
+  `SFU resync: cannot read LiveKit's rooms (...)` once per outage. LiveKit
+  itself logs each server-API call at INFO (`API RoomService.ListRooms`, and
+  one `ListParticipants` per room), so every resync adds 1 + rooms lines to
+  `journalctl -u livekit`.
 
   In the log: a sweep writes `SFU perms eviction: user N removed ...` only
   when LiveKit confirmed every session, and `... NOT removed ... LiveKit
