@@ -3016,6 +3016,14 @@ mod resync_tests {
             None,
         )
         .await;
+        // The member's session is already known and owed a check from an earlier
+        // pass that could not get an answer: this pass answers it, and the mark
+        // must go.
+        {
+            let mut u = state.sfu_rooms.entry(room.clone()).or_default();
+            u.participants.insert(id_m.clone(), Instant::now());
+            u.recheck.insert(id_m.clone(), Mark { what: Recheck::JoinCheck, passes: 1 });
+        }
         let r = resync_once(&state, &cfg_for(&base), &client()).await.expect("resync");
         let seen = asked(srv).await;
         let removed: std::collections::BTreeSet<String> = seen[4..]
@@ -3027,7 +3035,7 @@ mod resync_tests {
         assert_eq!(r.pending, 1, "only the server-less channel's session is owed another look");
         let u = state.sfu_rooms.get(&room).unwrap();
         assert!(u.participants.contains_key(&id_m), "a member of an SFU channel stays");
-        assert!(u.recheck.get(&id_m).is_none(), "answered and allowed: nothing owed");
+        assert!(u.recheck.get(&id_m).is_none(), "answered and allowed: the owed check is cleared");
         assert!(!u.participants.contains_key(&id_x));
         drop(u);
         let o = state.sfu_rooms.get(&orphan_room).unwrap();
