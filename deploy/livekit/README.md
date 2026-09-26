@@ -151,7 +151,10 @@ curl -s -H "Authorization: Bearer $JWT" https://chat.example.com/channels/<id>/s
   webhook runs - acting only on what the database answers (not a member, no
   VIEW_CHANNEL/CONNECT, not an SFU channel), never on a failed lookup - so a
   kick, ban or permission change that happened while a session was unknown
-  (during the read, or while the backend was down) still removes it. A voice
+  (during the read, or while the backend was down) still removes it, with one
+  `SFU resync: removing user N from sfu channel C (<reason>)` line each; a
+  removal LiveKit does not confirm is dropped from what the backend knows, so
+  the next resync learns and checks that session again. A voice
   move or transport change requested during the read is applied to the
   sessions the read added. It also clears a session whose `participant_left`
   webhook was lost.

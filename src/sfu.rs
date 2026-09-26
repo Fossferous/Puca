@@ -900,7 +900,7 @@ async fn resync_once(state: &AppState, cfg: &SfuConfig, client: &reqwest::Client
     for (room, identity) in added {
         let wanted_out = user_id_from_identity(&identity).is_some_and(|uid| intents.contains(&(room.clone(), uid)));
         if wanted_out {
-            report.reapplied += remove_identities(state, cfg, &room, std::slice::from_ref(&identity)).await.removed;
+            report.reapplied += remove_or_forget(state, cfg, &room, std::slice::from_ref(&identity)).await;
         } else {
             unchecked.push((room, identity));
         }
@@ -951,23 +951,49 @@ async fn reauthorize_added(state: &AppState, cfg: &SfuConfig, added: &[(String, 
         let (Some(cid), Some(uid)) = (channel_id_from_room(room), user_id_from_identity(identity)) else {
             continue;
         };
-        let refuse = if !sfu_channels.contains(&cid) {
-            true
-        } else {
-            match get_user_channel_permissions(&state.pool, cid, uid).await {
-                a @ ChannelPermAccess::Allowed { .. } => !sfu_entitled(&a),
-                ChannelPermAccess::NotMember => true,
-                // The channel exists (checked above), so this is a failed lookup.
-                ChannelPermAccess::NotFound => false,
-            }
-        };
-        if refuse {
+        let is_sfu = sfu_channels.contains(&cid);
+        let access = if is_sfu { Some(get_user_channel_permissions(&state.pool, cid, uid).await) } else { None };
+        if let Some(reason) = join_check_refuses(is_sfu, access.as_ref()) {
+            tracing::warn!("SFU resync: removing user {} from sfu channel {} ({})", uid, cid, reason);
             refused.entry(room.clone()).or_default().push(identity.clone());
         }
     }
     let mut removed = 0;
     for (room, identities) in refused {
-        removed += remove_identities(state, cfg, &room, &identities).await.removed;
+        removed += remove_or_forget(state, cfg, &room, &identities).await;
+    }
+    removed
+}
+
+/// The join check's verdict on one session, as a reason to remove it or None
+/// to keep it. `access` is None when the channel was confirmed not to be an
+/// SFU voice channel (no lookup needed). Only ANSWERS refuse: `NotFound` here
+/// is a lookup that failed (the channel was just confirmed to exist), and a
+/// failed lookup keeps the session.
+fn join_check_refuses(channel_is_sfu: bool, access: Option<&ChannelPermAccess>) -> Option<&'static str> {
+    if !channel_is_sfu {
+        return Some("the channel is not an SFU voice channel");
+    }
+    match access? {
+        a @ ChannelPermAccess::Allowed { .. } if !sfu_entitled(a) => Some("VIEW_CHANNEL or CONNECT denied"),
+        ChannelPermAccess::Allowed { .. } => None,
+        ChannelPermAccess::NotMember => Some("not a member of the server"),
+        ChannelPermAccess::NotFound => None,
+    }
+}
+
+/// Remove `identities` from `room` at LiveKit; any removal LiveKit did not
+/// confirm is FORGOTTEN (dropped from `sfu_rooms`) so the next resync learns it
+/// again and runs its check again, instead of keeping, for good, a session it
+/// was told to take out. Returns how many LiveKit confirmed.
+async fn remove_or_forget(state: &AppState, cfg: &SfuConfig, room: &str, identities: &[String]) -> usize {
+    let removed = remove_identities(state, cfg, room, identities).await.removed;
+    if removed < identities.len() {
+        if let Some(mut u) = state.sfu_rooms.get_mut(room) {
+            for id in identities {
+                u.participants.remove(id);
+            }
+        }
     }
     removed
 }
@@ -2288,6 +2314,9 @@ mod resync_tests {
         claims: serde_json::Value,
         /// The User-Agent header, as sent.
         ua: String,
+        /// A request that came AFTER the script ran out: a call the test did
+        /// not expect. `asked` fails on any.
+        extra: bool,
     }
 
     /// Serve `script` in order, one connection each: (path it must be, status,
@@ -2302,8 +2331,22 @@ mod resync_tests {
         let base = format!("http://{}", listener.local_addr().expect("addr"));
         let task = tokio::spawn(async move {
             let mut seen = Vec::new();
-            for (want, status, reply) in script {
-                let (mut s, _) = listener.accept().await.expect("accept");
+            // The scripted calls, then a short watch for any beyond them.
+            let scripted = script.len();
+            let mut script = script.into_iter().map(Some).collect::<Vec<_>>();
+            script.push(None);
+            let mut i = 0usize;
+            loop {
+                let entry = if i < scripted { script[i].take() } else { None };
+                i += 1;
+                let accepted = if entry.is_some() {
+                    Some(listener.accept().await.expect("accept"))
+                } else {
+                    tokio::time::timeout(Duration::from_millis(300), listener.accept()).await.ok().map(|r| r.expect("accept"))
+                };
+                let Some((mut s, _)) = accepted else { break };
+                let extra = entry.is_none();
+                let (want, status, reply) = entry.unwrap_or(("", 500, String::from("{}")));
                 let mut buf = Vec::new();
                 let mut chunk = [0u8; 4096];
                 let (head, body) = loop {
@@ -2322,7 +2365,9 @@ mod resync_tests {
                     }
                 };
                 let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
-                assert_eq!(path, want, "the calls come in this order");
+                if !extra {
+                    assert_eq!(path, want, "the calls come in this order");
+                }
                 let bearer = head
                     .lines()
                     .find_map(|l| l.to_ascii_lowercase().starts_with("authorization:").then(|| l.to_string()))
@@ -2344,7 +2389,7 @@ mod resync_tests {
                 if let Some(f) = &on_call {
                     f(path.rsplit('/').next().unwrap_or(""));
                 }
-                seen.push(Seen { body, claims, ua });
+                seen.push(Seen { body, claims, ua, extra });
                 let resp = format!(
                     "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
                     reply.len()
@@ -2358,10 +2403,13 @@ mod resync_tests {
     }
 
     async fn asked(task: tokio::task::JoinHandle<Vec<Seen>>) -> Vec<Seen> {
-        tokio::time::timeout(Duration::from_secs(10), task)
+        let seen = tokio::time::timeout(Duration::from_secs(10), task)
             .await
             .expect("a scripted call never came")
-            .expect("stand-in")
+            .expect("stand-in");
+        let extra: Vec<&str> = seen.iter().filter(|s| s.extra).map(|s| s.body.as_str()).collect();
+        assert!(extra.is_empty(), "calls beyond the script: {extra:?}");
+        seen
     }
 
     fn client() -> reqwest::Client {
@@ -2612,6 +2660,7 @@ mod resync_tests {
 
     #[tokio::test]
     async fn an_ejection_journals_its_intent_and_its_confirmed_removal() {
+        no_env_proxy();
         let state = test_state();
         state.sfu_rooms.insert("sfu_7".into(), usage(&[("u5#aa", Instant::now())], &[], &[]));
         *state.sfu_resync_journal.lock().unwrap() = Some(SfuResyncJournal::default());
@@ -2659,7 +2708,7 @@ mod resync_tests {
         let r = resync_once(&state, &cfg_for(&base), &client()).await.expect("resync");
         let seen = asked(srv).await;
         assert_eq!(r.reapplied, 1);
-        assert_eq!(seen.len(), 3, "exactly one removal");
+        assert_eq!(seen.len(), 3, "exactly one removal (asked fails on any call beyond the script)");
         let body: serde_json::Value = serde_json::from_str(&seen[2].body).unwrap();
         assert_eq!(body, serde_json::json!({ "room": "sfu_7", "identity": "u5#aa" }), "the session the merge added");
         assert_eq!(seen[2].ua, "puca-server");
@@ -2697,6 +2746,7 @@ mod resync_tests {
 
     #[tokio::test]
     async fn the_reconciler_backs_off_retries_and_zero_stops_after_the_first_success() {
+        no_env_proxy();
         let state = test_state();
         let (base, srv) = livekit_stand_in(
             vec![
@@ -2723,9 +2773,11 @@ mod resync_tests {
     /// honour HTTP(S)_PROXY / ALL_PROXY) need 127.0.0.1 exempted; say so.
     fn no_env_proxy() {
         let no = std::env::var("NO_PROXY").or_else(|_| std::env::var("no_proxy")).unwrap_or_default();
-        for k in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
+        let exempt = no.split(',').map(str::trim).any(|h| h == "*" || h == "127.0.0.1" || h.starts_with("127.0.0.0/"));
+        // The stand-in is http://, so HTTPS_PROXY never applies to it.
+        for k in ["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] {
             if std::env::var_os(k).is_some_and(|v| !v.is_empty()) {
-                assert!(no.split(',').any(|h| h.trim() == "127.0.0.1"), "{k} is set: add 127.0.0.1 to NO_PROXY to run the resync socket tests");
+                assert!(exempt, "{k} is set: add 127.0.0.1 to NO_PROXY to run the resync socket tests");
             }
         }
     }
@@ -2802,15 +2854,22 @@ mod resync_tests {
         let (cid,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type, sfu_mode) VALUES ($1, 'v', 1, true) RETURNING id")
             .bind(&sid).fetch_one(&pool).await.expect("channel");
         let cid = cid as i64;
+        // A voice channel NOT in SFU mode: nobody belongs in its LiveKit room.
+        let (mesh,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type, sfu_mode) VALUES ($1, 'm', 1, false) RETURNING id")
+            .bind(&sid).fetch_one(&pool).await.expect("mesh channel");
+        let mesh_room = room_name_for_channel(mesh as i64);
 
         let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
         let room = room_name_for_channel(cid);
-        let (id_m, id_x) = (format!("u{member}#m1"), format!("u{outsider}#x1"));
+        let (id_m, id_x, id_mesh) = (format!("u{member}#m1"), format!("u{outsider}#x1"), format!("u{member}#m2"));
         let (base, srv) = livekit_stand_in(
             vec![
-                ("/twirp/livekit.RoomService/ListRooms", 200, format!(r#"{{"rooms":[{{"name":"{room}"}}]}}"#)),
+                ("/twirp/livekit.RoomService/ListRooms", 200, format!(r#"{{"rooms":[{{"name":"{room}"}},{{"name":"{mesh_room}"}}]}}"#)),
                 ("/twirp/livekit.RoomService/ListParticipants", 200,
                  format!(r#"{{"participants":[{{"identity":"{id_m}","state":"ACTIVE","tracks":[]}},{{"identity":"{id_x}","state":"ACTIVE","tracks":[]}}]}}"#)),
+                ("/twirp/livekit.RoomService/ListParticipants", 200,
+                 format!(r#"{{"participants":[{{"identity":"{id_mesh}","state":"ACTIVE","tracks":[]}}]}}"#)),
+                ("/twirp/livekit.RoomService/RemoveParticipant", 200, "{}".to_string()),
                 ("/twirp/livekit.RoomService/RemoveParticipant", 200, "{}".to_string()),
             ],
             None,
@@ -2818,14 +2877,49 @@ mod resync_tests {
         .await;
         let r = resync_once(&state, &cfg_for(&base), &client()).await.expect("resync");
         let seen = asked(srv).await;
-        let body: serde_json::Value = serde_json::from_str(&seen[2].body).unwrap();
-        assert_eq!(body["identity"], id_x.as_str(), "the non-member, and only the non-member");
-        assert_eq!(r.denied, 1);
+        let removed: std::collections::BTreeSet<String> = seen[3..]
+            .iter()
+            .map(|s| serde_json::from_str::<serde_json::Value>(&s.body).unwrap()["identity"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(removed, [id_x.clone(), id_mesh.clone()].into_iter().collect(), "the non-member, and the member in a non-SFU channel");
+        assert_eq!(r.denied, 2);
         let u = state.sfu_rooms.get(&room).unwrap();
-        assert!(u.participants.contains_key(&id_m) && !u.participants.contains_key(&id_x));
+        assert!(u.participants.contains_key(&id_m), "a member of an SFU channel stays");
+        assert!(!u.participants.contains_key(&id_x));
         drop(u);
         let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&sid).execute(&pool).await;
         let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(users.iter().map(|u| *u as i32).collect::<Vec<_>>()).execute(&pool).await;
+    }
+
+
+    #[test]
+    fn the_join_check_refuses_only_on_answers() {
+        use crate::permissions::Permissions as P;
+        let allowed = |p: P| ChannelPermAccess::Allowed { server_id: "s".into(), perms: p };
+        assert_eq!(join_check_refuses(false, None), Some("the channel is not an SFU voice channel"));
+        assert_eq!(join_check_refuses(true, Some(&allowed(P::VIEW_CHANNEL | P::CONNECT))), None);
+        assert!(join_check_refuses(true, Some(&allowed(P::VIEW_CHANNEL))).is_some(), "no CONNECT");
+        assert!(join_check_refuses(true, Some(&ChannelPermAccess::NotMember)).is_some(), "a confirmed non-member");
+        assert_eq!(join_check_refuses(true, Some(&ChannelPermAccess::NotFound)), None, "a failed lookup keeps the session");
+    }
+
+    #[tokio::test]
+    async fn a_removal_livekit_does_not_confirm_is_forgotten_to_be_checked_again() {
+        no_env_proxy();
+        let state = test_state();
+        state.sfu_rooms.insert("sfu_7".into(), usage(&[("u5#aa", Instant::now())], &[], &[]));
+        let (base, srv) = livekit_stand_in(
+            vec![("/twirp/livekit.RoomService/RemoveParticipant", 503, r#"{"code":"unavailable"}"#.to_string())],
+            None,
+        )
+        .await;
+        let removed = remove_or_forget(&state, &cfg_for(&base), "sfu_7", &["u5#aa".to_string()]).await;
+        asked(srv).await;
+        assert_eq!(removed, 0);
+        assert!(
+            !state.sfu_rooms.get("sfu_7").unwrap().participants.contains_key("u5#aa"),
+            "forgotten: the next resync lists it again, as ADDED, and checks it again"
+        );
     }
 
 }

@@ -722,8 +722,13 @@ fn layer_overwrite_rows(
 /// of the member's role permissions (roles held + @everyone) layered with this
 /// channel's permission overwrites (see layer_overwrite_rows).
 ///
-/// FAIL CLOSED: any DB error is logged and treated as no permission — a member
-/// resolves to empty perms (every gate then denies), never to a default-allow.
+/// FAIL CLOSED: any DB error is logged and reported as `NotFound` ("not found
+/// or lookup failed") - never a default-allow, and never an answer that reads
+/// as a fact about the user. Every gate refuses `NotFound` exactly as it
+/// refuses `Allowed` without VIEW_CHANNEL (404 either way); the difference
+/// matters only where a verdict is ACTED ON as a fact - the eviction sweep
+/// with an unknown scope and the LiveKit resync's join check, which leave an
+/// unresolved verdict alone rather than eject someone on a database hiccup.
 pub async fn get_user_channel_permissions(
     pool: &sqlx::PgPool,
     channel_id: i64,
@@ -798,7 +803,7 @@ pub async fn get_user_channel_permissions(
                 "get_user_channel_permissions: role fetch failed for server {} user {}: {}",
                 server_id, user_id, e
             );
-            return ChannelPermAccess::Allowed { server_id, perms: Permissions::empty() };
+            return ChannelPermAccess::NotFound;
         }
     };
     let mut base = Permissions::empty();
@@ -838,10 +843,7 @@ pub async fn get_user_channel_permissions(
                 "get_user_channel_permissions: overwrite fetch failed for channel {} user {}: {}",
                 channel_id, user_id, e
             );
-                return ChannelPermAccess::Allowed {
-                    server_id,
-                    perms: Permissions::empty(),
-                };
+                return ChannelPermAccess::NotFound;
             }
         };
 
