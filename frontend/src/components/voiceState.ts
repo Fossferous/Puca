@@ -2,6 +2,7 @@
 // Extracted from VoicePanel so that component file only exports a component
 // (keeps React Fast Refresh working).
 
+import { useSyncExternalStore } from 'react';
 import { useStreamStore } from '../stores/streamStore';
 
 export interface VoiceUser {
@@ -92,8 +93,52 @@ export const globalCameraUsers = new Map<number, string>(); // userId -> usernam
 // their own screen share, and other people's cameras must survive it.
 export const globalCameraStreams = new Map<number, MediaStream>();
 
-// Global state for speaking users - accessible from sidebar
+// Global state for speaking users - accessible from sidebar. WRITE it only
+// through setUserSpeaking / clearSpeaking below, so every change is announced.
 export const globalSpeakingUsers = new Set<number>(); // Set of userIds currently speaking
+
+// ---- The speaking store --------------------------------------------------
+//
+// Speaking flips several times a second per talker in a lively call. It used
+// to live in VoicePanel state, whose every change re-built the roster,
+// re-registered the call's socket handlers and fired notifyVoiceUsersChange —
+// which re-rendered the whole of Chat (message list included) for one green
+// ring (measured: ~52 React commits a second sitting in a 6-person call).
+// Every other reader polled (300 ms avatars, 300 ms stage, 250 ms ducking)
+// because "a VAD flip doesn't always emit". Now a flip emits exactly here, and
+// only the components that draw a ring for THAT user re-render.
+type SpeakingListener = () => void;
+const speakingListeners: Set<SpeakingListener> = new Set();
+function emitSpeaking() { speakingListeners.forEach(cb => cb()); }
+
+/** Mark `userId` speaking or not. A no-op (and silent) when nothing changed. */
+export function setUserSpeaking(userId: number, speaking: boolean): void {
+    if (globalSpeakingUsers.has(userId) === speaking) return;
+    if (speaking) globalSpeakingUsers.add(userId); else globalSpeakingUsers.delete(userId);
+    emitSpeaking();
+}
+
+/** Nobody is speaking (leaving the call). */
+export function clearSpeaking(): void {
+    if (globalSpeakingUsers.size === 0) return;
+    globalSpeakingUsers.clear();
+    emitSpeaking();
+}
+
+export function subscribeToSpeaking(callback: SpeakingListener): () => void {
+    speakingListeners.add(callback);
+    return () => speakingListeners.delete(callback);
+}
+
+/** Re-renders the caller only when THIS user's speaking state flips. */
+export function useUserSpeaking(userId: number): boolean {
+    return useSyncExternalStore(subscribeToSpeaking, () => globalSpeakingUsers.has(userId), () => false);
+}
+
+/** Re-renders the caller only when "is anybody speaking" flips. */
+export function useAnyoneSpeaking(): boolean {
+    return useSyncExternalStore(subscribeToSpeaking, () => globalSpeakingUsers.size > 0, () => false);
+}
 
 // Helper function to get voice users in a specific room
 export function getVoiceUsersInRoom(roomId: string): VoiceUserStatus[] {

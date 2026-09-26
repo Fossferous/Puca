@@ -18,6 +18,7 @@ import {
     VideoPreset,
     VideoQuality,
     isE2EESupported,
+    setLogLevel,
     type RemoteParticipant,
     type RemoteTrack,
     type RemoteTrackPublication,
@@ -465,6 +466,11 @@ export class SfuManager {
 
         const keyProvider = new EpochKeyProvider();
         this.keyProvider = keyProvider;
+        // LiveKit's default level is `info`, which prints a full stats object to
+        // the console every 30 s for the whole call, plus chatter on every
+        // track event. The app's own logs say what matters; keep LiveKit to
+        // warnings and errors.
+        setLogLevel('warn');
         const room = new Room({
             dynacast: true,
             adaptiveStream: false,

@@ -666,10 +666,13 @@
     right: 10px;
     top: 50%;
     transform: translateY(-50%);
-    animation: spin 1s linear infinite;
+    animation: spin-centered 1s linear infinite;
 }
 
-@keyframes spin {
+/* Its own name: this spinner is vertically centred (translateY(-50%)), and
+   keyframes are global — sharing `spin` with the plain spinners in three
+   other files let whichever loaded last shift all the others, or this one. */
+@keyframes spin-centered {
     from {
         transform: translateY(-50%) rotate(0deg);
     }
@@ -2207,11 +2210,14 @@ button.message-attachment.error { color: #ffb4b4; }
     margin: 2px 0;
     border-radius: 4px;
     cursor: pointer;
-    transition: background 0.15s;
 }
 
+/* The fade lives on :hover only. On the base rule it also ran on every
+   speaking flip (the green tint below), so a lively call kept a transition
+   in flight, and the page re-styling, most of the time. */
 .voice-user-item:hover {
     background: rgba(255, 255, 255, 0.05);
+    transition: background 0.15s;
 }
 
 .voice-user-avatar-small {
@@ -2282,20 +2288,13 @@ button.message-attachment.error { color: #ffb4b4; }
 
 .voice-user-avatar-small.speaking {
     border: 2px solid #43b581;
+    /* STATIC on purpose. This ring used to pulse its box-shadow forever, and a
+       box-shadow cannot be animated on the compositor: every frame (165 a
+       second on a 165 Hz monitor) re-styled, repainted and re-rastered the
+       sidebar, on the integrated GPU the app is pinned to, for as long as
+       anybody in the call was talking. The ring switching on and off with the
+       voice is the signal; the pulse added cost and nothing else. */
     box-shadow: 0 0 0 2px rgba(67, 181, 129, 0.3), 0 0 8px rgba(67, 181, 129, 0.5);
-    animation: speaking-pulse 1s infinite;
-}
-
-@keyframes speaking-pulse {
-
-    0%,
-    100% {
-        box-shadow: 0 0 0 2px rgba(67, 181, 129, 0.3), 0 0 8px rgba(67, 181, 129, 0.5);
-    }
-
-    50% {
-        box-shadow: 0 0 0 3px rgba(67, 181, 129, 0.5), 0 0 12px rgba(67, 181, 129, 0.7);
-    }
 }
 
 /* LIVE badge for streaming users in sidebar */
@@ -2311,18 +2310,23 @@ button.message-attachment.error { color: #ffb4b4; }
     margin-left: 6px;
     text-transform: uppercase;
     letter-spacing: 0.3px;
-    animation: live-pulse-mini 1.5s infinite;
+    box-shadow: 0 0 6px rgba(237, 66, 69, 0.55);
+    animation: live-attention 1.5s ease-in-out 3;
 }
 
-@keyframes live-pulse-mini {
+/* Draws the eye when something goes live, then STOPS. The LIVE badges and
+   the watch buttons used to pulse a box-shadow forever — a repaint every
+   frame for as long as anybody streamed, whether or not you were watching.
+   Opacity animates on the compositor, and three pulses is enough to notice. */
+@keyframes live-attention {
 
     0%,
     100% {
-        box-shadow: 0 0 4px rgba(237, 66, 69, 0.4);
+        opacity: 1;
     }
 
     50% {
-        box-shadow: 0 0 8px rgba(237, 66, 69, 0.7);
+        opacity: 0.72;
     }
 }
 
@@ -2348,7 +2352,8 @@ button.message-attachment.error { color: #ffb4b4; }
     display: flex;
     align-items: center;
     gap: 0.3rem;
-    animation: live-pulse-mini 1.5s infinite;
+    box-shadow: 0 0 6px rgba(237, 66, 69, 0.55);
+    animation: live-attention 1.5s ease-in-out 3;
     transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
 
@@ -2392,7 +2397,7 @@ button.message-attachment.error { color: #ffb4b4; }
     cursor: pointer;
     box-shadow: 0 4px 16px rgba(237, 66, 69, 0.4);
     transition: transform 0.2s ease, box-shadow 0.2s ease;
-    animation: live-pulse-mini 1.5s infinite;
+    animation: live-attention 1.5s ease-in-out 3;
 }
 
 .watch-live-btn:hover {
@@ -2405,7 +2410,7 @@ button.message-attachment.error { color: #ffb4b4; }
     height: 8px;
     background: white;
     border-radius: 50%;
-    animation: live-dot-pulse 1s infinite;
+    animation: live-dot-pulse 1s ease-in-out 3;
 }
 
 @keyframes live-dot-pulse {

@@ -7,6 +7,7 @@ import {
     isUserStreaming,
     subscribeToVoiceUsers,
     subscribeToStreamState,
+    subscribeToSpeaking,
 } from './voiceState';
 import { SmartAvatar } from './SmartAvatar';
 import { MicOffIcon, HeadphonesOffIcon, SpeakerIcon, UserAddIcon, PlayIcon, CameraIcon, LockOpenIcon, ClipIcon, FullscreenIcon } from './Icons';
@@ -52,14 +53,16 @@ export function VoiceStage({
     onUserMenu,
 }: VoiceStageProps) {
     // Presence/speaking/stream state lives in module-level maps; re-render on
-    // change events plus a light poll (VAD speaking flips don't always emit).
+    // their change events. Speaking now emits on every flip (voiceState.ts);
+    // the slow poll stays only as a safety net for the other maps.
     const [, force] = useState(0);
     useEffect(() => {
         const bump = () => force(n => n + 1);
         const unsubVoice = subscribeToVoiceUsers(bump);
         const unsubStream = subscribeToStreamState(bump);
-        const interval = setInterval(bump, 300);
-        return () => { unsubVoice(); unsubStream(); clearInterval(interval); };
+        const unsubSpeaking = subscribeToSpeaking(bump);
+        const interval = setInterval(bump, 2000);
+        return () => { unsubVoice(); unsubStream(); unsubSpeaking(); clearInterval(interval); };
     }, []);
 
     const users = getVoiceUsersInRoom(roomId);

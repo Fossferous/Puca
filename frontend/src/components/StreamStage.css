@@ -52,10 +52,10 @@
 
 .live-indicator {
     font-size: 0.9rem;
-    animation: pulse 2s infinite;
+    animation: stage-live-blink 2s infinite;
 }
 
-@keyframes pulse {
+@keyframes stage-live-blink {
 
     0%,
     100% {
@@ -303,7 +303,7 @@
     border-radius: 50%;
     background: #ed4245;
     margin-right: 4px;
-    animation: pulse 2s infinite;
+    animation: stage-live-blink 2s ease-in-out 3;
 }
 
 /* Right-click stream menu (familiar chat-app context-menu style) */
@@ -585,7 +585,7 @@
     height: 8px;
     background: #ed4245;
     border-radius: 50%;
-    animation: pulse 2s infinite;
+    animation: stage-live-blink 2s ease-in-out 3;
 }
 
 /* Responsive adjustments */

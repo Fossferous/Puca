@@ -17,36 +17,14 @@
  * hidden users render the caller-supplied fallback (initials) instead.
  */
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { isUserSpeaking } from './voiceState';
+import { useUserSpeaking } from './voiceState';
 import { isAvatarHidden } from './avatarPrefs';
 import { useAuthedFileUrl } from '../hooks/useAuthedFileUrl';
 
-// One shared poll for every mounted avatar (mirrors VoiceStage's 300ms
-// cadence — VAD flips don't reliably emit an event). Each subscriber's
-// setState no-ops when the value is unchanged, so idle cost is negligible.
-const speakChecks = new Set<() => void>();
-let speakTimer: number | null = null;
-
-function useIsSpeaking(userId: number): boolean {
-    const [speaking, setSpeaking] = useState(() => isUserSpeaking(userId));
-    useEffect(() => {
-        const check = () => setSpeaking(isUserSpeaking(userId));
-        check();
-        speakChecks.add(check);
-        if (speakTimer === null) {
-            speakTimer = window.setInterval(() => speakChecks.forEach((f) => f()), 300);
-        }
-        return () => {
-            speakChecks.delete(check);
-            if (speakChecks.size === 0 && speakTimer !== null) {
-                clearInterval(speakTimer);
-                speakTimer = null;
-            }
-        };
-    }, [userId]);
-    return speaking;
-}
-
+// Speaking state comes from the speaking store (voiceState.ts), which emits on
+// every flip: this avatar re-renders when ITS user starts or stops talking, and
+// never otherwise. (It used to poll every mounted avatar every 300 ms because a
+// flip did not reliably emit.)
 function useAvatarHidden(userId: number): boolean {
     const [hidden, setHidden] = useState(() => isAvatarHidden(userId));
     useEffect(() => {
@@ -82,7 +60,7 @@ export function SmartAvatar({ userId, fileId, alt = '', className, fallback }: {
     fallback: ReactNode;
 }) {
     const hidden = useAvatarHidden(userId);
-    const speaking = useIsSpeaking(userId);
+    const speaking = useUserSpeaking(userId);
     // null while the authenticated fetch is in flight, and if it fails — both
     // land on the caller's fallback rather than a broken image.
     const src = useAuthedFileUrl(hidden ? null : fileId);

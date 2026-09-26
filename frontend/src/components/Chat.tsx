@@ -1,10 +1,12 @@
 import React, { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, type FormEvent } from 'react';
 import { noteRender } from '../api/healthLog';
+import { SpeakingDiv, SpeakingLi } from './SpeakingClass';
+import { pruneExpiredTyping } from './stableState';
 import { createPortal } from 'react-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { wsClient, type ServerMessage } from '../api/websocket';
 import { VoicePanel } from './VoicePanel';
-import { getVoiceUsersInRoom, globalVoiceUsers, globalCameraUsers, isUserStreaming, isUserSpeaking, subscribeToStreamState, subscribeToVoiceUsers, getSelectedStreams, getStreamData, getAllStreamers, selectStream, deselectStream, upsertVoiceUser } from './voiceState';
+import { getVoiceUsersInRoom, globalVoiceUsers, globalCameraUsers, isUserStreaming, subscribeToStreamState, subscribeToVoiceUsers, getSelectedStreams, getStreamData, getAllStreamers, selectStream, deselectStream, upsertVoiceUser } from './voiceState';
 import { useStreamStore } from '../stores/streamStore';
 import type { VoiceUserStatus } from './voiceState';
 import './FileUpload.css';
@@ -2413,13 +2415,9 @@ export function Chat({ onLogout }: ChatProps) {
 
         const typingCleanupInterval = setInterval(() => {
             const now = Date.now();
-            setTypingUsers(prev => {
-                const newMap = new Map(prev);
-                for (const [userId, data] of newMap) {
-                    if (data.expiry < now) newMap.delete(userId);
-                }
-                return newMap;
-            });
+            // The SAME map when nothing expired, so an idle second is not a
+            // render of the whole app (stableState.ts).
+            setTypingUsers(prev => pruneExpiredTyping(prev, now));
         }, 1000);
 
         return () => {
@@ -4717,15 +4715,15 @@ export function Chat({ onLogout }: ChatProps) {
                                             {voiceUsers.map(user => {
                                                 const member = allMembers.find(m => m.id === user.id);
                                                 const avatarId = member?.avatar_file_id;
-                                                const isSpeaking = isUserSpeaking(user.id);
                                                 const isStreaming = isUserStreaming(user.id);
                                                 const isDraggableVoiceRow = canMoveVoiceMembers
                                                     && !channel.is_afk
                                                     && user.id !== currentUserId;
                                                 return (
-                                                    <li
+                                                    <SpeakingLi
                                                         key={user.id}
-                                                        className={`voice-user-item ${user.isMuted ? 'muted' : ''} ${isSpeaking ? 'speaking' : ''} ${user.connecting ? 'connecting' : ''} ${voiceDragState.dragging?.userId === user.id ? 'voice-dragging' : ''}`}
+                                                        userId={user.id}
+                                                        className={`voice-user-item ${user.isMuted ? 'muted' : ''} ${user.connecting ? 'connecting' : ''} ${voiceDragState.dragging?.userId === user.id ? 'voice-dragging' : ''}`}
                                                         // Drag source. The attributes are what the hook
                                                         // picks rows up by, so a row that must not move
                                                         // simply does not carry them:
@@ -4771,13 +4769,13 @@ export function Chat({ onLogout }: ChatProps) {
                                                             });
                                                         }}
                                                     >
-                                                        <div className={`voice-user-avatar-small ${isSpeaking ? 'speaking' : ''}`}>
+                                                        <SpeakingDiv userId={user.id} className="voice-user-avatar-small">
                                                             <SmartAvatar
                                                                 userId={user.id}
                                                                 fileId={avatarId}
                                                                 fallback={<span>{user.username[0]?.toUpperCase()}</span>}
                                                             />
-                                                        </div>
+                                                        </SpeakingDiv>
                                                         <span className="voice-user-name">
                                                             {member?.display_name || user.username}
                                                             {globalCameraUsers.has(user.id) && <span className="camera-badge-mini" title="Camera On"><CameraIcon /></span>}
@@ -4796,7 +4794,7 @@ export function Chat({ onLogout }: ChatProps) {
                                                             {user.isMuted && <span className="voice-status-icon muted" title="Muted"><MicOffIcon /></span>}
                                                             {user.isDeafened && <span className="voice-status-icon deafened" title="Deafened"><HeadphonesOffIcon /></span>}
                                                         </div>
-                                                    </li>
+                                                    </SpeakingLi>
                                                 );
                                             })}
                                         </ul>

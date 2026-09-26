@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
     subscribeToStreamState,
-    subscribeToVoiceUsers,
     getSelectedStreams,
     getStreamData,
     getAllStreamers,
@@ -12,6 +11,7 @@ import {
     getCurrentStreamingUserId,
     notifyStreamStateChange,
     globalSpeakingUsers,
+    subscribeToSpeaking,
     getAllVoiceUsers,
 } from './voiceState';
 import {
@@ -329,9 +329,8 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
         return subscribeToStreamState(update);
     }, [focusedStream]);
 
-    // Attenuation: duck stream audio while anyone in voice is speaking.
-    // Speaking state lands in globalSpeakingUsers (VAD); subscribe + poll as a
-    // safety net since not every speaking change emits a voice-users event.
+    // Attenuation: duck stream audio while anyone in voice is speaking. The
+    // speaking store emits on every flip (voiceState.ts), so no poll is needed.
     useEffect(() => {
         const evaluate = () => {
             const speaking = globalSpeakingUsers.size > 0;
@@ -340,9 +339,8 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                 applyAllGains();
             }
         };
-        const unsub = subscribeToVoiceUsers(evaluate);
-        const interval = setInterval(evaluate, 250);
-        return () => { unsub(); clearInterval(interval); };
+        evaluate();
+        return subscribeToSpeaking(evaluate);
     }, [applyAllGains]);
 
     // Output volume/device changed in Settings: re-apply to the live stream

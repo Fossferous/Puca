@@ -22,10 +22,10 @@
 
 .update-logo {
     font-size: 4rem;
-    animation: pulse 2s ease-in-out infinite;
+    animation: update-logo-pulse 2s ease-in-out infinite;
 }
 
-@keyframes pulse {
+@keyframes update-logo-pulse {
 
     0%,
     100% {

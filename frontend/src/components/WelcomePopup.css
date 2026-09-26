@@ -30,10 +30,10 @@
     max-width: 90vw;
     box-shadow: 0 24px 48px rgba(0, 0, 0, 0.4);
     position: relative;
-    animation: slideUp 0.3s ease-out;
+    animation: welcome-slide-up 0.3s ease-out;
 }
 
-@keyframes slideUp {
+@keyframes welcome-slide-up {
     from {
         opacity: 0;
         transform: translateY(20px) scale(0.95);

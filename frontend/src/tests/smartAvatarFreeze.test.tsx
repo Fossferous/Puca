@@ -16,6 +16,7 @@ import { createRoot, type Root } from 'react-dom/client';
 let speaking = false;
 vi.mock('../components/voiceState', () => ({
     isUserSpeaking: () => speaking,
+    useUserSpeaking: () => speaking,
 }));
 
 let hidden = false;

@@ -20,6 +20,7 @@ import { sampleShareEncode, applyShareQuality, shareCaptureSize } from '../api/r
 import { ContextMenu } from './ContextMenu';
 import { copyDiagnostics } from '../api/diagnosticsReport';
 import { noteRender, startHealthLog, stopHealthLog } from '../api/healthLog';
+import { keepDetail, keepSummary } from './stableState';
 import { type NoiseSuppressionMode, type NoiseModeChange, NOISE_MODE_EVENT, getNoiseSuppressionMode, setNoiseSuppressionMode, changeNoiseModeLive, modeUsesWebAudio, rawInputHasHadSignal, hasLiveGainStage, isDeepFilterGateOpen, selectedInputDeviceId } from '../api/noiseFilter';
 import { registerHold, unregisterHold, registerPress, unregisterPress, startNativeFeed, stopNativeFeed, setNativeFeedHost } from '../api/hotkeys';
 import { computeNativeWatch } from '../api/hotkeyScope';
@@ -78,8 +79,7 @@ import { useDfSettledOffer, keepRnnoiseForSession, KEEP_RNNOISE_NOTICE } from '.
 import './VoicePanel.css';
 
 
-import { globalVoiceUsers, globalScreenSharers, globalCameraUsers, globalCameraStreams, globalSpeakingUsers, notifyVoiceUsersChange, registerStopScreenShareCallback, stopOwnScreenShare, setCurrentStreamingUser, setSelfInVoice, upsertVoiceUser, globalSelectedStreams, globalStreamData, notifyStreamStateChange, clearAllStreams, selectStream, deselectStream, subscribeToStreamState } from './voiceState';
-import type { VoiceUser } from './voiceState';
+import { globalVoiceUsers, globalScreenSharers, globalCameraUsers, globalCameraStreams, setUserSpeaking, clearSpeaking, notifyVoiceUsersChange, registerStopScreenShareCallback, stopOwnScreenShare, setCurrentStreamingUser, setSelfInVoice, upsertVoiceUser, globalSelectedStreams, globalStreamData, notifyStreamStateChange, clearAllStreams, selectStream, deselectStream, subscribeToStreamState } from './voiceState';
 
 interface VoicePanelProps {
     roomId: string;
@@ -165,7 +165,6 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     /** Why a mute toggle refused — shown as a Toast so a hotkey no-op is
      *  never silent (a silent refusal reads as "the hotkey is broken"). */
     const [muteNotice, setMuteNotice] = useState<string | null>(null);
-    const [_voiceUsers, setVoiceUsers] = useState<VoiceUser[]>([]);
     const [isConnecting, setIsConnecting] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [showPermissionHelp, setShowPermissionHelp] = useState(false);
@@ -274,7 +273,6 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     const pipRef = useRef<HTMLDivElement>(null);
 
     // Track which users are currently speaking
-    const [speakingUsers, setSpeakingUsers] = useState<Set<number>>(new Set());
     // Mic-health warning (silent capture / dead noise-suppression graph): the
     // "everyone says they can't hear me but everything looks fine" class.
     // Two writers share this slot, so clears are matched against the message.
@@ -296,8 +294,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             // webrtcManager-only poll kept total at 0 and the badge never
             // mounted — the deferred re-audit item.)
             const src = sfuMode ? sfuManager : webrtcManager;
-            setMediaSecure(src.mediaEncryptionSummary());
-            setE2eeDetail(src.allMediaE2eeStatuses());
+            // Unchanged → the same object, so a quiet tick renders nothing
+            // (both calls build a fresh object every time; stableState.ts).
+            setMediaSecure(prev => keepSummary(prev, src.mediaEncryptionSummary()));
+            setE2eeDetail(prev => keepDetail(prev, src.allMediaE2eeStatuses()));
         };
         tick();
         const iv = setInterval(tick, 2000);
@@ -677,12 +677,6 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         };
     }, []);
 
-    // Sync speakingUsers to global for sidebar access
-    useEffect(() => {
-        globalSpeakingUsers.clear();
-        speakingUsers.forEach(id => globalSpeakingUsers.add(id));
-    }, [speakingUsers]);
-
     // Sync screenSharers to global for sidebar and Chat.tsx access
     useEffect(() => {
         globalScreenSharers.clear();
@@ -763,37 +757,21 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         };
     }, []);
 
-    // Update voiceUsers display from global state
+    // The roster changed (join / leave / mute / REST rebuild): tell the
+    // sidebar and the stage. Speaking is NOT a roster change — it goes through
+    // the speaking store (voiceState.ts), so this callback's identity no longer
+    // churns several times a second and the call's socket handlers, which
+    // depend on it, stay registered instead of being torn down and re-added on
+    // every word.
     const refreshVoiceUsersList = useCallback(() => {
-        const roomUsers = globalVoiceUsers.get(roomId);
-        if (!roomUsers) {
-            // The room map is gone: only whoever the SFU still carries stays open.
-            if (isBufferingRef.current) declaredRef.current.observe(clipPresence(roomId), Date.now());
-            setVoiceUsers([]);
-            return;
-        }
-        // Every roster render while armed: opens spans for newcomers, closes
+        // Every roster change while armed: opens spans for newcomers, closes
         // the span of anyone BOTH the roster and the SFU have dropped
         // (StreamStopped / UserLeft / the REST rebuild / the SFU's terminal
-        // peer-disconnect all end up here).
+        // peer-disconnect all end up here). With the room map gone, only
+        // whoever the SFU still carries stays open.
         if (isBufferingRef.current) declaredRef.current.observe(clipPresence(roomId), Date.now());
-
-        const userList: VoiceUser[] = [];
-        for (const [userId, status] of roomUsers) {
-            userList.push({
-                id: userId,
-                username: status.username,
-                isMuted: status.isMuted,
-                isDeafened: status.isDeafened,
-                isSpeaking: speakingUsers.has(userId),
-                // Use ref to get current value (avoids stale closure)
-                isConnected: isInVoiceRef.current ? (userId === currentUserId || webrtcManager.isConnectedTo(userId)) : false,
-            });
-        }
-        setVoiceUsers(userList);
-        // Notify Chat.tsx sidebar to re-render
         notifyVoiceUsersChange();
-    }, [roomId, currentUserId, speakingUsers]);
+    }, [roomId]);
 
     /**
      * Announce a join ONCE, as a transition of `announcedRef`.
@@ -860,8 +838,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // talking to someone who could not yet decrypt a word of it.
 
     /** Flip the `connecting` chip on a roster entry (both the stage tile and
-     *  the sidebar row read it). Notifies through the bus, not
-     *  refreshVoiceUsersList, whose identity churns with speakingUsers. */
+     *  the sidebar row read it). Notifies through the bus directly. */
     const setConnecting = useCallback((id: number, on: boolean) => {
         const entry = globalVoiceUsers.get(roomId)?.get(id);
         if (!entry || !!entry.connecting === on) return;
@@ -1031,12 +1008,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             globalCameraUsers.delete(userId);
             globalCameraStreams.delete(userId);
             notifyStreamStateChange();
-            setSpeakingUsers(prev => {
-                if (!prev.has(userId)) return prev;
-                const next = new Set(prev);
-                next.delete(userId);
-                return next;
-            });
+            setUserSpeaking(userId, false);
         };
 
         const handleStreamStopped = (msg: ServerMessage) => {
@@ -1412,15 +1384,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     // Speaking is the primary activity signal: staying idle for
                     // 15 min moves us to AFK, so any speech resets the clock.
                     if (isSpeaking) resetInactivity();
-                    setSpeakingUsers(prev => {
-                        const newSet = new Set(prev);
-                        if (isSpeaking) {
-                            newSet.add(currentUserId);
-                        } else {
-                            newSet.delete(currentUserId);
-                        }
-                        return newSet;
-                    });
+                    setUserSpeaking(currentUserId, isSpeaking);
                 },
                 0.02 // threshold
             );
@@ -1580,17 +1544,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 voiceDetectorCleanups.current.get(userId)?.();
                 const remoteCleanup = webrtcManager.createVoiceActivityDetector(
                     stream,
-                    (isSpeaking) => {
-                        setSpeakingUsers(prev => {
-                            const newSet = new Set(prev);
-                            if (isSpeaking) {
-                                newSet.add(userId);
-                            } else {
-                                newSet.delete(userId);
-                            }
-                            return newSet;
-                        });
-                    },
+                    (isSpeaking) => setUserSpeaking(userId, isSpeaking),
                     0.02 // threshold
                 );
                 voiceDetectorCleanups.current.set(userId, remoteCleanup);
@@ -1824,11 +1778,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     cleanup();
                     voiceDetectorCleanups.current.delete(userId);
                 }
-                setSpeakingUsers(prev => {
-                    const newSet = new Set(prev);
-                    newSet.delete(userId);
-                    return newSet;
-                });
+                setUserSpeaking(userId, false);
                 refreshVoiceUsersList();
 
                 // SELF-HEAL for a sharer who vanished without a clean goodbye.
@@ -2311,7 +2261,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         // Clean up all voice activity detectors (incl. the -1 silence sentinel)
         voiceDetectorCleanups.current.forEach(cleanup => cleanup());
         voiceDetectorCleanups.current.clear();
-        setSpeakingUsers(new Set());
+        clearSpeaking();
         setMicNotice(null);
         setDfOffer(null);
 

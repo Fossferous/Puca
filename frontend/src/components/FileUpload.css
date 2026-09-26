@@ -51,32 +51,16 @@
     color: var(--text-muted);
 }
 
-/* Enhanced voice activity indicator - more prominent pulse */
+/* Enhanced voice activity indicator — a more prominent ring, STATIC. It used
+   to pulse three stacked box-shadows every 0.8 s, overriding VoicePanel.css
+   from here with !important: the heaviest repaint in a call, every frame,
+   whenever anybody talked. */
 .voice-user-avatar.speaking {
     border: 3px solid #43b581 !important;
     box-shadow:
         0 0 0 4px rgba(67, 181, 129, 0.3),
         0 0 16px rgba(67, 181, 129, 0.6),
         0 0 32px rgba(67, 181, 129, 0.3) !important;
-    animation: enhanced-speaking-pulse 0.8s ease-in-out infinite;
-}
-
-@keyframes enhanced-speaking-pulse {
-
-    0%,
-    100% {
-        box-shadow:
-            0 0 0 4px rgba(67, 181, 129, 0.3),
-            0 0 16px rgba(67, 181, 129, 0.6),
-            0 0 32px rgba(67, 181, 129, 0.3);
-    }
-
-    50% {
-        box-shadow:
-            0 0 0 6px rgba(67, 181, 129, 0.5),
-            0 0 24px rgba(67, 181, 129, 0.8),
-            0 0 48px rgba(67, 181, 129, 0.5);
-    }
 }
 
 /* Speaking indicator wave bars */

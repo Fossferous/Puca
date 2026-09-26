@@ -7,6 +7,20 @@ one-line summary; this file is the full story. Versions follow
 ## Unreleased
 
 ### Fixed
+- **Sitting in a voice call costs far less.** Measured in a six-person call:
+  the app's own processor use fell by about 40% and its graphics load by
+  about 45%. The speaking rings, the LIVE badges and the "watch" buttons
+  pulsed forever in a way the graphics card cannot do cheaply, redrawing the
+  window 165 times a second on a 165 Hz screen for as long as anybody talked
+  or streamed. Speaking rings are now a steady ring that switches with the
+  voice, and LIVE badges pulse three times when they appear, then hold still.
+  And every time somebody started or stopped talking, the whole app used to
+  redraw itself, messages included; now only that person's row does. On a
+  laptop or a PC whose graphics chip also runs the screen, this is the
+  difference you are most likely to feel during a long call.
+- **Spinners no longer jump.** Two different spinning animations shared one
+  name, so whichever loaded last knocked the other one half its height off
+  centre. The same kind of clash affected a few pulsing indicators.
 - **"Copy diagnostics" no longer gets stuck on "Measuring…".** A step that
   never answered — most often the clipboard, when its permission prompt
   opened somewhere you could not see it — kept the report waiting forever.

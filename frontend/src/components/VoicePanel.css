@@ -195,11 +195,16 @@
     color: var(--text-warning, #faa61a);
 }
 .voice-btn.voice-clip-arm.pending { opacity: 0.6; }
-/* "Prompt me to arm when I join" — a soft pulse for a few seconds after joining. */
-.voice-btn.voice-clip-arm.nudge { animation: clip-arm-nudge 1.4s ease-in-out infinite; }
+/* "Prompt me to arm when I join" — a soft pulse for a few seconds after joining.
+   A static amber ring plus a scale pulse: transform runs on the compositor,
+   where the old box-shadow pulse repainted the button every frame. */
+.voice-btn.voice-clip-arm.nudge {
+    box-shadow: 0 0 0 2px rgba(250, 166, 26, 0.45);
+    animation: clip-arm-nudge 1.4s ease-in-out infinite;
+}
 @keyframes clip-arm-nudge {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(250, 166, 26, 0); }
-    50% { box-shadow: 0 0 0 4px rgba(250, 166, 26, 0.45); }
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.08); }
 }
 @media (prefers-reduced-motion: reduce) {
     .voice-btn.voice-clip-arm.nudge { animation: none; box-shadow: 0 0 0 2px rgba(250, 166, 26, 0.6); }
@@ -290,7 +295,7 @@
     height: 6px;
     background: #ed4245;
     border-radius: 50%;
-    animation: live-dot-pulse 1s infinite;
+    animation: vp-live-dot-pulse 1s ease-in-out 3;
 }
 
 /* Camera Preview Box */
@@ -487,40 +492,18 @@
     border-radius: 50%;
 }
 
-/* Speaking state with green glowing ring */
+/* Speaking state with a green ring — STATIC, like the sidebar's (Chat.css):
+   a pulsing box-shadow repainted the participant list every frame for as
+   long as anybody was talking. The ring switching with the voice is the
+   signal. */
 .voice-user-avatar.speaking {
     border-color: #43b581;
     box-shadow: 0 0 0 3px rgba(67, 181, 129, 0.4), 0 0 12px rgba(67, 181, 129, 0.6);
-    animation: speaking-ring 1s infinite;
-}
-
-@keyframes speaking-ring {
-
-    0%,
-    100% {
-        box-shadow: 0 0 0 3px rgba(67, 181, 129, 0.4), 0 0 12px rgba(67, 181, 129, 0.6);
-    }
-
-    50% {
-        box-shadow: 0 0 0 4px rgba(67, 181, 129, 0.6), 0 0 20px rgba(67, 181, 129, 0.8);
-    }
 }
 
 /* Keep the pulse animation for the whole user row */
 .voice-user.speaking {
     background: rgba(67, 181, 129, 0.1);
-}
-
-@keyframes pulse {
-
-    0%,
-    100% {
-        transform: scale(1);
-    }
-
-    50% {
-        transform: scale(1.02);
-    }
 }
 
 .voice-user-name {
@@ -705,7 +688,7 @@
     border-radius: 4px;
     font-weight: 600;
     margin-left: auto;
-    animation: pulse-live 1.5s infinite;
+    animation: pulse-live 1.5s ease-in-out 3;
 }
 
 @keyframes pulse-live {
@@ -796,20 +779,9 @@
     margin-left: 8px;
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    animation: live-pulse 1.5s infinite;
+    /* Three pulses when it appears, then still (live-attention, Chat.css). */
+    animation: live-attention 1.5s ease-in-out 3;
     box-shadow: 0 0 8px rgba(237, 66, 69, 0.5);
-}
-
-@keyframes live-pulse {
-
-    0%,
-    100% {
-        box-shadow: 0 0 8px rgba(237, 66, 69, 0.5);
-    }
-
-    50% {
-        box-shadow: 0 0 16px rgba(237, 66, 69, 0.8);
-    }
 }
 
 /* Watch Stream button */
@@ -860,10 +832,11 @@
     height: 8px;
     background: #ed4245;
     border-radius: 50%;
-    animation: live-dot-pulse 1s infinite;
+    animation: vp-live-dot-pulse 1s ease-in-out 3;
 }
 
-@keyframes live-dot-pulse {
+/* Not Chat.css's live-dot-pulse (that one only fades): keyframes are global. */
+@keyframes vp-live-dot-pulse {
 
     0%,
     100% {

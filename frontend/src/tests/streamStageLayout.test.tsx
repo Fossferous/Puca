@@ -34,6 +34,7 @@ const notify = () => { for (const cb of [...subscribers]) cb(); };
 vi.mock('../components/voiceState', () => ({
     subscribeToStreamState: (cb: () => void) => { subscribers.add(cb); return () => { subscribers.delete(cb); }; },
     subscribeToVoiceUsers: () => () => { /* no voice users in these tests */ },
+    subscribeToSpeaking: () => () => { /* nobody speaks in these tests */ },
     getSelectedStreams: () => [...selected],
     getStreamData: (id: number) => STREAMS.get(id) ?? null,
     getAllStreamers: () => [...streamers],
