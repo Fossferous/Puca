@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.820 — 2026-09-26
 
+Sitting in a voice call costs far less: no more redrawing the window 165 times a second for speaking rings and LIVE badges, and one person talking no longer redraws the whole app. The clip buffer hands frames over as raw bytes, and calls now keep a minute-by-minute health line in the log.
 ### Fixed
 - **Sitting in a voice call costs far less.** Measured in a six-person call
   on the integrated graphics the desktop app uses: its graphics load fell
