@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.823 — 2026-09-26
 
+Stream diagnostics now cover the sending side, and the sign-in-screen service moves to a current web library.
 ### Improved
 - **A slow or choppy stream now explains itself in the log.** A stream that
   arrives at 22 frames a second with nothing lost on the way was decided on
