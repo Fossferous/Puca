@@ -894,9 +894,15 @@ pub struct AppState {
     pub task_events: Arc<crate::task_events::TaskEventHub>,
 
     /// Live + reserved usage of LiveKit SFU rooms, keyed by room name
-    /// ("sfu_<channel id>"). Fed by the /livekit/webhook event stream and by
-    /// token-mint reservations; backs node-global egress admission control.
+    /// ("sfu_<channel id>"). Fed by the /livekit/webhook event stream, by
+    /// token-mint reservations, and by a resync from LiveKit's RoomService at
+    /// startup and every few minutes (sfu::spawn_livekit_reconciler), which is
+    /// what makes a session that outlived a restart known here at all. Backs
+    /// node-global egress admission control and every SFU ejection.
     pub sfu_rooms: DashMap<String, crate::sfu::SfuRoomUsage>,
+    /// Events seen while a resync's snapshot is in flight (None otherwise);
+    /// the merge must not undo them. Lock order: this, then `sfu_rooms`.
+    pub sfu_resync_journal: std::sync::Mutex<Option<crate::sfu::SfuResyncJournal>>,
 
     /// Wake-signal transport (FCM doorbell; see src/wake). `NullWake` when
     /// unconfigured. The signal carries a constant — never data.
@@ -1224,6 +1230,7 @@ impl AppState {
             event_streams: DashMap::new(),
             task_events: crate::task_events::TaskEventHub::new(),
             sfu_rooms: DashMap::new(),
+            sfu_resync_journal: std::sync::Mutex::new(None),
             sfu_measured_egress_kbps: AtomicU64::new(0),
             sfu_measured_at: AtomicU64::new(0),
             next_conn_id: AtomicU64::new(1),

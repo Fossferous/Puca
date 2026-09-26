@@ -34,6 +34,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use dashmap::DashMap;
+
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -128,6 +130,9 @@ pub struct SfuRoomUsage {
 struct SfuConfig {
     /// Client-facing signaling URL (e.g. wss://sfu.example.com).
     url: String,
+    /// LIVEKIT_API_URL: where this process reaches LiveKit's server API. See
+    /// [`api_base`].
+    api_url: Option<String>,
     api_key: String,
     api_secret: String,
     /// Node-wide projected-egress ceiling, kbps.
@@ -153,6 +158,7 @@ fn sfu_config() -> Option<SfuConfig> {
     let getenv = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
     Some(SfuConfig {
         url: getenv("LIVEKIT_URL")?,
+        api_url: getenv("LIVEKIT_API_URL"),
         api_key: getenv("LIVEKIT_API_KEY")?,
         api_secret: getenv("LIVEKIT_API_SECRET")?,
         budget_kbps: getenv("SFU_EGRESS_BUDGET_MBPS")
@@ -174,6 +180,22 @@ fn sfu_config() -> Option<SfuConfig> {
 
 pub fn room_name_for_channel(channel_id: i64) -> String {
     format!("sfu_{channel_id}")
+}
+
+/// Where this process reaches LiveKit's server API (RoomService): LIVEKIT_API_URL
+/// when set, else the client-facing LIVEKIT_URL with ws(s) swapped for http(s).
+///
+/// Set it to the node's own listener (`http://127.0.0.1:7880` in the standard
+/// deploy) wherever LiveKit runs on the same host. The public URL goes out
+/// through the CDN and back in - and on a host DNS does NOT point at (a standby)
+/// it reaches the live node instead of this host's own, so that host's kicks
+/// and resyncs would act on calls it does not serve.
+fn api_base(cfg: &SfuConfig) -> String {
+    let base = match &cfg.api_url {
+        Some(u) => u.clone(),
+        None => cfg.url.replacen("wss://", "https://", 1).replacen("ws://", "http://", 1),
+    };
+    base.trim_end_matches('/').to_string()
 }
 
 /// Inverse of [`room_name_for_channel`]: `sfu_<id>` → channel id.
@@ -451,6 +473,439 @@ fn prune(state: &AppState) {
     });
 }
 
+// --- Resync from LiveKit -----------------------------------------------------
+//
+// `sfu_rooms` is otherwise fed only by mints and webhooks, so a restarted
+// backend knew nobody already in a call: a kick, ban or permission change could
+// not eject them, and admission counted their room as empty. The reconciler asks
+// LiveKit's RoomService which rooms and sessions exist - at startup, then every
+// SFU_RESYNC_SECS - and merges that in. It restores KNOWLEDGE only and never
+// ejects anyone itself: ejections still come from real events, so neither a
+// standby host nor a database that is briefly unreachable at boot can drop a
+// live call through it.
+
+/// Period of the reconcile after the first success (SFU_RESYNC_SECS overrides;
+/// 0 = stop after the first success). Also what repairs a lost webhook.
+const RESYNC_EVERY: Duration = Duration::from_secs(180);
+/// Waits between failed attempts - LiveKit down, or started after the backend
+/// (nothing orders the two units on a reboot).
+const RESYNC_RETRY_SECS: [u64; 6] = [1, 2, 4, 8, 16, 30];
+/// Events one resync will journal before it abandons that snapshot: a storm
+/// that large means the snapshot is stale anyway, and the next one will do.
+const JOURNAL_CAP: usize = 10_000;
+
+/// One LiveKit room as the resync sees it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LkRoom {
+    pub name: String,
+    /// Identities in state ACTIVE: the state `participant_joined` reports.
+    pub participants: Vec<String>,
+    /// Sids of tracks whose source is SCREEN_SHARE.
+    pub share_sids: Vec<String>,
+}
+
+/// Webhook events and confirmed evictions seen while a snapshot was in flight.
+/// The snapshot is older than every one of them, so the merge never undoes one.
+#[derive(Debug, Default)]
+pub struct SfuResyncJournal {
+    joined: HashSet<(String, String)>,
+    left: HashSet<(String, String)>,
+    published: HashSet<(String, String)>,
+    unpublished: HashSet<(String, String)>,
+    finished: HashSet<String>,
+    overflowed: bool,
+}
+
+/// An event for [`journal`]: (room, identity) or (room, track sid).
+pub(crate) enum JournalEntry<'a> {
+    Joined(&'a str, &'a str),
+    Left(&'a str, &'a str),
+    Published(&'a str, &'a str),
+    Unpublished(&'a str, &'a str),
+    Finished(&'a str),
+}
+
+impl SfuResyncJournal {
+    fn len(&self) -> usize {
+        self.joined.len() + self.left.len() + self.published.len() + self.unpublished.len() + self.finished.len()
+    }
+
+    fn record(&mut self, e: JournalEntry<'_>) {
+        if self.len() >= JOURNAL_CAP {
+            self.overflowed = true;
+            return;
+        }
+        let pair = |r: &str, k: &str| (r.to_string(), k.to_string());
+        match e {
+            JournalEntry::Joined(r, i) => {
+                self.joined.insert(pair(r, i));
+            }
+            JournalEntry::Left(r, i) => {
+                self.left.insert(pair(r, i));
+            }
+            JournalEntry::Published(r, s) => {
+                self.published.insert(pair(r, s));
+            }
+            JournalEntry::Unpublished(r, s) => {
+                self.unpublished.insert(pair(r, s));
+            }
+            JournalEntry::Finished(r) => {
+                self.finished.insert(r.to_string());
+            }
+        }
+    }
+
+    fn has(set: &HashSet<(String, String)>, room: &str, key: &str) -> bool {
+        set.contains(&(room.to_string(), key.to_string()))
+    }
+}
+
+/// Record an event for an in-flight resync, if there is one. Call it BEFORE
+/// touching `sfu_rooms` and never while holding one of its guards: the merge
+/// holds this lock while it writes the map, so the order is journal, then map.
+pub(crate) fn journal(state: &AppState, e: JournalEntry<'_>) {
+    let mut g = state.sfu_resync_journal.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(j) = g.as_mut() {
+        j.record(e);
+    }
+}
+
+/// What one resync saw and did. Counts only: which person was in which call is
+/// not something this server keeps a record of (see `AppState::clip_proposals`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ResyncReport {
+    pub rooms: usize,
+    pub participants: usize,
+    pub shares: usize,
+    /// Rooms LiveKit listed that are not `sfu_<channel id>`.
+    pub ignored: usize,
+    /// Sessions and shares this process did not know about.
+    pub added: usize,
+    /// Sessions and shares it knew that LiveKit no longer has.
+    pub cleared: usize,
+}
+
+/// Why a resync failed. Every failure leaves `sfu_rooms` exactly as it was.
+#[derive(Debug)]
+pub enum ResyncError {
+    Token(String),
+    Transport(String),
+    Refused(u16, String),
+    Malformed(String),
+    /// Too many events during the fetch to trust the snapshot; retried.
+    Busy,
+}
+
+impl std::fmt::Display for ResyncError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResyncError::Token(e) => write!(f, "could not sign a server-API token: {e}"),
+            ResyncError::Transport(e) => write!(f, "{e}"),
+            ResyncError::Refused(401, e) => write!(
+                f,
+                "LiveKit refused the server-API token (401): {e} - check LIVEKIT_API_KEY and LIVEKIT_API_SECRET"
+            ),
+            ResyncError::Refused(s, e) => write!(f, "LiveKit answered {s}: {e}"),
+            ResyncError::Malformed(e) => write!(f, "{e}"),
+            ResyncError::Busy => write!(f, "too many events arrived during the snapshot; it was discarded"),
+        }
+    }
+}
+
+/// An enum field as protobuf JSON may carry it: the name, or the number.
+fn enum_is(v: Option<&serde_json::Value>, name: &str, number: i64) -> bool {
+    match v {
+        Some(serde_json::Value::String(s)) => s == name,
+        Some(serde_json::Value::Number(n)) => n.as_i64() == Some(number),
+        _ => false,
+    }
+}
+
+/// `{"rooms":[{"name":..},..]}` -> names. LiveKit's Twirp JSON emits unset
+/// fields too, so a reply without the list is not "no rooms" but not a reply.
+fn parse_room_names(body: &str) -> Result<Vec<String>, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("ListRooms reply is not JSON: {e}"))?;
+    let rooms = v
+        .get("rooms")
+        .and_then(|r| r.as_array())
+        .ok_or("ListRooms reply carries no rooms list")?;
+    rooms
+        .iter()
+        .map(|r| {
+            r.get("name")
+                .and_then(|n| n.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| "ListRooms listed a room with no name".to_string())
+        })
+        .collect()
+}
+
+/// `{"participants":[..]}` -> (ACTIVE identities, SCREEN_SHARE track sids).
+///
+/// ACTIVE only: a JOINING or JOINED session may still abort, which LiveKit
+/// reports as `participant_connection_aborted` - never the `participant_left`
+/// this backend acts on - so importing one could leave a seat nobody frees.
+/// It is imported on a later resync, or by its own `participant_joined`.
+fn parse_participants(body: &str) -> Result<(Vec<String>, Vec<String>), String> {
+    let v: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("ListParticipants reply is not JSON: {e}"))?;
+    let list = v
+        .get("participants")
+        .and_then(|p| p.as_array())
+        .ok_or("ListParticipants reply carries no participants list")?;
+    let mut ids = Vec::new();
+    let mut shares = Vec::new();
+    for p in list {
+        if !enum_is(p.get("state"), "ACTIVE", 2) {
+            continue;
+        }
+        let Some(id) = p.get("identity").and_then(|i| i.as_str()).filter(|i| !i.is_empty()) else {
+            continue;
+        };
+        ids.push(id.to_string());
+        let tracks = p.get("tracks").and_then(|t| t.as_array());
+        for t in tracks.into_iter().flatten() {
+            if !enum_is(t.get("source"), "SCREEN_SHARE", 3) {
+                continue;
+            }
+            if let Some(sid) = t.get("sid").and_then(|s| s.as_str()).filter(|s| !s.is_empty()) {
+                shares.push(sid.to_string());
+            }
+        }
+    }
+    Ok((ids, shares))
+}
+
+/// One RoomService call. A non-2xx is LiveKit's reason (Twirp's `{"code","msg"}`),
+/// never an empty answer.
+async fn twirp(
+    client: &reqwest::Client,
+    cfg: &SfuConfig,
+    method: &str,
+    token: &str,
+    body: serde_json::Value,
+) -> Result<String, ResyncError> {
+    let resp = client
+        .post(format!("{}/twirp/livekit.RoomService/{method}", api_base(cfg)))
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| ResyncError::Transport(format!("{method}: {}", crate::http_err::http_err(&e))))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| ResyncError::Transport(format!("{method}: {}", crate::http_err::http_err(&e))))?;
+    if !status.is_success() {
+        let snippet: String = text.trim().chars().take(200).collect();
+        return Err(ResyncError::Refused(status.as_u16(), format!("{method}: {snippet}")));
+    }
+    Ok(text)
+}
+
+/// Every `sfu_<channel>` room LiveKit has, with its sessions, and how many
+/// other rooms it listed. All or nothing: one failed call fails the snapshot,
+/// because a room missing from a partial answer would read as "empty" and
+/// clear sessions that are still live.
+async fn fetch_snapshot(cfg: &SfuConfig, client: &reqwest::Client) -> Result<(Vec<LkRoom>, usize), ResyncError> {
+    let token = mint_list_token(cfg).map_err(|e| ResyncError::Token(e.to_string()))?;
+    let names = parse_room_names(&twirp(client, cfg, "ListRooms", &token, serde_json::json!({})).await?)
+        .map_err(ResyncError::Malformed)?;
+    let mut rooms = Vec::new();
+    let mut ignored = 0;
+    for name in names {
+        // The canonical spelling only: eviction rebuilds the name from the
+        // channel id, so an entry kept as "sfu_05" or "sfu_+5" would never be
+        // found by it.
+        let ours = channel_id_from_room(&name).is_some_and(|cid| room_name_for_channel(cid) == name);
+        if !ours {
+            ignored += 1;
+            continue;
+        }
+        let token = mint_admin_token(cfg, &name).map_err(|e| ResyncError::Token(e.to_string()))?;
+        let body = twirp(client, cfg, "ListParticipants", &token, serde_json::json!({ "room": name })).await?;
+        let (participants, share_sids) = parse_participants(&body).map_err(ResyncError::Malformed)?;
+        rooms.push(LkRoom { name, participants, share_sids });
+    }
+    Ok((rooms, ignored))
+}
+
+/// Merge a snapshot into `rooms`. The snapshot was requested at `started`, and
+/// every webhook or eviction since then is in `journal` and wins over it.
+///
+/// - A listed session is added if absent, at `now` (the fail-safe choice for
+///   admission's "settled" count), and a known one keeps its time. One that
+///   left since `started` is not brought back. A listed identity holding a
+///   reservation moves to participants, as its join would have moved it.
+/// - A known session LiveKit does not list is cleared only if it was known
+///   before `started` and no join was seen since: a `participant_left` that
+///   never arrived. The same holds for rooms LiveKit no longer has at all.
+/// - Screen shares follow the same rules, by track sid.
+/// - Reservations are never added, expired or cleared here: a minted token's
+///   room does not exist in LiveKit until its first join.
+fn merge_snapshot(
+    rooms: &DashMap<String, SfuRoomUsage>,
+    snap: &[LkRoom],
+    journal: &SfuResyncJournal,
+    started: Instant,
+    now: Instant,
+) -> ResyncReport {
+    let mut report = ResyncReport::default();
+    let listed_rooms: HashSet<&str> = snap.iter().map(|r| r.name.as_str()).collect();
+    for room in snap {
+        report.rooms += 1;
+        report.participants += room.participants.len();
+        report.shares += room.share_sids.len();
+        if journal.finished.contains(&room.name) {
+            continue;
+        }
+        let name = room.name.as_str();
+        let listed: HashSet<&str> = room.participants.iter().map(String::as_str).collect();
+        let listed_shares: HashSet<&str> = room.share_sids.iter().map(String::as_str).collect();
+        let mut u = rooms.entry(room.name.clone()).or_default();
+        for id in &room.participants {
+            if SfuResyncJournal::has(&journal.left, name, id) {
+                continue;
+            }
+            u.reservations.remove(id);
+            if !u.participants.contains_key(id) {
+                u.participants.insert(id.clone(), now);
+                report.added += 1;
+            }
+        }
+        let before = u.participants.len();
+        u.participants.retain(|id, seen| {
+            listed.contains(id.as_str()) || *seen >= started || SfuResyncJournal::has(&journal.joined, name, id)
+        });
+        report.cleared += before - u.participants.len();
+        for sid in &room.share_sids {
+            if SfuResyncJournal::has(&journal.unpublished, name, sid) {
+                continue;
+            }
+            if u.screen_shares.insert(sid.clone()) {
+                report.added += 1;
+            }
+        }
+        let before = u.screen_shares.len();
+        u.screen_shares
+            .retain(|sid| listed_shares.contains(sid.as_str()) || SfuResyncJournal::has(&journal.published, name, sid));
+        report.cleared += before - u.screen_shares.len();
+    }
+    // Rooms LiveKit no longer has at all: their sessions ended unseen. Keys
+    // first, so no guard is held while each entry is rewritten.
+    let gone: Vec<String> = rooms
+        .iter()
+        .map(|r| r.key().clone())
+        .filter(|k| !listed_rooms.contains(k.as_str()))
+        .collect();
+    for name in gone {
+        if let Some(mut u) = rooms.get_mut(&name) {
+            let before = u.participants.len() + u.screen_shares.len();
+            u.participants
+                .retain(|id, seen| *seen >= started || SfuResyncJournal::has(&journal.joined, &name, id));
+            u.screen_shares
+                .retain(|sid| SfuResyncJournal::has(&journal.published, &name, sid));
+            report.cleared += before - (u.participants.len() + u.screen_shares.len());
+        }
+    }
+    report
+}
+
+/// One resync: open the journal, take the snapshot, merge it under the
+/// journal's lock, prune. Only ever run from the one reconciler task - two at
+/// once would share, and wipe, one journal.
+async fn resync_once(state: &AppState, cfg: &SfuConfig, client: &reqwest::Client) -> Result<ResyncReport, ResyncError> {
+    *state.sfu_resync_journal.lock().unwrap_or_else(|p| p.into_inner()) = Some(SfuResyncJournal::default());
+    let started = Instant::now();
+    let fetched = fetch_snapshot(cfg, client).await;
+    let report = {
+        let mut g = state.sfu_resync_journal.lock().unwrap_or_else(|p| p.into_inner());
+        let journal = g.take().unwrap_or_default();
+        let (rooms, ignored) = fetched?;
+        if journal.overflowed {
+            return Err(ResyncError::Busy);
+        }
+        let mut report = merge_snapshot(&state.sfu_rooms, &rooms, &journal, started, Instant::now());
+        report.ignored = ignored;
+        report
+    };
+    prune(state);
+    Ok(report)
+}
+
+/// Background task: resync from LiveKit now, then every SFU_RESYNC_SECS
+/// (default 180; 0 = stop after the first success), backing off while LiveKit
+/// cannot be read. No-op when the SFU tier is not deployed.
+pub fn spawn_livekit_reconciler(state: Arc<AppState>) {
+    if sfu_config().is_none() {
+        return;
+    }
+    let every = std::env::var("SFU_RESYNC_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(RESYNC_EVERY);
+    tokio::spawn(async move {
+        let client = match reqwest::Client::builder().timeout(Duration::from_secs(10)).build() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("SFU resync: could not build an HTTP client: {}", crate::http_err::http_err(&e));
+                return;
+            }
+        };
+        let mut failures = 0usize;
+        let mut synced = false;
+        let mut reported_down = false;
+        loop {
+            let Some(cfg) = sfu_config() else { return };
+            match resync_once(&state, &cfg, &client).await {
+                Ok(r) => {
+                    if !synced {
+                        tracing::info!(
+                            "SFU resync: LiveKit has {} room(s), {} session(s), {} screen share(s); this process now knows them ({} added, {} cleared, {} other room(s) ignored)",
+                            r.rooms,
+                            r.participants,
+                            r.shares,
+                            r.added,
+                            r.cleared,
+                            r.ignored
+                        );
+                    } else if r.added > 0 || r.cleared > 0 {
+                        tracing::warn!(
+                            "SFU resync: LiveKit disagreed with this process ({} added, {} cleared) - webhooks were lost",
+                            r.added,
+                            r.cleared
+                        );
+                    }
+                    if reported_down {
+                        tracing::info!("SFU resync: LiveKit's rooms are readable again");
+                        reported_down = false;
+                    }
+                    synced = true;
+                    failures = 0;
+                    if every.is_zero() {
+                        return;
+                    }
+                    tokio::time::sleep(every).await;
+                }
+                Err(e) => {
+                    if !reported_down {
+                        tracing::warn!(
+                            "SFU resync: cannot read LiveKit's rooms ({e}); until it can, sessions from before this process started cannot be ejected or counted - retrying"
+                        );
+                        reported_down = true;
+                    }
+                    let wait = RESYNC_RETRY_SECS[failures.min(RESYNC_RETRY_SECS.len() - 1)];
+                    failures += 1;
+                    tokio::time::sleep(Duration::from_secs(wait)).await;
+                }
+            }
+        }
+    });
+}
+
 // --- LiveKit access token ---------------------------------------------------
 
 #[derive(Serialize)]
@@ -464,6 +919,9 @@ struct VideoGrant<'a> {
     /// Server-side room management (RemoveParticipant). Only set on admin tokens.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     room_admin: bool,
+    /// Listing every room (ListRooms). Only set on the resync's list token.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    room_list: bool,
     // NEVER skipped when false: LiveKit's default for an ABSENT canPublish /
     // canSubscribe / canPublishData is TRUE, so skipping the false value
     // handed a member with no media permission the full grant (the deny case
@@ -558,6 +1016,7 @@ fn mint_join_token(
             room_join: true,
             room_create: false,
             room_admin: false,
+            room_list: false,
             can_publish,
             can_subscribe: true,
             can_publish_data: true,
@@ -574,6 +1033,20 @@ fn mint_join_token(
 /// Mint a short-lived admin token for a server-to-server LiveKit API call
 /// (RemoveParticipant). No join/publish/subscribe grants — room admin only.
 fn mint_admin_token(cfg: &SfuConfig, room: &str) -> Result<String, jsonwebtoken::errors::Error> {
+    mint_service_token(cfg, room, true, false)
+}
+
+/// ListRooms checks `roomList` alone; it is not scoped to a room.
+fn mint_list_token(cfg: &SfuConfig) -> Result<String, jsonwebtoken::errors::Error> {
+    mint_service_token(cfg, "", false, true)
+}
+
+fn mint_service_token(
+    cfg: &SfuConfig,
+    room: &str,
+    room_admin: bool,
+    room_list: bool,
+) -> Result<String, jsonwebtoken::errors::Error> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -590,7 +1063,8 @@ fn mint_admin_token(cfg: &SfuConfig, room: &str) -> Result<String, jsonwebtoken:
             room,
             room_join: false,
             room_create: false,
-            room_admin: true,
+            room_admin,
+            room_list,
             can_publish: false,
             can_subscribe: false,
             can_publish_data: false,
@@ -611,10 +1085,10 @@ fn mint_admin_token(cfg: &SfuConfig, room: &str) -> Result<String, jsonwebtoken:
 /// ParticipantDisconnected on remaining clients, which drives an immediate media
 /// key rotation (closing the forward-secrecy latency window).
 ///
-/// Only identities this process has SEEN can be evicted: a mint reservation
-/// (60 s) or a `participant_joined` webhook since it last started. It does not
-/// ask LiveKit who is connected, so a session that outlived a backend restart
-/// is invisible here until it rejoins (where the webhook re-check applies).
+/// It evicts the identities `sfu_rooms` knows: mint reservations (60 s),
+/// `participant_joined` webhooks, and what the LiveKit resync found (see
+/// [`spawn_livekit_reconciler`]) - which is how a session that outlived a
+/// backend restart is known at all.
 pub async fn evict_user_from_channel(state: &Arc<AppState>, channel_id: i64, user_id: i64) -> Evicted {
     let Some(cfg) = sfu_config() else { return Evicted::default() };
     let room = room_name_for_channel(channel_id);
@@ -643,16 +1117,8 @@ pub async fn evict_user_from_channel(state: &Arc<AppState>, channel_id: i64, use
             return Evicted { tried, removed: 0 };
         }
     };
-    // LiveKit twirp: POST {url}/twirp/livekit.RoomService/RemoveParticipant.
-    // Derive the HTTP base from the signaling URL (ws->http, wss->https).
-    let http_base = cfg
-        .url
-        .replacen("wss://", "https://", 1)
-        .replacen("ws://", "http://", 1);
-    let endpoint = format!(
-        "{}/twirp/livekit.RoomService/RemoveParticipant",
-        http_base.trim_end_matches('/')
-    );
+    // LiveKit twirp: POST {api}/twirp/livekit.RoomService/RemoveParticipant.
+    let endpoint = format!("{}/twirp/livekit.RoomService/RemoveParticipant", api_base(&cfg));
     // A per-request timeout: this loops over participants awaiting each call,
     // so a single hung LiveKit connection (dropped node, network black hole)
     // would otherwise stall the whole eviction — and eviction runs on the
@@ -678,6 +1144,9 @@ pub async fn evict_user_from_channel(state: &Arc<AppState>, channel_id: i64, use
         match resp {
             Ok(r) if r.status().is_success() => {
                 removed += 1;
+                // Journal first: a resync whose snapshot still listed this
+                // session must not bring it back.
+                journal(state, JournalEntry::Left(&room, &identity));
                 // Drop from local usage so the egress projection frees the slot
                 // without waiting for the participant_left webhook.
                 if let Some(mut u) = state.sfu_rooms.get_mut(&room) {
@@ -941,6 +1410,7 @@ pub async fn livekit_webhook(
             {
                 let channel_id = channel_id_from_room(&room);
                 let user_id = user_id_from_identity(identity);
+                journal(&state, JournalEntry::Joined(&room, identity));
                 {
                     // Record first, in a scope of its own: the map guard must be
                     // gone before any await, and the eviction below finds this
@@ -1000,6 +1470,7 @@ pub async fn livekit_webhook(
                 .pointer("/participant/identity")
                 .and_then(|v| v.as_str())
             {
+                journal(&state, JournalEntry::Left(&room, identity));
                 if let Some(mut u) = state.sfu_rooms.get_mut(&room) {
                     u.participants.remove(identity);
                 }
@@ -1016,6 +1487,14 @@ pub async fn livekit_webhook(
                 .unwrap_or("");
             // Source is protobuf-JSON: "SCREEN_SHARE" (and "SCREEN_SHARE_AUDIO").
             if source == "SCREEN_SHARE" && !sid.is_empty() {
+                journal(
+                    &state,
+                    if kind == "track_published" {
+                        JournalEntry::Published(&room, sid)
+                    } else {
+                        JournalEntry::Unpublished(&room, sid)
+                    },
+                );
                 let mut u = state.sfu_rooms.entry(room).or_default();
                 if kind == "track_published" {
                     u.screen_shares.insert(sid.to_string());
@@ -1025,6 +1504,7 @@ pub async fn livekit_webhook(
             }
         }
         "room_finished" => {
+            journal(&state, JournalEntry::Finished(&room));
             state.sfu_rooms.remove(&room);
         }
         _ => {}
@@ -1330,7 +1810,7 @@ mod grant_serialization_tests {
     #[test]
     fn a_denied_publish_grant_says_so_on_the_wire() {
         let g = VideoGrant {
-            room: "r", room_join: true, room_create: false, room_admin: false,
+            room: "r", room_join: true, room_create: false, room_admin: false, room_list: false,
             can_publish: false, can_subscribe: true, can_publish_data: true,
             can_publish_sources: vec![],
         };
@@ -1339,5 +1819,383 @@ mod grant_serialization_tests {
         assert!(json.contains("\"canSubscribe\":true"), "{json}");
         assert!(!json.contains("canPublishSources"), "an empty list is omitted; canPublish:false is what denies — {json}");
         assert!(!json.contains("roomCreate"), "false room flags stay absent (LiveKit defaults them to false) — {json}");
+        assert!(!json.contains("roomList"), "{json}");
+    }
+}
+
+#[cfg(test)]
+mod resync_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn listed(name: &str, ids: &[&str], shares: &[&str]) -> LkRoom {
+        LkRoom {
+            name: name.into(),
+            participants: ids.iter().map(|s| s.to_string()).collect(),
+            share_sids: shares.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn usage(parts: &[(&str, Instant)], res: &[&str], shares: &[&str]) -> SfuRoomUsage {
+        SfuRoomUsage {
+            participants: parts.iter().map(|(i, t)| (i.to_string(), *t)).collect(),
+            reservations: res.iter().map(|i| (i.to_string(), Instant::now())).collect(),
+            screen_shares: shares.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    // ---- parsing: what LiveKit v1.13.4's Twirp JSON actually looks like -----------
+
+    /// Proto field names, EVERY field emitted (unset ones as "", 0, [] or
+    /// "JOINING"), 64-bit integers as strings, enums by name.
+    const PARTICIPANTS_SNAKE: &str = r#"{"participants":[
+        {"sid":"PA_1","identity":"u5#aa","state":"ACTIVE","tracks":[
+            {"sid":"TR_cam","type":"VIDEO","source":"CAMERA"},
+            {"sid":"TR_scr","type":"VIDEO","source":"SCREEN_SHARE"},
+            {"sid":"TR_sca","type":"AUDIO","source":"SCREEN_SHARE_AUDIO"}],
+         "joined_at":"1727350000","joined_at_ms":"1727350000123","is_publisher":true},
+        {"sid":"PA_2","identity":"u6#bb","state":"JOINING","tracks":[],"joined_at":"0"},
+        {"sid":"PA_3","identity":"u7#cc","state":"JOINED","tracks":[]},
+        {"sid":"PA_4","identity":"u8#dd","state":"DISCONNECTED","tracks":[]},
+        {"sid":"PA_5","identity":"","state":"ACTIVE","tracks":[]}]}"#;
+
+    #[test]
+    fn only_active_sessions_and_screen_shares_are_taken() {
+        let (ids, shares) = parse_participants(PARTICIPANTS_SNAKE).expect("parses");
+        assert_eq!(ids, vec!["u5#aa".to_string()], "JOINING, JOINED, DISCONNECTED and a blank identity are not sessions");
+        assert_eq!(shares, vec!["TR_scr".to_string()], "the camera and the share's AUDIO are not screen shares");
+    }
+
+    #[test]
+    fn enums_as_numbers_and_camel_case_parse_the_same() {
+        // What protojson emits with other options: enum numbers, camelCase,
+        // unset fields omitted. ACTIVE = 2, SCREEN_SHARE = 3.
+        let body = r#"{"participants":[{"identity":"u5#aa","state":2,"tracks":[{"sid":"TR_scr","source":3},{"sid":"TR_cam","source":1}],"joinedAt":"1"},{"identity":"u6#bb"}]}"#;
+        let (ids, shares) = parse_participants(body).expect("parses");
+        assert_eq!(ids, vec!["u5#aa".to_string()], "no state at all is JOINING (0), not ACTIVE");
+        assert_eq!(shares, vec!["TR_scr".to_string()]);
+    }
+
+    #[test]
+    fn a_reply_without_its_list_is_an_error_not_an_empty_room() {
+        // LiveKit emits unset lists as []; a body without one is not LiveKit's
+        // answer (a proxy page, an error shape), and reading it as "nobody here"
+        // would clear live sessions.
+        assert!(parse_participants(r#"{"code":"unauthenticated","msg":"no"}"#).is_err());
+        assert!(parse_room_names(r#"{"code":"unauthenticated","msg":"no"}"#).is_err());
+        assert!(parse_room_names("<html>").is_err());
+        assert_eq!(parse_participants(r#"{"participants":[]}"#).expect("empty is fine"), (vec![], vec![]));
+        assert_eq!(
+            parse_room_names(r#"{"rooms":[{"sid":"RM_1","name":"sfu_7","num_participants":1,"creation_time":"1"}]}"#).expect("parses"),
+            vec!["sfu_7".to_string()]
+        );
+    }
+
+    // ---- the merge -------------------------------------------------------------------
+
+    #[test]
+    fn a_session_nobody_told_this_process_about_is_learned() {
+        let rooms = DashMap::new();
+        let journal = SfuResyncJournal::default();
+        let started = Instant::now();
+        let r = merge_snapshot(&rooms, &[listed("sfu_7", &["u5#aa"], &["TR_scr"])], &journal, started, Instant::now());
+        let u = rooms.get("sfu_7").expect("the room is known now");
+        assert!(u.participants.contains_key("u5#aa"), "THE GAP: after a restart this map was empty");
+        assert!(u.screen_shares.contains("TR_scr"));
+        assert_eq!((r.rooms, r.participants, r.shares, r.added, r.cleared), (1, 1, 1, 2, 0));
+    }
+
+    #[test]
+    fn a_known_session_keeps_its_time() {
+        let rooms = DashMap::new();
+        let long_ago = Instant::now();
+        rooms.insert("sfu_7".to_string(), usage(&[("u5#aa", long_ago)], &[], &[]));
+        std::thread::sleep(Duration::from_millis(5));
+        let started = Instant::now();
+        let r = merge_snapshot(&rooms, &[listed("sfu_7", &["u5#aa"], &[])], &SfuResyncJournal::default(), started, Instant::now());
+        assert_eq!(rooms.get("sfu_7").unwrap().participants["u5#aa"], long_ago, "admission's settled count must not reset every resync");
+        assert_eq!((r.added, r.cleared), (0, 0));
+    }
+
+    #[test]
+    fn a_session_that_left_during_the_fetch_is_not_brought_back() {
+        let rooms = DashMap::new();
+        let mut journal = SfuResyncJournal::default();
+        journal.record(JournalEntry::Left("sfu_7", "u5#aa"));
+        let started = Instant::now();
+        merge_snapshot(&rooms, &[listed("sfu_7", &["u5#aa", "u6#bb"], &[])], &journal, started, Instant::now());
+        let u = rooms.get("sfu_7").unwrap();
+        assert!(!u.participants.contains_key("u5#aa"), "the snapshot predates the leave");
+        // Positive control: the same snapshot DOES add an identity with no
+        // journal entry, so the line above is the journal's doing.
+        assert!(u.participants.contains_key("u6#bb"));
+    }
+
+    #[test]
+    fn a_share_unpublished_during_the_fetch_is_not_brought_back() {
+        let rooms = DashMap::new();
+        let mut journal = SfuResyncJournal::default();
+        journal.record(JournalEntry::Unpublished("sfu_7", "TR_1"));
+        merge_snapshot(&rooms, &[listed("sfu_7", &["u5#aa"], &["TR_1", "TR_2"])], &journal, Instant::now(), Instant::now());
+        let u = rooms.get("sfu_7").unwrap();
+        assert!(!u.screen_shares.contains("TR_1"));
+        assert!(u.screen_shares.contains("TR_2"), "control");
+    }
+
+    #[test]
+    fn a_lost_leave_is_cleared_but_nothing_newer_than_the_snapshot_is() {
+        let rooms = DashMap::new();
+        let before = Instant::now();
+        rooms.insert("sfu_7".to_string(), usage(&[("u5#gone", before), ("u6#joined", before)], &[], &["TR_gone"]));
+        std::thread::sleep(Duration::from_millis(5));
+        let started = Instant::now();
+        let mut journal = SfuResyncJournal::default();
+        // Joined DURING the fetch (the snapshot missed it, the webhook did not).
+        journal.record(JournalEntry::Joined("sfu_7", "u6#joined"));
+        // Inserted after the request went out, by a join this snapshot cannot know.
+        rooms.get_mut("sfu_7").unwrap().participants.insert("u7#late".into(), Instant::now());
+        let r = merge_snapshot(&rooms, &[listed("sfu_7", &[], &[])], &journal, started, Instant::now());
+        let u = rooms.get("sfu_7").unwrap();
+        assert!(!u.participants.contains_key("u5#gone"), "a participant_left that never arrived");
+        assert!(u.participants.contains_key("u6#joined"), "journaled join kept");
+        assert!(u.participants.contains_key("u7#late"), "newer than the snapshot kept");
+        assert!(!u.screen_shares.contains("TR_gone"));
+        assert_eq!(r.cleared, 2);
+    }
+
+    #[test]
+    fn reservations_are_never_the_resyncs_business() {
+        let rooms = DashMap::new();
+        // A minted token whose room LiveKit does not have yet (it is created by
+        // the first join), and one whose holder the snapshot lists as joined.
+        rooms.insert("sfu_8".to_string(), usage(&[], &["u9#minted"], &[]));
+        rooms.insert("sfu_7".to_string(), usage(&[], &["u5#aa", "u6#waiting"], &[]));
+        merge_snapshot(&rooms, &[listed("sfu_7", &["u5#aa"], &[])], &SfuResyncJournal::default(), Instant::now(), Instant::now());
+        assert!(rooms.get("sfu_8").unwrap().reservations.contains_key("u9#minted"), "a room LiveKit lacks keeps its reservations");
+        let u = rooms.get("sfu_7").unwrap();
+        assert!(u.reservations.contains_key("u6#waiting"), "an unlisted reservation stays");
+        assert!(!u.reservations.contains_key("u5#aa") && u.participants.contains_key("u5#aa"), "a listed reservation moves, as its join would move it");
+    }
+
+    #[test]
+    fn a_room_that_ended_unseen_is_cleared_and_a_finished_one_is_left_alone() {
+        let rooms = DashMap::new();
+        let before = Instant::now();
+        rooms.insert("sfu_9".to_string(), usage(&[("u5#aa", before)], &[], &["TR_1"]));
+        std::thread::sleep(Duration::from_millis(5));
+        let started = Instant::now();
+        let mut journal = SfuResyncJournal::default();
+        journal.record(JournalEntry::Finished("sfu_7"));
+        let r = merge_snapshot(&rooms, &[listed("sfu_7", &["u6#bb"], &[])], &journal, started, Instant::now());
+        let u = rooms.get("sfu_9").unwrap();
+        assert!(u.participants.is_empty() && u.screen_shares.is_empty(), "LiveKit no longer has sfu_9 at all");
+        assert!(rooms.get("sfu_7").is_none(), "room_finished during the fetch: the snapshot's view of it is stale");
+        assert_eq!(r.cleared, 2);
+    }
+
+    #[test]
+    fn an_overflowing_journal_marks_itself() {
+        let mut j = SfuResyncJournal::default();
+        for i in 0..JOURNAL_CAP {
+            j.record(JournalEntry::Joined("sfu_1", &format!("u{i}#x")));
+        }
+        assert!(!j.overflowed, "exactly at the cap is still whole");
+        j.record(JournalEntry::Left("sfu_1", "u0#x"));
+        assert!(j.overflowed);
+    }
+
+    // ---- the calls, over a socket -------------------------------------------------------
+
+    fn cfg_for(base: &str) -> SfuConfig {
+        SfuConfig {
+            url: base.replacen("http://", "ws://", 1),
+            api_url: None,
+            api_key: "rig-key".into(),
+            api_secret: "rig-secret-0123456789abcdef0123456789".into(),
+            budget_kbps: 30_000,
+            room_max_participants: 8,
+            max_screen_shares: usize::MAX,
+        }
+    }
+
+    #[test]
+    fn the_admin_api_url_prefers_livekit_api_url() {
+        let mut cfg = cfg_for("http://127.0.0.1:1");
+        cfg.url = "wss://sfu.example.com/".into();
+        assert_eq!(api_base(&cfg), "https://sfu.example.com");
+        cfg.api_url = Some("http://127.0.0.1:7880/".into());
+        assert_eq!(api_base(&cfg), "http://127.0.0.1:7880", "the host's own node, not the public name");
+    }
+
+    struct Seen {
+        body: String,
+        claims: serde_json::Value,
+    }
+
+    /// Serve `script` in order, one connection each: (path it must be, status,
+    /// reply). Returns what was asked. Bounded by the caller.
+    async fn livekit_stand_in(
+        script: Vec<(&'static str, u16, String)>,
+        on_participants: Option<Box<dyn Fn() + Send>>,
+    ) -> (String, tokio::task::JoinHandle<Vec<Seen>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        let task = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for (want, status, reply) in script {
+                let (mut s, _) = listener.accept().await.expect("accept");
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let (head, body) = loop {
+                    let n = s.read(&mut chunk).await.expect("read");
+                    assert!(n > 0, "closed before a whole request");
+                    buf.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let len = text[..end]
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if buf.len() >= end + 4 + len {
+                            break (text[..end].to_string(), text[end + 4..end + 4 + len].to_string());
+                        }
+                    }
+                };
+                let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                assert_eq!(path, want, "the calls come in this order");
+                let bearer = head
+                    .lines()
+                    .find_map(|l| l.to_ascii_lowercase().starts_with("authorization:").then(|| l.to_string()))
+                    .and_then(|l| l.split_whitespace().nth(2).map(str::to_string))
+                    .unwrap_or_default();
+                let claims = bearer
+                    .split('.')
+                    .nth(1)
+                    .and_then(|p| base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, p).ok())
+                    .and_then(|raw| serde_json::from_slice(&raw).ok())
+                    .unwrap_or(serde_json::Value::Null);
+                if path.ends_with("ListParticipants") {
+                    if let Some(f) = &on_participants {
+                        f();
+                    }
+                }
+                seen.push(Seen { body, claims });
+                let resp = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                    reply.len()
+                );
+                s.write_all(resp.as_bytes()).await.expect("write");
+                let _ = s.shutdown().await;
+            }
+            seen
+        });
+        (base, task)
+    }
+
+    async fn asked(task: tokio::task::JoinHandle<Vec<Seen>>) -> Vec<Seen> {
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("a scripted call never came")
+            .expect("stand-in")
+    }
+
+    fn client() -> reqwest::Client {
+        reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(10)).build().expect("client")
+    }
+
+    #[tokio::test]
+    async fn the_snapshot_lists_rooms_then_each_rooms_sessions_with_the_right_grants() {
+        let (base, srv) = livekit_stand_in(
+            vec![
+                ("/twirp/livekit.RoomService/ListRooms", 200,
+                 r#"{"rooms":[{"name":"sfu_7"},{"name":"sfu_07"},{"name":"someone-elses"}]}"#.to_string()),
+                ("/twirp/livekit.RoomService/ListParticipants", 200, PARTICIPANTS_SNAKE.to_string()),
+            ],
+            None,
+        )
+        .await;
+        let (rooms, ignored) = fetch_snapshot(&cfg_for(&base), &client()).await.expect("snapshot");
+        assert_eq!(rooms, vec![listed("sfu_7", &["u5#aa"], &["TR_scr"])]);
+        assert_eq!(ignored, 2, "a non-canonical spelling and a foreign room are not ours");
+        let seen = asked(srv).await;
+        assert_eq!(seen[0].body, "{}");
+        assert_eq!(seen[0].claims["video"]["roomList"], true, "ListRooms needs roomList");
+        assert_eq!(seen[0].claims["iss"], "rig-key");
+        let body: serde_json::Value = serde_json::from_str(&seen[1].body).expect("json");
+        assert_eq!(body, serde_json::json!({ "room": "sfu_7" }));
+        assert_eq!(seen[1].claims["video"]["roomAdmin"], true);
+        assert_eq!(seen[1].claims["video"]["room"], "sfu_7", "LiveKit matches the admin grant's room exactly");
+    }
+
+    #[tokio::test]
+    async fn a_failed_room_fails_the_whole_snapshot() {
+        let (base, srv) = livekit_stand_in(
+            vec![
+                ("/twirp/livekit.RoomService/ListRooms", 200, r#"{"rooms":[{"name":"sfu_7"},{"name":"sfu_8"}]}"#.to_string()),
+                ("/twirp/livekit.RoomService/ListParticipants", 200, r#"{"participants":[]}"#.to_string()),
+                ("/twirp/livekit.RoomService/ListParticipants", 500, r#"{"code":"internal","msg":"boom"}"#.to_string()),
+            ],
+            None,
+        )
+        .await;
+        match fetch_snapshot(&cfg_for(&base), &client()).await {
+            Err(ResyncError::Refused(500, m)) => assert!(m.contains("boom"), "{m}"),
+            other => panic!("a partial snapshot must not be used: {other:?}"),
+        }
+        asked(srv).await;
+    }
+
+    #[test]
+    fn a_401_names_the_credentials() {
+        let m = ResyncError::Refused(401, "ListRooms: {}".into()).to_string();
+        assert!(m.contains("LIVEKIT_API_KEY"), "{m}");
+    }
+
+    fn test_state() -> Arc<AppState> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/does_not_connect")
+            .expect("lazy pool");
+        AppState::new(pool, "test-secret".into(), None, Arc::new(crate::wake::NullWake))
+    }
+
+    /// THE RACE, end to end: while the snapshot is in flight, a webhook says one
+    /// listed session left. The merge must honour it, and must still learn the
+    /// other one.
+    #[tokio::test]
+    async fn a_leave_that_lands_during_the_resync_wins_over_its_snapshot() {
+        let state = test_state();
+        let during = Arc::clone(&state);
+        let (base, srv) = livekit_stand_in(
+            vec![
+                ("/twirp/livekit.RoomService/ListRooms", 200, r#"{"rooms":[{"name":"sfu_7"}]}"#.to_string()),
+                ("/twirp/livekit.RoomService/ListParticipants", 200,
+                 r#"{"participants":[{"identity":"u5#left","state":"ACTIVE","tracks":[]},{"identity":"u6#stays","state":"ACTIVE","tracks":[]}]}"#.to_string()),
+            ],
+            Some(Box::new(move || journal(&during, JournalEntry::Left("sfu_7", "u5#left")))),
+        )
+        .await;
+        let r = resync_once(&state, &cfg_for(&base), &client()).await.expect("resync");
+        asked(srv).await;
+        let u = state.sfu_rooms.get("sfu_7").expect("room known");
+        assert!(!u.participants.contains_key("u5#left"), "the leave arrived after the snapshot was taken");
+        assert!(u.participants.contains_key("u6#stays"));
+        assert_eq!(r.added, 1);
+        assert!(state.sfu_resync_journal.lock().unwrap().is_none(), "the journal closes with the resync");
+    }
+
+    #[tokio::test]
+    async fn a_failed_resync_changes_nothing_and_closes_its_journal() {
+        let state = test_state();
+        state.sfu_rooms.insert("sfu_7".into(), usage(&[("u5#aa", Instant::now())], &[], &[]));
+        let (base, srv) = livekit_stand_in(
+            vec![("/twirp/livekit.RoomService/ListRooms", 401, r#"{"code":"unauthenticated","msg":"bad token"}"#.to_string())],
+            None,
+        )
+        .await;
+        let e = resync_once(&state, &cfg_for(&base), &client()).await.expect_err("401");
+        assert!(e.to_string().contains("LIVEKIT_API_KEY"), "{e}");
+        asked(srv).await;
+        assert!(state.sfu_rooms.get("sfu_7").unwrap().participants.contains_key("u5#aa"), "an unreadable LiveKit is not an empty one");
+        assert!(state.sfu_resync_journal.lock().unwrap().is_none());
     }
 }

@@ -590,7 +590,7 @@ pub async fn update_channel(
                         .get(&room_id)
                         .map(|r| r.members.iter().copied().collect())
                         .unwrap_or_default();
-                    for user_id in occupants {
+                    for &user_id in &occupants {
                         // cut_sfu: this is an ENFORCED removal — a client that
                         // ignores RoomLeft would otherwise keep publishing into
                         // a LiveKit room the channel no longer has.
@@ -602,6 +602,25 @@ pub async fn update_channel(
                             crate::ws::SelfNotice::Gone,
                         )
                         .await;
+                    }
+                    // A LiveKit session whose Púca socket is not in voice_<id>
+                    // (it never rejoined after a restart, or the socket died)
+                    // is not among the occupants; cut it at the SFU directly.
+                    // Collected first: no map guard may live across the awaits.
+                    let sfu_only: std::collections::BTreeSet<i64> = state
+                        .sfu_rooms
+                        .get(&crate::sfu::room_name_for_channel(channel_id))
+                        .map(|u| {
+                            u.participants
+                                .keys()
+                                .chain(u.reservations.keys())
+                                .filter_map(|i| crate::sfu::user_id_from_identity(i))
+                                .filter(|uid| !occupants.contains(uid))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    for user_id in sfu_only {
+                        crate::sfu::evict_user_from_channel(&state, channel_id, user_id).await;
                     }
                 }
             }

@@ -140,22 +140,22 @@ curl -s -H "Authorization: Bearer $JWT" https://chat.example.com/channels/<id>/s
   - a REJOIN with a token minted earlier is caught by the `participant_joined`
     webhook, which re-runs the mint-time permission check and evicts again.
 
-  Two limits, both by design of what the backend can see:
-  - it ejects only sessions it has SEEN since it last started - a token
-    minted in the last minute, or a `participant_joined` webhook. It never
-    asks LiveKit who is connected, so a participant already in a call when
-    the backend restarts cannot be ejected until they rejoin (where the
-    webhook re-check applies);
-  - the sweep's SFU pass only reaches channels that also have a Púca room
-    (`voice_<id>` / `channel_<id>`), which every real client joins (next
-    bullet). A participant outside those is not ejected by the sweep; if it
-    ever rejoins, the webhook refuses it.
+  What it can eject is what it knows: token mints, webhooks, and a resync
+  from LiveKit's RoomService (`ListRooms` + `ListParticipants`) at startup and
+  every `SFU_RESYNC_SECS` (180 s) - so a participant already in a call when
+  the backend restarts is known, and ejectable, as soon as LiveKit answers.
+  The resync never ejects anyone itself; it only restores knowledge (and
+  clears a session whose `participant_left` webhook was lost). The sweep and a
+  transport change also reach sessions whose Púca socket never rejoined.
+  Set `LIVEKIT_API_URL=http://127.0.0.1:7880` on every host that runs its own
+  LiveKit: without it these calls use the public `LIVEKIT_URL`, and a standby
+  host reaches the live node rather than its own. Startup logs one
+  `SFU resync: LiveKit has N room(s) ...` line; a failure logs
+  `SFU resync: cannot read LiveKit's rooms (...)` once per outage.
 
   In the log: a sweep writes `SFU perms eviction: user N removed ...` only
   when LiveKit confirmed every session, and `... NOT removed ... LiveKit
-  confirmed X of Y sessions` otherwise. A participant from before a restart
-  produces no line at all: the sweep takes its targets from the same record,
-  so it never learns of them. The webhook path writes `SFU join re-auth: evicting user N ...`
+  confirmed X of Y sessions` otherwise. The webhook path writes `SFU join re-auth: evicting user N ...`
   before it tries. Each failed call writes `SFU evict <identity>:` with
   LiveKit's status or the transport error and its cause.
 - **Remote control / voice status rely on the Puca WS room** — SFU

@@ -4284,14 +4284,27 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
             Some((r.key().clone(), cid, r.value().members.clone()))
         })
         .collect();
-    if snapshot.is_empty() {
+    // SFU rooms are candidates in their own right: a LiveKit session whose
+    // Púca socket is not in voice_<id> (it never rejoined after a restart, or
+    // it died) holds no mesh room, and the SFU pass below only sees channels
+    // in this scope.
+    let sfu_ids: Vec<i64> = state
+        .sfu_rooms
+        .iter()
+        .filter_map(|r| crate::sfu::channel_id_from_room(r.key()))
+        .collect();
+    if snapshot.is_empty() && sfu_ids.is_empty() {
         return;
     }
 
     // Restrict to rooms whose channel belongs to THIS server (one query).
     // `None` = the query failed and the scope is UNKNOWN; see sweep_keeps for
     // what the sweep then does with each member, and the retry below.
-    let candidate_ids: Vec<i64> = snapshot.iter().map(|(_, cid, _)| *cid).collect();
+    let candidate_ids: Vec<i64> = snapshot
+        .iter()
+        .map(|(_, cid, _)| *cid)
+        .chain(sfu_ids.iter().copied())
+        .collect();
     let scope: Option<std::collections::HashSet<i64>> = match sqlx::query_as::<_, (i32,)>(
         "SELECT id FROM channels WHERE server_id = $1 AND id::bigint = ANY($2)",
     )
