@@ -107,8 +107,24 @@
     const jitter = ([lo, hi]) => lo + Math.random() * (hi - lo);
     const b64 = (u8) => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
 
-    // ---- video: the pre-encoded access units, on the emulated agent's clock
-    function startVideo(generation) {
+    // ---- video: the pre-encoded access units, on the emulated agent's clock.
+    // Delivered as the shell delivers them: one raw binary message per access
+    // unit on the Channel the start was handed (clip_capture.rs chunk_frame,
+    // read by api/clips/chunkWire.ts), in Channel's {index, message} envelope.
+    function chunkFrame(key, generation, tsUs, durUs, width, height, codec, bytes) {
+        const c = codec ? new TextEncoder().encode(codec) : new Uint8Array(0);
+        const b = new ArrayBuffer(35 + c.length + bytes.length);
+        const v = new DataView(b);
+        v.setUint8(0, 1); v.setUint8(1, key ? 1 : 0);
+        v.setBigUint64(2, BigInt(generation), true); v.setBigUint64(10, BigInt(tsUs), true); v.setBigUint64(18, BigInt(durUs), true);
+        v.setUint32(26, width, true); v.setUint32(30, height, true); v.setUint8(34, c.length);
+        new Uint8Array(b, 35).set(c);
+        new Uint8Array(b, 35 + c.length).set(bytes);
+        return b;
+    }
+    function startVideo(generation, channelId) {
+        let index = 0;
+        const send = (buf) => { const fn = callbacks.get(channelId); if (fn) fn({ index: index++, message: buf }); };
         const aus = window.__AV_AUS__;      // [{key, bytes(Uint8Array)}] set by the harness
         if (!aus || !aus.length) throw new Error('no access units loaded');
         const periodMs = 1000 / cfg.fps;
@@ -122,10 +138,8 @@
             st.timers.push(setTimeout(() => {
                 if (st.stopped) return;
                 st.presented.push({ k, presentAt, tsUs });
-                emit('clip-video-chunk', {
-                    data: b64(aus[k].bytes), keyframe: aus[k].key, ts_us: tsUs, dur_us: Math.round(1e6 / cfg.fps),
-                    codec: aus[k].key ? window.__AV_CODEC__ : null, width: cfg.width, height: cfg.height, generation,
-                });
+                send(chunkFrame(aus[k].key, generation, tsUs, Math.round(1e6 / cfg.fps), cfg.width, cfg.height,
+                    aus[k].key ? window.__AV_CODEC__ : null, aus[k].bytes));
             }, emitAt - performance.now()));
         }
         return st;
@@ -190,7 +204,10 @@
                 case 'start_clip_video_capture': {
                     if (video && !video.stopped) throw new Error('Already capturing video');
                     const generation = ++videoGen;
-                    video = startVideo(generation);
+                    // The Channel instance the page passed (nativeCapture.ts
+                    // onChunk); its id is the callback transformCallback made.
+                    if (!args.onChunk || typeof args.onChunk.id !== 'number') throw new Error('start_clip_video_capture needs an onChunk Channel');
+                    video = startVideo(generation, args.onChunk.id);
                     // Each burst starts at its flash frame's present instant (+ offset).
                     const bursts = cfg.bursts.map(b => ({ frame: b.frame, flashAt: video.v0 + b.frame * (1000 / cfg.fps), burstAt: video.v0 + b.frame * (1000 / cfg.fps) + b.offsetMs, offsetMs: b.offsetMs }));
                     window.__AV_TRUTH__ = { bursts, micBurstAt: video.v0 + cfg.micBurstFrame * (1000 / cfg.fps), v0: video.v0, agentStart: video.agentStart };

@@ -18,6 +18,11 @@ one-line summary; this file is the full story. Versions follow
   redraw itself, messages included; now only that person's row does. On a
   laptop or a PC whose graphics chip also runs the screen, this is the
   difference you are most likely to feel during a long call.
+- **The clip buffer costs the app less while it records.** Every recorded
+  frame used to reach the app as text: converted to base64, wrapped, handed
+  over and converted back on the app's main thread, about 1.3 MB a second
+  for as long as the buffer was armed. Frames now arrive as raw bytes and go
+  straight to the recorder. Clips themselves are unchanged.
 - **Spinners no longer jump.** Two different spinning animations shared one
   name, so whichever loaded last knocked the other one half its height off
   centre. The same kind of clash affected a few pulsing indicators.

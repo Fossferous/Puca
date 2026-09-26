@@ -34,6 +34,7 @@
  * game audio while the clip buffer is separately armed is an ordinary case.
  */
 import { isTauri } from '../platform';
+import { readChunkFrame } from './chunkWire';
 
 export interface NativeCaptureTarget {
     outputIndex: number;
@@ -95,7 +96,7 @@ export async function startNativeVideo(
     onError?: (message: string) => void,
 ): Promise<NativeVideoHandle> {
     if (!isTauri()) throw new Error('native capture is desktop only');
-    const { invoke } = await import('@tauri-apps/api/core');
+    const { invoke, Channel } = await import('@tauri-apps/api/core');
     const { listen } = await import('@tauri-apps/api/event');
 
     // Set once the start resolves. Chunks carrying a DIFFERENT generation are
@@ -109,17 +110,22 @@ export async function startNativeVideo(
     const foreign = (g: number | undefined): boolean =>
         typeof g === 'number' && myGeneration !== null && g !== myGeneration;
 
-    const unlistenChunk = await listen<{
-        data: string; keyframe: boolean; ts_us: number; dur_us: number; codec: string | null; width: number; height: number; generation?: number;
-    }>('clip-video-chunk', (event) => {
-        const p = event.payload;
-        if (foreign(p.generation)) return;
-        const bytes = base64ToBytes(p.data);
+    // One raw binary message per access unit (chunkWire.ts) — no base64, no
+    // JSON, no script eval on this thread; the buffer goes to the worker as is.
+    // Each start has its own channel, so another capture's tail cannot arrive
+    // here; the generation check stays as the same belt-and-braces as audio.
+    const chunks = new Channel<ArrayBuffer>();
+    let chunksOpen = true;
+    chunks.onmessage = (msg) => {
+        if (!chunksOpen) return;
+        const f = readChunkFrame(msg);
+        if (!f || foreign(f.generation)) return;
         onChunk({
-            keyframe: p.keyframe, tsUs: p.ts_us, durUs: p.dur_us,
-            bytes: bytes.buffer as ArrayBuffer, codec: p.codec ?? undefined, codedWidth: p.width, codedHeight: p.height,
+            keyframe: f.keyframe, tsUs: f.tsUs, durUs: f.durUs,
+            bytes: f.data, codec: f.codec, codedWidth: f.width, codedHeight: f.height,
         });
-    });
+    };
+    const unlistenChunk = () => { chunksOpen = false; };
     const unlistenError = onError
         ? await listen<{ message?: string; generation?: number } | string>('clip-video-capture-error', (e) => {
             // A stale death: the OLD capture's error landing after a
@@ -133,7 +139,7 @@ export async function startNativeVideo(
 
     let target: RustTarget;
     try {
-        target = await invoke<RustTarget>('start_clip_video_capture', { fps: opts.fps, bitrate: opts.bitrate, assumedPixels: opts.assumedPixels, gopMs: opts.gopMs });
+        target = await invoke<RustTarget>('start_clip_video_capture', { fps: opts.fps, bitrate: opts.bitrate, assumedPixels: opts.assumedPixels, gopMs: opts.gopMs, onChunk: chunks });
         myGeneration = typeof target?.generation === 'number' ? target.generation : null;
     } catch (e) {
         unlistenChunk();

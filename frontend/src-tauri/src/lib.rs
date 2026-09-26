@@ -121,10 +121,13 @@ async fn start_clip_video_capture(
     bitrate: u32,
     assumed_pixels: u64,
     gop_ms: u32,
+    // JS: `onChunk` — each encoded access unit as one raw binary message
+    // (clip_capture.rs chunk_frame), not a base64 JSON event.
+    on_chunk: clip_capture::ChunkSink,
 ) -> Result<clip_capture::ClipCaptureTarget, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        clip_capture::start_video_capture(app_handle, state, fps, bitrate, assumed_pixels, gop_ms)
+        clip_capture::start_video_capture(app_handle, on_chunk, state, fps, bitrate, assumed_pixels, gop_ms)
     })
     .await
     .map_err(|e| e.to_string())?

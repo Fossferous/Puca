@@ -368,8 +368,12 @@ needs no picker).
   on the Rust side and the mixing hop, minus the video stamp's lag behind
   the present (it is taken after acquire and readback, and the async MFT
   holds a frame or two in flight); the emulation measures the JS part, a
-  flash plus click through the real app the rest. `clip-video-chunk` carries the capture
-  generation (as `clip-audio-data` does) and `startNativeVideo` drops any
+  flash plus click through the real app the rest. Each video chunk reaches
+  the page as one raw binary message on the Channel `start_clip_video_capture`
+  was given (`clip_capture.rs` `chunk_frame`, read by `chunkWire.ts`; it used
+  to be a base64 JSON event, ~1.3 MB/s of decoding on the main thread). The
+  frame carries the capture generation (as `clip-audio-data` does) and
+  `startNativeVideo` drops any
   other capture's chunks, so the old capture's tail after "Restart
   buffer" never reaches the new ring; as a backstop, a video timestamp
   going BACKWARDS is treated as another capture's clock and restarts the

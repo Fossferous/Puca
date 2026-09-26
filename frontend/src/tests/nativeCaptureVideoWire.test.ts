@@ -17,8 +17,12 @@ import { describe, test, expect, vi, beforeEach } from 'vitest';
 const invokeMock = vi.fn();
 type Listener = (e: { payload: unknown }) => void;
 const listeners = new Map<string, Listener[]>();
+// The chunks arrive on a Channel (raw binary, chunkWire.ts): the fake keeps
+// the Channel it is handed so a test can deliver frames on it.
+class FakeChannel<T> { onmessage: (m: T) => void = () => { }; }
 vi.mock('@tauri-apps/api/core', () => ({
     invoke: (cmd: string, args?: Record<string, unknown>) => invokeMock(cmd, args),
+    Channel: FakeChannel,
 }));
 vi.mock('@tauri-apps/api/event', () => ({
     listen: async (name: string, cb: Listener) => {
@@ -35,10 +39,21 @@ function fire(name: string, payload: unknown) {
 }
 
 const target = { output_index: 0, width: 2560, height: 1440, reason: 'primary', bitrate: 8_000_000, generation: 3 };
-const chunk = (generation: number | undefined, tsUs: number) => ({
-    data: btoa('\x00\x00\x00\x01\x65'), keyframe: false, ts_us: tsUs, dur_us: 33_333, codec: null, width: 2560, height: 1440,
-    ...(generation === undefined ? {} : { generation }),
-});
+/** A delta frame on the wire (clip_capture.rs chunk_frame). */
+const chunk = (generation: number, tsUs: number): ArrayBuffer => {
+    const payload = [0, 0, 0, 1, 0x65];
+    const b = new ArrayBuffer(35 + payload.length);
+    const v = new DataView(b);
+    v.setUint8(0, 1); v.setUint8(1, 0);
+    v.setBigUint64(2, BigInt(generation), true); v.setBigUint64(10, BigInt(tsUs), true); v.setBigUint64(18, 33_333n, true);
+    v.setUint32(26, 2560, true); v.setUint32(30, 1440, true); v.setUint8(34, 0);
+    new Uint8Array(b, 35).set(payload);
+    return b;
+};
+const channelOf = () => {
+    const start = invokeMock.mock.calls.find(c => c[0] === 'start_clip_video_capture');
+    return (start?.[1] as { onChunk: FakeChannel<ArrayBuffer> }).onChunk;
+};
 
 beforeEach(() => {
     invokeMock.mockReset();
@@ -50,7 +65,7 @@ describe('the clip-video invoke wire', () => {
         invokeMock.mockResolvedValue(target);
         const { startNativeVideo } = await import('../api/clips/nativeCapture');
         const h = await startNativeVideo({ fps: 30, bitrate: 8_000_000, assumedPixels: 2560 * 1440, gopMs: 2000 }, () => { });
-        expect(invokeMock).toHaveBeenCalledWith('start_clip_video_capture', { fps: 30, bitrate: 8_000_000, assumedPixels: 2560 * 1440, gopMs: 2000 });
+        expect(invokeMock).toHaveBeenCalledWith('start_clip_video_capture', { fps: 30, bitrate: 8_000_000, assumedPixels: 2560 * 1440, gopMs: 2000, onChunk: expect.any(FakeChannel) });
         await h.stop();
         expect(invokeMock).toHaveBeenCalledWith('stop_clip_video_capture', { generation: 3 });
     });
@@ -62,13 +77,16 @@ describe('the clip-video invoke wire', () => {
         const h = await startNativeVideo({ fps: 30, bitrate: 8_000_000, assumedPixels: 2560 * 1440, gopMs: 2000 }, c => got.push(c.tsUs));
         // The old capture's last frames, ten minutes into ITS clock, landing
         // after our start resolved.
-        fire('clip-video-chunk', chunk(2, 600_000_000));
-        fire('clip-video-chunk', chunk(2, 600_033_333));
+        channelOf().onmessage(chunk(2, 600_000_000));
+        channelOf().onmessage(chunk(2, 600_033_333));
         expect(got, 'a foreign chunk would skew the ring\'s clock anchor').toEqual([]);
         // POSITIVE CONTROL: ours get through.
-        fire('clip-video-chunk', chunk(3, 41_000));
+        channelOf().onmessage(chunk(3, 41_000));
         expect(got).toEqual([41_000]);
         await h.stop();
+        // A late frame after stop is dropped.
+        channelOf().onmessage(chunk(3, 74_333));
+        expect(got).toEqual([41_000]);
     });
 
     test('a stale death from a foreign generation does not reach onError; our own does', async () => {

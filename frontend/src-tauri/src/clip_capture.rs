@@ -469,27 +469,9 @@ impl ParamSetCache {
 
 // ---- capture + encode loop ---------------------------------------------------
 
-#[derive(Serialize, Clone)]
-struct ClipVideoChunkEvent {
-    /// Base64 Annex-B bitstream (same wire convention as `audio-data`).
-    data: String,
-    keyframe: bool,
-    /// Microseconds since the capture loop's own start instant, stamped
-    /// after the frame's acquire and readback. The FIRST chunk is not 0
-    /// (typically tens of ms) and nothing may assume it is: the worker
-    /// anchors this clock by measurement (replayWorker.ts vOriginMs).
-    ts_us: u64,
-    dur_us: u64,
-    /// The SPS-derived `avc1.PPCCLL` string, present on EVERY keyframe
-    /// (`null` on deltas). The JS worker consumes the first one it sees;
-    /// carrying it on every keyframe makes early-chunk loss self-healing
-    /// (see the note at the compute site).
-    codec: Option<String>,
-    width: u32,
-    height: u32,
-    /// Which capture emitted it (`ClipCaptureState::generation`).
-    generation: u64,
-}
+/// Where encoded chunks go: a raw binary IPC channel into the page
+/// (`chunk_frame` below is the wire).
+pub type ChunkSink = tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>;
 
 /// A capture's death, attributed, so a stale one landing after a
 /// successful restart cannot be mistaken for the new capture's.
@@ -502,6 +484,7 @@ struct ClipVideoError {
 #[cfg(windows)]
 pub fn start_video_capture(
     app: AppHandle,
+    chunks: ChunkSink,
     state: Arc<ClipCaptureState>,
     fps: u32,
     bitrate: u32,
@@ -552,7 +535,7 @@ pub fn start_video_capture(
     let emit_handle = app.clone();
     let t = target.clone();
     std::thread::spawn(move || {
-        let result = capture_loop(app, state_clone.clone(), t, fps, gop_ms, ready_tx);
+        let result = capture_loop(chunks, state_clone.clone(), t, fps, gop_ms, ready_tx);
         state_clone.is_capturing.store(false, Ordering::SeqCst);
         if let Err(e) = result {
             log::error!("Clip video capture error: {}", e);
@@ -637,7 +620,7 @@ fn relabel_missing_agent(error: String) -> String {
 /// the same code that has always run. It is not a workaround for a failing
 /// host: if the host cannot capture, that is the answer, and it says why.
 fn capture_loop(
-    app: AppHandle,
+    sink: ChunkSink,
     state: Arc<ClipCaptureState>,
     target: ClipCaptureTarget,
     fps: u32,
@@ -645,7 +628,7 @@ fn capture_loop(
     ready: std::sync::mpsc::Sender<Result<(), String>>,
 ) -> Result<(), String> {
     match clip_host_path() {
-        Some(path) => sidecar_capture_loop(path, app, state, target, fps, gop_ms, ready),
+        Some(path) => sidecar_capture_loop(path, sink, state, target, fps, gop_ms, ready),
         None => {
             // SAY WHICH CASE THIS IS. A Lite build and a dev run have no
             // sidecar by design and this line is routine. A Full RELEASE build
@@ -667,7 +650,7 @@ fn capture_loop(
             // The init failure reaches start_video_capture through `ready`
             // (relabelled inside the loop) and the runtime failure through
             // this Result (relabelled here) — the UI listens on both.
-            in_process_capture_loop(app, state, target, fps, gop_ms, ready, relabel_missing_agent)
+            in_process_capture_loop(sink, state, target, fps, gop_ms, ready, relabel_missing_agent)
                 .map_err(relabel_missing_agent)
         }
     }
@@ -676,7 +659,7 @@ fn capture_loop(
 #[cfg(windows)]
 fn sidecar_capture_loop(
     path: std::path::PathBuf,
-    app: AppHandle,
+    sink: ChunkSink,
     state: Arc<ClipCaptureState>,
     target: ClipCaptureTarget,
     fps: u32,
@@ -831,17 +814,8 @@ fn sidecar_capture_loop(
         };
 
         let emitted_bytes = data.len() as u64;
-        let event = ClipVideoChunkEvent {
-            data: base64_encode(&data),
-            keyframe,
-            ts_us,
-            dur_us,
-            codec,
-            width: target.width,
-            height: target.height,
-            generation: target.generation,
-        };
-        if app.emit("clip-video-chunk", event).is_err() {
+        let frame = chunk_frame(keyframe, target.generation, ts_us, dur_us, target.width, target.height, codec.as_deref(), &data);
+        if sink.send(tauri::ipc::InvokeResponseBody::Raw(frame)).is_err() {
             break; // the window is gone — nothing left to stream to
         }
         frames_encoded += 1;
@@ -883,7 +857,7 @@ fn sidecar_capture_loop(
 
 #[cfg(windows)]
 fn in_process_capture_loop(
-    app: AppHandle,
+    sink: ChunkSink,
     state: Arc<ClipCaptureState>,
     target: ClipCaptureTarget,
     fps: u32,
@@ -1076,17 +1050,8 @@ fn in_process_capture_loop(
 
         let dur_us = (1_000_000u64 / fps.max(1) as u64).max(1);
         let emitted_bytes = data.len() as u64;
-        let event = ClipVideoChunkEvent {
-            data: base64_encode(&data),
-            keyframe: encoded.keyframe,
-            ts_us: ts_us as u64,
-            dur_us,
-            codec,
-            width: target.width,
-            height: target.height,
-            generation: target.generation,
-        };
-        if app.emit("clip-video-chunk", event).is_err() {
+        let frame = chunk_frame(encoded.keyframe, target.generation, ts_us as u64, dur_us, target.width, target.height, codec.as_deref(), &data);
+        if sink.send(tauri::ipc::InvokeResponseBody::Raw(frame)).is_err() {
             break; // the window is gone — nothing left to stream to
         }
         frames_encoded += 1;
@@ -1119,6 +1084,7 @@ fn in_process_capture_loop(
 #[cfg(not(windows))]
 pub fn start_video_capture(
     _app: AppHandle,
+    _chunks: ChunkSink,
     _state: Arc<ClipCaptureState>,
     _fps: u32,
     _bitrate: u32,
@@ -1131,16 +1097,90 @@ pub fn start_video_capture(
 #[cfg(not(windows))]
 pub fn stop_video_capture(_state: Arc<ClipCaptureState>, _generation: Option<u64>) {}
 
-/// No base64 crate pulled in just for this — the app already depends on one
-/// for `audio_capture.rs`; reuse it so there is exactly one implementation.
-fn base64_encode(data: &[u8]) -> String {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD.encode(data)
+// ---- the chunk wire into the page ------------------------------------------
+//
+// Each encoded access unit reaches the page as ONE raw binary IPC message
+// (a `tauri::ipc::Channel` of `InvokeResponseBody::Raw`). It used to be a
+// Tauri event: the Annex-B bytes base64-encoded (x1.33), wrapped in JSON,
+// formatted into a script, evaluated in the page and base64-decoded again with
+// a charCodeAt loop on the main thread — about 1.3 MB/s of it at 30 fps and
+// 7.6 Mbit/s, for as long as the buffer is armed. A raw message arrives as an
+// ArrayBuffer and is transferred to the worker untouched.
+//
+// Little-endian, fixed header then payload. The TypeScript reader
+// (api/clips/chunkWire.ts) is tested against the same bytes as `chunk_frame`.
+//
+//   0      u8   wire version (1)
+//   1      u8   flags: bit 0 = keyframe
+//   2..10  u64  capture generation
+//  10..18  u64  ts_us: microseconds since the capture loop's own start instant,
+//               stamped after acquire and readback. The FIRST chunk is not 0
+//               and nothing may assume it is (replayWorker.ts vOriginMs).
+//  18..26  u64  dur_us
+//  26..30  u32  width
+//  30..34  u32  height
+//  34      u8   codec length n (0 = none: every delta, and a keyframe whose
+//               SPS could not be read). The SPS-derived `avc1.PPCCLL` string
+//               rides EVERY keyframe so early-chunk loss is self-healing.
+//  35..35+n     codec (ASCII)
+//  35+n..       the Annex-B access unit
+pub const CHUNK_WIRE_VERSION: u8 = 1;
+pub const CHUNK_HEADER_LEN: usize = 35;
+
+#[allow(clippy::too_many_arguments)]
+pub fn chunk_frame(
+    keyframe: bool,
+    generation: u64,
+    ts_us: u64,
+    dur_us: u64,
+    width: u32,
+    height: u32,
+    codec: Option<&str>,
+    data: &[u8],
+) -> Vec<u8> {
+    let codec = codec.map(str::as_bytes).unwrap_or(&[]);
+    let codec = &codec[..codec.len().min(u8::MAX as usize)];
+    let mut out = Vec::with_capacity(CHUNK_HEADER_LEN + codec.len() + data.len());
+    out.push(CHUNK_WIRE_VERSION);
+    out.push(u8::from(keyframe));
+    out.extend_from_slice(&generation.to_le_bytes());
+    out.extend_from_slice(&ts_us.to_le_bytes());
+    out.extend_from_slice(&dur_us.to_le_bytes());
+    out.extend_from_slice(&width.to_le_bytes());
+    out.extend_from_slice(&height.to_le_bytes());
+    out.push(codec.len() as u8);
+    out.extend_from_slice(codec);
+    out.extend_from_slice(data);
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hex(s: &str) -> Vec<u8> {
+        let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// The page reads these exact bytes (src/tests/chunkWire.test.ts decodes
+    /// the same hex). A change to either side that the other does not share
+    /// turns one of the two red.
+    #[test]
+    fn a_keyframe_is_the_documented_bytes() {
+        let f = chunk_frame(true, 3, 0x0102, 33_333, 2560, 1440, Some("avc1.640033"), &[0, 0, 0, 1, 0x65, 0xAA]);
+        assert_eq!(f, hex(
+            "01 01 0300000000000000 0201000000000000 3582000000000000 000A0000 A0050000 0B
+             617663312e363430303333 00000001 65AA"
+        ));
+        assert_eq!(f.len(), CHUNK_HEADER_LEN + 11 + 6);
+    }
+
+    #[test]
+    fn a_delta_carries_no_codec() {
+        let f = chunk_frame(false, 9, 1, 2, 1920, 1080, None, &[0, 0, 1, 0x41]);
+        assert_eq!(f, hex("01 00 0900000000000000 0100000000000000 0200000000000000 80070000 38040000 00 00000141"));
+    }
 
     /// A stop names the capture it owns; only an unnamed stop (teardown)
     /// ends whatever is running. A starter that lost the race holds an
