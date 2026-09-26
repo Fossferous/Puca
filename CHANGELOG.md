@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.822 — 2026-09-26
 
+Guessing an unattended passphrase is now slow, and remote file access never offers the disk's own system files.
 ### Security
 - **Guessing an unattended passphrase is now slow.** The passphrase is the
   second lock on unattended access, after your account password. Each try
