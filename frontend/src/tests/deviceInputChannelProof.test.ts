@@ -20,7 +20,7 @@
  * HOST. That is the half that was broken, and it is the half that has to keep
  * working against every host version that will ever exist.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
 
 const sent: Array<{ type: string; payload?: Record<string, unknown> }> = [];
 type Handler = (m: unknown) => void;
@@ -169,8 +169,22 @@ Object.defineProperty(window, 'RTCPeerConnection', {
     value: StubPc, configurable: true, writable: true,
 });
 
+/** Let the session's async work run out.
+ *
+ *  Everything this file drives is a PROMISE CHAIN: seal and open are stubbed
+ *  above, no WebCrypto call is made, and the only timers the controller arms
+ *  are its 20 s and 30 s deadlines, which never fire here. Measured, not
+ *  assumed: a single turn of the event loop settles every test in this file.
+ *  So a turn is what this waits for, not wall time.
+ *
+ *  It used to be 30 × setTimeout(0). Node clamps that to 1 ms, and on Windows
+ *  each one typically waits for the next timer tick (15.6 ms by default), so
+ *  every settle() cost ~470 ms there: 0.9-2.3 s per test on an idle machine,
+ *  and past the 5 s default under a full parallel run. setImmediate is a real macrotask turn
+ *  (the microtask queue drains before each one) with no timer behind it, so
+ *  thirty of them keep the same margin and cost microseconds. */
 async function settle(rounds = 30): Promise<void> {
-    for (let i = 0; i < rounds; i++) await new Promise(r => setTimeout(r, 0));
+    for (let i = 0; i < rounds; i++) await new Promise(r => setImmediate(r));
 }
 
 async function controllerSession(): Promise<string> {
@@ -202,6 +216,15 @@ const onChannel = () => inputDc().written;
 /** The hello an up-to-date agent sends: sealed under the session key, naming
  *  the session. Mirrors input_wire::InputHello / HELLO_PLAINTEXT. */
 const agentHello = (sid: string) => JSON.stringify({ sid, hello: 'sealed:{"hello":1}' });
+
+// Load the session module, and the graph under it, BEFORE any test's clock
+// starts. Otherwise the first `await import` pays for the transform inside
+// whichever test runs first — ~0.8 s alone, seconds under a full parallel run —
+// which is how that one test, and only that one, crossed the 5 s default.
+// It is setup, not the behaviour under test: every later import is a cache hit.
+beforeAll(async () => {
+    await import('../api/devices/session');
+});
 
 beforeEach(() => {
     sent.length = 0;

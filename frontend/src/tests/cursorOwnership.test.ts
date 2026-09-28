@@ -16,7 +16,7 @@
  * Every "must not happen" here has a positive-control sibling proving the rig
  * can see the good case happen.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, afterAll, afterEach, beforeAll, beforeEach } from 'vitest';
 
 const sent: Array<{ type: string; payload?: Record<string, unknown> }> = [];
 /** What the socket reports as unsent — the input coalescer's motion gate
@@ -101,9 +101,67 @@ Object.defineProperty(window, 'RTCPeerConnection', {
 
 import { sealControl, openControl, generateControlEphemeral, deriveDeviceControlKey } from '../api/e2ee';
 
-async function settle(rounds = 12): Promise<void> {
-    for (let i = 0; i < rounds; i++) await new Promise(r => setTimeout(r, 0));
+/** WebCrypto calls still running. Seal and open are REAL here (sealControl,
+ *  openControl), and crypto.subtle completes on Node's threadpool: no
+ *  microtask flush, and no fake clock, can wait for one. So they are counted
+ *  on the way out and waited for by name. */
+const subtleOut = new Set<Promise<unknown>>();
+const subtle = crypto.subtle as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
+// Every async method, not just the three this flow uses today: a digest or a
+// deriveBits added to it later would otherwise be a wait that settle() skips.
+const SUBTLE_CALLS = [
+    'encrypt', 'decrypt', 'sign', 'verify', 'digest', 'generateKey',
+    'deriveKey', 'deriveBits', 'importKey', 'exportKey', 'wrapKey', 'unwrapKey',
+].filter(m => typeof subtle[m] === 'function');
+const subtleReal = Object.fromEntries(SUBTLE_CALLS.map(m => [m, subtle[m]]));
+for (const m of SUBTLE_CALLS) {
+    subtle[m] = (...a) => {
+        const p = subtleReal[m].apply(crypto.subtle, a);
+        const drop = () => { subtleOut.delete(p); };
+        subtleOut.add(p);
+        p.then(drop, drop);
+        return p;
+    };
 }
+afterAll(() => { for (const m of SUBTLE_CALLS) subtle[m] = subtleReal[m]; });
+
+/** Let the session's async work run out: every WebCrypto call it started has
+ *  landed, then `quiet` turns of the event loop pass without it starting
+ *  another (the microtask queue drains before each turn).
+ *
+ *  It used to be 12 × setTimeout(0), which waited for wall time rather than
+ *  for the work. Node clamps that to 1 ms, and on Windows each one typically
+ *  waits for the next timer tick (15.6 ms by default): ~190 ms a settle, two
+ *  or three settles a test. setImmediate is a turn with no timer behind it. */
+async function settle(quiet = 12): Promise<void> {
+    for (let n = 0; n < quiet;) {
+        if (subtleOut.size > 0) {
+            await Promise.allSettled([...subtleOut]);
+            n = 0;
+        } else {
+            await new Promise(r => setImmediate(r));
+            n++;
+        }
+    }
+}
+
+/** Put the rest of this test on a fake clock. deviceDiagnosticsWindow sleeps
+ *  its window out on setTimeout and stamps both ends with Date.now(), and the
+ *  input coalescer spaces moves with the same two, so the window can be
+ *  driven rather than slept through: it was a real 1.5 s per test, and the
+ *  sends inside it had to land before it closed, however loaded the machine.
+ *  setImmediate stays real, because settle() turns on it. */
+function fakeClock(): void {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+}
+afterEach(() => { vi.useRealTimers(); });
+
+// Load the session module, and the graph under it, before any test's clock
+// starts, so the first test does not pay for the transform (~0.6 s alone,
+// seconds under a full parallel run). Every later import is a cache hit.
+beforeAll(async () => {
+    await import('../api/devices/session');
+});
 
 /** Drive a controller session to 'active', returning the key the HOST holds. */
 async function activeController(): Promise<{ id: string; key: Uint8Array }> {
@@ -386,9 +444,10 @@ describe('"Copy diagnostics" carries the pointer story (the lock-screen mouse re
     });
 });
 
-/** Let `ms` of real time pass, settling the async seal queue as it goes. */
+/** Let `ms` pass on the fake clock (see fakeClock), settling the async seal
+ *  queue as it goes. */
 async function wait(ms: number): Promise<void> {
-    await new Promise(r => setTimeout(r, ms));
+    vi.advanceTimersByTime(ms);
     await settle();
 }
 
@@ -396,6 +455,7 @@ describe('the diagnostics WINDOW, end to end through sendInput', () => {
     it('counts the moves sent while it was open, per kind and per second', async () => {
         const { id } = await activeController();
         const { sendInput, deviceDiagnosticsWindow } = await import('../api/devices/session');
+        fakeClock();
         // A move BEFORE the window is not counted in it.
         expect(sendInput(id, { t: 'move', x: 0.1, y: 0.1 })).toBe(true);
         await wait(30);
@@ -406,6 +466,7 @@ describe('the diagnostics WINDOW, end to end through sendInput', () => {
             expect(sendInput(id, { t: 'move', x: 0.2 + i / 10, y: 0.5 })).toBe(true);
             await wait(30);
         }
+        await wait(1_500);                  // the window closes
         const rows = await pending;
         const row = rows.find(r => r.id === id)!;
         expect(row, 'the window returns the session row').toBeTruthy();
@@ -417,10 +478,12 @@ describe('the diagnostics WINDOW, end to end through sendInput', () => {
     it('CONTROL: keys only in the window reports no move key at all', async () => {
         const { id } = await activeController();
         const { sendInput, deviceDiagnosticsWindow } = await import('../api/devices/session');
+        fakeClock();
         const pending = deviceDiagnosticsWindow(1_500);
         expect(sendInput(id, { t: 'key', code: 'Digit1', down: true })).toBe(true);
         expect(sendInput(id, { t: 'key', code: 'Digit1', down: false })).toBe(true);
         await wait(30);
+        await wait(1_500);                  // the window closes
         const row = (await pending).find(r => r.id === id)!;
         expect(row.windowInputByKind).toEqual({ key: 2 });
         expect((row.windowInputByKind as Record<string, number>).move).toBeUndefined();
@@ -445,6 +508,7 @@ describe('the motion gate is in the diagnostics (keys work, the mouse is held ba
     it('a congested relay: the gate reads closed, moves are held and counted, keys still pass', async () => {
         const { id } = await activeController();
         const { sendInput, deviceDiagnostics, deviceDiagnosticsWindow } = await import('../api/devices/session');
+        fakeClock();
         wsBuffered = 200_000;               // well past the 64 KiB high-water mark
         const pending = deviceDiagnosticsWindow(1_500);
         for (let i = 0; i < 3; i++) {
@@ -466,6 +530,7 @@ describe('the motion gate is in the diagnostics (keys work, the mouse is held ba
         const out = sent.filter(m => m.type === 'DeviceInput');
         expect(out, 'the key and the one move it forced out').toHaveLength(2);
 
+        await wait(1_500);                  // the window closes
         const win = (await pending).find(r => r.id === id)!;
         expect(win.windowMotionHeldByGate, 'the window counts what the gate held in it').toBe(3);
         wsBuffered = 0;

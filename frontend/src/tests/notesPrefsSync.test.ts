@@ -563,9 +563,24 @@ describe('an operation that outlives its account does nothing', () => {
 
     const flush = () => new Promise(r => setTimeout(r, 0));
     const until = async (cond: () => boolean) => { for (let i = 0; i < 100 && !cond(); i++) await flush(); };
+    /** Wait until `cond` holds or `op` has finished, whichever is first. A
+     *  finished operation can send nothing more, so "did it send a PUT?" is
+     *  answered the moment it finishes. The 100-flush cap is then only a
+     *  backstop for an operation that hangs. It used to be the ordinary way
+     *  out of a wait for something the fixed code never does, and on Windows
+     *  (a flush typically waits for the 15.6 ms timer tick) that cost ~1.6 s a
+     *  time: eight tests below waited twice. */
+    const untilOrDone = async (op: Promise<unknown>, cond: () => boolean) => {
+        let done = false;
+        try {
+            await Promise.race([op, until(() => done || cond())]);
+        } finally {
+            done = true;                                            // and end the loop the race left running
+        }
+    };
     /** Let the operation run to completion — or, where the unfixed code goes
      *  on to a PUT nobody answers, as far as it gets — then assert. */
-    const settle = (op: Promise<unknown>) => Promise.race([op, until(() => false)]);
+    const settle = (op: Promise<unknown>) => untilOrDone(op, () => false);
     const aDoc = async (rev: number, s: NotesNoteState) =>
         ({ rev, blob: await sealAccountBlob(idA, 1, 'notes-prefs', encodePrefsDoc(rev, s)) });
     const A_STATE = st({ labels: { 'list:1': ['A-private'] }, colors: { 'list:1': 'coral' }, times: times({ morning: '05:15' }) });
@@ -625,7 +640,7 @@ describe('an operation that outlives its account does nothing', () => {
         p.records.set(1, { rev: 1, base: EMPTY_NOTE_STATE, maxRev: 1 });
         p.atNextRead(() => { p.acct.uid = 2; p.acct.id = idB; p.acct.epoch++; });
         const op = p.sync.push();
-        await until(() => p.puts.length > 0);
+        await untilOrDone(op, () => p.puts.length > 0);
         expect(p.puts).toEqual([]);                                 // B's token never carries A's blob
         p.puts[0]?.resolve({ kind: 'written', rev: 2 });
         await settle(op);
@@ -711,9 +726,9 @@ describe('an operation that outlives its account does nothing', () => {
                 await settle(stalled);
                 // Had the choice run as the new session, let it do its worst:
                 // its GET answered with that account's real document.
-                await until(() => p.gets.length > 1);
+                await untilOrDone(asked, () => p.gets.length > 1);
                 p.gets[1]?.resolve({ kind: 'ok', doc: who === 'B signs in' ? await bDoc(3, B_SERVER) : await aDoc(3, A_STATE) });
-                await until(() => p.puts.length > 0);
+                await untilOrDone(asked, () => p.puts.length > 0);
                 p.puts[0]?.resolve({ kind: 'written', rev: 4 });
                 await settle(asked);
                 expect(p.puts.map(x => x.rev)).toEqual([]);             // nothing written over the new session's document
