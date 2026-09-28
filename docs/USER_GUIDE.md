@@ -355,7 +355,7 @@ confirmation first.
 ### Paste a checklist
 - Paste step-by-step instructions — say, an AI assistant's answer — into **Add a task…** in a list, or **Add an item…** in a checklist channel, and Púca asks first
 - **Add N items** adds each step as its own item, in order, without the numbers, bold marks, headings or the "Here's how:" line; **Add as one item** puts the whole paste on one line in the box for you to add; **Cancel** adds nothing
-- Paste it into the **New list** name instead and the list is made with the steps in it, named after the checklist's heading (or after what you had typed there)
+- Paste it into the **New list** name instead and the list is made with the steps in it, named after the checklist's heading (or after what you had typed there); **Add as one item** there makes the list with the whole paste as its one item
 - A one-line paste pastes as usual, and one paste adds at most 200 items
 
 ---

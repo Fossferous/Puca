@@ -335,6 +335,17 @@ describe('the "New list" name takes a pasted checklist', () => {
         expect(rows()).toEqual(ASSISTANT_ITEMS);
     });
 
+    it('"Add as one item" makes the list with the whole checklist as its one item', async () => {
+        await mount();
+        const name = await openNewList();
+        paste(name, ASSISTANT_ANSWER);
+        act(() => { button('Add as one item').click(); });
+        await paced(1);
+        expect(container.querySelector('.tasks-editor-title')?.textContent).toBe(ASSISTANT_TITLE);
+        expect(itemPosts(100)).toHaveLength(1);
+        expect(rows()).toEqual([ASSISTANT_ITEMS.join(' ')]);
+    });
+
     it('Cancel makes no list; text that is not a checklist pastes as a name', async () => {
         await mount();
         const name = await openNewList();
