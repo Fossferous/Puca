@@ -50,6 +50,7 @@ import {
 import { listChannels, sendChannelMessageEncrypted, type Channel } from '../api/servers';
 import { API_BASE_URL } from '../api/config';
 import { getToken } from '../api/auth';
+import { useOutputDeviceRef } from '../hooks/useOutputDeviceRef';
 import { CloseIcon, ClipIcon, ShieldCheckIcon, WarningIcon } from './Icons';
 import './ClipComposerModal.css';
 
@@ -96,6 +97,8 @@ export function ClipComposerModal({ isOpen, onClose, bufferedSeconds, maxSeconds
     const [trimNote, setTrimNote] = useState<string | null>(null);
     const [trimError, setTrimError] = useState<string | null>(null);
     const videoRef = useRef<HTMLVideoElement | null>(null);
+    // The preview follows Settings > Output Device while it is mounted.
+    const videoSinkRef = useOutputDeviceRef(videoRef);
     const detachRef = useRef<(() => void) | null>(null);
     // The clip id this composer is driving; guards the async chain against a
     // stale continuation after a cancel/close.
@@ -552,7 +555,7 @@ export function ClipComposerModal({ isOpen, onClose, bufferedSeconds, maxSeconds
                     return (
                         <>
                             <div className="clip-composer-section">
-                                <video ref={videoRef} className="clip-preview-video" controls playsInline muted={false} />
+                                <video ref={videoSinkRef} className="clip-preview-video" controls playsInline muted={false} />
                                 {previewState === 'loading' && <p className="clip-composer-hint">Loading preview…</p>}
                                 {previewState === 'failed' && <p className="clip-composer-hint"><WarningIcon size={13} /> Preview could not play here — the clip itself is intact and will still post.</p>}
                                 <p className="clip-composer-hint clip-composer-sealed-summary">

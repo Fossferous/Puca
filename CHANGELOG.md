@@ -66,10 +66,14 @@ one-line summary; this file is the full story. Versions follow
   played on the system's default device instead. So if you picked a
   headset, they could come out of your speakers, or out of whatever else
   was the default at the time, like a TV. They now follow the device you
-  chose and move when you change it. If that device is unplugged, they fall
-  back to the default, and they move back when it returns, the same way
-  voice does. Switching the Output Device quickly, or a device reconnecting
-  in a burst, could also leave voice on the wrong device. That is fixed too.
+  chose and move when you change it. So do the players for video and audio
+  attachments in chat and Tasks, clips posted in chat, the clip preview
+  before you post, and voice notes in Púca Notes on the web. If the chosen
+  device is unplugged, all of these fall back to the default, and they move
+  back when it returns, the same way voice does. (The Púca Notes Android app
+  has no Output Device setting, so it always uses the default.) Switching
+  the Output Device quickly, or a device reconnecting in a burst, could also
+  leave voice on the wrong device. That is fixed too.
 
 ## 0.9.823 — 2026-09-26
 

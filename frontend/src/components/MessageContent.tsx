@@ -16,7 +16,7 @@ import { openExternalUrl } from '../api/openExternal';
 import { ImageLightbox } from './ImageLightbox';
 import { LockIcon, CheckCircleIcon, WarningIcon, PaperclipIcon } from './Icons';
 import { saveAttachment } from '../api/saveAttachment';
-import { remoteImagesAllowed } from './settingsStore';
+import { remoteImagesAllowed, followOutputDeviceRef } from './settingsStore';
 import type { MemberWithRoles, Channel } from '../api/servers';
 
 /**
@@ -161,6 +161,8 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
             // never sees the revealing tap.
             <span className="message-video" onClick={(e) => e.stopPropagation()}>
                 <video
+                    // On the Output Device chosen in Settings, not the OS default.
+                    ref={followOutputDeviceRef}
                     src={url}
                     controls
                     preload="metadata"

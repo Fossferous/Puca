@@ -23,6 +23,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { CloseIcon, MicIcon, StopIcon, TrashIcon } from '../../components/Icons';
 import { MAX_CLIP_MS, assertClipUploadable, extForMime, formatClipTime, pickAudioMime } from '../model/audioNote';
+import { followOutputDeviceRef } from '../../components/settingsStore';
 import '../noteContent.css';
 
 export const MIC_DISCLOSURE =
@@ -268,7 +269,8 @@ export function AudioRecorder({ onSave, onCancel }: Props) {
                 {phase === 'review' && take && (
                     <>
                         <div className="notes-recorder-time">{formatClipTime(take.durationMs)}</div>
-                        <audio className="notes-recorder-preview" src={take.url} controls preload="metadata" aria-label="Recording preview" />
+                        {/* On the Output Device chosen in Settings (see NoteImages). */}
+                        <audio ref={followOutputDeviceRef} className="notes-recorder-preview" src={take.url} controls preload="metadata" aria-label="Recording preview" />
                         <div className="notes-recorder-foot">
                             <button type="button" className="ni-action" aria-label="Discard recording" onClick={discard}>
                                 <TrashIcon /> Discard

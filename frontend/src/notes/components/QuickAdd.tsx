@@ -36,6 +36,7 @@ import { MAX_BODY_BYTES, bodyBytes } from '../../api/listContent';
 import { pushMessageToast } from '../../components/messageToastBus';
 import { AudioRecorder, type RecordedClip } from './AudioRecorder';
 import { appendTranscript, canRecordAudio } from '../model/audioNote';
+import { followOutputDeviceRef } from '../../components/settingsStore';
 import { transcribeClip } from '../model/transcribe';
 import '../../components/NoteImages.css';
 import '../noteContent.css';
@@ -480,7 +481,8 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
                     <div className="notes-quickadd-media">
                         {clip && (
                             <figure className="qa-clip">
-                                <audio src={clip.url} controls preload="metadata" aria-label="Recording preview" />
+                                {/* On the Output Device chosen in Settings (see NoteImages). */}
+                                <audio ref={followOutputDeviceRef} src={clip.url} controls preload="metadata" aria-label="Recording preview" />
                                 <button type="button" className="ni-tool" aria-label="Remove recording" title="Remove"
                                     onClick={dropClip}>
                                     <CloseIcon size={14} />

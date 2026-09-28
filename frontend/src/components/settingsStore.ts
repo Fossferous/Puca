@@ -877,3 +877,35 @@ export function applyOutputDeviceToContext(ctx: AudioContext): Promise<void> {
     if (ctx.state === 'closed') return Promise.resolve();
     return routeToOutputDevice(ctx as AudioContext & SinkTarget);
 }
+
+/**
+ * Keep one media element on the chosen output device until the returned stop
+ * is called: routed now, and again whenever Settings change or a device comes
+ * or goes (the chosen one can vanish and return — a Bluetooth headset out of
+ * and back in range — and routeToOutputDevice chases it both ways).
+ *
+ * For players the user starts by hand (attachments, clips, Notes previews):
+ * nothing sounds before that click, and routing lands long before it, so
+ * routing on mount is enough. Anything that starts playing by itself must
+ * instead wait for applyOutputDevice() first.
+ */
+export function followOutputDevice(el: HTMLMediaElement): () => void {
+    const route = () => { void applyOutputDevice(el); };
+    route();
+    window.addEventListener('settingsChanged', route);
+    navigator.mediaDevices?.addEventListener?.('devicechange', route);
+    return () => {
+        window.removeEventListener('settingsChanged', route);
+        navigator.mediaDevices?.removeEventListener?.('devicechange', route);
+    };
+}
+
+/**
+ * followOutputDevice as a React ref: `<audio ref={followOutputDeviceRef} …>`.
+ * React 19 runs the returned stop when the element unmounts. A module-level
+ * function, so its identity never changes and React attaches it once per
+ * element — an inline arrow would detach and re-attach on every render.
+ */
+export function followOutputDeviceRef(el: HTMLMediaElement | null): (() => void) | undefined {
+    return el ? followOutputDevice(el) : undefined;
+}

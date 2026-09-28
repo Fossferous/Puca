@@ -40,6 +40,7 @@ import { parkedObjectUrl } from '../api/parkedPreview';
 import { saveAttachment } from '../api/saveAttachment';
 import { ImageLightbox } from './ImageLightbox';
 import { CameraIcon, CheckCircleIcon, CloseIcon, ImageIcon, LockIcon, MicIcon, PaperclipIcon, PencilIcon, WarningIcon } from './Icons';
+import { followOutputDeviceRef } from './settingsStore';
 import './NoteImages.css';
 
 /**
@@ -136,7 +137,10 @@ function AudioClip({ refItem }: { refItem: TaskAttachmentRef }) {
     return (
         <span className="ni-audio">
             <span className="ni-audio-name"><MicIcon /> {refItem.name}</span>
-            <audio src={url} controls preload="metadata" aria-label={refItem.name} />
+            {/* On the Output Device chosen in Settings: shared with Púca on the
+                web. The Android Notes app has no such setting, so it stays on
+                the default. */}
+            <audio ref={followOutputDeviceRef} src={url} controls preload="metadata" aria-label={refItem.name} />
         </span>
     );
 }
