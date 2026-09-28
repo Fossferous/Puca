@@ -310,9 +310,13 @@ occupant's speak right and tells the room with a server→client frame:
 with the channel's overwrites; `ADMINISTRATOR` and the server owner always
 have it). It is sent only for voice rooms: to the joining connection right
 after its `RoomJoined`, one frame for every member then in the room (itself
-included, each an explicit `true`/`false`); to every other occupant, the
-joiner's frame; and, when a permission change flips the right of someone who
-stays in the room, to the whole room including that member. Mesh voice is
+included, each an explicit `true`/`false`); to every other occupant, and to
+the joiner's own other connections already in the room, the joiner's frame;
+and, when a permission change flips the right of someone who stays in the
+room, to every other occupant and to that member's connections in the room.
+A connection of the member that is not in the room is not told. A join that
+races a permission change is resolved again by a further sweep, so the last
+frame a room sees is the newest answer. Mesh voice is
 peer-to-peer, so the server cannot silence anyone itself: a client that reads
 `false` for itself does not transmit, and every receiver refuses audio from a
 member flagged `false`. The shape is pinned by
@@ -325,8 +329,20 @@ current `SPEAK` (a permission change mid-call, or a join with a token minted
 before one), the server changes it through LiveKit's `UpdateParticipant`.
 LiveKit then unpublishes a microphone the new grant does not allow, and the
 member stays in the call, listening. Only the microphone moves on a live
-session: `VIDEO` and `STREAM` are checked when a camera or screen share starts,
-on both transports, and a new grant of them applies at the next join.
+session, including every call in progress when the server restarts. The one
+exception is a join-time grant LiveKit did not confirm: that session's grant
+is then treated as unknown, and the next permission change sends it the
+whole grant. `VIDEO` and `STREAM` are checked by the server when a camera or
+screen share starts (`CameraStart` and `ScreenShareStart` are refused without
+them), on both transports; a camera or share already running is not stopped.
+LiveKit's own grant of them, a deny as well as an allow, is brought up to date
+at the member's next join, including a rejoin with a token minted earlier.
+Until then, on an SFU channel, the start check binds Púca's own client only: a
+modified client that skips it can still publish what its join grant allowed.
+LiveKit can only be told about a session the server knows, which it learns
+from the `participant_joined` webhook or from the resync that
+`LIVEKIT_API_URL` enables (see `deploy/livekit/README.md`); with neither, the
+SFU side of all of this rests on the join token alone.
 
 **Rooms (0.9.5).** A `LeaveRoom` for a room this connection never joined is
 ignored — no `UserLeft` is broadcast (it used to be, into rooms the caller
@@ -334,6 +350,12 @@ could not see). Fully leaving a voice room retracts the leaver's media to the
 room (`StreamStopped`, plus `ScreenShareStopped` / `CameraStopped` for what
 this connection had announced) whether or not `StopStream` was sent first; the
 official client closes its peer connection to anyone the roster drops. A
+`JoinRoom` that the server refuses after admitting the connection (its
+permission re-check comes back negative) removes only that connection. If the
+user had been announced in the room, through this connection or another one
+that has since gone, the refusal is announced like a `LeaveRoom` (`RoomLeft`
+to the connection, `UserLeft` and media retractions to the room when the
+user has fully left); a user never announced is not. A
 `ChatMessage` into a `voice_<id>` room is gated like one into `channel_<id>`:
 VIEW and `SEND_MESSAGES` (`Not a member of this channel's server` otherwise),
 then the member-timeout deny list (`Could not verify timeout status` when the

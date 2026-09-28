@@ -34,6 +34,12 @@
 // With APP_B !== APP (an older B), the checks only a current client can
 // satisfy - B's panel label, the rejoin notice, no prompt - are skipped, so a
 // legacy-B run passes or fails on receiver enforcement alone.
+// On SFU a revoke is ALSO checked at LiveKit: A's page lists what LiveKit says
+// each participant publishes (__pucaVoiceDiag), and B's microphone must be
+// gone after the revoke while C's stays. With a legacy B (which never
+// unpublishes itself) that isolates the server's UpdateParticipant regrant.
+// A legacy B cannot run deny-at-join on SFU at all - its join fails, which is
+// the original bug - so that combination exits 2.
 //
 // Prereqs: Postgres (PGPORT/PGDB, password postgres), a backend on API with
 // CORS for APP/APP_B, the client built against it and served at APP
@@ -64,6 +70,13 @@ const TRANSPORT = process.env.TRANSPORT === 'sfu' ? 'sfu' : 'mesh';
 const EXPECT = process.env.EXPECT === 'bug' ? 'bug' : 'fixed';
 const SCENARIO = process.env.SCENARIO === 'revoke' ? 'revoke' : 'deny-at-join';
 const API = process.env.API || 'http://127.0.0.1:3000';
+if (!SAME_CLIENT_B && TRANSPORT === 'sfu' && SCENARIO === 'deny-at-join') {
+    // A pre-fix client publishes its mic on connect, LiveKit refuses it, and
+    // the whole join fails -- that is the bug itself, not something the rig
+    // can measure the fix against.
+    console.error('speak-perms-live: a pre-fix client cannot join an SFU call without Speak; use SCENARIO=revoke');
+    process.exit(2);
+}
 const CHANNEL = process.env.CHANNEL || 'msedge';
 const OUT = process.argv[2] || '';
 const PSQL = process.env.PSQL || 'C:/Program Files/PostgreSQL/16/bin/psql.exe';
@@ -226,9 +239,21 @@ try {
             });
             return r.status;
         }, { api: API, cid: voiceId, rid: Number(roleId), method, deny: SPEAK });
+        // What LiveKit itself says a member is publishing, read on A's page:
+        // the SFU's participant list, not anything that member's client
+        // claims. A legacy B never unpublishes its own mic, so with APP_B set
+        // this isolates the server's UpdateParticipant regrant from the
+        // receivers' SpeakGate. true / false, or 'absent' if not in the room.
+        const lkMic = (id) => A.evaluate(async (id) => {
+            const d = await window.__pucaVoiceDiag?.();
+            const peer = (d?.peers ?? []).find(p => String(p.identity).startsWith(`u${id}#`));
+            return peer ? peer.publications.some(p => p.source === 'microphone') : 'absent';
+        }, id);
         result.before = { AhearsB: audible0(await heard(A, uid.B)), AhearsC: audible0(await heard(A, uid.C)) };
+        if (TRANSPORT === 'sfu') result.livekit = { BmicBefore: await lkMic(uid.B), CmicBefore: await lkMic(uid.C) };
         result.revokeStatus = await overwrite('PUT');
         await sleep(5000);
+        if (TRANSPORT === 'sfu') Object.assign(result.livekit, { BmicAfterRevoke: await lkMic(uid.B), CmicAfterRevoke: await lkMic(uid.C) });
         const atA_B = await heard(A, uid.B);
         const atC_B = await heard(C, uid.B);
         result.afterRevoke = {
@@ -249,12 +274,21 @@ try {
         // receivers alone.
         const bClientSays = !SAME_CLIENT_B || (/can't speak/.test(r.afterRevoke.panelB.label ?? '')
             && r.afterGrant.panelB.errors.some(e => /rejoin/i.test(e)));
-        result.observed = { receiversEnforced, bClientSays: SAME_CLIENT_B ? bClientSays : 'skipped (APP_B is a different client)' };
-        ok = r.before.AhearsB && r.before.AhearsC && r.revokeStatus < 300 && receiversEnforced
-            && r.afterRevoke.AhearsC && r.grantStatus < 300 && bClientSays;
-        result.verdict = !r.before.AhearsB || !r.before.AhearsC
-            ? 'RIG BROKEN: before the revoke A must hear both B and C'
-            : ok ? `REVOKE ENFORCED (${TRANSPORT}${SAME_CLIENT_B ? '' : ', legacy B: receivers only'})`
+        // SFU: LiveKit must have dropped B's microphone publication and only
+        // B's (C keeps publishing), B still in the room. Before the revoke both
+        // must be there, or the check below cannot fail.
+        const lk = r.livekit;
+        const livekitEnforced = TRANSPORT !== 'sfu' || (lk.BmicAfterRevoke === false && lk.CmicAfterRevoke === true);
+        const livekitControl = TRANSPORT !== 'sfu' || (lk.BmicBefore === true && lk.CmicBefore === true);
+        result.observed = {
+            receiversEnforced, livekitEnforced: TRANSPORT === 'sfu' ? livekitEnforced : 'n/a (mesh)',
+            bClientSays: SAME_CLIENT_B ? bClientSays : 'skipped (APP_B is a different client)',
+        };
+        ok = r.before.AhearsB && r.before.AhearsC && livekitControl && r.revokeStatus < 300 && receiversEnforced
+            && livekitEnforced && r.afterRevoke.AhearsC && r.grantStatus < 300 && bClientSays;
+        result.verdict = !r.before.AhearsB || !r.before.AhearsC || !livekitControl
+            ? 'RIG BROKEN: before the revoke A must hear both B and C (and, on SFU, LiveKit must list both mics)'
+            : ok ? `REVOKE ENFORCED (${TRANSPORT}${SAME_CLIENT_B ? '' : TRANSPORT === 'sfu' ? ', legacy B: receivers + LiveKit' : ', legacy B: receivers only'})`
                 : `revoke NOT enforced (${TRANSPORT})`;
         throw Object.assign(new Error('done'), { done: true });
     }

@@ -2078,6 +2078,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         if (speakDeniedRef.current) return Promise.resolve();
         return webrtcManager.reapplyNoiseMode()
             .then(() => {
+                // SPEAK withdrawn while the re-acquire was running: the mic is
+                // closed on purpose (denySpeakLocally owns the UI), so none of
+                // the "mic came back" / "mic died" re-sync below applies.
+                if (speakDeniedRef.current) return;
                 // A mode change re-acquires the mic, so a listen-only user whose
                 // device has since freed up now has a LIVE track — which
                 // replaceMicTrack would publish while the UI still says

@@ -201,6 +201,19 @@ pub async fn kick_member(
 
     match result {
         Ok(r) if r.rows_affected() > 0 => {
+            // Straight after the commit that removed the membership, with no
+            // await in between: boot the kicked user's client out of the server
+            // in real time, and START the server-side force-evict from every
+            // live room (mesh AND SFU; the now-non-member fails VIEW
+            // everywhere). It runs detached, so a request cancelled from here
+            // on - during the audit row below - no longer loses the eviction.
+            state.send_to_user(
+                user_id,
+                ServerMessage::RemovedFromServer {
+                    server_id: server_id.clone(),
+                },
+            );
+            let evicting = crate::ws::start_perms_change(&state, &server_id);
             tracing::info!(
                 "User {} kicked from server {} by {} (reason: {:?})",
                 user_id,
@@ -218,17 +231,7 @@ pub async fn kick_member(
                 payload.reason.as_deref(),
             )
             .await;
-            // Boot the kicked user's client out of the server in real time.
-            state.send_to_user(
-                user_id,
-                ServerMessage::RemovedFromServer {
-                    server_id: server_id.clone(),
-                },
-            );
-            // Server-side force-evict from any live voice room (mesh AND SFU) —
-            // the now-non-member fails VIEW everywhere, so this cuts off their
-            // media immediately rather than trusting the client to disconnect.
-            crate::ws::broadcast_perms_changed_and_evict(&state, &server_id).await;
+            evicting.wait().await;
             StatusCode::OK.into_response()
         }
         Ok(_) => (StatusCode::NOT_FOUND, "User not found in server").into_response(),
@@ -289,35 +292,52 @@ pub async fn ban_member(
             .into_response();
     }
 
-    // Add to bans
-    let ban_result = sqlx::query(
-        "INSERT INTO bans (server_id, user_id, banned_by, reason) VALUES ($1, $2, $3, $4) ON CONFLICT (server_id, user_id) DO UPDATE SET banned_by = EXCLUDED.banned_by, reason = EXCLUDED.reason"
-    )
+    // The ban, and the membership and role assignments it ends, in ONE
+    // transaction: all of it commits together or none of it does, and that
+    // commit is the last thing awaited before the eviction starts below.
+    let banned: Result<(), sqlx::Error> = async {
+        let mut tx = state.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO bans (server_id, user_id, banned_by, reason) VALUES ($1, $2, $3, $4) ON CONFLICT (server_id, user_id) DO UPDATE SET banned_by = EXCLUDED.banned_by, reason = EXCLUDED.reason"
+        )
         .bind(&server_id)
         .bind(user_id)
         .bind(claims.sub as i32)
         .bind(&payload.reason)
-        .execute(&state.pool)
-        .await;
+        .execute(&mut *tx)
+        .await?;
+        // Purge role assignments so no permissions linger after removal.
+        sqlx::query("DELETE FROM member_roles WHERE server_id = $1 AND user_id::bigint = $2")
+            .bind(&server_id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        // Remove from server_members
+        sqlx::query("DELETE FROM server_members WHERE server_id = $1 AND user_id::bigint = $2")
+            .bind(&server_id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await
+    }
+    .await;
 
-    if ban_result.is_err() {
+    if banned.is_err() {
         return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create ban").into_response();
     }
 
-    // Purge role assignments so no permissions linger after removal.
-    let _ = sqlx::query("DELETE FROM member_roles WHERE server_id = $1 AND user_id::bigint = $2")
-        .bind(&server_id)
-        .bind(user_id)
-        .execute(&state.pool)
-        .await;
-
-    // Remove from server_members
-    let _ = sqlx::query("DELETE FROM server_members WHERE server_id = $1 AND user_id::bigint = $2")
-        .bind(&server_id)
-        .bind(user_id)
-        .execute(&state.pool)
-        .await;
-
+    // Straight after that commit, with no await in between: boot the banned
+    // user's client out of the server in real time, and START the server-side
+    // force-evict from every live room (mesh AND SFU). It runs detached, so a
+    // request cancelled from here on - during the audit row below - no
+    // longer loses the eviction.
+    state.send_to_user(
+        user_id,
+        ServerMessage::RemovedFromServer {
+            server_id: server_id.clone(),
+        },
+    );
+    let evicting = crate::ws::start_perms_change(&state, &server_id);
     tracing::info!(
         "User {} banned from server {} by {} (reason: {:?})",
         user_id,
@@ -335,15 +355,7 @@ pub async fn ban_member(
         payload.reason.as_deref(),
     )
     .await;
-    // Boot the banned user's client out of the server in real time.
-    state.send_to_user(
-        user_id,
-        ServerMessage::RemovedFromServer {
-            server_id: server_id.clone(),
-        },
-    );
-    // Force-evict from any live voice room (mesh AND SFU) server-side.
-    crate::ws::broadcast_perms_changed_and_evict(&state, &server_id).await;
+    evicting.wait().await;
     StatusCode::OK.into_response()
 }
 
@@ -1949,5 +1961,169 @@ mod channel_scope_tests {
         assert!(!reported_message_in_scope(&ChannelAccess::Forbidden, "s1"));
         assert!(!reported_message_in_scope(&ChannelAccess::Allowed("s2".into()), "s1"));
         assert!(!reported_message_in_scope(&ChannelAccess::Allowed(String::new()), "s1"));
+    }
+}
+
+#[cfg(test)]
+mod eviction_survives_cancellation_tests {
+    use super::{ban_member, kick_member, KickBanRequest};
+    use crate::auth::Claims;
+    use crate::permissions::Permissions;
+    use crate::protocol::ServerMessage;
+    use crate::state::AppState;
+    use axum::extract::{Path, State};
+    use axum::{Extension, Json};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tokio::sync::mpsc;
+
+    fn drain(rx: &mut mpsc::Receiver<ServerMessage>) -> Vec<ServerMessage> {
+        let mut out = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            out.push(m);
+        }
+        out
+    }
+
+    /// A server of its own: an owner, one member in a text channel. Returns
+    /// (server id, [owner, member], channel id).
+    async fn server_with_member(pool: &sqlx::PgPool, label: &str) -> (String, Vec<i32>, i32) {
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let mk = |n: &str| format!("kb_{label}_{n}_{}", &tag[..10]);
+        let mut ids: Vec<i32> = Vec::new();
+        for n in ["owner", "member"] {
+            let (id,): (i32,) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id")
+                .bind(mk(n))
+                .bind(b"s".as_ref())
+                .bind(b"v".as_ref())
+                .fetch_one(pool)
+                .await
+                .expect("user");
+            ids.push(id);
+        }
+        let sid = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, $2, $3)")
+            .bind(&sid)
+            .bind(mk("srv"))
+            .bind(ids[0])
+            .execute(pool)
+            .await
+            .expect("server");
+        for id in &ids {
+            sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)")
+                .bind(&sid)
+                .bind(id)
+                .execute(pool)
+                .await
+                .expect("member");
+        }
+        sqlx::query(
+            "INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) \
+             VALUES ($1, '@everyone', '#99AAB5', $2, 0, true)",
+        )
+        .bind(&sid)
+        .bind((Permissions::VIEW_CHANNEL | Permissions::CONNECT).bits() as i64)
+        .execute(pool)
+        .await
+        .expect("@everyone");
+        let (text,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type) VALUES ($1, 't', 0) RETURNING id")
+            .bind(&sid)
+            .fetch_one(pool)
+            .await
+            .expect("channel");
+        (sid, ids, text)
+    }
+
+    /// A KICK and a BAN whose requests are cancelled after the commit that
+    /// removes the membership - here, while each handler's audit row waits on a
+    /// lock - still boot and evict (TEST_DATABASE_URL; skips without it). The
+    /// eviction starts straight after that commit, detached; it used to come
+    /// after the audit row, so a request dropped during that INSERT lost it,
+    /// and the removed member kept every live room of the server until their
+    /// socket happened to close. Each in a server of its own, so neither's
+    /// sweep can do the other's eviction.
+    #[tokio::test]
+    async fn a_kick_or_ban_cancelled_after_its_commit_still_evicts() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let (kick_sid, kick_ids, kick_text) = server_with_member(&pool, "k").await;
+        let (ban_sid, ban_ids, ban_text) = server_with_member(&pool, "b").await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let (kick_room, ban_room) = (format!("channel_{kick_text}"), format!("channel_{ban_text}"));
+        let (kicked, banned) = (kick_ids[1] as i64, ban_ids[1] as i64);
+        let mut rx = Vec::new();
+        let mut conns = Vec::new();
+        for (uid, room) in [(kicked, &kick_room), (banned, &ban_room)] {
+            let (tx, r) = mpsc::channel::<ServerMessage>(64);
+            let (conn, _, _) = state.register_session(uid, format!("u{uid}"), tx, false, None, String::new());
+            state.join_room(room, uid, conn);
+            rx.push(r);
+            conns.push((uid, conn));
+        }
+        let claims = |owner: i32| Claims {
+            sub: owner as i64,
+            username: format!("u{owner}"),
+            exp: chrono::Utc::now().timestamp() + 3600,
+            tv: 0,
+            sst: 0,
+            sid: String::new(),
+            ls: false,
+        };
+
+        // Every audit INSERT waits on this lock until it is released.
+        let mut locker = pool.begin().await.expect("begin");
+        sqlx::query("LOCK TABLE audit_log IN ACCESS EXCLUSIVE MODE").execute(&mut *locker).await.expect("lock");
+        let wait = Duration::from_millis(1500);
+        let kick = tokio::time::timeout(
+            wait,
+            kick_member(
+                State(Arc::clone(&state)),
+                Path((kick_sid.clone(), kicked)),
+                Extension(claims(kick_ids[0])),
+                Json(KickBanRequest { reason: None }),
+            ),
+        )
+        .await
+        .map(|_| ());
+        let ban = tokio::time::timeout(
+            wait,
+            ban_member(
+                State(Arc::clone(&state)),
+                Path((ban_sid.clone(), banned)),
+                Extension(claims(ban_ids[0])),
+                Json(KickBanRequest { reason: None }),
+            ),
+        )
+        .await
+        .map(|_| ());
+        locker.rollback().await.expect("release");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let in_room = |uid: i64, room: &str| state.rooms.get(room).is_some_and(|r| r.members.contains(&uid));
+        while (in_room(kicked, &kick_room) || in_room(banned, &ban_room)) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let evicted = (!in_room(kicked, &kick_room), !in_room(banned, &ban_room));
+        let told: Vec<(bool, bool)> = rx
+            .iter_mut()
+            .map(|r| {
+                let frames = drain(r);
+                (
+                    frames.iter().any(|m| matches!(m, ServerMessage::RemovedFromServer { .. })),
+                    frames.iter().any(|m| matches!(m, ServerMessage::RoomLeft { .. })),
+                )
+            })
+            .collect();
+        for (uid, conn) in conns {
+            state.unregister_session(uid, conn);
+        }
+        for (sid, ids, text) in [(&kick_sid, &kick_ids, kick_text), (&ban_sid, &ban_ids, ban_text)] {
+            let _ = sqlx::query("DELETE FROM channels WHERE id = $1").bind(text).execute(&pool).await;
+            let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(sid).execute(&pool).await;
+            let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(ids.clone()).execute(&pool).await;
+        }
+
+        assert!(kick.is_err() && ban.is_err(), "fixture: both handlers were still at their audit row when dropped");
+        assert_eq!(evicted, (true, true), "(kicked, banned) evicted from their server's live room all the same");
+        assert_eq!(told, vec![(true, true), (true, true)], "each booted (RemovedFromServer) and told it left the room");
     }
 }

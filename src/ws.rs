@@ -1057,6 +1057,161 @@ fn leave_announces_departure(was_joined: bool, still_member: bool, announce_pres
     was_joined && !still_member && announce_presence
 }
 
+/// How many perms sweeps of `server_id` have started
+/// ([`AppState::perms_sweep_epochs`]).
+fn perms_sweep_epoch(state: &AppState, server_id: &str) -> u64 {
+    state.perms_sweep_epochs.get(server_id).map(|e| *e).unwrap_or(0)
+}
+
+/// Store a voice joiner's speak right from the join's own recheck - and if a
+/// perms sweep of `server_id` STARTED since `epoch_before` (read after the
+/// insert, before that recheck), ask for another, fire-and-forget.
+///
+/// The recheck resolves outside the server's perms lock (a join must not wait
+/// behind a sweep's LiveKit calls), so its answer can be OLDER than a sweep
+/// that resolved this user after a later change and has already written the
+/// flag: last writer wins, and the join would write the stale one - a SPEAK
+/// deny undone for every mesh receiver, or a lift that silences a member who
+/// holds the right - with nothing ever looking again. A sweep that started
+/// before `epoch_before` could not have seen the insert or saw a change that
+/// committed before this recheck read anything, so only one that started
+/// since can have written a newer answer; the sweep asked for here starts
+/// after this write and resolves the user afresh, restoring the newest.
+fn store_join_speak(state: &Arc<AppState>, room_id: &str, user_id: UserId, can_speak: bool, server_id: &str, epoch_before: u64) {
+    if let Some(mut room) = state.rooms.get_mut(room_id) {
+        room.set_can_speak(user_id, can_speak);
+    }
+    if perms_sweep_epoch(state, server_id) != epoch_before {
+        drop(request_perms_sweep(state, server_id, 0));
+    }
+}
+
+/// Undo a JoinRoom its post-insert recheck refused: take THIS connection
+/// (`conn_id`) out of `room_id`, and no other.
+///
+/// This used to remove the whole USER. A second device of theirs already in
+/// the call - or the socket this one is replacing, still waiting to be reaped -
+/// then sat outside `members` with its peer links up, where no later sweep
+/// could see it: a SPEAK deny sent no VoiceSpeakState for it, a VIEW deny or a
+/// kick no RoomLeft. Now it keeps its membership, and if the refusal was a real
+/// deny, the perms sweep - whose snapshot still holds the user - evicts them
+/// everywhere.
+///
+/// Announced only what had been announced - by whether the USER was, not only
+/// this connection. A connection that was ALREADY in the room
+/// (`conn_was_joined`: a repeat join on the same socket), or a user already
+/// in it through another connection (`already_member`), was announced; the
+/// connection leaves exactly as a LeaveRoom would, told `RoomLeft` itself, and
+/// the room hears the departure only if the user FULLY left
+/// (`announce_conn_departure` re-reads that). The second case matters when the
+/// other connection went while this one was being checked - a zombie socket
+/// reaped mid-recheck hands its stream claim to this connection and says
+/// nothing, since the user was still here - so this removal is what takes the
+/// user out, and it must say so. Otherwise the user was never announced, and
+/// there is nothing to take back.
+async fn withdraw_refused_join(
+    state: &Arc<AppState>,
+    room_id: &str,
+    user_id: UserId,
+    conn_id: u64,
+    conn_was_joined: bool,
+    already_member: bool,
+    joined_rooms: &mut std::collections::HashSet<String>,
+) {
+    let released = state.leave_room(room_id, user_id, conn_id);
+    joined_rooms.remove(room_id);
+    if conn_was_joined || already_member {
+        state.send_to_conn(user_id, conn_id, ServerMessage::RoomLeft { room_id: room_id.to_string() });
+        announce_conn_departure(state, room_id, user_id, released).await;
+    }
+}
+
+/// Announce that one of `user_id`'s connections, which WAS in `room_id` (its
+/// presence announced when it joined), has just been taken out of it -
+/// `released` being what that removal released. A clean LeaveRoom and a
+/// JoinRoom refused after its insert, for a connection that had already been
+/// in the room, both end here. Every announcement is gated on the user having
+/// FULLY left: one still present on another device must not be erased from
+/// every roster.
+async fn announce_conn_departure(
+    state: &Arc<AppState>,
+    room_id: &str,
+    user_id: UserId,
+    released: crate::state::ReleasedMedia,
+) {
+    let was_joined = true;
+    // "Fully left" — no other connection of this user remains in the room.
+    // Mirrors the disconnect path.
+    let still_member = state
+        .rooms
+        .get(room_id)
+        .map(|r| r.members.contains(&user_id))
+        .unwrap_or(false);
+
+    // r2-3-L3-01: a clean LeaveRoom from a VOICE room used to emit no media
+    // retraction at all — only UserLeft, which no client turns into a peer
+    // teardown. Mesh media is peer-to-peer, so remaining peers kept the
+    // leaver's RTCPeerConnection open with their microphone still on it,
+    // invisible to every roster and beyond every eviction path (which key off
+    // state.rooms, which the leaver just vacated). Emit the SAME over-complete
+    // StreamStopped the eviction path sends — unconditional of any streamer
+    // claim, because MEMBERSHIP is what clients render — plus the
+    // screen-share/camera retractions for whatever this connection actually
+    // released. Viewer-scoped, like every other StreamStopped emitter. The
+    // stock client sends StopStream first; a second StreamStopped is
+    // idempotent (Set/Map delete), exactly as the eviction path's own
+    // belt-and-braces overlap.
+    if leave_retracts_media(was_joined, parse_voice_room(room_id).is_some(), still_member) {
+        let msg = ServerMessage::StreamStopped {
+            room_id: room_id.to_string(),
+            streamer_id: user_id,
+        };
+        state.send_to_user(user_id, msg.clone());
+        for audience_id in voice_roster_audience(state, room_id, user_id).await {
+            state.send_to_user(audience_id, msg.clone());
+        }
+        // Belt-and-braces room-scoped send: reaches whoever holds a roster
+        // entry even if the viewer resolve failed closed to empty. The evictee
+        // is already out of the room, so no duplicate reaches them.
+        state.broadcast_to_room(room_id, msg, None);
+        if released.screen_sharer {
+            state.broadcast_to_room(
+                room_id,
+                ServerMessage::ScreenShareStopped {
+                    room_id: room_id.to_string(),
+                    streamer_id: user_id,
+                },
+                None,
+            );
+        }
+        if released.camera_user {
+            state.broadcast_to_room(
+                room_id,
+                ServerMessage::CameraStopped {
+                    room_id: room_id.to_string(),
+                    user_id,
+                },
+                None,
+            );
+        }
+    }
+
+    // Notify other room members only when the user has fully left. Mirrors the
+    // JoinRoom gate: a presence-hidden user was never announced outside voice,
+    // so their departure is not announced either.
+    let announce_presence = room_announces_presence(room_id) || user_shows_online(state, user_id).await;
+    if leave_announces_departure(was_joined, still_member, announce_presence) {
+        state.broadcast_to_room(
+            room_id,
+            ServerMessage::UserLeft {
+                room_id: room_id.to_string(),
+                user_id,
+            },
+            None,
+        );
+    }
+}
+
 /// Everyone currently sharing a live VOICE room with `user_id` (excluding
 /// themselves).
 ///
@@ -2304,10 +2459,8 @@ async fn handle_message(
             // (join_verdict: a member who can see the channel but lacks
             // CONNECT is told so; every other refusal stays generic.)
             let need_connect = parse_voice_room(&room_id).is_some();
-            if let Err(refusal) = join_verdict(
-                &get_user_channel_permissions(&state.pool, cid, user_id).await,
-                need_connect,
-            ) {
+            let access = get_user_channel_permissions(&state.pool, cid, user_id).await;
+            if let Err(refusal) = join_verdict(&access, need_connect) {
                 // Warn-level: a legitimate client rejoining after reconnect
                 // that lands here is silently cut off from live channel
                 // traffic — this must be visible in prod logs.
@@ -2365,6 +2518,14 @@ async fn handle_message(
                 }
             }
 
+            // The server this channel belongs to (only an Allowed answer, the
+            // one that admitted this join, names it): its sweep epoch orders
+            // this join's speak flag against its sweeps (store_join_speak).
+            let join_server = match &access {
+                ChannelPermAccess::Allowed { server_id, .. } => Some(server_id.clone()),
+                _ => None,
+            };
+
             // Was the user already in the room from another device? Peers only
             // get a UserJoined for the user's FIRST joined connection.
             let already_member = state
@@ -2373,8 +2534,14 @@ async fn handle_message(
                 .map(|r| r.members.contains(&user_id))
                 .unwrap_or(false);
 
+            // Whether THIS connection was already in the room (a repeat join on
+            // the same socket): its presence was announced then.
+            let conn_was_joined = joined_rooms.contains(&room_id);
             joined_rooms.insert(room_id.clone());
             state.join_room(&room_id, user_id, conn_id);
+            // After the insert: a sweep that starts later has this user in its
+            // snapshot, and one that started before it read this epoch.
+            let epoch_before = join_server.as_deref().map(|s| perms_sweep_epoch(state, s));
 
             // Close the check/insert race with a perms-change eviction pass:
             // the VIEW check above and the join_room insert are separated by
@@ -2393,11 +2560,7 @@ async fn handle_message(
             ) {
                 Ok(can_speak) => can_speak,
                 Err(refusal) => {
-                    if let Some(mut room) = state.rooms.get_mut(&room_id) {
-                        room.remove_member(user_id);
-                    }
-                    state.drop_room_if_empty(&room_id);
-                    joined_rooms.remove(&room_id);
+                    withdraw_refused_join(state, &room_id, user_id, conn_id, conn_was_joined, already_member, joined_rooms).await;
                     tracing::warn!(
                         "JoinRoom revoked post-insert for user {} ({}): VIEW/CONNECT lost for room {}",
                         user_id,
@@ -2411,8 +2574,13 @@ async fn handle_message(
             // occupant's frame read it. The write guard is dropped at the end of
             // this statement; the senders take their own read guard.
             if let Some(can_speak) = voice_can_speak {
-                if let Some(mut room) = state.rooms.get_mut(&room_id) {
-                    room.set_can_speak(user_id, can_speak);
+                match (join_server.as_deref(), epoch_before) {
+                    (Some(sid), Some(epoch)) => store_join_speak(state, &room_id, user_id, can_speak, sid, epoch),
+                    _ => {
+                        if let Some(mut room) = state.rooms.get_mut(&room_id) {
+                            room.set_can_speak(user_id, can_speak);
+                        }
+                    }
                 }
             }
 
@@ -2540,9 +2708,14 @@ async fn handle_message(
             // device (no UserJoined then), since this join's resolution is the
             // newest one. After UserJoined so a client that keys the flag off
             // its roster already has the entry; both are queued before any
-            // negotiation with the joiner could have produced audio.
+            // negotiation with the joiner could have produced audio. "Every
+            // occupant" includes the joiner's OWN other device already in the
+            // call: a change this join found is one the sweep will find already
+            // stored and so never announce, and only its self frame closes (or
+            // reopens) that device's microphone. The joining connection is
+            // skipped - the snapshot above told it.
             if voice_can_speak.is_some() {
-                state.broadcast_speak_state(&room_id, user_id, Some(user_id));
+                state.broadcast_speak_state(&room_id, user_id, Some(conn_id));
             }
 
             // A voice-room join IS voice presence: the only client that joins
@@ -2601,83 +2774,7 @@ async fn handle_message(
             );
 
             if was_joined {
-                // "Fully left" — no other connection of this user remains in
-                // the room. Every announcement below is gated on it, mirroring
-                // the disconnect path: a user still present via another device
-                // must not be erased from every roster.
-                let still_member = state
-                    .rooms
-                    .get(&room_id)
-                    .map(|r| r.members.contains(&user_id))
-                    .unwrap_or(false);
-
-                // r2-3-L3-01: a clean LeaveRoom from a VOICE room used to emit
-                // no media retraction at all — only UserLeft, which no client
-                // turns into a peer teardown. Mesh media is peer-to-peer, so
-                // remaining peers kept the leaver's RTCPeerConnection open with
-                // their microphone still on it, invisible to every roster and
-                // beyond every eviction path (which key off state.rooms, which
-                // the leaver just vacated). Emit the SAME over-complete
-                // StreamStopped the eviction path sends — unconditional of any
-                // streamer claim, because MEMBERSHIP is what clients render —
-                // plus the screen-share/camera retractions for whatever this
-                // connection actually released. Viewer-scoped, like every other
-                // StreamStopped emitter. The stock client sends StopStream
-                // first; a second StreamStopped is idempotent (Set/Map delete),
-                // exactly as the eviction path's own belt-and-braces overlap.
-                if leave_retracts_media(was_joined, parse_voice_room(&room_id).is_some(), still_member)
-                {
-                    let msg = ServerMessage::StreamStopped {
-                        room_id: room_id.clone(),
-                        streamer_id: user_id,
-                    };
-                    state.send_to_user(user_id, msg.clone());
-                    for audience_id in voice_roster_audience(&state, &room_id, user_id).await {
-                        state.send_to_user(audience_id, msg.clone());
-                    }
-                    // Belt-and-braces room-scoped send: reaches whoever holds a
-                    // roster entry even if the viewer resolve failed closed to
-                    // empty. The evictee is already out of the room, so no
-                    // duplicate reaches them.
-                    state.broadcast_to_room(&room_id, msg, None);
-                    if released.screen_sharer {
-                        state.broadcast_to_room(
-                            &room_id,
-                            ServerMessage::ScreenShareStopped {
-                                room_id: room_id.clone(),
-                                streamer_id: user_id,
-                            },
-                            None,
-                        );
-                    }
-                    if released.camera_user {
-                        state.broadcast_to_room(
-                            &room_id,
-                            ServerMessage::CameraStopped {
-                                room_id: room_id.clone(),
-                                user_id,
-                            },
-                            None,
-                        );
-                    }
-                }
-
-                // Notify other room members only when the user has fully left.
-                // Mirrors the JoinRoom gate: a presence-hidden user was never
-                // announced outside voice, so their departure is not announced
-                // either.
-                let announce_presence =
-                    room_announces_presence(&room_id) || user_shows_online(&state, user_id).await;
-                if leave_announces_departure(was_joined, still_member, announce_presence) {
-                    state.broadcast_to_room(
-                        &room_id,
-                        ServerMessage::UserLeft {
-                            room_id: room_id.clone(),
-                            user_id,
-                        },
-                        None,
-                    );
-                }
+                announce_conn_departure(state, &room_id, user_id, released).await;
             }
 
             tracing::info!("User {} left room {}", user_id, room_id);
@@ -4262,6 +4359,14 @@ async fn handle_message(
     Ok(())
 }
 
+/// How long a handler waits for [`broadcast_perms_changed_and_evict`]'s work
+/// before it answers anyway. A healthy sweep takes milliseconds (database
+/// lookups and a handful of LiveKit calls), so this binds only when LiveKit is
+/// slow or unreachable - each call there may take its full 5 s - and it keeps
+/// the request well inside any proxy's timeout. The work is detached, so
+/// answering early never cuts it short.
+const PERMS_CHANGE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// After any permission-affecting change in `server_id` (channel overwrite
 /// created/updated/deleted, role permissions edited, member roles changed):
 /// 1) broadcast ChannelPermsChanged to every server member (same fan-out
@@ -4270,7 +4375,65 @@ async fn handle_message(
 /// 2) evict now-VIEW-denied users from this server's live in-memory rooms
 ///    (channel_<id> / voice_<id>) — otherwise a freshly hidden channel keeps
 ///    streaming to members who could no longer join it.
+///
+/// Call it AFTER the change is committed. The work runs in a DETACHED task: a
+/// handler whose request is cancelled (the client gave up, a proxy cut it)
+/// used to take the queued or running sweep with it, and nothing else would
+/// ever evict. The handler still waits for it - so a kick has evicted by the
+/// time its response returns, whenever nothing is slow - but for at most
+/// [`PERMS_CHANGE_WAIT`]; after that it answers while the work finishes.
 pub async fn broadcast_perms_changed_and_evict(state: &Arc<AppState>, server_id: &str) {
+    start_perms_change(state, server_id).wait().await;
+}
+
+/// [`broadcast_perms_changed_and_evict`] in two halves, for a handler with
+/// more to await after its commit (an audit row): START it straight after the
+/// commit, with no await in between - from then on a cancelled request cannot
+/// lose it - then do the rest, then [`PendingPermsChange::wait`].
+pub fn start_perms_change(state: &Arc<AppState>, server_id: &str) -> PendingPermsChange {
+    let work = tokio::spawn(crate::sfu::carry_test_livekit(perms_changed(Arc::clone(state), server_id.to_string())));
+    PendingPermsChange { work, server_id: server_id.to_string() }
+}
+
+/// A perms change already running detached ([`start_perms_change`]).
+pub struct PendingPermsChange {
+    work: tokio::task::JoinHandle<()>,
+    server_id: String,
+}
+
+impl PendingPermsChange {
+    /// Wait for it, at most [`PERMS_CHANGE_WAIT`].
+    pub async fn wait(self) {
+        self.wait_at_most(PERMS_CHANGE_WAIT).await;
+    }
+
+    /// Wait for it, at most `wait`. Whether it (its sweep included) finished.
+    async fn wait_at_most(self, wait: std::time::Duration) -> bool {
+        match tokio::time::timeout(wait, self.work).await {
+            Ok(_) => true,
+            Err(_) => {
+                // Dropping the JoinHandle detaches the task; it carries on.
+                tracing::warn!(
+                    "Perms change in server {}: still sweeping after {} s (LiveKit slow or unreachable?); answering now, the sweep finishes in the background",
+                    self.server_id,
+                    wait.as_secs()
+                );
+                false
+            }
+        }
+    }
+}
+
+/// [`broadcast_perms_changed_and_evict`], waiting at most `wait`. Returns
+/// whether the work (its sweep included) had finished by then.
+#[cfg(test)]
+async fn perms_changed_within(state: &Arc<AppState>, server_id: &str, wait: std::time::Duration) -> bool {
+    start_perms_change(state, server_id).wait_at_most(wait).await
+}
+
+/// The body of [`broadcast_perms_changed_and_evict`], run detached.
+async fn perms_changed(state: Arc<AppState>, server_id: String) {
+    let (state, server_id) = (&state, server_id.as_str());
     // 0) Bump the member generation so the channel key ROTATES, exactly as it
     // does on a join/leave (migration 015's trigger). Losing VIEW is a
     // revocation like any other, but it left the key in force: the revoked
@@ -4328,16 +4491,156 @@ pub async fn broadcast_perms_changed_and_evict(state: &Arc<AppState>, server_id:
         );
     }
 
-    // 2) The eviction sweep itself, with a scheduled retry if its scope query
-    // fails (see evict_sweep).
-    evict_sweep(state, server_id, 3).await;
+    // 2) The eviction sweep itself, queued (see request_perms_sweep), with a
+    // scheduled retry if its scope query fails (see evict_sweep). Waited for:
+    // it is the run that starts after this change committed.
+    request_perms_sweep(state, server_id, 3).wait().await;
+}
+
+/// One server's perms-change sweeps ([`AppState::perms_sweeps`]): at most one
+/// RUNNING and one PENDING, however many changes ask.
+///
+/// Why a queue: every change used to run its own sweep inline in its HTTP
+/// handler, serialized per server. With LiveKit slow, each queued sweep sat
+/// through the one before it and then repeated every LiveKit call that one
+/// had failed - a failed grant or removal records nothing, so it is sent
+/// again - and a request cancelled while it waited lost its sweep outright.
+///
+/// Coalescing keeps what matters. A sweep resolves every member when it
+/// STARTS, so the one pending run - which starts only after the running one
+/// has finished acting - covers every change committed before it starts, and
+/// its answer is newer than anything the running one applied (the guarantee
+/// the per-server lock gives: see `AppState::lock_server_perms`, which the
+/// sweep still holds for the `participant_joined` check and the resync).
+pub struct SweepQueue {
+    /// Runs STARTED so far; while a run is going, this is its number.
+    started: u64,
+    /// The latest run a request is waiting for. A run starts while it is ahead
+    /// of `started`.
+    wanted: u64,
+    /// Scope-query retries the next run carries: the most any request asked.
+    retries: u8,
+    /// The number of the last run that FINISHED, for the requests waiting.
+    finished: tokio::sync::watch::Sender<u64>,
+}
+
+/// A request's place in its server's sweep queue.
+pub(crate) struct SweepTicket {
+    run: u64,
+    finished: tokio::sync::watch::Receiver<u64>,
+}
+
+impl SweepTicket {
+    /// The run that covers this request: the first to START after it asked.
+    #[cfg(test)]
+    pub(crate) fn run(&self) -> u64 {
+        self.run
+    }
+
+    /// Until that run has finished (or its runner is gone).
+    pub(crate) async fn wait(mut self) {
+        let run = self.run;
+        let _ = self.finished.wait_for(|&f| f >= run).await;
+    }
+}
+
+/// Ask for a sweep of `server_id` that STARTS after now - resolving every
+/// member after whatever the caller committed. Joins the pending run if there
+/// is one; otherwise it becomes the pending run (after the running one) or,
+/// with none running, starts a runner for it. The runner is its own task, so
+/// nobody who asked can cancel it by going away.
+pub(crate) fn request_perms_sweep(state: &Arc<AppState>, server_id: &str, retries: u8) -> SweepTicket {
+    use dashmap::mapref::entry::Entry;
+    let (ticket, start_runner) = match state.perms_sweeps.entry(server_id.to_string()) {
+        Entry::Occupied(mut o) => {
+            let q = o.get_mut();
+            // Not the running one: it may have resolved before this change.
+            let run = q.started + 1;
+            q.wanted = q.wanted.max(run);
+            q.retries = q.retries.max(retries);
+            (SweepTicket { run, finished: q.finished.subscribe() }, false)
+        }
+        Entry::Vacant(v) => {
+            let (finished, rx) = tokio::sync::watch::channel(0);
+            v.insert(SweepQueue { started: 0, wanted: 1, retries, finished });
+            (SweepTicket { run: 1, finished: rx }, true)
+        }
+    };
+    if start_runner {
+        tokio::spawn(crate::sfu::carry_test_livekit(run_perms_sweeps(Arc::clone(state), server_id.to_string())));
+    }
+    ticket
+}
+
+/// A server's sweep runner: runs sweeps one after another while any request
+/// is waiting for one, then leaves - removing the queue entry in the same
+/// step that finds nothing wanted, so a request either lands before that
+/// (and is run) or after it (and starts a new runner).
+async fn run_perms_sweeps(state: Arc<AppState>, server_id: String) {
+    let mut runner = SweepRunner { state: &state, server_id: &server_id, finished: false };
+    loop {
+        if state.perms_sweeps.remove_if(&server_id, |_, q| q.wanted <= q.started).is_some() {
+            runner.finished = true;
+            return;
+        }
+        // Only this runner removes the entry, so it is still there.
+        let Some((run, retries)) = state.perms_sweeps.get_mut(&server_id).map(|mut q| {
+            q.started += 1;
+            (q.started, std::mem::take(&mut q.retries))
+        }) else {
+            runner.finished = true;
+            return;
+        };
+        evict_sweep(&state, &server_id, retries).await;
+        if let Some(q) = state.perms_sweeps.get(&server_id) {
+            q.finished.send_replace(run);
+        }
+    }
+}
+
+/// Removes a runner's queue entry if the runner ends any way but its own
+/// (a panic in a sweep): an entry must never outlive its runner, or every
+/// later request would wait on a runner that no longer exists. Removing it
+/// closes the channel, so everyone waiting returns.
+struct SweepRunner<'a> {
+    state: &'a AppState,
+    server_id: &'a str,
+    finished: bool,
+}
+
+impl Drop for SweepRunner<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.state.perms_sweeps.remove(self.server_id);
+            tracing::error!("Perms sweep runner for server {} ended abnormally; its queue was dropped", self.server_id);
+        }
+    }
 }
 
 /// The eviction half of [`broadcast_perms_changed_and_evict`]: remove from
 /// this server's live rooms (mesh `channel_<id>` / `voice_<id>` and SFU) every
-/// member whose current permissions no longer satisfy the JOIN gate. Also the
-/// body of the delayed retry a failed scope query schedules for itself.
+/// member whose current permissions no longer satisfy the JOIN gate. The body
+/// of each run of the server's sweep queue ([`run_perms_sweeps`]), the delayed
+/// retry a failed scope query asks for included.
 async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
+    // ONE sweep per server at a time, for its whole run, and never alongside
+    // the SFU join checks for this server (the `participant_joined` check and
+    // the resync's), which take the same lock. The queue already runs one
+    // sweep at a time; the lock is what orders it against those checks. A
+    // sweep resolves members up front (allowed_cache) and acts on them
+    // afterwards, with awaits in between; two resolve-then-act passes
+    // interleaving let the EARLIER answer land after the later one - a stale
+    // SPEAK allow re-granting a microphone just taken away at LiveKit, or
+    // flipping a voice room's speak flag back - and nothing would ever look
+    // again. Held from before the snapshot, a later one resolves only after
+    // this one has finished acting. The retry this sweep may ask for below is
+    // queued by a task of its own; it never runs inside this one.
+    let _serial = state.lock_server_perms(server_id).await;
+    // A sweep of this server has started: before the snapshot, so a voice
+    // join that read the epoch before this knows its own speak answer may be
+    // older than this sweep's (store_join_speak).
+    *state.perms_sweep_epochs.entry(server_id.to_string()).or_insert(0) += 1;
+
     // 2) Snapshot the candidate rooms first — the resolver awaits, and holding
     // DashMap guards across await points risks shard deadlocks.
     let snapshot: Vec<(String, i64, Vec<UserId>)> = state
@@ -4399,13 +4702,12 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
             if retries_left > 0 {
                 let state = Arc::clone(state);
                 let sid = server_id.to_string();
-                tokio::spawn(async move {
+                tokio::spawn(crate::sfu::carry_test_livekit(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(sweep_backoff_secs(retries_left))).await;
-                    // Through the type-erased wrapper: the sweep spawns its own
-                    // retry, so its future would otherwise contain itself, and
-                    // the compiler could neither size it nor prove it Send.
-                    evict_sweep_boxed(state, sid, retries_left - 1).await;
-                });
+                    // Through the queue, like any other sweep: it runs after
+                    // (or with) whatever is pending, never beside it.
+                    drop(request_perms_sweep(&state, &sid, retries_left - 1));
+                }));
             }
             None
         }
@@ -4438,7 +4740,7 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
                     let access = get_user_channel_permissions(&state.pool, cid, member_id).await;
                     let verdict = (
                         sweep_keeps(scope_known, server_id, &access, need_connect),
-                        sweep_speak(&access, need_connect),
+                        sweep_speak(server_id, &access, need_connect),
                         sweep_grant(server_id, &access),
                     );
                     allowed_cache.insert((cid, member_id, need_connect), verdict);
@@ -4592,6 +4894,12 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
         }
         out
     };
+    // One LiveKit circuit breaker for this pass (crate::sfu::LiveKitBreaker):
+    // after the first call LiveKit does not answer, the rest are not sent but
+    // owed to the resync - so a hung LiveKit costs this pass one timeout, not
+    // one per session, and the next change's mesh pass is not held behind it.
+    let breaker = Arc::new(crate::sfu::LiveKitBreaker::default());
+    crate::sfu::with_livekit_breaker(Arc::clone(&breaker), async {
     for (cid, uid) in sfu_targets {
         // An SFU room is always voice: the token gate (sfu.rs get_sfu_token)
         // requires VIEW and CONNECT, so the sweep does too.
@@ -4608,7 +4916,7 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
                 let access = get_user_channel_permissions(&state.pool, cid, uid).await;
                 let verdict = (
                     sweep_keeps(scope_known, server_id, &access, true),
-                    sweep_speak(&access, true),
+                    sweep_speak(server_id, &access, true),
                     sweep_grant(server_id, &access),
                 );
                 allowed_cache.insert((cid, uid, true), verdict);
@@ -4631,13 +4939,16 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
                         server_id
                     );
                 } else if out.tried > 0 {
+                    // regrant_user has owed the unconfirmed ones to the resync
+                    // and says whether it will retry them (resync_retries).
                     tracing::warn!(
                         "SFU perms grant: user {} in sfu channel {}: LiveKit confirmed {} of {} session(s) needing the grant their permissions give \
-                         (see the SFU grant lines above; the next resync applies it again); sweep for server {}",
+                         (see the SFU grant lines above); for the rest {}; sweep for server {}",
                         uid,
                         cid,
                         out.applied,
                         out.tried,
+                        crate::sfu::grant_retry_note(out.resync_retries, crate::sfu::GrantAt::Live),
                         server_id
                     );
                 }
@@ -4666,16 +4977,22 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
             );
         }
     }
-}
-
-/// [`evict_sweep`] behind a `dyn Future` so the retry it spawns can await it
-/// without the recursive future type (see the spawn in evict_sweep).
-fn evict_sweep_boxed(
-    state: Arc<AppState>,
-    server_id: String,
-    retries_left: u8,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-    Box::pin(async move { evict_sweep(&state, &server_id, retries_left).await })
+    })
+    .await;
+    if breaker.tripped() {
+        // Read after every skipped session was owed: see grant_retry_note.
+        tracing::warn!(
+            "SFU perms sweep for server {}: LiveKit did not answer a call, so this sweep sent no further LiveKit calls ({} not sent); \
+             each is owed to the LiveKit resync, {}",
+            server_id,
+            breaker.skipped(),
+            if crate::sfu::resync_will_retry(state) {
+                "which will retry it"
+            } else {
+                "which is NOT running: each waits for the sweep of the next permission change in this server, or the session's rejoin"
+            }
+        );
+    }
 }
 
 /// Seconds to wait before re-running a sweep whose scope query failed:
@@ -4792,13 +5109,19 @@ mod sweep_keeps_tests {
 /// member kept, so neither may flip a flag: turning a database hiccup into
 /// "everyone may speak again" would undo a deny, and into "nobody may" would
 /// silence a call. A text room has no speak right at all.
-fn sweep_speak(access: &ChannelPermAccess, voice: bool) -> Option<bool> {
+///
+/// And only an answer for a channel of THIS server (`server_id`, the sweep's),
+/// like `sweep_grant`: with the scope unknown, `sweep_keeps` keeps another
+/// server's members, and their speak flag is no business of a sweep for this
+/// one - it holds only this server's lock, so another server's sweep could be
+/// writing the same flag at the same time.
+fn sweep_speak(server_id: &str, access: &ChannelPermAccess, voice: bool) -> Option<bool> {
     if !voice {
         return None;
     }
     match access {
-        ChannelPermAccess::Allowed { perms, .. } => Some(perms.has(Permissions::SPEAK)),
-        ChannelPermAccess::NotMember | ChannelPermAccess::NotFound => None,
+        ChannelPermAccess::Allowed { server_id: sid, perms } if sid == server_id => Some(perms.has(Permissions::SPEAK)),
+        ChannelPermAccess::Allowed { .. } | ChannelPermAccess::NotMember | ChannelPermAccess::NotFound => None,
     }
 }
 
@@ -4814,16 +5137,27 @@ mod sweep_speak_tests {
     #[test]
     fn a_kept_voice_member_gets_the_speak_bit_of_the_same_resolution() {
         let vc = P::VIEW_CHANNEL | P::CONNECT;
-        assert_eq!(sweep_speak(&allowed(vc | P::SPEAK), true), Some(true));
-        assert_eq!(sweep_speak(&allowed(vc), true), Some(false), "a SPEAK deny is an answer too");
-        assert_eq!(sweep_speak(&allowed(P::ADMINISTRATOR), true), Some(true), "ADMINISTRATOR implies SPEAK");
+        assert_eq!(sweep_speak("s", &allowed(vc | P::SPEAK), true), Some(true));
+        assert_eq!(sweep_speak("s", &allowed(vc), true), Some(false), "a SPEAK deny is an answer too");
+        assert_eq!(sweep_speak("s", &allowed(P::ADMINISTRATOR), true), Some(true), "ADMINISTRATOR implies SPEAK");
     }
 
     #[test]
     fn no_answer_leaves_the_flag_alone() {
-        assert_eq!(sweep_speak(&ChannelPermAccess::NotFound, true), None, "a failed lookup is not a verdict");
-        assert_eq!(sweep_speak(&ChannelPermAccess::NotMember, true), None);
-        assert_eq!(sweep_speak(&allowed(P::all()), false), None, "a text room has no speak right");
+        assert_eq!(sweep_speak("s", &ChannelPermAccess::NotFound, true), None, "a failed lookup is not a verdict");
+        assert_eq!(sweep_speak("s", &ChannelPermAccess::NotMember, true), None);
+        assert_eq!(sweep_speak("s", &allowed(P::all()), false), None, "a text room has no speak right");
+    }
+
+    /// With the scope unknown the sweep keeps another server's members; their
+    /// flag is not its business. Positive control: the same answer for THIS
+    /// server is one.
+    #[test]
+    fn another_servers_answer_leaves_the_flag_alone() {
+        let vc = P::VIEW_CHANNEL | P::CONNECT;
+        let other = ChannelPermAccess::Allowed { server_id: "other".into(), perms: vc };
+        assert_eq!(sweep_speak("s", &other, true), None);
+        assert_eq!(sweep_speak("other", &other, true), Some(false));
     }
 
     /// The join gate and its post-insert recheck share this, so the voice
@@ -6240,13 +6574,331 @@ mod voice_speak_join_tests {
         assert_eq!(unchanged, (vec![], vec![], vec![]), "no change, no frame");
         assert_eq!(members_after_sweeps, vec![owner, speaker, muted], "a SPEAK deny never evicts");
     }
+
+    /// A server with a mesh voice channel whose @everyone may VIEW, CONNECT
+    /// and SPEAK, its owner, and a member holding the (permission-less) role
+    /// `quiet`. Returns (server id, [owner, member], quiet role, channel).
+    async fn mesh_fixture(pool: &sqlx::PgPool, prefix: &str) -> (String, Vec<i32>, i64, i32) {
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let mk = |n: &str| format!("{prefix}_{n}_{}", &tag[..12]);
+        let mut ids: Vec<i32> = Vec::new();
+        for n in ["owner", "member"] {
+            let (id,): (i32,) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id")
+                .bind(mk(n))
+                .bind(b"s".as_ref())
+                .bind(b"v".as_ref())
+                .fetch_one(pool)
+                .await
+                .expect("user");
+            ids.push(id);
+        }
+        let sid = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, $2, $3)")
+            .bind(&sid)
+            .bind(mk("srv"))
+            .bind(ids[0])
+            .execute(pool)
+            .await
+            .expect("server");
+        sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2), ($1, $3)")
+            .bind(&sid)
+            .bind(ids[0])
+            .bind(ids[1])
+            .execute(pool)
+            .await
+            .expect("members");
+        sqlx::query(
+            "INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) \
+             VALUES ($1, '@everyone', '#99AAB5', $2, 0, true)",
+        )
+        .bind(&sid)
+        .bind((Permissions::VIEW_CHANNEL | Permissions::CONNECT | Permissions::SPEAK).bits() as i64)
+        .execute(pool)
+        .await
+        .expect("@everyone");
+        let quiet = role(pool, &sid, "quiet", ids[1]).await;
+        let (voice,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type, sfu_mode) VALUES ($1, 'v', 1, false) RETURNING id")
+            .bind(&sid)
+            .fetch_one(pool)
+            .await
+            .expect("voice channel");
+        (sid, ids, quiet, voice)
+    }
+
+    async fn drop_mesh_fixture(pool: &sqlx::PgPool, sid: &str, ids: &[i32], voice: i32) {
+        let _ = sqlx::query("DELETE FROM channels WHERE id = $1").bind(voice).execute(pool).await;
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(sid).execute(pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(ids.to_vec()).execute(pool).await;
+    }
+
+    /// A perms change whose HTTP request goes AWAY still sweeps
+    /// (TEST_DATABASE_URL; skips without it). The handler's future is dropped
+    /// at its first await - the client gave up, a proxy cut the request. The
+    /// work is detached, so the member whose SPEAK deny was lifted still hears
+    /// that they may speak again. (Inline, the sweep died with the request,
+    /// and nothing else would ever have told them.)
+    #[tokio::test]
+    async fn a_perms_change_whose_request_is_dropped_still_sweeps() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let (sid, ids, quiet, voice) = mesh_fixture(&pool, "pd").await;
+        deny(&pool, voice, quiet, Permissions::SPEAK).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = format!("voice_{voice}");
+        let member = ids[1] as UserId;
+        let mut s_owner = Sock::open(&state, ids[0], "owner");
+        let mut s_member = Sock::open(&state, ids[1], "member");
+        let joined = (s_owner.join(&state, &room).await, s_member.join(&state, &room).await);
+        let flagged = state.rooms.get(&room).map(|r| r.can_speak(member));
+        s_member.drain();
+
+        sqlx::query("DELETE FROM channel_permission_overwrites WHERE channel_id = $1 AND role_id = $2")
+            .bind(voice as i64)
+            .bind(quiet)
+            .execute(&pool)
+            .await
+            .expect("lift the deny");
+        let dropped = tokio::time::timeout(std::time::Duration::ZERO, super::broadcast_perms_changed_and_evict(&state, &sid)).await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut heard = Vec::new();
+        while !heard.contains(&(member, true)) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            heard.extend(speak(&s_member.drain(), &room));
+        }
+        for s in [&s_owner, &s_member] {
+            state.unregister_session(s.uid, s.conn);
+        }
+        drop_mesh_fixture(&pool, &sid, &ids, voice).await;
+
+        assert_eq!(joined, (Ok(()), Ok(())));
+        assert_eq!(flagged, Some(false), "fixture: denied at the join");
+        assert!(dropped.is_err(), "fixture: the handler did not finish before it was dropped");
+        assert_eq!(heard, vec![(member, true)], "the detached sweep told them");
+    }
+
+    /// A join whose speak answer a SWEEP OVERTOOK asks for another sweep
+    /// (TEST_DATABASE_URL; skips without it). The member is denied SPEAK. A
+    /// voice join's recheck resolves outside the server's lock, so its answer
+    /// can be older than a sweep that resolved the member after a later change
+    /// and already wrote the flag; the join, writing last, would leave its
+    /// stale answer for every mesh receiver. Here the join read the sweep
+    /// epoch, a sweep ran and wrote "denied", and then the join wrote its older
+    /// "may speak": a sweep is requested, and the flag comes back to "denied".
+    /// Positive control: with no sweep since the epoch was read, the join's
+    /// answer is the newest there is, and nothing is requested.
+    #[tokio::test]
+    async fn a_join_whose_speak_answer_a_sweep_overtook_asks_for_another() {
+        use super::{perms_sweep_epoch, store_join_speak};
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let (sid, ids, quiet, voice) = mesh_fixture(&pool, "so").await;
+        deny(&pool, voice, quiet, Permissions::SPEAK).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = format!("voice_{voice}");
+        let member = ids[1] as UserId;
+        let mut s_member = Sock::open(&state, ids[1], "member");
+        let joined = s_member.join(&state, &room).await;
+        let flag = || state.rooms.get(&room).map(|r| r.can_speak(member));
+
+        // Control: no sweep since the epoch was read - nothing asked for.
+        let epoch = perms_sweep_epoch(&state, &sid);
+        store_join_speak(&state, &room, member, true, &sid, epoch);
+        let control = (flag(), state.perms_sweeps.contains_key(&sid));
+
+        // A sweep starts and writes the newest answer; then the join, which
+        // read the epoch before it, writes its older one.
+        evict_sweep(&state, &sid, 0).await;
+        let swept = flag();
+        store_join_speak(&state, &room, member, true, &sid, epoch);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while (flag() != Some(false) || state.perms_sweeps.contains_key(&sid)) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let restored = flag();
+        state.unregister_session(s_member.uid, s_member.conn);
+        drop_mesh_fixture(&pool, &sid, &ids, voice).await;
+
+        assert_eq!(joined, Ok(()));
+        assert_eq!(control, (Some(true), false), "control: the join's answer stands, no sweep asked for");
+        assert_eq!(swept, Some(false), "fixture: the sweep wrote the newest answer");
+        assert_eq!(restored, Some(false), "the sweep the join asked for restored it");
+    }
+
+    /// A second device's join tells the FIRST device its own flag
+    /// (TEST_DATABASE_URL; skips without it). The member's desktop is in the
+    /// call, allowed to speak. SPEAK is denied to their role and, before any
+    /// sweep runs, their phone joins the same room: that join is what finds
+    /// the change, and the sweep will then find the flag already stored and
+    /// say nothing. So the desktop must hear its own VoiceSpeakState(false)
+    /// from the join - it is what closes that device's microphone - while the
+    /// phone, whose snapshot said it, gets no second copy.
+    #[tokio::test]
+    async fn a_second_devices_join_tells_the_first_device_its_own_flag() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let (sid, ids, quiet, voice) = mesh_fixture(&pool, "sd").await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = format!("voice_{voice}");
+        let (owner, member) = (ids[0] as UserId, ids[1] as UserId);
+        let mut s_owner = Sock::open(&state, ids[0], "owner");
+        let mut s_desk = Sock::open(&state, ids[1], "member");
+        let mut s_phone = Sock::open(&state, ids[1], "member");
+        let first = (s_owner.join(&state, &room).await, s_desk.join(&state, &room).await);
+        let (_, _) = (s_owner.drain(), s_desk.drain());
+
+        deny(&pool, voice, quiet, Permissions::SPEAK).await;
+        let second = s_phone.join(&state, &room).await;
+        let (f_owner, f_desk, f_phone) = (s_owner.drain(), s_desk.drain(), s_phone.drain());
+        for s in [&s_owner, &s_desk, &s_phone] {
+            state.unregister_session(s.uid, s.conn);
+        }
+        drop_mesh_fixture(&pool, &sid, &ids, voice).await;
+
+        assert_eq!((first, second), ((Ok(()), Ok(())), Ok(())));
+        assert_eq!(speak(&f_desk, &room), vec![(member, false)], "the desktop already in the call hears its own deny");
+        assert_eq!(speak(&f_owner, &room), vec![(member, false)]);
+        assert_eq!(
+            speak(&f_phone, &room),
+            vec![(owner, true), (member, false)],
+            "the joining phone: its snapshot, and no second copy"
+        );
+    }
+}
+
+#[cfg(test)]
+mod refused_join_tests {
+    use super::withdraw_refused_join;
+    use crate::protocol::ServerMessage;
+    use crate::state::{AppState, UserId};
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    /// An AppState whose database never answers, quickly.
+    fn test_state() -> Arc<AppState> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgres://localhost/does_not_connect")
+            .expect("lazy pool");
+        AppState::new(pool, "test-secret".into(), None, Arc::new(crate::wake::NullWake))
+    }
+
+    fn open(state: &Arc<AppState>, uid: UserId) -> (u64, mpsc::Receiver<ServerMessage>) {
+        let (tx, rx) = mpsc::channel::<ServerMessage>(64);
+        let (conn, _, _) = state.register_session(uid, format!("u{uid}"), tx, false, None, String::new());
+        (conn, rx)
+    }
+
+    fn drain(rx: &mut mpsc::Receiver<ServerMessage>) -> Vec<ServerMessage> {
+        let mut out = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            out.push(m);
+        }
+        out
+    }
+
+    /// Whether `frames` announce `who` leaving (UserLeft) or retract their
+    /// voice (StreamStopped).
+    fn departed(frames: &[ServerMessage], who: UserId) -> (bool, bool) {
+        (
+            frames.iter().any(|m| matches!(m, ServerMessage::UserLeft { user_id, .. } if *user_id == who)),
+            frames.iter().any(|m| matches!(m, ServerMessage::StreamStopped { streamer_id, .. } if *streamer_id == who)),
+        )
+    }
+
+    /// A JoinRoom refused after its insert takes out THAT connection only, and
+    /// announces only what had been announced.
+    ///
+    /// 1. The member's desktop is in the call; the phone's fresh join is
+    ///    refused. The desktop keeps its membership - with its speak deny - and
+    ///    stays reachable by the sweep's speak frames; nothing is announced.
+    /// 2. A fresh connection that was the user's only one: the user is gone,
+    ///    and was never announced, so nothing is announced now either.
+    /// 3. A connection that was ALREADY in the room (a repeat join on the same
+    ///    socket): it leaves as a LeaveRoom would - RoomLeft to it, UserLeft
+    ///    and the voice retraction to the room.
+    /// 4. The zombie reap. The user was announced through an old socket that is
+    ///    reaped WHILE the new one's recheck runs: the reap hands the old
+    ///    socket's stream claim to the new one and says nothing (the user was
+    ///    still there). The new, fresh connection's refusal is then what takes
+    ///    the user out, and it must say so, or peers keep a ghost - and a P2P
+    ///    call - that no later sweep can see.
+    #[tokio::test]
+    async fn a_refused_join_takes_out_only_its_own_connection_and_announces_only_what_was_announced() {
+        let state = test_state();
+        let room = "voice_9";
+        let (v, mut rv) = open(&state, 1);
+        state.join_room(room, 1, v);
+
+        // 1.
+        let (desk, mut rdesk) = open(&state, 2);
+        state.join_room(room, 2, desk);
+        state.rooms.get_mut(room).unwrap().set_can_speak(2, false);
+        let (phone, _rphone) = open(&state, 2);
+        let mut phone_rooms: HashSet<String> = [room.to_string()].into_iter().collect();
+        state.join_room(room, 2, phone);
+        withdraw_refused_join(&state, room, 2, phone, false, true, &mut phone_rooms).await;
+        let desk_kept = state.rooms.get(room).map(|r| (r.members.contains(&2), r.can_speak(2)));
+        state.broadcast_speak_state(room, 2, None);
+        let desk_heard = drain(&mut rdesk)
+            .iter()
+            .any(|m| matches!(m, ServerMessage::VoiceSpeakState { user_id: 2, can_speak: false, .. }));
+        let after_1 = departed(&drain(&mut rv), 2);
+
+        // 2.
+        let (w, _rw) = open(&state, 3);
+        let mut w_rooms: HashSet<String> = [room.to_string()].into_iter().collect();
+        state.join_room(room, 3, w);
+        withdraw_refused_join(&state, room, 3, w, false, false, &mut w_rooms).await;
+        let w_gone = state.rooms.get(room).is_some_and(|r| !r.members.contains(&3));
+        let after_2 = departed(&drain(&mut rv), 3);
+
+        // 3.
+        let (x, mut rx) = open(&state, 4);
+        let mut x_rooms: HashSet<String> = [room.to_string()].into_iter().collect();
+        state.join_room(room, 4, x); // its earlier, announced join
+        state.join_room(room, 4, x); // the repeat that is refused
+        withdraw_refused_join(&state, room, 4, x, true, true, &mut x_rooms).await;
+        let x_gone = state.rooms.get(room).is_some_and(|r| !r.members.contains(&4));
+        let after_3 = departed(&drain(&mut rv), 4);
+        let x_told = drain(&mut rx).iter().any(|m| matches!(m, ServerMessage::RoomLeft { room_id } if room_id == room));
+
+        // 4.
+        let (zombie, _rz) = open(&state, 5);
+        state.join_room(room, 5, zombie); // announced, and in the call
+        if let Some(mut r) = state.rooms.get_mut(room) {
+            r.set_media(crate::state::MediaKind::Stream, 5, zombie, true);
+        }
+        let (fresh, mut rfresh) = open(&state, 5);
+        let mut fresh_rooms: HashSet<String> = [room.to_string()].into_iter().collect();
+        state.join_room(room, 5, fresh); // the reconnect's replayed join: already a member
+        state.unregister_session(5, zombie); // the reap, mid-recheck
+        let fresh_holds_it = state.rooms.get(room).is_some_and(|r| r.members.contains(&5));
+        let reap_said = departed(&drain(&mut rv), 5);
+        withdraw_refused_join(&state, room, 5, fresh, false, true, &mut fresh_rooms).await;
+        let after_4 = departed(&drain(&mut rv), 5);
+        let fresh_told = drain(&mut rfresh).iter().any(|m| matches!(m, ServerMessage::RoomLeft { room_id } if room_id == room));
+
+        assert_eq!(desk_kept, Some((true, false)), "the desktop stays, its deny with it");
+        assert!(desk_heard, "and a later speak frame still reaches it");
+        assert!(!phone_rooms.contains(room));
+        assert_eq!(after_1, (false, false), "the user is still in the call: nothing to announce");
+        assert!(w_gone && !w_rooms.contains(room));
+        assert_eq!(after_2, (false, false), "never announced, so nothing taken back");
+        assert!(x_gone);
+        assert_eq!(after_3, (true, true), "announced before, so its departure is");
+        assert!(x_told, "the connection itself is told it left");
+        assert!(fresh_holds_it && reap_said == (false, false), "fixture: the reap left the user to the new connection, silently");
+        assert_eq!(after_4, (true, true), "the refusal took the announced user out, and says so");
+        assert!(fresh_told, "and the reconnected client is told it is not in the call");
+    }
 }
 
 #[cfg(test)]
 mod sfu_grant_sweep_tests {
     use super::evict_sweep;
     use crate::permissions::Permissions as P;
-    use crate::sfu::resync_tests::{asked, livekit_stand_in, no_env_proxy, Seen, CAMERA_ONLY, MIC_AND_CAMERA};
+    use crate::sfu::resync_tests::{
+        asked, livekit_stand_in, livekit_stand_in_holding, no_env_proxy, Seen, CAMERA_ONLY, MIC_AND_CAMERA,
+    };
     use crate::sfu::{room_name_for_channel, Grant, TEST_LIVEKIT};
     use crate::state::AppState;
     use std::sync::Arc;
@@ -6287,6 +6939,88 @@ mod sfu_grant_sweep_tests {
         assert_eq!(sweep_grant("s", &ChannelPermAccess::NotMember), None);
     }
 
+    /// A server with an SFU voice channel whose @everyone may VIEW, CONNECT,
+    /// SPEAK and use VIDEO, its owner, and a member holding the (so far
+    /// permission-less) role `role` that a test denies SPEAK to.
+    struct SweepFixture {
+        ids: Vec<i32>,
+        owner: i64,
+        member: i64,
+        sid: String,
+        role: i64,
+        cid: i32,
+    }
+
+    const EVERYONE: P = P::VIEW_CHANNEL.union(P::CONNECT).union(P::SPEAK).union(P::VIDEO);
+
+    async fn sweep_fixture(pool: &sqlx::PgPool) -> SweepFixture {
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let mk = |n: &str| format!("sg_{n}_{}", &tag[..12]);
+        let mut ids: Vec<i32> = Vec::new();
+        for n in ["owner", "member"] {
+            let (id,): (i32,) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id")
+                .bind(mk(n))
+                .bind(b"s".as_ref())
+                .bind(b"v".as_ref())
+                .fetch_one(pool)
+                .await
+                .expect("user");
+            ids.push(id);
+        }
+        let (owner, member) = (ids[0] as i64, ids[1] as i64);
+        let sid = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, $2, $3)")
+            .bind(&sid)
+            .bind(mk("srv"))
+            .bind(ids[0])
+            .execute(pool)
+            .await
+            .expect("server");
+        sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2), ($1, $3)")
+            .bind(&sid)
+            .bind(ids[0])
+            .bind(ids[1])
+            .execute(pool)
+            .await
+            .expect("members");
+        sqlx::query(
+            "INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) \
+             VALUES ($1, '@everyone', '#99AAB5', $2, 0, true)",
+        )
+        .bind(&sid)
+        .bind(EVERYONE.bits() as i64)
+        .execute(pool)
+        .await
+        .expect("@everyone");
+        let (role,): (i64,) = sqlx::query_as(
+            "INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) \
+             VALUES ($1, 'quiet', '#99AAB5', 0, 1, false) RETURNING id",
+        )
+        .bind(&sid)
+        .fetch_one(pool)
+        .await
+        .expect("role");
+        sqlx::query("INSERT INTO member_roles (server_id, user_id, role_id) VALUES ($1, $2, $3)")
+            .bind(&sid)
+            .bind(ids[1])
+            .bind(role)
+            .execute(pool)
+            .await
+            .expect("member role");
+        let (cid,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type, sfu_mode) VALUES ($1, 'v', 1, true) RETURNING id")
+            .bind(&sid)
+            .fetch_one(pool)
+            .await
+            .expect("sfu channel");
+        SweepFixture { ids, owner, member, sid, role, cid }
+    }
+
+    async fn drop_sweep_fixture(pool: &sqlx::PgPool, f: &SweepFixture) {
+        let _ = sqlx::query("DELETE FROM channels WHERE id = $1").bind(f.cid).execute(pool).await;
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&f.sid).execute(pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(f.ids.clone()).execute(pool).await;
+    }
+
     /// THE GAP, end to end through the real perms-change sweep
     /// (TEST_DATABASE_URL; skips without it). A member sits in an SFU call
     /// whose Púca socket is NOT in voice_<id> - it left that room, or died - so
@@ -6303,65 +7037,9 @@ mod sfu_grant_sweep_tests {
     async fn the_sweep_enforces_speak_at_livekit_for_sfu_members_it_keeps() {
         let Some(pool) = crate::migrator::test_pool(2).await else { return };
         no_env_proxy();
-        let tag = uuid::Uuid::new_v4().simple().to_string();
-        let mk = |n: &str| format!("sg_{n}_{}", &tag[..12]);
-        let mut ids: Vec<i32> = Vec::new();
-        for n in ["owner", "member"] {
-            let (id,): (i32,) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id")
-                .bind(mk(n))
-                .bind(b"s".as_ref())
-                .bind(b"v".as_ref())
-                .fetch_one(&pool)
-                .await
-                .expect("user");
-            ids.push(id);
-        }
-        let (owner, member) = (ids[0] as i64, ids[1] as i64);
-        let sid = uuid::Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, $2, $3)")
-            .bind(&sid)
-            .bind(mk("srv"))
-            .bind(ids[0])
-            .execute(&pool)
-            .await
-            .expect("server");
-        sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2), ($1, $3)")
-            .bind(&sid)
-            .bind(ids[0])
-            .bind(ids[1])
-            .execute(&pool)
-            .await
-            .expect("members");
-        let everyone = P::VIEW_CHANNEL | P::CONNECT | P::SPEAK | P::VIDEO;
-        sqlx::query(
-            "INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) \
-             VALUES ($1, '@everyone', '#99AAB5', $2, 0, true)",
-        )
-        .bind(&sid)
-        .bind(everyone.bits() as i64)
-        .execute(&pool)
-        .await
-        .expect("@everyone");
-        let (role,): (i64,) = sqlx::query_as(
-            "INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) \
-             VALUES ($1, 'quiet', '#99AAB5', 0, 1, false) RETURNING id",
-        )
-        .bind(&sid)
-        .fetch_one(&pool)
-        .await
-        .expect("role");
-        sqlx::query("INSERT INTO member_roles (server_id, user_id, role_id) VALUES ($1, $2, $3)")
-            .bind(&sid)
-            .bind(ids[1])
-            .bind(role)
-            .execute(&pool)
-            .await
-            .expect("member role");
-        let (cid,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type, sfu_mode) VALUES ($1, 'v', 1, true) RETURNING id")
-            .bind(&sid)
-            .fetch_one(&pool)
-            .await
-            .expect("sfu channel");
+        let f = sweep_fixture(&pool).await;
+        let (owner, member, cid, role) = (f.owner, f.member, f.cid, f.role);
+        let everyone = EVERYONE;
 
         let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
         let room = room_name_for_channel(cid as i64);
@@ -6388,7 +7066,7 @@ mod sfu_grant_sweep_tests {
             .await
             .expect("deny SPEAK");
         let (base, srv) = livekit_stand_in(vec![update(CAMERA_ONLY)], None).await;
-        sweep(&state, &sid, base).await;
+        sweep(&state, &f.sid, base).await;
         let revoke = asked(srv).await;
         let after_revoke = state.sfu_rooms.get(&room).map(|u| {
             (
@@ -6407,18 +7085,16 @@ mod sfu_grant_sweep_tests {
             .await
             .expect("lift the deny");
         let (base, srv) = livekit_stand_in(vec![update(MIC_AND_CAMERA), update(MIC_AND_CAMERA)], None).await;
-        sweep(&state, &sid, base).await;
+        sweep(&state, &f.sid, base).await;
         let grant = asked(srv).await;
 
         // 3. Nothing changed: nothing is sent (the stand-in fails on any call).
         let (base, srv) = livekit_stand_in(vec![], None).await;
-        sweep(&state, &sid, base).await;
+        sweep(&state, &f.sid, base).await;
         let quiet = asked(srv).await.len();
         let kept = state.sfu_rooms.get(&room).map(|u| u.participants.len());
 
-        let _ = sqlx::query("DELETE FROM channels WHERE id = $1").bind(cid).execute(&pool).await;
-        let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&sid).execute(&pool).await;
-        let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(ids.clone()).execute(&pool).await;
+        drop_sweep_fixture(&pool, &f).await;
 
         assert!(no_voice_room, "fixture: no socket of theirs is in voice_<id>");
         assert_eq!(revoke.len(), 1, "one session needed the new grant");
@@ -6447,5 +7123,302 @@ mod sfu_grant_sweep_tests {
         );
         assert_eq!(quiet, 0, "no change, no call");
         assert_eq!(kept, Some(3), "a SPEAK change never evicts");
+    }
+
+    /// TWO SWEEPS FOR ONE SERVER (TEST_DATABASE_URL; skips without it). The
+    /// member's session holds the camera-only grant an earlier SPEAK deny left
+    /// it. The deny is lifted, and sweep A resolves "may speak" and asks
+    /// LiveKit for the microphone back - and is parked in that call. Meanwhile
+    /// the deny is put back and sweep B runs for it.
+    ///
+    /// Interleaved, B resolved "may not speak", found the session already
+    /// holding the camera-only grant it wanted (A's call was not confirmed
+    /// yet) and sent nothing; then A's call landed and was recorded: LiveKit
+    /// let the microphone through while the database denied SPEAK, for good.
+    /// Serialized, B waits for A, resolves after it, finds the microphone A
+    /// gave and takes it away: B's answer - the newest - is the last word.
+    #[tokio::test]
+    async fn a_later_sweep_for_the_same_server_runs_after_the_earlier_one_and_its_answer_wins() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        no_env_proxy();
+        // The fixture starts with the deny lifted: @everyone may SPEAK.
+        let f = sweep_fixture(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = room_name_for_channel(f.cid as i64);
+        let a = format!("u{}#a", f.member);
+        let camera_only = Grant::of(P::VIEW_CHANNEL | P::CONNECT | P::VIDEO);
+        {
+            let mut u = state.sfu_rooms.entry(room.clone()).or_default();
+            u.participants.insert(a.clone(), Instant::now());
+            u.grants.insert(a.clone(), camera_only);
+        }
+
+        // Sweep A's call (the first) is held until the test lets it go.
+        let arrived = Arc::new(AtomicBool::new(false));
+        let seen_call = Arc::clone(&arrived);
+        let (release, held) = tokio::sync::oneshot::channel::<()>();
+        let (base, srv) = livekit_stand_in_holding(
+            vec![update(MIC_AND_CAMERA), update(CAMERA_ONLY)],
+            Some(Box::new(move |m: &str| {
+                if m == "UpdateParticipant" {
+                    seen_call.store(true, Ordering::SeqCst);
+                }
+            })),
+            Some((0, held)),
+        )
+        .await;
+        let order = std::sync::Mutex::new(Vec::new());
+        let b_done = AtomicBool::new(false);
+
+        let sweep_a = async {
+            TEST_LIVEKIT.scope(base.clone(), evict_sweep(&state, &f.sid, 0)).await;
+            order.lock().unwrap().push("A");
+        };
+        let then_b = async {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !arrived.load(Ordering::SeqCst) {
+                assert!(Instant::now() < deadline, "sweep A never reached LiveKit");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            // A is parked in its call, acting on what it resolved before this.
+            sqlx::query("INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny) VALUES ($1, $2, 0, $3)")
+                .bind(f.cid as i64)
+                .bind(f.role)
+                .bind(P::SPEAK.bits() as i64)
+                .execute(&pool)
+                .await
+                .expect("deny SPEAK again");
+            let sweep_b = async {
+                TEST_LIVEKIT.scope(base.clone(), evict_sweep(&state, &f.sid, 0)).await;
+                order.lock().unwrap().push("B");
+                b_done.store(true, Ordering::SeqCst);
+            };
+            // Let A go once B is queued behind it on the server's lock (the
+            // map's clone, A's, and B's) - or, were the sweeps not serialized,
+            // once B had simply finished.
+            let let_a_go = async {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    let queued = state.server_perms_locks.get(&f.sid).is_some_and(|m| Arc::strong_count(&m) >= 3);
+                    if queued || b_done.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    assert!(Instant::now() < deadline, "sweep B neither queued nor finished");
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                let _ = release.send(());
+            };
+            tokio::join!(sweep_b, let_a_go);
+        };
+        tokio::time::timeout(Duration::from_secs(60), async { tokio::join!(sweep_a, then_b) })
+            .await
+            .expect("both sweeps finished");
+        let order = order.into_inner().unwrap();
+        let held_now = state.sfu_rooms.get(&room).and_then(|u| u.grants.get(&a).copied());
+        let lock_left = state.server_perms_locks.contains_key(&f.sid);
+        drop_sweep_fixture(&pool, &f).await;
+
+        assert_eq!(order, vec!["A", "B"], "the later sweep finishes after the earlier one");
+        assert_eq!(held_now, Some(camera_only), "the newest answer is what LiveKit holds: no microphone");
+        let calls: Vec<serde_json::Value> = asked(srv).await.iter().map(|s| body(s)["permission"]["can_publish_sources"].clone()).collect();
+        assert_eq!(
+            calls,
+            vec![serde_json::json!(["MICROPHONE", "CAMERA"]), serde_json::json!(["CAMERA"])],
+            "A's (older) microphone, then B's (newer) revoke of it"
+        );
+        assert!(!lock_left, "the per-server lock is forgotten once nobody holds it");
+    }
+
+    /// Deny SPEAK to the fixture member's role on its channel.
+    async fn deny_speak(pool: &sqlx::PgPool, f: &SweepFixture) {
+        sqlx::query("INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny) VALUES ($1, $2, 0, $3)")
+            .bind(f.cid as i64)
+            .bind(f.role)
+            .bind(P::SPEAK.bits() as i64)
+            .execute(pool)
+            .await
+            .expect("deny SPEAK");
+    }
+
+    /// Until `what` holds, or fail (bounded).
+    async fn until(what: &str, mut ok: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ok() {
+            assert!(Instant::now() < deadline, "never: {what}");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// COALESCED (TEST_DATABASE_URL; skips without it). LiveKit is failing -
+    /// every grant refused, and a refused grant records nothing, so every
+    /// sweep sends it again. While the server's sweep runs (parked in its
+    /// call), five more changes ask for one: each waits for the first run to
+    /// START after it asked - the same one - and exactly one more runs. Two
+    /// calls in all, not seven; and none of the five is answered by the run
+    /// that was already going (it may have resolved before their changes).
+    #[tokio::test]
+    async fn requests_during_a_running_sweep_coalesce_into_one_more_run() {
+        use super::request_perms_sweep;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        no_env_proxy();
+        let f = sweep_fixture(&pool).await;
+        deny_speak(&pool, &f).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = room_name_for_channel(f.cid as i64);
+        let a = format!("u{}#a", f.member);
+        {
+            let mut u = state.sfu_rooms.entry(room.clone()).or_default();
+            u.participants.insert(a.clone(), Instant::now());
+            u.grants.insert(a.clone(), Grant::of(EVERYONE));
+        }
+        let arrived = Arc::new(AtomicBool::new(false));
+        let seen_call = Arc::clone(&arrived);
+        let (release, held) = tokio::sync::oneshot::channel::<()>();
+        let refused = || ("/twirp/livekit.RoomService/UpdateParticipant", 503, r#"{"code":"unavailable"}"#.to_string());
+        let (base, srv) = livekit_stand_in_holding(
+            vec![refused(), refused()],
+            Some(Box::new(move |_: &str| seen_call.store(true, Ordering::SeqCst))),
+            Some((0, held)),
+        )
+        .await;
+        let (first, more) = TEST_LIVEKIT
+            .scope(base, async {
+                let first = request_perms_sweep(&state, &f.sid, 0);
+                until("the first sweep reached LiveKit", || arrived.load(Ordering::SeqCst)).await;
+                let more: Vec<_> = (0..5).map(|_| request_perms_sweep(&state, &f.sid, 0)).collect();
+                (first, more)
+            })
+            .await;
+        let (first_run, runs): (u64, Vec<u64>) = (first.run(), more.iter().map(|t| t.run()).collect());
+        let _ = release.send(());
+        tokio::time::timeout(Duration::from_secs(30), async {
+            first.wait().await;
+            for t in more {
+                t.wait().await;
+            }
+        })
+        .await
+        .expect("every request's run finished");
+        until("the runner left", || !state.perms_sweeps.contains_key(&f.sid)).await;
+        drop_sweep_fixture(&pool, &f).await;
+
+        assert_eq!(first_run, 1);
+        assert_eq!(runs, vec![2; 5], "all five wait for the next run to start - the same one");
+        assert_eq!(asked(srv).await.len(), 2, "one run each: the running one, and ONE more");
+    }
+
+    /// A LiveKit that accepts connections and never answers: counts them, and
+    /// holds each open. Abort the task when done.
+    async fn hanging_livekit() -> (String, Arc<std::sync::atomic::AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = Arc::clone(&accepted);
+        let task = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                held.push(socket);
+            }
+        });
+        (base, accepted, task)
+    }
+
+    /// A HUNG LiveKit (TEST_DATABASE_URL; skips without it): it accepts and
+    /// never answers, so every call costs its whole 5 s timeout. Five stale
+    /// sessions - four of the member's owed a SPEAK revoke, one of a user who
+    /// is no member at all, owed a removal. The sweep's SFU pass sends ONE call
+    /// and no more: the rest are owed to the resync at once, each with its own
+    /// Recheck. So the sweep - and whatever change is queued behind it, a
+    /// kick's mesh eviction included - waits about one LiveKit timeout, not
+    /// one per session.
+    #[tokio::test]
+    async fn a_hung_livekit_costs_a_sweep_one_timeout_not_one_per_session() {
+        use crate::sfu::{Mark, Recheck};
+        use std::sync::atomic::Ordering;
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        no_env_proxy();
+        let f = sweep_fixture(&pool).await;
+        deny_speak(&pool, &f).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = room_name_for_channel(f.cid as i64);
+        let stale: Vec<String> = ["a", "b", "c", "d"].iter().map(|n| format!("u{}#{n}", f.member)).collect();
+        let outsider = "u2000000001#x".to_string();
+        {
+            let mut u = state.sfu_rooms.entry(room.clone()).or_default();
+            for id in stale.iter().chain(std::iter::once(&outsider)) {
+                u.participants.insert(id.clone(), Instant::now());
+                u.grants.insert(id.clone(), Grant::of(EVERYONE));
+            }
+        }
+        let (base, accepted, hung) = hanging_livekit().await;
+        let started = Instant::now();
+        let finished = tokio::time::timeout(Duration::from_secs(40), TEST_LIVEKIT.scope(base, evict_sweep(&state, &f.sid, 0))).await;
+        let took = started.elapsed();
+        hung.abort();
+        let marks: Vec<Option<Mark>> = {
+            let u = state.sfu_rooms.get(&room).expect("room");
+            stale.iter().chain(std::iter::once(&outsider)).map(|id| u.recheck.get(id).copied()).collect()
+        };
+        drop_sweep_fixture(&pool, &f).await;
+
+        assert!(finished.is_ok(), "the sweep finished");
+        assert_eq!(accepted.load(Ordering::SeqCst), 1, "one call reached the hung LiveKit; none after it");
+        assert!(took < Duration::from_secs(9), "one timeout, not one per session: took {took:?}");
+        let live = Some(Mark { what: Recheck::LiveGrant, passes: 0 });
+        assert_eq!(marks[..4], [live; 4], "each skipped grant owed as a live one");
+        assert_eq!(marks[4], Some(Mark { what: Recheck::JoinCheck, passes: 0 }), "the skipped removal owed as a join check");
+    }
+
+    /// A handler waits for its sweep, but not past its cap (TEST_DATABASE_URL;
+    /// skips without it): with LiveKit hanging on the grant, the handler
+    /// answers after the cap, and the sweep - detached - finishes on its own
+    /// once LiveKit answers.
+    #[tokio::test]
+    async fn a_handler_answers_after_its_cap_and_the_sweep_still_finishes() {
+        use super::perms_changed_within;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        no_env_proxy();
+        let f = sweep_fixture(&pool).await;
+        deny_speak(&pool, &f).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = room_name_for_channel(f.cid as i64);
+        let a = format!("u{}#a", f.member);
+        {
+            let mut u = state.sfu_rooms.entry(room.clone()).or_default();
+            u.participants.insert(a.clone(), Instant::now());
+            u.grants.insert(a.clone(), Grant::of(EVERYONE));
+        }
+        let arrived = Arc::new(AtomicBool::new(false));
+        let seen_call = Arc::clone(&arrived);
+        let (release, held) = tokio::sync::oneshot::channel::<()>();
+        let (base, srv) = livekit_stand_in_holding(
+            vec![update(CAMERA_ONLY)],
+            Some(Box::new(move |_: &str| seen_call.store(true, Ordering::SeqCst))),
+            Some((0, held)),
+        )
+        .await;
+        let answered = TEST_LIVEKIT
+            .scope(
+                base,
+                tokio::time::timeout(Duration::from_secs(5), perms_changed_within(&state, &f.sid, Duration::from_millis(200))),
+            )
+            .await;
+        let reached = arrived.load(Ordering::SeqCst);
+        let _ = release.send(());
+        let camera_only = Grant::of(P::VIEW_CHANNEL | P::CONNECT | P::VIDEO);
+        until("the detached sweep confirmed the grant", || {
+            state.sfu_rooms.get(&room).and_then(|u| u.grants.get(&a).copied()) == Some(camera_only)
+        })
+        .await;
+        until("the runner left", || !state.perms_sweeps.contains_key(&f.sid)).await;
+        drop_sweep_fixture(&pool, &f).await;
+
+        assert_eq!(answered.map_err(|_| "the handler outlived its cap"), Ok(false), "answered, sweep unfinished");
+        assert!(reached, "fixture: the sweep was parked in its LiveKit call");
+        assert_eq!(asked(srv).await.len(), 1);
     }
 }

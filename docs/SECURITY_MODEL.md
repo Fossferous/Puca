@@ -1014,7 +1014,13 @@ eviction sweep that runs after a kick, ban or permission change
 re-check `VIEW_CHANNEL` only, while both join gates require `CONNECT` as well:
 a member denied CONNECT could not rejoin, but was never removed. It now
 re-checks CONNECT for voice rooms and evicts from the mesh room (`RoomLeft`)
-and from the SFU room alike.
+and from the SFU room alike. The sweep runs in a task of its own, one at a
+time per server, so a request the client abandons still gets it; a kick or
+ban starts it straight after the membership change commits, before the audit
+row is written. A sweep stops calling LiveKit after the first call LiveKit
+does not answer and leaves the rest to the resync, so a hung LiveKit delays
+it by about one 5 s timeout. The request waits for it for at most 10 s and
+then answers while the sweep finishes.
 
 **A member without Speak can be in a call, but nobody plays their
 microphone.** Until this change Speak was enforced nowhere on mesh channels,
@@ -1038,7 +1044,8 @@ before it) the server changes the grant through LiveKit's
 
 - On mesh channels enforcement happens at the receiver, so an app older than
   this change still plays a denied member who also runs an older or modified
-  app. SFU channels do not depend on the receivers.
+  app. SFU channels do not depend on the receivers (given the webhook or the
+  resync; see the last point).
 - Screen-share audio is governed by Stream, not Speak: a member allowed to
   share can be heard through their share. Deny Stream as well to silence
   someone completely.
@@ -1048,6 +1055,21 @@ before it) the server changes the grant through LiveKit's
 - A Speak granted mid-call takes effect when the member rejoins. Video and
   Stream are checked when a camera or share starts; one already running is
   not stopped.
+- On an SFU channel only the microphone grant changes on a live session,
+  including every call in progress when the server restarts. LiveKit's grant
+  for camera and screen share catches up with a Video or Stream change at the
+  member's next join (or, after a join-time grant LiveKit did not confirm, at
+  the next permission change in that server). A rejoin whose
+  `participant_joined` webhook was lost is caught only if its grant differs
+  from the one last confirmed, so after a Video- or Stream-only change such a
+  rejoin can keep its old camera or share grant until the next join the
+  server sees. Until then the start check above
+  binds Púca's own app only; a modified app can publish what its join grant
+  allowed.
+- LiveKit's side needs the server to know the session, from the
+  `participant_joined` webhook or the resync (`LIVEKIT_API_URL`). A deploy
+  with neither falls back to the join token alone: a Speak revoked mid-call
+  is then enforced by the receivers only, as on mesh.
 
 **Queued and in-flight state is re-authorised against the permissions you have
 now, not the ones you had.** Frames parked for a device that was offline are

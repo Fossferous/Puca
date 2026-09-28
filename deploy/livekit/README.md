@@ -136,7 +136,28 @@ curl -s -H "Authorization: Bearer $JWT" https://chat.example.com/channels/<id>/s
   - a kick, ban, leave, role or permission-overwrite change runs the perms
     sweep (`evict_sweep` in `src/ws.rs`), which removes every member who no
     longer has VIEW and CONNECT on an SFU channel. The remaining clients see
-    the participant leave and re-key the call epoch at once;
+    the participant leave and re-key the call epoch at once. Sweeps run one
+    at a time per server, in a task of their own. A change made while one
+    runs waits for ONE more run, which reads permissions when it starts, so
+    it covers every change before it. The request waits at most 10 s for its
+    run; after that it answers while the sweep finishes in the background,
+    and writes `Perms change in server S: still sweeping after 10 s (LiveKit
+    slow or unreachable?); answering now, the sweep finishes in the
+    background`. A runner that dies writes `Perms sweep runner for server S
+    ended abnormally; its queue was dropped`, and the next change starts a
+    new one. A kick or ban starts its sweep, and tells the member, straight
+    after the membership change commits and before it writes the audit row,
+    so an abandoned request cannot lose the eviction (a ban's record and its
+    membership deletes are one transaction). A sweep stops calling LiveKit
+    after the first call LiveKit does not answer at all (a timeout or a
+    connection failure; an error answer does not count), so a hung LiveKit
+    costs a sweep, and a change queued behind it, about one 5 s timeout. The
+    calls it did not send are owed to the resync and logged once: `SFU perms
+    sweep for server S: LiveKit did not answer a call, so this sweep sent no
+    further LiveKit calls (N not sent); each is owed to the LiveKit resync,
+    which will retry it` (or, with the resync off, `which is NOT running: each
+    waits for the sweep of the next permission change in this server, or the
+    session's rejoin`);
   - a voice move cuts that user's SFU session, and changing a channel's
     transport (`sfu_mode`, either way) puts everyone in its room out to
     rejoin on the new one;
@@ -182,6 +203,62 @@ curl -s -H "Authorization: Bearer $JWT" https://chat.example.com/channels/<id>/s
   confirmed X of Y sessions` otherwise. The webhook path writes `SFU join re-auth: evicting user N ...`
   before it tries. Each failed call writes `SFU evict <identity>:` with
   LiveKit's status or the transport error and its cause.
+- **Speak, Video and Stream mid-call:** a join token lists the sources the
+  member may publish (the microphone with SPEAK, the camera with VIDEO, the
+  screen share and its audio with STREAM), and LiveKit checks them only at
+  join. So the backend changes a session's grant with
+  `RoomService.UpdateParticipant` (`regrant_if_stale` in `src/sfu.rs`, a 5 s
+  timeout per call):
+  - the perms sweep (a role, role-assignment or overwrite change) moves
+    only the **microphone** of a live session to match SPEAK. LiveKit then
+    unpublishes a microphone the grant no longer allows, and the member stays
+    in the call, listening. Camera and screen share keep the grant the session
+    joined with, because the app cannot recover from either being pulled out
+    from under it; Púca's own app is refused a new one at start time instead;
+  - a **join** gets the **whole** grant from the member's permissions now,
+    so a rejoin with a token minted before a change still ends up with what
+    the member may publish today. That covers the `participant_joined`
+    webhook, a reservation the resync finds already joined (its webhook
+    never arrived), and a known session whose listed grant has drifted from
+    the one this process last confirmed (a rejoin whose webhook was lost;
+    never while this process has an update for that session in flight). A
+    sweep's update that lands on a session which has meanwhile rejoined
+    leaves that session's grant recorded as unknown, so its join check sends
+    the whole grant;
+  - a session the resync learns for the first time, typically every call
+    in progress when the backend restarts, gets the same join check as the
+    webhook's but the **live** grant: only its microphone moves, so a
+    restart never pulls a running camera or share.
+
+  Both reach only sessions this process knows, from the webhook or the
+  resync, so a deploy with neither enforces these at the join token alone.
+  A grant LiveKit does not confirm is marked for the resync to apply again
+  (the same marks as the removals above; only resync passes count towards
+  the 5, and a debt owed while a resync check runs is kept for the next
+  pass). A join-time grant LiveKit does not confirm is also recorded as
+  unknown, so the next sweep for that server sends that session the whole
+  grant rather than only the microphone. Any grant LiveKit does not confirm
+  (it may have applied it without answering) leaves the session marked
+  unconfirmed, and the next sweep sends it its grant again even when the
+  grant looks unchanged.
+
+  In the log: a sweep writes `SFU perms grant: user N in sfu channel C:
+  LiveKit confirmed the grant their permissions give on X session(s), Y
+  already held it` when every call was confirmed, and a WARN `... LiveKit
+  confirmed X of Y session(s) needing the grant ...; for the rest <note>`
+  otherwise. While the resync runs, the note says `it is marked, and the
+  LiveKit resync will retry it` (`... will retry the whole grant` for a
+  join-time grant). With the resync off it names whatever will next send it:
+  for a live grant, `it may not be enforced at LiveKit (LiveKit may have
+  applied it without answering) until the sweep for the next permission
+  change in that server sends it again ... or the session rejoins`; for a
+  join-time grant, `it is NOT enforced at LiveKit until the sweep for the
+  next permission change in that server ... or the session's rejoin`. The webhook path writes `SFU join re-auth:
+  user N joined sfu channel C with a grant that was not (or not reported as)
+  the one their permissions give; LiveKit confirmed the current one`, or `did
+  NOT confirm` with the same note. Each failed call writes `SFU grant
+  <identity>:` with LiveKit's status or the transport error, or `LiveKit
+  answered, but shows ... rather than ...; not confirmed`.
 - **Remote control / voice status rely on the Puca WS room** — SFU
   clients still JoinRoom `voice_<id>`; only Offer/Answer/ICE stopped being
   used on the SFU path.

@@ -950,6 +950,29 @@ pub struct AppState {
     /// Events seen while a resync's snapshot is in flight (None otherwise);
     /// the merge must not undo them. Lock order: this, then `sfu_rooms`.
     pub sfu_resync_journal: std::sync::Mutex<Option<crate::sfu::SfuResyncJournal>>,
+    /// True while the LiveKit reconciler loop (sfu::run_reconciler) is running,
+    /// and so will pick up a session marked for another look. False when it was
+    /// never started (no LIVEKIT_API_URL) and after it stopped (SFU_RESYNC_SECS=0
+    /// after its first clean pass): a mark made then is never acted on, and a
+    /// log line must not promise that it will be (sfu::grant_retry_note). A
+    /// mutex, not an atomic: a check outside the resync marks a session AND
+    /// reads this under it (sfu::owe), and the reconciler counts the marks AND
+    /// decides to stop under it, so the two can never interleave - "will retry"
+    /// and "not running" are each exactly what then happens.
+    pub sfu_resync_running: std::sync::Mutex<bool>,
+    /// One async lock per server id: see [`AppState::lock_server_perms`].
+    pub server_perms_locks: DashMap<String, Arc<tokio::sync::Mutex<()>>>,
+    /// The perms-change sweep's queue per server id: at most one sweep
+    /// running and one pending (ws.rs `request_perms_sweep`). An entry exists
+    /// exactly while that server's sweep runner is alive.
+    pub perms_sweeps: DashMap<String, crate::ws::SweepQueue>,
+    /// How many perms sweeps of each server have STARTED (bumped under the
+    /// server's lock, before the sweep's snapshot). A voice JoinRoom reads it
+    /// before its own recheck: a sweep that started meanwhile may have written
+    /// the joiner's speak flag before the join's older answer did (ws.rs
+    /// `store_join_speak`). One number per server that ever changed a
+    /// permission, never removed.
+    pub perms_sweep_epochs: DashMap<String, u64>,
 
     /// Wake-signal transport (FCM doorbell; see src/wake). `NullWake` when
     /// unconfigured. The signal carries a constant — never data.
@@ -1240,6 +1263,28 @@ pub struct LoginFailureState {
     pub last: Instant,
 }
 
+/// A held per-server permissions lock ([`AppState::lock_server_perms`]).
+/// Released when dropped - also when the future holding it is cancelled.
+pub struct ServerPermsGuard<'a> {
+    locks: &'a DashMap<String, Arc<tokio::sync::Mutex<()>>>,
+    server_id: String,
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl Drop for ServerPermsGuard<'_> {
+    fn drop(&mut self) {
+        // Release first: the owned guard holds a clone of the entry's Arc.
+        drop(self.guard.take());
+        // Then forget the entry if nobody else holds or waits on it: a count of
+        // 1 is the map's own. Every clone is taken under this shard's lock
+        // (`lock_server_perms` goes through `entry`), which remove_if holds
+        // while it asks, so a waiter cannot appear between the count and the
+        // removal - and one that arrives after it simply creates a fresh lock
+        // nobody else holds.
+        self.locks.remove_if(&self.server_id, |_, m| Arc::strong_count(m) == 1);
+    }
+}
+
 impl AppState {
     /// The wake transport is explicit rather than defaulted so a caller cannot
     /// forget it and silently get a deployment where the doorbell never rings —
@@ -1278,10 +1323,47 @@ impl AppState {
             task_events: crate::task_events::TaskEventHub::new(),
             sfu_rooms: DashMap::new(),
             sfu_resync_journal: std::sync::Mutex::new(None),
+            sfu_resync_running: std::sync::Mutex::new(false),
+            server_perms_locks: DashMap::new(),
+            perms_sweeps: DashMap::new(),
+            perms_sweep_epochs: DashMap::new(),
             sfu_measured_egress_kbps: AtomicU64::new(0),
             sfu_measured_at: AtomicU64::new(0),
             next_conn_id: AtomicU64::new(1),
         })
+    }
+
+    /// Serialize everything that RESOLVES members' channel permissions in
+    /// `server_id` and then ACTS on the answer - at LiveKit (a publish grant)
+    /// or in a voice room (the speak flag): the perms-change sweep (ws.rs
+    /// `evict_sweep`, held for its whole run), the `participant_joined` check
+    /// and the resync's join check (sfu.rs, held from resolve to grant).
+    ///
+    /// Why: each of those reads the permissions, awaits, and then writes what
+    /// it read. Two of them interleaving - an earlier sweep still working
+    /// through members while a later change's sweep resolves and applies the
+    /// newer answer - let the EARLIER, now stale answer land last: the database
+    /// denies SPEAK, LiveKit lets the microphone through, and nothing ever looks
+    /// again. Held across the whole resolve-then-act, a later resolver starts
+    /// only after an earlier one finished, so the last word is always the
+    /// newest answer. tokio's Mutex is FIFO, so sweeps run in the order their
+    /// changes asked for them.
+    ///
+    /// Never take it while already holding it for the same server (it is not
+    /// re-entrant). The sweep's delayed retry is a task of its own and takes
+    /// the lock when it runs, never while the sweep that spawned it holds it.
+    /// The entry is dropped once nobody holds or waits on it (see
+    /// [`ServerPermsGuard`]'s Drop), so the map holds only servers in use.
+    pub async fn lock_server_perms(&self, server_id: &str) -> ServerPermsGuard<'_> {
+        // The clone is taken under the shard lock (entry), and the map guard is
+        // gone at the end of this statement - never held across the await.
+        let lock = Arc::clone(&*self.server_perms_locks.entry(server_id.to_string()).or_default());
+        let guard = lock.lock_owned().await;
+        ServerPermsGuard {
+            locks: &self.server_perms_locks,
+            server_id: server_id.to_string(),
+            guard: Some(guard),
+        }
     }
 
     /// Response delay owed for `username` from prior consecutive failures (M3).
@@ -2323,11 +2405,16 @@ impl AppState {
         }
     }
 
-    /// Tell voice room `room_id` (every member but `exclude`) what the server
-    /// holds for `user_id`'s speak right there — see
-    /// `ServerMessage::VoiceSpeakState`. Nothing is sent when `user_id` is no
-    /// longer a member: its absence would read as "may speak", and the room is
-    /// getting a `UserLeft` for them anyway.
+    /// Tell voice room `room_id` what the server holds for `user_id`'s speak
+    /// right there — see `ServerMessage::VoiceSpeakState`: every OTHER member,
+    /// and each of `user_id`'s own connections in the room except `skip_conn`
+    /// (a joining connection, which the snapshot already told). Per connection
+    /// for the member themself, not per user: their other device already in
+    /// the call must hear a change their new device's join found - their own
+    /// frame is the one that closes (or reopens) that device's microphone.
+    /// Nothing is sent when `user_id` is no longer a member: its absence would
+    /// read as "may speak", and the room is getting a `UserLeft` for them
+    /// anyway.
     ///
     /// The flag is read AT SEND TIME, under the same room guard the fan-out
     /// holds (exactly as `broadcast_to_room` holds it; `send_to_user` is a
@@ -2337,7 +2424,7 @@ impl AppState {
     /// a member stale: whichever fan-out runs last reads the last write, and a
     /// fan-out that started earlier has fully enqueued before the next write
     /// could take the guard.
-    pub fn broadcast_speak_state(&self, room_id: &str, user_id: UserId, exclude: Option<UserId>) {
+    pub fn broadcast_speak_state(&self, room_id: &str, user_id: UserId, skip_conn: Option<u64>) {
         let Some(room) = self.rooms.get(room_id) else {
             return;
         };
@@ -2350,8 +2437,13 @@ impl AppState {
             can_speak: room.can_speak(user_id),
         };
         for &member_id in &room.members {
-            if Some(member_id) != exclude {
+            if member_id != user_id {
                 self.send_to_user(member_id, msg.clone());
+            }
+        }
+        for &conn in room.member_conns.get(&user_id).into_iter().flatten() {
+            if Some(conn) != skip_conn {
+                self.send_to_conn(user_id, conn, msg.clone());
             }
         }
     }
@@ -4600,9 +4692,9 @@ mod speak_right_tests {
         assert_eq!(snap, vec![("voice_7".into(), 1, true), ("voice_7".into(), 2, false)]);
         assert!(speak_frames(&mut rx1).is_empty(), "the snapshot goes to the joining connection only");
 
-        state.broadcast_speak_state("voice_7", 2, Some(2));
+        state.broadcast_speak_state("voice_7", 2, Some(c2));
         assert_eq!(speak_frames(&mut rx1), vec![("voice_7".into(), 2, false)]);
-        assert!(speak_frames(&mut rx2).is_empty(), "excluded");
+        assert!(speak_frames(&mut rx2).is_empty(), "the skipped connection");
         state.broadcast_speak_state("voice_7", 2, None);
         assert_eq!(speak_frames(&mut rx1), vec![("voice_7".into(), 2, false)]);
         assert_eq!(speak_frames(&mut rx2), vec![("voice_7".into(), 2, false)], "None reaches the member too");
@@ -4613,5 +4705,92 @@ mod speak_right_tests {
         assert_eq!(state.send_speak_snapshot("voice_nope", 1, c1), 0);
         state.unregister_session(1, c1);
         state.unregister_session(2, c2);
+    }
+
+    /// The member's OWN other device in the room hears it: a second device's
+    /// join found a change (the sweep then has nothing left to flip, so it says
+    /// nothing), and only its self frame closes - or reopens - the first
+    /// device's microphone. The joining connection is skipped (the snapshot
+    /// told it), a device of theirs NOT in the room is not told, and another
+    /// member still is.
+    #[tokio::test]
+    async fn a_members_other_device_in_the_room_hears_their_own_flag() {
+        let state = test_state();
+        let (tx1, mut rx1) = mpsc::channel::<ServerMessage>(32);
+        let (tx_desk, mut rx_desk) = mpsc::channel::<ServerMessage>(32);
+        let (tx_phone, mut rx_phone) = mpsc::channel::<ServerMessage>(32);
+        let (tx_idle, mut rx_idle) = mpsc::channel::<ServerMessage>(32);
+        let (c1, _, _) = state.register_session(1, "one".into(), tx1, false, None, String::new());
+        let (desk, _, _) = state.register_session(2, "two".into(), tx_desk, false, None, String::new());
+        let (phone, _, _) = state.register_session(2, "two".into(), tx_phone, false, None, String::new());
+        let (idle, _, _) = state.register_session(2, "two".into(), tx_idle, false, None, String::new());
+        state.join_room("voice_7", 1, c1);
+        state.join_room("voice_7", 2, desk);
+        state.join_room("voice_7", 2, phone); // the joining device
+        assert!(state.rooms.get_mut("voice_7").unwrap().set_can_speak(2, false));
+
+        state.broadcast_speak_state("voice_7", 2, Some(phone));
+        assert_eq!(speak_frames(&mut rx_desk), vec![("voice_7".into(), 2, false)], "the device already in the call");
+        assert!(speak_frames(&mut rx_phone).is_empty(), "the joining device: its snapshot said it");
+        assert!(speak_frames(&mut rx_idle).is_empty(), "not in the room");
+        assert_eq!(speak_frames(&mut rx1), vec![("voice_7".into(), 2, false)]);
+        for c in [desk, phone, idle] {
+            state.unregister_session(2, c);
+        }
+        state.unregister_session(1, c1);
+    }
+}
+
+#[cfg(test)]
+mod server_perms_lock_tests {
+    use super::*;
+
+    fn test_state() -> Arc<AppState> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/does_not_connect")
+            .expect("lazy pool");
+        AppState::new(pool, "test-secret".into(), None, std::sync::Arc::new(crate::wake::NullWake))
+    }
+
+    /// Wait (bounded) until `n` clones of `server`'s lock exist: the map's own,
+    /// the holder's, and a taker queued behind it.
+    async fn queued(state: &AppState, server: &str, n: usize) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while state.server_perms_locks.get(server).map(|m| Arc::strong_count(&m)) != Some(n) {
+            assert!(Instant::now() < deadline, "the second taker never queued on {server}");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// One holder per server: a second taker for the SAME server waits until
+    /// the first lets go (and then gets it); another server's is not held up;
+    /// and nothing is left in the map once nobody holds or waits on a lock.
+    #[tokio::test]
+    async fn one_holder_per_server_and_no_entry_left_behind() {
+        let state = test_state();
+        let first = state.lock_server_perms("s1").await;
+
+        let other = tokio::time::timeout(Duration::from_secs(5), state.lock_server_perms("s2"))
+            .await
+            .expect("another server's lock is not held up");
+        drop(other);
+        assert!(!state.server_perms_locks.contains_key("s2"), "released and unwaited: forgotten");
+
+        let st = Arc::clone(&state);
+        let (got, mut got_rx) = tokio::sync::oneshot::channel::<()>();
+        let second = tokio::spawn(async move {
+            let _g = st.lock_server_perms("s1").await;
+            let _ = got.send(());
+        });
+        queued(&state, "s1", 3).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(got_rx.try_recv().is_err(), "the second taker must wait while the first holds it");
+        assert!(state.server_perms_locks.contains_key("s1"));
+
+        drop(first);
+        assert!(state.server_perms_locks.contains_key("s1"), "a queued taker keeps the entry (and so the same lock)");
+        tokio::time::timeout(Duration::from_secs(5), second).await.expect("released: the second gets it").expect("task");
+        assert!(got_rx.try_recv().is_ok(), "the second taker held it");
+        assert!(!state.server_perms_locks.contains_key("s1"), "nobody holds or waits: forgotten");
     }
 }

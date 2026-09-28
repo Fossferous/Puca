@@ -6,6 +6,16 @@ one-line summary; this file is the full story. Versions follow
 
 ## Unreleased
 
+### Added
+- **Voice channels have Connect, Speak, Video and Stream permissions of their
+  own.** Edit Channel > Permissions on a voice channel now lists them, so you
+  can stop a role joining, speaking, turning on a camera or sharing in that
+  one channel without changing the role everywhere. Turning Video or Stream
+  off stops the next camera or share; one that is already running carries
+  on until it is stopped. Someone who may not
+  join a voice channel is now told exactly that, before being asked for a
+  microphone, instead of being told they are not a member of the server.
+
 ### Security
 - **The server and the LAN waker use a current web library too.** 0.9.823
   moved the sign-in-screen service off an old version of its web library
@@ -31,6 +41,16 @@ one-line summary; this file is the full story. Versions follow
   says how to move an existing install. Logs stay where they were.
   Installs that use the shipped service file were not exposed in practice:
   it already stops the server process writing to that folder.
+- **Turning Speak off now actually silences someone.** In ordinary voice
+  calls the Speak permission did nothing: a member whose role could not speak
+  was still heard by everyone. Now the server tells everyone in a call who may
+  speak, and Púca refuses to play anyone who may not, straight away when it
+  changes in the middle of a call. On channels using SFU mode the voice server
+  also takes that member's microphone away, whichever version of the app they
+  run. In ordinary calls it is the listener's app that refuses, so update
+  everyone: someone still on an older version can hear a denied member who is
+  also on an older version. Speak does not cover screen-share audio; deny
+  Stream as well to silence someone completely.
 
 ### Fixed
 - **Removing someone from a call works after the server restarts.** The
@@ -74,6 +94,20 @@ one-line summary; this file is the full story. Versions follow
   has no Output Device setting, so it always uses the default.) Switching
   the Output Device quickly, or a device reconnecting in a burst, could also
   leave voice on the wrong device. That is fixed too.
+- **A kick or ban always takes effect in calls.** If the moderator's app
+  closed or lost its connection at the wrong moment, the person could stay in
+  the server's calls and channels until the next permission change. Removing
+  them from calls now starts the moment the kick or ban is saved, and a
+  voice server that has stopped answering can no longer hold it up for more
+  than a few seconds. A ban that fails part-way is now undone and reported,
+  instead of half-applied.
+- **Members who may not speak can join SFU-mode calls again.** On a channel
+  using SFU mode, anyone whose role had Speak turned off could not join the
+  call at all ("failed to publish track, insufficient permissions"), so they
+  could not even listen. They now join to listen, are never asked for their
+  microphone, and the voice panel says "Voice Connected · can't speak". If
+  Speak is taken away in the middle of a call their microphone closes; if it
+  is given back, they are told to rejoin to use it.
 
 ## 0.9.823 — 2026-09-26
 

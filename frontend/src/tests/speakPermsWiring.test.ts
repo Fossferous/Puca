@@ -141,14 +141,21 @@ const PINS: Pin[] = [
         ],
     },
     {
-        name: 'denySpeakLocally marks the manager denied, takes the mic off the SFU, then releases it',
+        name: 'denySpeakLocally clears "you can speak now" even when already denied, marks the manager denied, takes the mic off the SFU, then releases it',
         src: 'vp',
         holds: (c) => {
             const b = body(c, 'const denySpeakLocally = useCallback(');
-            return inOrder(b, 'webrtcManager.setSpeakDenied(true)', 'if (sfuMode) await sfuManager.unpublishMic()', 'await webrtcManager.releaseMic()');
+            return inOrder(b,
+                // Before the idempotence return: a deny after a mid-call grant must
+                // drop the rejoin notice although the mic is already closed.
+                'setSpeakGrantedPending(false)',
+                'if (speakDeniedRef.current && !webrtcManager.getLocalStreamSync()?.getAudioTracks().length) return;',
+                'webrtcManager.setSpeakDenied(true)', 'if (sfuMode) await sfuManager.unpublishMic()', 'await webrtcManager.releaseMic()');
         },
         mutants: [
             ['the mic is never released', replaceNth('await webrtcManager.releaseMic();', '')],
+            ['the notice is cleared only after the early return', replaceRe(
+                /setSpeakGrantedPending\(false\);(\s*)(if \(speakDeniedRef\.current && !webrtcManager[^\n]*return;)/, '$2$1setSpeakGrantedPending(false);')],
         ],
     },
     {
@@ -185,11 +192,14 @@ const PINS: Pin[] = [
         src: 'vp',
         holds: (c) => {
             const b = body(c, 'const applyNoiseModeLive = useCallback(');
-            return inOrder(b, 'if (speakDeniedRef.current) return Promise.resolve();', 'webrtcManager.reapplyNoiseMode()')
+            return inOrder(b, 'if (speakDeniedRef.current) return Promise.resolve();', 'webrtcManager.reapplyNoiseMode()',
+                // A deny that lands while the re-acquire runs: no "mic died" notice.
+                '.then(() => {', 'if (speakDeniedRef.current) return;', 'if (!webrtcManager.isListenOnly()) {')
                 && b!.includes('sfuMode && sfuManager.connected && !speakDeniedRef.current');
         },
         mutants: [
             ['no early return', replaceNth('if (speakDeniedRef.current) return Promise.resolve();', '')],
+            ['a deny during the re-acquire runs the listen-only re-sync', replaceNth('                if (speakDeniedRef.current) return;', '')],
         ],
     },
     {

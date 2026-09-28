@@ -137,6 +137,22 @@ pub struct SfuRoomUsage {
     /// whose recorded grant already equals what its member's permissions give
     /// is not sent the same grant again. See [`regrant_if_stale`].
     pub grants: HashMap<String, Grant>,
+    /// Sessions with an UpdateParticipant on its way to LiveKit (a count per
+    /// identity; see [`InFlight`]). LiveKit may apply it before a resync's
+    /// listing and this process read the answer only after the merge: the
+    /// merge takes neither the listed grant nor its difference (drift) for
+    /// these.
+    pub in_flight: HashMap<String, u32>,
+    /// Sessions whose last UpdateParticipant was sent and NOT confirmed: LiveKit
+    /// may hold it or the grant recorded in `grants`. Their recorded grant is
+    /// no shortcut - [`regrant_if_stale`] sends even a grant equal to it - until
+    /// a confirmed update, a join or a leave says what LiveKit holds.
+    pub unconfirmed: HashSet<String>,
+    /// Bumped on every write to a mark (`mark`, `owe`): the generation of each
+    /// session's mark, so a check can tell a debt owed while it ran from the
+    /// one it answered ([`clear_answered_mark`]).
+    pub mark_seq: u64,
+    pub mark_gens: HashMap<String, u64>,
 }
 
 /// A session's publish grant as LiveKit enforces it, compared by EFFECT, not
@@ -187,7 +203,8 @@ impl Grant {
     /// running camera or share under an app that has no idea it happened, and
     /// would make SFU channels stricter than mesh ones mid-call. SPEAK is the
     /// one right enforced mid-call everywhere. Unknown held grant: the whole
-    /// grant `perms` give - what a token minted now would carry.
+    /// grant `perms` give - what a token minted now would carry. A JOIN-time
+    /// check does not use this: it gives [`Grant::of`] (see [`GrantAt`]).
     pub(crate) fn target(held: Option<Grant>, perms: Permissions) -> Grant {
         let full = Grant::of(perms);
         match held {
@@ -287,10 +304,13 @@ pub struct Mark {
     pub passes: u8,
 }
 
-/// Passes a mark may fail before it is given up (one warn line; the session
-/// stays known and counted). Bounds a check that can never be answered and a
-/// cut LiveKit keeps refusing, which would otherwise keep SFU_RESYNC_SECS=0
-/// resyncing every 30 s for good.
+/// RESYNC passes a mark may fail before it is given up (one warn line; the
+/// session stays known and counted). Bounds a check that can never be answered
+/// and a cut LiveKit keeps refusing, which would otherwise keep
+/// SFU_RESYNC_SECS=0 resyncing every 30 s for good. Only a resync pass counts
+/// ([`mark`]): a sweep, kick or join check that fails outside one only makes
+/// sure a mark exists ([`owe`]), or six failed sweeps between two resyncs
+/// would give a mark up before any resync had retried it.
 const MARK_PASSES: u8 = 5;
 
 /// What the next resync owes a participant in [`SfuRoomUsage::recheck`].
@@ -298,8 +318,86 @@ const MARK_PASSES: u8 = 5;
 pub enum Recheck {
     /// It was to be removed and LiveKit did not confirm it: remove it again.
     Cut,
-    /// Its join check could not be answered: run the check again.
+    /// A JOIN-TIME check could not be completed (the database did not answer,
+    /// a removal or a grant was not confirmed): run the check again, and give
+    /// the join-time grant ([`GrantAt::Join`]).
     JoinCheck,
+    /// A check of a LIVE session could not be completed - the perms-change
+    /// sweep's grant was not confirmed, or the resync's check of a session it
+    /// learned (a live one, as far as this process can tell) went unanswered:
+    /// run the check again, and give the live grant ([`GrantAt::Live`] - only
+    /// the microphone moves).
+    LiveGrant,
+}
+
+impl Recheck {
+    /// The stronger of two debts on one session: a Cut (it must go) over a
+    /// join-time check (the whole grant, or removal) over a live grant (the
+    /// microphone alone). A mark only ever moves up this order, so a later,
+    /// weaker failure never erases what an earlier one owed.
+    fn stronger(self, other: Recheck) -> Recheck {
+        let rank = |r: Recheck| match r {
+            Recheck::LiveGrant => 0,
+            Recheck::JoinCheck => 1,
+            Recheck::Cut => 2,
+        };
+        if rank(other) > rank(self) {
+            other
+        } else {
+            self
+        }
+    }
+}
+
+/// Which grant a check gives a session its member is entitled to keep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GrantAt {
+    /// A JOIN this process can place: the `participant_joined` check, a
+    /// reservation the resync finds already joined (its webhook never came),
+    /// and a known session whose listed grant drifted from the one this
+    /// process held (a rejoin with an older token whose webhook was lost).
+    /// The WHOLE grant the member's permissions give now, camera and screen
+    /// included - exactly what a token minted now would carry. The mic-only
+    /// rule's reason (not pulling a running camera or share out from under an
+    /// app mid-call) does not apply to a join, and on SFU the LiveKit grant is
+    /// the only binding control for VIDEO and STREAM: receivers render a
+    /// camera nobody announced. A member whose token matches their
+    /// permissions already holds it, so this costs no call in the normal case.
+    Join,
+    /// A LIVE session: the perms-change sweep, and a session the resync learns
+    /// that this process never saw join - after a backend restart that is
+    /// every call in progress, possibly hours in, camera and share running.
+    /// Only the microphone moves ([`Grant::target`]).
+    Live,
+}
+
+impl GrantAt {
+    /// The grant to give a session holding `held`, whose member has `perms`.
+    fn want(self, held: Option<Grant>, perms: Permissions) -> Grant {
+        match self {
+            GrantAt::Join => Grant::of(perms),
+            GrantAt::Live => Grant::target(held, perms),
+        }
+    }
+
+    /// The mark that owes this check again.
+    fn recheck(self) -> Recheck {
+        match self {
+            GrantAt::Join => Recheck::JoinCheck,
+            GrantAt::Live => Recheck::LiveGrant,
+        }
+    }
+
+    /// This check, raised to the join-time one when that is what the session
+    /// owes now (`owed`: its current mark). A Cut owes a removal, which no
+    /// grant answers; it leaves the grant as it is and keeps its mark (see
+    /// [`clear_answered_mark`]).
+    fn at_least(self, owed: Option<Recheck>) -> GrantAt {
+        match owed {
+            Some(Recheck::JoinCheck) => GrantAt::Join,
+            _ => self,
+        }
+    }
 }
 
 struct SfuConfig {
@@ -335,6 +433,21 @@ tokio::task_local! {
     /// (the perms sweep in ws.rs) can aim this module's calls at a stand-in.
     /// A task spawned inside the scope does NOT inherit it.
     pub(crate) static TEST_LIVEKIT: String;
+}
+
+/// `fut`, boxed for `tokio::spawn`. In a test it carries the spawning task's
+/// stand-in LiveKit ([`TEST_LIVEKIT`]) into the new task, which would not
+/// inherit it; everywhere else it is only the future.
+pub(crate) fn carry_test_livekit<F>(fut: F) -> std::pin::Pin<Box<dyn std::future::Future<Output = F::Output> + Send>>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    #[cfg(test)]
+    if let Ok(base) = TEST_LIVEKIT.try_with(|b| b.clone()) {
+        return Box::pin(TEST_LIVEKIT.scope(base, fut));
+    }
+    Box::pin(fut)
 }
 
 /// The secret the stand-in LiveKit verifies tokens under.
@@ -688,6 +801,8 @@ fn prune(state: &AppState) {
     for mut r in state.sfu_rooms.iter_mut() {
         let u = &mut *r;
         u.grants.retain(|id, _| u.participants.contains_key(id));
+        u.unconfirmed.retain(|id| u.participants.contains_key(id));
+        u.mark_gens.retain(|id, _| u.participants.contains_key(id));
     }
 }
 
@@ -742,6 +857,10 @@ pub struct SfuResyncJournal {
     /// (room, user id) ejections requested during the fetch. One that found
     /// nothing to remove may concern a session only the snapshot knows.
     evict_intents: HashSet<(String, i64)>,
+    /// (room, identity) sessions whose recorded grant this process changed
+    /// during the fetch - one LiveKit confirmed ([`update_grant`]) or one it
+    /// forgot ([`forget_grant`]). Newer than the listing: the merge keeps it.
+    grants: HashSet<(String, String)>,
     overflowed: bool,
 }
 
@@ -753,6 +872,8 @@ pub(crate) enum JournalEntry<'a> {
     Unpublished(&'a str, &'a str),
     Finished(&'a str),
     EvictIntent(&'a str, i64),
+    /// (room, identity): the recorded grant changed.
+    GrantChanged(&'a str, &'a str),
 }
 
 impl SfuResyncJournal {
@@ -763,6 +884,7 @@ impl SfuResyncJournal {
             + self.unpublished.len()
             + self.finished.len()
             + self.evict_intents.len()
+            + self.grants.len()
     }
 
     fn record(&mut self, e: JournalEntry<'_>) {
@@ -789,6 +911,9 @@ impl SfuResyncJournal {
             }
             JournalEntry::EvictIntent(r, uid) => {
                 self.evict_intents.insert((r.to_string(), uid));
+            }
+            JournalEntry::GrantChanged(r, i) => {
+                self.grants.insert(pair(r, i));
             }
         }
     }
@@ -826,7 +951,7 @@ pub struct ResyncReport {
     pub moved: usize,
     /// Ejections requested during the fetch, re-applied to sessions it added.
     pub reapplied: usize,
-    /// Added sessions the join check refused (see [`reauthorize_added`]).
+    /// Sessions the join check refused (see [`reauthorize_added`]).
     pub denied: usize,
     /// Participants still marked for the next pass (see [`Recheck`]).
     pub pending: usize,
@@ -835,12 +960,17 @@ pub struct ResyncReport {
     pub regranted: usize,
 }
 
-/// A merge's result: its counts, the (room, identity) sessions it ADDED, and
-/// the marked sessions LiveKit still lists, with what each is owed. Their
-/// marks stay in place: success clears one, failure counts another pass.
+/// A merge's result: its counts, the (room, identity) sessions it ADDED, the
+/// reservations it MOVED to participants, and the marked sessions LiveKit
+/// still lists, with what each is owed. Their marks stay in place: success
+/// clears one, failure counts another pass.
 pub struct Merged {
     pub report: ResyncReport,
     pub added: Vec<(String, String)>,
+    /// Listed identities that still held a reservation. Not drift (their
+    /// `participant_joined` may simply be on its way), but not checked either:
+    /// if that webhook was lost, nothing else ever runs their join check.
+    pub moved: Vec<(String, String)>,
     pub due: Vec<(String, String, Recheck)>,
 }
 
@@ -1032,7 +1162,10 @@ async fn fetch_snapshot(
 /// - A listed session is added if absent, at `now` (the fail-safe choice for
 ///   admission's "settled" count), and a known one keeps its time. One that
 ///   left since `started` is not brought back. A listed identity holding a
-///   reservation moves to participants, as its join would have moved it.
+///   reservation moves to participants, as its join would have moved it, and
+///   is returned in `moved` for the join check: its token was minted under the
+///   permissions of THAT moment, and if its `participant_joined` was lost no
+///   other check would ever compare them with today's.
 /// - A known session LiveKit does not list is cleared only if it was known
 ///   before `started` and no join was seen since: a `participant_left` that
 ///   never arrived. The same holds for rooms LiveKit no longer has at all -
@@ -1042,7 +1175,8 @@ async fn fetch_snapshot(
 /// - Reservations are never added, expired or cleared here: a minted token's
 ///   room does not exist in LiveKit until its first join.
 /// - A listed session's grant, where LiveKit reported one, becomes the known
-///   grant (not for one that joined since `started`: its webhook's is newer).
+///   grant (not for one that joined since `started`: its webhook's is newer;
+///   nor for one whose recorded grant this process changed since `started`).
 ///   A KNOWN session whose grant differs from the one this process held is
 ///   due a join check, which re-applies what its member's permissions give.
 fn merge_snapshot(
@@ -1055,6 +1189,7 @@ fn merge_snapshot(
 ) -> Merged {
     let mut report = ResyncReport::default();
     let mut added = Vec::new();
+    let mut moved = Vec::new();
     let mut due = Vec::new();
     for room in snap {
         report.rooms += 1;
@@ -1078,6 +1213,7 @@ fn merge_snapshot(
                 u.participants.insert(id.clone(), now);
                 if was_reserved {
                     report.moved += 1;
+                    moved.push((room.name.clone(), id.clone()));
                 } else {
                     report.added += 1;
                     added.push((room.name.clone(), id.clone()));
@@ -1086,9 +1222,19 @@ fn merge_snapshot(
             // LiveKit's word on the grant this session holds - unless it joined
             // during the fetch: that webhook's payload is newer than the listing
             // (the same identity can rejoin with its token, under the token's
-            // grant), and its own check is on its way.
+            // grant), and its own check is on its way. Nor when this process
+            // changed the recorded grant during the fetch (a sweep's confirmed
+            // UpdateParticipant, a failed join grant forgotten): that is newer
+            // than the listing too, and the difference is not drift.
             let Some(&reported) = room.grants.get(id) else { continue };
-            if SfuResyncJournal::has(&journal.joined, name, id) {
+            if SfuResyncJournal::has(&journal.joined, name, id) || SfuResyncJournal::has(&journal.grants, name, id) {
+                continue;
+            }
+            // Nor while an UpdateParticipant for it is on its way: LiveKit may
+            // have applied it before this listing, with its answer not yet
+            // read - the listing is then newer than the record, and the
+            // difference is that update, not a rejoin.
+            if u.in_flight.contains_key(id) {
                 continue;
             }
             let held = u.grants.insert(id.clone(), reported);
@@ -1150,7 +1296,7 @@ fn merge_snapshot(
             u.recheck.retain(|id, _| known.contains(id));
         }
     }
-    Merged { report, added, due }
+    Merged { report, added, moved, due }
 }
 
 /// One resync: open the journal, take the snapshot, merge it under the
@@ -1171,17 +1317,19 @@ async fn resync_once(state: &AppState, cfg: &SfuConfig, client: &reqwest::Client
         let merged = merge_snapshot(&state.sfu_rooms, &rooms, &listed, &journal, started, Instant::now());
         let mut report = merged.report;
         report.ignored = listed.len() - rooms.len();
-        (report, (journal.evict_intents, merged.added, merged.due))
+        (report, (journal.evict_intents, merged.added, merged.moved, merged.due))
     };
-    let (intents, added, due) = intents;
+    let (intents, added, moved, due) = intents;
     prune(state);
     // What an earlier pass could not finish: cut again what LiveKit did not
-    // confirm, check again what the database could not answer.
+    // confirm, check again what the database could not answer or LiveKit did
+    // not confirm - each with the grant its check owes.
     let mut unchecked = Vec::new();
     for (room, identity, what) in due {
         match what {
             Recheck::Cut => report.reapplied += remove_or_mark(state, cfg, &room, std::slice::from_ref(&identity), Recheck::Cut).await,
-            Recheck::JoinCheck => unchecked.push((room, identity)),
+            Recheck::JoinCheck => unchecked.push((room, identity, GrantAt::Join)),
+            Recheck::LiveGrant => unchecked.push((room, identity, GrantAt::Live)),
         }
     }
     // An ejection requested during the fetch (a voice move, a transport change)
@@ -1193,9 +1341,20 @@ async fn resync_once(state: &AppState, cfg: &SfuConfig, client: &reqwest::Client
         if wanted_out {
             report.reapplied += remove_or_mark(state, cfg, &room, std::slice::from_ref(&identity), Recheck::Cut).await;
         } else {
-            unchecked.push((room, identity));
+            // A session this process never saw join is, as far as it can
+            // tell, a LIVE one - after a restart, every call in progress. Its
+            // running camera or share is not pulled: the live grant.
+            unchecked.push((room, identity, GrantAt::Live));
         }
     }
+    // A reservation LiveKit already lists as joined gets the join check too.
+    // Usually its participant_joined is merely on its way and runs the same
+    // check (both serialize on the server's lock, and whichever runs second
+    // finds nothing to change); but if that webhook was lost, a token minted
+    // before a revoke would keep its grant for the whole session. Not the
+    // ejection intents, though: this process knew the reservation, so an
+    // ejection during the fetch already tried to cut it by name.
+    unchecked.extend(moved.into_iter().map(|(room, identity)| (room, identity, GrantAt::Join)));
     // Every other added session never went through this process's join check
     // (its participant_joined never arrived here): run it now. This is what
     // catches a kick, ban or permission change that happened while the session
@@ -1203,8 +1362,13 @@ async fn resync_once(state: &AppState, cfg: &SfuConfig, client: &reqwest::Client
     let checked = reauthorize_added(state, cfg, &unchecked).await;
     report.denied += checked.denied;
     report.regranted += checked.regranted;
-    report.pending = state.sfu_rooms.iter().map(|r| r.recheck.len()).sum();
+    report.pending = pending_marks(state);
     Ok(report)
+}
+
+/// Sessions marked for the next resync, across every room.
+fn pending_marks(state: &AppState) -> usize {
+    state.sfu_rooms.iter().map(|r| r.recheck.len()).sum()
 }
 
 /// The join check the `participant_joined` webhook runs, for sessions the
@@ -1218,15 +1382,29 @@ async fn resync_once(state: &AppState, cfg: &SfuConfig, client: &reqwest::Client
 /// A session it keeps has its grant checked too: a token minted before a SPEAK
 /// (VIDEO, STREAM) change still carries the old grant, and LiveKit enforces the
 /// token's, so one that does not match what the member's permissions give now
-/// is given that ([`regrant_if_stale`]). One LiveKit does not confirm stays
-/// marked, and the next pass checks it again.
-async fn reauthorize_added(state: &AppState, cfg: &SfuConfig, added: &[(String, String)]) -> Checked {
+/// is given that ([`regrant_if_stale`]) - the whole grant for a join this
+/// process can place (a moved reservation, a drifted grant, a retried join
+/// check), the microphone alone for a live session (one it learned, a retried
+/// sweep grant): each entry's [`GrantAt`], raised to a JoinCheck owed since
+/// the merge. One LiveKit does not confirm stays marked, and the next pass
+/// checks it again. Each session's resolve-and-grant holds its server's
+/// permissions lock ([`resolve_serialized`]), so a perms-change sweep cannot
+/// land a newer grant in between and be overwritten by this older answer.
+async fn reauthorize_added(state: &AppState, cfg: &SfuConfig, added: &[(String, String, GrantAt)]) -> Checked {
     if added.is_empty() {
         return Checked::default();
     }
+    // Each session's mark generation, read BEFORE anything the check relies
+    // on (whether the channel is an SFU one, just below; the permissions): a
+    // debt owed after this is newer than the check's answer, and only a later
+    // pass may pay it (clear_answered_mark).
+    let gens_before: Vec<Option<u64>> = added
+        .iter()
+        .map(|(room, identity, _)| state.sfu_rooms.get(room).and_then(|u| u.mark_gens.get(identity).copied()))
+        .collect();
     let cids: Vec<i64> = added
         .iter()
-        .filter_map(|(room, _)| channel_id_from_room(room))
+        .filter_map(|(room, ..)| channel_id_from_room(room))
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
@@ -1243,18 +1421,28 @@ async fn reauthorize_added(state: &AppState, cfg: &SfuConfig, added: &[(String, 
                 "SFU resync: could not check the {} session(s) it learned ({e}); they are kept and checked again on the next pass",
                 added.len()
             );
-            mark(state, added, Recheck::JoinCheck);
+            for (room, identity, at) in added {
+                mark(state, &[(room.clone(), identity.clone())], at.recheck());
+            }
             return Checked::default();
         }
     };
     let mut refused: HashMap<String, Vec<String>> = HashMap::new();
     let mut regranted = 0;
-    for (room, identity) in added {
+    for ((room, identity, at), gen_before) in added.iter().zip(gens_before) {
         let (Some(cid), Some(uid)) = (channel_id_from_room(room), user_id_from_identity(identity)) else {
             continue;
         };
+        let session = [(room.clone(), identity.clone())];
         let is_sfu = sfu_channels.contains(&cid);
-        let access = if is_sfu { Some(get_user_channel_permissions(&state.pool, cid, uid).await) } else { None };
+        // Held until the end of this iteration: the grant below is applied
+        // under the same lock as the answer it comes from.
+        let (access, _serial) = if is_sfu {
+            let (a, g) = resolve_serialized(state, cid, uid).await;
+            (Some(a), g)
+        } else {
+            (None, None)
+        };
         if let Some(reason) = join_check_refuses(is_sfu, access.as_ref()) {
             tracing::warn!("SFU resync: removing user {} from sfu channel {} ({})", uid, cid, reason);
             refused.entry(room.clone()).or_default().push(identity.clone());
@@ -1263,18 +1451,26 @@ async fn reauthorize_added(state: &AppState, cfg: &SfuConfig, added: &[(String, 
             // enforces the grant these permissions give. The mark goes once it
             // does - not before, so a grant LiveKit keeps refusing still counts
             // its passes towards MARK_PASSES.
-            match regrant_if_stale(state, cfg, room, identity, perms).await {
-                Regrant::Failed => mark(state, std::slice::from_ref(&(room.clone(), identity.clone())), Recheck::JoinCheck),
+            //
+            // Which grant: what is owed NOW, re-read under the lock. `at` was
+            // fixed when the merge ran; since then a rejoin's own check may
+            // have failed and owed the WHOLE grant (a JoinCheck) - a live grant
+            // run in its place would find nothing to change and, by clearing
+            // the mark, erase that debt. The stronger of the two runs.
+            let owed = state.sfu_rooms.get(room).and_then(|u| u.recheck.get(identity).map(|m| m.what));
+            let at = at.at_least(owed);
+            match regrant_if_stale(state, cfg, room, identity, perms, at).await {
+                Regrant::Failed => mark(state, &session, at.recheck()),
                 done => {
                     if done == Regrant::Applied {
                         regranted += 1;
                     }
-                    clear_mark(state, room, identity);
+                    clear_answered_mark(state, room, identity, at.recheck(), gen_before);
                 }
             }
         } else {
             // Unanswered, not allowed: kept, and asked again next pass.
-            mark(state, std::slice::from_ref(&(room.clone(), identity.clone())), Recheck::JoinCheck);
+            mark(state, &session, at.recheck());
         }
     }
     let mut removed = 0;
@@ -1292,17 +1488,22 @@ struct Checked {
     regranted: usize,
 }
 
-/// Mark known participants for the next pass, counting the passes a mark has
-/// failed; past [`MARK_PASSES`] it is given up with one warn line (the session
-/// stays known and counted). One that is no longer known needs nothing: it is
-/// gone from the call as far as this process can tell.
+/// A RESYNC pass failed these: mark known participants for the next pass,
+/// counting the passes a mark has failed; past [`MARK_PASSES`] it is given up
+/// with one warn line (the session stays known and counted). One that is no
+/// longer known needs nothing: it is gone from the call as far as this process
+/// can tell. Only the resync calls this - see [`owe`] for everyone else. The
+/// mark keeps the stronger of what it owed and `what` ([`Recheck::stronger`]).
 fn mark(state: &AppState, sessions: &[(String, String)], what: Recheck) {
     for (room, identity) in sessions {
         let Some(mut u) = state.sfu_rooms.get_mut(room) else { continue };
         if !u.participants.contains_key(identity) {
             continue;
         }
-        let passes = u.recheck.get(identity).map_or(1, |m| m.passes.saturating_add(1));
+        let (passes, what) = match u.recheck.get(identity) {
+            Some(m) => (m.passes.saturating_add(1), m.what.stronger(what)),
+            None => (1, what),
+        };
         if passes > MARK_PASSES {
             u.recheck.remove(identity);
             drop(u);
@@ -1316,13 +1517,96 @@ fn mark(state: &AppState, sessions: &[(String, String)], what: Recheck) {
             continue;
         }
         u.recheck.insert(identity.clone(), Mark { what, passes });
+        bump_mark_gen(&mut u, identity);
     }
 }
 
-/// Nothing is owed for this participant any more.
-fn clear_mark(state: &AppState, room: &str, identity: &str) {
+/// A write to `identity`'s mark: a new generation for it (see
+/// [`SfuRoomUsage::mark_gens`]).
+fn bump_mark_gen(u: &mut SfuRoomUsage, identity: &str) {
+    u.mark_seq += 1;
+    let seq = u.mark_seq;
+    u.mark_gens.insert(identity.to_string(), seq);
+}
+
+/// A check OUTSIDE the resync failed for these (a sweep's grant, a kick's or a
+/// join check's removal, a join check's grant): make sure the resync owes them
+/// a look. A known participant with no mark gets one that no pass has tried
+/// yet (`passes: 0`); an existing mark keeps its pass count - that count is the
+/// resync's own - and only ever moves UP to the stronger debt (a join check
+/// failing after a live grant did owes the whole grant; a Cut stays a Cut:
+/// [`Recheck::stronger`]). Counting these would let a burst of failed sweeps
+/// between two resyncs give a mark up before any resync had retried it.
+///
+/// Returns whether the resync WILL retry them: whether its loop is running,
+/// read under the same lock the reconciler counts marks and decides to stop
+/// under ([`AppState::sfu_resync_running`]) - so a `true` here is a mark that
+/// count finds, and a `false` one no pass will ever see. Feed it to
+/// [`grant_retry_note`].
+fn owe(state: &AppState, sessions: &[(String, String)], what: Recheck) -> bool {
+    let running = resync_running(state);
+    for (room, identity) in sessions {
+        let Some(mut u) = state.sfu_rooms.get_mut(room) else { continue };
+        if !u.participants.contains_key(identity) {
+            continue;
+        }
+        u.recheck
+            .entry(identity.clone())
+            .and_modify(|m| m.what = m.what.stronger(what))
+            .or_insert(Mark { what, passes: 0 });
+        // A new debt even when the mark reads the same: a check already
+        // running answered the old one, not this.
+        bump_mark_gen(&mut u, identity);
+    }
+    *running
+}
+
+/// The reconciler's running flag, locked. Lock order: this, then `sfu_rooms`.
+fn resync_running(state: &AppState) -> std::sync::MutexGuard<'_, bool> {
+    state.sfu_resync_running.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Whether the resync will retry marks made BEFORE this call: read after
+/// them, a `true` means the reconciler has not stopped yet, and its stop
+/// decision counts them; a `false` that it has stopped.
+pub(crate) fn resync_will_retry(state: &AppState) -> bool {
+    *resync_running(state)
+}
+
+/// What happens next to a grant LiveKit did not confirm, for its log line -
+/// exactly: `retried` is what [`owe`] returned for it, `at` the grant it was.
+pub(crate) fn grant_retry_note(retried: bool, at: GrantAt) -> &'static str {
+    match (retried, at) {
+        (true, GrantAt::Live) => "it is marked, and the LiveKit resync will retry it",
+        (true, GrantAt::Join) => "it is marked, and the LiveKit resync will retry the whole grant",
+        // LiveKit may have applied it without answering. The session is
+        // marked unconfirmed, so the next sweep sends its microphone grant
+        // even if it looks unchanged.
+        (false, GrantAt::Live) => {
+            "it may not be enforced at LiveKit (LiveKit may have applied it without answering) until the sweep for the next permission change in that server sends it again - which it now does for this session even when its grant looks unchanged - or the session rejoins (the LiveKit resync is not running to retry it)"
+        }
+        // forget_grant recorded the session's grant as unknown, so any
+        // sweep's grant for it is the whole one.
+        (false, GrantAt::Join) => {
+            "it is NOT enforced at LiveKit until the sweep for the next permission change in that server (which now sends this session the whole grant: the one it held is recorded as unknown) or the session's rejoin (the LiveKit resync is not running to retry it)"
+        }
+    }
+}
+
+/// The check `ran` answered what this participant owed: its mark goes -
+/// unless the mark now owes something STRONGER than that check (a Cut, or a
+/// JoinCheck owed after a weaker live check was scheduled), or was written
+/// again after `gen_before` - the mark's generation read before the check read
+/// anything it relied on. A debt owed while the check ran (an eviction that
+/// failed after a flip out of SFU mode, say) is newer than the check's answer,
+/// even when it reads the same, and is left for the next pass to answer.
+/// Only a check at least as strong as the debt, and newer than it, pays it.
+fn clear_answered_mark(state: &AppState, room: &str, identity: &str, ran: Recheck, gen_before: Option<u64>) {
     if let Some(mut u) = state.sfu_rooms.get_mut(room) {
-        u.recheck.remove(identity);
+        let unchanged = u.mark_gens.get(identity).copied() == gen_before;
+        if unchanged && u.recheck.get(identity).is_some_and(|m| ran.stronger(m.what) == ran) {
+            u.recheck.remove(identity);
+        }
     }
 }
 
@@ -1433,6 +1717,24 @@ fn next_wait(every: Duration, pending: usize) -> Option<Duration> {
     }
 }
 
+/// Sets [`AppState::sfu_resync_running`] for as long as it lives: whichever
+/// way the reconciler ends - its last pass, a missing config, a panic, the
+/// task dropped - the flag no longer says a resync will retry anything.
+struct Running<'a>(&'a AppState);
+
+impl<'a> Running<'a> {
+    fn start(state: &'a AppState) -> Running<'a> {
+        *resync_running(state) = true;
+        Running(state)
+    }
+}
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        *resync_running(self.0) = false;
+    }
+}
+
 /// The reconciler loop. `config` is read on every pass (`sfu_config` in
 /// production) so a test can aim the loop at a stand-in.
 async fn run_reconciler<F>(state: Arc<AppState>, every: Duration, config: F)
@@ -1450,6 +1752,8 @@ where
             return;
         }
     };
+    // Running from here to whichever way this returns (the guard clears it).
+    let _running = Running::start(&state);
     let mut failures = 0usize;
     let mut synced = false;
     let mut reported_down = false;
@@ -1515,7 +1819,26 @@ where
                 }
                 match next_wait(every, r.pending) {
                     Some(wait) => tokio::time::sleep(wait).await,
-                    None => return,
+                    None => {
+                        // Stopping (SFU_RESYNC_SECS=0, nothing owed as of the
+                        // pass's own count). Count again and decide UNDER the
+                        // running flag's lock, which every check outside the
+                        // resync marks and reads under (`owe`): a mark made
+                        // before this is in the count, and the loop goes on
+                        // for it, having told its caller it would; one made
+                        // after it reads "not running", and nothing retries it.
+                        // Neither is ever told the other.
+                        let owed = {
+                            let mut running = resync_running(&state);
+                            let owed = pending_marks(&state);
+                            if owed == 0 {
+                                *running = false;
+                            }
+                            owed
+                        };
+                        let Some(wait) = next_wait(every, owed) else { return };
+                        tokio::time::sleep(wait).await;
+                    }
                 }
             }
             Err(ResyncError::Busy) => {
@@ -1757,10 +2080,11 @@ async fn evict_with(state: &AppState, cfg: &SfuConfig, channel_id: i64, user_id:
     let out = remove_identities(state, cfg, &room, &identities).await;
     if out.removed < out.tried {
         // LiveKit did not confirm every removal. A kick, ban, re-auth or
-        // transport change must not end there: the next resync checks these
-        // sessions again (and cuts the ones still refused).
+        // transport change must not end there: the resync (while it runs)
+        // checks these sessions again, and cuts the ones still refused. Owed,
+        // not counted: this is not a resync pass (see `owe`).
         let left: Vec<(String, String)> = identities.iter().map(|i| (room.clone(), i.clone())).collect();
-        mark(state, &left, Recheck::JoinCheck);
+        owe(state, &left, Recheck::JoinCheck);
     }
     out
 }
@@ -1798,6 +2122,11 @@ async fn remove_identities(state: &AppState, cfg: &SfuConfig, room: &str, identi
     let mut removed = 0;
     for identity in identities {
         let identity = identity.as_str();
+        // A perms sweep whose LiveKit already failed to answer sends no more:
+        // not removed, so owed to the resync like any unconfirmed removal.
+        if breaker_stops_call() {
+            continue;
+        }
         let resp = client
             .post(&endpoint)
             .bearer_auth(&token)
@@ -1817,13 +2146,14 @@ async fn remove_identities(state: &AppState, cfg: &SfuConfig, room: &str, identi
                     u.reservations.remove(identity);
                     u.recheck.remove(identity);
                     u.grants.remove(identity);
+                    u.unconfirmed.remove(identity);
                 }
             }
             Ok(r) => tracing::warn!("SFU evict {identity}: LiveKit returned {}", r.status()),
-            Err(e) => tracing::warn!(
-                "SFU evict {identity}: request failed: {}",
-                crate::http_err::http_err(&e)
-            ),
+            Err(e) => {
+                tracing::warn!("SFU evict {identity}: request failed: {}", crate::http_err::http_err(&e));
+                trip_breaker();
+            }
         }
     }
     Evicted { tried, removed }
@@ -1871,27 +2201,61 @@ enum Regrant {
     /// Sent, and LiveKit's answer shows it holds that grant now.
     Applied,
     /// Sent and not confirmed: refused, unreachable, or answered with another
-    /// grant. The caller marks it for the next resync.
+    /// grant. The caller owes it to the resync ([`owe`]; [`mark`] in a pass).
     Failed,
 }
 
-/// Make LiveKit enforce on `identity`'s session the grant `perms` give, unless
-/// it is known to hold it already ([`SfuRoomUsage::grants`]): the one LiveKit
-/// call, never sent when nothing changed.
-async fn regrant_if_stale(state: &AppState, cfg: &SfuConfig, room: &str, identity: &str, perms: Permissions) -> Regrant {
+/// Make LiveKit enforce on `identity`'s session the grant `perms` give at
+/// `at` (the whole grant at a join, the microphone alone on a live session:
+/// [`GrantAt`]), unless it is known to hold it already
+/// ([`SfuRoomUsage::grants`]): the one LiveKit call, never sent when nothing
+/// changed. The caller holds the server's permissions lock from the
+/// resolution `perms` came from until this returns.
+async fn regrant_if_stale(
+    state: &AppState,
+    cfg: &SfuConfig,
+    room: &str,
+    identity: &str,
+    perms: Permissions,
+    at: GrantAt,
+) -> Regrant {
     // One read: the grant, and WHICH session of this identity it belongs to
     // (its join time - a token can be used again, and every join re-times it).
-    let (held, session) = state
+    let (held, session, unconfirmed) = state
         .sfu_rooms
         .get(room)
-        .map(|u| (u.grants.get(identity).copied(), u.participants.get(identity).copied()))
-        .unwrap_or((None, None));
-    // Only the microphone moves on a live session (see Grant::target).
-    let want = Grant::target(held, perms);
-    if held == Some(want) {
+        .map(|u| (u.grants.get(identity).copied(), u.participants.get(identity).copied(), u.unconfirmed.contains(identity)))
+        .unwrap_or((None, None, false));
+    let want = at.want(held, perms);
+    // The shortcut trusts the recorded grant - except after an update LiveKit
+    // did not confirm, which it may hold instead: then even a grant equal to
+    // the recorded one is sent (a SPEAK restore after a revoke whose answer
+    // was lost would otherwise never reach LiveKit).
+    if held == Some(want) && !unconfirmed {
         return Regrant::Unchanged;
     }
-    update_grant(state, cfg, room, identity, want, session).await
+    let done = update_grant(state, cfg, room, identity, want, session).await;
+    if done == Regrant::Failed && at == GrantAt::Join {
+        forget_grant(state, room, identity, session);
+    }
+    done
+}
+
+/// A JOIN-time grant LiveKit did not confirm: what the session holds is no
+/// longer known. LiveKit may have applied it (the answer was lost) or kept the
+/// token's; the token's grant must not stay recorded either way, or the next
+/// sweep's live grant ([`Grant::target`], which keeps the held camera and
+/// screen) would hand back a camera or share the join check took away.
+/// Unknown, the next grant for it - a sweep's included - is the whole grant the
+/// permissions give. Journaled, so an in-flight resync does not write its
+/// older listing back; and only for `session`, the join it was sent for.
+fn forget_grant(state: &AppState, room: &str, identity: &str, session: Option<Instant>) {
+    journal(state, JournalEntry::GrantChanged(room, identity));
+    if let Some(mut u) = state.sfu_rooms.get_mut(room) {
+        if session.is_some() && u.participants.get(identity).copied() == session {
+            u.grants.remove(identity);
+        }
+    }
 }
 
 /// UpdateParticipant with the grant `want` (see [`permission_json`]).
@@ -1908,6 +2272,10 @@ async fn update_grant(
     want: Grant,
     session: Option<Instant>,
 ) -> Regrant {
+    // A perms sweep whose LiveKit already failed to answer sends no more.
+    if breaker_stops_call() {
+        return Regrant::Failed;
+    }
     let token = match mint_admin_token(cfg, room) {
         Ok(t) => t,
         Err(e) => {
@@ -1928,29 +2296,36 @@ async fn update_grant(
         }
     };
     let body = serde_json::json!({ "room": room, "identity": identity, "permission": permission_json(want) });
+    // In flight from before it is sent until its answer is recorded: LiveKit
+    // may apply it before a resync lists the room, and that resync must not
+    // read the difference as drift (see merge_snapshot).
+    let flight = InFlight::start(state, room, identity);
     let resp = client
         .post(format!("{}/twirp/livekit.RoomService/UpdateParticipant", api_base(cfg)))
         .bearer_auth(&token)
         .json(&body)
         .send()
         .await;
+    // Every failure from here on was SENT: LiveKit may have applied it.
     let text = match resp {
         Ok(r) if r.status().is_success() => match r.text().await {
             Ok(t) => t,
             Err(e) => {
                 tracing::warn!("SFU grant {identity}: reading LiveKit's answer failed: {}", crate::http_err::http_err(&e));
-                return Regrant::Failed;
+                trip_breaker();
+                return unconfirmed_update(state, room, identity);
             }
         },
         Ok(r) => {
             let status = r.status();
             let reason = r.text().await.map(|t| redact_livekit_error(&t)).unwrap_or_default();
             tracing::warn!("SFU grant {identity}: LiveKit returned {status}: {reason}");
-            return Regrant::Failed;
+            return unconfirmed_update(state, room, identity);
         }
         Err(e) => {
             tracing::warn!("SFU grant {identity}: request failed: {}", crate::http_err::http_err(&e));
-            return Regrant::Failed;
+            trip_breaker();
+            return unconfirmed_update(state, room, identity);
         }
     };
     let shown = serde_json::from_str::<serde_json::Value>(&text)
@@ -1958,19 +2333,126 @@ async fn update_grant(
         .and_then(|v| Grant::from_permission(v.get("permission")));
     if shown != Some(want) {
         tracing::warn!("SFU grant {identity}: LiveKit answered, but shows {shown:?} rather than {want:?}; not confirmed");
-        return Regrant::Failed;
+        return unconfirmed_update(state, room, identity);
     }
     // Recorded only for the SAME session it was sent for. One that left has
-    // nothing to hold a grant for; and if the identity joined again meanwhile
-    // (its token used again), that session holds its token's grant, which its
-    // own join recorded and its own check compares - writing ours over it
-    // would tell that check the grant is already right.
+    // nothing to hold a grant for. If the identity joined again meanwhile (its
+    // token used again), LiveKit applied this to the NEW session - it updates
+    // an identity's current session - which that join's payload did not show:
+    // its grant is unknown now, so its own check sends the whole grant rather
+    // than trusting the payload. Journaled first (the journal-then-map order),
+    // so a resync whose listing predates this answer keeps it rather than
+    // calling the difference drift.
+    journal(state, JournalEntry::GrantChanged(room, identity));
     if let Some(mut u) = state.sfu_rooms.get_mut(room) {
         if session.is_some() && u.participants.get(identity).copied() == session {
             u.grants.insert(identity.to_string(), want);
+            u.unconfirmed.remove(identity);
+        } else {
+            u.grants.remove(identity);
         }
     }
+    drop(flight);
     Regrant::Applied
+}
+
+/// An update was sent and not confirmed: LiveKit may hold it, or the grant
+/// recorded before it. Marked, so the recorded grant is no shortcut until
+/// something confirms what LiveKit holds (see [`SfuRoomUsage::unconfirmed`]).
+fn unconfirmed_update(state: &AppState, room: &str, identity: &str) -> Regrant {
+    if let Some(mut u) = state.sfu_rooms.get_mut(room) {
+        if u.participants.contains_key(identity) {
+            u.unconfirmed.insert(identity.to_string());
+        }
+    }
+    Regrant::Failed
+}
+
+/// An UpdateParticipant in flight for (room, identity), until dropped - also
+/// when the future sending it is cancelled.
+struct InFlight<'a> {
+    state: &'a AppState,
+    room: &'a str,
+    identity: &'a str,
+}
+
+impl<'a> InFlight<'a> {
+    fn start(state: &'a AppState, room: &'a str, identity: &'a str) -> InFlight<'a> {
+        if let Some(mut u) = state.sfu_rooms.get_mut(room) {
+            *u.in_flight.entry(identity.to_string()).or_insert(0) += 1;
+        }
+        InFlight { state, room, identity }
+    }
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        if let Some(mut u) = self.state.sfu_rooms.get_mut(self.room) {
+            if let Some(n) = u.in_flight.get_mut(self.identity) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    u.in_flight.remove(self.identity);
+                }
+            }
+        }
+    }
+}
+
+/// One perms sweep's LiveKit circuit breaker. While LiveKit accepts
+/// connections and never answers, every call costs its whole 5 s timeout, one
+/// after another - and the sweep holds its server's lock throughout, so the
+/// next change's mesh pass (a kick's eviction from its text and voice rooms,
+/// a SPEAK flip) used to wait N x 5 s behind it, every run for as long as
+/// LiveKit hung. The first call in the sweep that gets no answer (a transport
+/// error or a timeout; an error ANSWER is LiveKit working) opens it, and the
+/// sweep sends no more: every later grant or removal fails at once and is
+/// owed to the resync with its own Recheck, as any unconfirmed one is. So a
+/// sweep's SFU pass costs at most one LiveKit timeout. Set for the sweep's SFU
+/// pass only ([`with_livekit_breaker`]); every other caller sends as before.
+#[derive(Default)]
+pub(crate) struct LiveKitBreaker {
+    tripped: std::sync::atomic::AtomicBool,
+    skipped: std::sync::atomic::AtomicUsize,
+}
+
+impl LiveKitBreaker {
+    /// Whether a call got no answer.
+    pub(crate) fn tripped(&self) -> bool {
+        self.tripped.load(Ordering::SeqCst)
+    }
+
+    /// Calls not sent because of it.
+    pub(crate) fn skipped(&self) -> usize {
+        self.skipped.load(Ordering::SeqCst)
+    }
+}
+
+tokio::task_local! {
+    static SWEEP_BREAKER: Arc<LiveKitBreaker>;
+}
+
+/// Run `f` - a sweep's SFU pass - with `breaker` guarding its LiveKit calls.
+pub(crate) async fn with_livekit_breaker<F: std::future::Future>(breaker: Arc<LiveKitBreaker>, f: F) -> F::Output {
+    SWEEP_BREAKER.scope(breaker, f).await
+}
+
+/// Whether this task's breaker is open - counting the call it stops. False
+/// outside a sweep's SFU pass.
+fn breaker_stops_call() -> bool {
+    SWEEP_BREAKER
+        .try_with(|b| {
+            let open = b.tripped();
+            if open {
+                b.skipped.fetch_add(1, Ordering::SeqCst);
+            }
+            open
+        })
+        .unwrap_or(false)
+}
+
+/// A call got no answer: open this task's breaker, if it has one.
+fn trip_breaker() {
+    let _ = SWEEP_BREAKER.try_with(|b| b.tripped.store(true, Ordering::SeqCst));
 }
 
 /// What [`regrant_user`] did across one user's sessions in one SFU room.
@@ -1983,15 +2465,21 @@ pub struct Regranted {
     pub applied: usize,
     /// Sessions already holding the right grant: nothing sent.
     pub unchanged: usize,
+    /// Whether the LiveKit resync will retry the ones LiveKit did not confirm
+    /// (what [`owe`] said): feed it to [`grant_retry_note`] with
+    /// [`GrantAt::Live`]. False when every one was confirmed.
+    pub resync_retries: bool,
 }
 
 /// For the perms-change sweep: make LiveKit enforce, on every JOINED session
 /// `user_id` holds in `channel_id`'s SFU room, the MICROPHONE grant `perms`
 /// give (SPEAK) - in both directions, a revoke and a grant alike. Camera and
 /// screen stay what the session holds (see [`Grant::target`]). A session LiveKit
-/// does not confirm is marked, and the next resync's join check applies it
-/// again. Reservations are left alone: a token not yet used has no session to
-/// update, and its `participant_joined` check compares its grant then.
+/// does not confirm is owed a [`Recheck::LiveGrant`], which the resync (while
+/// it runs: [`grant_retry_note`]) applies again. Reservations are left alone: a
+/// token not yet used has no session to update, and its `participant_joined`
+/// check compares its grant then. The caller (the sweep) holds the server's
+/// permissions lock across the resolution of `perms` and this call.
 pub async fn regrant_user(state: &AppState, channel_id: i64, user_id: i64, perms: Permissions) -> Regranted {
     let Some(cfg) = sfu_config() else { return Regranted::default() };
     regrant_user_with(state, &cfg, channel_id, user_id, perms).await
@@ -2006,7 +2494,7 @@ async fn regrant_user_with(state: &AppState, cfg: &SfuConfig, channel_id: i64, u
     };
     let mut out = Regranted::default();
     for identity in identities {
-        match regrant_if_stale(state, cfg, &room, &identity, perms).await {
+        match regrant_if_stale(state, cfg, &room, &identity, perms, GrantAt::Live).await {
             Regrant::Unchanged => out.unchanged += 1,
             Regrant::Applied => {
                 out.tried += 1;
@@ -2014,24 +2502,51 @@ async fn regrant_user_with(state: &AppState, cfg: &SfuConfig, channel_id: i64, u
             }
             Regrant::Failed => {
                 out.tried += 1;
-                mark(state, &[(room.clone(), identity)], Recheck::JoinCheck);
+                out.resync_retries = owe(state, &[(room.clone(), identity)], Recheck::LiveGrant);
             }
         }
     }
     out
 }
 
+/// `uid`'s access to `cid`, resolved while holding the lock of the server the
+/// channel belongs to ([`AppState::lock_server_perms`]); the caller keeps the
+/// guard until it has ACTED on the answer, so no perms-change sweep for that
+/// server can resolve and apply a newer answer in between. The server is
+/// learned from a first resolution; only an `Allowed` names it, and only an
+/// `Allowed` carries a grant that could be applied stale - a `NotMember` or
+/// `NotFound` is returned as it is, with no lock (no grant is ever applied
+/// from either: the join webhook removes the session, the resync removes a
+/// non-member and asks again about a failed lookup). The second resolution,
+/// under the lock, is the one acted on: it has seen every change a sweep
+/// before it acted on.
+async fn resolve_serialized(
+    state: &AppState,
+    cid: i64,
+    uid: i64,
+) -> (ChannelPermAccess, Option<crate::state::ServerPermsGuard<'_>>) {
+    let first = get_user_channel_permissions(&state.pool, cid, uid).await;
+    let ChannelPermAccess::Allowed { server_id, .. } = &first else {
+        return (first, None);
+    };
+    let guard = state.lock_server_perms(server_id).await;
+    (get_user_channel_permissions(&state.pool, cid, uid).await, Some(guard))
+}
+
 /// The check `participant_joined` runs for a (re)joined session: the mint-time
 /// gate again - a member no longer entitled (fails CLOSED: a lookup that fails
-/// evicts) is removed - and, for one who stays, the grant their permissions
-/// give NOW, applied if the token's differs. That second half is what stops a
-/// token minted while SPEAK was allowed from publishing a microphone after the
-/// revoke, for the 20 minutes it stays valid.
+/// evicts) is removed - and, for one who stays, the WHOLE grant their
+/// permissions give NOW ([`GrantAt::Join`]: camera and screen too), applied if
+/// the token's differs. That second half is what stops a token minted while
+/// SPEAK (VIDEO, STREAM) was allowed from publishing after the revoke, for the
+/// 20 minutes it stays valid. Resolve and grant hold the server's permissions
+/// lock ([`resolve_serialized`]), so a sweep for a later change cannot apply
+/// its newer grant in between and then be overwritten by this older answer.
 async fn reauth_join(state: &AppState, cfg: &SfuConfig, room: &str, identity: &str, cid: i64, uid: i64) {
-    let access = get_user_channel_permissions(&state.pool, cid, uid).await;
+    let (access, _serial) = resolve_serialized(state, cid, uid).await;
     if sfu_entitled(&access) {
         if let ChannelPermAccess::Allowed { perms, .. } = access {
-            match regrant_if_stale(state, cfg, room, identity, perms).await {
+            match regrant_if_stale(state, cfg, room, identity, perms, GrantAt::Join).await {
                 Regrant::Unchanged => {}
                 Regrant::Applied => tracing::info!(
                     "SFU join re-auth: user {} joined sfu channel {} with a grant that was not (or not reported as) the one their permissions give; LiveKit confirmed the current one",
@@ -2039,12 +2554,14 @@ async fn reauth_join(state: &AppState, cfg: &SfuConfig, room: &str, identity: &s
                     cid
                 ),
                 Regrant::Failed => {
+                    // Owed before the line is written: see grant_retry_note.
+                    let retried = owe(state, &[(room.to_string(), identity.to_string())], Recheck::JoinCheck);
                     tracing::warn!(
-                        "SFU join re-auth: user {} joined sfu channel {} with a grant that was not (or not reported as) the one their permissions give, and LiveKit did NOT confirm the current one; the next resync applies it again",
+                        "SFU join re-auth: user {} joined sfu channel {} with a grant that was not (or not reported as) the one their permissions give, and LiveKit did NOT confirm the current one; {}",
                         uid,
-                        cid
+                        cid,
+                        grant_retry_note(retried, GrantAt::Join)
                     );
-                    mark(state, &[(room.to_string(), identity.to_string())], Recheck::JoinCheck);
                 }
             }
         }
@@ -2090,6 +2607,8 @@ fn apply_webhook_event(state: &Arc<AppState>, kind: &str, room: String, event: &
                         Some(g) => u.grants.insert(identity.to_string(), g),
                         None => u.grants.remove(identity),
                     };
+                    // A new session: nothing earlier is unconfirmed about it.
+                    u.unconfirmed.remove(identity);
                 }
                 // Re-authorize the join. A join token is minted against the
                 // perms of that moment and LiveKit checks only its signature,
@@ -2135,6 +2654,7 @@ fn apply_webhook_event(state: &Arc<AppState>, kind: &str, room: String, event: &
                     u.participants.remove(identity);
                     u.recheck.remove(identity);
                     u.grants.remove(identity);
+                    u.unconfirmed.remove(identity);
                 }
             }
         }
@@ -2738,6 +3258,7 @@ pub(crate) mod resync_tests {
             screen_shares: shares.iter().map(|s| s.to_string()).collect(),
             recheck: HashMap::new(),
             grants: HashMap::new(),
+            ..SfuRoomUsage::default()
         }
     }
 
@@ -2937,6 +3458,17 @@ pub(crate) mod resync_tests {
         script: Vec<(&'static str, u16, String)>,
         on_call: Option<Box<dyn Fn(&str) + Send>>,
     ) -> (String, StandIn) {
+        livekit_stand_in_holding(script, on_call, None).await
+    }
+
+    /// [`livekit_stand_in`], but the reply to scripted call number `hold.0`
+    /// (from 0) waits until `hold.1` fires (or its sender is dropped): the code
+    /// under test is then parked mid-call, for as long as the test needs.
+    pub(crate) async fn livekit_stand_in_holding(
+        script: Vec<(&'static str, u16, String)>,
+        on_call: Option<Box<dyn Fn(&str) + Send>>,
+        mut hold: Option<(usize, tokio::sync::oneshot::Receiver<()>)>,
+    ) -> (String, StandIn) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let base = format!("http://{}", listener.local_addr().expect("addr"));
         let (stop, mut stopped) = tokio::sync::oneshot::channel::<()>();
@@ -3002,6 +3534,10 @@ pub(crate) mod resync_tests {
                 };
                 if let Some(f) = &on_call {
                     f(path.rsplit('/').next().unwrap_or(""));
+                }
+                if hold.as_ref().is_some_and(|(n, _)| *n + 1 == i) {
+                    let (_, released) = hold.take().expect("checked");
+                    let _ = released.await;
                 }
                 seen.push(Seen { body, claims, ua, extra });
                 let resp = format!(
@@ -3157,8 +3693,11 @@ pub(crate) mod resync_tests {
     fn a_reservation_already_joined_is_moved_not_counted_as_drift() {
         let rooms = DashMap::new();
         rooms.insert("sfu_7".to_string(), usage(&[], &["u5#aa"], &[]));
-        let r = merge(&rooms, &[listed("sfu_7", &["u5#aa"], &[])], &SfuResyncJournal::default(), Instant::now(), Instant::now());
-        assert_eq!((r.added, r.moved), (0, 1), "its participant_joined was merely still on its way");
+        let names: HashSet<String> = ["sfu_7".to_string()].into_iter().collect();
+        let m = merge_snapshot(&rooms, &[listed("sfu_7", &["u5#aa"], &[])], &names, &SfuResyncJournal::default(), Instant::now(), Instant::now());
+        assert_eq!((m.report.added, m.report.moved), (0, 1), "its participant_joined may merely be on its way");
+        assert!(m.added.is_empty(), "not added: an ejection intent is no business of a session this process knew");
+        assert_eq!(m.moved, vec![("sfu_7".to_string(), "u5#aa".to_string())], "but it IS checked (see resync_once)");
     }
 
     #[test]
@@ -3363,24 +3902,32 @@ pub(crate) mod resync_tests {
     async fn the_reconciler_backs_off_retries_and_zero_stops_after_the_first_success() {
         no_env_proxy();
         let state = test_state();
+        // Whether the reconciler said it was running, at each call it made.
+        let running_at_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (during, record) = (Arc::clone(&state), Arc::clone(&running_at_calls));
         let (base, srv) = livekit_stand_in(
             vec![
                 ("/twirp/livekit.RoomService/ListRooms", 503, r#"{"code":"unavailable","msg":"starting"}"#.to_string()),
                 ("/twirp/livekit.RoomService/ListRooms", 200, r#"{"rooms":[]}"#.to_string()),
             ],
-            None,
+            Some(Box::new(move |_: &str| {
+                record.lock().unwrap().push(*during.sfu_resync_running.lock().unwrap());
+            })),
         )
         .await;
         let cfg_base = base.clone();
         let started = Instant::now();
+        assert!(!*state.sfu_resync_running.lock().unwrap(), "not running before it starts");
         tokio::time::timeout(
             Duration::from_secs(15),
-            run_reconciler(state, Duration::ZERO, move || Some(cfg_for(&cfg_base))),
+            run_reconciler(Arc::clone(&state), Duration::ZERO, move || Some(cfg_for(&cfg_base))),
         )
         .await
         .expect("SFU_RESYNC_SECS=0 returns after its first success");
         assert!(started.elapsed() >= Duration::from_secs(RESYNC_RETRY_SECS[0]), "it waited before retrying");
         assert_eq!(asked(srv).await.len(), 2, "one failure, one success, then nothing");
+        assert_eq!(*running_at_calls.lock().unwrap(), vec![true, true], "running - so retries are promised - while it works");
+        assert!(!*state.sfu_resync_running.lock().unwrap(), "stopped: nothing will retry a mark made now, and the logs must say so");
     }
 
 
@@ -3525,7 +4072,11 @@ pub(crate) mod resync_tests {
         drop(u);
         let o = state.sfu_rooms.get(&orphan_room).unwrap();
         assert!(o.participants.contains_key(&id_orphan), "an unanswered lookup keeps the session");
-        assert_eq!(o.recheck.get(&id_orphan).map(|m| m.what), Some(Recheck::JoinCheck), "and marks it to be asked again");
+        assert_eq!(
+            o.recheck.get(&id_orphan).map(|m| m.what),
+            Some(Recheck::LiveGrant),
+            "and marks it to be asked again - as the live session it is"
+        );
         drop(o);
         let _ = sqlx::query("DELETE FROM channels WHERE id = $1").bind(orphan).execute(&pool).await;
         let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&sid).execute(&pool).await;
@@ -3597,7 +4148,7 @@ pub(crate) mod resync_tests {
         {
             let u = state.sfu_rooms.get("sfu_7").unwrap();
             assert!(u.participants.contains_key("u6#bb"), "kept: nobody is dropped on a database that cannot answer");
-            assert_eq!(u.recheck.get("u6#bb"), Some(&Mark { what: Recheck::JoinCheck, passes: 1 }), "and asked about again");
+            assert_eq!(u.recheck.get("u6#bb"), Some(&Mark { what: Recheck::LiveGrant, passes: 1 }), "and asked about again - a live session");
         }
         assert_eq!(r.pending, 1);
         // The next pass: it is DUE (not added - no drift), asked again, and
@@ -3613,7 +4164,7 @@ pub(crate) mod resync_tests {
         let r = resync_once(&state, &cfg_for(&base), &client()).await.expect("second pass");
         asked(srv).await;
         assert_eq!((r.added, r.pending), (0, 1));
-        assert_eq!(state.sfu_rooms.get("sfu_7").unwrap().recheck.get("u6#bb"), Some(&Mark { what: Recheck::JoinCheck, passes: 2 }));
+        assert_eq!(state.sfu_rooms.get("sfu_7").unwrap().recheck.get("u6#bb"), Some(&Mark { what: Recheck::LiveGrant, passes: 2 }));
     }
 
     #[tokio::test]
@@ -3655,9 +4206,110 @@ pub(crate) mod resync_tests {
         assert_eq!(out, Evicted { tried: 1, removed: 0 });
         assert_eq!(
             state.sfu_rooms.get("sfu_7").unwrap().recheck.get("u5#aa"),
-            Some(&Mark { what: Recheck::JoinCheck, passes: 1 }),
-            "the next resync checks it again instead of the kick ending there"
+            Some(&Mark { what: Recheck::JoinCheck, passes: 0 }),
+            "the next resync checks it again instead of the kick ending there - owed, with no resync pass counted yet"
         );
+    }
+
+    /// Only a RESYNC pass counts towards MARK_PASSES. A kick, a sweep or a join
+    /// check failing outside one makes sure a mark exists and leaves an
+    /// existing one exactly as it is - so any number of failed sweeps between
+    /// two resyncs cannot give a mark up before a resync has retried it. The
+    /// resync's own failure (`mark`) is the positive control: it does count.
+    #[tokio::test]
+    async fn a_failure_outside_the_resync_owes_a_mark_but_never_counts_a_pass() {
+        use crate::permissions::Permissions as P;
+        no_env_proxy();
+        let state = test_state();
+        {
+            let now = Instant::now();
+            let mut u = usage(&[("u5#new", now), ("u5#owed", now), ("u5#cut", now)], &[], &[]);
+            for id in ["u5#new", "u5#owed", "u5#cut"] {
+                u.grants.insert(id.into(), Grant::of(P::SPEAK | P::VIDEO));
+            }
+            u.recheck.insert("u5#owed".into(), Mark { what: Recheck::JoinCheck, passes: 3 });
+            u.recheck.insert("u5#cut".into(), Mark { what: Recheck::Cut, passes: 2 });
+            state.sfu_rooms.insert("sfu_7".into(), u);
+        }
+        let marks = || {
+            let u = state.sfu_rooms.get("sfu_7").unwrap();
+            ["u5#new", "u5#owed", "u5#cut"].map(|id| u.recheck.get(id).copied())
+        };
+        let want = [
+            Some(Mark { what: Recheck::LiveGrant, passes: 0 }),
+            Some(Mark { what: Recheck::JoinCheck, passes: 3 }),
+            Some(Mark { what: Recheck::Cut, passes: 2 }),
+        ];
+        // More failed sweeps than MARK_PASSES, one after another: every grant
+        // refused, every time.
+        for sweep in 0..=MARK_PASSES {
+            let refused = (0..3)
+                .map(|_| ("/twirp/livekit.RoomService/UpdateParticipant", 503, r#"{"code":"unavailable"}"#.to_string()))
+                .collect();
+            let (base, srv) = livekit_stand_in(refused, None).await;
+            let out = regrant_user_with(&state, &cfg_for(&base), 7, 5, P::VIEW_CHANNEL | P::CONNECT | P::VIDEO).await;
+            asked(srv).await;
+            assert_eq!(out, Regranted { tried: 3, applied: 0, unchanged: 0, resync_retries: false });
+            assert_eq!(marks(), want, "sweep {sweep}: owed once, never counted, never given up");
+        }
+        // A failed kick of the same user does not count either. It does raise
+        // the owed live grant to a join check (the stronger debt), and it
+        // never lowers a Cut.
+        let refused = (0..3)
+            .map(|_| ("/twirp/livekit.RoomService/RemoveParticipant", 503, r#"{"code":"unavailable"}"#.to_string()))
+            .collect();
+        let (base, srv) = livekit_stand_in(refused, None).await;
+        assert_eq!(evict_with(&state, &cfg_for(&base), 7, 5).await, Evicted { tried: 3, removed: 0 });
+        asked(srv).await;
+        let raised = Some(Mark { what: Recheck::JoinCheck, passes: 0 });
+        assert_eq!(marks(), [raised, want[1], want[2]], "a failed kick owes, and counts nothing");
+        // Positive control: a RESYNC pass that fails them counts one pass each
+        // - and it, too, keeps the stronger debt.
+        let all = ["u5#new", "u5#owed", "u5#cut"].map(|id| ("sfu_7".to_string(), id.to_string()));
+        mark(&state, &all, Recheck::LiveGrant);
+        assert_eq!(
+            marks(),
+            [
+                Some(Mark { what: Recheck::JoinCheck, passes: 1 }),
+                Some(Mark { what: Recheck::JoinCheck, passes: 4 }),
+                Some(Mark { what: Recheck::Cut, passes: 3 }),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_mark_only_ever_moves_up_to_the_stronger_debt() {
+        use Recheck::*;
+        for (a, b, strong) in [(LiveGrant, JoinCheck, JoinCheck), (JoinCheck, Cut, Cut), (LiveGrant, Cut, Cut)] {
+            assert_eq!(a.stronger(b), strong);
+            assert_eq!(b.stronger(a), strong);
+            assert_eq!(a.stronger(a), a);
+        }
+    }
+
+    /// A line about an unconfirmed grant promises a retry only while the
+    /// reconciler runs - `owe` reports it, read under the running flag's lock -
+    /// and otherwise says the grant is NOT enforced, and until WHAT: for a live
+    /// (microphone) grant, a later sweep that finds it still differing from the
+    /// grant last confirmed; for a join-time grant, the next permission change
+    /// (whose sweep now sends the whole grant) or a rejoin.
+    #[tokio::test]
+    async fn the_retry_note_promises_a_retry_only_while_the_reconciler_runs() {
+        let state = test_state();
+        state.sfu_rooms.insert("sfu_7".into(), usage(&[("u5#a", Instant::now())], &[], &[]));
+        let session = [("sfu_7".to_string(), "u5#a".to_string())];
+        let retried = owe(&state, &session, Recheck::LiveGrant);
+        assert!(!retried, "never started (no LIVEKIT_API_URL): nothing will retry it");
+        let (live, join) = (grant_retry_note(retried, GrantAt::Live), grant_retry_note(retried, GrantAt::Join));
+        assert!(live.contains("may not be enforced") && live.contains("even when its grant looks unchanged"), "{live}");
+        assert!(join.contains("NOT enforced") && join.contains("whole grant"), "{join}");
+        *state.sfu_resync_running.lock().unwrap() = true;
+        let retried = owe(&state, &session, Recheck::JoinCheck);
+        assert!(retried, "running: the resync will retry it");
+        for at in [GrantAt::Live, GrantAt::Join] {
+            let note = grant_retry_note(retried, at);
+            assert!(note.contains("will retry") && !note.contains("NOT"), "{note}");
+        }
     }
 
     #[tokio::test]
@@ -3691,6 +4343,8 @@ pub(crate) mod resync_tests {
     pub(crate) const CAMERA_ONLY: &str = r#"{"can_subscribe":true,"can_publish":true,"can_publish_data":true,"can_publish_sources":["CAMERA"],"hidden":false,"recorder":false,"can_update_metadata":false,"agent":false,"can_subscribe_metrics":false,"can_manage_agent_session":false}"#;
     pub(crate) const MIC_AND_CAMERA: &str = r#"{"can_subscribe":true,"can_publish":true,"can_publish_data":true,"can_publish_sources":["MICROPHONE","CAMERA"],"hidden":false,"recorder":false,"can_update_metadata":false,"agent":false,"can_subscribe_metrics":false,"can_manage_agent_session":false}"#;
 
+    pub(crate) const MIC_ONLY: &str = r#"{"can_subscribe":true,"can_publish":true,"can_publish_data":true,"can_publish_sources":["MICROPHONE"],"hidden":false,"recorder":false,"can_update_metadata":false,"agent":false,"can_subscribe_metrics":false,"can_manage_agent_session":false}"#;
+
     /// The request body a revoke of SPEAK sends for a member who keeps VIDEO.
     fn camera_only_request(room: &str, identity: &str) -> serde_json::Value {
         serde_json::json!({
@@ -3698,6 +4352,58 @@ pub(crate) mod resync_tests {
             "identity": identity,
             "permission": {"can_subscribe": true, "can_publish": true, "can_publish_data": true, "can_publish_sources": ["CAMERA"]}
         })
+    }
+
+    /// The request body a join-time check sends for a member who may SPEAK but
+    /// no longer use VIDEO: the whole grant, camera removed.
+    fn mic_only_request(room: &str, identity: &str) -> serde_json::Value {
+        serde_json::json!({
+            "room": room,
+            "identity": identity,
+            "permission": {"can_subscribe": true, "can_publish": true, "can_publish_data": true, "can_publish_sources": ["MICROPHONE"]}
+        })
+    }
+
+    /// JOIN time versus LIVE: a token minted with SPEAK and VIDEO, VIDEO
+    /// revoked since. A join-time check gives the WHOLE grant the member has
+    /// now - camera removed (on SFU the grant is the only binding control for
+    /// a camera) - while the live sweep moves only the microphone, which is
+    /// already right, and so sends nothing at all. The same held grant and the
+    /// same permissions, so the difference is the moment alone.
+    #[tokio::test]
+    async fn a_join_time_check_gives_the_whole_grant_and_a_live_one_only_the_microphone() {
+        use crate::permissions::Permissions as P;
+        no_env_proxy();
+        let state = test_state();
+        let token = Grant::of(P::SPEAK | P::VIDEO);
+        let now_perms = P::VIEW_CHANNEL | P::CONNECT | P::SPEAK;
+        {
+            let mut u = usage(&[("u5#a", Instant::now())], &[], &[]);
+            u.grants.insert("u5#a".into(), token);
+            state.sfu_rooms.insert("sfu_7".into(), u);
+        }
+        // Live: nothing to send (the stand-in fails on any call).
+        let (base, srv) = livekit_stand_in(vec![], None).await;
+        let live = regrant_if_stale(&state, &cfg_for(&base), "sfu_7", "u5#a", now_perms, GrantAt::Live).await;
+        asked(srv).await;
+        assert_eq!(live, Regrant::Unchanged, "a live session keeps its camera");
+        assert_eq!(state.sfu_rooms.get("sfu_7").unwrap().grants.get("u5#a"), Some(&token));
+        // Join: the whole grant, camera removed.
+        let (base, srv) = livekit_stand_in(
+            vec![("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(MIC_ONLY))],
+            None,
+        )
+        .await;
+        let join = regrant_if_stale(&state, &cfg_for(&base), "sfu_7", "u5#a", now_perms, GrantAt::Join).await;
+        let seen = asked(srv).await;
+        assert_eq!(join, Regrant::Applied);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&seen[0].body).unwrap(), mic_only_request("sfu_7", "u5#a"));
+        assert_eq!(state.sfu_rooms.get("sfu_7").unwrap().grants.get("u5#a"), Some(&Grant::of(P::SPEAK)));
+        // And a token that already matches costs no call at a join either.
+        let (base, srv) = livekit_stand_in(vec![], None).await;
+        let again = regrant_if_stale(&state, &cfg_for(&base), "sfu_7", "u5#a", now_perms, GrantAt::Join).await;
+        asked(srv).await;
+        assert_eq!(again, Regrant::Unchanged);
     }
 
     #[test]
@@ -3831,7 +4537,7 @@ pub(crate) mod resync_tests {
         let (base, srv) = livekit_stand_in(vec![], None).await;
         let out = regrant_user_with(&state, &cfg_for(&base), 7, 5, P::VIEW_CHANNEL | P::CONNECT | P::SPEAK).await;
         asked(srv).await;
-        assert_eq!(out, Regranted { tried: 0, applied: 0, unchanged: 1 });
+        assert_eq!(out, Regranted { tried: 0, applied: 0, unchanged: 1, resync_retries: false });
         // SPEAK and VIDEO revoked together: the request keeps the camera.
         let (base, srv) = livekit_stand_in(
             vec![("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(CAMERA_ONLY))],
@@ -3840,7 +4546,7 @@ pub(crate) mod resync_tests {
         .await;
         let out = regrant_user_with(&state, &cfg_for(&base), 7, 5, P::VIEW_CHANNEL | P::CONNECT).await;
         let seen = asked(srv).await;
-        assert_eq!(out, Regranted { tried: 1, applied: 1, unchanged: 0 });
+        assert_eq!(out, Regranted { tried: 1, applied: 1, unchanged: 0, resync_retries: false });
         let body: serde_json::Value = serde_json::from_str(&seen[0].body).unwrap();
         assert_eq!(body, camera_only_request("sfu_7", "u5#a"));
     }
@@ -3866,7 +4572,7 @@ pub(crate) mod resync_tests {
         .await;
         let out = regrant_user_with(&state, &cfg_for(&base), 7, 5, P::VIEW_CHANNEL | P::CONNECT | P::VIDEO).await;
         let seen = asked(srv).await;
-        assert_eq!(out, Regranted { tried: 1, applied: 1, unchanged: 1 });
+        assert_eq!(out, Regranted { tried: 1, applied: 1, unchanged: 1, resync_retries: false });
         let body: serde_json::Value = serde_json::from_str(&seen[0].body).unwrap();
         assert_eq!(body, camera_only_request("sfu_7", "u5#a"));
         assert_eq!(seen[0].claims["video"]["roomAdmin"], true, "UpdateParticipant needs room admin");
@@ -3882,7 +4588,7 @@ pub(crate) mod resync_tests {
         let (base, srv) = livekit_stand_in(vec![], None).await;
         let again = regrant_user_with(&state, &cfg_for(&base), 7, 5, P::VIEW_CHANNEL | P::CONNECT | P::VIDEO).await;
         asked(srv).await;
-        assert_eq!(again, Regranted { tried: 0, applied: 0, unchanged: 2 });
+        assert_eq!(again, Regranted { tried: 0, applied: 0, unchanged: 2, resync_retries: false });
         // The grant back reaches both joined sessions, and only them.
         let (base, srv) = livekit_stand_in(
             vec![
@@ -3894,7 +4600,7 @@ pub(crate) mod resync_tests {
         .await;
         let back = regrant_user_with(&state, &cfg_for(&base), 7, 5, P::VIEW_CHANNEL | P::CONNECT | P::SPEAK | P::VIDEO).await;
         let seen = asked(srv).await;
-        assert_eq!(back, Regranted { tried: 2, applied: 2, unchanged: 0 });
+        assert_eq!(back, Regranted { tried: 2, applied: 2, unchanged: 0, resync_retries: false });
         let mut who = Vec::new();
         for s in &seen {
             let b: serde_json::Value = serde_json::from_str(&s.body).unwrap();
@@ -3910,8 +4616,9 @@ pub(crate) mod resync_tests {
 
     /// Not confirmed is not held: refused, answered with the OLD grant (what
     /// LiveKit shows when it did not read a field), or answered with something
-    /// that is not LiveKit's answer. Each is marked for the resync, and its
-    /// grant stays unconfirmed, so the next sweep sends it again.
+    /// that is not LiveKit's answer. Each is owed a LIVE-grant retry by the
+    /// resync (no pass counted yet: see `owe`), and its grant stays
+    /// unconfirmed, so the next sweep sends it again.
     #[tokio::test]
     async fn a_grant_livekit_does_not_confirm_is_marked_and_not_taken_as_held() {
         use crate::permissions::Permissions as P;
@@ -3936,20 +4643,25 @@ pub(crate) mod resync_tests {
         .await;
         let out = regrant_user_with(&state, &cfg_for(&base), 7, 5, P::VIEW_CHANNEL | P::CONNECT | P::VIDEO).await;
         asked(srv).await;
-        assert_eq!(out, Regranted { tried: 3, applied: 0, unchanged: 0 });
+        assert_eq!(out, Regranted { tried: 3, applied: 0, unchanged: 0, resync_retries: false });
         let u = state.sfu_rooms.get("sfu_7").unwrap();
         for id in ["u5#a", "u5#b", "u5#c"] {
             assert_eq!(u.grants.get(id), Some(&Grant::of(P::SPEAK | P::VIDEO)), "{id}: not confirmed, so not recorded as held");
-            assert_eq!(u.recheck.get(id), Some(&Mark { what: Recheck::JoinCheck, passes: 1 }), "{id}: the next resync applies it again");
+            assert_eq!(u.recheck.get(id), Some(&Mark { what: Recheck::LiveGrant, passes: 0 }), "{id}: the resync applies the live grant again");
         }
     }
 
     /// A confirmed grant is recorded for the session it was sent to, only. If
-    /// the identity joins again while the call is in flight (its token used
-    /// again), the new session holds its TOKEN's grant - that stays recorded,
-    /// so the new join's own check still sees a grant to correct.
+    /// the identity joined again while the call was in flight (its token used
+    /// again), LiveKit applied the update to the NEW session - it updates an
+    /// identity's current session - which that join's payload did not show.
+    /// Its grant is then UNKNOWN, not the payload's: the join check sends the
+    /// whole grant. Here the payload (the token's grant: no publishing, VIDEO
+    /// and SPEAK denied when it was minted) equals what the permissions give
+    /// now, so trusting it found nothing to change and left the session the
+    /// camera the sweep's live grant had kept for the OLD session.
     #[tokio::test]
-    async fn a_grant_confirmed_for_a_session_that_has_since_rejoined_is_not_recorded_for_the_new_one() {
+    async fn an_update_that_lands_on_a_rejoined_session_leaves_its_grant_unknown() {
         use crate::permissions::Permissions as P;
         no_env_proxy();
         let state = test_state();
@@ -3969,20 +4681,26 @@ pub(crate) mod resync_tests {
                         "participant_joined",
                         "sfu_7".into(),
                         &serde_json::json!({"participant": {"identity": "u5#a", "permission": {
-                            "canSubscribe": true, "canPublish": true, "canPublishData": true, "canPublishSources": ["MICROPHONE", "CAMERA"]}}}),
+                            "canSubscribe": true, "canPublishData": true}}}),
                     );
                 }
             })),
         )
         .await;
-        let out = regrant_user_with(&state, &cfg_for(&base), 7, 5, P::VIEW_CHANNEL | P::CONNECT | P::VIDEO).await;
+        let now_perms = P::VIEW_CHANNEL | P::CONNECT;
+        let out = regrant_user_with(&state, &cfg_for(&base), 7, 5, now_perms).await;
         asked(srv).await;
-        assert_eq!(out, Regranted { tried: 1, applied: 1, unchanged: 0 }, "LiveKit confirmed it, for the session it reached");
-        assert_eq!(
-            state.sfu_rooms.get("sfu_7").unwrap().grants.get("u5#a"),
-            Some(&Grant::of(P::SPEAK | P::VIDEO)),
-            "the new session's token grant stays known"
-        );
+        assert_eq!(out, Regranted { tried: 1, applied: 1, unchanged: 0, resync_retries: false }, "LiveKit confirmed it, for the session it reached");
+        assert_eq!(state.sfu_rooms.get("sfu_7").unwrap().grants.get("u5#a"), None, "unknown: the payload is older than the update");
+        // The new join's check: the whole grant is sent, taking the camera.
+        let (base, srv) = livekit_stand_in(
+            vec![("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(NO_PUBLISH))],
+            None,
+        )
+        .await;
+        let join = regrant_if_stale(&state, &cfg_for(&base), "sfu_7", "u5#a", now_perms, GrantAt::Join).await;
+        asked(srv).await;
+        assert_eq!(join, Regrant::Applied);
     }
 
     /// A join's grant is its TOKEN's: the webhook's report replaces whatever
@@ -4015,7 +4733,8 @@ pub(crate) mod resync_tests {
 
     /// The resync's merge takes LiveKit's word for each listed grant, and a
     /// KNOWN session whose grant is not the one this process held (a token
-    /// used again with its webhook lost) is due a join check.
+    /// used again with its webhook lost) is due a join check. A listed
+    /// reservation is handed back as moved, for the join check as well.
     #[test]
     fn a_known_session_whose_listed_grant_changed_is_due_a_join_check() {
         use crate::permissions::Permissions as P;
@@ -4063,23 +4782,30 @@ pub(crate) mod resync_tests {
             "the drifted one, and the marked one once, for its own mark"
         );
         assert_eq!(m.added, vec![("sfu_7".to_string(), "u3#new".to_string())], "a new one gets the join check as added");
+        assert_eq!(
+            m.moved,
+            vec![("sfu_7".to_string(), "u4#minted".to_string())],
+            "a moved reservation gets the join check too: its webhook may have been lost - but it is not drift, and not `added`"
+        );
         let u = rooms.get("sfu_7").unwrap();
         assert_eq!(u.grants.get("u5#drift"), Some(&Grant::of(P::SPEAK | P::VIDEO)), "LiveKit's word, until the check re-applies");
         assert_eq!(u.grants.get("u7#unknown"), Some(&Grant::of(P::SPEAK)), "learned; nothing to differ from");
         assert_eq!(u.grants.get("u8#rejoined"), Some(&Grant::of(P::SPEAK | P::VIDEO)), "not overwritten by the older listing");
-        assert_eq!(u.grants.get("u4#minted"), Some(&Grant::of(P::SPEAK)), "a moved reservation: its own webhook checks it");
+        assert_eq!(u.grants.get("u4#minted"), Some(&Grant::of(P::SPEAK)), "a moved reservation: LiveKit's word, which its join check compares");
         assert_eq!(u.grants.get("u3#new"), Some(&Grant::of(P::SPEAK)));
     }
 
     /// A server with an SFU voice channel whose @everyone may VIEW, CONNECT,
     /// SPEAK and use VIDEO; `muted` holds a role the channel denies SPEAK,
-    /// `speaker` does not, `outsider` is no member at all.
+    /// `camless` one it denies VIDEO, `speaker` neither, and `outsider` is no
+    /// member at all.
     struct SpeakFixture {
         sid: String,
         cid: i64,
         muted: i64,
         speaker: i64,
         outsider: i64,
+        camless: i64,
         users: Vec<i32>,
     }
 
@@ -4088,7 +4814,7 @@ pub(crate) mod resync_tests {
         let tag = uuid::Uuid::new_v4().simple().to_string();
         let mk = |n: &str| format!("gr_{n}_{}", &tag[..12]);
         let mut users = Vec::new();
-        for n in ["owner", "muted", "speaker", "outsider"] {
+        for n in ["owner", "muted", "speaker", "outsider", "camless"] {
             let (id,): (i32,) = sqlx::query_as("INSERT INTO users (username, email, salt, verifier, created_at) VALUES ($1, $2, $3, $4, NOW()) RETURNING id")
                 .bind(mk(n)).bind(format!("{}@test.invalid", mk(n))).bind(b"s".as_ref()).bind(b"v".as_ref())
                 .fetch_one(pool).await.expect("user");
@@ -4096,19 +4822,29 @@ pub(crate) mod resync_tests {
         }
         let sid = uuid::Uuid::new_v4().to_string();
         sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, $2, $3)").bind(&sid).bind(mk("srv")).bind(users[0]).execute(pool).await.expect("server");
-        sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2), ($1, $3), ($1, $4)")
-            .bind(&sid).bind(users[0]).bind(users[1]).bind(users[2]).execute(pool).await.expect("members");
+        sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2), ($1, $3), ($1, $4), ($1, $5)")
+            .bind(&sid).bind(users[0]).bind(users[1]).bind(users[2]).bind(users[4]).execute(pool).await.expect("members");
         let everyone = (P::VIEW_CHANNEL | P::CONNECT | P::SPEAK | P::VIDEO).bits() as i64;
         sqlx::query("INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) VALUES ($1, '@everyone', '#99AAB5', $2, 0, true)")
             .bind(&sid).bind(everyone).execute(pool).await.expect("@everyone");
-        let (rid,): (i64,) = sqlx::query_as("INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) VALUES ($1, 'muted', '#99AAB5', 0, 1, false) RETURNING id")
-            .bind(&sid).fetch_one(pool).await.expect("role");
-        sqlx::query("INSERT INTO member_roles (server_id, user_id, role_id) VALUES ($1, $2, $3)").bind(&sid).bind(users[1]).bind(rid).execute(pool).await.expect("member role");
         let (cid,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type, sfu_mode) VALUES ($1, 'v', 1, true) RETURNING id")
             .bind(&sid).fetch_one(pool).await.expect("channel");
-        sqlx::query("INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny) VALUES ($1, $2, 0, $3)")
-            .bind(cid as i64).bind(rid).bind(P::SPEAK.bits() as i64).execute(pool).await.expect("SPEAK deny");
-        SpeakFixture { sid, cid: cid as i64, muted: users[1] as i64, speaker: users[2] as i64, outsider: users[3] as i64, users }
+        for (name, holder, denied) in [("muted", users[1], P::SPEAK), ("camless", users[4], P::VIDEO)] {
+            let (rid,): (i64,) = sqlx::query_as("INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) VALUES ($1, $2, '#99AAB5', 0, 1, false) RETURNING id")
+                .bind(&sid).bind(name).fetch_one(pool).await.expect("role");
+            sqlx::query("INSERT INTO member_roles (server_id, user_id, role_id) VALUES ($1, $2, $3)").bind(&sid).bind(holder).bind(rid).execute(pool).await.expect("member role");
+            sqlx::query("INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny) VALUES ($1, $2, 0, $3)")
+                .bind(cid as i64).bind(rid).bind(denied.bits() as i64).execute(pool).await.expect("deny");
+        }
+        SpeakFixture {
+            sid,
+            cid: cid as i64,
+            muted: users[1] as i64,
+            speaker: users[2] as i64,
+            outsider: users[3] as i64,
+            camless: users[4] as i64,
+            users,
+        }
     }
 
     async fn drop_fixture(pool: &sqlx::PgPool, f: &SpeakFixture) {
@@ -4184,11 +4920,608 @@ pub(crate) mod resync_tests {
         assert_eq!(still_in, 4, "a SPEAK deny evicts nobody: they stay, listening");
     }
 
+    /// A RESERVATION LiveKit already lists as joined, through the resync
+    /// (TEST_DATABASE_URL; skips without it) - the case where its
+    /// `participant_joined` was lost, so nothing else would ever check it. It
+    /// gets the join check an added session gets: the SPEAK-denied member's
+    /// token (minted before the deny, naming the microphone) is given the grant
+    /// they have now; the VIDEO-denied member's the WHOLE grant, camera
+    /// removed; a member no longer in the server is removed. The speaker,
+    /// whose token is current, is sent nothing and stays: the check evicts
+    /// nobody who is entitled.
+    #[tokio::test]
+    async fn a_reservation_the_resync_finds_joined_gets_the_join_check() {
+        use crate::permissions::Permissions as P;
+        let Some(pool) = crate::migrator::test_pool(2).await else { return };
+        no_env_proxy();
+        let f = speak_fixture(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = room_name_for_channel(f.cid);
+        let ids = [
+            format!("u{}#r1", f.muted),
+            format!("u{}#r2", f.speaker),
+            format!("u{}#r3", f.camless),
+            format!("u{}#r4", f.outsider),
+        ];
+        let [muted, fine, camless, stranger] = &ids;
+        {
+            // Minted here, never seen joining: the webhook was lost.
+            let mut u = state.sfu_rooms.entry(room.clone()).or_default();
+            for id in &ids {
+                u.reservations.insert(id.clone(), Instant::now());
+            }
+        }
+        let listing = ids
+            .iter()
+            .map(|id| format!(r#"{{"identity":"{id}","state":"ACTIVE","tracks":[],"permission":{MIC_AND_CAMERA}}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let (base, srv) = livekit_stand_in(
+            vec![
+                ("/twirp/livekit.RoomService/ListRooms", 200, format!(r#"{{"rooms":[{{"name":"{room}"}}]}}"#)),
+                ("/twirp/livekit.RoomService/ListParticipants", 200, format!(r#"{{"participants":[{listing}]}}"#)),
+                // In listing order; the refused one is removed after the checks.
+                ("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(CAMERA_ONLY)),
+                ("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(MIC_ONLY)),
+                ("/twirp/livekit.RoomService/RemoveParticipant", 200, "{}".to_string()),
+            ],
+            None,
+        )
+        .await;
+        let r = resync_once(&state, &cfg_for(&base), &client()).await;
+        let seen = asked(srv).await;
+        let (still_in, reserved, grants) = {
+            let u = state.sfu_rooms.get(&room).expect("room");
+            let still_in: Vec<bool> = ids.iter().map(|id| u.participants.contains_key(id)).collect();
+            let grants: Vec<Option<Grant>> = ids.iter().map(|id| u.grants.get(id).copied()).collect();
+            (still_in, u.reservations.len(), grants)
+        };
+        drop_fixture(&pool, &f).await;
+
+        let r = r.expect("resync");
+        let bodies: Vec<serde_json::Value> = seen[2..].iter().map(|s| serde_json::from_str(&s.body).unwrap()).collect();
+        assert_eq!(
+            bodies,
+            vec![
+                camera_only_request(&room, muted),
+                mic_only_request(&room, camless),
+                serde_json::json!({ "room": room, "identity": stranger }),
+            ],
+            "the stale microphone, the stale camera, the non-member - never the speaker's current grant ({fine})"
+        );
+        assert_eq!((r.moved, r.added, r.regranted, r.denied, r.pending), (4, 0, 2, 1, 0), "moved, not drift - and checked");
+        assert_eq!(still_in, vec![true, true, true, false], "an entitled member stays; only the non-member goes");
+        assert_eq!(reserved, 0, "every listed reservation moved");
+        assert_eq!(
+            grants[..3],
+            [Some(Grant::of(P::VIDEO)), Some(Grant::of(P::SPEAK | P::VIDEO)), Some(Grant::of(P::SPEAK))],
+            "each holds what its member's permissions give now"
+        );
+    }
+
+    /// The join check is SERIALIZED with the perms-change sweep
+    /// (TEST_DATABASE_URL; skips without it). A sweep for the server holds its
+    /// lock - here, the test does - when the speaker's join arrives, its token
+    /// naming the microphone, which is still right. While the check waits, the
+    /// change that sweep is acting on lands: @everyone loses SPEAK. The check
+    /// must act on the permissions as they are once the sweep is done - take
+    /// the microphone away - not on the answer it read on arrival, which would
+    /// have found nothing to change and left LiveKit granting a microphone the
+    /// database denies.
+    #[tokio::test]
+    async fn the_join_check_waits_for_a_running_sweep_and_acts_on_what_it_left() {
+        use crate::permissions::Permissions as P;
+        use std::sync::atomic::AtomicBool;
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        no_env_proxy();
+        let f = speak_fixture(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = room_name_for_channel(f.cid);
+        let id = format!("u{}#j", f.speaker);
+        apply_webhook_event(
+            &state,
+            "participant_joined",
+            room.clone(),
+            &serde_json::json!({"participant": {"identity": id, "permission": {
+                "canSubscribe": true, "canPublish": true, "canPublishData": true, "canPublishSources": ["MICROPHONE", "CAMERA"]}}}),
+        );
+        let (base, srv) = livekit_stand_in(
+            vec![("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(CAMERA_ONLY))],
+            None,
+        )
+        .await;
+        let cfg = cfg_for(&base);
+        let sweep = state.lock_server_perms(&f.sid).await; // a sweep for this server, running
+        let check_done = AtomicBool::new(false);
+        let check = async {
+            reauth_join(&state, &cfg, &room, &id, f.cid, f.speaker).await;
+            check_done.store(true, Ordering::SeqCst);
+        };
+        let the_sweep = async {
+            // Until the check is queued behind the sweep (the map's clone, the
+            // sweep's, the check's) - or, were it not serialized, done.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !check_done.load(Ordering::SeqCst)
+                && state.server_perms_locks.get(&f.sid).map(|m| Arc::strong_count(&m)) != Some(3)
+            {
+                assert!(Instant::now() < deadline, "the join check neither queued nor finished");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            sqlx::query("UPDATE server_roles SET permissions = $1 WHERE server_id = $2 AND is_default")
+                .bind((P::VIEW_CHANNEL | P::CONNECT | P::VIDEO).bits() as i64)
+                .bind(&f.sid)
+                .execute(&pool)
+                .await
+                .expect("@everyone loses SPEAK");
+            drop(sweep);
+        };
+        tokio::time::timeout(Duration::from_secs(30), async { tokio::join!(check, the_sweep) })
+            .await
+            .expect("the check finished");
+        let held = state.sfu_rooms.get(&room).and_then(|u| u.grants.get(&id).copied());
+        let in_call = state.sfu_rooms.get(&room).is_some_and(|u| u.participants.contains_key(&id));
+        drop_fixture(&pool, &f).await;
+
+        assert_eq!(held, Some(Grant::of(P::VIDEO)), "the answer after the sweep: no microphone");
+        assert!(in_call, "a SPEAK change evicts nobody");
+        let seen = asked(srv).await;
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&seen[0].body).unwrap(), camera_only_request(&room, &id));
+    }
+
+    /// A retried grant keeps its MOMENT (TEST_DATABASE_URL; skips without it).
+    /// The VIDEO-denied member's session is live with the camera-only grant a
+    /// SPEAK deny left it, and SPEAK is allowed again. Owed a LIVE grant (the
+    /// sweep's re-grant of the microphone was not confirmed), the resync gives
+    /// the microphone back and leaves the running camera alone - the sweep's
+    /// own rule. Owed a JOIN-time check instead, it gets the whole grant the
+    /// member has now: the camera goes.
+    #[tokio::test]
+    async fn a_retried_grant_keeps_its_moment_live_or_join() {
+        use crate::permissions::Permissions as P;
+        let Some(pool) = crate::migrator::test_pool(2).await else { return };
+        no_env_proxy();
+        let f = speak_fixture(&pool).await;
+        let room = room_name_for_channel(f.cid);
+        let id = format!("u{}#live", f.camless);
+        let mut outcomes = Vec::new();
+        for (what, reply) in [(Recheck::LiveGrant, MIC_AND_CAMERA), (Recheck::JoinCheck, MIC_ONLY)] {
+            let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+            {
+                let mut u = state.sfu_rooms.entry(room.clone()).or_default();
+                u.participants.insert(id.clone(), Instant::now());
+                u.grants.insert(id.clone(), Grant::of(P::VIDEO));
+                u.recheck.insert(id.clone(), Mark { what, passes: 0 });
+            }
+            let (base, srv) = livekit_stand_in(
+                vec![
+                    ("/twirp/livekit.RoomService/ListRooms", 200, format!(r#"{{"rooms":[{{"name":"{room}"}}]}}"#)),
+                    ("/twirp/livekit.RoomService/ListParticipants", 200,
+                     format!(r#"{{"participants":[{{"identity":"{id}","state":"ACTIVE","tracks":[],"permission":{CAMERA_ONLY}}}]}}"#)),
+                    ("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(reply)),
+                ],
+                None,
+            )
+            .await;
+            let r = resync_once(&state, &cfg_for(&base), &client()).await;
+            let seen = asked(srv).await;
+            let u = state.sfu_rooms.get(&room).expect("room");
+            outcomes.push((
+                r.map(|r| (r.regranted, r.pending)).map_err(|e| e.to_string()),
+                seen.get(2).map(|s| serde_json::from_str::<serde_json::Value>(&s.body).unwrap()["permission"]["can_publish_sources"].clone()),
+                u.grants.get(&id).copied(),
+                u.participants.contains_key(&id),
+            ));
+        }
+        drop_fixture(&pool, &f).await;
+
+        assert_eq!(
+            outcomes[0],
+            (Ok((1, 0)), Some(serde_json::json!(["MICROPHONE", "CAMERA"])), Some(Grant::of(P::SPEAK | P::VIDEO)), true),
+            "a retried LIVE grant: the microphone back, the running camera kept"
+        );
+        assert_eq!(
+            outcomes[1],
+            (Ok((1, 0)), Some(serde_json::json!(["MICROPHONE"])), Some(Grant::of(P::SPEAK)), true),
+            "a retried JOIN check: the whole grant, camera removed"
+        );
+    }
+
+    /// No publishing at all, as LiveKit reports it back.
+    const NO_PUBLISH: &str = r#"{"can_subscribe":true,"can_publish":false,"can_publish_data":true,"can_publish_sources":[],"hidden":false,"recorder":false,"can_update_metadata":false,"agent":false,"can_subscribe_metrics":false,"can_manage_agent_session":false}"#;
+
+    /// A grant LiveKit CONFIRMS while a resync's snapshot is in flight is
+    /// journaled, so that resync's merge keeps it (see the merge test below).
+    #[tokio::test]
+    async fn a_grant_confirmed_during_a_resync_fetch_is_journaled() {
+        use crate::permissions::Permissions as P;
+        no_env_proxy();
+        let state = test_state();
+        {
+            let mut u = usage(&[("u5#a", Instant::now())], &[], &[]);
+            u.grants.insert("u5#a".into(), Grant::of(P::SPEAK | P::VIDEO));
+            state.sfu_rooms.insert("sfu_7".into(), u);
+        }
+        *state.sfu_resync_journal.lock().unwrap() = Some(SfuResyncJournal::default());
+        let (base, srv) = livekit_stand_in(
+            vec![("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(CAMERA_ONLY))],
+            None,
+        )
+        .await;
+        let out = regrant_user_with(&state, &cfg_for(&base), 7, 5, P::VIEW_CHANNEL | P::CONNECT | P::VIDEO).await;
+        asked(srv).await;
+        assert_eq!(out.applied, 1);
+        let g = state.sfu_resync_journal.lock().unwrap();
+        assert!(SfuResyncJournal::has(&g.as_ref().unwrap().grants, "sfu_7", "u5#a"), "journaled with the confirmation");
+    }
+
+    /// The merge keeps a grant this process changed during the fetch - a
+    /// sweep's confirmed grant is newer than the listing - and does not call
+    /// the difference drift (whose join check would pull a live camera).
+    /// Positive control: the same difference with nothing journaled IS drift.
+    #[test]
+    fn a_grant_changed_during_the_fetch_is_kept_and_is_not_drift() {
+        use crate::permissions::Permissions as P;
+        let rooms = DashMap::new();
+        let before = Instant::now();
+        let mut u = usage(&[("u5#swept", before), ("u6#drift", before)], &[], &[]);
+        u.grants.insert("u5#swept".into(), Grant::of(P::VIDEO)); // the sweep's confirmed grant
+        u.grants.insert("u6#drift".into(), Grant::of(P::VIDEO));
+        rooms.insert("sfu_7".to_string(), u);
+        std::thread::sleep(Duration::from_millis(5));
+        let started = Instant::now();
+        let mut journal = SfuResyncJournal::default();
+        journal.record(JournalEntry::GrantChanged("sfu_7", "u5#swept"));
+        let mut snap = listed("sfu_7", &["u5#swept", "u6#drift"], &[]);
+        for id in ["u5#swept", "u6#drift"] {
+            snap.grants.insert(id.into(), Grant::of(P::SPEAK | P::VIDEO)); // listed before the sweep
+        }
+        let names: HashSet<String> = ["sfu_7".to_string()].into_iter().collect();
+        let m = merge_snapshot(&rooms, &[snap], &names, &journal, started, Instant::now());
+        let due: Vec<String> = m.due.iter().map(|(_, id, _)| id.clone()).collect();
+        assert_eq!(due, vec!["u6#drift".to_string()], "only the unjournaled difference is drift");
+        let u = rooms.get("sfu_7").unwrap();
+        assert_eq!(u.grants.get("u5#swept"), Some(&Grant::of(P::VIDEO)), "this process's newer word kept");
+        assert_eq!(u.grants.get("u6#drift"), Some(&Grant::of(P::SPEAK | P::VIDEO)), "control: LiveKit's word taken");
+    }
+
+    /// A JOIN-time grant LiveKit does not confirm leaves the session's grant
+    /// UNKNOWN (journaled for an in-flight resync), never the token's: a SPEAK
+    /// deny's sweep then sends the whole grant its permissions give - it does
+    /// not hand back the camera the join check took away (VIDEO revoked since
+    /// the token). An unconfirmed LIVE grant is not forgotten: the grant last
+    /// confirmed stays what the sweep compares with.
+    #[tokio::test]
+    async fn an_unconfirmed_join_grant_is_forgotten_so_no_sweep_hands_the_camera_back() {
+        use crate::permissions::Permissions as P;
+        no_env_proxy();
+        let state = test_state();
+        let token = Grant::of(P::SPEAK | P::VIDEO);
+        {
+            let now = Instant::now();
+            let mut u = usage(&[("u5#join", now), ("u5#live", now)], &[], &[]);
+            u.grants.insert("u5#join".into(), token);
+            u.grants.insert("u5#live".into(), token);
+            state.sfu_rooms.insert("sfu_7".into(), u);
+        }
+        *state.sfu_resync_journal.lock().unwrap() = Some(SfuResyncJournal::default());
+        let refused = || ("/twirp/livekit.RoomService/UpdateParticipant", 503, r#"{"code":"unavailable"}"#.to_string());
+        let (base, srv) = livekit_stand_in(vec![refused(), refused()], None).await;
+        let cfg = cfg_for(&base);
+        let speak_no_video = P::VIEW_CHANNEL | P::CONNECT | P::SPEAK;
+        assert_eq!(regrant_if_stale(&state, &cfg, "sfu_7", "u5#join", speak_no_video, GrantAt::Join).await, Regrant::Failed);
+        // Positive control: the same failure for a LIVE grant (SPEAK revoked).
+        assert_eq!(
+            regrant_if_stale(&state, &cfg, "sfu_7", "u5#live", P::VIEW_CHANNEL | P::CONNECT | P::VIDEO, GrantAt::Live).await,
+            Regrant::Failed
+        );
+        asked(srv).await;
+        {
+            let u = state.sfu_rooms.get("sfu_7").unwrap();
+            assert_eq!(u.grants.get("u5#join"), None, "unknown, not the token's grant");
+            assert_eq!(u.grants.get("u5#live"), Some(&token), "a live grant's last confirmed one stays");
+        }
+        assert!(SfuResyncJournal::has(&state.sfu_resync_journal.lock().unwrap().as_ref().unwrap().grants, "sfu_7", "u5#join"));
+        // SPEAK denied now: the sweep's grant for the join-checked session is
+        // the whole one - no camera.
+        state.sfu_rooms.get_mut("sfu_7").unwrap().participants.remove("u5#live");
+        let (base, srv) = livekit_stand_in(
+            vec![("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(NO_PUBLISH))],
+            None,
+        )
+        .await;
+        let out = regrant_user_with(&state, &cfg_for(&base), 7, 5, P::VIEW_CHANNEL | P::CONNECT).await;
+        let seen = asked(srv).await;
+        assert_eq!(out.applied, 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&seen[0].body).unwrap()["permission"],
+            serde_json::json!({"can_subscribe": true, "can_publish": false, "can_publish_data": true, "can_publish_sources": []}),
+            "no camera handed back"
+        );
+    }
+
+    /// An UpdateParticipant is IN FLIGHT from before it is sent until its
+    /// answer is recorded, and a resync merging meanwhile - LiveKit already
+    /// lists the applied grant, this process has not read the answer yet -
+    /// takes neither the listed grant nor its difference (drift, whose join
+    /// check would pull the live camera) for that session. Positive control:
+    /// once the answer is in, nothing is in flight.
+    #[tokio::test]
+    async fn an_update_in_flight_is_not_read_as_drift() {
+        use crate::permissions::Permissions as P;
+        use std::sync::Mutex;
+        no_env_proxy();
+        let state = test_state();
+        {
+            let mut u = usage(&[("u5#a", Instant::now())], &[], &[]);
+            u.grants.insert("u5#a".into(), Grant::of(P::SPEAK | P::VIDEO));
+            state.sfu_rooms.insert("sfu_7".into(), u);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+        let during = Arc::clone(&state);
+        let seen: Arc<Mutex<Option<(bool, usize, Option<Grant>)>>> = Arc::new(Mutex::new(None));
+        let record = Arc::clone(&seen);
+        let (base, srv) = livekit_stand_in(
+            vec![("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(CAMERA_ONLY))],
+            Some(Box::new(move |m: &str| {
+                if m != "UpdateParticipant" {
+                    return;
+                }
+                // LiveKit has applied it; a resync lists and merges NOW.
+                let in_flight = during.sfu_rooms.get("sfu_7").is_some_and(|u| u.in_flight.contains_key("u5#a"));
+                let mut snap = listed("sfu_7", &["u5#a"], &[]);
+                snap.grants.insert("u5#a".into(), Grant::of(P::VIDEO));
+                let names: HashSet<String> = ["sfu_7".to_string()].into_iter().collect();
+                let m = merge_snapshot(&during.sfu_rooms, &[snap], &names, &SfuResyncJournal::default(), Instant::now(), Instant::now());
+                let held = during.sfu_rooms.get("sfu_7").and_then(|u| u.grants.get("u5#a").copied());
+                *record.lock().unwrap() = Some((in_flight, m.due.len(), held));
+            })),
+        )
+        .await;
+        let out = regrant_user_with(&state, &cfg_for(&base), 7, 5, P::VIEW_CHANNEL | P::CONNECT | P::VIDEO).await;
+        asked(srv).await;
+        let after = state.sfu_rooms.get("sfu_7").map(|u| (u.in_flight.is_empty(), u.grants.get("u5#a").copied()));
+
+        assert_eq!(out.applied, 1);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some((true, 0, Some(Grant::of(P::SPEAK | P::VIDEO)))),
+            "in flight while LiveKit had it: no drift, and the record left to the answer"
+        );
+        assert_eq!(after, Some((true, Some(Grant::of(P::VIDEO)))), "answered: nothing in flight, the confirmed grant recorded");
+    }
+
+    /// A LIVE grant LiveKit did not confirm leaves its session UNCONFIRMED:
+    /// the recorded grant is no shortcut until something confirms what LiveKit
+    /// holds. SPEAK is revoked and LiveKit does not confirm it (it may hold
+    /// it); SPEAK is restored, and the restore's grant - equal to the recorded
+    /// one - is SENT, not judged unchanged, which with the resync off would
+    /// leave LiveKit refusing a microphone the member may use. Its confirmation
+    /// ends the marker. The camera stays throughout: the grant is not
+    /// forgotten, which would send the whole grant and pull it.
+    #[tokio::test]
+    async fn a_live_grant_livekit_did_not_confirm_is_sent_again_even_when_it_looks_unchanged() {
+        use crate::permissions::Permissions as P;
+        no_env_proxy();
+        let state = test_state();
+        let held = Grant::of(P::SPEAK | P::VIDEO);
+        {
+            let mut u = usage(&[("u5#a", Instant::now())], &[], &[]);
+            u.grants.insert("u5#a".into(), held);
+            state.sfu_rooms.insert("sfu_7".into(), u);
+        }
+        let (base, srv) = livekit_stand_in(
+            vec![("/twirp/livekit.RoomService/UpdateParticipant", 503, r#"{"code":"unavailable"}"#.to_string())],
+            None,
+        )
+        .await;
+        let revoke = regrant_user_with(&state, &cfg_for(&base), 7, 5, P::VIEW_CHANNEL | P::CONNECT | P::VIDEO).await;
+        asked(srv).await;
+        let after_revoke = state.sfu_rooms.get("sfu_7").map(|u| (u.unconfirmed.contains("u5#a"), u.grants.get("u5#a").copied()));
+        let (base, srv) = livekit_stand_in(
+            vec![("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(MIC_AND_CAMERA))],
+            None,
+        )
+        .await;
+        let restore = regrant_user_with(&state, &cfg_for(&base), 7, 5, P::VIEW_CHANNEL | P::CONNECT | P::SPEAK | P::VIDEO).await;
+        let seen = asked(srv).await;
+        let after_restore = state.sfu_rooms.get("sfu_7").map(|u| u.unconfirmed.contains("u5#a"));
+
+        assert_eq!(revoke.applied, 0);
+        assert_eq!(after_revoke, Some((true, Some(held))), "unconfirmed, and the camera's grant kept");
+        assert_eq!((restore.tried, restore.applied), (1, 1), "sent although it equals the recorded grant");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&seen[0].body).unwrap()["permission"]["can_publish_sources"],
+            serde_json::json!(["MICROPHONE", "CAMERA"])
+        );
+        assert_eq!(after_restore, Some(false), "confirmed: the marker goes");
+    }
+
+    /// After a backend restart this process knows no session: the resync
+    /// learns every call in progress, and they are LIVE sessions (TEST_DATABASE_URL;
+    /// skips without it). The VIDEO-denied member's running camera - kept by
+    /// the live rule when VIDEO was revoked mid-call - is not pulled by the
+    /// first pass after a deploy; the SPEAK-denied member's microphone still
+    /// goes (the one right the live rule enforces).
+    #[tokio::test]
+    async fn a_session_the_resync_learns_keeps_its_running_camera() {
+        use crate::permissions::Permissions as P;
+        let Some(pool) = crate::migrator::test_pool(2).await else { return };
+        no_env_proxy();
+        let f = speak_fixture(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = room_name_for_channel(f.cid);
+        let (cam, mic) = (format!("u{}#live", f.camless), format!("u{}#live", f.muted));
+        let camera_track = r#"[{"sid":"TR_cam","source":"CAMERA"}]"#;
+        let (base, srv) = livekit_stand_in(
+            vec![
+                ("/twirp/livekit.RoomService/ListRooms", 200, format!(r#"{{"rooms":[{{"name":"{room}"}}]}}"#)),
+                ("/twirp/livekit.RoomService/ListParticipants", 200, format!(
+                    r#"{{"participants":[
+                    {{"identity":"{cam}","state":"ACTIVE","tracks":{camera_track},"permission":{MIC_AND_CAMERA}}},
+                    {{"identity":"{mic}","state":"ACTIVE","tracks":[],"permission":{MIC_AND_CAMERA}}}]}}"#
+                )),
+                // Only the SPEAK-denied member's microphone: nothing for the camera.
+                ("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(CAMERA_ONLY)),
+            ],
+            None,
+        )
+        .await;
+        let r = resync_once(&state, &cfg_for(&base), &client()).await;
+        let seen = asked(srv).await;
+        let grants: Vec<Option<Grant>> =
+            [&cam, &mic].iter().map(|id| state.sfu_rooms.get(&room).and_then(|u| u.grants.get(*id).copied())).collect();
+        drop_fixture(&pool, &f).await;
+
+        let r = r.expect("resync");
+        assert_eq!((r.added, r.regranted, r.denied), (2, 1, 0));
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&seen[2].body).unwrap(), camera_only_request(&room, &mic));
+        assert_eq!(grants, vec![Some(Grant::of(P::SPEAK | P::VIDEO)), Some(Grant::of(P::VIDEO))], "the camera stays running");
+    }
+
+    /// A debt owed SINCE the merge wins (TEST_DATABASE_URL; skips without it).
+    /// Two live sessions of the VIDEO-denied member are due a retried LIVE
+    /// grant. While the resync waits for the server's lock, one of them rejoins
+    /// and its join check fails - owing the whole grant (a JoinCheck) - and the
+    /// other is owed a Cut. The first must get the WHOLE grant (camera removed)
+    /// and only then lose its mark; the Cut, which no grant answers, must stay.
+    /// Scheduled as live, the first found nothing to change and its clear
+    /// erased the join check's debt, so nothing ever looked again.
+    #[tokio::test]
+    async fn a_join_check_owed_since_the_merge_is_given_and_a_stronger_debt_kept() {
+        use crate::permissions::Permissions as P;
+        use std::sync::atomic::AtomicBool;
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        no_env_proxy();
+        let f = speak_fixture(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = room_name_for_channel(f.cid);
+        let (rejoined, cut) = (format!("u{}#x", f.camless), format!("u{}#y", f.camless));
+        {
+            let mut u = state.sfu_rooms.entry(room.clone()).or_default();
+            for id in [&rejoined, &cut] {
+                u.participants.insert(id.clone(), Instant::now());
+                u.grants.insert(id.clone(), Grant::of(P::SPEAK | P::VIDEO));
+                u.recheck.insert(id.clone(), Mark { what: Recheck::LiveGrant, passes: 0 });
+            }
+        }
+        let listing = [&rejoined, &cut]
+            .iter()
+            .map(|id| format!(r#"{{"identity":"{id}","state":"ACTIVE","tracks":[],"permission":{MIC_AND_CAMERA}}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let (base, srv) = livekit_stand_in(
+            vec![
+                ("/twirp/livekit.RoomService/ListRooms", 200, format!(r#"{{"rooms":[{{"name":"{room}"}}]}}"#)),
+                ("/twirp/livekit.RoomService/ListParticipants", 200, format!(r#"{{"participants":[{listing}]}}"#)),
+                ("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(MIC_ONLY)),
+            ],
+            None,
+        )
+        .await;
+        let held = state.lock_server_perms(&f.sid).await;
+        let done = AtomicBool::new(false);
+        let resync = async {
+            let r = resync_once(&state, &cfg_for(&base), &client()).await;
+            done.store(true, Ordering::SeqCst);
+            r
+        };
+        let meanwhile = async {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !done.load(Ordering::SeqCst) && state.server_perms_locks.get(&f.sid).map(|m| Arc::strong_count(&m)) != Some(3) {
+                assert!(Instant::now() < deadline, "the resync never queued on the server's lock");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            {
+                let mut u = state.sfu_rooms.get_mut(&room).unwrap();
+                u.recheck.insert(rejoined.clone(), Mark { what: Recheck::JoinCheck, passes: 0 });
+                u.recheck.insert(cut.clone(), Mark { what: Recheck::Cut, passes: 0 });
+            }
+            drop(held);
+        };
+        let (r, ()) = tokio::time::timeout(Duration::from_secs(30), async { tokio::join!(resync, meanwhile) })
+            .await
+            .expect("the resync finished");
+        let seen = asked(srv).await;
+        let (marks, grant) = {
+            let u = state.sfu_rooms.get(&room).unwrap();
+            ([&rejoined, &cut].map(|id| u.recheck.get(id).map(|m| m.what)), u.grants.get(&rejoined).copied())
+        };
+        drop_fixture(&pool, &f).await;
+
+        r.expect("resync");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&seen[2].body).unwrap(), mic_only_request(&room, &rejoined));
+        assert_eq!(grant, Some(Grant::of(P::SPEAK)), "the whole grant: camera removed");
+        assert_eq!(marks, [None, Some(Recheck::Cut)], "the join check's debt paid; the Cut, which no grant answers, kept");
+    }
+
+    /// A debt owed WHILE a check runs survives it (TEST_DATABASE_URL; skips
+    /// without it). The speaker's session is owed a join check. The resync
+    /// reads its mark's generation, then waits for the server's lock; meanwhile
+    /// an eviction that does not take that lock - a flip out of SFU mode,
+    /// whose RemoveParticipant LiveKit did not confirm - owes the session a
+    /// join check again. The check runs on what it read before that (the
+    /// channel still an SFU one), finds nothing to change - and must NOT clear
+    /// the newer debt: the next pass's check, which would find the channel no
+    /// longer an SFU one and cut the session, has to run. (The F4 test is the
+    /// positive control: a mark only raised, not written again, is cleared.)
+    #[tokio::test]
+    async fn a_debt_owed_while_the_check_ran_is_left_for_the_next_pass() {
+        use std::sync::atomic::AtomicBool;
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        no_env_proxy();
+        let f = speak_fixture(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = room_name_for_channel(f.cid);
+        let id = format!("u{}#s", f.speaker);
+        {
+            let mut u = state.sfu_rooms.entry(room.clone()).or_default();
+            u.participants.insert(id.clone(), Instant::now());
+            u.grants.insert(id.clone(), Grant::of(Permissions::SPEAK | Permissions::VIDEO));
+            u.recheck.insert(id.clone(), Mark { what: Recheck::JoinCheck, passes: 0 });
+        }
+        let (base, srv) = livekit_stand_in(
+            vec![
+                ("/twirp/livekit.RoomService/ListRooms", 200, format!(r#"{{"rooms":[{{"name":"{room}"}}]}}"#)),
+                ("/twirp/livekit.RoomService/ListParticipants", 200,
+                 format!(r#"{{"participants":[{{"identity":"{id}","state":"ACTIVE","tracks":[],"permission":{MIC_AND_CAMERA}}}]}}"#)),
+            ],
+            None,
+        )
+        .await;
+        let held = state.lock_server_perms(&f.sid).await;
+        let done = AtomicBool::new(false);
+        let resync = async {
+            let r = resync_once(&state, &cfg_for(&base), &client()).await;
+            done.store(true, Ordering::SeqCst);
+            r
+        };
+        let meanwhile = async {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !done.load(Ordering::SeqCst) && state.server_perms_locks.get(&f.sid).map(|m| Arc::strong_count(&m)) != Some(3) {
+                assert!(Instant::now() < deadline, "the resync never queued on the server's lock");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            owe(&state, &[(room.clone(), id.clone())], Recheck::JoinCheck);
+            drop(held);
+        };
+        let (r, ()) = tokio::time::timeout(Duration::from_secs(30), async { tokio::join!(resync, meanwhile) })
+            .await
+            .expect("the resync finished");
+        asked(srv).await;
+        let mark = state.sfu_rooms.get(&room).and_then(|u| u.recheck.get(&id).map(|m| m.what));
+        drop_fixture(&pool, &f).await;
+
+        r.expect("resync");
+        assert_eq!(mark, Some(Recheck::JoinCheck), "owed after the check read its answer: left for the next pass");
+    }
+
     /// A STOCKPILED TOKEN, through the `participant_joined` check
     /// (TEST_DATABASE_URL; skips without it): a join whose token's grant names
     /// the microphone for a member denied SPEAK is given the current grant; a
     /// join whose grant is current is sent nothing; a join that reports no
-    /// grant is given it (unknown); and a non-member is still evicted.
+    /// grant is given it (unknown); a non-member is still evicted; and a join
+    /// whose token names the camera for a member denied VIDEO since is given
+    /// the WHOLE current grant - camera removed, not just the microphone moved.
     #[tokio::test]
     async fn the_join_webhooks_check_gives_a_stockpiled_token_the_grant_permissions_give_now() {
         let Some(pool) = crate::migrator::test_pool(2).await else { return };
@@ -4196,17 +5529,19 @@ pub(crate) mod resync_tests {
         let f = speak_fixture(&pool).await;
         let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
         let room = room_name_for_channel(f.cid);
-        let (stock, fine, silent, stranger) = (
+        let (stock, fine, silent, stranger, camless) = (
             format!("u{}#w1", f.muted),
             format!("u{}#w2", f.speaker),
             format!("u{}#w3", f.muted),
             format!("u{}#w4", f.outsider),
+            format!("u{}#w5", f.camless),
         );
         let (base, srv) = livekit_stand_in(
             vec![
                 ("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(CAMERA_ONLY)),
                 ("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(CAMERA_ONLY)),
                 ("/twirp/livekit.RoomService/RemoveParticipant", 200, "{}".to_string()),
+                ("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(MIC_ONLY)),
             ],
             None,
         )
@@ -4218,6 +5553,7 @@ pub(crate) mod resync_tests {
             (&fine, f.speaker, Some(&token_grant)),
             (&silent, f.muted, None),
             (&stranger, f.outsider, Some(&token_grant)),
+            (&camless, f.camless, Some(&token_grant)),
         ] {
             let mut p = serde_json::json!({ "identity": identity });
             if let Some(g) = permission {
@@ -4229,10 +5565,11 @@ pub(crate) mod resync_tests {
             reauth_join(&state, &cfg, &room, identity, f.cid, uid).await;
         }
         let seen = asked(srv).await;
-        let known: Vec<bool> = [&stock, &fine, &silent, &stranger]
+        let known: Vec<bool> = [&stock, &fine, &silent, &stranger, &camless]
             .iter()
             .map(|id| state.sfu_rooms.get(&room).is_some_and(|u| u.participants.contains_key(*id)))
             .collect();
+        let camless_grant = state.sfu_rooms.get(&room).and_then(|u| u.grants.get(&camless).copied());
         drop_fixture(&pool, &f).await;
 
         let bodies: Vec<serde_json::Value> = seen.iter().map(|s| serde_json::from_str(&s.body).unwrap()).collect();
@@ -4242,10 +5579,12 @@ pub(crate) mod resync_tests {
                 camera_only_request(&room, &stock),
                 camera_only_request(&room, &silent),
                 serde_json::json!({ "room": room, "identity": stranger }),
+                mic_only_request(&room, &camless),
             ],
-            "the stale token, the unreported grant, then the non-member's eviction - nothing for the speaker"
+            "the stale token, the unreported grant, the non-member's eviction, then the camera a VIDEO deny took away - nothing for the speaker"
         );
-        assert_eq!(known, vec![true, true, true, false], "only the non-member leaves");
+        assert_eq!(known, vec![true, true, true, false, true], "only the non-member leaves");
+        assert_eq!(camless_grant, Some(Grant::of(Permissions::SPEAK)), "confirmed: the join-time grant, camera removed");
     }
 
 }
