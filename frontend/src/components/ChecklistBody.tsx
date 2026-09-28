@@ -28,6 +28,8 @@ import { pushMessageToast } from './messageToastBus';
 import { heldOpKey } from '../api/opKey';
 import { invalidateTaskScope } from './taskSources';
 import { TaskTree } from './TaskTree';
+import { usePasteItems } from './usePasteItems';
+import { MAX_ITEM_LENGTH } from '../notes/model/notesModel';
 
 interface ChecklistBodyProps {
     /** Channel-scoped checklist (shared, E2EE under the channel group key). */
@@ -60,6 +62,10 @@ export function ChecklistBody({
 }: ChecklistBodyProps) {
     const [tasks, setTasks] = useState<Task[]>([]);
     const [newTask, setNewTask] = useState('');
+    const addRef = useRef<HTMLInputElement>(null);
+    // A step-by-step list pasted into "Add an item…" asks first, then lands
+    // item by item, in order (components/usePasteItems).
+    const pasteItems = usePasteItems();
     const [isLoading, setIsLoading] = useState(false);
     const isChannel = channelId !== undefined;
     // This body is the THIRD writer of a task's timing and completion on the
@@ -134,37 +140,60 @@ export function ChecklistBody({
         };
     }, [isChannel, channelId, subscribeRoom, loadTasks]);
 
-    // One key per intent, held across the user's own retries (api/opKey.ts):
-    // this form has no automatic one, so a failed create is re-sent by hand
-    // and must not be able to make a second item.
-    const addItem = async (description: string, parentId?: number) => {
-        const key = itemKey.current.keyFor(`${isChannel ? 'c' : 'l'}${isChannel ? channelId : listId}\u0000${parentId ?? ''}\u0000${description}`);
-        const created = isChannel
-            ? await createTask(channelId!, description, parentId, undefined, key)
-            : await createListTask(listId!, description, parentId, undefined, key);
-        itemKey.current.landed();
-        return created;
+    /**
+     * Create one item in `scope` — the add row, a subtask and every line of
+     * a pasted checklist come through here. The scope is the caller's, not
+     * the current props: a paste names the channel or list its field
+     * belonged to when it was pasted, and this body can be handed another
+     * one while that paste is still landing. The created item, or null when
+     * it was refused (and the person is told why).
+     *
+     * One key per intent, held across the user's own retries (api/opKey.ts):
+     * this form has no automatic one, so a failed create is re-sent by hand
+     * and must not be able to make a second item.
+     */
+    const addItem = async (scope: typeof scopeRef.current, description: string, parentId?: number): Promise<Task | null> => {
+        try {
+            const key = itemKey.current.keyFor(`${scope.isChannel ? 'c' : 'l'}${scope.isChannel ? scope.channelId : scope.listId}\u0000${parentId ?? ''}\u0000${description}`);
+            const created = scope.isChannel
+                ? await createTask(scope.channelId!, description, parentId, undefined, key)
+                : await createListTask(scope.listId!, description, parentId, undefined, key);
+            itemKey.current.landed();
+            const now = scopeRef.current;
+            if (now.isChannel === scope.isChannel && now.channelId === scope.channelId && now.listId === scope.listId) {
+                setTasks(prev => [...prev, created]);
+            }
+            return created;
+        } catch (err) {
+            console.error('Failed to create task:', err);
+            // The server's own reason when it gave one (400, 403, 409 — a missing
+            // CREATE_TASKS bit, an envelope refusal), else ours.
+            pushMessageToast({ title: err instanceof ApiError && (err.status === 400 || err.status === 403 || err.status === 409) ? err.message : 'Couldn’t add the item — check your connection' });
+            return null;
+        }
     };
 
     const handleAddTask = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!newTask.trim()) return;
-        try {
-            const created = await addItem(newTask.trim());
-            setTasks(prev => [...prev, created]);
-            setNewTask('');
-        } catch (err) {
-            console.error('Failed to create task:', err);
-        }
+        // A failed create leaves the words in the box for the retry.
+        if (await addItem({ isChannel, channelId, listId }, newTask.trim())) setNewTask('');
     };
 
     const handleAddSubtask = async (parentId: number, text: string) => {
-        try {
-            const created = await addItem(text, parentId);
-            setTasks(prev => [...prev, created]);
-        } catch (err) {
-            console.error('Failed to create subtask:', err);
-        }
+        await addItem({ isChannel, channelId, listId }, text, parentId);
+    };
+
+    /** A paste into "Add an item…". More than one line asks first; the items
+     *  go to the checklist this field belonged to WHEN it was pasted. */
+    const onPasteItem = (e: React.ClipboardEvent<HTMLInputElement>) => {
+        const scope = { isChannel, channelId, listId };
+        pasteItems.onPaste(e, {
+            separate: items => { void pasteItems.addInOrder(items, async text => (await addItem(scope, text)) !== null); },
+            // Into the box, not created: Enter adds it, as for typed text.
+            one: line => setNewTask(v => `${v}${line}`.slice(0, MAX_ITEM_LENGTH)),
+            after: () => addRef.current?.focus(),
+        });
     };
 
     const handleToggle = async (task: Task, completed: boolean) => {
@@ -312,15 +341,18 @@ export function ChecklistBody({
             {canCreate && (
                 <form className="checklist-add" onSubmit={handleAddTask}>
                     <input
+                        ref={addRef}
                         type="text"
                         value={newTask}
                         onChange={e => setNewTask(e.target.value)}
+                        onPaste={onPasteItem}
                         placeholder="Add an item…"
-                        maxLength={500}
+                        maxLength={MAX_ITEM_LENGTH}
                     />
                     <button type="submit" disabled={!newTask.trim()}>+</button>
                 </form>
             )}
+            {pasteItems.dialog}
 
             {isLoading ? (
                 <div className="checklist-loading">Loading…</div>

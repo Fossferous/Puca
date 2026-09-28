@@ -74,7 +74,7 @@ import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { useContextMenu } from './contextMenuUtils';
 import { ArchiveIcon, BellIcon, CalendarIcon, ChecklistIcon, FileTextIcon, NoteIcon, PlusIcon, StarIcon, TagIcon, TasksIcon, TrashIcon } from './Icons';
 // Púca Notes' organisation, shared rather than forked — see the header.
-import { type NoteColor } from '../notes/model/notesModel';
+import { MAX_ITEM_LENGTH, type NoteColor, deriveQuickTitle } from '../notes/model/notesModel';
 import {
     forgetNoteKeys,
     getNotesPrefs,
@@ -98,6 +98,7 @@ import { fetchListFeatures, flushBodySave, keepHiddenSlots, setTaskListTiming, t
 import { NoteDueChip, NoteReminderControl } from './schedule/NoteReminderControl';
 import { halfMinuteNow, subscribeHalfMinute } from './schedule/halfMinuteClock';
 import { heldOpKey } from '../api/opKey';
+import { textOutsideSelection, usePasteItems } from './usePasteItems';
 import { useQueryClient } from '@tanstack/react-query';
 import './TasksView.css';
 import './AllChecklistsView.css';
@@ -191,6 +192,10 @@ export function TasksView() {
     const itemKey = useRef(heldOpKey());
     const [addingList, setAddingList] = useState(false);
     const [newTaskText, setNewTaskText] = useState('');
+    const addTaskRef = useRef<HTMLInputElement>(null);
+    // A step-by-step list pasted into "Add a task…" or "New list" asks first
+    // and then lands item by item, in order (components/usePasteItems).
+    const pasteItems = usePasteItems();
     /** The list whose title is being edited, not a bare flag: the editor and
      *  its draft must not survive a change of tab and rename the next list. */
     const [editingTitle, setEditingTitle] = useState<number | null>(null);
@@ -431,10 +436,9 @@ export function TasksView() {
             : l));
     };
 
-    const handleCreateList = async (e: React.FormEvent) => {
-        e.preventDefault();
-        const title = newListTitle.trim();
-        if (!title) return;
+    /** Create a list and open it: the "New list" form, and a checklist
+     *  pasted into it. Null when it was refused, and the person is told. */
+    const createList = async (title: string): Promise<TaskList | null> => {
         try {
             const created = await createTaskList(title, listKey.current.keyFor(title));
             listKey.current.landed();
@@ -447,9 +451,19 @@ export function TasksView() {
             setNoteFilter({ kind: 'all' });
             setNewListTitle('');
             setAddingList(false);
+            return created;
         } catch (err) {
             console.error('Failed to create list:', err);
+            pushMessageToast({ title: err instanceof ApiError && (err.status === 400 || err.status === 409) ? err.message : 'Couldn’t create the list — check your connection' });
+            return null;
         }
+    };
+
+    const handleCreateList = async (e: React.FormEvent) => {
+        e.preventDefault();
+        const title = newListTitle.trim();
+        if (!title) return;
+        await createList(title);
     };
 
     /** The "Notes to self" list cannot go to the trash (the server refuses
@@ -545,33 +559,80 @@ export function TasksView() {
         }
     };
 
+    /**
+     * Create one item in personal list `listId` — the add row, a subtask and
+     * every line of a pasted checklist come through here. The item is the
+     * created one, or null when it was refused (and the person is told why).
+     *
+     * FUNCTIONAL updates, never `[...tasks, created]`: a pasted checklist
+     * lands one item after another, each answer arriving after renders the
+     * previous one caused, and a closure's `tasks` would keep only the last.
+     * And only into the list still on screen — the person may have moved on
+     * while the list was landing; its count is kept right either way.
+     */
+    const addListItem = async (listId: number, text: string, parentId?: number): Promise<Task | null> => {
+        try {
+            const created = await createListTask(listId, text, parentId, undefined, itemKey.current.keyFor(`${listId}\u0000${parentId ?? ''}\u0000${text}`));
+            itemKey.current.landed();
+            if (selectedRef.current?.kind === 'list' && selectedRef.current.id === listId) setTasks(prev => [...prev, created]);
+            setLists(prev => prev.map(l => (l.id === listId ? { ...l, total_tasks: l.total_tasks + 1 } : l)));
+            return created;
+        } catch (err) {
+            console.error('Failed to create task:', err);
+            pushMessageToast({ title: err instanceof ApiError && (err.status === 400 || err.status === 409) ? err.message : 'Couldn’t add the task — check your connection' });
+            return null;
+        }
+    };
+
     const handleAddTask = async (e: React.FormEvent) => {
         e.preventDefault();
         const text = newTaskText.trim();
         if (!text || selectedList === null) return;
-        try {
-            const created = await createListTask(selectedList.id, text, undefined, undefined, itemKey.current.keyFor(`${selectedList.id}\u0000${text}`));
-            itemKey.current.landed();
-            const next = [...tasks, created];
-            setTasks(next);
-            syncListCounts(selectedList.id, next);
-            setNewTaskText('');
-        } catch (err) {
-            console.error('Failed to create task:', err);
-        }
+        // A failed create leaves the words in the box for the retry.
+        if (await addListItem(selectedList.id, text)) setNewTaskText('');
     };
 
     const handleAddSubtask = async (parentId: number, text: string) => {
         if (selectedList === null) return;
-        try {
-            const created = await createListTask(selectedList.id, text, parentId, undefined, itemKey.current.keyFor(`${selectedList.id}\u0000${parentId}\u0000${text}`));
-            itemKey.current.landed();
-            const next = [...tasks, created];
-            setTasks(next);
-            syncListCounts(selectedList.id, next);
-        } catch (err) {
-            console.error('Failed to create subtask:', err);
-        }
+        await addListItem(selectedList.id, text, parentId);
+    };
+
+    /** A paste into "Add a task…". More than one line asks first; the items
+     *  go to the list this field belonged to WHEN it was pasted. */
+    const onPasteTask = (e: React.ClipboardEvent<HTMLInputElement>) => {
+        if (selectedList === null) return;
+        const listId = selectedList.id;
+        pasteItems.onPaste(e, {
+            separate: items => { void pasteItems.addInOrder(items, async text => (await addListItem(listId, text)) !== null); },
+            // Into the box, not created: Enter adds it, as for typed text.
+            one: line => setNewTaskText(v => `${v}${line}`.slice(0, MAX_ITEM_LENGTH)),
+            after: () => addTaskRef.current?.focus(),
+        });
+    };
+
+    /**
+     * A checklist pasted into the "New list" name makes the list AND its
+     * items, asked first. Named after what is typed there and staying (the
+     * paste replaces only the selection), else the checklist's heading, else
+     * its first item — the way Púca Notes names an untitled note. Anything
+     * that is not a checklist pastes as a name.
+     */
+    const onPasteListName = (e: React.ClipboardEvent<HTMLInputElement>) => {
+        // Read now: this form closes itself when it loses focus empty, and a
+        // tap on the dialog is exactly that.
+        const typed = textOutsideSelection(e.currentTarget).trim();
+        const makeList = async (items: string[], title: string | null) => {
+            const list = await createList(deriveQuickTitle(typed || title || '', items));
+            if (!list) return;
+            await pasteItems.addInOrder(items, async text => (await addListItem(list.id, text)) !== null);
+            // The new list opened before its items existed, and its first read
+            // may have answered in between: read it again now they are there.
+            void rereadList(list.id);
+        };
+        pasteItems.onPaste(e, {
+            separate: (items, title) => { void makeList(items, title); },
+            one: (line, title) => { void makeList([line], title); },
+        }, { checklistOnly: true });
     };
 
     /** Re-read one list's items into the editor, quietly (no "Loading…"),
@@ -950,6 +1011,7 @@ export function TasksView() {
                                 placeholder="List name…"
                                 value={newListTitle}
                                 onChange={e => setNewListTitle(e.target.value)}
+                                onPaste={onPasteListName}
                                 onBlur={() => { if (!newListTitle.trim()) setAddingList(false); }}
                                 onKeyDown={e => { if (e.key === 'Escape') { setNewListTitle(''); setAddingList(false); } }}
                                 maxLength={100}
@@ -1129,11 +1191,13 @@ export function TasksView() {
 
                     <form className="tasks-add" onSubmit={handleAddTask}>
                         <input
+                            ref={addTaskRef}
                             type="text"
                             placeholder="Add a task…"
                             value={newTaskText}
                             onChange={e => setNewTaskText(e.target.value)}
-                            maxLength={500}
+                            onPaste={onPasteTask}
+                            maxLength={MAX_ITEM_LENGTH}
                         />
                         <button type="submit" aria-label="Add task" disabled={!newTaskText.trim()}><PlusIcon /></button>
                     </form>
@@ -1170,6 +1234,7 @@ export function TasksView() {
                     onClose={hideContextMenu}
                 />
             )}
+            {pasteItems.dialog}
 
             {filterAnchor && (
                 <Popover anchor={filterAnchor} onClose={() => setFilterAnchor(null)} label="Filter notes">
