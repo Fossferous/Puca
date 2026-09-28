@@ -13,9 +13,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { bodyToItems, plainInline, readChecklist } from '../notes/model/noteContent';
+import { MAX_TAKEN_ITEMS, bodyToItems, plainInline, readChecklist, readPastedItems } from '../notes/model/noteContent';
+import { MAX_ITEM_LENGTH } from '../notes/model/notesModel';
 import { takeShare, type ComposeIntent } from '../notes/model/composeIntent';
 import { QuickAdd } from '../notes/components/QuickAdd';
+import { ASSISTANT_ANSWER, ASSISTANT_ITEMS, ASSISTANT_TITLE } from './fixtures/assistantChecklist';
 
 /** What an assistant typically answers "a checklist for setting up a router" with. */
 const ASSISTANT = `Here's a checklist for setting up your new router:
@@ -97,6 +99,36 @@ describe('readChecklist', () => {
         expect(bodyToItems('1. One\n2) Two\n# Head\n+ Plus\n- [ ] Box')).toEqual(['One', 'Two', 'Head', 'Plus', 'Box']);
         // Unchanged for what it already handled.
         expect(bodyToItems('Milk\n  - Bread\n* Eggs\n• Tea')).toEqual(['Milk', 'Bread', 'Eggs', 'Tea']);
+    });
+});
+
+describe('readPastedItems — the one reading every paste path shares', () => {
+    it('an assistant answer with a heading, sections, bold and a closing line reads as clean steps', () => {
+        expect(readPastedItems(ASSISTANT_ANSWER)).toEqual({ items: ASSISTANT_ITEMS, total: ASSISTANT_ITEMS.length, title: ASSISTANT_TITLE });
+    });
+
+    it('plain lines still split by line; ONE line is nothing to ask about', () => {
+        expect(readPastedItems('Milk\nBread')).toEqual({ items: ['Milk', 'Bread'], total: 2, title: null });
+        expect(readPastedItems('Milk')).toBeNull();
+        expect(readPastedItems('  \n Milk \n')).toBeNull();
+    });
+
+    it('a NAME field takes only a real checklist: other lines paste as a name', () => {
+        expect(readPastedItems('Milk\nBread', { checklistOnly: true })).toBeNull();
+        expect(readPastedItems(ASSISTANT_ANSWER, { checklistOnly: true })?.items).toEqual(ASSISTANT_ITEMS);
+    });
+
+    it(`is capped at ${MAX_TAKEN_ITEMS} items, each cut to what the field accepts, and counts the rest`, () => {
+        const text = [`${'a'.repeat(800)}`, ...Array.from({ length: 249 }, (_, i) => `line ${i + 1}`)].join('\n');
+        const read = readPastedItems(text)!;
+        expect(read.total).toBe(250);
+        expect(read.items).toHaveLength(MAX_TAKEN_ITEMS);
+        expect(read.items[0]).toHaveLength(MAX_ITEM_LENGTH);
+        expect(read.items.at(-1)).toBe(`line ${MAX_TAKEN_ITEMS - 1}`);
+        // A checklist is capped the same way.
+        const list = Array.from({ length: 250 }, (_, i) => `- [ ] step ${i + 1}`).join('\n');
+        expect(readPastedItems(list, { checklistOnly: true })).toMatchObject({ total: 250, items: expect.any(Array) });
+        expect(readPastedItems(list)!.items).toHaveLength(MAX_TAKEN_ITEMS);
     });
 });
 
@@ -228,6 +260,17 @@ describe('the composer', () => {
         act(() => { add.click(); });
         expect(items()).toEqual(['my own item', 'passport', 'tickets']);
         expect(title().value).toBe('Trip');
+    });
+
+    it(`a paste of more than ${MAX_TAKEN_ITEMS} lines offers the first ${MAX_TAKEN_ITEMS}, and says so`, () => {
+        render(null);
+        const first = host.querySelector('.notes-quickadd-item input')!;
+        paste(first, Array.from({ length: 250 }, (_, i) => `line ${i + 1}`).join('\n'));
+        expect(document.body.textContent).toContain('You pasted 250 lines');
+        expect(document.body.textContent).toContain(`Only the first ${MAX_TAKEN_ITEMS} are added`);
+        act(() => { addButton(MAX_TAKEN_ITEMS)!.click(); });
+        expect(items()).toHaveLength(MAX_TAKEN_ITEMS);
+        expect(items().at(-1)).toBe(`line ${MAX_TAKEN_ITEMS}`);
     });
 
     it('positive control: an ordinary title paste is left alone', () => {

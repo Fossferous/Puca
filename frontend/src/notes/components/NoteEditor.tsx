@@ -38,17 +38,14 @@ import { type NoteActions, useNoteTasks } from '../model/notesQueries';
 import { useReminderTimes } from '../model/notesPrefs';
 import { NoteContentSection } from './NoteContentSection';
 import { ListActionsMenu } from './ListActionsMenu';
-import { PastedLinesDialog } from '../../components/PastedLinesDialog';
-import { linesFromPaste, pasteAsOneLine, readableAttachmentsOf, recreateSubtree } from '../model/noteContent';
-import { PACE_MS } from '../../api/icsImport';
+import { type PasteAnswers, usePasteItems } from '../../components/usePasteItems';
+import { readableAttachmentsOf, recreateSubtree } from '../model/noteContent';
 import { pushMessageToast } from '../../components/messageToastBus';
 import { useEditorUndo } from './useEditorUndo';
 import { useTaskFeature } from '../../api/taskFeatures';
 import { NoteDueChip, NoteReminderControl } from '../../components/schedule/NoteReminderControl';
 import { halfMinuteNow, subscribeHalfMinute } from '../../components/schedule/halfMinuteClock';
 import { EditedStamp } from './EditedStamp';
-
-const sleep = (ms: number) => new Promise<void>(r => { setTimeout(r, ms); });
 
 interface NoteEditorProps {
     card: NoteCard;
@@ -252,34 +249,43 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
         addRef.current?.focus();
     };
 
-    // A multi-line paste into "Add an item…" asks before it creates: an item
-    // is removed one at a time with no Undo (onDelete below goes straight to
-    // deleteTaskFrom), so forty silent items would be unrecoverable.
-    const [paste, setPaste] = useState<{ lines: string[]; text: string } | null>(null);
+    // A multi-line paste asks before it creates (components/usePasteItems):
+    // forty silent items would be forty deletes. A checklist from elsewhere
+    // — an assistant's answer — reads as one, exactly as in the composer.
+    const pasteItems = usePasteItems();
+    /** The answers for a paste into THIS note. Every item goes through the
+     *  SAME addTask a typed one uses — sealed here, queued offline like any
+     *  other — one at a time, paced, and a run that stops part-way says so.
+     *  `rename`: name the note after the checklist, from this revision. */
+    const pasteAnswers = (rename: { base: number | undefined } | null): PasteAnswers => ({
+        separate: (items, title) => {
+            if (rename && title) void actions.renameNote(ref, title.slice(0, MAX_TITLE_LENGTH), rename.base);
+            void pasteItems.addInOrder(items, async line => (await actions.addTask(ref, line)) !== null)
+                .then(() => addRef.current?.focus());
+        },
+        // Into the add row, not created: Enter adds it, as for typed text.
+        one: line => { setNewItem(v => `${v}${line}`.slice(0, MAX_ITEM_LENGTH)); addRef.current?.focus(); },
+    });
     const onPasteNewItem = (e: React.ClipboardEvent<HTMLInputElement>) => {
-        const lines = linesFromPaste(e.clipboardData?.getData('text') ?? '');
-        if (lines.length < 2) return;   // one line pastes as normal
-        e.preventDefault();
-        setPaste({ lines, text: e.clipboardData?.getData('text') ?? '' });
+        pasteItems.onPaste(e, { ...pasteAnswers(null), after: () => addRef.current?.focus() });
     };
-    const addPastedLines = async (lines: string[]) => {
-        setPaste(null);
-        // One create per line, in order, through the SAME addTask a typed
-        // item uses — so each is sealed here and queues offline like any
-        // other. Paced like every other fan-out of creates in this app
-        // (icsImport's PACE_MS, well under the server's 50/s per IP): a
-        // hundred-line paste in one burst is exactly what trips the limiter.
-        // Truncated to what the field itself accepts, and a run that stops
-        // part-way SAYS where it stopped — addTask's own toast explains the
-        // refusal, not how much of the list arrived.
-        let made = 0;
-        for (const line of lines) {
-            if (made > 0) await sleep(PACE_MS);
-            if (!await actions.addTask(ref, line.slice(0, MAX_ITEM_LENGTH))) break;
-            made++;
-        }
-        if (made < lines.length) pushMessageToast({ title: `Added ${made} of ${lines.length} items` });
-        addRef.current?.focus();
+    /**
+     * A checklist pasted into the TITLE becomes this note's items, asked
+     * first like any other paste, instead of one long title line; any other
+     * text pastes as a title. It also names the note — only a personal note
+     * whose title field is empty or still "Untitled note". A channel
+     * checklist is renamed from the channel's settings in Púca, never from
+     * here, and a title being typed wins, as in the composer.
+     */
+    const onPasteTitle = (e: React.ClipboardEvent<HTMLInputElement>) => {
+        if (!canCreate) return;
+        const shown = titleDraft.trim();
+        const renames = !isChannel && !titleUnreadable && (shown === '' || shown === 'Untitled note');
+        // The revision the field stands on, taken when typing started like
+        // any rename from it: a rename made elsewhere since is refused, not
+        // overwritten.
+        const base = titleDirty ? titleBase.current : card.contentRev;
+        pasteItems.onPaste(e, pasteAnswers(renames ? { base } : null), { checklistOnly: true });
     };
 
     return createPortal(
@@ -295,6 +301,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                         title={isChannel ? 'Channel checklists are renamed from the channel settings in Púca' : 'Click to rename'}
                         aria-label="Note title"
                         onChange={e => { markTitleDirty(); setTitleDraft(e.target.value); }}
+                        onPaste={onPasteTitle}
                         onBlur={commitTitle}
                         onKeyDown={e => {
                             if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur(); }
@@ -426,14 +433,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                     <button type="button" className="notes-iconbtn" aria-label="More actions" title="More" onClick={e => onMenu(e, card, e.currentTarget)}><MoreVerticalIcon /></button>
                     <button type="button" className="notes-textbtn" onClick={onClose}>Close</button>
                 </div>
-                {paste && (
-                    <PastedLinesDialog
-                        lines={paste.lines}
-                        onAddSeparate={() => void addPastedLines(paste.lines)}
-                        onAddOne={() => { setPaste(null); setNewItem(v => `${v}${pasteAsOneLine(paste.text)}`.slice(0, MAX_ITEM_LENGTH)); addRef.current?.focus(); }}
-                        onCancel={() => { setPaste(null); addRef.current?.focus(); }}
-                    />
-                )}
+                {pasteItems.dialog}
             </div>
             {undo.bar}
         </div>,

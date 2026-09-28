@@ -11,7 +11,7 @@ import {
 } from '../../api/tasks';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { parseSchedule, parseSnooze, serializeSchedule } from '../../api/taskSchedule';
-import { deriveQuickTitle, type NoteRef } from './notesModel';
+import { deriveQuickTitle, MAX_ITEM_LENGTH, type NoteRef } from './notesModel';
 
 /** An item's attachment refs when this device can read its sidecar, else
  *  none — a locked sidecar is ciphertext, not an empty list. */
@@ -216,6 +216,44 @@ export function linesFromPaste(text: string): string[] {
  *  would have taken it had we not intercepted the paste. */
 export function pasteAsOneLine(text: string): string {
     return text.replace(/\s+/g, ' ').trim();
+}
+
+/** The most items one share or one paste may fill in, wherever it lands.
+ *  Each is one create (paced, PACE_MS apart), so a pasted document of a
+ *  thousand lines would otherwise be a minute of requests. */
+export const MAX_TAKEN_ITEMS = 200;
+
+export interface PastedItems {
+    /** One per item, in order: at most MAX_TAKEN_ITEMS, each cut to what
+     *  the field it lands in accepts (MAX_ITEM_LENGTH). */
+    items: string[];
+    /** How many the paste held before the cap. */
+    total: number;
+    /** The checklist's own title, when it read as one (readChecklist). */
+    title: string | null;
+}
+
+/**
+ * What a paste into an item field becomes, or null when there is nothing to
+ * ask about and the browser should paste it as usual (a single line).
+ *
+ * The one rule every paste path shares (the Notes composer, an open note,
+ * Púca's Tasks view): a checklist from elsewhere reads as one — numbers,
+ * "**", headings and the "Here's how:" intro gone (readChecklist) — and
+ * anything else splits by line (linesFromPaste). `checklistOnly` is for a
+ * TITLE field, where only a real checklist is taken and any other text
+ * pastes as a title.
+ */
+export function readPastedItems(text: string, opts: { checklistOnly?: boolean } = {}): PastedItems | null {
+    const list = readChecklist(text);
+    if (opts.checklistOnly && !list) return null;
+    const lines = list?.items ?? linesFromPaste(text);
+    if (lines.length < 2) return null;
+    return {
+        items: lines.slice(0, MAX_TAKEN_ITEMS).map(l => l.slice(0, MAX_ITEM_LENGTH)),
+        total: lines.length,
+        title: list?.title ?? null,
+    };
 }
 
 /** The minimum of a `DataTransfer` this module reads: a clipboard paste and

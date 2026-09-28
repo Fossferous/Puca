@@ -28,11 +28,7 @@ import { MAX_ITEM_LENGTH, MAX_TITLE_LENGTH, cleanQuickItems } from '../model/not
 import { composeModeFor, type ComposeIntent } from '../model/composeIntent';
 import { type NoteExtras } from '../model/useListContent';
 import { type DrawingFiles } from '../../api/noteMedia';
-import { filesFromTransfer, isTextPaste, linesFromPaste, pasteAsOneLine, readChecklist } from '../model/noteContent';
-
-/** The most items a share or a paste may fill in one go (a share's lines were
- *  already capped at this). */
-const MAX_TAKEN_ITEMS = 200;
+import { MAX_TAKEN_ITEMS, filesFromTransfer, isTextPaste, pasteAsOneLine, readPastedItems } from '../model/noteContent';
 import { DrawingCanvas } from '../../components/DrawingCanvas';
 import { PastedLinesDialog } from '../../components/PastedLinesDialog';
 import { hasTransferFiles, ONLY_PICTURES } from '../model/pasteDrop';
@@ -162,7 +158,7 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
             // if the user had pasted them.
             if (want === 'text') setBody(initial.body);
             else {
-                const lines = initial.body.split('\n').map(l => l.trim()).filter(Boolean).slice(0, 200);
+                const lines = initial.body.split('\n').map(l => l.trim()).filter(Boolean).slice(0, MAX_TAKEN_ITEMS);
                 setItems(lines.length > 0 ? lines : ['']);
             }
         }
@@ -273,7 +269,7 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     // Pictures go through addPictures, the SAME entry point the picker uses,
     // so they inherit its object-URL bookkeeping here and, at save, the
     // shrink-then-seal upload path. Nothing new touches the network.
-    const [paste, setPaste] = useState<{ lines: string[]; text: string; at: number; title?: string | null } | null>(null);
+    const [paste, setPaste] = useState<{ lines: string[]; total: number; text: string; at: number; title?: string | null } | null>(null);
 
     const [dragging, setDragging] = useState(false);
 
@@ -308,21 +304,21 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
         if (!isTextPaste(e.clipboardData) && filesFromTransfer(e.clipboardData).images.length > 0) return;
         // A checklist from elsewhere reads as one (numbers, "**", headings
         // and the "Here's how:" intro gone); anything else splits by line.
-        const list = readChecklist(text);
-        const lines = list?.items ?? linesFromPaste(text);
-        if (lines.length < 2) return;           // one line pastes as normal
+        // Capped like a share (MAX_TAKEN_ITEMS), and the dialog says so.
+        const read = readPastedItems(text);
+        if (!read) return;                      // one line pastes as normal
         e.preventDefault();
-        setPaste({ lines, text, at: i, title: list?.title ?? null });
+        setPaste({ lines: read.items, total: read.total, text, at: i, title: read.title });
     };
 
     /** A paste into the TITLE: a checklist becomes the note (its heading the
      *  title) instead of one long title line; anything else pastes as normal. */
     const onPasteTitle = (e: React.ClipboardEvent<HTMLInputElement>) => {
-        const list = readChecklist(e.clipboardData?.getData('text') ?? '');
-        if (!list) return;
+        const read = readPastedItems(e.clipboardData?.getData('text') ?? '', { checklistOnly: true });
+        if (!read) return;
         e.preventDefault();
         // Asked first, like any multi-line paste; added after what is there.
-        setPaste({ lines: list.items, text: list.items.join('\n'), at: Math.max(0, live.current.items.length - 1), title: list.title });
+        setPaste({ lines: read.items, total: read.total, text: read.items.join('\n'), at: Math.max(0, live.current.items.length - 1), title: read.title });
     };
 
     /** Put the pasted lines in at `at`: over that field when it is empty,
@@ -651,6 +647,7 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
             {paste && (
                 <PastedLinesDialog
                     lines={paste.lines}
+                    total={paste.total}
                     onAddSeparate={applyPasteSeparate}
                     onAddOne={applyPasteOne}
                     onCancel={() => { setPaste(null); focusItem(paste.at); }}

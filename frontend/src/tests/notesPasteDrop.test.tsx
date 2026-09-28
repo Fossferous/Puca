@@ -41,9 +41,11 @@ import { NoteEditor } from '../notes/components/NoteEditor';
 import { ONLY_PICTURES, PASTE_OFFLINE } from '../notes/model/pasteDrop';
 import { PACE_MS } from '../api/icsImport';
 import { MAX_ITEM_LENGTH } from '../notes/model/notesModel';
+import { MAX_TAKEN_ITEMS } from '../notes/model/noteContent';
 import { setMessageToastSink } from '../components/messageToastBus';
 import type { NoteActions } from '../notes/model/notesQueries';
 import type { NoteCard } from '../notes/model/notesModel';
+import { ASSISTANT_ANSWER, ASSISTANT_ITEMS, ASSISTANT_TITLE } from './fixtures/assistantChecklist';
 
 const LIST = { kind: 'list' as const, id: 1 };
 const card = { key: 'list:1', ref: LIST, title: 'Shopping', body: '', noteAttachments: null, labels: [], pinned: false, archived: false } as unknown as NoteCard;
@@ -363,5 +365,125 @@ describe('a multi-line paste into "Add an item…"', () => {
         const one = paste(e.input, { text: 'Milk' });
         expect(one.defaultPrevented).toBe(false);
         expect(dialog()).toBeNull();
+    });
+});
+
+// --- A checklist from elsewhere, pasted into the open note -------------------------
+
+describe('a step-by-step checklist pasted into an OPEN note', () => {
+    /** The open note, with the two writes a paste can make recorded. */
+    function openEditor(over: Partial<NoteCard> = {}) {
+        const added: string[] = [];
+        const renamed: Array<[unknown, string, number | undefined]> = [];
+        const note = { ...card, ...over } as NoteCard;
+        const actions = {
+            addTask: vi.fn(async (_n: unknown, text: string) => { added.push(text); return { id: added.length } as never; }),
+            renameNote: vi.fn(async (n: unknown, title: string, base?: number) => { renamed.push([n, title, base]); return true; }),
+            content: { features: { body: false, attachments: false }, setBody: vi.fn(async () => true) },
+            toggleTask: vi.fn(), deleteTaskFrom: vi.fn(), editTask: vi.fn(), moveTaskIn: vi.fn(),
+            reorderTaskIn: vi.fn(), setDue: vi.fn(), setAttachments: vi.fn(), refreshNote: vi.fn(), togglePin: vi.fn(),
+        } as unknown as NoteActions;
+        act(() => {
+            root.render(
+                <NoteEditor card={note} actions={actions} onClose={() => {}} onMenu={() => {}} onPickColor={() => {}}
+                    onPickLabels={() => {}} onArchive={() => {}} onSendToPuca={() => {}} pucaHref={null} />,
+            );
+        });
+        return {
+            actions, added, renamed,
+            input: document.querySelector<HTMLInputElement>('.notes-editor-add input')!,
+            title: document.querySelector<HTMLInputElement>('input.notes-editor-title')!,
+        };
+    }
+    const addN = () => button(`Add ${ASSISTANT_ITEMS.length} items`);
+
+    it('"Add an item…": the answer becomes its clean steps, in order — nothing before the answer', async () => {
+        const e = openEditor();
+        const ev = paste(e.input, { text: ASSISTANT_ANSWER });
+        expect(ev.defaultPrevented).toBe(true);
+        expect(dialogLines()).toEqual(ASSISTANT_ITEMS);
+        expect(e.actions.addTask).not.toHaveBeenCalled();
+        act(() => { addN().click(); });
+        await paced(ASSISTANT_ITEMS.length);
+        expect(e.added).toEqual(ASSISTANT_ITEMS);
+        // An open note's add row never renames it: only its title does.
+        expect(e.actions.renameNote).not.toHaveBeenCalled();
+    });
+
+    it('the TITLE of an untitled personal note: asks, then adds the steps and takes the heading as its name', async () => {
+        const e = openEditor({ title: 'Untitled note', contentRev: 4 } as Partial<NoteCard>);
+        const ev = paste(e.title, { text: ASSISTANT_ANSWER });
+        expect(ev.defaultPrevented, 'not one long title line').toBe(true);
+        expect(dialogLines()).toEqual(ASSISTANT_ITEMS);
+        expect(e.actions.renameNote).not.toHaveBeenCalled();   // asked first
+        act(() => { addN().click(); });
+        await paced(ASSISTANT_ITEMS.length);
+        expect(e.added).toEqual(ASSISTANT_ITEMS);
+        // Named against the revision the field stood on, like any rename.
+        expect(e.renamed).toEqual([[LIST, ASSISTANT_TITLE, 4]]);
+    });
+
+    it('a title field the user emptied counts as untitled too', async () => {
+        const e = openEditor({ title: 'Old name' });
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+        act(() => { setter.call(e.title, ''); e.title.dispatchEvent(new Event('input', { bubbles: true })); });
+        paste(e.title, { text: ASSISTANT_ANSWER });
+        act(() => { addN().click(); });
+        await paced(ASSISTANT_ITEMS.length);
+        expect(e.renamed.map(r => r[1])).toEqual([ASSISTANT_TITLE]);
+    });
+
+    it('a note that has a name keeps it; the steps still arrive', async () => {
+        const e = openEditor({ title: 'Home network' });
+        paste(e.title, { text: ASSISTANT_ANSWER });
+        act(() => { addN().click(); });
+        await paced(ASSISTANT_ITEMS.length);
+        expect(e.added).toEqual(ASSISTANT_ITEMS);
+        expect(e.actions.renameNote).not.toHaveBeenCalled();
+    });
+
+    it('a CHANNEL checklist is never renamed from here, untitled or not', async () => {
+        const e = openEditor({ ref: { kind: 'channel', id: 9 }, key: 'channel:9', title: 'Untitled note' } as Partial<NoteCard>);
+        paste(e.title, { text: ASSISTANT_ANSWER });
+        act(() => { addN().click(); });
+        await paced(ASSISTANT_ITEMS.length);
+        expect(e.added).toEqual(ASSISTANT_ITEMS);
+        expect(e.actions.renameNote).not.toHaveBeenCalled();
+    });
+
+    it('Cancel creates and renames nothing; "Add as one item" only fills the add row; other text pastes as a title', () => {
+        const e = openEditor({ title: 'Untitled note' });
+        paste(e.title, { text: ASSISTANT_ANSWER });
+        act(() => { button('Cancel').click(); });
+        expect(dialog()).toBeNull();
+        expect(e.actions.addTask).not.toHaveBeenCalled();
+        expect(e.actions.renameNote).not.toHaveBeenCalled();
+
+        paste(e.title, { text: ASSISTANT_ANSWER });
+        act(() => { button('Add as one item').click(); });
+        expect(e.actions.addTask).not.toHaveBeenCalled();
+        expect(e.actions.renameNote).not.toHaveBeenCalled();
+        expect(e.input.value).toBe(ASSISTANT_ITEMS.join(' '));
+
+        // POSITIVE CONTROL: lines that are not a checklist are a title paste.
+        const plain = paste(e.title, { text: 'Milk\nBread' });
+        expect(plain.defaultPrevented).toBe(false);
+        expect(dialog()).toBeNull();
+    });
+
+    it(`a paste of more than ${MAX_TAKEN_ITEMS} lines creates the first ${MAX_TAKEN_ITEMS}, and the prompt says so`, async () => {
+        const e = openEditor();
+        paste(e.input, { text: Array.from({ length: 250 }, (_, i) => `line ${i + 1}`).join('\n') });
+        expect(document.body.textContent).toContain('You pasted 250 lines');
+        expect(document.body.textContent).toContain(`Only the first ${MAX_TAKEN_ITEMS} are added`);
+        vi.useFakeTimers({ toFake: ['setTimeout'] });
+        try {
+            act(() => { button(`Add ${MAX_TAKEN_ITEMS} items`).click(); });
+            await act(async () => { await vi.advanceTimersByTimeAsync(PACE_MS * (MAX_TAKEN_ITEMS + 5)); });
+        } finally {
+            vi.useRealTimers();
+        }
+        expect(e.added).toHaveLength(MAX_TAKEN_ITEMS);
+        expect(e.added.at(-1)).toBe(`line ${MAX_TAKEN_ITEMS}`);
     });
 });
