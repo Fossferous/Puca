@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.825 — 2026-09-28
 
+Change your stream's resolution and frame rate while you are live, and a step-by-step list from an assistant goes into Púca Notes as a checklist.
 ### Improved
 - **Change your stream's resolution and frame rate while you are live.**
   The arrow beside **Stop Sharing** (or right-click your own stream, **Stream
