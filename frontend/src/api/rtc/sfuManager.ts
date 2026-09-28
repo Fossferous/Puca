@@ -31,6 +31,7 @@ import { noiseDiagnostics } from '../noiseFilter';
 import { ensureChannelKey } from '../channelKeys';
 import { CTL_SFU_TOPIC, deliverSfuControlFrame } from './controlDc';
 import type { EncodeSample } from './shareHealth';
+import type { RtpEndpoint } from './streamStats';
 import { deriveSfuMediaKey } from '../e2ee';
 import { registerScreenReceiver } from './receiverLatency';
 import { loadSettings } from '../../components/settingsStore';
@@ -1028,6 +1029,35 @@ export class SfuManager {
             }
         }
         for (const k of [...this.audioHealthPrev.keys()]) if (!seen.has(k)) this.audioHealthPrev.delete(k);
+        return out;
+    }
+
+    /**
+     * The SFU senders/receivers carrying any of `tracks`, for the stream
+     * stats overlay (streamStats.ts). Matched by track identity: a watched
+     * stream is built from its publications' mediaStreamTracks, and your own
+     * share is published from the captured tracks themselves.
+     */
+    rtpEndpointsFor(tracks: MediaStreamTrack[]): RtpEndpoint[] {
+        const room = this.room;
+        if (!room) return [];
+        const out: RtpEndpoint[] = [];
+        for (const p of room.remoteParticipants.values()) {
+            for (const pub of p.trackPublications.values()) {
+                const t = pub.track?.mediaStreamTrack;
+                const receiver = pub.track?.receiver;
+                if (t && receiver && tracks.includes(t)) {
+                    out.push({ key: receiver, direction: 'inbound', kind: t.kind, getStats: () => receiver.getStats() });
+                }
+            }
+        }
+        for (const pub of room.localParticipant.trackPublications.values()) {
+            const t = pub.track?.mediaStreamTrack;
+            const sender = pub.track?.sender;
+            if (t && sender && tracks.includes(t)) {
+                out.push({ key: sender, direction: 'outbound', kind: t.kind, getStats: () => sender.getStats() });
+            }
+        }
         return out;
     }
 

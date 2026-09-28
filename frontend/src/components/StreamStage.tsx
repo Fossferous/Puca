@@ -41,12 +41,13 @@ import { outputGain, applyOutputDevice, applyOutputDeviceToContext } from './set
 import { sfuManager } from '../api/rtc/sfuManager';
 import { useStreamStore } from '../stores/streamStore';
 import {
-    ChatIcon, CloseIcon, CrosshairIcon, FullscreenIcon, GamepadIcon, GridIcon, KeyboardIcon,
+    ActivityIcon, ChatIcon, CloseIcon, CrosshairIcon, FullscreenIcon, GamepadIcon, GridIcon, KeyboardIcon,
     LiveDotIcon, MegaphoneIcon, MonitorIcon, PendingIcon, PopOutIcon, ScreenIcon, SpeakerIcon,
     SpeakerOffIcon, StopIcon, StopSharingIcon,
 } from './Icons';
 import { pipSupported } from './streamPopout.utils';
 import { CameraRail } from './CameraRail';
+import { StreamStatsOverlay } from './StreamStatsOverlay';
 import { docPipSupported } from './streamDocPip';
 import './StreamStage.css';
 import {
@@ -145,6 +146,13 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     );
     const [attenuation, setAttenuationState] = useState<AttenuationSettings>(() => getAttenuation());
     const [ctxMenu, setCtxMenu] = useState<StreamContextMenu | null>(null);
+    // Streams showing the stats overlay (right-click → Show Stream Stats).
+    const [statsFor, setStatsFor] = useState<Set<number>>(() => new Set());
+    const toggleStats = (userId: number) => setStatsFor(prev => {
+        const next = new Set(prev);
+        if (next.has(userId)) next.delete(userId); else next.add(userId);
+        return next;
+    });
     const [control, setControl] = useState<ControlState>(getControlState);
     // FPS mode: relative mouse via pointer lock (for first-person games).
     // Persisted: someone who plays through this regularly should not have to
@@ -491,6 +499,15 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     // the device stage (deviceStageResume.ts); reading the ref map at
     // visibility time covers whatever tiles exist by then.
     useEffect(() => installBackgroundResumeAll(() => videoRefs.current.values()), []);
+
+    // A stream no longer watched forgets its stats overlay, so watching it
+    // again starts without one.
+    useEffect(() => {
+        setStatsFor(prev => {
+            const kept = [...prev].filter(id => selectedStreams.includes(id));
+            return kept.length === prev.size ? prev : new Set(kept);
+        });
+    }, [selectedStreams]);
 
     // Tear down audio chains for streams no longer watched; close on unmount.
     useEffect(() => {
@@ -922,6 +939,9 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                 muted={elementMuted}
                                 className="stream-video"
                             />
+                            {statsFor.has(userId) && !isThumb && data.stream && (
+                                <StreamStatsOverlay stream={data.stream} onClose={() => toggleStats(userId)} />
+                            )}
                             {/* Input-capture surface — active only while I'm controlling
                                 this screen, and NEVER on a filmstrip thumbnail. Once
                                 non-focused tiles became visible it was possible to be
@@ -1155,9 +1175,17 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                     className="stream-context-menu"
                     style={{
                         left: Math.min(ctxMenu.x, window.innerWidth - 260),
-                        top: Math.min(ctxMenu.y, window.innerHeight - (ctxMenu.isOwn ? 340 : 380)),
+                        top: Math.min(ctxMenu.y, window.innerHeight - (ctxMenu.isOwn ? 376 : 416)),
                     }}
                 >
+                    <button
+                        className="scm-item"
+                        onClick={() => { toggleStats(ctxMenu.userId); setCtxMenu(null); }}
+                    >
+                        {statsFor.has(ctxMenu.userId) ? 'Hide Stream Stats' : 'Show Stream Stats'}
+                        <span className="scm-icon"><ActivityIcon /></span>
+                    </button>
+                    <div className="scm-separator" />
                     {ctxMenu.isOwn ? (
                         <>
                             <button
