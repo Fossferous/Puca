@@ -178,6 +178,21 @@ Púca's reminders. Anything you do in one is what you see in the other.
   does mean "Púca Notes" is visible in every share sheet on the phone, i.e. it
   discloses that the app is installed; that is unavoidable if the feature
   exists at all.
+- **A step-by-step list arrives as a checklist.** Text that is a Markdown list
+  (an assistant's answer, a list copied off a web page) opens the composer as a
+  CHECKLIST when it is shared in, instead of one note of raw Markdown. When it is
+  pasted into a new note's title or an item, it opens the paste prompt showing the
+  clean steps. It is the inverse of *Copy as text*: `# Title` and `- [ ] item`
+  read back as the title and the items. A heading or a line that introduces the
+  list becomes the title ("Here's a checklist for X:" → *Checklist for X*).
+  Numbers, `**bold**`, links and code marks are dropped, and a `[x]` arrives
+  unticked. A later heading, or a line ending in a colon inside the list, stays as
+  an item so the grouping survives. A wrapped line, or a code block under a step,
+  joins that step. Closing sentences ("That's it!") are dropped. The reader
+  (`readChecklist`, `notes/model/noteContent.ts`) takes at least two list lines and
+  no more sentences than list lines around them, so a paragraph that happens to
+  mention a list stays a paragraph. Nothing is saved until **Done**, as with any
+  share or paste.
 - **Faster ways in (Android app).** Long-press the app icon for **New note**,
   **New list** or **Reminders**; add a **quick-settings tile** that opens a new
   note from the notification shade (account menu → *Add the quick tile*); or

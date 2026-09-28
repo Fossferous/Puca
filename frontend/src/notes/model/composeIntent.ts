@@ -12,6 +12,8 @@
  * what keeps a share from another app from silently writing into the account.
  */
 
+import { isListLine, readChecklist, titleFromLine } from './noteContent';
+
 /** Which composer to open on. */
 export type ComposeMode = 'list' | 'text' | 'draw' | 'photo';
 
@@ -29,6 +31,9 @@ export interface ComposeIntent {
     mode: ComposeMode;
     title?: string;
     body?: string;
+    /** A checklist read out of shared text (noteContent's readChecklist):
+     *  the composer opens on these items instead of a body. */
+    items?: string[];
     /** Pictures another app shared in. Files on this device; they are sealed
      *  by the ordinary upload path when the note is saved. */
     files?: File[];
@@ -132,5 +137,18 @@ export async function takeShare(shared: SharedPayload, deps: ShareIntakeDeps): P
     const files = content.pictures ? shared.files : [];
     if (shared.files.length > 0 && files.length === 0) deps.refusePicture();
     if (!shared.title && !shared.body && files.length === 0) return;
+    // A step-by-step list — an assistant's answer, a list off a web page —
+    // opens AS a checklist rather than as one note of raw Markdown. Titled
+    // by its own heading or introducing line; else by what was shared as
+    // the title (the subject, or the text's first line the native side
+    // split off — cleaned of "# " and "Here's"). A first line that is
+    // itself a step goes back to the list, not into the title.
+    const titleIsStep = isListLine(shared.title);
+    const list = readChecklist(titleIsStep ? `${shared.title}\n${shared.body}` : shared.body);
+    if (list) {
+        const own = titleIsStep ? '' : titleFromLine(shared.title);
+        deps.open({ mode: 'list', title: list.title ?? own, items: list.items, files });
+        return;
+    }
     deps.open({ mode: composeModeFor('text', content), title: shared.title, body: shared.body, files });
 }

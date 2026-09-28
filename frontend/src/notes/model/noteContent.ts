@@ -54,8 +54,152 @@ export function deriveContentTitle(
 export function bodyToItems(body: string): string[] {
     return body
         .split(/\r?\n/)
-        .map(l => l.trim().replace(/^(?:[-*•]\s+)?(?:\[[ xX]\]\s*)?/, '').trim())
+        // A list marker (- * + • or a number "1." / "1)"), then a task box,
+        // or a heading's hashes: the item is what follows.
+        .map(l => l.trim().replace(/^#{1,6}\s+/, '').replace(/^(?:(?:[-*+•]|\d{1,3}[.)])\s+)?(?:\[[ xX]\]\s*)?/, '').trim())
         .filter(l => l !== '');
+}
+
+// --- Checklists from elsewhere ------------------------------------------------------
+//
+// A step-by-step list written somewhere else — an assistant's answer, a web
+// page, an email — shared into Notes or pasted into the composer. It used to
+// arrive as ONE text note of raw Markdown (a share) or as items that kept
+// their "1." and "**", their "## Setup" heading and their "Here's how:"
+// intro (a paste). This reads it the way Notes itself writes a checklist
+// out (noteText.ts noteToMarkdown: "# Title", then "- [ ] item"), plus the
+// usual variants. It never saves anything: the composer opens on the
+// result, and the note exists only once the user presses Done.
+
+/** A list line: - * + • or "1." / "1)", then an optional task box; or a bare
+ *  task box. [1] is the indent, [2] the item. */
+const LIST_LINE = /^(\s*)(?:(?:[-*+•]|\d{1,3}[.)])\s+(?:\[[ xX]\]\s+)?|\[[ xX]\]\s+)(.*\S)\s*$/;
+const HEADING = /^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/;
+const FENCE = /^\s*(?:```|~~~)/;
+/** "Here's a checklist for X:" → "Checklist for X" — the lead-in is chat,
+ *  not a title. */
+const LEAD_IN = /^(?:(?:sure|okay|ok|of course)[,!.]?\s+)?(?:here(?:'|’)?s|here is|here are|below is|below are)\s+(?:a|an|the|your|some)\s+/i;
+
+/** Inline Markdown an item does not need: emphasis, code ticks, strike-
+ *  through, images (their alt text), links (kept as "text (url)"). Careful
+ *  with the lone-mark forms, so "2 * 3" and snake_case survive. */
+export function plainInline(s: string): string {
+    return s
+        .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+        .replace(/\[([^\]]+)\]\((\S+?)(?:\s+"[^"]*")?\)/g, (_m, t: string, u: string) => (t === u ? u : `${t} (${u})`))
+        .replace(/(\*\*|__)(?=\S)(.+?)(?<=\S)\1/g, '$2')
+        .replace(/(^|[^\w*])\*(?=\S)([^*]+?)(?<=\S)\*(?![\w*])/g, '$1$2')
+        .replace(/(^|[^\w_])_(?=\S)([^_]+?)(?<=\S)_(?![\w_])/g, '$1$2')
+        .replace(/~~(?=\S)(.+?)(?<=\S)~~/g, '$1')
+        .replace(/`([^`]+)`/g, '$1')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+/** A title the composer can take out of one line: no heading marks, no
+ *  chat lead-in, no trailing colon, capitalised. */
+export function titleFromLine(s: string): string {
+    const t = plainInline(s.replace(/^\s{0,3}#{1,6}\s+/, '').replace(/\s#+\s*$/, ''))
+        .replace(LEAD_IN, '').replace(/[:：]\s*$/, '').trim();
+    return t ? t.charAt(0).toUpperCase() + t.slice(1) : '';
+}
+
+/** True for a Markdown list line ("- x", "1. x", "[ ] x"…). */
+export function isListLine(line: string): boolean {
+    return LIST_LINE.test(line);
+}
+
+/** A line that introduces what follows: it ends in a colon, or it is chat
+ *  ("Here's a checklist for…"). */
+const introduces = (line: string): boolean => /[:：]\s*$/.test(line.trim()) || LEAD_IN.test(line.trim());
+
+/** A line of PROSE rather than a bare item: a sentence (it ends like one,
+ *  and has at least three words). "Milk" is an item; "You're all set!" is
+ *  prose. */
+const isSentence = (line: string): boolean => {
+    const t = line.trim();
+    return /[.!?…]["'”’)\]]?$/.test(t) && t.split(/\s+/).length >= 3;
+};
+
+export interface ReadChecklist {
+    /** The heading before the list, else the line that introduced it; null
+     *  when there was neither. */
+    title: string | null;
+    items: string[];
+}
+
+/**
+ * Read `text` AS A CHECKLIST — or null when it is not one, so prose stays
+ * prose: it takes at least two Markdown list lines, and no more sentences
+ * of prose around them than list lines.
+ *
+ * - The first heading before the list is the title; failing that, a line
+ *   that introduced the list ("Here's a checklist for X:" → "Checklist for
+ *   X", "Steps:" → "Steps").
+ * - A heading after that, or a line ending in a colon inside the list, is a
+ *   section and stays as an item ("Setup:"), so the grouping is not lost.
+ *   One left with nothing under it at the end is dropped.
+ * - A bare short line is an item ("Milk" in "Milk / - Bread"); a sentence
+ *   is prose and is dropped ("That's it, you're done!").
+ * - An indented line under an item, and a fenced code block under it (the
+ *   command a step says to run), join that item.
+ * - Nested items are flattened in order: the composer's list is flat.
+ * - Inline Markdown is dropped (plainInline); [x] boxes arrive unticked.
+ */
+export function readChecklist(text: string): ReadChecklist | null {
+    let title: string | null = null;
+    let intro: string | null = null;
+    const items: string[] = [];
+    /** Parallel to `items`: true for a section, which nothing joins. */
+    const section: boolean[] = [];
+    let listLines = 0;
+    let proseLines = 0;
+    let inFence = false;
+    const push = (item: string, isSection: boolean) => { if (item) { items.push(item); section.push(isSection); } };
+    const join = (extra: string) => {
+        const last = items.length - 1;
+        if (last >= 0 && !section[last] && extra) items[last] = `${items[last]} — ${extra}`;
+    };
+    for (const raw of text.split(/\r?\n/)) {
+        if (FENCE.test(raw)) { inFence = !inFence; continue; }
+        if (inFence) {
+            // Code under a step belongs to that step; code before any step is
+            // not part of the list.
+            join(raw.trim());
+            continue;
+        }
+        if (!raw.trim()) continue;
+        const h = HEADING.exec(raw);
+        if (h) {
+            const t = plainInline(h[1]);
+            if (!t) continue;
+            if (items.length === 0 && title === null) title = titleFromLine(t);
+            else push(`${t.replace(/[:：]\s*$/, '')}:`, true);
+            continue;
+        }
+        const m = LIST_LINE.exec(raw);
+        if (m) {
+            push(plainInline(m[2]), false);
+            listLines++;
+            continue;
+        }
+        if (items.length > 0 && /^\s{2,}\S/.test(raw)) {
+            join(plainInline(raw));
+            continue;
+        }
+        if (items.length === 0 && introduces(raw)) {
+            if (intro === null) intro = titleFromLine(raw);
+            continue;
+        }
+        if (isSentence(raw)) { proseLines++; continue; }
+        if (introduces(raw)) { push(`${plainInline(raw).replace(/[:：]\s*$/, '')}:`, true); continue; }
+        push(plainInline(raw), false);
+    }
+    if (listLines < 2 || listLines < proseLines) return null;
+    // A section with nothing under it (the last thing in the text) is not
+    // worth a box.
+    while (section.length > 0 && section[section.length - 1]) { items.pop(); section.pop(); }
+    return { title: title || intro || null, items };
 }
 
 // --- Paste and drop ------------------------------------------------------------------

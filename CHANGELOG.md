@@ -16,6 +16,13 @@ one-line summary; this file is the full story. Versions follow
   choice is remembered for your next share. A share sent at several sizes
   (Settings → Advanced → Screen sharing) keeps its sizes until the next
   share, because each one is fixed when it starts.
+- **A step-by-step list from an assistant goes into Púca Notes as a
+  checklist.** Share the answer to Púca Notes on your phone, or paste it into
+  a new note's title or first item, and it arrives as a checklist of the
+  steps, titled from the list's heading. Numbers, bold marks and the "Here's
+  how:" line are left behind. Before, a share came in as one note of raw
+  Markdown, and a paste split line by line with the marks still on. Nothing
+  is saved until you press **Done**.
 
 ## 0.9.824 — 2026-09-28
 

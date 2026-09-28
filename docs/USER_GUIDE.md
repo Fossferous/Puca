@@ -368,6 +368,11 @@ uses the account you are already signed in to.
   not reachable. A due-item notification opens it. An item in a shared
   checklist that someone else set is marked *Reminds whoever set it*: it goes
   off for them, not for you.
+- **A checklist from somewhere else** — say, step-by-step instructions from an
+  AI assistant — goes in as a checklist. On your phone, **Share** it to
+  **Púca Notes**. Anywhere, paste it into a new note's title or an item and
+  choose **Add N items**. Either way the list's heading becomes the title and
+  each step becomes an item. Press **Done** to save it.
 - Archiving or deleting a note offers **Undo** for a few seconds.
 - Shortcuts: `/` search, `c` new note, `r` refresh, `?` help.
 

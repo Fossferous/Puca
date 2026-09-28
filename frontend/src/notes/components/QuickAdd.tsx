@@ -28,7 +28,11 @@ import { MAX_ITEM_LENGTH, MAX_TITLE_LENGTH, cleanQuickItems } from '../model/not
 import { composeModeFor, type ComposeIntent } from '../model/composeIntent';
 import { type NoteExtras } from '../model/useListContent';
 import { type DrawingFiles } from '../../api/noteMedia';
-import { filesFromTransfer, isTextPaste, linesFromPaste, pasteAsOneLine } from '../model/noteContent';
+import { filesFromTransfer, isTextPaste, linesFromPaste, pasteAsOneLine, readChecklist } from '../model/noteContent';
+
+/** The most items a share or a paste may fill in one go (a share's lines were
+ *  already capped at this). */
+const MAX_TAKEN_ITEMS = 200;
 import { DrawingCanvas } from '../../components/DrawingCanvas';
 import { PastedLinesDialog } from './PastedLinesDialog';
 import { hasTransferFiles, ONLY_PICTURES } from '../model/pasteDrop';
@@ -149,7 +153,10 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
         setOpen(true);
         setMode(want === 'text' ? 'text' : 'list');
         if (initial.title !== undefined) setTitle(initial.title.slice(0, MAX_TITLE_LENGTH));
-        if (initial.body !== undefined) {
+        if (initial.items?.length) {
+            // A checklist read out of a share (composeIntent's takeShare).
+            setItems(initial.items.slice(0, MAX_TAKEN_ITEMS).map(i => i.slice(0, MAX_ITEM_LENGTH)));
+        } else if (initial.body !== undefined) {
             // Shared text belongs in a body; on a server with no body field
             // its lines become the checklist, which is where they would go
             // if the user had pasted them.
@@ -266,7 +273,8 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     // Pictures go through addPictures, the SAME entry point the picker uses,
     // so they inherit its object-URL bookkeeping here and, at save, the
     // shrink-then-seal upload path. Nothing new touches the network.
-    const [paste, setPaste] = useState<{ lines: string[]; text: string; at: number } | null>(null);
+    const [paste, setPaste] = useState<{ lines: string[]; text: string; at: number; title?: string | null } | null>(null);
+
     const [dragging, setDragging] = useState(false);
 
     /** Pictures out of a paste or a drop; anything else is REPORTED, not
@@ -298,10 +306,23 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
         // A picture goes to the root handler — but only when the root handler
         // will actually take it, which it does not for a text paste.
         if (!isTextPaste(e.clipboardData) && filesFromTransfer(e.clipboardData).images.length > 0) return;
-        const lines = linesFromPaste(text);
+        // A checklist from elsewhere reads as one (numbers, "**", headings
+        // and the "Here's how:" intro gone); anything else splits by line.
+        const list = readChecklist(text);
+        const lines = list?.items ?? linesFromPaste(text);
         if (lines.length < 2) return;           // one line pastes as normal
         e.preventDefault();
-        setPaste({ lines, text, at: i });
+        setPaste({ lines, text, at: i, title: list?.title ?? null });
+    };
+
+    /** A paste into the TITLE: a checklist becomes the note (its heading the
+     *  title) instead of one long title line; anything else pastes as normal. */
+    const onPasteTitle = (e: React.ClipboardEvent<HTMLInputElement>) => {
+        const list = readChecklist(e.clipboardData?.getData('text') ?? '');
+        if (!list) return;
+        e.preventDefault();
+        // Asked first, like any multi-line paste; added after what is there.
+        setPaste({ lines: list.items, text: list.items.join('\n'), at: Math.max(0, live.current.items.length - 1), title: list.title });
     };
 
     /** Put the pasted lines in at `at`: over that field when it is empty,
@@ -309,6 +330,8 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     const applyPasteSeparate = () => {
         if (!paste) return;
         const { lines, at } = paste;
+        if (paste.title && live.current.title.trim() === '') setTitle(paste.title.slice(0, MAX_TITLE_LENGTH));
+        if (live.current.mode !== 'list') setMode('list');
         setItems(prev => {
             const next = [...prev];
             const blank = (next[at] ?? '').trim() === '';
@@ -470,6 +493,7 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
                     value={title}
                     maxLength={MAX_TITLE_LENGTH}
                     onChange={e => setTitle(e.target.value)}
+                    onPaste={onPasteTitle}
                     onKeyDown={e => {
                         if (e.key === 'Enter') { e.preventDefault(); focusItem(0); }
                         if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); void close(); }
