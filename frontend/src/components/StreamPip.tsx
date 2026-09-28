@@ -23,7 +23,7 @@ import {
 } from './Icons';
 import './StreamPip.css';
 import { installBackgroundResumeAll } from './deviceStageResume';
-import { applyOutputDevice } from './settingsStore';
+import { applyOutputDevice, outputGain } from './settingsStore';
 import { pipSupported } from './streamPopout.utils';
 import { docPipSupported } from './streamDocPip';
 
@@ -132,14 +132,24 @@ export function StreamPip({ onExpand, onClose, docked = false, onStopWatching, p
     // volume caps at 100% here; boost/attenuation live in the full stream view.
     // Deafen does not reach here on purpose (see StreamStage's graph comment):
     // per-stream mute is the way to silence a stream.
+    // Master Output Volume applies here as on every other stream path
+    // (StreamStage's gainFor): it used to be skipped, so turning it down left
+    // a stream watched from chat at full volume. Re-applied on settingsChanged
+    // so a change reaches a PiP that is already playing.
     useEffect(() => {
         const video = videoRef.current;
         if (!video || selectedStreams.length === 0) return;
         const userId = selectedStreams[0];
-        const own = userId === getCurrentStreamingUserId();
-        const muted = own || !!getStreamMutes()[userId];
-        video.muted = muted || routedVideo !== video;
-        video.volume = Math.min(Math.max((getStreamVolumes()[userId] ?? DEFAULT_STREAM_VOLUME) / 100, 0), 1);
+        const apply = () => {
+            const own = userId === getCurrentStreamingUserId();
+            const muted = own || !!getStreamMutes()[userId];
+            video.muted = muted || routedVideo !== video;
+            const level = ((getStreamVolumes()[userId] ?? DEFAULT_STREAM_VOLUME) / 100) * outputGain();
+            video.volume = Math.min(Math.max(level, 0), 1);
+        };
+        apply();
+        window.addEventListener('settingsChanged', apply);
+        return () => window.removeEventListener('settingsChanged', apply);
     }, [selectedStreams, routedVideo]);
 
     // Handle dragging

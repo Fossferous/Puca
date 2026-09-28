@@ -74,6 +74,12 @@ one-line summary; this file is the full story. Versions follow
   has no Output Device setting, so it always uses the default.) Switching
   the Output Device quickly, or a device reconnecting in a burst, could also
   leave voice on the wrong device. That is fixed too.
+- **Output Volume applies to every stream you watch.** Settings > Output
+  Volume turns everything down together. A stream watched in the small
+  player over chat ignored it and played at full volume, as did a stream on
+  a device that plays it without Web Audio. In the full stream view, moving
+  a stream's volume slider or unmuting it briefly aimed past it too. All of
+  them now follow it, and a change to it reaches a stream already playing.
 
 ## 0.9.823 — 2026-09-26
 
