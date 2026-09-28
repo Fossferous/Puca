@@ -58,6 +58,18 @@ one-line summary; this file is the full story. Versions follow
   After a kick, ban or permission change, it used to report the person as
   removed from the voice server even when that failed. It now says so only
   when the voice server confirms it.
+- **Stream audio and notification sounds use your chosen Output Device.**
+  Settings > Voice & Video > Output Device used to apply to voice only. The
+  sound of a stream you were watching, notification sounds (join and leave,
+  mute and deafen, streams starting and stopping, messages, mentions,
+  people's custom join clips) and the preview of your own join clip all
+  played on the system's default device instead. So if you picked a
+  headset, they could come out of your speakers, or out of whatever else
+  was the default at the time, like a TV. They now follow the device you
+  chose and move when you change it. If that device is unplugged, they fall
+  back to the default, and they move back when it returns, the same way
+  voice does. Switching the Output Device quickly, or a device reconnecting
+  in a burst, could also leave voice on the wrong device. That is fixed too.
 
 ## 0.9.823 — 2026-09-26
 

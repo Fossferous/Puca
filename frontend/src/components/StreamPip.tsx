@@ -23,6 +23,7 @@ import {
 } from './Icons';
 import './StreamPip.css';
 import { installBackgroundResumeAll } from './deviceStageResume';
+import { applyOutputDevice } from './settingsStore';
 import { pipSupported } from './streamPopout.utils';
 import { docPipSupported } from './streamDocPip';
 
@@ -62,6 +63,9 @@ export function StreamPip({ onExpand, onClose, docked = false, onStopWatching, p
     const [control, setControl] = useState<ControlState>(getControlState);
     const videoRef = useRef<HTMLVideoElement>(null);
     const pipRef = useRef<HTMLDivElement>(null);
+    // The <video> that has reached Settings > Output Device. Any other one is
+    // held muted: autoPlay starts a bound stream at once, on the OS default.
+    const [routedVideo, setRoutedVideo] = useState<HTMLVideoElement | null>(null);
 
     useEffect(() => subscribeControl(setControl), []);
 
@@ -79,6 +83,29 @@ export function StreamPip({ onExpand, onClose, docked = false, onStopWatching, p
         update();
         return subscribeToStreamState(update);
     }, [onClose]);
+
+    // PiP is the audible stream path in chat view (see the audio effect
+    // below), so it follows Output Device like voice and StreamStage: routed
+    // as the element mounts (it only exists while a stream is selected),
+    // re-routed when Settings change or the chosen device leaves and returns.
+    // Before this it always played on the OS default.
+    const hasVideo = selectedStreams.length > 0;
+    useEffect(() => {
+        const video = videoRef.current;
+        if (!hasVideo || !video) return;
+        let live = true;
+        const reroute = () => {
+            void applyOutputDevice(video).then(() => { if (live) setRoutedVideo(video); });
+        };
+        reroute();
+        window.addEventListener('settingsChanged', reroute);
+        navigator.mediaDevices?.addEventListener?.('devicechange', reroute);
+        return () => {
+            live = false;
+            window.removeEventListener('settingsChanged', reroute);
+            navigator.mediaDevices?.removeEventListener?.('devicechange', reroute);
+        };
+    }, [hasVideo]);
 
     // Attach stream to video
     useEffect(() => {
@@ -111,9 +138,9 @@ export function StreamPip({ onExpand, onClose, docked = false, onStopWatching, p
         const userId = selectedStreams[0];
         const own = userId === getCurrentStreamingUserId();
         const muted = own || !!getStreamMutes()[userId];
-        video.muted = muted;
+        video.muted = muted || routedVideo !== video;
         video.volume = Math.min(Math.max((getStreamVolumes()[userId] ?? DEFAULT_STREAM_VOLUME) / 100, 0), 1);
-    }, [selectedStreams]);
+    }, [selectedStreams, routedVideo]);
 
     // Handle dragging
     const handleMouseDown = (e: React.MouseEvent) => {

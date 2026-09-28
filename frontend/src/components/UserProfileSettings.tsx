@@ -6,6 +6,7 @@ import './UserProfileSettings.css';
 import { CloseIcon, PlayIcon } from './Icons';
 import { fetchFileUrl } from '../api/authedMedia';
 import { useAuthedFileUrl } from '../hooks/useAuthedFileUrl';
+import { applyOutputDevice } from './settingsStore';
 
 interface UserProfileSettingsProps {
     isOpen: boolean;
@@ -254,6 +255,9 @@ export function UserProfileSettings({ isOpen, onClose }: UserProfileSettingsProp
         if (!url) { setError('Could not load that clip'); return; }
         const a = new Audio(url);
         a.volume = 0.6;
+        // On the Output Device chosen in Settings, routed BEFORE play() so no
+        // part of the clip lands on the OS default.
+        await applyOutputDevice(a);
         void a.play().catch(() => { /* autoplay refusal — a click precedes this, so rare */ });
     };
 

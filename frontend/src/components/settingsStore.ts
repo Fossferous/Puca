@@ -794,31 +794,86 @@ export function inputGain(): number {
     return Math.max(0, Math.min(4, (vol / 100) * (manual / 100)));
 }
 
+/** Anything with a sink: an <audio>/<video> element or an AudioContext. */
+type SinkTarget = object & { setSinkId?: (id: string) => Promise<void>; sinkId?: unknown };
+
 /**
- * Route one element to the chosen output device.
+ * Per target: how many routing requests it has been sent, and how many are
+ * still unanswered. Both exist because of two orderings measured in Edge 154
+ * (the WebView2 engine) on elements AND contexts alike: setSinkId calls are
+ * processed in order with the last one winning, and `sinkId` only changes when
+ * a call RESOLVES.
+ */
+const sinkRequests = new WeakMap<object, { issued: number; pending: number }>();
+
+/**
+ * Route one sink target to the chosen output device. Never rejects; settles
+ * once the target is on that device or has fallen back to the default.
  *
  * `setSinkId` is Chromium-only (our desktop shell and the web target) and
  * rejects if the device has gone away — a stale id must fall back to the
- * default EXPLICITLY (setSinkId('')), both so the element keeps playing
+ * default EXPLICITLY (setSinkId('')), both so the target keeps playing
  * somewhere and so a later re-apply (devicechange, Settings) starts clean.
  * The same explicitness covers the other direction: switching Settings back
  * to Default used to early-return here, leaving every live element stuck on
  * the previously chosen device.
  */
-export function applyOutputDevice(el: HTMLMediaElement): void {
-    const id = loadSettings().outputDeviceId;
-    const sinkable = el as HTMLMediaElement & { setSinkId?: (id: string) => Promise<void>; sinkId?: string };
-    if (typeof sinkable.setSinkId !== 'function') return;
-    if (!id || id === 'default') {
-        // Only elements actually routed elsewhere need the reset call.
-        if (sinkable.sinkId) {
-            void sinkable.setSinkId('').catch(() => { /* already unroutable */ });
-        }
-        return;
-    }
-    void sinkable.setSinkId(id).catch(() => {
-        // Device unplugged or permission withdrawn: fall back to the default
-        // sink rather than leaving the element pointed at a corpse.
-        void sinkable.setSinkId!('').catch(() => { /* keep whatever still plays */ });
-    });
+function routeToOutputDevice(target: SinkTarget): Promise<void> {
+    const setSinkId = target.setSinkId;
+    if (typeof setSinkId !== 'function') return Promise.resolve();
+    const chosen = loadSettings().outputDeviceId;
+    const id = !chosen || chosen === 'default' ? '' : chosen;
+    let req = sinkRequests.get(target);
+    if (!req) { req = { issued: 0, pending: 0 }; sinkRequests.set(target, req); }
+    // Only targets actually routed elsewhere need the reset call. An empty
+    // sinkId proves that only while nothing is in flight: mid-switch it still
+    // names the OLD sink, and skipping here left the target on the device
+    // being switched to while Settings said Default.
+    if (!id && !target.sinkId && req.pending === 0) return Promise.resolve();
+    const mine = ++req.issued;
+    req.pending++;
+    const r = req;
+    return setSinkId.call(target, id)
+        .catch(() => {
+            // Device unplugged or permission withdrawn: fall back to the default
+            // sink rather than leaving the target pointed at a corpse — unless
+            // a newer request was made meanwhile. That one is queued ahead of
+            // this fallback, which would land last and override it.
+            if (!id || r.issued !== mine) return;
+            return setSinkId.call(target, '').catch(() => { /* keep whatever still plays */ });
+        })
+        .finally(() => { r.pending--; });
+}
+
+/**
+ * Route one element to the chosen output device (see routeToOutputDevice).
+ * Callers may ignore the result; one that must not sound on the wrong device
+ * first waits for it.
+ */
+export function applyOutputDevice(el: HTMLMediaElement): Promise<void> {
+    return routeToOutputDevice(el as HTMLMediaElement & SinkTarget);
+}
+
+/**
+ * Route a Web Audio context to the chosen output device — applyOutputDevice's
+ * twin for audio that never touches an element. Watched-stream audio
+ * (StreamStage) and every notification sound (utils/audioFeedback) play
+ * through an AudioContext, and without this both played on the OS default
+ * whatever Settings said: the wrong device for anyone who picked one, and a
+ * leak to whatever happened to be the default (a streaming host's virtual
+ * cable, i.e. the TV).
+ *
+ * AudioContext.setSinkId is Chromium 110+ (WebView2, Android WebView) and
+ * only in a secure context; where it is missing this resolves at once and the
+ * context stays on the default, as before. Deliberately NOT
+ * `new AudioContext({ sinkId })`: given an unknown id that constructor does
+ * not throw, and the context then reports the bogus id as its sinkId, so a
+ * stale choice could never be detected or fallen back from.
+ *
+ * Resolves (never rejects) once routing settled. Callers that must not sound
+ * on the wrong device wait for it; it settles while the context is suspended.
+ */
+export function applyOutputDeviceToContext(ctx: AudioContext): Promise<void> {
+    if (ctx.state === 'closed') return Promise.resolve();
+    return routeToOutputDevice(ctx as AudioContext & SinkTarget);
 }

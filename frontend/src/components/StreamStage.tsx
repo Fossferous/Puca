@@ -37,7 +37,7 @@ import {
     type ControlState,
 } from '../api/remoteControl';
 import { isMobile, isTauri, RC_ENABLED } from '../api/platform';
-import { outputGain, applyOutputDevice } from './settingsStore';
+import { outputGain, applyOutputDevice, applyOutputDeviceToContext } from './settingsStore';
 import { sfuManager } from '../api/rtc/sfuManager';
 import { useStreamStore } from '../stores/streamStore';
 import {
@@ -167,6 +167,11 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     // viewer loses focus (see the release-all effect).
     const heldKeys = useRef<Set<string>>(new Set());
     const audioCtxRef = useRef<AudioContext | null>(null);
+    // Settles once audioCtxRef's context is on the Output Device chosen in
+    // Settings. A new graph joins the speakers only after it: the context is
+    // born on the OS default, so connecting at once played the start of the
+    // stream there.
+    const sinkRoutedRef = useRef<Promise<void>>(Promise.resolve());
     const graphsRef = useRef<Map<number, StreamAudioGraph>>(new Map());
     const duckedRef = useRef(false);
     const menuRef = useRef<HTMLDivElement>(null);
@@ -223,6 +228,9 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
             if (!ctx) {
                 ctx = new AudioContext();
                 audioCtxRef.current = ctx;
+                // Stream audio follows Settings > Output Device like voice
+                // does; without this it always played on the OS default.
+                sinkRoutedRef.current = applyOutputDeviceToContext(ctx);
             }
             if (ctx.state === 'suspended') ctx.resume().catch(() => { /* resumes on next gesture */ });
 
@@ -238,7 +246,18 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
             const source = ctx.createMediaStreamSource(new MediaStream([track]));
             const gain = ctx.createGain();
             source.connect(gain);
-            gain.connect(ctx.destination);
+            const out = ctx.destination;
+            void sinkRoutedRef.current.then(() => {
+                // Replaced or torn down while routing settled: a stale gain
+                // must not reach the speakers.
+                if (graphsRef.current.get(userId)?.gain !== gain) return;
+                try {
+                    gain.connect(out);
+                } catch (err) {
+                    console.warn('[StreamStage] Web Audio unavailable — falling back to element audio:', err);
+                    setAudioFallback(true);
+                }
+            });
             graphsRef.current.set(userId, { source, gain, trackId: track.id });
             applyGain(userId, false);
         } catch (err) {
@@ -351,10 +370,14 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     // audio immediately rather than at the next gain recalculation. Also on
     // devicechange — the chosen sink can vanish and return without any
     // settings change (a Bluetooth headset out of / back in range), and
-    // applyOutputDevice chases it in both directions.
+    // applyOutputDevice chases it in both directions. The audible path is
+    // the Web Audio context; the <video> elements only sound in the
+    // audioFallback path, and are routed too so that path follows as well.
     useEffect(() => {
         const reapply = () => {
             applyAllGains();
+            const ctx = audioCtxRef.current;
+            if (ctx) sinkRoutedRef.current = applyOutputDeviceToContext(ctx);
             videoRefs.current.forEach(video => applyOutputDevice(video));
         };
         window.addEventListener('settingsChanged', reapply);
@@ -393,6 +416,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                     if (video.srcObject !== data.stream) {
                         console.log('[StreamStage] Binding stream for userId:', userId);
                         video.srcObject = data.stream;
+                        applyOutputDevice(video); // audible in the audioFallback path
                         video.play().catch(err => console.warn('Video play failed:', err));
                     }
                     ensureStreamAudio(userId, data.stream);
@@ -862,6 +886,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                         const freshData = getStreamData(userId);
                                         if (freshData?.stream && el.srcObject !== freshData.stream) {
                                             el.srcObject = freshData.stream;
+                                            applyOutputDevice(el); // audible in the audioFallback path
                                             el.play().catch(err => console.warn('Video play failed:', err));
                                             ensureStreamAudio(userId, freshData.stream);
                                         }
