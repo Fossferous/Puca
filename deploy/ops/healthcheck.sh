@@ -124,11 +124,52 @@ if systemctl is-enabled --quiet "$SERVICE_NAME-waker" 2>/dev/null; then
 	# Any 4xx on the dial is the same verdict — turned away, needs a human — so
 	# count rather than parse. Both wordings are matched: the old one said
 	# "connect failed", the current one says "connect REFUSED".
-	waker_refusals=$(journalctl -u "$SERVICE_NAME-waker" --since "-15min" --no-pager 2>/dev/null |
+	# short-unix stamps each line with epoch seconds for the dial check below;
+	# the plain read is a fallback so the refusal count never depends on it.
+	waker_journal=$(journalctl -u "$SERVICE_NAME-waker" --since "-15min" --no-pager -o short-unix 2>/dev/null) ||
+		waker_journal=$(journalctl -u "$SERVICE_NAME-waker" --since "-15min" --no-pager 2>/dev/null || true)
+	waker_refusals=$(printf '%s\n' "$waker_journal" |
 		grep -cE 'connect (failed: HTTP error: 4|REFUSED: HTTP 4)' || true)
 	if [ "${waker_refusals:-0}" -ge 5 ]; then
 		note "$SERVICE_NAME-waker is RUNNING BUT REFUSED ($waker_refusals refusals in 15 min) — it is up and being turned away, so Wake is dead while every other check passes; re-ship it (deploy/ops/ship-waker.sh) and check its enrolment"
 		logger -t "$SERVICE_NAME-health" "$SERVICE_NAME-waker refused $waker_refusals times in 15min; running but locked out"
+	fi
+	# RUNNING BUT UNABLE TO DIAL is the same blindness with a different cause.
+	# A container restart left one box with a resolver config that could not
+	# resolve anything; its waker logged "connect failed: IO error: failed to
+	# lookup address information: Temporary failure in name resolution" once a
+	# minute, about 700 times, while the unit stayed active — Wake was dead for
+	# eleven hours and the check above said nothing, because it counts only 4xx.
+	#
+	# What is measured is the RUN of dial failures since the last line proving
+	# the socket came up ("connected" / "ready to wake"), so a waker that has
+	# already recovered is silent however many failures precede the recovery.
+	# The verdict is TIME without a connection, not a count: a resolver that
+	# fails fast logs about one a minute (the backoff is 1, 5, 15, 30, then
+	# 60 s), but a black-holed route spends ~2 minutes in each TCP connect, so
+	# any count that catches the first would never see the second. Ten minutes
+	# and at least three dials is two check cycles past a blip, and a standing
+	# outage then repeats on every run, like the FATAL lines below. A line with
+	# no epoch stamp (the fallback read) has no age, so it never trips this.
+	# "connect failed: HTTP error: 4xx" is the old binary's refusal: it stays
+	# with the check above and its wording, and does not count here.
+	waker_dial=$(printf '%s\n' "$waker_journal" | awk -v now="$(date +%s)" '
+		/\[waker\] connected|ready to wake/ { n = 0; last = ""; next }
+		/connect failed: HTTP error: 4/     { next }
+		/connect failed/ {
+			if (!n) first = ($1 ~ /^[0-9]+(\.[0-9]*)?$/) ? $1 + 0 : now
+			n++; last = $0; sub(/.*connect failed: /, "", last)
+		}
+		END {
+			gsub(/[[:cntrl:]]/, "", last)
+			print n + 0
+			print (n ? int((now - first) / 60) : 0)
+			print substr(last, 1, 200)
+		}')
+	{ IFS= read -r waker_dial_failures; IFS= read -r waker_dial_minutes; IFS= read -r waker_dial_last; } <<<"$waker_dial"
+	if [ "${waker_dial_failures:-0}" -ge 3 ] && [ "${waker_dial_minutes:-0}" -ge 10 ]; then
+		note "$SERVICE_NAME-waker is RUNNING BUT CANNOT CONNECT ($waker_dial_failures failed dials in a row, no connection for ${waker_dial_minutes}+ min) — Wake is dead while every other check passes; the likely cause is DNS or the network on THIS box, not the waker: check /etc/resolv.conf and that the server's name resolves here (getent hosts <server>). Last error: ${waker_dial_last:-?}"
+		logger -t "$SERVICE_NAME-health" "$SERVICE_NAME-waker failed to connect $waker_dial_failures times in a row over ${waker_dial_minutes}+ min; likely DNS/network. Last: ${waker_dial_last:-?}"
 	fi
 fi
 
@@ -151,14 +192,30 @@ if systemctl is-enabled --quiet livekit 2>/dev/null && systemctl is-active --qui
 		logger -t "$SERVICE_NAME-health" "livekit active but $LIVEKIT_PROBE_URL unreachable"
 	fi
 fi
+TURNSERVER_CONF="${TURNSERVER_CONF:-/etc/turnserver.conf}"
 if systemctl is-enabled --quiet coturn 2>/dev/null && systemctl is-active --quiet coturn; then
-	turn_port="$(sed -n 's/^listening-port=\([0-9]*\).*/\1/p' /etc/turnserver.conf 2>/dev/null | head -1)"
+	turn_port="$(sed -n 's/^listening-port=\([0-9]*\).*/\1/p' "$TURNSERVER_CONF" 2>/dev/null | head -1)"
 	COTURN_PROBE_PORT="${COTURN_PROBE_PORT:-${turn_port:-3478}}"
+	# The ADDRESS comes from the config too. With `listening-ip=` set, coturn
+	# binds only the addresses listed — a box that pins its public address
+	# answers there and nowhere else — so a probe of 127.0.0.1 logged "nothing
+	# listens" every five minutes against a relay that was working. Probe the
+	# first listed address; the wildcards mean loopback of the same family.
+	turn_ip="$(sed -n 's/^[[:space:]]*listening-ip[[:space:]]*=[[:space:]]*\([^[:space:]#]*\).*/\1/p' "$TURNSERVER_CONF" 2>/dev/null | head -1)"
+	case "$turn_ip" in
+		''|0.0.0.0) turn_ip=127.0.0.1 ;;
+		::|'[::]')  turn_ip=::1 ;;
+	esac
+	COTURN_PROBE_HOST="${COTURN_PROBE_HOST:-$turn_ip}"
+	# /dev/tcp hands the host to getaddrinfo, which wants a v6 literal bare.
+	COTURN_PROBE_HOST="${COTURN_PROBE_HOST#\[}"; COTURN_PROBE_HOST="${COTURN_PROBE_HOST%\]}"
+	case "$COTURN_PROBE_HOST" in *:*) turn_where="[$COTURN_PROBE_HOST]:$COTURN_PROBE_PORT" ;; *) turn_where="$COTURN_PROBE_HOST:$COTURN_PROBE_PORT" ;; esac
 	# coturn answers TCP on listening-port as well as UDP (unless no-tcp), so a
 	# plain connect is a real "is anything listening" test with no dependency.
-	if ! timeout 3 bash -c "exec 3<>/dev/tcp/127.0.0.1/$COTURN_PROBE_PORT" 2>/dev/null; then
-		note "coturn unit is active but nothing listens on 127.0.0.1:$COTURN_PROBE_PORT — reachable unit, unreachable endpoint; check listening-port in /etc/turnserver.conf and that coturn can READ it (a 600 root-owned file starts coturn with defaults, on 3478, as an open relay)"
-		logger -t "$SERVICE_NAME-health" "coturn active but port $COTURN_PROBE_PORT not listening"
+	# Host and port go in as arguments, never spliced into the script text.
+	if ! timeout 3 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$COTURN_PROBE_HOST" "$COTURN_PROBE_PORT" 2>/dev/null; then
+		note "coturn unit is active but nothing listens on $turn_where — reachable unit, unreachable endpoint; check listening-port and listening-ip in $TURNSERVER_CONF (or set COTURN_PROBE_HOST / COTURN_PROBE_PORT in /etc/default/puca) and that coturn can READ it (a 600 root-owned file starts coturn with defaults, on 3478, as an open relay)"
+		logger -t "$SERVICE_NAME-health" "coturn active but $turn_where not listening"
 	fi
 fi
 

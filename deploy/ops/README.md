@@ -34,7 +34,10 @@ the second runs **on your machine** and pushes releases to every server.
   HTTP-hung (probing the port from `.env`); detects a crash-looping unit
   (`NRestarts` climbing) for the backend, coturn, LiveKit and the LAN waker;
   supervises coturn and LiveKit where their units are enabled (restart when
-  down, one liveness probe each); re-asserts the origin firewall **only on a
+  down, one liveness probe each — coturn's on the address its
+  `listening-ip=` names, when it names one); calls out a LAN waker that is
+  running but refused (4xx) or running but unable to connect at all (ten
+  failed dials in a row: DNS or the network on that box); re-asserts the origin firewall **only on a
   host where ufw was configured** (an SSH allow rule in `ufw show added`, or
   `OPS_MANAGE_UFW=1`); checks Postgres; and on a host behind Cloudflare
   asserts that the Caddyfile carries the global `servers { trusted_proxies …
@@ -86,6 +89,8 @@ DB_USER=sovereign          # the Postgres role that owns the database (restore.s
 # HEALTH_URL=http://127.0.0.1:3000/   # only if PORT/BIND_ADDR in .env are not what to probe
 # OPS_MANAGE_UFW=1                    # force the ufw re-assert (0 = never touch ufw)
 # COTURN_PROBE_PORT=3479              # default: listening-port from /etc/turnserver.conf
+# COTURN_PROBE_HOST=203.0.113.7       # default: the first listening-ip from that file, else 127.0.0.1
+# TURNSERVER_CONF=/etc/turnserver.conf   # the coturn config both defaults are read from
 # LIVEKIT_PROBE_URL=http://127.0.0.1:7880/   # default: port: from /opt/livekit/livekit.yaml
 # CADDYFILE=/etc/caddy/Caddyfile     # the file the Cloudflare client-IP assertion reads
 # OPS_BEHIND_CLOUDFLARE=1            # force that assertion (0 = never; default: detect from the Caddyfile / cf-origin ufw rules)
