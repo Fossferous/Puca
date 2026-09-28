@@ -34,7 +34,7 @@ import { filesFromTransfer, isTextPaste, linesFromPaste, pasteAsOneLine, readChe
  *  already capped at this). */
 const MAX_TAKEN_ITEMS = 200;
 import { DrawingCanvas } from '../../components/DrawingCanvas';
-import { PastedLinesDialog } from './PastedLinesDialog';
+import { PastedLinesDialog } from '../../components/PastedLinesDialog';
 import { hasTransferFiles, ONLY_PICTURES } from '../model/pasteDrop';
 import { MAX_BODY_BYTES, bodyBytes } from '../../api/listContent';
 import { pushMessageToast } from '../../components/messageToastBus';

@@ -11,9 +11,14 @@
  *
  * A single-line paste never reaches here: linesFromPaste returns one line and
  * the handler lets the browser paste it normally.
+ *
+ * SHARED: it was notes/components/PastedLinesDialog.tsx until Púca's own
+ * Tasks view took pastes too. Its class names are unchanged (the Notes tests
+ * name them) and its rules travel with it, because Púca never loads
+ * notes/noteContent.css.
  */
-// The dialog shell moved to components/ when Púca grew the same views.
-import { NotesDialog } from '../../components/NotesDialog';
+import { NotesDialog } from './NotesDialog';
+import './PastedLinesDialog.css';
 
 /** Never render more rows than this; the rest are counted, not listed. */
 export const PASTE_PREVIEW_LIMIT = 50;

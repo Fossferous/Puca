@@ -1,0 +1,29 @@
+/* The paste confirmation (components/PastedLinesDialog.tsx) — shared by
+   Púca Notes and Púca's Tasks view, so the rules live beside the component
+   instead of in notes/noteContent.css, which Púca never loads. The dialog's
+   shell, text buttons and hint are NotesDialog.css. */
+.notes-paste-lines {
+    margin: 8px 0;
+    padding: 8px 10px;
+    list-style: none;
+    max-height: 40dvh;
+    overflow-y: auto;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+}
+.notes-paste-line {
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--text-normal);
+    word-break: break-word;
+}
+.notes-paste-line + .notes-paste-line { border-top: 1px solid var(--border-faint); }
+.notes-paste-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+
+@media (pointer: coarse) and (max-width: 1024px) {
+    /* The paste confirmation must stay answerable on a phone: the line list
+       scrolls, the buttons never leave the screen, and each is a tap target. */
+    .notes-paste-lines { max-height: 40dvh; }
+    .notes-paste-actions .notes-textbtn { min-height: 44px; }
+}

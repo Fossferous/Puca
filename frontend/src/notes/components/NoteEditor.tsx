@@ -38,7 +38,7 @@ import { type NoteActions, useNoteTasks } from '../model/notesQueries';
 import { useReminderTimes } from '../model/notesPrefs';
 import { NoteContentSection } from './NoteContentSection';
 import { ListActionsMenu } from './ListActionsMenu';
-import { PastedLinesDialog } from './PastedLinesDialog';
+import { PastedLinesDialog } from '../../components/PastedLinesDialog';
 import { linesFromPaste, pasteAsOneLine, readableAttachmentsOf, recreateSubtree } from '../model/noteContent';
 import { PACE_MS } from '../../api/icsImport';
 import { pushMessageToast } from '../../components/messageToastBus';
