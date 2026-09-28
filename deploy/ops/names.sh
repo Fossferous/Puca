@@ -111,6 +111,71 @@ ops_require_db() {
 	fi
 }
 
+# --- Root writing inside a directory it does not own -----------------------------
+#
+# INSTALL_DIR belongs to the service user (provision.sh chowns it), and these
+# scripts run as root. Any NAME in a directory someone else owns is theirs to
+# redirect: a symlink planted as `health.log`, `.health-http-ok` or `backups`
+# turns root's next `>`, `>>`, `chmod` or extraction into a write wherever it
+# points — truncate /etc/shadow, chmod /etc, drop a file in /etc/profile.d.
+#
+# Today that needs more than a compromised backend: the unit runs with
+# ProtectSystem=strict and may write only uploads/ and releases/. That is one
+# line of a unit file, though, and not every host was built from it — so root
+# does not rely on it. Two rules:
+#
+#  - A LOG in such a directory is only appended with O_NOFOLLOW and created
+#    with O_EXCL (ops_append): a planted symlink is refused, not followed; a
+#    FIFO cannot hang the run; nothing is created through a dangling link.
+#    State that is REWRITTEN does not live there at all (healthcheck.sh keeps
+#    it in OPS_STATE_DIR).
+#  - A DIRECTORY root fills with files is entered, not addressed
+#    (ops_enter_private_dir): cd into it, prove that what was entered is the
+#    real path and that nobody else can write it, then work relative to `.`.
+#    From then on the process holds the directory itself, so renaming or
+#    replacing the path cannot redirect a write, and no one can plant a name
+#    inside it.
+#
+# A hard link would get past O_NOFOLLOW; fs.protected_hardlinks (on by default
+# on every distro this targets) stops a user linking a file it does not own.
+
+#   ops_append <file> <line>  -> 0 when the line was appended; 1 when <file>
+#   is a symlink, FIFO, directory or anything else that is not a plain file.
+ops_append() {
+	printf '%s\n' "$2" | dd of="$1" oflag=append,nofollow,nonblock conv=notrunc,nocreat status=none 2>/dev/null && return 0
+	printf '%s\n' "$2" | dd of="$1" oflag=append,nofollow,nonblock conv=notrunc,excl status=none 2>/dev/null
+}
+
+#   ops_enter_private_dir <dir> [create]  -> cd into <dir> and return 0, or
+#   return 1 from `/` with the reason in OPS_DIR_ERR. <dir> must be a real
+#   directory at exactly that path (not reached through a symlink), owned by
+#   the user running this, and writable by no one else. With `create`, a
+#   missing <dir> is made 0700 first.
+ops_enter_private_dir() {
+	local d="${1%/}" parent want got owner mode
+	OPS_DIR_ERR=""
+	parent="$(cd -P -- "$(dirname -- "$d")" 2>/dev/null && pwd -P)" ||
+		{ OPS_DIR_ERR="$(dirname -- "$d") does not exist"; return 1; }
+	want="${parent%/}/$(basename -- "$d")"
+	if [ "${2:-}" = create ] && [ ! -e "$d" ] && [ ! -L "$d" ]; then
+		mkdir -m 700 -- "$d" 2>/dev/null || true   # a race either way is settled by the checks below
+	fi
+	cd -P -- "$d" 2>/dev/null || { OPS_DIR_ERR="$d is not a directory"; cd /; return 1; }
+	got="$(pwd -P)"
+	if [ "$got" != "$want" ]; then
+		OPS_DIR_ERR="$d leads to $got, not to itself — something replaced it with a symlink"; cd /; return 1
+	fi
+	# `.` is the directory now held, whatever the path points at by now.
+	owner="$(stat -c %u .)"; mode="$(stat -c %a .)"
+	if [ "$owner" != "$(id -u)" ]; then
+		OPS_DIR_ERR="$d is owned by uid $owner, not by uid $(id -u), which writes into it"; cd /; return 1
+	fi
+	if (( 8#$mode & 8#022 )); then
+		OPS_DIR_ERR="$d is mode $mode — writable by others, who could plant names in it"; cd /; return 1
+	fi
+	return 0
+}
+
 # --- Offsite artifacts are encrypted; the restore path must be able to open them.
 #
 # backup.sh ships `<name>.age` / `<name>.gpg` offsite (and nothing else — see

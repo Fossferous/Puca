@@ -208,11 +208,12 @@ with `dual-ship.sh`), the web app (§9), and **backups** (next).
 - **Backups and the health check — install them, this is not optional:**
 
   ```bash
-  sudo cp deploy/ops/{names.sh,backup.sh,restore.sh,restore-drill.sh,healthcheck.sh,ship-offsite.sh} /opt/puca/
+  sudo install -d -o root -g root -m 755 /usr/local/lib/puca-ops   # root-owned, NOT /opt/puca: see deploy/ops/README.md
+  sudo install -o root -g root -m 700 deploy/ops/{names.sh,backup.sh,restore.sh,restore-drill.sh,healthcheck.sh,ship-offsite.sh} /usr/local/lib/puca-ops/
   sudo chmod +x /opt/puca/*.sh
-  sudo cp deploy/ops/puca.cron /etc/cron.d/puca && sudo systemctl enable --now cron
-  sudo /opt/puca/backup.sh && tail -5 /opt/puca/backup.log     # db ok / uploads ok / config ok
-  sudo /opt/puca/restore-drill.sh --local                       # RESTORE DRILL PASSED
+  sudo install -o root -g root -m 644 deploy/ops/puca.cron /etc/cron.d/puca && sudo systemctl enable --now cron
+  sudo /usr/local/lib/puca-ops/backup.sh && tail -5 /opt/puca/backup.log     # db ok / uploads ok / config ok
+  sudo /usr/local/lib/puca-ops/restore-drill.sh --local                       # RESTORE DRILL PASSED
   ```
 
   The durable state is Postgres, `/opt/puca/uploads` (attachment ciphertext)

@@ -12,7 +12,42 @@ ops_require_install healthcheck
 
 LOG=$INSTALL_DIR/health.log
 ts(){ date '+%F %T'; }
-note(){ echo "$(ts) $*" >> "$LOG"; }
+# health.log stays where operators and the docs look for it, but INSTALL_DIR
+# belongs to the service user, so a line goes through ops_append (names.sh) —
+# never through a planted symlink, never blocking on a FIFO — and one that
+# cannot be written reaches syslog instead of vanishing.
+note(){
+	ops_append "$LOG" "$(ts) $*" ||
+		logger -t "$SERVICE_NAME-health" "REFUSED to write $LOG (not a plain file: a symlink, FIFO or directory is in its place): $*"
+}
+
+# --- State this script REWRITES lives where only root can write ----------------
+#
+# The restart counters and the probe's "has ever answered" mark used to be
+# `.<unit>-nrestarts.last` and `.health-http-ok` in INSTALL_DIR, written with
+# `>` — so a symlink planted under one of those names had root truncate
+# whatever it pointed at, every five minutes. They live in OPS_STATE_DIR now
+# (default /var/lib/puca-ops, created 0700 and entered, see names.sh). An old
+# file is read once, without following a link and as digits only, so the move
+# raises no false alarm; then it is unlinked (unlink never follows a link).
+# If the state directory is unusable, the checks still run from the old files
+# but nothing is written, and every run says why.
+OPS_STATE_DIR="${OPS_STATE_DIR:-/var/lib/puca-ops}"
+if ops_enter_private_dir "$OPS_STATE_DIR" create; then
+	STATE_OK=1
+else
+	STATE_OK=0
+	note "FATAL state directory unusable: $OPS_DIR_ERR — restart counters and the probe mark are NOT being kept, so a crash loop repeats its line every run; set OPS_STATE_DIR in /etc/default/puca to a root-owned directory nobody else can write (or remove the offending path and let this create it)"
+	logger -t "$SERVICE_NAME-health" "FATAL: state directory $OPS_STATE_DIR unusable: $OPS_DIR_ERR"
+fi
+
+#   read_count <file>  -> the digits at the start of a small state file, read
+#   without following a symlink or blocking on a FIFO; 0 when there are none.
+read_count() {
+	local v
+	v="$(dd if="$1" iflag=nofollow,nonblock bs=64 count=1 status=none 2>/dev/null | head -n 1 | tr -cd '0-9' | cut -c1-12)"
+	echo "${v:-0}"
+}
 
 # --- Crash-loop detector, shared by every unit below ---------------------------
 #
@@ -41,16 +76,27 @@ note(){ echo "$(ts) $*" >> "$LOG"; }
 # Detection only writes health.log + syslog; the fix is never automated,
 # because a crash loop, by definition, survives restarting.
 #
-#   check_restart_loop <unit> <state-file> <what is down while it loops>
+#   check_restart_loop <unit> <what is down while it loops> [old state file]
+#
+# The counter is kept as nrestarts.<unit> in OPS_STATE_DIR (the current
+# directory, when STATE_OK). The old file defaults to the name it had in
+# INSTALL_DIR; the waker's differs, and is passed.
 check_restart_loop() {
-	local unit="$1" state="$2" consequence="$3" now prev
+	local unit="$1" consequence="$2" old="${3:-$INSTALL_DIR/.$1-nrestarts.last}" now prev
 	now=$(systemctl show "$unit" -p NRestarts --value 2>/dev/null)
-	prev=$(cat "$state" 2>/dev/null || echo 0)
+	if [ "$STATE_OK" = 1 ] && [ -f "nrestarts.$unit" ]; then
+		prev=$(read_count "nrestarts.$unit")
+	else
+		prev=$(read_count "$old")
+	fi
 	if [ "${now:-0}" -gt "${prev:-0}" ] 2>/dev/null; then
 		note "$unit RESTARTED BY SYSTEMD (NRestarts $prev -> $now) — if this line repeats, it is crash-looping and $consequence; check: journalctl -u $unit | grep -E 'VersionMismatch|panic|SIGSYS'"
 		logger -t "$SERVICE_NAME-health" "$unit restarted by systemd (NRestarts=$now); repeated lines = crash loop, $consequence"
 	fi
-	echo "${now:-0}" > "$state" 2>/dev/null || true
+	if [ "$STATE_OK" = 1 ]; then
+		echo "${now:-0}" > "nrestarts.$unit" 2>/dev/null || true
+		rm -f -- "$old" 2>/dev/null || true
+	fi
 }
 
 # --- The backend ----------------------------------------------------------------
@@ -61,25 +107,36 @@ check_restart_loop() {
 # five minutes, forever, on a service that is perfectly healthy. So the first
 # success is remembered, and until it has happened once a failure is reported
 # as FATAL config rather than acted on.
-HEALTH_OK_MARK=$INSTALL_DIR/.health-http-ok
+#
+# The mark is http-ok.<service> in OPS_STATE_DIR. The old INSTALL_DIR mark
+# still counts when it is a plain file (never a link) — so the move cannot turn
+# a host's real outage into a "never succeeded" non-restart — and goes once the
+# new one exists. Planting it gains nothing: it only permits the restart that
+# a first success permits anyway.
+HEALTH_OK_MARK=http-ok.$SERVICE_NAME
+OLD_OK_MARK=$INSTALL_DIR/.health-http-ok
+health_ok_seen() {
+	{ [ "$STATE_OK" = 1 ] && [ -f "$HEALTH_OK_MARK" ]; } || { [ -f "$OLD_OK_MARK" ] && [ ! -L "$OLD_OK_MARK" ]; }
+}
 restart=0
 if ! systemctl is-active --quiet "$SERVICE_NAME"; then
 	note "service inactive -> restart"; restart=1
 elif ! curl -sf -o /dev/null --max-time 5 "$HEALTH_URL"; then
-	if [ -f "$HEALTH_OK_MARK" ]; then
+	if health_ok_seen; then
 		note "HTTP check failed (service up) -> restart"; restart=1
 	else
 		note "FATAL HTTP probe at $HEALTH_URL has NEVER succeeded on this host — check PORT/BIND_ADDR in $INSTALL_DIR/.env, or set HEALTH_URL in /etc/default/puca to the listener; NOT restarting a service over a probe that may be misconfigured"
 		logger -t "$SERVICE_NAME-health" "FATAL: HTTP probe $HEALTH_URL has never succeeded; check PORT/BIND_ADDR or HEALTH_URL; not restarting"
 	fi
-else
+elif [ "$STATE_OK" = 1 ]; then
 	[ -f "$HEALTH_OK_MARK" ] || : > "$HEALTH_OK_MARK" 2>/dev/null || true
+	[ -f "$HEALTH_OK_MARK" ] && rm -f -- "$OLD_OK_MARK" 2>/dev/null || true
 fi
 if [ "$restart" = "1" ]; then
 	systemctl restart "$SERVICE_NAME"
 	logger -t "$SERVICE_NAME-health" "$SERVICE_NAME unhealthy; restarted"
 fi
-check_restart_loop "$SERVICE_NAME" "$INSTALL_DIR/.$SERVICE_NAME-nrestarts.last" "the API is down"
+check_restart_loop "$SERVICE_NAME" "the API is down"
 
 sudo -u postgres pg_isready -q || note "postgres not ready"
 
@@ -99,19 +156,19 @@ supervise_optional_unit() {
 		systemctl restart "$unit"
 		logger -t "$SERVICE_NAME-health" "$unit unhealthy; restarted"
 	fi
-	check_restart_loop "$unit" "$INSTALL_DIR/.$unit-nrestarts.last" "$consequence"
+	check_restart_loop "$unit" "$consequence"
 }
 
 # The LAN waker (home box only; the unit simply doesn't exist elsewhere).
-# Its state file keeps the name it has always had, so the counter survives
-# this refactor without a spurious first-run alarm.
+# Its old state file had its own name, passed so the counter carries over
+# without a spurious first-run alarm.
 if systemctl is-enabled --quiet "$SERVICE_NAME-waker" 2>/dev/null; then
 	if ! systemctl is-active --quiet "$SERVICE_NAME-waker"; then
 		note "$SERVICE_NAME-waker inactive -> restart"
 		systemctl restart "$SERVICE_NAME-waker"
 		logger -t "$SERVICE_NAME-health" "$SERVICE_NAME-waker unhealthy; restarted"
 	fi
-	check_restart_loop "$SERVICE_NAME-waker" "$INSTALL_DIR/.waker-nrestarts.last" "Wake is down"
+	check_restart_loop "$SERVICE_NAME-waker" "Wake is down" "$INSTALL_DIR/.waker-nrestarts.last"
 	# RUNNING IS NOT THE SAME AS WORKING, and this is the one unit where the
 	# difference is invisible from outside. A waker whose credential the server
 	# refuses keeps its process, keeps its unit active, and retries for ever —
@@ -124,11 +181,52 @@ if systemctl is-enabled --quiet "$SERVICE_NAME-waker" 2>/dev/null; then
 	# Any 4xx on the dial is the same verdict — turned away, needs a human — so
 	# count rather than parse. Both wordings are matched: the old one said
 	# "connect failed", the current one says "connect REFUSED".
-	waker_refusals=$(journalctl -u "$SERVICE_NAME-waker" --since "-15min" --no-pager 2>/dev/null |
+	# short-unix stamps each line with epoch seconds for the dial check below;
+	# the plain read is a fallback so the refusal count never depends on it.
+	waker_journal=$(journalctl -u "$SERVICE_NAME-waker" --since "-15min" --no-pager -o short-unix 2>/dev/null) ||
+		waker_journal=$(journalctl -u "$SERVICE_NAME-waker" --since "-15min" --no-pager 2>/dev/null || true)
+	waker_refusals=$(printf '%s\n' "$waker_journal" |
 		grep -cE 'connect (failed: HTTP error: 4|REFUSED: HTTP 4)' || true)
 	if [ "${waker_refusals:-0}" -ge 5 ]; then
 		note "$SERVICE_NAME-waker is RUNNING BUT REFUSED ($waker_refusals refusals in 15 min) — it is up and being turned away, so Wake is dead while every other check passes; re-ship it (deploy/ops/ship-waker.sh) and check its enrolment"
 		logger -t "$SERVICE_NAME-health" "$SERVICE_NAME-waker refused $waker_refusals times in 15min; running but locked out"
+	fi
+	# RUNNING BUT UNABLE TO DIAL is the same blindness with a different cause.
+	# A container restart left one box with a resolver config that could not
+	# resolve anything; its waker logged "connect failed: IO error: failed to
+	# lookup address information: Temporary failure in name resolution" once a
+	# minute, about 700 times, while the unit stayed active — Wake was dead for
+	# eleven hours and the check above said nothing, because it counts only 4xx.
+	#
+	# What is measured is the RUN of dial failures since the last line proving
+	# the socket came up ("connected" / "ready to wake"), so a waker that has
+	# already recovered is silent however many failures precede the recovery.
+	# The verdict is TIME without a connection, not a count: a resolver that
+	# fails fast logs about one a minute (the backoff is 1, 5, 15, 30, then
+	# 60 s), but a black-holed route spends ~2 minutes in each TCP connect, so
+	# any count that catches the first would never see the second. Ten minutes
+	# and at least three dials is two check cycles past a blip, and a standing
+	# outage then repeats on every run, like the FATAL lines below. A line with
+	# no epoch stamp (the fallback read) has no age, so it never trips this.
+	# "connect failed: HTTP error: 4xx" is the old binary's refusal: it stays
+	# with the check above and its wording, and does not count here.
+	waker_dial=$(printf '%s\n' "$waker_journal" | awk -v now="$(date +%s)" '
+		/\[waker\] connected|ready to wake/ { n = 0; last = ""; next }
+		/connect failed: HTTP error: 4/     { next }
+		/connect failed/ {
+			if (!n) first = ($1 ~ /^[0-9]+(\.[0-9]*)?$/) ? $1 + 0 : now
+			n++; last = $0; sub(/.*connect failed: /, "", last)
+		}
+		END {
+			gsub(/[[:cntrl:]]/, "", last)
+			print n + 0
+			print (n ? int((now - first) / 60) : 0)
+			print substr(last, 1, 200)
+		}')
+	{ IFS= read -r waker_dial_failures; IFS= read -r waker_dial_minutes; IFS= read -r waker_dial_last; } <<<"$waker_dial"
+	if [ "${waker_dial_failures:-0}" -ge 3 ] && [ "${waker_dial_minutes:-0}" -ge 10 ]; then
+		note "$SERVICE_NAME-waker is RUNNING BUT CANNOT CONNECT ($waker_dial_failures failed dials in a row, no connection for ${waker_dial_minutes}+ min) — Wake is dead while every other check passes; the likely cause is DNS or the network on THIS box, not the waker: check /etc/resolv.conf and that the server's name resolves here (getent hosts <server>). Last error: ${waker_dial_last:-?}"
+		logger -t "$SERVICE_NAME-health" "$SERVICE_NAME-waker failed to connect $waker_dial_failures times in a row over ${waker_dial_minutes}+ min; likely DNS/network. Last: ${waker_dial_last:-?}"
 	fi
 fi
 
@@ -151,14 +249,30 @@ if systemctl is-enabled --quiet livekit 2>/dev/null && systemctl is-active --qui
 		logger -t "$SERVICE_NAME-health" "livekit active but $LIVEKIT_PROBE_URL unreachable"
 	fi
 fi
+TURNSERVER_CONF="${TURNSERVER_CONF:-/etc/turnserver.conf}"
 if systemctl is-enabled --quiet coturn 2>/dev/null && systemctl is-active --quiet coturn; then
-	turn_port="$(sed -n 's/^listening-port=\([0-9]*\).*/\1/p' /etc/turnserver.conf 2>/dev/null | head -1)"
+	turn_port="$(sed -n 's/^listening-port=\([0-9]*\).*/\1/p' "$TURNSERVER_CONF" 2>/dev/null | head -1)"
 	COTURN_PROBE_PORT="${COTURN_PROBE_PORT:-${turn_port:-3478}}"
+	# The ADDRESS comes from the config too. With `listening-ip=` set, coturn
+	# binds only the addresses listed — a box that pins its public address
+	# answers there and nowhere else — so a probe of 127.0.0.1 logged "nothing
+	# listens" every five minutes against a relay that was working. Probe the
+	# first listed address; the wildcards mean loopback of the same family.
+	turn_ip="$(sed -n 's/^[[:space:]]*listening-ip[[:space:]]*=[[:space:]]*\([^[:space:]#]*\).*/\1/p' "$TURNSERVER_CONF" 2>/dev/null | head -1)"
+	case "$turn_ip" in
+		''|0.0.0.0) turn_ip=127.0.0.1 ;;
+		::|'[::]')  turn_ip=::1 ;;
+	esac
+	COTURN_PROBE_HOST="${COTURN_PROBE_HOST:-$turn_ip}"
+	# /dev/tcp hands the host to getaddrinfo, which wants a v6 literal bare.
+	COTURN_PROBE_HOST="${COTURN_PROBE_HOST#\[}"; COTURN_PROBE_HOST="${COTURN_PROBE_HOST%\]}"
+	case "$COTURN_PROBE_HOST" in *:*) turn_where="[$COTURN_PROBE_HOST]:$COTURN_PROBE_PORT" ;; *) turn_where="$COTURN_PROBE_HOST:$COTURN_PROBE_PORT" ;; esac
 	# coturn answers TCP on listening-port as well as UDP (unless no-tcp), so a
 	# plain connect is a real "is anything listening" test with no dependency.
-	if ! timeout 3 bash -c "exec 3<>/dev/tcp/127.0.0.1/$COTURN_PROBE_PORT" 2>/dev/null; then
-		note "coturn unit is active but nothing listens on 127.0.0.1:$COTURN_PROBE_PORT — reachable unit, unreachable endpoint; check listening-port in /etc/turnserver.conf and that coturn can READ it (a 600 root-owned file starts coturn with defaults, on 3478, as an open relay)"
-		logger -t "$SERVICE_NAME-health" "coturn active but port $COTURN_PROBE_PORT not listening"
+	# Host and port go in as arguments, never spliced into the script text.
+	if ! timeout 3 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$COTURN_PROBE_HOST" "$COTURN_PROBE_PORT" 2>/dev/null; then
+		note "coturn unit is active but nothing listens on $turn_where — reachable unit, unreachable endpoint; check listening-port and listening-ip in $TURNSERVER_CONF (or set COTURN_PROBE_HOST / COTURN_PROBE_PORT in /etc/default/puca) and that coturn can READ it (a 600 root-owned file starts coturn with defaults, on 3478, as an open relay)"
+		logger -t "$SERVICE_NAME-health" "coturn active but $turn_where not listening"
 	fi
 fi
 

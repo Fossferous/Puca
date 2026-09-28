@@ -34,30 +34,53 @@ the second runs **on your machine** and pushes releases to every server.
   HTTP-hung (probing the port from `.env`); detects a crash-looping unit
   (`NRestarts` climbing) for the backend, coturn, LiveKit and the LAN waker;
   supervises coturn and LiveKit where their units are enabled (restart when
-  down, one liveness probe each); re-asserts the origin firewall **only on a
+  down, one liveness probe each — coturn's on the address its
+  `listening-ip=` names, when it names one); calls out a LAN waker that is
+  running but refused (4xx) or running but unable to connect at all (ten
+  failed dials in a row: DNS or the network on that box); re-asserts the origin firewall **only on a
   host where ufw was configured** (an SSH allow rule in `ufw show added`, or
   `OPS_MANAGE_UFW=1`); checks Postgres; and on a host behind Cloudflare
   asserts that the Caddyfile carries the global `servers { trusted_proxies …
   client_ip_headers CF-Connecting-IP }` block from
   `deploy/cloudflare/caddy-behind-cloudflare.snippet` — without it every
   per-IP rate limit is one bucket for the whole Cloudflare edge, and nothing
-  else notices (see **Abuse runbook** §5). Logs to `<install dir>/health.log`.
+  else notices (see **Abuse runbook** §5). Logs to `<install dir>/health.log`;
+  keeps its restart counters in `/var/lib/puca-ops`.
 - `puca.cron` — the `/etc/cron.d/puca` schedule wiring backup + health up.
 - `ship-offsite.sh` — the rclone uploader `backup.sh` calls when
   `OFFSITE_CMD` points at it (see **Offsite**).
 - `add-webapp-csp.py` — adds the Content-Security-Policy to the web app's
   Caddy vhost (see **CSP**).
 
-Install:
+Install — into a ROOT-OWNED directory, not the install dir:
 
 ```bash
-sudo cp deploy/ops/{names.sh,backup.sh,restore.sh,restore-drill.sh,healthcheck.sh,ship-offsite.sh} /opt/puca/
-sudo chmod +x /opt/puca/*.sh
-sudo cp deploy/ops/puca.cron /etc/cron.d/puca
+sudo install -d -o root -g root -m 755 /usr/local/lib/puca-ops
+sudo install -o root -g root -m 700 deploy/ops/{names.sh,backup.sh,restore.sh,restore-drill.sh,healthcheck.sh,ship-offsite.sh} /usr/local/lib/puca-ops/
+sudo install -o root -g root -m 644 deploy/ops/puca.cron /etc/cron.d/puca
 sudo systemctl enable --now cron
-sudo /opt/puca/backup.sh && tail -5 /opt/puca/backup.log      # db ok / uploads ok / config ok
-sudo /opt/puca/restore-drill.sh --local                        # must print RESTORE DRILL PASSED
+sudo /usr/local/lib/puca-ops/backup.sh && tail -5 /opt/puca/backup.log   # db ok / uploads ok / config ok
+sudo /usr/local/lib/puca-ops/restore-drill.sh --local                     # must print RESTORE DRILL PASSED
 ```
+
+**Why not `/opt/puca`.** These scripts run as root, and `/opt/puca` belongs to
+the service user (`provision.sh` chowns it to `puca`). Whoever owns a directory
+can replace any file in it, so a root-run script kept there is that user's to
+rewrite. The scripts also never trust a path in it: `health.log` and
+`backup.log` are appended without following a symlink, the backups directory is
+entered and proven root's own before a dump is written into it or taken from
+it, uploads are restored through a private staging directory, and the health
+check's restart counters live in `/var/lib/puca-ops` (created `0700`;
+`OPS_STATE_DIR` moves it). Today a compromised backend cannot reach any of
+those names — `puca.service` runs with `ProtectSystem=strict` and may write
+only `uploads/` and `releases/` — but that is one line of a unit file, and not
+every host was built from it.
+
+**Moving an existing install.** Copy the scripts as above, point both lines of
+your cron file at `/usr/local/lib/puca-ops/`, then delete the old copies from
+the install dir. Nothing else moves: the logs stay where they were, and the old
+`.<unit>-nrestarts.last` / `.health-http-ok` files are read once (without
+following a link) and removed, so the first run raises no false alarm.
 
 The tests beside them (`*.test.sh`) run offline against stubs — run them on
 any Linux/WSL shell before trusting an edited script:
@@ -86,6 +109,9 @@ DB_USER=sovereign          # the Postgres role that owns the database (restore.s
 # HEALTH_URL=http://127.0.0.1:3000/   # only if PORT/BIND_ADDR in .env are not what to probe
 # OPS_MANAGE_UFW=1                    # force the ufw re-assert (0 = never touch ufw)
 # COTURN_PROBE_PORT=3479              # default: listening-port from /etc/turnserver.conf
+# COTURN_PROBE_HOST=203.0.113.7       # default: the first listening-ip from that file, else 127.0.0.1
+# OPS_STATE_DIR=/var/lib/puca-ops      # healthcheck.sh's restart counters; must be root's alone (created 0700)
+# TURNSERVER_CONF=/etc/turnserver.conf   # the coturn config both defaults are read from
 # LIVEKIT_PROBE_URL=http://127.0.0.1:7880/   # default: port: from /opt/livekit/livekit.yaml
 # CADDYFILE=/etc/caddy/Caddyfile     # the file the Cloudflare client-IP assertion reads
 # OPS_BEHIND_CLOUDFLARE=1            # force that assertion (0 = never; default: detect from the Caddyfile / cf-origin ufw rules)
@@ -162,7 +188,7 @@ Config lives in `/etc/default/puca-backup` (sourced by the three scripts,
 `chmod 600`, off-repo) so no credentials are committed:
 
 ```sh
-OFFSITE_CMD=/opt/puca/ship-offsite.sh
+OFFSITE_CMD=/usr/local/lib/puca-ops/ship-offsite.sh
 RCLONE_REMOTE=gdrive:puca-backups     # <rclone-remote>:<path>
 BACKUP_AGE_RECIPIENT=age1...
 ```
@@ -178,7 +204,7 @@ needs a browser once to mint a token):
 2. Copy the resulting `rclone.conf` to the box at
    `/root/.config/rclone/rclone.conf`.
 3. Set `OFFSITE_CMD` + `RCLONE_REMOTE` as above; test:
-   `sudo /opt/puca/backup.sh && tail /opt/puca/backup.log` (expect
+   `sudo /usr/local/lib/puca-ops/backup.sh && tail /opt/puca/backup.log` (expect
    `offsite ok (cmd, enc=1)` lines), and `rclone --config /root/.config/rclone/rclone.conf
    lsf gdrive:puca-backups`.
 

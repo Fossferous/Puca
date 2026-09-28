@@ -16,6 +16,7 @@ import { ImageLightbox } from './ImageLightbox';
 import { CheckCircleIcon, CloseIcon, PaperclipIcon, WarningIcon } from './Icons';
 import { saveAttachment } from '../api/saveAttachment';
 import { isAudioMime } from '../notes/model/audioNote';
+import { followOutputDeviceRef } from './settingsStore';
 import './TaskAttachments.css';
 
 interface TaskAttachmentsProps {
@@ -74,11 +75,12 @@ function AttachmentItem({ refItem }: { refItem: TaskAttachmentRef }) {
             </>
         );
     }
+    // Both players sit on the Output Device chosen in Settings, not the OS default.
     if (videoMimeFor(refItem.name, parsed.mime)) {
-        return <video className="ta-video" src={url} controls preload="metadata" title={refItem.name} />;
+        return <video ref={followOutputDeviceRef} className="ta-video" src={url} controls preload="metadata" title={refItem.name} />;
     }
     if (isAudioMime(parsed.mime)) {
-        return <audio className="ta-audio" src={url} controls preload="metadata" title={refItem.name} aria-label={refItem.name} />;
+        return <audio ref={followOutputDeviceRef} className="ta-audio" src={url} controls preload="metadata" title={refItem.name} aria-label={refItem.name} />;
     }
     // A BUTTON, never a link: `download` is ignored by middle-click and
     // "Open link in new tab", and a blob: document inherits this app's origin

@@ -1,9 +1,18 @@
 // Audio feedback for voice actions using Web Audio API
-import { notifEnabled, outputGain } from '../components/settingsStore';
+import { notifEnabled, outputGain, applyOutputDeviceToContext } from '../components/settingsStore';
 import { getToken } from '../api/auth';
 
 let audioContext: AudioContext | null = null;
 let unlockArmed = false;
+/**
+ * Settles once `audioContext` is on the Output Device chosen in Settings.
+ * Every sound waits for it: a fresh context is born on the OS default, and a
+ * ping scheduled before the switch lands would play there — on the wrong
+ * device, or leaked to whatever the default is (a streaming host's virtual
+ * cable, i.e. the TV).
+ */
+let sinkRouted: Promise<void> = Promise.resolve();
+let sinkFollowArmed = false;
 
 /**
  * Chromium (and the desktop WebView2) create an AudioContext SUSPENDED when the
@@ -33,13 +42,33 @@ function armUnlock() {
     document.addEventListener('visibilitychange', nudge);
 }
 
+/**
+ * Follow the chosen Output Device for the page lifetime, the way voice does
+ * (VoicePanel's settingsChanged/devicechange re-apply): a Settings change
+ * moves the next ping, and a chosen device that vanishes and returns is
+ * chased in both directions.
+ */
+function armSinkFollow() {
+    if (sinkFollowArmed || typeof window === 'undefined') return;
+    sinkFollowArmed = true;
+    const follow = () => {
+        if (audioContext && audioContext.state !== 'closed') {
+            sinkRouted = applyOutputDeviceToContext(audioContext);
+        }
+    };
+    window.addEventListener('settingsChanged', follow);
+    navigator.mediaDevices?.addEventListener?.('devicechange', follow);
+}
+
 function getAudioContext(): AudioContext {
     // A closed context (device teardown / renderer suspend) can never play again.
     if (audioContext && audioContext.state === 'closed') audioContext = null;
     if (!audioContext) {
         audioContext = new AudioContext();
+        sinkRouted = applyOutputDeviceToContext(audioContext);
     }
     armUnlock();
+    armSinkFollow();
     return audioContext;
 }
 
@@ -65,15 +94,12 @@ function emitTone(ctx: AudioContext, frequency: number, duration: number, type: 
 // Generate a simple tone
 function playTone(frequency: number, duration: number, type: OscillatorType = 'sine', volume: number = 0.3) {
     const ctx = getAudioContext();
-    if (ctx.state === 'suspended') {
-        // Schedule only AFTER the resume settles: notes queued against a frozen
-        // clock are timestamped in the past and never sound.
-        ctx.resume()
-            .then(() => emitTone(ctx, frequency, duration, type, volume))
-            .catch(() => { /* no user gesture yet — the unlock listeners retry */ });
-        return;
-    }
-    emitTone(ctx, frequency, duration, type, volume);
+    // Schedule only once the context is on the chosen device (sinkRouted) and,
+    // if suspended, AFTER the resume settles: notes queued against a frozen
+    // clock are timestamped in the past and never sound.
+    Promise.all([sinkRouted, ctx.state === 'suspended' ? ctx.resume() : undefined])
+        .then(() => emitTone(ctx, frequency, duration, type, volume))
+        .catch(() => { /* no user gesture yet — the unlock listeners retry */ });
 }
 
 // Play two notes in sequence for a pleasant sound
@@ -181,6 +207,7 @@ export async function playCustomUserSound(url: string): Promise<boolean> {
         if (ctx.state === 'suspended') {
             await ctx.resume(); // schedule only against a live clock (see playTone)
         }
+        await sinkRouted; // and only on the chosen device (see playTone)
         let buf = clipCache.get(url);
         if (!buf) {
             // /files is authenticated — an unauthenticated fetch 401s and

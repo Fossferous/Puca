@@ -16,6 +16,21 @@ one-line summary; this file is the full story. Versions follow
   connect; their logs keep saying why a request failed (refused, name not
   found, certificate rejected, timed out), which the new library no longer
   does by itself. Server and waker only: no app update is needed for this.
+- **Self-hosting: the maintenance scripts no longer trust the install
+  folder.** The backup, restore and health-check scripts run as the
+  administrator, but the folder they worked in belongs to the Púca service
+  account. Had that account ever been taken over, it could have swapped a
+  log, a counter file or the backups folder for a link and made the next
+  run overwrite or change files anywhere on the server. They now refuse to
+  write through such a link, keep the health check's counters in a folder
+  only the administrator can write (`/var/lib/puca-ops`), take a local
+  restore drill's backup only from a folder only the administrator can
+  write, and unpack restored attachments somewhere private before moving
+  them into place. The setup guide now installs the scripts into
+  `/usr/local/lib/puca-ops` instead of the install folder; `deploy/ops/README.md`
+  says how to move an existing install. Logs stay where they were.
+  Installs that use the shipped service file were not exposed in practice:
+  it already stops the server process writing to that folder.
 
 ### Fixed
 - **Removing someone from a call works after the server restarts.** The
@@ -43,6 +58,22 @@ one-line summary; this file is the full story. Versions follow
   After a kick, ban or permission change, it used to report the person as
   removed from the voice server even when that failed. It now says so only
   when the voice server confirms it.
+- **Stream audio and notification sounds use your chosen Output Device.**
+  Settings > Voice & Video > Output Device used to apply to voice only. The
+  sound of a stream you were watching, notification sounds (join and leave,
+  mute and deafen, streams starting and stopping, messages, mentions,
+  people's custom join clips) and the preview of your own join clip all
+  played on the system's default device instead. So if you picked a
+  headset, they could come out of your speakers, or out of whatever else
+  was the default at the time, like a TV. They now follow the device you
+  chose and move when you change it. So do the players for video and audio
+  attachments in chat and Tasks, clips posted in chat, the clip preview
+  before you post, and voice notes in Púca Notes on the web. If the chosen
+  device is unplugged, all of these fall back to the default, and they move
+  back when it returns, the same way voice does. (The Púca Notes Android app
+  has no Output Device setting, so it always uses the default.) Switching
+  the Output Device quickly, or a device reconnecting in a burst, could also
+  leave voice on the wrong device. That is fixed too.
 
 ## 0.9.823 — 2026-09-26
 

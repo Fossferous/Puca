@@ -130,10 +130,27 @@ sudo -u postgres createdb -O "$DB_OWNER" "$DB_NAME"
 # otherwise hint something was wrong.
 gunzip -c "$DB_GZ" | sudo -u postgres psql -q -v ON_ERROR_STOP=1 "$DB_NAME"
 
+# The uploads are extracted where only root can reach and RENAMED into place.
+# Extracting straight into INSTALL_DIR — a directory the service user owns —
+# let that user swap `uploads` for a symlink after tar had created it, and
+# steer the rest of the extraction (member names it chose when it wrote the
+# files being restored) anywhere, as root; `chown -R` over the same path had
+# the same window. A fresh mktemp directory is root's alone (0700, random
+# name, entered and checked — names.sh), so nothing can be swapped under
+# either; the final rename is one step, and it refuses rather than follow a
+# symlink put in the way.
 if [ -n "$UP_TGZ" ]; then
+	UP_ABS="$(readlink -f -- "$UP_TGZ")"
+	STAGE="$(mktemp -d "$INSTALL_DIR/.restore-uploads.XXXXXX")"
 	rm -rf "$UPLOADS"
-	tar -xzf "$UP_TGZ" -C "$(dirname "$UPLOADS")"
-	chown -R "$SERVICE_USER:$SERVICE_USER" "$UPLOADS" 2>/dev/null || true
+	(
+		ops_enter_private_dir "$STAGE" || { echo "FATAL(restore): cannot stage the uploads privately: $OPS_DIR_ERR" >&2; exit 1; }
+		tar -xzf "$UP_ABS"
+		chown -R "$SERVICE_USER:$SERVICE_USER" uploads 2>/dev/null || true
+		rm -rf -- "$UPLOADS"   # whatever appeared there meanwhile; rm never follows a link
+		mv -T -- uploads "$UPLOADS"
+	)
+	rmdir -- "$STAGE" 2>/dev/null || true
 fi
 
 systemctl start "$SERVICE_NAME"

@@ -23,7 +23,7 @@ count() { printf '%s' "$1" | grep -cF -- "$2"; }
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"; [ -n "${LISTENER:-}" ] && kill "$LISTENER" 2>/dev/null' EXIT
-INSTALL="$TMP/install"; STATE="$TMP/state"; CALLS="$TMP/calls.log"
+INSTALL="$TMP/install"; STATE="$TMP/state"; CALLS="$TMP/calls.log"; OPSSTATE="$TMP/opsstate"
 mkdir -p "$INSTALL" "$STATE" "$TMP/bin"
 
 # --- stubs ---------------------------------------------------------------------
@@ -69,10 +69,12 @@ while [ $# -gt 0 ]; do case "$1" in -u) shift 2 ;; -*) shift ;; *) break ;; esac
 exec "$@"
 STUB
 # journalctl: prints whatever a case put in journal.<unit>, so the waker's
-# "running but refused" check can be driven without a live journal.
+# checks can be driven without a live journal. With no-short-unix present it
+# rejects `-o short-unix` the way a journalctl without that mode would.
 cat > "$TMP/bin/journalctl" <<'STUB'
 #!/usr/bin/env bash
 echo "journalctl $*" >> "$CALLS"
+case " $* " in *" short-unix "*) [ -f "$HC_STATE/no-short-unix" ] && { echo "Unknown output format" >&2; exit 1; } ;; esac
 u=""
 while [ $# -gt 0 ]; do case "$1" in -u) u="$2"; shift 2 ;; *) shift ;; esac; done
 cat "$HC_STATE/journal.$u" 2>/dev/null || true
@@ -83,17 +85,18 @@ chmod +x "$TMP/bin"/*
 
 LOGF="$INSTALL/health.log"
 reset() {   # a healthy, already-monitored host, with ufw active so it stays out of the way
-	rm -rf "$STATE"; mkdir -p "$STATE"
-	rm -f "$CALLS" "$LOGF" "$INSTALL"/.[a-z]* "$INSTALL/.env" "$TMP/Caddyfile"
+	rm -rf "$STATE" "$OPSSTATE"; mkdir -p "$STATE"
+	rm -f "$CALLS" "$LOGF" "$INSTALL"/.[a-z]* "$INSTALL/.env" "$TMP/Caddyfile" "$TMP/turnserver.conf"
 	: > "$CALLS"
 	touch "$STATE/active.sandbox"
 	echo any > "$STATE/curl-ok"
 	echo "Status: active" > "$STATE/ufw-status"
 	touch "$INSTALL/.health-http-ok"
 }
-# CADDYFILE is pinned into the sandbox so the real /etc/caddy/Caddyfile on the
-# machine running this can never leak into a case (absent = no Caddy here).
-run() { ( cd "$HERE" && CALLS="$CALLS" HC_STATE="$STATE" SERVICE_NAME=sandbox INSTALL_DIR="$INSTALL" CADDYFILE="$TMP/Caddyfile" PATH="$TMP/bin:$PATH" "$@" bash ./healthcheck.sh 2>&1 ); }
+# CADDYFILE, TURNSERVER_CONF and OPS_STATE_DIR are pinned into the sandbox so the
+# real files on the machine running this can never leak into a case (absent =
+# not installed), and /var/lib is never touched.
+run() { ( cd "$HERE" && CALLS="$CALLS" HC_STATE="$STATE" SERVICE_NAME=sandbox INSTALL_DIR="$INSTALL" CADDYFILE="$TMP/Caddyfile" TURNSERVER_CONF="$TMP/turnserver.conf" OPS_STATE_DIR="$OPSSTATE" PATH="$TMP/bin:$PATH" "$@" bash ./healthcheck.sh 2>&1 ); }
 logtxt() { cat "$LOGF" 2>/dev/null; }
 calls() { cat "$CALLS"; }
 
@@ -145,11 +148,11 @@ reset; : > "$STATE/curl-ok"; rm -f "$INSTALL/.health-http-ok"
 run env
 check "a probe that has NEVER succeeded is reported as config, not restarted" "$([ "$(has "$(calls)" 'systemctl restart sandbox')" = 0 ] && echo 1 || echo 0)" "$(calls)"
 check "and the log names the URL and the knobs"                              "$(has "$(logtxt)" 'has NEVER succeeded')" "$(logtxt)"
-check "with no marker left behind"                                           "$([ ! -f "$INSTALL/.health-http-ok" ] && echo 1 || echo 0)"
+check "with no marker left behind"                                           "$([ ! -f "$INSTALL/.health-http-ok" ] && [ ! -f "$OPSSTATE/http-ok.sandbox" ] && echo 1 || echo 0)"
 
 reset; rm -f "$INSTALL/.health-http-ok"
 run env
-check "the first success writes the marker" "$([ -f "$INSTALL/.health-http-ok" ] && echo 1 || echo 0)"
+check "the first success writes the marker (in the state directory)" "$([ -f "$OPSSTATE/http-ok.sandbox" ] && echo 1 || echo 0)" "$(ls -la "$OPSSTATE" 2>&1)"
 
 reset
 run env
@@ -183,7 +186,7 @@ check "it does not restart over a counter"        "$([ "$(has "$(calls)" 'system
 reset; touch "$STATE/enabled.sandbox-waker" "$STATE/active.sandbox-waker"; echo 5 > "$STATE/nrestarts.sandbox-waker"
 run env
 check "the waker path still fires (the refactor did not regress it)" "$(has "$(logtxt)" 'sandbox-waker RESTARTED BY SYSTEMD (NRestarts 0 -> 5)')" "$(logtxt)"
-check "and keeps its historical state file name"                    "$([ "$(cat "$INSTALL/.waker-nrestarts.last" 2>/dev/null)" = 5 ] && echo 1 || echo 0)"
+check "and its counter is kept in the state directory"             "$([ "$(cat "$OPSSTATE/nrestarts.sandbox-waker" 2>/dev/null)" = 5 ] && echo 1 || echo 0)"
 
 reset; touch "$STATE/enabled.sandbox-waker"
 run env
@@ -213,13 +216,119 @@ check "the pre-fix wording is counted as well" "$(has "$(logtxt)" 'RUNNING BUT R
 reset; touch "$STATE/enabled.sandbox-waker" "$STATE/active.sandbox-waker"
 echo "[waker] attested as abc - ready to wake" > "$STATE/journal.sandbox-waker"
 run env
-check "a healthy waker says nothing" "$([ "$(has "$(logtxt)" 'RUNNING BUT REFUSED')" = 0 ] && echo 1 || echo 0)" "$(logtxt)"
+check "a healthy waker says nothing" "$([ "$(has "$(logtxt)" 'RUNNING BUT')" = 0 ] && echo 1 || echo 0)" "$(logtxt)"
 
 # And a couple of blips are not a lockout.
 reset; touch "$STATE/enabled.sandbox-waker" "$STATE/active.sandbox-waker"
 for _ in 1 2; do echo "[waker] connect REFUSED: HTTP 401" >> "$STATE/journal.sandbox-waker"; done
 run env
 check "two refusals in fifteen minutes is below the bar" "$([ "$(has "$(logtxt)" 'RUNNING BUT REFUSED')" = 0 ] && echo 1 || echo 0)" "$(logtxt)"
+
+# RUNNING BUT UNABLE TO DIAL — the blind spot the 4xx count left. A box whose
+# resolver broke at a container restart logged this once a minute, ~700 times,
+# with its unit active, and Wake was dead for eleven hours in total silence.
+# Lines are shaped as `journalctl -o short-unix` prints them: epoch, host,
+# unit, message — the verdict is how long since the waker last connected.
+DNSFAIL='[waker] connect failed: IO error: failed to lookup address information: Temporary failure in name resolution'
+BLACKHOLE='[waker] connect failed: IO error: Connection timed out (os error 110)'
+READY='[waker] attested as dev-1 — ready to wake'
+CONNECTED='[waker] connected; waiting for the attestation challenge'
+#   wj <seconds ago> <message>          one journal line
+#   wj_run <count> <oldest ago> <step> <message>   a run, oldest first
+wj() { echo "$((NOW - $1)).000000 box sandbox-waker[812]: $2" >> "$STATE/journal.sandbox-waker"; }
+wj_run() { local i; for ((i = 0; i < $1; i++)); do wj "$(($2 - i * $3))" "$4"; done; }
+waker_up() { reset; touch "$STATE/enabled.sandbox-waker" "$STATE/active.sandbox-waker"; NOW=$(date +%s); }
+NOCONN='RUNNING BUT CANNOT CONNECT'
+noconn_quiet() { [ "$(has "$(logtxt)" "$NOCONN")" = 0 ] && echo 1 || echo 0; }
+
+# The incident as it was: one failure a minute, for longer than the window.
+waker_up; wj_run 14 840 60 "$DNSFAIL"
+run env
+check "a waker that cannot even dial is called out"          "$(has "$(logtxt)" "$NOCONN")" "$(logtxt)"
+check "and names DNS/the network as the likely cause"        "$(has "$(logtxt)" 'likely cause is DNS or the network')" "$(logtxt)"
+check "and quotes the last error, so the cause is on screen" "$(has "$(logtxt)" 'Last error: IO error: failed to lookup address information: Temporary failure in name resolution')" "$(logtxt)"
+check "and counts the run and how long it has lasted"        "$(has "$(logtxt)" '(14 failed dials in a row, no connection for 14+ min)')" "$(logtxt)"
+check "and reaches syslog"                                   "$(has "$(calls)" 'logger -t sandbox-health sandbox-waker failed to connect 14 times in a row over 14+ min')" "$(calls)"
+check "and read the journal with epoch stamps"               "$(has "$(calls)" '-o short-unix')" "$(calls)"
+check "and is NOT blamed on enrolment (the 4xx wording)"      "$([ "$(has "$(logtxt)" 'RUNNING BUT REFUSED')" = 0 ] && echo 1 || echo 0)" "$(logtxt)"
+check "and is NOT restarted over it"                          "$([ "$(has "$(calls)" 'systemctl restart sandbox-waker')" = 0 ] && echo 1 || echo 0)" "$(calls)"
+
+# A BLACK-HOLED ROUTE fails slowly: ~2 minutes inside each TCP connect plus the
+# 60 s backoff is five failures a window. A count threshold never sees it.
+waker_up; wj_run 5 780 180 "$BLACKHOLE"
+run env
+check "slow failures (a black-holed route) are caught by time, not count" "$(has "$(logtxt)" '(5 failed dials in a row, no connection for 13+ min)')" "$(logtxt)"
+
+# A BLIP is not an outage: the backoff packs failures in fast at first, so a
+# count alone would fire on a few minutes of trouble.
+waker_up; wj_run 9 400 45 "$DNSFAIL"
+run env
+check "nine quick failures over under seven minutes stay below the bar" "$(noconn_quiet)" "$(logtxt)"
+# The bar itself: ten minutes, and at least three dials.
+waker_up; wj_run 3 610 300 "$DNSFAIL"
+run env
+check "three dials over ten minutes is at the bar"    "$(has "$(logtxt)" "$NOCONN")" "$(logtxt)"
+waker_up; wj_run 3 570 280 "$DNSFAIL"
+run env
+check "three dials over nine and a half is below it" "$(noconn_quiet)" "$(logtxt)"
+waker_up; wj_run 2 720 600 "$DNSFAIL"
+run env
+check "two dials, however far apart, are below it"   "$(noconn_quiet)" "$(logtxt)"
+
+# POSITIVE CONTROLS: a waker that has already RECOVERED is silent, however many
+# failures came before — whichever success line it printed last.
+waker_up; wj_run 14 840 60 "$DNSFAIL"; wj 20 "$CONNECTED"; wj 19 "$READY"
+run env
+check "failures followed by 'ready to wake' are silent" "$(noconn_quiet)" "$(logtxt)"
+waker_up; wj_run 14 840 60 "$DNSFAIL"; wj 20 "$CONNECTED"
+run env
+check "failures followed by 'connected' are silent"     "$(noconn_quiet)" "$(logtxt)"
+
+# ...and the clock starts at the first failure AFTER the last success, not at
+# the top of the window: up, then down for eleven minutes, is down.
+waker_up; wj 880 "$CONNECTED"; wj 879 "$READY"; wj_run 12 660 55 "$DNSFAIL"
+run env
+check "a success EARLIER in the window does not hide the run after it" "$(has "$(logtxt)" '(12 failed dials in a row, no connection for 11+ min)')" "$(logtxt)"
+waker_up; wj_run 6 890 60 "$DNSFAIL"; wj 500 "$CONNECTED"; wj_run 5 400 60 "$DNSFAIL"
+run env
+check "a failure BEFORE the last success does not start the clock"     "$(noconn_quiet)" "$(logtxt)"
+
+# The old binary's refusal reads "connect failed: HTTP error: 401" — it belongs
+# to the 4xx check and its wording, and must not ALSO be called a DNS problem.
+waker_up; wj_run 14 840 60 "[waker] connect failed: HTTP error: 401 Unauthorized"
+run env
+check "old-wording 4xx: the refusal line fires"              "$(has "$(logtxt)" 'RUNNING BUT REFUSED')" "$(logtxt)"
+check "old-wording 4xx: it is NOT counted as a dial failure" "$(noconn_quiet)" "$(logtxt)"
+waker_up; wj_run 14 840 60 "[waker] connect REFUSED: HTTP 401 — too old (refusal 3 of 15) — this waker is being turned away"
+run env
+check "new-wording 4xx: NOT counted as a dial failure"       "$(noconn_quiet)" "$(logtxt)"
+
+# A 5xx from the old binary is the server or its proxy, not this waker: it is a
+# failed dial like any other and counts.
+waker_up; wj_run 12 780 60 "[waker] connect failed: HTTP error: 502 Bad Gateway"
+run env
+check "old-wording 5xx counts as a failed dial" "$(has "$(logtxt)" "$NOCONN")" "$(logtxt)"
+check "and not as a refusal"                    "$([ "$(has "$(logtxt)" 'RUNNING BUT REFUSED')" = 0 ] && echo 1 || echo 0)" "$(logtxt)"
+
+# A journalctl without `-o short-unix` must not take the REFUSAL check down
+# with it: the plain read is retried. Unstamped failures have no age, so the
+# dial check stays out of it rather than print a made-up one.
+waker_up; touch "$STATE/no-short-unix"
+for _ in 1 2 3 4 5 6; do echo "Sep 27 14:20:01 box sandbox-waker[812]: [waker] connect REFUSED: HTTP 401" >> "$STATE/journal.sandbox-waker"; done
+run env
+check "fixture sanity: short-unix was tried and refused" "$(has "$(calls)" '-o short-unix')" "$(calls)"
+check "no short-unix: the refusal check still fires"     "$(has "$(logtxt)" 'RUNNING BUT REFUSED')" "$(logtxt)"
+waker_up; touch "$STATE/no-short-unix"
+for _ in 1 2 3; do echo "Sep 27 14:20:01 box sandbox-waker[812]: $DNSFAIL" >> "$STATE/journal.sandbox-waker"; done
+run env
+check "no short-unix: unstamped failures have no age, so they do not guess" "$(noconn_quiet)" "$(logtxt)"
+
+# A journal line is copied into health.log: control characters in it must not
+# be, and a runaway one must not become a runaway log line.
+waker_up; wj_run 4 800 200 "[waker] connect failed: $(printf 'evil\033[2Jreason')$(printf 'x%.0s' $(seq 400))"
+run env
+check "control characters are stripped from the quoted error" "$([ "$(printf '%s' "$(logtxt)" | grep -c $'\033')" = 0 ] && [ "$(has "$(logtxt)" 'evil[2Jreason')" = 1 ] && echo 1 || echo 0)" "$(logtxt)"
+check "and the quote is bounded"                               "$([ "$(printf '%s' "$(logtxt)" | grep -o 'xxxxx*' | awk '{ print length }' | sort -n | tail -1)" -le 200 ] && echo 1 || echo 0)"
 
 echo
 echo "--- coturn / livekit: gated on is-enabled, restarted when down, probed when up ---"
@@ -247,17 +356,107 @@ reset; touch "$STATE/enabled.coturn" "$STATE/active.coturn"
 run env COTURN_PROBE_PORT=34799
 check "active coturn with nothing listening gets a DISTINCT line" "$(has "$(logtxt)" 'coturn unit is active but nothing listens on 127.0.0.1:34799')" "$(logtxt)"
 
-if command -v python3 >/dev/null 2>&1; then
-	python3 -m http.server 34799 --bind 127.0.0.1 >/dev/null 2>&1 &
+#   listen_on <addr> <port>  -> a real TCP listener there (LISTENER = its pid);
+#   returns 1, with nothing left running, if it never became connectable.
+#   A bare accept-and-close socket, not `python3 -m http.server`: that one
+#   reverse-resolves its bind address before listening, which for 127.0.0.2
+#   can outlast the wait below and turn a control into a spurious failure.
+tcp_open() { timeout 1 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$1" "$2" 2>/dev/null; }
+listen_on() {
+	python3 -c '
+import socket, sys
+s = socket.socket(socket.AF_INET6 if ":" in sys.argv[1] else socket.AF_INET)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind((sys.argv[1], int(sys.argv[2])))
+s.listen(16)
+while True:
+    s.accept()[0].close()
+' "$1" "$2" >/dev/null 2>&1 &
 	LISTENER=$!
-	for _ in 1 2 3 4 5 6 7 8 9 10; do timeout 1 bash -c 'exec 3<>/dev/tcp/127.0.0.1/34799' 2>/dev/null && break; sleep 0.3; done
+	for _ in 1 2 3 4 5 6 7 8 9 10; do tcp_open "$1" "$2" && return 0; sleep 0.3; done
+	kill "$LISTENER" 2>/dev/null; LISTENER=""; return 1
+}
+unlisten() { kill "$LISTENER" 2>/dev/null; wait "$LISTENER" 2>/dev/null; LISTENER=""; }
+coturn_quiet() { [ "$(has "$(logtxt)" 'coturn')" = 0 ] && echo 1 || echo 0; }
+
+if command -v python3 >/dev/null 2>&1; then
+	listen_on 127.0.0.1 34799
 	reset; touch "$STATE/enabled.coturn" "$STATE/active.coturn"
 	run env COTURN_PROBE_PORT=34799
-	check "POSITIVE CONTROL: a real listener on the port is silent" "$([ "$(has "$(logtxt)" 'coturn')" = 0 ] && echo 1 || echo 0)" "$(logtxt)"
-	kill "$LISTENER" 2>/dev/null; LISTENER=""
+	check "POSITIVE CONTROL: a real listener on the port is silent" "$(coturn_quiet)" "$(logtxt)"
+	unlisten
+
+	# THE FALSE POSITIVE THIS FIXES: coturn with `listening-ip=` binds ONLY the
+	# listed address. A box pinned to its public address answered there, and a
+	# probe of 127.0.0.1 logged "nothing listens" every five minutes against a
+	# relay that was working. 127.0.0.2 stands in for that address: it is local,
+	# and a listener on it does NOT answer on 127.0.0.1.
+	if listen_on 127.0.0.2 34799; then
+		check "fixture sanity: the listener answers on 127.0.0.2 and NOT on 127.0.0.1" "$(tcp_open 127.0.0.2 34799 && ! tcp_open 127.0.0.1 34799 && echo 1 || echo 0)"
+		reset; touch "$STATE/enabled.coturn" "$STATE/active.coturn"
+		printf '# relay\nlistening-port=34799\nlistening-ip=127.0.0.2\nrelay-ip=127.0.0.2\n' > "$TMP/turnserver.conf"
+		run env
+		check "listening-ip in turnserver.conf is probed there, and a working relay is silent" "$(coturn_quiet)" "$(logtxt)"
+
+		# Several listening-ip lines: the first is the one probed.
+		reset; touch "$STATE/enabled.coturn" "$STATE/active.coturn"
+		printf 'listening-port=34799\nlistening-ip=127.0.0.2\nlistening-ip=127.0.0.3\n' > "$TMP/turnserver.conf"
+		run env
+		check "with several listening-ip lines the FIRST is probed" "$(coturn_quiet)" "$(logtxt)"
+
+		# The knob beats the file.
+		reset; touch "$STATE/enabled.coturn" "$STATE/active.coturn"
+		printf 'listening-port=34799\nlistening-ip=127.0.0.3\n' > "$TMP/turnserver.conf"
+		run env COTURN_PROBE_HOST=127.0.0.2
+		check "COTURN_PROBE_HOST overrides listening-ip" "$(coturn_quiet)" "$(logtxt)"
+
+		# Spaces around '=' and a CRLF file (edited on Windows) still parse.
+		reset; touch "$STATE/enabled.coturn" "$STATE/active.coturn"
+		printf 'listening-port=34799\r\n  listening-ip = 127.0.0.2\r\n' > "$TMP/turnserver.conf"
+		run env
+		check "spaces around '=' and CRLF line endings still parse" "$(coturn_quiet)" "$(logtxt)"
+		unlisten
+	else
+		check "could open a listener on 127.0.0.2 (needed for the listening-ip controls)" 0
+	fi
+
+	# IPv6: /dev/tcp gives the host to getaddrinfo, which takes a v6 literal
+	# bare — the brackets a human writes (and the log prints) must come off.
+	if listen_on ::1 34799; then
+		reset; touch "$STATE/enabled.coturn" "$STATE/active.coturn"
+		printf 'listening-port=34799\nlistening-ip=::1\n' > "$TMP/turnserver.conf"
+		run env
+		check "an IPv6 listening-ip is probed (bare literal)" "$(coturn_quiet)" "$(logtxt)"
+		reset; touch "$STATE/enabled.coturn" "$STATE/active.coturn"
+		run env COTURN_PROBE_PORT=34799 COTURN_PROBE_HOST='[::1]'
+		check "a bracketed COTURN_PROBE_HOST is unwrapped"    "$(coturn_quiet)" "$(logtxt)"
+		unlisten
+	else
+		echo "SKIP  IPv6 coturn controls (no ::1 on this machine)"
+	fi
 else
-	echo "SKIP  coturn positive control (no python3 to open a listener)"
+	echo "SKIP  coturn positive controls (no python3 to open a listener)"
 fi
+
+# The negative side of the same change: the line names the address it probed,
+# so it can never again say 127.0.0.1 about a relay configured elsewhere.
+reset; touch "$STATE/enabled.coturn" "$STATE/active.coturn"
+printf 'listening-port=34798\nlistening-ip=127.0.0.3\n' > "$TMP/turnserver.conf"
+run env
+check "nothing on the listening-ip -> the line names THAT address" "$(has "$(logtxt)" 'coturn unit is active but nothing listens on 127.0.0.3:34798')" "$(logtxt)"
+check "and names both knobs"                                       "$(has "$(logtxt)" 'COTURN_PROBE_HOST / COTURN_PROBE_PORT')" "$(logtxt)"
+reset; touch "$STATE/enabled.coturn" "$STATE/active.coturn"
+printf 'listening-port=34798\nlistening-ip=2001:db8::5\n' > "$TMP/turnserver.conf"
+run env
+check "an IPv6 address is printed bracketed, with its port" "$(has "$(logtxt)" 'nothing listens on [2001:db8::5]:34798')" "$(logtxt)"
+reset; touch "$STATE/enabled.coturn" "$STATE/active.coturn"
+printf 'listening-port=34798\n#listening-ip=127.0.0.3\n' > "$TMP/turnserver.conf"
+run env
+check "a commented-out listening-ip is ignored (loopback)" "$(has "$(logtxt)" 'nothing listens on 127.0.0.1:34798')" "$(logtxt)"
+reset; touch "$STATE/enabled.coturn" "$STATE/active.coturn"
+printf 'listening-port=34798\nlistening-ip=0.0.0.0\n' > "$TMP/turnserver.conf"
+run env
+check "listening-ip=0.0.0.0 probes loopback" "$(has "$(logtxt)" 'nothing listens on 127.0.0.1:34798')" "$(logtxt)"
 
 reset; touch "$STATE/enabled.coturn"
 run env
@@ -268,6 +467,88 @@ run env COTURN_PROBE_PORT=1 ; : > "$LOGF"
 echo 2 > "$STATE/nrestarts.coturn"
 run env COTURN_PROBE_PORT=1
 check "the crash-loop detector runs for coturn too" "$(has "$(logtxt)" 'coturn RESTARTED BY SYSTEMD (NRestarts 0 -> 2)')" "$(logtxt)"
+
+echo
+echo "--- root never writes through a name the service user controls ---"
+# INSTALL_DIR belongs to the service user. Each case plants what that user
+# could plant there and proves root's write does NOT land where it points —
+# every one of these went through on the script before this change.
+VICTIM="$TMP/victim"
+victim_is() { [ "$(cat "$VICTIM" 2>/dev/null)" = "$1" ] && echo 1 || echo 0; }
+REFUSED='REFUSED to write'
+
+# A restart counter planted as a link: the old `echo N > state` truncated the
+# target every five minutes; its digits must not be read either.
+reset; echo 77 > "$VICTIM"; ln -s "$VICTIM" "$INSTALL/.sandbox-nrestarts.last"; echo 5 > "$STATE/nrestarts.sandbox"
+run env
+check "a symlinked old counter: its target is NOT overwritten" "$(victim_is 77)" "victim now: $(cat "$VICTIM")"
+check "and NOT read (the link counts as no history: 0 -> 5)"   "$(has "$(logtxt)" 'sandbox RESTARTED BY SYSTEMD (NRestarts 0 -> 5)')" "$(logtxt)"
+check "and the link itself is gone, not its target"            "$([ ! -L "$INSTALL/.sandbox-nrestarts.last" ] && [ -f "$VICTIM" ] && echo 1 || echo 0)"
+check "the counter now lives in the state directory"           "$([ "$(cat "$OPSSTATE/nrestarts.sandbox" 2>/dev/null)" = 5 ] && echo 1 || echo 0)"
+
+# The probe mark planted as a DANGLING link: the old `: > mark` created a
+# root-owned file wherever it pointed (/etc/nologin locks out every login).
+reset; rm -f "$INSTALL/.health-http-ok"; ln -s "$TMP/made-by-root" "$INSTALL/.health-http-ok"
+run env
+check "a dangling mark link: nothing is created at its target" "$([ ! -e "$TMP/made-by-root" ] && echo 1 || echo 0)"
+check "and the real mark is written in the state directory"    "$([ -f "$OPSSTATE/http-ok.sandbox" ] && echo 1 || echo 0)"
+# ...nor does a linked mark count as a first success.
+reset; rm -f "$INSTALL/.health-http-ok"; : > "$VICTIM"; ln -s "$VICTIM" "$INSTALL/.health-http-ok"; : > "$STATE/curl-ok"
+run env
+check "a linked old mark is not taken as 'has answered before'" "$([ "$(has "$(calls)" 'systemctl restart sandbox')" = 0 ] && [ "$(has "$(logtxt)" 'has NEVER succeeded')" = 1 ] && echo 1 || echo 0)" "$(calls)"
+
+# health.log itself.
+reset; echo precious > "$VICTIM"; ln -s "$VICTIM" "$LOGF"; rm -f "$STATE/active.sandbox"
+run env
+check "health.log as a link: its target is NOT appended to"  "$(victim_is precious)" "victim now: $(cat "$VICTIM")"
+check "and the line reaches syslog instead, saying why"      "$(has "$(calls)" "$REFUSED $LOGF")" "$(calls)"
+check "and the check itself still acted (restart)"            "$(has "$(calls)" 'systemctl restart sandbox')" "$(calls)"
+reset; ln -s "$TMP/log-made-by-root" "$LOGF"; rm -f "$STATE/active.sandbox"
+run env
+check "a dangling health.log link creates nothing"           "$([ ! -e "$TMP/log-made-by-root" ] && echo 1 || echo 0)"
+# A FIFO with no reader: `>>` blocked on it for ever, holding the cron flock,
+# so every later run was skipped — monitoring gone, silently.
+reset; rm -f "$LOGF"; mkfifo "$LOGF"; rm -f "$STATE/active.sandbox"
+run timeout 30 env >/dev/null; rc=$?
+check "health.log as a FIFO does not hang the run"           "$([ "$rc" = 0 ] && echo 1 || echo 0)" "exit $rc (124 = hung until timeout)"
+check "and is refused, not written"                          "$(has "$(calls)" "$REFUSED $LOGF")" "$(calls)"
+rm -f "$LOGF"
+# POSITIVE CONTROL: a plain health.log is written as always.
+reset; rm -f "$STATE/active.sandbox"; echo "earlier line" > "$LOGF"
+run env
+check "POSITIVE CONTROL: a plain health.log is appended to" "$([ "$(head -1 "$LOGF")" = 'earlier line' ] && [ "$(has "$(logtxt)" 'service inactive -> restart')" = 1 ] && echo 1 || echo 0)" "$(logtxt)"
+check "and nothing is refused"                              "$([ "$(has "$(calls)" "$REFUSED")" = 0 ] && echo 1 || echo 0)"
+
+# The state directory: created private, and refused when it is not.
+reset
+run env
+check "the state directory is created 0700" "$([ "$(stat -c %a "$OPSSTATE" 2>/dev/null)" = 700 ] && echo 1 || echo 0)" "$(stat -c %a "$OPSSTATE" 2>&1)"
+reset; mkdir -m 777 "$OPSSTATE"; chmod 777 "$OPSSTATE"; echo 4 > "$STATE/nrestarts.sandbox"
+run env
+check "a state directory others can write is refused, loudly" "$(has "$(logtxt)" 'FATAL state directory unusable')" "$(logtxt)"
+check "and nothing is written into it"                        "$([ -z "$(ls -A "$OPSSTATE")" ] && echo 1 || echo 0)" "$(ls -la "$OPSSTATE")"
+reset; mkdir -m 700 "$TMP/elsewhere-state"; ln -s "$TMP/elsewhere-state" "$OPSSTATE"; echo 4 > "$STATE/nrestarts.sandbox"
+run env
+check "a state directory that is a symlink is refused"        "$(has "$(logtxt)" 'something replaced it with a symlink')" "$(logtxt)"
+check "and nothing is written where it points"                "$([ -z "$(ls -A "$TMP/elsewhere-state")" ] && echo 1 || echo 0)"
+rm -rf "$TMP/elsewhere-state"
+
+# The move itself must not cry wolf: an old plain counter carries over.
+reset; echo 3 > "$INSTALL/.sandbox-nrestarts.last"; echo 3 > "$STATE/nrestarts.sandbox"
+run env
+check "an old plain counter carries over (no alarm for history)" "$([ "$(has "$(logtxt)" 'RESTARTED BY SYSTEMD')" = 0 ] && echo 1 || echo 0)" "$(logtxt)"
+check "and is removed once carried"                               "$([ ! -e "$INSTALL/.sandbox-nrestarts.last" ] && [ "$(cat "$OPSSTATE/nrestarts.sandbox")" = 3 ] && echo 1 || echo 0)"
+reset; echo 1 > "$INSTALL/.sandbox-nrestarts.last"; echo 3 > "$STATE/nrestarts.sandbox"
+run env
+check "POSITIVE CONTROL: a rise over the old counter still alarms" "$(has "$(logtxt)" 'sandbox RESTARTED BY SYSTEMD (NRestarts 1 -> 3)')" "$(logtxt)"
+reset; touch "$STATE/enabled.sandbox-waker" "$STATE/active.sandbox-waker"; echo 5 > "$INSTALL/.waker-nrestarts.last"; echo 5 > "$STATE/nrestarts.sandbox-waker"
+run env
+check "the waker's differently named old counter carries over too" "$([ "$(has "$(logtxt)" 'RESTARTED BY SYSTEMD')" = 0 ] && [ ! -e "$INSTALL/.waker-nrestarts.last" ] && echo 1 || echo 0)" "$(logtxt)"
+# An old plain mark still counts, so the move cannot turn an outage into a
+# "never succeeded" non-restart.
+reset; : > "$STATE/curl-ok"
+run env
+check "an old plain mark still permits the restart" "$([ "$(count "$(calls)" 'systemctl restart sandbox')" = 1 ] && echo 1 || echo 0)" "$(calls)"
 
 echo
 echo "--- Cloudflare: the global client-IP block is asserted, or every per-IP limit is one bucket ---"

@@ -3,7 +3,7 @@
 # Uploads one backup artifact to an rclone remote (Google Drive, R2, B2, etc.).
 #
 # Wire it in /etc/default/puca-backup:
-#   OFFSITE_CMD=/opt/puca/ship-offsite.sh
+#   OFFSITE_CMD=/usr/local/lib/puca-ops/ship-offsite.sh
 #   RCLONE_REMOTE=gdrive:puca-backups     # <remote>:<path>
 #
 # rclone reads /root/.config/rclone/rclone.conf (created once via `rclone config`).

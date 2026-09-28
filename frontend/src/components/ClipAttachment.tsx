@@ -26,6 +26,8 @@ import { clipBadge, clipBadgeText } from '../api/clips/clipConsentBadge';
 import { formatClock, formatMB } from '../api/clips/clipPresets';
 import type { ClipConsent } from '../api/servers';
 import { saveAttachment } from '../api/saveAttachment';
+import { applyOutputDevice } from './settingsStore';
+import { useOutputDeviceRef } from '../hooks/useOutputDeviceRef';
 import { ClipIcon, DownloadIcon, LockIcon, PlayIcon, ShieldCheckIcon, WarningIcon } from './Icons';
 import './ClipAttachment.css';
 
@@ -48,6 +50,8 @@ export function ClipAttachment({ href, consent }: ClipAttachmentProps) {
     const [state, setState] = useState<PlayState>('idle');
     const [error, setError] = useState<string | null>(null);
     const videoRef = useRef<HTMLVideoElement | null>(null);
+    // The player follows Settings > Output Device while it is mounted.
+    const videoSinkRef = useOutputDeviceRef(videoRef);
     const playerRef = useRef<ClipPlayerHandle | null>(null);
     const [dlState, setDlState] = useState<DownloadState>('idle');
     const [dlProgress, setDlProgress] = useState<ClipDownloadProgress | null>(null);
@@ -89,6 +93,10 @@ export function ClipAttachment({ href, consent }: ClipAttachmentProps) {
             const el = videoRef.current;
             if (!el) throw new Error('no video element');
             await player.attach(el);
+            // play() is OURS, not a click on the controls: make sure the
+            // routing the ref started has landed first, or the clip's first
+            // moments play on the OS default.
+            await applyOutputDevice(el);
             setState('playing');
             void el.play().catch(() => { /* autoplay refused — controls are visible */ });
         } catch (e) {
@@ -130,7 +138,7 @@ export function ClipAttachment({ href, consent }: ClipAttachmentProps) {
         <div className={`clip-attachment ${refused ? 'refused' : ''}`} data-clip-state={state}>
             <div className="clip-attachment-plate">
                 {showVideo ? (
-                    <video ref={videoRef} className="clip-attachment-video" controls playsInline preload="none" />
+                    <video ref={videoSinkRef} className="clip-attachment-video" controls playsInline preload="none" />
                 ) : (
                     <>
                         <span className="clip-attachment-glyph" aria-hidden="true"><ClipIcon size={28} /></span>

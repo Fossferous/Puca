@@ -74,20 +74,34 @@ TS=$(date +%Y%m%d-%H%M%S)
 OFFSITE_DEST="${OFFSITE_DEST:-}"
 OFFSITE_CMD="${OFFSITE_CMD:-}"
 
-log(){ echo "$(date '+%F %T') $*" >> "$LOG"; }
+# backup.log lives in INSTALL_DIR, which the service user owns: appended with
+# ops_append (names.sh), never through a planted symlink; syslog otherwise.
+log(){
+	ops_append "$LOG" "$(date '+%F %T') $*" ||
+		logger -t "$SERVICE_NAME-backup" "REFUSED to write $LOG (not a plain file: a symlink, FIFO or directory is in its place): $*"
+}
 human(){ numfmt --to=iec --suffix=B "$1" 2>/dev/null || echo "${1}B"; }
-mkdir -p "$DIR"
 # The dumps written below contain every user's SRP verifier and their
 # password-wrapped E2EE seed — the offline-attack material for the whole
 # instance. Without this they took the default mode (commonly 0755 on the
 # directory, 0644 on the files), readable by every local account on the box.
 # Set it on the directory AND via umask, so each file created below inherits it
 # and a re-run over an existing directory is corrected too.
-chmod 700 "$DIR" 2>/dev/null || true
 umask 077
+# ...and the directory is ENTERED, not addressed: backups/ sits in a directory
+# the service user owns, so `chmod 700 $DIR` or `gzip > $DIR/<name>` would
+# follow a symlink planted in its place (chmod /etc; write a dump over any
+# file). After this every artifact is a name relative to `.` — the directory
+# held — and nothing below may name "$DIR" again. See names.sh.
+if ! ops_enter_private_dir "$DIR" create; then
+	log "FATAL backups directory unsafe: $OPS_DIR_ERR — refusing to write a single backup through it. If $DIR is the real backups directory and only its mode is wrong: chmod 700 $DIR. Otherwise move it aside (mv $DIR $DIR.untrusted) and the next run creates a private one"
+	logger -t "$SERVICE_NAME-backup" "FATAL: backups directory $DIR unsafe: $OPS_DIR_ERR; no backup taken"
+	exit 78
+fi
+chmod 700 . 2>/dev/null || true
 
 # --- 1. Postgres ---
-DB_FILE="$DIR/$DB_NAME-db-$TS.sql.gz"
+DB_FILE="./$DB_NAME-db-$TS.sql.gz"
 if sudo -u postgres pg_dump "$DB_NAME" | gzip > "$DB_FILE"; then
 	log "db ok -> $(basename "$DB_FILE") ($(du -h "$DB_FILE" | cut -f1))"
 else
@@ -95,10 +109,10 @@ else
 fi
 
 # --- 2. Uploaded attachment ciphertext ---
-UP_FILE="$DIR/$DB_NAME-uploads-$TS.tar.gz"
+UP_FILE="./$DB_NAME-uploads-$TS.tar.gz"
 if [ -d "$UPLOADS" ]; then
 	need="$(du -sb "$UPLOADS" 2>/dev/null | cut -f1)"; need="${need:-0}"
-	free="$(df -B1 --output=avail "$DIR" 2>/dev/null | tail -1 | tr -d ' ')"; free="${free:-0}"
+	free="$(df -B1 --output=avail . 2>/dev/null | tail -1 | tr -d ' ')"; free="${free:-0}"
 	if [ "$free" -lt $(( need + BACKUP_MIN_FREE_BYTES )) ] 2>/dev/null; then
 		log "ERROR insufficient free space for the uploads archive (tree is $(human "$need"), only $(human "$free") free, want $(human "$BACKUP_MIN_FREE_BYTES") left afterwards) — skipping it rather than filling the disk Postgres lives on; set MAX_LOCAL_UPLOAD_ARCHIVES, lower KEEP_DAYS, or add disk"
 		UP_FILE=""
@@ -118,7 +132,7 @@ fi
 # offsite target already has by definition. Members are stored relative to /
 # so the archive restores with `tar -xzf <file> -C / <member>`, one member at
 # a time, by hand — restore.sh deliberately never applies it (see its header).
-CFG_FILE="$DIR/$DB_NAME-config-$TS.tar.gz"
+CFG_FILE="./$DB_NAME-config-$TS.tar.gz"
 cfg_members=()
 [ -f "$INSTALL_DIR/.env" ] && cfg_members+=("${INSTALL_DIR#/}/.env")
 [ -f /etc/default/puca ]   && cfg_members+=("etc/default/puca")
@@ -233,13 +247,13 @@ fi
 if [ "${DB_DUMP_FAILED:-0}" = "1" ]; then
 	log "ERROR skipping rotation: tonight produced no database backup, and rotating would spend a day of the $KEEP_DAYS-day window for nothing"
 else
-find "$DIR" -name "$DB_NAME-*.sql.gz"         -mtime +"$KEEP_DAYS" -delete
-find "$DIR" -name "$DB_NAME-uploads-*.tar.gz" -mtime +"$KEEP_DAYS" -delete
-find "$DIR" -name "$DB_NAME-config-*.tar.gz"  -mtime +"$KEEP_DAYS" -delete
+find . -name "$DB_NAME-*.sql.gz"         -mtime +"$KEEP_DAYS" -delete
+find . -name "$DB_NAME-uploads-*.tar.gz" -mtime +"$KEEP_DAYS" -delete
+find . -name "$DB_NAME-config-*.tar.gz"  -mtime +"$KEEP_DAYS" -delete
 # Count cap on the uploads archives — the artifact that scales with the data —
 # newest kept. Names carry no spaces (they are timestamps), so `ls -t` is safe.
 if [ "$MAX_LOCAL_UPLOAD_ARCHIVES" -gt 0 ] 2>/dev/null; then
-	ls -t "$DIR"/"$DB_NAME"-uploads-*.tar.gz 2>/dev/null | tail -n +$(( MAX_LOCAL_UPLOAD_ARCHIVES + 1 )) | while read -r old; do
+	ls -t ./"$DB_NAME"-uploads-*.tar.gz 2>/dev/null | tail -n +$(( MAX_LOCAL_UPLOAD_ARCHIVES + 1 )) | while read -r old; do
 		rm -f "$old" && log "rotated (count cap $MAX_LOCAL_UPLOAD_ARCHIVES) -> $(basename "$old")"
 	done
 fi
@@ -247,7 +261,7 @@ fi
 fi
 
 # --- 6. The trend line: how much the backups hold, how much room is left ---
-log "backups dir $(du -sh "$DIR" 2>/dev/null | cut -f1), free on that filesystem $(human "$(df -B1 --output=avail "$DIR" 2>/dev/null | tail -1 | tr -d ' ')")"
+log "backups dir $(du -sh . 2>/dev/null | cut -f1), free on that filesystem $(human "$(df -B1 --output=avail . 2>/dev/null | tail -1 | tr -d ' ')")"
 
 # --- 7. Tell the scheduler ------------------------------------------------
 # The database dump is the artifact a restore cannot do without. Everything
