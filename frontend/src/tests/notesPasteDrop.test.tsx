@@ -310,6 +310,7 @@ describe('a multi-line paste into "Add an item…"', () => {
                     onPickColor={() => {}}
                     onPickLabels={() => {}}
                     onArchive={() => {}}
+                    onSendToPuca={() => {}}
                     pucaHref={null}
                 />,
             );
