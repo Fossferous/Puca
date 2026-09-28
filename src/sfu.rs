@@ -1480,8 +1480,9 @@ async fn reauthorize_added(state: &AppState, cfg: &SfuConfig, added: &[(String, 
     Checked { denied: removed, regranted }
 }
 
-/// What [`reauthorize_added`] did: sessions removed, and sessions whose grant
-/// LiveKit confirmed it replaced.
+/// What [`reauthorize_added`] did: sessions removed, and sessions LiveKit
+/// confirmed a grant for - one that differed from what it held, or a re-send of
+/// one an earlier update left unconfirmed.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Checked {
     denied: usize,
@@ -1803,7 +1804,7 @@ where
                 }
                 if r.regranted > 0 {
                     tracing::info!(
-                        "SFU resync: gave {} session(s) the publish grant their member's permissions give now (LiveKit held another)",
+                        "SFU resync: sent {} session(s) the publish grant their member's permissions give now (a grant LiveKit held that differed, or one it had not confirmed)",
                         r.regranted
                     );
                 }
@@ -2459,7 +2460,8 @@ fn trip_breaker() {
 /// `tried == 0` means none needed a new grant (or this process knows none).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Regranted {
-    /// Sessions whose grant had to change: each was sent UpdateParticipant.
+    /// Sessions sent UpdateParticipant: their grant had to change, or an
+    /// earlier update of it went unconfirmed and is re-sent.
     pub tried: usize,
     /// Of those, how many LiveKit confirmed.
     pub applied: usize,

@@ -154,10 +154,11 @@ curl -s -H "Authorization: Bearer $JWT" https://chat.example.com/channels/<id>/s
     costs a sweep, and a change queued behind it, about one 5 s timeout. The
     calls it did not send are owed to the resync and logged once: `SFU perms
     sweep for server S: LiveKit did not answer a call, so this sweep sent no
-    further LiveKit calls (N not sent); each is owed to the LiveKit resync,
-    which will retry it` (or, with the resync off, `which is NOT running: each
-    waits for the sweep of the next permission change in this server, or the
-    session's rejoin`);
+    further LiveKit calls (N not sent); each joined session is owed to the
+    LiveKit resync, which will retry it (a session that has not joined yet is
+    checked when it joins)` (or, with the resync off, `which is NOT running:
+    each waits for the sweep of the next permission change in this server, or
+    the session's rejoin`);
   - a voice move cuts that user's SFU session, and changing a channel's
     transport (`sfu_mode`, either way) puts everyone in its room out to
     rejoin on the new one;

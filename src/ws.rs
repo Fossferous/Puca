@@ -4926,8 +4926,8 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
         if allowed {
             if let Some(perms) = grant {
                 // Say what LiveKit confirmed, not what was attempted. A session
-                // already holding the grant is not sent it (tried counts only
-                // those whose grant had to change).
+                // already holding the grant is not sent it (tried counts those
+                // whose grant had to change, or whose last update went unconfirmed).
                 let out = crate::sfu::regrant_user(state, cid, uid, perms).await;
                 if out.tried > 0 && out.applied == out.tried {
                     tracing::info!(
@@ -4983,7 +4983,7 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
         // Read after every skipped session was owed: see grant_retry_note.
         tracing::warn!(
             "SFU perms sweep for server {}: LiveKit did not answer a call, so this sweep sent no further LiveKit calls ({} not sent); \
-             each is owed to the LiveKit resync, {}",
+             each joined session is owed to the LiveKit resync, {} (a session that has not joined yet is checked when it joins)",
             server_id,
             breaker.skipped(),
             if crate::sfu::resync_will_retry(state) {
