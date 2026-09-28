@@ -346,6 +346,20 @@ confirmation first.
 
 ---
 
+## Tasks
+
+### Open Tasks
+- Click **Direct Messages** at the top of the server rail, then **Tasks** in the left column
+- The tab bar holds **All tasks**, **Calendar**, **Reminders**, your lists and every checklist channel from your servers; **New list** (the plus at its right end) starts a list
+
+### Paste a checklist
+- Paste step-by-step instructions — say, an AI assistant's answer — into **Add a task…** in a list, or **Add an item…** in a checklist channel, and Púca asks first
+- **Add N items** adds each step as its own item, in order, without the numbers, bold marks, headings or the "Here's how:" line; **Add as one item** puts the whole paste on one line in the box for you to add; **Cancel** adds nothing
+- Paste it into the **New list** name instead and the list is made with the steps in it, named after the checklist's heading (or after what you had typed there)
+- A one-line paste pastes as usual, and one paste adds at most 200 items
+
+---
+
 ## Púca Notes (notes)
 
 Púca Notes shows your task lists as notes, Google-Keep style, in the browser at
@@ -372,7 +386,11 @@ uses the account you are already signed in to.
   AI assistant — goes in as a checklist. On your phone, **Share** it to
   **Púca Notes**. Anywhere, paste it into a new note's title or an item and
   choose **Add N items**. Either way the list's heading becomes the title and
-  each step becomes an item. Press **Done** to save it.
+  each step becomes an item. Press **Done** to save it. Pasted into a note
+  that is already open (its title or **Add an item…**), the steps are added
+  once you choose **Add N items**, and a note of yours with no name yet takes
+  the heading as its name. Púca's own Tasks view takes the same paste (see
+  *Tasks*, above).
 - Archiving or deleting a note offers **Undo** for a few seconds.
 - Shortcuts: `/` search, `c` new note, `r` refresh, `?` help.
 

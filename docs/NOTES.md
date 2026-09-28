@@ -182,7 +182,12 @@ Púca's reminders. Anything you do in one is what you see in the other.
   (an assistant's answer, a list copied off a web page) opens the composer as a
   CHECKLIST when it is shared in, instead of one note of raw Markdown. When it is
   pasted into a new note's title or an item, it opens the paste prompt showing the
-  clean steps. It is the inverse of *Copy as text*: `# Title` and `- [ ] item`
+  clean steps. The same goes for a note that is already OPEN — its *Add an item…*
+  row, and its title, where the checklist's heading also names a personal note
+  that has no name yet (a shared checklist is never renamed from here) — and for
+  Púca's own Tasks view (*Add a task…*, a checklist's *Add an item…*, and the
+  *New list* name, which makes the list named after the heading and then its
+  steps). It is the inverse of *Copy as text*: `# Title` and `- [ ] item`
   read back as the title and the items. A heading or a line that introduces the
   list becomes the title ("Here's a checklist for X:" → *Checklist for X*).
   Numbers, `**bold**`, links and code marks are dropped, and a `[x]` arrives
@@ -1386,8 +1391,9 @@ never promises something a shell that does not deliver drops could not do.
 
 These are Púca **Notes'** gestures. Púca's Tasks view renders the same note
 text and the same pictures (`ListContentBlock.tsx` → `NoteBodyField`,
-`NoteImages`) and therefore shows the same links, but it wires no paste or
-drop handler: there, a picture still goes in through the picker.
+`NoteImages`) and therefore shows the same links, but it wires no picture
+paste or drop handler: there, a picture still goes in through the picker. (It
+does take a pasted LIST — see *Pasting a list*, below.)
 
 A paste that carries TEXT is text, whatever picture came with it. Chromium
 puts an `image/png` on the clipboard *beside* the text for any rich copy — a
@@ -1402,18 +1408,37 @@ pasted into a message IS the message.)
 **Pasting a list.** Paste several lines into an item field, or into *Add an
 item…*, and Púca Notes asks first — showing the lines it is about to add, with
 *Add N items*, *Add as one item* and *Cancel*. It asks because items are
-removed one at a time and an item delete has no Undo: a stray paste of a
-document would otherwise make forty items nobody can take back in one go. The
-lines are split by the same rule *Show checkboxes* uses, so `- `, `* `, `• `,
-`[ ]` and `[x]` are dropped and blank lines are ignored. A paste of ONE line is
-never intercepted — it lands in the field as any paste would.
+removed one at a time: a stray paste of a document would otherwise make forty
+items nobody can take back in one go. A checklist from elsewhere is read as
+one (*A step-by-step list arrives as a checklist*, above); anything else is
+split by the same rule *Show checkboxes* uses, so `- `, `* `, `• `, `[ ]` and
+`[x]` are dropped and blank lines are ignored. A paste of ONE line is never
+intercepted — it lands in the field as any paste would. A TITLE (the
+composer's, an open note's) and Púca's *New list* name take only a real
+checklist; other lines paste there as a name.
 
-A pasted line is truncated to the same length the field itself accepts
-(`MAX_ITEM_LENGTH`, 500), so no route into a list can produce an item you
-could not have typed. In the open note the creates are **paced** like every
-other fan-out in the app (`icsImport`'s `PACE_MS`, well under the server's
-50/s per IP), and a run that stops part-way says how many items landed
-rather than leaving an arbitrary prefix of the list unexplained.
+One reader decides all of it for every field, `readPastedItems`
+(`notes/model/noteContent.ts`). One flow asks and then creates,
+`components/usePasteItems.tsx`, shared by the open note and Púca's Tasks view
+(*Add a task…*, the *New list* name and `ChecklistBody`'s *Add an item…*,
+which is every channel checklist on the Púca page); the composer only fills
+its own fields, and saves nothing until **Done**. The Tasks view has no Undo
+for an item at all, so there too the question is the guard. *Add as one item* never creates
+anything by itself: in an open note or the Tasks view it puts the paste, on
+one line, into the add row, and Enter adds it.
+
+A paste takes at most `MAX_TAKEN_ITEMS` (200) items — the prompt says "Only
+the first 200 are added" when there were more — and each is truncated to the
+length the field itself accepts (`MAX_ITEM_LENGTH`, 500), so no route into a
+list can produce an item you could not have typed. The creates go one at a
+time, in order, **paced** like every other fan-out in the app (`icsImport`'s
+`PACE_MS`, well under the server's 50/s per IP), each with its own create
+key; a second paste confirmed while the first is still landing waits its
+turn. Where they go is fixed when you PASTE — the list or channel the field
+belonged to then — so switching list while they land does not send the rest
+elsewhere. A run that stops at a refusal stops there, says why, and says how
+many items landed ("Added 3 of 7 items") rather than leaving an arbitrary
+prefix of the list unexplained.
 
 **Links in a note.** A web address typed or pasted into a note's text, or
 into an item, becomes tappable. Púca Notes works out where it goes by looking

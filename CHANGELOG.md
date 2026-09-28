@@ -4,6 +4,35 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Improved
+- **Paste a step-by-step checklist into Púca's Tasks, and into an open
+  note.** An assistant's answer (or any list) pasted into **Add a task…**,
+  a checklist channel's **Add an item…**, or a note that is already open in
+  Púca Notes now becomes one clean item per step, in order, without the
+  numbers, bold marks, headings or the "Here's how:" line. Pasted into the
+  **New list** name, it makes the list, named after the checklist's
+  heading, with the steps in it; pasted into an open note's title, it adds
+  the steps and names a note of yours that has no name yet. Before, only a
+  new note in Púca Notes read a paste this way: an open note split it line
+  by line, keeping the intro, the closing sentence and the bold marks, and
+  Tasks took the whole paste as one long line. It still asks first
+  (**Add N items**, **Add as one item** or **Cancel**), nothing is added
+  until you answer, and one paste adds at most 200 items (the question says
+  so when there were more).
+
+### Fixed
+- **Adding several tasks in a row in Tasks shows all of them.** A task added
+  while the one before it was still saving could replace it on screen until
+  you switched lists, and a task, item or list the server refused failed
+  without a word. Now every one stays, and a refusal says what went wrong,
+  with your words still in the box to try again.
+- **Snoozing from the Púca Notes calendar is one snooze.** Each tap sent the
+  snooze twice, and the two could disagree about when Tomorrow is, so the
+  item sometimes woke at 9:00 instead of the morning time you chose. It now
+  uses your morning time, once.
+
 ## 0.9.825 — 2026-09-28
 
 Change your stream's resolution and frame rate while you are live, and a step-by-step list from an assistant goes into Púca Notes as a checklist.
