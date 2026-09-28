@@ -277,5 +277,10 @@ describe('the composer', () => {
         render(null);
         const ev = paste(title(), 'Weekend plans');
         expect(ev.defaultPrevented).toBe(false);
+        // ...and so are lines that are not a checklist: only a checklist
+        // becomes items from the TITLE.
+        const lines = paste(title(), 'Weekend plans\nwith the kids');
+        expect(lines.defaultPrevented).toBe(false);
+        expect(document.body.textContent).not.toContain('Add these as items?');
     });
 });
