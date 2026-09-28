@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.824 — 2026-09-28
 
+Going live takes three clicks with the game's sound, stream audio and sounds follow your Output Device, and voice channels get their own Connect, Speak, Video and Stream permissions.
 ### Added
 - **Voice channels have Connect, Speak, Video and Stream permissions of their
   own.** Edit Channel > Permissions on a voice channel now lists them, so you
