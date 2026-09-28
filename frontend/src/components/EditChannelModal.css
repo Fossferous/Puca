@@ -116,6 +116,17 @@
     overflow-wrap: anywhere;
 }
 
+/* The voice rows' one-line explanation, under the label (only those rows
+   carry one, so the existing rows render exactly as before). Same muted
+   small text as .channel-perms-hint. */
+.channel-perm-desc {
+    display: block;
+    margin-top: 2px;
+    font-size: 12px;
+    line-height: 1.35;
+    color: var(--text-muted, #72767d);
+}
+
 .tri-state {
     display: flex;
     flex-shrink: 0;
@@ -181,7 +192,10 @@
    Mobile — the role list beside the grid leaves no room for labels at phone
    widths; the role list becomes a horizontally-scrolling strip above the
    grid (SettingsModal.css pattern), the modal caps at 85dvh with the close
-   button kept reachable, and tap targets grow to 40px.
+   button kept reachable, and tap targets grow to 44px (DESIGN_PHILOSOPHY's
+   touch minimum). Stated here rather than left to mobile.css's blanket
+   `button { min-height: 44px }`: a class selector outranks that element
+   selector, which is how the role strip sat at 40px.
    ========================================================================== */
 @media (pointer: coarse) and (max-width: 1024px) {
     .modal-content.edit-channel-modal {
@@ -228,7 +242,7 @@
 
     .channel-perms-role {
         flex-shrink: 0;
-        min-height: 40px;
+        min-height: 44px;
     }
 
     .channel-perm-label {
@@ -236,8 +250,8 @@
     }
 
     .tri-btn {
-        width: 40px;
-        height: 40px;
+        width: 44px;
+        height: 44px;
         font-size: 16px;
     }
 }

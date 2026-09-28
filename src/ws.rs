@@ -1422,6 +1422,42 @@ fn join_target(room_id: &str) -> Result<i64, &'static str> {
     room_channel_id(room_id).ok_or(UNKNOWN_ROOM)
 }
 
+/// The JoinRoom refusal for anyone who may not know the channel is there:
+/// not found, a failed lookup, a non-member, or a member VIEW-denied on it.
+/// Identical across all four so the refusal is no existence oracle.
+const JOIN_REFUSED: &str = "Not a member of this channel's server";
+
+/// The JoinRoom refusal for a member who can SEE the voice channel but lacks
+/// CONNECT. Saying so leaks nothing — the channel is in their sidebar — and
+/// the generic text told a member they were not in a server they plainly are.
+const JOIN_NO_CONNECT: &str = "You don't have permission to join this voice channel";
+
+/// What one resolver answer means for a JoinRoom — the same function for the
+/// pre-insert gate and the post-insert recheck, so they cannot disagree.
+///
+/// - `Ok(None)`: a text room, admitted (VIEW).
+/// - `Ok(Some(can_speak))`: a voice room, admitted (VIEW + CONNECT), carrying
+///   the joiner's SPEAK right from the SAME resolution (`has` counts
+///   ADMINISTRATOR, which the server owner resolves to).
+/// - `Err(text)`: refused, with the text the socket sends back. Only
+///   `Allowed` with VIEW can earn the specific CONNECT text; everything else,
+///   `NotMember` and `NotFound` included, gets `JOIN_REFUSED` — both fail
+///   closed, they differ only in what they say.
+fn join_verdict(access: &ChannelPermAccess, voice: bool) -> Result<Option<bool>, &'static str> {
+    match access {
+        ChannelPermAccess::Allowed { perms, .. } if perms.has(Permissions::VIEW_CHANNEL) => {
+            if !voice {
+                Ok(None)
+            } else if perms.has(Permissions::CONNECT) {
+                Ok(Some(perms.has(Permissions::SPEAK)))
+            } else {
+                Err(JOIN_NO_CONNECT)
+            }
+        }
+        _ => Err(JOIN_REFUSED),
+    }
+}
+
 /// True if `a` and `b` are both currently joined to the same in-memory VOICE
 /// room (`voice_<channelId>` — also the home of screen-share / camera / remote
 /// control). Used to authorize peer-to-peer relays (WebRTC signaling,
@@ -2265,14 +2301,13 @@ async fn handle_message(
             // role bit ("Join voice channels") that nothing enforced, so a
             // member explicitly denied CONNECT could still join the call.
             // Text rooms need VIEW only — CONNECT is a voice permission.
+            // (join_verdict: a member who can see the channel but lacks
+            // CONNECT is told so; every other refusal stays generic.)
             let need_connect = parse_voice_room(&room_id).is_some();
-            let allowed = matches!(
-                get_user_channel_permissions(&state.pool, cid, user_id).await,
-                ChannelPermAccess::Allowed { perms, .. }
-                    if perms.has(Permissions::VIEW_CHANNEL)
-                        && (!need_connect || perms.has(Permissions::CONNECT))
-            );
-            if !allowed {
+            if let Err(refusal) = join_verdict(
+                &get_user_channel_permissions(&state.pool, cid, user_id).await,
+                need_connect,
+            ) {
                 // Warn-level: a legitimate client rejoining after reconnect
                 // that lands here is silently cut off from live channel
                 // traffic — this must be visible in prod logs.
@@ -2282,7 +2317,7 @@ async fn handle_message(
                     username,
                     room_id
                 );
-                return Err("Not a member of this channel's server".to_string());
+                return Err(refusal.to_string());
             }
 
             // VOICE EXCLUSIVITY: one voice room per USER across all devices.
@@ -2347,28 +2382,37 @@ async fn handle_message(
             // eviction snapshot and keep a live subscription. Overwrites are
             // committed before eviction runs, so re-checking after the insert
             // is guaranteed to see any deny this join raced against.
-            if let Some(cid) = parse_channel_room(&room_id).or_else(|| parse_voice_room(&room_id)) {
-                // Same bits as the gate above: a voice room needs CONNECT too.
-                let recheck_connect = parse_voice_room(&room_id).is_some();
-                let still_allowed = matches!(
-                    get_user_channel_permissions(&state.pool, cid, user_id).await,
-                    ChannelPermAccess::Allowed { perms, .. }
-                        if perms.has(Permissions::VIEW_CHANNEL)
-                            && (!recheck_connect || perms.has(Permissions::CONNECT))
-                );
-                if !still_allowed {
+            //
+            // The same resolution is the joiner's SPEAK right in a voice room
+            // (`voice_can_speak`, None for a text room): the newest answer
+            // this join has, and one that already saw any deny it raced.
+            // Same bits as the gate above: a voice room needs CONNECT too.
+            let voice_can_speak = match join_verdict(
+                &get_user_channel_permissions(&state.pool, cid, user_id).await,
+                need_connect,
+            ) {
+                Ok(can_speak) => can_speak,
+                Err(refusal) => {
                     if let Some(mut room) = state.rooms.get_mut(&room_id) {
                         room.remove_member(user_id);
                     }
                     state.drop_room_if_empty(&room_id);
                     joined_rooms.remove(&room_id);
                     tracing::warn!(
-                        "JoinRoom revoked post-insert for user {} ({}): VIEW lost for room {}",
+                        "JoinRoom revoked post-insert for user {} ({}): VIEW/CONNECT lost for room {}",
                         user_id,
                         username,
                         room_id
                     );
-                    return Err("Not a member of this channel's server".to_string());
+                    return Err(refusal.to_string());
+                }
+            };
+            // Store it BEFORE anything is sent, so the snapshot below and every
+            // occupant's frame read it. The write guard is dropped at the end of
+            // this statement; the senders take their own read guard.
+            if let Some(can_speak) = voice_can_speak {
+                if let Some(mut room) = state.rooms.get_mut(&room_id) {
+                    room.set_can_speak(user_id, can_speak);
                 }
             }
 
@@ -2416,6 +2460,17 @@ async fn handle_message(
                     members: members.clone(),
                 },
             );
+
+            // A voice joiner learns the speak right of EVERY member, itself
+            // included, before any media replay below can start a negotiation:
+            // its receivers must refuse a flagged member's audio from the first
+            // packet, and its own entry tells a cooperating client not to send.
+            // No presence filtering is needed — a voice room always announces
+            // presence (room_announces_presence), so `members` above was not
+            // filtered either.
+            if voice_can_speak.is_some() {
+                state.send_speak_snapshot(&room_id, user_id, conn_id);
+            }
 
             // Send existing streams to the joining connection
             for streamer_id in active_streamers {
@@ -2479,6 +2534,15 @@ async fn handle_message(
                     },
                     Some(user_id),
                 );
+            }
+
+            // And every occupant learns the joiner's — sent even for a second
+            // device (no UserJoined then), since this join's resolution is the
+            // newest one. After UserJoined so a client that keys the flag off
+            // its roster already has the entry; both are queued before any
+            // negotiation with the joiner could have produced audio.
+            if voice_can_speak.is_some() {
+                state.broadcast_speak_state(&room_id, user_id, Some(user_id));
             }
 
             // A voice-room join IS voice presence: the only client that joins
@@ -4350,7 +4414,11 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
 
     // Re-run the resolver per (channel, member, needs-CONNECT), cached — a user
     // sitting in both channel_<id> and voice_<id> resolves once per gate shape.
-    let mut allowed_cache: std::collections::HashMap<(i64, UserId, bool), bool> =
+    // The value is (keeps, can_speak, grant perms): the sweep_keeps verdict,
+    // for a voice room the member's SPEAK right from the SAME resolution
+    // (sweep_speak) — a member who stays has it re-evaluated without a second
+    // query — and the permissions the SFU pass hands LiveKit (sweep_grant).
+    let mut allowed_cache: std::collections::HashMap<(i64, UserId, bool), (bool, Option<bool>, Option<Permissions>)> =
         std::collections::HashMap::new();
     for (room_id, cid, room_members) in snapshot {
         if let Some(set) = &scope {
@@ -4364,16 +4432,42 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
         // no time bound.
         let need_connect = parse_voice_room(&room_id).is_some();
         for member_id in room_members {
-            let allowed = match allowed_cache.get(&(cid, member_id, need_connect)) {
-                Some(&ok) => ok,
+            let (allowed, can_speak, _) = match allowed_cache.get(&(cid, member_id, need_connect)) {
+                Some(&verdict) => verdict,
                 None => {
                     let access = get_user_channel_permissions(&state.pool, cid, member_id).await;
-                    let ok = sweep_keeps(scope_known, server_id, &access, need_connect);
-                    allowed_cache.insert((cid, member_id, need_connect), ok);
-                    ok
+                    let verdict = (
+                        sweep_keeps(scope_known, server_id, &access, need_connect),
+                        sweep_speak(&access, need_connect),
+                        sweep_grant(server_id, &access),
+                    );
+                    allowed_cache.insert((cid, member_id, need_connect), verdict);
+                    verdict
                 }
             };
             if allowed {
+                // Staying in a voice room: a SPEAK allow/deny may be exactly
+                // what changed. Tell the WHOLE room when the stored right
+                // flipped — the member too, so their own client stops (or
+                // resumes) sending. set_can_speak is a no-op for somebody who
+                // left since the snapshot; the write guard is dropped before
+                // the fan-out, which re-reads the flag under its own guard.
+                if let Some(can_speak) = can_speak {
+                    let changed = state
+                        .rooms
+                        .get_mut(&room_id)
+                        .is_some_and(|mut room| room.set_can_speak(member_id, can_speak));
+                    if changed {
+                        state.broadcast_speak_state(&room_id, member_id, None);
+                        tracing::info!(
+                            "Perms sweep: user {} may {}speak in {} (change in server {})",
+                            member_id,
+                            if can_speak { "" } else { "no longer " },
+                            room_id,
+                            server_id
+                        );
+                    }
+                }
                 continue;
             }
 
@@ -4501,16 +4595,53 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
     for (cid, uid) in sfu_targets {
         // An SFU room is always voice: the token gate (sfu.rs get_sfu_token)
         // requires VIEW and CONNECT, so the sweep does too.
-        let allowed = match allowed_cache.get(&(cid, uid, true)) {
-            Some(&ok) => ok,
+        //
+        // A member it keeps has the grant their permissions give applied AT
+        // LIVEKIT, both ways (a SPEAK revoke and a SPEAK grant). The speak
+        // FLAG rides the mesh pass above, but it lives in voice_<id>: a client
+        // that leaves that room (or lets its socket die) while staying in
+        // LiveKit takes the server's deny with it, and would publish its mic
+        // under the token's old grant. LiveKit's own grant does not leave.
+        let (allowed, grant) = match allowed_cache.get(&(cid, uid, true)) {
+            Some(&(ok, _, grant)) => (ok, grant),
             None => {
                 let access = get_user_channel_permissions(&state.pool, cid, uid).await;
-                let ok = sweep_keeps(scope_known, server_id, &access, true);
-                allowed_cache.insert((cid, uid, true), ok);
-                ok
+                let verdict = (
+                    sweep_keeps(scope_known, server_id, &access, true),
+                    sweep_speak(&access, true),
+                    sweep_grant(server_id, &access),
+                );
+                allowed_cache.insert((cid, uid, true), verdict);
+                (verdict.0, verdict.2)
             }
         };
         if allowed {
+            if let Some(perms) = grant {
+                // Say what LiveKit confirmed, not what was attempted. A session
+                // already holding the grant is not sent it (tried counts only
+                // those whose grant had to change).
+                let out = crate::sfu::regrant_user(state, cid, uid, perms).await;
+                if out.tried > 0 && out.applied == out.tried {
+                    tracing::info!(
+                        "SFU perms grant: user {} in sfu channel {}: LiveKit confirmed the grant their permissions give on {} session(s), {} already held it (sweep for server {})",
+                        uid,
+                        cid,
+                        out.applied,
+                        out.unchanged,
+                        server_id
+                    );
+                } else if out.tried > 0 {
+                    tracing::warn!(
+                        "SFU perms grant: user {} in sfu channel {}: LiveKit confirmed {} of {} session(s) needing the grant their permissions give \
+                         (see the SFU grant lines above; the next resync applies it again); sweep for server {}",
+                        uid,
+                        cid,
+                        out.applied,
+                        out.tried,
+                        server_id
+                    );
+                }
+            }
             continue;
         }
         // Say what LiveKit confirmed, not what was attempted: this line used to
@@ -4602,6 +4733,19 @@ fn sweep_keeps(scope_known: bool, server_id: &str, access: &ChannelPermAccess, n
     }
 }
 
+/// The permissions whose publish grant the sweep has LiveKit enforce on an SFU
+/// member it keeps (`crate::sfu::regrant_user`), or None to leave their grant
+/// alone. Only an `Allowed` answer for a channel of THIS server: with the scope
+/// unknown, `sweep_keeps` keeps another server's members, and their grant is
+/// no business of a sweep for this one; `NotFound` (a lookup that failed) and
+/// `NotMember` say nothing about what they may publish.
+fn sweep_grant(server_id: &str, access: &ChannelPermAccess) -> Option<Permissions> {
+    match access {
+        ChannelPermAccess::Allowed { server_id: sid, perms } if sid == server_id => Some(*perms),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod sweep_keeps_tests {
     use super::sweep_keeps;
@@ -4636,6 +4780,75 @@ mod sweep_keeps_tests {
         assert!(!sweep_keeps(false, "s", &ChannelPermAccess::NotMember, false));
         // Unresolvable (a lookup that failed): left to the retry, not dropped on a guess.
         assert!(sweep_keeps(false, "s", &ChannelPermAccess::NotFound, false));
+    }
+}
+
+/// The sweep's speak verdict for a member it KEEPS: in a voice room, the
+/// member's SPEAK right from the resolution `sweep_keeps` was given
+/// (`Some`), or `None` to leave the stored flag exactly as it is.
+///
+/// Only an `Allowed` answer is an answer about SPEAK. `NotFound` is "not
+/// found or the lookup failed" and `NotMember` does not reach here with a
+/// member kept, so neither may flip a flag: turning a database hiccup into
+/// "everyone may speak again" would undo a deny, and into "nobody may" would
+/// silence a call. A text room has no speak right at all.
+fn sweep_speak(access: &ChannelPermAccess, voice: bool) -> Option<bool> {
+    if !voice {
+        return None;
+    }
+    match access {
+        ChannelPermAccess::Allowed { perms, .. } => Some(perms.has(Permissions::SPEAK)),
+        ChannelPermAccess::NotMember | ChannelPermAccess::NotFound => None,
+    }
+}
+
+#[cfg(test)]
+mod sweep_speak_tests {
+    use super::{join_verdict, sweep_speak, JOIN_NO_CONNECT, JOIN_REFUSED};
+    use crate::permissions::{ChannelPermAccess, Permissions as P};
+
+    fn allowed(perms: P) -> ChannelPermAccess {
+        ChannelPermAccess::Allowed { server_id: "s".into(), perms }
+    }
+
+    #[test]
+    fn a_kept_voice_member_gets_the_speak_bit_of_the_same_resolution() {
+        let vc = P::VIEW_CHANNEL | P::CONNECT;
+        assert_eq!(sweep_speak(&allowed(vc | P::SPEAK), true), Some(true));
+        assert_eq!(sweep_speak(&allowed(vc), true), Some(false), "a SPEAK deny is an answer too");
+        assert_eq!(sweep_speak(&allowed(P::ADMINISTRATOR), true), Some(true), "ADMINISTRATOR implies SPEAK");
+    }
+
+    #[test]
+    fn no_answer_leaves_the_flag_alone() {
+        assert_eq!(sweep_speak(&ChannelPermAccess::NotFound, true), None, "a failed lookup is not a verdict");
+        assert_eq!(sweep_speak(&ChannelPermAccess::NotMember, true), None);
+        assert_eq!(sweep_speak(&allowed(P::all()), false), None, "a text room has no speak right");
+    }
+
+    /// The join gate and its post-insert recheck share this, so the voice
+    /// joiner's speak right comes from the very resolution that admitted them.
+    #[test]
+    fn the_join_verdict_admits_refuses_and_carries_speak() {
+        let vc = P::VIEW_CHANNEL | P::CONNECT;
+        assert_eq!(join_verdict(&allowed(P::VIEW_CHANNEL), false), Ok(None), "a text room needs VIEW only");
+        assert_eq!(join_verdict(&allowed(vc | P::SPEAK), true), Ok(Some(true)));
+        assert_eq!(join_verdict(&allowed(vc), true), Ok(Some(false)), "admitted, but not to speak");
+        assert_eq!(join_verdict(&allowed(P::ADMINISTRATOR), true), Ok(Some(true)), "the owner resolves to ADMINISTRATOR");
+    }
+
+    /// Both refusals fail closed; only a member who can SEE the channel is told
+    /// it is CONNECT they lack. VIEW-denied, non-member and not-found keep the
+    /// generic text, so it stays no oracle for a channel they cannot see.
+    #[test]
+    fn only_a_member_who_can_see_the_channel_is_told_it_is_connect() {
+        assert_eq!(join_verdict(&allowed(P::VIEW_CHANNEL | P::SPEAK), true), Err(JOIN_NO_CONNECT));
+        assert_eq!(join_verdict(&allowed(P::CONNECT | P::SPEAK), true), Err(JOIN_REFUSED), "VIEW-denied: generic");
+        assert_eq!(join_verdict(&allowed(P::CONNECT), false), Err(JOIN_REFUSED));
+        assert_eq!(join_verdict(&ChannelPermAccess::NotMember, true), Err(JOIN_REFUSED));
+        assert_eq!(join_verdict(&ChannelPermAccess::NotFound, true), Err(JOIN_REFUSED));
+        assert_eq!(join_verdict(&ChannelPermAccess::NotFound, false), Err(JOIN_REFUSED));
+        assert_ne!(JOIN_NO_CONNECT, JOIN_REFUSED);
     }
 }
 
@@ -5758,5 +5971,481 @@ mod device_attest_bind_tests {
         assert!(matches!(rebind_first, Ok(true)), "re-attesting as the bound device is fine: {rebind_first:?}");
         assert!(matches!(legacy, Ok(true)), "a live device attests on a socket with no sid: {legacy:?}");
         assert_eq!(after_all.as_deref(), Some(first.as_str()));
+    }
+}
+
+#[cfg(test)]
+mod voice_speak_join_tests {
+    use super::{evict_sweep, handle_message, JOIN_NO_CONNECT, JOIN_REFUSED};
+    use crate::permissions::Permissions;
+    use crate::protocol::ServerMessage;
+    use crate::state::{AppState, UserId};
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    /// One registered socket of one user, driven through the real handler.
+    struct Sock {
+        uid: UserId,
+        name: String,
+        conn: u64,
+        rx: mpsc::Receiver<ServerMessage>,
+        joined: HashSet<String>,
+    }
+
+    impl Sock {
+        fn open(state: &Arc<AppState>, uid: i32, name: &str) -> Sock {
+            let (tx, rx) = mpsc::channel::<ServerMessage>(256);
+            let (conn, _, _) = state.register_session(uid as UserId, name.to_string(), tx, false, None, String::new());
+            Sock { uid: uid as UserId, name: name.to_string(), conn, rx, joined: HashSet::new() }
+        }
+
+        async fn join(&mut self, state: &Arc<AppState>, room: &str) -> Result<(), String> {
+            let frame = serde_json::json!({ "type": "JoinRoom", "payload": { "room_id": room } }).to_string();
+            handle_message(state, self.uid, self.conn, &self.name, &frame, &mut self.joined, "").await
+        }
+
+        /// Everything queued since the last drain, in order.
+        fn drain(&mut self) -> Vec<ServerMessage> {
+            let mut out = Vec::new();
+            while let Ok(m) = self.rx.try_recv() {
+                out.push(m);
+            }
+            out
+        }
+    }
+
+    /// The VoiceSpeakState frames for `room`, in arrival order.
+    fn speak(frames: &[ServerMessage], room: &str) -> Vec<(UserId, bool)> {
+        frames
+            .iter()
+            .filter_map(|m| match m {
+                ServerMessage::VoiceSpeakState { room_id, user_id, can_speak } if room_id == room => {
+                    Some((*user_id, *can_speak))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// RoomJoined for `room` arrived, and before the first speak frame.
+    fn room_joined_first(frames: &[ServerMessage], room: &str) -> bool {
+        let joined = frames
+            .iter()
+            .position(|m| matches!(m, ServerMessage::RoomJoined { room_id, .. } if room_id == room));
+        let first_speak = frames.iter().position(|m| matches!(m, ServerMessage::VoiceSpeakState { .. }));
+        matches!((joined, first_speak), (Some(j), Some(s)) if j < s)
+    }
+
+    /// Deny `bits` to `role_id` on `channel` (an upsert).
+    async fn deny(pool: &sqlx::PgPool, channel: i32, role_id: i64, bits: Permissions) {
+        sqlx::query(
+            "INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny) VALUES ($1, $2, 0, $3) \
+             ON CONFLICT (channel_id, role_id) DO UPDATE SET deny = EXCLUDED.deny",
+        )
+        .bind(channel as i64)
+        .bind(role_id)
+        .bind(bits.bits() as i64)
+        .execute(pool)
+        .await
+        .expect("overwrite");
+    }
+
+    /// A role with no permissions of its own, held by `holder`.
+    async fn role(pool: &sqlx::PgPool, sid: &str, name: &str, holder: i32) -> i64 {
+        let (rid,): (i64,) = sqlx::query_as(
+            "INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) \
+             VALUES ($1, $2, '#99AAB5', 0, 1, false) RETURNING id",
+        )
+        .bind(sid)
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .expect("role");
+        sqlx::query("INSERT INTO member_roles (server_id, user_id, role_id) VALUES ($1, $2, $3)")
+            .bind(sid)
+            .bind(holder)
+            .bind(rid)
+            .execute(pool)
+            .await
+            .expect("member role");
+        rid
+    }
+
+    /// THE SPEAK AUTHORITY, end to end through the real JoinRoom handler and
+    /// the real perms-change sweep (TEST_DATABASE_URL; skips without it).
+    ///
+    /// A member whose role carries a channel overwrite denying SPEAK is
+    /// admitted to the voice room (they hold VIEW + CONNECT) but flagged
+    /// false: to themselves (their client must not send) and to everyone
+    /// already in the room (their receivers must refuse the audio). A member
+    /// without that overwrite, and the owner, are flagged true. The expected
+    /// lists hold `true` entries AND a `false` one, so the test is red for
+    /// "no frames at all", for "always true" and for "always false" alike.
+    ///
+    /// Then the sweep: lifting the deny flips the stored right and tells the
+    /// WHOLE room, the member included; re-imposing it flips it back; a sweep
+    /// with nothing changed says nothing.
+    ///
+    /// Refusals ride along: a member who sees the channel but is denied
+    /// CONNECT is told it is CONNECT; a VIEW-denied member and a non-member
+    /// get the generic text; none of the three is sent any speak state.
+    #[tokio::test]
+    async fn a_speak_denied_member_is_flagged_false_to_themselves_and_the_room() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let mk = |n: &str| format!("vs_{n}_{}", &tag[..12]);
+        let mut ids: Vec<i32> = Vec::new();
+        for n in ["owner", "speaker", "muted", "noconnect", "hidden", "outsider"] {
+            let (id,): (i32,) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id")
+                .bind(mk(n))
+                .bind(b"s".as_ref())
+                .bind(b"v".as_ref())
+                .fetch_one(&pool)
+                .await
+                .expect("user");
+            ids.push(id);
+        }
+        let (owner_i, speaker_i, muted_i, noconnect_i, hidden_i, outsider_i) = (ids[0], ids[1], ids[2], ids[3], ids[4], ids[5]);
+        let sid = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, $2, $3)")
+            .bind(&sid)
+            .bind(mk("srv"))
+            .bind(owner_i)
+            .execute(&pool)
+            .await
+            .expect("server");
+        for m in [owner_i, speaker_i, muted_i, noconnect_i, hidden_i] {
+            sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)")
+                .bind(&sid)
+                .bind(m)
+                .execute(&pool)
+                .await
+                .expect("member");
+        }
+        let everyone = (Permissions::VIEW_CHANNEL | Permissions::CONNECT | Permissions::SPEAK).bits() as i64;
+        sqlx::query(
+            "INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) \
+             VALUES ($1, '@everyone', '#99AAB5', $2, 0, true)",
+        )
+        .bind(&sid)
+        .bind(everyone)
+        .execute(&pool)
+        .await
+        .expect("@everyone");
+        let muted_role = role(&pool, &sid, "muted", muted_i).await;
+        let noconnect_role = role(&pool, &sid, "noconnect", noconnect_i).await;
+        let hidden_role = role(&pool, &sid, "hidden", hidden_i).await;
+        let (voice,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type, sfu_mode) VALUES ($1, 'v', 1, false) RETURNING id")
+            .bind(&sid)
+            .fetch_one(&pool)
+            .await
+            .expect("voice channel");
+        let (text,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type) VALUES ($1, 't', 0) RETURNING id")
+            .bind(&sid)
+            .fetch_one(&pool)
+            .await
+            .expect("text channel");
+        deny(&pool, voice, muted_role, Permissions::SPEAK).await;
+        deny(&pool, voice, noconnect_role, Permissions::CONNECT).await;
+        deny(&pool, voice, hidden_role, Permissions::VIEW_CHANNEL).await;
+
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = format!("voice_{voice}");
+        let text_room = format!("channel_{text}");
+        let (owner, speaker, muted) = (owner_i as UserId, speaker_i as UserId, muted_i as UserId);
+        let mut s_owner = Sock::open(&state, owner_i, "owner");
+        let mut s_speaker = Sock::open(&state, speaker_i, "speaker");
+        let mut s_muted = Sock::open(&state, muted_i, "muted");
+        let mut s_noconnect = Sock::open(&state, noconnect_i, "noconnect");
+        let mut s_hidden = Sock::open(&state, hidden_i, "hidden");
+        let mut s_outsider = Sock::open(&state, outsider_i, "outsider");
+
+        // A text room carries no speak right at all (negative control).
+        let text_join = s_owner.join(&state, &text_room).await;
+        let text_frames = s_owner.drain();
+
+        let j_owner = s_owner.join(&state, &room).await;
+        let j_speaker = s_speaker.join(&state, &room).await;
+        let j_muted = s_muted.join(&state, &room).await;
+        let j_noconnect = s_noconnect.join(&state, &room).await;
+        let j_hidden = s_hidden.join(&state, &room).await;
+        let j_outsider = s_outsider.join(&state, &room).await;
+        let (f_owner, f_speaker, f_muted) = (s_owner.drain(), s_speaker.drain(), s_muted.drain());
+        let refused_saw: usize = [&mut s_noconnect, &mut s_hidden, &mut s_outsider]
+            .into_iter()
+            .map(|s| speak(&s.drain(), &room).len())
+            .sum();
+        let stored_muted = state.rooms.get(&room).map(|r| r.can_speak(muted));
+        let members_after_join: Vec<UserId> = state.rooms.get(&room).map(|r| r.members.clone()).unwrap_or_default();
+
+        // The sweep: lift the SPEAK deny, then put it back, then change nothing.
+        sqlx::query("DELETE FROM channel_permission_overwrites WHERE channel_id = $1 AND role_id = $2")
+            .bind(voice as i64)
+            .bind(muted_role)
+            .execute(&pool)
+            .await
+            .expect("lift the deny");
+        evict_sweep(&state, &sid, 0).await;
+        let lifted = (speak(&s_owner.drain(), &room), speak(&s_speaker.drain(), &room), speak(&s_muted.drain(), &room));
+        let stored_after_lift = state.rooms.get(&room).map(|r| r.can_speak(muted));
+        deny(&pool, voice, muted_role, Permissions::SPEAK).await;
+        evict_sweep(&state, &sid, 0).await;
+        let reimposed = (speak(&s_owner.drain(), &room), speak(&s_speaker.drain(), &room), speak(&s_muted.drain(), &room));
+        evict_sweep(&state, &sid, 0).await;
+        let unchanged = (speak(&s_owner.drain(), &room), speak(&s_speaker.drain(), &room), speak(&s_muted.drain(), &room));
+        let members_after_sweeps: Vec<UserId> = state.rooms.get(&room).map(|r| r.members.clone()).unwrap_or_default();
+
+        for s in [&s_owner, &s_speaker, &s_muted, &s_noconnect, &s_hidden, &s_outsider] {
+            state.unregister_session(s.uid, s.conn);
+        }
+        let _ = sqlx::query("DELETE FROM channels WHERE id = ANY($1)").bind(vec![voice, text]).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&sid).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(ids.clone()).execute(&pool).await;
+
+        assert_eq!(text_join, Ok(()), "fixture: the owner joins the text room");
+        assert!(
+            !text_frames.iter().any(|m| matches!(m, ServerMessage::VoiceSpeakState { .. })),
+            "a text room carries no speak right: {text_frames:?}"
+        );
+
+        assert_eq!(j_owner, Ok(()));
+        assert_eq!(j_speaker, Ok(()));
+        assert_eq!(j_muted, Ok(()), "SPEAK is not needed to JOIN: VIEW + CONNECT admit");
+        assert_eq!(members_after_join, vec![owner, speaker, muted]);
+
+        // Each joiner is told every member present, itself included, after RoomJoined.
+        assert!(room_joined_first(&f_owner, &room), "owner: RoomJoined first: {f_owner:?}");
+        assert!(room_joined_first(&f_speaker, &room), "speaker: RoomJoined first: {f_speaker:?}");
+        assert!(room_joined_first(&f_muted, &room), "muted: RoomJoined first: {f_muted:?}");
+        let all = vec![(owner, true), (speaker, true), (muted, false)];
+        // owner: its own snapshot, then each later joiner's frame.
+        assert_eq!(speak(&f_owner, &room), all, "owner: {f_owner:?}");
+        // speaker: a snapshot of owner + itself, then the muted joiner's frame.
+        assert_eq!(speak(&f_speaker, &room), all, "speaker: {f_speaker:?}");
+        // muted: the snapshot, including its OWN false (its client must not send).
+        assert_eq!(speak(&f_muted, &room), all, "muted: {f_muted:?}");
+        assert_eq!(stored_muted, Some(false));
+
+        assert_eq!(j_noconnect, Err(JOIN_NO_CONNECT.to_string()), "a member who sees the channel is told it is CONNECT");
+        assert_eq!(j_hidden, Err(JOIN_REFUSED.to_string()), "VIEW-denied: the generic text");
+        assert_eq!(j_outsider, Err(JOIN_REFUSED.to_string()), "a non-member: the generic text");
+        assert_eq!(refused_saw, 0, "a refused joiner is sent no speak state");
+
+        // Sweep, deny lifted: all three hear the ONE change, the member included.
+        let one = |v: bool| vec![(muted, v)];
+        assert_eq!(lifted, (one(true), one(true), one(true)), "lifting the deny");
+        assert_eq!(stored_after_lift, Some(true));
+        assert_eq!(reimposed, (one(false), one(false), one(false)), "re-imposing the deny");
+        assert_eq!(unchanged, (vec![], vec![], vec![]), "no change, no frame");
+        assert_eq!(members_after_sweeps, vec![owner, speaker, muted], "a SPEAK deny never evicts");
+    }
+}
+
+#[cfg(test)]
+mod sfu_grant_sweep_tests {
+    use super::evict_sweep;
+    use crate::permissions::Permissions as P;
+    use crate::sfu::resync_tests::{asked, livekit_stand_in, no_env_proxy, Seen, CAMERA_ONLY, MIC_AND_CAMERA};
+    use crate::sfu::{room_name_for_channel, Grant, TEST_LIVEKIT};
+    use crate::state::AppState;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// Run the real sweep with the SFU tier aimed at a stand-in, bounded: a
+    /// sweep stuck on a call must fail the test, not hang it.
+    async fn sweep(state: &Arc<AppState>, sid: &str, base: String) {
+        tokio::time::timeout(Duration::from_secs(30), TEST_LIVEKIT.scope(base, evict_sweep(state, sid, 0)))
+            .await
+            .expect("the sweep finished");
+    }
+
+    fn update(permission: &str) -> (&'static str, u16, String) {
+        (
+            "/twirp/livekit.RoomService/UpdateParticipant",
+            200,
+            format!(r#"{{"sid":"PA_1","identity":"x","state":"ACTIVE","tracks":[],"permission":{permission}}}"#),
+        )
+    }
+
+    fn body(s: &Seen) -> serde_json::Value {
+        serde_json::from_str(&s.body).expect("a JSON body")
+    }
+
+    /// Only an answer for THIS server's channel carries a grant: with the scope
+    /// unknown the sweep keeps another server's members, and their grant is not
+    /// its business; a failed lookup and a non-member say nothing about it.
+    #[test]
+    fn only_this_servers_answer_carries_a_grant() {
+        use super::sweep_grant;
+        use crate::permissions::ChannelPermAccess;
+        let perms = P::VIEW_CHANNEL | P::CONNECT | P::VIDEO;
+        let allowed = |sid: &str| ChannelPermAccess::Allowed { server_id: sid.into(), perms };
+        assert_eq!(sweep_grant("s", &allowed("s")), Some(perms));
+        assert_eq!(sweep_grant("s", &allowed("other")), None);
+        assert_eq!(sweep_grant("s", &ChannelPermAccess::NotFound), None);
+        assert_eq!(sweep_grant("s", &ChannelPermAccess::NotMember), None);
+    }
+
+    /// THE GAP, end to end through the real perms-change sweep
+    /// (TEST_DATABASE_URL; skips without it). A member sits in an SFU call
+    /// whose Púca socket is NOT in voice_<id> - it left that room, or died - so
+    /// the server holds no speak flag for them at all, and their LiveKit
+    /// sessions carry the grant their tokens were minted with.
+    ///
+    /// Denying SPEAK must reach LiveKit: one UpdateParticipant, for the one
+    /// session whose grant still names the microphone - not for their second
+    /// session that already holds the camera-only grant, not for the owner, not
+    /// for a reservation - and it evicts nobody. Lifting the deny grants the
+    /// microphone back to both sessions. A sweep with nothing changed sends
+    /// nothing at all.
+    #[tokio::test]
+    async fn the_sweep_enforces_speak_at_livekit_for_sfu_members_it_keeps() {
+        let Some(pool) = crate::migrator::test_pool(2).await else { return };
+        no_env_proxy();
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let mk = |n: &str| format!("sg_{n}_{}", &tag[..12]);
+        let mut ids: Vec<i32> = Vec::new();
+        for n in ["owner", "member"] {
+            let (id,): (i32,) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id")
+                .bind(mk(n))
+                .bind(b"s".as_ref())
+                .bind(b"v".as_ref())
+                .fetch_one(&pool)
+                .await
+                .expect("user");
+            ids.push(id);
+        }
+        let (owner, member) = (ids[0] as i64, ids[1] as i64);
+        let sid = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, $2, $3)")
+            .bind(&sid)
+            .bind(mk("srv"))
+            .bind(ids[0])
+            .execute(&pool)
+            .await
+            .expect("server");
+        sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2), ($1, $3)")
+            .bind(&sid)
+            .bind(ids[0])
+            .bind(ids[1])
+            .execute(&pool)
+            .await
+            .expect("members");
+        let everyone = P::VIEW_CHANNEL | P::CONNECT | P::SPEAK | P::VIDEO;
+        sqlx::query(
+            "INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) \
+             VALUES ($1, '@everyone', '#99AAB5', $2, 0, true)",
+        )
+        .bind(&sid)
+        .bind(everyone.bits() as i64)
+        .execute(&pool)
+        .await
+        .expect("@everyone");
+        let (role,): (i64,) = sqlx::query_as(
+            "INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) \
+             VALUES ($1, 'quiet', '#99AAB5', 0, 1, false) RETURNING id",
+        )
+        .bind(&sid)
+        .fetch_one(&pool)
+        .await
+        .expect("role");
+        sqlx::query("INSERT INTO member_roles (server_id, user_id, role_id) VALUES ($1, $2, $3)")
+            .bind(&sid)
+            .bind(ids[1])
+            .bind(role)
+            .execute(&pool)
+            .await
+            .expect("member role");
+        let (cid,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type, sfu_mode) VALUES ($1, 'v', 1, true) RETURNING id")
+            .bind(&sid)
+            .fetch_one(&pool)
+            .await
+            .expect("sfu channel");
+
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = room_name_for_channel(cid as i64);
+        let (a, b, o, r) = (format!("u{member}#a"), format!("u{member}#b"), format!("u{owner}#o"), format!("u{member}#r"));
+        {
+            let now = Instant::now();
+            let mut u = state.sfu_rooms.entry(room.clone()).or_default();
+            u.participants.insert(a.clone(), now); // joined while SPEAK was allowed
+            u.participants.insert(b.clone(), now); // already holds the camera-only grant
+            u.participants.insert(o.clone(), now);
+            u.reservations.insert(r.clone(), now); // minted, never joined: no session to update
+            u.grants.insert(a.clone(), Grant::of(everyone));
+            u.grants.insert(b.clone(), Grant::of(P::VIEW_CHANNEL | P::CONNECT | P::VIDEO));
+            u.grants.insert(o.clone(), Grant::of(P::ADMINISTRATOR));
+        }
+        let no_voice_room = state.rooms.get(&format!("voice_{cid}")).is_none();
+
+        // 1. SPEAK denied to the member's role on this channel.
+        sqlx::query("INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny) VALUES ($1, $2, 0, $3)")
+            .bind(cid as i64)
+            .bind(role)
+            .bind(P::SPEAK.bits() as i64)
+            .execute(&pool)
+            .await
+            .expect("deny SPEAK");
+        let (base, srv) = livekit_stand_in(vec![update(CAMERA_ONLY)], None).await;
+        sweep(&state, &sid, base).await;
+        let revoke = asked(srv).await;
+        let after_revoke = state.sfu_rooms.get(&room).map(|u| {
+            (
+                u.grants.get(&a).copied(),
+                u.participants.contains_key(&a),
+                u.participants.contains_key(&b),
+                u.reservations.contains_key(&r),
+            )
+        });
+
+        // 2. The deny lifted: the microphone is granted back to both sessions.
+        sqlx::query("DELETE FROM channel_permission_overwrites WHERE channel_id = $1 AND role_id = $2")
+            .bind(cid as i64)
+            .bind(role)
+            .execute(&pool)
+            .await
+            .expect("lift the deny");
+        let (base, srv) = livekit_stand_in(vec![update(MIC_AND_CAMERA), update(MIC_AND_CAMERA)], None).await;
+        sweep(&state, &sid, base).await;
+        let grant = asked(srv).await;
+
+        // 3. Nothing changed: nothing is sent (the stand-in fails on any call).
+        let (base, srv) = livekit_stand_in(vec![], None).await;
+        sweep(&state, &sid, base).await;
+        let quiet = asked(srv).await.len();
+        let kept = state.sfu_rooms.get(&room).map(|u| u.participants.len());
+
+        let _ = sqlx::query("DELETE FROM channels WHERE id = $1").bind(cid).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&sid).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(ids.clone()).execute(&pool).await;
+
+        assert!(no_voice_room, "fixture: no socket of theirs is in voice_<id>");
+        assert_eq!(revoke.len(), 1, "one session needed the new grant");
+        assert_eq!(
+            body(&revoke[0]),
+            serde_json::json!({"room": room, "identity": a, "permission": {
+                "can_subscribe": true, "can_publish": true, "can_publish_data": true, "can_publish_sources": ["CAMERA"]}}),
+            "the microphone goes; listening, the data lane and the camera stay"
+        );
+        assert_eq!(revoke[0].claims["video"]["roomAdmin"], true);
+        assert_eq!(
+            after_revoke,
+            Some((Some(Grant::of(P::VIEW_CHANNEL | P::CONNECT | P::VIDEO)), true, true, true)),
+            "confirmed, and nobody evicted"
+        );
+
+        let mut granted: Vec<(String, serde_json::Value)> =
+            grant.iter().map(|s| (body(s)["identity"].as_str().unwrap().to_string(), body(s)["permission"].clone())).collect();
+        granted.sort_by(|x, y| x.0.cmp(&y.0));
+        let mic_and_camera = serde_json::json!({
+            "can_subscribe": true, "can_publish": true, "can_publish_data": true, "can_publish_sources": ["MICROPHONE", "CAMERA"]});
+        assert_eq!(
+            granted,
+            vec![(a.clone(), mic_and_camera.clone()), (b.clone(), mic_and_camera)],
+            "both of the member's sessions, not the owner's"
+        );
+        assert_eq!(quiet, 0, "no change, no call");
+        assert_eq!(kept, Some(3), "a SPEAK change never evicts");
     }
 }

@@ -149,12 +149,22 @@ DM.
 3. You are connected. Clicking the channel again opens the voice view; it never disconnects you
 4. If a warning appears instead, the app did not connect you — read it, then press **Join Voice** if you still want to join
 
+A channel's **Speak** and **Connect** permissions (see
+[Channel permissions](#channel-permissions-manage-channels)) change what
+happens:
+
+- **Without Speak** you still join, listen-only: you hear everyone, nobody
+  hears you, and the app does not ask for microphone access. The panel reads
+  **Voice Connected · can't speak**.
+- **Without Connect** you cannot join. The panel says
+  **You don't have permission to join this voice channel.**
+
 ### Voice Controls
 The voice panel's buttons, by tooltip:
 
 | Tooltip | Action |
 |---------|--------|
-| **Mute** / **Unmute** | Stop or resume sending your microphone. Reads **Push to talk — hold your key to speak** in push-to-talk mode, and **No microphone detected — listen-only mode** if there is none |
+| **Mute** / **Unmute** | Stop or resume sending your microphone. Reads **Push to talk — hold your key to speak** in push-to-talk mode, **No microphone detected — listen-only mode** if there is none, and **You don't have permission to speak in this channel** if you do not have the Speak permission there |
 | **Deafen** / **Undeafen** | Stop hearing everyone, which also mutes you |
 | **Noise suppression** | A picker, not a button: choose the microphone filter — **No suppression**, **Standard** or **RNNoise (ML)**. **DeepFilter (Max)** is listed too once **DeepFilterNet noise suppression** is ticked under **Settings → Advanced** |
 | **Turn On Camera** / **Turn Off Camera** | Share your webcam |
@@ -162,6 +172,14 @@ The voice panel's buttons, by tooltip:
 | **Disconnect** | Leave voice |
 
 On a phone the less-used buttons sit behind **More voice controls**.
+
+Without the Speak permission the panel's status line reads
+**Voice Connected · can't speak** instead of **Voice Connected**, and the
+microphone stays closed for the whole call. If Speak is taken away while you
+are in the call, your microphone is closed at once and the status line
+changes. If it is given back, the panel says
+**You can speak in this channel now. Leave and rejoin it to use your microphone.**
+The microphone is not reopened mid-call; disconnect and join the channel again.
 
 ### Mute vs Deafen
 - **Mute**: others cannot hear you; you still hear them
@@ -242,6 +260,43 @@ Tasks, Complete Tasks, Manage Tasks, Connect, Speak, Video, Stream, Mute
 Members, Move Members, Create Clips, Manage Channels, Manage Roles, Manage
 Server, Kick Members, Ban Members, Create Invites, and Administrator (full
 access to all permissions).
+
+### Channel permissions (Manage Channels)
+A role's permissions apply in every channel. To change what a role may do in
+one channel only:
+
+1. Right-click the channel in the channel list and choose **Edit Channel**
+2. Open the **Permissions** tab (it appears only if you have Manage Channels)
+3. Pick a role from the list
+4. Each permission has three buttons, by tooltip: **Inherit** (use the role's
+   server-wide setting), **Allow** and **Deny**
+5. Click **Save Permissions**
+
+Every channel lists View Channel, Send Messages, Add Tasks, Complete Tasks,
+Manage Tasks, Manage Messages and Create Clips. A voice channel also lists:
+
+| Row | What **Deny** does in this channel |
+|-----|------------------------------------|
+| **Connect** | The role cannot join the call, and anyone already in it is disconnected |
+| **Speak** | The role can join and listen, but people on a current version of Púca don't hear their microphone. It does not silence their screen-share audio |
+| **Video** | The role cannot turn on a camera |
+| **Stream** | The role cannot share a screen |
+
+How the settings combine:
+
+- Denies never apply to the server owner or to administrators.
+- When a member's roles disagree, an **Allow** on any of them wins over a
+  **Deny**. Any role's setting also wins over the @everyone role's, so to
+  silence one role in a channel where @everyone is allowed to speak, deny
+  Speak on that role.
+- A **Deny** of Connect or Speak takes effect straight away for people already
+  in the call. A new **Allow** of Speak applies when they leave and rejoin.
+- Speak covers the microphone only. Someone sharing their screen with sound is
+  still heard through the share, so to silence someone completely deny
+  **Stream** as well (and see the next point about a share already running).
+- Video and Stream are checked each time someone turns on a camera or starts
+  sharing; a camera or share already running is not stopped. In an SFU channel
+  a new **Allow** applies after the member rejoins.
 
 ### Kick and Ban (Owner)
 The member's profile popup has **Kick** and **Ban** buttons; each asks for

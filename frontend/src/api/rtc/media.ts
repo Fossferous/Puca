@@ -104,6 +104,10 @@ export class MediaManager {
     /** True when the local stream came up WITHOUT a mic track because no capture
      *  device could be opened. We still receive everyone (listen-only). */
     private noMic = false;
+    /** SPEAK is denied in this voice channel: the microphone must never be
+     *  opened, by the join or by any later re-acquire (noise-mode change,
+     *  device watchdog, settings change). Set by VoicePanel per join. */
+    private speakDenied = false;
     // A single shared AudioContext for all voice-activity detectors — browsers
     // cap the number of AudioContexts (~6), so one per remote user would break
     // in a busy channel.
@@ -126,9 +130,46 @@ export class MediaManager {
         return this.localStream;
     }
 
-    /** True when we joined without a microphone (listen-only). */
+    /** True when we are in the call without a microphone (listen-only):
+     *  none could be opened, or SPEAK is denied here. */
     isListenOnly(): boolean {
-        return this.noMic;
+        return this.noMic || this.speakDenied;
+    }
+
+    /** Mark SPEAK denied (or allowed) for the call being joined. While denied,
+     *  getLocalStream never asks for the mic and reacquireAudioTrack refuses. */
+    setSpeakDenied(denied: boolean): void {
+        this.speakDenied = denied;
+    }
+
+    isSpeakDenied(): boolean {
+        return this.speakDenied;
+    }
+
+    /**
+     * Close the microphone for good (SPEAK denied after it was opened): stop
+     * and remove every audio track of the local stream and the noise graph
+     * behind it, so nothing - no peer, not the clip buffer - can read it.
+     * Returns the tracks removed so the caller can clear the senders that
+     * carried them.
+     */
+    releaseMic(): MediaStreamTrack[] {
+        // Disarm the device watch FIRST: this is a deliberate close, not a
+        // device loss, and the watchdog must not try to re-open it.
+        this.rawMicTrack = null;
+        const removed: MediaStreamTrack[] = [];
+        if (this.localStream) {
+            for (const t of this.localStream.getAudioTracks()) {
+                t.stop();
+                this.localStream.removeTrack(t);
+                removed.push(t);
+            }
+        }
+        cleanupNoiseFilter(); // also stops the raw capture behind a Web Audio graph
+        // Anything tapping the local stream (VAD, the clip buffer's mic tap)
+        // re-reads it; with no audio track left they go quiet.
+        this.vadRebuilds.forEach(fn => { try { fn(); } catch { /* detector gone */ } });
+        return removed;
     }
 
     /**
@@ -281,6 +322,15 @@ export class MediaManager {
         if (this.localStream) {
             return this.localStream;
         }
+        // No SPEAK here: never open the mic, not even to throw it away. A
+        // valid (empty) handle still lets the call and the camera path work.
+        if (audio && this.speakDenied) {
+            audio = false;
+            if (!video) {
+                this.localStream = new MediaStream();
+                return this.localStream;
+            }
+        }
 
         try {
             const mode = getNoiseSuppressionMode();
@@ -376,8 +426,9 @@ export class MediaManager {
         // stale, not a device loss.
         this.rawMicTrack = null;
         // Clear listen-only so a rejoin retries the mic (they may have plugged
-        // a headset in since).
+        // a headset in since). SPEAK is re-decided by the next join too.
         this.noMic = false;
+        this.speakDenied = false;
         // Also tear down the 'high'-mode Web Audio graph + its raw mic track.
         cleanupNoiseFilter();
     }
@@ -404,6 +455,9 @@ export class MediaManager {
      */
     async reacquireAudioTrack(): Promise<{ oldTrack: MediaStreamTrack | null; newTrack: MediaStreamTrack } | null> {
         if (!this.localStream) return null;
+        // SPEAK denied: every re-acquire path (noise mode, device watchdog,
+        // settings) ends here, and none of them may open a mic.
+        if (this.speakDenied) return null;
         const oldAudio = this.localStream.getAudioTracks()[0] ?? null;
         const wasEnabled = oldAudio?.enabled ?? true;
 
@@ -439,6 +493,15 @@ export class MediaManager {
         if (this.localStream !== streamAtStart) {
             mic.getTracks().forEach(t => t.stop());
             if (this.localStream === null) cleanupNoiseFilter();
+            return null;
+        }
+        // SPEAK was withdrawn while this capture was being built (the entry
+        // check above ran seconds ago): it must never go live. The old mic is
+        // already closed (releaseMic); close the new one the same way.
+        if (this.speakDenied) {
+            mic.getTracks().forEach(t => t.stop());
+            rawMic.getTracks().forEach(t => t.stop());
+            cleanupNoiseFilter();
             return null;
         }
         const newAudio = mic.getAudioTracks()[0];

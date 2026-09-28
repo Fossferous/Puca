@@ -1016,6 +1016,39 @@ a member denied CONNECT could not rejoin, but was never removed. It now
 re-checks CONNECT for voice rooms and evicts from the mesh room (`RoomLeft`)
 and from the SFU room alike.
 
+**A member without Speak can be in a call, but nobody plays their
+microphone.** Until this change Speak was enforced nowhere on mesh channels,
+and on SFU channels it broke the join outright. Mesh voice is peer-to-peer,
+so the server cannot take a member's audio off the wire. It is the authority
+instead: everyone in a voice room is told each member's Speak right when they
+join, and again whenever a role, a role assignment or a channel overwrite
+changes it (`VoiceSpeakState`, [`src/ws.rs`](../src/ws.rs)). Every receiving
+app refuses to play a member flagged as not allowed, and stops one already
+playing (`SpeakGate`,
+[`frontend/src/api/rtc/speakGate.ts`](../frontend/src/api/rtc/speakGate.ts)).
+The member's own app never opens the microphone in that channel, and closes it
+on a mid-call revoke. A second audio stream from a peer with no screen share
+announced behind it is held as well, so it cannot be passed off as share
+audio. On SFU channels LiveKit enforces it too: a join token grants the
+microphone only with Speak, and when a live session's microphone grant no
+longer matches the member's Speak (a change mid-call, or a token minted
+before it) the server changes the grant through LiveKit's
+`UpdateParticipant`, which unpublishes the microphone and refuses a new one
+([`src/sfu.rs`](../src/sfu.rs)). The limits:
+
+- On mesh channels enforcement happens at the receiver, so an app older than
+  this change still plays a denied member who also runs an older or modified
+  app. SFU channels do not depend on the receivers.
+- Screen-share audio is governed by Stream, not Speak: a member allowed to
+  share can be heard through their share. Deny Stream as well to silence
+  someone completely.
+- On a mesh channel, a receiver that misses the one frame about a member (its
+  connection so far behind that the server drops frames to it) treats that
+  member as allowed until their right changes again or they rejoin.
+- A Speak granted mid-call takes effect when the member rejoins. Video and
+  Stream are checked when a camera or share starts; one already running is
+  not stopped.
+
 **Queued and in-flight state is re-authorised against the permissions you have
 now, not the ones you had.** Frames parked for a device that was offline are
 re-checked when it connects (the delivery branch of `handle_socket`,

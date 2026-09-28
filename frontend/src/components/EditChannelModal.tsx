@@ -26,6 +26,19 @@ const CHANNEL_PERMS: { bit: number; label: string }[] = [
     { bit: PERM.CREATE_CLIPS, label: 'Create Clips' },
 ];
 
+// The voice bits, offered on VOICE channels only (channel_type 1). The backend
+// accepts these overwrites on any channel, but they are only ever read for a
+// voice room — JoinRoom (CONNECT), the speak-state push (SPEAK), CameraStart
+// (VIDEO), ScreenShareStart (STREAM) and the SFU token grants — so on a text
+// channel they would be controls that change nothing. Labels and descriptions
+// are RoleSettingsModal's, narrowed to the one channel being edited.
+const VOICE_CHANNEL_PERMS: { bit: number; label: string; desc: string }[] = [
+    { bit: PERM.CONNECT, label: 'Connect', desc: 'Join this voice channel' },
+    { bit: PERM.SPEAK, label: 'Speak', desc: 'Talk in this voice channel' },
+    { bit: PERM.VIDEO, label: 'Video', desc: 'Turn on a camera here' },
+    { bit: PERM.STREAM, label: 'Stream', desc: 'Screen share here' },
+];
+
 type TriState = 'inherit' | 'allow' | 'deny';
 type OverwriteMap = Record<number, { allow: number; deny: number }>;
 
@@ -199,6 +212,12 @@ export function EditChannelModal({ isOpen, onClose, channel, onChannelUpdated, c
     if (!isOpen) return null;
 
     const selectedRole = permRoles.find(r => r.id === selectedRoleId) || null;
+    const isVoice = channel.channel_type === 1;
+    // Existing rows first, in their existing order, for every channel type;
+    // a voice channel appends its own four below them.
+    const permRows: { bit: number; label: string; desc?: string }[] = isVoice
+        ? [...CHANNEL_PERMS, ...VOICE_CHANNEL_PERMS]
+        : CHANNEL_PERMS;
 
     return (
         <div className="modal-overlay" onClick={onClose}>
@@ -385,11 +404,34 @@ export function EditChannelModal({ isOpen, onClose, channel, onChannelUpdated, c
                                             The tick allows and the cross denies the permission in this
                                             channel only.
                                         </p>
-                                        {CHANNEL_PERMS.map(perm => {
+                                        {/* Every claim here is what the server does, not a
+                                            convention: the owner resolves to ADMINISTRATOR and
+                                            an admin base skips overwrites entirely; role rows
+                                            merge deny-then-allow AFTER the @everyone row
+                                            (permissions.rs layer_overwrite_rows); a change runs
+                                            the eviction pass (CONNECT) and the speak-state push
+                                            (SPEAK) at once, while VIDEO/STREAM are checked when
+                                            a camera or share starts. */}
+                                        {isVoice && (
+                                            <p className="channel-perms-hint channel-perms-voice-hint">
+                                                Denies never apply to the server owner or administrators.
+                                                When a member's roles disagree, an Allow on any of them wins
+                                                over a Deny, and any role's setting wins over @everyone's.
+                                                A Deny of Connect or Speak takes effect straight away for
+                                                people already in the call; a new Allow of Speak applies
+                                                when they rejoin. Video and Stream are checked each time
+                                                someone turns on a camera or shares their screen (in an
+                                                SFU channel, a new Allow applies after they rejoin).
+                                            </p>
+                                        )}
+                                        {permRows.map(perm => {
                                             const state = triFor(selectedRole.id, perm.bit);
                                             return (
                                                 <div key={perm.bit} className="channel-perm-row">
-                                                    <span className="channel-perm-label">{perm.label}</span>
+                                                    <span className="channel-perm-label">
+                                                        {perm.label}
+                                                        {perm.desc && <span className="channel-perm-desc">{perm.desc}</span>}
+                                                    </span>
                                                     <div className="tri-state">
                                                         <button
                                                             type="button"

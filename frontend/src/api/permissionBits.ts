@@ -13,6 +13,14 @@ export const PERM = {
     MANAGE_MESSAGES: 1 << 3,
     ATTACH_FILES: 1 << 4,
     ADD_REACTIONS: 1 << 6,
+    // Voice. Channel-overwritable (the Permissions tab of a voice channel).
+    // CONNECT: join the call. SPEAK: send a mic — a member without it joins
+    // listen-only and peers refuse their audio. VIDEO: camera. STREAM: screen
+    // share. Backend: permissions.rs.
+    CONNECT: 1 << 8,
+    SPEAK: 1 << 9,
+    VIDEO: 1 << 10,
+    STREAM: 1 << 11,
     MOVE_MEMBERS: 1 << 14,
     MANAGE_CHANNELS: 1 << 17,
     MANAGE_ROLES: 1 << 18,

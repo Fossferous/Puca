@@ -111,6 +111,11 @@ export class WebRTCManager {
      *  only announced video (B7): the VIDEO/STREAM bits are enforced on the
      *  announcement, so a track with none behind it is held, never shown. */
     private videoGate = new AnnouncedVideoGate<{ stream: MediaStream; receiver: RTCRtpReceiver }>();
+    /** A peer's EXTRA audio stream (neither their voice nor an announced share)
+     *  that arrived before any share announcement, held like unannounced video
+     *  (B7). Without the hold, a member denied SPEAK could send their mic as a
+     *  second stream and have it played as "share audio". */
+    private heldShareAudio = new Map<UserId, MediaStream>();
 
     /** Our own user id — set on joining voice. Used for deterministic
      *  perfect-negotiation politeness (higher id = polite = yields on glare). */
@@ -479,9 +484,36 @@ export class WebRTCManager {
         return audioTrack?.enabled ?? false;
     }
 
-    /** True when we joined without a microphone (listen-only). */
+    /** True when we are in the call without a microphone (listen-only). */
     isListenOnly(): boolean {
         return this.media.isListenOnly();
+    }
+
+    /** SPEAK denied in this channel: the mic is never opened (see MediaManager). */
+    setSpeakDenied(denied: boolean): void {
+        this.media.setSpeakDenied(denied);
+    }
+
+    isSpeakDenied(): boolean {
+        return this.media.isSpeakDenied();
+    }
+
+    /**
+     * SPEAK withdrawn after the mic was opened: close it and stop sending it to
+     * every peer. replaceTrack(null) keeps each transceiver (so we still
+     * RECEIVE) with no renegotiation; the senders are found by track identity,
+     * never by kind, so a screen share's audio keeps flowing.
+     */
+    async releaseMic(): Promise<void> {
+        const removed = this.media.releaseMic();
+        if (removed.length === 0) return;
+        for (const [, peer] of this.peers) {
+            for (const sender of peer.connection.getSenders()) {
+                if (sender.track && removed.includes(sender.track)) {
+                    await sender.replaceTrack(null).catch(() => { /* peer gone */ });
+                }
+            }
+        }
     }
 
     /** Driven by the ScreenShareStarted/Stopped WS events. `streamId` is the
@@ -491,6 +523,11 @@ export class WebRTCManager {
         if (sharing) this.videoGate.announceShare(userId, streamId);
         else this.videoGate.stopShare(userId);
         this.releaseHeldVideo(userId);
+        const heldAudio = this.heldShareAudio.get(userId);
+        if (heldAudio) {
+            this.heldShareAudio.delete(userId);
+            if (sharing) this.onScreenShareStream?.(userId, heldAudio);
+        }
     }
 
     /** Driven by the CameraStarted/Stopped WS events — a peer's camera video
@@ -1197,11 +1234,18 @@ export class WebRTCManager {
                 } else if (peer.remoteStream === null || isVoiceStream) {
                     peer.remoteStream = stream;
                     this.onRemoteStream?.(userId, stream);
-                } else {
+                } else if (this.videoGate.isSharing(userId)) {
                     // System/screen audio — it belongs to the screen-share
                     // stream, NOT the voice element (which it used to clobber).
                     // Re-notify so viewers rebind now that audio exists.
                     this.onScreenShareStream?.(userId, stream);
+                } else {
+                    // An extra audio stream with NO share announced behind it:
+                    // held, like unannounced video, until ScreenShareStarted
+                    // (the STREAM bit is enforced on that announcement). Played
+                    // as-is, it was a way to talk past a SPEAK deny.
+                    console.log(`[WebRTC] holding extra audio from ${userId} until the server announces a share`);
+                    this.heldShareAudio.set(userId, stream);
                 }
             }
         };
@@ -1606,6 +1650,7 @@ export class WebRTCManager {
         }
         // Held video rode this pc; the announcements are server state and stay.
         this.videoGate.forgetHeld(userId);
+        this.heldShareAudio.delete(userId);
         // The control lanes die with the pc; forget them so a rebuilt peer
         // starts from "no capability" rather than inheriting a hello that
         // belonged to a connection that no longer exists.
@@ -1626,6 +1671,7 @@ export class WebRTCManager {
     closeAll() {
         this.inVoice = false;
         this.videoGate.reset();
+        this.heldShareAudio.clear();
         this.voiceEpoch++;
         this.peers.forEach((peer) => peer.connection.close());
         this.peers.clear();

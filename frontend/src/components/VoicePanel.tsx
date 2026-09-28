@@ -34,10 +34,20 @@ const NO_MIC_NOTICE = 'No microphone detected — you joined in listen-only mode
  *  range) and no other input could be opened. The device watchdog retries
  *  automatically when one returns. */
 const MIC_LOST_NOTICE = 'Your microphone disconnected and no other input is available — nobody can hear you. It will reconnect automatically when a microphone returns.';
+/** In the call without SPEAK (a role or channel permission): listen-only BY
+ *  PERMISSION. Deliberately not NO_MIC_NOTICE — no microphone help can fix it. */
+const SPEAK_DENIED_NOTICE = "You don't have permission to speak in this channel. You can hear everyone; nobody can hear you.";
+/** SPEAK was granted while we were in the call without it. The mic is not
+ *  opened mid-call (a permission prompt out of nowhere, and an SFU grant is
+ *  minted per join); the next join picks it up. */
+const SPEAK_GRANTED_NOTICE = 'You can speak in this channel now. Leave and rejoin it to use your microphone.';
+/** No CONNECT on this voice channel: refused before the mic is ever asked for. */
+const CONNECT_DENIED_NOTICE = "You don't have permission to join this voice channel.";
 import { startHidingCaptureBar, stopHidingCaptureBar } from '../api/captureBar';
 import { holdStreamBoost, releaseStreamBoost } from '../api/streamBoost';
 import { holdStreamDiag, releaseStreamDiag } from '../api/streamDiag';
 import { isTauri, isAndroidApp } from '../api/platform';
+import { SpeakGate, parseVoiceSpeakState } from '../api/rtc/speakGate';
 import { setVoiceKeepAlive, openMobileAppSettings } from '../api/mobileApp';
 import { phonePanelQuery } from '../utils/phonePanel';
 import { isTouchDevice } from './settingsModal.utils';
@@ -112,6 +122,14 @@ interface VoicePanelProps {
     sfuMode?: boolean;
     /** The VOICE server's clip policy (docs/CLIPS.md), computed by Chat.tsx. */
     clipPolicy?: ClipPolicy;
+    /** This channel's SPEAK, from its my_permissions. A HINT read at join so a
+     *  member without it never gets a microphone prompt; the server's
+     *  VoiceSpeakState frames are the authority once in the room (and the SFU
+     *  grant for publishing). Absent means allowed (older server). */
+    canSpeak?: boolean;
+    /** This channel's CONNECT, same source. false: the join is refused locally
+     *  (the server refuses it too) before any microphone prompt. */
+    canConnect?: boolean;
 }
 
 // Remote camera feeds used to render here in a floating `remote-cameras-grid`
@@ -135,7 +153,7 @@ function clipPresence(roomId: string): number[] {
     return [...ids];
 }
 
-export function VoicePanel({ roomId, channelName, currentUserId, currentUsername, memberAvatars: _memberAvatars, memberSounds, onDisconnect, serverRequireMediaE2ee = false, isAfkChannel = false, afkTimeoutMs = DEFAULT_AFK_TIMEOUT_MS, onInactive, sfuMode = false, clipPolicy }: VoicePanelProps) {
+export function VoicePanel({ roomId, channelName, currentUserId, currentUsername, memberAvatars: _memberAvatars, memberSounds, onDisconnect, serverRequireMediaE2ee = false, isAfkChannel = false, afkTimeoutMs = DEFAULT_AFK_TIMEOUT_MS, onInactive, sfuMode = false, clipPolicy, canSpeak = true, canConnect = true }: VoicePanelProps) {
     noteRender('voicePanel');
     const [isInVoice, setIsInVoice] = useState(false);
     /** RIGHT-CLICK THE PANEL FOR DIAGNOSTICS.
@@ -279,6 +297,26 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     const [micNotice, setMicNotice] = useState<string | null>(null);
     // Joined without any usable microphone — receive-only participation.
     const [listenOnly, setListenOnly] = useState(false);
+    // In the call WITHOUT SPEAK: listenOnly is set too (every mic gate already
+    // honours it); this one changes the copy and forbids any path from ever
+    // re-opening the mic (noise mode, device watchdog, settings).
+    const [speakDenied, setSpeakDenied] = useState(false);
+    const speakDeniedRef = useRef(false);
+    // SPEAK arrived mid-call while denied — takes effect on the next join.
+    const [speakGrantedPending, setSpeakGrantedPending] = useState(false);
+    // Receiver-side SPEAK enforcement for both transports (see speakGate.ts).
+    const speakGateRef = useRef(new SpeakGate());
+    // The in-call voice attach (built by joinVoice): the gate re-delivers a
+    // held stream through it when the server grants SPEAK.
+    const deliverVoiceRef = useRef<((userId: number, stream: MediaStream) => void) | null>(null);
+    const canSpeakRef = useRef(canSpeak);
+    const canConnectRef = useRef(canConnect);
+    // Always-fresh handles for the always-on WS effect and joinVoice (the
+    // callbacks are defined further down, after broadcastStatus).
+    const applySpeakStateRef = useRef<(userId: number, canSpeak: boolean) => void>(() => { /* not mounted yet */ });
+    const denySpeakLocallyRef = useRef<() => Promise<void>>(async () => { /* not mounted yet */ });
+    useEffect(() => { canSpeakRef.current = canSpeak; }, [canSpeak]);
+    useEffect(() => { canConnectRef.current = canConnect; }, [canConnect]);
     // Aggregate media-E2EE status (polled) so the UI can show a lock — a
     // server-forced downgrade to transport-only is then visible.
     const [mediaSecure, setMediaSecure] = useState<{ total: number; encrypted: number; supported: boolean; enforced: boolean }>(
@@ -802,7 +840,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
      */
     const playAnnouncement = useCallback((id: number, kind: 'join' | 'leave') => {
         const fallback = kind === 'join' ? playUserJoinedSound : playUserLeftSound;
-        const suppressClip = isDeafenedRef.current || isBlocked(id);
+        // A member without SPEAK does not get their own recorded clip played
+        // to the room either — it is their audio, like their voice.
+        const suppressClip = isDeafenedRef.current || isBlocked(id) || speakGateRef.current.isDenied(id);
         const clipId = suppressClip ? null : (memberSoundsRef.current?.get(id)?.[kind] ?? null);
         if (clipId) {
             void playCustomUserSound(getFileUrl(clipId)).then(ok => { if (!ok) fallback(); });
@@ -983,7 +1023,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         // rode it. Idempotent — the stock client's StopStream-then-LeaveRoom
         // runs it twice, and closePeer on an unknown peer only bumps the
         // generation, which is what we want for a build still in flight.
-        const retireDepartedPeer = (userId: number) => {
+        const retireDepartedPeer = (userId: number): boolean => {
             const ev = { roomId, userId };
             const ctx = {
                 roomId,
@@ -992,7 +1032,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 sfuMode,
                 sfuSessionAlive: sfuMode && sfuManager.hasParticipant(userId),
             };
-            if (!shouldTearDownDepartedPeer(ev, ctx)) return;
+            if (!shouldTearDownDepartedPeer(ev, ctx)) return false;
             webrtcManager.closePeer(userId);
             document.getElementById(`audio-${userId}`)?.remove();
             // Their activity detector polls a stream that is now dead; the
@@ -1009,6 +1049,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             globalCameraStreams.delete(userId);
             notifyStreamStateChange();
             setUserSpeaking(userId, false);
+            return true;
         };
 
         const handleStreamStopped = (msg: ServerMessage) => {
@@ -1244,7 +1285,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             // keep hearing the room from outside every roster and beyond the
             // reach of every eviction path. Same predicate and same steps as
             // StreamStopped, so a leaver mid-share also loses their tile.
-            retireDepartedPeer(payload.user_id);
+            const tornDown = retireDepartedPeer(payload.user_id);
             sharingAnnouncedRef.current.stopped(payload.user_id);
             setScreenSharers(prev => {
                 if (!prev.has(payload.user_id)) return prev;
@@ -1255,6 +1296,12 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             deselectStream(payload.user_id);
             refreshVoiceUsersList();
             announceLeave(payload.user_id);
+            // Forget their SPEAK state only once their media is really gone —
+            // AFTER the leave clip, which the deny also suppresses. An SFU peer
+            // whose LiveKit session survives a blip on their socket keeps it:
+            // forgetting would let that still-live session be heard again.
+            // Their next join starts from the server's word.
+            if (tornDown) speakGateRef.current.forget(payload.user_id);
         };
 
         // Mesh receivers render only ANNOUNCED video (B7): keep the manager's
@@ -1281,8 +1328,18 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         wsClient.on('ScreenShareStarted', handleScreenShareStarted);
         wsClient.on('ScreenShareStopped', handleScreenShareStopped);
         wsClient.on('RoomLeft', handleRoomLeft);
+        // SPEAK rights from the server (the join replay, then every change).
+        // Always-on like the camera handlers above, so the replay that lands
+        // right after JoinRoom is counted before any voice stream arrives.
+        const handleVoiceSpeakState = (msg: ServerMessage) => {
+            const p = parseVoiceSpeakState(msg);
+            if (!p || p.room_id !== roomId) return;
+            applySpeakStateRef.current(p.user_id, p.can_speak);
+        };
+        wsClient.on('VoiceSpeakState', handleVoiceSpeakState);
 
         return () => {
+            wsClient.off('VoiceSpeakState', handleVoiceSpeakState);
             wsClient.off('StreamStarted', handleStreamStarted);
             wsClient.off('StreamStopped', handleStreamStopped);
             wsClient.off('CameraStarted', handleCameraStartedAlways);
@@ -1328,16 +1385,90 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // re-register every WS handler on each identity change.
     useEffect(() => { broadcastStatusRef.current = broadcastStatus; }, [broadcastStatus]);
 
+    // Stop PLAYING a member whose SPEAK was withdrawn. The stream stays in the
+    // gate so a later grant can play it again (the SFU never re-delivers a
+    // surviving session's track). Never gated with element.muted/volume:
+    // deafen and the per-user volume write those.
+    const retractVoice = useCallback((userId: number) => {
+        const el = document.getElementById(`audio-${userId}`) as HTMLAudioElement | null;
+        if (el) {
+            el.pause();
+            el.srcObject = null;
+            el.remove();
+        }
+        voiceDetectorCleanups.current.get(userId)?.();
+        voiceDetectorCleanups.current.delete(userId);
+        setUserSpeaking(userId, false);
+        refreshVoiceUsersList();
+    }, [refreshVoiceUsersList]);
+
+    // We lost SPEAK (the server's word mid-call, or an SFU grant without a
+    // microphone): close the mic for good, stop sending it on every transport,
+    // and say why. Idempotent.
+    const denySpeakLocally = useCallback(async () => {
+        setSpeakGrantedPending(false); // a deny after a grant: no "you can speak now"
+        if (speakDeniedRef.current && !webrtcManager.getLocalStreamSync()?.getAudioTracks().length) return;
+        speakDeniedRef.current = true;
+        setSpeakDenied(true);
+        webrtcManager.setSpeakDenied(true);
+        // The local VAD and the silence sentinel read the track being closed.
+        voiceDetectorCleanups.current.get(currentUserId)?.();
+        voiceDetectorCleanups.current.delete(currentUserId);
+        voiceDetectorCleanups.current.get(-1)?.();
+        voiceDetectorCleanups.current.delete(-1);
+        setUserSpeaking(currentUserId, false);
+        setMicNotice(null);
+        if (sfuMode) await sfuManager.unpublishMic();
+        await webrtcManager.releaseMic();
+        setListenOnly(true);
+        setIsMuted(true);
+        broadcastStatus(true, isDeafenedRef.current);
+    }, [currentUserId, sfuMode, broadcastStatus]);
+    useEffect(() => { denySpeakLocallyRef.current = denySpeakLocally; }, [denySpeakLocally]);
+
+    // The server's VoiceSpeakState for one member of this room.
+    const applySpeakState = useCallback((userId: number, allowed: boolean) => {
+        if (userId === currentUserId) {
+            if (!allowed) void denySpeakLocally();
+            else if (speakDeniedRef.current) setSpeakGrantedPending(true);
+            return;
+        }
+        const action = speakGateRef.current.set(userId, allowed);
+        if (action === 'retract') {
+            console.log(`[VoicePanel] ${userId} may no longer speak here - no longer playing them`);
+            retractVoice(userId);
+        } else if (action === 'deliver') {
+            const stream = speakGateRef.current.stream(userId);
+            if (stream) deliverVoiceRef.current?.(userId, stream);
+        }
+    }, [currentUserId, denySpeakLocally, retractVoice]);
+    useEffect(() => { applySpeakStateRef.current = applySpeakState; }, [applySpeakState]);
+
     // Handle joining voice
     const joinVoice = useCallback(async () => {
         // Re-entry guard: auto-join, the retry button, and double-clicks can
         // overlap; a concurrent second join built a SECOND LiveKit session on
         // SFU channels — the loser leaked and fed the user's mic back to them.
         if (joiningRef.current || isInVoiceRef.current) return;
+        // No CONNECT: refuse here, before any microphone prompt. The server
+        // refuses the JoinRoom as well; this only spares the prompt and the
+        // alert.
+        if (canConnectRef.current === false) {
+            setError(CONNECT_DENIED_NOTICE);
+            return;
+        }
         setIsConnecting(true);
         setError(null);
         joiningRef.current = true;
         evictedWhileJoiningRef.current = false;
+        // SPEAK, decided BEFORE the JoinRoom so the server's own replay (which
+        // can land while the mic prompt is still up) meets a settled state.
+        speakGateRef.current.reset();
+        setSpeakGrantedPending(false);
+        const deniedByHint = canSpeakRef.current === false;
+        speakDeniedRef.current = deniedByHint;
+        setSpeakDenied(deniedByHint);
+        webrtcManager.setSpeakDenied(deniedByHint);
 
         try {
             // Identify ourselves for perfect-negotiation politeness (glare handling).
@@ -1353,8 +1484,13 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             wsClient.joinRoom(roomId);
 
             const localStream = await webrtcManager.getLocalStream(true, false);
-            // No usable microphone → we joined LISTEN-ONLY rather than failing
-            // the join outright. We hear everyone; nobody hears us.
+            // The server said "no SPEAK" while the mic prompt was up: close
+            // what the prompt opened before any peer or the SFU can see it.
+            if (speakDeniedRef.current && localStream.getAudioTracks().length > 0) {
+                await webrtcManager.releaseMic();
+            }
+            // No usable microphone, or no SPEAK → we joined LISTEN-ONLY rather
+            // than failing the join outright. We hear everyone; nobody hears us.
             const noMic = webrtcManager.isListenOnly();
             setListenOnly(noMic);
 
@@ -1427,6 +1563,17 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             // streams, the SFU delivers per-participant mic streams — the audio
             // element + VAD wiring is identical either way.
             const handleRemoteStream = (userId: number, stream: MediaStream) => {
+                // SPEAK is enforced HERE for both transports: a member the
+                // server flags as not allowed to speak is held, never played
+                // (mesh media is peer-to-peer, so the receiver is the only
+                // place it can be refused — speakGate.ts).
+                if (!speakGateRef.current.admit(userId, stream)) {
+                    console.log(`[VoicePanel] Holding audio from ${userId}: not allowed to speak in this channel`);
+                    return;
+                }
+                attachVoice(userId, stream);
+            };
+            const attachVoice = (userId: number, stream: MediaStream) => {
                 console.log(`[VoicePanel] Got remote stream from ${userId}`);
                 console.log(`[VoicePanel] Stream tracks:`, stream.getTracks().map(t => ({
                     kind: t.kind,
@@ -1551,6 +1698,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
 
                 refreshVoiceUsersList();
             };
+            deliverVoiceRef.current = attachVoice;
             webrtcManager.setOnRemoteStream(handleRemoteStream);
             sfuManager.setOnRemoteStream(handleRemoteStream);
 
@@ -1836,7 +1984,11 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 if (__RC_ENABLED__) setSfuControlSender((userId, frame) => sfuManager.publishControlFrame(userId, frame));
                 const channelId = parseInt(roomId.replace(/^voice_/, ''), 10);
                 const micTrack = localStream.getAudioTracks()[0] ?? null;
-                await sfuManager.connect(channelId, micTrack);
+                const { micAllowed } = await sfuManager.connect(channelId, micTrack);
+                // The grant has no microphone (no SPEAK) but we opened one: the
+                // hint was stale. Joined all the same — listen-only — and the
+                // mic is closed rather than left hot and unpublished.
+                if (!micAllowed && micTrack) await denySpeakLocallyRef.current();
             }
 
             // Broadcast that we joined
@@ -1922,6 +2074,8 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // Returns the whole chain so the watchdog can coalesce restarts.
     const applyNoiseModeLive = useCallback(() => {
         if (!isInVoiceRef.current) return Promise.resolve();
+        // No SPEAK: there is no mic to rebuild, and none may be opened.
+        if (speakDeniedRef.current) return Promise.resolve();
         return webrtcManager.reapplyNoiseMode()
             .then(() => {
                 // A mode change re-acquires the mic, so a listen-only user whose
@@ -1955,7 +2109,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 // one into the mesh senders only. On an SFU call the LiveKit
                 // publication would keep holding the ended track (→ silence to
                 // the whole room), so re-publish the new track there too.
-                if (sfuMode && sfuManager.connected) {
+                if (sfuMode && sfuManager.connected && !speakDeniedRef.current) {
                     const newMic = webrtcManager
                         .getVideoStreamForPreview()?.getAudioTracks()[0];
                     if (newMic) return sfuManager.replaceMicTrack(newMic);
@@ -2124,6 +2278,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             });
         };
         const onMicLost = (e: Event) => {
+            if (webrtcManager.isSpeakDenied()) return; // nothing may re-open the mic
             const kind = (e as CustomEvent<{ kind?: string }>).detail?.kind;
             if (kind === 'muted') {
                 // A wedged-but-still-registered device can hand back another
@@ -2143,7 +2298,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             // it is gone — either way the element keeps playing somewhere.
             document.querySelectorAll('audio[id^="audio-"]').forEach(el =>
                 applyOutputDevice(el as HTMLAudioElement));
-            // INPUT half.
+            // INPUT half. Not for a member without SPEAK: "listen-only, so
+            // retry the mic" is exactly the loop that must never run for them.
+            if (webrtcManager.isSpeakDenied()) return;
             const state = webrtcManager.rawMicState();
             let restart = webrtcManager.isListenOnly() || !state || state.ended || state.muted;
             if (!restart && state) {
@@ -2276,6 +2433,11 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         setIsMuted(false);
         setIsDeafened(false);
         setListenOnly(false); // a rejoin retries the microphone
+        speakDeniedRef.current = false; // and re-decides SPEAK
+        setSpeakDenied(false);
+        setSpeakGrantedPending(false);
+        speakGateRef.current.reset();
+        deliverVoiceRef.current = null;
         refreshVoiceUsersList();
 
         // Clear all stream viewing state - this will switch view back to chat
@@ -3204,7 +3366,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         <div className="voice-status-row">
                             <span className="voice-connected-icon">{isAfkChannel ? <MoonIcon /> : <SignalIcon />}</span>
                             <div className="voice-connection-text">
-                                <span className="voice-connected-label">{isAfkChannel ? 'AFK — mic disabled' : listenOnly ? 'Voice Connected · listen-only' : 'Voice Connected'}</span>
+                                <span className="voice-connected-label">{isAfkChannel ? 'AFK — mic disabled' : speakDenied ? "Voice Connected · can't speak" : listenOnly ? 'Voice Connected · listen-only' : 'Voice Connected'}</span>
                                 <span className="voice-channel-name">{channelName || roomId}</span>
                             </div>
                             {mediaSecure.total > 0 && (
@@ -3239,7 +3401,8 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                 <button
                                     className={`voice-btn ${listenOnly ? 'no-mic' : (isMuted || holdClosed ? 'active' : pttIdle ? 'ptt-idle' : '')}`}
                                     onClick={toggleMute}
-                                    title={listenOnly ? 'No microphone detected — listen-only mode'
+                                    title={speakDenied ? "You don't have permission to speak in this channel"
+                                        : listenOnly ? 'No microphone detected — listen-only mode'
                                         : isAfkChannel ? 'Microphone is disabled in AFK channels'
                                             : holdClosed ? 'Push-to-mute held — mic muted'
                                                 : pttIdle ? 'Push to talk — hold your key to speak'
@@ -3481,7 +3644,12 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
 
             {error && <div className="voice-error-mini">{error}</div>}
             {micNotice && <div className="voice-error-mini">{micNotice}</div>}
-            {listenOnly && (
+            {speakDenied && (
+                <div className="voice-error-mini">
+                    {speakGrantedPending ? SPEAK_GRANTED_NOTICE : SPEAK_DENIED_NOTICE}
+                </div>
+            )}
+            {listenOnly && !speakDenied && (
                 <div className="voice-error-mini">
                     {NO_MIC_NOTICE}
                     {/* Some WebView2 builds report a privacy-blocked mic as

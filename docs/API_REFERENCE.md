@@ -293,6 +293,41 @@ the official client publishes its tracks only after that echo, and mesh
 receivers render a peer's video only while the server has announced it — a
 track that arrives without an announcement is held, not shown.
 
+**Voice rooms: joining and the right to speak.** `JoinRoom` for a
+`voice_<id>` room needs `VIEW_CHANNEL` and `CONNECT`. A member who can see the
+channel but lacks `CONNECT` is refused with `"You don't have permission to join
+this voice channel"`; a non-member, a member who cannot see the channel, and a
+channel that does not exist all get the same `"Not a member of this channel's
+server"`, so the refusal says nothing about a channel the caller cannot see.
+`SPEAK` is not needed to join. Instead the server is the authority for each
+occupant's speak right and tells the room with a server→client frame:
+
+```json
+{"type":"VoiceSpeakState","payload":{"room_id":"voice_42","user_id":7,"can_speak":false}}
+```
+
+`can_speak` is the member's channel-effective `SPEAK` (role permissions layered
+with the channel's overwrites; `ADMINISTRATOR` and the server owner always
+have it). It is sent only for voice rooms: to the joining connection right
+after its `RoomJoined`, one frame for every member then in the room (itself
+included, each an explicit `true`/`false`); to every other occupant, the
+joiner's frame; and, when a permission change flips the right of someone who
+stays in the room, to the whole room including that member. Mesh voice is
+peer-to-peer, so the server cannot silence anyone itself: a client that reads
+`false` for itself does not transmit, and every receiver refuses audio from a
+member flagged `false`. The shape is pinned by
+`frontend/src/tests/fixtures/voiceSpeakState.json`, which the server's and the
+client's tests both parse. On an SFU (`sfu_mode`) channel the right is also
+enforced by LiveKit itself, independently of whether the member's socket stays
+in `voice_<id>`: a join token grants the `microphone` source only with `SPEAK`,
+and whenever a live session's microphone grant no longer matches the member's
+current `SPEAK` (a permission change mid-call, or a join with a token minted
+before one), the server changes it through LiveKit's `UpdateParticipant`.
+LiveKit then unpublishes a microphone the new grant does not allow, and the
+member stays in the call, listening. Only the microphone moves on a live
+session: `VIDEO` and `STREAM` are checked when a camera or screen share starts,
+on both transports, and a new grant of them applies at the next join.
+
 **Rooms (0.9.5).** A `LeaveRoom` for a room this connection never joined is
 ignored — no `UserLeft` is broadcast (it used to be, into rooms the caller
 could not see). Fully leaving a voice room retracts the leaver's media to the

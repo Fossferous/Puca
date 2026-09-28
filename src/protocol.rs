@@ -329,6 +329,38 @@ pub enum ServerMessage {
     /// User left the room you're in
     UserLeft { room_id: String, user_id: UserId },
 
+    /// The server's word on whether `user_id` may SPEAK in voice room
+    /// `room_id` (`voice_<channelId>`). Only ever sent for voice rooms.
+    ///
+    /// The server is the authority: it resolves the member's channel-effective
+    /// SPEAK bit (role permissions layered with the channel's overwrites;
+    /// ADMINISTRATOR and the server owner imply it) and tells the room. Mesh
+    /// voice is peer-to-peer, so the server never touches the audio and cannot
+    /// silence anyone itself — before this frame a member denied SPEAK was
+    /// heard by everyone. A cooperating client that reads `can_speak: false`
+    /// for ITSELF does not transmit; every receiver refuses audio from a member
+    /// flagged `false`, which is what holds against a client that ignores its
+    /// own flag.
+    ///
+    /// Who receives it:
+    /// - the JOINING connection, right after its `RoomJoined`: one frame for
+    ///   EVERY member then in the room, itself included, each with an explicit
+    ///   `true`/`false`, so it starts from a complete picture;
+    /// - every OTHER occupant: the joiner's frame, since they are the ones who
+    ///   must refuse the joiner's audio;
+    /// - the WHOLE room, the member included, when a permission change flips
+    ///   the right of someone who stays in the room (the perms-change sweep),
+    ///   so their own client stops sending as well.
+    ///
+    /// The byte shape is pinned by
+    /// `frontend/src/tests/fixtures/voiceSpeakState.json`, which the client's
+    /// tests parse too.
+    VoiceSpeakState {
+        room_id: String,
+        user_id: UserId,
+        can_speak: bool,
+    },
+
     /// Received a chat message
     ChatMessage {
         room_id: String,
@@ -1015,5 +1047,55 @@ mod wake_frame_tests {
         // The payload keys it destructures.
         assert!(src.contains("ok?: boolean"), "the client must read `ok`");
         assert!(src.contains("message?: string"), "the client must read `message`");
+    }
+}
+
+#[cfg(test)]
+mod voice_speak_state_tests {
+    use super::*;
+
+    /// The server and the client are pinned to ONE file: the client's tests
+    /// parse the same fixture this compares against, so a rename of the frame
+    /// or of a payload key on either side goes red on that side.
+    ///
+    /// `user_id` is `UserId` = i64 here and a JS number there; serde_json
+    /// stores a non-negative i64 and a parsed `7` alike (an unsigned integer),
+    /// so the equality below is exact and would fail on `7.0` or `"7"`.
+    #[test]
+    fn the_voice_speak_state_frame_is_the_fixture_the_client_parses() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../frontend/src/tests/fixtures/voiceSpeakState.json"
+        ))
+        .expect("the fixture is JSON");
+        let ours = serde_json::to_value(ServerMessage::VoiceSpeakState {
+            room_id: "voice_42".into(),
+            user_id: 7,
+            can_speak: false,
+        })
+        .unwrap();
+        assert_eq!(ours, fixture);
+
+        // Not vacuous: the fixture really says what this test claims it says,
+        // and a frame that differs only in the flag does NOT equal it.
+        assert_eq!(fixture["type"], "VoiceSpeakState");
+        assert_eq!(fixture["payload"]["user_id"].as_i64(), Some(7), "an integer, not 7.0 or \"7\"");
+        assert_eq!(fixture["payload"]["can_speak"], false);
+        let flipped = serde_json::to_value(ServerMessage::VoiceSpeakState {
+            room_id: "voice_42".into(),
+            user_id: 7,
+            can_speak: true,
+        })
+        .unwrap();
+        assert_ne!(flipped, fixture);
+
+        // The number survives a text round trip the way the socket carries it.
+        let text = serde_json::to_string(&ServerMessage::VoiceSpeakState {
+            room_id: "voice_42".into(),
+            user_id: 2_147_483_647,
+            can_speak: true,
+        })
+        .unwrap();
+        let back: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(back["payload"]["user_id"].as_i64(), Some(2_147_483_647));
     }
 }

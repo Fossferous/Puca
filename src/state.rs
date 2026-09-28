@@ -517,6 +517,16 @@ pub struct Room {
     /// forget it. Only voice_* rooms are ever asked; text rooms carry an unused
     /// empty log.
     pub presence_log: PresenceLog,
+    /// Members of a VOICE room the server has found WITHOUT the SPEAK right in
+    /// this channel; absent = may speak. The server is the authority for it and
+    /// tells the room (`ServerMessage::VoiceSpeakState`) — mesh audio is
+    /// peer-to-peer, so receivers refusing a flagged member is the only
+    /// enforcement there is. Set through `set_can_speak`, which refuses a
+    /// non-member, and cleared INSIDE `remove_member` (which
+    /// `remove_member_conn` reaches when the last connection goes), like
+    /// `presence_log`, so an entry never outlives the membership it describes
+    /// and a later re-join starts from the join gate's fresh answer.
+    speak_denied: HashSet<UserId>,
 }
 
 /// Which media kinds a departing connection released at the USER level (i.e.
@@ -558,7 +568,34 @@ impl Room {
             camera_conns: HashMap::new(),
             share_stream_ids: HashMap::new(),
             presence_log: PresenceLog::new(now_unix_ms()),
+            speak_denied: HashSet::new(),
         }
+    }
+
+    /// Record whether `user_id` may speak in this (voice) room. Returns true
+    /// when the stored right CHANGED, so a caller re-evaluating a member knows
+    /// whether the room needs telling.
+    ///
+    /// A no-op returning false for a user who is not a member: the entry is
+    /// cleared only when a member leaves, so one written for somebody already
+    /// gone (they left between a caller's resolve and this write) would never
+    /// be cleared, and would silence them on their next join before the join
+    /// gate had said a word.
+    pub fn set_can_speak(&mut self, user_id: UserId, can_speak: bool) -> bool {
+        if !self.members.contains(&user_id) {
+            return false;
+        }
+        if can_speak {
+            self.speak_denied.remove(&user_id)
+        } else {
+            self.speak_denied.insert(user_id)
+        }
+    }
+
+    /// Whether `user_id` may speak here, as far as the server has resolved it.
+    /// Absent = may speak: only a resolved deny is stored.
+    pub fn can_speak(&self, user_id: UserId) -> bool {
+        !self.speak_denied.contains(&user_id)
     }
 
     pub fn add_member(&mut self, user_id: UserId, conn_id: u64) {
@@ -763,6 +800,7 @@ impl Room {
         self.screen_sharers.retain(|&id| id != user_id);
         self.camera_users.retain(|&id| id != user_id);
         self.presence_log.close_at(user_id, now_unix_ms());
+        self.speak_denied.remove(&user_id);
     }
 
     /// Invariant every Room test asserts: a user is in `members` iff the presence
@@ -772,6 +810,14 @@ impl Room {
         let open = self.presence_log.open_users();
         let members: HashSet<UserId> = self.members.iter().copied().collect();
         assert_eq!(open, members, "presence log open spans must equal room members");
+    }
+
+    /// Invariant: nobody outside `members` carries a speak deny.
+    #[cfg(test)]
+    pub fn assert_speak_denied_within_members(&self) {
+        for id in &self.speak_denied {
+            assert!(self.members.contains(id), "user {id} carries a speak deny but is not a member");
+        }
     }
 }
 
@@ -2275,6 +2321,61 @@ impl AppState {
                 }
             }
         }
+    }
+
+    /// Tell voice room `room_id` (every member but `exclude`) what the server
+    /// holds for `user_id`'s speak right there — see
+    /// `ServerMessage::VoiceSpeakState`. Nothing is sent when `user_id` is no
+    /// longer a member: its absence would read as "may speak", and the room is
+    /// getting a `UserLeft` for them anyway.
+    ///
+    /// The flag is read AT SEND TIME, under the same room guard the fan-out
+    /// holds (exactly as `broadcast_to_room` holds it; `send_to_user` is a
+    /// non-blocking `try_send`), never carried in from an earlier read. Every
+    /// writer (`Room::set_can_speak`, under the write guard) calls this AFTER
+    /// its write, so two racing writers cannot leave a receiver's last word on
+    /// a member stale: whichever fan-out runs last reads the last write, and a
+    /// fan-out that started earlier has fully enqueued before the next write
+    /// could take the guard.
+    pub fn broadcast_speak_state(&self, room_id: &str, user_id: UserId, exclude: Option<UserId>) {
+        let Some(room) = self.rooms.get(room_id) else {
+            return;
+        };
+        if !room.members.contains(&user_id) {
+            return;
+        }
+        let msg = ServerMessage::VoiceSpeakState {
+            room_id: room_id.to_string(),
+            user_id,
+            can_speak: room.can_speak(user_id),
+        };
+        for &member_id in &room.members {
+            if Some(member_id) != exclude {
+                self.send_to_user(member_id, msg.clone());
+            }
+        }
+    }
+
+    /// Send ONE connection (a voice-room joiner) the speak right of EVERY
+    /// member of `room_id`, itself included, each an explicit true/false. Read
+    /// under the room guard for the same ordering reason as
+    /// `broadcast_speak_state`. Returns how many frames were queued.
+    pub fn send_speak_snapshot(&self, room_id: &str, user_id: UserId, conn_id: u64) -> usize {
+        let Some(room) = self.rooms.get(room_id) else {
+            return 0;
+        };
+        let mut sent = 0;
+        for &member_id in &room.members {
+            let msg = ServerMessage::VoiceSpeakState {
+                room_id: room_id.to_string(),
+                user_id: member_id,
+                can_speak: room.can_speak(member_id),
+            };
+            if self.send_to_conn(user_id, conn_id, msg) {
+                sent += 1;
+            }
+        }
+        sent
     }
 
     /// Join a room (connection-scoped: the same user may be joined from
@@ -4391,5 +4492,126 @@ mod presence_log_tests {
         let (_, _) = state.unregister_session(1, conn);
         assert!(state.rooms.get("voice_42").is_none());
         assert!(state.orphan_presence_logs.contains_key("voice_42"));
+    }
+}
+
+#[cfg(test)]
+mod speak_right_tests {
+    use super::*;
+    use crate::protocol::ServerMessage;
+    use tokio::sync::mpsc;
+
+    fn test_state() -> Arc<AppState> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/does_not_connect")
+            .expect("lazy pool");
+        AppState::new(pool, "test-secret".into(), None, std::sync::Arc::new(crate::wake::NullWake))
+    }
+
+    /// Every VoiceSpeakState a receiver has queued, as (room, user, can_speak).
+    fn speak_frames(rx: &mut mpsc::Receiver<ServerMessage>) -> Vec<(String, UserId, bool)> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let ServerMessage::VoiceSpeakState { room_id, user_id, can_speak } = msg {
+                out.push((room_id, user_id, can_speak));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn absent_means_may_speak_and_set_reports_only_a_change() {
+        let mut room = Room::new("voice_1".into(), "voice_1".into());
+        room.add_member(5, 50);
+        assert!(room.can_speak(5), "nothing stored = may speak");
+        assert!(!room.set_can_speak(5, true), "already allowed: no change");
+        assert!(room.set_can_speak(5, false), "allowed -> denied is a change");
+        assert!(!room.can_speak(5));
+        assert!(!room.set_can_speak(5, false), "denied again: no change");
+        assert!(room.set_can_speak(5, true), "denied -> allowed is a change");
+        assert!(room.can_speak(5));
+        room.assert_speak_denied_within_members();
+    }
+
+    /// The entry must not outlive the membership: a stale deny would silence a
+    /// member's NEXT join before the join gate had answered, and a stale entry
+    /// for a departed user is exactly what `set_can_speak` refuses to create.
+    #[test]
+    fn a_deny_is_cleared_when_the_member_fully_leaves_by_either_path() {
+        let mut room = Room::new("voice_1".into(), "voice_1".into());
+        room.add_member(1, 10);
+        room.add_member(2, 20);
+        assert!(room.set_can_speak(1, false));
+        assert!(room.set_can_speak(2, false));
+
+        room.remove_member(1);
+        room.remove_member_conn(2, 20); // their only connection
+        room.assert_speak_denied_within_members();
+
+        // Positive control: they are back, and start from "may speak" rather
+        // than from the deny they carried out of the room.
+        room.add_member(1, 11);
+        room.add_member(2, 21);
+        assert!(room.can_speak(1), "remove_member must clear the deny");
+        assert!(room.can_speak(2), "remove_member_conn's last connection must clear the deny");
+    }
+
+    #[test]
+    fn a_second_device_leaving_does_not_clear_the_deny() {
+        let mut room = Room::new("voice_1".into(), "voice_1".into());
+        room.add_member(3, 30);
+        room.add_member(3, 31);
+        assert!(room.set_can_speak(3, false));
+        room.remove_member_conn(3, 30);
+        assert!(room.members.contains(&3), "fixture: still present on the other device");
+        assert!(!room.can_speak(3), "one device leaving must not lift the deny for the one still in the call");
+        room.remove_member_conn(3, 31);
+        room.assert_speak_denied_within_members();
+    }
+
+    #[test]
+    fn a_non_member_cannot_be_given_a_deny() {
+        let mut room = Room::new("voice_1".into(), "voice_1".into());
+        room.add_member(1, 10);
+        assert!(!room.set_can_speak(9, false), "not a member: no-op");
+        room.assert_speak_denied_within_members();
+        room.add_member(9, 90);
+        assert!(room.can_speak(9), "and nothing was waiting for them when they arrived");
+    }
+
+    /// What the two senders put on the wire is what the room holds: the
+    /// snapshot covers every member (the joiner included) with an explicit
+    /// flag, the broadcast skips `exclude` and says nothing for a departed
+    /// user. The empty-room and gone-user cases are the negative controls.
+    #[tokio::test]
+    async fn the_snapshot_and_the_broadcast_carry_the_stored_flag() {
+        let state = test_state();
+        let (tx1, mut rx1) = mpsc::channel::<ServerMessage>(32);
+        let (tx2, mut rx2) = mpsc::channel::<ServerMessage>(32);
+        let (c1, _, _) = state.register_session(1, "one".into(), tx1, false, None, String::new());
+        let (c2, _, _) = state.register_session(2, "two".into(), tx2, false, None, String::new());
+        state.join_room("voice_7", 1, c1);
+        state.join_room("voice_7", 2, c2);
+        assert!(state.rooms.get_mut("voice_7").unwrap().set_can_speak(2, false));
+
+        assert_eq!(state.send_speak_snapshot("voice_7", 2, c2), 2);
+        let mut snap = speak_frames(&mut rx2);
+        snap.sort();
+        assert_eq!(snap, vec![("voice_7".into(), 1, true), ("voice_7".into(), 2, false)]);
+        assert!(speak_frames(&mut rx1).is_empty(), "the snapshot goes to the joining connection only");
+
+        state.broadcast_speak_state("voice_7", 2, Some(2));
+        assert_eq!(speak_frames(&mut rx1), vec![("voice_7".into(), 2, false)]);
+        assert!(speak_frames(&mut rx2).is_empty(), "excluded");
+        state.broadcast_speak_state("voice_7", 2, None);
+        assert_eq!(speak_frames(&mut rx1), vec![("voice_7".into(), 2, false)]);
+        assert_eq!(speak_frames(&mut rx2), vec![("voice_7".into(), 2, false)], "None reaches the member too");
+
+        state.leave_room("voice_7", 2, c2);
+        state.broadcast_speak_state("voice_7", 2, None);
+        assert!(speak_frames(&mut rx1).is_empty(), "nothing is said for somebody who left");
+        assert_eq!(state.send_speak_snapshot("voice_nope", 1, c1), 0);
+        state.unregister_session(1, c1);
+        state.unregister_session(2, c2);
     }
 }

@@ -270,6 +270,29 @@ export function publicationsHaveLadder(pubs: Iterable<LadderProbe>): boolean {
     return false;
 }
 
+/** `TrackSource.MICROPHONE` in @livekit/protocol (the grant's canPublishSources
+ *  carries these proto values). livekit-client does not re-export the enum;
+ *  sfuSpeakGrant.test.ts pins this against it. */
+export const MIC_PROTO_SOURCE = 2;
+
+/**
+ * May this grant publish a MICROPHONE? The same rule livekit-client applies
+ * before it throws PublishTrackError 403 (LocalParticipant.hasPermissionsToPublish):
+ * canPublish, and either no source list or one that names the microphone.
+ * The backend mints the microphone source from SPEAK only (sfu.rs
+ * publish_sources), so a member without SPEAK gets canPublish=true with
+ * [camera, screen_share, ...] when they keep VIDEO/STREAM — checking
+ * canPublish alone would still 403. No permissions yet = not allowed, as
+ * livekit-client itself treats it.
+ */
+export function micPublishAllowed(
+    perms: { canPublish?: boolean; canPublishSources?: readonly number[] } | undefined | null,
+): boolean {
+    if (!perms || !perms.canPublish) return false;
+    const sources = perms.canPublishSources ?? [];
+    return sources.length === 0 || sources.includes(MIC_PROTO_SOURCE);
+}
+
 /** `u<user id>#<per-connection nonce>` → user id (see backend sfu.rs). */
 export function userIdFromIdentity(identity: string): number | null {
     const m = /^u(\d+)#/.exec(identity);
@@ -418,13 +441,13 @@ export class SfuManager {
      * with zero extra wiring. Concurrent calls coalesce; a same-channel call
      * while already connected is a no-op.
      */
-    async connect(channelId: number, micTrack: MediaStreamTrack | null): Promise<void> {
+    async connect(channelId: number, micTrack: MediaStreamTrack | null): Promise<{ micAllowed: boolean }> {
         // Wait out any in-flight join (loop: a third caller may queue behind us).
         while (this.connectPromise) {
             await this.connectPromise;
         }
         // The earlier join may already have put us where we're going.
-        if (this.room && this.channelId === channelId && this.connected) return;
+        if (this.room && this.channelId === channelId && this.connected) return { micAllowed: this.micAllowed() };
 
         let release!: () => void;
         const gate = new Promise<void>((r) => { release = r; });
@@ -435,6 +458,14 @@ export class SfuManager {
             if (this.connectPromise === gate) this.connectPromise = null;
             release();
         }
+        // Read from the LIVE grant, never a field the join set: a coalesced
+        // second caller must get the same answer as the first.
+        return { micAllowed: this.micAllowed() };
+    }
+
+    /** Does the current session's grant allow publishing a microphone (SPEAK)? */
+    micAllowed(): boolean {
+        return micPublishAllowed(this.room?.localParticipant.permissions);
     }
 
     private async doConnect(channelId: number, micTrack: MediaStreamTrack | null): Promise<void> {
@@ -509,7 +540,12 @@ export class SfuManager {
                 return;
             }
 
-            if (micTrack) {
+            // A member without SPEAK gets a grant with no microphone source, and
+            // livekit-client throws 403 on the publish — which used to take the
+            // WHOLE join down with it, so they could not even listen. Publish
+            // only what the grant allows; the caller learns the verdict from
+            // connect()'s result and releases the mic it opened.
+            if (micTrack && micPublishAllowed(room.localParticipant.permissions)) {
                 this.micPub = await room.localParticipant.publishTrack(micTrack, {
                     source: Track.Source.Microphone,
                     dtx: true,
@@ -634,6 +670,10 @@ export class SfuManager {
      */
     async replaceMicTrack(newTrack: MediaStreamTrack): Promise<void> {
         if (!this.room) return;
+        // No SPEAK: never unpublish-then-fail. The publish below would 403 and
+        // leave the call with no mic publication at all while the UI believed
+        // it had swapped one in.
+        if (!this.micAllowed()) return;
         // Live lookup, same reason as unpublishCamera: a stale handle here left
         // the OLD publication up and added a second one, so the room heard the
         // dead track.
@@ -648,6 +688,18 @@ export class SfuManager {
             red: true,
             forceStereo: false, // mono voice — see the initial mic publish
         });
+    }
+
+    /** Take our microphone off the SFU (SPEAK revoked mid-call). The caller
+     *  stops the capture itself; this only ends the publication. */
+    async unpublishMic(): Promise<void> {
+        if (!this.room) return;
+        for (const pub of this.localPubs(Track.Source.Microphone)) {
+            if (pub.track) {
+                await this.room.localParticipant.unpublishTrack(pub.track.mediaStreamTrack, false).catch(() => { /* already gone */ });
+            }
+        }
+        this.micPub = null;
     }
 
     /** Swap the published camera track (mid-call camera flip). No-op if no camera. */
@@ -1196,6 +1248,11 @@ export class SfuManager {
         for (const p of this.room.remoteParticipants.values()) {
             const uid = userIdFromIdentity(p.identity);
             if (uid === null || uid === this.localUserId) continue;
+            // A participant that publishes NOTHING sends no media to encrypt
+            // or to leak — a listener without SPEAK, a member with no mic. It
+            // used to count as "not encrypted" forever and turned the whole
+            // call's badge into "some media is blocked".
+            if (p.trackPublications.size === 0) continue;
             const s = this.participantE2ee(p);
             const prev = byUser.get(uid);
             // Multi-connection users collapse to one row; worst connection wins.

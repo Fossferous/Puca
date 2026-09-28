@@ -4880,6 +4880,15 @@ export function Chat({ onLogout }: ChatProps) {
                                     ?.afk_timeout_minutes ?? 15) * 60_000
                             }
                             sfuMode={!!currentVoiceChannel.sfu_mode}
+                            // SPEAK / CONNECT hints for this voice channel, read at join
+                            // (hasPerm keeps an old server's missing bits "allowed").
+                            // The server's VoiceSpeakState is the authority in the call.
+                            // From the FRESH channel-list row when the voice channel is on
+                            // the viewed server (ChannelPermsChanged refetches that list),
+                            // else the row captured when it was clicked. currentVoiceChannel
+                            // itself is not swapped: the panel reads sfuMode once at join.
+                            canSpeak={hasPerm((channels.find(c => c.id === currentVoiceChannel.id) ?? currentVoiceChannel).my_permissions, PERM.SPEAK)}
+                            canConnect={hasPerm((channels.find(c => c.id === currentVoiceChannel.id) ?? currentVoiceChannel).my_permissions, PERM.CONNECT)}
                             // Clips policy of the VOICE channel's server (docs/CLIPS.md) —
                             // not the viewed one; the default post target is the viewed
                             // channel only when it belongs to that server.

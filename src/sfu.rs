@@ -130,6 +130,154 @@ pub struct SfuRoomUsage {
     /// could not answer (check again). They stay KNOWN meanwhile - counted by
     /// admission, reachable by every ejection - which forgetting them was not.
     pub recheck: HashMap<String, Mark>,
+    /// The publish grant LiveKit is known to hold for each joined session: read
+    /// from the `participant_joined` webhook or a ListParticipants listing, or
+    /// recorded when LiveKit confirmed an UpdateParticipant. Absent = unknown,
+    /// which every check treats as "apply it". Only ever a shortcut: a session
+    /// whose recorded grant already equals what its member's permissions give
+    /// is not sent the same grant again. See [`regrant_if_stale`].
+    pub grants: HashMap<String, Grant>,
+}
+
+/// A session's publish grant as LiveKit enforces it, compared by EFFECT, not
+/// by spelling: `can_publish: true` with no source list and one naming all
+/// four sources are the same grant (LiveKit's `GetCanPublishSource`, protocol
+/// auth/grants.go:326-341). `subscribe` and `data` ride along because
+/// UpdateParticipant overwrites them too, and a grant that dropped either
+/// would cut the member's listening or the remote-control data lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Grant {
+    subscribe: bool,
+    data: bool,
+    /// Bit per source LiveKit lets the session publish: [`SOURCE_BITS`].
+    sources: u8,
+}
+
+/// The microphone's bit in [`Grant::sources`] - the one source SPEAK decides.
+const MIC_BIT: u8 = 1;
+
+/// (publish_sources' spelling, LiveKit's TrackSource enum name, its number,
+/// the bit in [`Grant::sources`]). The enum is protocol livekit_models.proto
+/// `TrackSource`: CAMERA = 1, MICROPHONE = 2, SCREEN_SHARE = 3,
+/// SCREEN_SHARE_AUDIO = 4. LiveKit's grant strings are the enum names
+/// lowercased (grants.go `sourceToString`), which is how the join token spells
+/// them; the Twirp API takes the enum itself.
+const SOURCE_BITS: [(&str, &str, i64, u8); 4] = [
+    ("microphone", "MICROPHONE", 2, MIC_BIT),
+    ("camera", "CAMERA", 1, 2),
+    ("screen_share", "SCREEN_SHARE", 3, 4),
+    ("screen_share_audio", "SCREEN_SHARE_AUDIO", 4, 8),
+];
+
+impl Grant {
+    /// What a member's channel permissions entitle a session to: exactly what
+    /// [`mint_join_token`] puts in the token (via [`publish_sources`]), with
+    /// subscribe and data always on.
+    pub(crate) fn of(perms: Permissions) -> Grant {
+        let (can_publish, sources) = publish_sources(perms);
+        Grant::effective(true, true, can_publish, &sources)
+    }
+
+    /// The grant to give a LIVE session whose member now has `perms`: the one
+    /// it holds with ONLY the microphone changed - on for SPEAK, off without.
+    /// Camera and screen keep what the session joined with. VIDEO and STREAM
+    /// are checked when a camera or share STARTS (ws.rs CameraStart /
+    /// ScreenShareStart), on both transports, and a new grant of them applies
+    /// at the next join; taking them off a live session here would unpublish a
+    /// running camera or share under an app that has no idea it happened, and
+    /// would make SFU channels stricter than mesh ones mid-call. SPEAK is the
+    /// one right enforced mid-call everywhere. Unknown held grant: the whole
+    /// grant `perms` give - what a token minted now would carry.
+    pub(crate) fn target(held: Option<Grant>, perms: Permissions) -> Grant {
+        let full = Grant::of(perms);
+        match held {
+            None => full,
+            Some(h) => Grant {
+                subscribe: true,
+                data: true,
+                sources: (h.sources & !MIC_BIT) | (full.sources & MIC_BIT),
+            },
+        }
+    }
+
+    /// The effect of a (can_publish, source list) pair, as LiveKit reads it.
+    fn effective(subscribe: bool, data: bool, can_publish: bool, listed: &[&str]) -> Grant {
+        let mut sources = 0u8;
+        if can_publish {
+            for (grant_name, _, _, bit) in SOURCE_BITS {
+                // An empty list is "every source" (grants.go:330-333).
+                if listed.is_empty() || listed.contains(&grant_name) {
+                    sources |= bit;
+                }
+            }
+        }
+        Grant { subscribe, data, sources }
+    }
+
+    /// A `ParticipantPermission` as LiveKit reports it, or None when there is
+    /// none to read (then the grant is unknown). Accepts both of LiveKit's JSON
+    /// shapes: ListParticipants answers in proto field names with every field
+    /// emitted, the webhook in camelCase with false and empty fields OMITTED
+    /// (protocol utils/protojson Marshal) - so an absent bool is false and an
+    /// absent list empty, exactly as protojson decodes them. Enum values may be
+    /// names or numbers.
+    fn from_permission(p: Option<&serde_json::Value>) -> Option<Grant> {
+        let p = p?.as_object()?;
+        let field = |snake: &str, camel: &str| p.get(snake).or_else(|| p.get(camel));
+        let flag = |snake: &str, camel: &str| field(snake, camel).and_then(|v| v.as_bool()).unwrap_or(false);
+        let mut listed: Vec<&str> = Vec::new();
+        let mut unrecognised = false;
+        for v in field("can_publish_sources", "canPublishSources")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
+            match SOURCE_BITS.iter().find(|(_, name, number, _)| enum_is(Some(v), name, *number)) {
+                Some((grant_name, ..)) => listed.push(grant_name),
+                // UNKNOWN (0) or a source this server does not know: it is in
+                // the list, so the list is not empty and does not mean "every
+                // source" - it simply allows none of ours.
+                None => unrecognised = true,
+            }
+        }
+        let can_publish = flag("can_publish", "canPublish");
+        let mut g = Grant::effective(
+            flag("can_subscribe", "canSubscribe"),
+            flag("can_publish_data", "canPublishData"),
+            can_publish,
+            &listed,
+        );
+        if listed.is_empty() && unrecognised {
+            g.sources = 0;
+        }
+        Some(g)
+    }
+}
+
+/// The `permission` of an UpdateParticipant request for a member with `perms`
+/// (protocol livekit_models.proto `ParticipantPermission`). LiveKit REPLACES
+/// the session's whole grant with it (grants.go `UpdateFromPermission`), and
+/// these are plain proto3 bools, so an omitted one decodes as FALSE: both
+/// `can_subscribe` and `can_publish_data` are sent true explicitly, or the
+/// member would stop hearing the call and lose the data lane. Sources go as
+/// enum NAMES, uppercase: the Twirp decoder runs with DiscardUnknown, which
+/// also drops an unknown enum name, so the token's lowercase spelling would
+/// silently empty the list - and `can_publish` with an empty list is every
+/// source. The fields left out (hidden, can_update_metadata, ...) are false in
+/// every join token this server mints, so they stay what they were. Sources are
+/// listed EXPLICITLY; no source at all is `can_publish: false`.
+fn permission_json(g: Grant) -> serde_json::Value {
+    let names: Vec<&str> = SOURCE_BITS
+        .iter()
+        .filter(|(.., bit)| g.sources & bit != 0)
+        .map(|(_, name, ..)| *name)
+        .collect();
+    serde_json::json!({
+        "can_subscribe": g.subscribe,
+        "can_publish": g.sources != 0,
+        "can_publish_data": g.data,
+        "can_publish_sources": names,
+    })
 }
 
 /// A participant's outstanding [`Recheck`], and how many passes have tried it.
@@ -179,9 +327,41 @@ fn sfu_metrics_url() -> Option<String> {
     (v != "off").then_some(v)
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    /// A stand-in LiveKit's base URL for the future a test scopes with it:
+    /// `sfu_config` then answers [`cfg_for`] of it. Task-local rather than env
+    /// vars, which every test in the process would read - so a test elsewhere
+    /// (the perms sweep in ws.rs) can aim this module's calls at a stand-in.
+    /// A task spawned inside the scope does NOT inherit it.
+    pub(crate) static TEST_LIVEKIT: String;
+}
+
+/// The secret the stand-in LiveKit verifies tokens under.
+#[cfg(test)]
+pub(crate) const RIG_SECRET: &str = "rig-secret-0123456789abcdef0123456789";
+
+/// A config aimed at a stand-in at `base`.
+#[cfg(test)]
+fn cfg_for(base: &str) -> SfuConfig {
+    SfuConfig {
+        url: base.replacen("http://", "ws://", 1),
+        api_url: None,
+        api_key: "rig-key".into(),
+        api_secret: RIG_SECRET.into(),
+        budget_kbps: 30_000,
+        room_max_participants: 8,
+        max_screen_shares: usize::MAX,
+    }
+}
+
 /// All-or-nothing: an unset/blank var means the SFU tier is not deployed and
 /// every mint request answers 503, leaving the mesh path untouched.
 fn sfu_config() -> Option<SfuConfig> {
+    #[cfg(test)]
+    if let Ok(base) = TEST_LIVEKIT.try_with(|b| b.clone()) {
+        return Some(cfg_for(&base));
+    }
     let getenv = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
     Some(SfuConfig {
         url: getenv("LIVEKIT_URL")?,
@@ -502,6 +682,13 @@ fn prune(state: &AppState) {
     state.sfu_rooms.retain(|_, u| {
         !(u.participants.is_empty() && u.reservations.is_empty() && u.screen_shares.is_empty())
     });
+    // A grant is only ever known for a joined session. The paths that forget a
+    // session drop its grant themselves or run this after them (the resync's
+    // merge); whatever is left over is dropped here.
+    for mut r in state.sfu_rooms.iter_mut() {
+        let u = &mut *r;
+        u.grants.retain(|id, _| u.participants.contains_key(id));
+    }
 }
 
 // --- Resync from LiveKit -----------------------------------------------------
@@ -538,6 +725,9 @@ pub struct LkRoom {
     pub participants: Vec<String>,
     /// Sids of tracks whose source is SCREEN_SHARE.
     pub share_sids: Vec<String>,
+    /// The publish grant LiveKit reports for each listed session that carried
+    /// a readable `permission` (see [`parse_listed_grants`]).
+    pub grants: HashMap<String, Grant>,
 }
 
 /// Webhook events and confirmed evictions seen while a snapshot was in flight.
@@ -640,6 +830,9 @@ pub struct ResyncReport {
     pub denied: usize,
     /// Participants still marked for the next pass (see [`Recheck`]).
     pub pending: usize,
+    /// Checked sessions whose LiveKit grant did not match their member's
+    /// permissions and that LiveKit confirmed were given the right one.
+    pub regranted: usize,
 }
 
 /// A merge's result: its counts, the (room, identity) sessions it ADDED, and
@@ -743,6 +936,25 @@ fn parse_participants(body: &str) -> Result<(Vec<String>, Vec<String>), String> 
     Ok((ids, shares))
 }
 
+/// The grant LiveKit reports for each session [`parse_participants`] takes
+/// (ACTIVE, with an identity), where its `permission` is readable. LiveKit
+/// v1.13.4's ListParticipants emits every participant's (`ParticipantInfo`
+/// carries `grants.Video.ToPermission()`, pkg/rtc/participant.go:914).
+fn parse_listed_grants(body: &str) -> HashMap<String, Grant> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
+        return HashMap::new();
+    };
+    let list = v.get("participants").and_then(|p| p.as_array());
+    list.into_iter()
+        .flatten()
+        .filter(|p| enum_is(p.get("state"), "ACTIVE", 2))
+        .filter_map(|p| {
+            let id = p.get("identity").and_then(|i| i.as_str()).filter(|i| !i.is_empty())?;
+            Some((id.to_string(), Grant::from_permission(p.get("permission"))?))
+        })
+        .collect()
+}
+
 /// A LiveKit error body, fit for a log line. The auth middleware answers a bad
 /// token in plain text - "invalid token: <the whole JWT>, error: <reason>" -
 /// so keep the reason and drop the token; anything else is capped.
@@ -808,7 +1020,8 @@ async fn fetch_snapshot(
         let token = mint_admin_token(cfg, &name).map_err(|e| ResyncError::Token(e.to_string()))?;
         let body = twirp(client, cfg, "ListParticipants", &token, serde_json::json!({ "room": name })).await?;
         let (participants, share_sids) = parse_participants(&body).map_err(ResyncError::Malformed)?;
-        rooms.push(LkRoom { name, participants, share_sids });
+        let grants = parse_listed_grants(&body);
+        rooms.push(LkRoom { name, participants, share_sids, grants });
     }
     Ok((rooms, listed))
 }
@@ -828,6 +1041,10 @@ async fn fetch_snapshot(
 /// - Screen shares follow the same rules, by track sid.
 /// - Reservations are never added, expired or cleared here: a minted token's
 ///   room does not exist in LiveKit until its first join.
+/// - A listed session's grant, where LiveKit reported one, becomes the known
+///   grant (not for one that joined since `started`: its webhook's is newer).
+///   A KNOWN session whose grant differs from the one this process held is
+///   due a join check, which re-applies what its member's permissions give.
 fn merge_snapshot(
     rooms: &DashMap<String, SfuRoomUsage>,
     snap: &[LkRoom],
@@ -850,12 +1067,14 @@ fn merge_snapshot(
         let listed: HashSet<&str> = room.participants.iter().map(String::as_str).collect();
         let listed_shares: HashSet<&str> = room.share_sids.iter().map(String::as_str).collect();
         let mut u = rooms.entry(room.name.clone()).or_default();
+        let mut drifted = Vec::new();
         for id in &room.participants {
             if SfuResyncJournal::has(&journal.left, name, id) {
                 continue;
             }
             let was_reserved = u.reservations.remove(id).is_some();
-            if !u.participants.contains_key(id) {
+            let known = u.participants.contains_key(id);
+            if !known {
                 u.participants.insert(id.clone(), now);
                 if was_reserved {
                     report.moved += 1;
@@ -864,6 +1083,26 @@ fn merge_snapshot(
                     added.push((room.name.clone(), id.clone()));
                 }
             }
+            // LiveKit's word on the grant this session holds - unless it joined
+            // during the fetch: that webhook's payload is newer than the listing
+            // (the same identity can rejoin with its token, under the token's
+            // grant), and its own check is on its way.
+            let Some(&reported) = room.grants.get(id) else { continue };
+            if SfuResyncJournal::has(&journal.joined, name, id) {
+                continue;
+            }
+            let held = u.grants.insert(id.clone(), reported);
+            // A known session whose grant is not the one this process last
+            // saw or applied (a join whose webhook was lost, re-using a token
+            // minted under older permissions): its grant is checked against
+            // the member's permissions again, with the join check. One already
+            // marked is due anyway.
+            if known && held.is_some_and(|h| h != reported) && !u.recheck.contains_key(id) {
+                drifted.push(id.clone());
+            }
+        }
+        for id in drifted {
+            due.push((room.name.clone(), id, Recheck::JoinCheck));
         }
         let before = u.participants.len();
         u.participants.retain(|id, seen| {
@@ -961,7 +1200,9 @@ async fn resync_once(state: &AppState, cfg: &SfuConfig, client: &reqwest::Client
     // (its participant_joined never arrived here): run it now. This is what
     // catches a kick, ban or permission change that happened while the session
     // was unknown - during the fetch, or while this process was down.
-    report.denied += reauthorize_added(state, cfg, &unchecked).await;
+    let checked = reauthorize_added(state, cfg, &unchecked).await;
+    report.denied += checked.denied;
+    report.regranted += checked.regranted;
     report.pending = state.sfu_rooms.iter().map(|r| r.recheck.len()).sum();
     Ok(report)
 }
@@ -972,10 +1213,16 @@ async fn resync_once(state: &AppState, cfg: &SfuConfig, client: &reqwest::Client
 /// not a member, permissions without VIEW_CHANNEL and CONNECT. A lookup that
 /// fails keeps the session: a database hiccup at boot must not drop calls. The
 /// resync only runs against this host's own LiveKit (LIVEKIT_API_URL), so this
-/// never judges another host's calls. Returns how many sessions it removed.
-async fn reauthorize_added(state: &AppState, cfg: &SfuConfig, added: &[(String, String)]) -> usize {
+/// never judges another host's calls.
+///
+/// A session it keeps has its grant checked too: a token minted before a SPEAK
+/// (VIDEO, STREAM) change still carries the old grant, and LiveKit enforces the
+/// token's, so one that does not match what the member's permissions give now
+/// is given that ([`regrant_if_stale`]). One LiveKit does not confirm stays
+/// marked, and the next pass checks it again.
+async fn reauthorize_added(state: &AppState, cfg: &SfuConfig, added: &[(String, String)]) -> Checked {
     if added.is_empty() {
-        return 0;
+        return Checked::default();
     }
     let cids: Vec<i64> = added
         .iter()
@@ -997,10 +1244,11 @@ async fn reauthorize_added(state: &AppState, cfg: &SfuConfig, added: &[(String, 
                 added.len()
             );
             mark(state, added, Recheck::JoinCheck);
-            return 0;
+            return Checked::default();
         }
     };
     let mut refused: HashMap<String, Vec<String>> = HashMap::new();
+    let mut regranted = 0;
     for (room, identity) in added {
         let (Some(cid), Some(uid)) = (channel_id_from_room(room), user_id_from_identity(identity)) else {
             continue;
@@ -1010,19 +1258,38 @@ async fn reauthorize_added(state: &AppState, cfg: &SfuConfig, added: &[(String, 
         if let Some(reason) = join_check_refuses(is_sfu, access.as_ref()) {
             tracing::warn!("SFU resync: removing user {} from sfu channel {} ({})", uid, cid, reason);
             refused.entry(room.clone()).or_default().push(identity.clone());
-        } else if matches!(access, Some(ChannelPermAccess::NotFound)) {
+        } else if let Some(ChannelPermAccess::Allowed { perms, .. }) = access {
+            // Answered, and allowed: what is owed now is only that LiveKit
+            // enforces the grant these permissions give. The mark goes once it
+            // does - not before, so a grant LiveKit keeps refusing still counts
+            // its passes towards MARK_PASSES.
+            match regrant_if_stale(state, cfg, room, identity, perms).await {
+                Regrant::Failed => mark(state, std::slice::from_ref(&(room.clone(), identity.clone())), Recheck::JoinCheck),
+                done => {
+                    if done == Regrant::Applied {
+                        regranted += 1;
+                    }
+                    clear_mark(state, room, identity);
+                }
+            }
+        } else {
             // Unanswered, not allowed: kept, and asked again next pass.
             mark(state, std::slice::from_ref(&(room.clone(), identity.clone())), Recheck::JoinCheck);
-        } else {
-            // Answered, and allowed: nothing is owed any more.
-            clear_mark(state, room, identity);
         }
     }
     let mut removed = 0;
     for (room, identities) in refused {
         removed += remove_or_mark(state, cfg, &room, &identities, Recheck::JoinCheck).await;
     }
-    removed
+    Checked { denied: removed, regranted }
+}
+
+/// What [`reauthorize_added`] did: sessions removed, and sessions whose grant
+/// LiveKit confirmed it replaced.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Checked {
+    denied: usize,
+    regranted: usize,
 }
 
 /// Mark known participants for the next pass, counting the passes a mark has
@@ -1230,6 +1497,12 @@ where
                         r.denied
                     );
                 }
+                if r.regranted > 0 {
+                    tracing::info!(
+                        "SFU resync: gave {} session(s) the publish grant their member's permissions give now (LiveKit held another)",
+                        r.regranted
+                    );
+                }
                 drifted = synced && drift;
                 if reported_down {
                     tracing::info!("SFU resync: LiveKit's rooms are readable again");
@@ -1358,8 +1631,10 @@ fn mint_join_token(
 ) -> Result<String, jsonwebtoken::errors::Error> {
     // Enforced by LiveKit itself — the one place a publish gate holds
     // server-side in the SFU tier (the mesh gates live in ws.rs and are
-    // advisory to a modified client). A demotion mid-call takes effect at
-    // the next token (TOKEN_TTL_SECS) unless the member is evicted.
+    // advisory to a modified client). The token's grant is fixed at mint: a
+    // change mid-call reaches a live session through `regrant_user` (the
+    // perms-change sweep), and a session joined with an older token through
+    // the `participant_joined` check (`reauth_join`) and the resync.
     let (can_publish, can_publish_sources) = publish_sources(perms);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1541,6 +1816,7 @@ async fn remove_identities(state: &AppState, cfg: &SfuConfig, room: &str, identi
                     u.participants.remove(identity);
                     u.reservations.remove(identity);
                     u.recheck.remove(identity);
+                    u.grants.remove(identity);
                 }
             }
             Ok(r) => tracing::warn!("SFU evict {identity}: LiveKit returned {}", r.status()),
@@ -1560,6 +1836,227 @@ async fn remove_identities(state: &AppState, cfg: &SfuConfig, room: &str, identi
 pub struct Evicted {
     pub tried: usize,
     pub removed: usize,
+}
+
+// --- Publish grants mid-call ----------------------------------------------------
+//
+// A join token's grant is fixed when it is minted (publish_sources), and LiveKit
+// enforces the token's grant for the whole session. So a SPEAK (VIDEO, STREAM)
+// revoke mid-call used to live only in the WebSocket room and on the receivers:
+// a modified client could leave voice_<id> - the server then forgets the deny -
+// and keep publishing its microphone into LiveKit under the old grant, heard by
+// everyone, including anyone who joined later.
+//
+// UpdateParticipant replaces a live session's grant (LiveKit v1.13.4:
+// pkg/service/roomservice.go:260-293 -> RoomManager.UpdateParticipant,
+// pkg/service/roommanager.go:874-898 -> ParticipantImpl.SetPermission,
+// pkg/rtc/participant.go:807-867). SetPermission then REMOVES every published
+// track whose source the new grant does not allow (participant.go:835-840):
+// the track is closed for every subscriber (UpTrackManager.RemovePublishedTrack,
+// pkg/rtc/uptrackmanager.go:285-291) and the publisher is told
+// TrackUnpublished (participant.go:2259-2267; a client on protocol > 6 - ours
+// is 17), on which livekit-client unpublishes it. It is not a mute the client
+// could lift: a new AddTrack for that source is refused NOT_ALLOWED
+// (participant.go:1328-1339) and media for one arriving anyway is dropped
+// (participant.go:2337-2343). The session itself stays: it keeps subscribing
+// (the grant keeps can_subscribe), so a member who loses SPEAK is left in the
+// call listening - honest client or not, nobody is evicted for it.
+
+/// What [`regrant_if_stale`] did for one session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Regrant {
+    /// The grant LiveKit holds for it is already the one its member's
+    /// permissions give (as far as this process knows): nothing was sent.
+    Unchanged,
+    /// Sent, and LiveKit's answer shows it holds that grant now.
+    Applied,
+    /// Sent and not confirmed: refused, unreachable, or answered with another
+    /// grant. The caller marks it for the next resync.
+    Failed,
+}
+
+/// Make LiveKit enforce on `identity`'s session the grant `perms` give, unless
+/// it is known to hold it already ([`SfuRoomUsage::grants`]): the one LiveKit
+/// call, never sent when nothing changed.
+async fn regrant_if_stale(state: &AppState, cfg: &SfuConfig, room: &str, identity: &str, perms: Permissions) -> Regrant {
+    // One read: the grant, and WHICH session of this identity it belongs to
+    // (its join time - a token can be used again, and every join re-times it).
+    let (held, session) = state
+        .sfu_rooms
+        .get(room)
+        .map(|u| (u.grants.get(identity).copied(), u.participants.get(identity).copied()))
+        .unwrap_or((None, None));
+    // Only the microphone moves on a live session (see Grant::target).
+    let want = Grant::target(held, perms);
+    if held == Some(want) {
+        return Regrant::Unchanged;
+    }
+    update_grant(state, cfg, room, identity, want, session).await
+}
+
+/// UpdateParticipant with the grant `want` (see [`permission_json`]).
+/// Confirmed only when LiveKit's answer - the participant as it now is,
+/// roommanager.go:897 - shows exactly that grant: a field LiveKit did not read
+/// (its decoder discards unknown names) shows up there as the OLD grant, not
+/// as an error. A confirmed grant becomes the known one - for `session` (the
+/// join time it was sent for) only.
+async fn update_grant(
+    state: &AppState,
+    cfg: &SfuConfig,
+    room: &str,
+    identity: &str,
+    want: Grant,
+    session: Option<Instant>,
+) -> Regrant {
+    let token = match mint_admin_token(cfg, room) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("SFU grant: admin token mint failed: {e}");
+            return Regrant::Failed;
+        }
+    };
+    // The same per-request bound as an eviction: the sweep awaits these in turn.
+    let client = match reqwest::Client::builder()
+        .user_agent(HTTP_USER_AGENT)
+        .timeout(Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("SFU grant: could not build HTTP client: {}", crate::http_err::http_err(&e));
+            return Regrant::Failed;
+        }
+    };
+    let body = serde_json::json!({ "room": room, "identity": identity, "permission": permission_json(want) });
+    let resp = client
+        .post(format!("{}/twirp/livekit.RoomService/UpdateParticipant", api_base(cfg)))
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await;
+    let text = match resp {
+        Ok(r) if r.status().is_success() => match r.text().await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!("SFU grant {identity}: reading LiveKit's answer failed: {}", crate::http_err::http_err(&e));
+                return Regrant::Failed;
+            }
+        },
+        Ok(r) => {
+            let status = r.status();
+            let reason = r.text().await.map(|t| redact_livekit_error(&t)).unwrap_or_default();
+            tracing::warn!("SFU grant {identity}: LiveKit returned {status}: {reason}");
+            return Regrant::Failed;
+        }
+        Err(e) => {
+            tracing::warn!("SFU grant {identity}: request failed: {}", crate::http_err::http_err(&e));
+            return Regrant::Failed;
+        }
+    };
+    let shown = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| Grant::from_permission(v.get("permission")));
+    if shown != Some(want) {
+        tracing::warn!("SFU grant {identity}: LiveKit answered, but shows {shown:?} rather than {want:?}; not confirmed");
+        return Regrant::Failed;
+    }
+    // Recorded only for the SAME session it was sent for. One that left has
+    // nothing to hold a grant for; and if the identity joined again meanwhile
+    // (its token used again), that session holds its token's grant, which its
+    // own join recorded and its own check compares - writing ours over it
+    // would tell that check the grant is already right.
+    if let Some(mut u) = state.sfu_rooms.get_mut(room) {
+        if session.is_some() && u.participants.get(identity).copied() == session {
+            u.grants.insert(identity.to_string(), want);
+        }
+    }
+    Regrant::Applied
+}
+
+/// What [`regrant_user`] did across one user's sessions in one SFU room.
+/// `tried == 0` means none needed a new grant (or this process knows none).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Regranted {
+    /// Sessions whose grant had to change: each was sent UpdateParticipant.
+    pub tried: usize,
+    /// Of those, how many LiveKit confirmed.
+    pub applied: usize,
+    /// Sessions already holding the right grant: nothing sent.
+    pub unchanged: usize,
+}
+
+/// For the perms-change sweep: make LiveKit enforce, on every JOINED session
+/// `user_id` holds in `channel_id`'s SFU room, the MICROPHONE grant `perms`
+/// give (SPEAK) - in both directions, a revoke and a grant alike. Camera and
+/// screen stay what the session holds (see [`Grant::target`]). A session LiveKit
+/// does not confirm is marked, and the next resync's join check applies it
+/// again. Reservations are left alone: a token not yet used has no session to
+/// update, and its `participant_joined` check compares its grant then.
+pub async fn regrant_user(state: &AppState, channel_id: i64, user_id: i64, perms: Permissions) -> Regranted {
+    let Some(cfg) = sfu_config() else { return Regranted::default() };
+    regrant_user_with(state, &cfg, channel_id, user_id, perms).await
+}
+
+async fn regrant_user_with(state: &AppState, cfg: &SfuConfig, channel_id: i64, user_id: i64, perms: Permissions) -> Regranted {
+    let room = room_name_for_channel(channel_id);
+    let prefix = format!("u{user_id}#");
+    let identities: Vec<String> = match state.sfu_rooms.get(&room) {
+        Some(u) => u.participants.keys().filter(|i| i.starts_with(&prefix)).cloned().collect(),
+        None => return Regranted::default(),
+    };
+    let mut out = Regranted::default();
+    for identity in identities {
+        match regrant_if_stale(state, cfg, &room, &identity, perms).await {
+            Regrant::Unchanged => out.unchanged += 1,
+            Regrant::Applied => {
+                out.tried += 1;
+                out.applied += 1;
+            }
+            Regrant::Failed => {
+                out.tried += 1;
+                mark(state, &[(room.clone(), identity)], Recheck::JoinCheck);
+            }
+        }
+    }
+    out
+}
+
+/// The check `participant_joined` runs for a (re)joined session: the mint-time
+/// gate again - a member no longer entitled (fails CLOSED: a lookup that fails
+/// evicts) is removed - and, for one who stays, the grant their permissions
+/// give NOW, applied if the token's differs. That second half is what stops a
+/// token minted while SPEAK was allowed from publishing a microphone after the
+/// revoke, for the 20 minutes it stays valid.
+async fn reauth_join(state: &AppState, cfg: &SfuConfig, room: &str, identity: &str, cid: i64, uid: i64) {
+    let access = get_user_channel_permissions(&state.pool, cid, uid).await;
+    if sfu_entitled(&access) {
+        if let ChannelPermAccess::Allowed { perms, .. } = access {
+            match regrant_if_stale(state, cfg, room, identity, perms).await {
+                Regrant::Unchanged => {}
+                Regrant::Applied => tracing::info!(
+                    "SFU join re-auth: user {} joined sfu channel {} with a grant that was not (or not reported as) the one their permissions give; LiveKit confirmed the current one",
+                    uid,
+                    cid
+                ),
+                Regrant::Failed => {
+                    tracing::warn!(
+                        "SFU join re-auth: user {} joined sfu channel {} with a grant that was not (or not reported as) the one their permissions give, and LiveKit did NOT confirm the current one; the next resync applies it again",
+                        uid,
+                        cid
+                    );
+                    mark(state, &[(room.to_string(), identity.to_string())], Recheck::JoinCheck);
+                }
+            }
+        }
+        return;
+    }
+    let reason = match access {
+        ChannelPermAccess::NotFound => "channel not found or lookup failed",
+        ChannelPermAccess::NotMember => "not a member of the server",
+        ChannelPermAccess::Allowed { .. } => "VIEW_CHANNEL or CONNECT denied",
+    };
+    tracing::warn!("SFU join re-auth: evicting user {} from sfu channel {} ({})", uid, cid, reason);
+    evict_with(state, cfg, cid, uid).await;
 }
 
 /// Apply one authenticated LiveKit webhook event to `sfu_rooms`. Every arm
@@ -1584,6 +2081,15 @@ fn apply_webhook_event(state: &Arc<AppState>, kind: &str, room: String, event: &
                     // The re-auth below is this session's check now; an older
                     // mark (a cut or a check owed) must not act after it.
                     u.recheck.remove(identity);
+                    // The grant this session joined with is its TOKEN's, never
+                    // one applied to an earlier session of the same identity
+                    // (a token can be used again until it expires). What the
+                    // payload says, then - and unknown, so the check below
+                    // applies it, when it says nothing.
+                    match Grant::from_permission(event.pointer("/participant/permission")) {
+                        Some(g) => u.grants.insert(identity.to_string(), g),
+                        None => u.grants.remove(identity),
+                    };
                 }
                 // Re-authorize the join. A join token is minted against the
                 // perms of that moment and LiveKit checks only its signature,
@@ -1593,29 +2099,17 @@ fn apply_webhook_event(state: &Arc<AppState>, kind: &str, room: String, event: &
                 // reconnect after every eviction. This webhook is the one
                 // server-side point that observes a (re)join, so the mint-time
                 // gate is re-run here and a no-longer-entitled participant is
-                // removed. Spawned: eviction awaits a RemoveParticipant round
-                // trip, and the webhook response must not wait on LiveKit.
+                // removed - and an entitled one whose token grants what their
+                // permissions no longer do is given the grant they do.
+                // Spawned: both await a LiveKit round trip, and the webhook
+                // response must not wait on LiveKit.
                 match (channel_id, user_id) {
                     (Some(cid), Some(uid)) => {
                         let state = Arc::clone(&state);
+                        let (room, identity) = (room.clone(), identity.to_string());
                         tokio::spawn(async move {
-                            let access =
-                                get_user_channel_permissions(&state.pool, cid, uid).await;
-                            if sfu_entitled(&access) {
-                                return;
-                            }
-                            let reason = match access {
-                                ChannelPermAccess::NotFound => "channel not found or lookup failed",
-                                ChannelPermAccess::NotMember => "not a member of the server",
-                                ChannelPermAccess::Allowed { .. } => "VIEW_CHANNEL or CONNECT denied",
-                            };
-                            tracing::warn!(
-                                "SFU join re-auth: evicting user {} from sfu channel {} ({})",
-                                uid,
-                                cid,
-                                reason
-                            );
-                            evict_user_from_channel(&state, cid, uid).await;
+                            let Some(cfg) = sfu_config() else { return };
+                            reauth_join(&state, &cfg, &room, &identity, cid, uid).await;
                         });
                     }
                     _ => {
@@ -1640,6 +2134,7 @@ fn apply_webhook_event(state: &Arc<AppState>, kind: &str, room: String, event: &
                 if let Some(mut u) = state.sfu_rooms.get_mut(&room) {
                     u.participants.remove(identity);
                     u.recheck.remove(identity);
+                    u.grants.remove(identity);
                 }
             }
         }
@@ -2223,7 +2718,7 @@ mod grant_serialization_tests {
 }
 
 #[cfg(test)]
-mod resync_tests {
+pub(crate) mod resync_tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -2232,6 +2727,7 @@ mod resync_tests {
             name: name.into(),
             participants: ids.iter().map(|s| s.to_string()).collect(),
             share_sids: shares.iter().map(|s| s.to_string()).collect(),
+            grants: HashMap::new(),
         }
     }
 
@@ -2241,6 +2737,7 @@ mod resync_tests {
             reservations: res.iter().map(|i| (i.to_string(), Instant::now())).collect(),
             screen_shares: shares.iter().map(|s| s.to_string()).collect(),
             recheck: HashMap::new(),
+            grants: HashMap::new(),
         }
     }
 
@@ -2406,20 +2903,6 @@ mod resync_tests {
 
     // ---- the calls, over a socket -------------------------------------------------------
 
-    const RIG_SECRET: &str = "rig-secret-0123456789abcdef0123456789";
-
-    fn cfg_for(base: &str) -> SfuConfig {
-        SfuConfig {
-            url: base.replacen("http://", "ws://", 1),
-            api_url: None,
-            api_key: "rig-key".into(),
-            api_secret: RIG_SECRET.into(),
-            budget_kbps: 30_000,
-            room_max_participants: 8,
-            max_screen_shares: usize::MAX,
-        }
-    }
-
     #[test]
     fn the_admin_api_url_prefers_livekit_api_url() {
         let mut cfg = cfg_for("http://127.0.0.1:1");
@@ -2429,9 +2912,9 @@ mod resync_tests {
         assert_eq!(api_base(&cfg), "http://127.0.0.1:7880", "the host's own node, not the public name");
     }
 
-    struct Seen {
-        body: String,
-        claims: serde_json::Value,
+    pub(crate) struct Seen {
+        pub(crate) body: String,
+        pub(crate) claims: serde_json::Value,
         /// The User-Agent header, as sent.
         ua: String,
         /// A request that came AFTER the script ran out: a call the test did
@@ -2445,12 +2928,12 @@ mod resync_tests {
     /// answered 401, as LiveKit would.
     /// A running stand-in: its task, and the signal that the code under test
     /// is done, until which any call beyond the script is caught.
-    struct StandIn {
+    pub(crate) struct StandIn {
         task: tokio::task::JoinHandle<Vec<Seen>>,
         stop: tokio::sync::oneshot::Sender<()>,
     }
 
-    async fn livekit_stand_in(
+    pub(crate) async fn livekit_stand_in(
         script: Vec<(&'static str, u16, String)>,
         on_call: Option<Box<dyn Fn(&str) + Send>>,
     ) -> (String, StandIn) {
@@ -2533,7 +3016,7 @@ mod resync_tests {
         (base, StandIn { task, stop })
     }
 
-    async fn asked(srv: StandIn) -> Vec<Seen> {
+    pub(crate) async fn asked(srv: StandIn) -> Vec<Seen> {
         let _ = srv.stop.send(());
         let seen = tokio::time::timeout(Duration::from_secs(10), srv.task)
             .await
@@ -2903,7 +3386,7 @@ mod resync_tests {
 
     /// Tests that reach the stand-in through the PRODUCTION clients (which
     /// honour HTTP(S)_PROXY / ALL_PROXY) need 127.0.0.1 exempted; say so.
-    fn no_env_proxy() {
+    pub(crate) fn no_env_proxy() {
         let no = std::env::var("NO_PROXY").or_else(|_| std::env::var("no_proxy")).unwrap_or_default();
         let exempt = no.split(',').map(str::trim).any(|h| h == "*" || h == "127.0.0.1" || h.starts_with("127.0.0.0/"));
         // The stand-in is http://, so HTTPS_PROXY never applies to it.
@@ -3005,7 +3488,9 @@ mod resync_tests {
             vec![
                 ("/twirp/livekit.RoomService/ListRooms", 200, format!(r#"{{"rooms":[{{"name":"{room}"}},{{"name":"{mesh_room}"}},{{"name":"{orphan_room}"}}]}}"#)),
                 ("/twirp/livekit.RoomService/ListParticipants", 200,
-                 format!(r#"{{"participants":[{{"identity":"{id_m}","state":"ACTIVE","tracks":[]}},{{"identity":"{id_x}","state":"ACTIVE","tracks":[]}}]}}"#)),
+                 // The member's grant is already what VIEW + CONNECT give (no
+                 // publishing), so keeping them sends nothing either.
+                 format!(r#"{{"participants":[{{"identity":"{id_m}","state":"ACTIVE","tracks":[],"permission":{{"can_subscribe":true,"can_publish":false,"can_publish_data":true,"can_publish_sources":[]}}}},{{"identity":"{id_x}","state":"ACTIVE","tracks":[]}}]}}"#)),
                 ("/twirp/livekit.RoomService/ListParticipants", 200,
                  format!(r#"{{"participants":[{{"identity":"{id_mesh}","state":"ACTIVE","tracks":[]}}]}}"#)),
                 ("/twirp/livekit.RoomService/ListParticipants", 200,
@@ -3191,6 +3676,576 @@ mod resync_tests {
         assert_eq!(next_wait(Duration::from_secs(180), 3), Some(Duration::from_secs(180)));
         assert_eq!(next_wait(Duration::ZERO, 0), None, "SFU_RESYNC_SECS=0: done after the first success");
         assert_eq!(next_wait(Duration::ZERO, 2), Some(Duration::from_secs(30)), "unless a cut or a check is still owed");
+    }
+
+
+    // ---- publish grants mid-call --------------------------------------------------------
+
+    /// A ParticipantInfo as LiveKit's Twirp JSON spells it (proto names, every
+    /// field emitted) - what UpdateParticipant answers - carrying `permission`.
+    fn info_reply(permission: &str) -> String {
+        format!(r#"{{"sid":"PA_1","identity":"u5#a","state":"ACTIVE","tracks":[],"permission":{permission},"joined_at":"1"}}"#)
+    }
+
+    /// Permissions as LiveKit reports them back (every field emitted).
+    pub(crate) const CAMERA_ONLY: &str = r#"{"can_subscribe":true,"can_publish":true,"can_publish_data":true,"can_publish_sources":["CAMERA"],"hidden":false,"recorder":false,"can_update_metadata":false,"agent":false,"can_subscribe_metrics":false,"can_manage_agent_session":false}"#;
+    pub(crate) const MIC_AND_CAMERA: &str = r#"{"can_subscribe":true,"can_publish":true,"can_publish_data":true,"can_publish_sources":["MICROPHONE","CAMERA"],"hidden":false,"recorder":false,"can_update_metadata":false,"agent":false,"can_subscribe_metrics":false,"can_manage_agent_session":false}"#;
+
+    /// The request body a revoke of SPEAK sends for a member who keeps VIDEO.
+    fn camera_only_request(room: &str, identity: &str) -> serde_json::Value {
+        serde_json::json!({
+            "room": room,
+            "identity": identity,
+            "permission": {"can_subscribe": true, "can_publish": true, "can_publish_data": true, "can_publish_sources": ["CAMERA"]}
+        })
+    }
+
+    #[test]
+    fn the_grant_request_keeps_listening_and_data_and_names_sources_as_livekit_enums() {
+        use crate::permissions::Permissions as P;
+        // A SPEAK revoke for a member who keeps VIDEO: the microphone goes, the
+        // camera stays, and listening and the data lane are said out loud - an
+        // omitted proto3 bool is FALSE to LiveKit, and UpdateParticipant
+        // replaces the whole grant.
+        assert_eq!(
+            permission_json(Grant::of(P::VIEW_CHANNEL | P::CONNECT | P::VIDEO)),
+            serde_json::json!({"can_subscribe": true, "can_publish": true, "can_publish_data": true, "can_publish_sources": ["CAMERA"]})
+        );
+        // The grant back, the microphone by its enum NAME: the lowercase grant
+        // spelling would be discarded as unknown, leaving an empty list, and
+        // can_publish with an empty list is every source.
+        assert_eq!(
+            permission_json(Grant::of(P::SPEAK | P::VIDEO)),
+            serde_json::json!({"can_subscribe": true, "can_publish": true, "can_publish_data": true, "can_publish_sources": ["MICROPHONE", "CAMERA"]})
+        );
+        // No publish bits at all: can_publish false says it.
+        assert_eq!(
+            permission_json(Grant::of(P::VIEW_CHANNEL | P::CONNECT)),
+            serde_json::json!({"can_subscribe": true, "can_publish": false, "can_publish_data": true, "can_publish_sources": []})
+        );
+        assert_eq!(
+            permission_json(Grant::of(P::ADMINISTRATOR))["can_publish_sources"],
+            serde_json::json!(["MICROPHONE", "CAMERA", "SCREEN_SHARE", "SCREEN_SHARE_AUDIO"])
+        );
+        // The join token's order, so LiveKit's MatchesPermission (an ordered
+        // comparison) sees an unchanged grant as unchanged.
+        for perms in [P::SPEAK, P::SPEAK | P::STREAM, P::ADMINISTRATOR, P::VIDEO | P::STREAM] {
+            let names: Vec<String> = permission_json(Grant::of(perms))["can_publish_sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_ascii_lowercase())
+                .collect();
+            assert_eq!(names, publish_sources(perms).1, "{perms:?}");
+        }
+    }
+
+    #[test]
+    fn a_permission_reads_the_same_in_both_of_livekits_json_shapes() {
+        use crate::permissions::Permissions as P;
+        let read = |s: &str| Grant::from_permission(Some(&serde_json::from_str::<serde_json::Value>(s).unwrap()));
+        // ListParticipants / UpdateParticipant: proto names, every field.
+        assert_eq!(read(CAMERA_ONLY), Some(Grant::of(P::VIDEO)));
+        assert_eq!(read(MIC_AND_CAMERA), Some(Grant::of(P::SPEAK | P::VIDEO)));
+        // The webhook: camelCase, false and empty OMITTED.
+        assert_eq!(
+            read(r#"{"canSubscribe":true,"canPublish":true,"canPublishData":true,"canPublishSources":["CAMERA"]}"#),
+            Some(Grant::of(P::VIDEO))
+        );
+        assert_eq!(read(r#"{"canSubscribe":true,"canPublishData":true}"#), Some(Grant::of(P::empty())), "an omitted canPublish is false");
+        // Enum numbers: MICROPHONE = 2, CAMERA = 1.
+        assert_eq!(
+            read(r#"{"canSubscribe":true,"canPublish":true,"canPublishData":true,"canPublishSources":[2,1]}"#),
+            Some(Grant::of(P::SPEAK | P::VIDEO))
+        );
+        // can_publish with no list is EVERY source, as LiveKit enforces it.
+        assert_eq!(
+            read(r#"{"can_subscribe":true,"can_publish":true,"can_publish_data":true,"can_publish_sources":[]}"#),
+            Some(Grant::of(P::ADMINISTRATOR))
+        );
+        // A list naming only something else allows none of ours; it is not an
+        // empty list.
+        assert_eq!(
+            read(r#"{"can_subscribe":true,"can_publish":true,"can_publish_data":true,"can_publish_sources":["UNKNOWN"]}"#),
+            Some(Grant::of(P::empty()))
+        );
+        // Listening and data are part of the grant: one that lost either differs.
+        assert_ne!(
+            read(r#"{"can_subscribe":false,"can_publish":true,"can_publish_data":true,"can_publish_sources":["CAMERA"]}"#),
+            Some(Grant::of(P::VIDEO))
+        );
+        // Nothing to read is unknown, never "no grant".
+        assert_eq!(Grant::from_permission(None), None);
+        assert_eq!(Grant::from_permission(Some(&serde_json::json!("x"))), None);
+        // What this server sends reads back as what it meant.
+        for perms in [P::empty(), P::SPEAK, P::VIDEO, P::SPEAK | P::VIDEO | P::STREAM, P::ADMINISTRATOR] {
+            assert_eq!(Grant::from_permission(Some(&permission_json(Grant::of(perms)))), Some(Grant::of(perms)), "{perms:?}");
+        }
+    }
+
+    #[test]
+    fn the_listing_reports_each_active_sessions_grant() {
+        use crate::permissions::Permissions as P;
+        let body = format!(
+            r#"{{"participants":[
+            {{"identity":"u5#aa","state":"ACTIVE","tracks":[],"permission":{CAMERA_ONLY}}},
+            {{"identity":"u6#bb","state":"JOINING","tracks":[],"permission":{CAMERA_ONLY}}},
+            {{"identity":"u7#cc","state":"ACTIVE","tracks":[]}}]}}"#
+        );
+        let g = parse_listed_grants(&body);
+        assert_eq!(g.get("u5#aa"), Some(&Grant::of(P::VIDEO)));
+        assert_eq!(g.len(), 1, "a JOINING session is not taken, and one without a permission has no grant to report");
+    }
+
+    /// The sweep's call: one UpdateParticipant per joined session of the user
+    /// whose known grant is not the one their permissions give - and none for
+    /// a session that already holds it, another user's, or a reservation.
+    /// Only SPEAK is enforced on a LIVE session: the microphone moves, camera
+    /// and screen keep what the session joined with (VIDEO and STREAM are
+    /// checked when a camera or share starts, on both transports).
+    #[test]
+    fn the_live_target_moves_only_the_microphone() {
+        use crate::permissions::Permissions as P;
+        let all = Grant::of(P::SPEAK | P::VIDEO | P::STREAM);
+        assert_eq!(Grant::target(Some(all), P::VIDEO | P::STREAM), Grant::of(P::VIDEO | P::STREAM), "SPEAK revoked: mic off, the rest kept");
+        assert_eq!(Grant::target(Some(all), P::SPEAK), all, "VIDEO and STREAM revoked: a live session keeps its camera and share");
+        assert_eq!(Grant::target(Some(Grant::of(P::VIDEO)), P::SPEAK), Grant::of(P::SPEAK | P::VIDEO), "SPEAK granted: mic on, camera kept");
+        assert_eq!(Grant::target(Some(Grant::of(P::empty())), P::SPEAK | P::VIDEO), Grant::of(P::SPEAK), "a new VIDEO allow waits for the next join");
+        assert_eq!(Grant::target(None, P::SPEAK | P::VIDEO), Grant::of(P::SPEAK | P::VIDEO), "unknown held grant: the whole grant");
+    }
+
+    /// The sweep never takes a running camera off a live session: a VIDEO
+    /// revoke alone sends nothing, and a revoke of both only drops the mic.
+    #[tokio::test]
+    async fn a_live_session_loses_only_its_microphone() {
+        use crate::permissions::Permissions as P;
+        no_env_proxy();
+        let state = test_state();
+        {
+            let now = Instant::now();
+            let mut u = usage(&[("u5#a", now)], &[], &[]);
+            u.grants.insert("u5#a".into(), Grant::of(P::SPEAK | P::VIDEO)); // joined with mic and camera
+            state.sfu_rooms.insert("sfu_7".into(), u);
+        }
+        // VIDEO revoked, SPEAK kept: nothing sent (the stand-in fails on any call).
+        let (base, srv) = livekit_stand_in(vec![], None).await;
+        let out = regrant_user_with(&state, &cfg_for(&base), 7, 5, P::VIEW_CHANNEL | P::CONNECT | P::SPEAK).await;
+        asked(srv).await;
+        assert_eq!(out, Regranted { tried: 0, applied: 0, unchanged: 1 });
+        // SPEAK and VIDEO revoked together: the request keeps the camera.
+        let (base, srv) = livekit_stand_in(
+            vec![("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(CAMERA_ONLY))],
+            None,
+        )
+        .await;
+        let out = regrant_user_with(&state, &cfg_for(&base), 7, 5, P::VIEW_CHANNEL | P::CONNECT).await;
+        let seen = asked(srv).await;
+        assert_eq!(out, Regranted { tried: 1, applied: 1, unchanged: 0 });
+        let body: serde_json::Value = serde_json::from_str(&seen[0].body).unwrap();
+        assert_eq!(body, camera_only_request("sfu_7", "u5#a"));
+    }
+
+    #[tokio::test]
+    async fn a_grant_is_sent_to_each_session_whose_known_grant_differs_and_to_no_other() {
+        use crate::permissions::Permissions as P;
+        no_env_proxy();
+        let state = test_state();
+        {
+            let now = Instant::now();
+            let mut u = usage(&[("u5#a", now), ("u5#b", now), ("u6#c", now)], &["u5#r"], &[]);
+            u.grants.insert("u5#a".into(), Grant::of(P::SPEAK | P::VIDEO)); // joined while SPEAK was allowed
+            u.grants.insert("u5#b".into(), Grant::of(P::VIDEO)); // already what the revoke gives
+            u.grants.insert("u6#c".into(), Grant::of(P::SPEAK | P::VIDEO)); // another user
+            state.sfu_rooms.insert("sfu_7".into(), u);
+        }
+        // The revoke: exactly one call, for u5#a.
+        let (base, srv) = livekit_stand_in(
+            vec![("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(CAMERA_ONLY))],
+            None,
+        )
+        .await;
+        let out = regrant_user_with(&state, &cfg_for(&base), 7, 5, P::VIEW_CHANNEL | P::CONNECT | P::VIDEO).await;
+        let seen = asked(srv).await;
+        assert_eq!(out, Regranted { tried: 1, applied: 1, unchanged: 1 });
+        let body: serde_json::Value = serde_json::from_str(&seen[0].body).unwrap();
+        assert_eq!(body, camera_only_request("sfu_7", "u5#a"));
+        assert_eq!(seen[0].claims["video"]["roomAdmin"], true, "UpdateParticipant needs room admin");
+        assert_eq!(seen[0].claims["video"]["room"], "sfu_7");
+        assert_eq!(seen[0].ua, "puca-server");
+        {
+            let u = state.sfu_rooms.get("sfu_7").unwrap();
+            assert_eq!(u.grants.get("u5#a"), Some(&Grant::of(P::VIDEO)), "confirmed, so known");
+            assert_eq!(u.grants.get("u6#c"), Some(&Grant::of(P::SPEAK | P::VIDEO)), "another user's session is untouched");
+            assert!(u.recheck.is_empty(), "nothing owed");
+        }
+        // Nothing changed since: nothing is sent (the stand-in fails on any call).
+        let (base, srv) = livekit_stand_in(vec![], None).await;
+        let again = regrant_user_with(&state, &cfg_for(&base), 7, 5, P::VIEW_CHANNEL | P::CONNECT | P::VIDEO).await;
+        asked(srv).await;
+        assert_eq!(again, Regranted { tried: 0, applied: 0, unchanged: 2 });
+        // The grant back reaches both joined sessions, and only them.
+        let (base, srv) = livekit_stand_in(
+            vec![
+                ("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(MIC_AND_CAMERA)),
+                ("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(MIC_AND_CAMERA)),
+            ],
+            None,
+        )
+        .await;
+        let back = regrant_user_with(&state, &cfg_for(&base), 7, 5, P::VIEW_CHANNEL | P::CONNECT | P::SPEAK | P::VIDEO).await;
+        let seen = asked(srv).await;
+        assert_eq!(back, Regranted { tried: 2, applied: 2, unchanged: 0 });
+        let mut who = Vec::new();
+        for s in &seen {
+            let b: serde_json::Value = serde_json::from_str(&s.body).unwrap();
+            assert_eq!(
+                b["permission"],
+                serde_json::json!({"can_subscribe": true, "can_publish": true, "can_publish_data": true, "can_publish_sources": ["MICROPHONE", "CAMERA"]})
+            );
+            who.push(b["identity"].as_str().unwrap().to_string());
+        }
+        who.sort();
+        assert_eq!(who, vec!["u5#a".to_string(), "u5#b".to_string()], "joined sessions only: a reservation has no session to update");
+    }
+
+    /// Not confirmed is not held: refused, answered with the OLD grant (what
+    /// LiveKit shows when it did not read a field), or answered with something
+    /// that is not LiveKit's answer. Each is marked for the resync, and its
+    /// grant stays unconfirmed, so the next sweep sends it again.
+    #[tokio::test]
+    async fn a_grant_livekit_does_not_confirm_is_marked_and_not_taken_as_held() {
+        use crate::permissions::Permissions as P;
+        no_env_proxy();
+        let state = test_state();
+        {
+            let now = Instant::now();
+            let mut u = usage(&[("u5#a", now), ("u5#b", now), ("u5#c", now)], &[], &[]);
+            for id in ["u5#a", "u5#b", "u5#c"] {
+                u.grants.insert(id.into(), Grant::of(P::SPEAK | P::VIDEO));
+            }
+            state.sfu_rooms.insert("sfu_7".into(), u);
+        }
+        let (base, srv) = livekit_stand_in(
+            vec![
+                ("/twirp/livekit.RoomService/UpdateParticipant", 503, r#"{"code":"unavailable","msg":"starting"}"#.to_string()),
+                ("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(MIC_AND_CAMERA)),
+                ("/twirp/livekit.RoomService/UpdateParticipant", 200, "<html>ok</html>".to_string()),
+            ],
+            None,
+        )
+        .await;
+        let out = regrant_user_with(&state, &cfg_for(&base), 7, 5, P::VIEW_CHANNEL | P::CONNECT | P::VIDEO).await;
+        asked(srv).await;
+        assert_eq!(out, Regranted { tried: 3, applied: 0, unchanged: 0 });
+        let u = state.sfu_rooms.get("sfu_7").unwrap();
+        for id in ["u5#a", "u5#b", "u5#c"] {
+            assert_eq!(u.grants.get(id), Some(&Grant::of(P::SPEAK | P::VIDEO)), "{id}: not confirmed, so not recorded as held");
+            assert_eq!(u.recheck.get(id), Some(&Mark { what: Recheck::JoinCheck, passes: 1 }), "{id}: the next resync applies it again");
+        }
+    }
+
+    /// A confirmed grant is recorded for the session it was sent to, only. If
+    /// the identity joins again while the call is in flight (its token used
+    /// again), the new session holds its TOKEN's grant - that stays recorded,
+    /// so the new join's own check still sees a grant to correct.
+    #[tokio::test]
+    async fn a_grant_confirmed_for_a_session_that_has_since_rejoined_is_not_recorded_for_the_new_one() {
+        use crate::permissions::Permissions as P;
+        no_env_proxy();
+        let state = test_state();
+        {
+            let mut u = usage(&[("u5#a", Instant::now())], &[], &[]);
+            u.grants.insert("u5#a".into(), Grant::of(P::SPEAK | P::VIDEO));
+            state.sfu_rooms.insert("sfu_7".into(), u);
+        }
+        let during = Arc::clone(&state);
+        let (base, srv) = livekit_stand_in(
+            vec![("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(CAMERA_ONLY))],
+            Some(Box::new(move |m: &str| {
+                if m == "UpdateParticipant" {
+                    std::thread::sleep(Duration::from_millis(2)); // a later join time
+                    apply_webhook_event(
+                        &during,
+                        "participant_joined",
+                        "sfu_7".into(),
+                        &serde_json::json!({"participant": {"identity": "u5#a", "permission": {
+                            "canSubscribe": true, "canPublish": true, "canPublishData": true, "canPublishSources": ["MICROPHONE", "CAMERA"]}}}),
+                    );
+                }
+            })),
+        )
+        .await;
+        let out = regrant_user_with(&state, &cfg_for(&base), 7, 5, P::VIEW_CHANNEL | P::CONNECT | P::VIDEO).await;
+        asked(srv).await;
+        assert_eq!(out, Regranted { tried: 1, applied: 1, unchanged: 0 }, "LiveKit confirmed it, for the session it reached");
+        assert_eq!(
+            state.sfu_rooms.get("sfu_7").unwrap().grants.get("u5#a"),
+            Some(&Grant::of(P::SPEAK | P::VIDEO)),
+            "the new session's token grant stays known"
+        );
+    }
+
+    /// A join's grant is its TOKEN's: the webhook's report replaces whatever
+    /// was applied to an earlier session of the same identity, a join that
+    /// reports none leaves it unknown, and a leave forgets it.
+    #[tokio::test]
+    async fn a_join_records_the_grant_its_token_carries_and_forgets_one_it_cannot_read() {
+        use crate::permissions::Permissions as P;
+        let state = test_state();
+        {
+            let mut u = usage(&[("u5#a", Instant::now())], &[], &[]);
+            u.grants.insert("u5#a".into(), Grant::of(P::VIDEO)); // applied to an earlier session
+            state.sfu_rooms.insert("sfu_7".into(), u);
+        }
+        let grant_of = || state.sfu_rooms.get("sfu_7").and_then(|u| u.grants.get("u5#a").copied());
+        apply_webhook_event(
+            &state,
+            "participant_joined",
+            "sfu_7".into(),
+            &serde_json::json!({"participant": {"identity": "u5#a", "permission": {
+                "canSubscribe": true, "canPublish": true, "canPublishData": true, "canPublishSources": ["MICROPHONE", "CAMERA"]}}}),
+        );
+        assert_eq!(grant_of(), Some(Grant::of(P::SPEAK | P::VIDEO)), "the token's grant, not the one applied before");
+        apply_webhook_event(&state, "participant_joined", "sfu_7".into(), &serde_json::json!({"participant": {"identity": "u5#a"}}));
+        assert_eq!(grant_of(), None, "no permission reported: unknown, so its check applies the grant");
+        state.sfu_rooms.get_mut("sfu_7").unwrap().grants.insert("u5#a".into(), Grant::of(P::VIDEO));
+        apply_webhook_event(&state, "participant_left", "sfu_7".into(), &serde_json::json!({"participant": {"identity": "u5#a"}}));
+        assert_eq!(grant_of(), None, "a leave forgets it");
+    }
+
+    /// The resync's merge takes LiveKit's word for each listed grant, and a
+    /// KNOWN session whose grant is not the one this process held (a token
+    /// used again with its webhook lost) is due a join check.
+    #[test]
+    fn a_known_session_whose_listed_grant_changed_is_due_a_join_check() {
+        use crate::permissions::Permissions as P;
+        let rooms = DashMap::new();
+        let before = Instant::now();
+        let mut u = usage(
+            &[("u5#drift", before), ("u6#same", before), ("u7#unknown", before), ("u8#rejoined", before), ("u9#marked", before)],
+            &["u4#minted"],
+            &[],
+        );
+        u.grants.insert("u5#drift".into(), Grant::of(P::VIDEO));
+        u.grants.insert("u6#same".into(), Grant::of(P::SPEAK));
+        u.grants.insert("u8#rejoined".into(), Grant::of(P::SPEAK | P::VIDEO));
+        u.grants.insert("u9#marked".into(), Grant::of(P::VIDEO));
+        u.recheck.insert("u9#marked".into(), Mark { what: Recheck::Cut, passes: 1 });
+        rooms.insert("sfu_7".to_string(), u);
+        std::thread::sleep(Duration::from_millis(5));
+        let started = Instant::now();
+        let mut journal = SfuResyncJournal::default();
+        // Joined again DURING the fetch: its webhook's grant is newer than the listing.
+        journal.record(JournalEntry::Joined("sfu_7", "u8#rejoined"));
+        let mut snap = listed(
+            "sfu_7",
+            &["u5#drift", "u6#same", "u7#unknown", "u8#rejoined", "u9#marked", "u4#minted", "u3#new"],
+            &[],
+        );
+        for (id, g) in [
+            ("u5#drift", P::SPEAK | P::VIDEO),
+            ("u6#same", P::SPEAK),
+            ("u7#unknown", P::SPEAK),
+            ("u8#rejoined", P::VIDEO),
+            ("u9#marked", P::SPEAK),
+            ("u4#minted", P::SPEAK),
+            ("u3#new", P::SPEAK),
+        ] {
+            snap.grants.insert(id.into(), Grant::of(g));
+        }
+        let names: HashSet<String> = ["sfu_7".to_string()].into_iter().collect();
+        let m = merge_snapshot(&rooms, &[snap], &names, &journal, started, Instant::now());
+        let mut due: Vec<(String, Recheck)> = m.due.iter().map(|(_, id, w)| (id.clone(), *w)).collect();
+        due.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            due,
+            vec![("u5#drift".to_string(), Recheck::JoinCheck), ("u9#marked".to_string(), Recheck::Cut)],
+            "the drifted one, and the marked one once, for its own mark"
+        );
+        assert_eq!(m.added, vec![("sfu_7".to_string(), "u3#new".to_string())], "a new one gets the join check as added");
+        let u = rooms.get("sfu_7").unwrap();
+        assert_eq!(u.grants.get("u5#drift"), Some(&Grant::of(P::SPEAK | P::VIDEO)), "LiveKit's word, until the check re-applies");
+        assert_eq!(u.grants.get("u7#unknown"), Some(&Grant::of(P::SPEAK)), "learned; nothing to differ from");
+        assert_eq!(u.grants.get("u8#rejoined"), Some(&Grant::of(P::SPEAK | P::VIDEO)), "not overwritten by the older listing");
+        assert_eq!(u.grants.get("u4#minted"), Some(&Grant::of(P::SPEAK)), "a moved reservation: its own webhook checks it");
+        assert_eq!(u.grants.get("u3#new"), Some(&Grant::of(P::SPEAK)));
+    }
+
+    /// A server with an SFU voice channel whose @everyone may VIEW, CONNECT,
+    /// SPEAK and use VIDEO; `muted` holds a role the channel denies SPEAK,
+    /// `speaker` does not, `outsider` is no member at all.
+    struct SpeakFixture {
+        sid: String,
+        cid: i64,
+        muted: i64,
+        speaker: i64,
+        outsider: i64,
+        users: Vec<i32>,
+    }
+
+    async fn speak_fixture(pool: &sqlx::PgPool) -> SpeakFixture {
+        use crate::permissions::Permissions as P;
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let mk = |n: &str| format!("gr_{n}_{}", &tag[..12]);
+        let mut users = Vec::new();
+        for n in ["owner", "muted", "speaker", "outsider"] {
+            let (id,): (i32,) = sqlx::query_as("INSERT INTO users (username, email, salt, verifier, created_at) VALUES ($1, $2, $3, $4, NOW()) RETURNING id")
+                .bind(mk(n)).bind(format!("{}@test.invalid", mk(n))).bind(b"s".as_ref()).bind(b"v".as_ref())
+                .fetch_one(pool).await.expect("user");
+            users.push(id);
+        }
+        let sid = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, $2, $3)").bind(&sid).bind(mk("srv")).bind(users[0]).execute(pool).await.expect("server");
+        sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2), ($1, $3), ($1, $4)")
+            .bind(&sid).bind(users[0]).bind(users[1]).bind(users[2]).execute(pool).await.expect("members");
+        let everyone = (P::VIEW_CHANNEL | P::CONNECT | P::SPEAK | P::VIDEO).bits() as i64;
+        sqlx::query("INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) VALUES ($1, '@everyone', '#99AAB5', $2, 0, true)")
+            .bind(&sid).bind(everyone).execute(pool).await.expect("@everyone");
+        let (rid,): (i64,) = sqlx::query_as("INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) VALUES ($1, 'muted', '#99AAB5', 0, 1, false) RETURNING id")
+            .bind(&sid).fetch_one(pool).await.expect("role");
+        sqlx::query("INSERT INTO member_roles (server_id, user_id, role_id) VALUES ($1, $2, $3)").bind(&sid).bind(users[1]).bind(rid).execute(pool).await.expect("member role");
+        let (cid,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type, sfu_mode) VALUES ($1, 'v', 1, true) RETURNING id")
+            .bind(&sid).fetch_one(pool).await.expect("channel");
+        sqlx::query("INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny) VALUES ($1, $2, 0, $3)")
+            .bind(cid as i64).bind(rid).bind(P::SPEAK.bits() as i64).execute(pool).await.expect("SPEAK deny");
+        SpeakFixture { sid, cid: cid as i64, muted: users[1] as i64, speaker: users[2] as i64, outsider: users[3] as i64, users }
+    }
+
+    async fn drop_fixture(pool: &sqlx::PgPool, f: &SpeakFixture) {
+        let _ = sqlx::query("DELETE FROM channels WHERE id = $1").bind(f.cid as i32).execute(pool).await;
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&f.sid).execute(pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(f.users.clone()).execute(pool).await;
+    }
+
+    /// A STOCKPILED TOKEN, through the resync (TEST_DATABASE_URL; skips without
+    /// it). LiveKit lists a session of the SPEAK-denied member that joined with
+    /// a token minted before the deny (its grant names the microphone); the
+    /// join check keeps them - they may still VIEW and CONNECT - and gives the
+    /// session the grant they have now. So does a KNOWN session whose grant
+    /// drifted back to the token's. The speaker's session, whose grant is
+    /// current, is sent nothing.
+    #[tokio::test]
+    async fn the_resyncs_join_check_gives_a_session_the_grant_its_members_permissions_give_now() {
+        use crate::permissions::Permissions as P;
+        let Some(pool) = crate::migrator::test_pool(2).await else { return };
+        no_env_proxy();
+        let f = speak_fixture(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = room_name_for_channel(f.cid);
+        let (stock, fine, known) = (format!("u{}#stock", f.muted), format!("u{}#fine", f.speaker), format!("u{}#known", f.muted));
+        // Listed with no permission at all: its grant is unknown, so it is given one.
+        let bare = format!("u{}#bare", f.speaker);
+        {
+            // Applied by an earlier sweep; the listing below says otherwise.
+            let mut u = state.sfu_rooms.entry(room.clone()).or_default();
+            u.participants.insert(known.clone(), Instant::now());
+            u.grants.insert(known.clone(), Grant::of(P::VIDEO));
+        }
+        let (base, srv) = livekit_stand_in(
+            vec![
+                ("/twirp/livekit.RoomService/ListRooms", 200, format!(r#"{{"rooms":[{{"name":"{room}"}}]}}"#)),
+                ("/twirp/livekit.RoomService/ListParticipants", 200, format!(
+                    r#"{{"participants":[
+                    {{"identity":"{stock}","state":"ACTIVE","tracks":[],"permission":{MIC_AND_CAMERA}}},
+                    {{"identity":"{fine}","state":"ACTIVE","tracks":[],"permission":{MIC_AND_CAMERA}}},
+                    {{"identity":"{known}","state":"ACTIVE","tracks":[],"permission":{MIC_AND_CAMERA}}},
+                    {{"identity":"{bare}","state":"ACTIVE","tracks":[]}}]}}"#
+                )),
+                // In check order: the due (drifted) one, then the added ones as listed.
+                ("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(CAMERA_ONLY)),
+                ("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(CAMERA_ONLY)),
+                ("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(MIC_AND_CAMERA)),
+            ],
+            None,
+        )
+        .await;
+        let r = resync_once(&state, &cfg_for(&base), &client()).await;
+        let seen = asked(srv).await;
+        let grants: Vec<Option<Grant>> = [&stock, &fine, &known, &bare]
+            .iter()
+            .map(|id| state.sfu_rooms.get(&room).and_then(|u| u.grants.get(*id).copied()))
+            .collect();
+        let still_in = state.sfu_rooms.get(&room).map(|u| u.participants.len()).unwrap_or(0);
+        drop_fixture(&pool, &f).await;
+
+        let r = r.expect("resync");
+        let mut bodies: Vec<serde_json::Value> = seen[2..].iter().map(|s| serde_json::from_str(&s.body).unwrap()).collect();
+        bodies.sort_by(|a, b| a["identity"].as_str().cmp(&b["identity"].as_str()));
+        let mut bare_request = camera_only_request(&room, &bare);
+        bare_request["permission"]["can_publish_sources"] = serde_json::json!(["MICROPHONE", "CAMERA"]);
+        let mut want = vec![camera_only_request(&room, &known), camera_only_request(&room, &stock), bare_request];
+        want.sort_by(|a, b| a["identity"].as_str().cmp(&b["identity"].as_str()));
+        assert_eq!(bodies, want, "the stockpiled token's session, the drifted one and the unreported one; never the speaker's current one");
+        assert_eq!((r.regranted, r.denied, r.pending, r.added), (3, 0, 0, 3));
+        assert_eq!(
+            grants,
+            vec![Some(Grant::of(P::VIDEO)), Some(Grant::of(P::SPEAK | P::VIDEO)), Some(Grant::of(P::VIDEO)), Some(Grant::of(P::SPEAK | P::VIDEO))]
+        );
+        assert_eq!(still_in, 4, "a SPEAK deny evicts nobody: they stay, listening");
+    }
+
+    /// A STOCKPILED TOKEN, through the `participant_joined` check
+    /// (TEST_DATABASE_URL; skips without it): a join whose token's grant names
+    /// the microphone for a member denied SPEAK is given the current grant; a
+    /// join whose grant is current is sent nothing; a join that reports no
+    /// grant is given it (unknown); and a non-member is still evicted.
+    #[tokio::test]
+    async fn the_join_webhooks_check_gives_a_stockpiled_token_the_grant_permissions_give_now() {
+        let Some(pool) = crate::migrator::test_pool(2).await else { return };
+        no_env_proxy();
+        let f = speak_fixture(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = room_name_for_channel(f.cid);
+        let (stock, fine, silent, stranger) = (
+            format!("u{}#w1", f.muted),
+            format!("u{}#w2", f.speaker),
+            format!("u{}#w3", f.muted),
+            format!("u{}#w4", f.outsider),
+        );
+        let (base, srv) = livekit_stand_in(
+            vec![
+                ("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(CAMERA_ONLY)),
+                ("/twirp/livekit.RoomService/UpdateParticipant", 200, info_reply(CAMERA_ONLY)),
+                ("/twirp/livekit.RoomService/RemoveParticipant", 200, "{}".to_string()),
+            ],
+            None,
+        )
+        .await;
+        let cfg = cfg_for(&base);
+        let token_grant = serde_json::json!({"canSubscribe": true, "canPublish": true, "canPublishData": true, "canPublishSources": ["MICROPHONE", "CAMERA"]});
+        for (identity, uid, permission) in [
+            (&stock, f.muted, Some(&token_grant)),
+            (&fine, f.speaker, Some(&token_grant)),
+            (&silent, f.muted, None),
+            (&stranger, f.outsider, Some(&token_grant)),
+        ] {
+            let mut p = serde_json::json!({ "identity": identity });
+            if let Some(g) = permission {
+                p["permission"] = g.clone();
+            }
+            // Records the payload's grant; its own spawned check finds no SFU
+            // configuration in a test and does nothing - this is that check:
+            apply_webhook_event(&state, "participant_joined", room.clone(), &serde_json::json!({ "participant": p }));
+            reauth_join(&state, &cfg, &room, identity, f.cid, uid).await;
+        }
+        let seen = asked(srv).await;
+        let known: Vec<bool> = [&stock, &fine, &silent, &stranger]
+            .iter()
+            .map(|id| state.sfu_rooms.get(&room).is_some_and(|u| u.participants.contains_key(*id)))
+            .collect();
+        drop_fixture(&pool, &f).await;
+
+        let bodies: Vec<serde_json::Value> = seen.iter().map(|s| serde_json::from_str(&s.body).unwrap()).collect();
+        assert_eq!(
+            bodies,
+            vec![
+                camera_only_request(&room, &stock),
+                camera_only_request(&room, &silent),
+                serde_json::json!({ "room": room, "identity": stranger }),
+            ],
+            "the stale token, the unreported grant, then the non-member's eviction - nothing for the speaker"
+        );
+        assert_eq!(known, vec![true, true, true, false], "only the non-member leaves");
     }
 
 }
