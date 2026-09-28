@@ -147,10 +147,11 @@ export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled
 
     const onSnooze = (e: CalendarEntry, preset: 'tomorrow' | '10m' | '1h') => {
         const note = noteOf(e);
-        if (note && !e.source.isNote) void actions.snoozeTask(note, e.source.task, snoozeUntil(preset, Date.now()));
-        // Tomorrow is the person's morning here too, so the calendar and
-        // Reminders never disagree about what Tomorrow means.
-        if (note) void actions.snoozeTask(note, e.source.task, snoozeUntil(preset, Date.now(), undefined, times.morning));
+        // ONE call. Tomorrow is the person's morning here too, so the
+        // calendar and Reminders never disagree about what Tomorrow means.
+        // (Two used to go out per tap — one without this guard — racing each
+        // other to the same item: tests/notesCalendarSnooze.test.tsx.)
+        if (note && !e.source.isNote) void actions.snoozeTask(note, e.source.task, snoozeUntil(preset, Date.now(), undefined, times.morning));
     };
 
     // --- Tap-to-add ------------------------------------------------------------------
