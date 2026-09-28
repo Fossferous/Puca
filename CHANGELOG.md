@@ -32,6 +32,28 @@ one-line summary; this file is the full story. Versions follow
   Installs that use the shipped service file were not exposed in practice:
   it already stops the server process writing to that folder.
 
+### Improved
+- **Going live takes three clicks, with the game's sound.** **Share Screen**
+  now opens the picker straight away with your last resolution, frame rate
+  and audio choice: pick the game's window and you are live. Before, a
+  settings dialog came first, and after the picker a list asked which apps'
+  audio to stream with the game not ticked, because Púca guessed the game
+  from window titles that the desktop app never actually saw. It now finds
+  the app from the shared window itself, so the right audio is chosen every
+  time with nothing to tick. The list still appears when you share a whole
+  screen. The settings are one click away, on the arrow beside **Share
+  Screen**. Desktop app.
+- **Add or remove a stream's audio while you are live.** **Stream audio
+  sources**, beside **Stop Sharing**, adds another app's sound to your
+  stream (music alongside the game, say), removes one, or changes its
+  volume, without restarting the stream or dropping anyone watching.
+  Desktop app.
+- **Stream stats.** Right-click any stream and choose **Show Stream Stats**
+  for a live readout: resolution, frame rate, video and audio bitrate, the
+  codec and whether it is handled in hardware, packet loss, dropped frames
+  and round trip. On your own stream it shows what you are sending and what
+  is holding it back: the CPU, the connection, or nothing.
+
 ### Fixed
 - **Removing someone from a call works after the server restarts.** The
   server only knew who was in a voice call from events it had seen since it
