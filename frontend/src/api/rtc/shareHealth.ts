@@ -130,11 +130,23 @@ export function createShareLoadWatch() {
 }
 
 /** The share sizes the dialog offers, largest first — the order a step DOWN
- *  walks. This is now the single source: ScreenShareModal derives its option
- *  list from it, and the capture size comes from `shareDimensions` below. */
+ *  walks. This is now the single source: ScreenShareModal and the live
+ *  quality panel derive their option lists from it, and the capture size
+ *  comes from `shareDimensions` below. */
 export const RES_STEPS = ['source', '1440', '1080', '720'] as const;
 /** The frame rates the dialog offers, fastest first. */
 export const FPS_STEPS = [60, 30, 15] as const;
+
+/** The resolution choices as the dialogs show them, smallest first (the way
+ *  they are read). Derived from RES_STEPS so the dialogs and the step-down
+ *  offer cannot come to disagree about which sizes exist. */
+export const RESOLUTION_OPTIONS = [...RES_STEPS].reverse().map(value => ({
+    value,
+    label: value === 'source' ? 'Source' : `${value}p`,
+}));
+
+/** The frame-rate choices as the dialogs show them, slowest first. */
+export const FPS_OPTIONS = [...FPS_STEPS].reverse();
 
 export interface ShareQuality { resolution: string; fps: number }
 
@@ -290,4 +302,99 @@ export function starvedOffer(
         return null;
     }
     return { text: `Your screen share is being limited by CPU. Drop to ${qualityLabel(to)}?`, to };
+}
+
+/**
+ * What a screen share asks the browser for.
+ *
+ * `max`, NOT `ideal`, on all three. An ideal is a preference the browser may
+ * ignore, and for display capture Chromium routinely does: it hands back the
+ * surface at its native size. So somebody on a 1440p monitor who picked
+ * "1080p" was capturing and ENCODING 1440p — 1.8x the pixels they chose — and
+ * on a 4K monitor, four times. The frame rate was already capped here; the
+ * resolution was not, and the clip path has always capped all three
+ * (clips/replayBuffer.ts's displayConstraints).
+ *
+ * It matters more than it looks because the share was encoded in SOFTWARE on
+ * every machine with a log line (`encoder=OpenH264`, until the profile fix in
+ * h264Profiles.ts) and still is on any machine without a hardware encoder —
+ * and software H.264 costs roughly linearly in pixels per second. Silently
+ * doubling the pixel count silently doubles the CPU taken from whatever is
+ * being shared, which is usually a game the person is also trying to play.
+ *
+ * Pure, and exported, so the cap is a testable contract rather than an object
+ * literal three call frames inside a picker.
+ */
+/**
+ * Would this cap actually reduce what is being captured?
+ *
+ * WHY IT HAS TO BE ASKED. These constraints are CEILINGS. Applying a ceiling
+ * at or above the current capture succeeds and changes nothing — so a "lower
+ * the quality" button would report success, spend its one-per-share offer, and
+ * leave the machine exactly as overloaded as it was. It came up immediately:
+ * "Source" on a 1080p monitor captures 1920x1080, and the step down from
+ * Source was 1440p, whose ceiling is 2560x1440.
+ *
+ * Asked BEFORE applying rather than by diffing `getSettings()` afterwards,
+ * because the engine need not have updated them by the time `applyConstraints`
+ * resolves — a diff would report false failures.
+ */
+export function capWouldReduce(
+    now: { width?: number; height?: number; frameRate?: number },
+    width: number,
+    height: number,
+    fps: number,
+): boolean {
+    return (now.width ?? 0) > width
+        || (now.height ?? 0) > height
+        || Math.round(now.frameRate ?? 0) > fps;
+}
+
+export function shareVideoConstraints(width: number, height: number, fps: number) {
+    return {
+        width: { max: width },
+        height: { max: height },
+        frameRate: { max: fps },
+    };
+}
+
+/** What a live capture produces after a re-size, read back from the track. */
+export interface LiveCapture { width: number; height: number; fps: number }
+
+/**
+ * Re-size a LIVE display capture in place, up or down, and report what it
+ * then produces.
+ *
+ * `applyConstraints` retunes the existing track: no new track, no SDP
+ * renegotiation, so the share does not end and nobody watching is dropped.
+ * Measured 2026-09-28 in Edge 154 (the WebView2 engine) on a real capture
+ * with a loopback sender: 640x360@15 -> 1280x720@30 -> 854x480@10, the track
+ * stayed live, and the encoder followed every step.
+ *
+ * The constraints are ceilings, but what a ceiling ABOVE the source does
+ * depends on the surface. A window or screen stays at its own size (the
+ * premise of the dialog's "Source" option). A browser TAB is re-rendered at
+ * the asked size instead: measured, a 1920x1080 tab capped at 3840x2160
+ * reports 3840x2160. So what comes back is read from the track, never echoed
+ * from the request, and the caller shows the person the real size. Null when
+ * the engine refused.
+ */
+export async function recapDisplayTrack(
+    track: MediaStreamTrack,
+    width: number,
+    height: number,
+    fps: number,
+): Promise<LiveCapture | null> {
+    try {
+        await track.applyConstraints(shareVideoConstraints(width, height, fps) as MediaTrackConstraints);
+    } catch (e) {
+        console.warn('[WebRTC] Live share re-size refused:', e);
+        return null;
+    }
+    const s = track.getSettings();
+    return {
+        width: s.width ?? 0,
+        height: s.height ?? 0,
+        fps: Math.round(s.frameRate ?? 0),
+    };
 }

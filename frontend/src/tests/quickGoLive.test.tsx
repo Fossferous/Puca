@@ -237,7 +237,9 @@ describe('VoicePanel wiring (VoicePanel is not mountable under vitest)', () => {
 
     it('the Share button launches quick; the arrow launches settings', () => {
         expect(shareButton).toMatch(/setShareLaunch\('quick'\);\s*setShowStreamSettings\(true\)/);
-        expect(vp).toMatch(/vp-share-options"[\s\S]{0,200}setShareLaunch\('settings'\); setShowStreamSettings\(true\)/);
+        // Not sharing: the arrow opens the settings the next share starts with
+        // (while live it opens Stream quality — liveShareQuality.test.tsx).
+        expect(vp).toMatch(/vp-share-options"[\s\S]{0,400}setShareLaunch\('settings'\);\s*setShowStreamSettings\(true\)/);
         expect(vp).toMatch(/<ScreenShareModal[\s\S]{0,120}launch=\{shareLaunch\}/);
     });
 

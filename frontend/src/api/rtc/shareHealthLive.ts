@@ -9,7 +9,7 @@
  */
 import { sfuManager } from './sfuManager';
 import { webrtcManager } from '../webrtc';
-import { shareDimensions, type EncodeSample, type ShareQuality } from './shareHealth';
+import { shareDimensions, type EncodeSample, type LiveCapture, type ShareQuality } from './shareHealth';
 
 /**
  * Read the local share's encode health from whichever transport is carrying
@@ -58,6 +58,47 @@ export async function applyShareQuality(q: ShareQuality): Promise<boolean> {
     if (shareHasLadder()) return false;
     const { width, height } = shareDimensions(q.resolution);
     return webrtcManager.applyShareQuality(width, height, q.fps);
+}
+
+/** Window event asking VoicePanel to open the live Stream quality panel —
+ *  how the stream tile's own right-click menu reaches a panel it does not own. */
+export const OPEN_SHARE_QUALITY_EVENT = 'sovereign:open-share-quality';
+
+export function requestShareQualityPanel(): void {
+    try { window.dispatchEvent(new CustomEvent(OPEN_SHARE_QUALITY_EVENT)); } catch { /* non-DOM env */ }
+}
+
+/** What became of a live quality change (changeLiveShareQuality). */
+export type LiveQualityOutcome =
+    | { kind: 'applied'; capture: LiveCapture }
+    /** An SFU share published with quality layers: see changeLiveShareQuality. */
+    | { kind: 'ladder' }
+    | { kind: 'no-share' }
+    | { kind: 'refused' };
+
+/**
+ * Change the RUNNING share's resolution and frame rate, up or down, without
+ * sending the person back through the picker (Stream quality while live).
+ * The streamer's choice, where applyShareQuality above is the struggling
+ * machine's one-way step down.
+ *
+ * Same ladder rule as applyShareQuality, for the same reason: LiveKit fixes
+ * each quality layer as a RATIO of the capture at publish time, so re-sizing
+ * the capture re-sizes every layer with it. Those shares report 'ladder' and
+ * keep running as they are; the choice is still saved for the next share.
+ * Quality layers are off by default, so most shares never meet this.
+ */
+export async function changeLiveShareQuality(q: ShareQuality): Promise<LiveQualityOutcome> {
+    if (!shareCaptureSize()) return { kind: 'no-share' };
+    if (shareHasLadder()) return { kind: 'ladder' };
+    const { width, height } = shareDimensions(q.resolution);
+    let capture: LiveCapture | null = null;
+    try {
+        capture = await webrtcManager.setShareQuality(width, height, q.fps);
+    } catch {
+        capture = null;
+    }
+    return capture ? { kind: 'applied', capture } : { kind: 'refused' };
 }
 
 /** Is the running share published with more than one encoding? False on mesh

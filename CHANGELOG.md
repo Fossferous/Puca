@@ -4,6 +4,19 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Improved
+- **Change your stream's resolution and frame rate while you are live.**
+  The arrow beside **Stop Sharing** (or right-click your own stream, **Stream
+  Quality**) now changes the stream that is already going out, up as well as
+  down, straight away and without dropping anyone watching. Before, the only
+  way to raise it was to stop sharing and start again, and the only live
+  change was the step down Púca offers when your computer struggles. The
+  choice is remembered for your next share. A share sent at several sizes
+  (Settings → Advanced → Screen sharing) keeps its sizes until the next
+  share, because each one is fixed when it starts.
+
 ## 0.9.824 — 2026-09-28
 
 Going live takes three clicks with the game's sound, stream audio and sounds follow your Output Device, and voice channels get their own Connect, Speak, Video and Stream permissions.

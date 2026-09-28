@@ -10,7 +10,7 @@ import { resolvePinnedIdentityKey } from '../keyVerification';
 import { registerScreenReceiver } from './receiverLatency';
 import { outboundTrackId, receiverHints, summariseInboundAudio, summariseRtcStats, videoSendExtras, summariseRtcStatsDelta, type InboundAudioHealth, type RtcLatencySummary } from './statsSummary';
 import { negotiatedH264Profile } from './h264Profiles';
-import type { EncodeSample } from './shareHealth';
+import type { EncodeSample, LiveCapture } from './shareHealth';
 import type { RtpEndpoint } from './streamStats';
 import { AnnouncedVideoGate } from './announcedVideo';
 
@@ -780,6 +780,11 @@ export class WebRTCManager {
      *  track object. */
     applyShareQuality(width: number, height: number, fps: number): Promise<boolean> {
         return this.media.applyShareQuality(width, height, fps);
+    }
+
+    /** Set the live share's quality, up or down (see MediaManager.setShareQuality). */
+    setShareQuality(width: number, height: number, fps: number): Promise<LiveCapture | null> {
+        return this.media.setShareQuality(width, height, fps);
     }
 
     /** The live share's real capture size (see MediaManager.shareCaptureSize). */

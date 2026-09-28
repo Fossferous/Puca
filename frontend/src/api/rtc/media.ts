@@ -1,5 +1,6 @@
 import { processAudioStream, getMicConstraints, getNoiseSuppressionMode, setNoiseSuppressionMode, cleanupNoiseFilter, selectedInputDeviceId, type NoiseSuppressionMode } from '../noiseFilter';
 import { inputGain } from '../../components/settingsStore';
+import { capWouldReduce, recapDisplayTrack, shareVideoConstraints, type LiveCapture } from './shareHealth';
 
 /** Errors that mean "the requested mic device can't be opened" — the cases
  *  where retrying on the OS default is the right degradation. Matched by NAME,
@@ -44,59 +45,11 @@ export function rmsAmplitude(samples: Float32Array): number {
     return Math.sqrt(sum / samples.length);
 }
 
-/**
- * What a screen share asks the browser for.
- *
- * `max`, NOT `ideal`, on all three. An ideal is a preference the browser may
- * ignore, and for display capture Chromium routinely does: it hands back the
- * surface at its native size. So somebody on a 1440p monitor who picked
- * "1080p" was capturing and ENCODING 1440p — 1.8x the pixels they chose — and
- * on a 4K monitor, four times. The frame rate was already capped here; the
- * resolution was not, and the clip path has always capped all three
- * (clips/replayBuffer.ts's displayConstraints).
- *
- * It matters more than it looks because the share was encoded in SOFTWARE on
- * every machine with a log line (`encoder=OpenH264`, until the profile fix in
- * h264Profiles.ts) and still is on any machine without a hardware encoder —
- * and software H.264 costs roughly linearly in pixels per second. Silently
- * doubling the pixel count silently doubles the CPU taken from whatever is
- * being shared, which is usually a game the person is also trying to play.
- *
- * Pure, and exported, so the cap is a testable contract rather than an object
- * literal three call frames inside a picker.
- */
-/**
- * Would this cap actually reduce what is being captured?
- *
- * WHY IT HAS TO BE ASKED. These constraints are CEILINGS. Applying a ceiling
- * at or above the current capture succeeds and changes nothing — so a "lower
- * the quality" button would report success, spend its one-per-share offer, and
- * leave the machine exactly as overloaded as it was. It came up immediately:
- * "Source" on a 1080p monitor captures 1920x1080, and the step down from
- * Source was 1440p, whose ceiling is 2560x1440.
- *
- * Asked BEFORE applying rather than by diffing `getSettings()` afterwards,
- * because the engine need not have updated them by the time `applyConstraints`
- * resolves — a diff would report false failures.
- */
-export function capWouldReduce(
-    now: { width?: number; height?: number; frameRate?: number },
-    width: number,
-    height: number,
-    fps: number,
-): boolean {
-    return (now.width ?? 0) > width
-        || (now.height ?? 0) > height
-        || Math.round(now.frameRate ?? 0) > fps;
-}
-
-export function shareVideoConstraints(width: number, height: number, fps: number) {
-    return {
-        width: { max: width },
-        height: { max: height },
-        frameRate: { max: fps },
-    };
-}
+// The capture cap (`shareVideoConstraints`), its reduce test (`capWouldReduce`)
+// and the live re-size (`recapDisplayTrack`) live in shareHealth.ts, which is
+// dependency-free: e2e/share-quality-live-real-browser.mjs bundles and runs
+// them in a real browser. Re-exported for the callers that import them here.
+export { capWouldReduce, shareVideoConstraints } from './shareHealth';
 
 export class MediaManager {
     private localStream: MediaStream | null = null;
@@ -251,6 +204,17 @@ export class MediaManager {
             console.warn('[WebRTC] Screen share re-cap refused:', e);
             return false;
         }
+    }
+
+    /**
+     * Set the LIVE screen capture's quality, UP or down: the streamer's own
+     * choice mid-share (Stream quality while live). Unlike applyShareQuality,
+     * which is the struggling machine's step down and may only lower, this
+     * may raise the cap. See recapDisplayTrack for what comes back.
+     */
+    setShareQuality(width: number, height: number, fps: number): Promise<LiveCapture | null> {
+        const track = this.screenShareStream?.getVideoTracks()[0];
+        return track ? recapDisplayTrack(track, width, height, fps) : Promise.resolve(null);
     }
 
     /** What the live screen capture is ACTUALLY producing, or null when

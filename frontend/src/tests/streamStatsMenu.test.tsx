@@ -110,6 +110,21 @@ describe('Show Stream Stats', () => {
         expect(tileOf('alice').querySelector('.stream-stats-overlay')).not.toBeNull();
     });
 
+    it('your own stream also offers Stream Quality, which asks VoicePanel for the live panel', async () => {
+        ownId = 1;
+        act(() => { for (const cb of [...subscribers]) cb(); });
+        const heard = vi.fn();
+        window.addEventListener('sovereign:open-share-quality', heard);
+        rightClick(tileOf('alice'));
+        await act(async () => { menuItem(/Stream Quality/)!.click(); });
+        window.removeEventListener('sovereign:open-share-quality', heard);
+        expect(heard).toHaveBeenCalledTimes(1);
+        expect(container.querySelector('.stream-context-menu'), 'the menu closes').toBeNull();
+        // Not on someone else's stream: it is not theirs to change.
+        rightClick(tileOf('bob'));
+        expect(menuItem(/Stream Quality/)).toBeUndefined();
+    });
+
     it('never on a filmstrip thumbnail', async () => {
         rightClick(tileOf('bob'));
         await act(async () => { menuItem(/Show Stream Stats/)!.click(); });

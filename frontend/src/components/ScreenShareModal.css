@@ -375,3 +375,16 @@
     font-size: 13px;
     color: var(--text-danger, #f23f43);
 }
+
+/* Stream quality while live (LiveShareQualityModal). */
+.stream-live-current {
+    margin: 0 0 12px;
+    font-size: 13px;
+    color: #b5bac1;
+}
+
+.stream-live-status {
+    margin: 4px 0 12px;
+    font-size: 13px;
+    color: #dbdee1;
+}

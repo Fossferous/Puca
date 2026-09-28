@@ -11,13 +11,14 @@ import { loadSettings, saveSettings, inputGain, outputGain, applyOutputDevice } 
 import { wsClient, type ServerMessage, type MessageHandler } from '../api/websocket';
 import ScreenShareModal from './ScreenShareModal';
 import { StreamAudioSourcesModal } from './StreamAudioSourcesModal';
+import { LiveShareQualityModal } from './LiveShareQualityModal';
 import { MicPermissionHelp } from './MicPermissionHelp';
 import { useContextMenu } from './contextMenuUtils';
 import {
     createShareLoadWatch, starvedOffer, rememberedQuality,
     shareDimensions, qualityLabel, SAMPLE_MS, type ShareQuality,
 } from '../api/rtc/shareHealth';
-import { sampleShareEncode, applyShareQuality, shareCaptureSize } from '../api/rtc/shareHealthLive';
+import { sampleShareEncode, applyShareQuality, shareCaptureSize, OPEN_SHARE_QUALITY_EVENT } from '../api/rtc/shareHealthLive';
 import { ContextMenu } from './ContextMenu';
 import { copyDiagnostics } from '../api/diagnosticsReport';
 import { noteRender, startHealthLog, stopHealthLog } from '../api/healthLog';
@@ -205,6 +206,15 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     const [shareLaunch, setShareLaunch] = useState<'quick' | 'settings'>('quick');
     // Audio sources while live (desktop): add/drop apps without restarting.
     const [showStreamAudio, setShowStreamAudio] = useState(false);
+    // Stream quality while live: resolution / frame rate of the running share.
+    const [showLiveQuality, setShowLiveQuality] = useState(false);
+    // Right-click your own stream → Stream Quality reaches this panel by event
+    // (the stream tile does not own it).
+    useEffect(() => {
+        const open = () => setShowLiveQuality(true);
+        window.addEventListener(OPEN_SHARE_QUALITY_EVENT, open);
+        return () => window.removeEventListener(OPEN_SHARE_QUALITY_EVENT, open);
+    }, []);
     // Multi-streamer support: Map of userId -> { username, stream }
     const [screenSharers, setScreenSharers] = useState<Map<number, { username: string; stream: MediaStream | null }>>(new Map());
     // Stream WATCH selection lives ONLY in globalSelectedStreams (voiceState):
@@ -3496,6 +3506,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                         wsClient.stopScreenShare(roomId);
                                         setIsScreenSharing(false);
                                         setShowStreamAudio(false);
+                                        setShowLiveQuality(false);
                                         // Remove own stream from screenSharers
                                         setScreenSharers(prev => {
                                             const newMap = new Map(prev);
@@ -3517,12 +3528,20 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                 <ScreenShareIcon size={18} />
                             </button>
                         )}
-                        {!isMobile && !isScreenSharing && (
+                        {!isMobile && (
                             <button
                                 className="voice-btn vp-share-options"
-                                onClick={() => { setShareLaunch('settings'); setShowStreamSettings(true); }}
-                                title="Stream settings: resolution, frame rate, audio"
-                                aria-label="Stream settings"
+                                onClick={() => {
+                                    // Live: change the running share. Otherwise:
+                                    // the settings the next share starts with.
+                                    if (isScreenSharing) { setShowLiveQuality(true); return; }
+                                    setShareLaunch('settings');
+                                    setShowStreamSettings(true);
+                                }}
+                                title={isScreenSharing
+                                    ? 'Stream quality: change resolution and frame rate while live'
+                                    : 'Stream settings: resolution, frame rate, audio'}
+                                aria-label={isScreenSharing ? 'Stream quality' : 'Stream settings'}
                             >
                                 <ChevronDownIcon size={14} />
                             </button>
@@ -3877,6 +3896,11 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             <StreamAudioSourcesModal
                 isOpen={showStreamAudio && isScreenSharing}
                 onClose={() => setShowStreamAudio(false)}
+            />
+
+            <LiveShareQualityModal
+                isOpen={showLiveQuality && isScreenSharing}
+                onClose={() => setShowLiveQuality(false)}
             />
 
             {/* Camera preview is now in camera-preview-mini above - removed duplicate */}

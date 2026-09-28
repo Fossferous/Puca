@@ -229,6 +229,16 @@ While you are sharing in the desktop app, **Stream audio sources** beside
 **Stop Sharing** adds an app's audio to the stream (music alongside the game,
 say), removes one, or changes its volume, without restarting the stream.
 
+While you are sharing, the same arrow (**Stream quality**) changes the
+**Resolution** and **Frame Rate** of the stream that is already going out,
+up or down, without the picker and without dropping anyone watching. Each
+change applies at once, and is remembered for your next share. A window or
+screen is never sent larger than it is: ask for 1440p from a 1080p window and
+the stream says it is capturing 1080p. One exception: a share sent at several
+sizes (**Settings → Advanced → Screen sharing**, **Send my screen at several
+sizes**) fixes each size when it starts, so its quality changes on the next
+share instead.
+
 ### Viewing Streams
 When someone shares, their entry in the voice view shows a **LIVE** badge and a
 **Watch stream** button. The chat header also gains a **Watch live streams**
@@ -249,7 +259,8 @@ Hover a stream for its buttons, or right-click it for the same items as a menu:
 | **Show Stream Stats** / **Hide Stream Stats** | Menu only. A live readout on the stream, refreshed every second: resolution, frame rate, video and audio bitrate, codec and whether it is decoded in hardware, packet loss, dropped frames and round trip |
 
 Your own stream has **Stop sharing your screen** and, in the menu, **Stop
-Sharing** and **Show Stream Stats**. On your own stream the readout shows the
+Sharing**, **Stream Quality** (the same panel as the arrow) and **Show Stream
+Stats**. On your own stream the readout shows the
 encoding side: what you are sending, whether it is encoded in hardware, and
 what is holding the stream back (**Limited by**: CPU, bandwidth, or nothing).
 

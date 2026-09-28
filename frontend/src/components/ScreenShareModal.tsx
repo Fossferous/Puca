@@ -4,7 +4,7 @@ import { appLabel, defaultMixerSelection, loadSavedSelection, saveSelection, wit
 import type { CaptureApp, SelectedApp, WindowOwner } from '../api/appAudio';
 import { CloseIcon, InfoIcon, SpeakerIcon } from './Icons';
 import { loadSettings, rememberedShareAudio, saveSettings, type ShareAudioMode } from './settingsStore';
-import { RES_STEPS, FPS_STEPS, rememberedQuality } from '../api/rtc/shareHealth';
+import { FPS_OPTIONS, RESOLUTION_OPTIONS, rememberedQuality } from '../api/rtc/shareHealth';
 import { AppMixerList, type MixerRowState } from './AppMixerList';
 import './ScreenShareModal.css';
 
@@ -51,15 +51,8 @@ interface ScreenShareModalProps {
     onCancelAfterCapture: () => void;
 }
 
-/** Smallest first, which is how they are read. Derived from RES_STEPS (largest
- *  first, the order a step DOWN walks) so the dialog and the step-down offer in
- *  shareHealth.ts cannot come to disagree about which sizes exist. */
-const RESOLUTIONS = [...RES_STEPS].reverse().map(value => ({
-    value,
-    label: value === 'source' ? 'Source' : `${value}p`,
-}));
-
-const FPS_OPTIONS = [...FPS_STEPS].reverse();
+// The resolution / frame-rate choices come from shareHealth.ts (RESOLUTION_OPTIONS,
+// FPS_OPTIONS), shared with the live Stream quality panel.
 
 const AUDIO_OPTIONS: { value: ShareAudioMode; label: string }[] = [
     { value: 'auto', label: "The shared window's app — found automatically" },
@@ -312,7 +305,7 @@ const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, launch = 's
                     <div className="stream-setting-group">
                         <label>Resolution</label>
                         <div className="stream-options-grid">
-                            {RESOLUTIONS.map((res) => (
+                            {RESOLUTION_OPTIONS.map((res) => (
                                 <button
                                     key={res.value}
                                     className={`stream-option ${selectedRes === res.value ? 'selected' : ''}`}

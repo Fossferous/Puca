@@ -38,10 +38,11 @@ import {
 } from '../api/remoteControl';
 import { isMobile, isTauri, RC_ENABLED } from '../api/platform';
 import { outputGain, applyOutputDevice, applyOutputDeviceToContext } from './settingsStore';
+import { requestShareQualityPanel } from '../api/rtc/shareHealthLive';
 import { sfuManager } from '../api/rtc/sfuManager';
 import { useStreamStore } from '../stores/streamStore';
 import {
-    ActivityIcon, ChatIcon, CloseIcon, CrosshairIcon, FullscreenIcon, GamepadIcon, GridIcon, KeyboardIcon,
+    ActivityIcon, ChatIcon, CloseIcon, CrosshairIcon, SlidersIcon, FullscreenIcon, GamepadIcon, GridIcon, KeyboardIcon,
     LiveDotIcon, MegaphoneIcon, MonitorIcon, PendingIcon, PopOutIcon, ScreenIcon, SpeakerIcon,
     SpeakerOffIcon, StopIcon, StopSharingIcon,
 } from './Icons';
@@ -1175,7 +1176,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                     className="stream-context-menu"
                     style={{
                         left: Math.min(ctxMenu.x, window.innerWidth - 260),
-                        top: Math.min(ctxMenu.y, window.innerHeight - (ctxMenu.isOwn ? 376 : 416)),
+                        top: Math.min(ctxMenu.y, window.innerHeight - (ctxMenu.isOwn ? 412 : 416)),
                     }}
                 >
                     <button
@@ -1193,6 +1194,12 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                 onClick={() => { setCtxMenu(null); stopOwnScreenShare(); clearAllStreams(); onBackToChat(); }}
                             >
                                 Stop Sharing <span className="scm-icon"><StopSharingIcon /></span>
+                            </button>
+                            <button
+                                className="scm-item"
+                                onClick={() => { setCtxMenu(null); requestShareQualityPanel(); }}
+                            >
+                                Stream Quality <span className="scm-icon"><SlidersIcon /></span>
                             </button>
                             {/* Hand control of my screen to someone in voice
                                 (desktop host only — injection is native). The

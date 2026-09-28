@@ -326,6 +326,7 @@ node scripts/gen-third-party-notices.mjs      # regenerates THIRD_PARTY_NOTICES.
 cd frontend && node e2e/ice-url-real-browser.mjs   # real RTCPeerConnection; no server needed
 cd frontend && node e2e/h264-profile-real-browser.mjs   # real encoder choice per H.264 profile; no server needed
 cd frontend && node e2e/stream-stats-real-browser.mjs   # Show Stream Stats' reducer on REAL getStats reports (bundles the real module); no server needed
+cd frontend && node e2e/share-quality-live-real-browser.mjs   # a LIVE share re-sized up and down in a real browser (own tab only); no server needed
 cd frontend && node e2e/notes-walk.mjs                  # Púca Notes end to end; needs a dist built against a throwaway backend + serve-dist (header of the file)
 ```
 
