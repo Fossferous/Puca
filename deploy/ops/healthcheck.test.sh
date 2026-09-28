@@ -23,7 +23,7 @@ count() { printf '%s' "$1" | grep -cF -- "$2"; }
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"; [ -n "${LISTENER:-}" ] && kill "$LISTENER" 2>/dev/null' EXIT
-INSTALL="$TMP/install"; STATE="$TMP/state"; CALLS="$TMP/calls.log"
+INSTALL="$TMP/install"; STATE="$TMP/state"; CALLS="$TMP/calls.log"; OPSSTATE="$TMP/opsstate"
 mkdir -p "$INSTALL" "$STATE" "$TMP/bin"
 
 # --- stubs ---------------------------------------------------------------------
@@ -85,7 +85,7 @@ chmod +x "$TMP/bin"/*
 
 LOGF="$INSTALL/health.log"
 reset() {   # a healthy, already-monitored host, with ufw active so it stays out of the way
-	rm -rf "$STATE"; mkdir -p "$STATE"
+	rm -rf "$STATE" "$OPSSTATE"; mkdir -p "$STATE"
 	rm -f "$CALLS" "$LOGF" "$INSTALL"/.[a-z]* "$INSTALL/.env" "$TMP/Caddyfile" "$TMP/turnserver.conf"
 	: > "$CALLS"
 	touch "$STATE/active.sandbox"
@@ -93,9 +93,10 @@ reset() {   # a healthy, already-monitored host, with ufw active so it stays out
 	echo "Status: active" > "$STATE/ufw-status"
 	touch "$INSTALL/.health-http-ok"
 }
-# CADDYFILE and TURNSERVER_CONF are pinned into the sandbox so the real files on
-# the machine running this can never leak into a case (absent = not installed).
-run() { ( cd "$HERE" && CALLS="$CALLS" HC_STATE="$STATE" SERVICE_NAME=sandbox INSTALL_DIR="$INSTALL" CADDYFILE="$TMP/Caddyfile" TURNSERVER_CONF="$TMP/turnserver.conf" PATH="$TMP/bin:$PATH" "$@" bash ./healthcheck.sh 2>&1 ); }
+# CADDYFILE, TURNSERVER_CONF and OPS_STATE_DIR are pinned into the sandbox so the
+# real files on the machine running this can never leak into a case (absent =
+# not installed), and /var/lib is never touched.
+run() { ( cd "$HERE" && CALLS="$CALLS" HC_STATE="$STATE" SERVICE_NAME=sandbox INSTALL_DIR="$INSTALL" CADDYFILE="$TMP/Caddyfile" TURNSERVER_CONF="$TMP/turnserver.conf" OPS_STATE_DIR="$OPSSTATE" PATH="$TMP/bin:$PATH" "$@" bash ./healthcheck.sh 2>&1 ); }
 logtxt() { cat "$LOGF" 2>/dev/null; }
 calls() { cat "$CALLS"; }
 
@@ -147,11 +148,11 @@ reset; : > "$STATE/curl-ok"; rm -f "$INSTALL/.health-http-ok"
 run env
 check "a probe that has NEVER succeeded is reported as config, not restarted" "$([ "$(has "$(calls)" 'systemctl restart sandbox')" = 0 ] && echo 1 || echo 0)" "$(calls)"
 check "and the log names the URL and the knobs"                              "$(has "$(logtxt)" 'has NEVER succeeded')" "$(logtxt)"
-check "with no marker left behind"                                           "$([ ! -f "$INSTALL/.health-http-ok" ] && echo 1 || echo 0)"
+check "with no marker left behind"                                           "$([ ! -f "$INSTALL/.health-http-ok" ] && [ ! -f "$OPSSTATE/http-ok.sandbox" ] && echo 1 || echo 0)"
 
 reset; rm -f "$INSTALL/.health-http-ok"
 run env
-check "the first success writes the marker" "$([ -f "$INSTALL/.health-http-ok" ] && echo 1 || echo 0)"
+check "the first success writes the marker (in the state directory)" "$([ -f "$OPSSTATE/http-ok.sandbox" ] && echo 1 || echo 0)" "$(ls -la "$OPSSTATE" 2>&1)"
 
 reset
 run env
@@ -185,7 +186,7 @@ check "it does not restart over a counter"        "$([ "$(has "$(calls)" 'system
 reset; touch "$STATE/enabled.sandbox-waker" "$STATE/active.sandbox-waker"; echo 5 > "$STATE/nrestarts.sandbox-waker"
 run env
 check "the waker path still fires (the refactor did not regress it)" "$(has "$(logtxt)" 'sandbox-waker RESTARTED BY SYSTEMD (NRestarts 0 -> 5)')" "$(logtxt)"
-check "and keeps its historical state file name"                    "$([ "$(cat "$INSTALL/.waker-nrestarts.last" 2>/dev/null)" = 5 ] && echo 1 || echo 0)"
+check "and its counter is kept in the state directory"             "$([ "$(cat "$OPSSTATE/nrestarts.sandbox-waker" 2>/dev/null)" = 5 ] && echo 1 || echo 0)"
 
 reset; touch "$STATE/enabled.sandbox-waker"
 run env
@@ -466,6 +467,88 @@ run env COTURN_PROBE_PORT=1 ; : > "$LOGF"
 echo 2 > "$STATE/nrestarts.coturn"
 run env COTURN_PROBE_PORT=1
 check "the crash-loop detector runs for coturn too" "$(has "$(logtxt)" 'coturn RESTARTED BY SYSTEMD (NRestarts 0 -> 2)')" "$(logtxt)"
+
+echo
+echo "--- root never writes through a name the service user controls ---"
+# INSTALL_DIR belongs to the service user. Each case plants what that user
+# could plant there and proves root's write does NOT land where it points —
+# every one of these went through on the script before this change.
+VICTIM="$TMP/victim"
+victim_is() { [ "$(cat "$VICTIM" 2>/dev/null)" = "$1" ] && echo 1 || echo 0; }
+REFUSED='REFUSED to write'
+
+# A restart counter planted as a link: the old `echo N > state` truncated the
+# target every five minutes; its digits must not be read either.
+reset; echo 77 > "$VICTIM"; ln -s "$VICTIM" "$INSTALL/.sandbox-nrestarts.last"; echo 5 > "$STATE/nrestarts.sandbox"
+run env
+check "a symlinked old counter: its target is NOT overwritten" "$(victim_is 77)" "victim now: $(cat "$VICTIM")"
+check "and NOT read (the link counts as no history: 0 -> 5)"   "$(has "$(logtxt)" 'sandbox RESTARTED BY SYSTEMD (NRestarts 0 -> 5)')" "$(logtxt)"
+check "and the link itself is gone, not its target"            "$([ ! -L "$INSTALL/.sandbox-nrestarts.last" ] && [ -f "$VICTIM" ] && echo 1 || echo 0)"
+check "the counter now lives in the state directory"           "$([ "$(cat "$OPSSTATE/nrestarts.sandbox" 2>/dev/null)" = 5 ] && echo 1 || echo 0)"
+
+# The probe mark planted as a DANGLING link: the old `: > mark` created a
+# root-owned file wherever it pointed (/etc/nologin locks out every login).
+reset; rm -f "$INSTALL/.health-http-ok"; ln -s "$TMP/made-by-root" "$INSTALL/.health-http-ok"
+run env
+check "a dangling mark link: nothing is created at its target" "$([ ! -e "$TMP/made-by-root" ] && echo 1 || echo 0)"
+check "and the real mark is written in the state directory"    "$([ -f "$OPSSTATE/http-ok.sandbox" ] && echo 1 || echo 0)"
+# ...nor does a linked mark count as a first success.
+reset; rm -f "$INSTALL/.health-http-ok"; : > "$VICTIM"; ln -s "$VICTIM" "$INSTALL/.health-http-ok"; : > "$STATE/curl-ok"
+run env
+check "a linked old mark is not taken as 'has answered before'" "$([ "$(has "$(calls)" 'systemctl restart sandbox')" = 0 ] && [ "$(has "$(logtxt)" 'has NEVER succeeded')" = 1 ] && echo 1 || echo 0)" "$(calls)"
+
+# health.log itself.
+reset; echo precious > "$VICTIM"; ln -s "$VICTIM" "$LOGF"; rm -f "$STATE/active.sandbox"
+run env
+check "health.log as a link: its target is NOT appended to"  "$(victim_is precious)" "victim now: $(cat "$VICTIM")"
+check "and the line reaches syslog instead, saying why"      "$(has "$(calls)" "$REFUSED $LOGF")" "$(calls)"
+check "and the check itself still acted (restart)"            "$(has "$(calls)" 'systemctl restart sandbox')" "$(calls)"
+reset; ln -s "$TMP/log-made-by-root" "$LOGF"; rm -f "$STATE/active.sandbox"
+run env
+check "a dangling health.log link creates nothing"           "$([ ! -e "$TMP/log-made-by-root" ] && echo 1 || echo 0)"
+# A FIFO with no reader: `>>` blocked on it for ever, holding the cron flock,
+# so every later run was skipped — monitoring gone, silently.
+reset; rm -f "$LOGF"; mkfifo "$LOGF"; rm -f "$STATE/active.sandbox"
+run timeout 30 env >/dev/null; rc=$?
+check "health.log as a FIFO does not hang the run"           "$([ "$rc" = 0 ] && echo 1 || echo 0)" "exit $rc (124 = hung until timeout)"
+check "and is refused, not written"                          "$(has "$(calls)" "$REFUSED $LOGF")" "$(calls)"
+rm -f "$LOGF"
+# POSITIVE CONTROL: a plain health.log is written as always.
+reset; rm -f "$STATE/active.sandbox"; echo "earlier line" > "$LOGF"
+run env
+check "POSITIVE CONTROL: a plain health.log is appended to" "$([ "$(head -1 "$LOGF")" = 'earlier line' ] && [ "$(has "$(logtxt)" 'service inactive -> restart')" = 1 ] && echo 1 || echo 0)" "$(logtxt)"
+check "and nothing is refused"                              "$([ "$(has "$(calls)" "$REFUSED")" = 0 ] && echo 1 || echo 0)"
+
+# The state directory: created private, and refused when it is not.
+reset
+run env
+check "the state directory is created 0700" "$([ "$(stat -c %a "$OPSSTATE" 2>/dev/null)" = 700 ] && echo 1 || echo 0)" "$(stat -c %a "$OPSSTATE" 2>&1)"
+reset; mkdir -m 777 "$OPSSTATE"; chmod 777 "$OPSSTATE"; echo 4 > "$STATE/nrestarts.sandbox"
+run env
+check "a state directory others can write is refused, loudly" "$(has "$(logtxt)" 'FATAL state directory unusable')" "$(logtxt)"
+check "and nothing is written into it"                        "$([ -z "$(ls -A "$OPSSTATE")" ] && echo 1 || echo 0)" "$(ls -la "$OPSSTATE")"
+reset; mkdir -m 700 "$TMP/elsewhere-state"; ln -s "$TMP/elsewhere-state" "$OPSSTATE"; echo 4 > "$STATE/nrestarts.sandbox"
+run env
+check "a state directory that is a symlink is refused"        "$(has "$(logtxt)" 'something replaced it with a symlink')" "$(logtxt)"
+check "and nothing is written where it points"                "$([ -z "$(ls -A "$TMP/elsewhere-state")" ] && echo 1 || echo 0)"
+rm -rf "$TMP/elsewhere-state"
+
+# The move itself must not cry wolf: an old plain counter carries over.
+reset; echo 3 > "$INSTALL/.sandbox-nrestarts.last"; echo 3 > "$STATE/nrestarts.sandbox"
+run env
+check "an old plain counter carries over (no alarm for history)" "$([ "$(has "$(logtxt)" 'RESTARTED BY SYSTEMD')" = 0 ] && echo 1 || echo 0)" "$(logtxt)"
+check "and is removed once carried"                               "$([ ! -e "$INSTALL/.sandbox-nrestarts.last" ] && [ "$(cat "$OPSSTATE/nrestarts.sandbox")" = 3 ] && echo 1 || echo 0)"
+reset; echo 1 > "$INSTALL/.sandbox-nrestarts.last"; echo 3 > "$STATE/nrestarts.sandbox"
+run env
+check "POSITIVE CONTROL: a rise over the old counter still alarms" "$(has "$(logtxt)" 'sandbox RESTARTED BY SYSTEMD (NRestarts 1 -> 3)')" "$(logtxt)"
+reset; touch "$STATE/enabled.sandbox-waker" "$STATE/active.sandbox-waker"; echo 5 > "$INSTALL/.waker-nrestarts.last"; echo 5 > "$STATE/nrestarts.sandbox-waker"
+run env
+check "the waker's differently named old counter carries over too" "$([ "$(has "$(logtxt)" 'RESTARTED BY SYSTEMD')" = 0 ] && [ ! -e "$INSTALL/.waker-nrestarts.last" ] && echo 1 || echo 0)" "$(logtxt)"
+# An old plain mark still counts, so the move cannot turn an outage into a
+# "never succeeded" non-restart.
+reset; : > "$STATE/curl-ok"
+run env
+check "an old plain mark still permits the restart" "$([ "$(count "$(calls)" 'systemctl restart sandbox')" = 1 ] && echo 1 || echo 0)" "$(calls)"
 
 echo
 echo "--- Cloudflare: the global client-IP block is asserted, or every per-IP limit is one bucket ---"

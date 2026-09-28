@@ -16,6 +16,21 @@ one-line summary; this file is the full story. Versions follow
   connect; their logs keep saying why a request failed (refused, name not
   found, certificate rejected, timed out), which the new library no longer
   does by itself. Server and waker only: no app update is needed for this.
+- **Self-hosting: the maintenance scripts no longer trust the install
+  folder.** The backup, restore and health-check scripts run as the
+  administrator, but the folder they worked in belongs to the Púca service
+  account. Had that account ever been taken over, it could have swapped a
+  log, a counter file or the backups folder for a link and made the next
+  run overwrite or change files anywhere on the server. They now refuse to
+  write through such a link, keep the health check's counters in a folder
+  only the administrator can write (`/var/lib/puca-ops`), take a local
+  restore drill's backup only from a folder only the administrator can
+  write, and unpack restored attachments somewhere private before moving
+  them into place. The setup guide now installs the scripts into
+  `/usr/local/lib/puca-ops` instead of the install folder; `deploy/ops/README.md`
+  says how to move an existing install. Logs stay where they were.
+  Installs that use the shipped service file were not exposed in practice:
+  it already stops the server process writing to that folder.
 
 ### Fixed
 - **Removing someone from a call works after the server restarts.** The

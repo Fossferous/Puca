@@ -38,7 +38,7 @@ STUB
 printf '#!/usr/bin/env bash\necho "pg_dump $*" >> "$CALLS"\nprintf "CREATE TABLE users (id int);\\n"\n' > "$TMP/bin/pg_dump"
 printf '#!/usr/bin/env bash\necho 1\n' > "$TMP/bin/psql"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/systemctl"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/logger"
+printf '#!/usr/bin/env bash\necho "logger $*" >> "$CALLS"\n' > "$TMP/bin/logger"
 # df: reports whatever free space $STATE/df-avail says, in the two shapes the
 # script asks for.
 cat > "$TMP/bin/df" <<'STUB'
@@ -195,6 +195,46 @@ out="$(run env KEEP_DAYS=7)"; rc=$?
 check "healthy run exits 0"                            "$([ "$rc" = 0 ] && echo 1 || echo 0)" "exit=$rc"
 check "healthy run DOES rotate the stale artifact"     "$([ ! -f "$INSTALL/backups/sandbox-db-old.sql.gz" ] && echo 1 || echo 0)" "$(artifacts)"
 check "and still produced tonight's dump"              "$([ -n "$(ls "$INSTALL"/backups/sandbox-db-2*.sql.gz 2>/dev/null)" ] && echo 1 || echo 0)" "$(artifacts)"
+
+echo
+echo "--- root never writes through a name the service user controls ---"
+# backups/ and backup.log sit in INSTALL_DIR, which the service user owns. Each
+# case plants what that user could plant, and every one of them went through
+# on the script before this change: chmod 700 on the link's target, dumps
+# written into it, the log appended to whatever it pointed at.
+reset; mkdir -p "$TMP/elsewhere"; chmod 755 "$TMP/elsewhere"; : > "$TMP/elsewhere/keep"; ln -s "$TMP/elsewhere" "$INSTALL/backups"
+out="$(run env)"; rc=$?
+check "backups/ as a symlink: refused with EX_CONFIG"   "$([ "$rc" = 78 ] && echo 1 || echo 0)" "exit=$rc $out"
+check "and says what it found"                          "$(has "$(logtxt)" 'something replaced it with a symlink')" "$(logtxt)"
+check "the target's mode is NOT changed"                "$([ "$(stat -c %a "$TMP/elsewhere")" = 755 ] && echo 1 || echo 0)" "now $(stat -c %a "$TMP/elsewhere")"
+check "and nothing is written into it"                  "$([ "$(ls -A "$TMP/elsewhere")" = keep ] && echo 1 || echo 0)" "$(ls -A "$TMP/elsewhere")"
+check "and it reaches syslog"                           "$(has "$(cat "$CALLS")" 'logger -t sandbox-backup FATAL')" "$(cat "$CALLS")"
+rm -f "$INSTALL/backups"; rm -rf "$TMP/elsewhere"
+
+reset; ln -s "$TMP/dir-made-by-root" "$INSTALL/backups"
+out="$(run env)"; rc=$?
+check "a dangling backups/ link: refused, nothing created at its target" "$([ "$rc" = 78 ] && [ ! -e "$TMP/dir-made-by-root" ] && echo 1 || echo 0)" "exit=$rc"
+rm -f "$INSTALL/backups"
+
+reset; mkdir -p "$INSTALL/backups"; chmod 777 "$INSTALL/backups"
+out="$(run env)"; rc=$?
+check "a backups/ others can write is refused"           "$([ "$rc" = 78 ] && [ "$(has "$(logtxt)" 'writable by others')" = 1 ] && echo 1 || echo 0)" "exit=$rc $(logtxt)"
+check "and no dump is written into it"                   "$([ -z "$(artifacts)" ] && echo 1 || echo 0)" "$(artifacts)"
+
+# POSITIVE CONTROL: a pre-existing 0755 backups/ owned by the writer (what a
+# host whose backup.sh predates the chmod has) is used, and tightened.
+reset; mkdir -p "$INSTALL/backups"; chmod 755 "$INSTALL/backups"
+out="$(run env)"; rc=$?
+check "POSITIVE CONTROL: an own 0755 backups/ is accepted" "$([ "$rc" = 0 ] && [ -n "$(ls "$INSTALL"/backups/sandbox-db-*.sql.gz 2>/dev/null)" ] && echo 1 || echo 0)" "exit=$rc $(logtxt)"
+check "and tightened to 0700"                              "$([ "$(stat -c %a "$INSTALL/backups")" = 700 ] && echo 1 || echo 0)" "$(stat -c %a "$INSTALL/backups")"
+
+VICTIM="$TMP/victim"
+reset; echo precious > "$VICTIM"; ln -s "$VICTIM" "$LOGF"
+out="$(run env)"; rc=$?
+check "backup.log as a link: its target is NOT appended to" "$([ "$(cat "$VICTIM")" = precious ] && echo 1 || echo 0)" "victim now: $(cat "$VICTIM")"
+check "the lines reach syslog, saying why"                  "$(has "$(cat "$CALLS")" "REFUSED to write $LOGF")" "$(cat "$CALLS")"
+check "and the backup itself still happened"                "$([ "$rc" = 0 ] && [ -n "$(ls "$INSTALL"/backups/sandbox-db-*.sql.gz 2>/dev/null)" ] && echo 1 || echo 0)" "exit=$rc"
+rm -f "$LOGF"
 
 echo
 if [ "$fails" -gt 0 ]; then

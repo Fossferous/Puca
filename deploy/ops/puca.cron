@@ -1,11 +1,16 @@
 # Puca: nightly DB backup + 5-min health check  ->  /etc/cron.d/puca
 #
-# These paths must match where you installed the scripts. They assume a fresh
-# install (/opt/puca). If your deployment lives somewhere else, edit both lines
-# — cron cannot detect it, though the scripts themselves resolve their OWN names
-# and will abort loudly (exit 78, which cron mails to you) rather than quietly
-# back up or monitor nothing. See names.sh.
+# The scripts run as ROOT, so they live where only root can write:
+# /usr/local/lib/puca-ops (see deploy/ops/README.md, Install). NOT in the
+# install dir: /opt/puca belongs to the service user, and a root-run script
+# in a directory someone else owns is theirs to replace.
 #
-# names.sh must sit beside them: the scripts source it from their own directory.
-0 3 * * * root /opt/puca/backup.sh
-*/5 * * * * root /opt/puca/healthcheck.sh
+# The scripts resolve their OWN names (/opt/puca or a pre-rename
+# /opt/sovereign) and abort loudly (exit 78, which cron mails to you) rather
+# than quietly back up or monitor nothing. See names.sh, which must sit beside
+# them: they source it from their own directory.
+#
+# flock -n: a run that is still going when the next is due is left to finish,
+# never doubled up.
+0 3 * * * root flock -n /run/puca-backup.lock /usr/local/lib/puca-ops/backup.sh
+*/5 * * * * root flock -n /run/puca-health.lock /usr/local/lib/puca-ops/healthcheck.sh

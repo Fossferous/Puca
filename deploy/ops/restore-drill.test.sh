@@ -144,6 +144,30 @@ check "a missing owner role FAILS the drill"        "$([ $rc -ne 0 ] && [ "$(has
 check "and explains restore.sh would fail after the drop" "$(has "$out" 'AFTER dropping the live database')"
 
 echo
+echo "--- --local takes its dump only from a directory root alone can write ---"
+# The newest local dump is piped into psql AS THE POSTGRES SUPERUSER, and psql
+# runs a dump's `\!` lines as shell commands. The service user owns
+# INSTALL_DIR, so it could swap backups/ for a directory of its own holding a
+# "newer" dump. Before this change the drill followed the swap and restored it.
+printf '#!/usr/bin/env bash\necho "createdb $*" >> "$CALLS"\nexit 0\n' > "$TMP/bin/createdb"
+drill_local() { ( cd "$HERE" && CALLS="$CALLS" SERVICE_NAME=sandbox INSTALL_DIR="$INSTALL" PATH="$TMP/bin:$PATH" bash ./restore-drill.sh --local 2>&1 ); }
+mkdir -p "$TMP/hostile"; printf '\\! id\n' | gzip > "$TMP/hostile/sandbox-db-29990101-030000.sql.gz"
+mv "$INSTALL/backups" "$INSTALL/backups.real"; ln -s "$TMP/hostile" "$INSTALL/backups"
+: > "$CALLS"; out="$(drill_local)"; rc=$?
+check "backups/ swapped for a symlink: the drill refuses"  "$([ $rc = 78 ] && [ "$(has "$out" 'refusing the local backup dir')" = 1 ] && echo 1 || echo 0)" "rc=$rc $out"
+check "and restores nothing from it (no createdb, no psql)" "$([ "$(has "$(calls)" 'createdb')" = 0 ] && [ "$(has "$(calls)" 'psql')" = 0 ] && echo 1 || echo 0)" "$(calls)"
+rm -f "$INSTALL/backups"; mv "$INSTALL/backups.real" "$INSTALL/backups"
+
+chmod 777 "$INSTALL/backups"
+: > "$CALLS"; out="$(drill_local)"; rc=$?
+check "a backups/ others can write is refused too"          "$([ $rc = 78 ] && [ "$(has "$out" 'writable by others')" = 1 ] && [ "$(has "$(calls)" 'psql')" = 0 ] && echo 1 || echo 0)" "rc=$rc $out"
+chmod 755 "$INSTALL/backups"
+
+# POSITIVE CONTROL: the real directory, back in place, drills as before.
+: > "$CALLS"; out="$(drill_local)"; rc=$?
+check "POSITIVE CONTROL: the real backups/ still drills"     "$([ $rc = 0 ] && [ "$(has "$out" 'RESTORE DRILL PASSED')" = 1 ] && echo 1 || echo 0)" "rc=$rc $out"
+
+echo
 if [ "$fails" -gt 0 ]; then
 	echo "$fails FAILED"
 	exit 1

@@ -163,6 +163,40 @@ check "intact archives are accepted"                 "$([ $rc -eq 0 ] && echo 1 
 check "and the drop/recreate did happen"             "$([ "$(has "$(calls)" 'dropdb --if-exists sandbox')" = 1 ] && echo 1 || echo 0)" "$(calls)"
 
 echo
+echo "--- the uploads are extracted where the service user cannot reach ---"
+# INSTALL_DIR belongs to the service user. GNU tar already replaces a symlink
+# planted in uploads/'s place BEFORE extraction; the hole was a swap DURING
+# it, after tar had created uploads/ — the rest of the members then followed
+# the link, as root. This tar plays that user: it extracts the directory
+# entry, then does what the owner of INSTALL_DIR can do (move uploads/ aside,
+# plant a symlink to a victim), then extracts the files.
+export RS_REAL_TAR="$(command -v tar)" RS_INSTALL="$INSTALL" RS_VICTIM="$TMP/victimdir"
+mkdir -p "$RS_VICTIM"
+cat > "$TMP/bin/tar" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+	-xzf)
+		echo "tar-x cwd=$(pwd -P) mode=$(stat -c %a .) args=$*" >> "$CALLS"
+		"$RS_REAL_TAR" "$@" --no-recursion uploads || exit $?
+		if [ -d "$RS_INSTALL/uploads" ] && [ ! -L "$RS_INSTALL/uploads" ]; then mv "$RS_INSTALL/uploads" "$RS_INSTALL/uploads.moved"; fi
+		ln -sfn "$RS_VICTIM" "$RS_INSTALL/uploads"
+		exec "$RS_REAL_TAR" "$@" $("$RS_REAL_TAR" -tzf "$2" | grep -v '/$') ;;
+	*) exec "$RS_REAL_TAR" "$@" ;;
+esac
+STUB
+chmod +x "$TMP/bin/tar"
+reset; dump_with_owner sandbox; echo sandbox > "$STATE/roles"
+out="$(run "$TMP/dump.sql.gz" "$TMP/uploads.tar.gz")"; rc=$?
+check "fixture sanity: the racing tar really ran"             "$(has "$(calls)" 'tar-x ')" "$(calls)"
+check "a swap during extraction does NOT redirect root's writes" "$([ -z "$(ls -A "$RS_VICTIM")" ] && echo 1 || echo 0)" "victim holds: $(ls -A "$RS_VICTIM")"
+check "the restore completes"                                 "$([ $rc -eq 0 ] && [ "$(has "$out" 'restore complete')" = 1 ] && echo 1 || echo 0)" "$out"
+check "with uploads/ a real directory holding the files"      "$([ -d "$INSTALL/uploads" ] && [ ! -L "$INSTALL/uploads" ] && [ -f "$INSTALL/uploads/f1" ] && echo 1 || echo 0)" "$(ls -la "$INSTALL")"
+check "extracted in a private (0700) directory, not in INSTALL_DIR" "$(calls | grep 'tar-x ' | grep -q "mode=700" && ! calls | grep 'tar-x ' | grep -qE "cwd=$INSTALL |-C $INSTALL( |\$)" && echo 1 || echo 0)" "$(calls | grep 'tar-x ')"
+check "and the staging directory is removed afterwards"       "$([ -z "$(ls -d "$INSTALL"/.restore-uploads.* 2>/dev/null)" ] && echo 1 || echo 0)" "$(ls -a "$INSTALL")"
+rm -f "$TMP/bin/tar"; rm -rf "$INSTALL/uploads.moved"; [ -L "$INSTALL/uploads" ] && rm -f "$INSTALL/uploads"
+unset RS_REAL_TAR RS_INSTALL RS_VICTIM
+
+echo
 if [ "$fails" -gt 0 ]; then
 	echo "$fails FAILED"
 	exit 1

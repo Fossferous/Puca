@@ -55,8 +55,16 @@ DB_GZ=""; UP_TGZ=""
 case "${1:-}" in
 	--local)
 		[ -d "$BACKUP_DIR" ] || { echo "no backup dir '$BACKUP_DIR' — set INSTALL_DIR in /etc/default/puca"; exit 78; }
-		DB_GZ=$(ls -t "$BACKUP_DIR"/"$DB_NAME"-db-*.sql.gz 2>/dev/null | head -1)
-		UP_TGZ=$(ls -t "$BACKUP_DIR"/"$DB_NAME"-uploads-*.tar.gz 2>/dev/null | head -1)
+		# The newest dump found here is piped into psql AS THE POSTGRES
+		# SUPERUSER, and psql runs a dump's `\!` lines as shell commands. So
+		# the directory is entered and proven to be root's own before anything
+		# in it is chosen (names.sh): the service user owns INSTALL_DIR and
+		# could otherwise swap in a directory of its own, holding a "newer"
+		# dump it wrote. Every path below is relative to it.
+		ops_enter_private_dir "$BACKUP_DIR" ||
+			{ echo "refusing the local backup dir: $OPS_DIR_ERR — only root may be able to write where a drill takes its dump from (backup.sh keeps it 0700)"; exit 78; }
+		DB_GZ=$(ls -t ./"$DB_NAME"-db-*.sql.gz 2>/dev/null | head -1)
+		UP_TGZ=$(ls -t ./"$DB_NAME"-uploads-*.tar.gz 2>/dev/null | head -1)
 		note "using newest LOCAL backup from $BACKUP_DIR"
 		;;
 	"" )
