@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { isTauri } from '../api/platform';
-import { appLabel, defaultMixerSelection, loadSavedSelection, saveSelection } from '../api/appAudio';
-import type { CaptureApp, SelectedApp } from '../api/appAudio';
+import { appLabel, defaultMixerSelection, loadSavedSelection, saveSelection, withOwner } from '../api/appAudio';
+import type { CaptureApp, SelectedApp, WindowOwner } from '../api/appAudio';
 import { CloseIcon, InfoIcon, SpeakerIcon } from './Icons';
-import { loadSettings, saveSettings } from './settingsStore';
+import { loadSettings, rememberedShareAudio, saveSettings, type ShareAudioMode } from './settingsStore';
 import { RES_STEPS, FPS_STEPS, rememberedQuality } from '../api/rtc/shareHealth';
+import { AppMixerList, type MixerRowState } from './AppMixerList';
 import './ScreenShareModal.css';
 
 // 'browser' is the WEB build's marker for "the picker's own Share-audio
@@ -18,13 +19,14 @@ type StreamAudioChoice = 'app' | 'browser' | 'none';
 
 /** Result of capturing the screen surface (before choosing audio). */
 interface CaptureResult {
-    /** Name of the app auto-matched to the shared window, or null (no match). */
-    appName: string | null;
-    /** PID of the auto-matched app, or null. */
-    appPid: number | null;
-    /** Every running app whose audio we could capture (desktop only). */
-    apps: CaptureApp[];
-    /** True when a full screen/monitor was shared (no window to match). */
+    /** Desktop window share: the capturable app that owns the shared window
+     *  (found from the window's handle — exact, not a guess), or null. */
+    windowOwner: WindowOwner | null;
+    /** Every running app whose audio we could capture (desktop only). A
+     *  function, because only the app step needs it: a window share with a
+     *  known owner goes live without the ~0.5 s scan. */
+    loadApps: () => Promise<CaptureApp[]>;
+    /** True when a full screen/monitor was shared (no window to go by). */
     isScreenShare: boolean;
     /** Web only: whether the browser share included an audio track. */
     hasBrowserAudio: boolean;
@@ -32,10 +34,16 @@ interface CaptureResult {
 
 interface ScreenShareModalProps {
     isOpen: boolean;
+    /** 'quick' — the Share button: straight to the picker with the
+     *  remembered settings, no dialog unless the app step is needed.
+     *  'settings' — the arrow beside Share: resolution, frame rate and audio
+     *  first. */
+    launch?: 'quick' | 'settings';
     onClose: () => void;
     /** Runs getDisplayMedia (the OS picker) + app detection. Returns null if the
-     *  user cancelled the picker. */
-    onCaptureScreen: (opts: { resolution: string; fps: number }) => Promise<CaptureResult | null>;
+     *  user cancelled the picker. `prefetchApps`: start the app scan while the
+     *  picker is open, because the app step will certainly want it. */
+    onCaptureScreen: (opts: { resolution: string; fps: number; prefetchApps: boolean }) => Promise<CaptureResult | null>;
     /** Finalize the share with the chosen audio mode; `apps` carries the mixer
      *  selection (which apps + volumes) when audio === 'app'. */
     onGoLive: (audio: StreamAudioChoice, apps?: SelectedApp[]) => Promise<void>;
@@ -53,20 +61,25 @@ const RESOLUTIONS = [...RES_STEPS].reverse().map(value => ({
 
 const FPS_OPTIONS = [...FPS_STEPS].reverse();
 
-// App resolution itself lives in api/appAudio.ts (resolveAppAudio) so it's
-// unit-testable: window-title match first, then audio-session activity (the
-// app audibly playing sound right now — the signal that actually works under
-// WebView2's generic surface labels), then the remembered last app.
+const AUDIO_OPTIONS: { value: ShareAudioMode; label: string }[] = [
+    { value: 'auto', label: "The shared window's app — found automatically" },
+    { value: 'pick', label: 'Choose apps after picking the window' },
+    { value: 'none', label: 'No audio' },
+];
 
-/** Per-row mixer state: ticked + volume slider. */
-interface MixerRowState { on: boolean; gainPercent: number }
+/** A remembered volume for the owner, when the app step once saved one for
+ *  an app of that name. */
+function savedGainFor(owner: WindowOwner): number | undefined {
+    const label = owner.window_title?.trim() ? owner.window_title : owner.name;
+    return loadSavedSelection().find(s => s.name === owner.name || s.name === label)?.gainPercent;
+}
 
-const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, onClose, onCaptureScreen, onGoLive, onCancelAfterCapture }) => {
+const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, launch = 'settings', onClose, onCaptureScreen, onGoLive, onCancelAfterCapture }) => {
     const desktop = isTauri();
     // One object rather than two fields: they are always read and written
     // together, and it keeps the effect below to a single setState call.
-    const [{ resolution: selectedRes, fps: selectedFps }, setQuality] =
-        useState(() => rememberedQuality(loadSettings()));
+    const [{ resolution: selectedRes, fps: selectedFps, audio }, setChoices] =
+        useState(() => ({ ...rememberedQuality(loadSettings()), audio: rememberedShareAudio(loadSettings()) }));
 
     // RE-READ ON EVERY OPEN, not once at mount.
     //
@@ -81,7 +94,7 @@ const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, onClose, on
     // which is precisely the thing the setting is meant to stop.
     useEffect(() => {
         if (!isOpen) return;
-        const q = rememberedQuality(loadSettings());
+        const s = loadSettings();
         // ONE call, not two. `set-state-in-effect` reports at the setState call
         // site and `eslint-disable-next-line` covers exactly one line, so a
         // directive above the first of two setters silences nothing on the
@@ -93,66 +106,93 @@ const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, onClose, on
         // a multi-line comment block with it lands it on another comment and
         // silences nothing (which is what the version before this did).
         // eslint-disable-next-line react-hooks/set-state-in-effect
-        setQuality(q);
+        setChoices({ ...rememberedQuality(s), audio: rememberedShareAudio(s) });
     }, [isOpen]);
 
     /** Remember the choice as it is made rather than on go-live: somebody who
      *  turns the quality down because their last share hurt, then backs out of
      *  the OS picker, has still told us something. */
     const chooseRes = (value: string) => {
-        setQuality(q => ({ ...q, resolution: value }));
+        setChoices(c => ({ ...c, resolution: value }));
         saveSettings({ ...loadSettings(), shareResolution: value });
     };
     const chooseFps = (value: number) => {
-        setQuality(q => ({ ...q, fps: value }));
+        setChoices(c => ({ ...c, fps: value }));
         saveSettings({ ...loadSettings(), shareFps: value });
     };
+    const chooseAudio = (value: ShareAudioMode) => {
+        setChoices(c => ({ ...c, audio: value }));
+        saveSettings({ ...loadSettings(), shareAudio: value });
+    };
     const [busy, setBusy] = useState(false);
-    // Audio is chosen HERE, up front. "Selected apps" adds one mixer step
-    // after the OS picker (that's when the running-app list is known).
-    const [audio, setAudio] = useState<StreamAudioChoice>(desktop ? 'app' : 'browser');
-    // Mixer step: non-null after the surface is captured with audio === 'app'.
+    // App step: non-null after the surface is captured when the stream's
+    // apps have to be chosen (mode 'pick', or 'auto' with no window to go by).
     const [mixerApps, setMixerApps] = useState<CaptureApp[] | null>(null);
     const [mixerSel, setMixerSel] = useState<Map<number, MixerRowState>>(new Map());
-
-    if (!isOpen) return null;
+    // A quick launch opens the picker exactly once per open. A ref, not
+    // state: StrictMode runs the effect twice, and two pickers would open.
+    const quickStarted = useRef(false);
 
     const reset = () => { setBusy(false); setMixerApps(null); setMixerSel(new Map()); };
 
     const handleSelectScreen = async () => {
         setBusy(true);
         let captured = false;
+        // Read the remembered values, not state, for a quick launch: it runs
+        // from the open effect, before the re-read above has re-rendered.
+        const s = loadSettings();
+        const q = launch === 'quick' ? rememberedQuality(s) : { resolution: selectedRes, fps: selectedFps };
+        const mode = launch === 'quick' ? rememberedShareAudio(s) : audio;
         try {
-            const result = await onCaptureScreen({ resolution: selectedRes, fps: selectedFps });
-            if (!result) { setBusy(false); return; } // picker cancelled — stay open
+            const result = await onCaptureScreen({ ...q, prefetchApps: desktop && mode === 'pick' });
+            if (!result) {
+                // Picker cancelled. From the dialog, stay on it; a quick launch
+                // had nothing on screen but the picker, so it is simply over.
+                setBusy(false);
+                if (launch === 'quick') onClose();
+                return;
+            }
             captured = true;
 
-            if (desktop && audio === 'app') {
-                // Mixer step: show the app list, pre-ticked by the saved
-                // selection or the auto-detect suggestion. Go-live happens
-                // from the mixer's own button.
-                const apps = result.apps ?? [];
+            if (desktop && mode !== 'none') {
+                const owner = result.windowOwner;
+                if (mode === 'auto' && owner) {
+                    // The shared window's own app: exact, so no question to ask.
+                    // Anything else can be added from Audio sources while live.
+                    const label = owner.window_title?.trim() ? owner.window_title : owner.name;
+                    await onGoLive('app', [{ pid: owner.pid, name: label, gainPercent: savedGainFor(owner) ?? 100 }]);
+                    reset();
+                    onClose();
+                    return;
+                }
+                // App step: the list, the shared window's app pre-ticked (when
+                // there is one) alongside the saved selection. Go-live happens
+                // from its own button.
+                const apps = withOwner(await result.loadApps(), owner);
                 // Third arg (legacy single-app name) is gone: nothing has written
                 // that key for several releases, so the read could only ever
                 // return null on any current install.
-                const defaults = defaultMixerSelection(apps, result.appPid, null, loadSavedSelection());
+                const defaults = defaultMixerSelection(apps, owner?.pid ?? null, null, loadSavedSelection());
+                if (owner && !defaults.has(owner.pid)) defaults.set(owner.pid, savedGainFor(owner) ?? 100);
                 const sel = new Map<number, MixerRowState>();
                 for (const a of apps) {
                     const gain = defaults.get(a.pid);
                     sel.set(a.pid, { on: gain != null, gainPercent: gain ?? 100 });
                 }
-                // Audible-first, then windowed, then name — the game floats up.
+                // The shared window's app first, then audible, then windowed,
+                // then name — the game floats up.
                 apps.sort((a, b) =>
-                    Number(b.has_active_audio === true) - Number(a.has_active_audio === true)
+                    Number(b.pid === owner?.pid) - Number(a.pid === owner?.pid)
+                    || Number(b.has_active_audio === true) - Number(a.has_active_audio === true)
                     || Number(!!b.window_title?.trim()) - Number(!!a.window_title?.trim())
                     || a.name.localeCompare(b.name));
                 setMixerApps(apps);
                 setMixerSel(sel);
                 setBusy(false);
-                return; // stay open on the mixer step
+                return; // stay open on the app step
             }
 
-            let effAudio: StreamAudioChoice = audio;
+            let effAudio: StreamAudioChoice = desktop ? 'none' : 'browser';
             if (!desktop) {
                 // Web: audio comes from the browser picker's own "share audio" toggle.
                 effAudio = result.hasBrowserAudio ? 'browser' : 'none';
@@ -165,10 +205,25 @@ const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, onClose, on
             console.error('[ScreenShare] capture/go-live failed:', e);
             if (captured) onCancelAfterCapture(); // tear the surface down on a failed go-live
             setBusy(false);
+            if (launch === 'quick') { reset(); onClose(); }
         }
     };
 
-    /** Go live from the mixer step with exactly the ticked apps. */
+    // The Share button's quick launch: open the picker at once. Runs from
+    // the click's own commit, well inside the picker's user-activation window.
+    // An effect EVENT, because the open edge is the only trigger: the
+    // handler is recreated every render and must not re-run the effect.
+    const startQuickLaunch = useEffectEvent(() => { void handleSelectScreen(); });
+    useEffect(() => {
+        if (!isOpen) { quickStarted.current = false; return; }
+        if (launch !== 'quick' || quickStarted.current) return;
+        quickStarted.current = true;
+        startQuickLaunch();
+    }, [isOpen, launch]);
+
+    if (!isOpen) return null;
+
+    /** Go live from the app step with exactly the ticked apps. */
     const handleMixerGoLive = async () => {
         if (!mixerApps) return;
         setBusy(true);
@@ -189,11 +244,20 @@ const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, onClose, on
     };
 
     const handleCancel = () => {
-        // Cancelling from the mixer step abandons an already-captured surface.
+        // Cancelling from the app step abandons an already-captured surface.
         if (mixerApps) onCancelAfterCapture();
         reset();
         onClose();
     };
+
+    // A quick launch shows nothing but the picker — and then, only if the
+    // stream's apps must be chosen, the app step. While it works, a small
+    // status line instead of a dialog nobody needs to read.
+    if (launch === 'quick' && !mixerApps) {
+        return busy
+            ? <div className="stream-quick-status" role="status">Starting your stream…</div>
+            : null;
+    }
 
     return (
         <div className="stream-modal-overlay">
@@ -208,57 +272,20 @@ const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, onClose, on
                         <div className="stream-modal-content">
                             <div className="stream-setting-group">
                                 <label>Which apps' audio should the stream carry?</label>
-                                <div className="app-mixer-list">
-                                    {mixerApps.map((a) => {
-                                        const row = mixerSel.get(a.pid) ?? { on: false, gainPercent: 100 };
-                                        return (
-                                            <div key={a.pid} className={`app-mixer-row ${row.on ? 'on' : ''}`}>
-                                                <label className="app-mixer-name">
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={row.on}
-                                                        onChange={(e) => {
-                                                            const next = new Map(mixerSel);
-                                                            next.set(a.pid, { ...row, on: e.target.checked });
-                                                            setMixerSel(next);
-                                                        }}
-                                                    />
-                                                    {a.icon ? (
-                                                        <img
-                                                            src={a.icon}
-                                                            className="app-mixer-icon"
-                                                            alt=""
-                                                            onError={(e) => {
-                                                                // Handle corrupted base64 or missing transparency by hiding the broken image
-                                                                e.currentTarget.style.display = 'none';
-                                                            }}
-                                                        />
-                                                    ) : (
-                                                        <div className="app-mixer-icon-placeholder" />
-                                                    )}
-                                                    <span className="app-mixer-title">
-                                                        {a.has_active_audio ? <><SpeakerIcon />{' '}</> : ''}{appLabel(a)}
-                                                    </span>
-                                                </label>
-                                                <input
-                                                    type="range"
-                                                    className="app-mixer-slider"
-                                                    min={0}
-                                                    max={200}
-                                                    step={5}
-                                                    value={row.gainPercent}
-                                                    disabled={!row.on}
-                                                    onChange={(e) => {
-                                                        const next = new Map(mixerSel);
-                                                        next.set(a.pid, { ...row, gainPercent: Number(e.target.value) });
-                                                        setMixerSel(next);
-                                                    }}
-                                                />
-                                                <span className="app-mixer-volume">{row.gainPercent}%</span>
-                                            </div>
-                                        );
-                                    })}
-                                </div>
+                                <AppMixerList
+                                    apps={mixerApps}
+                                    rows={mixerSel}
+                                    onToggle={(a, on) => {
+                                        const next = new Map(mixerSel);
+                                        next.set(a.pid, { ...(mixerSel.get(a.pid) ?? { on: false, gainPercent: 100 }), on });
+                                        setMixerSel(next);
+                                    }}
+                                    onGain={(a, gainPercent) => {
+                                        const next = new Map(mixerSel);
+                                        next.set(a.pid, { ...(mixerSel.get(a.pid) ?? { on: false, gainPercent: 100 }), gainPercent });
+                                        setMixerSel(next);
+                                    }}
+                                />
                             </div>
                             <div className="stream-quality-hint">
                                 <span className="info-icon"><InfoIcon /></span>
@@ -266,7 +293,7 @@ const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, onClose, on
                                     {/* This icon is the SUBJECT of the sentence, not decoration —
                                         it needs a name or the instruction loses its noun. */}
                                     Only ticked apps are heard — <SpeakerIcon title="the speaker mark" /> marks apps currently playing sound.
-                                    Nothing ticked streams video only.
+                                    Nothing ticked streams video only. You can add or remove apps while live.
                                 </span>
                             </div>
                         </div>
@@ -318,10 +345,9 @@ const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, onClose, on
                             <select
                                 className="app-select"
                                 value={audio}
-                                onChange={(e) => setAudio(e.target.value as StreamAudioChoice)}
+                                onChange={(e) => chooseAudio(e.target.value as ShareAudioMode)}
                             >
-                                <option value="app">Selected apps — pick exactly which apps are heard</option>
-                                <option value="none">No audio</option>
+                                {AUDIO_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                             </select>
                         </div>
                     )}
@@ -330,10 +356,13 @@ const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, onClose, on
                         <span className="info-icon"><InfoIcon /></span>
                         <span>
                             {desktop
-                                ? (audio === 'app'
-                                    ? "Next you'll pick the window or screen, then tick exactly which apps' audio the stream carries."
-                                    : "Next you'll pick the window or screen — then you're live.")
+                                ? (audio === 'auto'
+                                    ? "Next you'll pick the window or screen — then you're live with that window's audio. Share a whole screen and you'll tick which apps are heard. Add more apps any time from Audio sources."
+                                    : audio === 'pick'
+                                        ? "Next you'll pick the window or screen, then tick exactly which apps' audio the stream carries."
+                                        : "Next you'll pick the window or screen — then you're live, video only.")
                                 : "Next you'll pick the window, screen, or tab — then you're live. To include sound, tick “Share audio” in that picker."}
+                            {' '}These settings are remembered: the Share button goes straight to the picker next time.
                         </span>
                     </div>
                 </div>

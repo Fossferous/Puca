@@ -76,6 +76,304 @@ pub(crate) fn clamp_samples(out: &mut [f32]) {
     }
 }
 
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+
+/// One app feeding a [`LiveMix`]: the ring its capture thread fills, its
+/// volume, and the flag that tells that thread to stop.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) struct LiveSource {
+    pub pid: u32,
+    pub ring: Arc<Mutex<VecDeque<f32>>>,
+    /// Linear gain (f32 bits in an AtomicU32); 1.0 = 100%.
+    pub gain: Arc<AtomicU32>,
+    /// Set on removal, when the whole mix closes, or by the capture thread
+    /// itself when its process exits. The thread polls it.
+    pub stop: Arc<AtomicBool>,
+}
+
+struct LiveMixInner {
+    sources: Vec<LiveSource>,
+    closed: bool,
+}
+
+/// What became of a [`LiveMix::push`].
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PushOutcome {
+    Added,
+    /// That app is already in the mix (two adds raced): the new source was
+    /// told to stop, so the app is not mixed twice at double volume.
+    Duplicate,
+    /// The mix had closed: the new source was told to stop.
+    Closed,
+}
+
+/// The multi-app stream mixer's source list, which can change WHILE the
+/// stream runs: the streamer adds an app (music alongside the game) or drops
+/// one without restarting the share. It used to be a fixed Vec handed to the
+/// mixer thread at start, so any change meant tearing the stream audio down.
+///
+/// Platform-agnostic (pure std) so the bookkeeping — what reaches the mix,
+/// what is told to stop, what is refused once the mix has closed — is
+/// testable with plain `cargo test`. windows_audio feeds it WASAPI sources.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) struct LiveMix {
+    inner: Mutex<LiveMixInner>,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl LiveMix {
+    pub fn new(sources: Vec<LiveSource>) -> Self {
+        Self { inner: Mutex::new(LiveMixInner { sources, closed: false }) }
+    }
+
+    /// A source for `pid` is present and its thread has not stopped.
+    pub fn has_live(&self, pid: u32) -> bool {
+        let g = self.inner.lock().unwrap();
+        g.sources.iter().any(|s| s.pid == pid && !s.stop.load(Ordering::SeqCst))
+    }
+
+    /// Add a source. Refused once the mix has closed, or when the same app
+    /// is already live in it — and then told to stop, so a capture thread
+    /// started for a stream that ended meanwhile (or a second one for an app
+    /// already mixed) cannot keep running.
+    pub fn push(&self, source: LiveSource) -> PushOutcome {
+        let mut g = self.inner.lock().unwrap();
+        if g.closed {
+            source.stop.store(true, Ordering::SeqCst);
+            return PushOutcome::Closed;
+        }
+        if g.sources.iter().any(|s| s.pid == source.pid && !s.stop.load(Ordering::SeqCst)) {
+            source.stop.store(true, Ordering::SeqCst);
+            return PushOutcome::Duplicate;
+        }
+        g.sources.push(source);
+        PushOutcome::Added
+    }
+
+    /// Drop `pid` from the mix and tell its thread to stop. False when it
+    /// was not in the mix.
+    pub fn remove(&self, pid: u32) -> bool {
+        let mut g = self.inner.lock().unwrap();
+        let before = g.sources.len();
+        g.sources.retain(|s| {
+            if s.pid == pid {
+                s.stop.store(true, Ordering::SeqCst);
+                false
+            } else {
+                true
+            }
+        });
+        g.sources.len() != before
+    }
+
+    /// Set a live source's gain (linear). False when `pid` is not live.
+    pub fn set_gain(&self, pid: u32, gain: f32) -> bool {
+        let g = self.inner.lock().unwrap();
+        match g.sources.iter().find(|s| s.pid == pid && !s.stop.load(Ordering::SeqCst)) {
+            Some(s) => {
+                s.gain.store(gain.to_bits(), Ordering::Relaxed);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The stream audio ended: stop every source and refuse new ones.
+    pub fn close(&self) {
+        let mut g = self.inner.lock().unwrap();
+        g.closed = true;
+        for s in &g.sources {
+            s.stop.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// One mixer tick: drain up to `mix.len()` samples from every source's
+    /// ring, gain-scale, sum, clamp. Returns whether any source had audio.
+    /// A source that stopped because its process exited still drains what
+    /// it buffered; a REMOVED source is gone and contributes nothing.
+    pub fn tick(&self, mix: &mut [f32], scratch: &mut [f32]) -> bool {
+        mix.fill(0.0);
+        let mut any = false;
+        let g = self.inner.lock().unwrap();
+        for s in &g.sources {
+            let gain = f32::from_bits(s.gain.load(Ordering::Relaxed));
+            let n = {
+                let mut r = s.ring.lock().unwrap();
+                let n = r.len().min(mix.len()).min(scratch.len());
+                for slot in scratch.iter_mut().take(n) {
+                    *slot = r.pop_front().unwrap_or(0.0);
+                }
+                n
+            };
+            if n > 0 {
+                any = true;
+                accumulate_into(&mut mix[..n], &scratch[..n], gain);
+            }
+        }
+        clamp_samples(mix);
+        any
+    }
+}
+
+#[cfg(test)]
+mod live_mix_tests {
+    use super::{LiveMix, LiveSource, PushOutcome};
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    fn source(pid: u32, gain: f32) -> LiveSource {
+        LiveSource {
+            pid,
+            ring: Arc::new(Mutex::new(VecDeque::new())),
+            gain: Arc::new(AtomicU32::new(gain.to_bits())),
+            stop: Arc::new(AtomicBool::new(false)),
+        }
+    }
+    fn feed(s: &LiveSource, samples: &[f32]) {
+        s.ring.lock().unwrap().extend(samples.iter().copied());
+    }
+    /// Handles a test keeps after moving the source into the mix.
+    fn handles(s: &LiveSource) -> (Arc<Mutex<VecDeque<f32>>>, Arc<AtomicBool>) {
+        (s.ring.clone(), s.stop.clone())
+    }
+
+    #[test]
+    fn mixes_every_source_with_its_gain() {
+        let a = source(1, 1.0);
+        let b = source(2, 0.5);
+        feed(&a, &[0.2, 0.2]);
+        feed(&b, &[0.4, 0.4]);
+        let mix = LiveMix::new(vec![a, b]);
+        let (mut out, mut scratch) = (vec![0.0f32; 2], vec![0.0f32; 2]);
+        assert!(mix.tick(&mut out, &mut scratch));
+        assert!((out[0] - 0.4).abs() < 1e-6 && (out[1] - 0.4).abs() < 1e-6);
+        // Rings drained: the next tick is silence and says so.
+        assert!(!mix.tick(&mut out, &mut scratch));
+        assert_eq!(out, vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn a_source_added_while_running_is_heard_from_the_next_tick() {
+        let mix = LiveMix::new(vec![source(1, 1.0)]);
+        let (mut out, mut scratch) = (vec![0.0f32; 2], vec![0.0f32; 2]);
+        assert!(!mix.tick(&mut out, &mut scratch));
+        let added = source(2, 1.0);
+        let (ring, _) = handles(&added);
+        assert_eq!(mix.push(added), PushOutcome::Added);
+        ring.lock().unwrap().extend([0.3f32, 0.3]);
+        assert!(mix.tick(&mut out, &mut scratch));
+        assert!((out[0] - 0.3).abs() < 1e-6);
+        assert!(mix.has_live(1) && mix.has_live(2));
+    }
+
+    #[test]
+    fn removing_a_source_stops_its_thread_and_silences_it() {
+        let a = source(1, 1.0);
+        let b = source(2, 1.0);
+        let (ring_b, stop_b) = handles(&b);
+        let mix = LiveMix::new(vec![a, b]);
+        assert!(mix.remove(2));
+        assert!(stop_b.load(Ordering::SeqCst), "the removed source's thread was not told to stop");
+        // Whatever its thread still writes never reaches the mix.
+        ring_b.lock().unwrap().extend([0.9f32, 0.9]);
+        let (mut out, mut scratch) = (vec![0.0f32; 2], vec![0.0f32; 2]);
+        assert!(!mix.tick(&mut out, &mut scratch));
+        assert_eq!(out, vec![0.0, 0.0]);
+        assert!(!mix.has_live(2));
+        assert!(!mix.remove(2), "removing a pid that is not in the mix must report it");
+    }
+
+    #[test]
+    fn a_closed_mix_stops_everything_and_refuses_new_sources() {
+        let a = source(1, 1.0);
+        let (_, stop_a) = handles(&a);
+        let mix = LiveMix::new(vec![a]);
+        mix.close();
+        assert!(stop_a.load(Ordering::SeqCst));
+        let late = source(2, 1.0);
+        let (_, stop_late) = handles(&late);
+        assert_eq!(mix.push(late), PushOutcome::Closed);
+        assert!(stop_late.load(Ordering::SeqCst), "a refused source must be told to stop, or it leaks");
+        assert!(!mix.has_live(2));
+    }
+
+    #[test]
+    fn a_source_whose_process_exited_is_not_live_but_drains_what_it_buffered() {
+        let a = source(1, 1.0);
+        let (ring, stop) = handles(&a);
+        let mix = LiveMix::new(vec![a]);
+        ring.lock().unwrap().extend([0.5f32, 0.5]);
+        stop.store(true, Ordering::SeqCst); // what source_loop does on exit
+        assert!(!mix.has_live(1), "an exited source must not block re-adding the app");
+        let (mut out, mut scratch) = (vec![0.0f32; 2], vec![0.0f32; 2]);
+        assert!(mix.tick(&mut out, &mut scratch));
+        assert!((out[0] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn gain_changes_reach_only_live_sources() {
+        let a = source(1, 1.0);
+        let (ring, _) = handles(&a);
+        let mix = LiveMix::new(vec![a]);
+        assert!(mix.set_gain(1, 0.25));
+        assert!(!mix.set_gain(9, 0.25));
+        ring.lock().unwrap().extend([0.8f32, 0.8]);
+        let (mut out, mut scratch) = (vec![0.0f32; 2], vec![0.0f32; 2]);
+        mix.tick(&mut out, &mut scratch);
+        assert!((out[0] - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_second_source_for_an_app_already_mixed_is_refused_and_stopped() {
+        let a = source(1, 1.0);
+        let (ring_a, _) = handles(&a);
+        let mix = LiveMix::new(vec![a]);
+        let again = source(1, 1.0);
+        let (ring_again, stop_again) = handles(&again);
+        assert_eq!(mix.push(again), PushOutcome::Duplicate);
+        assert!(stop_again.load(Ordering::SeqCst), "the duplicate's thread must be told to stop");
+        // Mixed once, not twice.
+        ring_a.lock().unwrap().extend([0.25f32, 0.25]);
+        ring_again.lock().unwrap().extend([0.25f32, 0.25]);
+        let (mut out, mut scratch) = (vec![0.0f32; 2], vec![0.0f32; 2]);
+        mix.tick(&mut out, &mut scratch);
+        assert!((out[0] - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn an_app_whose_source_exited_can_be_added_again() {
+        let a = source(1, 1.0);
+        let (_, stop) = handles(&a);
+        let mix = LiveMix::new(vec![a]);
+        stop.store(true, Ordering::SeqCst); // its process exited
+        assert_eq!(mix.push(source(1, 1.0)), PushOutcome::Added);
+    }
+
+    #[test]
+    fn a_volume_change_for_an_app_that_exited_is_refused() {
+        let a = source(1, 1.0);
+        let (_, stop) = handles(&a);
+        let mix = LiveMix::new(vec![a]);
+        stop.store(true, Ordering::SeqCst); // its process exited
+        assert!(!mix.set_gain(1, 0.5), "the slider must learn the app is gone");
+    }
+
+    #[test]
+    fn a_tick_never_drains_more_than_it_can_hold() {
+        let a = source(1, 1.0);
+        let (ring, _) = handles(&a);
+        let mix = LiveMix::new(vec![a]);
+        ring.lock().unwrap().extend([0.1f32; 5]);
+        let (mut out, mut scratch) = (vec![0.0f32; 2], vec![0.0f32; 2]);
+        mix.tick(&mut out, &mut scratch);
+        assert_eq!(ring.lock().unwrap().len(), 3, "the rest waits for the next tick");
+    }
+}
+
 #[cfg(test)]
 mod mix_tests {
     use super::{accumulate_into, clamp_samples};
@@ -476,6 +774,97 @@ pub mod windows_audio {
     }
 
     /// Map pid -> title of its first visible, titled, top-level window.
+    /// The app that owns a shared window, so a window share can stream THAT
+    /// app's audio without asking. A window share's track label is
+    /// `window:<HWND>:<n>` — measured 2026-09-28 in Edge 154 (the WebView2
+    /// engine): the number is exactly the window's handle. Title matching,
+    /// the old signal, never worked under WebView2, whose labels carry no
+    /// title; this is exact.
+    #[derive(Debug, Clone, Serialize)]
+    pub struct WindowOwner {
+        pub pid: u32,
+        pub name: String,
+        pub window_title: Option<String>,
+    }
+
+    /// None when the handle is not a window, or the owner is not an app we
+    /// would capture: Puca's own tree (it carries the voice call) or a system
+    /// process (the same filter as the app list).
+    pub fn window_owner(hwnd: i64) -> Option<WindowOwner> {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindowTextW, GetWindowThreadProcessId, IsWindow};
+        if hwnd <= 0 {
+            return None;
+        }
+        let h = HWND(hwnd as isize as *mut core::ffi::c_void);
+        let (pid, title) = unsafe {
+            if !IsWindow(h).as_bool() {
+                return None;
+            }
+            let mut pid: u32 = 0;
+            GetWindowThreadProcessId(h, Some(&mut pid));
+            let mut buf = [0u16; 256];
+            let len = GetWindowTextW(h, &mut buf);
+            let title = (len > 0).then(|| String::from_utf16_lossy(&buf[..len as usize]));
+            (pid, title)
+        };
+        if pid == 0 {
+            return None;
+        }
+        let own_pid = std::process::id();
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            sysinfo::ProcessRefreshKind::new(),
+        );
+        let parent_of: std::collections::HashMap<u32, u32> = sys
+            .processes()
+            .iter()
+            .filter_map(|(p, proc_)| proc_.parent().map(|pp| (p.as_u32(), pp.as_u32())))
+            .collect();
+        if super::pid_in_tree(&parent_of, pid, own_pid) {
+            return None;
+        }
+        let name = sys.process(sysinfo::Pid::from_u32(pid))?.name().to_string_lossy().to_string();
+        if is_system_process(&name) {
+            return None;
+        }
+        Some(WindowOwner {
+            pid,
+            name: name.trim_end_matches(".exe").to_string(),
+            window_title: title.filter(|t| !t.trim().is_empty()),
+        })
+    }
+
+    #[cfg(test)]
+    mod window_owner_tests {
+        use super::window_owner;
+
+        #[test]
+        fn a_handle_that_is_not_a_window_has_no_owner() {
+            assert!(window_owner(0).is_none());
+            assert!(window_owner(-1).is_none());
+            // No window has this handle (they are small and even).
+            assert!(window_owner(0x7FFF_FFF1).is_none());
+        }
+
+        #[test]
+        fn names_the_process_that_owns_a_real_window() {
+            use windows::Win32::UI::WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId};
+            let shell = unsafe { GetShellWindow() };
+            if shell.0.is_null() {
+                eprintln!("skipping: no shell window in this session");
+                return;
+            }
+            let mut pid = 0u32;
+            unsafe { GetWindowThreadProcessId(shell, Some(&mut pid)) };
+            let owner = window_owner(shell.0 as isize as i64).expect("the shell window has an owner");
+            assert_eq!(owner.pid, pid);
+            assert_eq!(owner.name.to_lowercase(), "explorer");
+        }
+    }
+
     fn window_titles_by_pid() -> std::collections::HashMap<u32, String> {
         use std::collections::HashMap;
         use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
@@ -890,18 +1279,23 @@ pub mod windows_audio {
     /// One mixer tick: 10 ms of 48 kHz stereo.
     const SAMPLES_PER_TICK: usize = 48_000 / 100 * 2;
 
-    struct MixSource {
-        pid: u32,
-        ring: Arc<Mutex<VecDeque<f32>>>,
-        /// Linear gain (f32 bits in an AtomicU32); 1.0 = 100%.
-        gain: Arc<AtomicU32>,
-    }
+    use super::{LiveMix, LiveSource};
 
-    /// Gain handles for the CURRENTLY running multi-capture, so the
-    /// set_app_capture_gain command can move sliders mid-stream.
-    static ACTIVE_GAINS: OnceLock<Mutex<StdHashMap<u32, Arc<AtomicU32>>>> = OnceLock::new();
-    fn active_gains() -> &'static Mutex<StdHashMap<u32, Arc<AtomicU32>>> {
-        ACTIVE_GAINS.get_or_init(|| Mutex::new(StdHashMap::new()))
+    /// The multi-capture that is running now, so sources can be added,
+    /// removed and re-gained while the stream is live.
+    struct ActiveMix {
+        mix: Arc<LiveMix>,
+        app_handle: AppHandle,
+        state: Arc<AudioCaptureState>,
+        /// Every source thread ever started for this mix, added ones
+        /// included. The capture slot is released only once ALL of them have
+        /// finished: releasing early lets a quick restart clear stop_signal
+        /// before a laggard observes it, leaking a live WASAPI capture.
+        joins: Vec<std::thread::JoinHandle<()>>,
+    }
+    static ACTIVE_MIX: OnceLock<Mutex<Option<ActiveMix>>> = OnceLock::new();
+    fn active_mix() -> &'static Mutex<Option<ActiveMix>> {
+        ACTIVE_MIX.get_or_init(|| Mutex::new(None))
     }
 
     /// Set a running mixer source's gain (linear, clamped to 0.0–2.0).
@@ -912,12 +1306,111 @@ pub mod windows_audio {
             return Err("gain must be a finite number".to_string());
         }
         let clamped = gain.clamp(0.0, 2.0);
-        match active_gains().lock().unwrap().get(&pid) {
-            Some(g) => {
-                g.store(clamped.to_bits(), Ordering::Relaxed);
+        let g = active_mix().lock().unwrap();
+        match g.as_ref() {
+            Some(a) if a.mix.set_gain(pid, clamped) => Ok(()),
+            _ => Err(format!("No active mixer capture for PID {pid}")),
+        }
+    }
+
+    /// Puca's own process tree, which must never be captured (it carries the
+    /// voice call). Same guard as start_capture's.
+    fn is_own_tree(pid: u32) -> bool {
+        let own_pid = std::process::id();
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            sysinfo::ProcessRefreshKind::new(),
+        );
+        let parent_of: StdHashMap<u32, u32> = sys
+            .processes()
+            .iter()
+            .filter_map(|(p, proc_)| proc_.parent().map(|pp| (p.as_u32(), pp.as_u32())))
+            .collect();
+        super::pid_in_tree(&parent_of, pid, own_pid)
+    }
+
+    /// Add one app to the stream audio that is ALREADY running (the "Audio
+    /// sources" control while live). Blocks, bounded, until the new source
+    /// is capturing or has failed — like start_multi_capture — so the caller
+    /// learns the outcome. Adding an app that is already in the mix is Ok.
+    pub fn add_mix_source(pid: u32, gain: f32) -> Result<(), String> {
+        if !gain.is_finite() {
+            return Err("gain must be a finite number".to_string());
+        }
+        if is_own_tree(pid) {
+            log::warn!("Refusing mixer capture of PID {} — Puca's own tree", pid);
+            return Err("That app is Puca itself — its audio is never streamed".to_string());
+        }
+        let (mix, app_handle, state) = {
+            let g = active_mix().lock().unwrap();
+            let a = g.as_ref().ok_or_else(|| "No stream audio is running".to_string())?;
+            (a.mix.clone(), a.app_handle.clone(), a.state.clone())
+        };
+        if state.stop_signal.load(Ordering::SeqCst) {
+            return Err("The stream audio is stopping".to_string());
+        }
+        if mix.has_live(pid) {
+            return Ok(());
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        let ring = Arc::new(Mutex::new(VecDeque::new()));
+        let gain_bits = Arc::new(AtomicU32::new(gain.clamp(0.0, 2.0).to_bits()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let join = {
+            let (h, st, r, s) = (app_handle.clone(), state.clone(), ring.clone(), stop.clone());
+            std::thread::spawn(move || source_loop(h, pid, st, r, s, tx))
+        };
+        // Register the thread BEFORE waiting on it, so a stream that ends
+        // while it initialises still joins it before releasing the slot.
+        {
+            let mut g = active_mix().lock().unwrap();
+            match g.as_mut() {
+                Some(a) if Arc::ptr_eq(&a.mix, &mix) => a.joins.push(join),
+                _ => {
+                    drop(g);
+                    stop.store(true, Ordering::SeqCst);
+                    let _ = join.join();
+                    return Err("The stream audio stopped".to_string());
+                }
+            }
+        }
+        match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+            Ok(Ok(())) => match mix.push(LiveSource { pid, ring, gain: gain_bits, stop }) {
+                super::PushOutcome::Added => {
+                    log::info!("Mixer source {} added mid-stream", pid);
+                    Ok(())
+                }
+                // Two adds raced; the other one is capturing this app.
+                super::PushOutcome::Duplicate => Ok(()),
+                super::PushOutcome::Closed => Err("The stream audio stopped".to_string()),
+            },
+            Ok(Err(e)) => {
+                stop.store(true, Ordering::SeqCst);
+                log::warn!("Mixer source {} failed to start: {}", pid, e);
+                Err(e)
+            }
+            Err(_) => {
+                stop.store(true, Ordering::SeqCst);
+                log::warn!("Mixer source {} init timed out", pid);
+                Err("Audio capture initialisation timed out".to_string())
+            }
+        }
+    }
+
+    /// Drop one app from the running stream audio. The stream keeps going;
+    /// with nothing left it carries silence until an app is added again.
+    pub fn remove_mix_source(pid: u32) -> Result<(), String> {
+        let g = active_mix().lock().unwrap();
+        match g.as_ref() {
+            Some(a) if a.mix.remove(pid) => {
+                log::info!("Mixer source {} removed mid-stream", pid);
                 Ok(())
             }
-            None => Err(format!("No active mixer capture for PID {pid}")),
+            Some(_) => Err(format!("PID {pid} is not in the stream audio")),
+            None => Err("No stream audio is running".to_string()),
         }
     }
 
@@ -925,12 +1418,15 @@ pub mod windows_audio {
     /// writes interleaved f32 into its ring. Watches the pid for exit and
     /// emits 'app-audio-source-ended' (the STREAM keeps going — the UI just
     /// drops this app from its list), unlike the single-capture path where a
-    /// game exiting ends the whole stream.
+    /// game exiting ends the whole stream. Runs until the whole capture stops
+    /// (`state.stop_signal`) or this one source is removed (`stop`), and sets
+    /// `stop` itself when it ends on its own, so the mix sees it as gone.
     fn source_loop(
         app_handle: AppHandle,
         pid: u32,
         state: Arc<AudioCaptureState>,
         ring: Arc<Mutex<VecDeque<f32>>>,
+        stop: Arc<AtomicBool>,
         ready: std::sync::mpsc::Sender<Result<(), String>>,
     ) {
         macro_rules! init_step {
@@ -978,12 +1474,13 @@ pub mod windows_audio {
         };
         let mut buffer: Vec<u8> = vec![0u8; 48_000 * 2 * 4];
 
-        while !state.stop_signal.load(Ordering::SeqCst) {
+        while !state.stop_signal.load(Ordering::SeqCst) && !stop.load(Ordering::SeqCst) {
             if let Some(h) = &process_handle {
                 use windows::Win32::Foundation::WAIT_OBJECT_0;
                 use windows::Win32::System::Threading::WaitForSingleObject;
                 if unsafe { WaitForSingleObject(*h, 0) } == WAIT_OBJECT_0 {
                     log::info!("Mixer source PID {} exited", pid);
+                    stop.store(true, Ordering::SeqCst);
                     let _ = app_handle.emit("app-audio-source-ended", pid);
                     break;
                 }
@@ -1018,6 +1515,7 @@ pub mod windows_audio {
                     Ok(_) => {}
                     Err(e) => {
                         log::error!("Mixer source {}: packet-size error: {:?}", pid, e);
+                        stop.store(true, Ordering::SeqCst);
                         let _ = app_handle.emit("app-audio-source-ended", pid);
                         break;
                     }
@@ -1034,8 +1532,10 @@ pub mod windows_audio {
     }
 
     /// 10 ms mixer tick: drain up to one tick of samples from every source
-    /// ring, gain-scale, sum, clamp, emit ONE 'audio-data' chunk.
-    fn mixer_loop(app_handle: AppHandle, sources: Vec<MixSource>, state: Arc<AudioCaptureState>) {
+    /// ring, gain-scale, sum, clamp, emit ONE 'audio-data' chunk. Reads the
+    /// source list afresh each tick, so an added or removed app takes effect
+    /// on the next one.
+    fn mixer_loop(app_handle: AppHandle, mix_sources: Arc<LiveMix>, state: Arc<AudioCaptureState>) {
         let tick = std::time::Duration::from_millis(10);
         let mut next = std::time::Instant::now() + tick;
         let mut mix = vec![0f32; SAMPLES_PER_TICK];
@@ -1062,24 +1562,7 @@ pub mod windows_audio {
                 next = now + tick;
             }
 
-            mix.fill(0.0);
-            let mut any = false;
-            for s in &sources {
-                let gain = f32::from_bits(s.gain.load(Ordering::Relaxed));
-                let n = {
-                    let mut r = s.ring.lock().unwrap();
-                    let n = r.len().min(SAMPLES_PER_TICK);
-                    for slot in scratch.iter_mut().take(n) {
-                        *slot = r.pop_front().unwrap_or(0.0);
-                    }
-                    n
-                };
-                if n > 0 {
-                    any = true;
-                    super::accumulate_into(&mut mix[..n], &scratch[..n], gain);
-                }
-            }
-            super::clamp_samples(&mut mix);
+            let any = mix_sources.tick(&mut mix, &mut scratch);
 
             let mut bytes = Vec::with_capacity(SAMPLES_PER_TICK * 4);
             for v in &mix {
@@ -1166,23 +1649,29 @@ pub mod windows_audio {
             let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
             let ring = Arc::new(Mutex::new(VecDeque::new()));
             let gain = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+            let stop = Arc::new(AtomicBool::new(false));
             let handle = app_handle.clone();
             let st = state.clone();
             let r = ring.clone();
-            let join = std::thread::spawn(move || source_loop(handle, pid, st, r, tx));
-            pending.push((pid, rx, ring, gain, join));
+            let sp = stop.clone();
+            let join = std::thread::spawn(move || source_loop(handle, pid, st, r, sp, tx));
+            pending.push((pid, rx, ring, gain, stop, join));
         }
-        let mut sources: Vec<MixSource> = Vec::new();
+        let mut sources: Vec<LiveSource> = Vec::new();
         let mut source_joins = Vec::new();
-        for (pid, rx, ring, gain, join) in pending {
+        for (pid, rx, ring, gain, stop, join) in pending {
             source_joins.push(join);
             match rx.recv_timeout(std::time::Duration::from_secs(3)) {
-                Ok(Ok(())) => sources.push(MixSource { pid, ring, gain }),
+                Ok(Ok(())) => sources.push(LiveSource { pid, ring, gain, stop }),
                 Ok(Err(e)) => {
+                    stop.store(true, Ordering::SeqCst);
                     log::warn!("Mixer source {} failed to start: {}", pid, e);
                     failed.push(pid);
                 }
                 Err(_) => {
+                    // Its thread may still come up after the timeout; told to
+                    // stop, it exits instead of capturing into a dead ring.
+                    stop.store(true, Ordering::SeqCst);
                     log::warn!("Mixer source {} init timed out", pid);
                     failed.push(pid);
                 }
@@ -1199,31 +1688,53 @@ pub mod windows_audio {
             return Err("No selected app could be captured".to_string());
         }
 
-        {
-            let mut g = active_gains().lock().unwrap();
-            g.clear();
-            for s in &sources {
-                g.insert(s.pid, s.gain.clone());
-            }
-        }
         log::info!(
             "Mixer capture started: {} source(s) {:?}, {} failed",
             sources.len(),
             sources.iter().map(|s| s.pid).collect::<Vec<_>>(),
             failed.len()
         );
+        let mix = Arc::new(LiveMix::new(sources));
+        *active_mix().lock().unwrap() = Some(ActiveMix {
+            mix: mix.clone(),
+            app_handle: app_handle.clone(),
+            state: state.clone(),
+            joins: source_joins,
+        });
 
         let st = state.clone();
         std::thread::spawn(move || {
-            mixer_loop(app_handle, sources, st.clone());
-            // The mixer only exits once stop_signal is set — now wait for every
-            // source thread to actually finish before releasing the slot, so a
-            // quick restart can't clear stop_signal before a lagging source
-            // observed it (which would leak a live capture until the next stop).
-            for j in source_joins {
-                let _ = j.join();
+            mixer_loop(app_handle, mix.clone(), st.clone());
+            // The mixer only exits once stop_signal is set. Refuse new
+            // sources, then wait for EVERY source thread — the ones added
+            // mid-stream too — to actually finish before releasing the slot,
+            // so a quick restart can't clear stop_signal before a lagging
+            // source observed it (which would leak a live capture until the
+            // next stop). Joins are taken one at a time and joined OUTSIDE the
+            // lock (add_mix_source registers its thread under it); finding the
+            // list empty and clearing the entry happen under ONE lock, or an
+            // add landing between the two would be dropped unjoined.
+            mix.close();
+            loop {
+                let next = {
+                    let mut g = active_mix().lock().unwrap();
+                    if !g.as_ref().is_some_and(|a| Arc::ptr_eq(&a.mix, &mix)) {
+                        None
+                    } else {
+                        let j = g.as_mut().and_then(|a| a.joins.pop());
+                        if j.is_none() {
+                            *g = None;
+                        }
+                        j
+                    }
+                };
+                match next {
+                    Some(j) => {
+                        let _ = j.join();
+                    }
+                    None => break,
+                }
             }
-            active_gains().lock().unwrap().clear();
             st.is_capturing.store(false, Ordering::SeqCst);
         });
 
@@ -1247,5 +1758,12 @@ pub mod windows_audio {
 
     pub fn get_running_apps() -> Vec<AudioApp> {
         vec![]
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    pub struct WindowOwner {
+        pub pid: u32,
+        pub name: String,
+        pub window_title: Option<String>,
     }
 }

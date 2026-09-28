@@ -1392,3 +1392,18 @@
     background: var(--bg-modifier-hover, rgba(255, 255, 255, 0.08));
     color: var(--text-secondary, #b9bbbe);
 }
+
+/* Share is a split button: the main half goes straight to the picker with
+   the remembered settings, this narrow half opens them (ScreenShareModal
+   'settings'). Only its own width, so the bar does not gain a row. */
+.voice-btn.vp-share-options {
+    flex: 0 0 auto;
+    min-width: 22px;
+    padding: 8px 2px;
+}
+
+/* Audio sources while live (StreamAudioSourcesModal) — beside Stop Sharing. */
+.voice-btn.vp-stream-audio {
+    flex: 0 0 auto;
+    min-width: 36px;
+}

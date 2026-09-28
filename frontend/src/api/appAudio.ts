@@ -76,31 +76,60 @@ function emitUiEvent(name: string, detail?: unknown): void {
 }
 
 /**
- * Find the running app whose window matches the shared surface. Chromium sets
- * the display-capture video track's label to the shared window's title, so
- * "share Elden Ring's window" can auto-select Elden Ring's audio.
- * Returns null for screen shares (label like "screen:0:0") or no match.
+ * The window handle a window share's track label carries, or null for a
+ * screen, a tab, or any label not of that shape. Chromium labels a window
+ * share `window:<HWND>:<n>` — measured 2026-09-28 in Edge 154, the WebView2
+ * engine: the number is exactly the shared window's handle. That makes the
+ * window's OWN app knowable exactly, where matching its title (the old way) never
+ * worked under WebView2, whose labels carry no title at all.
  */
-export function matchAppByWindowTitle(apps: CaptureApp[], trackLabel: string): CaptureApp | null {
-    const label = trackLabel.trim().toLowerCase();
-    // No label, a screen/monitor share, or Chromium's generic surface ids
-    // ("window:271812:0" — no title in sight) can't be matched; the UI falls
-    // back to a manual app picker in those cases.
-    if (!label || label.length < 3) return null;
-    if (/^(screen|monitor|window|web-contents-media-stream)[:\d]/.test(label)) return null;
-    const clean = (s: string) => s.toLowerCase().trim();
-    return (
-        apps.find(a => a.window_title && clean(a.window_title) === label) ??
-        apps.find(a => {
-            if (!a.window_title) return false;
-            const title = clean(a.window_title);
-            // Substring either way, but only against real titles — require a
-            // minimum length so "go" doesn't match "Google Chrome".
-            return title.length >= 3 && (label.includes(title) || title.includes(label));
-        }) ??
-        apps.find(a => a.name.length >= 3 && label.includes(clean(a.name))) ??
-        null
-    );
+export function windowHandleFromTrackLabel(label: string): number | null {
+    const m = /^window:(\d+):\d+$/.exec(label.trim());
+    if (!m) return null;
+    const hwnd = Number(m[1]);
+    return Number.isSafeInteger(hwnd) && hwnd > 0 ? hwnd : null;
+}
+
+/** The app that owns a shared window (Rust `window_owner`). */
+export interface WindowOwner {
+    pid: number;
+    name: string;
+    window_title: string | null;
+}
+
+/**
+ * The capturable app that owns the shared window, or null: not a window
+ * share, a window of Púca itself or of a system process, not the desktop
+ * app, or an installed binary that predates the command.
+ */
+export async function sharedWindowOwner(trackLabel: string): Promise<WindowOwner | null> {
+    const hwnd = windowHandleFromTrackLabel(trackLabel);
+    if (hwnd === null || !isTauri()) return null;
+    try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        return (await invoke<WindowOwner | null>('window_owner', { hwnd })) ?? null;
+    } catch (err) {
+        console.warn('[AppAudio] window_owner failed:', err);
+        return null;
+    }
+}
+
+/**
+ * The app list with `owner` in it. The owner is the app that owns the shared
+ * window, and the scan lists one process per exe name, so it can hold a
+ * different process of the same name than the one whose window is shared.
+ * The owner then gets its own row at the top, and that pid is the one ticked.
+ */
+export function withOwner(apps: CaptureApp[], owner: WindowOwner | null): CaptureApp[] {
+    if (!owner || apps.some(a => a.pid === owner.pid)) return apps;
+    const same = apps.find(a => a.name === owner.name);
+    return [{
+        pid: owner.pid,
+        name: owner.name,
+        window_title: owner.window_title,
+        has_active_audio: same?.has_active_audio,
+        icon: same?.icon ?? null,
+    }, ...apps];
 }
 
 /** Display name for an app: window title beats process name. */
@@ -111,7 +140,7 @@ export function appLabel(app: CaptureApp): string {
 export interface ResolvedAppAudio {
     pid: number;
     name: string;
-    /** True only for a real window-title match — the only signal safe to
+    /** True only for the shared window's own app — the only signal safe to
      *  persist as the "last app" (heuristic guesses poisoned it before). */
     confident: boolean;
 }
@@ -120,8 +149,8 @@ export interface ResolvedAppAudio {
  * Resolve which app's audio to stream for the "game only" choice, without
  * asking the user. Signals, strongest first:
  *
- *  1. A real window-title match against the shared surface (rare under
- *     WebView2 — it usually reports a generic surface id, not the title).
+ *  1. The app that owns the shared window (`matchedPid`, from the window
+ *     handle in the share's track label — see windowHandleFromTrackLabel).
  *  2. Audio-session activity: the apps whose process trees are audibly playing
  *     sound RIGHT NOW (`has_active_audio`, from WASAPI session enumeration).
  *     The remembered "last app" is trusted only when it is currently audible;
@@ -263,21 +292,33 @@ export async function startMultiAppAudioTrack(
     onSourceEnded?: (pid: number, name: string) => void,
 ): Promise<MediaStreamTrack> {
     const nameByPid = new Map(apps.map(a => [a.pid, a.name]));
+    let failed: number[] = [];
     const track = await startCaptureTrack(
         'start_multi_app_audio_capture',
         { pids: apps.map(a => a.pid) },
         null,
         undefined,
-        (pid) => onSourceEnded?.(pid, nameByPid.get(pid) ?? `PID ${pid}`),
+        (pid) => {
+            // A source that was added live is not in the start list.
+            const name = nameByPid.get(pid) ?? liveSources.find(s => s.pid === pid)?.name ?? `PID ${pid}`;
+            dropLiveSource(pid);
+            onSourceEnded?.(pid, name);
+        },
         (result) => {
             // The command returns the pids it could NOT start (partial success).
             if (Array.isArray(result) && result.length > 0) {
-                const names = (result as number[]).map(p => nameByPid.get(p) ?? `PID ${p}`).join(', ');
+                failed = result as number[];
+                const names = failed.map(p => nameByPid.get(p) ?? `PID ${p}`).join(', ');
                 console.warn(`[AppAudio] Mixer sources failed to start: ${names}`);
                 emitUiEvent('sovereign:stream-audio-error', `Couldn't capture audio from: ${names}`);
             }
         },
     );
+    liveMixer = true;
+    liveSources = apps
+        .filter(a => !failed.includes(a.pid))
+        .map(a => ({ pid: a.pid, name: a.name, gainPercent: a.gainPercent ?? 100 }));
+    notifyLiveSources();
     for (const a of apps) {
         if (a.gainPercent != null && a.gainPercent !== 100) {
             void setAppCaptureGain(a.pid, a.gainPercent);
@@ -289,12 +330,80 @@ export async function startMultiAppAudioTrack(
 /** Adjust one mixer source's volume (percent, 100 = unity, clamped 0–200). */
 export async function setAppCaptureGain(pid: number, gainPercent: number): Promise<void> {
     if (!isTauri()) return;
+    const live = liveSources.find(s => s.pid === pid);
+    if (live && live.gainPercent !== gainPercent) {
+        liveSources = liveSources.map(s => (s.pid === pid ? { ...s, gainPercent } : s));
+        notifyLiveSources();
+    }
     try {
         const { invoke } = await import('@tauri-apps/api/core');
         await invoke('set_app_capture_gain', { pid, gain: gainPercent / 100 });
     } catch (err) {
         console.warn('[AppAudio] set_app_capture_gain failed:', err);
     }
+}
+
+// --- the stream audio while live ---------------------------------------------
+//
+// The mixer can take and drop apps without restarting the stream (Rust
+// add_app_audio_source / remove_app_audio_source), so the stream starts with
+// the shared window's own app and the streamer adds music, a second game,
+// whatever, from the Audio sources control. This is what that control reads.
+
+/** True while the running stream audio is the mixer — the only mode that can
+ *  change its apps live (the legacy single-app capture cannot). */
+let liveMixer = false;
+/** The apps in the running mixer, in the order they joined. */
+let liveSources: SelectedApp[] = [];
+const liveSourceListeners = new Set<() => void>();
+
+function notifyLiveSources(): void {
+    for (const cb of [...liveSourceListeners]) {
+        try { cb(); } catch { /* a listener's bug must not break the others */ }
+    }
+}
+function dropLiveSource(pid: number): void {
+    if (!liveSources.some(s => s.pid === pid)) return;
+    liveSources = liveSources.filter(s => s.pid !== pid);
+    notifyLiveSources();
+}
+
+/** Whether apps can be added to the stream audio right now. */
+export function liveMixerRunning(): boolean {
+    return liveMixer;
+}
+
+/** The apps in the running stream audio (a fresh array each change). */
+export function getLiveAudioSources(): SelectedApp[] {
+    return liveSources;
+}
+
+export function subscribeLiveAudioSources(cb: () => void): () => void {
+    liveSourceListeners.add(cb);
+    return () => { liveSourceListeners.delete(cb); };
+}
+
+/** Add an app to the stream audio while live. Throws with the native
+ *  reason (not capturable, Púca itself, the stream audio stopped). */
+export async function addLiveAudioSource(app: SelectedApp): Promise<void> {
+    if (!liveMixer) throw new Error('This stream has no app audio to add to');
+    if (liveSources.some(s => s.pid === app.pid)) return;
+    const gainPercent = app.gainPercent ?? 100;
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('add_app_audio_source', { pid: app.pid, gain: gainPercent / 100 });
+    // The stream may have ended while the capture came up.
+    if (!liveMixer || liveSources.some(s => s.pid === app.pid)) return;
+    liveSources = [...liveSources, { pid: app.pid, name: app.name, gainPercent }];
+    notifyLiveSources();
+}
+
+/** Drop an app from the stream audio while live; the stream continues
+ *  (carrying silence once nothing is left, until an app is added again). */
+export async function removeLiveAudioSource(pid: number): Promise<void> {
+    if (!liveMixer) return;
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('remove_app_audio_source', { pid });
+    dropLiveSource(pid);
 }
 
 async function startCaptureTrack(
@@ -448,6 +557,11 @@ async function startCaptureTrack(
 
 /** Stop the capture + release the audio graph. Safe to call repeatedly. */
 export async function stopGameAudio(): Promise<void> {
+    if (liveMixer || liveSources.length > 0) {
+        liveMixer = false;
+        liveSources = [];
+        notifyLiveSources();
+    }
     if (!active && !ctx) return;
     active = false;
     if (watchdog) { clearTimeout(watchdog); watchdog = null; }

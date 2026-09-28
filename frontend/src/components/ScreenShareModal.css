@@ -344,3 +344,34 @@
     color: #949ba4;
     font-variant-numeric: tabular-nums;
 }
+
+/* The Share button's quick launch: nothing on screen but the OS picker, then
+   this one line while the stream starts — no dialog to read or dismiss. */
+.stream-quick-status {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%);
+    z-index: 2000;
+    padding: 8px 14px;
+    border-radius: 999px;
+    background: #1e1f22;
+    color: #dbdee1;
+    font-size: 13px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    pointer-events: none;
+    max-width: calc(100vw - 32px);
+}
+
+/* Audio sources while live (StreamAudioSourcesModal). */
+.stream-audio-loading {
+    margin: 4px 0 0;
+    font-size: 13px;
+    color: #949ba4;
+}
+
+.stream-audio-error {
+    margin: 0 24px 12px;
+    font-size: 13px;
+    color: var(--text-danger, #f23f43);
+}

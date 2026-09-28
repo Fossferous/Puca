@@ -301,6 +301,14 @@ export const defaultSettings = {
      *  leave the dialog with nothing selected. */
     shareResolution: '1080',
     shareFps: 30,
+    /** Desktop stream audio, remembered like the quality above, because
+     *  Share now goes straight to the picker without the settings dialog:
+     *  'auto' — the shared window's own app, found from the window itself
+     *  (the app list only appears when there is no window to go by, e.g. a
+     *  whole-screen share); 'pick' — always show the app list after the
+     *  picker, that app pre-ticked; 'none' — video only. Changed from the
+     *  arrow beside Share. Validated on read (rememberedShareAudio). */
+    shareAudio: 'auto' as ShareAudioMode,
     /** What happens when I join a voice channel that allows clips:
      *  'off' — nothing; 'prompt' — highlight the Arm button for a few seconds;
      *  'auto' — start recording with NO popup (ClipControls.tsx → armNative):
@@ -396,6 +404,15 @@ export const defaultSettings = {
 };
 
 export type Settings = typeof defaultSettings;
+
+/** Desktop stream-audio mode (see `shareAudio` above). */
+export type ShareAudioMode = 'auto' | 'pick' | 'none';
+
+/** The remembered stream-audio mode, falling back to 'auto' for a missing
+ *  or unknown stored value (an older build, a hand-edited profile). */
+export function rememberedShareAudio(s: { shareAudio?: unknown }): ShareAudioMode {
+    return s.shareAudio === 'pick' || s.shareAudio === 'none' ? s.shareAudio : 'auto';
+}
 
 /** The two voice binds whose system-wide scope depends on provenance. */
 export type VoiceBindField = 'toggleMuteBinding' | 'toggleDeafenBinding';
