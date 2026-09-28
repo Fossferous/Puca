@@ -862,3 +862,76 @@
         opacity: 1;
     }
 }
+
+/* Stream stats (right-click a stream -> Show Stream Stats). Bottom-left,
+   clear of the hover header; click-through except its close button, so it
+   never blocks the remote-control capture surface or the tile's own clicks. */
+.stream-stats-overlay {
+    position: absolute;
+    left: 8px;
+    bottom: 8px;
+    z-index: 3;
+    min-width: 200px;
+    max-width: calc(100% - 16px);
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.72);
+    color: #f2f3f5;
+    font-size: 12px;
+    line-height: 1.45;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+}
+
+.stream-stats-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 4px;
+    font-weight: 600;
+}
+
+.stream-stats-close {
+    pointer-events: auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.12);
+    color: inherit;
+    cursor: pointer;
+}
+
+.stream-stats-close:hover {
+    background: rgba(255, 255, 255, 0.24);
+}
+
+.stream-stats-rows {
+    margin: 0;
+}
+
+.stream-stats-row {
+    display: flex;
+    gap: 10px;
+}
+
+.stream-stats-row dt {
+    flex: 0 0 76px;
+    color: #b5bac1;
+}
+
+.stream-stats-row dd {
+    margin: 0;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.stream-stats-empty {
+    margin: 0;
+    color: #b5bac1;
+}

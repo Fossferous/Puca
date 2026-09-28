@@ -10,6 +10,7 @@ import { isE2EESupported } from 'livekit-client';
 import { loadSettings, saveSettings, inputGain, outputGain, applyOutputDevice } from './settingsStore';
 import { wsClient, type ServerMessage, type MessageHandler } from '../api/websocket';
 import ScreenShareModal from './ScreenShareModal';
+import { StreamAudioSourcesModal } from './StreamAudioSourcesModal';
 import { MicPermissionHelp } from './MicPermissionHelp';
 import { useContextMenu } from './contextMenuUtils';
 import {
@@ -83,7 +84,7 @@ import { PendingJoins, JOIN_PRESENT_GRACE_MS, JOIN_ANNOUNCE_TIMEOUT_MS, PENDING_
 import { shouldTearDownDepartedPeer } from '../utils/departedPeer';
 import { getLocalUserVolumes, getLocalUserMutes } from './userVolumeStore';
 import { keepVoiceAudioAlive, installVoiceAudioResume } from './voiceAudioKeepAlive';
-import { MicIcon, MicOffIcon, HeadphonesIcon, HeadphonesOffIcon, CameraIcon, CameraOffIcon, ScreenShareIcon, DisconnectIcon, FlipCameraIcon, FullscreenIcon, CloseIcon, MoonIcon, SignalIcon, InfoIcon, ChevronUpIcon, ChevronDownIcon, WarningIcon } from './Icons';
+import { MicIcon, MicOffIcon, HeadphonesIcon, HeadphonesOffIcon, CameraIcon, CameraOffIcon, ScreenShareIcon, DisconnectIcon, FlipCameraIcon, FullscreenIcon, CloseIcon, MoonIcon, SignalIcon, InfoIcon, ChevronUpIcon, ChevronDownIcon, WarningIcon, SlidersIcon } from './Icons';
 import { Toast } from './Toast';
 import { useDfSettledOffer, keepRnnoiseForSession, KEEP_RNNOISE_NOTICE } from './useDfSettledOffer';
 import './VoicePanel.css';
@@ -199,6 +200,11 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         return () => window.removeEventListener('settingsChanged', sync);
     }, []);
     const [showStreamSettings, setShowStreamSettings] = useState(false);
+    // Share goes straight to the picker ('quick'); the arrow beside it opens
+    // the settings first ('settings'). See ScreenShareModal's `launch`.
+    const [shareLaunch, setShareLaunch] = useState<'quick' | 'settings'>('quick');
+    // Audio sources while live (desktop): add/drop apps without restarting.
+    const [showStreamAudio, setShowStreamAudio] = useState(false);
     // Multi-streamer support: Map of userId -> { username, stream }
     const [screenSharers, setScreenSharers] = useState<Map<number, { username: string; stream: MediaStream | null }>>(new Map());
     // Stream WATCH selection lives ONLY in globalSelectedStreams (voiceState):
@@ -3489,6 +3495,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                         webrtcManager.stopScreenShare();
                                         wsClient.stopScreenShare(roomId);
                                         setIsScreenSharing(false);
+                                        setShowStreamAudio(false);
                                         // Remove own stream from screenSharers
                                         setScreenSharers(prev => {
                                             const newMap = new Map(prev);
@@ -3498,7 +3505,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                         // Clear stream viewing state - this will switch view back to chat
                                         clearAllStreams();
                                     } else {
-                                        // Open settings modal instead of starting immediately
+                                        // Straight to the picker with the remembered
+                                        // settings: the dialog is the arrow's job now.
+                                        setShareLaunch('quick');
                                         setShowStreamSettings(true);
                                     }
                                 }}
@@ -3506,6 +3515,26 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                 title={isScreenSharing ? 'Stop Sharing' : 'Share Screen'}
                             >
                                 <ScreenShareIcon size={18} />
+                            </button>
+                        )}
+                        {!isMobile && !isScreenSharing && (
+                            <button
+                                className="voice-btn vp-share-options"
+                                onClick={() => { setShareLaunch('settings'); setShowStreamSettings(true); }}
+                                title="Stream settings: resolution, frame rate, audio"
+                                aria-label="Stream settings"
+                            >
+                                <ChevronDownIcon size={14} />
+                            </button>
+                        )}
+                        {!isMobile && isScreenSharing && isTauri() && (
+                            <button
+                                className="voice-btn vp-stream-audio"
+                                onClick={() => setShowStreamAudio(true)}
+                                title="Stream audio: add or remove apps while live"
+                                aria-label="Stream audio sources"
+                            >
+                                <SlidersIcon size={18} />
                             </button>
                         )}
                         <ClipButtons
@@ -3667,13 +3696,14 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             {/* Stream Settings Modal — 2-step: pick quality → OS picker → choose audio */}
             <ScreenShareModal
                 isOpen={showStreamSettings}
+                launch={shareLaunch}
                 onClose={() => setShowStreamSettings(false)}
                 onCancelAfterCapture={() => {
                     // User backed out after the OS picker; drop the captured surface.
                     stopHidingCaptureBar();
                     webrtcManager.stopScreenShare();
                 }}
-                onCaptureScreen={async ({ resolution, fps }) => {
+                onCaptureScreen={async ({ resolution, fps, prefetchApps }) => {
                     // One source of truth with the step-down offer: two copies
                     // of this ladder is how "lower it" ends up capturing a size
                     // the dialog never offered.
@@ -3682,7 +3712,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     const isDesktop = isTauri();
                     
                     // Start fetching apps BEFORE waiting on the OS picker so the
-                    // 0.5s scan happens while the user is looking at the dialog.
+                    // 0.5s scan happens while the user is looking at it, but only
+                    // when the app step will certainly want the list ('pick'
+                    // mode). A window share in 'auto' goes live from the window's
+                    // own app and never scans at all.
                     // Assign the CHAIN synchronously, not from inside .then().
                     // Assigning in the callback meant that if the user answered
                     // the picker before the dynamic import resolved, this was
@@ -3690,7 +3723,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     // became [] — app-audio matching skipped, with no error.
                     // The .catch keeps a cancelled picker (which never awaits
                     // this) from producing an unhandled rejection.
-                    const appsPromise: Promise<import('../api/appAudio').CaptureApp[]> | null = isDesktop
+                    const appsPromise: Promise<import('../api/appAudio').CaptureApp[]> | null = isDesktop && prefetchApps
                         ? import('../api/appAudio')
                             .then(({ listCaptureApps }) => listCaptureApps())
                             .catch(err => {
@@ -3711,23 +3744,23 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         startHidingCaptureBar();
 
                         if (isDesktop) {
-                            const { matchAppByWindowTitle } = await import('../api/appAudio');
+                            const { sharedWindowOwner, listCaptureApps } = await import('../api/appAudio');
                             const label = shareStream.getVideoTracks()[0]?.label ?? '';
-                            const apps = appsPromise ? await appsPromise : [];
-                            const matched = matchAppByWindowTitle(apps, label);
+                            // The shared window's own app, from the window handle in
+                            // the label: exact, where title matching never worked
+                            // under WebView2 (its labels carry no title).
+                            const windowOwner = await sharedWindowOwner(label);
                             const isScreenShare = /^(screen|monitor)/i.test(label.trim());
                             return {
-                                appName: matched?.name ?? null,
-                                appPid: matched?.pid ?? null,
-                                apps,
+                                windowOwner,
+                                loadApps: () => appsPromise ?? listCaptureApps(),
                                 isScreenShare,
                                 hasBrowserAudio: false,
                             };
                         }
                         return {
-                            appName: null,
-                            appPid: null,
-                            apps: [],
+                            windowOwner: null,
+                            loadApps: async () => [],
                             isScreenShare: false,
                             hasBrowserAudio: shareStream.getAudioTracks().length > 0,
                         };
@@ -3839,6 +3872,11 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         selectStream(currentUserId); // adds to the global set + notifies
                     }
                 }}
+            />
+
+            <StreamAudioSourcesModal
+                isOpen={showStreamAudio && isScreenSharing}
+                onClose={() => setShowStreamAudio(false)}
             />
 
             {/* Camera preview is now in camera-preview-mini above - removed duplicate */}

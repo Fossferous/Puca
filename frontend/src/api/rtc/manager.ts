@@ -11,6 +11,7 @@ import { registerScreenReceiver } from './receiverLatency';
 import { outboundTrackId, receiverHints, summariseInboundAudio, summariseRtcStats, videoSendExtras, summariseRtcStatsDelta, type InboundAudioHealth, type RtcLatencySummary } from './statsSummary';
 import { negotiatedH264Profile } from './h264Profiles';
 import type { EncodeSample } from './shareHealth';
+import type { RtpEndpoint } from './streamStats';
 import { AnnouncedVideoGate } from './announcedVideo';
 
 export { classifyRemoteVideo } from './announcedVideo';
@@ -1756,6 +1757,31 @@ export class WebRTCManager {
             } catch { /* closed mid-iteration */ }
         }
         for (const k of [...this.audioHealthPrev.keys()]) if (!this.peers.has(k)) this.audioHealthPrev.delete(k);
+        return out;
+    }
+
+    /**
+     * The mesh senders/receivers carrying any of `tracks`, for the stream
+     * stats overlay (streamStats.ts). Matched by TRACK IDENTITY, like
+     * stopScreenShare: a watched stream's tracks are its receivers' tracks,
+     * and your own share's are its senders' — once per peer, because a mesh
+     * encodes the picture separately for every viewer.
+     */
+    rtpEndpointsFor(tracks: MediaStreamTrack[]): RtpEndpoint[] {
+        const out: RtpEndpoint[] = [];
+        for (const [, peer] of this.peers) {
+            const pc = peer.connection;
+            for (const r of pc.getReceivers()) {
+                if (r.track && tracks.includes(r.track)) {
+                    out.push({ key: r, direction: 'inbound', kind: r.track.kind, getStats: () => r.getStats() });
+                }
+            }
+            for (const s of pc.getSenders()) {
+                if (s.track && tracks.includes(s.track)) {
+                    out.push({ key: s, direction: 'outbound', kind: s.track.kind, getStats: () => s.getStats() });
+                }
+            }
+        }
         return out;
     }
 

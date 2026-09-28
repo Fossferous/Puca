@@ -260,6 +260,37 @@ fn set_app_capture_gain(pid: u32, gain: f32) -> Result<(), String> {
     audio_capture::windows_audio::set_capture_gain(pid, gain)
 }
 
+/// Add one app to the stream audio while the stream is live (linear gain,
+/// 0.0–2.0). Blocks, bounded, until it is capturing or has failed — hence
+/// async + spawn_blocking, never the main thread.
+#[cfg(windows)]
+#[tauri::command]
+async fn add_app_audio_source(pid: u32, gain: f32) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        audio_capture::windows_audio::add_mix_source(pid, gain)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Drop one app from the live stream audio; the stream itself continues.
+#[cfg(windows)]
+#[tauri::command]
+fn remove_app_audio_source(pid: u32) -> Result<(), String> {
+    audio_capture::windows_audio::remove_mix_source(pid)
+}
+
+/// The capturable app that owns a window (the HWND in a window share's
+/// track label), so a window share streams that app's audio unasked.
+/// Async: it enumerates processes for the own-tree guard.
+#[cfg(windows)]
+#[tauri::command]
+async fn window_owner(hwnd: i64) -> Option<audio_capture::windows_audio::WindowOwner> {
+    tauri::async_runtime::spawn_blocking(move || audio_capture::windows_audio::window_owner(hwnd))
+        .await
+        .unwrap_or(None)
+}
+
 #[cfg(windows)]
 #[tauri::command]
 fn stop_app_audio_capture(state: tauri::State<'_, Arc<AudioCaptureState>>) -> Result<(), String> {
@@ -290,6 +321,24 @@ fn start_multi_app_audio_capture(_pids: Vec<u32>) -> Result<Vec<u32>, String> {
 #[tauri::command]
 fn set_app_capture_gain(_pid: u32, _gain: f32) -> Result<(), String> {
     Err("Per-app audio capture is only supported on Windows".to_string())
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+fn add_app_audio_source(_pid: u32, _gain: f32) -> Result<(), String> {
+    Err("Per-app audio capture is only supported on Windows".to_string())
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+fn remove_app_audio_source(_pid: u32) -> Result<(), String> {
+    Err("Per-app audio capture is only supported on Windows".to_string())
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+fn window_owner(_hwnd: i64) -> Option<audio_capture::windows_audio::WindowOwner> {
+    None
 }
 
 #[cfg(not(windows))]
@@ -1477,6 +1526,9 @@ pub fn run() {
             start_app_audio_capture,
             start_multi_app_audio_capture,
             set_app_capture_gain,
+            add_app_audio_source,
+            remove_app_audio_source,
+            window_owner,
             stop_app_audio_capture,
             hide_screen_capture_bar,
             start_clip_video_capture,

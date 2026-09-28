@@ -41,12 +41,13 @@ import { outputGain, applyOutputDevice, applyOutputDeviceToContext } from './set
 import { sfuManager } from '../api/rtc/sfuManager';
 import { useStreamStore } from '../stores/streamStore';
 import {
-    ChatIcon, CloseIcon, CrosshairIcon, FullscreenIcon, GamepadIcon, GridIcon, KeyboardIcon,
+    ActivityIcon, ChatIcon, CloseIcon, CrosshairIcon, FullscreenIcon, GamepadIcon, GridIcon, KeyboardIcon,
     LiveDotIcon, MegaphoneIcon, MonitorIcon, PendingIcon, PopOutIcon, ScreenIcon, SpeakerIcon,
     SpeakerOffIcon, StopIcon, StopSharingIcon,
 } from './Icons';
 import { pipSupported } from './streamPopout.utils';
 import { CameraRail } from './CameraRail';
+import { StreamStatsOverlay } from './StreamStatsOverlay';
 import { docPipSupported } from './streamDocPip';
 import './StreamStage.css';
 import {
@@ -145,6 +146,13 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     );
     const [attenuation, setAttenuationState] = useState<AttenuationSettings>(() => getAttenuation());
     const [ctxMenu, setCtxMenu] = useState<StreamContextMenu | null>(null);
+    // Streams showing the stats overlay (right-click → Show Stream Stats).
+    const [statsFor, setStatsFor] = useState<Set<number>>(() => new Set());
+    const toggleStats = (userId: number) => setStatsFor(prev => {
+        const next = new Set(prev);
+        if (next.has(userId)) next.delete(userId); else next.add(userId);
+        return next;
+    });
     const [control, setControl] = useState<ControlState>(getControlState);
     // FPS mode: relative mouse via pointer lock (for first-person games).
     // Persisted: someone who plays through this regularly should not have to
@@ -176,16 +184,24 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     const duckedRef = useRef(false);
     const menuRef = useRef<HTMLDivElement>(null);
 
-    // Current gain for a stream = user volume × mute × attenuation ducking.
-    const targetGain = useCallback((userId: number): number => {
-        if (mutedStreams.has(userId)) return 0;
-        const base = (volumes[userId] ?? DEFAULT_STREAM_VOLUME) / 100;
+    // Gain for a stream = user volume × mute × attenuation ducking × master.
+    // The ONE formula: the slider and mute handlers use it too, because they
+    // run before the new volume/mute reaches state (so targetGain would read
+    // the old one). Each used to re-derive it without the master, aiming the
+    // gain at the un-mastered level until the next applyGain overwrote it.
+    const gainFor = useCallback((volumePercent: number, muted: boolean): number => {
+        if (muted) return 0;
         const duck = duckedRef.current && attenuation.enabled ? (1 - attenuation.strength) : 1;
         // Master output volume from Settings governs everything you hear, not
         // just voice — otherwise turning it down would silence people but leave
         // a stream at full volume.
-        return base * duck * outputGain();
-    }, [mutedStreams, volumes, attenuation]);
+        return (volumePercent / 100) * duck * outputGain();
+    }, [attenuation]);
+
+    // Current gain for a stream, from state.
+    const targetGain = useCallback((userId: number): number =>
+        gainFor(volumes[userId] ?? DEFAULT_STREAM_VOLUME, mutedStreams.has(userId)),
+    [gainFor, mutedStreams, volumes]);
 
     // Smoothly move a stream's gain to its target (fast attack, gentle release).
     const applyGain = useCallback((userId: number, smooth = true) => {
@@ -210,7 +226,21 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
 
     const applyAllGains = useCallback(() => {
         graphsRef.current.forEach((_g, userId) => applyGain(userId));
-    }, [applyGain]);
+        // The element fallback has no graphs — its <video>s carry the audio —
+        // so walking graphs alone never gave them the master (or anything).
+        if (audioFallback) {
+            videoRefs.current.forEach((_v, userId) => {
+                if (!graphsRef.current.has(userId)) applyGain(userId);
+            });
+        }
+    }, [applyGain, audioFallback]);
+
+    // Nothing else sets a fallback <video>'s volume until a slider moves, so
+    // it started at 1 whatever the master said. Engage it at the right level
+    // and keep it there as tiles, volumes, mutes and ducking change.
+    useEffect(() => {
+        if (audioFallback) applyAllGains();
+    }, [audioFallback, applyAllGains, selectedStreams]);
 
     // Build/refresh the audio chain for one stream. Idempotent per track.
     const ensureStreamAudio = useCallback((userId: number, stream: MediaStream) => {
@@ -470,6 +500,15 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
     // visibility time covers whatever tiles exist by then.
     useEffect(() => installBackgroundResumeAll(() => videoRefs.current.values()), []);
 
+    // A stream no longer watched forgets its stats overlay, so watching it
+    // again starts without one.
+    useEffect(() => {
+        setStatsFor(prev => {
+            const kept = [...prev].filter(id => selectedStreams.includes(id));
+            return kept.length === prev.size ? prev : new Set(kept);
+        });
+    }, [selectedStreams]);
+
     // Tear down audio chains for streams no longer watched; close on unmount.
     useEffect(() => {
         graphsRef.current.forEach((graph, userId) => {
@@ -498,12 +537,12 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
         const graph = graphsRef.current.get(userId);
         const ctx = audioCtxRef.current;
         if (graph && ctx && !mutedStreams.has(userId)) {
-            const duck = duckedRef.current && attenuation.enabled ? (1 - attenuation.strength) : 1;
-            graph.gain.gain.setTargetAtTime((volume / 100) * duck, ctx.currentTime, 0.02);
+            graph.gain.gain.setTargetAtTime(gainFor(volume, false), ctx.currentTime, 0.02);
         }
         if (audioFallback) {
             const video = videoRefs.current.get(userId);
-            if (video) video.volume = Math.min(volume, 100) / 100;
+            // An element cannot boost: capped at full scale, as in applyGain.
+            if (video) video.volume = Math.min(Math.max(gainFor(volume, false), 0), 1);
         }
     };
 
@@ -516,9 +555,8 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
             const graph = graphsRef.current.get(userId);
             const ctx = audioCtxRef.current;
             if (graph && ctx) {
-                const duck = duckedRef.current && attenuation.enabled ? (1 - attenuation.strength) : 1;
-                const vol = (volumes[userId] ?? DEFAULT_STREAM_VOLUME) / 100;
-                graph.gain.gain.setTargetAtTime(nowMuted ? 0 : vol * duck, ctx.currentTime, 0.02);
+                graph.gain.gain.setTargetAtTime(
+                    gainFor(volumes[userId] ?? DEFAULT_STREAM_VOLUME, nowMuted), ctx.currentTime, 0.02);
             }
             return newSet;
         });
@@ -901,6 +939,9 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                 muted={elementMuted}
                                 className="stream-video"
                             />
+                            {statsFor.has(userId) && !isThumb && data.stream && (
+                                <StreamStatsOverlay stream={data.stream} onClose={() => toggleStats(userId)} />
+                            )}
                             {/* Input-capture surface — active only while I'm controlling
                                 this screen, and NEVER on a filmstrip thumbnail. Once
                                 non-focused tiles became visible it was possible to be
@@ -1134,9 +1175,17 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                     className="stream-context-menu"
                     style={{
                         left: Math.min(ctxMenu.x, window.innerWidth - 260),
-                        top: Math.min(ctxMenu.y, window.innerHeight - (ctxMenu.isOwn ? 340 : 380)),
+                        top: Math.min(ctxMenu.y, window.innerHeight - (ctxMenu.isOwn ? 376 : 416)),
                     }}
                 >
+                    <button
+                        className="scm-item"
+                        onClick={() => { toggleStats(ctxMenu.userId); setCtxMenu(null); }}
+                    >
+                        {statsFor.has(ctxMenu.userId) ? 'Hide Stream Stats' : 'Show Stream Stats'}
+                        <span className="scm-icon"><ActivityIcon /></span>
+                    </button>
+                    <div className="scm-separator" />
                     {ctxMenu.isOwn ? (
                         <>
                             <button

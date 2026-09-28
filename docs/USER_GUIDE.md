@@ -199,9 +199,10 @@ is in the foreground, which is why it is set up the moment you join.
 ### Start Sharing
 Desktop and browser only — a phone cannot share its screen.
 
-Púca remembers the **Resolution** and **Frame Rate** you last picked, so if you
-turn them down because your machine struggled, that is where the dialog opens
-next time.
+Púca remembers the **Resolution**, **Frame Rate** and **Audio to share** you
+last picked, and **Share Screen** uses them without asking. So if you turn the
+quality down because your machine struggled, every share after that starts
+there.
 
 If your computer cannot keep up with the share while it is running, the voice
 panel offers to drop it a step — one click, applied to the share already going
@@ -211,9 +212,22 @@ struggling. Lowering the frame rate saves more than lowering the resolution if
 you need a bigger reduction; both are in the Screen Share dialog.
 
 1. Join a voice channel
-2. Click **Share Screen** in the voice panel. A **Screen Share** dialog asks for **Resolution**, **Frame Rate** and, in the desktop app, **Audio to share**
-3. Click **Select Screen & Go Live →** and pick a window, screen or tab in the picker that opens
-4. Sound: in the desktop app, choose **Selected apps** under **Audio to share** before step 3; after the picker, tick the apps whose audio the stream should carry, then click **Go Live →** — closing the dialog instead shares nothing. In a browser, tick **Share audio** in the browser's own picker — the app cannot tick it for you
+2. Click **Share Screen** in the voice panel. The picker opens straight away
+3. Pick a window, screen or tab. You are live
+4. Sound, in the desktop app: share a game's window and the stream carries that game's audio, found from the window itself. Share a whole screen and Púca asks which apps' audio to carry; tick them and click **Go Live**. Closing that list instead shares nothing
+5. Sound, in a browser: tick **Share audio** in the browser's own picker. The app cannot tick it for you
+
+To change the settings first, click the arrow beside **Share Screen**
+(**Stream settings**). It opens the **Screen Share** dialog with
+**Resolution**, **Frame Rate** and, in the desktop app, **Audio to share**:
+
+- **The shared window's app**: the default, as in step 4
+- **Choose apps after picking the window**: always show the app list, with the window's app already ticked
+- **No audio**: video only
+
+While you are sharing in the desktop app, **Stream audio sources** beside
+**Stop Sharing** adds an app's audio to the stream (music alongside the game,
+say), removes one, or changes its volume, without restarting the stream.
 
 ### Viewing Streams
 When someone shares, their entry in the voice view shows a **LIVE** badge and a
@@ -232,8 +246,12 @@ Hover a stream for its buttons, or right-click it for the same items as a menu:
 | **Stop Watching** | Remove it from your view |
 | **Request Control** | Ask the sharer for keyboard and mouse control of their screen; they must accept |
 | **Stream Attenuation** | Automatically reduce stream volume when people are talking |
+| **Show Stream Stats** / **Hide Stream Stats** | Menu only. A live readout on the stream, refreshed every second: resolution, frame rate, video and audio bitrate, codec and whether it is decoded in hardware, packet loss, dropped frames and round trip |
 
-Your own stream has **Stop sharing your screen** and, in the menu, **Stop Sharing**.
+Your own stream has **Stop sharing your screen** and, in the menu, **Stop
+Sharing** and **Show Stream Stats**. On your own stream the readout shows the
+encoding side: what you are sending, whether it is encoded in hardware, and
+what is holding the stream back (**Limited by**: CPU, bandwidth, or nothing).
 
 ---
 
