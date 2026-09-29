@@ -46,6 +46,8 @@ const h = vi.hoisted(() => ({
     shareListeners: new Set<() => void>(),
     /** Replaces the features ask, to hold a share on it. */
     ensure: null as null | (() => Promise<unknown>),
+    /** Replaces the session probe a "sign in again" tap waits on. */
+    probe: null as null | (() => Promise<'ok' | 'rejected' | 'unreachable'>),
     created: [] as unknown[][],
     openToSet: [] as string[],
     cards: [] as unknown[],
@@ -74,6 +76,10 @@ vi.mock('../notes/native/notesNative', async importOriginal => ({
     syncNativeReminders: async () => ({ ok: true }),
     setNativeBackgroundRefresh: async () => undefined,
 }));
+vi.mock('../api/client', async importOriginal => {
+    const real = await importOriginal<typeof import('../api/client')>();
+    return { ...real, probeSession: () => (h.probe ? h.probe() : real.probeSession()) };
+});
 vi.mock('../api/taskReminders', async importOriginal => ({
     ...(await importOriginal<typeof import('../api/taskReminders')>()),
     startTaskReminders: () => () => {},
@@ -236,6 +242,7 @@ beforeEach(() => {
     h.navListeners.clear();
     h.shareListeners.clear();
     h.ensure = null;
+    h.probe = null;
     h.created = [];
     h.openToSet = [];
     h.cards = [];
@@ -613,6 +620,41 @@ describe('coming back to the app', () => {
         await act(async () => { release(); });
         await tick(0);
         expect(titleField()?.value).toBe('Milk and bread');
+    });
+
+    // A tap that resumes the app mostly changes the shell's state at once (a
+    // compose target opens the composer, 'reminders' opens Reminders), so
+    // "nothing open" already stands down for it. These two do not: only the
+    // count of taps that came with the return keeps the composer off them.
+    it('a "sign in again" tap that brought the app back wins: nothing opens while its session check is out, then Reminders does', async () => {
+        let answer: (r: 'ok') => void = () => {};
+        h.probe = () => new Promise(r => { answer = r; });
+        mount({ coldStart: false });
+        await tick(0);
+        setVisibility('hidden');
+        await tick(OPEN_TO_AWAY_MS);
+        act(() => { for (const cb of h.navListeners) cb({ target: 'signin', item: null }); });
+        setVisibility('visible');
+        await tick(OPEN_TO_SETTLE_MS * 3);
+        expect(composer(), 'nothing opened while the session check is out').toBeNull();
+        expect(path, 'the check has not answered yet').toBe('/');
+        await act(async () => { answer('ok'); });
+        await tick(0);
+        expect(path).toBe('/reminders');
+        expect(composer()).toBeNull();
+    });
+
+    it('a tap from a newer app that this page does not know, landing just after the page turns visible, still wins: nothing opens', async () => {
+        mount({ coldStart: false });
+        await tick(0);
+        setVisibility('hidden');
+        await tick(OPEN_TO_AWAY_MS);
+        setVisibility('visible');
+        await tick(OPEN_TO_SETTLE_MS / 4);
+        act(() => { for (const cb of h.navListeners) cb({ target: 'compose-something-later', item: null }); });
+        await tick(OPEN_TO_SETTLE_MS);
+        expect(composer()).toBeNull();
+        expect(path).toBe('/');
     });
 
     it('not in the desktop app’s Notes', async () => {
