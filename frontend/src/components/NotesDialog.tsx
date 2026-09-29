@@ -21,6 +21,14 @@ import { CloseIcon } from './Icons';
  */
 let opened = 0;
 const listening = new Set<number>();
+/**
+ * Which dialog each Escape is for, taken by the first of them to hear it,
+ * before any has closed. A real key press ends every listener in a microtask
+ * checkpoint, where React commits the top one's onClose — its cleanup
+ * leaving `listening` too — before the next listener runs; asked again
+ * there, the one below would find itself on top and close as well.
+ */
+const escapeFor = new WeakMap<Event, number>();
 
 interface NotesDialogProps {
     title: string;
@@ -65,7 +73,13 @@ export function NotesDialog({ title, onClose, children, escapeBlocked = false, b
         const me = order.current;
         listening.add(me);
         const onKey = (e: KeyboardEvent) => {
-            if (e.key !== 'Escape' || me !== Math.max(...listening) || escapeBlocked) return;
+            if (e.key !== 'Escape') return;
+            let top = escapeFor.get(e);
+            if (top === undefined) {
+                top = Math.max(...listening);
+                escapeFor.set(e, top);
+            }
+            if (me !== top || escapeBlocked) return;
             if (busy) { e.preventDefault(); e.stopPropagation(); return; }
             e.preventDefault();
             e.stopPropagation();

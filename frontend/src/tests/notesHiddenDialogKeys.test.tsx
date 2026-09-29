@@ -19,6 +19,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, type ReactElement } from 'react';
+import { flushSync } from 'react-dom';
 import { createRoot, type Root } from 'react-dom/client';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -216,6 +217,37 @@ describe('two NotesDialogs stacked', () => {
         both(true, { topOnScreen: false });
         escape();
         expect(top).not.toHaveBeenCalled();
+        expect(below).toHaveBeenCalledTimes(1);
+    });
+
+    // A real key press ends every listener in a microtask checkpoint, where
+    // React commits the top one's onClose — its cleanup too — before the next
+    // listener runs. jsdom runs none between listeners, so the top one's
+    // onClose commits with flushSync here, as the browser would. Hidden and
+    // shown again (Notes left and came back), both re-bind in tree order,
+    // the top one — earlier in the tree, opened later — first.
+    it('the top one closing mid-key, as a real key press lets React do, leaves the one below open', () => {
+        const stack = (withTop: boolean) => (
+            <>
+                {withTop && <NotesDialog title="Top" onClose={closeTop}><span>top</span></NotesDialog>}
+                <NotesDialog title="Below" onClose={below}><span>below</span></NotesDialog>
+            </>
+        );
+        // The same tree `render` makes, so nothing but the top one unmounts.
+        function closeTop() {
+            top();
+            flushSync(() => { root!.render(<LayerOnScreenContext.Provider value>{stack(false)}</LayerOnScreenContext.Provider>); });
+        }
+        render(stack(false), true);
+        render(stack(true), true);
+        render(stack(true), false);
+        render(stack(true), true);
+        escape();
+        expect(top).toHaveBeenCalledTimes(1);
+        expect(document.querySelector('[aria-label="Top"]')).toBeNull();
+        expect(below).not.toHaveBeenCalled();
+        expect(reachedWindow).toEqual([]);
+        escape();
         expect(below).toHaveBeenCalledTimes(1);
     });
 });
