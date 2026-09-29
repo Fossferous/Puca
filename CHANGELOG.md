@@ -29,10 +29,19 @@ one-line summary; this file is the full story. Versions follow
   means an older version of Púca shows it as an item reading "## Before you
   start", and a count taken before a list's items have loaded (a tab not
   opened yet, a note in the trash) still includes its headings.
-- **One gap left:** a checklist copied as rendered text — selected on the
-  page rather than taken with the assistant's Copy button — has no `#` or
-  `- [ ]` left in it, so it still pastes one item per line, its title and
-  headings included.
+- **A checklist copied off the page keeps its title and headings.** Select
+  an assistant's answer (or a list on a web page) and copy it, rather than
+  using its Copy button, and the copied text has lost its `#` and `- [ ]`,
+  so it used to paste one item per line: the chatty intro, the title and
+  every heading each one more box to tick. A paste now also reads the
+  formatting the clipboard carries beside the text (its headings, list
+  items and checkboxes), so it lands exactly as the Markdown would have: the
+  title, the headings as headings, the steps. Anything that is not a
+  checklist pastes as it always did. The formatting is only read, never
+  shown or run, and one too big or too tangled to read in a moment is not
+  read at all, so no paste can freeze the app. Everywhere a checklist can
+  be pasted: the Notes composer, an open note, Púca's Tasks view and every
+  checklist channel.
 
 ## 0.9.826 — 2026-09-29
 

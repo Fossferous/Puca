@@ -225,10 +225,14 @@ Púca's reminders. Anything you do in one is what you see in the other.
   becomes a **heading** (see *Headings*), so the grouping survives without
   one more box to tick; one left with nothing under it at the end is
   dropped. The paste prompt shows it as a heading and counts it apart
-  (*Add 6 items and 1 heading*). A checklist copied as RENDERED text —
-  selected on the page rather than taken with the assistant's Copy button —
-  has no `#` or `- [ ]` left in it, so it reads as plain lines, one item
-  each: the clipboard's formatting is not read yet. A wrapped line, or a
+  (*Add 6 items and 1 heading*). A checklist copied as RENDERED text
+  (selected on the page rather than taken with the assistant's Copy button)
+  has no `#` or `- [ ]` left in its plain text, so a paste reads the HTML the
+  clipboard carries beside it, whose headings, list items and checkboxes
+  give the same title, headings and steps; HTML that is not a checklist, or
+  is too large or too tangled to read cheaply, falls back to the plain text,
+  and it is only ever parsed inert (`notes/model/pastedHtml.ts`: nothing in
+  it runs or loads). A wrapped line, or a
   code block under a step, joins that step. Closing sentences ("That's it!") are dropped. The reader
   (`readChecklist`, `notes/model/noteContent.ts`) takes at least two list lines and
   no more sentences than list lines around them, so a paragraph that happens to

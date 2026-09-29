@@ -33,7 +33,7 @@ import { PastedLinesDialog } from './PastedLinesDialog';
 import { pushMessageToast } from './messageToastBus';
 import { PACE_MS } from '../api/icsImport';
 import { MAX_ITEM_LENGTH } from '../notes/model/notesModel';
-import { pasteAsOneLine, readPastedItems, type PastedItems } from '../notes/model/noteContent';
+import { pasteAsOneLine, readPaste, type PastedItems } from '../notes/model/noteContent';
 import { headingLabel } from '../api/taskHeading';
 
 const sleep = (ms: number) => new Promise<void>(r => { setTimeout(r, ms); });
@@ -94,8 +94,9 @@ export function usePasteItems() {
      * and pastes anything else as a name. True when the paste was taken.
      */
     const onPaste = (e: React.ClipboardEvent<HTMLInputElement>, answers: PasteAnswers, opts: { checklistOnly?: boolean } = {}): boolean => {
-        const text = e.clipboardData?.getData('text') ?? '';
-        const read = readPastedItems(text, opts);
+        // Its HTML too, when it has one: a checklist copied off the page it
+        // was rendered on keeps its headings and boxes only there.
+        const { text, read } = readPaste(e.clipboardData, opts);
         if (!read) return false;                // one line pastes as normal
         e.preventDefault();
         // "As one item" of a name-field paste is the clean steps, not the

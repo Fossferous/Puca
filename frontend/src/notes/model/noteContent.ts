@@ -2,7 +2,8 @@
  * Púca Notes — the pure side of a note's own text (`body`): its title when
  * the composer's is blank, the two conversions between a text note and a
  * checklist, and what a paste or a drop carries. (Its photos and drawings
- * are api/noteMedia.ts.) No network, no DOM; unit-tested
+ * are api/noteMedia.ts.) No network, and no DOM but one read of a paste's
+ * HTML through a detached parse (pastedHtml.ts); unit-tested
  * (src/tests/noteContent.test.ts).
  */
 import {
@@ -13,6 +14,7 @@ import { isUndecryptable } from '../../api/decryptMarkers';
 import { parseSchedule, parseSnooze, serializeSchedule } from '../../api/taskSchedule';
 import { asHeadingText, headingLabel, isHeadingTask, isHeadingText } from '../../api/taskHeading';
 import { deriveQuickTitle, MAX_ITEM_LENGTH, type NoteRef } from './notesModel';
+import { htmlToMarkdown } from './pastedHtml';
 
 /** An item's attachment refs when this device can read its sidecar, else
  *  none — a locked sidecar is ciphertext, not an empty list. */
@@ -263,16 +265,18 @@ export interface PastedItems {
  * `checklistOnly` is for a TITLE field, where only a real checklist is
  * taken and any other text pastes as a title.
  *
- * NOT READ YET: the clipboard's HTML. A copy of a RENDERED checklist (an
- * assistant's answer selected on the page rather than taken with its Copy
- * button) carries no "#" or "- [ ]" in `text/plain`, so readChecklist
- * rightly says it is not one, and the title and every heading land as one
- * item per line. Its `text/html` still has the <h1>/<h2> and the <li>. The
- * place to read it is here, before `text`: every paste path (usePasteItems,
- * the Notes composer) comes through this one function.
+ * `html` is the clipboard's `text/html`, read FIRST. A copy of a RENDERED
+ * checklist (an assistant's answer selected on the page rather than taken
+ * with its Copy button, a list off a web page) carries no "#" or "- [ ]" in
+ * its plain text, so on its own that reads as one item per line, the title
+ * and every heading included; its HTML still has the <h1>/<h2>, the <li> and
+ * the boxes (pastedHtml.ts turns them back into that Markdown). The HTML is
+ * taken only when it reads as a checklist: anything else — a table, a
+ * paragraph, a page too big to read — falls back to `text` exactly as
+ * before. Every paste path comes through here (readPaste).
  */
-export function readPastedItems(text: string, opts: { checklistOnly?: boolean } = {}): PastedItems | null {
-    const list = readChecklist(text);
+export function readPastedItems(text: string, opts: { checklistOnly?: boolean; html?: string } = {}): PastedItems | null {
+    const list = readRenderedChecklist(opts.html) ?? readChecklist(text);
     if (opts.checklistOnly && !list) return null;
     const lines = list?.items ?? linesFromPaste(text);
     if (lines.length < 2) return null;
@@ -283,6 +287,13 @@ export function readPastedItems(text: string, opts: { checklistOnly?: boolean } 
     };
 }
 
+/** A clipboard's HTML read as a checklist, or null when it is not one (or
+ *  there is none, or it is not read: pastedHtml.ts). */
+export function readRenderedChecklist(html: string | null | undefined): ReadChecklist | null {
+    const md = htmlToMarkdown(html);
+    return md ? readChecklist(md) : null;
+}
+
 /** The minimum of a `DataTransfer` this module reads: a clipboard paste and
  *  an OS drop both satisfy it, and a test can hand-build one. A drop has no
  *  `getData` worth reading; a paste does. */
@@ -290,6 +301,30 @@ export interface TransferLike {
     files?: ArrayLike<File> | null;
     items?: ArrayLike<DataTransferItem> | null;
     getData?: (format: string) => string;
+}
+
+/** One format of a transfer, or '' when it has none (or will not say). */
+function dataOf(dt: TransferLike | null | undefined, format: string): string {
+    try {
+        return dt?.getData?.(format) ?? '';
+    } catch {
+        return '';
+    }
+}
+
+/**
+ * A paste into an item or title field, read from BOTH the formats its
+ * clipboard carries (readPastedItems): the plain text, and the HTML beside
+ * it. `text` is the plain text, which "Add as one item" keeps as the field
+ * would have — or, when the clipboard held only HTML, the items it read.
+ * The one entry point for every paste path: usePasteItems (an open note,
+ * Púca's Tasks view, ChecklistBody) and the Notes composer (QuickAdd).
+ */
+export function readPaste(dt: TransferLike | null | undefined, opts: { checklistOnly?: boolean } = {}): { text: string; read: PastedItems | null } {
+    const plain = dataOf(dt, 'text/plain');
+    const read = readPastedItems(plain, { ...opts, html: dataOf(dt, 'text/html') });
+    const text = plain.trim() === '' && read ? read.items.map(headingLabel).join('\n') : plain;
+    return { text, read };
 }
 
 /** True when this paste is TEXT that merely carries a picture alongside it.

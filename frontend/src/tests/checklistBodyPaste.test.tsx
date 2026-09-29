@@ -49,7 +49,9 @@ import { OP_KEY_SHAPE } from '../api/opKey';
 import { PACE_MS } from '../api/icsImport';
 import { PERM } from '../api/permissionBits';
 import { setMessageToastSink } from '../components/messageToastBus';
-import { ASSISTANT_ADD, ASSISTANT_ANSWER, ASSISTANT_ITEMS, ASSISTANT_SHOWN } from './fixtures/assistantChecklist';
+import {
+    ASSISTANT_ADD, ASSISTANT_ANSWER, ASSISTANT_HTML, ASSISTANT_ITEMS, ASSISTANT_RENDERED_LINES, ASSISTANT_RENDERED_TEXT, ASSISTANT_SHOWN,
+} from './fixtures/assistantChecklist';
 
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
@@ -91,9 +93,15 @@ async function mount(props: { channelId?: number; listId?: number; myPerms?: num
     await act(async () => { root!.render(<QueryClientProvider client={qc}><ChecklistBody {...props} /></QueryClientProvider>); });
     await settle();
 }
-function paste(el: Element, text: string) {
+/** A paste: the text, and the HTML beside it when there is one. */
+function paste(el: Element, text: string, html?: string) {
     const ev = new Event('paste', { bubbles: true, cancelable: true });
-    Object.defineProperty(ev, 'clipboardData', { value: { files: [], items: [], types: ['text/plain'], getData: () => text } });
+    Object.defineProperty(ev, 'clipboardData', {
+        value: {
+            files: [], items: [], types: html ? ['text/plain', 'text/html'] : ['text/plain'],
+            getData: (f: string) => (f === 'text/html' ? html ?? '' : text),
+        },
+    });
     act(() => { el.dispatchEvent(ev); });
     return ev;
 }
@@ -163,6 +171,20 @@ describe('a checklist pasted into a channel checklist', () => {
         const keys = createTask.mock.calls.map(c => c[4] as string);
         for (const k of keys) expect(k).toMatch(OP_KEY_SHAPE);
         expect(new Set(keys).size).toBe(keys.length);
+        expect(rows()).toEqual(ASSISTANT_ITEMS);
+    });
+
+    it('copied as RENDERED text, it reads from its HTML: the same steps and heading', async () => {
+        await mount({ channelId: 9 });
+        // POSITIVE CONTROL: the plain text alone, one item per line.
+        paste(input()!, ASSISTANT_RENDERED_TEXT);
+        expect(dialogLines()).toEqual(ASSISTANT_RENDERED_LINES);
+        act(() => { button('Cancel').click(); });
+        paste(input()!, ASSISTANT_RENDERED_TEXT, ASSISTANT_HTML);
+        expect(dialogLines()).toEqual(ASSISTANT_SHOWN);
+        act(() => { addN().click(); });
+        await paced(ASSISTANT_ITEMS.length);
+        expect(createTask.mock.calls.map(c => c[1])).toEqual(ASSISTANT_ITEMS);
         expect(rows()).toEqual(ASSISTANT_ITEMS);
     });
 

@@ -17,7 +17,7 @@ import { MAX_TAKEN_ITEMS, bodyToItems, plainInline, readChecklist, readPastedIte
 import { MAX_ITEM_LENGTH } from '../notes/model/notesModel';
 import { takeShare, type ComposeIntent } from '../notes/model/composeIntent';
 import { QuickAdd } from '../notes/components/QuickAdd';
-import { ASSISTANT_ANSWER, ASSISTANT_ITEMS, ASSISTANT_TITLE } from './fixtures/assistantChecklist';
+import { ASSISTANT_ADD, ASSISTANT_ANSWER, ASSISTANT_HTML, ASSISTANT_ITEMS, ASSISTANT_RENDERED_TEXT, ASSISTANT_TITLE } from './fixtures/assistantChecklist';
 
 /** What an assistant typically answers "a checklist for setting up a router" with. */
 const ASSISTANT = `Here's a checklist for setting up your new router:
@@ -202,9 +202,14 @@ describe('the composer', () => {
     const title = () => host.querySelector<HTMLInputElement>('input.notes-quickadd-title')!;
     const items = () => [...host.querySelectorAll<HTMLInputElement>('.notes-quickadd-item input')].map(i => i.value);
     const done = () => [...host.querySelectorAll('button')].find(b => b.textContent?.trim() === 'Done') as HTMLButtonElement;
-    function paste(el: Element, text: string) {
+    function paste(el: Element, text: string, html?: string) {
         const ev = new Event('paste', { bubbles: true, cancelable: true });
-        Object.defineProperty(ev, 'clipboardData', { value: { files: [], items: [], types: ['text/plain'], getData: () => text } });
+        Object.defineProperty(ev, 'clipboardData', {
+            value: {
+                files: [], items: [], types: html ? ['text/plain', 'text/html'] : ['text/plain'],
+                getData: (f: string) => (f === 'text/html' ? html ?? '' : text),
+            },
+        });
         act(() => { el.dispatchEvent(ev); });
         return ev;
     }
@@ -240,6 +245,18 @@ describe('the composer', () => {
         expect(onCreate).not.toHaveBeenCalled();
         await act(async () => { done().click(); });
         expect(onCreate).toHaveBeenCalledWith('Checklist for setting up your new router', expect.arrayContaining(['Change the admin password']), undefined);
+    });
+
+    it('an answer copied as RENDERED text into the TITLE: its HTML makes it the note, titled and sectioned', () => {
+        render(null);
+        // POSITIVE CONTROL: the plain text alone is no checklist, so it
+        // pastes as a title would.
+        expect(paste(title(), ASSISTANT_RENDERED_TEXT).defaultPrevented).toBe(false);
+        const ev = paste(title(), ASSISTANT_RENDERED_TEXT, ASSISTANT_HTML);
+        expect(ev.defaultPrevented, 'not one long title line').toBe(true);
+        act(() => { [...document.querySelectorAll('button')].find(b => b.textContent === ASSISTANT_ADD)!.click(); });
+        expect(title().value).toBe(ASSISTANT_TITLE);
+        expect(items()).toEqual(ASSISTANT_ITEMS);
     });
 
     it('pasted into an item of a new note: the same one question, then title and steps', () => {

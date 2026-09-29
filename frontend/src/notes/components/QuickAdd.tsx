@@ -30,7 +30,7 @@ import { MAX_ITEM_LENGTH, MAX_TITLE_LENGTH, cleanQuickItems } from '../model/not
 import { composeModeFor, type ComposeIntent } from '../model/composeIntent';
 import { type NoteExtras } from '../model/useListContent';
 import { type DrawingFiles } from '../../api/noteMedia';
-import { MAX_TAKEN_ITEMS, filesFromTransfer, isTextPaste, pasteAsOneLine, readPastedItems } from '../model/noteContent';
+import { MAX_TAKEN_ITEMS, filesFromTransfer, isTextPaste, pasteAsOneLine, readPaste } from '../model/noteContent';
 import { DrawingCanvas } from '../../components/DrawingCanvas';
 import { PastedLinesDialog } from '../../components/PastedLinesDialog';
 import { hasTransferFiles, ONLY_PICTURES } from '../model/pasteDrop';
@@ -301,14 +301,14 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     /** A paste into an item field. More than one line asks first — items are
      *  removed one at a time, so a silent forty-item paste is unrecoverable. */
     const onPasteItem = (i: number, e: React.ClipboardEvent<HTMLInputElement>) => {
-        const text = e.clipboardData?.getData('text') ?? '';
         // A picture goes to the root handler — but only when the root handler
         // will actually take it, which it does not for a text paste.
         if (!isTextPaste(e.clipboardData) && filesFromTransfer(e.clipboardData).images.length > 0) return;
         // A checklist from elsewhere reads as one (numbers, "**", headings
-        // and the "Here's how:" intro gone); anything else splits by line.
-        // Capped like a share (MAX_TAKEN_ITEMS), and the dialog says so.
-        const read = readPastedItems(text);
+        // and the "Here's how:" intro gone), from its HTML when it was copied
+        // as rendered text; anything else splits by line. Capped like a share
+        // (MAX_TAKEN_ITEMS), and the dialog says so.
+        const { text, read } = readPaste(e.clipboardData);
         if (!read) return;                      // one line pastes as normal
         e.preventDefault();
         setPaste({ lines: read.items, total: read.total, text, at: i, title: read.title });
@@ -317,7 +317,7 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     /** A paste into the TITLE: a checklist becomes the note (its heading the
      *  title) instead of one long title line; anything else pastes as normal. */
     const onPasteTitle = (e: React.ClipboardEvent<HTMLInputElement>) => {
-        const read = readPastedItems(e.clipboardData?.getData('text') ?? '', { checklistOnly: true });
+        const { read } = readPaste(e.clipboardData, { checklistOnly: true });
         if (!read) return;
         e.preventDefault();
         // Asked first, like any multi-line paste; added after what is there.

@@ -46,7 +46,10 @@ import { setMessageToastSink } from '../components/messageToastBus';
 import { LayerOnScreenContext } from '../components/portalTarget';
 import type { NoteActions } from '../notes/model/notesQueries';
 import type { NoteCard } from '../notes/model/notesModel';
-import { ASSISTANT_ADD, ASSISTANT_ANSWER, ASSISTANT_ITEMS, ASSISTANT_SHOWN, ASSISTANT_TITLE } from './fixtures/assistantChecklist';
+import {
+    ASSISTANT_ADD, ASSISTANT_ANSWER, ASSISTANT_HTML, ASSISTANT_ITEMS, ASSISTANT_RENDERED_LINES, ASSISTANT_RENDERED_TEXT,
+    ASSISTANT_SHOWN, ASSISTANT_TITLE,
+} from './fixtures/assistantChecklist';
 
 const LIST = { kind: 'list' as const, id: 1 };
 const card = { key: 'list:1', ref: LIST, title: 'Shopping', body: '', noteAttachments: null, labels: [], pinned: false, archived: false } as unknown as NoteCard;
@@ -56,8 +59,9 @@ const png = (name = 'shot.png') => new File([new Uint8Array([1, 2, 3])], name, {
 /** A paste, as the browser delivers it: a real event carrying a transfer.
  *  `sidecar` is the image Chromium puts on the clipboard BESIDE rich text (a
  *  Word paragraph, an Excel range), reachable only through `items` — the way
- *  filesFromTransfer's fallback finds it. */
-function paste(el: Element, data: { text?: string; files?: File[]; sidecar?: File }) {
+ *  filesFromTransfer's fallback finds it. `html` is the `text/html` beside
+ *  the text. */
+function paste(el: Element, data: { text?: string; html?: string; files?: File[]; sidecar?: File }) {
     const ev = new Event('paste', { bubbles: true, cancelable: true });
     const items = data.sidecar ? [{ kind: 'file', type: data.sidecar.type, getAsFile: () => data.sidecar }] : [];
     Object.defineProperty(ev, 'clipboardData', {
@@ -67,8 +71,9 @@ function paste(el: Element, data: { text?: string; files?: File[]; sidecar?: Fil
             types: [
                 ...(data.files?.length || data.sidecar ? ['Files'] : []),
                 ...(data.text ? ['text/plain'] : []),
+                ...(data.html ? ['text/html'] : []),
             ],
-            getData: () => data.text ?? '',
+            getData: (f: string) => (f === 'text/html' ? data.html ?? '' : data.text ?? ''),
         },
     });
     act(() => { el.dispatchEvent(ev); });
@@ -140,6 +145,21 @@ describe('a multi-line paste asks before it creates anything', () => {
         expect(dialogLines()).toEqual(['Milk', 'Bread', 'Eggs']);
         expect(itemInputs()).toHaveLength(1);          // nothing created yet
         expect(itemInputs()[0].value).toBe('');
+    });
+
+    it('an answer copied as RENDERED text: its HTML gives the title and the heading, not one line each', () => {
+        composer();
+        // POSITIVE CONTROL: the plain text alone, one item per line.
+        paste(itemInputs()[0], { text: ASSISTANT_RENDERED_TEXT });
+        expect(dialogLines()).toEqual(ASSISTANT_RENDERED_LINES);
+        act(() => { button('Cancel').click(); });
+        const ev = paste(itemInputs()[0], { text: ASSISTANT_RENDERED_TEXT, html: ASSISTANT_HTML });
+        expect(ev.defaultPrevented).toBe(true);
+        expect(dialogLines()).toEqual(ASSISTANT_SHOWN);
+        act(() => { button(ASSISTANT_ADD).click(); });
+        // Stored as it will be saved: the section a "## " row (a heading).
+        expect(itemInputs().map(i => i.value)).toEqual(ASSISTANT_ITEMS);
+        expect(document.querySelector<HTMLInputElement>('input.notes-quickadd-title')?.value).toBe(ASSISTANT_TITLE);
     });
 
     it('"Add 3 items" makes one item per line, in order', () => {
@@ -508,6 +528,26 @@ describe('a step-by-step checklist pasted into an OPEN note', () => {
         expect(e.added).toEqual(ASSISTANT_ITEMS);
         // An open note's add row never renames it: only its title does.
         expect(e.actions.renameNote).not.toHaveBeenCalled();
+    });
+
+    it('"Add an item…" and the title take an answer copied as RENDERED text from its HTML', async () => {
+        const e = openEditor({ title: 'Untitled note', contentRev: 4 } as Partial<NoteCard>);
+        // POSITIVE CONTROL: the plain text alone, one item per line.
+        paste(e.input, { text: ASSISTANT_RENDERED_TEXT });
+        expect(dialogLines()).toEqual(ASSISTANT_RENDERED_LINES);
+        act(() => { button('Cancel').click(); });
+        paste(e.input, { text: ASSISTANT_RENDERED_TEXT, html: ASSISTANT_HTML });
+        expect(dialogLines()).toEqual(ASSISTANT_SHOWN);
+        act(() => { addN().click(); });
+        await paced(ASSISTANT_ITEMS.length);
+        expect(e.added).toEqual(ASSISTANT_ITEMS);
+        // The title: without the HTML it is no checklist, and pastes as a title.
+        expect(paste(e.title, { text: ASSISTANT_RENDERED_TEXT }).defaultPrevented).toBe(false);
+        const ev = paste(e.title, { text: ASSISTANT_RENDERED_TEXT, html: ASSISTANT_HTML });
+        expect(ev.defaultPrevented, 'not one long title line').toBe(true);
+        act(() => { addN().click(); });
+        await paced(ASSISTANT_ITEMS.length);
+        expect(e.renamed).toEqual([[LIST, ASSISTANT_TITLE, 4]]);
     });
 
     it('the TITLE of an untitled personal note: asks, then adds the steps and takes the heading as its name', async () => {

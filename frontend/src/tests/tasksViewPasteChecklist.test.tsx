@@ -54,7 +54,10 @@ import { setActiveIdentity } from '../api/e2ee';
 import { setMessageToastSink } from '../components/messageToastBus';
 import { MAX_TAKEN_ITEMS } from '../notes/model/noteContent';
 import { testIdentity, warmIdentities, WARM_TIMEOUT_MS } from './fixtures/identities';
-import { ASSISTANT_ADD, ASSISTANT_ANSWER, ASSISTANT_ITEMS, ASSISTANT_SHOWN, ASSISTANT_STEPS, ASSISTANT_TITLE } from './fixtures/assistantChecklist';
+import {
+    ASSISTANT_ADD, ASSISTANT_ANSWER, ASSISTANT_HTML, ASSISTANT_ITEMS, ASSISTANT_RENDERED_LINES, ASSISTANT_RENDERED_TEXT,
+    ASSISTANT_SHOWN, ASSISTANT_STEPS, ASSISTANT_TITLE,
+} from './fixtures/assistantChecklist';
 
 const ME = ['paste-checklist-pw', 'ab'.repeat(16)] as const;
 
@@ -189,10 +192,16 @@ function typeInto(el: HTMLInputElement, value: string) {
     });
 }
 
-/** A paste, as the browser delivers it: a real event carrying the text. */
-function paste(el: Element, text: string) {
+/** A paste, as the browser delivers it: a real event carrying the text,
+ *  and the HTML beside it when there is one. */
+function paste(el: Element, text: string, html?: string) {
     const ev = new Event('paste', { bubbles: true, cancelable: true });
-    Object.defineProperty(ev, 'clipboardData', { value: { files: [], items: [], types: ['text/plain'], getData: () => text } });
+    Object.defineProperty(ev, 'clipboardData', {
+        value: {
+            files: [], items: [], types: html ? ['text/plain', 'text/html'] : ['text/plain'],
+            getData: (f: string) => (f === 'text/html' ? html ?? '' : text),
+        },
+    });
     act(() => { el.dispatchEvent(ev); });
     return ev;
 }
@@ -242,6 +251,23 @@ describe('"Add a task…" takes a pasted checklist', () => {
         // The text is sealed on the wire, never beside the key.
         expect(JSON.stringify(post.mock.calls)).not.toContain('Unplug');
         expect(toasts).toEqual([]);
+    });
+
+    it('the same answer copied as RENDERED text reads from its HTML: the same steps, the same heading', async () => {
+        await mount();
+        await openList('List 1');
+        // POSITIVE CONTROL: its plain text alone is one item per line, the
+        // title and the section among them.
+        paste(addInput(), ASSISTANT_RENDERED_TEXT);
+        expect(dialogLines()).toEqual(ASSISTANT_RENDERED_LINES);
+        act(() => { button('Cancel').click(); });
+        const ev = paste(addInput(), ASSISTANT_RENDERED_TEXT, ASSISTANT_HTML);
+        expect(ev.defaultPrevented).toBe(true);
+        expect(dialogLines()).toEqual(ASSISTANT_SHOWN);
+        act(() => { button(ASSISTANT_ADD).click(); });
+        await paced(ASSISTANT_ITEMS.length);
+        expect(rows()).toEqual(ASSISTANT_ITEMS);
+        expect(tabCount('List 1')).toBe(`0/${ASSISTANT_STEPS}`);
     });
 
     it('Cancel creates nothing; "Add as one item" only fills the box', async () => {
@@ -430,6 +456,21 @@ describe('the "New list" name takes a pasted checklist', () => {
         expect(itemPosts(100)).toHaveLength(ASSISTANT_ITEMS.length);
         expect(rows()).toEqual(ASSISTANT_ITEMS);
         expect(container.querySelector('.tasks-tab-newform')).toBeNull();
+    });
+
+    it('copied as RENDERED text, it is named after the heading its HTML still has', async () => {
+        await mount();
+        const name = await openNewList();
+        // POSITIVE CONTROL: its plain text alone is no checklist, so it
+        // pastes as a name.
+        expect(paste(name, ASSISTANT_RENDERED_TEXT).defaultPrevented).toBe(false);
+        const ev = paste(name, ASSISTANT_RENDERED_TEXT, ASSISTANT_HTML);
+        expect(ev.defaultPrevented).toBe(true);
+        expect(dialog()?.textContent).toContain(`This makes a new list, “${ASSISTANT_TITLE}”.`);
+        act(() => { button(ASSISTANT_ADD).click(); });
+        await paced(ASSISTANT_ITEMS.length);
+        expect(container.querySelector('.tasks-editor-title')?.textContent).toBe(ASSISTANT_TITLE);
+        expect(rows()).toEqual(ASSISTANT_ITEMS);
     });
 
     it('what was typed there names it instead', async () => {
