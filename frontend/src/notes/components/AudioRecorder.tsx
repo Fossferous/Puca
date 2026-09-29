@@ -9,8 +9,9 @@
  *  - FOREGROUND ONLY. Exactly one getUserMedia stream, stopped on Stop, on
  *    Discard, on unmount, on `visibilitychange`/`pagehide`, and — Notes inside
  *    the Púca desktop app — when the person switches to another view
- *    (components/portalTarget.ts, useLayerOnScreen): nothing here can record with Notes off the screen,
- *    and there is no service behind it (docs/NOTES.md, "The Android app").
+ *    (useLayerOnScreen, components/portalTarget.ts): nothing here can
+ *    record with Notes off the screen, and there is no service behind it
+ *    (docs/NOTES.md, "The Android app").
  *  - NOTHING PLAYS BY ITSELF. The preview is an <audio controls> with no
  *    autoplay and no call to play(); sound happens because someone pressed
  *    play, never because a recording finished.
