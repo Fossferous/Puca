@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.828 — 2026-09-29
 
+Send diagnostics to the server owner in one click, and going live logs where its time goes.
 ### Added
 - **Send diagnostics to the server owner.** When a call or stream misbehaves,
   **Settings → Advanced → Send diagnostics to the server owner** (or the
