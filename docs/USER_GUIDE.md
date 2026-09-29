@@ -352,7 +352,7 @@ confirmation first.
 - Click **Direct Messages** at the top of the server rail, then **Tasks** in the left column
 - The tab bar holds **All tasks**, **Calendar**, **Reminders**, your lists and every checklist channel from your servers; **New list** (the plus at its right end) starts a list
 - **Refresh** (the circling arrows at the right end of the tab bar) reads your lists again, so a change made on another device shows without leaving Tasks; what you type or tick, just before or while it reads, is saved first and stays as it is
-- Start an item with `## ` (say, `## Before you start`) to make it a **heading**: a section title with no checkbox that is not counted as a task. **Turn into heading** on a row does the same, and **Turn into item** turns it back
+- Start an item with `## ` (say, `## Before you start`) to make it a **heading**: a section title with no checkbox that is not counted as a task. **Turn into heading** on a row does the same, and **Turn into item** turns it back. A heading that still has a due time (an older version can give it one) shows **Remove due time**
 
 ### Paste a checklist
 - Paste step-by-step instructions — say, an AI assistant's answer — into **Add a task…** in a list, or **Add an item…** in a checklist channel, and Púca asks first
@@ -389,7 +389,8 @@ Inside Notes:
   from the clock, attach pictures from the paperclip.
 - An item that starts with `## ` is a **heading** — a section title with no
   checkbox, never counted as a step; **Turn into heading** on an item makes
-  one, and **Turn into item** turns it back.
+  one, and **Turn into item** turns it back. One that still has a due time
+  shows **Remove due time**.
 - **Pin** keeps a note at the top (it is the same favourite as the Tasks tab
   bar). **Colour**, **Labels** and **Archive** are Notes' own, and follow your
   account to every device, sealed. **Search** looks through titles and items.

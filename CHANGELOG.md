@@ -15,8 +15,14 @@ one-line summary; this file is the full story. Versions follow
   **Delete checked**, **Reminders** and the calendar see only the steps.
   Before, each one became one more item to tick ("Before you start:"). To
   make one yourself, start an item with `## `, or use **Turn into heading**
-  on a row; **Turn into item** turns it back, and an item with a due time
-  asks first, because a heading has none. A heading is edited, dragged and
+  on a row; **Turn into item** turns it back. An item with a due time asks
+  first, because a heading has none, and a ticked one is unticked on the
+  way. A heading that turns up with a time anyway (one an older version
+  gave it) shows a single **Remove due time** button, so it cannot remind
+  you with nothing on screen to stop it. Only a line that is nothing but a
+  heading becomes one: a pasted list line such as "- # of guests", a
+  `# comment` inside a code block, and whatever the calendar or an `.ics`
+  import adds stay items, `#` and all. A heading is edited, dragged and
   deleted like any row, and stays at the top of the list's nesting: the
   steps after it are its section, not its subtasks. **Copy as text**,
   **Export** and **Send to Púca** write it as a Markdown `## ` section,
@@ -28,7 +34,8 @@ one-line summary; this file is the full story. Versions follow
   sealed like any other, so nothing changed on the server — which also
   means an older version of Púca shows it as an item reading "## Before you
   start", and a count taken before a list's items have loaded (a tab not
-  opened yet, a note in the trash) still includes its headings.
+  opened yet, a note in the trash, a tab whose list was changed on another
+  device since you last opened it) still includes its headings.
 - **A checklist copied off the page keeps its title and headings.** Select
   an assistant's answer (or a list on a web page) and copy it, rather than
   using its Copy button, and the copied text has lost its `#` and `- [ ]`,
@@ -36,12 +43,25 @@ one-line summary; this file is the full story. Versions follow
   every heading each one more box to tick. A paste now also reads the
   formatting the clipboard carries beside the text (its headings, list
   items and checkboxes), so it lands exactly as the Markdown would have: the
-  title, the headings as headings, the steps. Anything that is not a
+  title, the headings as headings, the steps. Text that is already Markdown
+  with its own headings (copied out of a code editor, or with the Copy
+  button) is read as it was written, and a selection of one of Púca's own
+  lists pastes back with its headings. Anything that is not a
   checklist pastes as it always did. The formatting is only read, never
   shown or run, and one too big or too tangled to read in a moment is not
   read at all, so no paste can freeze the app. Everywhere a checklist can
   be pasted: the Notes composer, an open note, Púca's Tasks view and every
   checklist channel.
+
+### Fixed
+- **A pasted note copied with Copy as text gains no extra first item.** A
+  note that was pinned, labelled or shared in a channel is copied with a
+  line under its title ("pinned · labels: work"), and pasting it back made
+  that line an item to tick. It is now read as what it is and left out.
+- **A title or heading that ends in a hash keeps it.** "# Learn C#" pasted
+  as a checklist named the note "Learn C", and a "## Learn C#" section lost
+  its "#" the same way. Only Markdown's own closing hashes, after a space,
+  are dropped now.
 
 ## 0.9.826 — 2026-09-29
 

@@ -60,16 +60,37 @@ Púca's reminders. Anything you do in one is what you see in the other.
   with `## ` — in *Add an item…*, the composer, or over an existing item —
   to make one; the row's **Turn into heading** button does it for a
   top-level item and **Turn into item** undoes it. An item with a due time
-  or a date & repeat asks first, and loses it before it becomes a heading:
-  nothing reminds about a section title. A heading is a TOP-LEVEL row: the
+  or a date & repeat asks first, and loses it as it becomes a heading:
+  nothing reminds about a section title. A ticked item (typed over in
+  Completed) is unticked on the way — the server keeps a ticked row among
+  the done ones, where a heading could never be dragged into its section —
+  and a member who may edit it but not tick it is told so and nothing is
+  written. The writes go out side by side, so a refused clear could still
+  leave a heading with a time; a heading that has one anyway (an older
+  version's, or that) shows ONE time control, *Remove due time* (or
+  *Remove date & repeat*), rather than hide a reminder nothing on screen
+  could stop. Only a line that is nothing but a heading is one: a list
+  line whose text starts with `# ` (`- # of guests`), a `# comment` inside
+  a fenced code block, a heading turned back into an item whose label
+  itself starts with `# `, and anything the calendar or an `.ics` import
+  adds (all timed) are ITEMS — the space after their `#` is stored as a
+  no-break space, which looks the same and which neither this rule nor
+  Markdown reads as a heading, so they copy out and paste back unchanged.
+  A heading is a TOP-LEVEL row: the
   items after it are its section, as siblings, not its subtasks, so a drag
   never nests a heading or an item under one (a `## x` nested under an item,
-  which only an older version can put there, is an ordinary sub-item). It is
+  which only an older version can put there, is an ordinary sub-item; one
+  with a time is not dragged out to the top level, where it would be a
+  heading that still reminds — remove its time first). It is
   stored as nothing more than the item's text (`api/taskHeading.ts` is the
   one rule every surface asks), sealed like any other: the server has no
   new field and cannot tell a heading from an item, so a count it gives
   before the items are read — a Tasks tab not opened yet, the trash's *N
-  items* — still includes headings, and an older Púca shows the row as an
+  items* — still includes headings. The Tasks view takes off the headings
+  it has read only while the server still counts the rows it read them
+  among: a list changed since (another device, Púca Notes) shows the
+  server's count until it is opened again, rather than a stale subtraction
+  counting its steps short. An older Púca shows the row as an
   item reading `## Before you start`. *Copy as text* and the Markdown
   export write it as a `## ` section, the JSON export marks it
   `"heading": true`, *Hide checkboxes* writes it as a `## ` line that *Show
@@ -229,10 +250,20 @@ Púca's reminders. Anything you do in one is what you see in the other.
   (selected on the page rather than taken with the assistant's Copy button)
   has no `#` or `- [ ]` left in its plain text, so a paste reads the HTML the
   clipboard carries beside it, whose headings, list items and checkboxes
-  give the same title, headings and steps; HTML that is not a checklist, or
+  give the same title, headings and steps (and a row of Púca's own list is
+  a `role="heading"` item, so a selection of one pastes back with its
+  headings). Plain text that is already Markdown with heading lines of its
+  own — a code editor's copy, whose HTML is one `<div>` a line with its
+  indents lost, or an app's Copy button — is the list as it was written
+  and is read instead (`readBestChecklist`); a plain text that kept its
+  list marks but no heading line takes the HTML only when that has
+  headings. HTML that is not a checklist, or
   is too large or too tangled to read cheaply, falls back to the plain text,
   and it is only ever parsed inert (`notes/model/pastedHtml.ts`: nothing in
-  it runs or loads). A wrapped line, or a
+  it runs or loads). A wholly italic line before the list — the
+  `_pinned · labels: work_` that *Copy as text* writes under a note's title
+  — is a subtitle, never an item, so a copied note pastes back as it was. A
+  wrapped line, or a
   code block under a step, joins that step. Closing sentences ("That's it!") are dropped. The reader
   (`readChecklist`, `notes/model/noteContent.ts`) takes at least two list lines and
   no more sentences than list lines around them, so a paragraph that happens to
