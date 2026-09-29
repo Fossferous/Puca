@@ -328,6 +328,7 @@ cd frontend && node e2e/h264-profile-real-browser.mjs   # real encoder choice pe
 cd frontend && node e2e/stream-stats-real-browser.mjs   # Show Stream Stats' reducer on REAL getStats reports (bundles the real module); no server needed
 cd frontend && node e2e/share-quality-live-real-browser.mjs   # a LIVE share re-sized up and down in a real browser (own tab only); no server needed
 cd frontend && node e2e/notes-walk.mjs                  # Púca Notes end to end; needs a dist built against a throwaway backend + serve-dist (header of the file)
+cd frontend && node e2e/notes-desktop-embed.mjs         # Púca Notes INSIDE the desktop app, under a fake Tauri shell; needs the main bundle built against a throwaway backend into its own --outDir + serve-dist (header of the file)
 ```
 
 **`h264-profile-real-browser.mjs` exists because the share encoded in SOFTWARE
@@ -358,6 +359,19 @@ peer-to-peer file transfer at once, for every user of that deployment. This
 script hands each shape the backend can emit to a real Chromium and asserts it
 constructs, with negative controls so a browser that accepted anything would
 fail the run rather than pass it vacuously. It needs no server and no build.
+
+**`notes-desktop-embed.mjs` is REQUIRED because Notes inside the desktop app
+renders only under Tauri.** `NotesDesktopView` is lazy and Chat mounts it only
+when `isTauri()`, so `notes-walk.mjs` (Notes' own `/notes/` page) never reaches
+it, and the vitest suites mount its pieces under jsdom with the shell mocked.
+The walk injects a fake `window.__TAURI_INTERNALS__` before any page script
+(every command the app sends has a deliberate answer, and a command the table
+does not know FAILS the run), then drives the built main bundle: the rail opens
+Notes with no navigation and the same socket, a pasted checklist, search, a
+colour and a label, a channel and back with Notes kept, `c`, `/` and `?`
+pressed in the chat (Notes must not act), Púca's own toasts, Export through
+`attachment_save`, and a sign-out that leaves no Notes cache. Its negative
+control is the same rail button with no shell, which must open the Tasks view.
 
 **The JUnit gate is REQUIRED and was missing from this list until 0.8.68.**
 `frontend/android/app/src/test/` holds the pure-Java decision logic —
