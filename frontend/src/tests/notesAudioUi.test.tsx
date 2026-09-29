@@ -264,6 +264,62 @@ describe('AudioRecorder: the microphone', () => {
         expect(sheet('audio'), 'the guard swallowed a take the user asked to keep').not.toBeNull();
     });
 
+    /**
+     * The permission prompt can take as long as the person does (WebView2's
+     * own, on a first voice note), and every release above can run while it
+     * is up — before there is a stream to stop. The answer that lands after
+     * Notes left the screen, or after the sheet is gone, must not start a
+     * recording nobody can see or stop.
+     */
+    describe('a microphone that arrives late', () => {
+        let grant: () => void = () => {};
+        beforeEach(() => {
+            vi.spyOn(window, 'confirm').mockReturnValue(true);
+            navigator.mediaDevices.getUserMedia = vi.fn(() => new Promise<MediaStream>(resolve => {
+                grant = () => {
+                    const t = { stopped: false, stop() { this.stopped = true; } };
+                    tracks.push(t);
+                    resolve({ getTracks: () => tracks } as unknown as MediaStream);
+                };
+            })) as unknown as typeof navigator.mediaDevices.getUserMedia;
+        });
+        const at = (onScreen: boolean) => (
+            <LayerOnScreenContext.Provider value={onScreen}>
+                <AudioRecorder onSave={() => true} onCancel={() => {}} />
+            </LayerOnScreenContext.Provider>
+        );
+        const recording = () => recorderInstances.some(r => r.state === 'recording');
+
+        it('POSITIVE CONTROL: granted while on screen, it records', async () => {
+            await act(async () => { root.render(at(true)); });
+            await act(async () => { grant(); });
+            await settle();
+            expect(recording()).toBe(true);
+            expect(tracks[0].stopped).toBe(false);
+        });
+
+        it('granted after Notes left the screen, it lets go at once and says nothing was recorded', async () => {
+            await act(async () => { root.render(at(true)); });
+            await act(async () => { root.render(at(false)); });
+            await act(async () => { grant(); });
+            await settle();
+            expect(recording(), 'recording with Notes off the screen').toBe(false);
+            expect(tracks[0].stopped, 'the microphone was left on').toBe(true);
+            await act(async () => { root.render(at(true)); });
+            expect(sheet('button[aria-label="Stop recording"]')).toBeNull();
+            expect(sheet('.notes-recorder-hint.warn')?.textContent).toMatch(/nothing was recorded/i);
+        });
+
+        it('granted after the sheet closed (Close, a sign-out), it lets go at once', async () => {
+            await act(async () => { root.render(at(true)); });
+            await act(async () => { root.render(<div />); });
+            await act(async () => { grant(); });
+            await settle();
+            expect(recording(), 'recording with no sheet at all').toBe(false);
+            expect(tracks[0].stopped, 'the microphone was left on').toBe(true);
+        });
+    });
+
     it('a refused microphone says so and records nothing', async () => {
         installMic(false);
         vi.spyOn(window, 'confirm').mockReturnValue(true);

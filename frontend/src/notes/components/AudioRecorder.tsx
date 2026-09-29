@@ -9,9 +9,10 @@
  *  - FOREGROUND ONLY. Exactly one getUserMedia stream, stopped on Stop, on
  *    Discard, on unmount, on `visibilitychange`/`pagehide`, and — Notes inside
  *    the Púca desktop app — when the person switches to another view
- *    (useLayerOnScreen, components/portalTarget.ts): nothing here can
- *    record with Notes off the screen, and there is no service behind it
- *    (docs/NOTES.md, "The Android app").
+ *    (useLayerOnScreen, components/portalTarget.ts); a microphone granted
+ *    only after the sheet closed or Notes left the screen is let go as it
+ *    arrives. Nothing here can record with Notes off the screen, and there
+ *    is no service behind it (docs/NOTES.md, "The Android app").
  *  - NOTHING PLAYS BY ITSELF. The preview is an <audio controls> with no
  *    autoplay and no call to play(); sound happens because someone pressed
  *    play, never because a recording finished.
@@ -101,8 +102,14 @@ export function AudioRecorder({ onSave, onCancel }: Props) {
         };
     }, [release]);
     // The same, when the page stays but Notes leaves it (the desktop app).
+    // `onScreenRef` is set in the same effect, before the release, for the
+    // microphone that arrives AFTER it (begin).
     const onScreen = useLayerOnScreen();
-    useEffect(() => { if (!onScreen) release(); }, [onScreen, release]);
+    const onScreenRef = useRef(onScreen);
+    useEffect(() => {
+        onScreenRef.current = onScreen;
+        if (!onScreen) release();
+    }, [onScreen, release]);
 
     // Unmount: the microphone goes, and a take nobody kept is freed.
     // `alive` is set on the way IN as well, because StrictMode mounts, tears
@@ -136,6 +143,18 @@ export function AudioRecorder({ onSave, onCancel }: Props) {
             stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         } catch {
             setError('Púca Notes can’t use the microphone. Allow it for this app, then try again.');
+            setPhase('refused');
+            return;
+        }
+        // The prompt can stay up as long as the person takes to answer it,
+        // and every release above may have run meanwhile, with no stream to
+        // stop yet. Granted after the sheet closed, or after Notes left the
+        // screen: let go of it now, and record nothing.
+        if (!alive.current || !onScreenRef.current) {
+            for (const t of stream.getTracks()) {
+                try { t.stop(); } catch { /* already stopped */ }
+            }
+            setError('Nothing was recorded: Púca Notes left the screen before the microphone was ready.');
             setPhase('refused');
             return;
         }
