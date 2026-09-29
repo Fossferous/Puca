@@ -22,6 +22,13 @@ one-line summary; this file is the full story. Versions follow
   the file goes. In the full and the Lite desktop app alike; the web app and
   the phone apps are unchanged.
 
+### Fixed
+- **A calendar export the PC cannot save now says why.** When **Export
+  .ics…** could not write its file on the desktop, for example into a folder
+  you may not write to or onto a drive that is not ready, the Tasks view's
+  and Púca Notes' calendars said only "Export failed". They now show the
+  reason Windows gave, and so does Notes' **Export notes**.
+
 ## 0.9.825 — 2026-09-28
 
 Change your stream's resolution and frame rate while you are live, and a step-by-step list from an assistant goes into Púca Notes as a checklist.
