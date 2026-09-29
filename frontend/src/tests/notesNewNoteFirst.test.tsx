@@ -220,6 +220,33 @@ describe('a note made in Púca Notes goes first under the pinned ones', () => {
         expect(show(prefsOps()[1].prefs)).toBe('1*,2*,51,50,3,4');          // built on the first, not on a stale copy
     });
 
+    it('online, the grid then shows the order as SAVED — with a pin another device made that this one had not read', async () => {
+        const actions = await mountActions();
+        // The order the outbox wrote the note into (notesOutbox.ts execOp):
+        // the server's, where another device has pinned 4 meanwhile.
+        H.sendNoteOp.mockImplementation(async (op: NoteOp) => (op.k === 'prefs'
+            ? { queued: false, value: [pref(4, true), pref(1, true), pref(2, true), pref(50), pref(3)] }
+            : { queued: false, value: undefined }));
+        await act(async () => { await actions().createNote('Groceries', ['Milk']); });
+        await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+        expect(show(qc.getQueryData(notesKeys.prefs))).toBe('4*,1*,2*,50,3');
+    });
+
+    it('…but only the latest save puts its answer up: a placement answered after the next save has gone out leaves the screen to that one', async () => {
+        const actions = await mountActions();
+        const answers: Array<(v: TaskTabPref[]) => void> = [];
+        H.sendNoteOp.mockImplementation((op: NoteOp) => (op.k === 'prefs'
+            ? new Promise(r => { answers.push(v => r({ queued: false, value: v })); })
+            : Promise.resolve({ queued: false as const, value: undefined })));
+        await act(async () => { await actions().createNote('One', ['a']); });
+        await act(async () => { await actions().createNote('Two', ['b']); });
+        expect(answers).toHaveLength(2);
+        await act(async () => { answers[0]([pref(1, true), pref(2, true), pref(50), pref(3), pref(4)]); });
+        expect(show(qc.getQueryData(notesKeys.prefs))).toBe('1*,2*,51,50,3,4');   // not the older answer
+        await act(async () => { answers[1]([pref(1, true), pref(2, true), pref(51), pref(50), pref(3), pref(4), pref(8)]); });
+        expect(show(qc.getQueryData(notesKeys.prefs))).toBe('1*,2*,51,50,3,4,8');
+    });
+
     it('a note made some other way (a calendar import) is placed through actions.placeNewNote', async () => {
         const actions = await mountActions();
         act(() => { actions().placeNewNote({ kind: 'list', id: 77 }); });

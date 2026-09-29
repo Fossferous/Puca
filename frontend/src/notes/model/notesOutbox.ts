@@ -38,7 +38,10 @@
  * elsewhere in the meantime (docs/NOTES.md says so). A RENAME replayed off
  * the queue is last-write-wins too, deliberately (see `renameList`). Pins
  * and order are replayed as intents against the server's CURRENT set, never
- * as a stale full replace.
+ * as a stale full replace — and a new note's place is such an intent even
+ * online. This page's pin and order writes go out one at a time, in the
+ * order they were made (`prefsTurn`), so a pin saved while a new note's
+ * place is between its read and its write is not undone by it.
  *
  * A NOTE'S TEXT IS NOT LAST-WRITE-WINS, queued or not. A replayed `setBody`
  * names the revision the typing started from (migration 069), and when
@@ -100,6 +103,7 @@ import {
 import { type ContentWrite, watchContentWrites } from '../../api/listConflict';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { isReplayGone, newOpKey } from '../../api/opKey';
+import { SerialQueue } from '../../api/serialQueue';
 import { type TaskAttachmentRef } from '../../api/tasks';
 import { addNoteRefs, fileIdsOf, removeNoteRefs, uploadParkedMedia } from '../../api/noteMedia';
 import { appParkedStore, type ParkedStore } from './notesBlobs';
@@ -116,9 +120,9 @@ export type PrefsIntent =
     | { type: 'pins'; tabs: TaskTabRef[]; favorite: boolean }
     | { type: 'order'; keys: string[] }
     // A note just made goes first among the unpinned (api/tasks.ts
-    // placeNewTabPrefs). Queued right behind its create, and replayed against
-    // the server's order as it is THEN, so a note made offline lands first
-    // without a stale full replace putting back the order this device saw.
+    // placeNewTabPrefs). Always placed against the server's order as it is
+    // when it runs — online at once, offline queued right behind its create —
+    // so no stale full replace puts back the order this device saw.
     | { type: 'created'; tab: TaskTabRef };
 
 type OpBody =
@@ -294,7 +298,8 @@ type IdMap = Record<string, number>;
 export interface AddedParked { id: string; ref: TaskAttachmentRef }
 
 /** Run one op against the server. `fromQueue` = a replay: pins and order are
- *  re-derived from the server's current set instead of PUT as captured. */
+ *  re-derived from the server's current set instead of PUT as captured. A
+ *  new note's place always is, and answers the order as saved. */
 export async function execOp(op: OpBody, idMap: IdMap, fromQueue: boolean, parked: ParkedStore = appParkedStore): Promise<unknown> {
     const r = (id: number): number => {
         if (id >= 0) return id;
@@ -401,10 +406,19 @@ export async function execOp(op: OpBody, idMap: IdMap, fromQueue: boolean, parke
         // server really held is taken out, and only its uploads deleted.
         case 'removeMedia': return removeNoteRefs(r(op.listId), op.removing);
         case 'prefs': {
-            if (!fromQueue) return putTaskTabPrefs(op.prefs);
+            // Inline, a pin or a move is the set this page shows, PUT as it
+            // is. A new note's place never is: nobody asked for a reorder,
+            // and this page's copy of the order can be behind another
+            // device's pin or move (a cache restored at a cold start, a live
+            // stream still reconnecting), which a full replace of it would
+            // undo. It is an insert into the order the server holds NOW,
+            // inline as on replay.
+            if (!fromQueue && op.intent.type !== 'created') return putTaskTabPrefs(op.prefs);
             const current = await getTaskTabPrefs();
             const next = applyPrefsIntent(current, op.intent, idMap);
-            return next === null ? undefined : putTaskTabPrefs(next);
+            if (next !== null) await putTaskTabPrefs(next);
+            // The order as it is now saved: what the page shows next.
+            return next ?? current;
         }
     }
 }
@@ -801,6 +815,10 @@ export function createOutbox(deps: OutboxDeps): Outbox {
         collecting?.push(w);
     });
 
+    /** This page's pin and order writes sent inline, one at a time. Replay
+     *  needs none: while anything is queued, a new one queues behind it. */
+    const prefsTurn = new SerialQueue();
+
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let backoffMs = 2_000;
     const scheduleReplay = (ms: number) => {
@@ -942,7 +960,10 @@ export function createOutbox(deps: OutboxDeps): Outbox {
             }
             const done = beginNoteWrite(busyKeyOf(op));
             try {
-                const value = await execTracked(op, { ...view.ids }, false) as T;
+                const run = () => execTracked(op, { ...view.ids }, false);
+                // A pin or a move waits for a new note's place to be read and
+                // written, and that for them (the module header).
+                const value = await (op.k === 'prefs' ? prefsTurn.run(run) : run()) as T;
                 return { queued: false as const, value };
             } catch (err) {
                 if (!isNetworkError(err)) throw err;

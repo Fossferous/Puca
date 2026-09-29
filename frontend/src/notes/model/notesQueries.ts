@@ -535,11 +535,15 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
     const prefSeq = useRef(0);
 
     /** Put a pin/order set on screen and send it (queued offline). Only the
-     *  latest save may roll back, to `before`. */
+     *  latest save may roll back, to `before` — and only the latest may put
+     *  up the order a new note's place was saved into (placeNewNote). */
     const sendPrefs = useCallback((next: TaskTabPref[], intent: PrefsIntent, before: TaskTabPref[]) => {
         const seq = ++prefSeq.current;
         qc.setQueryData<TaskTabPref[]>(notesKeys.prefs, next);
-        sendNoteOp(ops.prefs(next, intent)).catch(err => {
+        sendNoteOp<TaskTabPref[] | undefined>(ops.prefs(next, intent)).then(sent => {
+            if (intent.type !== 'created' || sent.queued || !Array.isArray(sent.value)) return;
+            if (prefSeq.current === seq) qc.setQueryData<TaskTabPref[]>(notesKeys.prefs, sent.value);
+        }, err => {
             console.error('[notes] saving pins/order failed:', err);
             pushMessageToast({ title: 'Couldn’t save the pin or order — check your connection' });
             if (prefSeq.current === seq) qc.setQueryData<TaskTabPref[]>(notesKeys.prefs, before);
@@ -550,16 +554,19 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
      * A note just made goes FIRST among the unpinned, directly under the
      * pinned ones (api/tasks.ts placeNewTabPrefs) — in the saved order, which
      * is Púca's Tasks tab bar too, so it is first there after the favourites
-     * and on every other device. One save through the same outbox as a pin:
-     * behind its own create when that was queued offline, and placed against
-     * the server's order when it replays.
+     * and on every other device. One save through the same outbox as a pin,
+     * but never a full replace of this page's copy of the order, which can be
+     * behind another device's pin or move: it is an insert into the order the
+     * server holds when it runs (notesOutbox.ts execOp) — at once online,
+     * behind its own create when that was queued offline. The insert shows at
+     * once, and then the order as saved (sendPrefs).
      *
      * Silent where savePrefs speaks, because nobody asked for a reorder: an
-     * order that was never read gets no full replace built on a guess (the
-     * note then lands where the order puts a note it has never seen, after
-     * the others), and the trash need not have been read — only an insert is
-     * made, so no hidden note's slot has to be put back. It reads the cache,
-     * not the render's copy, so two notes made back to back both land.
+     * order this page has never read gets no save (the note then lands where
+     * the order puts a note it has never seen, after the others), and the
+     * trash need not have been read — only an insert is made, so no hidden
+     * note's slot has to be put back. It reads the cache, not the render's
+     * copy, so two notes made back to back both land.
      */
     const placeNewNote = useCallback((note: NoteRef) => {
         const current = qc.getQueryData<TaskTabPref[]>(notesKeys.prefs);

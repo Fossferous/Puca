@@ -16,7 +16,8 @@ one-line summary; this file is the full story. Versions follow
   on its **Calendar** tab: the new list is the first tab after your
   favourites (an imported one now shows on the bar straight away, not only
   after **Refresh** or leaving Tasks). Your pinned notes stay where they
-  are and the others keep their order. It is the one saved order both apps
+  are and the others keep their order, a pin or a move you have just made,
+  here or on another device, included. It is the one saved order both apps
   share, so the note is still at the top after a reload and on your other
   devices, and a note made offline takes its place there when it syncs.
   Sorting by **Title**, **Newest** or **Edited** is unchanged.

@@ -578,12 +578,15 @@ export function toggleFavoriteKeepingHidden<T extends TaskTabRef>(
  * for a list made where no fresh copy of the order is at hand: Save to Notes
  * in a conversation, and Púca's Tasks view, which reads the order once, when
  * it opens (its New list, and its calendar's import). Read, insert, write
- * back: what a queued placement does when it replays
+ * back: what Notes' placement does, online and on replay
  * (notes/model/notesOutbox.ts), so another device's reorder since is kept
- * rather than replaced. Best effort, and never throws: the note exists
- * either way, and a failure only leaves it where the order puts a list it
- * has never seen — after the others. Answers the order as it is now saved,
- * or null when it could not be read or written.
+ * rather than replaced. A caller that also writes the order itself sends
+ * this in turn with those writes (TasksView's prefsWrites), or one lands
+ * between this read and this write and is undone by it. Best effort, and
+ * never throws: the note exists either way, and a failure only leaves it
+ * where the order puts a list it has never seen — after the others. Answers
+ * the order as it is now saved, or null when it could not be read or
+ * written.
  */
 export async function placeNewListFirst(listId: number): Promise<TaskTabPref[] | null> {
     try {

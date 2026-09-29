@@ -345,23 +345,35 @@ move for it.
 In Púca Notes the place goes out as one pin/order save through the same
 outbox as a pin, the moment the list exists and before its items (the live
 stream reads the listing again straight away, and a note placed afterwards
-would show at the bottom and then jump). Made offline, it is queued right
-behind its create and applied to the order the server holds when it lands,
-not to the one this device saw, so another device's reorder in the meantime
-is kept. Púca's Tasks view (its *New list*, and a calendar imported into a
-new note on its *Calendar* tab) and *Save to Notes* in a conversation do the
-same at once — read the server's order, insert, write it back
+would show at the bottom and then jump). It is never a full replace of this
+device's copy of the order, which can be behind another device's pin or
+move (a cache restored at a cold start, a live stream still reconnecting):
+it is an insert into the order the server holds when it runs — at once
+online, and made offline, queued right behind its create and applied when it
+lands — so another device's change in the meantime is kept, and the grid then
+shows the order as saved. Púca's Tasks view (its *New list*, and a calendar
+imported into a new note on its *Calendar* tab) and *Save to Notes* in a
+conversation do the same — read the server's order, insert, write it back
 (`placeNewListFirst` in `frontend/src/api/listContent.ts`) — because the
 Tasks bar reads the order once, when it opens, and a full replace of that
 copy would put back an order another device has changed since. The Tasks
 view puts the new list on its bar straight away and takes the order that
 write answers as its own copy, so a drag or a favourite made there next
-keeps the new list where it went. Where the order cannot be read (an old or
-unreachable server, or, in Notes, before it has ever been read on that
-device), nothing is saved and the note lands where the order puts a note it
-has never seen: after the others. That is also where a note made by an older
-Púca or Notes goes, and where the queue's own *"(offline copy)"* of text that
-lost to another device's lands.
+keeps the new list where it went. Both front doors send their order writes
+one at a time, in the order they were made
+(`frontend/src/api/serialQueue.ts`): a pin, a favourite or a drag made while
+a new note's place is between its read and its write waits for it, rather
+than being undone by it. The saved order carries no revision to compare
+against, so a change another device (or another tab) saves in that same
+moment — one round trip — can still be lost; a full replace of this
+device's copy would lose every change since the copy was read. Where the
+order cannot be read (an old or unreachable server, or, in Notes, before it
+has ever been read on that device), nothing is saved and the note lands
+where the order puts a note it has never seen: after the others. That is
+also where a note made by an older Púca or Notes goes, and where the
+queue's own *"(offline copy)"* of text that lost to another device's lands.
+(In Notes a connection that drops mid-placement only queues it, like any
+other change, and the note goes first once it lands.)
 
 **Colour, labels and archive are shared too.** They are not Notes' private
 state: Púca's Tasks view reads the same sealed document and writes it through

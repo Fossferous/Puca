@@ -7,10 +7,11 @@
  *
  * Here: where the insert goes (api/tasks.ts placeNewTabPrefs), what the grid
  * then shows and what it leaves alone (the pinned notes, the order of the
- * others, the other sort modes), the placement through Notes' offline outbox
- * — queued behind its own create, and placed against the order the server
- * holds when it lands — and the read-insert-write for a note made where no
- * copy of the order is at hand (api/listContent.ts placeNewListFirst).
+ * others, the other sort modes), the placement through Notes' outbox —
+ * placed against the order the server holds when it runs, online as well as
+ * queued behind its own create offline, and never overtaken by a pin sent
+ * after it — and the read-insert-write for a note made where no copy of the
+ * order is at hand (api/listContent.ts placeNewListFirst).
  *
  * Each display check has its positive control: the same fixture WITHOUT the
  * placement puts the new note last, so a green here is the placement, not
@@ -207,11 +208,52 @@ describe('placed through the outbox', () => {
         expect(applyPrefsIntent([pref(1)], { type: 'created', tab: { kind: 'list', id: -5 } }, {})).toBeNull();
     });
 
-    it('online, it is the set this device shows, sent as it is (like every pin)', async () => {
-        const shown = placeNewTabPrefs([pref(1, true), pref(3)], NEW)!;
-        await execOp(ops.prefs(shown, { type: 'created', tab: NEW }), {}, false);
-        expect(prefsPuts()).toEqual(['1*,50,3']);
+    it('online too, it goes into the order the server holds NOW: a pin another device made, not yet read here, is kept', async () => {
+        // This device's copy (a cache restored at a cold start, say): 3, then 4.
+        const shown = placeNewTabPrefs([pref(3), pref(4)], NEW)!;
+        // Meanwhile another device pinned 4.
+        get.mockResolvedValue([pref(4, true), pref(3)]);
+        const saved = await execOp(ops.prefs(shown, { type: 'created', tab: NEW }), {}, false);
+        expect(get).toHaveBeenCalledWith('/task-tab-prefs');
+        expect(prefsPuts()).toEqual(['4*,50,3']);          // not 50,3,4: that would unpin 4 everywhere
+        expect(show(saved as TaskTabPref[])).toBe('4*,50,3');   // what the grid shows next
+    });
+
+    it('POSITIVE CONTROL: a pin sent online is still the set this page shows, PUT as it is', async () => {
+        const shown = [pref(3, true), pref(4)];
+        await execOp(ops.prefs(shown, { type: 'pin', tab: { kind: 'list', id: 3 }, favorite: true }), {}, false);
+        expect(prefsPuts()).toEqual(['3*,4']);
         expect(get).not.toHaveBeenCalled();
+    });
+
+    it('a pin sent while a new note’s place is between its read and its write waits for it, and is not undone by it', async () => {
+        // The server as it is: an order, read and written. A read is answered
+        // from what the server holds when it arrives, and its answer is held
+        // in transit until the test lets it go.
+        let server = [pref(3), pref(4)];
+        let deliver: () => void = () => {};
+        get.mockImplementation(async (path: string) => {
+            if (path !== '/task-tab-prefs') throw new Error(`unexpected GET ${path}`);
+            const answer = server;
+            await new Promise<void>(r => { deliver = r; });
+            return answer;
+        });
+        put.mockImplementation(async (path: string, body: { prefs: TaskTabPref[] }) => {
+            if (path === '/task-tab-prefs') server = body.prefs;
+            return {};
+        });
+        const h = harness();
+        const placed = h.ob.send(ops.prefs(placeNewTabPrefs(server, NEW)!, { type: 'created', tab: NEW }));
+        await vi.waitFor(() => expect(get).toHaveBeenCalledTimes(1));
+        // Pinning the note just made, while its place is still out: the set
+        // this page shows then, sent as it is.
+        const pinned = h.ob.send(ops.prefs([pref(50, true), pref(3), pref(4)], { type: 'pin', tab: NEW, favorite: true }));
+        await new Promise(r => setTimeout(r, 0));
+        expect(prefsPuts(), 'the pin waits its turn').toEqual([]);
+        deliver();
+        await Promise.all([placed, pinned]);
+        expect(prefsPuts()).toEqual(['50,3,4', '50*,3,4']);
+        expect(show(server)).toBe('50*,3,4');                // the pin is what the server keeps
     });
 });
 
