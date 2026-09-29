@@ -30,17 +30,26 @@ export async function chooseSavePath(suggestedName: string): Promise<string | nu
  * nothing and say nothing.
  *
  * Returns the full path it was written to, or null when the user cancelled
- * (nothing is written then). A failed write rejects with the shell's reason.
+ * (nothing is written then). A failed write rejects with an Error whose
+ * message is the shell's reason. The shell's commands fail with a bare string
+ * (attachment_save is Result<String, String>, and invoke rejects with the
+ * string itself), which every caller's `e instanceof Error ? e.message : …`
+ * would otherwise swap for its generic line — "access denied" became
+ * "Couldn't save the export".
  *
  * Headers must be ASCII, so the name and the chosen path go percent-encoded
  * and the shell decodes them as UTF-8: "Púca notes.md" under C:\Users\Zoë
  * arrives whole. The bytes are the text as UTF-8.
  */
 export async function saveTextAs(suggestedName: string, text: string): Promise<string | null> {
-    const dest = await chooseSavePath(suggestedName);
-    if (dest === null) return null;
-    const { invoke } = await import('@tauri-apps/api/core');
-    return invoke<string>('attachment_save', new TextEncoder().encode(text), {
-        headers: { 'x-file-name': encodeURIComponent(suggestedName), 'x-dest-path': encodeURIComponent(dest) },
-    });
+    try {
+        const dest = await chooseSavePath(suggestedName);
+        if (dest === null) return null;
+        const { invoke } = await import('@tauri-apps/api/core');
+        return await invoke<string>('attachment_save', new TextEncoder().encode(text), {
+            headers: { 'x-file-name': encodeURIComponent(suggestedName), 'x-dest-path': encodeURIComponent(dest) },
+        });
+    } catch (e) {
+        throw typeof e === 'string' ? new Error(e) : e;
+    }
 }

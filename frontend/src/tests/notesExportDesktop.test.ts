@@ -99,7 +99,11 @@ describe('saveNotesExport in the desktop app', () => {
 
     it('a failed write rejects with the shell\'s reason, never "saved"', async () => {
         core.invoke.mockRejectedValue('could not write "C:\\\\x.md": access denied');
-        await expect(saveNotesExport('a.md', 'x', 'text/markdown')).rejects.toMatch(/access denied/);
+        const failed = saveNotesExport('a.md', 'x', 'text/markdown');
+        // An Error carrying it, not the bare string the shell rejects with:
+        // every caller reads `e instanceof Error ? e.message : <generic>`.
+        await expect(failed).rejects.toBeInstanceOf(Error);
+        await expect(failed).rejects.toThrow(/access denied/);
         expect(anchorClick).not.toHaveBeenCalled();
     });
 
@@ -144,9 +148,18 @@ describe('the account menu\'s export (exportNotes) in the desktop app', () => {
     });
 
     it('a failed write is a toast with the reason', async () => {
-        core.invoke.mockRejectedValue(new Error('disk full'));
+        // The shape the shell really rejects with: attachment_save returns
+        // Result<String, String>, and invoke rejects with that bare string.
+        core.invoke.mockRejectedValue('could not write "C:\\\\x.md": Access is denied. (os error 5)');
         await exportNotes([card], 'md');
-        expect(toasts).toEqual(['disk full']);
+        expect(toasts).toEqual(['could not write "C:\\\\x.md": Access is denied. (os error 5)']);
+    });
+
+    it('so is a Save As dialog that fails to open', async () => {
+        dialog.save.mockRejectedValue('dialog.save not allowed');
+        await exportNotes([card], 'md');
+        expect(toasts).toEqual(['dialog.save not allowed']);
+        expect(core.invoke).not.toHaveBeenCalled();
     });
 });
 
@@ -160,5 +173,12 @@ describe('the calendar .ics shares the same way out (deliverIcs)', () => {
         dialog.save.mockResolvedValue(null);
         await expect(deliverIcs('puca-notes.ics', 'BEGIN:VCALENDAR')).resolves.toEqual({ how: 'cancelled' });
         expect(core.invoke).not.toHaveBeenCalled();
+    });
+
+    it('a failed write carries the shell\'s reason to the calendar\'s toast', async () => {
+        core.invoke.mockRejectedValue('could not write "D:\\\\cal.ics": The device is not ready. (os error 21)');
+        const failed = deliverIcs('puca-notes.ics', 'BEGIN:VCALENDAR');
+        await expect(failed).rejects.toBeInstanceOf(Error);
+        await expect(failed).rejects.toThrow(/The device is not ready/);
     });
 });
