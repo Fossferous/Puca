@@ -4,14 +4,14 @@
  * event for a note this page is writing waits for the write.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { QueryClient } from '@tanstack/react-query';
+import { QueryClient, QueryObserver } from '@tanstack/react-query';
 
 vi.mock('../api/auth', () => ({ getToken: () => 'tok', storeRenewedToken: vi.fn(), currentUserIdFromToken: () => 1 }));
 vi.mock('../notes/model/notesPrefsSync', () => ({ pullNotesPrefs: vi.fn() }));
 
 const {
     parseTaskEvent, takeSseEvents, startTaskEvents, applyTaskEvent,
-    EVICTED_RETRY_MS, UNSUPPORTED_RETRY_MS, WATCHDOG_MS,
+    EVICTED_RETRY_MS, UNSUPPORTED_RETRY_MS, WATCHDOG_MS, LIVE_REREAD_GAP_MS,
 } = await import('../notes/model/taskEvents');
 const { beginNoteWrite, resetNoteBusy } = await import('../notes/model/noteBusy');
 const { pullNotesPrefs } = await import('../notes/model/notesPrefsSync');
@@ -206,6 +206,89 @@ describe('events -> queries', () => {
         done();
         // ...and then both run, once each (one waiter per key must carry both).
         expect(spy.mock.calls.map(c => c[0])).toEqual([{ queryKey: ['notes', 'lists'] }, { queryKey: ['notes', 'trash'] }]);
+    });
+
+    /**
+     * One event per created row (src/task_events.rs), and a paste in Púca's
+     * Tasks view creates up to 200 of them, paced, outside anything Notes
+     * marks busy. Each event re-read and re-decrypted the whole note — a
+     * cancelled refetch still runs to the end (listListTasks takes no
+     * signal) — in a Notes the desktop keeps mounted, hidden. Read together;
+     * and whatever arrived last is still read, or a created item would be
+     * missing until the next refetch.
+     */
+    it('a burst of events for one note is read in a few reads, and the last read has every row', async () => {
+        vi.useFakeTimers();
+        const qc = new QueryClient();
+        const server: string[] = [];
+        let reads = 0;
+        const key = ['notes', 'tasks', 'list', 4];
+        const observer = new QueryObserver(qc, {
+            queryKey: key,
+            queryFn: async () => {
+                reads++;
+                const rows = [...server];
+                await new Promise(r => { setTimeout(r, 30); });   // the round trip and the decrypt
+                return rows;
+            },
+        });
+        const unsubscribe = observer.subscribe(() => {});
+        try {
+            await vi.advanceTimersByTimeAsync(100);
+            reads = 0;
+            for (let i = 0; i < 100; i++) {
+                server.push(`item ${i + 1}`);
+                applyTaskEvent(qc, { t: 'list', id: 4 }, false);
+                await vi.advanceTimersByTimeAsync(20);
+            }
+            await vi.advanceTimersByTimeAsync(2_000);
+            expect(qc.getQueryData(key)).toEqual(server);
+            expect(reads).toBeGreaterThan(1);
+            expect(reads).toBeLessThanOrEqual(10);
+            // Quiet again, the next event is read at once.
+            const before = reads;
+            server.push('one more');
+            applyTaskEvent(qc, { t: 'list', id: 4 }, false);
+            await vi.advanceTimersByTimeAsync(100);
+            expect(reads).toBe(before + 1);
+            expect(qc.getQueryData(key)).toEqual(server);
+        } finally {
+            unsubscribe();
+            qc.clear();
+            vi.useRealTimers();
+        }
+    });
+
+    it('the read that follows a burst still waits for this page’s own write', async () => {
+        vi.useFakeTimers();
+        try {
+            const qc = new QueryClient();
+            const spy = vi.spyOn(qc, 'invalidateQueries').mockResolvedValue(undefined);
+            applyTaskEvent(qc, { t: 'list', id: 4 }, false);
+            applyTaskEvent(qc, { t: 'list', id: 4 }, false);
+            expect(spy).toHaveBeenCalledTimes(1);
+            const done = beginNoteWrite('list:4');
+            await vi.advanceTimersByTimeAsync(LIVE_REREAD_GAP_MS + 50);
+            expect(spy).toHaveBeenCalledTimes(1);
+            done();
+            expect(spy).toHaveBeenCalledTimes(2);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('a note’s read being out holds up no other note', () => {
+        const qc = new QueryClient();
+        const spy = vi.spyOn(qc, 'invalidateQueries').mockImplementation(() => new Promise<void>(() => {}));
+        applyTaskEvent(qc, { t: 'list', id: 4 }, false);
+        applyTaskEvent(qc, { t: 'list', id: 4 }, false);
+        applyTaskEvent(qc, { t: 'channel', id: 4 }, false);
+        applyTaskEvent(qc, { t: 'list', id: 5 }, false);
+        expect(spy.mock.calls.map(c => c[0])).toEqual([
+            { queryKey: ['notes', 'tasks', 'list', 4] },
+            { queryKey: ['notes', 'tasks', 'channel', 4] },
+            { queryKey: ['notes', 'tasks', 'list', 5] },
+        ]);
     });
 
     it('re-reads everything on a resync and on a reconnect’s hello, not on the first hello', () => {

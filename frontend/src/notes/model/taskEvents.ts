@@ -23,6 +23,8 @@
  * WRITES IN FLIGHT. An event for a note this page is itself writing (or has
  * queued offline) is deferred until the write settles (noteBusy.ts), so a
  * refetch cannot land the server's pre-write state over the optimistic edit.
+ * A BURST of events for one note — a pasted checklist is one per item — is
+ * read together, and the last of them is still read (rereadTogether).
  */
 import { useEffect, useSyncExternalStore } from 'react';
 import { useQueryClient, type QueryClient } from '@tanstack/react-query';
@@ -259,6 +261,42 @@ export function useTaskEventsLive(): boolean {
 
 // --- Events -> query invalidation ---------------------------------------------------
 
+/** After a note's live re-read, how long its further events wait to be read
+ *  together (rereadTogether). */
+export const LIVE_REREAD_GAP_MS = 400;
+
+/** Per client, the notes whose live re-read is out (or in the pause after
+ *  it), and whether an event came in meanwhile. */
+const rereading = new WeakMap<QueryClient, Map<string, { again: boolean }>>();
+
+/**
+ * Re-read a note's items for a live event — TOGETHER with the ones after it.
+ * The server sends one event per created row (src/task_events.rs), and a
+ * paste in Púca's Tasks view or a calendar import is up to hundreds of
+ * creates, paced, that Notes never marks busy. One re-read each re-read and
+ * re-decrypted the whole note every time — a refetch cancelled by the next
+ * still runs to the end, as listListTasks takes no signal — in a Notes the
+ * desktop keeps mounted while nobody looks at it. So an event is read at
+ * once; every event that arrives while that read is out, or in the
+ * LIVE_REREAD_GAP_MS after it, is read by ONE more read at the end of the
+ * pause, which starts after the last of them — nothing is dropped. The same
+ * rule as a channel checklist's live sync (components/ChecklistBody.tsx).
+ */
+function rereadTogether(qc: QueryClient, key: string, queryKey: readonly unknown[]): void {
+    let out = rereading.get(qc);
+    if (!out) { out = new Map(); rereading.set(qc, out); }
+    const busy = out.get(key);
+    if (busy) { busy.again = true; return; }
+    const read = { again: false };      // this read covers every event before it
+    out.set(key, read);
+    void qc.invalidateQueries({ queryKey }).finally(() => {
+        setTimeout(() => {
+            out.delete(key);
+            if (read.again) whenNoteSettled(key, () => rereadTogether(qc, key, queryKey));
+        }, LIVE_REREAD_GAP_MS);
+    });
+}
+
 /** Mark what an event names as stale, deferring a note this page is writing. */
 export function applyTaskEvent(qc: QueryClient, ev: TaskEventMsg, isReconnect: boolean): void {
     const invalidate = (key: string, queryKey: readonly unknown[]) =>
@@ -267,7 +305,8 @@ export function applyTaskEvent(qc: QueryClient, ev: TaskEventMsg, isReconnect: b
         case 'list':
         case 'channel': {
             const kind = ev.t;
-            invalidate(`${kind}:${ev.id}`, ['notes', 'tasks', kind, ev.id]);
+            const key = `${kind}:${ev.id}`;
+            whenNoteSettled(key, () => rereadTogether(qc, key, ['notes', 'tasks', kind, ev.id]));
             break;
         }
         case 'lists':
