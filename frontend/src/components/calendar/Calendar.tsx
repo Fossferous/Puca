@@ -14,7 +14,7 @@
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { usePortalTarget } from '../portalTarget';
+import { useLayerOnScreen, usePortalTarget } from '../portalTarget';
 import { type CalendarEntry, type CalendarSource, entriesInRange, groupByDay, layoutDay } from '../../api/taskCalendar';
 import { type SnoozePreset, activeSnooze, maySnooze } from '../../api/taskSchedule';
 import { formatDateKey, formatTime } from '../../api/scheduleFormat';
@@ -503,8 +503,11 @@ function EntryMenu({
     extra: CalendarAction[];
 }) {
     const portalTarget = usePortalTarget();
+    const onScreen = useLayerOnScreen();
     const [moveTo, setMoveTo] = useState(entry.dayKeys[0]);
     useEffect(() => {
+        // Hidden with Notes in the desktop app: not our key (portalTarget.ts).
+        if (!onScreen) return;
         const onKey = (e: KeyboardEvent) => {
             if (e.key !== 'Escape') return;
             e.preventDefault();
@@ -513,7 +516,7 @@ function EntryMenu({
         };
         document.addEventListener('keydown', onKey, true);
         return () => document.removeEventListener('keydown', onKey, true);
-    }, [onClose]);
+    }, [onClose, onScreen]);
     const t = entry.source.task;
     // A snooze rides the completion right on the server: never offer it to a
     // member who would only be refused (a 403 the menu cannot explain) — nor

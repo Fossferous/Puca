@@ -63,12 +63,10 @@ vi.mock('../components/notesDesktopView.utils', async importOriginal => ({
     },
 }));
 vi.mock('../notes/components/NotesShell', async () => {
-    const { usePortalTarget } = await import('../components/portalTarget');
-    const { useContext } = await import('react');
-    const { NotesOnScreenContext } = await import('../notes/components/notesOnScreen');
+    const { useLayerOnScreen, usePortalTarget } = await import('../components/portalTarget');
     function NotesShell(props: { onSignOut: () => void; embedded?: { active: boolean; ownsKey: (e: KeyboardEvent) => boolean } }) {
         const where = useLocation().pathname;
-        const onScreen = useContext(NotesOnScreenContext);
+        const onScreen = useLayerOnScreen();
         useEffect(() => { h.onScreen = onScreen; }, [onScreen]);
         // After every commit, which is when the host's props have landed.
         useEffect(() => {

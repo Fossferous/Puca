@@ -825,7 +825,11 @@ commit. `frontend/src/components/NotesDesktopView.tsx` hosts it:
 - **Kept, hidden, once opened.** Going to a channel hides Notes (`inert`, not
   unmounted): an open note, the page you were on, queued offline edits, live
   updates and a pending *Undo* all survive the trip. A playing voice note
-  pauses and the recorder lets go of the microphone.
+  pauses and the recorder lets go of the microphone, and a dialog left open
+  there (a picture, a schedule, a half-made drawing) takes no key until you
+  come back: an Escape pressed in the chat is the chat's, and remote
+  control's *Escape always revokes* still sees it
+  (`LayerOnScreenContext` in `components/portalTarget.ts`).
 - **What Púca already does, Notes leaves to it** (`embedded` on NotesShell):
   Notes' toasts show in Púca's own, Púca's identity banner and reminder loop
   run once for both, and there is no *Open Púca*. The Reminders page's banner

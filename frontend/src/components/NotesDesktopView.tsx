@@ -26,8 +26,10 @@
  *    yet the pager's scroll position and the open note survive the trip, and
  *    Notes' dialogs and bars — portaled into this view's own layer
  *    (components/portalTarget.ts), not the body — hide with it. It takes no
- *    shortcut then either (NotesShell's `embedded`), a recording stops as it
- *    would off the screen, and a voice note that was playing pauses.
+ *    shortcut then either (NotesShell's `embedded`), a dialog left open in
+ *    it listens for no key (LayerOnScreenContext, beside the layer), a
+ *    recording stops as it would off the screen, and a voice note that was
+ *    playing pauses.
  *  - NO SOCKET. Nothing under src/notes may reach the WebSocket
  *    (tests/notesNoSocket.test.ts). This file lives outside src/notes so that
  *    what Notes needs from the app — its sign-out — arrives as a callback.
@@ -40,10 +42,9 @@ import { createRoot, type Root } from 'react-dom/client';
 import { QueryClientProvider, type QueryClient } from '@tanstack/react-query';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ErrorBoundary } from './ErrorBoundary';
-import { PortalTargetContext } from './portalTarget';
+import { LayerOnScreenContext, PortalTargetContext } from './portalTarget';
 import { notesOwnsKey, whenIdentityReady } from './notesDesktopView.utils';
 import { NotesShell } from '../notes/components/NotesShell';
-import { NotesOnScreenContext } from '../notes/components/notesOnScreen';
 import { makeNotesQueryClient, notesKeys } from '../notes/model/notesQueries';
 import { hydrateNotesCache } from '../notes/model/notesCache';
 import notesCss from '../notes/notes.css?inline';
@@ -129,13 +130,13 @@ export function NotesDesktopView({ active, onSignOut }: NotesDesktopViewProps) {
                 <ErrorBoundary>
                     <QueryClientProvider client={m.qc}>
                         <PortalTargetContext.Provider value={m.layer}>
-                            <NotesOnScreenContext.Provider value={active}>
+                            <LayerOnScreenContext.Provider value={active}>
                                 <MemoryRouter>
                                     <Routes>
                                         <Route path="/*" element={<NotesShell onSignOut={signOut} embedded={{ active, ownsKey }} />} />
                                     </Routes>
                                 </MemoryRouter>
-                            </NotesOnScreenContext.Provider>
+                            </LayerOnScreenContext.Provider>
                         </PortalTargetContext.Provider>
                     </QueryClientProvider>
                 </ErrorBoundary>

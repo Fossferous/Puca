@@ -15,7 +15,7 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { usePortalTarget } from './portalTarget';
+import { useLayerOnScreen, usePortalTarget } from './portalTarget';
 import { type DrawingFiles } from '../api/noteMedia';
 import {
     type DrawingDoc, type Stroke,
@@ -39,6 +39,7 @@ interface DrawingCanvasProps {
 
 export function DrawingCanvas({ initial, onCancel, onSave }: DrawingCanvasProps) {
     const portalTarget = usePortalTarget();
+    const onScreen = useLayerOnScreen();
     const [start] = useState<DrawingDoc>(() => initial ?? emptyDrawing());
     const [doc, setDoc] = useState<DrawingDoc>(start);
     const [tool, setTool] = useState<'pen' | 'eraser'>('pen');
@@ -67,12 +68,16 @@ export function DrawingCanvas({ initial, onCancel, onSave }: DrawingCanvasProps)
     }, [dirty, onCancel]);
 
     useEffect(() => {
+        // Hidden with Notes in the desktop app: not our key (portalTarget.ts)
+        // — and the strokes wait here for its return rather than asking to
+        // be discarded over the chat.
+        if (!onScreen) return;
         const onKey = (e: KeyboardEvent) => {
             if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancel(); }
         };
         document.addEventListener('keydown', onKey, true);
         return () => document.removeEventListener('keydown', onKey, true);
-    }, [cancel]);
+    }, [cancel, onScreen]);
 
     const point = (e: React.PointerEvent<HTMLCanvasElement>) => toCanvasPoint(e.clientX, e.clientY, e.currentTarget.getBoundingClientRect(), doc);
 

@@ -10,7 +10,7 @@
  */
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { usePortalTarget } from '../portalTarget';
+import { useLayerOnScreen, usePortalTarget } from '../portalTarget';
 import { type ScheduleKind } from '../../api/taskSchedule';
 import { DEFAULT_REMINDER_TIMES } from '../../api/reminderTimes';
 import { CalendarIcon, CloseIcon, MembersIcon } from '../Icons';
@@ -48,6 +48,7 @@ export function CalendarAddSheet({ dayKey, time, defaultTime = DEFAULT_REMINDER_
     allowNew?: boolean;
 }) {
     const portalTarget = usePortalTarget();
+    const onScreen = useLayerOnScreen();
     const [title, setTitle] = useState('');
     const [day, setDay] = useState(dayKey);
     const [at, setAt] = useState(time ?? defaultTime);
@@ -57,6 +58,8 @@ export function CalendarAddSheet({ dayKey, time, defaultTime = DEFAULT_REMINDER_
     const [busy, setBusy] = useState(false);
 
     useEffect(() => {
+        // Hidden with Notes in the desktop app: not our key (portalTarget.ts).
+        if (!onScreen) return;
         const onKey = (e: KeyboardEvent) => {
             if (e.key !== 'Escape') return;
             e.preventDefault();
@@ -65,7 +68,7 @@ export function CalendarAddSheet({ dayKey, time, defaultTime = DEFAULT_REMINDER_
         };
         document.addEventListener('keydown', onKey, true);
         return () => document.removeEventListener('keydown', onKey, true);
-    }, [onClose]);
+    }, [onClose, onScreen]);
 
     const submit = async (e: React.FormEvent) => {
         e.preventDefault();

@@ -9,7 +9,7 @@
  *  - FOREGROUND ONLY. Exactly one getUserMedia stream, stopped on Stop, on
  *    Discard, on unmount, on `visibilitychange`/`pagehide`, and — Notes inside
  *    the Púca desktop app — when the person switches to another view
- *    (notesOnScreen.ts): nothing here can record with Notes off the screen,
+ *    (components/portalTarget.ts, useLayerOnScreen): nothing here can record with Notes off the screen,
  *    and there is no service behind it (docs/NOTES.md, "The Android app").
  *  - NOTHING PLAYS BY ITSELF. The preview is an <audio controls> with no
  *    autoplay and no call to play(); sound happens because someone pressed
@@ -20,13 +20,12 @@
  * The recorded clip is handed back as a File; the caller seals and uploads it
  * through api/noteMedia.ts exactly as it would a photo.
  */
-import { useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { usePortalTarget } from '../../components/portalTarget';
+import { useLayerOnScreen, usePortalTarget } from '../../components/portalTarget';
 import { CloseIcon, MicIcon, StopIcon, TrashIcon } from '../../components/Icons';
 import { MAX_CLIP_MS, assertClipUploadable, extForMime, formatClipTime, pickAudioMime } from '../model/audioNote';
 import { followOutputDeviceRef } from '../../components/settingsStore';
-import { NotesOnScreenContext } from './notesOnScreen';
 import '../noteContent.css';
 
 export const MIC_DISCLOSURE =
@@ -101,7 +100,7 @@ export function AudioRecorder({ onSave, onCancel }: Props) {
         };
     }, [release]);
     // The same, when the page stays but Notes leaves it (the desktop app).
-    const onScreen = useContext(NotesOnScreenContext);
+    const onScreen = useLayerOnScreen();
     useEffect(() => { if (!onScreen) release(); }, [onScreen, release]);
 
     // Unmount: the microphone goes, and a take nobody kept is freed.

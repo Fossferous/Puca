@@ -13,7 +13,7 @@
  */
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { usePortalTarget } from '../portalTarget';
+import { useLayerOnScreen, usePortalTarget } from '../portalTarget';
 
 interface PopoverProps {
     anchor: HTMLElement | null;
@@ -26,6 +26,7 @@ const MARGIN = 8;
 
 export function Popover({ anchor, onClose, label, children }: PopoverProps) {
     const portalTarget = usePortalTarget();
+    const onScreen = useLayerOnScreen();
     const ref = useRef<HTMLDivElement>(null);
     const [pos, setPos] = useState<{ left: number; top: number }>({ left: MARGIN, top: MARGIN });
 
@@ -47,6 +48,8 @@ export function Popover({ anchor, onClose, label, children }: PopoverProps) {
     }, [anchor]);
 
     useEffect(() => {
+        // Hidden with Notes in the desktop app: not our key (portalTarget.ts).
+        if (!onScreen) return;
         const onKey = (e: KeyboardEvent) => {
             if (e.key !== 'Escape') return;
             e.preventDefault();
@@ -55,7 +58,7 @@ export function Popover({ anchor, onClose, label, children }: PopoverProps) {
         };
         document.addEventListener('keydown', onKey, true);
         return () => document.removeEventListener('keydown', onKey, true);
-    }, [onClose]);
+    }, [onClose, onScreen]);
 
     return createPortal(
         <>

@@ -18,7 +18,7 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { usePortalTarget } from '../portalTarget';
+import { useLayerOnScreen, usePortalTarget } from '../portalTarget';
 import { type Task } from '../../api/tasks';
 import { type ScheduleKind, deriveDueAt, parseSchedule, serializeSchedule } from '../../api/taskSchedule';
 import {
@@ -58,6 +58,7 @@ function todayKey(now: number): string {
 
 export function ScheduleEditor({ task, onSave, onClose, defaultKind = 'task', defaultDate, now: nowProp, times = DEFAULT_REMINDER_TIMES }: ScheduleEditorProps) {
     const portalTarget = usePortalTarget();
+    const onScreen = useLayerOnScreen();
     const [now] = useState(() => nowProp ?? Date.now());
     const parsed = useMemo(() => parseSchedule(task.schedule), [task.schedule]);
     const readOnly = parsed.state === 'readonly';
@@ -76,6 +77,8 @@ export function ScheduleEditor({ task, onSave, onClose, defaultKind = 'task', de
     const set = (patch: Partial<ScheduleForm>) => { setForm(f => ({ ...f, ...patch })); setError(null); };
 
     useEffect(() => {
+        // Hidden with Notes in the desktop app: not our key (portalTarget.ts).
+        if (!onScreen) return;
         const onKey = (e: KeyboardEvent) => {
             if (e.key !== 'Escape') return;
             e.preventDefault();
@@ -84,7 +87,7 @@ export function ScheduleEditor({ task, onSave, onClose, defaultKind = 'task', de
         };
         document.addEventListener('keydown', onKey, true);
         return () => document.removeEventListener('keydown', onKey, true);
-    }, [onClose]);
+    }, [onClose, onScreen]);
 
     const date = parseWall(form.date)?.wall;
     const weekday = date ? new Intl.DateTimeFormat(undefined, { weekday: 'long', timeZone: 'UTC' }).format(Date.UTC(date.y, date.m - 1, date.d)) : '';

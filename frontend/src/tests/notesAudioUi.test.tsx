@@ -22,7 +22,7 @@ vi.mock('../api/attachments', () => ({
 
 const { NoteImages } = await import('../components/NoteImages');
 const { AudioRecorder } = await import('../notes/components/AudioRecorder');
-const { NotesOnScreenContext } = await import('../notes/components/notesOnScreen');
+const { LayerOnScreenContext } = await import('../components/portalTarget');
 
 const settle = async () => { await act(async () => { for (let i = 0; i < 6; i++) await new Promise(r => setTimeout(r, 0)); }); };
 
@@ -204,9 +204,9 @@ describe('AudioRecorder: the microphone', () => {
     it('Notes leaving the screen while the page stays (the desktop app, another view) releases it too', async () => {
         vi.spyOn(window, 'confirm').mockReturnValue(true);
         const at = (onScreen: boolean) => (
-            <NotesOnScreenContext.Provider value={onScreen}>
+            <LayerOnScreenContext.Provider value={onScreen}>
                 <AudioRecorder onSave={() => true} onCancel={() => {}} />
-            </NotesOnScreenContext.Provider>
+            </LayerOnScreenContext.Provider>
         );
         await act(async () => { root.render(at(true)); });
         await settle();
