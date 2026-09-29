@@ -6,6 +6,7 @@
 import { onIdentityRestoreChange } from '../api/auth';
 import { getActiveIdentity, seedMatchesCurrentAccount } from '../api/e2ee';
 import { matchesRegisteredHotkey } from '../api/hotkeys';
+import { coveredAt } from './portalTarget';
 
 /**
  * Whether a window-level key press is embedded Notes' to act on. The window
@@ -25,16 +26,7 @@ export function notesOwnsKey(e: KeyboardEvent, host: HTMLElement | null): boolea
     if (matchesRegisteredHotkey(e)) return false;
     const t = e.target;
     if (t instanceof Node && t !== document.body && t !== document.documentElement && !host.contains(t)) return false;
-    return !coveredByApp(host);
-}
-
-function coveredByApp(host: HTMLElement): boolean {
-    // jsdom has no layout; there is nothing on top of anything there.
-    if (typeof document.elementFromPoint !== 'function') return false;
-    const r = host.getBoundingClientRect();
-    if (r.width <= 0 || r.height <= 0) return false;
-    const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-    return top !== null && !host.contains(top);
+    return !coveredAt(host);
 }
 
 /** This account's own identity is in hand, so its sealed cache opens. */

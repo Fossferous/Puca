@@ -43,6 +43,7 @@ import { PACE_MS } from '../api/icsImport';
 import { MAX_ITEM_LENGTH } from '../notes/model/notesModel';
 import { MAX_TAKEN_ITEMS } from '../notes/model/noteContent';
 import { setMessageToastSink } from '../components/messageToastBus';
+import { LayerOnScreenContext } from '../components/portalTarget';
 import type { NoteActions } from '../notes/model/notesQueries';
 import type { NoteCard } from '../notes/model/notesModel';
 import { ASSISTANT_ANSWER, ASSISTANT_ITEMS, ASSISTANT_TITLE } from './fixtures/assistantChecklist';
@@ -365,6 +366,105 @@ describe('a multi-line paste into "Add an item…"', () => {
         const one = paste(e.input, { text: 'Milk' });
         expect(one.defaultPrevented).toBe(false);
         expect(dialog()).toBeNull();
+    });
+});
+
+/**
+ * A pasted batch takes tens of seconds (paced, a round trip each), and when
+ * it ends the add row takes the focus back for the next item. By then the
+ * person may be somewhere else: renaming the note, or — Notes in the desktop
+ * app — typing in one of Púca's dialogs over it, or in another view. Moving
+ * the caret into the note then sent their next keystrokes, and an Enter,
+ * into it. A typed item's create comes back the same way, sooner.
+ */
+describe('after a create, the add row takes the focus back only from where it was left', () => {
+    function editor(onScreen = true, batch = true) {
+        const actions = {
+            addTask: vi.fn(async () => ({ id: 1 }) as never),
+            content: { features: { body: false, attachments: false }, setBody: vi.fn(async () => true) },
+            toggleTask: vi.fn(), deleteTaskFrom: vi.fn(), editTask: vi.fn(), moveTaskIn: vi.fn(),
+            reorderTaskIn: vi.fn(), setDue: vi.fn(), setAttachments: vi.fn(), refreshNote: vi.fn(), togglePin: vi.fn(),
+        } as unknown as NoteActions;
+        const at = (on: boolean) => act(() => {
+            root.render(
+                <LayerOnScreenContext.Provider value={on}>
+                    <NoteEditor card={card} actions={actions} onClose={() => {}} onMenu={() => {}} onPickColor={() => {}}
+                        onPickLabels={() => {}} onArchive={() => {}} onSendToPuca={() => {}} pucaHref={null} />
+                </LayerOnScreenContext.Provider>,
+            );
+        });
+        at(onScreen);
+        const input = document.querySelector<HTMLInputElement>('.notes-editor-add input')!;
+        if (batch) {
+            paste(input, { text: 'Milk\nBread\nEggs' });
+            act(() => { button('Add 3 items').click(); });
+        }
+        return { input, at, actions, title: document.querySelector<HTMLInputElement>('input.notes-editor-title')! };
+    }
+    /** A field of one of Púca's own dialogs, outside Notes. */
+    const pucaField = () => {
+        const f = document.createElement('input');
+        document.body.appendChild(f);
+        return f;
+    };
+
+    it('POSITIVE CONTROL: left alone — the add row, or nowhere — it ends in the add row', async () => {
+        const e = editor();
+        (document.activeElement as HTMLElement).blur();
+        await paced(3);
+        expect(document.activeElement).toBe(e.input);
+    });
+
+    it('an item added with the + button: the add row takes the focus back', async () => {
+        const e = editor(true, false);
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+        act(() => { setter.call(e.input, 'Milk'); e.input.dispatchEvent(new Event('input', { bubbles: true })); });
+        const plus = document.querySelector<HTMLButtonElement>('button[aria-label="Add item"]')!;
+        plus.focus();
+        expect(document.activeElement).toBe(plus);
+        await act(async () => { plus.click(); });
+        await flush();
+        expect(e.actions.addTask).toHaveBeenCalledTimes(1);
+        expect(document.activeElement).toBe(e.input);
+    });
+
+    it('typing in one of Púca’s dialogs when it ends, the focus stays there', async () => {
+        editor();
+        const field = pucaField();
+        field.focus();
+        await paced(3);
+        expect(document.activeElement).toBe(field);
+    });
+
+    it('renaming the note when it ends, the focus stays in the title', async () => {
+        const e = editor();
+        e.title.focus();
+        await paced(3);
+        expect(document.activeElement).toBe(e.title);
+    });
+
+    it('with one of Púca’s dialogs over the note and the focus nowhere, it stays out', async () => {
+        const e = editor();
+        const backdrop = document.createElement('div');
+        document.body.appendChild(backdrop);
+        // jsdom has no layout: the note gets a box, and a dialog is what is on top of it.
+        vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 400, height: 300, right: 400, bottom: 300, x: 0, y: 0, toJSON() {} } as DOMRect);
+        Object.defineProperty(document, 'elementFromPoint', { configurable: true, value: () => backdrop });
+        try {
+            (document.activeElement as HTMLElement).blur();
+            await paced(3);
+            expect(document.activeElement).not.toBe(e.input);
+        } finally {
+            delete (document as { elementFromPoint?: unknown }).elementFromPoint;
+        }
+    });
+
+    it('with Notes off the screen (another view of the app), it stays out', async () => {
+        const e = editor();
+        e.at(false);
+        (document.activeElement as HTMLElement).blur();
+        await paced(3);
+        expect(document.activeElement).not.toBe(e.input);
     });
 });
 

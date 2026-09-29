@@ -17,7 +17,7 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
-import { usePortalTarget } from '../../components/portalTarget';
+import { coveredAt, useLayerOnScreen, usePortalTarget } from '../../components/portalTarget';
 import { type Task } from '../../api/tasks';
 import { currentUserIdFromToken } from '../../api/auth';
 import { isEditableTarget } from '../../api/hotkeys';
@@ -116,6 +116,25 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
     };
     const addRef = useRef<HTMLInputElement>(null);
     const titleRef = useRef<HTMLInputElement>(null);
+    const editorRef = useRef<HTMLDivElement>(null);
+    const onScreen = useLayerOnScreen();
+    const onScreenRef = useRef(onScreen);
+    useEffect(() => { onScreenRef.current = onScreen; });
+    /**
+     * Back to the add row once a create has come back — only from where it
+     * was left: the add row (its field or its + button), or nowhere. A
+     * pasted batch takes tens of seconds, and by its end the person may be
+     * renaming the note or, Notes in the desktop app, typing in one of
+     * Púca's dialogs over it or in another view; moving the caret into the
+     * note sent their next keys, and an Enter, into it. Nor while the note
+     * is off the screen or covered.
+     */
+    const backToAddRow = () => {
+        const at = document.activeElement;
+        if (at && at !== document.body && !addRef.current?.form?.contains(at)) return;
+        if (!onScreenRef.current || !editorRef.current || coveredAt(editorRef.current)) return;
+        addRef.current?.focus();
+    };
     // Not Date.now() in render: the chip must flip to "overdue" while the
     // note is open, and an impure render call fails the lint gate.
     const now = useSyncExternalStore(subscribeHalfMinute, halfMinuteNow, halfMinuteNow);
@@ -260,7 +279,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
         setNewItem('');
         const created = await actions.addTask(ref, text);
         if (!created) setNewItem(text);   // failed: give the text back
-        addRef.current?.focus();
+        backToAddRow();
     };
 
     /** The answers for a paste into THIS note. Every item goes through the
@@ -272,7 +291,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
         separate: read => {
             if (rename && read.title) void actions.renameNote(ref, read.title.slice(0, MAX_TITLE_LENGTH), rename.base);
             void pasteItems.addInOrder(read.items, async line => (await actions.addTask(ref, line)) !== null)
-                .then(() => addRef.current?.focus());
+                .then(backToAddRow);
         },
         // Into the add row, not created: Enter adds it, as for typed text.
         one: line => { setNewItem(v => `${v}${line}`.slice(0, MAX_ITEM_LENGTH)); addRef.current?.focus(); },
@@ -307,7 +326,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
 
     return createPortal(
         <div className="notes-editor-backdrop" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
-            <div className="notes-editor" data-color={card.color} role="dialog" aria-modal="true" aria-label={card.title || 'Untitled note'}>
+            <div ref={editorRef} className="notes-editor" data-color={card.color} role="dialog" aria-modal="true" aria-label={card.title || 'Untitled note'}>
                 <div className="notes-editor-head">
                     <input
                         ref={titleRef}

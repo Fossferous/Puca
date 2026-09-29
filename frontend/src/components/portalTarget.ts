@@ -49,3 +49,18 @@ export const LayerOnScreenContext = createContext(true);
 export function useLayerOnScreen(): boolean {
     return useContext(LayerOnScreenContext);
 }
+
+/**
+ * Something else is on top of `el`: asked of the page itself, by what is at
+ * its centre, so no list of the app's dozens of modals has to be kept in
+ * step with it. One of the app's dialogs over Notes in the desktop app is;
+ * so is Notes hidden, which `visibility: hidden` takes out of hit-testing.
+ */
+export function coveredAt(el: HTMLElement): boolean {
+    // jsdom has no layout; there is nothing on top of anything there.
+    if (typeof document.elementFromPoint !== 'function') return false;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return false;
+    const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return top !== null && !el.contains(top);
+}
