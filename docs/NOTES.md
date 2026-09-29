@@ -830,6 +830,10 @@ commit. `frontend/src/components/NotesDesktopView.tsx` hosts it:
   Notes' toasts show in Púca's own, Púca's identity banner and reminder loop
   run once for both, and there is no *Open Púca*. The Reminders page's banner
   reads Púca's desktop-notification setting, not the browser's permission.
+  That setting is one switch for due items and new messages alike (Settings ›
+  *Enable Desktop Notifications*), and Púca fires due items whether Notes is
+  open or not, so with it off the banner says both before it offers *Turn
+  on*.
 - **Keys.** `c`, `r`, `/`, `?` and the calendar's keys act only while Notes is
   on screen, and never on a Púca hotkey, a key typed in Púca's own chrome, or
   while one of Púca's dialogs covers Notes (`notesDesktopView.utils.ts`).

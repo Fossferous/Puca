@@ -812,6 +812,7 @@ export function NotesShell({ onSignOut, expiredOffline = false, embedded }: Note
                                 onOpen={openNote}
                                 notificationsState={notif}
                                 onEnableNotifications={() => { void enableNotifications(); }}
+                                inPucaDesktop={isEmbedded}
                                 nativeBanner={<NativeReminderBanners />}
                                 placeItems={placeItems}
                                 canSnooze={canSnooze}

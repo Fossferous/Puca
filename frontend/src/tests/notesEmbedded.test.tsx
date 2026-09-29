@@ -366,26 +366,46 @@ describe('the Reminders banner speaks for Púca’s desktop notifications', () =
         expect(banner()).toMatch(/blocked/i);
     });
 
-    it('setting off: offers Enable, which asks the OS through Tauri and turns the setting on', async () => {
+    it('setting off: offers to turn it on, which asks the OS through Tauri and turns the setting on', async () => {
         vi.stubGlobal('Notification', { permission: 'denied', requestPermission: vi.fn(async () => 'denied') });
         mount(shell(on()), '/reminders');
-        expect(banner()).toMatch(/Get a notification/);
-        const enable = [...document.querySelectorAll<HTMLButtonElement>('.notes-status button')].find(b => b.textContent === 'Enable');
-        await act(async () => { enable!.click(); await Promise.resolve(); });
+        expect(banner()).toMatch(/Desktop notifications are off/);
+        const turnOn = [...document.querySelectorAll<HTMLButtonElement>('.notes-status button')].find(b => b.textContent === 'Turn on');
+        await act(async () => { turnOn!.click(); await Promise.resolve(); });
         await act(async () => { await new Promise(r => setTimeout(r, 0)); });
         expect(h.asked).toBe(1);
         expect(h.settings.desktopNotifications).toBe(true);
         expect((globalThis.Notification as unknown as { requestPermission: ReturnType<typeof vi.fn> }).requestPermission).not.toHaveBeenCalled();
-        expect(banner()).not.toMatch(/Get a notification/);
+        expect(banner()).not.toMatch(/Desktop notifications are off/);
+    });
+
+    // That setting is Púca's ONE desktop switch — Settings' "Enable Desktop
+    // Notifications", which every message notification is gated on too — and
+    // Chat's loop fires due items whenever Púca runs, Notes open or not. The
+    // banner must not sell it as a reminders-only, while-Notes-is-open opt-in:
+    // someone who turned message popups off on purpose would get them back
+    // from one click they were never told about.
+    it('it says, before the click, that the same switch turns on message notifications too', () => {
+        mount(shell(on()), '/reminders');
+        expect(banner()).toMatch(/new messages/);
+        expect(banner()).not.toMatch(/while Notes is open/);
+        expect([...document.querySelectorAll('.notes-status button')].map(b => b.textContent)).not.toContain('Enable');
+    });
+
+    it('POSITIVE CONTROL: on Notes’ own page the banner is the page’s own, reminders only, while it is open', () => {
+        vi.stubGlobal('Notification', { permission: 'default', requestPermission: async () => 'default' });
+        mount(shell(undefined), '/reminders');
+        expect(banner()).toMatch(/Get a notification when an item comes due while Notes is open/);
+        expect(banner()).not.toMatch(/new messages/);
     });
 
     it('turned on from Settings instead, the banner follows', () => {
         mount(shell(on()), '/reminders');
-        expect(banner()).toMatch(/Get a notification/);
+        expect(banner()).toMatch(/Desktop notifications are off/);
         act(() => {
             h.settings = { desktopNotifications: true };
             window.dispatchEvent(new CustomEvent('settingsChanged'));
         });
-        expect(banner()).not.toMatch(/Get a notification/);
+        expect(banner()).not.toMatch(/Desktop notifications are off/);
     });
 });
