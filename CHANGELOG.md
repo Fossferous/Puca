@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.827 — 2026-09-29
 
+Checklist headings show as headings, a copied answer pastes with its headings, new notes go to the top, and a new note from MacroDroid opens with the keyboard up.
 ### Improved
 - **Headings in a checklist show as headings.** The section titles of a
   pasted checklist ("## Before you start", or a line such as "Optional
