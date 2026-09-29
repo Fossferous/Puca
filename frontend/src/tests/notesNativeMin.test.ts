@@ -15,7 +15,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkNativeMin, nativeSurface, readNativeMin, versionGt } from '../../scripts/notes-native-min.mjs';
+import { checkNativeMin, nativeSurface, readNativeMin, versionGt, type NativeSurfaceSources } from '../../scripts/notes-native-min.mjs';
 
 const FRONTEND = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -32,7 +32,7 @@ const RECORD = {
         permissions: ['android.permission.INTERNET'],
     },
 };
-const surfaceOf = (over: Partial<{ notesPkg: object; javaSources: { name: string; text: string }[]; manifestXml: string }> = {}) =>
+const surfaceOf = (over: Partial<NativeSurfaceSources> = {}) =>
     nativeSurface({ notesPkg: PKG, javaSources: [{ name: 'MainActivity.java', text: 'public class MainActivity extends BridgeActivity {}' }], manifestXml: MANIFEST, ...over });
 
 describe('checkNativeMin', () => {

@@ -20,7 +20,7 @@ import { TASK_IDENTITY_LOCKED, ENC_KEY_UNAVAILABLE } from '../api/decryptMarkers
 const { hydrateNotesCache, startNotesCachePersistence, memoryStore, safeToPersist, idbStore, NOTES_DB_VERSION } = await import('../notes/model/notesCache');
 const { notesCacheDbName } = await import('../api/notesCacheScrub');
 const { makeFakeIndexedDB } = await import('./fixtures/fakeIndexedDB');
-// @ts-expect-error -- a plain .mjs build script, typed by notes-sw.d.mts for the vite config only
+// A plain .mjs build script; scripts/notes-sw.d.mts types it.
 const { renderNotesServiceWorker } = await import('../../scripts/notes-sw.mjs');
 
 const me = makeIdentity(new Uint8Array(32).fill(2));
