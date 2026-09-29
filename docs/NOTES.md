@@ -348,12 +348,15 @@ stream reads the listing again straight away, and a note placed afterwards
 would show at the bottom and then jump). Made offline, it is queued right
 behind its create and applied to the order the server holds when it lands,
 not to the one this device saw, so another device's reorder in the meantime
-is kept. Púca's Tasks view (its *New list* and its calendar's import) and
-*Save to Notes* in a conversation do the same at once — read the server's
-order, insert, write it back (`placeNewListFirst` in
-`frontend/src/api/listContent.ts`) — because the Tasks bar reads the order
-once, when it opens, and a full replace of that copy would put back an order
-another device has changed since. Where the order cannot be read (an old or
+is kept. Púca's Tasks view (its *New list*, and a calendar imported into a
+new note on its *Calendar* tab) and *Save to Notes* in a conversation do the
+same at once — read the server's order, insert, write it back
+(`placeNewListFirst` in `frontend/src/api/listContent.ts`) — because the
+Tasks bar reads the order once, when it opens, and a full replace of that
+copy would put back an order another device has changed since. The Tasks
+view puts the new list on its bar straight away and takes the order that
+write answers as its own copy, so a drag or a favourite made there next
+keeps the new list where it went. Where the order cannot be read (an old or
 unreachable server, or, in Notes, before it has ever been read on that
 device), nothing is saved and the note lands where the order puts a note it
 has never seen: after the others. That is also where a note made by an older

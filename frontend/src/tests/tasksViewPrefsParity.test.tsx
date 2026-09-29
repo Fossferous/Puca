@@ -49,6 +49,12 @@ vi.mock('../notes/model/notesPrefsSync', async (orig) => ({
 // The view's children are not under test and pull in far more than a tab bar.
 vi.mock('../components/ChecklistBody', () => ({ ChecklistBody: () => null }));
 vi.mock('../components/TaskTree', () => ({ TaskTree: () => null }));
+// The Calendar tab's own content neither: only what the view hands it (a
+// note its import makes goes on the bar).
+const calendar = vi.hoisted(() => ({ props: null as null | { onListCreated?: (list: import('../api/tasks').TaskList) => void } }));
+vi.mock('../components/calendar/TasksCalendar', () => ({
+    TasksCalendar: (p: { onListCreated?: (list: import('../api/tasks').TaskList) => void }) => { calendar.props = p; return null; },
+}));
 // The tab bar's drop handler, as TasksView hands it to the drag hook.
 type DropEvent = { key: string; group: string; order: string[]; insertAt: number; crossDelta: number; sameSlot?: boolean };
 const drag = vi.hoisted(() => ({ onDrop: null as null | ((e: DropEvent) => void) }));
@@ -200,6 +206,7 @@ beforeEach(() => {
     serverLists = [5, 7, 9];
     serverPrefs = SAVED;
     drag.onDrop = null;
+    calendar.props = null;
     syncHook.mounts = 0;
     toasts = [];
     setMessageToastSink(t => { toasts.push(t.title); });
@@ -413,6 +420,28 @@ describe('Púca Tasks view: a new list goes first after the favourites', () => {
         await createList('Fresh');
         expect(savedOrders()).toEqual([]);
         expect(barOrder()).toEqual(['list:5', 'list:7', 'list:9', 'list:12']);
+    });
+
+    it('a calendar imported into a new note: on the bar at once, after the favourite — and the bar’s own copy holds it, so a favourite made next keeps it there', async () => {
+        serverPrefs = [{ kind: 'list', ref_id: 5, is_favorite: true }, ...SAVED.slice(1)];
+        await mount();
+        const calTab = container.querySelector<HTMLElement>('.tasks-tab-calendar');
+        expect(calTab, 'the Calendar tab').toBeTruthy();
+        await act(async () => { calTab!.click(); });
+        await settle();
+        expect(calendar.props?.onListCreated, 'the view hands the calendar a way to put a new note on its bar').toBeTypeOf('function');
+        // What the import dialog does once the server has made the note.
+        await act(async () => { calendar.props!.onListCreated!(row(15)); });
+        await settle();
+        expect(savedOrders()).toEqual([['list:5*', 'list:15', 'list:7', 'list:9']]);
+        expect(barOrder()).toEqual(['list:5', 'list:15', 'list:7', 'list:9']);
+        // The next full replace from this bar is built on the order it now
+        // holds: the imported note keeps its place rather than being dropped
+        // (it is neither in the lists nor in the order the bar first read).
+        serverPrefs = [{ kind: 'list', ref_id: 5, is_favorite: true }, { kind: 'list', ref_id: 15, is_favorite: false }, ...SAVED.slice(1)];
+        put.mockClear();
+        // (A new favourite leads the favourites — toggleFavoritePrefs' rule.)
+        expect(await favourite('List 9')).toEqual(['list:9*', 'list:5*', 'list:15', 'list:7']);
     });
 
     it('with a note ARCHIVED (off the bar, still in the order), it is only an insert: the archived note keeps its place', async () => {

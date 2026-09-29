@@ -1263,6 +1263,12 @@ export function TasksView() {
                         currentUserId={currentUserId}
                         noteReminders={support.features.noteReminders}
                         onOpen={(kind, id) => setSelected({ kind, id })}
+                        // A calendar imported into a new note: on the bar at
+                        // once, first among the unpinned, like New list.
+                        onListCreated={list => {
+                            setLists(prev => (prev.some(l => l.id === list.id) ? prev : [...prev, list]));
+                            placeNewList(list.id);
+                        }}
                     />
                 </div>
             ) : selected?.kind === 'reminders' ? (

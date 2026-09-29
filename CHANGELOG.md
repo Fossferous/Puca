@@ -12,12 +12,14 @@ one-line summary; this file is the full story. Versions follow
   from the composer, a share, a pasted checklist, the calendar's **New
   note…** and a calendar imported into a new note, **Make a copy**, and
   **Save to Notes** in a conversation. Púca's Tasks view does the same for
-  **New list**, typed or pasted: the new list is the first tab after your
-  favourites. Your pinned notes stay where they are and the others keep
-  their order. It is the one saved order both apps share, so the note is
-  still at the top after a reload and on your other devices, and a note
-  made offline takes its place there when it syncs. Sorting by **Title**,
-  **Newest** or **Edited** is unchanged.
+  **New list**, typed or pasted, and for a calendar imported into a new note
+  on its **Calendar** tab: the new list is the first tab after your
+  favourites (an imported one now shows on the bar straight away, not only
+  after **Refresh** or leaving Tasks). Your pinned notes stay where they
+  are and the others keep their order. It is the one saved order both apps
+  share, so the note is still at the top after a reload and on your other
+  devices, and a note made offline takes its place there when it syncs.
+  Sorting by **Title**, **Newest** or **Edited** is unchanged.
 
 ## 0.9.826 — 2026-09-29
 

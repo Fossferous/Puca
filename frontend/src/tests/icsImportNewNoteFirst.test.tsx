@@ -5,9 +5,10 @@
  *
  *  - Notes' /calendar places it through its own actions (placeNewNote: the
  *    order on screen at once, the save through the offline outbox);
- *  - Púca's Calendar tab has no copy of the order at hand, so it reads the
- *    server's, inserts and writes it back (api/listContent.ts
- *    placeNewListFirst).
+ *  - Púca's Calendar tab hands the note to the Tasks view it sits in
+ *    (onListCreated), which puts it on its bar and saves the place; alone,
+ *    with no copy of the order at hand, it reads the server's, inserts and
+ *    writes it back itself (api/listContent.ts placeNewListFirst).
  *
  * The dialog is replaced by a stub that keeps the `io` it was handed; what
  * is under test is that io — the wiring at each door, which the placement's
@@ -98,6 +99,16 @@ describe('a calendar imported into a new note puts that note first among the unp
         const made = await io.createList('Trip');
         expect(made.id).toBe(88);
         expect(h.placeNewListFirst).toHaveBeenCalledWith(88);
+    });
+
+    it('Púca’s Calendar tab inside the Tasks view: handed to the view, which puts it on its bar and saves the place itself', async () => {
+        const onListCreated = vi.fn();
+        const io = await openImport(render(<TasksCalendar lists={[]} channels={[]} currentUserId={3} onOpen={() => {}} onListCreated={onListCreated} />));
+        expect(onListCreated).not.toHaveBeenCalled();
+        const made = await io.createList('Trip');
+        expect(onListCreated).toHaveBeenCalledWith(made);
+        // Once, by the view (tasksViewPrefsParity.test.tsx) — not twice.
+        expect(h.placeNewListFirst).not.toHaveBeenCalled();
     });
 
     it('a list that could not be made places nothing', async () => {
