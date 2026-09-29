@@ -16,7 +16,9 @@
 //   - registered and signed in through the main app, the rail's Tasks & notes
 //     opens Notes INSIDE the app: the address stays /chat, the document is
 //     not reloaded or navigated, the same WebSocket stays open, notes.css is
-//     the first stylesheet in <head>, and Notes' portals land in the view;
+//     the first stylesheet in <head> and still wins what it wins on its own
+//     page (a focused search box or composer item wears no index.css ring),
+//     and Notes' portals land in the view;
 //   - a note made in the composer; a Markdown answer from an assistant pasted
 //     into the composer's title asks first, then "Add 4 items" gives clean
 //     items and the heading as the title; search finds it; a colour and a
@@ -76,6 +78,14 @@ const ck = (name, ok, detail) => {
 /** A check run against a target where it MUST come out false. */
 const control = (name, result, detail) => ck(`control: ${name}`, result === false, detail ?? `the check answered ${result}`);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+/** The focused element matches `sel` and wears no outline. index.css rings
+ *  every focused input (`input:focus`, `input:focus-visible`) at the same
+ *  specificity as Notes' `.notes-search input`, and notes.css comes FIRST in
+ *  the app, so Notes' own "no ring" has to win by specificity, not by order. */
+const focusedWithoutRing = (page, sel) => page.evaluate(s => {
+    const el = document.activeElement;
+    return !!el && el.matches(s) && getComputedStyle(el).outlineStyle === 'none';
+}, sel);
 const until = async (page, fn, arg, timeout = 10000) =>
     page.waitForFunction(fn, arg, { timeout }).then(() => true).catch(() => false);
 
@@ -325,6 +335,16 @@ ck('notes: notes.css is the FIRST stylesheet in <head>', await page.evaluate(() 
     return !!first && first.hasAttribute('data-notes-desktop') && document.head.querySelectorAll('style[data-notes-desktop]').length === 1;
 }));
 ck('notes: the empty state', /Take a note/.test(await page.locator('.notes-desktop-view .notes-empty').innerText().catch(() => '')));
+// What the two ring checks below would see if index.css won: a plain input
+// focused in the same document wears its ring, so "no ring" is not vacuous.
+control('a plain input focused in this document wears no ring', await page.evaluate(() => {
+    const i = document.createElement('input');
+    document.body.append(i);
+    i.focus();
+    const none = document.activeElement === i && getComputedStyle(i).outlineStyle === 'none';
+    i.remove();
+    return none;
+}));
 await shot(page, 'notes-open');
 
 // =============================================================================
@@ -338,6 +358,7 @@ await openComposer();
 await page.fill('.notes-quickadd-title', 'Groceries');
 const item = i => page.locator('.notes-quickadd-item input').nth(i);
 await item(0).fill('Milk');
+ck('composer: a focused item wears no ring of its own (as on Notes\' page)', await focusedWithoutRing(page, '.notes-quickadd-item input'));
 await item(0).press('Enter');
 await item(1).fill('Bread');
 await item(1).press('Enter');
@@ -388,6 +409,7 @@ ck('paste: saved as a note with those four items',
 // ---- Search ------------------------------------------------------------------
 await page.fill('.notes-search input', 'green');
 await sleep(400);
+ck('search: the focused box wears no ring inside its pill (as on Notes\' page)', await focusedWithoutRing(page, '.notes-search input'));
 ck('search: finds the pasted note by an item',
     await page.locator('.notes-card').count() === 1 && await router().count() === 1,
     `${await page.locator('.notes-card').count()} card(s)`);

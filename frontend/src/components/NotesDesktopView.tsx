@@ -59,6 +59,14 @@ import './NotesDesktopView.css';
  * NotesDialog's primary button, for one, would take notes.css's brand fill
  * under NotesDialog.css's brand-coloured text, in Púca's own Tasks view as
  * much as in Notes. Once per document; the app's CSP allows inline styles.
+ *
+ * The one sheet the page loads BEFORE notes.css, index.css, is inside the
+ * app's own built stylesheet here, which cannot be split to put notes.css
+ * after it — so here index.css comes after, and would win their ties. The
+ * only ones that mattered were index.css's focus ring on a bare `input`
+ * against Notes' borderless search box and composer items; notes.css now
+ * wins those by specificity (`:focus`), whatever the order, and the desktop
+ * walk (e2e/notes-desktop-embed.mjs) checks the focused inputs.
  */
 function installNotesCss(): void {
     if (document.head.querySelector('style[data-notes-desktop]')) return;

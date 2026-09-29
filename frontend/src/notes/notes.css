@@ -90,10 +90,16 @@
     min-width: 0;
     background: none;
     border: none;
-    outline: none;
     color: var(--text-normal);
     font-size: 15px;
 }
+/* The pill's :focus-within border is the focus cue, not a ring inside it.
+   On :focus, not the bare input: index.css's `input:focus` and
+   `input:focus-visible` rings are as specific as `.notes-search input`, so
+   which one won went by load order — notes.css last on Notes' own page, but
+   FIRST inside the desktop app (components/NotesDesktopView.tsx), where the
+   ring won. Same for the composer's items below. */
+.notes-search input:focus { outline: none; }
 .notes-search input::placeholder { color: var(--text-faint); }
 
 .notes-topbar-actions {
@@ -295,11 +301,11 @@
     min-width: 0;
     border: none;
     background: none;
-    outline: none;
     color: var(--text-normal);
     font-size: 14px;
     padding: 5px 0;
 }
+.notes-quickadd-item input:focus { outline: none; }
 .notes-quickadd-item input::placeholder { color: var(--text-faint); }
 .notes-quickadd-item .notes-iconbtn { opacity: 0; }
 .notes-quickadd-item:hover .notes-iconbtn, .notes-quickadd-item:focus-within .notes-iconbtn { opacity: 1; }
