@@ -30,6 +30,7 @@ import { invalidateTaskScope } from './taskSources';
 import { TaskTree } from './TaskTree';
 import { usePasteItems } from './usePasteItems';
 import { createdWhileReading } from './createdWhileReading';
+import { SAVE_WAIT_MS, writesInFlight } from './writesInFlight';
 import { MAX_ITEM_LENGTH } from '../notes/model/notesModel';
 
 /** Which checklist a body shows: a channel's, or a personal list's. */
@@ -64,11 +65,17 @@ interface ChecklistBodyProps {
     /** Fires after every local task-state change (load, add, toggle, delete…)
      *  so an embedding view can keep progress counts in sync. */
     onTasksChanged?: (tasks: Task[]) => void;
+    /** An embedder's Refresh (TasksView's All-tasks board, for its personal
+     *  lists — they have no live updates). Called while mounted with the
+     *  way to read this checklist again; the answer is whether it could be
+     *  read. The read is quiet and waits for this body's own writes, like
+     *  the embedder's (writesInFlight). Returns the unregister function. */
+    registerRefresh?: (reread: () => Promise<boolean>) => () => void;
 }
 
 export function ChecklistBody({
     channelId, listId, compact = false, subscribeRoom = false,
-    myPerms, currentUserId, resolveUserName, onTasksChanged,
+    myPerms, currentUserId, resolveUserName, onTasksChanged, registerRefresh,
 }: ChecklistBodyProps) {
     const [tasks, setTasks] = useState<Task[]>([]);
     const [newTask, setNewTask] = useState('');
@@ -111,6 +118,9 @@ export function ChecklistBody({
     // (a pasted checklist is still landing when the side panel comes back
     // to it, or another member's edit makes it read again).
     const whileReading = useRef(createdWhileReading());
+    // This body's writes still out, for the embedder's Refresh: its read
+    // waits for them, and an answer that raced one is dropped.
+    const [writes] = useState(writesInFlight);
 
     const loadTasks = useCallback(async () => {
         const asked: Scope = { isChannel, channelId, listId };
@@ -135,17 +145,21 @@ export function ChecklistBody({
     useEffect(() => { loadTasks(); }, [loadTasks]);
 
     /** Re-read from truth WITHOUT loadTasks' "Loading…" swap (which resets
-     *  collapse and edit state — review W4-F5). */
-    const rereadQuietly = async () => {
+     *  collapse and edit state — review W4-F5). `current`, asked when the
+     *  answer is in, says whether it may still land. False when it could
+     *  not be read (and that was logged); never rejects. */
+    const rereadQuietly = async (current: () => boolean = () => true): Promise<boolean> => {
         const asked: Scope = { isChannel, channelId, listId };
         const read = whileReading.current.reading(scopeKey(asked));
         try {
             const fresh = isChannel ? await listTasks(channelId!) : await listListTasks(listId!);
-            if (!sameScope(scopeRef.current, asked)) return;
+            if (!sameScope(scopeRef.current, asked) || !current()) return true;
             loadedOnce.current = true;
             setTasks(read.merge(fresh));
+            return true;
         } catch (err) {
             console.error('Failed to reload tasks:', err);
+            return false;
         } finally {
             read.done();
         }
@@ -153,6 +167,20 @@ export function ChecklistBody({
     // The live re-read below outlives the render that started it.
     const rereadRef = useRef(rereadQuietly);
     useEffect(() => { rereadRef.current = rereadQuietly; });
+
+    // The embedder's Refresh: what this body has out lands first, and an
+    // answer that raced a write started meanwhile is dropped — the screen is
+    // newer than it (writesInFlight). A save still out after the wait is
+    // left to report itself, and this list is not read: that answer would
+    // be dropped anyway.
+    useEffect(() => {
+        if (!registerRefresh) return;
+        return registerRefresh(async () => {
+            if (!await writes.settled(SAVE_WAIT_MS)) return true;
+            const mark = writes.mark();
+            return rereadRef.current(() => !writes.since(mark));
+        });
+    }, [registerRefresh, writes]);
 
     // Live sync: another viewer changed this CHANNEL's checklist → re-read.
     // Personal lists are owner-only, so they get no broadcast (nothing to sync).
@@ -211,7 +239,7 @@ export function ChecklistBody({
      * this form has no automatic one, so a failed create is re-sent by hand
      * and must not be able to make a second item.
      */
-    const addItem = async (scope: Scope, description: string, parentId?: number): Promise<Task | null> => {
+    const addItem = (scope: Scope, description: string, parentId?: number) => writes.run(async (): Promise<Task | null> => {
         try {
             const key = itemKey.current.keyFor(`${scope.isChannel ? 'c' : 'l'}${scope.isChannel ? scope.channelId : scope.listId}\u0000${parentId ?? ''}\u0000${description}`);
             const created = scope.isChannel
@@ -228,7 +256,7 @@ export function ChecklistBody({
             pushMessageToast({ title: err instanceof ApiError && (err.status === 400 || err.status === 403 || err.status === 409) ? err.message : 'Couldn’t add the item — check your connection' });
             return null;
         }
-    };
+    });
 
     const handleAddTask = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -254,7 +282,7 @@ export function ChecklistBody({
         });
     };
 
-    const handleToggle = async (task: Task, completed: boolean) => {
+    const handleToggle = (task: Task, completed: boolean) => writes.run(async () => {
         const original = tasks;
         // One completion path (taskCompletion.ts): a repeating task advances.
         const plan = planToggle(tasks, task, completed, { canEdit: canEditTask(task, currentUserId, myPerms) });
@@ -276,9 +304,9 @@ export function ChecklistBody({
                 void rereadQuietly();
             }
         }
-    };
+    });
 
-    const handleEdit = async (task: Task, description: string) => {
+    const handleEdit = (task: Task, description: string) => writes.run(async () => {
         const original = tasks;
         setTasks(prev => prev.map(t => t.id === task.id ? { ...t, description } : t));
         try {
@@ -290,9 +318,9 @@ export function ChecklistBody({
             if (err instanceof ApiError && err.status === 409) pushMessageToast({ title: err.message });
             setTasks(original);
         }
-    };
+    });
 
-    const handleMove = async (task: Task, direction: 'up' | 'down') => {
+    const handleMove = (task: Task, direction: 'up' | 'down') => writes.run(async () => {
         const original = tasks;
         const next = applyMove(tasks, task, direction);
         if (next === tasks) return;
@@ -303,11 +331,11 @@ export function ChecklistBody({
             console.error('Failed to move task:', err);
             setTasks(original);
         }
-    };
+    });
 
-    const handleReorder = async (
+    const handleReorder = (
         task: Task, afterId: number | null, reparent?: { parentId: number | null },
-    ) => {
+    ) => writes.run(async () => {
         const original = tasks;
         const next = applyReorder(tasks, task, afterId, reparent);
         if (next === tasks) return;
@@ -331,9 +359,9 @@ export function ChecklistBody({
             console.error('Failed to reorder task:', err);
             setTasks(original);
         }
-    };
+    });
 
-    const handleSetDue = async (task: Task, dueAt: string | null) => {
+    const handleSetDue = (task: Task, dueAt: string | null) => writes.run(async () => {
         const original = tasks;
         setTasks(prev => prev.map(t => t.id === task.id ? { ...t, due_at: dueAt } : t));
         try {
@@ -347,7 +375,7 @@ export function ChecklistBody({
             console.error('Failed to set due time:', err);
             setTasks(original);
         }
-    };
+    });
 
     // Date & repeat: only against a server that stores it (taskFeatures).
     const scheduleOn = useTaskFeature('schedule') === true;
@@ -358,8 +386,11 @@ export function ChecklistBody({
     const snoozeOn = useTaskFeature('snooze') === true;
     const canEditTime = useCallback((task: Task) => canEditTask(task, currentUserId, myPerms), [currentUserId, myPerms]);
     const handleSnooze = useSnoozeSetter(tasks, setTasks, canEditTime);
+    // The two above, counted as writes for a Refresh (writesInFlight).
+    const setScheduleCounted = (task: Task, schedule: string | null, dueAt: string | null) => writes.run(() => handleSetSchedule(task, schedule, dueAt));
+    const snoozeCounted = (task: Task, until: number | null) => writes.run(() => handleSnooze(task, until));
 
-    const handleSetAttachments = async (task: Task, refs: TaskAttachmentRef[]) => {
+    const handleSetAttachments = (task: Task, refs: TaskAttachmentRef[]) => writes.run(async () => {
         const original = tasks;
         try {
             // Local state holds the OPENED sidecar (plaintext JSON); the update
@@ -372,9 +403,9 @@ export function ChecklistBody({
             console.error('Failed to update attachments:', err);
             setTasks(original);
         }
-    };
+    });
 
-    const handleDelete = async (taskId: number) => {
+    const handleDelete = (taskId: number) => writes.run(async () => {
         const original = tasks;
         // An item that has only just landed must not come back with a read
         // that is still out (createdWhileReading).
@@ -390,7 +421,7 @@ export function ChecklistBody({
             console.error('Failed to delete task:', err);
             setTasks(original);
         }
-    };
+    });
 
     // CREATE_TASKS gate: the add form (and TaskTree's add-subtask affordance)
     // is hidden entirely without the bit. undefined bits = allowed (hasPerm's
@@ -427,8 +458,8 @@ export function ChecklistBody({
                     onMove={handleMove}
                     onReorder={handleReorder}
                     onSetDue={handleSetDue}
-                    onSetSchedule={scheduleOn ? handleSetSchedule : undefined}
-                    onSnooze={snoozeOn ? handleSnooze : undefined}
+                    onSetSchedule={scheduleOn ? setScheduleCounted : undefined}
+                    onSnooze={snoozeOn ? snoozeCounted : undefined}
                     onSetAttachments={handleSetAttachments}
                     myPerms={myPerms}
                     currentUserId={currentUserId}

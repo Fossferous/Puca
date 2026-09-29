@@ -60,7 +60,7 @@ import {
 } from '../api/tasks';
 import { useServers, keys } from '../hooks/queries';
 import { pokeTaskReminders } from '../api/taskReminders';
-import { invalidateTaskScope } from './taskSources';
+import { invalidateTaskScope, taskScopesKey } from './taskSources';
 import { consumeTasksTab, peekTasksIds, peekTasksTab, soleDueId } from '../api/tasksViewIntent';
 import { planToggle } from '../api/taskCompletion';
 import { useTaskFeature } from '../api/taskFeatures';
@@ -72,7 +72,7 @@ import { TaskTree } from './TaskTree';
 import { ChecklistBody } from './ChecklistBody';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { useContextMenu } from './contextMenuUtils';
-import { ArchiveIcon, BellIcon, CalendarIcon, ChecklistIcon, FileTextIcon, NoteIcon, PlusIcon, StarIcon, TagIcon, TasksIcon, TrashIcon } from './Icons';
+import { ArchiveIcon, BellIcon, CalendarIcon, ChecklistIcon, FileTextIcon, NoteIcon, PlusIcon, RefreshIcon, StarIcon, TagIcon, TasksIcon, TrashIcon } from './Icons';
 // Púca Notes' organisation, shared rather than forked — see the header.
 import { MAX_ITEM_LENGTH, type NoteColor, deriveQuickTitle } from '../notes/model/notesModel';
 import {
@@ -101,6 +101,7 @@ import { heldOpKey } from '../api/opKey';
 import type { PastedItems } from '../notes/model/noteContent';
 import { textOutsideSelection, usePasteItems } from './usePasteItems';
 import { createdWhileReading } from './createdWhileReading';
+import { SAVE_WAIT_MS, writesInFlight } from './writesInFlight';
 import { useQueryClient } from '@tanstack/react-query';
 import './TasksView.css';
 import './AllChecklistsView.css';
@@ -205,6 +206,21 @@ export function TasksView() {
     // Items created here while the open list is being read: its answer is
     // older than they are and must not take them off the screen.
     const whileReading = useRef(createdWhileReading());
+    // What this view has out — item changes, a list's title and reminder, the
+    // tab order — so Refresh lets them land first and cannot put an older
+    // copy over them (writesInFlight).
+    const [writes] = useState(writesInFlight);
+    // Refresh: running (the button is disabled and spins), and the same
+    // thing for the tap that lands before that render (a state lags one).
+    const [refreshing, setRefreshing] = useState(false);
+    const refreshingRef = useRef(false);
+    // The board's list cards keep their items themselves (ChecklistBody) and
+    // hand Refresh the way to read them again while they are on screen.
+    const [cardRefreshes] = useState(() => new Set<() => Promise<boolean>>());
+    const registerCardRefresh = useCallback((reread: () => Promise<boolean>) => {
+        cardRefreshes.add(reread);
+        return () => { cardRefreshes.delete(reread); };
+    }, [cardRefreshes]);
     /** The list whose title is being edited, not a bare flag: the editor and
      *  its draft must not survive a change of tab and rename the next list. */
     const [editingTitle, setEditingTitle] = useState<number | null>(null);
@@ -340,7 +356,7 @@ export function TasksView() {
         const prev = prefs;
         const seq = ++saveSeq.current;
         setPrefs(next);
-        putTaskTabPrefs(next).catch(err => {
+        writes.run(() => putTaskTabPrefs(next)).catch(err => {
             console.error('Failed to save tab prefs:', err);
             if (saveSeq.current === seq) setPrefs(prev);
         });
@@ -398,21 +414,29 @@ export function TasksView() {
         onSwipeRight: () => stepTab(-1),
     });
 
-    const refreshLists = useCallback(async (withPrefs = false) => {
+    /** Read the lists (and, `withPrefs`, the saved tab order) onto the
+     *  screen. `current`, asked as each answer comes in, says whether it may
+     *  still land (Refresh drops one that raced a change — see refresh).
+     *  False when the lists could not be read. */
+    const refreshLists = useCallback(async (withPrefs = false, current: () => boolean = () => true): Promise<boolean> => {
+        let read = true;
         try {
             const fetched = await listTaskLists();
-            setLists(fetched);
+            if (current()) setLists(fetched);
         } catch (err) {
             console.error('Failed to load task lists:', err);
+            read = false;
         }
         if (withPrefs) {
             try {
-                setPrefs(await getTaskTabPrefs());
+                const fetched = await getTaskTabPrefs();
+                if (current()) setPrefs(fetched);
             } catch {
                 // Old backend / offline: natural order, favourites unsaved.
             }
         }
         setLoading(false);
+        return read;
     }, []);
 
     useEffect(() => {
@@ -451,7 +475,7 @@ export function TasksView() {
 
     /** Create a list and open it: the "New list" form, and a checklist
      *  pasted into it. Null when it was refused, and the person is told. */
-    const createList = async (title: string): Promise<TaskList | null> => {
+    const createList = (title: string) => writes.run(async (): Promise<TaskList | null> => {
         try {
             const created = await createTaskList(title, listKey.current.keyFor(title));
             listKey.current.landed();
@@ -470,7 +494,7 @@ export function TasksView() {
             pushMessageToast({ title: err instanceof ApiError && (err.status === 400 || err.status === 409) ? err.message : 'Couldn’t create the list — check your connection' });
             return null;
         }
-    };
+    });
 
     const handleCreateList = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -491,7 +515,7 @@ export function TasksView() {
     /** Set the LIST's own reminder (migration 068). Optimistic over the same
      *  local rows a rename patches, rolled back on a refusal, and it pokes
      *  the reminder loop so a time minutes away gets a timer now. */
-    const saveListTiming = async (list: TaskList, patch: { dueAt?: string | null; schedule?: string | null }) => {
+    const saveListTiming = (list: TaskList, patch: { dueAt?: string | null; schedule?: string | null }) => writes.run(async () => {
         const before = { due_at: list.due_at, schedule: list.schedule };
         patchList(list.id, {
             ...(patch.dueAt !== undefined ? { due_at: patch.dueAt } : {}),
@@ -505,9 +529,9 @@ export function TasksView() {
             patchList(list.id, before);
             pushMessageToast({ title: err instanceof ApiError && (err.status === 400 || err.status === 409) ? err.message : 'Couldn’t save the reminder — check your connection' });
         }
-    };
+    });
 
-    const handleDeleteList = async (list: TaskList) => {
+    const handleDeleteList = (list: TaskList) => writes.run(async () => {
         // Only a server KNOWN to have no trash gets the permanent delete.
         let features = support.features;
         if (!support.featuresKnown) {
@@ -556,9 +580,9 @@ export function TasksView() {
             console.error('Failed to delete list:', err);
             setLists(original);
         }
-    };
+    });
 
-    const commitTitle = async () => {
+    const commitTitle = () => writes.run(async () => {
         const editing = editingTitle;
         setEditingTitle(null);
         const title = titleDraft.trim();
@@ -572,7 +596,7 @@ export function TasksView() {
             if (err instanceof ApiError && err.status === 409) pushMessageToast({ title: err.message });
             setLists(original);
         }
-    };
+    });
 
     /**
      * Create one item in personal list `listId` — the add row, a subtask and
@@ -585,7 +609,7 @@ export function TasksView() {
      * And only into the list still on screen — the person may have moved on
      * while the list was landing; its count is kept right either way.
      */
-    const addListItem = async (listId: number, text: string, parentId?: number): Promise<Task | null> => {
+    const addListItem = (listId: number, text: string, parentId?: number) => writes.run(async (): Promise<Task | null> => {
         try {
             const created = await createListTask(listId, text, parentId, undefined, itemKey.current.keyFor(`${listId}\u0000${parentId ?? ''}\u0000${text}`));
             itemKey.current.landed();
@@ -598,7 +622,7 @@ export function TasksView() {
             pushMessageToast({ title: err instanceof ApiError && (err.status === 400 || err.status === 409) ? err.message : 'Couldn’t add the task — check your connection' });
             return null;
         }
-    };
+    });
 
     const handleAddTask = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -658,25 +682,80 @@ export function TasksView() {
     /** Re-read one list's items into the editor, quietly (no "Loading…"),
      *  GUARDED like the load effect: a reply for a list the user has since
      *  left must not land in the new list's editor — and, like it, keeping
-     *  what was created here while it was out (createdWhileReading). */
-    const rereadList = async (forList: number) => {
+     *  what was created here while it was out (createdWhileReading).
+     *  `current`, asked when the answer is in, says whether it may still
+     *  land (see refresh). False when it could not be read. */
+    const rereadList = async (forList: number, current: () => boolean = () => true): Promise<boolean> => {
         const read = whileReading.current.reading(`list:${forList}`);
+        let ok = true;
         // No `finally`: the React Compiler (and with it this component's
         // hook lint) gives up on a function that has one.
         try {
             const fetched = await listListTasks(forList);
-            if (selectedRef.current?.kind === 'list' && selectedRef.current.id === forList) {
+            if (selectedRef.current?.kind === 'list' && selectedRef.current.id === forList && current()) {
                 const rows = read.merge(fetched);
                 setTasks(rows);
                 syncListCounts(forList, rows);
             }
         } catch (err) {
             console.error('Failed to reload tasks:', err);
+            ok = false;
         }
         read.done();
+        return ok;
     };
 
-    const handleToggle = async (task: Task, completed: boolean) => {
+    /**
+     * Refresh: read again what this view read when it opened — the lists and
+     * their saved order — and what is on screen from them: the open list's
+     * items, the board's list cards, the Calendar and Reminders tabs and the
+     * trash. Nothing sends this view a personal list's changes (there is no
+     * one else to tell), so this is how an edit made on another device shows
+     * up without leaving Tasks. A checklist channel is not read again here:
+     * it updates itself live (ChecklistBody).
+     *
+     * QUIETLY, like rereadList: nothing is swapped for "Loading…", so the open
+     * list, where it is scrolled to and an item open for editing stay as they
+     * are. What the person has just done lands first — the tap that got here
+     * took the focus out of an item or the title, which saved it, and the
+     * note's text is waited for as a trash waits for it — and an answer is
+     * dropped if they change something while it is out (writesInFlight). A
+     * save that has not answered by SAVE_WAIT_MS stops it, and says so,
+     * rather than keep the button spinning on a connection gone quiet.
+     * One at a time: a tap while it runs does nothing.
+     */
+    const refresh = async () => {
+        if (refreshingRef.current) return;
+        refreshingRef.current = true;
+        setRefreshing(true);
+        const at = selectedRef.current;
+        const openList = at?.kind === 'list' ? at.id : null;
+        if (openList !== null) await flushBodySave(openList);
+        if (!await writes.settled(SAVE_WAIT_MS)) {
+            // A save is still out: an answer now would be older than the
+            // screen and dropped, so there is nothing to read yet.
+            pushMessageToast({ title: 'Still saving your last change — try again in a moment' });
+            refreshingRef.current = false;
+            setRefreshing(false);
+            return;
+        }
+        const mark = writes.mark();
+        const current = () => !writes.since(mark);
+        // The cache's own reads, as read / not read.
+        const settles = (p: Promise<unknown>) => p.then(() => true, () => false);
+        const read = await Promise.all([
+            refreshLists(true, current),
+            openList !== null ? rereadList(openList, current) : true,
+            ...[...cardRefreshes].map(reread => reread().catch(() => false)),
+            settles(qc.invalidateQueries({ queryKey: taskScopesKey }, { throwOnError: true })),
+            settles(qc.invalidateQueries({ queryKey: listContentQueryKeys.trash }, { throwOnError: true })),
+        ]);
+        if (read.includes(false)) pushMessageToast({ title: 'Couldn’t refresh — check your connection' });
+        refreshingRef.current = false;
+        setRefreshing(false);
+    };
+
+    const handleToggle = (task: Task, completed: boolean) => writes.run(async () => {
         if (selectedList === null) return;
         const original = tasks;
         // One completion path (taskCompletion.ts): a repeating task advances.
@@ -702,9 +781,9 @@ export function TasksView() {
                 void rereadList(selectedList.id);
             }
         }
-    };
+    });
 
-    const handleEdit = async (task: Task, description: string) => {
+    const handleEdit = (task: Task, description: string) => writes.run(async () => {
         const original = tasks;
         setTasks(prev => prev.map(t => t.id === task.id ? { ...t, description } : t));
         try {
@@ -714,9 +793,9 @@ export function TasksView() {
             if (err instanceof ApiError && err.status === 409) pushMessageToast({ title: err.message });
             setTasks(original);
         }
-    };
+    });
 
-    const handleMove = async (task: Task, direction: 'up' | 'down') => {
+    const handleMove = (task: Task, direction: 'up' | 'down') => writes.run(async () => {
         const original = tasks;
         const next = applyMove(tasks, task, direction);
         if (next === tasks) return; // already at the edge
@@ -727,11 +806,11 @@ export function TasksView() {
             console.error('Failed to move task:', err);
             setTasks(original);
         }
-    };
+    });
 
-    const handleReorder = async (
+    const handleReorder = (
         task: Task, afterId: number | null, reparent?: { parentId: number | null },
-    ) => {
+    ) => writes.run(async () => {
         const original = tasks;
         const next = applyReorder(tasks, task, afterId, reparent);
         if (next === tasks) return;
@@ -754,9 +833,9 @@ export function TasksView() {
             console.error('Failed to reorder task:', err);
             setTasks(original);
         }
-    };
+    });
 
-    const handleSetDue = async (task: Task, dueAt: string | null) => {
+    const handleSetDue = (task: Task, dueAt: string | null) => writes.run(async () => {
         const original = tasks;
         setTasks(prev => prev.map(t => t.id === task.id ? { ...t, due_at: dueAt } : t));
         try {
@@ -770,7 +849,7 @@ export function TasksView() {
             console.error('Failed to set due time:', err);
             setTasks(original);
         }
-    };
+    });
 
     // Date & repeat: only against a server that stores it (taskFeatures).
     const scheduleOn = useTaskFeature('schedule') === true;
@@ -782,8 +861,11 @@ export function TasksView() {
     // so the snoozer may always move its due_at.
     const snoozeOn = useTaskFeature('snooze') === true;
     const handleSnooze = useSnoozeSetter(tasks, setTasks, alwaysEditable);
+    // The two above, counted as writes for Refresh (writesInFlight).
+    const setScheduleCounted = (task: Task, schedule: string | null, dueAt: string | null) => writes.run(() => handleSetSchedule(task, schedule, dueAt));
+    const snoozeCounted = (task: Task, until: number | null) => writes.run(() => handleSnooze(task, until));
 
-    const handleSetAttachments = async (task: Task, refs: TaskAttachmentRef[]) => {
+    const handleSetAttachments = (task: Task, refs: TaskAttachmentRef[]) => writes.run(async () => {
         const original = tasks;
         try {
             // Local state holds the OPENED sidecar (plaintext JSON); the update
@@ -795,9 +877,9 @@ export function TasksView() {
             console.error('Failed to update attachments:', err);
             setTasks(original);
         }
-    };
+    });
 
-    const handleDelete = async (taskId: number) => {
+    const handleDelete = (taskId: number) => writes.run(async () => {
         if (selectedList === null) return;
         const original = tasks;
         // The whole subtree cascades server-side; mirror locally at any depth.
@@ -815,7 +897,7 @@ export function TasksView() {
             setTasks(original);
             syncListCounts(selectedList.id, original);
         }
-    };
+    });
 
     /** Archive or unarchive a note. Either way it leaves the surface the user
      *  is looking at, so an open editor for it would be stranded. */
@@ -952,6 +1034,7 @@ export function TasksView() {
                         listId={tab.id}
                         compact
                         onTasksChanged={ts => syncListCounts(tab.id, ts)}
+                        registerRefresh={registerCardRefresh}
                     />
                 ) : (
                     <ChecklistBody
@@ -1074,6 +1157,19 @@ export function TasksView() {
                             {noteFilter.kind === 'archive' ? <ArchiveIcon /> : <TagIcon />}
                         </button>
                     )}
+                    {/* Reads the lists again, and what is open (refresh):
+                        another device's changes, without leaving the tab. */}
+                    <button
+                        type="button"
+                        className={`tasks-tab tasks-tab-icon tasks-tab-refresh ${refreshing ? 'busy' : ''}`}
+                        title="Refresh"
+                        aria-label="Refresh"
+                        aria-busy={refreshing}
+                        disabled={refreshing}
+                        onClick={() => { void refresh(); }}
+                    >
+                        <RefreshIcon className="tasks-tab-refresh-icon" />
+                    </button>
                     {notesHref && (
                         <a
                             className="tasks-tab tasks-tab-icon tasks-tab-notes"
@@ -1244,8 +1340,8 @@ export function TasksView() {
                         onMove={handleMove}
                         onReorder={handleReorder}
                         onSetDue={handleSetDue}
-                        onSetSchedule={scheduleOn ? handleSetSchedule : undefined}
-                        onSnooze={snoozeOn ? handleSnooze : undefined}
+                        onSetSchedule={scheduleOn ? setScheduleCounted : undefined}
+                        onSnooze={snoozeOn ? snoozeCounted : undefined}
                         onSetAttachments={handleSetAttachments}
                     />
                 </div>

@@ -452,6 +452,19 @@
    it is hiding anything. */
 .tasks-tab-filter.on { color: var(--accent-color, #5865f2); }
 
+/* Refresh, beside it (TasksView.tsx refresh): disabled while it runs, and the
+   arrows turn (the icon is a flex item, so the classic style's glyph span
+   turns as the SVG does). With animation off the state still reads —
+   dimmed, and aria-busy for a screen reader. */
+.tasks-tab-refresh:disabled { cursor: progress; }
+.tasks-tab-refresh.busy .tasks-tab-refresh-icon { animation: tasks-refresh-spin 0.8s linear infinite; }
+@keyframes tasks-refresh-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+    .tasks-tab-refresh.busy .tasks-tab-refresh-icon { animation: none; }
+    .tasks-tab-refresh.busy { opacity: 0.6; }
+}
+[data-animations="false"] .tasks-tab-refresh.busy { opacity: 0.6; }
+
 .tasks-filter-menu { display: flex; flex-direction: column; min-width: 200px; }
 .tasks-filter-item {
     display: flex;
@@ -479,7 +492,8 @@
     /* The bar is already scrolling horizontally at 390px; the label hint
        would push the titles out of it, and the board card keeps them. */
     .tasks-tab-labels { display: none; }
-    .tasks-tab-filter { min-width: 44px; justify-content: center; }
+    .tasks-tab-filter, .tasks-tab-refresh { min-width: 44px; justify-content: center; }
+    .tasks-tab-refresh { min-height: 44px; }
     .tasks-filter-item { padding: 12px 10px; font-size: 15px; min-height: 44px; }
     .tasks-card-label { padding: 6px 10px; font-size: 13px; }
 }
