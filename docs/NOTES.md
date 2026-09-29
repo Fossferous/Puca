@@ -300,7 +300,7 @@ until, a few lists along, a neighbour counts as on screen at rest.
 | Items, nesting, completed, due times, attachments | The tasks (`channel_tasks`), through `frontend/src/api/tasks.ts` |
 | A note's text, photos and drawings; the Trash | `task_lists.body` / `.attachments` (encrypt-to-self) and `.trashed_at` — personal notes only (below) |
 | Pin | `task_tab_prefs.is_favorite` — the same favourite as the Tasks tab bar |
-| Note order (drag in one-column views; `Move to top / up / down / to bottom`) | `task_tab_prefs` order — the Tasks tab bar's order |
+| Note order (drag in one-column views; `Move to top / up / down / to bottom`; a new note first under the pinned) | `task_tab_prefs` order — the Tasks tab bar's order |
 | An item's date, repeat, place and alerts; its snooze | `channel_tasks.schedule` / `.snooze` (066), sealed like attachments |
 | Edited | `updated_at` on the list and its items (066) |
 | Reminders | `due_at` on `channel_tasks` (an item) **and** on `task_lists` (a note's own, 068) + `frontend/src/api/taskReminders.ts`; the grouping and the timing rules are `frontend/src/api/reminderGroups.ts` + `reminderSlots.ts`, the list itself `frontend/src/components/reminders/` (both front doors) |
@@ -326,6 +326,39 @@ would be rewritten). Grid view is masonry — two columns on a phone, like
 Keep's — which is two-dimensional while the drag is one-axis, so it keeps the
 menu alone. Ordering is offered only against
 the saved order, never a display sort or a search result.
+
+**Where a new note goes.** First among the notes that are not pinned —
+directly under the pinned ones — in *Púca order*: a note from the composer,
+a share, a pasted checklist, the calendar's *New note…* or a calendar
+imported into a new note, *Make a copy* (a copy of several notes puts the
+last one made on top), *Save to Notes* in a conversation, and a list made
+with Púca's *New list*, typed or pasted. It is one insert into the saved
+order itself (`placeNewTabPrefs` in `frontend/src/api/tasks.ts`): the pinned
+notes keep their places and every other note — the hidden ones in the trash
+and the archive included — keeps its order. Because it is the saved order, it
+survives a reload and reaches every device the way a reorder does, and Púca's
+Tasks bar shows the new list first after its favourites — strictly, in front
+of the first tab that is not a favourite, since a favourite dragged or left
+behind other tabs stays where it is. Title, Newest and Edited sorts do not
+move for it.
+
+In Púca Notes the place goes out as one pin/order save through the same
+outbox as a pin, the moment the list exists and before its items (the live
+stream reads the listing again straight away, and a note placed afterwards
+would show at the bottom and then jump). Made offline, it is queued right
+behind its create and applied to the order the server holds when it lands,
+not to the one this device saw, so another device's reorder in the meantime
+is kept. Púca's Tasks view (its *New list* and its calendar's import) and
+*Save to Notes* in a conversation do the same at once — read the server's
+order, insert, write it back (`placeNewListFirst` in
+`frontend/src/api/listContent.ts`) — because the Tasks bar reads the order
+once, when it opens, and a full replace of that copy would put back an order
+another device has changed since. Where the order cannot be read (an old or
+unreachable server, or, in Notes, before it has ever been read on that
+device), nothing is saved and the note lands where the order puts a note it
+has never seen: after the others. That is also where a note made by an older
+Púca or Notes goes, and where the queue's own *"(offline copy)"* of text that
+lost to another device's lands.
 
 **Colour, labels and archive are shared too.** They are not Notes' private
 state: Púca's Tasks view reads the same sealed document and writes it through

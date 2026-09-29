@@ -4,6 +4,21 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Improved
+- **A new note goes to the top.** In Púca Notes, a note you make now
+  appears first, directly under your pinned notes, instead of at the end:
+  from the composer, a share, a pasted checklist, the calendar's **New
+  note…** and a calendar imported into a new note, **Make a copy**, and
+  **Save to Notes** in a conversation. Púca's Tasks view does the same for
+  **New list**, typed or pasted: the new list is the first tab after your
+  favourites. Your pinned notes stay where they are and the others keep
+  their order. It is the one saved order both apps share, so the note is
+  still at the top after a reload and on your other devices, and a note
+  made offline takes its place there when it syncs. Sorting by **Title**,
+  **Newest** or **Edited** is unchanged.
+
 ## 0.9.826 — 2026-09-29
 
 Púca Notes inside the desktop app, checklists pasted into Tasks and open notes, Refresh in Tasks, and Púca Notes on Android can open straight to a new note.
