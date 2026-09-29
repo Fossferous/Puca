@@ -21,6 +21,7 @@ import {
 import { sampleShareEncode, applyShareQuality, shareCaptureSize, OPEN_SHARE_QUALITY_EVENT } from '../api/rtc/shareHealthLive';
 import { ContextMenu } from './ContextMenu';
 import { copyDiagnostics } from '../api/diagnosticsReport';
+import { goLiveBegin, goLiveMark, goLiveEnd } from '../api/goLiveTiming';
 import { noteRender, startHealthLog, stopHealthLog } from '../api/healthLog';
 import { keepDetail, keepSummary } from './stableState';
 import { type NoiseSuppressionMode, type NoiseModeChange, NOISE_MODE_EVENT, getNoiseSuppressionMode, setNoiseSuppressionMode, changeNoiseModeLive, modeUsesWebAudio, rawInputHasHadSignal, hasLiveGainStage, isDeepFilterGateOpen, selectedInputDeviceId } from '../api/noiseFilter';
@@ -3205,6 +3206,12 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     setDiagNote('Measuring for a few seconds…');
                     setDiagNote(await copyDiagnostics());
                 },
+            }, {
+                id: 'send-diagnostics',
+                label: 'Send diagnostics to the server owner…',
+                icon: 'send' as const,
+                // Chat.tsx owns the dialog (api/supportReport.ts).
+                onClick: () => { window.dispatchEvent(new CustomEvent('sovereign:send-diagnostics')); },
             }])}
         >
             {contextMenu && (
@@ -3754,7 +3761,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     try {
                         // Desktop captures video-only (native audio is attached later);
                         // browsers must request audio at getDisplayMedia time.
+                        goLiveBegin();
                         const shareStream = await webrtcManager.getScreenShareStream({ width, height, fps, audio: !isDesktop });
+                        goLiveMark('picker');
                         // WebView2's "… is sharing a window" bar appears a beat after
                         // the picker resolves, i.e. NOW — long before go-live. Hide it
                         // from capture, not from the announce/publish round trip (the
@@ -3769,6 +3778,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                             // the label: exact, where title matching never worked
                             // under WebView2 (its labels carry no title).
                             const windowOwner = await sharedWindowOwner(label);
+                            goLiveMark('window-owner');
                             const isScreenShare = /^(screen|monitor)/i.test(label.trim());
                             return {
                                 windowOwner,
@@ -3787,6 +3797,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         // getDisplayMedia throws when the user cancels the OS picker.
                         // The appsPromise is safely orphaned and ignored.
                         console.warn('[VoicePanel] Screen capture cancelled/failed:', err);
+                        goLiveEnd('cancelled');
                         webrtcManager.stopScreenShare();
                         return null;
                     }
@@ -3831,6 +3842,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         console.error('[VoicePanel] Stream audio capture failed:', audioErr);
                         setError('Audio capture failed — streaming video only.');
                     }
+                    goLiveMark('audio');
 
                     // Announce FIRST, publish on the server's echo (B7): the
                     // STREAM bit is enforced on the announcement, and peers
@@ -3844,7 +3856,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     }
                     const announcedStream = webrtcManager.getScreenShareStreamForPreview();
                     const ack = await wsClient.startScreenShareAcked(roomId, announcedStream?.id, currentUserId);
+                    goLiveMark('ack');
                     if (!ack.ok) {
+                        goLiveEnd('refused');
                         console.warn('[VoicePanel] screen share refused by the server:', ack.message);
                         setError(ack.message);
                         wsClient.stopScreenShare(roomId); // retract: a timeout may still have been accepted
@@ -3861,6 +3875,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                             if (sfuStream) await sfuManager.startScreenShare(sfuStream);
                         } catch (shareErr) {
                             console.warn('[VoicePanel] SFU screen share refused:', shareErr);
+                            goLiveEnd('failed');
                             setError((shareErr as Error).message || 'Screen share failed');
                             wsClient.stopScreenShare(roomId); // retract the announcement
                             stopHidingCaptureBar();
@@ -3870,6 +3885,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     } else {
                         await webrtcManager.addScreenShareToPeers();
                     }
+                    goLiveMark('published');
                     // The capture + publish awaits above can outlive the call
                     // (channel switch / hang-up mid-picker): announcing then
                     // would hit the server's membership gate. Same guard as
@@ -3883,6 +3899,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     const stream = webrtcManager.getScreenShareStreamForPreview();
                     // Announced (and acknowledged) above, before any track was published.
                     setIsScreenSharing(true); // the effect below keeps WebView2's redundant "is sharing" bar hidden
+                    goLiveEnd('live');
                     setCurrentStreamingUser(currentUserId);
                     if (selfPreviewRef.current && stream) selfPreviewRef.current.srcObject = stream;
                     if (stream) {

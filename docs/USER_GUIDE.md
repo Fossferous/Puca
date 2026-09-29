@@ -533,3 +533,9 @@ Keybinds**. Push to talk and push to mute only do anything once you switch
 ### Screen share black screen
 - Use the desktop app, or Chrome or Edge
 - Try sharing the entire screen instead of a single window
+
+### Send a problem report to the server owner
+- When calls or streams misbehave, open **Settings → Advanced → Send diagnostics to the server owner**, or right-click the voice panel and choose **Send diagnostics to the server owner…**. Do it while the problem is happening, or soon after
+- Pick the server whose owner should get it (the one you are in is picked first), optionally say what went wrong, and press **Send report**. It takes a few seconds, because it measures your call first
+- The owner receives a text file in an encrypted direct message from you: the same measurements **Copy diagnostics** takes and, in the desktop app, the app's log (call and stream quality over the last hours, and the names of programs whose audio you shared). No messages, passwords or addresses are included, and the Windows account name is removed from any file path
+- On a phone or in a browser there is no log file, so the report holds the measurements only

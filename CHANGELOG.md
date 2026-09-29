@@ -4,6 +4,27 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Added
+- **Send diagnostics to the server owner.** When a call or stream misbehaves,
+  **Settings → Advanced → Send diagnostics to the server owner** (or the
+  voice panel's right-click menu) sends a report to the owner of a server
+  you are in, as a file in an encrypted direct message. It holds what
+  **Copy diagnostics** measures and, in the desktop app, the whole app log:
+  call and stream quality over the last hours, with the rotated files too,
+  so nobody has to dig `puca.log` out of `%LOCALAPPDATA%`. You pick which
+  server's owner (the one you are in comes first) and can add a note. No
+  messages, passwords or addresses are included, and the Windows account
+  name is removed from any file path before it leaves your computer.
+
+### Improved
+- **Going live writes where its time went.** Each screen share now logs one
+  `go-live` line in `puca.log`: how long the picker took, when the window got
+  focus back, and each step after it (the shared window's app, starting its
+  audio, the server's answer, publishing). A slow go-live can then be traced
+  to the step that took the time.
+
 ## 0.9.827 — 2026-09-29
 
 Checklist headings show as headings, a copied answer pastes with its headings, new notes go to the top, and a new note from MacroDroid opens with the keyboard up.

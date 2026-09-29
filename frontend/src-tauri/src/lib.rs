@@ -43,6 +43,7 @@ mod sidecar;
 // on lite builds — silently, because streamBoost.ts swallows the rejected
 // invoke as best-effort. stream_boost.rs depends on nothing gated.
 mod stream_boost;
+mod support_log;
 #[cfg(feature = "remote-control")]
 mod tunnel;
 #[cfg(feature = "remote-control")]
@@ -1590,6 +1591,7 @@ pub fn run() {
             power::display_power_session_end,
             stream_boost::set_stream_boost,
             log_stream_diag,
+            support_log::read_support_log,
             #[cfg(feature = "remote-control")]
             agent_ipc::agent_probe,
             #[cfg(feature = "remote-control")]
