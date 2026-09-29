@@ -76,10 +76,10 @@ function openMenu(canComplete: boolean | undefined, over: { t?: Task; canEdit?: 
 const card = (myPerms: number | undefined, kind: 'list' | 'channel', t: Task = task): NoteCard => ({
     key: `${kind}:9`, ref: { kind, id: 9 }, title: 'home', tasks: [t], pinned: false, color: 'default', labels: [], archived: false,
     total: 1, completed: 0, myPerms,
-} as unknown as NoteCard);
+});
 const reminders = (c: NoteCard, t: Task = task) => mount(
     <RemindersView
-        groups={{ overdue: [], today: [], upcoming: [{ task: t, note: c, at: Date.parse(t.due_at!) }] }}
+        groups={{ overdue: [], today: [], upcoming: [{ kind: 'task', task: t, note: c, at: Date.parse(t.due_at!) }] }}
         actions={{} as NoteActions} now={Date.parse('2030-10-01T00:00:00Z')} onOpen={() => {}}
         notificationsState="granted" onEnableNotifications={() => {}} canSnooze
     />,

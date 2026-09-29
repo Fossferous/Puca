@@ -350,7 +350,7 @@ describe('what replay does with parked media', () => {
         const ob = h.make();
         await h.parked.park([media('a')]);
         await ob.send(ops.addMedia(4, ['a'], [], [], 'a picture'));
-        h.failures.set('a picture', new ApiError(403, 'no'));
+        h.failures.set('a picture', new ApiError('no', 403));
         h.setOnline(true);
         const summary = await ob.replay();
         expect(summary?.dropped.map(o => o.label)).toEqual(['a picture']);

@@ -11,17 +11,26 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { Task } from '../api/tasks';
+import type { DueItem, NoteCard } from '../notes/model/notesModel';
 
 vi.mock('../api/auth', () => ({ currentUserIdFromToken: () => 7 }));
 vi.mock('../notes/native/PlaceReminders', () => ({ PlaceReminders: () => null }));
 
 const { RemindersView } = await import('../notes/components/RemindersView');
 
-function item(id: number, offsetMs: number) {
+/** One ITEM reminder (kind 'task') in a personal note of its own. */
+function item(id: number, offsetMs: number): DueItem {
     const due = new Date(Date.now() + offsetMs).toISOString();
-    const note = { key: `list:${id}`, ref: { kind: 'list', id }, title: `Note ${id}` } as never;
-    const task = { id, description: `Item ${id}`, due_at: due, created_by: 7, is_completed: false } as never;
-    return { task, note, at: Date.parse(due) };
+    const task: Task = {
+        id, channel_id: null, list_id: id, parent_id: null, description: `Item ${id}`,
+        is_completed: false, position: 0, created_at: due, created_by: 7, attachments: null, due_at: due,
+    };
+    const note: NoteCard = {
+        key: `list:${id}`, ref: { kind: 'list', id }, title: `Note ${id}`,
+        tasks: [task], pinned: false, color: 'default', labels: [], archived: false, total: 1, completed: 0,
+    };
+    return { kind: 'task', task, note, at: Date.parse(due) };
 }
 
 let root: Root | null = null;

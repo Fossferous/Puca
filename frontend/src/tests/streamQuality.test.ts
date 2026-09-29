@@ -50,14 +50,17 @@ describe('Stream Quality IPC and Production Integration Tests', () => {
             return JSON.stringify({});
         });
 
-        await agentAnswerOffer('s1', 'offer-sdp', 0, 30, undefined);
+        // The options bag, not the old positional (fps, bitrateKbps) tail: a
+        // bare `30` there destructures to nothing, so fps only read 30 because
+        // 30 is also the default. A non-default fps proves the bag is read.
+        await agentAnswerOffer('s1', 'offer-sdp', 0, { fps: 60, bitrateKbps: undefined });
 
         const lastCall = invokeMock.mock.calls[0];
         expect(lastCall[0]).toBe('agent_request');
         const parsed = JSON.parse(lastCall[1].request);
         expect(parsed.cmd).toBe('start_stream');
         expect(parsed.session_id).toBe('s1');
-        expect(parsed.fps).toBe(30);
+        expect(parsed.fps).toBe(60);
         expect(parsed.bitrate).toBe(6_000_000);
     });
 
