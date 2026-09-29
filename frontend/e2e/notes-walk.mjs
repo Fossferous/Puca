@@ -872,13 +872,23 @@ await page.locator('.notes-quickadd-item input').first().fill('Dune');
 await page.getByRole('button', { name: 'Done' }).click();
 await page.waitForFunction(() => document.querySelectorAll('.notes-card').length === 6, null, { timeout: 15000 });
 const othersTitles = async () => (await page.locator('section[aria-label="Other notes"] .notes-card-title').allInnerTexts()).map(t => t.trim());
-ck('others: natural order Poem, Holiday photo, Sketch, Packing, Reading', (await othersTitles()).join(',') === 'Poem,Holiday photo,Sketch,Packing,Reading', (await othersTitles()).join(','));
-await page.locator('.notes-card', { hasText: 'Reading' }).hover();
-await page.locator('.notes-card', { hasText: 'Reading' }).locator('button[aria-label="More actions"]').click();
+// A new note goes FIRST among the unpinned, directly under the pinned one
+// (Groceries, §7): each of these was made after the one before, so the
+// newest leads. That place is the saved tab order (task_tab_prefs), which
+// Púca's Tasks bar renders too — so it has to survive a reload.
+ck('new notes: each goes first under the pinned one — Reading, Packing, Sketch, Holiday photo, Poem', (await othersTitles()).join(',') === 'Reading,Packing,Sketch,Holiday photo,Poem', (await othersTitles()).join(','));
+await page.reload();
+await page.waitForSelector('section[aria-label="Pinned notes"] .notes-card', { timeout: 20000 });
+await sleep(1000);
+ck('new notes: their places survived a reload (they reached the saved tab order)', (await othersTitles()).join(',') === 'Reading,Packing,Sketch,Holiday photo,Poem', (await othersTitles()).join(','));
+ck('new notes: the pinned note stayed where it was',
+    (await page.locator('section[aria-label="Pinned notes"] .notes-card-title').allInnerTexts()).map(t => t.trim()).join(',') === 'Groceries');
+await page.locator('.notes-card', { hasText: 'Poem' }).hover();
+await page.locator('.notes-card', { hasText: 'Poem' }).locator('button[aria-label="More actions"]').click();
 await page.waitForSelector('.context-menu', { timeout: 5000 });
 await page.locator('.context-menu-item', { hasText: 'Move to top' }).click();
 await sleep(400);
-ck('move: "Move to top" reorders the others (and never touches the pinned one)', (await othersTitles()).join(',') === 'Reading,Poem,Holiday photo,Sketch,Packing' && await page.locator('section[aria-label="Pinned notes"] .notes-card').count() === 1);
+ck('move: "Move to top" reorders the others (and never touches the pinned one)', (await othersTitles()).join(',') === 'Poem,Reading,Packing,Sketch,Holiday photo' && await page.locator('section[aria-label="Pinned notes"] .notes-card').count() === 1, (await othersTitles()).join(','));
 await shot('three-cards');
 // Move to bottom — the model has had the branch since ordering landed; until
 // now the menu stopped at 'Move down', so sending a note 200 places took 199
@@ -889,7 +899,7 @@ await page.waitForSelector('.context-menu', { timeout: 5000 });
 await page.locator('.context-menu-item', { hasText: 'Move to bottom' }).click();
 await sleep(400);
 ck('move: "Move to bottom" sends the note to the end of the others',
-    (await othersTitles()).join(',') === 'Reading,Holiday photo,Sketch,Packing,Poem', (await othersTitles()).join(','));
+    (await othersTitles()).join(',') === 'Reading,Packing,Sketch,Holiday photo,Poem', (await othersTitles()).join(','));
 ck('move: the pinned section is untouched by a bottom move', await page.locator('section[aria-label="Pinned notes"] .notes-card').count() === 1);
 
 // Drag to reorder, in LIST view (one column — masonry has no one-axis order).
@@ -934,7 +944,7 @@ const dragOneSlotDown = async cardAt => {
 const indicatorSeen = await dragOneSlotDown(otherCard);
 ck('drag: the insertion line appears while dragging', indicatorSeen);
 ck('drag: dropping a card one slot down reorders the others',
-    (await othersTitles()).join(',') === 'Holiday photo,Reading,Sketch,Packing,Poem', (await othersTitles()).join(','));
+    (await othersTitles()).join(',') === 'Packing,Reading,Sketch,Holiday photo,Poem', (await othersTitles()).join(','));
 ck('drag: the drop did not open the note (the ghost click is swallowed)', await page.locator('.notes-editor').count() === 0);
 ck('drag: the pinned card kept its section', await page.locator('section[aria-label="Pinned notes"] .notes-card').count() === 1);
 await shot('list-drag');
@@ -943,7 +953,7 @@ await page.reload();
 await page.waitForSelector('.notes-card', { timeout: 20000 });
 await sleep(1000);
 ck('drag: the new order survived a reload (it reached the saved tab order)',
-    (await othersTitles()).join(',') === 'Holiday photo,Reading,Sketch,Packing,Poem', (await othersTitles()).join(','));
+    (await othersTitles()).join(',') === 'Packing,Reading,Sketch,Holiday photo,Poem', (await othersTitles()).join(','));
 // The PINNED section has its own hook instance, its own drag group and its
 // own arm of the shell's section -> visible-keys lookup. Invert that one
 // ternary and every pinned drop hands applyVisibleOrder a list that is not a
@@ -1517,6 +1527,10 @@ await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 }
 ck('copy: both notes are there — the original and its copy',
     await page.locator('.notes-card').filter({ has: page.locator('.notes-card-title', { hasText: /^Holiday photo$/ }) }).count() === 1
     && await page.locator('.notes-card').filter({ has: page.locator('.notes-card-title', { hasText: /^Holiday photo \(copy\)$/ }) }).count() === 1);
+// A copy is a new note: it goes first among the unpinned, the newer on top.
+const unpinnedTitles = async () => (await page.locator('section:not([aria-label="Pinned notes"]) .notes-card-title').allInnerTexts()).map(t => t.trim());
+ck('copy: both copies lead the unpinned notes, the newer on top',
+    (await unpinnedTitles()).slice(0, 2).join(',') === 'Holiday photo (copy),Groceries (copy)', (await unpinnedTitles()).join(','));
 // Put the copies away again: every section below names its fixtures by title,
 // and "Groceries" must go on meaning ONE card. (That the copy owns its own
 // uploads — so deleting either note forever never touches the other's
@@ -1856,6 +1870,13 @@ const afterCreate = await barTabs().count();
 ck('púca: a list created while a filter was on is on the bar, and the filter is back to everything',
     underFilter === 1 && await page.locator('.tasks-tab', { hasText: 'Made under a filter' }).count() === 1 && afterCreate === tabsAll + 1,
     `underFilter=${underFilter} afterCreate=${afterCreate} all=${tabsAll}`);
+// A new list goes first among the tabs that are not favourites — the place
+// Púca Notes shows it, directly under the pinned notes. (A favourite dragged
+// or left behind other tabs stays there, so this asks for the first plain
+// tab, not the first tab after every star.)
+const firstPlainTab = async () => page.evaluate(() => [...document.querySelectorAll('.tasks-tab-scroll .tasks-tab:not(.tasks-tab-all):not(.tasks-tab-calendar):not(.tasks-tab-reminders)')]
+    .find(t => !t.querySelector('.tasks-tab-star'))?.querySelector('.tasks-tab-title')?.textContent ?? null);
+ck('púca: a list made here is the first tab that is not a favourite', await firstPlainTab() === 'Made under a filter', String(await firstPlainTab()));
 // Put the bar back as the checks below expect to find it.
 await page.locator('.tasks-tab', { hasText: 'Made under a filter' }).click({ button: 'right' });
 await page.locator('.context-menu-item', { hasText: 'Move to trash' }).click();

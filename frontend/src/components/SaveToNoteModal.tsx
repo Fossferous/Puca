@@ -34,6 +34,7 @@ import {
     fetchListFeatures,
     heldUploadsClock,
     mayReuseHeldUploads,
+    placeNewListFirst,
     setTaskListBody,
 } from '../api/listContent';
 import {
@@ -276,6 +277,9 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
                 heldNew.current = null;
                 try { await deleteTaskList(createdId); } catch { orphaned = true; }
             }
+            // A note that could not be undone is one the person is told to
+            // go and finish: it goes where a new note goes, at the top.
+            if (orphaned && createdId !== null) void placeNewListFirst(createdId);
             // ...but not after a picture write whose answer was lost: it may
             // have landed, and then the note names them. (A new note whose
             // create answer was lost has already let go of `copied` above.)
@@ -292,6 +296,11 @@ export function SaveToNoteModal({ content, onClose, onSaved }: SaveToNoteModalPr
             setSaving(false);
             return;
         }
+        // A new note goes first among the unpinned, as one made in Notes
+        // does (api/listContent.ts) — once it is whole, so a save undone
+        // above leaves no place in the order behind it. Best effort: the
+        // note is kept either way.
+        if (createdId !== null) void placeNewListFirst(createdId);
         onSaved(saved);
         onClose();
     };

@@ -57,6 +57,7 @@ import {
     orderTaskTabs,
     isFavoriteTab,
     buildPrefsForOrder,
+    placeNewTabPrefs,
     taskTabKey,
 } from '../api/tasks';
 import { useServers, keys } from '../hooks/queries';
@@ -95,7 +96,7 @@ import { useSwipe } from '../hooks/useSwipe';
 import { useDragReorder } from '../hooks/useDragReorder';
 import { ListContentBlock, TasksTrash } from './ListContentBlock';
 import { listBodySnippet, listContentQueryKeys, useListContentSupport } from './useListContentSupport';
-import { fetchListFeatures, flushBodySave, keepHiddenSlots, listTrashedTaskLists, setTaskListTiming, toggleFavoriteKeepingHidden, trashTaskList } from '../api/listContent';
+import { fetchListFeatures, flushBodySave, keepHiddenSlots, listTrashedTaskLists, placeNewListFirst, setTaskListTiming, toggleFavoriteKeepingHidden, trashTaskList } from '../api/listContent';
 import { NoteDueChip, NoteReminderControl } from './schedule/NoteReminderControl';
 import { halfMinuteNow, subscribeHalfMinute } from './schedule/halfMinuteClock';
 import { heldOpKey } from '../api/opKey';
@@ -188,6 +189,10 @@ export function TasksView() {
     const [flashTaskId, setFlashTaskId] = useState<number | null>(() => soleDueId(peekTasksIds()));
     const [lists, setLists] = useState<TaskList[]>([]);
     const [prefs, setPrefs] = useState<TaskTabPref[]>([]);
+    // The saved order as last put on screen, for a write that lands after an
+    // await (a new list is placed once its create answers).
+    const prefsNow = useRef(prefs);
+    useEffect(() => { prefsNow.current = prefs; }, [prefs]);
     const [tasks, setTasks] = useState<Task[]>([]);
     const [loading, setLoading] = useState(true);
     const [newListTitle, setNewListTitle] = useState('');
@@ -363,6 +368,28 @@ export function TasksView() {
             if (saveSeq.current === seq) setPrefs(prev);
         });
     };
+    /** A list just made goes FIRST among the tabs that are not favourites
+     *  (api/tasks.ts placeNewTabPrefs) — the saved order, so Púca Notes shows
+     *  it directly under the pinned notes and every device has it there.
+     *  On the bar at once; SAVED into the order the server holds now
+     *  (api/listContent.ts placeNewListFirst), never as a full replace of this
+     *  view's copy: the bar reads the order once, when it opens, and that copy
+     *  would put back an order another device has changed since. The answer
+     *  becomes the bar's order; an order that cannot be read or written is
+     *  left alone, silently (nobody asked for a reorder), and the list goes
+     *  back to where a tab the order has never seen goes — the end. It is an
+     *  insert, so the trash need not have been read. */
+    const placeNewList = (listId: number) => {
+        const before = prefsNow.current;
+        const shown = placeNewTabPrefs(before, { kind: 'list', id: listId });
+        if (!shown) return;
+        const seq = ++saveSeq.current;
+        prefsNow.current = shown;
+        setPrefs(shown);
+        void writes.run(() => placeNewListFirst(listId)).then(saved => {
+            if (saveSeq.current === seq) setPrefs(saved ?? before);
+        });
+    };
 
     const toggleFavorite = (tab: BarTab) => {
         // Every tab the trash, the archive or a filter is hiding keeps its slot
@@ -482,6 +509,7 @@ export function TasksView() {
             const created = await createTaskList(title, listKey.current.keyFor(title));
             listKey.current.landed();
             setLists(prev => [...prev, created]);
+            placeNewList(created.id);
             setSelected({ kind: 'list', id: created.id });
             // A brand-new list has no labels and is not archived, so ANY
             // filter hides it: the editor would open on a note with no tab and

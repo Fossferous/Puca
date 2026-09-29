@@ -91,7 +91,7 @@ import {
     type NewTaskTiming, type StampClock, type Task, type TaskList, type TaskTabPref, type TaskTabRef, type TaskTimingPatch,
     timingPatchMovesClock, createTask, createListTask, createTaskList, renameTaskList, openSelfTaskText,
     updateTask, updateChannelTask, updateListTask, deleteTask, moveTask, reorderTask, patchTaskTiming,
-    getTaskTabPrefs, putTaskTabPrefs, isFavoriteTab, toggleFavoritePrefs, buildPrefsForOrder, taskTabKey,
+    getTaskTabPrefs, putTaskTabPrefs, isFavoriteTab, toggleFavoritePrefs, buildPrefsForOrder, placeNewTabPrefs, taskTabKey,
 } from '../../api/tasks';
 import {
     NoteConflictError, createTaskListWithContent, deleteFiles, keepHiddenSlots, restoreTaskList,
@@ -114,7 +114,12 @@ import { MAX_TITLE_LENGTH, noteKey, type NoteRef } from './notesModel';
 export type PrefsIntent =
     | { type: 'pin'; tab: TaskTabRef; favorite: boolean }
     | { type: 'pins'; tabs: TaskTabRef[]; favorite: boolean }
-    | { type: 'order'; keys: string[] };
+    | { type: 'order'; keys: string[] }
+    // A note just made goes first among the unpinned (api/tasks.ts
+    // placeNewTabPrefs). Queued right behind its create, and replayed against
+    // the server's order as it is THEN, so a note made offline lands first
+    // without a stale full replace putting back the order this device saw.
+    | { type: 'created'; tab: TaskTabRef };
 
 type OpBody =
     | { k: 'createList'; tempId: number; title: string; key: string }
@@ -238,7 +243,9 @@ export const ops = {
     removeMedia: (listId: number, removing: string[], refs: TaskAttachmentRef[], what: string) =>
         withMeta({ k: 'removeMedia', listId, removing, refs }, what),
     prefs: (prefs: TaskTabPref[], intent: PrefsIntent) =>
-        withMeta({ k: 'prefs', prefs, intent }, intent.type === 'order' ? 'reorder notes' : `${intent.favorite ? 'pin' : 'unpin'} ${intent.type === 'pins' ? `${intent.tabs.length} notes` : 'a note'}`),
+        withMeta({ k: 'prefs', prefs, intent }, intent.type === 'order' ? 'reorder notes'
+            : intent.type === 'created' ? 'put a new note at the top'
+                : `${intent.favorite ? 'pin' : 'unpin'} ${intent.type === 'pins' ? `${intent.tabs.length} notes` : 'a note'}`),
 };
 
 /** Which busy key (noteBusy.ts) an op holds. */
@@ -262,7 +269,7 @@ function idsOf(op: OpBody): number[] {
         case 'createTask': return [op.note.id, ...(op.parentId !== undefined ? [op.parentId] : [])];
         case 'editTask': case 'updateTask': case 'moveTask': case 'deleteTask': case 'timing': return [op.note.id, op.taskId];
         case 'reorderTask': return [op.note.id, op.taskId, ...(op.afterId !== null ? [op.afterId] : []), ...(op.reparent?.parentId != null ? [op.reparent.parentId] : [])];
-        case 'prefs': return op.intent.type === 'pin' ? [op.intent.tab.id] : op.intent.type === 'pins' ? op.intent.tabs.map(t => t.id) : [];
+        case 'prefs': return op.intent.type === 'pin' || op.intent.type === 'created' ? [op.intent.tab.id] : op.intent.type === 'pins' ? op.intent.tabs.map(t => t.id) : [];
     }
 }
 
@@ -575,6 +582,10 @@ export function applyPrefsIntent(current: TaskTabPref[], intent: PrefsIntent, id
             if (r) { next = r; changed = true; }
         }
         return changed ? next : null;
+    }
+    if (intent.type === 'created') {
+        const tab = realTab(intent.tab);
+        return tab ? placeNewTabPrefs(current, tab) : null;
     }
     if (intent.type === 'pin') {
         const tab = realTab(intent.tab);
@@ -967,7 +978,10 @@ export function createOutbox(deps: OutboxDeps): Outbox {
                         return next;
                     };
                     if (idsOf(head).some(id => state.dead.includes(id))) {
-                        summary.dropped.push(head);
+                        // A new note's place goes with the note: the toast
+                        // already names the note that was not made, and the
+                        // person never asked for a reorder.
+                        if (!(head.k === 'prefs' && head.intent.type === 'created')) summary.dropped.push(head);
                         await dropHead(head.k === 'createTask' || head.k === 'createList' ? head.tempId : undefined);
                         continue;
                     }

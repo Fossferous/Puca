@@ -88,6 +88,8 @@ let slowFirstRead: Set<number>;
 /** Lists whose next read is held until the test lets it answer. */
 let heldReads: Map<number, Promise<void>>;
 let toasts: string[];
+/** The saved tab order the server answers with. */
+let savedPrefs: Array<{ kind: 'list' | 'channel'; ref_id: number; is_favorite: boolean }>;
 
 let root: Root;
 let container: HTMLDivElement;
@@ -111,13 +113,14 @@ beforeEach(() => {
     slowFirstRead = new Set();
     heldReads = new Map();
     toasts = [];
+    savedPrefs = [];
     setMessageToastSink(t => { toasts.push(t.title); });
     get.mockReset(); post.mockReset(); patch.mockReset(); del.mockReset(); put.mockReset();
     get.mockImplementation(async (path: string) => {
         if (path === '/task-lists/features') return { body: true, attachments: true, trash: true, trash_retention_days: 30, max_body_len: 65536, content_rev: true, idempotent_creates: true };
         if (path === '/task-lists?trashed=true') return [];
         if (path === '/task-lists') return [row(1, 'List 1'), row(3, 'List 3')];
-        if (path === '/task-tab-prefs') return [];
+        if (path === '/task-tab-prefs') return savedPrefs;
         if (path === '/servers') return [];
         const m = /^\/task-lists\/(\d+)\/tasks$/.exec(path);
         if (m) {
@@ -430,6 +433,21 @@ describe('the "New list" name takes a pasted checklist', () => {
         expect(itemPosts(100)).toHaveLength(ASSISTANT_ITEMS.length);
         expect(rows()).toEqual(ASSISTANT_ITEMS);
         expect(container.querySelector('.tasks-tab-newform')).toBeNull();
+    });
+
+    it('the list it makes goes right after the favourites, in the order saved for every device', async () => {
+        savedPrefs = [{ kind: 'list', ref_id: 3, is_favorite: true }, { kind: 'list', ref_id: 1, is_favorite: false }];
+        await mount();
+        const name = await openNewList();
+        paste(name, ASSISTANT_ANSWER);
+        act(() => { button(`Add ${ASSISTANT_ITEMS.length} items`).click(); });
+        await paced(ASSISTANT_ITEMS.length);
+        const saves = put.mock.calls.filter(c => c[0] === '/task-tab-prefs')
+            .map(c => (c[1] as { prefs: typeof savedPrefs }).prefs.map(p => `${p.ref_id}${p.is_favorite ? '*' : ''}`));
+        expect(saves).toEqual([['3*', '100', '1']]);
+        expect([...container.querySelectorAll<HTMLElement>('.tasks-tab[data-drag-key]')].map(t => t.dataset.dragKey))
+            .toEqual(['list:3', 'list:100', 'list:1']);
+        expect(rows()).toEqual(ASSISTANT_ITEMS);               // and its steps, as before
     });
 
     it('what was typed there names it instead', async () => {

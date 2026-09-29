@@ -46,7 +46,7 @@ import {
     listTasks, updateChannelTaskAttachments,
     getTaskTabPrefs,
     applyMove, applyReorder, applyToggle, collectSubtreeIds, serializeTaskAttachments,
-    buildPrefsForOrder, isFavoriteTab, canEditTask,
+    buildPrefsForOrder, isFavoriteTab, canEditTask, placeNewTabPrefs,
 } from '../../api/tasks';
 import { listServers, listChannels, listMembersWithRoles, type Channel, type MemberWithRoles, type Server } from '../../api/servers';
 import { hasPerm, PERM } from '../../api/permissionBits';
@@ -491,6 +491,9 @@ export interface NoteActions {
      *  copy may carry pictures, which cannot wait for a connection, so it
      *  never queues and says so when it fails. */
     copyNote: (plan: CopyPlan) => Promise<NoteRef | null>;
+    /** Put a note made some other way (a calendar import) first among the
+     *  unpinned, as createNote and copyNote do for theirs. */
+    placeNewNote: (note: NoteRef) => void;
     /** `baseRev` is the note's content revision when the user STARTED typing
      *  the new title (NoteEditor captures it on the clean→dirty edge). Pass
      *  it, or a rename made while another device's landed will name THEIRS
@@ -530,7 +533,45 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
     useEffect(() => { cardsRef.current = cards; prefsRef.current = prefs; prefsReadyRef.current = prefsReady; });
     // Sequenced pref saves: only the LATEST save may roll back (TasksView's rule).
     const prefSeq = useRef(0);
-    const content = useListContentActions(notesKeys);
+
+    /** Put a pin/order set on screen and send it (queued offline). Only the
+     *  latest save may roll back, to `before`. */
+    const sendPrefs = useCallback((next: TaskTabPref[], intent: PrefsIntent, before: TaskTabPref[]) => {
+        const seq = ++prefSeq.current;
+        qc.setQueryData<TaskTabPref[]>(notesKeys.prefs, next);
+        sendNoteOp(ops.prefs(next, intent)).catch(err => {
+            console.error('[notes] saving pins/order failed:', err);
+            pushMessageToast({ title: 'Couldn’t save the pin or order — check your connection' });
+            if (prefSeq.current === seq) qc.setQueryData<TaskTabPref[]>(notesKeys.prefs, before);
+        });
+    }, [qc]);
+
+    /**
+     * A note just made goes FIRST among the unpinned, directly under the
+     * pinned ones (api/tasks.ts placeNewTabPrefs) — in the saved order, which
+     * is Púca's Tasks tab bar too, so it is first there after the favourites
+     * and on every other device. One save through the same outbox as a pin:
+     * behind its own create when that was queued offline, and placed against
+     * the server's order when it replays.
+     *
+     * Silent where savePrefs speaks, because nobody asked for a reorder: an
+     * order that was never read gets no full replace built on a guess (the
+     * note then lands where the order puts a note it has never seen, after
+     * the others), and the trash need not have been read — only an insert is
+     * made, so no hidden note's slot has to be put back. It reads the cache,
+     * not the render's copy, so two notes made back to back both land.
+     */
+    const placeNewNote = useCallback((note: NoteRef) => {
+        const current = qc.getQueryData<TaskTabPref[]>(notesKeys.prefs);
+        if (current === undefined) return;
+        const tab = { kind: note.kind, id: note.id };
+        const next = placeNewTabPrefs(current, tab);
+        if (next) sendPrefs(next, { type: 'created', tab }, current);
+    }, [qc, sendPrefs]);
+
+    // The content paths (a text or picture note, Make a copy) place theirs
+    // the moment the list exists, as createPlainNote does below.
+    const content = useListContentActions(notesKeys, placeNewNote);
     const contentRef = useRef(content);
     useEffect(() => { contentRef.current = content; });
     // The rows this page's deletes took out of the grid, for their Undo: the
@@ -780,13 +821,8 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         }
     }, [snapshot, setTasks, restore]);
 
-    const createNote = useCallback(async (title: string, items: string[], extra?: NoteExtras, timing?: (NewTaskTiming | undefined)[]): Promise<NoteRef | null> => {
-        // A note with text or pictures goes through the content path, which
-        // makes it in ONE request when there is a connection and queues it
-        // (media sealed on this device first) when there is not. Its items
-        // keep their timing, as here — a copy of a text note keeps its
-        // items' dates and repeats.
-        if (hasExtras(extra)) return contentRef.current.createContentNote(title, items, extra, timing);
+    /** A note of a title and items only: the list, then its items. */
+    const createPlainNote = useCallback(async (title: string, items: string[], timing?: (NewTaskTiming | undefined)[]): Promise<NoteRef | null> => {
         // Timing rides with its item through the blank-dropping clean.
         const timingOf = new Map<number, NewTaskTiming | undefined>();
         const cleanItems = cleanQuickItems(items.filter((raw, i) => {
@@ -802,6 +838,7 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
             return null;   // nothing landed: the caller keeps the draft
         }
         const ref: NoteRef = { kind: 'list', id: list.id };
+        placeNewNote(ref);
         const created: Task[] = [];
         const missing: string[] = [];
         let timedAndSent = false;
@@ -826,7 +863,23 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
             });
         }
         return ref;
-    }, [qc]);
+    }, [qc, placeNewNote]);
+
+    // Every note Notes makes comes through createNote or copyNote — the
+    // composer, a share, a pasted checklist, the calendar's "New note…",
+    // Make a copy — and each path puts it first among the unpinned the
+    // moment the list exists (placeNewNote), before its items: the live
+    // stream reads the listing again as soon as the list is made, and a note
+    // placed only at the end would show at the bottom and then jump.
+    const createNote = useCallback(async (title: string, items: string[], extra?: NoteExtras, timing?: (NewTaskTiming | undefined)[]): Promise<NoteRef | null> => {
+        // A note with text or pictures goes through the content path, which
+        // makes it in ONE request when there is a connection and queues it
+        // (media sealed on this device first) when there is not. Its items
+        // keep their timing, as here — a copy of a text note keeps its
+        // items' dates and repeats.
+        if (hasExtras(extra)) return contentRef.current.createContentNote(title, items, extra, timing);
+        return createPlainNote(title, items, timing);
+    }, [createPlainNote]);
 
     const copyNote = useCallback(async (plan: CopyPlan): Promise<NoteRef | null> => {
         return contentRef.current.createNoteFromPlan(plan);
@@ -981,15 +1034,8 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
             pushMessageToast({ title: 'Still loading the trash — try again in a moment' });
             return;
         }
-        const before = prefsRef.current;
-        const seq = ++prefSeq.current;
-        qc.setQueryData<TaskTabPref[]>(notesKeys.prefs, next);
-        sendNoteOp(ops.prefs(next, intent)).catch(err => {
-            console.error('[notes] saving pins/order failed:', err);
-            pushMessageToast({ title: 'Couldn’t save the pin or order — check your connection' });
-            if (prefSeq.current === seq) qc.setQueryData<TaskTabPref[]>(notesKeys.prefs, before);
-        });
-    }, [qc]);
+        sendPrefs(next, intent, prefsRef.current);
+    }, [sendPrefs]);
 
     const orderedTabs = useCallback(() => cardsRef.current.map(c => ({ kind: c.ref.kind, id: c.ref.id })), []);
 
@@ -1032,11 +1078,11 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
 
     return useMemo(() => ({
         toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setSchedule, setNoteTiming, snoozeTask, restoreCompleted, setAttachments,
-        createNote, copyNote, renameNote, deleteNote, restoreNote, content, togglePin, setPinnedMany, reorderNotes,
+        createNote, copyNote, placeNewNote, renameNote, deleteNote, restoreNote, content, togglePin, setPinnedMany, reorderNotes,
         setColor, setLabels, setArchived, refreshAll, refreshNote,
     }), [
         toggleTask, editTask, addTask, deleteTaskFrom, moveTaskIn, reorderTaskIn, setDue, setSchedule, setNoteTiming, snoozeTask, restoreCompleted, setAttachments,
-        createNote, copyNote, renameNote, deleteNote, restoreNote, content, togglePin, setPinnedMany, reorderNotes,
+        createNote, copyNote, placeNewNote, renameNote, deleteNote, restoreNote, content, togglePin, setPinnedMany, reorderNotes,
         setColor, setLabels, setArchived, refreshAll, refreshNote,
     ]);
 }

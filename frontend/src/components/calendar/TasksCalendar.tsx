@@ -26,6 +26,7 @@ import { buildIcs, parseIcs, type IcsItem, type IcsParseResult } from '../../api
 import { currentIcsUid } from '../../api/icsUid';
 import { deliverIcs } from '../../api/icsDelivery';
 import { toastRefusal } from '../../api/refusalToast';
+import { placeNewListFirst } from '../../api/listContent';
 import { pushMessageToast } from '../messageToastBus';
 import { heldOpKey } from '../../api/opKey';
 import { localDayKey } from '../../utils/calendarMath';
@@ -232,7 +233,13 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen, noteRemi
                     parsed={importing.parsed}
                     targets={importTargets}
                     io={{
-                        createList: title => createTaskList(title),
+                        // A new note goes first among the unpinned, as one made
+                        // in the tab bar does (api/listContent.ts).
+                        createList: async title => {
+                            const list = await createTaskList(title);
+                            void placeNewListFirst(list.id);
+                            return list;
+                        },
                         createTask: (listId, text, parentId, timing) => createListTask(listId, text, parentId, timing),
                         sleep: ms => new Promise(r => setTimeout(r, ms)),
                     }}

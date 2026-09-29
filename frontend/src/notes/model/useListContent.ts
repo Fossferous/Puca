@@ -294,7 +294,10 @@ export interface ListContentActions {
     emptyTrash: (keep?: ReadonlySet<number>) => Promise<void>;
 }
 
-export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: NoteRef) => QueryKey }): ListContentActions {
+/** `placeNew` is told of every note made here the moment its list exists
+ *  (or its create is queued), before its items: Notes puts it first among
+ *  the unpinned (notesQueries.ts placeNewNote). */
+export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: NoteRef) => QueryKey }, placeNew?: (ref: NoteRef) => void): ListContentActions {
     const qc = useQueryClient();
     const { features, known } = useListFeatures();
     const trashed = useTrashedLists();
@@ -303,6 +306,8 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
     const trashedKeys = useMemo(() => new Set((trashData ?? []).map(l => `list:${l.id}`)), [trashData]);
     const keysRef = useRef(keys);
     useEffect(() => { keysRef.current = keys; });
+    const placeNewRef = useRef(placeNew);
+    useEffect(() => { placeNewRef.current = placeNew; });
 
     const heldCreate = useRef<HeldCreate | null>(null);
     const heldCopy = useRef<HeldCopy | null>(null);
@@ -366,6 +371,7 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
             return null;
         }
         const ref: NoteRef = { kind: 'list', id: list.id };
+        placeNewRef.current?.(ref);
         if (body) {
             try {
                 await sendNoteOp(ops.setBody(list.id, body));
@@ -508,6 +514,7 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         }
         if (heldCreate.current === held) heldCreate.current = null;   // landed: the next one is new
         const ref: NoteRef = { kind: 'list', id: list.id };
+        placeNewRef.current?.(ref);
         const created: Task[] = [];
         let timed = false;
         for (const e of entries) {
@@ -608,6 +615,7 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         }
         if (heldCopy.current === held) heldCopy.current = null;   // landed
         const ref: NoteRef = { kind: 'list', id: list.id };
+        placeNewRef.current?.(ref);
         const created: Task[] = [];
         const newIdOf = new Map<CopyItem, number>();
         let missing = 0;

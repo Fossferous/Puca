@@ -31,6 +31,8 @@ import { parseServerTimestamp } from '../../utils/serverTime';
 import { type ReminderSlot, reminderSlotOf } from '../../api/reminderSlots';
 import { bucketDue, reminderBadgeCount as badgeCount, type Grouped } from '../../api/reminderGroups';
 import { noteReminderSlotOf, noteScheduleSearchText, noteUpdatedAt, scheduleSearchText } from './notesTiming';
+// Type only, and erased: notesPrefs imports this module at run time.
+import type { NotesSortMode } from './notesPrefs';
 
 /** Which checklist a note is: a personal list or a channel checklist. */
 export interface NoteRef {
@@ -248,6 +250,21 @@ export function filterNotes(cards: NoteCard[], filter: NoteFilter): NoteCard[] {
         case 'search':
             return searchNotes(cards, filter.query);
     }
+}
+
+/**
+ * The grid's display sort. 'puca' is the saved order itself (Púca's tab
+ * order, where a new note goes first among the unpinned); the others sort
+ * by title, by when a note was made, or by its last edit, and the saved
+ * order only breaks their ties.
+ */
+export function sortNoteCards(cards: NoteCard[], sort: NotesSortMode): NoteCard[] {
+    if (sort === 'puca') return cards;
+    const out = [...cards];
+    if (sort === 'title') out.sort((a, b) => a.title.localeCompare(b.title));
+    else if (sort === 'edited') out.sort((a, b) => (Date.parse(b.updatedAt ?? b.createdAt ?? '') || 0) - (Date.parse(a.updatedAt ?? a.createdAt ?? '') || 0));
+    else out.sort((a, b) => (Date.parse(b.createdAt ?? '') || 0) - (Date.parse(a.createdAt ?? '') || 0));
+    return out;
 }
 
 /** Pinned first, in order; then the rest, in order. */

@@ -21,11 +21,14 @@ import {
     type TaskTabRef,
     buildPrefsForOrder,
     deleteTaskList,
+    getTaskTabPrefs,
     isFavoriteTab,
     listListTasks,
     listTaskLists,
     openSelfTaskText,
     parseTaskAttachments,
+    placeNewTabPrefs,
+    putTaskTabPrefs,
     serializeTaskAttachments,
     isAttachmentsLocked,
     taskTabKey,
@@ -567,6 +570,31 @@ export function toggleFavoriteKeepingHidden<T extends TaskTabRef>(
         ? [{ kind: target.kind, id: target.id }, ...shown.filter(t => !(t.kind === target.kind && t.id === target.id))]
         : shown;
     return buildPrefsForOrder(keepHiddenSlots(next, prefs, hiddenKeys), prefs, overrides);
+}
+
+/**
+ * A new note goes first among the ones that are not pinned
+ * (api/tasks.ts placeNewTabPrefs), placed in the order the SERVER holds now —
+ * for a list made where no fresh copy of the order is at hand: Save to Notes
+ * in a conversation, and Púca's Tasks view, which reads the order once, when
+ * it opens (its New list, and its calendar's import). Read, insert, write
+ * back: what a queued placement does when it replays
+ * (notes/model/notesOutbox.ts), so another device's reorder since is kept
+ * rather than replaced. Best effort, and never throws: the note exists
+ * either way, and a failure only leaves it where the order puts a list it
+ * has never seen — after the others. Answers the order as it is now saved,
+ * or null when it could not be read or written.
+ */
+export async function placeNewListFirst(listId: number): Promise<TaskTabPref[] | null> {
+    try {
+        const current = await getTaskTabPrefs();
+        const next = placeNewTabPrefs(current, { kind: 'list', id: listId });
+        if (next) await putTaskTabPrefs(next);
+        return next ?? current;
+    } catch (err) {
+        console.error('Couldn’t put the new note first:', err);
+        return null;
+    }
 }
 
 // --- Note text limits (NoteBodyField) --------------------------------------------------

@@ -76,6 +76,9 @@ let trashSupported = true;
 /** Which lists the server actually returns (dropping 7 makes it an UNKNOWN
  *  saved ref — a tab nothing knows is hidden, which is the control). */
 let serverLists = [5, 7, 9];
+/** The saved order the server answers with, or 'unreadable' for a GET that
+ *  fails (an old server, a bad moment). */
+let serverPrefs: TaskTabPref[] | 'unreadable' = SAVED;
 let toasts: string[] = [];
 // Restored per test rather than with vi.restoreAllMocks(), which would also
 // clear the localStorage stand-ins the setup file installs.
@@ -95,7 +98,10 @@ function installServer() {
         }
         if (path === '/task-lists?trashed=true') return [];
         if (path === '/task-lists') return serverLists.map(row);
-        if (path === '/task-tab-prefs') return SAVED;
+        if (path === '/task-tab-prefs') {
+            if (serverPrefs === 'unreadable') throw new ApiError('Bad Gateway', 502);
+            return serverPrefs;
+        }
         if (path === '/servers') return [];
         if (/^\/task-lists\/\d+\/tasks$/.test(path)) return [];
         throw new Error(`unexpected GET ${path}`);
@@ -192,6 +198,7 @@ beforeEach(() => {
     get.mockReset(); post.mockReset(); patch.mockReset(); del.mockReset(); put.mockReset();
     trashSupported = true;
     serverLists = [5, 7, 9];
+    serverPrefs = SAVED;
     drag.onDrop = null;
     syncHook.mounts = 0;
     toasts = [];
@@ -367,6 +374,56 @@ describe('Púca Tasks view: a new list is not created behind a filter', () => {
         await mount();
         await createList('Fresh');
         expect(tabFor('Fresh')).toBeTruthy();
+    });
+});
+
+describe('Púca Tasks view: a new list goes first after the favourites', () => {
+    const createReturns = (id: number) => post.mockImplementation(async (path: string) => {
+        if (path === '/task-lists') return row(id);
+        return {};
+    });
+    /** The note tabs on the bar, in the order it shows them. */
+    const barOrder = () => [...container.querySelectorAll<HTMLElement>('.tasks-tab[data-drag-key]')].map(t => t.dataset.dragKey);
+    const savedOrders = () => put.mock.calls.filter(c => c[0] === '/task-tab-prefs')
+        .map(c => (c[1] as { prefs: TaskTabPref[] }).prefs.map(p => `${p.kind}:${p.ref_id}${p.is_favorite ? '*' : ''}`));
+
+    it('New list puts it right after the favourite — on the bar, and in the one order every device (and Púca Notes) reads', async () => {
+        serverPrefs = [{ kind: 'list', ref_id: 5, is_favorite: true }, ...SAVED.slice(1)];
+        createReturns(11);
+        await mount();
+        await createList('Fresh');
+        expect(savedOrders()).toEqual([['list:5*', 'list:11', 'list:7', 'list:9']]);
+        expect(barOrder()).toEqual(['list:5', 'list:11', 'list:7', 'list:9']);
+    });
+
+    it('it is saved into the order the server holds NOW: a reorder made on another device since the bar opened is kept', async () => {
+        createReturns(14);
+        await mount();
+        // While this view was open, another device put 9 first and pinned it.
+        serverPrefs = [{ kind: 'list', ref_id: 9, is_favorite: true }, { kind: 'list', ref_id: 5, is_favorite: false }, { kind: 'list', ref_id: 7, is_favorite: false }];
+        await createList('Fresh');
+        expect(savedOrders()).toEqual([['list:9*', 'list:14', 'list:5', 'list:7']]);   // not 14, 5, 7, 9 from this view's copy
+        expect(barOrder()).toEqual(['list:9', 'list:14', 'list:5', 'list:7']);         // and the bar takes that order
+    });
+
+    it('POSITIVE CONTROL: an order that could not be read is not replaced, and the list sits at the end, where a tab the order never saw goes', async () => {
+        serverPrefs = 'unreadable';
+        createReturns(12);
+        await mount();
+        await createList('Fresh');
+        expect(savedOrders()).toEqual([]);
+        expect(barOrder()).toEqual(['list:5', 'list:7', 'list:9', 'list:12']);
+    });
+
+    it('with a note ARCHIVED (off the bar, still in the order), it is only an insert: the archived note keeps its place', async () => {
+        seedPrefs({ archived: { 'list:7': true } });
+        createReturns(13);
+        await mount();
+        await createList('Fresh');
+        // No favourites, so first of all; list 7 stays between 5 and 9 rather
+        // than drifting to the tail as a save of the visible tabs would put it.
+        expect(savedOrders()).toEqual([['list:13', 'list:5', 'list:7', 'list:9']]);
+        expect(barOrder()).toEqual(['list:13', 'list:5', 'list:9']);
     });
 });
 
