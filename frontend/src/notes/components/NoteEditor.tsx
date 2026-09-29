@@ -48,6 +48,7 @@ import { useTaskFeature } from '../../api/taskFeatures';
 import { NoteDueChip, NoteReminderControl } from '../../components/schedule/NoteReminderControl';
 import { halfMinuteNow, subscribeHalfMinute } from '../../components/schedule/halfMinuteClock';
 import { EditedStamp } from './EditedStamp';
+import { asItemText } from '../../api/taskHeading';
 
 interface NoteEditorProps {
     card: NoteCard;
@@ -273,12 +274,13 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
 
     const addItem = async (e: React.FormEvent) => {
         e.preventDefault();
-        const text = newItem.trim();
+        const typed = newItem.trim();
         // Enter under the paste question adds nothing behind it.
-        if (!text || pasteItems.asking) return;
+        if (!typed || pasteItems.asking) return;
         setNewItem('');
-        const created = await actions.addTask(ref, text);
-        if (!created) setNewItem(text);   // failed: give the text back
+        // "## Something" makes a heading (api/taskHeading.ts).
+        const created = await actions.addTask(ref, asItemText(typed));
+        if (!created) setNewItem(typed);   // failed: give the text back
         backToAddRow();
     };
 

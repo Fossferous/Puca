@@ -500,6 +500,15 @@ export const ListLayoutIcon = makeIcon('ListLayoutIcon', <>
     <rect x="3.25" y="13.25" width="17.5" height="7.5" rx="1.5" />
 </>);
 
+/** A checklist HEADING (a section title, api/taskHeading.ts): "Turn into
+ *  heading". A plain capital H — not HashIcon, which is a channel. No legacy
+ *  glyph: nothing shipped this control before. */
+export const HeadingIcon = makeIcon('HeadingIcon', <>
+    <path d="M6.25 4.75v14.5" />
+    <path d="M17.75 4.75v14.5" />
+    <path d="M6.25 12h11.5" />
+</>);
+
 /** Open the navigation drawer (Notes on a phone). Three full-width lines —
  *  the rail's own rows, not ChannelsIcon's dotted channel list. No legacy
  *  glyph: nothing shipped this control before. */
@@ -1311,6 +1320,7 @@ export const ICONS = {
     'more-vertical': MoreVerticalIcon,
     grip: GripIcon,
     'list-layout': ListLayoutIcon,
+    heading: HeadingIcon,
     menu: MenuIcon,
 
     // settings sections, templates, emoji-picker categories

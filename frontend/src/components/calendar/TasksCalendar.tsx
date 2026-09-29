@@ -29,6 +29,7 @@ import { toastRefusal } from '../../api/refusalToast';
 import { pushMessageToast } from '../messageToastBus';
 import { heldOpKey } from '../../api/opKey';
 import { localDayKey } from '../../utils/calendarMath';
+import { isHeadingTask } from '../../api/taskHeading';
 
 /** The Calendar tab's channels — the shape every dated view takes. */
 export type TasksCalendarChannel = TasksScopeChannel;
@@ -157,6 +158,8 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen, noteRemi
         const items: IcsItem[] = [];
         for (const s of sources) {
             const t = s.task;
+            // A heading is never dated (api/taskHeading.ts), as the grid says.
+            if (!s.isNote && isHeadingTask(t)) continue;
             if (t.is_completed && !prefs.showCompleted) continue;
             const p = parseSchedule(t.schedule);
             if (p.state === 'ok') items.push({ uid: p.schedule.uid, summary: t.description, schedule: p.schedule });

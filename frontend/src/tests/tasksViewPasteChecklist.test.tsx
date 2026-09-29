@@ -54,7 +54,7 @@ import { setActiveIdentity } from '../api/e2ee';
 import { setMessageToastSink } from '../components/messageToastBus';
 import { MAX_TAKEN_ITEMS } from '../notes/model/noteContent';
 import { testIdentity, warmIdentities, WARM_TIMEOUT_MS } from './fixtures/identities';
-import { ASSISTANT_ANSWER, ASSISTANT_ITEMS, ASSISTANT_TITLE } from './fixtures/assistantChecklist';
+import { ASSISTANT_ADD, ASSISTANT_ANSWER, ASSISTANT_ITEMS, ASSISTANT_SHOWN, ASSISTANT_STEPS, ASSISTANT_TITLE } from './fixtures/assistantChecklist';
 
 const ME = ['paste-checklist-pw', 'ab'.repeat(16)] as const;
 
@@ -224,10 +224,10 @@ describe('"Add a task…" takes a pasted checklist', () => {
         await openList('List 1');
         const ev = paste(addInput(), ASSISTANT_ANSWER);
         expect(ev.defaultPrevented).toBe(true);
-        expect(dialogLines()).toEqual(ASSISTANT_ITEMS);
+        expect(dialogLines()).toEqual(ASSISTANT_SHOWN);
         expect(itemPosts()).toHaveLength(0);                 // nothing before the answer
 
-        act(() => { button(`Add ${ASSISTANT_ITEMS.length} items`).click(); });
+        act(() => { button(ASSISTANT_ADD).click(); });
         await paced(ASSISTANT_ITEMS.length);
 
         // EVERY item on screen, in order — a closure's `[...tasks, created]`
@@ -238,7 +238,7 @@ describe('"Add a task…" takes a pasted checklist', () => {
         const keys = posts.map(c => (c[1] as Record<string, unknown>).op_key as string);
         for (const k of keys) expect(k).toMatch(OP_KEY_SHAPE);
         expect(new Set(keys).size).toBe(keys.length);        // one intent each
-        expect(tabCount('List 1')).toBe(`0/${ASSISTANT_ITEMS.length}`);
+        expect(tabCount('List 1')).toBe(`0/${ASSISTANT_STEPS}`);
         // The text is sealed on the wire, never beside the key.
         expect(JSON.stringify(post.mock.calls)).not.toContain('Unplug');
         expect(toasts).toEqual([]);
@@ -274,7 +274,7 @@ describe('"Add a task…" takes a pasted checklist', () => {
         await openList('List 1');
         refuseAt = 2;
         paste(addInput(), ASSISTANT_ANSWER);
-        act(() => { button(`Add ${ASSISTANT_ITEMS.length} items`).click(); });
+        act(() => { button(ASSISTANT_ADD).click(); });
         await paced(ASSISTANT_ITEMS.length);
         expect(itemPosts(1)).toHaveLength(3);                // the third was tried, refused, and nothing after it
         expect(rows()).toEqual(ASSISTANT_ITEMS.slice(0, 2));
@@ -286,13 +286,13 @@ describe('"Add a task…" takes a pasted checklist', () => {
         await mount();
         await openList('List 1');
         paste(addInput(), ASSISTANT_ANSWER);
-        act(() => { button(`Add ${ASSISTANT_ITEMS.length} items`).click(); });
+        act(() => { button(ASSISTANT_ADD).click(); });
         await openList('List 3');
         await paced(ASSISTANT_ITEMS.length);
         expect(itemPosts(1)).toHaveLength(ASSISTANT_ITEMS.length);
         expect(itemPosts(3)).toHaveLength(0);
         expect(rows()).toEqual([]);                          // List 3 shows none of them
-        expect(tabCount('List 1')).toBe(`0/${ASSISTANT_ITEMS.length}`);
+        expect(tabCount('List 1')).toBe(`0/${ASSISTANT_STEPS}`);
         await openList('List 1');
         expect(rows()).toEqual(ASSISTANT_ITEMS);
     });
@@ -422,7 +422,7 @@ describe('the "New list" name takes a pasted checklist', () => {
         // The editor opens on the new list at once, and its first read of
         // the (still empty) list answers while the steps are landing.
         slowFirstRead.add(100);
-        act(() => { button(`Add ${ASSISTANT_ITEMS.length} items`).click(); });
+        act(() => { button(ASSISTANT_ADD).click(); });
         await paced(ASSISTANT_ITEMS.length);
         const lists = post.mock.calls.filter(c => c[0] === '/task-lists');
         expect(lists).toHaveLength(1);
@@ -437,7 +437,7 @@ describe('the "New list" name takes a pasted checklist', () => {
         const name = await openNewList();
         typeInto(name, 'Saturday');
         paste(name, ASSISTANT_ANSWER);
-        act(() => { button(`Add ${ASSISTANT_ITEMS.length} items`).click(); });
+        act(() => { button(ASSISTANT_ADD).click(); });
         await paced(ASSISTANT_ITEMS.length);
         expect(container.querySelector('.tasks-editor-title')?.textContent).toBe('Saturday');
         expect(rows()).toEqual(ASSISTANT_ITEMS);
@@ -451,7 +451,7 @@ describe('the "New list" name takes a pasted checklist', () => {
         await paced(1);
         expect(container.querySelector('.tasks-editor-title')?.textContent).toBe(ASSISTANT_TITLE);
         expect(itemPosts(100)).toHaveLength(1);
-        expect(rows()).toEqual([ASSISTANT_ITEMS.join(' ')]);
+        expect(rows()).toEqual([ASSISTANT_SHOWN.join(' ')]);
     });
 
     it('the question says it makes a list, and what the list is called', async () => {
@@ -490,7 +490,7 @@ describe('the "New list" name takes a pasted checklist', () => {
         await submit('.tasks-tab-newform');
         expect(post.mock.calls.filter(c => c[0] === '/task-lists')).toHaveLength(0);
         expect(dialog()).not.toBeNull();
-        act(() => { button(`Add ${ASSISTANT_ITEMS.length} items`).click(); });
+        act(() => { button(ASSISTANT_ADD).click(); });
         await paced(ASSISTANT_ITEMS.length);
         expect(post.mock.calls.filter(c => c[0] === '/task-lists')).toHaveLength(1);
         expect(rows()).toEqual(ASSISTANT_ITEMS);

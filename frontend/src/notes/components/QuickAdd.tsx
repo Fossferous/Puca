@@ -23,7 +23,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { usePortalTarget } from '../../components/portalTarget';
-import { CameraIcon, CheckboxIcon, CloseIcon, FileTextIcon, ImageIcon, MicIcon, PaperclipIcon, PencilIcon, PlusIcon, TrashIcon } from '../../components/Icons';
+import { CameraIcon, CheckboxIcon, CloseIcon, FileTextIcon, HeadingIcon, ImageIcon, MicIcon, PaperclipIcon, PencilIcon, PlusIcon, TrashIcon } from '../../components/Icons';
+import { headingLabel, isHeadingText } from '../../api/taskHeading';
 import { isEditableTarget } from '../../api/hotkeys';
 import { MAX_ITEM_LENGTH, MAX_TITLE_LENGTH, cleanQuickItems } from '../model/notesModel';
 import { composeModeFor, type ComposeIntent } from '../model/composeIntent';
@@ -320,7 +321,7 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
         if (!read) return;
         e.preventDefault();
         // Asked first, like any multi-line paste; added after what is there.
-        setPaste({ lines: read.items, total: read.total, text: read.items.join('\n'), at: Math.max(0, live.current.items.length - 1), title: read.title });
+        setPaste({ lines: read.items, total: read.total, text: read.items.map(headingLabel).join('\n'), at: Math.max(0, live.current.items.length - 1), title: read.title });
     };
 
     /** Put the pasted lines in at `at`: over that field when it is empty,
@@ -540,8 +541,10 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
                     />
                 )}
                 {mode === 'list' && items.map((it, i) => (
-                    <div className="notes-quickadd-item" key={i}>
-                        <CheckboxIcon />
+                    // "## Something" is a heading, not a box: the row says so
+                    // before Done makes it one.
+                    <div className={`notes-quickadd-item${isHeadingText(it.trim()) ? ' heading' : ''}`} key={i}>
+                        {isHeadingText(it.trim()) ? <HeadingIcon /> : <CheckboxIcon />}
                         <input
                             ref={el => { itemRefs.current[i] = el; }}
                             value={it}

@@ -49,7 +49,7 @@ import { OP_KEY_SHAPE } from '../api/opKey';
 import { PACE_MS } from '../api/icsImport';
 import { PERM } from '../api/permissionBits';
 import { setMessageToastSink } from '../components/messageToastBus';
-import { ASSISTANT_ANSWER, ASSISTANT_ITEMS } from './fixtures/assistantChecklist';
+import { ASSISTANT_ADD, ASSISTANT_ANSWER, ASSISTANT_ITEMS, ASSISTANT_SHOWN } from './fixtures/assistantChecklist';
 
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
@@ -102,7 +102,7 @@ const rows = () => [...host!.querySelectorAll('.rows li')].map(l => l.textConten
 const dialogLines = () => [...document.querySelectorAll('.notes-paste-line')].map(l => l.textContent);
 const button = (text: string) => [...document.querySelectorAll<HTMLButtonElement>('.notes-paste-actions button')]
     .find(b => b.textContent === text)!;
-const addN = () => button(`Add ${ASSISTANT_ITEMS.length} items`);
+const addN = () => button(ASSISTANT_ADD);
 /** Real time in short act() slices, so the body's effects run meanwhile. */
 const wait = async (ms: number) => {
     for (let t = 0; t < ms; t += 10) await act(async () => { await new Promise(r => { setTimeout(r, 10); }); });
@@ -155,7 +155,7 @@ describe('a checklist pasted into a channel checklist', () => {
         await mount({ channelId: 9 });
         const ev = paste(input()!, ASSISTANT_ANSWER);
         expect(ev.defaultPrevented).toBe(true);
-        expect(dialogLines()).toEqual(ASSISTANT_ITEMS);
+        expect(dialogLines()).toEqual(ASSISTANT_SHOWN);
         expect(createTask).not.toHaveBeenCalled();
         act(() => { addN().click(); });
         await paced(ASSISTANT_ITEMS.length);

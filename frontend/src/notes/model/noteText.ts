@@ -16,9 +16,25 @@ import { readableBody } from './noteContent';
 import { newUid, parseSchedule, serializeSchedule } from '../../api/taskSchedule';
 import { describeSchedule } from '../../api/scheduleFormat';
 import { scrubClipRefs } from '../../components/contextMenuUtils';
+import { asHeadingText, isHeadingTask } from '../../api/taskHeading';
+
+/** A heading as a Markdown section (api/taskHeading.ts): its own "## " line,
+ *  after a blank one unless it opens the list — the way Notes reads a
+ *  section back (noteContent.readChecklist), so a copy pasted in again has
+ *  the same headings where they were. */
+function pushHeading(out: string[], task: Task): void {
+    if (out.length > 0 && out[out.length - 1] !== '') out.push('');
+    out.push(asHeadingText(task.description));
+}
 
 function lines(nodes: TaskNode[], depth: number, out: string[]): void {
     for (const n of nodes) {
+        if (isHeadingTask(n.task)) {
+            pushHeading(out, n.task);
+            for (const r of parseTaskAttachments(n.task.attachments)) out.push(`- attachment: ${r.name}`);
+            lines(n.children, depth + 1, out);
+            continue;
+        }
         const box = n.task.is_completed ? '[x]' : '[ ]';
         const sched = parseSchedule(n.task.schedule);
         const due = sched.state === 'ok'
@@ -104,6 +120,12 @@ export function noteToMessage(card: NoteCard): { text: string; omitted: number; 
     const walk = (nodes: TaskNode[], depth: number) => {
         for (const n of nodes) {
             if (isUndecryptable(n.task.description)) { omitted++; continue; }
+            if (isHeadingTask(n.task)) {
+                pushHeading(rows, n.task);
+                namePictures(n.task.attachments);
+                walk(n.children, depth + 1);
+                continue;
+            }
             rows.push(`${'  '.repeat(depth)}- ${n.task.is_completed ? '[x]' : '[ ]'} ${n.task.description}`);
             namePictures(n.task.attachments);
             walk(n.children, depth + 1);
@@ -173,7 +195,10 @@ export function notesToJson(cards: NoteCard[], exportedAt: string): string {
             parentId: t.parent_id,
             text: t.description,
             unreadable: isUndecryptable(t.description),
-            completed: t.is_completed,
+            // A section title, not a step (api/taskHeading.ts); its text is
+            // the "## " line, so a reader that ignores this still sees it.
+            heading: isHeadingTask(t),
+            completed: t.is_completed && !isHeadingTask(t),
             position: t.position,
             dueAt: t.due_at,
             schedule: scheduleForExport(t),
@@ -277,9 +302,13 @@ export function copyPlanOf(card: NoteCard, opts: { schedules?: boolean } = {}): 
         return refs;
     };
     const walk = (nodes: TaskNode[]): CopyItem[] => nodes.map(n => {
+        // A heading is copied as a heading — its text is the "## " line —
+        // and a heading is never done and never dated, whatever an older
+        // client set on the source.
+        const heading = isHeadingTask(n.task);
         const p = parseSchedule(n.task.schedule);
         let schedule: string | null = null;
-        if (schedules && p.state === 'ok') {
+        if (!heading && schedules && p.state === 'ok') {
             try {
                 schedule = serializeSchedule({ ...p.schedule, uid: newUid(), doneThrough: undefined }, p.raw);
             } catch {
@@ -288,8 +317,8 @@ export function copyPlanOf(card: NoteCard, opts: { schedules?: boolean } = {}): 
         }
         return {
             text: n.task.description,
-            completed: n.task.is_completed,
-            dueAt: n.task.due_at,
+            completed: n.task.is_completed && !heading,
+            dueAt: heading ? null : n.task.due_at,
             schedule,
             attachments: refsOf(n.task.attachments),
             children: walk(n.children),

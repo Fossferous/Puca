@@ -71,6 +71,26 @@
     color: var(--text-muted, #72767d);
 }
 
+/* A checklist HEADING (api/taskHeading.ts): a section title, not a step. No
+   checkbox, so its label starts where the boxes do and reads as the section
+   the rows below belong to; a step larger and bolder, with room above it.
+   The first row of a list gets no extra room — there is nothing to separate
+   it from. */
+.tt-item.tt-heading {
+    padding-top: 14px;
+}
+.tt-list > .tt-group:first-child > .tt-item.tt-heading {
+    padding-top: 6px;
+}
+.tt-heading .tt-description {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text-primary, #fff);
+}
+.tt-heading .tt-edit-input {
+    font-weight: 700;
+}
+
 .tt-edit-input {
     flex: 1;
     padding: 4px 8px;

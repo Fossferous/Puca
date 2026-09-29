@@ -307,6 +307,9 @@
 }
 .notes-quickadd-item input:focus { outline: none; }
 .notes-quickadd-item input::placeholder { color: var(--text-faint); }
+/* A row typed as "## Something" is a heading (api/taskHeading.ts): it gets
+   the heading mark instead of a box, and reads bold as it will in the note. */
+.notes-quickadd-item.heading input { font-weight: 700; }
 .notes-quickadd-item .notes-iconbtn { opacity: 0; }
 .notes-quickadd-item:hover .notes-iconbtn, .notes-quickadd-item:focus-within .notes-iconbtn { opacity: 1; }
 .notes-quickadd-foot {
@@ -435,6 +438,10 @@
 }
 .notes-card-item input[type="checkbox"]:disabled { cursor: default; opacity: 0.6; }
 .notes-card-item-text { min-width: 0; word-break: break-word; }
+/* A checklist heading (api/taskHeading.ts) in the preview: its label, bold,
+   where the boxes start — a section of the card, not one more box. */
+.notes-card-item.heading { font-weight: 700; color: var(--text-normal); padding-top: 6px; }
+.notes-card-item.heading:first-child { padding-top: 2px; }
 .notes-card-item .tt-due, .notes-card-item .tt-not-encrypted { margin-left: 4px; }
 .notes-card-more {
     margin: 4px 0 0 23px;

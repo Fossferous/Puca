@@ -31,6 +31,7 @@ import { parseServerTimestamp } from '../../utils/serverTime';
 import { type ReminderSlot, reminderSlotOf } from '../../api/reminderSlots';
 import { bucketDue, reminderBadgeCount as badgeCount, type Grouped } from '../../api/reminderGroups';
 import { noteReminderSlotOf, noteScheduleSearchText, noteUpdatedAt, scheduleSearchText } from './notesTiming';
+import { asItemText, countItems, headingLabel, isHeadingTask } from '../../api/taskHeading';
 
 /** Which checklist a note is: a personal list or a channel checklist. */
 export interface NoteRef {
@@ -187,10 +188,10 @@ export function buildNoteCards(
     });
 }
 
+/** "3/10": headings are sections, not steps, so neither side counts them
+ *  (api/taskHeading.ts countItems — the rule Púca's Tasks view counts by). */
 export function countProgress(tasks: Task[]): { total: number; completed: number } {
-    let completed = 0;
-    for (const t of tasks) if (t.is_completed) completed++;
-    return { total: tasks.length, completed };
+    return countItems(tasks);
 }
 
 /**
@@ -279,13 +280,14 @@ export function noteMatches(card: NoteCard, query: string): boolean {
     const terms = normalizeForSearch(query).split(' ').filter(Boolean);
     if (terms.length === 0) return true;
     const readable = (s: string) => (isUndecryptable(s) ? '' : s);
+    // A heading is searched by its label, the text it shows.
     const hay = [
         readable(card.title),
         readable(card.body ?? ''),
         card.serverName ?? '',
         noteScheduleSearchText(card),
         ...card.labels,
-        ...(card.tasks ?? []).map(t => readable(t.description)),
+        ...(card.tasks ?? []).map(t => readable(isHeadingTask(t) ? headingLabel(t.description) : t.description)),
         ...(card.tasks ?? []).map(scheduleSearchText),
     ].map(normalizeForSearch).join('\n');
     return terms.every(term => hay.includes(term));
@@ -380,9 +382,9 @@ export interface PreviewRow {
 }
 
 export interface NotePreview {
-    /** Open items in tree order, capped at `limit`. */
+    /** Open items and headings in tree order, capped at `limit`. */
     rows: PreviewRow[];
-    /** Open items the cap hid. */
+    /** Open items the cap hid (a hidden heading is not an item). */
     moreOpen: number;
     /** Completed top-level items (their subtrees are folded into them). */
     completedCount: number;
@@ -392,26 +394,32 @@ export interface NotePreview {
  * The card's compact view of a note: open items first (nested, in Púca's
  * order), the rest summarised as counts. Completed items are folded away
  * exactly as TaskTree's collapsed Completed section folds them — a card is
- * a glance, not the editor.
+ * a glance, not the editor. A heading stays where it stands, as TaskTree
+ * keeps it, and is never counted as done or as one more to do.
  */
 export function previewRows(tasks: Task[], limit: number): NotePreview {
     const tree = buildTaskTree(tasks);
     const rows: PreviewRow[] = [];
     let openTotal = 0;
     let completedCount = 0;
+    let shownItems = 0;
     const walk = (nodes: TaskNode[], depth: number) => {
         for (const n of nodes) {
-            if (n.task.is_completed) {
+            const heading = isHeadingTask(n.task);
+            if (n.task.is_completed && !heading) {
                 if (depth === 0) completedCount++;
                 continue;
             }
-            openTotal++;
-            if (rows.length < limit) rows.push({ task: n.task, depth });
+            if (!heading) openTotal++;
+            if (rows.length < limit) {
+                rows.push({ task: n.task, depth });
+                if (!heading) shownItems++;
+            }
             walk(n.children, depth + 1);
         }
     };
     walk(tree, 0);
-    return { rows, moreOpen: Math.max(0, openTotal - rows.length), completedCount };
+    return { rows, moreOpen: Math.max(0, openTotal - shownItems), completedCount };
 }
 
 /** The earliest due time among OPEN tasks (overdue ones sort first because
@@ -421,8 +429,8 @@ export function nearestDue(tasks: Task[]): Task | null {
     let bestT = Infinity;
     for (const t of tasks) {
         // A scheduled item's due_at is its next REMINDER, not a deadline: its
-        // own chip (ScheduleChip) says when it is.
-        if (t.is_completed || !t.due_at || (t.schedule !== undefined && t.schedule !== null)) continue;
+        // own chip (ScheduleChip) says when it is. A heading is never due.
+        if (t.is_completed || !t.due_at || (t.schedule !== undefined && t.schedule !== null) || isHeadingTask(t)) continue;
         const at = parseServerTimestamp(t.due_at);
         if (!Number.isFinite(at) || at >= bestT) continue;
         best = t;
@@ -477,6 +485,9 @@ export function groupReminders(cards: NoteCard[], now: number): ReminderGroups {
         const own = noteReminderSlotOf(note, now);
         if (own) items.push({ kind: 'note', note, at: own.at, slot: own });
         for (const task of note.tasks ?? []) {
+            // A heading reminds about nothing — even one an older client
+            // gave a time, which no row here could show or clear.
+            if (isHeadingTask(task)) continue;
             // Snoozes, repeats and events (api/reminderSlots.reminderSlotOf):
             // an event is never overdue, a snoozed item sorts by its snooze.
             const slot = reminderSlotOf(task, now);
@@ -511,16 +522,22 @@ export const QUICK_TITLE_FROM_ITEM_LENGTH = 60;
 export function deriveQuickTitle(title: string, items: string[]): string {
     const t = title.replace(/\s+/g, ' ').trim();
     if (t) return t.slice(0, MAX_TITLE_LENGTH);
-    const first = items.map(i => i.replace(/\s+/g, ' ').trim()).find(i => i !== '');
+    // A heading lends its label ("## Groceries" names the note "Groceries").
+    const first = items.map(i => headingLabel(i.replace(/\s+/g, ' ').trim())).find(i => i !== '');
     if (!first) return 'Untitled note';
     return first.length > QUICK_TITLE_FROM_ITEM_LENGTH
         ? first.slice(0, QUICK_TITLE_FROM_ITEM_LENGTH - 1).trimEnd() + '…'
         : first;
 }
 
-/** Items a quick-add will create, in order: trimmed, blanks dropped. */
+/** Items a quick-add will create, in order: trimmed, blanks dropped, and a
+ *  heading typed as "# x" or "### x" stored the one way a heading is
+ *  written ("## x", api/taskHeading.ts). */
 export function cleanQuickItems(items: string[]): string[] {
-    return items.map(i => i.replace(/\s+/g, ' ').trim()).filter(i => i !== '');
+    return items
+        .map(i => i.replace(/\s+/g, ' ').trim())
+        .filter(i => i !== '')
+        .map(asItemText);
 }
 
 /** The union of every label in use, sorted for the rail. */

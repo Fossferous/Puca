@@ -29,6 +29,7 @@
  */
 import { useEffect, useRef } from 'react';
 import { NotesDialog } from './NotesDialog';
+import { addItemsLabel, headingLabel, isHeadingText } from '../api/taskHeading';
 import './PastedLinesDialog.css';
 
 /** Never render more rows than this; the rest are counted, not listed. */
@@ -42,7 +43,7 @@ interface PastedLinesDialogProps {
     /** What answering does besides adding items ("This makes a new list,
      *  …"), when it does more. */
     detail?: string | null;
-    /** One item per line. */
+    /** One item per line (a "## " line as a heading). */
     onAddSeparate: () => void;
     /** The whole paste as a single item. */
     onAddOne: () => void;
@@ -63,14 +64,17 @@ export function PastedLinesDialog({ lines, total = lines.length, detail = null, 
                 {total > lines.length && <p className="notes-labels-hint">Only the first {lines.length} are added.</p>}
                 {detail && <p className="notes-labels-hint">{detail}</p>}
                 <ul className="notes-paste-lines">
-                    {shown.map((l, i) => <li key={i} className="notes-paste-line">{l}</li>)}
+                    {/* A heading shows as the heading it will be: its label, bold. */}
+                    {shown.map((l, i) => isHeadingText(l)
+                        ? <li key={i} className="notes-paste-line heading">{headingLabel(l)}</li>
+                        : <li key={i} className="notes-paste-line">{l}</li>)}
                 </ul>
                 {hidden > 0 && <p className="notes-labels-hint">…and {hidden} more.</p>}
                 <div className="notes-paste-actions">
                     <button type="button" className="notes-textbtn" onClick={onCancel}>Cancel</button>
                     <button type="button" className="notes-textbtn" onClick={onAddOne}>Add as one item</button>
                     <button type="button" className="notes-textbtn primary" onClick={onAddSeparate}>
-                        Add {lines.length} items
+                        {addItemsLabel(lines)}
                     </button>
                 </div>
             </div>

@@ -11,6 +11,7 @@ import {
 } from '../../api/tasks';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { parseSchedule, parseSnooze, serializeSchedule } from '../../api/taskSchedule';
+import { asHeadingText, headingLabel, isHeadingTask, isHeadingText } from '../../api/taskHeading';
 import { deriveQuickTitle, MAX_ITEM_LENGTH, type NoteRef } from './notesModel';
 
 /** An item's attachment refs when this device can read its sidecar, else
@@ -50,13 +51,20 @@ export function deriveContentTitle(
 
 /** "Show checkboxes": one item per non-blank line of the text, with a
  *  leading bullet or checkbox (`- `, `* `, `• `, `[ ]`, `[x]`) dropped — so a
- *  note pasted as a Markdown list converts cleanly. */
+ *  note pasted as a Markdown list converts cleanly. A Markdown heading line
+ *  ("## Setup", "# Setup") becomes a HEADING item (api/taskHeading.ts), kept
+ *  in the one form a heading is stored in — which is also what "Hide
+ *  checkboxes" writes a heading back out as, so the two undo each other. */
 export function bodyToItems(body: string): string[] {
     return body
         .split(/\r?\n/)
-        // A list marker (- * + • or a number "1." / "1)"), then a task box,
-        // or a heading's hashes: the item is what follows.
-        .map(l => l.trim().replace(/^#{1,6}\s+/, '').replace(/^(?:(?:[-*+•]|\d{1,3}[.)])\s+)?(?:\[[ xX]\]\s*)?/, '').trim())
+        .map(l => {
+            const t = l.trim();
+            if (isHeadingText(t)) return asHeadingText(t);
+            // A list marker (- * + • or a number "1." / "1)"), then a task
+            // box: the item is what follows.
+            return t.replace(/^(?:(?:[-*+•]|\d{1,3}[.)])\s+)?(?:\[[ xX]\]\s*)?/, '').trim();
+        })
         .filter(l => l !== '');
 }
 
@@ -67,9 +75,11 @@ export function bodyToItems(body: string): string[] {
 // arrive as ONE text note of raw Markdown (a share) or as items that kept
 // their "1." and "**", their "## Setup" heading and their "Here's how:"
 // intro (a paste). This reads it the way Notes itself writes a checklist
-// out (noteText.ts noteToMarkdown: "# Title", then "- [ ] item"), plus the
-// usual variants. It never saves anything: the composer opens on the
-// result, and the note exists only once the user presses Done.
+// out (noteText.ts noteToMarkdown: "# Title", then "- [ ] item", a section
+// as "## Section"), plus the usual variants. Its sections become HEADING
+// items (api/taskHeading.ts), not boxes to tick. It never saves anything:
+// the composer opens on the result, and the note exists only once the user
+// presses Done.
 
 /** A list line: - * + • or "1." / "1)", then an optional task box; or a bare
  *  task box. [1] is the indent, [2] the item. */
@@ -137,8 +147,9 @@ export interface ReadChecklist {
  *   that introduced the list ("Here's a checklist for X:" → "Checklist for
  *   X", "Steps:" → "Steps").
  * - A heading after that, or a line ending in a colon inside the list, is a
- *   section and stays as an item ("Setup:"), so the grouping is not lost.
- *   One left with nothing under it at the end is dropped.
+ *   section and becomes a HEADING item ("## Setup", api/taskHeading.ts), so
+ *   the grouping is not lost and it is not one more box to tick. One left
+ *   with nothing under it at the end is dropped.
  * - A bare short line is an item ("Milk" in "Milk / - Bread"); a sentence
  *   is prose and is dropped ("That's it, you're done!").
  * - An indented line under an item, and a fenced code block under it (the
@@ -156,6 +167,11 @@ export function readChecklist(text: string): ReadChecklist | null {
     let proseLines = 0;
     let inFence = false;
     const push = (item: string, isSection: boolean) => { if (item) { items.push(item); section.push(isSection); } };
+    /** A section: its label, colon gone, as a heading item. */
+    const pushSection = (label: string) => {
+        const l = label.replace(/[:：]\s*$/, '').trim();
+        if (l) push(asHeadingText(l), true);
+    };
     const join = (extra: string) => {
         const last = items.length - 1;
         if (last >= 0 && !section[last] && extra) items[last] = `${items[last]} — ${extra}`;
@@ -174,7 +190,7 @@ export function readChecklist(text: string): ReadChecklist | null {
             const t = plainInline(h[1]);
             if (!t) continue;
             if (items.length === 0 && title === null) title = titleFromLine(t);
-            else push(`${t.replace(/[:：]\s*$/, '')}:`, true);
+            else pushSection(t);
             continue;
         }
         const m = LIST_LINE.exec(raw);
@@ -192,7 +208,7 @@ export function readChecklist(text: string): ReadChecklist | null {
             continue;
         }
         if (isSentence(raw)) { proseLines++; continue; }
-        if (introduces(raw)) { push(`${plainInline(raw).replace(/[:：]\s*$/, '')}:`, true); continue; }
+        if (introduces(raw)) { pushSection(plainInline(raw)); continue; }
         push(plainInline(raw), false);
     }
     if (listLines < 2 || listLines < proseLines) return null;
@@ -213,9 +229,11 @@ export function linesFromPaste(text: string): string[] {
 }
 
 /** A multi-line paste kept as ONE item: a single line, the way an `<input>`
- *  would have taken it had we not intercepted the paste. */
+ *  would have taken it had we not intercepted the paste. An ITEM, whatever
+ *  the paste began with: "## Setup - a - b" would otherwise land as a
+ *  heading (api/taskHeading.ts), which "Add as one item" did not offer. */
 export function pasteAsOneLine(text: string): string {
-    return text.replace(/\s+/g, ' ').trim();
+    return headingLabel(text.replace(/\s+/g, ' ').trim());
 }
 
 /** The most items one share or one paste may fill in, wherever it lands.
@@ -239,10 +257,19 @@ export interface PastedItems {
  *
  * The one rule every paste path shares (the Notes composer, an open note,
  * Púca's Tasks view): a checklist from elsewhere reads as one — numbers,
- * "**", headings and the "Here's how:" intro gone (readChecklist) — and
- * anything else splits by line (linesFromPaste). `checklistOnly` is for a
- * TITLE field, where only a real checklist is taken and any other text
- * pastes as a title.
+ * "**" and the "Here's how:" intro gone, its title taken and its sections
+ * kept as headings (readChecklist) — and anything else splits by line
+ * (linesFromPaste, which keeps a "## " line as a heading too).
+ * `checklistOnly` is for a TITLE field, where only a real checklist is
+ * taken and any other text pastes as a title.
+ *
+ * NOT READ YET: the clipboard's HTML. A copy of a RENDERED checklist (an
+ * assistant's answer selected on the page rather than taken with its Copy
+ * button) carries no "#" or "- [ ]" in `text/plain`, so readChecklist
+ * rightly says it is not one, and the title and every heading land as one
+ * item per line. Its `text/html` still has the <h1>/<h2> and the <li>. The
+ * place to read it is here, before `text`: every paste path (usePasteItems,
+ * the Notes composer) comes through this one function.
  */
 export function readPastedItems(text: string, opts: { checklistOnly?: boolean } = {}): PastedItems | null {
     const list = readChecklist(text);
@@ -306,13 +333,17 @@ export function filesFromTransfer(dt: TransferLike | null | undefined): { images
 }
 
 /** "Hide checkboxes": every item as a line, in the editor's order (open
- *  items, then completed), nested items indented two spaces per level. */
+ *  items, then completed), nested items indented two spaces per level. A
+ *  heading is a "## " line where it stands among the open items — which is
+ *  where TaskTree shows it, ticked by an older client or not — and "Show
+ *  checkboxes" reads that line back as a heading (bodyToItems). */
 export function itemsToBody(tasks: Task[]): string {
     const lines: string[] = [];
     const walk = (nodes: TaskNode[], depth: number, completed: boolean) => {
         for (const n of nodes) {
-            if (n.task.is_completed !== completed && depth === 0) continue;
-            lines.push(`${'  '.repeat(depth)}${n.task.description}`);
+            const heading = isHeadingTask(n.task);
+            if ((n.task.is_completed && !heading) !== completed && depth === 0) continue;
+            lines.push(`${'  '.repeat(depth)}${heading ? asHeadingText(n.task.description) : n.task.description}`);
             walk(n.children, depth + 1, completed);
         }
     };
@@ -339,7 +370,8 @@ export function conversionLosses(tasks: Task[]): ConversionLosses {
         if (t.parent_id !== null) out.nested = true;
         if (t.due_at) out.due++;
         if (t.attachments) out.attachments++;
-        if (t.is_completed) out.completed++;
+        // A heading is never done here, whatever an older client set.
+        if (t.is_completed && !isHeadingTask(t)) out.completed++;
         if (isUndecryptable(t.description)) out.unreadable++;
     }
     return out;

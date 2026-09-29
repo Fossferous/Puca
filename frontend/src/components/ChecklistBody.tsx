@@ -32,6 +32,7 @@ import { usePasteItems } from './usePasteItems';
 import { createdWhileReading } from './createdWhileReading';
 import { SAVE_WAIT_MS, type WritesInFlight, writesInFlight } from './writesInFlight';
 import { MAX_ITEM_LENGTH } from '../notes/model/notesModel';
+import { asItemText } from '../api/taskHeading';
 
 /** Which checklist a body shows: a channel's, or a personal list's. */
 interface Scope { isChannel: boolean; channelId?: number; listId?: number }
@@ -277,7 +278,8 @@ export function ChecklistBody({
         // Enter under the paste question adds nothing behind it.
         if (!newTask.trim() || pasteItems.asking) return;
         // A failed create leaves the words in the box for the retry.
-        if (await addItem({ isChannel, channelId, listId }, newTask.trim())) setNewTask('');
+        // "## Something" makes a heading (api/taskHeading.ts).
+        if (await addItem({ isChannel, channelId, listId }, asItemText(newTask.trim()))) setNewTask('');
     };
 
     const handleAddSubtask = async (parentId: number, text: string) => {

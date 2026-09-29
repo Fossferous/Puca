@@ -6,6 +6,13 @@
  * editing, and a collapsible Completed section. Used by both the channel
  * ChecklistPanel and the personal TasksView; all mutations are delegated to
  * the owner via callbacks so each panel keeps its own optimistic state.
+ *
+ * A HEADING row ("## Before you start", api/taskHeading.ts) is a section
+ * title: no checkbox, no time, no subtasks, never in Completed. It is edited
+ * as its label (the marks are put back on save), dragged, moved and deleted
+ * like any row, and the row's own button turns it back into an item — or an
+ * item into one. Headings are plain text to every callback here, so no owner
+ * needed a new one.
  */
 
 import { isUndecryptable } from '../api/decryptMarkers';
@@ -29,9 +36,10 @@ import { TaskAttachments } from './TaskAttachments';
 import { NoteLinkText } from './NoteLinkText';
 import { useDragReorder } from '../hooks/useDragReorder';
 import {
-    CalendarIcon, ChevronDownIcon, ChevronRightIcon, ChevronUpIcon, ClockIcon, GripIcon, LockIcon,
+    CalendarIcon, CheckboxIcon, ChevronDownIcon, ChevronRightIcon, ChevronUpIcon, ClockIcon, GripIcon, HeadingIcon, LockIcon,
     MapPinIcon, PaperclipIcon, PendingIcon, PlusIcon, TrashIcon, WarningIcon,
 } from './Icons';
+import { asHeadingText, headingLabel, isHeadingTask, isHeadingText } from '../api/taskHeading';
 import { ScheduleChip, SnoozeChip } from './schedule/ScheduleChip';
 import { ScheduleEditor } from './schedule/ScheduleEditor';
 import { SnoozeControl } from './reminders/SnoozeControl';
@@ -291,8 +299,10 @@ export function TaskTree({
     }, [tasks]);
 
     const tree = buildTaskTree(tasks);
-    const active = tree.filter(n => !n.task.is_completed);
-    const completed = tree.filter(n => n.task.is_completed);
+    // A heading is never done and never moves to Completed (api/taskHeading.ts)
+    // — not even one an older client ticked, which stays where it stands.
+    const active = tree.filter(n => isHeadingTask(n.task) || !n.task.is_completed);
+    const completed = tree.filter(n => !isHeadingTask(n.task) && n.task.is_completed);
 
     // Drag-drop reorder among same-group siblings (same parent, same
     // completion state — the same constraint the server enforces), plus the
@@ -342,10 +352,12 @@ export function TaskTree({
     // A failure marker is shown as it is; otherwise the caller's renderer
      // wins (Púca Notes highlights a search inside the links), and with none
      // the default is the shared link renderer both front doors use.
+    // A heading shows its label, never the "## " it is stored with.
     const describe = (task: Task) => {
         if (isUndecryptable(task.description)) return task.description;
-        if (renderDescription) return renderDescription(task.description);
-        return <NoteLinkText text={task.description} />;
+        const text = isHeadingTask(task) ? headingLabel(task.description) : task.description;
+        if (renderDescription) return renderDescription(text);
+        return <NoteLinkText text={text} />;
     };
 
     const startEdit = (task: Task) => {
@@ -354,15 +366,56 @@ export function TaskTree({
         // layer refuses too; this just keeps the editor from opening on it.
         if (isUndecryptable(task.description)) return;
         setEditingId(task.id);
-        setEditText(task.description);
+        // A heading is edited as its label; commitEdit puts the marks back.
+        setEditText(isHeadingTask(task) ? headingLabel(task.description) : task.description);
+    };
+
+    /**
+     * Make a top-level item a heading (api/taskHeading.ts). A heading has no
+     * time: its row has no control that could show one, and nothing reminds
+     * about a section title. So an item with a due time or a date & repeat
+     * loses it — asked first, because that is the one thing this cannot give
+     * back. The phone's place reminder for it goes too.
+     */
+    const turnIntoHeading = (task: Task, text: string) => {
+        const scheduled = task.schedule !== undefined && task.schedule !== null;
+        if (scheduled || task.due_at) {
+            const label = headingLabel(text);
+            const name = label.length > 40 ? `${label.slice(0, 39)}…` : label;
+            const what = scheduled ? 'date & repeat' : 'due time';
+            if (!window.confirm(`A heading has no ${what}. Turn “${name}” into a heading and remove its ${what}?`)) return;
+            // The time goes FIRST: an edit that then fails leaves an item
+            // without its time, never a heading that still reminds.
+            if (scheduled && onSetSchedule) onSetSchedule(task, null, null);
+            else if (task.due_at) onSetDue?.(task, null);
+        }
+        if (isAndroidApp()) unassignTasks([task.id]);
+        onEdit(task, asHeadingText(text));
+    };
+
+    /** A heading back to an ordinary item: its label, marks gone. */
+    const turnIntoItem = (task: Task) => {
+        onEdit(task, headingLabel(task.description));
     };
 
     const commitEdit = (task: Task) => {
         const text = editText.trim();
         setEditingId(null);
-        if (text && text !== task.description) {
-            onEdit(task, text);
+        if (!text) return;
+        if (isHeadingTask(task)) {
+            // Edited as its label, saved as a heading ("## label"). Typing
+            // the marks in here too is not a second heading level.
+            if (headingLabel(asHeadingText(text)) !== headingLabel(task.description)) onEdit(task, asHeadingText(text));
+            return;
         }
+        if (text === task.description) return;
+        // "## Something" typed over a top-level item makes it a heading —
+        // the same rule as the add row, with the same question about a time.
+        if (task.parent_id === null && isHeadingText(text)) {
+            turnIntoHeading(task, text);
+            return;
+        }
+        onEdit(task, text);
     };
 
     const commitSubtask = (parentId: number) => {
@@ -470,11 +523,15 @@ export function TaskTree({
         const place = isAndroidApp() ? getTaskPlace(task.id) : null;
         // Any schedule value (even one this build cannot read) owns the timing.
         const hasSchedule = task.schedule !== undefined && task.schedule !== null;
+        // A section title (api/taskHeading.ts): no checkbox, no time, no
+        // subtasks — but edited, moved and deleted like any row.
+        const heading = isHeadingTask(task);
+        const done = task.is_completed && !heading;
         return (
         <li
             key={task.id}
             id={`tt-task-${task.id}`}
-            className={`tt-item ${task.is_completed ? 'completed' : ''} ${depth > 0 ? 'subtask' : ''}${task.id === flashTaskId ? ' flash' : ''}`}
+            className={`tt-item ${done ? 'completed' : ''} ${depth > 0 ? 'subtask' : ''}${heading ? ' tt-heading' : ''}${task.id === flashTaskId ? ' flash' : ''}`}
             title={byline ? `Added by ${byline} · ${new Date(parseServerTimestamp(task.created_at)).toLocaleDateString()}` : undefined}
         >
             {/* Ghost keeps the checkbox column aligned on rows that can't
@@ -484,18 +541,21 @@ export function TaskTree({
                     ? <span className="tt-grip" title="Drag to reorder"><GripIcon /></span>
                     : <span className="tt-grip tt-grip-ghost" aria-hidden="true" />
             )}
-            <input
-                type="checkbox"
-                checked={task.is_completed}
-                disabled={!canComplete}
-                title={canComplete ? undefined : 'No permission to complete tasks'}
-                onChange={() => onToggle(task, !task.is_completed)}
-            />
+            {!heading && (
+                <input
+                    type="checkbox"
+                    checked={task.is_completed}
+                    disabled={!canComplete}
+                    title={canComplete ? undefined : 'No permission to complete tasks'}
+                    onChange={() => onToggle(task, !task.is_completed)}
+                />
+            )}
             {editingId === task.id ? (
                 <input
                     className="tt-edit-input"
                     value={editText}
                     autoFocus
+                    aria-label={heading ? 'Heading' : undefined}
                     onChange={e => setEditText(e.target.value)}
                     onBlur={() => commitEdit(task)}
                     onKeyDown={e => {
@@ -504,11 +564,17 @@ export function TaskTree({
                     }}
                 />
             ) : editable ? (
-                <span className="tt-description" onClick={() => startEdit(task)} title="Click to edit">
+                <span
+                    className="tt-description"
+                    role={heading ? 'heading' : undefined}
+                    aria-level={heading ? 3 : undefined}
+                    onClick={() => startEdit(task)}
+                    title="Click to edit"
+                >
                     {describe(task)}
                 </span>
             ) : (
-                <span className="tt-description">{describe(task)}</span>
+                <span className="tt-description" role={heading ? 'heading' : undefined} aria-level={heading ? 3 : undefined}>{describe(task)}</span>
             )}
             {/* Flag a checklist item the server stored as plaintext (never
                 encrypted) — audit H-1. Everything else here is E2EE, so an
@@ -518,10 +584,11 @@ export function TaskTree({
                     <WarningIcon /> Not encrypted
                 </span>
             )}
-            {/* Due chip: red once the deadline passes on an open task. */}
-            {hasSchedule && editingId !== task.id && <ScheduleChip task={task} now={now} />}
-            {editingId !== task.id && <SnoozeChip task={task} now={now} />}
-            {task.due_at && !hasSchedule && editingId !== task.id && (
+            {/* Due chip: red once the deadline passes on an open task. A
+                heading has no time to show. */}
+            {!heading && hasSchedule && editingId !== task.id && <ScheduleChip task={task} now={now} />}
+            {!heading && editingId !== task.id && <SnoozeChip task={task} now={now} />}
+            {!heading && task.due_at && !hasSchedule && editingId !== task.id && (
                 <span
                     className={`tt-due ${isTaskOverdue(task, now) ? 'overdue' : ''}`}
                     title={`Due ${new Date(parseServerTimestamp(task.due_at)).toLocaleString()}`}
@@ -534,7 +601,7 @@ export function TaskTree({
             {/* Place chip: this phone reminds when it arrives there. The label
                 is the user's own device-local text — in-app UI only, never in
                 the notification. */}
-            {place && !task.is_completed && editingId !== task.id && (
+            {place && !heading && !task.is_completed && editingId !== task.id && (
                 <span className="tt-place" title={`Reminds on this phone near "${place.label}"`}>
                     <MapPinIcon /><span className="tt-due-label">{place.label}</span>
                 </span>
@@ -558,8 +625,9 @@ export function TaskTree({
                         </button>
                     </>
                 )}
-                {/* Any task can hold subtasks until the depth cap. */}
-                {!task.is_completed && canCreate && depth < MAX_TASK_DEPTH - 1 && (
+                {/* Any task can hold subtasks until the depth cap — except a
+                    heading: the items after it are its section, as siblings. */}
+                {!heading && !task.is_completed && canCreate && depth < MAX_TASK_DEPTH - 1 && (
                     <button
                         className="tt-btn"
                         title="Add subtask"
@@ -571,7 +639,7 @@ export function TaskTree({
                         <PlusIcon />
                     </button>
                 )}
-                {!task.is_completed && editable && onSetDue && !hasSchedule && (
+                {!heading && !task.is_completed && editable && onSetDue && !hasSchedule && (
                     <button
                         className="tt-btn"
                         title={task.due_at ? 'Edit due time' : 'Add due time'}
@@ -584,7 +652,7 @@ export function TaskTree({
                         <ClockIcon />
                     </button>
                 )}
-                {!task.is_completed && editable && onSetSchedule && (
+                {!heading && !task.is_completed && editable && onSetSchedule && (
                     <button
                         className="tt-btn"
                         title={hasSchedule ? 'Edit date & repeat' : 'Add date & repeat'}
@@ -598,7 +666,7 @@ export function TaskTree({
                     (not `editable`): a member who may tick an item may push
                     its reminder back, and taskSchedule.maySnooze also keeps an
                     editor's moved snooze out of a tick-only member's hands. */}
-                {!task.is_completed && onSnooze && maySnooze(task, canComplete, canEdit(task)) && editingId !== task.id && (
+                {!heading && !task.is_completed && onSnooze && maySnooze(task, canComplete, canEdit(task)) && editingId !== task.id && (
                     <SnoozeControl
                         task={task}
                         snoozed={isSnoozed(task, now)}
@@ -611,7 +679,7 @@ export function TaskTree({
                 {/* NOT gated on `editable`: the place is this phone's own
                     reminder state, so a member who can't edit a shared task
                     can still be reminded at their own saved place. */}
-                {!task.is_completed && placesOn && (
+                {!heading && !task.is_completed && placesOn && (
                     <button
                         className="tt-btn"
                         title={place ? 'Edit place reminder' : 'Remind at a place'}
@@ -620,7 +688,30 @@ export function TaskTree({
                         <MapPinIcon />
                     </button>
                 )}
-                {!task.is_completed && editable && (
+                {/* The row's kind: a top-level item can become a heading and
+                    a heading an item again. Typing "## " at the start of the
+                    text does the same; this is the tap for it. */}
+                {!heading && !task.is_completed && editable && task.parent_id === null && !isUndecryptable(task.description) && (
+                    <button
+                        className="tt-btn"
+                        title="Turn into heading"
+                        aria-label="Turn into heading"
+                        onClick={() => turnIntoHeading(task, task.description)}
+                    >
+                        <HeadingIcon />
+                    </button>
+                )}
+                {heading && editable && (
+                    <button
+                        className="tt-btn"
+                        title="Turn into item"
+                        aria-label="Turn into item"
+                        onClick={() => turnIntoItem(task)}
+                    >
+                        <CheckboxIcon />
+                    </button>
+                )}
+                {!heading && !task.is_completed && editable && (
                     <button
                         className="tt-btn"
                         title={locked ? "Attachments locked — key unavailable" : "Attach picture/video"}

@@ -50,11 +50,13 @@ describe('readChecklist', () => {
         });
     });
 
-    it('keeps sections as items, drops one left empty at the end', () => {
+    it('keeps sections as HEADINGS, drops one left empty at the end', () => {
         const text = '# Move house\n## Before\n- [ ] Book van\n- [ ] Pack\n\n## On the day\n- [ ] Load\n\n## Notes\n';
         expect(readChecklist(text)).toEqual({
-            title: 'Move house', items: ['Before:', 'Book van', 'Pack', 'On the day:', 'Load'],
+            title: 'Move house', items: ['## Before', 'Book van', 'Pack', '## On the day', 'Load'],
         });
+        // Any level reads as a section; each is stored the one way ("## ").
+        expect(readChecklist('# T\n### Deep\n- a\n- b')?.items).toEqual(['## Deep', 'a', 'b']);
     });
 
     it('a command under a step, and a wrapped line, join that step', () => {
@@ -75,8 +77,8 @@ describe('readChecklist', () => {
         expect(readChecklist('Packing list:\n- socks\n- charger')?.title).toBe('Packing list');
         // A closing sentence is dropped, not boxed.
         expect(readChecklist('- a\n- b\nYou are all set now!')?.items).toEqual(['a', 'b']);
-        // A colon line INSIDE the list is a section.
-        expect(readChecklist('- a\n- b\nOptional extras:\n- c')?.items).toEqual(['a', 'b', 'Optional extras:', 'c']);
+        // A colon line INSIDE the list is a section: a heading.
+        expect(readChecklist('- a\n- b\nOptional extras:\n- c')?.items).toEqual(['a', 'b', '## Optional extras', 'c']);
     });
 
     it('prose stays prose (not a checklist)', () => {
@@ -95,8 +97,8 @@ describe('readChecklist', () => {
         expect(plainInline('![a chart](c.png) here')).toBe('a chart here');
     });
 
-    it('"Show checkboxes" and a plain paste lose numbers and heading marks too', () => {
-        expect(bodyToItems('1. One\n2) Two\n# Head\n+ Plus\n- [ ] Box')).toEqual(['One', 'Two', 'Head', 'Plus', 'Box']);
+    it('"Show checkboxes" and a plain paste lose numbers and bullets; a heading line stays a heading', () => {
+        expect(bodyToItems('1. One\n2) Two\n# Head\n+ Plus\n- [ ] Box')).toEqual(['One', 'Two', '## Head', 'Plus', 'Box']);
         // Unchanged for what it already handled.
         expect(bodyToItems('Milk\n  - Bread\n* Eggs\n• Tea')).toEqual(['Milk', 'Bread', 'Eggs', 'Tea']);
     });
@@ -271,6 +273,21 @@ describe('the composer', () => {
         act(() => { addButton(MAX_TAKEN_ITEMS)!.click(); });
         expect(items()).toHaveLength(MAX_TAKEN_ITEMS);
         expect(items().at(-1)).toBe(`line ${MAX_TAKEN_ITEMS}`);
+    });
+
+    it('a "## " row is a HEADING in the composer: the heading mark, not a box', () => {
+        render({ seq: 1, mode: 'list', title: 'Trip', items: ['## Documents', 'passport'] });
+        const rows = [...host.querySelectorAll('.notes-quickadd-item')];
+        expect(rows[0].classList.contains('heading')).toBe(true);
+        // POSITIVE CONTROL.
+        expect(rows[1].classList.contains('heading')).toBe(false);
+    });
+
+    it('a checklist pasted into the TITLE and "Add as one item" carries no heading marks', () => {
+        render(null);
+        paste(title(), '# Trip\n- passport\n## Documents\n- tickets');
+        act(() => { [...document.querySelectorAll('button')].find(b => b.textContent === 'Add as one item')!.click(); });
+        expect(items()[0]).toBe('passport Documents tickets');
     });
 
     it('positive control: an ordinary title paste is left alone', () => {

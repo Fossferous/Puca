@@ -32,6 +32,7 @@ import { ScheduleChip } from '../../components/schedule/ScheduleChip';
 import { NoteDueChip } from '../../components/schedule/NoteReminderControl';
 import { useNoteUnsynced } from '../model/notesOutbox';
 import { useLongPress } from './useLongPress';
+import { headingLabel, isHeadingTask } from '../../api/taskHeading';
 
 export const PREVIEW_ROWS = 8;
 const MAX_THUMBS = 3;
@@ -141,9 +142,11 @@ function NoteCardImpl({
         };
         for (const t of tasksForHits) {
             if (!shown.has(t.id)) {
-                const desc = isUndecryptable(t.description) ? '' : t.description;
+                // A heading by its label: what it shows, never ticked.
+                const heading = isHeadingTask(t);
+                const desc = isUndecryptable(t.description) ? '' : heading ? headingLabel(t.description) : t.description;
                 const r = findRanges(desc, terms);
-                if (r.length > 0) row(t.is_completed ? 'ticked' : 'further down', desc, r);
+                if (r.length > 0) row(t.is_completed && !heading ? 'ticked' : 'further down', desc, r);
             }
             const place = scheduleSearchText(t);
             const pr = place ? findRanges(place, terms) : [];
@@ -282,7 +285,22 @@ function NoteCardImpl({
                 hasBody || hero.length > 0 || fileCount > 0 ? null : <div className="notes-card-empty">Empty note</div>
             ) : (
                 <ul className="notes-card-items">
-                    {preview.rows.map(({ task, depth }) => (
+                    {preview.rows.map(({ task, depth }) => isHeadingTask(task) ? (
+                        // A section title (api/taskHeading.ts): its label, no
+                        // box to tick and no time.
+                        <li key={task.id} className="notes-card-item heading" style={{ '--depth': depth } as React.CSSProperties}>
+                            <span className="notes-card-item-text" role="heading" aria-level={4}>
+                                <NoteLinkText
+                                    text={headingLabel(task.description)}
+                                    interactive={false}
+                                    renderText={v => <Highlight text={v} ranges={findRanges(readable(v), terms)} />}
+                                />
+                            </span>
+                            {task.descEncState === 'legacy' && (
+                                <span className="tt-not-encrypted" title="Not encrypted — this item was stored as plaintext, not end-to-end encrypted."><WarningIcon /> Not encrypted</span>
+                            )}
+                        </li>
+                    ) : (
                         <li key={task.id} className="notes-card-item" style={{ '--depth': depth } as React.CSSProperties}>
                             <input
                                 type="checkbox"

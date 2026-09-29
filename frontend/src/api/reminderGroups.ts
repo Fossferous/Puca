@@ -11,6 +11,7 @@ import { type Task, isTaskOverdue } from './tasks';
 import { type ReminderSlot, reminderSlotOf } from './reminderSlots';
 import { maySnooze } from './taskSchedule';
 import { type CalendarSource } from './taskCalendar';
+import { isHeadingTask } from './taskHeading';
 
 /** The least a row needs to be sorted and bucketed.
  *
@@ -85,6 +86,10 @@ function tieBreak(a: DueLike, b: DueLike): number {
 export function groupReminderSources(sources: CalendarSource[], now: number): ReminderRowGroups {
     const rows: DueRow[] = [];
     for (const source of sources) {
+        // A heading reminds about nothing (api/taskHeading.ts) — even one an
+        // older client gave a time. A note's own row is never one: its
+        // "task" is the note's title, projected (noteAsCalendarItem).
+        if (!source.isNote && isHeadingTask(source.task)) continue;
         // Snoozes, repeats and events (reminderSlots.reminderSlotOf): an
         // event is never overdue, a snoozed item sorts by its snooze.
         const slot = reminderSlotOf(source.task, now);

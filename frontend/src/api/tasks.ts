@@ -28,6 +28,7 @@ import * as MARKERS from './decryptMarkers';
 import { parseServerTimestamp } from '../utils/serverTime';
 import { openListContent } from './listSeal';
 import { patchListContent } from './listConflict';
+import { isHeadingTask } from './taskHeading';
 
 export interface Task {
     id: number;
@@ -877,6 +878,7 @@ export function subtreeHeight(tasks: Task[], rootId: number): number {
  *    differs — a completed parent is not in the moving task's group).
  *
  * Every impossible indent DEGRADES to the plain plan rather than dying: a
+ * nest of a heading or under one (a heading stays a top-level row), a
  * nest at the top slot, into the moving subtree (cycle), or past
  * MAX_TASK_DEPTH (the moving SUBTREE's height counts — pre-validating what
  * the server's depth rule will refuse) all fall back to the drop the
@@ -906,6 +908,12 @@ export function planDropTarget(
         if (insertAt === 0) return plain;
         const parentCandidate = order[insertAt - 1];
         if (parentCandidate === undefined || parentCandidate === moved.parent_id) return plain;
+        // A heading is a top-level row (api/taskHeading.ts): it never nests
+        // under an item, and nothing nests under it — the items after a
+        // heading are its section, as siblings, not its subtasks.
+        if (isHeadingTask(moved)) return plain;
+        const candidate = tasks.find(t => t.id === parentCandidate);
+        if (candidate && isHeadingTask(candidate)) return plain;
         if (collectSubtreeIds(tasks, moved.id).has(parentCandidate)) return plain;
         if (taskDepth(tasks, parentCandidate) + subtreeHeight(tasks, moved.id) > MAX_TASK_DEPTH) {
             return plain;

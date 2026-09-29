@@ -35,6 +35,7 @@ import { type NoteActions, SHARED_NOTE_POLL_MS, notesKeys } from '../model/notes
 import { CalendarAddSheet, type AddSheetResult } from '../../components/calendar/CalendarAddSheet';
 import { IcsImportDialog } from '../../components/calendar/IcsImportDialog';
 import { fileStamp } from '../model/noteText';
+import { isHeadingTask } from '../../api/taskHeading';
 import '../timing.css';
 
 const VIEWS: CalView[] = ['month', 'week', 'day', 'agenda'];
@@ -185,6 +186,8 @@ export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled
         const items: IcsItem[] = [];
         for (const s of sources) {
             const t = s.task;
+            // A heading is never dated (api/taskHeading.ts), as the grid says.
+            if (!s.isNote && isHeadingTask(t)) continue;
             if (t.is_completed && !prefs.showCompleted) continue;
             const p = parseSchedule(t.schedule);
             if (p.state === 'ok') items.push({ uid: p.schedule.uid, summary: t.description, schedule: p.schedule });

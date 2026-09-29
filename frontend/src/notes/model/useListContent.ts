@@ -64,7 +64,7 @@ import { LISTS_KEY, beginNoteWrite } from './noteBusy';
 import { ApiError, isDefiniteRefusal } from '../../api/client';
 import { pushMessageToast } from '../../components/messageToastBus';
 import { pokeTaskReminders } from '../../api/taskReminders';
-import { type NoteRef, cleanQuickItems } from './notesModel';
+import { type NoteRef, cleanQuickItems, countProgress } from './notesModel';
 import { deriveContentTitle } from './noteContent';
 import { type CopyItem, type CopyPlan, flattenCopyItems } from './noteText';
 
@@ -394,7 +394,7 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         qc.setQueryData<Task[]>(keysRef.current.tasks(ref), created);
         qc.setQueryData<TaskList[]>(keysRef.current.lists, prev => [...(prev ?? []), {
             ...list,
-            total_tasks: created.length,
+            total_tasks: countProgress(created).total,
             completed_tasks: 0,
             body: body || null,
             attachments: shown.length === 0 ? null : JSON.stringify(shown.map(({ href, name }) => ({ href, name }))),
@@ -520,7 +520,7 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         }
         if (timed) pokeTaskReminders();
         qc.setQueryData<Task[]>(keysRef.current.tasks(ref), created);
-        qc.setQueryData<TaskList[]>(keysRef.current.lists, prev => withListed(prev, { ...list, total_tasks: created.length, completed_tasks: 0 }));
+        qc.setQueryData<TaskList[]>(keysRef.current.lists, prev => withListed(prev, { ...list, total_tasks: countProgress(created).total, completed_tasks: 0 }));
         return ref;
     }, [qc, queueContentNote, mayResend]);
 
@@ -652,8 +652,9 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
         }
         if (timed) pokeTaskReminders();
         qc.setQueryData<Task[]>(keysRef.current.tasks(ref), created);
+        const counts = countProgress(created);
         qc.setQueryData<TaskList[]>(keysRef.current.lists, prev => withListed(prev, {
-            ...list, total_tasks: created.length, completed_tasks: created.filter(t => t.is_completed).length,
+            ...list, total_tasks: counts.total, completed_tasks: counts.completed,
         }));
         if (missing > 0) {
             pushMessageToast({ title: `The copy is missing ${missing} item${missing === 1 ? '' : 's'} — check it against the original` });

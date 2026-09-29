@@ -34,6 +34,7 @@ import { pushMessageToast } from './messageToastBus';
 import { PACE_MS } from '../api/icsImport';
 import { MAX_ITEM_LENGTH } from '../notes/model/notesModel';
 import { pasteAsOneLine, readPastedItems, type PastedItems } from '../notes/model/noteContent';
+import { headingLabel } from '../api/taskHeading';
 
 const sleep = (ms: number) => new Promise<void>(r => { setTimeout(r, ms); });
 
@@ -98,8 +99,9 @@ export function usePasteItems() {
         if (!read) return false;                // one line pastes as normal
         e.preventDefault();
         // "As one item" of a name-field paste is the clean steps, not the
-        // Markdown they came in: that field never showed the raw text.
-        setAsking({ read, text: opts.checklistOnly ? read.items.join('\n') : text, answers, detail: answers.detail?.(read) ?? null });
+        // Markdown they came in: that field never showed the raw text — nor
+        // a heading's "## " (api/taskHeading.ts).
+        setAsking({ read, text: opts.checklistOnly ? read.items.map(headingLabel).join('\n') : text, answers, detail: answers.detail?.(read) ?? null });
         return true;
     };
 

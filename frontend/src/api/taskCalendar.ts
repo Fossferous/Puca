@@ -16,6 +16,7 @@
  * floating dates.
  */
 import { type Task } from './tasks';
+import { isHeadingTask } from './taskHeading';
 import { type EventSchedule, occurrencesBetween, parseSchedule } from './taskSchedule';
 import { compareWall, dayStartMs, localDayKey, minutesIntoDay, parseWall, viewerZone, addDaysToKey } from '../utils/calendarMath';
 import { parseServerTimestamp } from '../utils/serverTime';
@@ -117,6 +118,10 @@ export function entriesInRange(sources: CalendarSource[], fromKey: string, toKey
     const out: CalendarEntry[] = [];
     for (const src of sources) {
         const t = src.task;
+        // A heading is a section title, never a date (api/taskHeading.ts) —
+        // even one an older client gave a time. A note's own row is never
+        // one: its "task" is the note's title, projected.
+        if (!src.isNote && isHeadingTask(t)) continue;
         const parsed = parseSchedule(t.schedule);
         if (parsed.state === 'ok') {
             const s = parsed.schedule;

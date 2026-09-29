@@ -76,6 +76,7 @@ import { useContextMenu } from './contextMenuUtils';
 import { ArchiveIcon, BellIcon, CalendarIcon, ChecklistIcon, FileTextIcon, NoteIcon, PlusIcon, RefreshIcon, StarIcon, TagIcon, TasksIcon, TrashIcon } from './Icons';
 // Púca Notes' organisation, shared rather than forked — see the header.
 import { MAX_ITEM_LENGTH, type NoteColor, deriveQuickTitle } from '../notes/model/notesModel';
+import { asItemText, countHeadings, countItems, isHeadingText } from '../api/taskHeading';
 import {
     forgetNoteKeys,
     getNotesPrefs,
@@ -207,6 +208,13 @@ export function TasksView() {
     // Items created here while the open list is being read: its answer is
     // older than they are and must not take them off the screen.
     const whileReading = useRef(createdWhileReading());
+    // The HEADINGS this view has read in each personal list, and how many of
+    // them an older client ticked (api/taskHeading.ts). The server counts a
+    // list's rows, and to it a heading is a row — task text is sealed, so it
+    // cannot tell one from an item. A lists read takes the headings it knows
+    // of back off, or a Refresh whose lists answer after the open list's
+    // items would put them back on its tab.
+    const headingsSeen = useRef(new Map<number, { total: number; completed: number }>());
     // What this view has out — item changes, a list's title and reminder, the
     // tab order — so Refresh lets them land first and cannot put an older
     // copy over them (writesInFlight).
@@ -424,7 +432,12 @@ export function TasksView() {
         let read = true;
         try {
             const fetched = await listTaskLists();
-            if (current()) setLists(fetched);
+            if (current()) {
+                setLists(fetched.map(l => {
+                    const h = headingsSeen.current.get(l.id);
+                    return h ? { ...l, total_tasks: Math.max(0, l.total_tasks - h.total), completed_tasks: Math.max(0, l.completed_tasks - h.completed) } : l;
+                }));
+            }
         } catch (err) {
             console.error('Failed to load task lists:', err);
             read = false;
@@ -456,22 +469,33 @@ export function TasksView() {
         // A pasted checklist may still be landing in this list: what lands
         // while the read is out is kept (components/createdWhileReading).
         const read = whileReading.current.reading(`list:${selected.id}`);
-        listListTasks(selected.id)
-            .then(fetched => { if (!cancelled) setTasks(read.merge(fetched)); })
+        const listId = selected.id;
+        listListTasks(listId)
+            .then(fetched => {
+                if (cancelled) return;
+                const rows = read.merge(fetched);
+                setTasks(rows);
+                // The server's count includes any heading (it cannot tell
+                // one from an item); the open list's own count does not
+                // (syncListCounts' rule, inline: a setter is the only thing
+                // this effect may close over).
+                const { total, completed } = countItems(rows);
+                headingsSeen.current.set(listId, countHeadings(rows));
+                setLists(prev => prev.map(l => (l.id === listId ? { ...l, total_tasks: total, completed_tasks: completed } : l)));
+            })
             .catch(err => console.error('Failed to load tasks:', err))
             .finally(read.done);
         return () => { cancelled = true; };
     }, [selected?.kind, selected?.id]);
 
     /** Update the sidebar counts for one personal list from local task state
-     *  (the selected editor and the All-board cards both report through here). */
+     *  (the selected editor and the All-board cards both report through here).
+     *  A heading is a section, not a step: it is not counted (api/taskHeading.ts). */
     const syncListCounts = (listId: number, nextTasks: Task[]) => {
+        const { total, completed } = countItems(nextTasks);
+        headingsSeen.current.set(listId, countHeadings(nextTasks));
         setLists(prev => prev.map(l => l.id === listId
-            ? {
-                ...l,
-                total_tasks: nextTasks.length,
-                completed_tasks: nextTasks.filter(t => t.is_completed).length,
-            }
+            ? { ...l, total_tasks: total, completed_tasks: completed }
             : l));
     };
 
@@ -617,7 +641,15 @@ export function TasksView() {
             itemKey.current.landed();
             whileReading.current.created(`list:${listId}`, created);
             if (selectedRef.current?.kind === 'list' && selectedRef.current.id === listId) setTasks(prev => [...prev, created]);
-            setLists(prev => prev.map(l => (l.id === listId ? { ...l, total_tasks: l.total_tasks + 1 } : l)));
+            // A new heading is no new step (countItems) — but one more row
+            // in the server's count, which a lists read takes back off.
+            // Nested, "## x" is an ordinary sub-item, and counts.
+            if (parentId === undefined && isHeadingText(text)) {
+                const seen = headingsSeen.current.get(listId) ?? { total: 0, completed: 0 };
+                headingsSeen.current.set(listId, { ...seen, total: seen.total + 1 });
+            } else {
+                setLists(prev => prev.map(l => (l.id === listId ? { ...l, total_tasks: l.total_tasks + 1 } : l)));
+            }
             return created;
         } catch (err) {
             console.error('Failed to create task:', err);
@@ -628,7 +660,7 @@ export function TasksView() {
 
     const handleAddTask = async (e: React.FormEvent) => {
         e.preventDefault();
-        const text = newTaskText.trim();
+        const text = asItemText(newTaskText.trim());
         if (!text || selectedList === null || pasteItems.asking) return;
         // A failed create leaves the words in the box for the retry.
         if (await addListItem(selectedList.id, text)) setNewTaskText('');

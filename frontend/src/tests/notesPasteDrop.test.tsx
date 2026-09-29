@@ -46,7 +46,7 @@ import { setMessageToastSink } from '../components/messageToastBus';
 import { LayerOnScreenContext } from '../components/portalTarget';
 import type { NoteActions } from '../notes/model/notesQueries';
 import type { NoteCard } from '../notes/model/notesModel';
-import { ASSISTANT_ANSWER, ASSISTANT_ITEMS, ASSISTANT_TITLE } from './fixtures/assistantChecklist';
+import { ASSISTANT_ADD, ASSISTANT_ANSWER, ASSISTANT_ITEMS, ASSISTANT_SHOWN, ASSISTANT_TITLE } from './fixtures/assistantChecklist';
 
 const LIST = { kind: 'list' as const, id: 1 };
 const card = { key: 'list:1', ref: LIST, title: 'Shopping', body: '', noteAttachments: null, labels: [], pinned: false, archived: false } as unknown as NoteCard;
@@ -495,13 +495,13 @@ describe('a step-by-step checklist pasted into an OPEN note', () => {
             title: document.querySelector<HTMLInputElement>('input.notes-editor-title')!,
         };
     }
-    const addN = () => button(`Add ${ASSISTANT_ITEMS.length} items`);
+    const addN = () => button(ASSISTANT_ADD);
 
     it('"Add an item…": the answer becomes its clean steps, in order — nothing before the answer', async () => {
         const e = openEditor();
         const ev = paste(e.input, { text: ASSISTANT_ANSWER });
         expect(ev.defaultPrevented).toBe(true);
-        expect(dialogLines()).toEqual(ASSISTANT_ITEMS);
+        expect(dialogLines()).toEqual(ASSISTANT_SHOWN);
         expect(e.actions.addTask).not.toHaveBeenCalled();
         act(() => { addN().click(); });
         await paced(ASSISTANT_ITEMS.length);
@@ -514,7 +514,7 @@ describe('a step-by-step checklist pasted into an OPEN note', () => {
         const e = openEditor({ title: 'Untitled note', contentRev: 4 } as Partial<NoteCard>);
         const ev = paste(e.title, { text: ASSISTANT_ANSWER });
         expect(ev.defaultPrevented, 'not one long title line').toBe(true);
-        expect(dialogLines()).toEqual(ASSISTANT_ITEMS);
+        expect(dialogLines()).toEqual(ASSISTANT_SHOWN);
         expect(e.actions.renameNote).not.toHaveBeenCalled();   // asked first
         act(() => { addN().click(); });
         await paced(ASSISTANT_ITEMS.length);
@@ -563,7 +563,7 @@ describe('a step-by-step checklist pasted into an OPEN note', () => {
         act(() => { button('Add as one item').click(); });
         expect(e.actions.addTask).not.toHaveBeenCalled();
         expect(e.actions.renameNote).not.toHaveBeenCalled();
-        expect(e.input.value).toBe(ASSISTANT_ITEMS.join(' '));
+        expect(e.input.value).toBe(ASSISTANT_SHOWN.join(' '));
 
         // POSITIVE CONTROL: lines that are not a checklist are a title paste.
         const plain = paste(e.title, { text: 'Milk\nBread' });

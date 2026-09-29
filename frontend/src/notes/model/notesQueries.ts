@@ -69,7 +69,7 @@ import {
 } from '../../api/listContent';
 import {
     type NoteCard, type NoteRef, type NoteSource, type NotesNoteState,
-    buildNoteCards, noteKey, cleanQuickItems, deriveQuickTitle, bulkPinOrder, withCreatedList,
+    buildNoteCards, noteKey, cleanQuickItems, countProgress, deriveQuickTitle, bulkPinOrder, withCreatedList,
 } from './notesModel';
 import { type CopyPlan } from './noteText';
 import { useTaskEventsLive } from './taskEvents';
@@ -554,7 +554,9 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
     const syncListCounts = useCallback((note: NoteRef, tasks: Task[]) => {
         if (note.kind !== 'list') return;
         qc.setQueryData<TaskList[]>(notesKeys.lists, prev => prev?.map(l => l.id === note.id
-            ? { ...l, total_tasks: tasks.length, completed_tasks: tasks.filter(t => t.is_completed).length }
+            // Headings are not steps: the count a card shows before its
+            // items load is the one it shows after (countProgress).
+            ? { ...l, total_tasks: countProgress(tasks).total, completed_tasks: countProgress(tasks).completed }
             : l));
     }, [qc]);
     /** May this user edit the item's time (its creator, a task manager, any
@@ -819,7 +821,7 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
         }
         if (timedAndSent) pokeTaskReminders();
         qc.setQueryData<Task[]>(notesKeys.tasks(ref), created);
-        qc.setQueryData<TaskList[]>(notesKeys.lists, prev => withCreatedList(prev, { ...list, total_tasks: created.length, completed_tasks: 0 }));
+        qc.setQueryData<TaskList[]>(notesKeys.lists, prev => withCreatedList(prev, { ...list, total_tasks: countProgress(created).total, completed_tasks: 0 }));
         if (missing.length > 0) {
             pushMessageToast({
                 title: `Note saved, but ${missing.length} item${missing.length === 1 ? '' : 's'} didn’t — add again: ${missing.join(', ').slice(0, 120)}`,

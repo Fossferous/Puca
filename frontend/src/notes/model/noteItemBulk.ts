@@ -26,14 +26,23 @@
  *    subtreeCompletionBlock are both gated on `completed === true`, so
  *    un-ticking passes them untouched. Hence deadSeriesAmong.
  *
+ * A HEADING (api/taskHeading.ts) is none of this: it is never ticked here,
+ * so it is never unticked or deleted as "checked" — not even one an older
+ * client ticked, which TaskTree shows as a heading where it stands, and
+ * which "Delete checked" would otherwise delete out from under its section.
+ *
  * Pure: no React, no network. Unit-tested in src/tests/notesItemBulk.test.tsx.
  */
 import { type Task, buildTaskTree, type TaskNode } from '../../api/tasks';
 import { currentOccurrenceKey, parseSchedule } from '../../api/taskSchedule';
+import { isHeadingTask } from '../../api/taskHeading';
+
+/** Ticked, as these actions mean it: done, and not a heading. */
+const checked = (t: Task): boolean => t.is_completed && !isHeadingTask(t);
 
 /** How many of these items are ticked. */
 export function checkedCount(tasks: Task[]): number {
-    return tasks.filter(t => t.is_completed).length;
+    return tasks.filter(checked).length;
 }
 
 /**
@@ -44,9 +53,9 @@ export function checkedCount(tasks: Task[]): number {
 export function checkedRoots(tasks: Task[]): Task[] {
     const byId = new Map(tasks.map(t => [t.id, t]));
     return tasks.filter(t => {
-        if (!t.is_completed) return false;
+        if (!checked(t)) return false;
         const parent = t.parent_id === null ? undefined : byId.get(t.parent_id);
-        return !parent?.is_completed;
+        return !(parent && checked(parent));
     });
 }
 
@@ -56,7 +65,7 @@ export function uncheckOrder(tasks: Task[]): Task[] {
     const out: Task[] = [];
     const walk = (nodes: TaskNode[]) => {
         for (const n of nodes) {
-            if (n.task.is_completed) out.push(n.task);
+            if (checked(n.task)) out.push(n.task);
             walk(n.children);
         }
     };
@@ -71,7 +80,7 @@ export function uncheckOrder(tasks: Task[]): Task[] {
  */
 export function deadSeriesAmong(tasks: Task[]): Task[] {
     return tasks.filter(t => {
-        if (!t.is_completed || !t.schedule) return false;
+        if (!checked(t) || !t.schedule) return false;
         const p = parseSchedule(t.schedule);
         if (p.state !== 'ok' || !p.schedule.rrule) return false;
         return currentOccurrenceKey(p.schedule) === null;
