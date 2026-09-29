@@ -290,6 +290,9 @@ describe('the scan before the parse (what a browser is slow on)', () => {
         // block ends, a cell the next cell or row ends, an <option> the next.
         expect(tooCostlyToParse(`<ul>${'<li>a<p>b'.repeat(5_000)}</ul>`)).toBe(false);
         expect(tooCostlyToParse(`<table>${'<tr><td>a<td>b'.repeat(5_000)}</table>`)).toBe(false);
+        expect(tooCostlyToParse(`<table><tr>${'<td>a'.repeat(5_000)}</table>`)).toBe(false);   // one row, no </td>
+        expect(tooCostlyToParse('<h2>a'.repeat(5_000))).toBe(false);
+        expect(tooCostlyToParse('<option>a'.repeat(5_000))).toBe(false);
         expect(tooCostlyToParse(`<dl>${'<dt>a<dd>b'.repeat(5_000)}</dl>`)).toBe(false);
         expect(tooCostlyToParse('<p>a'.repeat(5_000))).toBe(false);
     });
