@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.826 — 2026-09-29
 
+Púca Notes inside the desktop app, checklists pasted into Tasks and open notes, Refresh in Tasks, and Púca Notes on Android can open straight to a new note.
 ### Added
 - **Púca Notes inside the desktop app.** On the PC, the rail's **Tasks &
   notes** button now opens Púca Notes in Púca itself: the notes grid, the
