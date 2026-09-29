@@ -3338,10 +3338,11 @@ export function Chat({ onLogout }: ChatProps) {
         setShowAllChecklists(false);
         setShowChecklist(false); // the channel drawer would cover it
     };
-    // Its rail button again: back to wherever you were. With no server and no
-    // conversation under it that is the home dashboard, as for Devices
-    // (leaveDevicesView) — otherwise the auto-select effect would pick a
-    // server the person never chose.
+    // Its rail button again: to the channel or conversation under it, as for
+    // Devices (leaveDevicesView) — not to a dashboard view Notes covered.
+    // With no server and no conversation under it that is the home dashboard;
+    // otherwise the auto-select effect would pick a server the person never
+    // chose.
     const leaveNotesView = () => {
         setShowNotesView(false);
         if (!currentServer && !currentDM) setShowFriendsPanel(true);

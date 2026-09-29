@@ -366,7 +366,8 @@ Púca Notes shows your task lists as notes, Google-Keep style. It uses the
 account you are already signed in to.
 
 - **In the desktop app** it opens inside Púca: click **Tasks & notes** on the
-  server rail, and click it again to go back to where you were. Going to a
+  server rail, and click it again to go back to the channel or conversation
+  you last had open (or to the home screen, if there is none). Going to a
   channel and back keeps your place in Notes. The Tasks view is still there:
   click **Direct Messages** at the top of the rail, then **Tasks** in the left
   column.

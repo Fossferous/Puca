@@ -817,9 +817,11 @@ from any client that sends it.
 
 In Púca's desktop app (full and Lite) the rail's *Tasks & notes* opens Notes
 itself, in the space beside the rail where Devices opens; pressing it again goes
-back to where you were. It is the SAME component tree as the page — NotesShell
-and everything under it — so a Notes feature reaches the desktop in the same
-commit. `frontend/src/components/NotesDesktopView.tsx` hosts it:
+to the channel or conversation last open under it, or to the home dashboard when
+there is none — as leaving Devices does, not back to a dashboard view it covered
+(Tasks, the checklist board). It is the SAME component tree as the page —
+NotesShell and everything under it — so a Notes feature reaches the desktop in
+the same commit. `frontend/src/components/NotesDesktopView.tsx` hosts it:
 
 - **Its own React root and a MemoryRouter.** A router cannot nest inside the
   app's, and Notes' routes never become the app's address: the window stays on

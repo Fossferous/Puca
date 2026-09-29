@@ -211,6 +211,24 @@ describe('desktop: the rail opens Púca Notes inside the app', () => {
         expect(host!.querySelector('.server-icon[title="Alpha"]')!.classList.contains('active')).toBe(false);
     });
 
+    // What the docs promise (CHANGELOG, USER_GUIDE, NOTES.md), as leaving
+    // Devices does: the channel under it, not the dashboard view it covered.
+    it('with a server chosen under it, the button again goes to that server — even opened from the Tasks view', async () => {
+        h.servers = [{ id: 's1', name: 'Alpha', owner_id: 99, icon_file_id: null }];
+        await mountChat();
+        await click(railHome());
+        const tasksNav = [...host!.querySelectorAll<HTMLElement>('.friends-dashboard .sidebar-nav .nav-item')]
+            .find(b => b.textContent?.trim() === 'Tasks');
+        await click(tasksNav ?? null);
+        expect(dashboard()!.classList.contains('tasks-active')).toBe(true);
+        await click(railNotes());
+        expect(notesView()?.dataset.active).toBe('true');
+        await click(railNotes());
+        expect(notesView()?.dataset.active).toBe('false');
+        expect(dashboard()).toBeNull();
+        expect(host!.querySelector('.server-icon[title="Alpha"]')!.classList.contains('active')).toBe(true);
+    });
+
     it('selecting a server hides Notes', async () => {
         h.servers = [{ id: 's1', name: 'Alpha', owner_id: 99, icon_file_id: null }];
         await mountChat();

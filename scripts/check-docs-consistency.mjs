@@ -54,6 +54,7 @@ const STALE = [
     ['Not Tested', 'an internal QA audit is not product documentation'],
     ['Immediate Fixes Needed', 'an internal fix list is not product documentation'],
     ['Last Audit:', 'a dated QA audit is not product documentation'],
+    ['back to where you were', 'leaving Notes in the desktop app goes to the channel or conversation last open under it, or home when there is none (Chat.tsx leaveNotesView), not back to the view it covered — as leaving Devices does'],
 ];
 const docFiles = tracked(['docs/*.md', 'deploy/**', 'README.md', 'CHANGELOG.md', 'SECURITY.md', 'CONTRIBUTING.md', '.env.example'])
     .filter((f) => /\.(md|html|conf|snippet|example|service|cron|py|sh|json)$|Caddyfile/.test(f));
