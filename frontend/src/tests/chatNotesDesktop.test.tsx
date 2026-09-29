@@ -31,6 +31,8 @@ const h = vi.hoisted(() => ({
     tauri: false, servers: [] as unknown[], dms: [] as unknown[], channels: [] as unknown[],
     viewProps: [] as { active: boolean }[], viewMounts: 0, viewUnmounts: 0,
     markRead: [] as number[], sounds: 0,
+    /** Streams being watched, and streams anyone is sending. */
+    watching: [] as number[], streamers: [] as { userId: number }[],
 }));
 
 vi.mock('../api/platform', async importOriginal => ({
@@ -52,6 +54,18 @@ vi.mock('../utils/audioFeedback', async importOriginal => ({
     ...(await importOriginal<typeof import('../utils/audioFeedback')>()),
     playMessageSound: () => { h.sounds += 1; },
     playMentionSound: () => {},
+}));
+// A stream to watch, without a call behind it: what the floating PiP and the
+// "Watch Live" button need to show, and a stand-in PiP whose expand is a plain
+// button.
+vi.mock('../components/voiceState', async importOriginal => ({
+    ...(await importOriginal<typeof import('../components/voiceState')>()),
+    getSelectedStreams: () => h.watching,
+    getAllStreamers: () => h.streamers,
+    selectStream: () => {},
+}));
+vi.mock('../components/StreamPip', () => ({
+    StreamPip: ({ onExpand }: { onExpand: () => void }) => <button type="button" data-testid="pip-expand" onClick={onExpand}>Expand</button>,
 }));
 vi.mock('../components/NotesDesktopView', async () => {
     const { useEffect } = await import('react');
@@ -116,6 +130,8 @@ beforeEach(() => {
     h.viewUnmounts = 0;
     h.markRead = [];
     h.sounds = 0;
+    h.watching = [];
+    h.streamers = [];
 });
 afterEach(() => {
     act(() => { root?.unmount(); });
@@ -290,6 +306,36 @@ describe('Notes over the chat: the conversation under it is not on screen', () =
         await click(railNotes());
         await deliver('DirectMessage', bobWrites());
         expect(h.sounds).toBe(1);
+    });
+});
+
+describe('opening a stream from over Notes leaves Notes', () => {
+    beforeEach(() => { h.tauri = true; });
+    const GENERAL = { id: 10, server_id: 's1', name: 'general', channel_type: 0, position: 0, parent_id: null };
+    const channelRow = (name: string) => [...host!.querySelectorAll<HTMLElement>('.channel')].find(el => el.textContent?.includes(name)) ?? null;
+
+    it('the floating PiP’s expand (it floats above Notes) opens the stage, and Notes gets out of its way', async () => {
+        h.servers = [{ id: 's1', name: 'Alpha', owner_id: 99, icon_file_id: null }];
+        h.channels = [GENERAL];
+        h.watching = [5];
+        await mountChat();
+        // Watching opened the stage; back to the channel keeps it as the PiP.
+        await click(channelRow('general'));
+        expect(host!.querySelector('[data-testid="pip-expand"]')).not.toBeNull();
+        await click(railNotes());
+        expect(notesView()?.dataset.active).toBe('true');
+        await click(host!.querySelector('[data-testid="pip-expand"]'));
+        expect(notesView()?.dataset.active).toBe('false');
+    });
+
+    it('so does the floating "Watch Live" button', async () => {
+        h.streamers = [{ userId: 5 }];
+        await mountChat();
+        await click(railNotes());
+        const watch = host!.querySelector('.watch-live-btn');
+        expect(watch).not.toBeNull();
+        await click(watch);
+        expect(notesView()?.dataset.active).toBe('false');
     });
 });
 

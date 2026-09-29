@@ -5200,6 +5200,7 @@ export function Chat({ onLogout }: ChatProps) {
                         docked
                         onExpand={() => {
                             setShowPip(false);
+                            setShowNotesView(false);
                             setViewMode('stream');
                         }}
                         onClose={() => setShowPip(false)}
@@ -6228,8 +6229,11 @@ export function Chat({ onLogout }: ChatProps) {
                 docked inside .chat-main instead (see below the chat header). */}
             {!isMobile && showPip && viewMode === 'chat' && (
                 <StreamPip
+                    // It floats above Notes, so the stage it opens must not
+                    // open underneath it.
                     onExpand={() => {
                         setShowPip(false);
+                        setShowNotesView(false);
                         setViewMode('stream');
                     }}
                     onClose={() => setShowPip(false)}
@@ -6291,6 +6295,8 @@ export function Chat({ onLogout }: ChatProps) {
                             onClick={() => {
                                 // Select all available streams
                                 streamers.forEach(s => selectStream(s.userId));
+                                // It floats above Notes too.
+                                setShowNotesView(false);
                                 setViewMode('stream');
                             }}
                         >
