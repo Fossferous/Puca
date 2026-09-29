@@ -3,13 +3,25 @@
  * note, and every popover, menu and snackbar. Owns the view state (the hash
  * route + `?q=` search + `?note=` open note) and hands the data layer's
  * actions down.
+ *
+ * EMBEDDED (`embedded`): the same shell mounted inside the Púca desktop app
+ * (components/NotesDesktopView.tsx), under a MemoryRouter instead of the
+ * page's HashRouter. The app already owns four things this shell otherwise
+ * brings, so here it brings none of them: the identity banner (App renders
+ * one), the toast sink (the bus has ONE; it is Chat's, and a second would
+ * take Chat's toasts and clear them on unmount), the reminder loop (Chat
+ * runs it) and the `sovereign:open-reminders` door (Chat's too). What it
+ * keeps is everything that makes Notes Notes: live updates, the offline
+ * outbox and cache, and the synced colours and labels. It is kept mounted
+ * while the person is elsewhere in the app, so while it is not `active` —
+ * and whenever the host vetoes a key — it takes no keyboard shortcut.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { decodeJwtPayload, getToken, logoutEverywhere } from '../../api/auth';
 import { isNetworkError } from '../../api/client';
 import { isMobile } from '../../api/platform';
-import { notificationPermission } from '../../api/desktopNotify';
+import { desktopNotificationState, enableDesktopNotifications, notificationPermission } from '../../api/desktopNotify';
 import { useTaskFeature } from '../../api/taskFeatures';
 import { ContextMenu, type ContextMenuItem } from '../../components/ContextMenu';
 import { useContextMenu } from '../../components/contextMenuUtils';
@@ -51,6 +63,7 @@ import { NoteMayExistError, type NoteExtras } from '../model/useListContent';
 import { CalendarView } from './CalendarView';
 import { UndoBar } from './UndoBar';
 import { useNotesShortcuts } from './useNotesShortcuts';
+import { useLiveRouteQuery } from './useLiveRouteQuery';
 import { onOpenReminders, useNotesReminderLoop } from '../native/useNativeReminders';
 import { canShareNotes, exportNotes, shareNote, shareNotes } from '../native/notesExport';
 import { usePlaceReminderItems } from '../native/useNotesPlaces';
@@ -109,30 +122,39 @@ function sortCards(cards: NoteCard[], sort: NotesSortMode): NoteCard[] {
     return out;
 }
 
-/**
- * The query of the route as the HISTORY holds it right now. NotesApp is a
- * HashRouter, so the route, query included, is the hash. Not
- * `useLocation().search`: React Router renders every navigation inside
- * startTransition, so a note opened a moment ago is already in the history
- * but not yet in the last render. Measured: with the render's query, a card
- * clicked in the same task as a snap's end lost its note 12 times out of 12.
- */
-function liveRouteQuery(): string {
-    const hash = window.location.hash;
-    const q = hash.indexOf('?');
-    return q < 0 ? '' : hash.slice(q);
+/** Notes mounted inside the Púca desktop app (components/NotesDesktopView.tsx). */
+export interface NotesEmbedding {
+    /** On screen. False while the person is elsewhere in the app: Notes stays
+     *  mounted — queued edits keep replaying, live updates keep landing, an
+     *  Undo keeps its window — but takes no keys and closes its menus. */
+    active: boolean;
+    /** Whether a window-level key press is Notes' at all. False while one of
+     *  the app's own dialogs covers the view, when focus is in the app's
+     *  chrome, or for a Púca hotkey. Asked only for keys Notes acts on. */
+    ownsKey: (e: KeyboardEvent) => boolean;
 }
 
 interface NotesShellProps {
+    /** Leave the account. Embedded, this is the app's own sign-out. */
     onSignOut: () => void;
     /** The token expired while offline: keep showing the cached notes. */
     expiredOffline?: boolean;
+    /** Mounted inside the desktop app rather than as its own page. */
+    embedded?: NotesEmbedding;
 }
 
-export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProps) {
+export function NotesShell({ onSignOut, expiredOffline = false, embedded }: NotesShellProps) {
     const location = useLocation();
     const navigate = useNavigate();
     const [params, setParams] = useSearchParams();
+    // The query as the history holds it, not as the last render saw it
+    // (useLiveRouteQuery.ts has the measurement).
+    const liveRouteQuery = useLiveRouteQuery();
+    const isEmbedded = embedded !== undefined;
+    /** Notes is on screen: always on its own page; embedded, only while the
+     *  view is the one showing. Off it, no shortcut runs. */
+    const onScreen = !embedded || embedded.active;
+    const ownsKey = embedded?.ownsKey;
     // The search text lives in state, NOT in the URL: it is typed against
     // decrypted note content, and the address bar and history are the one
     // store a sign-out cannot scrub. Only the open note's id rides the hash.
@@ -185,7 +207,11 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     const [flashTap, setFlashTap] = useState<{ id: number; seq: number } | null>(null);
     const flashItem = flashTap?.id ?? null;
     const [pending, setPending] = useState<Pending | null>(null);
-    const [notif, setNotif] = useState(notificationPermission);
+    // Embedded, the banner speaks for PÚCA's desktop notifications — its own
+    // setting — not for the webview's permission, which inside the desktop
+    // app is the notification plugin's stand-in and reads "denied" until
+    // something asks (api/desktopNotify.ts).
+    const [notif, setNotif] = useState<ReturnType<typeof notificationPermission>>(() => (isEmbedded ? desktopNotificationState() : notificationPermission()));
     const { contextMenu, showContextMenu, hideContextMenu } = useContextMenu();
     const searchRef = useRef<HTMLInputElement>(null);
     const cardEls = useRef(new Map<string, HTMLElement>());
@@ -246,7 +272,7 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     // note again the moment the settle landed.
     const onPagerSettle = useCallback((i: number) => {
         navigate(routeForIndex(i, labels) + liveRouteQuery(), { replace: true });
-    }, [navigate, labels]);
+    }, [navigate, labels, liveRouteQuery]);
     // How many notes carry each label, ARCHIVED INCLUDED — the label manager
     // exists because a filtered view can never reach those (filterNotes).
     const labelCounts = useMemo(() => {
@@ -259,7 +285,7 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     }, [cards]);
     // Bulk selection over what the grid shows, in the order it shows it.
     const gridOrder = useMemo(() => [...pinned, ...others], [pinned, others]);
-    const selection = useNoteSelection({ visible: gridOrder, actions, labels, bulk, grid: isGridPath(path), enabled: !openKey });
+    const selection = useNoteSelection({ visible: gridOrder, actions, labels, bulk, grid: isGridPath(path), enabled: onScreen && !openKey, accept: ownsKey });
     const reminders = useMemo(() => groupReminders(cards, now), [cards, now]);
     const counts = useMemo(() => ({
         notes: cards.filter(c => !c.archived).length,
@@ -340,7 +366,8 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
 
     // --- Reminders loop + notifications -------------------------------------------------
     // Android app: native alarms own firing, open or closed (notes/native/).
-    useNotesReminderLoop(go, onNativeCompose);
+    // Embedded: none — Chat runs the page's one loop.
+    useNotesReminderLoop(go, onNativeCompose, !isEmbedded);
 
     // A due notification that named ONE item: take the id off the URL at
     // once (a one-shot — a reload must not replay it), then, once the notes
@@ -388,10 +415,18 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     }, [flashTap]);
     // The browser/desktop half of the same tap: notifyTasksDue carries the
     // due ids on its event (api/desktopNotify.ts, and the merge note beside
-    // onOpenReminders).
-    useEffect(() => onOpenReminders(navigate), [navigate]);
+    // onOpenReminders). Embedded, the event is Chat's: it has one owner.
+    useEffect(() => (isEmbedded ? undefined : onOpenReminders(navigate)), [navigate, isEmbedded]);
     const placeItems = usePlaceReminderItems(cards);
+    // Settings' toggle is the other way to change the desktop setting.
+    useEffect(() => {
+        if (!isEmbedded) return;
+        const sync = () => setNotif(desktopNotificationState());
+        window.addEventListener('settingsChanged', sync);
+        return () => window.removeEventListener('settingsChanged', sync);
+    }, [isEmbedded]);
     const enableNotifications = async () => {
+        if (isEmbedded) { setNotif(await enableDesktopNotifications()); return; }
         if (typeof Notification === 'undefined') return;
         await Notification.requestPermission();
         setNotif(notificationPermission());
@@ -476,8 +511,8 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
 
     // --- Card menu -----------------------------------------------------------------------------
     // In the Notes Android shell `/` is this very page, so there is nothing to
-    // open; on the web it is Púca, one origin over.
-    const pucaHref = isMobile() ? null : `${window.location.origin}/`;
+    // open; on the web it is Púca, one origin over. Embedded, Notes is IN Púca.
+    const pucaHref = isMobile() || isEmbedded ? null : `${window.location.origin}/`;
     const copyAsText = async (card: NoteCard) => {
         try {
             await navigator.clipboard.writeText(noteToMarkdown(card));
@@ -622,7 +657,24 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
         // A dialog opened from a Reminders row is none of the shell's own
         // popups, and hotkeys.isEditableTarget says false for a <select> —
         // without this, `c` and `r` fire behind the open schedule editor.
-    }, !openCard && !popup && !help && !sheet && !contextMenu && !labelMgr && !reminderModal);
+    }, onScreen && !openCard && !popup && !help && !sheet && !contextMenu && !labelMgr && !reminderModal, ownsKey);
+
+    // Embedded and switched away from: the shell's own menus and pickers
+    // close, as any menu does when you click elsewhere. Each holds a capture-
+    // phase Escape that stops the event, so one left open behind the chat
+    // would swallow the chat's Escape; and nothing half-chosen waits to
+    // reappear. The open note, the composer and an Undo stay as they were.
+    const [wasOnScreen, setWasOnScreen] = useState(onScreen);
+    if (wasOnScreen !== onScreen) {
+        setWasOnScreen(onScreen);
+        if (!onScreen) {
+            setPopup(null);
+            setHelp(false);
+            setLabelMgr(false);
+            setDrawer(false);
+            hideContextMenu();
+        }
+    }
 
     // --- Account -------------------------------------------------------------------------------------
     const username = (() => {
@@ -695,8 +747,8 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
     const offline = error !== null && error !== undefined && isNetworkError(error);
 
     return (
-        <div className="notes-app">
-            <IdentityBanner onSignOut={onSignOut} />
+        <div className={`notes-app${isEmbedded ? ' embedded' : ''}`}>
+            {!isEmbedded && <IdentityBanner onSignOut={onSignOut} />}
             <NotesTopBar
                 ref={searchRef}
                 query={query}
@@ -725,6 +777,7 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                     onNavigate={to => { setQuery(''); go(to); }}
                     onEditLabels={() => setLabelMgr(true)}
                     version={__APP_VERSION__}
+                    inPuca={isEmbedded}
                 />
                 <main className={`notes-main ${pagerOn ? 'pager' : ''}`}>
                     <div className="notes-main-inner">
@@ -759,6 +812,7 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                                 onOpen={openNote}
                                 notificationsState={notif}
                                 onEnableNotifications={() => { void enableNotifications(); }}
+                                inPucaDesktop={isEmbedded}
                                 nativeBanner={<NativeReminderBanners />}
                                 placeItems={placeItems}
                                 canSnooze={canSnooze}
@@ -772,7 +826,8 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                                 actions={actions}
                                 now={now}
                                 onOpenNote={key => setParams(p => { p.set('note', key); return p; })}
-                                shortcutsEnabled={!openCard && !popup && !help && !sheet && !contextMenu && !labelMgr}
+                                shortcutsEnabled={onScreen && !openCard && !popup && !help && !sheet && !contextMenu && !labelMgr}
+                                acceptKey={ownsKey}
                             />
                         ) : pagerOn ? (
                             <>
@@ -835,7 +890,8 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                     onArchive={archiveWithUndo}
                     onSendToPuca={() => setPopup({ kind: 'send', key: openCard.key })}
                     pucaHref={pucaHref}
-                    escapeBlocked={!!popup || !!contextMenu || help || labelMgr}
+                    escapeBlocked={!onScreen || !!popup || !!contextMenu || help || labelMgr}
+                    acceptKey={ownsKey}
                     flashTaskId={flashItem}
                     query={filter.kind === 'search' ? filter.query : undefined}
                 />
@@ -873,6 +929,7 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
                         onHelp={() => { setPopup(null); setHelp(true); }}
                         onSignOut={() => { setPopup(null); onSignOut(); }}
                         onSignOutEverywhere={() => { setPopup(null); void signOutEverywhere(); }}
+                        inPuca={isEmbedded}
                     />
                 </Popover>
             )}
@@ -903,7 +960,8 @@ export function NotesShell({ onSignOut, expiredOffline = false }: NotesShellProp
             )}
             {selection.bar}
             {selection.undo}
-            <MessageToasts />
+            {/* Embedded, Chat's MessageToasts is the bus's one sink. */}
+            {!isEmbedded && <MessageToasts />}
         </div>
     );
 }

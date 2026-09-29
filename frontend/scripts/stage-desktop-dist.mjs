@@ -3,9 +3,13 @@
  * Stage the desktop installer's web assets: frontend/dist → frontend/dist-desktop,
  * WITHOUT Púca Notes (dist/notes/).
  *
- * The desktop shell only ever loads index.html, and nothing in it links to
- * /notes/ (TasksView's "Open in Púca Notes" is web-only), so an installer that
- * embedded dist/notes/ carried a second, unreachable HTML document for
+ * The desktop shell only ever loads index.html. Púca Notes DOES run in the
+ * desktop app, but not as this page: it is a lazy chunk of the main bundle
+ * (components/NotesDesktopView.tsx, loaded when the rail's "Tasks & notes" is
+ * pressed), inside the app's own document, session and CSP — so it is in
+ * dist-desktop/ with the rest of assets/. Nothing loads or links /notes/
+ * (TasksView's "Open in Púca Notes" is web-only), so an installer that
+ * embedded dist/notes/ would carry a second, unreachable HTML document for
  * nothing. It cannot be stripped from dist/ itself: dist/ is also the webapp
  * tarball, where Notes IS served and dual-ship.sh checks its entry chunk. So
  * the installer gets its own copy — tauri.conf.json's frontendDist is

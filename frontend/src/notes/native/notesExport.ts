@@ -2,8 +2,9 @@
  * Export and share for Púca Notes, on every platform it runs on.
  *
  *  - Save (Markdown or JSON): a download in the browser; in the Android app a
- *    file in Documents/Puca Notes/ (noteText.saveNotesExport), with the
- *    place it landed — or the real reason it did not — in a toast.
+ *    file in Documents/Puca Notes/; in the desktop app wherever the Save As
+ *    dialog says (noteText.saveNotesExport) — with the place it landed, or
+ *    the real reason it did not, in a toast.
  *  - Share (Android app only): the same text through Android's share sheet,
  *    so it can go to Files, Drive, e-mail or a messenger. The browser offers
  *    no equivalent worth the name here, so the menu hides it there.

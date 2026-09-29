@@ -27,6 +27,7 @@ import { type ReminderSlot } from '../../api/reminderSlots';
 import { type Task } from '../../api/tasks';
 import { DEFAULT_REMINDER_TIMES, type ReminderTimes } from '../../api/reminderTimes';
 import { CalendarIcon, RepeatIcon, SnoozeIcon } from '../Icons';
+import { useLayerOnScreen } from '../portalTarget';
 
 const PRESETS: { value: SnoozePreset; label: string }[] = [
     { value: '10m', label: '10 min' },
@@ -48,8 +49,11 @@ export function SnoozeControl({ task, snoozed = false, now, onSnooze, times = DE
 }) {
     const [open, setOpen] = useState(false);
     const wrapRef = useRef<HTMLSpanElement>(null);
+    const onScreen = useLayerOnScreen();
     useEffect(() => {
-        if (!open) return;
+        // Hidden with Notes in the desktop app: not our key, nor our click
+        // (portalTarget.ts).
+        if (!open || !onScreen) return;
         const onDown = (e: PointerEvent) => {
             if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
         };
@@ -72,7 +76,7 @@ export function SnoozeControl({ task, snoozed = false, now, onSnooze, times = DE
             document.removeEventListener('pointerdown', onDown, true);
             document.removeEventListener('keydown', onKey, true);
         };
-    }, [open]);
+    }, [open, onScreen]);
     if (!task.due_at) return null;
     return (
         <span ref={wrapRef} className={`notes-snooze ${className}`.trim()} onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>

@@ -22,6 +22,7 @@ vi.mock('../api/attachments', () => ({
 
 const { NoteImages } = await import('../components/NoteImages');
 const { AudioRecorder } = await import('../notes/components/AudioRecorder');
+const { LayerOnScreenContext } = await import('../components/portalTarget');
 
 const settle = async () => { await act(async () => { for (let i = 0; i < 6; i++) await new Promise(r => setTimeout(r, 0)); }); };
 
@@ -198,6 +199,22 @@ describe('AudioRecorder: the microphone', () => {
         await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
         expect(tracks[0].stopped).toBe(true);
         spy.mockRestore();
+    });
+
+    it('Notes leaving the screen while the page stays (the desktop app, another view) releases it too', async () => {
+        vi.spyOn(window, 'confirm').mockReturnValue(true);
+        const at = (onScreen: boolean) => (
+            <LayerOnScreenContext.Provider value={onScreen}>
+                <AudioRecorder onSave={() => true} onCancel={() => {}} />
+            </LayerOnScreenContext.Provider>
+        );
+        await act(async () => { root.render(at(true)); });
+        await settle();
+        expect(tracks[0].stopped).toBe(false);   // positive control: on screen, it records
+        await act(async () => { root.render(at(false)); });
+        expect(tracks[0].stopped).toBe(true);
+        // …and the sheet is still there, with what was taken so far.
+        expect(document.querySelector('.notes-recorder[role="dialog"]')).not.toBeNull();
     });
 
     it('Discard WHILE recording leaves no preview URL nothing can free', async () => {

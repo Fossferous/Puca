@@ -1,0 +1,53 @@
+/* Púca Notes inside the desktop app (NotesDesktopView.tsx).
+ *
+ * A first-class view beside the server rail, anchored exactly as the Devices
+ * view is (DevicesView.css) and in the same z-band, so the app's own dialogs,
+ * toasts and menus stay above it. Its z-index makes it a stacking context:
+ * Notes' editor, popovers and Undo bar are portaled into its own layer and
+ * stack INSIDE that band (notes.css's 900-1200), never over the app's dialogs.
+ * Nothing here may set a transform, filter or containment — Notes' popovers
+ * are placed in viewport coordinates, and any of those would move the box
+ * their fixed position is measured from.
+ *
+ * Desktop layout only: Chat opens this view only outside its phone layout
+ * (the coarse-pointer query, where the Tasks view is the destination), so
+ * notes.css's coarse block and mobile.css never style it.
+ */
+.notes-desktop-view {
+    position: fixed;
+    top: 0;
+    left: 72px; /* after the server rail */
+    right: 0;
+    bottom: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-primary);
+    z-index: 100;
+}
+
+/* Hidden but kept mounted: `inert` takes it out of focus, clicks and the
+   accessibility tree; this takes it off the screen WITHOUT discarding its
+   boxes, so the pager's scroll position and an open note's are still there
+   on the way back (display: none would reset both). */
+.notes-desktop-view[inert] {
+    visibility: hidden;
+}
+
+.notes-desktop-root {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+/* Púca's App.css zeroes every element's margin and padding (`* { … }`).
+   Notes' own page never loads it, and Notes is laid out against the
+   browser's defaults under its own rules — paragraphs, lists and buttons
+   without a padding of their own included. Put the defaults back here, at
+   zero specificity: this outranks only App.css's reset (same specificity,
+   loaded later, in this lazily loaded chunk), and every rule of Notes' own
+   still wins. */
+:where(.notes-desktop-view) :where(*) {
+    margin: revert;
+    padding: revert;
+}

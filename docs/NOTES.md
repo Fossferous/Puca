@@ -4,7 +4,9 @@ A notes app, Google-Keep style, that is a second front door onto Púca's task
 system. Same account, same end-to-end encryption, same lists and checklist
 channels — its own page, its own shape. It lives at **`/notes/`** on the web
 app's origin (`https://app.example.com/notes/`), and Púca's Tasks view links to
-it from the tab bar.
+it from the tab bar. In Púca's **desktop app** it is part of the app: the
+rail's *Tasks & notes* opens it in place, already signed in (*Inside the
+desktop app* below).
 
 The server holds little that is new: a note's sealed text, its pictures and
 the trash (migration 065 — *Text, pictures and the trash* below), an item's
@@ -706,8 +708,11 @@ back the copy it holds (migration 069, `expect_rev` on
 
 Notes and the web app share the origin's storage, so signing in to one signs in
 to the other — in the **browser**. The desktop and phone shells run at their
-own origins, where nothing is shared; that is why Púca's *Open in Púca Notes*
-button appears only in the web app.
+own origins, where nothing is shared with these pages; that is why Púca's
+*Open in Púca Notes* button appears only in the web app. The desktop app needs
+no link and no second sign-in for another reason: there Notes is not a page at
+all but part of Púca's own, under the session the app already holds (*Inside
+the desktop app* below).
 
 Two pages on one origin also share the token and the E2EE seed at rest but not
 in memory. `frontend/src/api/sessionSync.ts` watches the `storage` event so a
@@ -808,6 +813,53 @@ checks the session and the token version. Púca's own sign-in does not offer the
 box — it opens the ordinary session — though the server accepts the request
 from any client that sends it.
 
+## Inside the desktop app
+
+In Púca's desktop app (full and Lite) the rail's *Tasks & notes* opens Notes
+itself, in the space beside the rail where Devices opens; pressing it again goes
+back to where you were. It is the SAME component tree as the page — NotesShell
+and everything under it — so a Notes feature reaches the desktop in the same
+commit. `frontend/src/components/NotesDesktopView.tsx` hosts it:
+
+- **Its own React root and a MemoryRouter.** A router cannot nest inside the
+  app's, and Notes' routes never become the app's address: the window stays on
+  `/chat`, the socket stays up, a call stays connected.
+- **The app's session.** No second sign-in and no SessionGate: a Notes query
+  client is made per mount and thrown away when Chat goes (sign-out, expiry),
+  and the sealed on-device cache is read into it once this account's identity
+  is unwrapped. *Sign out* in Notes' menu is Púca's sign-out.
+- **Kept, hidden, once opened.** Going to a channel hides Notes (`inert`, not
+  unmounted): an open note, the page you were on, queued offline edits, live
+  updates and a pending *Undo* all survive the trip. A playing voice note
+  pauses and the recorder lets go of the microphone, and a dialog left open
+  there (a picture, a schedule, a half-made drawing) takes no key until you
+  come back: an Escape pressed in the chat is the chat's, and remote
+  control's *Escape always revokes* still sees it
+  (`LayerOnScreenContext` in `components/portalTarget.ts`).
+- **What Púca already does, Notes leaves to it** (`embedded` on NotesShell):
+  Notes' toasts show in Púca's own, Púca's identity banner and reminder loop
+  run once for both, and there is no *Open Púca*. The Reminders page's banner
+  reads Púca's desktop-notification setting, not the browser's permission.
+  That setting is one switch for due items and new messages alike (Settings ›
+  *Enable Desktop Notifications*), and Púca fires due items whether Notes is
+  open or not, so with it off the banner says both before it offers *Turn
+  on*.
+- **Keys.** `c`, `r`, `/`, `?` and the calendar's keys act only while Notes is
+  on screen, and never on a Púca hotkey, a key typed in Púca's own chrome, or
+  while one of Púca's dialogs covers Notes (`notesDesktopView.utils.ts`).
+- **Export** opens the Save As dialog and the shell writes the file
+  (`api/savePath.ts` `saveTextAs`, which the calendar's `.ics` shares).
+
+A desktop window narrow and touch-driven enough to take Púca's phone layout
+keeps the Tasks view, and the Tasks view stays on the home dashboard's *Tasks*
+on every desktop. The web app and the phone apps are unchanged. Nothing under
+`src/notes` reaches the socket still
+(`frontend/src/tests/notesNoSocket.test.ts`): the host lives outside it and
+hands Notes the sign-out as a callback. Opening Notes on
+the desktop adds one live-update stream for the account; the server keeps four
+per account (`MAX_STREAMS_PER_USER` in `src/task_events.rs`) and drops the
+oldest, which falls back to refetching as *Live updates* describes.
+
 ## Building and serving
 
 `npm run build` builds Notes after the main bundle (`vite.notes.config.ts` →
@@ -823,11 +875,15 @@ The web tarball ships it (`deploy/webapp/README.md`); the operator's Caddy
 phone shells strip `dist/notes/` (`scripts/strip-notes-from-native.mjs` after
 every `cap sync`, and `rm -rf ota-src/notes` in the OTA recipe) — a browser-only
 page with no CSP meta has no business inside a WebView. The desktop installer
-no longer carries it either: Tauri embeds `dist-desktop/`
+does not carry this page either: Tauri embeds `dist-desktop/`
 (`tauri.conf.json` `frontendDist`), a copy of `dist/` without `notes/` that
 `scripts/stage-desktop-dist.mjs` makes after every full and Lite build — the
 shell only ever loads `index.html`, and `dist/` itself stays whole because it is
-the webapp tarball. `scripts/check-lite-identity.mjs` fails if the installer is
+the webapp tarball. Notes reaches the desktop app another way: the main build
+emits `NotesDesktopView` (*Inside the desktop app*) as a lazy chunk with
+`notes.css` inlined, and `dist-desktop/` carries it with the rest of `assets/`.
+The web app and the phone apps have the chunk too and never load it.
+`scripts/check-lite-identity.mjs` fails if the installer is
 pointed back at `dist/`. `deploy/ops/dual-ship.sh webapp` checks
 Notes' entry chunk for the API host the same way it checks the main one.
 
@@ -1643,9 +1699,11 @@ offline bullet below); it is never queued.
 - **Sending a note to several places, or several notes at once.** The bulk bar
   offers *Copy as text*, not a bulk send: N messages from one click is a spam
   hazard, and a send that is refused half way through has no sensible undo.
-- **A desktop Notes app.** Notes on a computer is the browser page; the
-  desktop installer deliberately carries no copy of it (see *Building and
-  serving*).
+- **A due-item notification that opens anything on the desktop.** The
+  notification plugin reports no click there (it registers no listener
+  command on the desktop), so a desktop reminder appears but opens nothing
+  when clicked; Notes' *Reminders* is one click away on the rail. Fixing it is
+  a native change that ships in the installer, not in the web bundle.
 - **Undoing an item's position, or an edit to its text.** An item put back by
   Undo is appended to its group rather than returned to its old slot, and
   there is no undo of a committed item edit (Escape still cancels one that
@@ -1984,3 +2042,20 @@ a fresh user), drives the tabs, the rail and a deep link on a desktop, and on
 the phone scrolls the pager, swipes it with real touch events (held still
 past half-way, then flicked: it must land exactly one list along), drags a
 card by its grip and scrolls a page down.
+
+`frontend/e2e/notes-desktop-embed.mjs` is the same kind of walk for Notes
+*inside the desktop app*, which renders only under Tauri: it drives the built
+MAIN bundle with a fake desktop shell injected before any page script (every
+command the app sends is answered on purpose and recorded, and one it does
+not know fails the run). From a sign-up in Púca it opens Notes from the rail
+and checks the address, the document and the socket did not change; makes a
+note, pastes an assistant's Markdown checklist into the composer's title
+(asked first, then clean items), searches, colours, labels, opens and closes;
+goes to a channel and back and finds the same shell with its search still
+typed; presses `c`, `/` and `?` in the chat and sees Notes do nothing (the
+same presses act with Notes on screen, as the control); keeps a message as a
+note through Púca's own toast;
+exports through the shell's Save As and `attachment_save` with the notes in
+the bytes and a non-ASCII folder intact; and signs out to Púca's login with no
+Notes UI, query cache or sealed cache left. Without the shell, the same rail
+button must open the Tasks view.

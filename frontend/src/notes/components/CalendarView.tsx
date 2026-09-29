@@ -46,9 +46,11 @@ interface CalendarViewProps {
     onOpenNote: (key: string) => void;
     /** No dialog/editor above the calendar: its single-key shortcuts may run. */
     shortcutsEnabled: boolean;
+    /** The desktop app's veto on a key (NotesShell's `embedded`). */
+    acceptKey?: (e: KeyboardEvent) => boolean;
 }
 
-export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled }: CalendarViewProps) {
+export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled, acceptKey }: CalendarViewProps) {
     // The ONE phone/desktop gate both calendar hosts use (calendarGate.ts):
     // the native shell or the coarse-pointer query — not the Notes shell's
     // own media-query-only check, which a native phone could fall through.
@@ -268,6 +270,7 @@ export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled
                 headerActions={headerActions}
                 entryActions={entryActions}
                 shortcutsEnabled={shortcutsEnabled && !adding && !editing && !importing}
+                acceptKey={acceptKey}
                 footnote={sharedNote ? 'Shared notes refresh every 30 seconds here.' : undefined}
             />
             <div className="cal-weekstart">

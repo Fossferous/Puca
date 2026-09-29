@@ -54,6 +54,11 @@ interface RemindersViewProps {
     /** Whether the browser will show OS notifications for due items. */
     notificationsState: 'granted' | 'denied' | 'default' | 'unsupported';
     onEnableNotifications: () => void;
+    /** Notes inside the Púca desktop app: `notificationsState` is then Púca's
+     *  own desktop-notification setting, ONE switch for due items and new
+     *  messages alike, and Púca fires due items whether Notes is open or not.
+     *  The banner says so before anyone turns it on. */
+    inPucaDesktop?: boolean;
     /** The Android app's own status lines (notes/native/); renders nothing elsewhere. */
     nativeBanner?: ReactNode;
     /** Open items with a place saved on this phone (Android app only). */
@@ -201,7 +206,7 @@ function RetimeControl({ task, note, actions, canSchedule, onModal }: {
     );
 }
 
-export function RemindersView({ groups, actions, now, onOpen, notificationsState, onEnableNotifications, nativeBanner, placeItems = [], canSnooze = false, flashTaskId = null, canSchedule = false, onModal }: RemindersViewProps) {
+export function RemindersView({ groups, actions, now, onOpen, notificationsState, onEnableNotifications, inPucaDesktop = false, nativeBanner, placeItems = [], canSnooze = false, flashTaskId = null, canSchedule = false, onModal }: RemindersViewProps) {
     const me = currentUserIdFromToken() ?? undefined;
     const times = useReminderTimes();
     // The note each row belongs to, so a click, a tick and a snooze can name
@@ -240,12 +245,17 @@ export function RemindersView({ groups, actions, now, onOpen, notificationsState
             header={(
                 <>
                     {nativeBanner}
-                    {notificationsState === 'default' && (
+                    {notificationsState === 'default' && (inPucaDesktop ? (
+                        <div className="notes-status offline">
+                            <BellIcon /> Desktop notifications are off, so due items won’t notify you. Turning them on covers new messages too.
+                            <button type="button" onClick={onEnableNotifications}>Turn on</button>
+                        </div>
+                    ) : (
                         <div className="notes-status offline">
                             <BellIcon /> Get a notification when an item comes due while Notes is open.
                             <button type="button" onClick={onEnableNotifications}>Enable</button>
                         </div>
-                    )}
+                    ))}
                     {notificationsState === 'denied' && (
                         <div className="notes-status offline"><BellIcon /> Notifications are blocked for this site in the browser; due items still show here.</div>
                     )}

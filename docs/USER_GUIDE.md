@@ -362,10 +362,19 @@ confirmation first.
 
 ## Púca Notes (notes)
 
-Púca Notes shows your task lists as notes, Google-Keep style, in the browser at
-`/notes/` on your server's web address. Open it with **Open in Púca Notes**
-(the note button beside **New list** in the Tasks view of the web app); it
-uses the account you are already signed in to.
+Púca Notes shows your task lists as notes, Google-Keep style. It uses the
+account you are already signed in to.
+
+- **In the desktop app** it opens inside Púca: click **Tasks & notes** on the
+  server rail, and click it again to go back to where you were. Going to a
+  channel and back keeps your place in Notes. The Tasks view is still there:
+  click **Direct Messages** at the top of the rail, then **Tasks** in the left
+  column.
+- **In the browser** it is at `/notes/` on your server's web address. Open it
+  with **Open in Púca Notes** (the note button beside **New list** in the
+  Tasks view of the web app).
+
+Inside Notes:
 
 - **Take a note…** starts a new list — type a title and items (Enter adds the
   next). On a phone, the **New note** button at the bottom right does the same.
@@ -373,13 +382,14 @@ uses the account you are already signed in to.
   edit, add subtasks, drag by the grip to reorder or nest, set a due time
   from the clock, attach pictures from the paperclip.
 - **Pin** keeps a note at the top (it is the same favourite as the Tasks tab
-  bar). **Colour**, **Labels** and **Archive** are Notes' own, and stay on the
-  device you set them on. **Search** looks through titles and items.
+  bar). **Colour**, **Labels** and **Archive** are Notes' own, and follow your
+  account to every device, sealed. **Search** looks through titles and items.
 - **Reminders** in the left column lists every item with a due time, grouped
   **Overdue**, **Today** and **Upcoming**. The Tasks view in Púca itself has
   the same list as a **Reminders** tab, beside **Calendar** — so you can see
-  what is due on the desktop app and on your phone, where Púca Notes' page is
-  not reachable. A due-item notification opens it. An item in a shared
+  what is due in Púca's phone app too, where Púca Notes' page is not
+  reachable. A due-item notification opens it, except in the desktop app,
+  where clicking one opens nothing yet. An item in a shared
   checklist that someone else set is marked *Reminds whoever set it*: it goes
   off for them, not for you.
 - **A checklist from somewhere else** — say, step-by-step instructions from an
@@ -392,6 +402,9 @@ uses the account you are already signed in to.
   the heading as its name (the question says so first). Púca's own Tasks view
   takes the same paste (see *Tasks*, above).
 - Archiving or deleting a note offers **Undo** for a few seconds.
+- **Export notes as Markdown** or **as JSON**, under **Account** at the top,
+  saves every note to a file, not encrypted. In the desktop app you choose
+  where it goes.
 - Shortcuts: `/` search, `c` new note, `r` refresh, `?` help.
 
 Every checklist channel from your servers appears as a shared note with the

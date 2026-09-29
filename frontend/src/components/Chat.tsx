@@ -36,7 +36,7 @@ import { addReaction, notifyReactionChanged } from '../api/reactions';
 import { ForwardModal } from './ForwardModal';
 import { SaveToNoteModal } from './SaveToNoteModal';
 import { getToken } from '../api/auth';
-import { appIsForeground, isMobile as isNativeMobile, RC_ENABLED } from '../api/platform';
+import { appIsForeground, isMobile as isNativeMobile, isTauri, RC_ENABLED } from '../api/platform';
 import {
     // getOrCreateDefaultServer removed - no auto-join default server
     listServers,
@@ -187,6 +187,12 @@ import { searchChannel, searchDM, type SearchOutcome } from '../api/searchMessag
 const DevicesView = __RC_ENABLED__
     ? React.lazy(() => import('./DevicesView').then(m => ({ default: m.DevicesView })))
     : (() => null);
+
+// Púca Notes inside the desktop app (NotesDesktopView.tsx). Lazy, and only
+// ever rendered under Tauri, so the web app and the phone apps never fetch
+// Notes' tree or its stylesheet. Carries no remote-control code, so the Lite
+// desktop build has it too.
+const NotesDesktopView = React.lazy(() => import('./NotesDesktopView').then(m => ({ default: m.NotesDesktopView })));
 
 /**
  * The socket was not OPEN at send time. Distinct from SecureSendError so the
@@ -765,6 +771,11 @@ export function Chat({ onLogout }: ChatProps) {
     const [showSettingsModal, setShowSettingsModal] = useState(false);
     // Devices is a first-class view (the FriendsPanel pattern), not a modal.
     const [showDevicesView, setShowDevicesView] = useState(false);
+    // Púca Notes, desktop only: the same slot beside the rail. Once opened it
+    // stays mounted (`notesOpened`) and leaving it only hides it — see
+    // NotesDesktopView.tsx for what unmounting would cost.
+    const [showNotesView, setShowNotesView] = useState(false);
+    const [notesOpened, setNotesOpened] = useState(false);
 
     // User profile popup state
     const [selectedMember, setSelectedMember] = useState<MemberWithRoles | null>(null);
@@ -1115,6 +1126,25 @@ export function Chat({ onLogout }: ChatProps) {
         isNativeMobile() ||
         window.matchMedia('(pointer: coarse) and (max-width: 1024px)').matches
     );
+    // Where the rail's "Tasks & notes" goes: Púca Notes itself, inside the
+    // app, on desktop; the Tasks view everywhere else — the web app (Notes
+    // has its own page there), the phone app, and a desktop window narrow
+    // and touch-driven enough to take the phone layout, whose panels the
+    // Tasks view is built for.
+    const notesInApp = isTauri() && !isMobile;
+    const notesOnScreen = notesInApp && showNotesView;
+    // The message list can be what the shared scroller holds and still not be
+    // SEEN: Notes lies over the chat as a view of its own, without touching
+    // the scroller, so showingMessageList — which the scroll state follows —
+    // stays true under it. Everything that reads "it arrived on screen, so it
+    // is read" (the open channel's read cursor, the unread poll's zero, a DM
+    // into the open conversation making no sound) asks this instead, or a
+    // message nobody saw would be marked read.
+    const messageListSeen = showingMessageList && !notesOnScreen;
+    const messageListSeenRef = useRef(messageListSeen);
+    useLayoutEffect(() => {
+        messageListSeenRef.current = messageListSeen;
+    }, [messageListSeen]);
 
     // Swipe between the mobile panels (servers ↔ channels ↔ chat ↔ members),
     // reusing the existing panel state + CSS slide transitions. Guarded so it
@@ -1155,6 +1185,7 @@ export function Chat({ onLogout }: ChatProps) {
         if (next === current) return;
         if (next === 'devices') {
             setShowDevicesView(true);
+            setShowNotesView(false);
             setShowFriendsPanel(false);
             setShowChecklist(false);
             setMobilePanel('servers');
@@ -1412,15 +1443,30 @@ export function Chat({ onLogout }: ChatProps) {
             if (currentChannelIdRef.current !== channelId) return;
             if (document.visibilityState !== 'visible' || !document.hasFocus()) return;
             // The voice/stream/checklist views keep currentChannel pointing at
-            // the last text channel while COVERING it — messages arriving then
-            // were never seen, so they must not be marked read.
-            if (!showingMessageListRef.current) return;
+            // the last text channel while COVERING it, and Notes lies over it
+            // — messages arriving then were never seen, so they must not be
+            // marked read.
+            if (!messageListSeenRef.current) return;
             markReadNow(channelId);
         }, 1500);
     }, [markReadNow]);
     useEffect(() => () => {
         if (readDebounceRef.current !== null) clearTimeout(readDebounceRef.current);
     }, []);
+
+    // Notes lifted off the SAME channel it covered: what arrived under it is
+    // on screen now, and read as it would be on coming back to the window —
+    // here, and pinned at the bottom. Left for another channel instead, that
+    // one's history load reads it.
+    const channelUnderNotesRef = useRef<number | null>(null);
+    useEffect(() => {
+        if (notesOnScreen) { channelUnderNotesRef.current = currentChannelIdRef.current; return; }
+        const covered = channelUnderNotesRef.current;
+        channelUnderNotesRef.current = null;
+        if (covered === null || covered !== currentChannelIdRef.current) return;
+        if (document.visibilityState !== 'visible' || !document.hasFocus()) return;
+        if (messageListSeenRef.current && atBottomRef.current) markReadNow(covered);
+    }, [notesOnScreen, markReadNow]);
 
     // Rail bubbles: hydrate the cross-server unread totals on mount, on every
     // WS (re)connect (events missed while the socket was down are invisible
@@ -1668,6 +1714,7 @@ export function Chat({ onLogout }: ChatProps) {
             setMessages([]);
             setShowFriendsPanel(true);
             setShowDevicesView(false);
+            setShowNotesView(false);
             if (isMobile) setMobilePanel('chat');
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1684,11 +1731,11 @@ export function Chat({ onLogout }: ChatProps) {
         // dependency here — so this effect re-ran and, on mobile, immediately
         // set the panel to 'channels', sliding the view the user had just
         // opened off-screen. Every full-slot overlay has to be listed.
-        if (!currentServer && servers.length > 0 && !currentDM && !showFriendsPanel && !showDevicesView) {
+        if (!currentServer && servers.length > 0 && !currentDM && !showFriendsPanel && !showDevicesView && !showNotesView) {
             setCurrentServer(servers[0]);
             // On mobile, start on the channels panel so users see the channel list
             setMobilePanel('channels');
-        } else if (servers.length === 0 && !isServersLoading && !currentDM && !showDevicesView) {
+        } else if (servers.length === 0 && !isServersLoading && !currentDM && !showDevicesView && !showNotesView) {
             // !currentDM: a zero-server user reading a DM (e.g. Notes to self)
             // must not have the dashboard force-reopened over the conversation
             // the instant they open it — this effect refires on every
@@ -1706,7 +1753,7 @@ export function Chat({ onLogout }: ChatProps) {
             // slide it off-screen behind the empty server rail.
             setMobilePanel('chat');
         }
-    }, [servers, currentServer, isServersLoading, currentDM, showFriendsPanel, showDevicesView]);
+    }, [servers, currentServer, isServersLoading, currentDM, showFriendsPanel, showDevicesView, showNotesView]);
 
     // Load the DM conversation list that backs the home/DM sidebar menu.
     // Refreshes when a DM is opened so a freshly-created conversation (incl.
@@ -1776,7 +1823,7 @@ export function Chat({ onLogout }: ChatProps) {
                 // Via refs so this effect stays keyed on the server id alone.
                 const activeId = currentChannelIdRef.current;
                 if (activeId !== null && appIsForeground()
-                    && showingMessageListRef.current && atBottomRef.current) {
+                    && messageListSeenRef.current && atBottomRef.current) {
                     countsMap.set(activeId, 0);
                 }
                 setUnreadCounts(countsMap);
@@ -2001,7 +2048,8 @@ export function Chat({ onLogout }: ChatProps) {
             if (isBlocked(payload.sender.id)) return;
 
             // Ping for an incoming DM from someone else that isn't the
-            // conversation already on screen. (self-gates on the `message` setting.)
+            // conversation already on screen — the open one with Notes over
+            // it is not. (self-gates on the `message` setting.)
             if (payload.sender.id !== currentUserId) {
                 // Same rule as channels: notify on FOCUS, ping on what is open.
                 notifyNewMessage({
@@ -2012,7 +2060,7 @@ export function Chat({ onLogout }: ChatProps) {
                     notifyKey: `dm:${payload.conversation_id}`,
                     nav: `dm:${payload.conversation_id}`,
                 });
-                if (!(currentDM && payload.conversation_id === currentDM.id)) {
+                if (!(currentDM && payload.conversation_id === currentDM.id && messageListSeenRef.current)) {
                     playMessageSound();
                     // In-app shade, WITH the decrypted body — a DM's plaintext
                     // is available here (pairwise key = the sender), unlike
@@ -2273,6 +2321,7 @@ export function Chat({ onLogout }: ChatProps) {
                 setMessages([]);
                 setShowFriendsPanel(true);
                 setShowDevicesView(false);
+                setShowNotesView(false);
                 if (isMobile) setMobilePanel('chat');
             }
         };
@@ -2390,10 +2439,11 @@ export function Chat({ onLogout }: ChatProps) {
                 // The user just read this on screen — advance the read cursor,
                 // or the 30s poll re-lights the badge on the open channel.
                 // Gated on focus + the message list actually being on screen
-                // (not covered by the voice/stream/checklist views) + pinned
-                // at the bottom, so nothing unseen is ever marked read.
+                // (not covered by the voice/stream/checklist views, nor by
+                // Notes) + pinned at the bottom, so nothing unseen is ever
+                // marked read.
                 if (document.visibilityState === 'visible' && document.hasFocus()
-                    && showingMessageListRef.current && atBottomRef.current) {
+                    && messageListSeenRef.current && atBottomRef.current) {
                     scheduleMarkRead(currentChannel.id);
                 }
             }
@@ -2614,7 +2664,7 @@ export function Chat({ onLogout }: ChatProps) {
             // message to that channel was silently swallowed — the reported
             // "text messages in voice make no noise". The friends dashboard and
             // the checklists board cover the chat for the same reason.
-            const chatOnScreen = viewMode === 'chat' && !showFriendsPanel && !showAllChecklists;
+            const chatOnScreen = viewMode === 'chat' && !showFriendsPanel && !showAllChecklists && !notesOnScreen;
             // isServerQuiet: 'nothing' AND 'mentions only' both silence the
             // GENERIC blip/toast — under mentions-only, the mention sound (the
             // open-channel ChatMessage path) is what still pings.
@@ -2651,7 +2701,7 @@ export function Chat({ onLogout }: ChatProps) {
         };
         wsClient.on('MessageNotification', handleMessageNotification);
         return () => wsClient.off('MessageNotification', handleMessageNotification);
-    }, [currentChannel?.id, currentUserId, viewMode, showFriendsPanel, showAllChecklists]);
+    }, [currentChannel?.id, currentUserId, viewMode, showFriendsPanel, showAllChecklists, notesOnScreen]);
 
     // Somebody joined a server you are in.
     //
@@ -2730,9 +2780,9 @@ export function Chat({ onLogout }: ChatProps) {
             void clearMobileNotifications();
             const activeId = currentChannelIdRef.current;
             // Message list on screen AND pinned at the bottom: what arrived
-            // while away is visible now. A covered chat (voice view etc.) or
-            // a scrolled-up reader keeps their unread state.
-            if (activeId !== null && showingMessageListRef.current && atBottomRef.current) {
+            // while away is visible now. A covered chat (voice view, Notes
+            // over it) or a scrolled-up reader keeps their unread state.
+            if (activeId !== null && messageListSeenRef.current && atBottomRef.current) {
                 markReadNow(activeId);
             }
         };
@@ -3271,9 +3321,30 @@ export function Chat({ onLogout }: ChatProps) {
         setFriendsTab('tasks');
         setShowFriendsPanel(true);
         setShowDevicesView(false);
+        setShowNotesView(false);
         setShowAllChecklists(false);
         setShowChecklist(false); // channel drawer would otherwise keep covering
         if (isMobile) setMobilePanel('chat');
+    };
+
+    // Púca Notes inside the desktop app: the rail's "Tasks & notes" there,
+    // and where "Saved to …" leads. Opened into the dashboard slot beside the
+    // rail as Devices is; mounted the first time and kept from then on.
+    const openNotesView = () => {
+        setNotesOpened(true);
+        setShowNotesView(true);
+        setShowFriendsPanel(false);
+        setShowDevicesView(false);
+        setShowAllChecklists(false);
+        setShowChecklist(false); // the channel drawer would cover it
+    };
+    // Its rail button again: back to wherever you were. With no server and no
+    // conversation under it that is the home dashboard, as for Devices
+    // (leaveDevicesView) — otherwise the auto-select effect would pick a
+    // server the person never chose.
+    const leaveNotesView = () => {
+        setShowNotesView(false);
+        if (!currentServer && !currentDM) setShowFriendsPanel(true);
     };
 
     // The Tasks view, opened on its Reminders tab: what a clicked due-item
@@ -3331,6 +3402,7 @@ export function Chat({ onLogout }: ChatProps) {
         setDmMessages([]); // clear the previous conversation while this one loads
         setShowFriendsPanel(false);
         setShowDevicesView(false);
+        setShowNotesView(false);
         setShowAllChecklists(false); // board would otherwise cover the DM
         // Keep a live stream visible as a movable PiP rather than a full stage.
         if (getSelectedStreams().length > 0) setShowPip(true);
@@ -3374,6 +3446,7 @@ export function Chat({ onLogout }: ChatProps) {
         setShowAllChecklists(false); // selecting a channel exits the All-checklists board
         setShowFriendsPanel(false); // the Friends dashboard otherwise keeps covering the channel
         setShowDevicesView(false); // same reason — it shares the dashboard slot
+        setShowNotesView(false);
         if (channel.channel_type === 0) { // Text channel
             // If watching streams, switch to PiP mode instead of fully switching away
             const hasStreams = getSelectedStreams().length > 0;
@@ -3457,6 +3530,7 @@ export function Chat({ onLogout }: ChatProps) {
                 setCurrentChannel(newChannel);
                 setShowFriendsPanel(false);
                 setShowDevicesView(false);
+                setShowNotesView(false);
                 if (isMobile) setMobilePanel('chat');
             }
         } catch (error) {
@@ -3691,6 +3765,7 @@ export function Chat({ onLogout }: ChatProps) {
                 setFriendsTab('online');
                 setShowFriendsPanel(true);
                 setShowDevicesView(false);
+                setShowNotesView(false);
                 setShowChecklist(false);
                 setShowAllChecklists(false);
                 if (isMobile) setMobilePanel('chat');
@@ -3719,6 +3794,7 @@ export function Chat({ onLogout }: ChatProps) {
                 setFriendsTab('online');
                 setShowFriendsPanel(true);   // home content on desktop
                 setShowDevicesView(false);
+                setShowNotesView(false);
                 setShowChecklist(false);
                 setShowAllChecklists(false);
                 // 'chat', same as the 'friends' branch: on mobile the home
@@ -3732,6 +3808,7 @@ export function Chat({ onLogout }: ChatProps) {
                 setShowChecklist(false);
                 setShowAllChecklists(false);
                 setShowDevicesView(true);
+                setShowNotesView(false);
                 // 'servers', not 'chat': the Devices view keeps the rail
                 // visible on mobile (same choice as the rail's own button).
                 if (isMobile) setMobilePanel('servers');
@@ -3755,6 +3832,7 @@ export function Chat({ onLogout }: ChatProps) {
                 if (server) {
                     setShowFriendsPanel(false);
                     setShowDevicesView(false);
+                    setShowNotesView(false);
                     switchServer(server);
                     if (isMobile) setMobilePanel('channels');
                 } else if (isServersLoading || servers.length === 0) {
@@ -3852,6 +3930,7 @@ export function Chat({ onLogout }: ChatProps) {
             // does this (onServerJoined).
             setShowFriendsPanel(false);
             setShowDevicesView(false);
+            setShowNotesView(false);
             await switchServer(newServer);
             if (isMobile) setMobilePanel('channels');
         } catch (error) {
@@ -4090,6 +4169,7 @@ export function Chat({ onLogout }: ChatProps) {
                     queryClient.setQueryData(keys.servers, (old: Server[] | undefined) => [...(old || []), server]);
                     setShowFriendsPanel(false);
                     setShowDevicesView(false);
+                    setShowNotesView(false);
                     switchServer(server);
                 }}
             />
@@ -4238,6 +4318,15 @@ export function Chat({ onLogout }: ChatProps) {
                 </React.Suspense>
             )}
 
+            {/* Púca Notes — desktop only, in the same slot. Mounted on first
+                open and kept, hidden, until Chat itself goes (sign-out,
+                expiry); `active` is whether it is the view on screen. */}
+            {isTauri() && notesOpened && (
+                <React.Suspense fallback={null}>
+                    <NotesDesktopView active={notesOnScreen} onSignOut={() => onLogout?.()} />
+                </React.Suspense>
+            )}
+
             {/* User Context Menu */}
             {userContextMenuTarget && (
                 <UserContextMenu
@@ -4350,6 +4439,7 @@ export function Chat({ onLogout }: ChatProps) {
                 onSelectServer={(server) => {
                     setShowFriendsPanel(false);
                     setShowDevicesView(false);
+                    setShowNotesView(false);
                     switchServer(server);
                     if (isMobile) setMobilePanel('channels');
                 }}
@@ -4363,6 +4453,7 @@ export function Chat({ onLogout }: ChatProps) {
                         return;
                     }
                     setShowDevicesView(true);
+                    setShowNotesView(false);
                     setShowFriendsPanel(false);
                     setShowChecklist(false); // drawer would cover the view
                     // THE SERVERS SLOT, not the chat slot — so the rail stays on
@@ -4437,13 +4528,18 @@ export function Chat({ onLogout }: ChatProps) {
                     setShowInviteModal(true);
                 }}
                 canInviteCurrent={canCreateInvite}
-                onOpenNotes={openTasksView}
-                notesActive={showFriendsPanel && friendsTab === 'tasks'}
-                showingFriends={showFriendsPanel && friendsTab !== 'tasks'}
+                // Desktop: Púca Notes, a toggle like Devices, and the
+                // highlight follows it — the Tasks view is then the home
+                // dashboard's tab (the sidebar's Tasks, the Friends panel's
+                // tab), so it lights the home button. Elsewhere: the Tasks view.
+                onOpenNotes={notesInApp ? (showNotesView ? leaveNotesView : openNotesView) : openTasksView}
+                notesActive={notesInApp ? showNotesView : showFriendsPanel && friendsTab === 'tasks'}
+                showingFriends={notesInApp ? showFriendsPanel : showFriendsPanel && friendsTab !== 'tasks'}
                 onShowFriends={() => {
                     setFriendsTab('online');
                     setShowFriendsPanel(true);
                     setShowDevicesView(false);
+                    setShowNotesView(false);
                     setShowChecklist(false); // drawer would cover the dashboard
                     if (isMobile) setMobilePanel('chat');
                 }}
@@ -4554,6 +4650,7 @@ export function Chat({ onLogout }: ChatProps) {
                                     setCurrentDM(null);
                                     setShowFriendsPanel(false);
                                     setShowDevicesView(false);
+                                    setShowNotesView(false);
                                     if (isMobile) setMobilePanel('chat');
                                 }}
                                 title="View every checklist in this server"
@@ -4837,6 +4934,7 @@ export function Chat({ onLogout }: ChatProps) {
                             setFriendsTab('online');
                             setShowFriendsPanel(true);
                             setShowDevicesView(false);
+                            setShowNotesView(false);
                             setShowChecklist(false); // drawer would cover the dashboard
                             if (isMobile) setMobilePanel('chat');
                         }}
@@ -4991,6 +5089,7 @@ export function Chat({ onLogout }: ChatProps) {
                                     setFriendsTab('online');
                                     setShowFriendsPanel(true);
                                     setShowDevicesView(false);
+                                    setShowNotesView(false);
                                     if (isMobile) setMobilePanel('chat');
                                 }}
                                 title="Back to messages"
@@ -5101,6 +5200,7 @@ export function Chat({ onLogout }: ChatProps) {
                         docked
                         onExpand={() => {
                             setShowPip(false);
+                            setShowNotesView(false);
                             setViewMode('stream');
                         }}
                         onClose={() => setShowPip(false)}
@@ -6038,7 +6138,7 @@ export function Chat({ onLogout }: ChatProps) {
                     onClose={() => setSavingToNote(null)}
                     onSaved={title => pushMessageToast({
                         title: `Saved to “${title}”`,
-                        onClick: () => openTasksView(),
+                        onClick: () => (notesInApp ? openNotesView() : openTasksView()),
                     })}
                 />
             )}
@@ -6129,8 +6229,11 @@ export function Chat({ onLogout }: ChatProps) {
                 docked inside .chat-main instead (see below the chat header). */}
             {!isMobile && showPip && viewMode === 'chat' && (
                 <StreamPip
+                    // It floats above Notes, so the stage it opens must not
+                    // open underneath it.
                     onExpand={() => {
                         setShowPip(false);
+                        setShowNotesView(false);
                         setViewMode('stream');
                     }}
                     onClose={() => setShowPip(false)}
@@ -6192,6 +6295,8 @@ export function Chat({ onLogout }: ChatProps) {
                             onClick={() => {
                                 // Select all available streams
                                 streamers.forEach(s => selectStream(s.userId));
+                                // It floats above Notes too.
+                                setShowNotesView(false);
                                 setViewMode('stream');
                             }}
                         >
@@ -6275,6 +6380,7 @@ export function Chat({ onLogout }: ChatProps) {
                                 setShowChecklist(false);
                                 setShowFriendsPanel(false);
                                 setShowDevicesView(true);
+                                setShowNotesView(false);
                                 // THE SERVERS SLOT, matching the rail's onOpenDevices:
                                 // DevicesView anchors at left:72px beside the rail and
                                 // its sidebar-eviction CSS keys on 'servers'.

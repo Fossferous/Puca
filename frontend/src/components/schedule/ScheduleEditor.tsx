@@ -1,7 +1,8 @@
 /**
  * The date & repeat editor for one item — an event (date, all-day, start/end,
  * repeat, place, reminder) or a to-do (due, repeat, reminder). A dialog
- * portaled to document.body: centred on desktop, a full-screen sheet on a
+ * portaled to document.body (or embedded Notes' layer, components/
+ * portalTarget.ts): centred on desktop, a full-screen sheet on a
  * phone (Schedule.css), never inside a transformed panel (DESIGN_PHILOSOPHY
  * §6). Every input is a native date/time/select at 16px or more under a
  * coarse pointer.
@@ -17,6 +18,7 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useLayerOnScreen, usePortalTarget } from '../portalTarget';
 import { type Task } from '../../api/tasks';
 import { type ScheduleKind, deriveDueAt, parseSchedule, serializeSchedule } from '../../api/taskSchedule';
 import {
@@ -55,6 +57,8 @@ function todayKey(now: number): string {
 }
 
 export function ScheduleEditor({ task, onSave, onClose, defaultKind = 'task', defaultDate, now: nowProp, times = DEFAULT_REMINDER_TIMES }: ScheduleEditorProps) {
+    const portalTarget = usePortalTarget();
+    const onScreen = useLayerOnScreen();
     const [now] = useState(() => nowProp ?? Date.now());
     const parsed = useMemo(() => parseSchedule(task.schedule), [task.schedule]);
     const readOnly = parsed.state === 'readonly';
@@ -73,6 +77,8 @@ export function ScheduleEditor({ task, onSave, onClose, defaultKind = 'task', de
     const set = (patch: Partial<ScheduleForm>) => { setForm(f => ({ ...f, ...patch })); setError(null); };
 
     useEffect(() => {
+        // Hidden with Notes in the desktop app: not our key (portalTarget.ts).
+        if (!onScreen) return;
         const onKey = (e: KeyboardEvent) => {
             if (e.key !== 'Escape') return;
             e.preventDefault();
@@ -81,7 +87,7 @@ export function ScheduleEditor({ task, onSave, onClose, defaultKind = 'task', de
         };
         document.addEventListener('keydown', onKey, true);
         return () => document.removeEventListener('keydown', onKey, true);
-    }, [onClose]);
+    }, [onClose, onScreen]);
 
     const date = parseWall(form.date)?.wall;
     const weekday = date ? new Intl.DateTimeFormat(undefined, { weekday: 'long', timeZone: 'UTC' }).format(Date.UTC(date.y, date.m - 1, date.d)) : '';
@@ -277,6 +283,6 @@ export function ScheduleEditor({ task, onSave, onClose, defaultKind = 'task', de
                 </div>
             </div>
         </div>,
-        document.body,
+        portalTarget,
     );
 }

@@ -22,6 +22,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { usePortalTarget } from '../../components/portalTarget';
 import { CameraIcon, CheckboxIcon, CloseIcon, FileTextIcon, ImageIcon, MicIcon, PaperclipIcon, PencilIcon, PlusIcon, TrashIcon } from '../../components/Icons';
 import { isEditableTarget } from '../../api/hotkeys';
 import { MAX_ITEM_LENGTH, MAX_TITLE_LENGTH, cleanQuickItems } from '../model/notesModel';
@@ -85,6 +86,7 @@ interface QuickAddProps {
 }
 
 export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, content, initial = null, onInitialUsed }: QuickAddProps) {
+    const portalTarget = usePortalTarget();
     const [open, setOpen] = useState(sheet);
     const [title, setTitle] = useState('');
     const [items, setItems] = useState<string[]>(['']);
@@ -674,6 +676,6 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
         >
             <div className="notes-editor notes-quickadd-sheet">{composer}</div>
         </div>,
-        document.body,
+        portalTarget,
     );
 }

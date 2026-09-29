@@ -2,8 +2,9 @@
  * Shared chrome (styles/noteChrome.css): the colour and label pickers open
  * in this from Púca Notes and from Púca's Tasks view alike.
  *
- * An anchored popover: portaled to document.body (so no transformed
- * ancestor — the mobile drawer — can trap it), positioned under its anchor
+ * An anchored popover: portaled to document.body, or to embedded Notes'
+ * own layer (components/portalTarget.ts) — never under a transformed
+ * ancestor that could trap it (the mobile drawer) — positioned under its anchor
  * and clamped to the viewport on desktop; styles/noteChrome.css — imported by
  * notes/notes.css and by components/TasksView.css alike — pins it to the
  * bottom of the screen under a coarse pointer. Escape closes it and STOPS
@@ -12,6 +13,7 @@
  */
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
+import { useLayerOnScreen, usePortalTarget } from '../portalTarget';
 
 interface PopoverProps {
     anchor: HTMLElement | null;
@@ -23,6 +25,8 @@ interface PopoverProps {
 const MARGIN = 8;
 
 export function Popover({ anchor, onClose, label, children }: PopoverProps) {
+    const portalTarget = usePortalTarget();
+    const onScreen = useLayerOnScreen();
     const ref = useRef<HTMLDivElement>(null);
     const [pos, setPos] = useState<{ left: number; top: number }>({ left: MARGIN, top: MARGIN });
 
@@ -44,6 +48,8 @@ export function Popover({ anchor, onClose, label, children }: PopoverProps) {
     }, [anchor]);
 
     useEffect(() => {
+        // Hidden with Notes in the desktop app: not our key (portalTarget.ts).
+        if (!onScreen) return;
         const onKey = (e: KeyboardEvent) => {
             if (e.key !== 'Escape') return;
             e.preventDefault();
@@ -52,7 +58,7 @@ export function Popover({ anchor, onClose, label, children }: PopoverProps) {
         };
         document.addEventListener('keydown', onKey, true);
         return () => document.removeEventListener('keydown', onKey, true);
-    }, [onClose]);
+    }, [onClose, onScreen]);
 
     return createPortal(
         <>
@@ -67,6 +73,6 @@ export function Popover({ anchor, onClose, label, children }: PopoverProps) {
                 {children}
             </div>
         </>,
-        document.body,
+        portalTarget,
     );
 }

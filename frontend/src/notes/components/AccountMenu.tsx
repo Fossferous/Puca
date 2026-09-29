@@ -44,9 +44,12 @@ interface AccountMenuProps {
     onHelp: () => void;
     onSignOut: () => void;
     onSignOutEverywhere: () => void;
+    /** Notes is running inside the Púca desktop app: there is no other Púca
+     *  to open, so the link is not offered. */
+    inPuca?: boolean;
 }
 
-export function AccountMenu({ username, sort, onSort, times, onTimes, onExportMarkdown, onExportJson, onShare, onHelp, onSignOut, onSignOutEverywhere }: AccountMenuProps) {
+export function AccountMenu({ username, sort, onSort, times, onTimes, onExportMarkdown, onExportJson, onShare, onHelp, onSignOut, onSignOutEverywhere, inPuca = false }: AccountMenuProps) {
     const [settings, setSettings] = useState(loadSettings);
     const update = (patch: Partial<ReturnType<typeof loadSettings>>) => {
         const next = { ...loadSettings(), ...patch };
@@ -108,12 +111,13 @@ export function AccountMenu({ username, sort, onSort, times, onTimes, onExportMa
             <div className="notes-menu-sep" />
             {/* In the Android app these write to Documents/Puca Notes (an
                 Android WebView ignores the download attribute, so the browser
-                path would save nothing) and Share opens the share sheet. */}
+                path would save nothing) and Share opens the share sheet; in
+                the desktop app they open the Save As dialog. */}
             <button type="button" className="notes-menu-item" onClick={onExportMarkdown}><DownloadIcon /> {NATIVE ? 'Save as Markdown' : 'Export notes as Markdown'}</button>
             <button type="button" className="notes-menu-item" onClick={onExportJson}><DownloadIcon /> {NATIVE ? 'Save as JSON' : 'Export notes as JSON'}</button>
             {onShare && <button type="button" className="notes-menu-item" onClick={onShare}><UploadIcon /> Share notes…</button>}
             <button type="button" className="notes-menu-item" onClick={onHelp}><HelpIcon /> Keyboard shortcuts</button>
-            {!NATIVE && <a className="notes-menu-item" href="/" target="_blank" rel="noopener"><PopOutIcon /> Open Púca</a>}
+            {!NATIVE && !inPuca && <a className="notes-menu-item" href="/" target="_blank" rel="noopener"><PopOutIcon /> Open Púca</a>}
             {NATIVE && <><div className="notes-menu-sep" /><NotesUpdateMenu /></>}
             <div className="notes-menu-sep" />
             <button type="button" className="notes-menu-item" onClick={onSignOut}><LogoutIcon /> Sign out</button>

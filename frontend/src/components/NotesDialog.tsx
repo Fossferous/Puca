@@ -9,6 +9,7 @@
  */
 import { useEffect, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
+import { useLayerOnScreen, usePortalTarget } from './portalTarget';
 import './NotesDialog.css';
 import { CloseIcon } from './Icons';
 
@@ -37,7 +38,11 @@ interface NotesDialogProps {
 }
 
 export function NotesDialog({ title, onClose, children, escapeBlocked = false, busy = false }: NotesDialogProps) {
+    const portalTarget = usePortalTarget();
+    const onScreen = useLayerOnScreen();
     useEffect(() => {
+        // Hidden with Notes in the desktop app: not our key (portalTarget.ts).
+        if (!onScreen) return;
         const onKey = (e: KeyboardEvent) => {
             if (e.key !== 'Escape' || escapeBlocked) return;
             if (busy) { e.preventDefault(); e.stopPropagation(); return; }
@@ -47,7 +52,7 @@ export function NotesDialog({ title, onClose, children, escapeBlocked = false, b
         };
         document.addEventListener('keydown', onKey, true);
         return () => document.removeEventListener('keydown', onKey, true);
-    }, [onClose, escapeBlocked, busy]);
+    }, [onClose, escapeBlocked, busy, onScreen]);
     return createPortal(
         <div className="notes-dialog-backdrop" onClick={busy ? undefined : onClose}>
             <div className="notes-dialog" role="dialog" aria-modal="true" aria-label={title} onClick={e => e.stopPropagation()}>
@@ -60,7 +65,7 @@ export function NotesDialog({ title, onClose, children, escapeBlocked = false, b
                 <div className="notes-dialog-body">{children}</div>
             </div>
         </div>,
-        document.body,
+        portalTarget,
     );
 }
 

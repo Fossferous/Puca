@@ -5,7 +5,7 @@
  *    installed APK has it — feature-detected, because the plugin ships in a
  *    native build that may be older or newer than this web bundle;
  *  - the desktop shell: the OS Save As dialog, then the same native write
- *    every saved file uses;
+ *    every saved file uses (savePath.saveTextAs, as Notes' export does);
  *  - Púca's Android app: Documents/Puca through Capacitor Filesystem (a
  *    blob-anchor click writes nothing in a WebView — accountExport.ts);
  *  - a browser: a transient download anchor (saveAttachment's web path).
@@ -19,7 +19,7 @@
  */
 import { isMobile, isTauri } from './platform';
 import { saveAttachment } from './saveAttachment';
-import { chooseSavePath } from './savePath';
+import { saveTextAs } from './savePath';
 
 /**
  * EXACTLY the shape Púca Notes' plugin reads (NotesNativePlugin.java, and the
@@ -126,13 +126,8 @@ export async function deliverIcs(fileName: string, text: string): Promise<Delive
         }
     }
     if (isTauri()) {
-        const dest = await chooseSavePath(fileName);
-        if (dest === null) return { how: 'cancelled' };
-        const { invoke } = await import('@tauri-apps/api/core');
-        const path = await invoke<string>('attachment_save', new TextEncoder().encode(text), {
-            headers: { 'x-file-name': encodeURIComponent(fileName), 'x-dest-path': encodeURIComponent(dest) },
-        });
-        return { how: 'saved', where: path };
+        const path = await saveTextAs(fileName, text);
+        return path === null ? { how: 'cancelled' } : { how: 'saved', where: path };
     }
     if (isMobile()) {
         const { Capacitor } = await import('@capacitor/core');

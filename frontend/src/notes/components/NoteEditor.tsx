@@ -6,8 +6,9 @@
  * the rows, the nesting, the drag/nest gesture, due editor, attachments and
  * completed section are the same component Púca renders.
  *
- * Portaled to document.body: a modal on desktop, full-screen on a phone
- * (notes.css), and never inside the drawer's transform.
+ * Portaled to document.body — or, inside the desktop app, to the Notes
+ * view's own layer (components/portalTarget.ts): a modal on desktop,
+ * full-screen on a phone (notes.css), and never inside the drawer's transform.
  *
  * Escape closes the editor — but only when it was not aimed at an input:
  * TaskTree's inline item editor cancels on Escape WITHOUT stopping
@@ -16,6 +17,7 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
+import { usePortalTarget } from '../../components/portalTarget';
 import { type Task } from '../../api/tasks';
 import { currentUserIdFromToken } from '../../api/auth';
 import { isEditableTarget } from '../../api/hotkeys';
@@ -68,6 +70,9 @@ interface NoteEditorProps {
      *  from a bubble-phase listener of its own without stopping propagation,
      *  so without this both would close on one keypress. */
     escapeBlocked?: boolean;
+    /** The desktop app's veto on a key press when Notes runs inside it (one of
+     *  Púca's own dialogs is over the note): NotesShell's `embedded`. */
+    acceptKey?: (e: KeyboardEvent) => boolean;
     /** The one item a due notification came for: TaskTree flashes that row. */
     flashTaskId?: number | null;
     /** The search that led here, so the note can say where it matched and
@@ -75,7 +80,8 @@ interface NoteEditorProps {
     query?: string;
 }
 
-export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPickLabels, onArchive, onSendToPuca, pucaHref, escapeBlocked = false, flashTaskId = null, query }: NoteEditorProps) {
+export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPickLabels, onArchive, onSendToPuca, pucaHref, escapeBlocked = false, acceptKey, flashTaskId = null, query }: NoteEditorProps) {
+    const portalTarget = usePortalTarget();
     const ref = card.ref;
     // Its own query subscription with `live` so a shared note polls while open.
     const tasksQuery = useNoteTasks(ref, { live: true });
@@ -185,11 +191,12 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
         const onKey = (e: KeyboardEvent) => {
             if (e.key !== 'Escape' || e.defaultPrevented) return;
             if (isEditableTarget(e.target)) return;   // TaskTree's editors own their Escape
+            if (acceptKey && !acceptKey(e)) return;
             onClose();
         };
         document.addEventListener('keydown', onKey);
         return () => document.removeEventListener('keydown', onKey);
-    }, [onClose, escapeBlocked]);
+    }, [onClose, escapeBlocked, acceptKey]);
 
     const commitTitle = () => {
         const t = titleDraft.trim();
@@ -448,6 +455,6 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
             </div>
             {undo.bar}
         </div>,
-        document.body,
+        portalTarget,
     );
 }

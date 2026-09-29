@@ -1,13 +1,15 @@
 /**
  * Púca Notes — notes as text: copy-as-text, and the export the account menu
  * offers. Pure over the decrypted cards the grid already holds; nothing here
- * talks to the server, and the download is a Blob the browser saves.
+ * talks to the server, and the export is written where this platform keeps
+ * files (saveNotesExport).
  */
 import { type Task, type TaskAttachmentRef, buildTaskTree, type TaskNode, isAttachmentsLocked, parseTaskAttachments } from '../../api/tasks';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { type NoteCard } from './notesModel';
-import { isMobile } from '../../api/platform';
+import { isMobile, isTauri } from '../../api/platform';
 import { type SaveResult } from '../../api/saveAttachment';
+import { saveTextAs } from '../../api/savePath';
 import { NOTES_FOLDER, deviceWriteFailedMessage, saveTextToDevice, timestampedName } from '../../api/saveToDevice';
 import { noteScheduleForExport, scheduleForExport } from './notesTiming';
 import { readableBody } from './noteContent';
@@ -319,14 +321,22 @@ export function fileStamp(now: number): string {
 }
 
 /**
- * Save an export where this platform keeps files. In the Android app that is
+ * Save an export where this platform keeps files. In the desktop app (Notes
+ * inside Púca, components/NotesDesktopView.tsx) that is wherever the user
+ * picks in the Save As dialog, written by the shell (savePath.saveTextAs — a
+ * webview's download attribute is not a reliable download there either); a
+ * cancel writes nothing and says nothing. In the Android app it is
  * Documents/Puca Notes/<name-with-timestamp> through the filesystem plugin
  * (a WebView ignores the download attribute — the anchor would write
- * nothing); it throws with a real reason when the write fails. In a browser
- * it is the download below. Either way the file is PLAINTEXT, and the caller
+ * nothing). Both throw with a real reason when the write fails. In a browser
+ * it is the download below. Every way, the file is PLAINTEXT, and the caller
  * says so.
  */
 export async function saveNotesExport(name: string, text: string, mime: string): Promise<SaveResult> {
+    if (isTauri()) {
+        const where = await saveTextAs(name, text);
+        return where === null ? { where: '', onDisk: false, cancelled: true } : { where, onDisk: true };
+    }
     if (isMobile()) {
         try {
             // The timestamp carries the date: drop the name's own -YYYY-MM-DD.
@@ -341,7 +351,8 @@ export async function saveNotesExport(name: string, text: string, mime: string):
 }
 
 /** Hand the browser a file to save. BROWSER only: the Android app's WebView
- *  ignores the download attribute — saveNotesExport routes around it. */
+ *  ignores the download attribute and the desktop shell's is no reliable
+ *  download — saveNotesExport routes around both. */
 export function downloadTextFile(name: string, text: string, mime: string): void {
     const blob = new Blob([text], { type: mime });
     const url = URL.createObjectURL(blob);

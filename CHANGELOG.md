@@ -6,6 +6,22 @@ one-line summary; this file is the full story. Versions follow
 
 ## Unreleased
 
+### Added
+- **Púca Notes inside the desktop app.** On the PC, the rail's **Tasks &
+  notes** button now opens Púca Notes in Púca itself: the notes grid, the
+  composer, search, labels, reminders, the calendar, the trash and picking
+  several notes at once, for the account you are already signed in with.
+  Before, the desktop app had only the Tasks view, and Notes meant a
+  browser tab and a second sign-in. Going to a channel or a conversation
+  keeps your place in Notes: an open note stays open, edits made offline
+  keep going out, and a delete's **Undo** is still there if you come
+  straight back. Press the button again to go back to where you were. The
+  Tasks view is still on the home screen's **Tasks**, and **Saved to …**
+  after keeping a message in a note now opens Notes. **Export notes as
+  Markdown** and **as JSON** open the Save As dialog, so you choose where
+  the file goes. In the full and the Lite desktop app alike; the web app and
+  the phone apps are unchanged.
+
 ### Improved
 - **Paste a step-by-step checklist into Púca's Tasks, and into an open
   note.** An assistant's answer (or any list) pasted into **Add a task…**,
@@ -43,6 +59,11 @@ one-line summary; this file is the full story. Versions follow
   snooze twice, and the two could disagree about when Tomorrow is, so the
   item sometimes woke at 9:00 instead of the morning time you chose. It now
   uses your morning time, once.
+- **A calendar export the PC cannot save now says why.** When **Export
+  .ics…** could not write its file on the desktop, for example into a folder
+  you may not write to or onto a drive that is not ready, the Tasks view's
+  and Púca Notes' calendars said only "Export failed". They now show the
+  reason Windows gave, and so does Notes' **Export notes**.
 
 ## 0.9.825 — 2026-09-28
 

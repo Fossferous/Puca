@@ -7,9 +7,11 @@
  *    native/NotesLocationSettings.tsx does it for location. Dismissing it
  *    never touches the mic.
  *  - FOREGROUND ONLY. Exactly one getUserMedia stream, stopped on Stop, on
- *    Discard, on unmount, and on `visibilitychange`/`pagehide` — nothing here
- *    can record with the app off the screen, and there is no service behind
- *    it (docs/NOTES.md, "The Android app").
+ *    Discard, on unmount, on `visibilitychange`/`pagehide`, and — Notes inside
+ *    the Púca desktop app — when the person switches to another view
+ *    (useLayerOnScreen, components/portalTarget.ts): nothing here can
+ *    record with Notes off the screen, and there is no service behind it
+ *    (docs/NOTES.md, "The Android app").
  *  - NOTHING PLAYS BY ITSELF. The preview is an <audio controls> with no
  *    autoplay and no call to play(); sound happens because someone pressed
  *    play, never because a recording finished.
@@ -21,6 +23,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useLayerOnScreen, usePortalTarget } from '../../components/portalTarget';
 import { CloseIcon, MicIcon, StopIcon, TrashIcon } from '../../components/Icons';
 import { MAX_CLIP_MS, assertClipUploadable, extForMime, formatClipTime, pickAudioMime } from '../model/audioNote';
 import { followOutputDeviceRef } from '../../components/settingsStore';
@@ -48,6 +51,7 @@ interface Props {
 type Phase = 'asking' | 'recording' | 'review' | 'refused';
 
 export function AudioRecorder({ onSave, onCancel }: Props) {
+    const portalTarget = usePortalTarget();
     const [phase, setPhase] = useState<Phase>('asking');
     const [error, setError] = useState<string | null>(null);
     const [elapsed, setElapsed] = useState(0);
@@ -96,6 +100,9 @@ export function AudioRecorder({ onSave, onCancel }: Props) {
             window.removeEventListener('pagehide', release);
         };
     }, [release]);
+    // The same, when the page stays but Notes leaves it (the desktop app).
+    const onScreen = useLayerOnScreen();
+    useEffect(() => { if (!onScreen) release(); }, [onScreen, release]);
 
     // Unmount: the microphone goes, and a take nobody kept is freed.
     // `alive` is set on the way IN as well, because StrictMode mounts, tears
@@ -294,6 +301,6 @@ export function AudioRecorder({ onSave, onCancel }: Props) {
                 {phase === 'asking' && <p className="notes-recorder-hint">Getting the microphone ready…</p>}
             </div>
         </div>,
-        document.body,
+        portalTarget,
     );
 }

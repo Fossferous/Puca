@@ -7,10 +7,13 @@
  * into the APK and every OTA bundle as a second HTML document with no
  * Content-Security-Policy: scripts/cap-index-csp.mjs patches exactly one
  * index.html, and the WebView's https://localhost origin gets no headers from
- * anywhere. Notes is a browser surface — the shells run at their own origins,
- * where its session and E2EE seed are not shared — so on a phone it has no
- * reachable entry point and nothing to do. Deleting it is simpler and safer
- * than policing it.
+ * anywhere. This page is a browser surface — the shells run at their own
+ * origins, where its session and E2EE seed are not shared — so on a phone it
+ * has no reachable entry point and nothing to do. Deleting it is simpler and
+ * safer than policing it. (Púca's DESKTOP app shows Notes inside its own page
+ * instead: components/NotesDesktopView.tsx, a lazy chunk of the main bundle.
+ * That chunk is in the phone's assets too, as part of the main bundle, but
+ * Chat loads it only under Tauri; it never needs this page.)
  *
  * Runs after `cap sync` in the cap:build:* scripts and in build-lite.mjs's
  * --sync branch, BEFORE cap-index-csp.mjs. The OTA staging recipe in

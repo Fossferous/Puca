@@ -6,12 +6,17 @@
  * same settings, same task API — its own shell. What Púca's main.tsx boots
  * that Notes does NOT: the WebSocket (see model/notesQueries.ts — a bare
  * socket would eat parked file offers), the P2P transfer wiring, device
- * attestation, the remote-control globals, the Tauri hooks. Notes never runs
- * inside PÚCA's shells (scripts/strip-notes-from-native.mjs keeps it out of
- * them) — but it IS the whole page of its own Android app (notes-app/), and
- * there it blesses its OTA bundle first and runs NotesUpdateGate. What it MUST
- * replay: the appearance boot below, or the theme, contrast, text scale and
- * icon style a user chose in Púca do nothing here.
+ * attestation, the remote-control globals, the Tauri hooks. This PAGE never
+ * runs inside Púca's shells (scripts/strip-notes-from-native.mjs keeps it out
+ * of the phone's, scripts/stage-desktop-dist.mjs out of the installer). The
+ * desktop app shows Notes all the same, without this file: the same NotesShell
+ * mounted inside Púca's own page by components/NotesDesktopView.tsx, a lazy
+ * chunk of the main bundle, which does its own hosting (a query client per
+ * mount, a MemoryRouter, the sealed cache). This page IS the whole of Notes'
+ * own Android app (notes-app/), and there it blesses its OTA bundle first and
+ * runs NotesUpdateGate. What it MUST replay: the appearance boot below, or
+ * the theme, contrast, text scale and icon style a user chose in Púca do
+ * nothing here.
  */
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
