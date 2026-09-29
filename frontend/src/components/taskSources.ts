@@ -27,8 +27,12 @@ export interface TasksScopeChannel {
 
 export type TaskScopeKind = 'list' | 'channel';
 
+/** What every scope's key starts with: invalidating it reads again all that
+ *  the Calendar and Reminders tabs show (TasksView's Refresh). */
+export const taskScopesKey = ['tasks-calendar'] as const;
+
 /** The cache key a scope's items live under, for every view that shows them. */
-export const taskScopeKey = (kind: TaskScopeKind, id: number) => ['tasks-calendar', kind, id] as const;
+export const taskScopeKey = (kind: TaskScopeKind, id: number) => [taskScopesKey[0], kind, id] as const;
 
 /**
  * Tell the dated views a scope changed.

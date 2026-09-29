@@ -24,6 +24,12 @@ one-line summary; this file is the full story. Versions follow
   the phone apps are unchanged.
 
 ### Improved
+- **Refresh in Tasks.** The circling arrows at the right end of the tab
+  bar read your lists again, with the list you have open, the cards on
+  **All tasks**, **Calendar**, **Reminders** and the trash, so a change made
+  on another device shows without leaving Tasks and coming back. Anything
+  you type, tick or restore, just before or while it reads, is saved first
+  and stays as you left it. Checklist channels already update on their own.
 - **Paste a step-by-step checklist into Púca's Tasks, and into an open
   note.** An assistant's answer (or any list) pasted into **Add a task…**,
   a checklist channel's **Add an item…**, or a note that is already open in
