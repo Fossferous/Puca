@@ -208,7 +208,21 @@ Púca's reminders. Anything you do in one is what you see in the other.
   put the **home-screen widget** on a home screen for new list / new note /
   draw / photo. Every one of them carries a single constant word and nothing
   else — no note titles, no counts — so the launcher, the shade and the home
-  screen learn nothing about your notes.
+  screen learn nothing about your notes. Or have the app itself open that
+  way: account menu → **Open Púca Notes to** → *Your notes* (the default),
+  *A new note* or *A new list*. It applies at two moments: when the app
+  **starts** signed in — unless a shortcut, the tile, the widget, a share or
+  a reminder tap started it, which then wins — and when you **come back** to
+  it after five minutes or more in the background (Android usually keeps the
+  app alive, so the icon resumes it rather than starting it again) with
+  nothing open: no note, composer, dialog, menu or search, and not on Trash,
+  Reminders or the Calendar. A shortcut, share or reminder tap that brings
+  it back wins there too, and a quick switch away and back never opens it.
+  The composer opens exactly as the **New note** / **New list** shortcut
+  opens it, so a server that keeps no note text gets a checklist, and
+  closing it untouched saves nothing. The choice is kept on that phone
+  only, beside the grid/list view and the sort (a sign-out clears it with
+  them); it is not on the web page or in the desktop app.
 - **Keyboard** — `/` search, `c` new note, `r` refresh, `Esc` close, `?` help.
 - **Installable, and it works offline** — a web app manifest lets a browser add
   Notes to the home screen or desktop, and a service worker scoped to
@@ -376,8 +390,10 @@ step:
 
 A backend without the route (404) leaves Notes as it was: device-local.
 
-**What stays on this device:** grid/list and the sort choice, deliberately —
-choosing list view on a phone should not flip a desktop. Sign-out scrubs them.
+**What stays on this device:** grid/list, the sort choice and, in the Android
+app, what it opens to (*Open Púca Notes to*), deliberately — choosing list
+view on a phone should not flip a desktop, nor a phone that opens on a new
+note make a tablet do it. Sign-out scrubs them.
 
 Nothing here lets the operator read your notes (`docs/SECURITY_MODEL.md`):
 search is local, thumbnails are decrypted client-side as they are in Púca, and

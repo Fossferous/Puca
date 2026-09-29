@@ -380,6 +380,9 @@ Inside Notes:
 
 - **Take a note…** starts a new list — type a title and items (Enter adds the
   next). On a phone, the **New note** button at the bottom right does the same.
+  In the Android app, **Open Púca Notes to** in the account menu can start the
+  app on **A new note** or **A new list** instead — when it starts, and when
+  you come back to it after five minutes or more — on that phone only.
 - Click a note to open it. Inside, items work exactly as in Tasks: tick,
   edit, add subtasks, drag by the grip to reorder or nest, set a due time
   from the clock, attach pictures from the paperclip.

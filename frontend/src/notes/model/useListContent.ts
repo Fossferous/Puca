@@ -253,6 +253,10 @@ const purgedThisSession = new Set<number>();
 
 export interface ListContentActions {
     features: ListFeatures;
+    /** `features` is the server's answer (fetched, or restored with the
+     *  sealed cache) rather than the NO_LIST_FEATURES stand-in. A composer
+     *  opened before this would take a text note for a checklist. */
+    featuresKnown: boolean;
     trashEnabled: boolean;
     /** The trash has been read (or there is none): until then the trashed
      *  keys are unknown, and a pin or move would drop their slots. */
@@ -953,7 +957,7 @@ export function useListContentActions(keys: { lists: QueryKey; tasks: (ref: Note
 
     const trashEnabled = known && features.trash;
     return useMemo(() => ({
-        features, trashEnabled, trashSettled, trashedKeys, isSelfList, ensureFeatures,
+        features, featuresKnown: known, trashEnabled, trashSettled, trashedKeys, isSelfList, ensureFeatures,
         createContentNote, createNoteFromPlan, setBody, setNoteAttachments, addNoteMedia, deleteForever, emptyTrash,
-    }), [features, trashEnabled, trashSettled, trashedKeys, isSelfList, ensureFeatures, createContentNote, createNoteFromPlan, setBody, setNoteAttachments, addNoteMedia, deleteForever, emptyTrash]);
+    }), [features, known, trashEnabled, trashSettled, trashedKeys, isSelfList, ensureFeatures, createContentNote, createNoteFromPlan, setBody, setNoteAttachments, addNoteMedia, deleteForever, emptyTrash]);
 }

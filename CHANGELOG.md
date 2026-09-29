@@ -22,6 +22,14 @@ one-line summary; this file is the full story. Versions follow
   Markdown** and **as JSON** open the Save As dialog, so you choose where
   the file goes. In the full and the Lite desktop app alike; the web app and
   the phone apps are unchanged.
+- **Open Púca Notes straight to a new note.** In the Android app, the account
+  menu's **Open Púca Notes to** can start the app on **A new note** or **A
+  new list**, ready to type in, instead of on your notes. It applies when the
+  app starts, and when you come back to it after five minutes or more with
+  nothing open; a shortcut, the quick tile, the widget, a share or a reminder
+  tap still goes where it was going, and a quick switch away and back leaves
+  the app as it was. It is kept on that phone only, and closing the composer
+  untouched saves nothing. The web page and the desktop app are unchanged.
 
 ### Improved
 - **Refresh in Tasks.** The circling arrows at the right end of the tab

@@ -1449,6 +1449,7 @@ await page.click('button[aria-label="Account and settings"]');
 await page.waitForSelector('.notes-menu', { timeout: 5000 });
 ck('web menu: no location-reminders toggle', await page.locator('#notes-location').count() === 0);
 ck('web menu: no "Share notes…"', await page.getByRole('button', { name: /Share notes/ }).count() === 0);
+ck('web menu: no "Open Púca Notes to" (the Android app\'s alone)', await page.locator('#notes-open-to').count() === 0);
 ck('web menu: the export items are there', await page.getByRole('button', { name: 'Export notes as Markdown' }).count() === 1
     && await page.getByRole('button', { name: 'Export notes as JSON' }).count() === 1);
 const [dl] = await Promise.all([
@@ -3436,6 +3437,8 @@ await m.tap('button[aria-label="Account and settings"]');
 await m.waitForSelector('.notes-menu-row select', { timeout: 5000 });
 const selPx = await m.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.notes-menu-row select')).fontSize));
 ck('phone: account-menu selects ≥ 16px', selPx >= 16, `${selPx}px`);
+// A phone-sized web page is still the web page: the row is the APP's (section 16).
+ck('phone (web page): no "Open Púca Notes to"', await m.locator('#notes-open-to').count() === 0);
 // The four reminder-time rows: inside 390px, and no iOS zoom either.
 const timeRow = await m.locator('.notes-menu-row:has(#notes-remind-morning)').boundingBox();
 ck('phone: the reminder-time rows fit the viewport', timeRow && timeRow.x >= 0 && timeRow.x + timeRow.width <= 390.5, JSON.stringify(timeRow));
@@ -4183,8 +4186,58 @@ try {
     await a.waitForSelector('#notes-location', { timeout: 5000 }).catch(() => {});
     ck('android shell: the location-reminders toggle is there (control)', await a.locator('#notes-location').count() === 1);
     ck('android shell: "Share notes…" is there (control)', await a.getByRole('button', { name: /Share notes/ }).count() === 1);
+    // "Open Púca Notes to": the app's own row, on Your notes to begin with
+    // (the web page has none — section 12b and the phone pass check that).
+    ck('android shell: "Open Púca Notes to" is in the account menu, on Your notes (control for the web page\'s absence)',
+        await a.locator('#notes-open-to').count() === 1 && await a.locator('#notes-open-to').inputValue() === 'notes');
+    const openToRow = await a.evaluate(() => {
+        const sel = document.querySelector('#notes-open-to');
+        const row = sel ? sel.closest('.notes-menu-row') : null;
+        if (!sel || !row) return null;
+        const r = row.getBoundingClientRect();
+        return { left: r.left, right: r.right, px: parseFloat(getComputedStyle(sel).fontSize), vw: document.documentElement.clientWidth };
+    });
+    ck('open-to (390x844): the row fits the phone and its select is ≥ 16px',
+        !!openToRow && openToRow.left >= -0.5 && openToRow.right <= openToRow.vw + 0.5 && openToRow.px >= 16, JSON.stringify(openToRow));
+    await a.selectOption('#notes-open-to', 'note');
     await a.keyboard.press('Escape');
     await a.waitForSelector('.notes-popover', { state: 'detached', timeout: 5000 }).catch(() => {});
+
+    // A reload is the app STARTING (the page loads with the session already
+    // there): with "A new note" chosen it opens on the composer, the way the
+    // New note shortcut does — a text note, since this server keeps note text.
+    const cardsOpenTo = await a.locator('.notes-card').count();
+    await a.reload();
+    await a.waitForSelector('.notes-quickadd-sheet', { timeout: 15000 }).catch(() => {});
+    ck('open-to: with "A new note" chosen, a reload (the app starting) opens the composer as a text note',
+        await a.locator('.notes-quickadd-sheet').count() === 1
+        && await a.locator('.notes-quickadd-sheet textarea.notes-quickadd-body').count() === 1
+        && await a.locator('.notes-quickadd-sheet .notes-quickadd-item').count() === 0);
+    await shotOf(a)('open-to-new-note');
+    // Done on it untouched: the composer goes, and nothing is saved.
+    await a.locator('.notes-quickadd-sheet .notes-textbtn').tap().catch(() => {});
+    await a.waitForSelector('.notes-quickadd-sheet', { state: 'detached', timeout: 5000 }).catch(() => {});
+    await a.waitForFunction(n => document.querySelectorAll('.notes-card').length >= n, cardsOpenTo, { timeout: 15000 }).catch(() => {});
+    await sleep(500);
+    ck('open-to: closed untouched, that composer saved nothing',
+        await a.locator('.notes-quickadd-sheet').count() === 0 && await a.locator('.notes-card').count() === cardsOpenTo,
+        `${await a.locator('.notes-card').count()} cards, ${cardsOpenTo} before`);
+    // Back to Your notes — every reload below relies on it — and the negative
+    // control: a reload now opens the notes and no composer.
+    await a.tap('button[aria-label="Account and settings"]');
+    await a.waitForSelector('#notes-open-to', { timeout: 5000 }).catch(() => {});
+    ck('open-to: the choice was kept on this phone across the restart',
+        await a.locator('#notes-open-to').inputValue().catch(() => null) === 'note');
+    await a.selectOption('#notes-open-to', 'notes').catch(() => {});
+    await a.keyboard.press('Escape');
+    await a.waitForSelector('.notes-popover', { state: 'detached', timeout: 5000 }).catch(() => {});
+    await a.reload();
+    await a.waitForSelector('.notes-card', { timeout: 20000 });
+    // Longer than a start ever waits before it opens: the launch is read,
+    // then at most SHARE_ASK_MS (1.5 s) for the server's answer.
+    await sleep(2500);
+    ck('open-to: back on "Your notes", a reload opens the notes and no composer (negative control)',
+        await a.locator('.notes-quickadd-sheet').count() === 0);
 
     const card = a.locator('.notes-card', { hasText: 'Groceries' });
     await card.locator('button[aria-label="More actions"]').tap();

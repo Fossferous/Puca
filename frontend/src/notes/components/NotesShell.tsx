@@ -20,7 +20,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { decodeJwtPayload, getToken, logoutEverywhere } from '../../api/auth';
 import { isNetworkError } from '../../api/client';
-import { isMobile } from '../../api/platform';
+import { isAndroidApp, isMobile } from '../../api/platform';
 import { desktopNotificationState, enableDesktopNotifications, notificationPermission } from '../../api/desktopNotify';
 import { useTaskFeature } from '../../api/taskFeatures';
 import { ContextMenu, type ContextMenuItem } from '../../components/ContextMenu';
@@ -39,8 +39,9 @@ import {
 } from '../model/notesPages';
 import { type ComposeIntent, type ComposeMode, takeShare } from '../model/composeIntent';
 import { useNativeShareIn, type SharedIntoNotes } from '../native/useNativeShareIn';
+import { useNotesOpenTo } from '../native/useNotesOpenTo';
 import { restoreLabels } from '../model/notesBulk';
-import { setNotesSort, setNotesView, setReminderTimes, type NotesSortMode } from '../model/notesPrefs';
+import { setNotesOpenTo, setNotesSort, setNotesView, setReminderTimes, type NotesSortMode } from '../model/notesPrefs';
 import { useNotesPrefs, useNoteActions, useNoteCards } from '../model/notesQueries';
 import { copyBlockersOf, copyPlanOf, copyRefusal, noteToMarkdown } from '../model/noteText';
 import { SendToPucaSheet } from './SendToPucaSheet';
@@ -141,9 +142,12 @@ interface NotesShellProps {
     expiredOffline?: boolean;
     /** Mounted inside the desktop app rather than as its own page. */
     embedded?: NotesEmbedding;
+    /** The shell the page STARTED with, signed in — the app's cold start,
+     *  not a shell a sign-in mounted later (NotesApp; useStartedSignedIn). */
+    coldStart?: boolean;
 }
 
-export function NotesShell({ onSignOut, expiredOffline = false, embedded }: NotesShellProps) {
+export function NotesShell({ onSignOut, expiredOffline = false, embedded, coldStart = false }: NotesShellProps) {
     const location = useLocation();
     const navigate = useNavigate();
     const [params, setParams] = useSearchParams();
@@ -339,6 +343,25 @@ export function NotesShell({ onSignOut, expiredOffline = false, embedded }: Note
     const onNativeCompose = useCallback((mode: ComposeMode) => { openCompose({ mode }); }, [openCompose]);
     const composeTaken = useCallback(() => setComposeIntent(null), []);
 
+    // "Open Púca Notes to" (the account menu, Android app only): at the
+    // app's start, and on coming back after five minutes away, the composer
+    // opens exactly as the New note / New list shortcut opens it — but only
+    // over nothing. Everything below is something it must not open over;
+    // the hook also looks at the page itself for any open dialog or menu.
+    // `openKey`, not `openCard`: a note in the address is open even while
+    // the notes are still loading and its editor is not drawn yet.
+    const openToIdle = !openKey && !popup && !help && !labelMgr && !sheet && !contextMenu && !drawer && !reminderModal
+        && composeIntent === null && !selection.active
+        && !query.trim() && !remindersView && !trashView && !calendarView;
+    const launchReports = useNotesOpenTo({
+        enabled: isAndroidApp() && !isEmbedded,
+        coldStart,
+        openTo: local.openTo,
+        idle: openToIdle,
+        contentKnown: actions.content.featuresKnown === true,
+        open: onNativeCompose,
+    });
+
     // Share INTO Notes (Android): the composer opens with what arrived. A
     // picture this server cannot keep is refused out loud rather than
     // vanishing, which would look like the share never came.
@@ -362,12 +385,12 @@ export function NotesShell({ onSignOut, expiredOffline = false, embedded }: Note
             refusePicture: () => pushMessageToast({ title: 'This server can’t keep pictures in a note, so the shared picture wasn’t added.' }),
         });
     };
-    useNativeShareIn(onShared);
+    useNativeShareIn(onShared, launchReports.share);
 
     // --- Reminders loop + notifications -------------------------------------------------
     // Android app: native alarms own firing, open or closed (notes/native/).
     // Embedded: none — Chat runs the page's one loop.
-    useNotesReminderLoop(go, onNativeCompose, !isEmbedded);
+    useNotesReminderLoop(go, onNativeCompose, !isEmbedded, launchReports.nav);
 
     // A due notification that named ONE item: take the id off the URL at
     // once (a one-shot — a reload must not replay it), then, once the notes
@@ -921,6 +944,8 @@ export function NotesShell({ onSignOut, expiredOffline = false, embedded }: Note
                         username={username}
                         sort={local.sort}
                         onSort={s => setNotesSort(s)}
+                        openTo={local.openTo}
+                        onOpenTo={o => setNotesOpenTo(o)}
                         times={local.times}
                         onTimes={patch => setReminderTimes(patch)}
                         onExportMarkdown={() => { setPopup(null); exportMd(); }}

@@ -53,26 +53,33 @@ export function shapeSharedText(text: string | null, subject: string | null): { 
 /**
  * @param onShare called once per share, with what the composer should show.
  *                It is read through a ref, so the shell may rebuild it.
+ * @param onLaunch told once whether the LAUNCH carried a share, as soon as
+ *                the native side has answered — before the pictures are
+ *                read, and whatever they turn out to be. "Open Púca Notes
+ *                to" stands down for one (native/useNotesOpenTo.ts).
  */
-export function useNativeShareIn(onShare: (shared: SharedIntoNotes) => void): void {
+export function useNativeShareIn(onShare: (shared: SharedIntoNotes) => void, onLaunch?: (carried: boolean) => void): void {
     const cbRef = useRef(onShare);
     useEffect(() => { cbRef.current = onShare; }, [onShare]);
+    const launchRef = useRef(onLaunch);
+    useEffect(() => { launchRef.current = onLaunch; }, [onLaunch]);
 
     useEffect(() => {
         if (!notesNativeAvailable()) return;
         let live = true;
-        const drain = async () => {
+        const drain = async (launch: boolean) => {
             const payload = await consumeNativeLaunchShare();
             if (!live) return;
+            if (launch) launchRef.current?.(!!payload.text || !!payload.subject || payload.files.length > 0);
             const files = await fetchSharedFiles(payload);
             if (!live) return;
             const { title, body } = shapeSharedText(payload.text, payload.subject);
             if (!title && !body && files.length === 0) return;
             cbRef.current({ title, body, files });
         };
-        void drain();
+        void drain(true);
         // A share while the app runs: a content-free ping, then we ask.
-        const off = onNativeShare(() => { void drain(); });
+        const off = onNativeShare(() => { void drain(false); });
         return () => { live = false; off(); };
     }, []);
 }
