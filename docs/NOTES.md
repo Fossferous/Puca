@@ -1485,9 +1485,11 @@ which is every channel checklist on the Púca page); the composer only fills
 its own fields, and saves nothing until **Done**. The Tasks view has no Undo
 for an item at all, so there too the question is the guard. *Add as one item* never creates
 anything by itself: in an open note or the Tasks view it puts the paste, on
-one line, into the add row, and Enter adds it. The one exception is the *New
-list* name, where either answer makes the list — with the steps, or with the
-paste as its one item.
+one line, into the add row, and Enter adds it — from an open note's title, the
+clean steps on one line instead, since a name field never showed the raw
+paste. The one exception is the *New list* name, where either answer makes the
+list — with the steps as its items, or with those steps, on one line, as its
+one item.
 
 The question takes the focus when it opens: on the question itself, not on a
 button, because the paste it guards against is the one nobody meant, and a
