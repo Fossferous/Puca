@@ -54,7 +54,12 @@ const STALE = [
     ['Not Tested', 'an internal QA audit is not product documentation'],
     ['Immediate Fixes Needed', 'an internal fix list is not product documentation'],
     ['Last Audit:', 'a dated QA audit is not product documentation'],
-    ['back to where you were', 'leaving Notes in the desktop app goes to the channel or conversation last open under it, or home when there is none (Chat.tsx leaveNotesView), not back to the view it covered — as leaving Devices does'],
+    // A checklist pasted into Tasks' New list name (TasksView.tsx onPasteListName).
+    ['heading, with the steps in it', 'the new list is named after what is typed there, else the heading, else the first step'],
+    ['makes the list named after the heading', 'the new list is named after what is typed there, else the heading, else the first step'],
+    ['heading, or what you had typed there', 'what is typed there comes FIRST, then the heading, then the first step'],
+    ['the whole paste as its one item', '"Add as one item" from the New list name is the clean steps on one line (usePasteItems checklistOnly), not the raw paste'],
+    ['back to where you were','leaving Notes in the desktop app goes to the channel or conversation last open under it, or home when there is none (Chat.tsx leaveNotesView), not back to the view it covered — as leaving Devices does'],
 ];
 const docFiles = tracked(['docs/*.md', 'deploy/**', 'README.md', 'CHANGELOG.md', 'SECURITY.md', 'CONTRIBUTING.md', '.env.example'])
     .filter((f) => /\.(md|html|conf|snippet|example|service|cron|py|sh|json)$|Caddyfile/.test(f));

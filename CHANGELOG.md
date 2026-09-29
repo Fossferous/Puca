@@ -31,10 +31,11 @@ one-line summary; this file is the full story. Versions follow
   numbers, bold marks or the "Here's how:" line. The checklist's own
   heading names a new list or an untitled note, and a section heading
   inside it stays as an item of its own, so the grouping survives. Pasted
-  into the **New list** name, it makes the list, named after the checklist's
-  heading, with the steps in it; pasted into an open note's title, it adds
-  the steps and names a note of yours that has no name yet. The question
-  says when it will make a list or rename the note, and with what name.
+  into the **New list** name, it makes the list with the steps in it, named
+  after what you had typed there, else the checklist's heading, else its
+  first step; pasted into an open note's title, it adds the steps and names
+  a note of yours that has no name yet. The question says when it will make
+  a list or rename the note, and with what name.
   Before, only a new note in Púca Notes read a paste this way: an open note
   split it line by line, keeping the intro, the closing sentence and the
   bold marks, and Tasks took the whole paste as one long line. It still asks

@@ -188,10 +188,11 @@ Púca's reminders. Anything you do in one is what you see in the other.
   row, and its title, where the checklist's heading also names a personal note
   that has no name yet (a shared checklist is never renamed from here) — and for
   Púca's own Tasks view (*Add a task…*, a checklist's *Add an item…*, and the
-  *New list* name, which makes the list named after the heading and then its
-  steps). It is the inverse of *Copy as text*: `# Title` and `- [ ] item`
-  read back as the title and the items. A heading or a line that introduces the
-  list becomes the title ("Here's a checklist for X:" → *Checklist for X*).
+  *New list* name, which makes the list — named after what is typed there, else
+  the heading, else the first step — and then its steps). It is the inverse of
+  *Copy as text*: `# Title` and `- [ ] item` read back as the title and the
+  items. A heading or a line that introduces the list becomes the title
+  ("Here's a checklist for X:" → *Checklist for X*).
   Numbers, `**bold**`, links and code marks are dropped, and a `[x]` arrives
   unticked. A later heading, or a line ending in a colon inside the list, stays as
   an item so the grouping survives. A wrapped line, or a code block under a step,
