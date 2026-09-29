@@ -351,7 +351,7 @@ confirmation first.
 ### Open Tasks
 - Click **Direct Messages** at the top of the server rail, then **Tasks** in the left column
 - The tab bar holds **All tasks**, **Calendar**, **Reminders**, your lists and every checklist channel from your servers; **New list** (the plus at its right end) starts a list
-- **Refresh** (the circling arrows at the right end of the tab bar) reads your lists again, so a change made on another device shows without leaving Tasks; what you have just typed or ticked is saved first and stays as it is
+- **Refresh** (the circling arrows at the right end of the tab bar) reads your lists again, so a change made on another device shows without leaving Tasks; what you type or tick, just before or while it reads, is saved first and stays as it is
 
 ### Paste a checklist
 - Paste step-by-step instructions — say, an AI assistant's answer — into **Add a task…** in a list, or **Add an item…** in a checklist channel, and Púca asks first

@@ -11,7 +11,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import {
     type Task, type TaskAttachmentRef,
     listTasks, createTask, updateChannelTask, updateChannelTaskAttachments,
-    listListTasks, createListTask, updateListTask, updateListTaskAttachments,
+    listListTasks, listIsGone, createListTask, updateListTask, updateListTaskAttachments,
     updateTask, deleteTask, moveTask, reorderTask,
     applyMove, applyReorder, collectSubtreeIds,
     serializeTaskAttachments,
@@ -30,7 +30,7 @@ import { invalidateTaskScope } from './taskSources';
 import { TaskTree } from './TaskTree';
 import { usePasteItems } from './usePasteItems';
 import { createdWhileReading } from './createdWhileReading';
-import { SAVE_WAIT_MS, writesInFlight } from './writesInFlight';
+import { SAVE_WAIT_MS, type WritesInFlight, writesInFlight } from './writesInFlight';
 import { MAX_ITEM_LENGTH } from '../notes/model/notesModel';
 
 /** Which checklist a body shows: a channel's, or a personal list's. */
@@ -71,11 +71,19 @@ interface ChecklistBodyProps {
      *  read. The read is quiet and waits for this body's own writes, like
      *  the embedder's (writesInFlight). Returns the unregister function. */
     registerRefresh?: (reread: () => Promise<boolean>) => () => void;
+    /** The embedder's count of its writes, for this body's to join (the
+     *  board's list cards). Through onTasksChanged a change here is also a
+     *  change to the embedder's copy of the list — its counts — so the
+     *  embedder's Refresh must see it, or its lists answer, read before the
+     *  change landed, puts the old counts back. Without it the body counts
+     *  its own. */
+    writes?: WritesInFlight;
 }
 
 export function ChecklistBody({
     channelId, listId, compact = false, subscribeRoom = false,
     myPerms, currentUserId, resolveUserName, onTasksChanged, registerRefresh,
+    writes: sharedWrites,
 }: ChecklistBodyProps) {
     const [tasks, setTasks] = useState<Task[]>([]);
     const [newTask, setNewTask] = useState('');
@@ -119,8 +127,10 @@ export function ChecklistBody({
     // to it, or another member's edit makes it read again).
     const whileReading = useRef(createdWhileReading());
     // This body's writes still out, for the embedder's Refresh: its read
-    // waits for them, and an answer that raced one is dropped.
-    const [writes] = useState(writesInFlight);
+    // waits for them, and an answer that raced one is dropped — the
+    // embedder's count when it hands one over (`writes`).
+    const [ownWrites] = useState(writesInFlight);
+    const writes = sharedWrites ?? ownWrites;
 
     const loadTasks = useCallback(async () => {
         const asked: Scope = { isChannel, channelId, listId };
@@ -147,7 +157,10 @@ export function ChecklistBody({
     /** Re-read from truth WITHOUT loadTasks' "Loading…" swap (which resets
      *  collapse and edit state — review W4-F5). `current`, asked when the
      *  answer is in, says whether it may still land. False when it could
-     *  not be read (and that was logged); never rejects. */
+     *  not be read (and that was logged); never rejects. A personal list
+     *  deleted for good on another device reads as gone (listIsGone): that
+     *  is an answer, and the embedder's own lists read takes this card
+     *  away, so it is not a failure to report. */
     const rereadQuietly = async (current: () => boolean = () => true): Promise<boolean> => {
         const asked: Scope = { isChannel, channelId, listId };
         const read = whileReading.current.reading(scopeKey(asked));
@@ -158,6 +171,7 @@ export function ChecklistBody({
             setTasks(read.merge(fresh));
             return true;
         } catch (err) {
+            if (!isChannel && listIsGone(err)) return true;
             console.error('Failed to reload tasks:', err);
             return false;
         } finally {

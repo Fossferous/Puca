@@ -41,6 +41,7 @@ import {
     renameTaskList,
     deleteTaskList,
     listListTasks,
+    listIsGone,
     createListTask,
     updateListTask,
     updateListTaskAttachments,
@@ -94,7 +95,7 @@ import { useSwipe } from '../hooks/useSwipe';
 import { useDragReorder } from '../hooks/useDragReorder';
 import { ListContentBlock, TasksTrash } from './ListContentBlock';
 import { listBodySnippet, listContentQueryKeys, useListContentSupport } from './useListContentSupport';
-import { fetchListFeatures, flushBodySave, keepHiddenSlots, setTaskListTiming, toggleFavoriteKeepingHidden, trashTaskList } from '../api/listContent';
+import { fetchListFeatures, flushBodySave, keepHiddenSlots, listTrashedTaskLists, setTaskListTiming, toggleFavoriteKeepingHidden, trashTaskList } from '../api/listContent';
 import { NoteDueChip, NoteReminderControl } from './schedule/NoteReminderControl';
 import { halfMinuteNow, subscribeHalfMinute } from './schedule/halfMinuteClock';
 import { heldOpKey } from '../api/opKey';
@@ -210,8 +211,9 @@ export function TasksView() {
     // tab order — so Refresh lets them land first and cannot put an older
     // copy over them (writesInFlight).
     const [writes] = useState(writesInFlight);
-    // Refresh: running (the button is disabled and spins), and the same
-    // thing for the tap that lands before that render (a state lags one).
+    // Refresh: running (the button says it is busy and spins), and the
+    // guard every tap meets while it runs — the button stays focusable and
+    // clickable, and a state lags one render behind the tap anyway.
     const [refreshing, setRefreshing] = useState(false);
     const refreshingRef = useRef(false);
     // The board's list cards keep their items themselves (ChecklistBody) and
@@ -684,7 +686,9 @@ export function TasksView() {
      *  left must not land in the new list's editor — and, like it, keeping
      *  what was created here while it was out (createdWhileReading).
      *  `current`, asked when the answer is in, says whether it may still
-     *  land (see refresh). False when it could not be read. */
+     *  land (see refresh). False when it could not be read — not when the
+     *  list is gone (deleted for good on another device, listIsGone): that
+     *  is an answer, and the lists read beside it takes the list away. */
     const rereadList = async (forList: number, current: () => boolean = () => true): Promise<boolean> => {
         const read = whileReading.current.reading(`list:${forList}`);
         let ok = true;
@@ -698,11 +702,40 @@ export function TasksView() {
                 syncListCounts(forList, rows);
             }
         } catch (err) {
-            console.error('Failed to reload tasks:', err);
-            ok = false;
+            if (!listIsGone(err)) {
+                console.error('Failed to reload tasks:', err);
+                ok = false;
+            }
         }
         read.done();
         return ok;
+    };
+
+    /** The Calendar and Reminders tabs' cache, for Refresh: every scope is
+     *  marked stale and the ones on screen are read again. (A write made
+     *  there reads its own scope again once it lands, which replaces an
+     *  answer of ours still out.) False when one could not be read — not
+     *  for a list that is gone (listIsGone), which the lists read takes off
+     *  those tabs. */
+    const rereadScopes = async (): Promise<boolean> => {
+        await qc.invalidateQueries({ queryKey: taskScopesKey });
+        return qc.getQueryCache().findAll({ queryKey: taskScopesKey, type: 'active' })
+            .every(q => q.state.status !== 'error' || (q.queryKey[1] === 'list' && listIsGone(q.state.error)));
+    };
+
+    /** The trash under the board, for Refresh: read, and put in the cache
+     *  only if `current` says nothing has overtaken it — a list restored or
+     *  deleted for good while it was out must not come back into it. */
+    const rereadTrash = async (current: () => boolean): Promise<boolean> => {
+        if (!support.trashEnabled) return true;
+        try {
+            const fresh = await listTrashedTaskLists();
+            if (current()) qc.setQueryData(listContentQueryKeys.trash, fresh);
+            return true;
+        } catch (err) {
+            console.error('Failed to read the trash:', err);
+            return false;
+        }
     };
 
     /**
@@ -718,11 +751,15 @@ export function TasksView() {
      * list, where it is scrolled to and an item open for editing stay as they
      * are. What the person has just done lands first — the tap that got here
      * took the focus out of an item or the title, which saved it, and the
-     * note's text is waited for as a trash waits for it — and an answer is
-     * dropped if they change something while it is out (writesInFlight). A
-     * save that has not answered by SAVE_WAIT_MS stops it, and says so,
-     * rather than keep the button spinning on a connection gone quiet.
-     * One at a time: a tap while it runs does nothing.
+     * note's text is waited for as a trash waits for it — and every answer,
+     * the trash's included, is dropped if they change something while it is
+     * out (writesInFlight): an item, the note's text or pictures, a restore
+     * from the trash, a board card. A save that has not answered by
+     * SAVE_WAIT_MS — the note's text too, one bound for the whole wait —
+     * stops it, and says so, rather than keep the button spinning on a
+     * connection gone quiet. A list deleted for good on another device is
+     * not a failure to read (listIsGone): it leaves the screen, and no
+     * connection is blamed. One at a time: a tap while it runs does nothing.
      */
     const refresh = async () => {
         if (refreshingRef.current) return;
@@ -730,8 +767,8 @@ export function TasksView() {
         setRefreshing(true);
         const at = selectedRef.current;
         const openList = at?.kind === 'list' ? at.id : null;
-        if (openList !== null) await flushBodySave(openList);
-        if (!await writes.settled(SAVE_WAIT_MS)) {
+        // The note's text first, then every counted save: one bound for all.
+        if (!await writes.settled(SAVE_WAIT_MS, openList === null ? undefined : flushBodySave(openList))) {
             // A save is still out: an answer now would be older than the
             // screen and dropped, so there is nothing to read yet.
             pushMessageToast({ title: 'Still saving your last change — try again in a moment' });
@@ -741,14 +778,12 @@ export function TasksView() {
         }
         const mark = writes.mark();
         const current = () => !writes.since(mark);
-        // The cache's own reads, as read / not read.
-        const settles = (p: Promise<unknown>) => p.then(() => true, () => false);
         const read = await Promise.all([
             refreshLists(true, current),
             openList !== null ? rereadList(openList, current) : true,
             ...[...cardRefreshes].map(reread => reread().catch(() => false)),
-            settles(qc.invalidateQueries({ queryKey: taskScopesKey }, { throwOnError: true })),
-            settles(qc.invalidateQueries({ queryKey: listContentQueryKeys.trash }, { throwOnError: true })),
+            rereadScopes(),
+            rereadTrash(current),
         ]);
         if (read.includes(false)) pushMessageToast({ title: 'Couldn’t refresh — check your connection' });
         refreshingRef.current = false;
@@ -1035,6 +1070,7 @@ export function TasksView() {
                         compact
                         onTasksChanged={ts => syncListCounts(tab.id, ts)}
                         registerRefresh={registerCardRefresh}
+                        writes={writes}
                     />
                 ) : (
                     <ChecklistBody
@@ -1057,6 +1093,7 @@ export function TasksView() {
             features={support.features}
             trashed={support.trashed}
             onRestored={l => setLists(prev => (prev.some(x => x.id === l.id) ? prev : [...prev, l]))}
+            runWrite={writes.run}
         />
     );
 
@@ -1158,14 +1195,19 @@ export function TasksView() {
                         </button>
                     )}
                     {/* Reads the lists again, and what is open (refresh):
-                        another device's changes, without leaving the tab. */}
+                        another device's changes, without leaving the tab.
+                        Busy is aria-disabled, NOT disabled: a browser moves
+                        the focus off a focused button that becomes disabled
+                        (to the page, where it stays), so a keyboard user
+                        would lose their place on every Enter. A tap while
+                        busy is refresh's own guard's to ignore. */}
                     <button
                         type="button"
                         className={`tasks-tab tasks-tab-icon tasks-tab-refresh ${refreshing ? 'busy' : ''}`}
                         title="Refresh"
                         aria-label="Refresh"
                         aria-busy={refreshing}
-                        disabled={refreshing}
+                        aria-disabled={refreshing}
                         onClick={() => { void refresh(); }}
                     >
                         <RefreshIcon className="tasks-tab-refresh-icon" />
@@ -1316,6 +1358,7 @@ export function TasksView() {
                         features={support.features}
                         onPatch={patchList}
                         coarse={isMobile() || window.matchMedia('(pointer: coarse) and (max-width: 1024px)').matches}
+                        runWrite={writes.run}
                     />
 
                     <form className="tasks-add" onSubmit={handleAddTask}>

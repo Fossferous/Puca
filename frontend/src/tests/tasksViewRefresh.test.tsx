@@ -17,10 +17,16 @@
  *   dropped rather than let it undo the change;
  * - a save that never answers does not hold the button: after the bounded
  *   wait the refresh stops and says so;
- * - two taps before the button re-renders start one read;
+ * - two taps before the button re-renders start one read, and so does a
+ *   tap after it: busy is aria-disabled, not disabled, so the button keeps
+ *   the keyboard focus and only the view's guard stops a tap;
  * - a read that fails says so, as every other failure in the view does;
  * - and, the positive control, without the button nothing is read again —
  *   so what the tests see is the button's doing.
+ *
+ * What the components BESIDE the view write while it is out (the note's
+ * text, the trash, a board card, the Calendar tab) is
+ * tasksViewRefreshRaces.test.tsx.
  *
  * The server is a small stateful fake behind a mocked apiClient: items are
  * sealed for real on the way in and opened through the real decrypt, and a
@@ -218,6 +224,8 @@ const refreshButton = () => {
     expect(b, 'the Refresh button').toBeTruthy();
     return b!;
 };
+/** Refresh says it is running (aria-busy, with the spin and the dimming). */
+const busy = () => refreshButton().getAttribute('aria-busy') === 'true';
 async function tap(label: string) {
     const b = container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
     expect(b, `the "${label}" button`).toBeTruthy();
@@ -286,23 +294,46 @@ describe('Refresh reads again what the Tasks view shows', () => {
         const listReads = countReads('/task-lists');
         const release = hold('GET /task-lists');
 
-        // Two taps before the first one's render: the button is not disabled
-        // yet, so only the view's own guard stops the second.
+        // Two taps before the first one's render, then one after it: the view's
+        // own guard stops both — the button is never natively disabled.
         await act(async () => { refreshButton().click(); refreshButton().click(); });
         await settle();
+        await tap('Refresh');
+        await settle();
         expect(countReads('/task-lists')).toBe(listReads + 1);
-        expect(refreshButton().disabled).toBe(true);
+        expect(refreshButton().getAttribute('aria-disabled')).toBe('true');
         expect(refreshButton().getAttribute('aria-busy')).toBe('true');
         expect(refreshButton().classList.contains('busy')).toBe(true);
 
         release();
         await settle();
-        expect(refreshButton().disabled).toBe(false);
+        expect(refreshButton().getAttribute('aria-disabled')).toBe('false');
+        expect(refreshButton().getAttribute('aria-busy')).toBe('false');
         expect(refreshButton().classList.contains('busy')).toBe(false);
         // And it is not stuck: the next tap reads again.
         await tap('Refresh');
         await settle();
         expect(countReads('/task-lists')).toBe(listReads + 2);
+    });
+
+    it('while it runs the button keeps the keyboard focus: busy is aria-disabled, never disabled', async () => {
+        // A browser moves the focus off a focused button that becomes
+        // disabled — to the page, where it stays (measured in headless
+        // Chromium: activeElement is BODY during and after, and the next
+        // Enter does nothing). jsdom has no such rule, so what is pinned here
+        // is the cause: the button is not natively disabled while busy.
+        await mount();
+        const release = hold('GET /task-lists');
+        refreshButton().focus();
+        await tap('Refresh');
+        await settle();
+        expect(busy()).toBe(true);
+        expect(refreshButton().disabled).toBe(false);
+        expect(refreshButton().getAttribute('aria-disabled')).toBe('true');
+        expect(document.activeElement).toBe(refreshButton());
+        release();
+        await settle();
+        expect(document.activeElement).toBe(refreshButton());
     });
 
     it('an item whose edit is still saving is not put back: the read waits for the save', async () => {
@@ -344,14 +375,14 @@ describe('Refresh reads again what the Tasks view shows', () => {
         vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
         await tap('Refresh');
         await act(async () => { await vi.advanceTimersByTimeAsync(SAVE_WAIT_MS - 1_000); });
-        expect(refreshButton().disabled).toBe(true);
+        expect(busy()).toBe(true);
         expect(toasts).toEqual([]);
 
         await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
         vi.useRealTimers();
         await settle();
         expect(toasts).toEqual(['Still saving your last change — try again in a moment']);
-        expect(refreshButton().disabled).toBe(false);
+        expect(busy()).toBe(false);
         // Nothing was read: the answer would have been older than the screen.
         expect(countReads('/task-lists')).toBe(listReads);
         expect(countReads('/task-lists/1/tasks')).toBe(itemReads);
@@ -374,7 +405,7 @@ describe('Refresh reads again what the Tasks view shows', () => {
         answer();
         await settle();
         expect(rows()).toEqual(['Milk [done]']);
-        expect(refreshButton().disabled).toBe(false);
+        expect(busy()).toBe(false);
     });
 
     it('a failed read of the lists says so, and keeps what is on screen', async () => {
@@ -385,7 +416,7 @@ describe('Refresh reads again what the Tasks view shows', () => {
         await settle();
         expect(toasts).toEqual([FAILED]);
         expect(tabTitles()).toEqual(['All tasks', 'Calendar', 'Reminders', 'List 1', 'List 3']);
-        expect(refreshButton().disabled).toBe(false);
+        expect(busy()).toBe(false);
     });
 
     it('a failed read of the open list says so, and keeps its items', async () => {

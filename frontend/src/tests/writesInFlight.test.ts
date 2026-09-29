@@ -4,7 +4,7 @@
  * (within a bound, so a save that never answers cannot hold Refresh).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { SAVE_WAIT_MS, writesInFlight } from '../components/writesInFlight';
+import { SAVE_WAIT_MS, uncounted, within, writesInFlight } from '../components/writesInFlight';
 
 /** A write the test lands (or fails) by hand. */
 function pending() {
@@ -86,5 +86,69 @@ describe('writesInFlight', () => {
         expect(done).toBeNull();
         await vi.advanceTimersByTimeAsync(1);
         expect(done).toBe(false);
+    });
+});
+
+describe('settled with a first wait (a note\'s text save): one bound for all of it', () => {
+    it('waits for the first wait, then the writes, and is settled when both are', async () => {
+        const w = writesInFlight();
+        const note = pending();
+        const item = pending();
+        void w.run(() => item.p);
+        let done: boolean | null = null;
+        const waiting = w.settled(SAVE_WAIT_MS, note.p).then(v => { done = v; });
+        item.land();
+        await new Promise(r => setTimeout(r, 0));
+        expect(done).toBeNull();
+        note.land();
+        await waiting;
+        expect(done).toBe(true);
+    });
+
+    it('a first wait that takes most of the bound leaves the writes only the rest of it', async () => {
+        vi.useFakeTimers();
+        const w = writesInFlight();
+        const note = pending();
+        void w.run(() => new Promise<void>(() => {}));
+        let done: boolean | null = null;
+        void w.settled(SAVE_WAIT_MS, note.p).then(v => { done = v; });
+        setTimeout(note.land, SAVE_WAIT_MS - 5_000);
+        await vi.advanceTimersByTimeAsync(SAVE_WAIT_MS - 1);
+        expect(done).toBeNull();
+        await vi.advanceTimersByTimeAsync(1);
+        expect(done).toBe(false);
+    });
+
+    it('a first wait that never answers ends at the bound', async () => {
+        vi.useFakeTimers();
+        const w = writesInFlight();
+        let done: boolean | null = null;
+        void w.settled(SAVE_WAIT_MS, new Promise(() => {})).then(v => { done = v; });
+        await vi.advanceTimersByTimeAsync(SAVE_WAIT_MS - 1);
+        expect(done).toBeNull();
+        await vi.advanceTimersByTimeAsync(1);
+        expect(done).toBe(false);
+    });
+});
+
+describe('within — the bound for a wait that is not a counted write (a note\'s text save)', () => {
+    it('true when the promise settles in time, either way', async () => {
+        expect(await within(Promise.resolve('saved'), SAVE_WAIT_MS)).toBe(true);
+        expect(await within(Promise.reject(new Error('refused')), SAVE_WAIT_MS)).toBe(true);
+    });
+
+    it('false at the bound for one that never answers, and at once with no time left', async () => {
+        vi.useFakeTimers();
+        let done: boolean | null = null;
+        void within(new Promise(() => {}), SAVE_WAIT_MS).then(v => { done = v; });
+        await vi.advanceTimersByTimeAsync(SAVE_WAIT_MS - 1);
+        expect(done).toBeNull();
+        await vi.advanceTimersByTimeAsync(1);
+        expect(done).toBe(false);
+        expect(await within(new Promise(() => {}), 0)).toBe(false);
+    });
+
+    it('uncounted runs the write as it is, and hands its promise back', async () => {
+        expect(await uncounted(async () => 'saved')).toBe('saved');
     });
 });

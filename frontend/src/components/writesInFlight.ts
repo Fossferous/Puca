@@ -20,9 +20,16 @@
  * Creates count too: an item that lands after an answer that already holds
  * it would be added to the screen a second time.
  *
+ * EVERY write that changes what a refresh reads back has to be counted, not
+ * only the view's own handlers: a component the view embeds that writes a
+ * list — a note's text and pictures, a restore from the trash, a board card's
+ * items and with them the list's counts — takes the view's `run` (RunWrite)
+ * or the whole count, or its write is invisible to `since` and the answer
+ * lands over it.
+ *
  * The wait is BOUNDED (`SAVE_WAIT_MS`). Nothing here times a request out, so
  * a save on a connection that has gone quiet can stay out for minutes, and a
- * refresh that waited for it would hold its button disabled all that time.
+ * refresh that waited for it would hold its button busy all that time.
  */
 export interface WritesInFlight {
     /** Run `write` now, counted as a write until its promise settles. Call
@@ -30,18 +37,42 @@ export interface WritesInFlight {
      *  hands the React Compiler a function it must assume is called there. */
     run<R>(write: () => Promise<R>): Promise<R>;
     /** True once no write is out, including any that start meanwhile; false
-     *  if some are still out after `limitMs`. Never rejects: a write that
-     *  fails has already said so. */
-    settled(limitMs: number): Promise<boolean>;
+     *  if some are still out after `limitMs`. `first`, a wait that is not a
+     *  counted write (a note's text save still finishing: flushBodySave), is
+     *  waited for before them and inside the SAME bound — one limit for the
+     *  whole wait, not one each. Never rejects: a write that fails has
+     *  already said so. */
+    settled(limitMs: number, first?: Promise<unknown>): Promise<boolean>;
     /** Where the count stands now, to ask `since` about later. */
     mark(): number;
     /** A write started after `mark`, or one is still out. */
     since(mark: number): boolean;
 }
 
+/** How a component an embedder refreshes runs its writes: the embedder's
+ *  `run`, so they count as the embedder's (ListContentBlock, TasksTrash). */
+export type RunWrite = WritesInFlight['run'];
+
+/** A write run as it is, counted by nobody: a component with no embedder
+ *  that refreshes it. */
+export const uncounted: RunWrite = write => write();
+
 /** How long a refresh waits for the saves before it: well past an ordinary
  *  save, short enough that a stuck one does not keep Refresh spinning. */
 export const SAVE_WAIT_MS = 15_000;
+
+/** True if `p` settles (either way) within `limitMs`; false once that time
+ *  has run out first, or when there is none left. Never rejects. */
+export async function within(p: Promise<unknown>, limitMs: number): Promise<boolean> {
+    if (limitMs <= 0) return false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const inTime = await Promise.race([
+        p.then(() => true, () => true),
+        new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), limitMs); }),
+    ]);
+    clearTimeout(timer);
+    return inTime;
+}
 
 export function writesInFlight(): WritesInFlight {
     const out = new Set<Promise<unknown>>();
@@ -55,18 +86,11 @@ export function writesInFlight(): WritesInFlight {
             p.then(done, done);
             return p;
         },
-        settled: async limitMs => {
+        settled: async (limitMs, first) => {
             const deadline = Date.now() + limitMs;
+            if (first && !await within(first, limitMs)) return false;
             while (out.size > 0) {
-                const left = deadline - Date.now();
-                if (left <= 0) return false;
-                let timer: ReturnType<typeof setTimeout> | undefined;
-                const late = await Promise.race([
-                    Promise.allSettled([...out]).then(() => false),
-                    new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(true), left); }),
-                ]);
-                clearTimeout(timer);
-                if (late) return false;
+                if (!await within(Promise.allSettled([...out]), deadline - Date.now())) return false;
             }
             return true;
         },

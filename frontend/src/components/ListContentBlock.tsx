@@ -31,6 +31,7 @@ import { DrawingCanvas } from './DrawingCanvas';
 import { pushMessageToast } from './messageToastBus';
 import { forgetNoteKeys } from '../notes/model/notesPrefs';
 import { ChevronDownIcon, ChevronRightIcon, TrashIcon } from './Icons';
+import { type RunWrite, uncounted } from './writesInFlight';
 import './NoteImages.css';
 
 interface BlockProps {
@@ -39,9 +40,14 @@ interface BlockProps {
     /** Apply a change to the list in the caller's state (optimistic). */
     onPatch: (listId: number, patch: Partial<TaskList>) => void;
     coarse: boolean;
+    /** The caller's count of its writes (TasksView's, writesInFlight): the
+     *  text and picture saves run through it, so a Refresh of the caller's
+     *  lists waits for them and cannot put the list's old text and
+     *  `content_rev` back over one that landed while it was out. */
+    runWrite?: RunWrite;
 }
 
-export function ListContentBlock({ list, features, onPatch, coarse }: BlockProps) {
+export function ListContentBlock({ list, features, onPatch, coarse, runWrite = uncounted }: BlockProps) {
     const [busy, setBusy] = useState(false);
     // The open drawing editor: {} for a new one, or the drawing being
     // changed with its strokes. Every hook stays ABOVE the early return.
@@ -50,7 +56,7 @@ export function ListContentBlock({ list, features, onPatch, coarse }: BlockProps
     const opened = list.attachments ?? null;
     const refs: TaskAttachmentRef[] = isAttachmentsLocked(opened) ? [] : parseTaskAttachments(opened);
 
-    const saveBody = async (text: string, baseRev?: number): Promise<BodySaveOutcome> => {
+    const saveBody = (text: string, baseRev?: number) => runWrite(async (): Promise<BodySaveOutcome> => {
         const before = list.body ?? null;
         const base = features.contentRev ? (baseRev ?? list.content_rev) : undefined;
         onPatch(list.id, { body: text === '' ? null : text });
@@ -70,7 +76,7 @@ export function ListContentBlock({ list, features, onPatch, coarse }: BlockProps
             console.error('Failed to save note text:', err);
             return false;
         }
-    };
+    });
     /**
      * Write the sidecar. `dropped` (what the write takes out) is deleted only
      * once the write has LANDED: until then the stored sidecar may still name
@@ -89,7 +95,7 @@ export function ListContentBlock({ list, features, onPatch, coarse }: BlockProps
      * both failures too: after a refusal the sidecar still names it, and after
      * a lost answer it may.
      */
-    const saveRefs = async (next: TaskAttachmentRef[], dropped: TaskAttachmentRef[]): Promise<'saved' | 'refused' | 'unsure'> => {
+    const saveRefs = (next: TaskAttachmentRef[], dropped: TaskAttachmentRef[]) => runWrite(async (): Promise<'saved' | 'refused' | 'unsure'> => {
         const before = list.attachments ?? null;
         onPatch(list.id, { attachments: next.length === 0 ? null : JSON.stringify(next) });
         try {
@@ -110,7 +116,7 @@ export function ListContentBlock({ list, features, onPatch, coarse }: BlockProps
         }
         if (dropped.length > 0) void deleteFiles(fileIdsOf(dropped));
         return 'saved';
-    };
+    });
     /** After a save that did not land for certain: a definite refusal takes
      *  this save's uploads back; a lost answer keeps them, and says only what
      *  is known — not "couldn't reach the server", which a gateway's 5xx or
@@ -210,14 +216,19 @@ interface TrashProps {
     trashed: TaskList[];
     /** A restored list, for the caller to show again. */
     onRestored: (list: TaskList) => void;
+    /** The caller's count of its writes (TasksView's, writesInFlight): a
+     *  restore or a delete made while its Refresh is out must not have the
+     *  list taken off the bar again, or put back in the trash, by answers
+     *  read before it landed. */
+    runWrite?: RunWrite;
 }
 
-export function TasksTrash({ features, trashed, onRestored }: TrashProps) {
+export function TasksTrash({ features, trashed, onRestored, runWrite = uncounted }: TrashProps) {
     const qc = useQueryClient();
     const [open, setOpen] = useState(false);
     if (trashed.length === 0) return null;
     const drop = (id: number) => qc.setQueryData<TaskList[]>(listContentQueryKeys.trash, prev => prev?.filter(l => l.id !== id));
-    const restore = async (l: TaskList) => {
+    const restore = (l: TaskList) => runWrite(async () => {
         try {
             await restoreTaskList(l.id);
             drop(l.id);
@@ -226,20 +237,22 @@ export function TasksTrash({ features, trashed, onRestored }: TrashProps) {
             console.error('Failed to restore list:', err);
             pushMessageToast({ title: 'Couldn’t restore the list' });
         }
-    };
+    });
     const forever = async (l: TaskList) => {
         if (!window.confirm(`Delete “${l.title}” forever? Its tasks, pictures and attachments go with it. This can’t be undone.`)) return;
-        try {
-            await deleteListForever(l);
-            drop(l.id);
-            // Gone for good: its colour and labels go with it, here as in
-            // Notes. (A RESTORE keeps them, which is why the trash does not.)
-            forgetNoteKeys([`list:${l.id}`]);
-        } catch (err) {
-            console.error('Failed to delete list:', err);
-            // Refused because its files cannot all be found: say so, in its words.
-            pushMessageToast({ title: err instanceof NoteFilesUnreadableError ? err.message : 'Couldn’t delete the list' });
-        }
+        await runWrite(async () => {
+            try {
+                await deleteListForever(l);
+                drop(l.id);
+                // Gone for good: its colour and labels go with it, here as in
+                // Notes. (A RESTORE keeps them, which is why the trash does not.)
+                forgetNoteKeys([`list:${l.id}`]);
+            } catch (err) {
+                console.error('Failed to delete list:', err);
+                // Refused because its files cannot all be found: say so, in its words.
+                pushMessageToast({ title: err instanceof NoteFilesUnreadableError ? err.message : 'Couldn’t delete the list' });
+            }
+        });
     };
     const days = features.trashRetentionDays;
     return (

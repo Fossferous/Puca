@@ -7,7 +7,7 @@
 // channel GROUP KEY for the current epoch — exactly like channel messages — so
 // the server only ever stores envelopes and a removed member loses access on the
 // next key rotation.
-import { apiClient } from './client';
+import { ApiError, apiClient } from './client';
 import {
     getActiveIdentity,
     encryptSelf,
@@ -529,6 +529,14 @@ export async function renameTaskList(listId: number, title: string, expectRev?: 
 
 export function deleteTaskList(listId: number): Promise<void> {
     return apiClient.delete(`/task-lists/${listId}`);
+}
+
+/** A read of a personal list's items (listListTasks) answered 404: the list
+ *  is not there any more — deleted for good, here or on another device (one
+ *  in the trash still reads). That is an answer about the list, not a failed
+ *  read: nothing about the connection is wrong (TasksView's Refresh). */
+export function listIsGone(err: unknown): boolean {
+    return err instanceof ApiError && err.status === 404;
 }
 
 export async function listListTasks(listId: number): Promise<Task[]> {
