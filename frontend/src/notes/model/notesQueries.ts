@@ -599,14 +599,19 @@ export function useNoteActions(cards: NoteCard[], prefs: TaskTabPref[], prefsRea
 
     const editTask = useCallback(async (note: NoteRef, task: Task, description: string) => {
         const original = await snapshot(note);
-        setTasks(note, prev => prev.map(t => (t.id === task.id ? { ...t, description } : t)));
+        const next = original.map(t => (t.id === task.id ? { ...t, description } : t));
+        restore(note, next);
+        // An edit can turn an item into a heading or back (api/taskHeading.ts),
+        // which changes what the note counts.
+        syncListCounts(note, next);
         try {
             await sendNoteOp(ops.editTask(note, task, description));
         } catch (err) {
             explain('edit failed', err);
             restore(note, original);
+            syncListCounts(note, original);
         }
-    }, [snapshot, setTasks, restore]);
+    }, [snapshot, restore, syncListCounts]);
 
     const addTask = useCallback(async (note: NoteRef, description: string, parentId?: number, timing?: NewTaskTiming): Promise<Task | null> => {
         try {
