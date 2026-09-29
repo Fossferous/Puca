@@ -100,6 +100,7 @@ import { halfMinuteNow, subscribeHalfMinute } from './schedule/halfMinuteClock';
 import { heldOpKey } from '../api/opKey';
 import type { PastedItems } from '../notes/model/noteContent';
 import { textOutsideSelection, usePasteItems } from './usePasteItems';
+import { createdWhileReading } from './createdWhileReading';
 import { useQueryClient } from '@tanstack/react-query';
 import './TasksView.css';
 import './AllChecklistsView.css';
@@ -198,6 +199,9 @@ export function TasksView() {
     // A step-by-step list pasted into "Add a task…" or "New list" asks first
     // and then lands item by item, in order (components/usePasteItems).
     const pasteItems = usePasteItems();
+    // Items created here while the open list is being read: its answer is
+    // older than they are and must not take them off the screen.
+    const whileReading = useRef(createdWhileReading());
     /** The list whose title is being edited, not a bare flag: the editor and
      *  its draft must not survive a change of tab and rename the next list. */
     const [editingTitle, setEditingTitle] = useState<number | null>(null);
@@ -420,9 +424,13 @@ export function TasksView() {
             return;
         }
         let cancelled = false;
+        // A pasted checklist may still be landing in this list: what lands
+        // while the read is out is kept (components/createdWhileReading).
+        const read = whileReading.current.reading(`list:${selected.id}`);
         listListTasks(selected.id)
-            .then(fetched => { if (!cancelled) setTasks(fetched); })
-            .catch(err => console.error('Failed to load tasks:', err));
+            .then(fetched => { if (!cancelled) setTasks(read.merge(fetched)); })
+            .catch(err => console.error('Failed to load tasks:', err))
+            .finally(read.done);
         return () => { cancelled = true; };
     }, [selected?.kind, selected?.id]);
 
@@ -578,6 +586,7 @@ export function TasksView() {
         try {
             const created = await createListTask(listId, text, parentId, undefined, itemKey.current.keyFor(`${listId}\u0000${parentId ?? ''}\u0000${text}`));
             itemKey.current.landed();
+            whileReading.current.created(`list:${listId}`, created);
             if (selectedRef.current?.kind === 'list' && selectedRef.current.id === listId) setTasks(prev => [...prev, created]);
             setLists(prev => prev.map(l => (l.id === listId ? { ...l, total_tasks: l.total_tasks + 1 } : l)));
             return created;
@@ -630,10 +639,9 @@ export function TasksView() {
         const makeList = async (name: string, items: string[]) => {
             const list = await createList(name);
             if (!list) return;
+            // The new list opens at once and is read while these land; that
+            // read keeps them (createdWhileReading).
             await pasteItems.addInOrder(items, async text => (await addListItem(list.id, text)) !== null);
-            // The new list opened before its items existed, and its first read
-            // may have answered in between: read it again now they are there.
-            void rereadList(list.id);
         };
         pasteItems.onPaste(e, {
             separate: read => { void makeList(nameOf(read), read.items); },
@@ -646,16 +654,23 @@ export function TasksView() {
 
     /** Re-read one list's items into the editor, quietly (no "Loading…"),
      *  GUARDED like the load effect: a reply for a list the user has since
-     *  left must not land in the new list's editor. */
+     *  left must not land in the new list's editor — and, like it, keeping
+     *  what was created here while it was out (createdWhileReading). */
     const rereadList = async (forList: number) => {
+        const read = whileReading.current.reading(`list:${forList}`);
+        // No `finally`: the React Compiler (and with it this component's
+        // hook lint) gives up on a function that has one.
         try {
             const fetched = await listListTasks(forList);
-            if (selectedRef.current?.kind !== 'list' || selectedRef.current.id !== forList) return;
-            setTasks(fetched);
-            syncListCounts(forList, fetched);
+            if (selectedRef.current?.kind === 'list' && selectedRef.current.id === forList) {
+                const rows = read.merge(fetched);
+                setTasks(rows);
+                syncListCounts(forList, rows);
+            }
         } catch (err) {
             console.error('Failed to reload tasks:', err);
         }
+        read.done();
     };
 
     const handleToggle = async (task: Task, completed: boolean) => {
@@ -784,6 +799,9 @@ export function TasksView() {
         const original = tasks;
         // The whole subtree cascades server-side; mirror locally at any depth.
         const doomed = collectSubtreeIds(tasks, taskId);
+        // An item that has only just landed must not come back with a read
+        // that is still out (createdWhileReading).
+        whileReading.current.forget(doomed);
         const next = tasks.filter(t => !doomed.has(t.id));
         setTasks(next);
         syncListCounts(selectedList.id, next);

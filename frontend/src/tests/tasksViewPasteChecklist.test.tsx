@@ -30,8 +30,18 @@ vi.mock('../api/client', async () => {
 // reduced to their text, in the order the view holds them.
 vi.mock('../components/ChecklistBody', () => ({ ChecklistBody: () => null }));
 vi.mock('../components/TaskTree', () => ({
-    TaskTree: ({ tasks }: { tasks: Array<{ id: number; description: string }> }) => (
-        <ul className="rows">{tasks.map(t => <li key={t.id}>{t.description}</li>)}</ul>
+    TaskTree: ({ tasks, onToggle, onDelete }: {
+        tasks: Array<{ id: number; description: string }>;
+        onToggle: (t: unknown, done: boolean) => void;
+        onDelete: (id: number) => void;
+    }) => (
+        <ul className="rows">{tasks.map(t => (
+            <li key={t.id}>
+                {t.description}
+                <button type="button" aria-label={`Tick ${t.description}`} onClick={() => onToggle(t, true)} />
+                <button type="button" aria-label={`Delete ${t.description}`} onClick={() => onDelete(t.id)} />
+            </li>
+        ))}</ul>
     ),
 }));
 vi.mock('../components/calendar/TasksCalendar', () => ({ TasksCalendar: () => null }));
@@ -75,6 +85,8 @@ let refuseAt: number | null;
 /** Lists whose FIRST read answers late, with what the server held when it
  *  was asked — a new list's editor opens before its items exist. */
 let slowFirstRead: Set<number>;
+/** Lists whose next read is held until the test lets it answer. */
+let heldReads: Map<number, Promise<void>>;
 let toasts: string[];
 
 let root: Root;
@@ -97,6 +109,7 @@ beforeEach(() => {
     nextId = 100;
     refuseAt = null;
     slowFirstRead = new Set();
+    heldReads = new Map();
     toasts = [];
     setMessageToastSink(t => { toasts.push(t.title); });
     get.mockReset(); post.mockReset(); patch.mockReset(); del.mockReset(); put.mockReset();
@@ -111,6 +124,8 @@ beforeEach(() => {
             const id = Number(m[1]);
             const snapshot = [...(stored.get(id) ?? [])];
             if (slowFirstRead.delete(id)) await new Promise(r => { setTimeout(r, PACE_MS * 3); });
+            const held = heldReads.get(id);
+            if (held) { heldReads.delete(id); await held; }
             return snapshot;
         }
         throw new Error(`unexpected GET ${path}`);
@@ -131,6 +146,14 @@ beforeEach(() => {
             return t;
         }
         throw new Error(`unexpected POST ${path}`);
+    });
+    del.mockImplementation(async (path: string) => {
+        const m = /^\/tasks\/(\d+)$/.exec(path);
+        if (!m) throw new Error(`unexpected DELETE ${path}`);
+        for (const items of stored.values()) {
+            const at = items.findIndex(t => t.id === Number(m[1]));
+            if (at >= 0) items.splice(at, 1);
+        }
     });
     put.mockResolvedValue({});
     container = document.createElement('div');
@@ -181,6 +204,10 @@ async function submit(selector: string) {
     await act(async () => { form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
     await settle();
 }
+/** Real time in short act() slices, as `paced` waits. */
+const wait = async (ms: number) => {
+    for (let t = 0; t < ms; t += 10) await act(async () => { await new Promise(r => { setTimeout(r, 10); }); });
+};
 
 const addInput = () => container.querySelector<HTMLInputElement>('.tasks-add input')!;
 const rows = () => [...container.querySelectorAll('.rows li')].map(l => l.textContent);
@@ -268,6 +295,61 @@ describe('"Add a task…" takes a pasted checklist', () => {
         expect(tabCount('List 1')).toBe(`0/${ASSISTANT_ITEMS.length}`);
         await openList('List 1');
         expect(rows()).toEqual(ASSISTANT_ITEMS);
+    });
+
+    it('every pasted row stays on screen when the list is read again while they land', async () => {
+        await mount();
+        await openList('List 1');
+        const lines = Array.from({ length: 12 }, (_, i) => `step ${i + 1}`);
+        paste(addInput(), lines.join('\n'));
+        act(() => { button(`Add ${lines.length} items`).click(); });
+        await wait(PACE_MS * 3);
+        await openList('List 3');
+        // Back to List 1, whose read answers late while its items keep
+        // landing: the read's answer is older than the rows already shown.
+        slowFirstRead.add(1);
+        await openList('List 1');
+        await paced(lines.length);
+        expect(stored.get(1)).toHaveLength(lines.length);
+        expect(rows()).toEqual(lines);
+        expect(tabCount('List 1')).toBe(`0/${lines.length}`);
+    });
+
+    it('every pasted row stays when a refused tick makes the list read again while they land', async () => {
+        await mount();
+        await openList('List 1');
+        patch.mockRejectedValue(new ApiError('Changed on another device', 409));
+        const lines = Array.from({ length: 12 }, (_, i) => `step ${i + 1}`);
+        paste(addInput(), lines.join('\n'));
+        act(() => { button(`Add ${lines.length} items`).click(); });
+        await wait(PACE_MS * 3);
+        // Refused as out of date: the list is read again (rereadList), and
+        // that read answers late while the rest land.
+        slowFirstRead.add(1);
+        act(() => { container.querySelector<HTMLButtonElement>('[aria-label="Tick step 1"]')!.click(); });
+        await paced(lines.length);
+        expect(toasts).toContain('Changed on another device');
+        expect(stored.get(1)).toHaveLength(lines.length);
+        expect(rows()).toEqual(lines);
+    });
+
+    it('an item deleted just after it landed does not come back with a read that was out', async () => {
+        await mount();
+        await openList('List 1');
+        await openList('List 3');
+        let answer!: () => void;
+        heldReads.set(1, new Promise<void>(r => { answer = r; }));
+        await openList('List 1');                          // its read is out until answer()
+        typeInto(addInput(), 'Milk');
+        await submit('.tasks-add');
+        expect(rows()).toEqual(['Milk']);
+        act(() => { container.querySelector<HTMLButtonElement>('[aria-label="Delete Milk"]')!.click(); });
+        await settle();
+        expect(stored.get(1)).toEqual([]);
+        expect(heldReads.size, 'the read went out and is still held').toBe(0);
+        await act(async () => { answer(); });
+        await settle();
+        expect(rows()).toEqual([]);
     });
 
     it('the question takes the focus, so Enter adds nothing behind it; any answer gives the focus back', async () => {
