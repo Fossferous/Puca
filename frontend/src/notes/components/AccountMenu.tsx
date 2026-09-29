@@ -8,15 +8,19 @@
  * Evening mean on an item and what a new reminder starts at. They are sealed
  * into the account's Notes document with the colours and labels, so they
  * follow the account; the server never sees them.
+ *
+ * "Open Púca Notes to" is the Android app's alone (not the web page, not the
+ * desktop app's Notes): what the app opens on, kept on this phone
+ * (native/useNotesOpenTo.ts has when it applies).
  */
 import { useState } from 'react';
 import { loadSettings, saveSettings } from '../../components/settingsStore';
 import { DownloadIcon, HelpIcon, LogoutIcon, PopOutIcon, UploadIcon } from '../../components/Icons';
 import { NotesLocationSettings } from '../native/NotesLocationSettings';
 import { NotesTileSetting } from '../native/NotesTileSetting';
-import { isMobile } from '../../api/platform';
+import { isAndroidApp, isMobile } from '../../api/platform';
 import { type ReminderTimes } from '../../api/reminderTimes';
-import { type NotesSortMode } from '../model/notesPrefs';
+import { asNotesOpenTo, type NotesOpenTo, type NotesSortMode } from '../model/notesPrefs';
 import { NotesUpdateMenu } from './NotesUpdateMenu';
 
 /** The Notes Android shell: no Púca page at `/` to open. */
@@ -35,6 +39,10 @@ interface AccountMenuProps {
     username: string;
     sort: NotesSortMode;
     onSort: (s: NotesSortMode) => void;
+    /** What the Android app opens to, on this device. The row shows only in
+     *  the app, and only when both are given. */
+    openTo?: NotesOpenTo;
+    onOpenTo?: (o: NotesOpenTo) => void;
     times: ReminderTimes;
     onTimes: (patch: Partial<ReminderTimes>) => void;
     onExportMarkdown: () => void;
@@ -49,7 +57,7 @@ interface AccountMenuProps {
     inPuca?: boolean;
 }
 
-export function AccountMenu({ username, sort, onSort, times, onTimes, onExportMarkdown, onExportJson, onShare, onHelp, onSignOut, onSignOutEverywhere, inPuca = false }: AccountMenuProps) {
+export function AccountMenu({ username, sort, onSort, openTo, onOpenTo, times, onTimes, onExportMarkdown, onExportJson, onShare, onHelp, onSignOut, onSignOutEverywhere, inPuca = false }: AccountMenuProps) {
     const [settings, setSettings] = useState(loadSettings);
     const update = (patch: Partial<ReturnType<typeof loadSettings>>) => {
         const next = { ...loadSettings(), ...patch };
@@ -90,6 +98,21 @@ export function AccountMenu({ username, sort, onSort, times, onTimes, onExportMa
                     <option value="edited">Recently edited</option>
                 </select>
             </div>
+            {isAndroidApp() && !inPuca && openTo !== undefined && onOpenTo && (
+                <>
+                    <div className="notes-menu-row">
+                        <label htmlFor="notes-open-to">Open Púca Notes to</label>
+                        <select id="notes-open-to" value={openTo} onChange={e => onOpenTo(asNotesOpenTo(e.target.value))}>
+                            <option value="notes">Your notes</option>
+                            <option value="note">A new note</option>
+                            <option value="list">A new list</option>
+                        </select>
+                    </div>
+                    <div className="notes-menu-hint">
+                        On this phone, when the app starts and when you come back to it after five minutes or more.
+                    </div>
+                </>
+            )}
             <div className="notes-menu-sep" />
             {TIME_ROWS.map(r => (
                 <div className="notes-menu-row" key={r.id}>

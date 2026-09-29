@@ -124,8 +124,18 @@ export async function routeNativeTarget(
  *
  *  `enabled` false runs nothing: Notes inside the Púca desktop app, where
  *  Chat already runs the one loop a page may have (api/taskReminders.ts
- *  guards itself, and a second caller's stop would be a no-op). */
-export function useNotesReminderLoop(navigate: (to: string) => void, compose?: (mode: ComposeMode) => void, enabled = true): void {
+ *  guards itself, and a second caller's stop would be a no-op).
+ *
+ *  `onLaunch` hears, once, whether the LAUNCH carried a target — a
+ *  shortcut, the tile, the widget or a notification tap — before that
+ *  target is acted on. "Open Púca Notes to" stands down for one
+ *  (native/useNotesOpenTo.ts): the launch's own request wins. */
+export function useNotesReminderLoop(
+    navigate: (to: string) => void,
+    compose?: (mode: ComposeMode) => void,
+    enabled = true,
+    onLaunch?: (carried: boolean) => void,
+): void {
     useEffect(() => {
         if (!enabled) return;
         if (!notesNativeAvailable()) return startTaskReminders();
@@ -152,6 +162,8 @@ export function useNotesReminderLoop(navigate: (to: string) => void, compose?: (
     // events between the unsubscribe and the next listener.
     const composeRef = useRef(compose);
     useEffect(() => { composeRef.current = compose; }, [compose]);
+    const launchRef = useRef(onLaunch);
+    useEffect(() => { launchRef.current = onLaunch; }, [onLaunch]);
     useEffect(() => {
         if (!enabled || !notesNativeAvailable()) return;
         let live = true;
@@ -162,7 +174,11 @@ export function useNotesReminderLoop(navigate: (to: string) => void, compose?: (
                 compose: mode => { if (live) composeRef.current?.(mode); },
             });
         };
-        void consumeNativeLaunchNav().then(go);
+        void consumeNativeLaunchNav().then(nav => {
+            // Told BEFORE the target is acted on, so nothing can open over it.
+            if (live) launchRef.current?.(!!nav.target);
+            go(nav);
+        });
         // The native side also keeps an event's target as the pending launch
         // target (for a page that was not listening yet); take it here too, or
         // the next mount of this shell — say, after signing out and back in —

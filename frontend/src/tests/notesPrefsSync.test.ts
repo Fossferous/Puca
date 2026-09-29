@@ -372,10 +372,11 @@ describe('the envelope', () => {
         expect(await openAccountBlob(identity, UID, 'notes-prefs', '{"v":1,"t":"notes-prefs","ct":"not base64 at all"}')).toBeNull();
     });
 
-    it('carries colour, labels and archive only — never the per-device view or sort', () => {
-        const text = encodePrefsDoc(1, { colors: {}, labels: {}, archived: {}, view: 'list', sort: 'title' } as unknown as NotesNoteState);
+    it('carries colour, labels and archive only — never the per-device view, sort or what the app opens to', () => {
+        const text = encodePrefsDoc(1, { colors: {}, labels: {}, archived: {}, view: 'list', sort: 'title', openTo: 'note' } as unknown as NotesNoteState);
         expect(text).not.toContain('view');
         expect(text).not.toContain('sort');
+        expect(text).not.toContain('openTo');
     });
 });
 

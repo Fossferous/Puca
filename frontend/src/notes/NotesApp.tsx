@@ -21,6 +21,7 @@ import { notesKeys } from './model/notesQueries';
 import { NativeTokenGate } from './native/NativeTokenGate';
 import { adoptFromNative, adoptOnResume, rescueOrExpire, rescueWhenOnline } from './native/nativeSessionRescue';
 import { useNotesNativeSession } from './native/useNotesNativeSession';
+import { useStartedSignedIn } from './native/useNotesOpenTo';
 import { pendingOutboxCount } from './model/notesOutbox';
 import { flushNotesPrefs, prefsUnsynced } from './model/notesPrefsSync';
 import { settlePendingDeviceRevoke } from '../api/deviceIdentity/pendingRevoke';
@@ -41,6 +42,10 @@ function SessionGate() {
     const navigate = useNavigate();
     const qc = useQueryClient();
     const [signedIn, setSignedIn] = useState(isAuthenticated());
+    // The session this page loaded with: the app's cold start, for "Open
+    // Púca Notes to". Over at the first sign-out — a shell a later sign-in
+    // mounts is not an app start.
+    const coldStart = useStartedSignedIn(signedIn);
     // Android app: every way out of the session clears the native side too.
     useNotesNativeSession(signedIn);
     // The token ran out while OFFLINE: signing in is impossible right now, so
@@ -203,7 +208,7 @@ function SessionGate() {
             />
             <Route
                 path="/*"
-                element={signedIn ? <NotesShell onSignOut={signOut} expiredOffline={expiredOffline} /> : <Navigate to="/login" replace />}
+                element={signedIn ? <NotesShell onSignOut={signOut} expiredOffline={expiredOffline} coldStart={coldStart} /> : <Navigate to="/login" replace />}
             />
         </Routes>
     );

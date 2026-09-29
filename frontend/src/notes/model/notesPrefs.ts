@@ -27,7 +27,8 @@
  * (what Morning, Afternoon and Evening mean, and the time a new reminder
  * starts at) ride in the same document and follow the account too. The
  * grid/list and sort choices are NOT synced — they are per device, on
- * purpose.
+ * purpose — and neither is what the Android app opens to (`openTo`): that
+ * is how one phone behaves, not a fact about the account.
  *
  * NAMESPACED PER ACCOUNT, deliberately, like taskPlaces: the key carries the
  * user id, so on a shared browser user B never sees user A's labels, and a
@@ -47,6 +48,14 @@ export type NotesViewMode = 'grid' | 'list';
 /** `puca` = the saved tab order Púca's Tasks view uses (pins lead); the
  *  others are display-only sorts and disable the Move actions. */
 export type NotesSortMode = 'puca' | 'title' | 'created' | 'edited';
+/** What Púca Notes' Android app opens to: the notes, or a new note / a new
+ *  list ready to type in (native/useNotesOpenTo.ts says when). */
+export type NotesOpenTo = 'notes' | 'note' | 'list';
+
+/** A stored or chosen value, anything unknown read as the notes. */
+export function asNotesOpenTo(raw: unknown): NotesOpenTo {
+    return raw === 'note' || raw === 'list' ? raw : 'notes';
+}
 
 export interface NotesPrefs extends NotesNoteState {
     /** Always concrete here (the synced shape leaves it absent when the
@@ -54,6 +63,7 @@ export interface NotesPrefs extends NotesNoteState {
     times: ReminderTimes;
     view: NotesViewMode;
     sort: NotesSortMode;
+    openTo: NotesOpenTo;
 }
 
 const STORAGE_PREFIX = 'pucaNotesPrefs';
@@ -65,6 +75,7 @@ export const EMPTY_KEEP_PREFS: NotesPrefs = Object.freeze({
     times: DEFAULT_REMINDER_TIMES,
     view: 'grid',
     sort: 'puca',
+    openTo: 'notes',
 }) as NotesPrefs;
 
 function storageKey(uid: string): string {
@@ -119,7 +130,7 @@ export function parseNotesPrefs(raw: string | null): NotesPrefs {
 
     const view: NotesViewMode = o.view === 'list' ? 'list' : 'grid';
     const sort: NotesSortMode = o.sort === 'title' || o.sort === 'created' || o.sort === 'edited' ? o.sort : 'puca';
-    return { colors, labels, archived, times: parseReminderTimes(o.times), view, sort };
+    return { colors, labels, archived, times: parseReminderTimes(o.times), view, sort, openTo: asNotesOpenTo(o.openTo) };
 }
 
 /** Normalise, drop blanks, dedupe case-insensitively (first spelling wins),
@@ -247,6 +258,13 @@ export function setNotesSort(sort: NotesSortMode): void {
     update(p => (p.sort === sort ? p : { ...p, sort }));
 }
 
+/** This device only, like the view and the sort: signed out there is no
+ *  account to file it under and the write is dropped; a sign-out scrubs it
+ *  with the rest of this record (api/auth.ts logout). */
+export function setNotesOpenTo(openTo: NotesOpenTo): void {
+    update(p => (p.openTo === openTo ? p : { ...p, openTo }));
+}
+
 /** Change one or more reminder times. A malformed value is ignored rather
  *  than stored (the <input type="time"> hands us '' while it is half-typed). */
 export function setReminderTimes(patch: Partial<ReminderTimes>): void {
@@ -290,8 +308,8 @@ export function pruneNotesPrefs(liveKeys: ReadonlySet<string>): void {
 }
 
 /** Replace the SYNCED part (colour, labels, archive) with what the account's
- *  sealed blob says — notesPrefsSync.ts's one write path. View and sort are
- *  per device and are left exactly as they are.
+ *  sealed blob says — notesPrefsSync.ts's one write path. View, sort and
+ *  what the app opens to are per device and are left exactly as they are.
  *
  *  `expectUid`: the account this state belongs to. When given and it is not
  *  the one signed in, nothing is written — a sync operation that outlived

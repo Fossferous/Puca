@@ -13,7 +13,7 @@ vi.mock('../api/auth', () => ({
 const {
     parseNotesPrefs, dedupeLabels, getNotesPrefs, subscribeNotesPrefs, invalidateNotesPrefs,
     setNoteColor, setNoteLabels, setNoteArchived, setNotesView, setReminderTimes, renameLabel, pruneNotesPrefs,
-    EMPTY_KEEP_PREFS,
+    setNotesOpenTo, replaceNoteState, EMPTY_KEEP_PREFS,
 } = await import('../notes/model/notesPrefs');
 import { DEFAULT_REMINDER_TIMES } from '../api/reminderTimes';
 
@@ -52,6 +52,7 @@ describe('parseNotesPrefs', () => {
             times: DEFAULT_REMINDER_TIMES,
             view: 'list',
             sort: 'puca',
+            openTo: 'notes',
         });
     });
 
@@ -104,7 +105,7 @@ describe('the live store', () => {
         setNoteLabels('list:2', ['  ']);
         setNoteArchived('list:3', true);
         setNoteArchived('list:3', false);
-        expect(JSON.parse(backing.get('pucaNotesPrefs:42')!)).toEqual({ colors: {}, labels: {}, archived: {}, times: DEFAULT_REMINDER_TIMES, view: 'grid', sort: 'puca' });
+        expect(JSON.parse(backing.get('pucaNotesPrefs:42')!)).toEqual({ colors: {}, labels: {}, archived: {}, times: DEFAULT_REMINDER_TIMES, view: 'grid', sort: 'puca', openTo: 'notes' });
     });
 
     it('notifies subscribers on every write and on invalidation, not on reads', () => {
@@ -172,7 +173,7 @@ describe('the live store', () => {
         pruneNotesPrefs(new Set(['list:1', 'list:2', 'channel:3']));
         expect(getNotesPrefs()).toBe(before);   // untouched: no write, same object
         pruneNotesPrefs(new Set(['list:2']));
-        expect(getNotesPrefs()).toEqual({ colors: {}, labels: { 'list:2': ['x'] }, archived: {}, times: DEFAULT_REMINDER_TIMES, view: 'grid', sort: 'puca' });
+        expect(getNotesPrefs()).toEqual({ colors: {}, labels: { 'list:2': ['x'] }, archived: {}, times: DEFAULT_REMINDER_TIMES, view: 'grid', sort: 'puca', openTo: 'notes' });
     });
 });
 
@@ -213,5 +214,50 @@ describe('reminder times', () => {
         setReminderTimes({ evening: '24:00' });
         expect(getNotesPrefs()).toBe(before);     // no write at all: same object
         expect(getNotesPrefs().times.morning).toBe('07:30');
+    });
+});
+
+// "Open Púca Notes to" (the Android app's account menu). It is how ONE phone
+// behaves, so it lives beside the view and the sort: this device, this
+// account's record, never the synced document — and a sign-out scrubs the
+// record with everything else in it (api/auth.ts logout).
+describe('what the Android app opens to', () => {
+    it('defaults to the notes: a fresh device, and a record written before the setting existed', () => {
+        expect(getNotesPrefs().openTo).toBe('notes');
+        expect(EMPTY_KEEP_PREFS.openTo).toBe('notes');
+        expect(parseNotesPrefs(JSON.stringify({ view: 'list', sort: 'title' })).openTo).toBe('notes');
+    });
+
+    it('keeps each of the three choices across a fresh read of storage', () => {
+        for (const choice of ['note', 'list', 'notes'] as const) {
+            setNotesOpenTo(choice);
+            expect(JSON.parse(backing.get('pucaNotesPrefs:42')!).openTo).toBe(choice);
+            invalidateNotesPrefs();   // as a fresh launch reads it
+            expect(getNotesPrefs().openTo).toBe(choice);
+        }
+    });
+
+    it('reads anything it does not know as the notes, never as a composer', () => {
+        expect(parseNotesPrefs('{"openTo":"draw"}').openTo).toBe('notes');
+        expect(parseNotesPrefs('{"openTo":7}').openTo).toBe('notes');
+        expect(parseNotesPrefs('{"openTo":"list"}').openTo).toBe('list');   // positive control
+    });
+
+    it('belongs to this account on this device: another account starts from the notes, and signed out nothing is written', () => {
+        setNotesOpenTo('note');
+        uid = 7;
+        expect(getNotesPrefs().openTo).toBe('notes');
+        uid = null;
+        setNotesOpenTo('list');
+        expect([...backing.keys()]).toEqual(['pucaNotesPrefs:42']);
+        uid = 42;
+        expect(getNotesPrefs().openTo).toBe('note');
+    });
+
+    it('a sync from the account leaves it exactly as this device set it', () => {
+        setNotesOpenTo('list');
+        replaceNoteState({ colors: { 'list:1': 'mint' }, labels: {}, archived: {} });
+        expect(getNotesPrefs().colors).toEqual({ 'list:1': 'mint' });   // the sync did land
+        expect(getNotesPrefs().openTo).toBe('list');
     });
 });
