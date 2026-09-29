@@ -162,6 +162,64 @@ describe.each(CASES)('$name', ({ ui, open, isOpen }) => {
     });
 });
 
+// --- Two NotesDialogs at once ---------------------------------------------------------------
+
+/**
+ * Stacked — the shortcuts help over a paste question, a confirm over the
+ * label manager — each dialog listens on the document in the capture phase,
+ * and stopPropagation never stops another listener on the same node: one
+ * Escape closed both, the lower one first. It is the top one's; the one
+ * below is next.
+ */
+describe('two NotesDialogs stacked', () => {
+    const below = vi.fn();
+    const top = vi.fn();
+    beforeEach(() => { below.mockReset(); top.mockReset(); });
+    // The lower one gets a fresh closure each render, as a parent passes it,
+    // so it re-binds its listener AFTER the top one's — and must not rise
+    // over the newer dialog for it.
+    const both = (withTop: boolean, over: { topBlocked?: boolean; topOnScreen?: boolean } = {}) => render(
+        <>
+            <NotesDialog title="Below" onClose={() => below()}><span>below</span></NotesDialog>
+            {withTop && (
+                <LayerOnScreenContext.Provider value={over.topOnScreen ?? true}>
+                    <NotesDialog title="Top" onClose={top} escapeBlocked={over.topBlocked}><span>top</span></NotesDialog>
+                </LayerOnScreenContext.Provider>
+            )}
+        </>,
+        true,
+    );
+
+    it('one Escape closes only the top one; the next closes the one below', () => {
+        both(false);
+        both(true);
+        both(true);
+        escape();
+        expect(top).toHaveBeenCalledTimes(1);
+        expect(below).not.toHaveBeenCalled();
+        expect(reachedWindow).toEqual([]);
+        both(false);
+        escape();
+        expect(below).toHaveBeenCalledTimes(1);
+    });
+
+    it('the top one’s Escape wanted by something inside it closes neither', () => {
+        both(false);
+        both(true, { topBlocked: true });
+        escape();
+        expect(top).not.toHaveBeenCalled();
+        expect(below).not.toHaveBeenCalled();
+    });
+
+    it('a newer one hidden with Notes leaves Escape to the one on screen', () => {
+        both(false);
+        both(true, { topOnScreen: false });
+        escape();
+        expect(top).not.toHaveBeenCalled();
+        expect(below).toHaveBeenCalledTimes(1);
+    });
+});
+
 // --- Every other window- or document-level key listener Notes can reach ----------------------
 
 const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');

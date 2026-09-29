@@ -96,10 +96,18 @@ export function eventMatchesBinding(
     return e.ctrlKey === b.ctrl && e.altKey === b.alt && e.shiftKey === b.shift;
 }
 
+/**
+ * Is a key typed here typing, not a command? An input, a textarea, editable
+ * text — or anything inside `[data-owns-keys]`: a question that took the
+ * focus off the field a paste went into, so that a reflexive Enter answers
+ * nothing (components/PastedLinesDialog.tsx). The keys were typing a moment
+ * ago and still are not commands — not a bare-key press here, nor Notes'
+ * single-key shortcuts or its Ctrl+A over the page behind the question.
+ */
 export function isEditableTarget(t: EventTarget | null): boolean {
     if (!(t instanceof HTMLElement)) return false;
     if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return true;
-    return t.isContentEditable;
+    return t.isContentEditable || t.closest('[data-owns-keys]') !== null;
 }
 
 /**

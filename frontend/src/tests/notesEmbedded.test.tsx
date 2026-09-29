@@ -288,6 +288,61 @@ describe('the keyboard, while the view is hidden or covered', () => {
     });
 });
 
+/**
+ * The composer's paste question takes the focus off the field it was pasted
+ * into (PastedLinesDialog: a reflexive Enter must answer nothing), onto an
+ * element that is not editable — and every key gate here had relied on the
+ * focus sitting in an input. It is none of the shell's own popups, so
+ * nothing else switched the shortcuts off: `r` refreshed, `?` stacked the
+ * help over it, `/` took the focus into the search box behind it and Ctrl+A
+ * selected the notes under it. Keys typed at the question are the
+ * question's, on Notes' own page and embedded alike.
+ */
+describe('the composer’s paste question holds the keys', () => {
+    const question = () => document.querySelector<HTMLElement>('.notes-paste-dialog');
+    const at = (key: string, init: KeyboardEventInit = {}) => {
+        const e = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...init });
+        act(() => { (document.activeElement ?? document.body).dispatchEvent(e); });
+        return e;
+    };
+    function pasteIntoComposer() {
+        act(() => { document.querySelector<HTMLButtonElement>('button[aria-label="Take a note"]')!.click(); });
+        const item = document.querySelector<HTMLInputElement>('input[aria-label="Item 1"]')!;
+        item.focus();
+        const ev = new Event('paste', { bubbles: true, cancelable: true });
+        Object.defineProperty(ev, 'clipboardData', { value: { files: [], items: [], types: ['text/plain'], getData: () => 'Milk\nBread\nEggs' } });
+        act(() => { item.dispatchEvent(ev); });
+        expect(question(), 'the question is open').not.toBeNull();
+        expect(document.activeElement, 'and has the focus').toBe(question());
+    }
+
+    for (const mode of ['embedded', 'page'] as const) {
+        it(`${mode}: \`r\` \`?\` \`/\` and Ctrl+A at the question do nothing behind it`, () => {
+            mount(shell(mode === 'embedded' ? on() : undefined));
+            pasteIntoComposer();
+            at('r');
+            expect(h.refreshes, 'r').toBe(0);
+            at('?');
+            expect(helpOpen(), '?').toBe(false);
+            at('/');
+            expect(document.activeElement, '/').toBe(question());
+            expect(at('a', { ctrlKey: true }).defaultPrevented, 'Ctrl+A').toBe(false);
+            // Tabbed on to an answer, or back to the X: still the question's.
+            for (const b of document.querySelectorAll<HTMLButtonElement>('.notes-dialog button')) {
+                b.focus();
+                at('r');
+            }
+            expect(h.refreshes, 'r from its buttons').toBe(0);
+            // POSITIVE CONTROL: the shortcuts are live, and answer from anywhere else.
+            act(() => { [...document.querySelectorAll<HTMLButtonElement>('.notes-paste-actions button')].find(b => b.textContent === 'Cancel')!.click(); });
+            expect(question()).toBeNull();
+            (document.activeElement as HTMLElement).blur();
+            at('r');
+            expect(h.refreshes).toBe(1);
+        });
+    }
+});
+
 describe('below the shell: the calendar and the open note', () => {
     it('POSITIVE CONTROL: on the calendar, `m` goes to the month', () => {
         mount(shell(on()), '/calendar');

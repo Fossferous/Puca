@@ -18,6 +18,9 @@
  * goes to the question itself, not to a button: the paste this guards
  * against is the one the person did not mean, and a reflexive Enter after it
  * must answer nothing — least of all "Add N items". Tab reaches the answers.
+ * The keys typed there were typing a moment ago and stay the question's
+ * (`ownsKeys`): no bare-key hotkey of Púca's, and no single-key shortcut or
+ * Ctrl+A of Notes' behind it — every one of them stood aside for the input.
  *
  * SHARED: it was notes/components/PastedLinesDialog.tsx until Púca's own
  * Tasks view took pastes too. Its class names are unchanged (the Notes tests
@@ -52,7 +55,7 @@ export function PastedLinesDialog({ lines, total = lines.length, detail = null, 
     const bodyRef = useRef<HTMLDivElement>(null);
     useEffect(() => { bodyRef.current?.focus({ preventScroll: true }); }, []);
     return (
-        <NotesDialog title="Add these as items?" onClose={onCancel}>
+        <NotesDialog title="Add these as items?" onClose={onCancel} ownsKeys>
             <div className="notes-paste-dialog" ref={bodyRef} tabIndex={-1}>
                 <p className="notes-labels-hint">
                     You pasted {total} lines. Items are removed one at a time, so this asks first.
