@@ -5,9 +5,17 @@
 import { describe, it, expect, vi } from 'vitest';
 import { QueryClient } from '@tanstack/react-query';
 
-vi.mock('../api/auth', () => ({ currentUserIdFromToken: () => 7 }));
+/** The token's account: 7, until a test signs it out. The keys the page
+ *  holds, for the tests that call with the page's own defaults. */
+const auth = vi.hoisted(() => ({ sub: 7 as number | null, identity: null as Identity | null }));
+vi.mock('../api/auth', () => ({ currentUserIdFromToken: () => auth.sub }));
+vi.mock('../api/e2ee', async importOriginal => ({
+    ...(await importOriginal<typeof import('../api/e2ee')>()),
+    seedMatchesCurrentAccount: () => auth.identity !== null,
+    getActiveIdentity: () => auth.identity,
+}));
 
-import { makeIdentity, sealLocal, openLocal } from '../api/e2ee';
+import { makeIdentity, sealLocal, openLocal, type Identity } from '../api/e2ee';
 import { TASK_IDENTITY_LOCKED, ENC_KEY_UNAVAILABLE } from '../api/decryptMarkers';
 const { hydrateNotesCache, startNotesCachePersistence, memoryStore, safeToPersist, idbStore, NOTES_DB_VERSION } = await import('../notes/model/notesCache');
 const { notesCacheDbName } = await import('../api/notesCacheScrub');
@@ -92,6 +100,36 @@ describe('persist, then hydrate on a cold start', () => {
         b.getQueryCache().subscribe(e => { if (e.type === 'added') current = null; });
         expect(await hydrateNotesCache(b, { sub: 7, identity: me, store, currentSub: () => current })).toBe(1);
         expect(b.getQueryCache().getAll()).toHaveLength(1);
+    });
+
+    // As the desktop view and Notes' own page call it: with no deps, so the
+    // account it keeps asking about is the token's.
+    it('called with its own defaults, it stops at a sign-out too', async () => {
+        const idb = makeFakeIndexedDB();
+        const real = globalThis.indexedDB;
+        Object.defineProperty(globalThis, 'indexedDB', { value: idb.factory, configurable: true });
+        auth.identity = me;
+        try {
+            const store = idbStore(7, 'q')!;
+            const a = new QueryClient();
+            const stop = startNotesCachePersistence(a, { sub: 7, currentSub: () => 7, identity: () => me, store }, 5);
+            for (let i = 1; i <= 3; i++) a.setQueryData(['notes', 'tasks', 'list', i], tasks);
+            await new Promise(r => setTimeout(r, 30));
+            await settle();
+            stop();
+
+            // POSITIVE CONTROL: signed in throughout, the defaults bring all three back.
+            expect(await hydrateNotesCache(new QueryClient())).toBe(3);
+
+            const b = new QueryClient();
+            b.getQueryCache().subscribe(e => { if (e.type === 'added') auth.sub = null; });
+            expect(await hydrateNotesCache(b)).toBe(1);
+        } finally {
+            auth.sub = 7;
+            auth.identity = null;
+            if (real === undefined) delete (globalThis as { indexedDB?: IDBFactory }).indexedDB;
+            else Object.defineProperty(globalThis, 'indexedDB', { value: real, configurable: true });
+        }
     });
 
     it('writes nothing once a different account is signed in', async () => {

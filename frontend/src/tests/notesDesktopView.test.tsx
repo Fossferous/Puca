@@ -19,7 +19,7 @@ import { act, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { createRoot, type Root } from 'react-dom/client';
 import { useLocation } from 'react-router-dom';
-import type { QueryClient } from '@tanstack/react-query';
+import { QueryObserver, type Query, type QueryClient } from '@tanstack/react-query';
 
 const h = vi.hoisted(() => ({
     clients: [] as QueryClient[],
@@ -109,6 +109,21 @@ async function unmount() {
 const view = () => document.querySelector<HTMLElement>('.notes-desktop-view');
 let pause: ReturnType<typeof vi.spyOn>;
 
+/** The long timers (a query's gc timer is 30 minutes) armed from here on,
+ *  and those of them nobody has cleared. */
+function longTimers() {
+    const set = vi.spyOn(globalThis, 'setTimeout');
+    const clear = vi.spyOn(globalThis, 'clearTimeout');
+    const ids = () => set.mock.calls.flatMap((c, i) => ((c[1] ?? 0) >= 60_000 ? [set.mock.results[i].value as unknown] : []));
+    return {
+        armed: () => ids().length,
+        pending: () => {
+            const cleared = new Set(clear.mock.calls.map(c => c[0] as unknown));
+            return ids().filter(id => !cleared.has(id));
+        },
+    };
+}
+
 beforeEach(() => {
     h.clients = [];
     h.cleared = [];
@@ -175,6 +190,50 @@ describe('one query client per mount, gone with it', () => {
         expect(qc.getQueryData(['notes', 'tasks', 'list', 1])).toBeUndefined();
         expect(qc.getQueryData(['notes', 'lists'])).toBeUndefined();
         expect(qc.getQueryCache().getAll()).toEqual([]);
+    });
+
+    // Out of the cache is not out of memory. A fetch still out on a query
+    // re-arms its gc timer as it ends — cancelled by the clear or not — and
+    // that timer holds the query, rows and all, for 30 minutes.
+    it('a fetch still out as the view goes ends holding no rows, and no timer keeps it', async () => {
+        mount(true);
+        await flush();
+        const [qc] = h.clients;
+        let answer!: (rows: string[]) => void;
+        let reads = 0;
+        const read = () => (++reads === 1 ? Promise.resolve(['Groceries']) : new Promise<string[]>(r => { answer = r; }));
+        const notes = new QueryObserver(qc, { queryKey: ['notes', 'lists'], queryFn: read });
+        const stopWatching = notes.subscribe(() => {});
+        await flush();
+        const q = qc.getQueryCache().find({ queryKey: ['notes', 'lists'] })!;
+        expect(q.state.data).toEqual(['Groceries']);       // POSITIVE CONTROL: the rows are there
+        void qc.invalidateQueries({ queryKey: ['notes'] });  // a live event's re-read
+        expect(q.state.fetchStatus).toBe('fetching');
+        const timers = longTimers();
+        stopWatching();                                      // Notes' own query, gone with its root
+        await unmount();
+        answer(['Groceries', 'Hardware']);
+        await flush();
+        expect(qc.getQueryCache().getAll()).toEqual([]);
+        expect(timers.armed()).toBeGreaterThan(0);           // its end did re-arm one...
+        expect(timers.pending()).toEqual([]);                // ...and nothing keeps it
+        expect(q.state.data).toBeUndefined();
+    });
+
+    it('a fetch started on it after it was cleared ends holding nothing either', async () => {
+        mount(true);
+        await flush();
+        const [qc] = h.clients;
+        await unmount();
+        let q: Query | undefined;
+        qc.getQueryCache().subscribe(e => { if (e.type === 'added') q = e.query; });
+        const timers = longTimers();
+        await qc.fetchQuery({ queryKey: ['notes', 'lists'], queryFn: async () => ['Groceries'] });
+        await flush();
+        expect(q?.state.status).toBe('pending');             // emptied, not merely out of the cache
+        expect(q?.state.data).toBeUndefined();
+        expect(timers.armed()).toBeGreaterThan(0);
+        expect(timers.pending()).toEqual([]);
     });
 
     it('a second mount — the next session — gets a new client, not the last one', async () => {
