@@ -115,6 +115,9 @@ import './ServerTasksBoard.css';
  * file name stays in the address bar and nothing else changes. The desktop shell runs at tauri://localhost and the phone at
  * https://localhost, where nothing is shared: a link from either would open
  * a signed-out, default-themed page in the system browser, so they get none.
+ * The desktop app needs none anyway — Notes is inside it, on the rail's
+ * "Tasks & notes" (NotesDesktopView.tsx; Chat's `notesInApp`), already signed
+ * in.
  */
 function notesUrl(): string | null {
     if (typeof window === 'undefined' || isTauri() || isMobile()) return null;

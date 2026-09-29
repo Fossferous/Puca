@@ -327,6 +327,12 @@ for (const f of ['docs/USER_GUIDE.md', 'docs/GETTING_STARTED.md']) {
         if (/Share sheet/.test(notBuilt) && /android\.intent\.action\.SEND\b/.test(manifest) && shareIn) {
             fail('docs/NOTES.md (Not built)', 'still says Púca Notes is not in Android\'s Share sheet, but the Notes manifest declares ACTION_SEND and the plugin advertises "shareIn" — delete the bullet (the browser-side gap has its own)');
         }
+        // Notes inside the desktop app (NotesDesktopView): a bullet saying the
+        // desktop has no Notes — the one this replaced, or a merge bringing it
+        // back — is a claim the tree contradicts.
+        if (/desktop Notes app|Notes on a computer is the browser page/i.test(notBuilt) && exists('frontend/src/components/NotesDesktopView.tsx')) {
+            fail('docs/NOTES.md (Not built)', 'still says there is no Púca Notes on the desktop, but frontend/src/components/NotesDesktopView.tsx puts it inside the desktop app — delete the bullet (see "Inside the desktop app")');
+        }
     }
 }
 

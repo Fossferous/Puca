@@ -18,7 +18,10 @@ import { notesServiceWorkerPlugin } from './scripts/notes-sw.mjs'
  * copy of dist/ without it (scripts/stage-desktop-dist.mjs), because in the
  * browser Notes is a page of the web app's origin — Púca's shells run at their
  * own origins, where the session and the E2EE seed are not shared with it.
- * Notes' OWN Android app is the native build below.
+ * Púca's DESKTOP app has Notes anyway, not from this build: the same NotesShell
+ * mounted inside Púca's own page (components/NotesDesktopView.tsx), which the
+ * MAIN build emits as a lazy chunk, so it rides in dist-desktop/ with the rest
+ * of the main bundle. Notes' OWN Android app is the native build below.
  */
 const here = (p: string) => fileURLToPath(new URL(p, import.meta.url))
 
