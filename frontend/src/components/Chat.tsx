@@ -1133,6 +1133,18 @@ export function Chat({ onLogout }: ChatProps) {
     // Tasks view is built for.
     const notesInApp = isTauri() && !isMobile;
     const notesOnScreen = notesInApp && showNotesView;
+    // The message list can be what the shared scroller holds and still not be
+    // SEEN: Notes lies over the chat as a view of its own, without touching
+    // the scroller, so showingMessageList — which the scroll state follows —
+    // stays true under it. Everything that reads "it arrived on screen, so it
+    // is read" (the open channel's read cursor, the unread poll's zero, a DM
+    // into the open conversation making no sound) asks this instead, or a
+    // message nobody saw would be marked read.
+    const messageListSeen = showingMessageList && !notesOnScreen;
+    const messageListSeenRef = useRef(messageListSeen);
+    useLayoutEffect(() => {
+        messageListSeenRef.current = messageListSeen;
+    }, [messageListSeen]);
 
     // Swipe between the mobile panels (servers ↔ channels ↔ chat ↔ members),
     // reusing the existing panel state + CSS slide transitions. Guarded so it
@@ -1431,15 +1443,30 @@ export function Chat({ onLogout }: ChatProps) {
             if (currentChannelIdRef.current !== channelId) return;
             if (document.visibilityState !== 'visible' || !document.hasFocus()) return;
             // The voice/stream/checklist views keep currentChannel pointing at
-            // the last text channel while COVERING it — messages arriving then
-            // were never seen, so they must not be marked read.
-            if (!showingMessageListRef.current) return;
+            // the last text channel while COVERING it, and Notes lies over it
+            // — messages arriving then were never seen, so they must not be
+            // marked read.
+            if (!messageListSeenRef.current) return;
             markReadNow(channelId);
         }, 1500);
     }, [markReadNow]);
     useEffect(() => () => {
         if (readDebounceRef.current !== null) clearTimeout(readDebounceRef.current);
     }, []);
+
+    // Notes lifted off the SAME channel it covered: what arrived under it is
+    // on screen now, and read as it would be on coming back to the window —
+    // here, and pinned at the bottom. Left for another channel instead, that
+    // one's history load reads it.
+    const channelUnderNotesRef = useRef<number | null>(null);
+    useEffect(() => {
+        if (notesOnScreen) { channelUnderNotesRef.current = currentChannelIdRef.current; return; }
+        const covered = channelUnderNotesRef.current;
+        channelUnderNotesRef.current = null;
+        if (covered === null || covered !== currentChannelIdRef.current) return;
+        if (document.visibilityState !== 'visible' || !document.hasFocus()) return;
+        if (messageListSeenRef.current && atBottomRef.current) markReadNow(covered);
+    }, [notesOnScreen, markReadNow]);
 
     // Rail bubbles: hydrate the cross-server unread totals on mount, on every
     // WS (re)connect (events missed while the socket was down are invisible
@@ -1796,7 +1823,7 @@ export function Chat({ onLogout }: ChatProps) {
                 // Via refs so this effect stays keyed on the server id alone.
                 const activeId = currentChannelIdRef.current;
                 if (activeId !== null && appIsForeground()
-                    && showingMessageListRef.current && atBottomRef.current) {
+                    && messageListSeenRef.current && atBottomRef.current) {
                     countsMap.set(activeId, 0);
                 }
                 setUnreadCounts(countsMap);
@@ -2021,7 +2048,8 @@ export function Chat({ onLogout }: ChatProps) {
             if (isBlocked(payload.sender.id)) return;
 
             // Ping for an incoming DM from someone else that isn't the
-            // conversation already on screen. (self-gates on the `message` setting.)
+            // conversation already on screen — the open one with Notes over
+            // it is not. (self-gates on the `message` setting.)
             if (payload.sender.id !== currentUserId) {
                 // Same rule as channels: notify on FOCUS, ping on what is open.
                 notifyNewMessage({
@@ -2032,7 +2060,7 @@ export function Chat({ onLogout }: ChatProps) {
                     notifyKey: `dm:${payload.conversation_id}`,
                     nav: `dm:${payload.conversation_id}`,
                 });
-                if (!(currentDM && payload.conversation_id === currentDM.id)) {
+                if (!(currentDM && payload.conversation_id === currentDM.id && messageListSeenRef.current)) {
                     playMessageSound();
                     // In-app shade, WITH the decrypted body — a DM's plaintext
                     // is available here (pairwise key = the sender), unlike
@@ -2411,10 +2439,11 @@ export function Chat({ onLogout }: ChatProps) {
                 // The user just read this on screen — advance the read cursor,
                 // or the 30s poll re-lights the badge on the open channel.
                 // Gated on focus + the message list actually being on screen
-                // (not covered by the voice/stream/checklist views) + pinned
-                // at the bottom, so nothing unseen is ever marked read.
+                // (not covered by the voice/stream/checklist views, nor by
+                // Notes) + pinned at the bottom, so nothing unseen is ever
+                // marked read.
                 if (document.visibilityState === 'visible' && document.hasFocus()
-                    && showingMessageListRef.current && atBottomRef.current) {
+                    && messageListSeenRef.current && atBottomRef.current) {
                     scheduleMarkRead(currentChannel.id);
                 }
             }
@@ -2751,9 +2780,9 @@ export function Chat({ onLogout }: ChatProps) {
             void clearMobileNotifications();
             const activeId = currentChannelIdRef.current;
             // Message list on screen AND pinned at the bottom: what arrived
-            // while away is visible now. A covered chat (voice view etc.) or
-            // a scrolled-up reader keeps their unread state.
-            if (activeId !== null && showingMessageListRef.current && atBottomRef.current) {
+            // while away is visible now. A covered chat (voice view, Notes
+            // over it) or a scrolled-up reader keeps their unread state.
+            if (activeId !== null && messageListSeenRef.current && atBottomRef.current) {
                 markReadNow(activeId);
             }
         };

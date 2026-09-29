@@ -13,6 +13,10 @@
  * "Saved to …" toast, and every place another full view opens also closing
  * Notes — the list that grows each time a view is added, and the one a new
  * entry point silently forgets.
+ *
+ * And what Notes covering the chat means for the conversation under it:
+ * nothing arriving there is seen, so none of it is marked read, and a DM in
+ * it pings like any DM not on screen.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
@@ -23,11 +27,31 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-const h = vi.hoisted(() => ({ tauri: false, servers: [] as unknown[], dms: [] as unknown[], viewProps: [] as { active: boolean }[], viewMounts: 0, viewUnmounts: 0 }));
+const h = vi.hoisted(() => ({
+    tauri: false, servers: [] as unknown[], dms: [] as unknown[], channels: [] as unknown[],
+    viewProps: [] as { active: boolean }[], viewMounts: 0, viewUnmounts: 0,
+    markRead: [] as number[], sounds: 0,
+}));
 
 vi.mock('../api/platform', async importOriginal => ({
     ...(await importOriginal<typeof import('../api/platform')>()),
     isTauri: () => h.tauri,
+}));
+// The read cursor, the ping, and content that needs no keys to "decrypt".
+vi.mock('../api/servers', async importOriginal => ({
+    ...(await importOriginal<typeof import('../api/servers')>()),
+    markChannelRead: async (id: number) => { h.markRead.push(id); },
+    decryptChannelContent: async (_channel: number, content: string) => content,
+    decryptChannelMessages: async () => [],
+}));
+vi.mock('../api/dms', async importOriginal => ({
+    ...(await importOriginal<typeof import('../api/dms')>()),
+    decryptDMContent: async (content: string) => content,
+}));
+vi.mock('../utils/audioFeedback', async importOriginal => ({
+    ...(await importOriginal<typeof import('../utils/audioFeedback')>()),
+    playMessageSound: () => { h.sounds += 1; },
+    playMentionSound: () => {},
 }));
 vi.mock('../components/NotesDesktopView', async () => {
     const { useEffect } = await import('react');
@@ -44,6 +68,7 @@ Object.defineProperty(window, 'matchMedia', {
     configurable: true,
     value: (q: string) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} }),
 });
+if (!Element.prototype.scrollTo) Element.prototype.scrollTo = function scrollTo() {};
 class NoObserver { observe() {} unobserve() {} disconnect() {} }
 vi.stubGlobal('ResizeObserver', NoObserver);
 vi.stubGlobal('IntersectionObserver', NoObserver);
@@ -51,11 +76,13 @@ vi.stubGlobal('IntersectionObserver', NoObserver);
 // would otherwise reach for the network. One server list, the rest empty.
 vi.stubGlobal('fetch', vi.fn(async (url: string) => {
     const u = String(url);
-    const body = /\/servers$/.test(u) ? h.servers : /\/dms$/.test(u) ? h.dms : /ice|features|version|keys|me$|settings|unread/.test(u) ? {} : [];
+    const body = /\/servers$/.test(u) ? h.servers : /\/dms$/.test(u) ? h.dms : /\/servers\/[^/]+\/channels$/.test(u) ? h.channels
+        : /ice|features|version|keys|me$|settings|unread/.test(u) ? {} : [];
     return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body), headers: new Headers() } as unknown as Response;
 }));
 
 const { Chat } = await import('../components/Chat');
+const { wsClient } = await import('../api/websocket');
 
 let root: Root | null = null;
 let host: HTMLElement | null = null;
@@ -83,9 +110,12 @@ beforeEach(() => {
     h.tauri = false;
     h.servers = [];
     h.dms = [];
+    h.channels = [];
     h.viewProps = [];
     h.viewMounts = 0;
     h.viewUnmounts = 0;
+    h.markRead = [];
+    h.sounds = 0;
 });
 afterEach(() => {
     act(() => { root?.unmount(); });
@@ -168,6 +198,98 @@ describe('desktop: the rail opens Púca Notes inside the app', () => {
         expect(notesView()?.dataset.active).toBe('true');
         await click(host!.querySelector('.server-icon[title="Alpha"]'));
         expect(notesView()?.dataset.active).toBe('false');
+    });
+});
+
+describe('Notes over the chat: the conversation under it is not on screen', () => {
+    beforeEach(() => {
+        h.tauri = true;
+        // Here, focused and visible: every "is the person looking" gate but
+        // the one under test says yes.
+        vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+        vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    });
+    afterEach(() => { vi.restoreAllMocks(); });
+
+    const GENERAL = { id: 10, server_id: 's1', name: 'general', channel_type: 0, position: 0, parent_id: null };
+    const deliver = async (type: string, payload: unknown) => {
+        await act(async () => {
+            (wsClient as unknown as { handleMessage(m: unknown): void }).handleMessage({ type, payload });
+            await new Promise(r => setTimeout(r, 0));
+        });
+    };
+    const fromBob = () => ({ room_id: 'channel_10', sender: { id: 2, username: 'bob' }, content: 'hi', timestamp: 1, message_id: `m${Math.random()}` });
+    /** Past the 1.5 s the open channel's read cursor waits for a burst. */
+    const pastDebounce = () => act(async () => { await new Promise(r => setTimeout(r, 1700)); });
+    async function openGeneral() {
+        h.servers = [{ id: 's1', name: 'Alpha', owner_id: 99, icon_file_id: null }];
+        h.channels = [GENERAL];
+        await mountChat();
+        await act(async () => { await new Promise(r => setTimeout(r, 30)); });
+        // Opening it read it; what follows is about what arrives after.
+        expect(h.markRead).toContain(10);
+        h.markRead = [];
+    }
+
+    it('POSITIVE CONTROL: a message into the open channel, on screen, is marked read', async () => {
+        await openGeneral();
+        await deliver('ChatMessage', fromBob());
+        await pastDebounce();
+        expect(h.markRead).toEqual([10]);
+    });
+
+    it('with Notes over it, a message into that channel is NOT marked read', async () => {
+        await openGeneral();
+        await click(railNotes());
+        expect(notesView()?.dataset.active).toBe('true');
+        await deliver('ChatMessage', fromBob());
+        await pastDebounce();
+        expect(h.markRead).toEqual([]);
+    });
+
+    it('nor by coming back to the window while Notes is over it', async () => {
+        await openGeneral();
+        await click(railNotes());
+        await act(async () => { window.dispatchEvent(new Event('focus')); });
+        expect(h.markRead).toEqual([]);
+    });
+
+    it('POSITIVE CONTROL: coming back to the window with the channel on screen marks it read', async () => {
+        await openGeneral();
+        await act(async () => { window.dispatchEvent(new Event('focus')); });
+        expect(h.markRead).toEqual([10]);
+    });
+
+    it('leaving Notes puts the channel on screen: what arrived under it is read then', async () => {
+        await openGeneral();
+        await click(railNotes());
+        await deliver('ChatMessage', fromBob());
+        await pastDebounce();
+        expect(h.markRead).toEqual([]);
+        await click(railNotes());
+        expect(notesView()?.dataset.active).toBe('false');
+        expect(h.markRead).toEqual([10]);
+    });
+
+    const BOB_DM = { id: 'd1', other_user_id: 2, other_username: 'bob', other_display_name: null, last_message: null, last_message_at: null, created_at: '2026-09-01' };
+    const bobWrites = () => ({ message_id: `x${Math.random()}`, conversation_id: 'd1', sender: { id: 2, username: 'bob', display_name: null }, content: 'hello', timestamp: 1 });
+    async function openBob() {
+        h.dms = [BOB_DM];
+        await mountChat();
+        await click(host!.querySelector('.friends-dashboard .dm-item'));
+    }
+
+    it('POSITIVE CONTROL: a DM into the conversation on screen makes no sound', async () => {
+        await openBob();
+        await deliver('DirectMessage', bobWrites());
+        expect(h.sounds).toBe(0);
+    });
+
+    it('with Notes over that conversation, a DM into it pings', async () => {
+        await openBob();
+        await click(railNotes());
+        await deliver('DirectMessage', bobWrites());
+        expect(h.sounds).toBe(1);
     });
 });
 
