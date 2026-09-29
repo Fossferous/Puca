@@ -2888,6 +2888,29 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             Copy
                                         </button>
                                     </div>
+                                    <div className="settings-option">
+                                        <div className="option-info">
+                                            <label>Send diagnostics to the server owner</label>
+                                            <span className="option-hint">
+                                                Sends the same measurements, plus this app's log where it keeps
+                                                one (call and stream quality over the last hours), to a server
+                                                owner as an encrypted direct message, so whoever runs the server
+                                                can see what went wrong. No messages, passwords or addresses are
+                                                included.
+                                            </span>
+                                        </div>
+                                        <button
+                                            className="secondary-btn"
+                                            onClick={() => {
+                                                // Settings sits above the chat, where the send
+                                                // dialog opens: close it first.
+                                                onClose();
+                                                window.dispatchEvent(new CustomEvent('sovereign:send-diagnostics'));
+                                            }}
+                                        >
+                                            Send…
+                                        </button>
+                                    </div>
                                 </div>
                                 {isAndroidApp() && (
                                     <>

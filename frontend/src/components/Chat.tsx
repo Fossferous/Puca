@@ -34,6 +34,7 @@ import {
 } from './unreadStore';
 import { addReaction, notifyReactionChanged } from '../api/reactions';
 import { ForwardModal } from './ForwardModal';
+import { SupportReportModal } from './SupportReportModal';
 import { SaveToNoteModal } from './SaveToNoteModal';
 import { getToken } from '../api/auth';
 import { appIsForeground, isMobile as isNativeMobile, isTauri, RC_ENABLED } from '../api/platform';
@@ -1045,6 +1046,14 @@ export function Chat({ onLogout }: ChatProps) {
 
     // Full settings modal
     const [showSettings, setShowSettings] = useState(false);
+    // "Send diagnostics" (api/supportReport.ts). Opened by an event so the
+    // voice panel's menu and the Settings button need no prop threading.
+    const [showSupportReport, setShowSupportReport] = useState(false);
+    useEffect(() => {
+        const open = () => setShowSupportReport(true);
+        window.addEventListener('sovereign:send-diagnostics', open);
+        return () => window.removeEventListener('sovereign:send-diagnostics', open);
+    }, []);
 
     // Emoji settings
     const [draggingChannelId, setDraggingChannelId] = useState<number | null>(null);
@@ -4306,6 +4315,15 @@ export function Chat({ onLogout }: ChatProps) {
                 onClose={() => setShowSettings(false)}
                 onLogout={onLogout}
             />
+
+            {showSupportReport && (
+                <SupportReportModal
+                    servers={servers}
+                    currentUserId={currentUserId}
+                    preferredServerId={currentVoiceChannel?.server_id ?? currentServer?.id ?? null}
+                    onClose={() => setShowSupportReport(false)}
+                />
+            )}
 
             {/* Devices — first-class view. Rendered after FriendsPanel so it
                 paints above the dashboard at the shared z-band while open.

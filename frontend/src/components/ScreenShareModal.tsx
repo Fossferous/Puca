@@ -1,5 +1,6 @@
 import React, { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { isTauri } from '../api/platform';
+import { goLiveMark } from '../api/goLiveTiming';
 import { appLabel, defaultMixerSelection, loadSavedSelection, saveSelection, withOwner } from '../api/appAudio';
 import type { CaptureApp, SelectedApp, WindowOwner } from '../api/appAudio';
 import { CloseIcon, InfoIcon, SpeakerIcon } from './Icons';
@@ -219,6 +220,9 @@ const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, launch = 's
     /** Go live from the app step with exactly the ticked apps. */
     const handleMixerGoLive = async () => {
         if (!mixerApps) return;
+        // The app step was the person choosing: close it as its own step so
+        // the go-live line does not charge it to the audio start.
+        goLiveMark('app-step');
         setBusy(true);
         try {
             const chosen: SelectedApp[] = mixerApps

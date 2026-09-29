@@ -1,0 +1,54 @@
+/* Send diagnostics — builds on ForwardModal.css (overlay, list, targets). */
+
+.support-report-text {
+    margin: 0 0 10px;
+    font-size: 14px;
+    line-height: 1.45;
+    color: var(--text-muted, #b5bac1);
+}
+
+.support-report-owners {
+    flex: 0 1 auto;
+    max-height: 30vh;
+    margin-bottom: 10px;
+}
+
+.forward-target.is-picked {
+    background: var(--bg-tertiary, #404249);
+    box-shadow: inset 0 0 0 2px var(--brand-primary, #5865f2);
+}
+
+.support-report-note {
+    resize: vertical;
+    min-height: 64px;
+    font-family: inherit;
+}
+
+.support-report-actions {
+    display: flex;
+    justify-content: flex-end;
+}
+
+.support-report-send {
+    min-height: 40px;
+    padding: 8px 16px;
+    border: none;
+    border-radius: 6px;
+    background: var(--brand-primary, #5865f2);
+    color: #fff;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.support-report-send:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+@media (pointer: coarse) and (max-width: 1024px) {
+    .support-report-send {
+        min-height: 44px;
+        width: 100%;
+    }
+}
