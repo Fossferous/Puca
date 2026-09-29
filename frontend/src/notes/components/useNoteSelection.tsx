@@ -91,11 +91,14 @@ interface SelectionOptions {
     grid: boolean;
     /** Keyboard selection (Ctrl/Cmd+A, Esc): on the grid with no note open. */
     enabled: boolean;
+    /** The host's veto on a key press, when Notes runs inside the Púca
+     *  desktop app and the window is shared (useNotesShortcuts has why). */
+    accept?: (e: KeyboardEvent) => boolean;
 }
 
 const NOTHING: ReadonlySet<string> = new Set();
 
-export function useNoteSelection({ visible, actions, labels, bulk, grid, enabled }: SelectionOptions) {
+export function useNoteSelection({ visible, actions, labels, bulk, grid, enabled, accept }: SelectionOptions) {
     const [raw, setRaw] = useState<Set<string>>(() => new Set());
     const anchor = useRef<string | null>(null);
     // Leaving the grid drops the selection, so coming back does not revive it.
@@ -135,17 +138,16 @@ export function useNoteSelection({ visible, actions, labels, bulk, grid, enabled
         if (!keys) return;
         const onKey = (e: KeyboardEvent) => {
             if (e.defaultPrevented || isEditableTarget(e.target)) return;
-            if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'a') {
-                e.preventDefault();
-                setRaw(new Set(visibleKeys));
-            } else if (e.key === 'Escape' && active) {
-                e.preventDefault();
-                clear();
-            }
+            const all = (e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'a';
+            if (!all && !(e.key === 'Escape' && active)) return;
+            if (accept && !accept(e)) return;
+            e.preventDefault();
+            if (all) setRaw(new Set(visibleKeys));
+            else clear();
         };
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
-    }, [keys, visibleKeys, active, clear]);
+    }, [keys, visibleKeys, active, clear, accept]);
 
     const cards = useMemo(() => visible.filter(c => selected.has(c.key)), [visible, selected]);
     const bar = active ? (

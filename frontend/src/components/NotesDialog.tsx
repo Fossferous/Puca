@@ -9,6 +9,7 @@
  */
 import { useEffect, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
+import { usePortalTarget } from './portalTarget';
 import './NotesDialog.css';
 import { CloseIcon } from './Icons';
 
@@ -37,6 +38,7 @@ interface NotesDialogProps {
 }
 
 export function NotesDialog({ title, onClose, children, escapeBlocked = false, busy = false }: NotesDialogProps) {
+    const portalTarget = usePortalTarget();
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
             if (e.key !== 'Escape' || escapeBlocked) return;
@@ -60,7 +62,7 @@ export function NotesDialog({ title, onClose, children, escapeBlocked = false, b
                 <div className="notes-dialog-body">{children}</div>
             </div>
         </div>,
-        document.body,
+        portalTarget,
     );
 }
 

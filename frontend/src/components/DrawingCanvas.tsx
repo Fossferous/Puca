@@ -15,6 +15,7 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { usePortalTarget } from './portalTarget';
 import { type DrawingFiles } from '../api/noteMedia';
 import {
     type DrawingDoc, type Stroke,
@@ -37,6 +38,7 @@ interface DrawingCanvasProps {
 }
 
 export function DrawingCanvas({ initial, onCancel, onSave }: DrawingCanvasProps) {
+    const portalTarget = usePortalTarget();
     const [start] = useState<DrawingDoc>(() => initial ?? emptyDrawing());
     const [doc, setDoc] = useState<DrawingDoc>(start);
     const [tool, setTool] = useState<'pen' | 'eraser'>('pen');
@@ -178,6 +180,6 @@ export function DrawingCanvas({ initial, onCancel, onSave }: DrawingCanvasProps)
                 </div>
             </div>
         </div>,
-        document.body,
+        portalTarget,
     );
 }

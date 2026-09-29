@@ -14,6 +14,7 @@
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
+import { usePortalTarget } from '../portalTarget';
 import { type CalendarEntry, type CalendarSource, entriesInRange, groupByDay, layoutDay } from '../../api/taskCalendar';
 import { type SnoozePreset, activeSnooze, maySnooze } from '../../api/taskSchedule';
 import { formatDateKey, formatTime } from '../../api/scheduleFormat';
@@ -66,11 +67,16 @@ export interface CalendarProps {
     entryActions?: (entry: CalendarEntry) => CalendarAction[];
     /** Single-key shortcuts (t, j/k, n/p, m/w/d/a, c) while this is true. */
     shortcutsEnabled?: boolean;
+    /** The host's veto on one of those keys, when the window is shared with
+     *  Púca (Notes inside the desktop app: notes/components/useNotesShortcuts). */
+    acceptKey?: (e: KeyboardEvent) => boolean;
     /** A note under the header (e.g. "shared notes refresh every 30 s"). */
     footnote?: ReactNode;
 }
 
 const HOUR_PX = 48;
+/** The single-key shortcuts below, so a host's veto is asked only for them. */
+const CAL_KEYS = new Set(['t', 'j', 'n', 'k', 'p', 'm', 'w', 'd', 'a', 'c']);
 
 function titleOf(e: CalendarEntry): string {
     return e.source.task.description;
@@ -104,7 +110,7 @@ export function Calendar(props: CalendarProps) {
     const {
         sources, view: requestedView, date, onNavigate, showCompleted, showPlain, onToggleCompleted, onTogglePlain,
         weekStart, now, coarse, locale, onOpen, onMove, onAdd, onToggleDone, onSnooze, onSkip, onEditSchedule,
-        headerActions = [], entryActions, shortcutsEnabled = false, footnote,
+        headerActions = [], entryActions, shortcutsEnabled = false, acceptKey, footnote,
     } = props;
     // The week grid does not exist under the phone gate.
     const view: CalView = coarse && requestedView === 'week' ? 'day' : requestedView;
@@ -174,6 +180,7 @@ export function Calendar(props: CalendarProps) {
     useEffect(() => {
         keyRef.current = (e: KeyboardEvent) => {
             if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || isEditableTarget(e.target) || menuFor) return;
+            if (!CAL_KEYS.has(e.key) || (acceptKey && !acceptKey(e))) return;
             const go = (v: CalView) => { e.preventDefault(); onNavigate(v, date); };
             switch (e.key) {
                 case 't': e.preventDefault(); onNavigate(view, today); break;
@@ -495,6 +502,7 @@ function EntryMenu({
     onSnooze?: CalendarProps['onSnooze']; onSkip?: CalendarProps['onSkip']; onEditSchedule?: CalendarProps['onEditSchedule'];
     extra: CalendarAction[];
 }) {
+    const portalTarget = usePortalTarget();
     const [moveTo, setMoveTo] = useState(entry.dayKeys[0]);
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
@@ -572,6 +580,6 @@ function EntryMenu({
                 </div>
             </div>
         </div>,
-        document.body,
+        portalTarget,
     );
 }

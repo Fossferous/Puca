@@ -10,6 +10,7 @@
  */
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { usePortalTarget } from '../portalTarget';
 import { type ScheduleKind } from '../../api/taskSchedule';
 import { DEFAULT_REMINDER_TIMES } from '../../api/reminderTimes';
 import { CalendarIcon, CloseIcon, MembersIcon } from '../Icons';
@@ -46,6 +47,7 @@ export function CalendarAddSheet({ dayKey, time, defaultTime = DEFAULT_REMINDER_
     /** Offer "New note…" (Notes); Púca makes lists from its tab bar. */
     allowNew?: boolean;
 }) {
+    const portalTarget = usePortalTarget();
     const [title, setTitle] = useState('');
     const [day, setDay] = useState(dayKey);
     const [at, setAt] = useState(time ?? defaultTime);
@@ -136,6 +138,6 @@ export function CalendarAddSheet({ dayKey, time, defaultTime = DEFAULT_REMINDER_
                 </div>
             </form>
         </div>,
-        document.body,
+        portalTarget,
     );
 }

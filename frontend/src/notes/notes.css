@@ -28,6 +28,14 @@
     background: var(--bg-primary);
     color: var(--text-normal);
 }
+/* Inside the Púca desktop app (NotesShell's `embedded`): as tall as the view
+   that holds it, beside the app's rail (components/NotesDesktopView.css),
+   never the window. */
+.notes-app.embedded {
+    flex: 1;
+    height: auto;
+    min-height: 0;
+}
 
 .notes-topbar {
     height: var(--notes-topbar-height);

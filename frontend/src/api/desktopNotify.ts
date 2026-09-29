@@ -11,7 +11,7 @@
  * generic — a notification is rendered by the OS, survives in a notification
  * centre, and is visible on a lock screen. "New message" leaks nothing there.
  */
-import { loadSettings } from '../components/settingsStore';
+import { loadSettings, saveSettings } from '../components/settingsStore';
 import { appIsForeground, isMobile, isTauri } from './platform';
 import { isBadgeWorthy, setUnreadBadge } from './unreadBadge';
 import {
@@ -144,6 +144,37 @@ export function shouldNotify(i: NotifyInput): NotifyDecision {
 export function notificationPermission(): NotificationPermission | 'unsupported' {
     if (typeof Notification === 'undefined') return 'unsupported';
     return Notification.permission;
+}
+
+/**
+ * Whether a due item will raise a notification on DESKTOP, for Púca Notes'
+ * Reminders banner when Notes runs inside the desktop app. Púca's own setting
+ * is the whole answer. NOT `Notification.permission`: inside the Tauri
+ * webview that is the notification plugin's stand-in, which reads "denied"
+ * until something first asks — so the banner said notifications were blocked
+ * "for this site in the browser" on a desktop that shows them. The OS side is
+ * granted on desktop, and notifyTasksDue asks again at fire time regardless.
+ */
+export function desktopNotificationState(): 'granted' | 'default' {
+    return loadSettings().desktopNotifications ? 'granted' : 'default';
+}
+
+/**
+ * Turn desktop notifications on the way Settings' toggle does: ask the OS
+ * through the Tauri plugin (never the webview) and store the answer in the
+ * same setting. Resolves with the new desktopNotificationState().
+ */
+export async function enableDesktopNotifications(): Promise<'granted' | 'default'> {
+    let granted = true;
+    try {
+        const { isPermissionGranted, requestPermission } = await import('@tauri-apps/plugin-notification');
+        granted = (await isPermissionGranted()) || (await requestPermission()) === 'granted';
+    } catch {
+        // Plugin unavailable: still switch it on, as Settings does, rather
+        // than refuse in silence.
+    }
+    saveSettings({ ...loadSettings(), desktopNotifications: granted });
+    return desktopNotificationState();
 }
 
 /**

@@ -10,6 +10,7 @@
  */
 import { useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import { usePortalTarget } from '../../components/portalTarget';
 
 export const UNDO_WINDOW_MS = 6_000;
 
@@ -22,6 +23,7 @@ interface UndoBarProps {
 }
 
 export function UndoBar({ message, onUndo, onExpire, token }: UndoBarProps) {
+    const portalTarget = usePortalTarget();
     const expireRef = useRef(onExpire);
     useEffect(() => { expireRef.current = onExpire; });
     useEffect(() => {
@@ -33,6 +35,6 @@ export function UndoBar({ message, onUndo, onExpire, token }: UndoBarProps) {
             <span className="notes-undo-text">{message}</span>
             <button type="button" className="notes-textbtn" onClick={onUndo}>Undo</button>
         </div>,
-        document.body,
+        portalTarget,
     );
 }

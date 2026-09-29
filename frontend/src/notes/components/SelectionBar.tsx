@@ -20,6 +20,7 @@
  */
 import { useState } from 'react';
 import { createPortal } from 'react-dom';
+import { usePortalTarget } from '../../components/portalTarget';
 import {
     ArchiveIcon, CheckboxCheckedIcon, CheckboxIcon, CloseIcon, CopyIcon, FileTextIcon, PaletteIcon, PinIcon, PlusIcon, TagIcon, TrashIcon,
 } from '../../components/Icons';
@@ -47,6 +48,7 @@ interface SelectionBarProps {
 }
 
 export function SelectionBar({ cards, actions, labels, bulk, onClear, onSelectAll, allSelected }: SelectionBarProps) {
+    const portalTarget = usePortalTarget();
     const [pop, setPop] = useState<Pop>(null);
     const scheduleOnServer = useTaskFeature('schedule') === true;
     const keys = cards.map(c => c.key);
@@ -145,7 +147,7 @@ export function SelectionBar({ cards, actions, labels, bulk, onClear, onSelectAl
                 </Popover>
             )}
         </>,
-        document.body,
+        portalTarget,
     );
 }
 

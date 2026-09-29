@@ -36,6 +36,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { usePortalTarget } from './portalTarget';
 import { canCopyImages, copyImageToClipboard, describeCopyFailure } from '../api/copyImage';
 import { CheckIcon, CloseIcon } from './Icons';
 import { clampPanTo } from './deviceZoomFollow';
@@ -81,6 +82,7 @@ const WHEEL_ZOOM_RATE = 0.002;
 interface DownInfo { x: number; y: number; onPicture: boolean; moved: boolean }
 
 export function ImageLightbox({ url, name, onClose }: ImageLightboxProps) {
+    const portalTarget = usePortalTarget();
     const [copyState, setCopyState] = useState<'idle' | 'copying' | 'copied' | 'error'>('idle');
     const [copyError, setCopyError] = useState('');
     const [t, setT] = useState<Transform>(FIT);
@@ -337,6 +339,6 @@ export function ImageLightbox({ url, name, onClose }: ImageLightboxProps) {
             )}
             <button className="image-lightbox-close" onClick={onClose} aria-label="Close"><CloseIcon size={18} /></button>
         </div>,
-        document.body,
+        portalTarget,
     );
 }

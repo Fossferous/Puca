@@ -120,9 +120,14 @@ export async function routeNativeTarget(
 }
 
 /** Mount once in the signed-in shell. `navigate` receives '/reminders' when
- *  the app was opened (or brought forward) by a reminder notification. */
-export function useNotesReminderLoop(navigate: (to: string) => void, compose?: (mode: ComposeMode) => void): void {
+ *  the app was opened (or brought forward) by a reminder notification.
+ *
+ *  `enabled` false runs nothing: Notes inside the Púca desktop app, where
+ *  Chat already runs the one loop a page may have (api/taskReminders.ts
+ *  guards itself, and a second caller's stop would be a no-op). */
+export function useNotesReminderLoop(navigate: (to: string) => void, compose?: (mode: ComposeMode) => void, enabled = true): void {
     useEffect(() => {
+        if (!enabled) return;
         if (!notesNativeAvailable()) return startTaskReminders();
         const stop = startTaskReminders({
             notify: false,
@@ -138,7 +143,7 @@ export function useNotesReminderLoop(navigate: (to: string) => void, compose?: (
             stop();
             window.removeEventListener('authTokenRenewed', pushNativeCredentials);
         };
-    }, []);
+    }, [enabled]);
 
     const navRef = useRef(navigate);
     useEffect(() => { navRef.current = navigate; }, [navigate]);
@@ -148,7 +153,7 @@ export function useNotesReminderLoop(navigate: (to: string) => void, compose?: (
     const composeRef = useRef(compose);
     useEffect(() => { composeRef.current = compose; }, [compose]);
     useEffect(() => {
-        if (!notesNativeAvailable()) return;
+        if (!enabled || !notesNativeAvailable()) return;
         let live = true;
         const go = (nav: { target: string | null; item: number | null }) => {
             if (!live) return;
@@ -164,5 +169,5 @@ export function useNotesReminderLoop(navigate: (to: string) => void, compose?: (
         // would replay a tap from long ago.
         const off = onNativeNavigate(nav => { go(nav); void consumeNativeLaunchNav(); });
         return () => { live = false; off(); };
-    }, []);
+    }, [enabled]);
 }

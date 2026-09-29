@@ -24,9 +24,12 @@ interface NotesRailProps {
     /** Open the label manager. Absent = the Labels heading stays plain text. */
     onEditLabels?: () => void;
     version: string;
+    /** Notes is running inside the Púca desktop app: the rail's way back to
+     *  Púca is the app's own rail, beside this one. */
+    inPuca?: boolean;
 }
 
-export function NotesRail({ filter, labels, reminderBadge, counts, open, onClose, onNavigate, onEditLabels, version, trashEnabled = false }: NotesRailProps) {
+export function NotesRail({ filter, labels, reminderBadge, counts, open, onClose, onNavigate, onEditLabels, version, trashEnabled = false, inPuca = false }: NotesRailProps) {
     const go = (to: string) => { onNavigate(to); onClose(); };
     const is = (k: string) => filter.kind === k;
     return (
@@ -81,7 +84,7 @@ export function NotesRail({ filter, labels, reminderBadge, counts, open, onClose
                         <TrashIcon /><span className="notes-rail-label">Trash</span>
                     </button>
                 )}
-                {!NATIVE && (
+                {!NATIVE && !inPuca && (
                     <a className="notes-rail-item" href="/" target="_blank" rel="noopener">
                         <PopOutIcon /><span className="notes-rail-label">Open Púca</span>
                     </a>
