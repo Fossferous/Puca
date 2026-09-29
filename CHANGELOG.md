@@ -17,8 +17,10 @@ one-line summary; this file is the full story. Versions follow
   keep going out, and a delete's **Undo** is still there if you come
   straight back. Press the button again to go back to where you were. The
   Tasks view is still on the home screen's **Tasks**, and **Saved to …**
-  after keeping a message in a note now opens Notes. In the full and the
-  Lite desktop app alike; the web app and the phone apps are unchanged.
+  after keeping a message in a note now opens Notes. **Export notes as
+  Markdown** and **as JSON** open the Save As dialog, so you choose where
+  the file goes. In the full and the Lite desktop app alike; the web app and
+  the phone apps are unchanged.
 
 ## 0.9.825 — 2026-09-28
 
