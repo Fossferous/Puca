@@ -3338,9 +3338,10 @@ export function Chat({ onLogout }: ChatProps) {
         setShowAllChecklists(false);
         setShowChecklist(false); // the channel drawer would cover it
     };
-    // Its rail button again: to the channel or conversation under it, as for
-    // Devices (leaveDevicesView) — not to a dashboard view Notes covered.
-    // With no server and no conversation under it that is the home dashboard;
+    // Its rail button again: to the channel or conversation under it, not
+    // back to the Tasks view or a server's All Checklists board Notes
+    // covered. With neither under it, the home dashboard, on the tab it was
+    // showing (Tasks included), as leaving Devices does (leaveDevicesView);
     // otherwise the auto-select effect would pick a server the person never
     // chose.
     const leaveNotesView = () => {

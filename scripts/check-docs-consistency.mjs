@@ -54,7 +54,8 @@ const STALE = [
     ['Not Tested', 'an internal QA audit is not product documentation'],
     ['Immediate Fixes Needed', 'an internal fix list is not product documentation'],
     ['Last Audit:', 'a dated QA audit is not product documentation'],
-    ['back to where you were', 'leaving Notes in the desktop app goes to the channel or conversation last open under it, or home when there is none (Chat.tsx leaveNotesView), not back to the view it covered — as leaving Devices does'],
+    ['back to where you were', 'with a channel or conversation under it, leaving Notes in the desktop app goes to that, not back to the view it covered; with neither, to the home dashboard on the tab it was showing (Chat.tsx leaveNotesView)'],
+    ['a dashboard view it covered', 'with no channel or conversation under Notes, leaving it DOES go back to the dashboard on the tab it was showing, Tasks included (Chat.tsx leaveNotesView)'],
     // A checklist pasted into Tasks' New list name (TasksView.tsx onPasteListName).
     ['heading, with the steps in it', 'the new list is named after what is typed there, else the heading, else the first step'],
     ['makes the list named after the heading', 'the new list is named after what is typed there, else the heading, else the first step'],
