@@ -14,7 +14,8 @@
  *  - A QUERY CLIENT PER MOUNT, never at module scope as on Notes' own page
  *    (notes/main.tsx, where the page IS the session). Chat unmounts on
  *    sign-out and on expiry, and this view with it, so the decrypted cache
- *    ends with the session instead of outliving it into the next account.
+ *    ends with the session instead of outliving it into the next account —
+ *    and nothing still on its way in fills it again (retireQueryClient).
  *    The sealed on-device cache is read into it once this account's identity
  *    is in hand (whenIdentityReady).
  *  - KEPT MOUNTED ONCE OPENED, hidden while the person is elsewhere in the
@@ -43,7 +44,7 @@ import { QueryClientProvider, type QueryClient } from '@tanstack/react-query';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ErrorBoundary } from './ErrorBoundary';
 import { LayerOnScreenContext, PortalTargetContext } from './portalTarget';
-import { notesOwnsKey, whenIdentityReady } from './notesDesktopView.utils';
+import { notesOwnsKey, retireQueryClient, whenIdentityReady } from './notesDesktopView.utils';
 import { NotesShell } from '../notes/components/NotesShell';
 import { makeNotesQueryClient, notesKeys } from '../notes/model/notesQueries';
 import { hydrateNotesCache } from '../notes/model/notesCache';
@@ -123,7 +124,7 @@ export function NotesDesktopView({ active, onSignOut }: NotesDesktopViewProps) {
             // one root synchronously while it is committing another.
             queueMicrotask(() => {
                 root.unmount();
-                qc.clear();
+                retireQueryClient(qc);
                 mount.remove();
                 layer.remove();
             });

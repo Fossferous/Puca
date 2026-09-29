@@ -1,8 +1,10 @@
 /**
- * The two decisions NotesDesktopView.tsx makes on the page's behalf, kept out
- * of the component so they can be tested without mounting it: whose a key
- * press is, and when Notes' sealed cache may be read back.
+ * The decisions NotesDesktopView.tsx makes on the page's behalf, kept out of
+ * the component so they can be tested without mounting it: whose a key press
+ * is, when Notes' sealed cache may be read back, and how its query client
+ * ends.
  */
+import type { QueryClient } from '@tanstack/react-query';
 import { onIdentityRestoreChange } from '../api/auth';
 import { getActiveIdentity, seedMatchesCurrentAccount } from '../api/e2ee';
 import { matchesRegisteredHotkey } from '../api/hotkeys';
@@ -27,6 +29,21 @@ export function notesOwnsKey(e: KeyboardEvent, host: HTMLElement | null): boolea
     const t = e.target;
     if (t instanceof Node && t !== document.body && t !== document.documentElement && !host.contains(t)) return false;
     return !coveredAt(host);
+}
+
+/**
+ * Empty the view's own query client for good, as the view goes (sign-out,
+ * expiry). A clear alone is not the end of it: whatever is still on its way
+ * in — the sealed cache being read back, a create's answer — lands after it
+ * and builds a fresh query, with the signed-out account's decrypted rows in
+ * it and a 30-minute gc timer holding them into the next account's session,
+ * in a client nothing reads. From here on, anything added is dropped as it
+ * arrives.
+ */
+export function retireQueryClient(qc: QueryClient): void {
+    const cache = qc.getQueryCache();
+    cache.subscribe(e => { if (e.type === 'added') cache.remove(e.query); });
+    qc.clear();
 }
 
 /** This account's own identity is in hand, so its sealed cache opens. */

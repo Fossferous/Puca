@@ -71,6 +71,29 @@ describe('persist, then hydrate on a cold start', () => {
         expect(await hydrateNotesCache(c, { sub: 7, identity: other, store })).toBe(0);
     });
 
+    it('a read-back still opening rows when the account signs out stops, and adds no more', async () => {
+        const store = memoryStore();
+        const a = new QueryClient();
+        const stop = startNotesCachePersistence(a, { sub: 7, currentSub: () => 7, identity: () => me, store }, 5);
+        for (let i = 1; i <= 3; i++) a.setQueryData(['notes', 'tasks', 'list', i], tasks);
+        await new Promise(r => setTimeout(r, 30));
+        await settle();
+        stop();
+        expect(store.map.size).toBe(3);
+
+        // POSITIVE CONTROL: signed in throughout, all three come back.
+        const whole = new QueryClient();
+        expect(await hydrateNotesCache(whole, { sub: 7, identity: me, store, currentSub: () => 7 })).toBe(3);
+
+        // Signed out as the first row lands (the token goes; the identity
+        // this read captured still opens rows).
+        let current: number | null = 7;
+        const b = new QueryClient();
+        b.getQueryCache().subscribe(e => { if (e.type === 'added') current = null; });
+        expect(await hydrateNotesCache(b, { sub: 7, identity: me, store, currentSub: () => current })).toBe(1);
+        expect(b.getQueryCache().getAll()).toHaveLength(1);
+    });
+
     it('writes nothing once a different account is signed in', async () => {
         const store = memoryStore();
         let current = 7;

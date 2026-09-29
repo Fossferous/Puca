@@ -156,6 +156,27 @@ describe('one query client per mount, gone with it', () => {
         expect(h.shellUnmounts).toBe(mountsBefore);
     });
 
+    // Clearing is not the end of it: the sealed cache being read back, a
+    // create's answer or a refetch can still be on the way in when the view
+    // goes, and landing after the clear it built a fresh query — decrypted
+    // rows of the signed-out account, held by a 30-minute gc timer in a
+    // client nothing reads, into the next account's session.
+    it('whatever lands in that client after it was cleared is dropped as it arrives', async () => {
+        mount(true);
+        await flush();
+        const [qc] = h.clients;
+        // POSITIVE CONTROL: while the view is up, a write is kept.
+        qc.setQueryData(['notes', 'x'], 1);
+        expect(qc.getQueryData(['notes', 'x'])).toBe(1);
+        await unmount();
+        expect(h.cleared).toContain(qc);
+        qc.setQueryData(['notes', 'tasks', 'list', 1], [{ id: 1, description: 'Buy oat milk' }]);
+        qc.setQueryData(['notes', 'lists'], (prev: unknown[] | undefined) => [...(prev ?? []), { id: 1, title: 'Groceries' }]);
+        expect(qc.getQueryData(['notes', 'tasks', 'list', 1])).toBeUndefined();
+        expect(qc.getQueryData(['notes', 'lists'])).toBeUndefined();
+        expect(qc.getQueryCache().getAll()).toEqual([]);
+    });
+
     it('a second mount — the next session — gets a new client, not the last one', async () => {
         mount(true);
         await flush();

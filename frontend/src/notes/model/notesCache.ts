@@ -150,13 +150,17 @@ interface CachedQuery {
 /**
  * Put every cached query back into `qc` (before the first render). Bounded:
  * a database that does not answer in `timeoutMs` is skipped, never waited on.
+ * It stops as soon as this account is no longer the one signed in: the
+ * identity it took at the start still opens rows after a sign-out, and the
+ * desktop app's Notes goes on living in the same page.
  */
 export async function hydrateNotesCache(
     qc: QueryClient,
-    deps: { sub: number | null; identity: Identity | null; store: KV | null } = defaultDeps(),
+    deps: { sub: number | null; identity: Identity | null; store: KV | null; currentSub?: () => number | null } = defaultDeps(),
     timeoutMs = 1_500,
 ): Promise<number> {
     const { sub, identity, store } = deps;
+    const stillSignedIn = () => (deps.currentSub ? deps.currentSub() === sub : true);
     if (sub === null || !identity || !store) return 0;
     let rows: Array<[string, string]>;
     try {
@@ -170,6 +174,7 @@ export async function hydrateNotesCache(
     let n = 0;
     for (const [hash, sealed] of rows) {
         const text = await openLocal(identity, sub, PURPOSE(hash), sealed);
+        if (!stillSignedIn()) break;        // signed out meanwhile: nothing more comes back
         if (text === null) continue;
         let c: CachedQuery;
         try { c = JSON.parse(text) as CachedQuery; } catch { continue; }
@@ -190,7 +195,7 @@ export async function hydrateNotesCache(
 function defaultDeps() {
     const sub = currentUserIdFromToken();
     const identity = seedMatchesCurrentAccount() ? getActiveIdentity() : null;
-    return { sub, identity, store: sub === null ? null : idbStore(sub, 'q') };
+    return { sub, identity, store: sub === null ? null : idbStore(sub, 'q'), currentSub: currentUserIdFromToken };
 }
 
 /**
