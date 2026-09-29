@@ -4,6 +4,22 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Added
+- **Púca Notes inside the desktop app.** On the PC, the rail's **Tasks &
+  notes** button now opens Púca Notes in Púca itself: the notes grid, the
+  composer, search, labels, reminders, the calendar, the trash and picking
+  several notes at once, for the account you are already signed in with.
+  Before, the desktop app had only the Tasks view, and Notes meant a
+  browser tab and a second sign-in. Going to a channel or a conversation
+  keeps your place in Notes: an open note stays open, edits made offline
+  keep going out, and a delete's **Undo** is still there if you come
+  straight back. Press the button again to go back to where you were. The
+  Tasks view is still on the home screen's **Tasks**, and **Saved to …**
+  after keeping a message in a note now opens Notes. In the full and the
+  Lite desktop app alike; the web app and the phone apps are unchanged.
+
 ## 0.9.825 — 2026-09-28
 
 Change your stream's resolution and frame rate while you are live, and a step-by-step list from an assistant goes into Púca Notes as a checklist.
