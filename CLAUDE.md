@@ -431,7 +431,7 @@ that just ran; `frontend/src/tests/buildAgentTargetDir.test.ts` keeps it that
 way.
 
 **NEVER use `npx tsc --noEmit` here — it checks NOTHING and always exits 0.**
-The root `tsconfig.json` is solution-style (`"files": []` plus two
+The root `tsconfig.json` is solution-style (`"files": []` plus three
 `references`), so a bare `tsc` compiles an EMPTY program. Proven 2026-08-04 by
 appending `export const X: number = "a string"` to a real source file: `tsc
 --noEmit` exited 0, `tsc -b` reported TS2322. That is why a missing
@@ -439,17 +439,42 @@ appending `export const X: number = "a string"` to a real source file: `tsc
 `npm run build` caught it — and it means every "typecheck passed" in this
 repo's history proved nothing.
 
-`npm run typecheck` is `tsc -b`, which builds both referenced projects. Both
-set `noEmit: true` with their `.tsbuildinfo` under `node_modules/.tmp/`, so it
-is a pure check that leaves the tree clean.
+`npm run typecheck` is `tsc -b`, which builds all three referenced projects:
+`tsconfig.app.json` (the app), `tsconfig.node.json` (the vite configs) and
+`tsconfig.tests.json` (the tests). All three set `noEmit: true` with their
+`.tsbuildinfo` under `node_modules/.tmp/`, so it is a pure check that leaves
+the tree clean.
 
-**`npm run typecheck` does not type-check the tests.** `frontend/tsconfig.app.json`
-excludes `src/tests` and `*.test.ts*`, and vitest transpiles with esbuild, which
-drops types without checking them. So a test can call a function with the
-wrong number of arguments, pass every gate, and keep passing for the wrong
-reason (found 2026-09-02: four `decryptDMContent` calls with a missing required
-argument, green because the omitted context is ignored for v2 envelopes). When
-you change a signature, grep the tests for its call sites yourself.
+**The tests ARE type-checked — by `tsc -b`, through `frontend/tsconfig.tests.json`.**
+Until 2026-09-29 nothing checked them: `tsconfig.app.json` excludes `src/tests`
+and `*.test.ts*`, and vitest transpiles with esbuild, which drops types without
+checking them. So a test could call a function with the wrong arguments, pass
+every gate, and keep passing for the wrong reason (2026-09-02: four
+`decryptDMContent` calls missing a required argument, green because the
+omitted context is ignored for v2 envelopes). The first check found **179
+errors in 57 test files**, and fixing them turned up tests that were green for
+a reason other than the one they state:
+
+- `streamQuality.test.ts` called `agentAnswerOffer` with the retired
+  positional `(…, 0, 30, undefined)` tail. The 30 fell into the options bag's
+  slot and meant nothing; `fps === 30` held only because 30 is the default.
+- `notesOfflineContent.test.ts`, "an op the server REFUSES takes its parked
+  bytes with it", threw `new ApiError(403, 'no')` — arguments swapped, so the
+  status was the string `'no'`, `isDefiniteRefusal` said no, and the op was
+  dropped down another path. It never exercised a 403.
+- `notesRemindersFlash.test.tsx` and `snoozeRights.test.tsx` fed
+  `RemindersView` DueItems with no `kind`; they rendered as item rows only by
+  falling through `kind === 'note'`.
+
+`tsconfig.tests.json` extends `tsconfig.app.json`, so tests compile under the
+rules of the code they test, and its `include` mirrors vitest's.
+`npm run typecheck:tests` runs it alone. Since `npm run build` runs `tsc -b`,
+CI's build step checks the tests too. A test that imports a plain `.mjs`
+script needs a `.d.mts` beside it (`frontend/scripts/notes-sw.d.mts` is the
+pattern): a relative ambient `declare module` is not allowed, and
+`@ts-ignore` / `as any` hide exactly what this gate exists to show. vitest
+still checks no types, so a type error in a test shows up in
+`npm run typecheck`, never in `npx vitest run`.
 
 `npm run build` is still a separate gate: it also runs the agent build and
 vite, either of which can fail when the typecheck passes.
