@@ -4,6 +4,36 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Improved
+- **Headings in a checklist show as headings.** The section titles of a
+  pasted checklist ("## Before you start", or a line such as "Optional
+  extras:" inside the list) now land as headings: bold, a step larger, with
+  no checkbox, no due time and no subtasks. They are never ticked and never
+  counted, so the "3/10" on a card or a tab, **Completed**, **Uncheck all**,
+  **Delete checked**, **Reminders** and the calendar see only the steps.
+  Before, each one became one more item to tick ("Before you start:"). To
+  make one yourself, start an item with `## `, or use **Turn into heading**
+  on a row; **Turn into item** turns it back, and an item with a due time
+  asks first, because a heading has none. A heading is edited, dragged and
+  deleted like any row, and stays at the top of the list's nesting: the
+  steps after it are its section, not its subtasks. **Copy as text**,
+  **Export** and **Send to Púca** write it as a Markdown `## ` section,
+  **Hide checkboxes** as a `## ` line that **Show checkboxes** turns back
+  into a heading, and **Make a copy** keeps it. The paste question lists
+  headings as headings and says what it will add ("Add 6 items and 1
+  heading"). In Púca Notes, Púca's Tasks view and every checklist channel,
+  on the PC and the phone alike. A heading is kept as the item's own text,
+  sealed like any other, so nothing changed on the server — which also
+  means an older version of Púca shows it as an item reading "## Before you
+  start", and a count taken before a list's items have loaded (a tab not
+  opened yet, a note in the trash) still includes its headings.
+- **One gap left:** a checklist copied as rendered text — selected on the
+  page rather than taken with the assistant's Copy button — has no `#` or
+  `- [ ]` left in it, so it still pastes one item per line, its title and
+  headings included.
+
 ## 0.9.826 — 2026-09-29
 
 Púca Notes inside the desktop app, checklists pasted into Tasks and open notes, Refresh in Tasks, and Púca Notes on Android can open straight to a new note.

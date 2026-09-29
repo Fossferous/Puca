@@ -352,10 +352,11 @@ confirmation first.
 - Click **Direct Messages** at the top of the server rail, then **Tasks** in the left column
 - The tab bar holds **All tasks**, **Calendar**, **Reminders**, your lists and every checklist channel from your servers; **New list** (the plus at its right end) starts a list
 - **Refresh** (the circling arrows at the right end of the tab bar) reads your lists again, so a change made on another device shows without leaving Tasks; what you type or tick, just before or while it reads, is saved first and stays as it is
+- Start an item with `## ` (say, `## Before you start`) to make it a **heading**: a section title with no checkbox that is not counted as a task. **Turn into heading** on a row does the same, and **Turn into item** turns it back
 
 ### Paste a checklist
 - Paste step-by-step instructions — say, an AI assistant's answer — into **Add a task…** in a list, or **Add an item…** in a checklist channel, and Púca asks first
-- **Add N items** adds each step as its own item, in order, without the numbers, bold marks or the "Here's how:" line (a section heading inside the list, such as "Security", stays as an item of its own); **Add as one item** puts the whole paste on one line in the box for you to add; **Cancel** adds nothing
+- **Add N items** adds each step as its own item, in order, without the numbers, bold marks or the "Here's how:" line (a section heading inside the list, such as "Security", becomes a heading, and the button says so: **Add 6 items and 1 heading**); **Add as one item** puts the whole paste on one line in the box for you to add; **Cancel** adds nothing
 - Paste it into the **New list** name instead and the question says it will make a new list, and what the list will be called: what you had typed there, else the checklist's heading, else its first step. **Add N items** makes the list with the steps in it; **Add as one item** makes it with the steps, on one line, as its one item
 - A one-line paste pastes as usual, and one paste adds at most 200 items
 
@@ -386,6 +387,9 @@ Inside Notes:
 - Click a note to open it. Inside, items work exactly as in Tasks: tick,
   edit, add subtasks, drag by the grip to reorder or nest, set a due time
   from the clock, attach pictures from the paperclip.
+- An item that starts with `## ` is a **heading** — a section title with no
+  checkbox, never counted as a step; **Turn into heading** on an item makes
+  one, and **Turn into item** turns it back.
 - **Pin** keeps a note at the top (it is the same favourite as the Tasks tab
   bar). **Colour**, **Labels** and **Archive** are Notes' own, and follow your
   account to every device, sealed. **Search** looks through titles and items.
@@ -400,8 +404,9 @@ Inside Notes:
 - **A checklist from somewhere else** — say, step-by-step instructions from an
   AI assistant — goes in as a checklist. On your phone, **Share** it to
   **Púca Notes**. Anywhere, paste it into a new note's title or an item and
-  choose **Add N items**. Either way the list's heading becomes the title and
-  each step becomes an item. Press **Done** to save it. Pasted into a note
+  choose **Add N items**. Either way the list's heading becomes the title,
+  each section heading in it a heading, and each step an item. Press
+  **Done** to save it. Pasted into a note
   that is already open (its title or **Add an item…**), the steps are added
   once you choose **Add N items**, and a note of yours with no name yet takes
   the heading as its name (the question says so first). Púca's own Tasks view

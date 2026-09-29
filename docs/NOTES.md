@@ -48,6 +48,32 @@ Púca's reminders. Anything you do in one is what you see in the other.
   was tapped. And there is deliberately no "move checked to bottom": ticked
   items are always in the Completed section at the bottom, here and on the
   server, so there is nowhere else for them to be.
+- **Headings** — an item whose text is a Markdown heading (`## Before you
+  start`; any `#` to `######` and a space) is a section title, not a step.
+  It shows as its label, bold and a step larger, with no checkbox, no due
+  time, date & repeat, snooze, place or attachment button and no subtasks.
+  It is never ticked and never moves to Completed — not even one an older
+  version ticked — so *Uncheck all*, *Delete checked*, the progress count on
+  a card or a Tasks tab, the card's *+N more*, Reminders, the calendar and
+  its `.ics` export all leave it out. It is edited as its label (the `## `
+  goes back on save), dragged, moved and deleted like any row. Start an item
+  with `## ` — in *Add an item…*, the composer, or over an existing item —
+  to make one; the row's **Turn into heading** button does it for a
+  top-level item and **Turn into item** undoes it. An item with a due time
+  or a date & repeat asks first, and loses it before it becomes a heading:
+  nothing reminds about a section title. A heading is a TOP-LEVEL row: the
+  items after it are its section, as siblings, not its subtasks, so a drag
+  never nests a heading or an item under one (a `## x` nested under an item,
+  which only an older version can put there, is an ordinary sub-item). It is
+  stored as nothing more than the item's text (`api/taskHeading.ts` is the
+  one rule every surface asks), sealed like any other: the server has no
+  new field and cannot tell a heading from an item, so a count it gives
+  before the items are read — a Tasks tab not opened yet, the trash's *N
+  items* — still includes headings, and an older Púca shows the row as an
+  item reading `## Before you start`. *Copy as text* and the Markdown
+  export write it as a `## ` section, the JSON export marks it
+  `"heading": true`, *Hide checkboxes* writes it as a `## ` line that *Show
+  checkboxes* reads back as a heading, and *Make a copy* keeps it.
 - **Search** — over decrypted titles, items, labels and server names, on the
   device; nothing about the query leaves it. Matches are **highlighted** in a
   card's title, its text and its items. A long note shows a piece of itself
@@ -190,13 +216,20 @@ Púca's reminders. Anything you do in one is what you see in the other.
   Púca's own Tasks view (*Add a task…*, a checklist's *Add an item…*, and the
   *New list* name, which makes the list — named after what is typed there, else
   the heading, else the first step — and then its steps). It is the inverse of
-  *Copy as text*: `# Title` and `- [ ] item` read back as the title and the
-  items. A heading or a line that introduces the list becomes the title
-  ("Here's a checklist for X:" → *Checklist for X*).
+  *Copy as text*: `# Title`, `## Section` and `- [ ] item` read back as the
+  title, a heading and the items. The first heading, or a line that
+  introduces the list, becomes the title ("Here's a checklist for X:" →
+  *Checklist for X*).
   Numbers, `**bold**`, links and code marks are dropped, and a `[x]` arrives
-  unticked. A later heading, or a line ending in a colon inside the list, stays as
-  an item so the grouping survives. A wrapped line, or a code block under a step,
-  joins that step. Closing sentences ("That's it!") are dropped. The reader
+  unticked. A later heading, or a line ending in a colon inside the list,
+  becomes a **heading** (see *Headings*), so the grouping survives without
+  one more box to tick; one left with nothing under it at the end is
+  dropped. The paste prompt shows it as a heading and counts it apart
+  (*Add 6 items and 1 heading*). A checklist copied as RENDERED text —
+  selected on the page rather than taken with the assistant's Copy button —
+  has no `#` or `- [ ]` left in it, so it reads as plain lines, one item
+  each: the clipboard's formatting is not read yet. A wrapped line, or a
+  code block under a step, joins that step. Closing sentences ("That's it!") are dropped. The reader
   (`readChecklist`, `notes/model/noteContent.ts`) takes at least two list lines and
   no more sentences than list lines around them, so a paragraph that happens to
   mention a list stays a paragraph. In the composer nothing is saved until
@@ -1489,7 +1522,9 @@ removed one at a time: a stray paste of a document would otherwise make forty
 items nobody can take back in one go. A checklist from elsewhere is read as
 one (*A step-by-step list arrives as a checklist*, above); anything else is
 split by the same rule *Show checkboxes* uses, so `- `, `* `, `• `, `[ ]` and
-`[x]` are dropped and blank lines are ignored. A paste of ONE line is never
+`[x]` are dropped, a `## ` line is kept as a heading, and blank lines are
+ignored. *Add as one item* is always an item, whatever the paste began
+with. A paste of ONE line is never
 intercepted — it lands in the field as any paste would. A TITLE (the
 composer's, an open note's) and Púca's *New list* name take only a real
 checklist; other lines paste there as a name.
