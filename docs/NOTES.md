@@ -243,9 +243,16 @@ Púca's reminders. Anything you do in one is what you see in the other.
   a new note opens on its **text** and a new list on its **first item**,
   the way Google Keep does, **with the keyboard up**, whether the app was
   closed or already running. A drawing or a photo opens with the keyboard
-  down, and so does a request that had to wait behind the sign-in screen
-  (it still opens the composer once you are in, but you last typed a
-  password, and it may be old). Taking a note from inside the app — the
+  down, even straight after a list that had it up: Android puts back a
+  keyboard that was up when the app left, and the APK puts that one away
+  again, because a canvas or a Take photo button has nothing to type into
+  (`NotesNative.hideKeyboard`, which never touches a keyboard while a field
+  has the focus). A request that had to wait behind the sign-in screen
+  opens with the keyboard down too (it still opens the composer once you
+  are in, but you last typed a password, and it may be old), and so does
+  one that finds another screen over the composer, such as *Install the
+  new Púca Notes app*: the composer is there beneath it, and you tap it
+  once you are past that screen. Taking a note from inside the app — the
   **New note** button, *Take a note…*, `c` — and a share are unchanged. An
   Android WebView raises the keyboard for a tap, not for a field the
   page focuses by itself, so the APK does it (`NotesNative.showKeyboard`,
@@ -253,7 +260,8 @@ Púca's reminders. Anything you do in one is what you see in the other.
   focus, stops once the keyboard is up, and gives up after 1.5 s). That
   needs the Notes APK from **the release after 0.9.826** or newer: an older
   APK takes the same update over the air and lands on the same field, but
-  the keyboard waits for a tap, as before.
+  the keyboard waits for a tap, as before, and a drawing opened right after
+  a list can still bring that list's keyboard back.
 - **Keyboard** — `/` search, `c` new note, `r` refresh, `Esc` close, `?` help.
 - **Installable, and it works offline** — a web app manifest lets a browser add
   Notes to the home screen or desktop, and a service worker scoped to

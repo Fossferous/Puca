@@ -68,6 +68,45 @@ final class NotesKeyboard {
         });
     }
 
+    /**
+     * No keyboard over a drawing or a photo opened from outside the app
+     * (NotesNativePlugin.hideKeyboard): watch through the window's return
+     * and put away a keyboard that shows with no field focused in the page.
+     * When, and when to stop, is KeyboardPlan.nextLower. Answers once
+     * (true = the keyboard is down).
+     */
+    static void lower(final View view, final Result result) {
+        final Handler handler = new Handler(Looper.getMainLooper());
+        final long start = SystemClock.uptimeMillis();
+        final long[] focusedAt = { -1 };
+        final InputMethodManager imm =
+                (InputMethodManager) view.getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                KeyboardPlan.Lower step;
+                boolean up;
+                try {
+                    long now = SystemClock.uptimeMillis();
+                    if (focusedAt[0] < 0 && view.hasWindowFocus()) focusedAt[0] = now;
+                    up = imeVisible(view);
+                    step = KeyboardPlan.nextLower(now - start, focusedAt[0] < 0 ? -1 : now - focusedAt[0],
+                            view.onCheckIsTextEditor(), up);
+                    if (step == KeyboardPlan.Lower.HIDE && imm != null) {
+                        imm.hideSoftInputFromWindow(view.getWindowToken(), 0);
+                    }
+                } catch (Throwable t) {
+                    // A keyboard that could not be put away is one tap away,
+                    // exactly as before this existed; never a crash.
+                    result.done(false);
+                    return;
+                }
+                if (step == KeyboardPlan.Lower.DONE) result.done(!up);
+                else handler.postDelayed(this, KeyboardPlan.STEP_MS);
+            }
+        });
+    }
+
     /** Is the keyboard on screen for this view's window? */
     static boolean imeVisible(View view) {
         WindowInsetsCompat insets = ViewCompat.getRootWindowInsets(view);

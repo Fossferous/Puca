@@ -79,8 +79,9 @@ public class NotesNativePlugin extends Plugin {
      *  one item that came due), tile (the quick-settings tile prompt) and
      *  transcribe (on-device speech-to-text for a voice note). All four ride
      *  0.9.817, so they share ONE level. 3: keyboard (showKeyboard, the
-     *  keyboard for a composer opened from outside the page). Feature strings
-     *  are added HERE and nowhere else. */
+     *  keyboard for a composer opened from outside the page, and
+     *  hideKeyboard, none over a drawing or a photo opened that way; one
+     *  APK, one level). Feature strings are added HERE and nowhere else. */
     private static final int API_LEVEL = 3;
 
     /** The nav target of the intent that started the activity, held until
@@ -174,6 +175,32 @@ public class NotesNativePlugin extends Plugin {
         activity.runOnUiThread(() -> NotesKeyboard.raise(view, shown -> {
             JSObject ret = new JSObject();
             ret.put("shown", shown);
+            call.resolve(ret);
+        }));
+    }
+
+    /**
+     * No keyboard over a drawing or a photo a shortcut, the tile, the widget
+     * or an intent from another app opened (QuickAdd, after it has left no
+     * field focused): Android puts the keyboard back as the window returns
+     * if it was up when the app left, typing into nothing (NotesKeyboard.
+     * lower). Never touches a keyboard while a field in the page has the
+     * focus. Content-free both ways. Resolves {hidden}; never rejects. An APK
+     * without it makes Capacitor reject the call, which the page ignores.
+     */
+    @PluginMethod
+    public void hideKeyboard(PluginCall call) {
+        Activity activity = getActivity();
+        WebView view = getBridge() == null ? null : getBridge().getWebView();
+        if (activity == null || view == null) {
+            JSObject ret = new JSObject();
+            ret.put("hidden", false);
+            call.resolve(ret);
+            return;
+        }
+        activity.runOnUiThread(() -> NotesKeyboard.lower(view, hidden -> {
+            JSObject ret = new JSObject();
+            ret.put("hidden", hidden);
             call.resolve(ret);
         }));
     }

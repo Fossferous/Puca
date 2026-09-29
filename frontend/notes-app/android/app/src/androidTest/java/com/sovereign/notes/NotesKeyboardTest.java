@@ -4,7 +4,9 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+import android.content.Context;
 import android.os.SystemClock;
+import android.view.inputmethod.InputMethodManager;
 import android.webkit.WebView;
 
 import androidx.test.core.app.ActivityScenario;
@@ -29,7 +31,10 @@ import java.util.concurrent.atomic.AtomicReference;
  *  - a field the PAGE focuses (no tap) gets no keyboard — the reason the
  *    method exists, and the negative control for the next line;
  *  - showKeyboard, called right after, brings it up and answers shown:true;
- *  - with no field focused it asks for nothing and answers shown:false.
+ *  - with no field focused it asks for nothing and answers shown:false;
+ *  - hideKeyboard puts away a keyboard that is up with NO field focused (the
+ *    state Android's restore leaves over a drawing or a photo), where
+ *    nothing else would — and never one while a field has the focus.
  *
  * The page is whatever the synced bundle renders (the sign-in screen, on a
  * fresh install); the field is one the test adds outside React's root, so
@@ -94,15 +99,28 @@ public class NotesKeyboardTest {
         throw new AssertionError("the page never finished loading with Capacitor's bridge");
     }
 
-    /** The page's own call, through Capacitor's bridge, as notesNative.ts makes it. */
-    private static final String CALL = "window.__kbd = 'pending';"
-            + "window.Capacitor.nativePromise('NotesNative', 'showKeyboard', {})"
-            + ".then(r => { window.__kbd = String(r && r.shown); }, e => { window.__kbd = 'rejected: ' + e; });"
-            + "true";
+    /** The page's own call, through Capacitor's bridge, as notesNative.ts
+     *  makes it; the answer's `key` lands in window.__kbd. */
+    private static String call(String method, String key) {
+        return "window.__kbd = 'pending';"
+                + "window.Capacitor.nativePromise('NotesNative', '" + method + "', {})"
+                + ".then(r => { window.__kbd = String(r && r." + key + "); }, e => { window.__kbd = 'rejected: ' + e; });"
+                + "true";
+    }
+    private static final String CALL = call("showKeyboard", "shown");
+    private static final String HIDE = call("hideKeyboard", "hidden");
+
+    /** How long the page's hideKeyboard may take to answer: it watches the
+     *  window for KeyboardPlan.SETTLE_MS after it has focus. */
+    private static final long LOWER_MS = KeyboardPlan.LOWER_CAP_MS + 2_000;
 
     private static String answer(WebView wv) throws InterruptedException {
+        return answer(wv, KEYBOARD_MS);
+    }
+
+    private static String answer(WebView wv, long ms) throws InterruptedException {
         String v = "\"pending\"";
-        long until = SystemClock.uptimeMillis() + KEYBOARD_MS;
+        long until = SystemClock.uptimeMillis() + ms;
         while ("\"pending\"".equals(v) && SystemClock.uptimeMillis() < until) {
             SystemClock.sleep(100);
             v = js(wv, "window.__kbd");
@@ -145,6 +163,61 @@ public class NotesKeyboardTest {
             assertEquals("true", js(wv, CALL));
             assertEquals("no field: it gives up and says so", "\"false\"", answer(wv));
             assertFalse("and nothing came up", imeVisible(wv));
+        }
+    }
+
+    /** The page's field, focused by the page, and the keyboard up for it. */
+    private static void fieldWithTheKeyboardUp(WebView wv) throws InterruptedException {
+        assertEquals("true", js(wv, "(() => {"
+                + " const i = document.createElement('input'); i.id = 'kbd-probe';"
+                + " document.body.appendChild(i); i.focus();"
+                + " return document.activeElement === i; })()"));
+        assertEquals("true", js(wv, CALL));
+        assertEquals("\"true\"", answer(wv));
+        assertTrue(imeVisible(wv));
+    }
+
+    @Test
+    public void hideKeyboardPutsAwayAKeyboardWithNothingToTypeInto() throws Exception {
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            WebView wv = webView(scenario);
+            waitForPage(wv);
+            // What Android's restore leaves over a drawing: the keyboard up
+            // and no field focused in the page (inputType 0x0). Made here by
+            // asking the input method directly with the page's focus gone.
+            js(wv, "(() => { const a = document.activeElement; if (a && a.blur) a.blur(); return true; })()");
+            assertEquals("true", js(wv, "document.activeElement === document.body"));
+            Context ctx = InstrumentationRegistry.getInstrumentation().getTargetContext();
+            InputMethodManager imm = (InputMethodManager) ctx.getSystemService(Context.INPUT_METHOD_SERVICE);
+            InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> {
+                wv.requestFocus();
+                imm.showSoftInput(wv, InputMethodManager.SHOW_IMPLICIT);
+            });
+            assertTrue("precondition: a keyboard up with no field focused",
+                    waitFor(KEYBOARD_MS, () -> imeVisible(wv)));
+
+            // NEGATIVE CONTROL: nothing else puts it away.
+            SystemClock.sleep(1500);
+            assertTrue("the keyboard stays up by itself", imeVisible(wv));
+
+            assertEquals("true", js(wv, HIDE));
+            assertTrue("hideKeyboard must put it away", waitFor(LOWER_MS, () -> !imeVisible(wv)));
+            assertEquals("and say so", "\"true\"", answer(wv, LOWER_MS));
+            assertFalse(imeVisible(wv));
+        }
+    }
+
+    @Test
+    public void hideKeyboardNeverTouchesAKeyboardWhileAFieldHasTheFocus() throws Exception {
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            WebView wv = webView(scenario);
+            waitForPage(wv);
+            fieldWithTheKeyboardUp(wv);
+
+            assertEquals("true", js(wv, HIDE));
+            assertEquals("it answers not hidden", "\"false\"", answer(wv, LOWER_MS));
+            assertTrue("the keyboard the field has is left up", imeVisible(wv));
+            assertEquals("true", js(wv, "document.activeElement === document.getElementById('kbd-probe')"));
         }
     }
 }

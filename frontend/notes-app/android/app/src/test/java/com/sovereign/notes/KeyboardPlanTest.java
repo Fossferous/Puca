@@ -88,4 +88,78 @@ public class KeyboardPlanTest {
         assertTrue("short enough not to read as the app misbehaving", KeyboardPlan.BUDGET_MS <= 2000);
         assertTrue("long enough for a warm start's window focus", KeyboardPlan.BUDGET_MS >= 1000);
     }
+
+    // --- nextLower: no keyboard over a drawing or a photo ---------------------
+
+    @Test
+    public void putsAwayAKeyboardWithNothingToTypeInto() {
+        // Positive control: the state Android's restore leaves — the window
+        // back in front, the keyboard up, no field focused in the page.
+        assertEquals(KeyboardPlan.Lower.HIDE, KeyboardPlan.nextLower(0, 0, false, true));
+        assertEquals(KeyboardPlan.Lower.HIDE, KeyboardPlan.nextLower(KeyboardPlan.SETTLE_MS + 400, KeyboardPlan.SETTLE_MS - 1, false, true));
+    }
+
+    @Test
+    public void neverPutsAwayAKeyboardWhileAFieldHasTheFocus() {
+        for (long focused : new long[] { 0, 1, KeyboardPlan.SETTLE_MS - 1 }) {
+            assertEquals("focused=" + focused, KeyboardPlan.Lower.WAIT, KeyboardPlan.nextLower(focused, focused, true, true));
+        }
+    }
+
+    @Test
+    public void waitsForTheWindowBecauseTheRestoreComesWithIt() {
+        // A warm start's intent reaches the page before the window is back;
+        // the keyboard Android restores arrives with the window's focus.
+        assertEquals(KeyboardPlan.Lower.WAIT, KeyboardPlan.nextLower(0, -1, false, false));
+        assertEquals(KeyboardPlan.Lower.WAIT, KeyboardPlan.nextLower(0, -1, false, true));
+        assertEquals(KeyboardPlan.Lower.WAIT, KeyboardPlan.nextLower(KeyboardPlan.LOWER_CAP_MS - 1, -1, false, true));
+    }
+
+    @Test
+    public void keepsWatchingThroughTheSettleSoALateRestoreIsCaught() {
+        // Keyboard down at the first looks is not the end: the restore may
+        // not have landed yet.
+        assertEquals(KeyboardPlan.Lower.WAIT, KeyboardPlan.nextLower(0, 0, false, false));
+        assertEquals(KeyboardPlan.Lower.WAIT, KeyboardPlan.nextLower(KeyboardPlan.SETTLE_MS + 300, KeyboardPlan.SETTLE_MS - 1, false, false));
+        // ...and after a HIDE it still looks again rather than stopping.
+        assertEquals(KeyboardPlan.Lower.HIDE, KeyboardPlan.nextLower(200, 200, false, true));
+        assertEquals(KeyboardPlan.Lower.WAIT, KeyboardPlan.nextLower(300, 300, false, false));
+        assertEquals(KeyboardPlan.Lower.HIDE, KeyboardPlan.nextLower(400, 400, false, true));
+    }
+
+    @Test
+    public void stopsOnceSettledOrAtTheCapWhateverItSees() {
+        for (boolean field : new boolean[] { true, false }) {
+            for (boolean ime : new boolean[] { true, false }) {
+                assertEquals(KeyboardPlan.Lower.DONE, KeyboardPlan.nextLower(KeyboardPlan.SETTLE_MS, KeyboardPlan.SETTLE_MS, field, ime));
+                assertEquals(KeyboardPlan.Lower.DONE, KeyboardPlan.nextLower(KeyboardPlan.LOWER_CAP_MS, -1, field, ime));
+                assertEquals(KeyboardPlan.Lower.DONE, KeyboardPlan.nextLower(Long.MAX_VALUE, 0, field, ime));
+            }
+        }
+    }
+
+    @Test
+    public void everyLowerEndsWithinItsCap() {
+        // Walk the clock the way NotesKeyboard.lower does, with the keyboard
+        // coming straight back after every hide and the window's focus
+        // arriving at different moments (or never): it must reach DONE.
+        final int cap = (int) (KeyboardPlan.LOWER_CAP_MS / KeyboardPlan.STEP_MS) * 10 + 10;
+        for (long focusAt : new long[] { 0, 700, 2900, Long.MAX_VALUE }) {
+            for (boolean field : new boolean[] { true, false }) {
+                int looks = 0;
+                KeyboardPlan.Lower step;
+                long t = 0;
+                do {
+                    long focused = t >= focusAt ? t - focusAt : -1;
+                    step = KeyboardPlan.nextLower(t, focused, field, true);
+                    t += KeyboardPlan.STEP_MS;
+                    looks++;
+                } while (step != KeyboardPlan.Lower.DONE && looks < cap);
+                assertEquals("focusAt=" + focusAt + " field=" + field, KeyboardPlan.Lower.DONE, step);
+                assertTrue("looks=" + looks, looks <= KeyboardPlan.LOWER_CAP_MS / KeyboardPlan.STEP_MS + 1);
+            }
+        }
+        assertTrue("the restore lands with the window's focus, well inside the settle", KeyboardPlan.SETTLE_MS >= 800);
+        assertTrue("short enough that a field tapped soon after is never second-guessed for long", KeyboardPlan.SETTLE_MS <= 1500);
+    }
 }

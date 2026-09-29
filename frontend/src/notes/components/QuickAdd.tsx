@@ -39,7 +39,7 @@ import { AudioRecorder, type RecordedClip } from './AudioRecorder';
 import { appendTranscript, canRecordAudio } from '../model/audioNote';
 import { followOutputDeviceRef } from '../../components/settingsStore';
 import { transcribeClip } from '../model/transcribe';
-import { raiseNativeKeyboard } from '../native/notesNative';
+import { hideNativeKeyboard, raiseNativeKeyboard } from '../native/notesNative';
 import '../../components/NoteImages.css';
 import '../noteContent.css';
 
@@ -145,6 +145,23 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
         const a = document.activeElement;
         if (a instanceof HTMLElement && rootRef.current?.contains(a)) a.blur();
     };
+    /** Another screen is drawn over this field: the update gate's "Install
+     *  the new Púca Notes app" (fixed, over everything, and the shell mounts
+     *  under it at a cold start), its download screen, a note or a dialog on
+     *  top of the sheet. Read from what the page draws at the field's centre,
+     *  so it is the stacking the person sees, not DOM order or aria-modal (a
+     *  note open UNDER the sheet is aria-modal too); and only a SCREEN — a
+     *  role="dialog" that is not the one holding this field — counts, so a
+     *  strip or a toast over the field does not cost the keyboard. No answer
+     *  — off screen, or no layout at all — is not a cover either. */
+    const coveredField = (field: HTMLElement): boolean => {
+        if (typeof document.elementFromPoint !== 'function') return false;
+        const r = field.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        if (hit === null || field.contains(hit)) return false;
+        const screen = hit.closest('[role="dialog"]');
+        return screen !== null && !screen.contains(field);
+    };
 
     useEffect(() => {
         if (openSignal > 0) { setOpen(true); focusItem(0); }
@@ -180,14 +197,21 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
         // file input needs a user activation, and a launch is not one. The
         // button is focused instead, so it is one tap away and never dead.
         typeInto.current = null;
-        if (want === 'photo') requestAnimationFrame(() => cameraBtnRef.current?.focus());
-        else if (want === 'draw') {
-            // A drawing is not typed: nothing in the composer under the
-            // canvas keeps the focus, or Android puts the keyboard up over
-            // the canvas (it restores the IME for a focused field when the
-            // app comes back to the front — measured on the emulator with a
-            // checklist composer already open).
-            if (initial.readyToType) blurInside();
+        // A drawing or a photo from outside the app (readyToType) is not
+        // typed, so no keyboard: nothing in the composer keeps the focus
+        // under the canvas, and the Android app is asked to keep the keyboard
+        // down (native/notesNative's hideNativeKeyboard). Android restores a
+        // keyboard that was up when the app left as the window comes back —
+        // a list opened by the shortcut, keyboard up, then Home, then Draw or
+        // Photo — over the canvas or the photo composer, typing into nothing:
+        // measured on the emulator, and the page's blur alone loses that race.
+        if (want === 'photo') {
+            requestAnimationFrame(() => {
+                cameraBtnRef.current?.focus();
+                if (initial.readyToType) void hideNativeKeyboard();
+            });
+        } else if (want === 'draw') {
+            if (initial.readyToType) { blurInside(); void hideNativeKeyboard(); }
         } else if (initial.readyToType) typeInto.current = want;   // the effect below, once that field is drawn
         else focusItem(0);
         onInitialUsed?.();
@@ -208,12 +232,18 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     // the mode in the same breath, and until it lands the field does not
     // exist (a field of the other mode is gone from its ref as soon as it
     // unmounts). Once per request, whatever the outcome.
+    // Only where the person can see it (coveredField): under another screen
+    // the keyboard came up over that screen and typed into a composer nobody
+    // could see — measured on the emulator under the update gate. There the
+    // composer opens beneath with neither: the sheet's title keeps the focus
+    // it takes on opening, as it always has, and the keyboard stays down.
     useEffect(() => {
         const want = typeInto.current;
         if (!want) return;
         const field = want === 'text' ? bodyRef.current : itemRefs.current[0];
         if (!field) return;
         typeInto.current = null;
+        if (coveredField(field)) return;
         field.focus();
         void raiseNativeKeyboard();
     });

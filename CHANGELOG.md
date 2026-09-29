@@ -14,8 +14,9 @@ one-line summary; this file is the full story. Versions follow
   its text, a list on its first item, whether the app was closed or already
   running. Before, the composer opened with the keyboard down (and a new
   note on its title), so you had to tap before you could type. A drawing
-  or a photo still opens without the keyboard, and so does a new note that
-  had to wait for you to sign in.
+  or a photo opens without the keyboard, even right after a list that had
+  it up, and so does a new note that had to wait for you to sign in or that
+  opens behind the *Install the new Púca Notes app* screen.
   The intent to send (action, app, and the one word that picks a note, a
   list, a drawing, a photo or Reminders) is in the Púca Notes guide.
   **Install the new Púca Notes app once, from the download page, for the

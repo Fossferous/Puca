@@ -49,6 +49,7 @@ interface NotesNativePlugin {
     consumeLaunchShare(): Promise<NativeSharedPayload>;
     requestAddTile(): Promise<{ ok: boolean; reason?: string }>;
     showKeyboard(): Promise<{ shown: boolean }>;
+    hideKeyboard(): Promise<{ hidden: boolean }>;
     addListener(eventName: 'navigate', listener: (data: { target: string; item?: number | null }) => void): Promise<PluginListenerHandle>;
     addListener(eventName: 'share', listener: () => void): Promise<PluginListenerHandle>;
 }
@@ -300,6 +301,22 @@ export async function requestNativeAddTile(): Promise<boolean> {
  */
 export async function raiseNativeKeyboard(): Promise<boolean> {
     return (await call(() => Native.showKeyboard(), { shown: false }))?.shown === true;
+}
+
+/**
+ * The other way: no keyboard over a drawing or a photo opened from outside
+ * the page, which leaves no field focused. Android puts the keyboard back
+ * as the window returns if it was up when the app left — a list opened by
+ * the same shortcut, keyboard up, then Home, then Draw — and the page cannot
+ * see that coming. NotesNativePlugin.hideKeyboard watches the window's
+ * return and puts away a keyboard with no field to type into
+ * (NotesKeyboard.java); it never touches one while a field has the focus.
+ * Content-free. true = the keyboard is down; false covers the browser, the
+ * desktop app's Notes and a Notes APK from before the method, where nothing
+ * else changes.
+ */
+export async function hideNativeKeyboard(): Promise<boolean> {
+    return (await call(() => Native.hideKeyboard(), { hidden: false }))?.hidden === true;
 }
 
 function claims(token: string | null): { sub: string | null; exp: number } {
