@@ -109,6 +109,39 @@ import './TasksView.css';
 import './AllChecklistsView.css';
 import './ServerTasksBoard.css';
 
+/** What this view last read of one list's rows: its headings (and how many
+ *  of them an older client ticked), and ALL its rows — which is what the
+ *  server's count of that list was then. `rows` is null for a list this
+ *  view never read, where the headings it knows of are the ones it added. */
+interface SeenRows {
+    headings: { total: number; completed: number };
+    rows: { total: number; completed: number } | null;
+}
+
+/** A list's rows as `headingsSeen` records them (SeenRows). */
+function seenRowsOf(tasks: Task[]): SeenRows {
+    return {
+        headings: countHeadings(tasks),
+        rows: { total: tasks.length, completed: tasks.filter(t => t.is_completed).length },
+    };
+}
+
+/** The server's list counts, less the headings this view has read in each
+ *  list (see `headingsSeen` in TasksView): to the server a heading is one
+ *  more row, since it cannot tell one from an item (api/taskHeading.ts).
+ *  Only while the server still counts the rows this view read: a list
+ *  changed since — on another device, in Púca Notes — may have gained or
+ *  lost a heading, and taking off the old number would count its steps
+ *  short. Its count is then the server's, headings and all, until the list
+ *  is read again (the rule for a list this view has never read). */
+function withoutSeenHeadings(lists: TaskList[], seen: ReadonlyMap<number, SeenRows>): TaskList[] {
+    return lists.map(l => {
+        const h = seen.get(l.id);
+        if (!h || (h.rows && (l.total_tasks !== h.rows.total || l.completed_tasks !== h.rows.completed))) return l;
+        return { ...l, total_tasks: Math.max(0, l.total_tasks - h.headings.total), completed_tasks: Math.max(0, l.completed_tasks - h.headings.completed) };
+    });
+}
+
 /**
  * Where Púca Notes lives, or null where the link would be wrong. WEB ONLY:
  * Notes is a second page on the web app's origin, and it is signed in there
@@ -125,16 +158,6 @@ import './ServerTasksBoard.css';
  * "Tasks & notes" (NotesDesktopView.tsx; Chat's `notesInApp`), already signed
  * in.
  */
-/** The server's list counts, less the headings this view has read in each
- *  list (see `headingsSeen` in TasksView): to the server a heading is one
- *  more row, since it cannot tell one from an item (api/taskHeading.ts). */
-function withoutSeenHeadings(lists: TaskList[], seen: ReadonlyMap<number, { total: number; completed: number }>): TaskList[] {
-    return lists.map(l => {
-        const h = seen.get(l.id);
-        return h ? { ...l, total_tasks: Math.max(0, l.total_tasks - h.total), completed_tasks: Math.max(0, l.completed_tasks - h.completed) } : l;
-    });
-}
-
 function notesUrl(): string | null {
     if (typeof window === 'undefined' || isTauri() || isMobile()) return null;
     return `${window.location.origin}/notes/index.html`;
@@ -219,12 +242,14 @@ export function TasksView() {
     // older than they are and must not take them off the screen.
     const whileReading = useRef(createdWhileReading());
     // The HEADINGS this view has read in each personal list, and how many of
-    // them an older client ticked (api/taskHeading.ts). The server counts a
-    // list's rows, and to it a heading is a row — task text is sealed, so it
-    // cannot tell one from an item. A lists read takes the headings it knows
-    // of back off, or a Refresh whose lists answer after the open list's
-    // items would put them back on its tab.
-    const headingsSeen = useRef(new Map<number, { total: number; completed: number }>());
+    // them an older client ticked (api/taskHeading.ts), beside the rows it
+    // read them among (SeenRows). The server counts a list's rows, and to it
+    // a heading is a row — task text is sealed, so it cannot tell one from
+    // an item. A lists read takes the headings it knows of back off, or a
+    // Refresh whose lists answer after the open list's items would put them
+    // back on its tab — but only while the server still counts those rows
+    // (withoutSeenHeadings).
+    const headingsSeen = useRef(new Map<number, SeenRows>());
     // What this view has out — item changes, a list's title and reminder, the
     // tab order — so Refresh lets them land first and cannot put an older
     // copy over them (writesInFlight).
@@ -493,7 +518,7 @@ export function TasksView() {
                 // (syncListCounts' rule, inline: a setter is the only thing
                 // this effect may close over).
                 const { total, completed } = countItems(rows);
-                headingsSeen.current.set(listId, countHeadings(rows));
+                headingsSeen.current.set(listId, seenRowsOf(rows));
                 setLists(prev => prev.map(l => (l.id === listId ? { ...l, total_tasks: total, completed_tasks: completed } : l)));
             })
             .catch(err => console.error('Failed to load tasks:', err))
@@ -506,7 +531,7 @@ export function TasksView() {
      *  A heading is a section, not a step: it is not counted (api/taskHeading.ts). */
     const syncListCounts = (listId: number, nextTasks: Task[]) => {
         const { total, completed } = countItems(nextTasks);
-        headingsSeen.current.set(listId, countHeadings(nextTasks));
+        headingsSeen.current.set(listId, seenRowsOf(nextTasks));
         setLists(prev => prev.map(l => l.id === listId
             ? { ...l, total_tasks: total, completed_tasks: completed }
             : l));
@@ -656,11 +681,15 @@ export function TasksView() {
             if (selectedRef.current?.kind === 'list' && selectedRef.current.id === listId) setTasks(prev => [...prev, created]);
             // A new heading is no new step (countItems) — but one more row
             // in the server's count, which a lists read takes back off.
-            // Nested, "## x" is an ordinary sub-item, and counts.
+            // Nested, "## x" is an ordinary sub-item, and counts. Either
+            // way the server now counts one row more than this view read.
+            const seen = headingsSeen.current.get(listId);
+            const rows = seen?.rows ? { ...seen.rows, total: seen.rows.total + 1 } : null;
             if (parentId === undefined && isHeadingText(text)) {
-                const seen = headingsSeen.current.get(listId) ?? { total: 0, completed: 0 };
-                headingsSeen.current.set(listId, { ...seen, total: seen.total + 1 });
+                const headings = seen?.headings ?? { total: 0, completed: 0 };
+                headingsSeen.current.set(listId, { headings: { ...headings, total: headings.total + 1 }, rows });
             } else {
+                if (seen) headingsSeen.current.set(listId, { ...seen, rows });
                 setLists(prev => prev.map(l => (l.id === listId ? { ...l, total_tasks: l.total_tasks + 1 } : l)));
             }
             return created;
@@ -865,13 +894,20 @@ export function TasksView() {
 
     const handleEdit = (task: Task, description: string) => writes.run(async () => {
         const original = tasks;
+        const listId = selectedList?.id;
+        // Functional: Turn into heading sends its untick and its cleared
+        // time beside this edit, and a copy of `tasks` would put them back.
         setTasks(prev => prev.map(t => t.id === task.id ? { ...t, description } : t));
+        // An edit can change what the row IS — Turn into heading, Turn into
+        // item, "## x" typed over an item — so the tab counts it again.
+        if (listId !== undefined) syncListCounts(listId, tasks.map(t => t.id === task.id ? { ...t, description } : t));
         try {
             await updateListTask(task.id, { description });
         } catch (err) {
             console.error('Failed to edit task:', err);
             if (err instanceof ApiError && err.status === 409) pushMessageToast({ title: err.message });
             setTasks(original);
+            if (listId !== undefined) syncListCounts(listId, original);
         }
     });
 
@@ -895,6 +931,10 @@ export function TasksView() {
         const next = applyReorder(tasks, task, afterId, reparent);
         if (next === tasks) return;
         setTasks(next);
+        // Out from under its parent, a "## x" sub-item is a heading, which
+        // the tab does not count (api/taskHeading.ts: a heading is top level).
+        const listId = selectedList?.id;
+        if (reparent && listId !== undefined) syncListCounts(listId, next);
         try {
             await reorderTask(task.id, afterId, reparent);
             // A reparent re-fetches from truth on success (the load effect's
@@ -904,14 +944,15 @@ export function TasksView() {
             if (reparent && selected?.kind === 'list') {
                 const forList = selected.id;
                 const fetched = await listListTasks(forList);
-                setTasks(prev =>
-                    selectedRef.current?.kind === 'list' && selectedRef.current.id === forList
-                        ? fetched
-                        : prev);
+                if (selectedRef.current?.kind === 'list' && selectedRef.current.id === forList) {
+                    setTasks(fetched);
+                    syncListCounts(forList, fetched);
+                }
             }
         } catch (err) {
             console.error('Failed to reorder task:', err);
             setTasks(original);
+            if (reparent && listId !== undefined) syncListCounts(listId, original);
         }
     });
 

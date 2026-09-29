@@ -158,3 +158,106 @@ describe("Púca's Tasks view", () => {
         expect(tabCount()).toBe('0/3');
     });
 });
+
+describe("an edit that changes what a row IS re-counts the tab", () => {
+    beforeEach(() => {
+        patch.mockResolvedValue({});
+    });
+    const click = async (row: Element | null, title: string) => {
+        const b = [...(row?.querySelectorAll('button') ?? [])].find(x => x.getAttribute('title') === title);
+        expect(b, title).toBeTruthy();
+        await act(async () => { b!.click(); });
+        await settle();
+    };
+
+    it('Turn into heading takes the row off the count', async () => {
+        await mountAndOpen();
+        expect(tabCount()).toBe('0/2');
+        await click(rowOf('Update the app'), 'Turn into heading');
+        expect(rowOf('Update the app')?.classList.contains('tt-heading')).toBe(true);
+        expect(tabCount()).toBe('0/1');
+    });
+
+    it('Turn into item puts it on', async () => {
+        await mountAndOpen();
+        await click(rowOf('Before you start'), 'Turn into item');
+        expect(rowOf('Before you start')?.querySelector('input[type="checkbox"]')).not.toBeNull();
+        expect(tabCount()).toBe('0/3');
+    });
+
+    it('a refused edit puts the count back with the row', async () => {
+        await mountAndOpen();
+        patch.mockRejectedValueOnce(new Error('offline'));
+        await click(rowOf('Update the app'), 'Turn into heading');
+        expect(rowOf('Update the app')?.classList.contains('tt-heading')).toBe(false);
+        expect(tabCount()).toBe('0/2');
+    });
+
+    it('POSITIVE CONTROL: an edit that keeps the row an item leaves the count', async () => {
+        await mountAndOpen();
+        await act(async () => { (rowOf('Update the app')?.querySelector('.tt-description') as HTMLElement).click(); });
+        const input = container.querySelector<HTMLInputElement>('input.tt-edit-input')!;
+        await act(async () => {
+            Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, 'Update the app today');
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        await act(async () => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
+        await settle();
+        expect(rowOf('Update the app today')).not.toBeNull();
+        expect(tabCount()).toBe('0/2');
+    });
+});
+
+describe('a list changed elsewhere since this view read it', () => {
+    it('a Refresh does not take off headings the list may no longer have', async () => {
+        // A second list to move to, so the first is NOT re-read by Refresh.
+        const base = get.getMockImplementation()!;
+        get.mockImplementation(async (path: string) => {
+            if (path === '/task-lists') return [row(1, 'Test list', stored.length), row(2, 'Other', 0)];
+            if (path === '/task-lists/2/tasks') return [];
+            return base(path);
+        });
+        await mountAndOpen();
+        expect(tabCount()).toBe('0/2');
+        const other = [...container.querySelectorAll<HTMLButtonElement>('.tasks-tab')].find(b => b.textContent?.includes('Other'))!;
+        await act(async () => { other.click(); });
+        await settle();
+        // Another device deletes the heading: two rows left, both steps.
+        stored = stored.filter(t => t.id !== 10);
+        await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!.click(); });
+        for (let i = 0; i < 10; i++) await act(async () => { await new Promise(r => { setTimeout(r, 10); }); });
+        await settle();
+        expect(get.mock.calls.filter(c => c[0] === '/task-lists/1/tasks').length, 'list 1 was re-read, which is not this case').toBe(1);
+        // The server's 2 rows, not 2 minus the heading this view once saw.
+        expect(tabCount()).toBe('0/2');
+    });
+
+    it('POSITIVE CONTROL: what this view added itself is still counted right after that Refresh', async () => {
+        const base = get.getMockImplementation()!;
+        get.mockImplementation(async (path: string) => {
+            if (path === '/task-lists') return [row(1, 'Test list', stored.length), row(2, 'Other', 0)];
+            if (path === '/task-lists/2/tasks') return [];
+            return base(path);
+        });
+        await mountAndOpen();
+        const input = container.querySelector<HTMLInputElement>('.tasks-add input')!;
+        for (const text of ['# Calendar', 'Snooze an item']) {
+            await act(async () => {
+                Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, text);
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+            });
+            await act(async () => { container.querySelector('form.tasks-add')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
+            await settle();
+        }
+        expect(tabCount()).toBe('0/3');
+        const other = [...container.querySelectorAll<HTMLButtonElement>('.tasks-tab')].find(b => b.textContent?.includes('Other'))!;
+        await act(async () => { other.click(); });
+        await settle();
+        await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!.click(); });
+        for (let i = 0; i < 10; i++) await act(async () => { await new Promise(r => { setTimeout(r, 10); }); });
+        await settle();
+        // Five rows on the server, two of them headings this view knows of.
+        expect(stored.length).toBe(5);
+        expect(tabCount()).toBe('0/3');
+    });
+});
