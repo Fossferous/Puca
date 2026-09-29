@@ -1913,6 +1913,17 @@ await page.waitForSelector('.notes-card:has-text("Live note")', { timeout: 15000
     .catch(async e => { await shot('live-note-missing'); throw e; });
 const liveArrived = await pageB.waitForSelector('.notes-card:has-text("Live note")', { timeout: 10000 }).then(() => true, () => false);
 ck('live: a note created on A appears on B without a refresh', liveArrived);
+// A new note goes first among the unpinned on EVERY device: its place is the
+// saved tab order, and B learns of that order's change only from the stream
+// ({"t":"prefs"}), separately from the listing — so B may show the note at
+// the end for a moment before it moves up. Bounded, never forever.
+const leadsUnpinned = (pg, want, timeout = 15000) => pg.waitForFunction(w => {
+    const got = [...document.querySelectorAll('section:not([aria-label="Pinned notes"]) .notes-card-title')].map(t => t.textContent.trim());
+    return w.every((title, i) => got[i] === title);
+}, want, { timeout }).then(() => true, () => false);
+const unpinnedOn = async pg => (await pg.locator('section:not([aria-label="Pinned notes"]) .notes-card-title').allInnerTexts()).map(t => t.trim()).join(',');
+ck('live: the new note leads the unpinned notes on A', await leadsUnpinned(page, ['Live note'], 5000), await unpinnedOn(page));
+ck('live: …and on B, through the order’s own sync', await leadsUnpinned(pageB, ['Live note']), await unpinnedOn(pageB));
 // A labels it; the sealed blob event brings the label to B.
 const liveCard = () => page.locator('.notes-card', { hasText: 'Live note' });
 await liveCard().hover();
@@ -2044,6 +2055,13 @@ const synced = await page.waitForSelector('[data-sync="pending"]', { state: 'det
 ck('offline: back online, the queue replays', synced);
 const offlineOnB = await pageB.waitForSelector('.notes-card:has-text("Offline note")', { timeout: 15000 }).then(() => true, () => false);
 ck('offline: the edit made offline reached the server and device B sees it', offlineOnB);
+// Made offline, each note was placed first under its temporary id; the
+// queued placement ran again once its create landed, against the order the
+// server held then. So both lead the unpinned, the newer on top — on A after
+// the replay, and on B.
+ck('offline: the notes made offline lead the unpinned on A once they land, the newer on top',
+    await leadsUnpinned(page, ['Offline photo', 'Offline note']), await unpinnedOn(page));
+ck('offline: …and on B', await leadsUnpinned(pageB, ['Offline photo', 'Offline note']), await unpinnedOn(pageB));
 // 20 s, the budget its two neighbours already use, not the 10 s it shipped
 // with. Device B learns about a PERSONAL note's items from the live event
 // stream: the server sends the owner's other streams `{"t":"list","id":N}`
