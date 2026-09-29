@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { SerialQueue } from '../api/devices/serialQueue';
+import { SerialQueue } from '../api/serialQueue';
 
 const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
 

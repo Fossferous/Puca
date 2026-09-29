@@ -53,7 +53,7 @@ import { deviceKeyDh } from './deviceKeyRc';
 import { buildClipboardEvent, isClipboardEvent, readLocalClipboardDetailed, writeLocalClipboard, MAX_CLIPBOARD_BYTES } from './clipboard';
 import { getHostBackend } from './hostBackend';
 import { attachTunnelChannel, closeTunnels } from './tunnel';
-import { SerialQueue } from './serialQueue';
+import { SerialQueue } from '../serialQueue';
 import { InputCoalescer } from './inputCoalescer';
 import { issueUaChallenge, unattendedState, verifyUaResponse } from './unattendedHost';
 import {

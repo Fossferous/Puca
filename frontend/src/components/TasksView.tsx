@@ -100,6 +100,7 @@ import { fetchListFeatures, flushBodySave, keepHiddenSlots, listTrashedTaskLists
 import { NoteDueChip, NoteReminderControl } from './schedule/NoteReminderControl';
 import { halfMinuteNow, subscribeHalfMinute } from './schedule/halfMinuteClock';
 import { heldOpKey } from '../api/opKey';
+import { SerialQueue } from '../api/serialQueue';
 import type { PastedItems } from '../notes/model/noteContent';
 import { textOutsideSelection, usePasteItems } from './usePasteItems';
 import { createdWhileReading } from './createdWhileReading';
@@ -216,6 +217,11 @@ export function TasksView() {
     // tab order — so Refresh lets them land first and cannot put an older
     // copy over them (writesInFlight).
     const [writes] = useState(writesInFlight);
+    // The tab order's writes, one at a time and in the order they were made
+    // (api/serialQueue.ts): a new list's place is read from the server and
+    // then written back, and a favourite or a drag saved in between would be
+    // undone by that write.
+    const [prefsWrites] = useState(() => new SerialQueue());
     // Refresh: running (the button says it is busy and spins), and the
     // guard every tap meets while it runs — the button stays focusable and
     // clickable, and a state lags one render behind the tap anyway.
@@ -363,7 +369,7 @@ export function TasksView() {
         const prev = prefs;
         const seq = ++saveSeq.current;
         setPrefs(next);
-        writes.run(() => putTaskTabPrefs(next)).catch(err => {
+        writes.run(() => prefsWrites.run(() => putTaskTabPrefs(next))).catch(err => {
             console.error('Failed to save tab prefs:', err);
             if (saveSeq.current === seq) setPrefs(prev);
         });
@@ -386,7 +392,7 @@ export function TasksView() {
         const seq = ++saveSeq.current;
         prefsNow.current = shown;
         setPrefs(shown);
-        void writes.run(() => placeNewListFirst(listId)).then(saved => {
+        void writes.run(() => prefsWrites.run(() => placeNewListFirst(listId))).then(saved => {
             if (saveSeq.current === seq) setPrefs(saved ?? before);
         });
     };

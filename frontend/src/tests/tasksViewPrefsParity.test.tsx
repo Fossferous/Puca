@@ -454,6 +454,82 @@ describe('Púca Tasks view: a new list goes first after the favourites', () => {
         expect(savedOrders()).toEqual([['list:13', 'list:5', 'list:7', 'list:9']]);
         expect(barOrder()).toEqual(['list:13', 'list:5', 'list:9']);
     });
+
+    // The bar's order writes go out one at a time. A new list's place is a
+    // READ of the server's order and then a write of it; a favourite or a
+    // drag is a full replace. Sent side by side, whichever lands second wins,
+    // and the place's write was built on a read from before the other landed.
+    describe('a favourite made just before or just after it is not lost', () => {
+        /** The server's saved order, as the writes that reached it left it. */
+        let held: TaskTabPref[];
+        const shown = () => held.map(p => `${p.kind}:${p.ref_id}${p.is_favorite ? '*' : ''}`);
+        beforeEach(() => {
+            held = SAVED;
+            get.mockImplementation(async (path: string) => {
+                if (path === '/task-tab-prefs') return held;
+                if (path === '/task-lists/features') return { body: true, attachments: true, trash: true, trash_retention_days: 30, max_body_len: 65536 };
+                if (path === '/task-lists?trashed=true') return [];
+                if (path === '/task-lists') return serverLists.map(row);
+                if (path === '/servers') return [];
+                if (/^\/task-lists\/\d+\/tasks$/.test(path)) return [];
+                throw new Error(`unexpected GET ${path}`);
+            });
+            put.mockImplementation(async (path: string, body: { prefs: TaskTabPref[] }) => {
+                if (path === '/task-tab-prefs') held = body.prefs;
+                return {};
+            });
+        });
+        const favouriteNow = async (label: string) => { await openMenu(label); await clickMenuItem('Favourite'); };
+
+        it('a favourite made while the new list’s place is being read waits for it, and the server keeps both', async () => {
+            createReturns(11);
+            await mount();
+            // The place's read is answered from what the server holds when it
+            // arrives, and that answer is held in transit.
+            let deliver: () => void = () => {};
+            const readNow = get.getMockImplementation()!;
+            get.mockImplementation(async (path: string) => {
+                if (path !== '/task-tab-prefs') return readNow(path);
+                const answer = held;
+                await new Promise<void>(r => { deliver = r; });
+                return answer;
+            });
+            await createList('Fresh');
+            await favouriteNow('List 9');
+            expect(savedOrders(), 'the favourite waits its turn').toEqual([]);
+            await act(async () => { deliver(); });
+            await settle();
+            expect(savedOrders()).toEqual([
+                ['list:11', 'list:5', 'list:7', 'list:9'],
+                ['list:9*', 'list:11', 'list:5', 'list:7'],
+            ]);
+            expect(shown()).toEqual(['list:9*', 'list:11', 'list:5', 'list:7']);
+            expect(barOrder()).toEqual(['list:9', 'list:11', 'list:5', 'list:7']);   // the bar and the server agree
+        });
+
+        it('a list made while a favourite’s save is still out is placed once that has landed, into the order with the favourite', async () => {
+            createReturns(12);
+            await mount();
+            // The favourite's save — the first order written — is slow to land.
+            let land: () => void = () => {};
+            let first = true;
+            put.mockImplementation(async (path: string, body: { prefs: TaskTabPref[] }) => {
+                if (path !== '/task-tab-prefs') return {};
+                if (first) { first = false; await new Promise<void>(r => { land = r; }); }
+                held = body.prefs;
+                return {};
+            });
+            await favouriteNow('List 9');
+            const reads = () => get.mock.calls.filter(c => c[0] === '/task-tab-prefs').length;
+            const readsBefore = reads();
+            await createList('Fresh');
+            expect(reads(), 'the place is not read while the favourite is out').toBe(readsBefore);
+            await act(async () => { land(); });
+            await settle();
+            expect(shown()).toEqual(['list:9*', 'list:12', 'list:5', 'list:7']);
+            expect(barOrder()).toEqual(['list:9', 'list:12', 'list:5', 'list:7']);
+        });
+    });
 });
 
 describe('Púca Tasks view: a delete forgets the organisation, the trash does not', () => {
