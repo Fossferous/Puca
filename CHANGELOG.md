@@ -66,6 +66,21 @@ one-line summary; this file is the full story. Versions follow
   share, so the note is still at the top after a reload and on your other
   devices, and a note made offline takes its place there when it syncs.
   Sorting by **Title**, **Newest** or **Edited** is unchanged.
+- **A new note from outside Púca Notes opens ready to type.** On Android,
+  a new note or list opened by a long-press shortcut, the quick tile, the
+  widget, **Open Púca Notes to**, or an app such as MacroDroid or Tasker
+  sending the shortcut's intent now opens with the keyboard up: a note on
+  its text, a list on its first item, whether the app was closed or already
+  running. Before, the composer opened with the keyboard down (and a new
+  note on its title), so you had to tap before you could type. A drawing
+  or a photo opens without the keyboard, even right after a list that had
+  it up, and so does a new note that had to wait for you to sign in or that
+  opens behind the *Install the new Púca Notes app* screen.
+  The intent to send (action, app, and the one word that picks a note, a
+  list, a drawing, a photo or Reminders) is in the Púca Notes guide.
+  **Install the new Púca Notes app once, from the download page, for the
+  keyboard:** an older one takes this update over the air and opens on the
+  same field, but the keyboard still waits for a tap.
 
 ### Fixed
 - **A pasted note copied with Copy as text gains no extra first item.** A

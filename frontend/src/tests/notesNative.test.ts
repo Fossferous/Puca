@@ -25,6 +25,8 @@ const fake = {
     consumeLaunchShare: vi.fn(async () => ({ text: null as string | null, subject: null as string | null, files: [] as { url: string | null; name: string; mime: string; size: number }[] })),
     requestAddTile: vi.fn(async () => ({ ok: true })),
     notificationStatus: vi.fn(async () => ({ granted: false, needsRequest: true, blocked: false })),
+    showKeyboard: vi.fn(async (): Promise<{ shown: boolean }> => ({ shown: true })),
+    hideKeyboard: vi.fn(async (): Promise<{ hidden: boolean }> => ({ hidden: true })),
 };
 
 vi.mock('@capacitor/core', () => ({
@@ -109,6 +111,8 @@ describe('degrading without the plugin', () => {
         await expect(nn.consumeNativeLaunchShare()).resolves.toEqual({ text: null, subject: null, files: [] });
         await expect(nn.requestNativeAddTile()).resolves.toBe(false);
         await expect(nn.clearNativeSession()).resolves.toBeUndefined();
+        await expect(nn.raiseNativeKeyboard()).resolves.toBe(false);
+        await expect(nn.hideNativeKeyboard()).resolves.toBe(false);
         expect(nn.notesNativeAvailable()).toBe(false);
         for (const f of Object.values(fake)) expect(f).not.toHaveBeenCalled();
     });
@@ -144,5 +148,57 @@ describe('degrading without the plugin', () => {
     it('clearing the background refresh sends nulls, not a stale token', async () => {
         await nn.setNativeBackgroundRefresh(null);
         expect(fake.setBackgroundRefresh).toHaveBeenCalledWith({ apiBase: null, token: null, account: null });
+    });
+});
+
+describe('raiseNativeKeyboard (the keyboard for a composer opened from outside)', () => {
+    it('with the plugin: one content-free call, and its answer', async () => {
+        await expect(nn.raiseNativeKeyboard()).resolves.toBe(true);
+        expect(fake.showKeyboard).toHaveBeenCalledTimes(1);
+        expect(fake.showKeyboard).toHaveBeenCalledWith();
+        fake.showKeyboard.mockResolvedValueOnce({ shown: false });
+        await expect(nn.raiseNativeKeyboard()).resolves.toBe(false);
+    });
+
+    it('an APK from before the method (Capacitor rejects it): false, never a throw', async () => {
+        fake.showKeyboard.mockRejectedValueOnce(Object.assign(new Error('"NotesNative.showKeyboard()" is not implemented on android'), { code: 'UNIMPLEMENTED' }));
+        await expect(nn.raiseNativeKeyboard()).resolves.toBe(false);
+    });
+
+    it('a malformed answer is not a yes', async () => {
+        fake.showKeyboard.mockResolvedValueOnce(undefined as unknown as { shown: boolean });
+        await expect(nn.raiseNativeKeyboard()).resolves.toBe(false);
+        fake.showKeyboard.mockResolvedValueOnce({ shown: 'yes' } as unknown as { shown: boolean });
+        await expect(nn.raiseNativeKeyboard()).resolves.toBe(false);
+    });
+
+    it('the browser and the desktop app: no plugin, no call', async () => {
+        pluginPresent = false;
+        await expect(nn.raiseNativeKeyboard()).resolves.toBe(false);
+        expect(fake.showKeyboard).not.toHaveBeenCalled();
+    });
+});
+
+describe('hideNativeKeyboard (no keyboard over a drawing or a photo opened from outside)', () => {
+    it('with the plugin: one content-free call to hideKeyboard — not showKeyboard — and its answer', async () => {
+        await expect(nn.hideNativeKeyboard()).resolves.toBe(true);
+        expect(fake.hideKeyboard).toHaveBeenCalledTimes(1);
+        expect(fake.hideKeyboard).toHaveBeenCalledWith();
+        expect(fake.showKeyboard).not.toHaveBeenCalled();
+        fake.hideKeyboard.mockResolvedValueOnce({ hidden: false });
+        await expect(nn.hideNativeKeyboard()).resolves.toBe(false);
+    });
+
+    it('an APK from before the method, or a malformed answer: false, never a throw', async () => {
+        fake.hideKeyboard.mockRejectedValueOnce(Object.assign(new Error('"NotesNative.hideKeyboard()" is not implemented on android'), { code: 'UNIMPLEMENTED' }));
+        await expect(nn.hideNativeKeyboard()).resolves.toBe(false);
+        fake.hideKeyboard.mockResolvedValueOnce(undefined as unknown as { hidden: boolean });
+        await expect(nn.hideNativeKeyboard()).resolves.toBe(false);
+    });
+
+    it('the browser and the desktop app: no plugin, no call', async () => {
+        pluginPresent = false;
+        await expect(nn.hideNativeKeyboard()).resolves.toBe(false);
+        expect(fake.hideKeyboard).not.toHaveBeenCalled();
     });
 });

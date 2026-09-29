@@ -27,14 +27,15 @@
  *
  * THE SHORTCUT'S OWN DOOR. Each choice IS a launcher shortcut's word
  * (COMPOSE_TARGETS), opened through the shell's onNativeCompose — the same
- * seq/intent path, the same sheet-or-inline choice, the same focus, and the
- * same composeModeFor fallback (a server that keeps no note text opens a
- * checklist). Nothing is saved here: an empty composer closed untouched
- * creates nothing (QuickAdd's close), which is what makes opening one
- * unasked harmless.
+ * seq/intent path, the same sheet-or-inline choice, the same focus and
+ * keyboard (ComposeIntent.readyToType), and the same composeModeFor
+ * fallback (a server that keeps no note text opens a checklist). Nothing
+ * is saved here: an empty composer closed untouched creates nothing
+ * (QuickAdd's close), which is what makes opening one unasked harmless.
  *
  * Web-only on purpose: page visibility and the plugin's existing events. No
- * plugin, permission or native method is added (notes-app/native-min.json).
+ * plugin, permission or native method is added for it (notes-app/
+ * native-min.json); the keyboard is the shortcut's, not this hook's.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { COMPOSE_TARGETS, SHARE_ASK_MS, type ComposeMode } from '../model/composeIntent';

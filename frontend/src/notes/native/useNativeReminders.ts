@@ -39,6 +39,13 @@ export function pushNativeCredentials(): void {
     void setNativeBackgroundRefresh({ apiBase: API_BASE_URL, token, account: acc });
 }
 
+/** Where a compose request reached the page from: the target the launch
+ *  carried, drained once when the shell mounts ('launch'), or a tap that
+ *  arrived while the shell was already up ('event' — a warm start). The
+ *  shell decides from it whether the request is still fresh enough to bring
+ *  the keyboard up (NotesShell's onNativeCompose). */
+export type NativeComposeSource = 'launch' | 'event';
+
 /** What a tap carried beyond its target: the one item a due notification
  *  came for, and where "open the composer" lands (a composer is state in the
  *  shell, not a route, so it cannot be expressed as a navigate). */
@@ -132,7 +139,7 @@ export async function routeNativeTarget(
  *  (native/useNotesOpenTo.ts): the launch's own request wins. */
 export function useNotesReminderLoop(
     navigate: (to: string) => void,
-    compose?: (mode: ComposeMode) => void,
+    compose?: (mode: ComposeMode, source: NativeComposeSource) => void,
     enabled = true,
     onLaunch?: (carried: boolean) => void,
 ): void {
@@ -167,23 +174,23 @@ export function useNotesReminderLoop(
     useEffect(() => {
         if (!enabled || !notesNativeAvailable()) return;
         let live = true;
-        const go = (nav: { target: string | null; item: number | null }) => {
+        const go = (nav: { target: string | null; item: number | null }, source: NativeComposeSource) => {
             if (!live) return;
             void routeNativeTarget(nav.target, to => { if (live) navRef.current(to); }, undefined, {
                 item: nav.item,
-                compose: mode => { if (live) composeRef.current?.(mode); },
+                compose: mode => { if (live) composeRef.current?.(mode, source); },
             });
         };
         void consumeNativeLaunchNav().then(nav => {
             // Told BEFORE the target is acted on, so nothing can open over it.
             if (live) launchRef.current?.(!!nav.target);
-            go(nav);
+            go(nav, 'launch');
         });
         // The native side also keeps an event's target as the pending launch
         // target (for a page that was not listening yet); take it here too, or
         // the next mount of this shell — say, after signing out and back in —
         // would replay a tap from long ago.
-        const off = onNativeNavigate(nav => { go(nav); void consumeNativeLaunchNav(); });
+        const off = onNativeNavigate(nav => { go(nav, 'event'); void consumeNativeLaunchNav(); });
         return () => { live = false; off(); };
     }, [enabled]);
 }

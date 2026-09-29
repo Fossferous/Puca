@@ -37,6 +37,17 @@ export interface ComposeIntent {
     /** Pictures another app shared in. Files on this device; they are sealed
      *  by the ordinary upload path when the note is saved. */
     files?: File[];
+    /**
+     * Opened to START WRITING NOW: a launcher shortcut, the quick tile, the
+     * widget, another app sending the same intent (MacroDroid, Tasker) or
+     * "Open Púca Notes to". The composer then lands where Google Keep does —
+     * a text note on its text, a checklist on its first item — and, in the
+     * Android app, brings the keyboard up (native/notesNative's
+     * raiseNativeKeyboard); a drawing or a photo leaves the keyboard down.
+     * Absent — a share, whose content is already in, and every click on the
+     * page itself — the composer focuses exactly as it always has.
+     */
+    readyToType?: boolean;
 }
 
 /** The nav targets that mean "open the composer", in the widget's cell order.
