@@ -60,6 +60,7 @@ import { type AddSheetResult } from '../components/calendar/CalendarAddSheet';
 import { OP_KEY_SHAPE } from '../api/opKey';
 import { setMessageToastSink } from '../components/messageToastBus';
 import type { TaskList } from '../api/tasks';
+import { isHeadingText } from '../api/taskHeading';
 
 const LIST = { id: 7, title: 'Bins', created_at: '2026-09-01T00:00:00Z', total_tasks: 0, completed_tasks: 0 } as unknown as TaskList;
 
@@ -163,5 +164,25 @@ describe('the calendar add sheet: one key per intent, and the intent is the whol
         expect(await add(filled())).toBe(true);
         expect(keys().length).toBe(2);
         expect(keys()[1], 'the second add replayed the one already on the server').not.toBe(keys()[0]);
+    });
+});
+
+// A heading has no time (api/taskHeading.ts), so what the calendar makes —
+// always timed — is an item whatever its title starts with. Stored as typed,
+// "## Standup" would be a heading: hidden from the day it was added to and
+// from Reminders, and still reminding.
+describe('the calendar add sheet never makes a heading', () => {
+    it('"## Standup" lands as the item it was typed as', async () => {
+        openSheet();
+        expect(await add(filled({ title: '## Standup' }))).toBe(true);
+        const text = createListTask.mock.calls[0][1] as string;
+        expect(text).toBe('##\u00a0Standup');
+        expect(isHeadingText(text)).toBe(false);
+    });
+
+    it('POSITIVE CONTROL: any other title is sent exactly as typed', async () => {
+        openSheet();
+        expect(await add(filled({ title: '#1 Bins out' }))).toBe(true);
+        expect(createListTask.mock.calls[0][1]).toBe('#1 Bins out');
     });
 });

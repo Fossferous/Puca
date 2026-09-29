@@ -126,6 +126,29 @@ describe('the HTML, as Markdown', () => {
         expect(md('<ul><li><h3>Step</h3><p>more</p></li></ul>')).toBe('- Step\n  more');
     });
 
+    it('role="heading" is a heading at its aria-level (2 when it names none)', () => {
+        expect(md('<div role="heading" aria-level="4">A</div><div role="heading">B</div><p>c</p>')).toBe('#### A\n## B\nc');
+    });
+
+    it('a list item that is NOTHING but a heading is that heading — how Púca renders one of its rows', () => {
+        // A copied row of Púca's own checklist: grip, the heading, buttons.
+        const row = (label: string) => `<li class="tt-item tt-heading"><span class="tt-grip"><svg><path d="M0"/></svg></span>`
+            + `<span class="tt-description" role="heading" aria-level="3">${label}</span>`
+            + '<div class="tt-actions"><button title="Turn into item">x</button><button title="Delete">y</button></div></li>';
+        const item = (label: string) => `<li class="tt-item"><input type="checkbox"><span class="tt-description">${label}</span></li>`;
+        expect(md(`<ul>${item('Pack')}${row('Before you start')}${item('Update the app')}</ul>`))
+            .toBe('- [ ] Pack\n### Before you start\n- [ ] Update the app');
+        expect(md('<ul><li><h2>Setup</h2></li><li>a</li></ul>')).toBe('## Setup\n- a');
+        // POSITIVE CONTROLS: more text than the heading, a box, or two
+        // headings, and it is an item as before.
+        expect(md('<ul><li><span role="heading">Step</span> and more</li></ul>')).toBe('- Step and more');
+        expect(md('<ul><li><input type="checkbox"><span role="heading">Step</span></li></ul>')).toBe('- [ ] Step');
+        expect(md('<ul><li role="checkbox" aria-checked="true"><span role="heading">Step</span></li></ul>')).toBe('- [x] Step');
+        expect(md('<ul><li><h3>A</h3><h3>B</h3></li></ul>')).toBe('- A\n  B');
+        // Nested, it stays an item of its parent.
+        expect(md('<ul><li>a<ul><li><h3>Sub</h3></li></ul></li></ul>')).toBe('- a\n  - Sub');
+    });
+
     it('list items are "- " and "1. ", nested lists indented under their item', () => {
         expect(md('<ol start="3"><li>a<ul><li>b<ol><li>c</li></ol></li></ul></li><li>d</li></ol>'))
             .toBe('3. a\n   - b\n     1. c\n4. d');

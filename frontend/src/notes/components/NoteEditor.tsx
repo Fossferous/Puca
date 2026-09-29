@@ -48,7 +48,7 @@ import { useTaskFeature } from '../../api/taskFeatures';
 import { NoteDueChip, NoteReminderControl } from '../../components/schedule/NoteReminderControl';
 import { halfMinuteNow, subscribeHalfMinute } from '../../components/schedule/halfMinuteClock';
 import { EditedStamp } from './EditedStamp';
-import { asItemText } from '../../api/taskHeading';
+import { asItemText, headingLabel, isHeadingTask } from '../../api/taskHeading';
 
 interface NoteEditorProps {
     card: NoteCard;
@@ -243,7 +243,9 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
         // are its own again, so there is nothing to undo and nothing to clean.
         if (!await actions.deleteTaskFrom(ref, root.id)) return;
         const orphaned = fileIdsOf(subtree.flatMap(readableAttachmentsOf));
-        const label = isUndecryptable(root.description) ? '' : root.description.replace(/\s+/g, ' ').trim();
+        // A heading is named by its label, as its row shows it — never "## ".
+        const shown = isHeadingTask(root) ? headingLabel(root.description) : root.description;
+        const label = isUndecryptable(root.description) ? '' : shown.replace(/\s+/g, ' ').trim();
         undo.push({
             message: label ? `Deleted “${label.length > 24 ? `${label.slice(0, 23)}…` : label}”` : 'Item deleted',
             run: async () => {

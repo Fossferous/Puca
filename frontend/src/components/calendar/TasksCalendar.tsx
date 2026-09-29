@@ -29,7 +29,7 @@ import { toastRefusal } from '../../api/refusalToast';
 import { pushMessageToast } from '../messageToastBus';
 import { heldOpKey } from '../../api/opKey';
 import { localDayKey } from '../../utils/calendarMath';
-import { isHeadingTask } from '../../api/taskHeading';
+import { asLiteralItemText, isHeadingTask } from '../../api/taskHeading';
 
 /** The Calendar tab's channels — the shape every dated view takes. */
 export type TasksCalendarChannel = TasksScopeChannel;
@@ -137,8 +137,11 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen, noteRemi
             // original row at its ORIGINAL timing, answered 200, and the
             // sheet closed as a success with the change silently dropped.
             const opKey = addKey.current.keyFor([r.target, r.dayKey, r.time, r.allDay, r.kind, r.title].join('\u0000'));
-            if (kind === 'list') await createListTask(Number(id), r.title, undefined, timing, opKey);
-            else await createTask(Number(id), r.title, undefined, timing, opKey);
+            // What the calendar makes has a time, so it is an item, never a
+            // heading — whatever its title starts with (api/taskHeading.ts).
+            const title = asLiteralItemText(r.title);
+            if (kind === 'list') await createListTask(Number(id), title, undefined, timing, opKey);
+            else await createTask(Number(id), title, undefined, timing, opKey);
             addKey.current.landed();
             setCalendarPrefs({ lastNote: r.target });
             pokeTaskReminders();

@@ -24,6 +24,7 @@ import { checkedCount, checkedRoots, uncheckOrder } from '../notes/model/noteIte
 import { copyPlanOf, noteToMarkdown, noteToMessage, notesToJson } from '../notes/model/noteText';
 import { entriesInRange, noteAsCalendarItem, type CalendarSource } from '../api/taskCalendar';
 import { groupReminderSources } from '../api/reminderGroups';
+import { isHeadingText } from '../api/taskHeading';
 
 /** The owner's paste, as the assistant's Copy button put it on the clipboard. */
 const OWNER_MARKDOWN = `Here's your 0.9.826 test checklist:
@@ -209,5 +210,94 @@ describe('writing a checklist out', () => {
             // POSITIVE CONTROL: an item keeps its tick and its time.
             ['Snooze', true, '2026-09-30T09:00:00Z'],
         ]);
+    });
+});
+
+// Review round (2026-09-29): what only LOOKS like a heading stays what it
+// is, and the round trip survives what Copy as text writes around a list.
+describe('text that only looks like a heading', () => {
+    it('a list line whose text starts with "# " is an ITEM, and keeps its hash', () => {
+        const items = bodyToItems('- # of guests\n- chairs');
+        expect(items).toEqual(['#\u00a0of guests', 'chairs']);
+        expect(items.map(isHeadingText)).toEqual([false, false]);
+        expect(readChecklist('Party:\n- # of guests to invite\n- chairs to rent')).toEqual({
+            title: 'Party', items: ['#\u00a0of guests to invite', 'chairs to rent'],
+        });
+        // POSITIVE CONTROL: a line that is nothing but a heading is one.
+        expect(bodyToItems('# Party\n- chairs')).toEqual(['## Party', 'chairs']);
+    });
+
+    it('...and reads back as the same item after Copy as text', () => {
+        const tasks = [task(1, '#\u00a0of guests'), task(2, 'chairs')];
+        expect(readChecklist(noteToMarkdown(cardOf(tasks)))?.items).toEqual(['#\u00a0of guests', 'chairs']);
+    });
+
+    it('the composer keeps that item an item; "# x" TYPED there is still a heading', () => {
+        expect(cleanQuickItems(['#\u00a0of guests'])).toEqual(['#\u00a0of guests']);
+        expect(cleanQuickItems(['# of guests'])).toEqual(['## of guests']);
+    });
+
+    it('a comment inside a fenced code block is not a heading', () => {
+        const items = bodyToItems('```\n# install deps\nnpm i\n```');
+        expect(items).toEqual(['```', '#\u00a0install deps', 'npm i', '```']);
+        // POSITIVE CONTROL: the same line after the fence closes is one.
+        expect(bodyToItems('```\nnpm i\n```\n# install deps')).toContain('## install deps');
+    });
+
+    it('a hash that belongs to the label survives the round trip ("Learn C#")', () => {
+        expect(readChecklist('# Learn C#\n- a\n- b\n## Learn C#\n- c')).toEqual({
+            title: 'Learn C#', items: ['a', 'b', '## Learn C#', 'c'],
+        });
+        const read = readChecklist(noteToMarkdown(cardOf([task(1, 'a'), task(2, '## Learn C#'), task(3, 'c')])));
+        expect(read?.items).toEqual(['a', '## Learn C#', 'c']);
+        // POSITIVE CONTROL: Markdown's own closing hashes still go.
+        expect(readChecklist('- a\n- b\n## Calendar ##\n- c')?.items).toEqual(['a', 'b', '## Calendar', 'c']);
+    });
+
+    it('Copy as text of a pinned, labelled or shared note reads back with no extra first item', () => {
+        const tasks = tasksOf(['## Before you start', 'Update the app', 'Back up', '## Then', 'Open it']);
+        const plain = readChecklist(noteToMarkdown(cardOf(tasks)));
+        for (const meta of [{ pinned: true }, { labels: ['work', 'home'] }, { serverName: 'Home server' }, { pinned: true, labels: ['work'], serverName: 'S' }]) {
+            const md = noteToMarkdown({ ...cardOf(tasks), ...meta });
+            expect(md).toMatch(/\n_.+_\n/);             // the meta line really is there
+            expect(readChecklist(md), JSON.stringify(meta)).toEqual(plain);
+        }
+        // POSITIVE CONTROL: a plain line before the list is still an item,
+        // and so is a bold one — only a wholly italic line is a subtitle.
+        expect(readChecklist('# T\nFirst thing\n- a\n- b')?.items).toEqual(['First thing', 'a', 'b']);
+        expect(readChecklist('# T\n**First thing**\n- a\n- b')?.items).toEqual(['First thing', 'a', 'b']);
+    });
+});
+
+describe('a paste carrying both formats reads the one that kept its structure', () => {
+    // A Markdown checklist as a code editor copies it: the text is the
+    // Markdown, the HTML one <div> a line in a white-space: pre block, its
+    // spaces as &nbsp; — so its indents do not survive the HTML reading.
+    const MD = ['# Release test', '', '## Before you start', '- [ ] Update the app', '  (from the download page)', '- [ ] Sign in', '', '## Calls', '- [ ] Join a call', '- [ ] Leave it'].join('\n');
+    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/ /g, '&nbsp;');
+    const EDITOR_HTML = `<meta charset='utf-8'><div style="font-family: Consolas, monospace; white-space: pre;">${MD.split('\n').map(l => (l === '' ? '<br>' : `<div><span style="color: #cccccc;">${esc(l)}</span></div>`)).join('')}</div>`;
+
+    it('Markdown with its own headings wins over the HTML beside it', () => {
+        const alone = readPastedItems(MD);
+        expect(alone?.items).toEqual(['## Before you start', 'Update the app — (from the download page)', 'Sign in', '## Calls', 'Join a call', 'Leave it']);
+        expect(readPastedItems(MD, { html: EDITOR_HTML })).toEqual(alone);
+    });
+
+    it('plain text that kept its list marks but lost its headings reads the HTML, which has them', () => {
+        // What a browser that writes list markers into a copied selection's
+        // text gives: "1." and "*" kept, the headings bare lines.
+        const text = 'Router setup\n1. Unplug the old router\n2. Connect the new one\nSecurity\n* Change the admin password\n* Turn on WPA3';
+        const html = '<h1>Router setup</h1><ol><li>Unplug the old router</li><li>Connect the new one</li></ol><h2>Security</h2><ul><li>Change the admin password</li><li>Turn on WPA3</li></ul>';
+        // On its own the text is a checklist whose title and heading are items.
+        expect(readPastedItems(text)?.items).toContain('Security');
+        expect(readPastedItems(text, { html })).toEqual({
+            items: ['Unplug the old router', 'Connect the new one', '## Security', 'Change the admin password', 'Turn on WPA3'],
+            total: 5, title: 'Router setup',
+        });
+    });
+
+    it('POSITIVE CONTROL: with no heading in the HTML either, the plain text is read as it was', () => {
+        const text = '- a\n- b\n- c';
+        expect(readPastedItems(text, { html: '<ul><li>a</li><li>b</li><li>c (html)</li></ul>' })).toEqual(readPastedItems(text));
     });
 });

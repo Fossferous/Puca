@@ -6,6 +6,7 @@ import { type IcsImportItem } from '../api/ics';
 import { ApiError, apiClient, retryAfterMsOf } from '../api/client';
 import { parseSchedule, serializeSchedule } from '../api/taskSchedule';
 import { type Task } from '../api/tasks';
+import { isHeadingText } from '../api/taskHeading';
 
 const item = (i: number, extra: Partial<IcsImportItem> = {}): IcsImportItem => ({
     kind: 'event', uid: `uid-${i}`, summary: `Event ${i}`, notes: [],
@@ -105,6 +106,14 @@ describe('runImport', () => {
         const s = await runImport([item(1), item(2), item(3)], { listId: 7, title: 'x', existingCount: 0, existingUids: new Set() }, f.io, { nowMs: NOW, signal: { cancelled: false } });
         expect(s.created).toBe(2);
         expect(s.failed).toEqual([{ summary: 'Event 2', reason: 'Task description too long' }]);
+    });
+
+    it('an event titled like a heading ("# Team sync") lands as an ITEM: a heading has no time', async () => {
+        const f = fakeIO();
+        await runImport([item(1, { summary: '# Team sync' }), item(2)], { listId: 7, title: 'x', existingCount: 0, existingUids: new Set() }, f.io, { nowMs: NOW, signal: { cancelled: false } });
+        expect(f.tasks.map(t => t.text)).toEqual(['#\u00a0Team sync', 'Event 2']);
+        expect(isHeadingText(f.tasks[0].text)).toBe(false);
+        expect(parseSchedule(f.tasks[0].schedule).state).toBe('ok');
     });
 });
 

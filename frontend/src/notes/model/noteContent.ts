@@ -12,7 +12,9 @@ import {
 } from '../../api/tasks';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { parseSchedule, parseSnooze, serializeSchedule } from '../../api/taskSchedule';
-import { asHeadingText, headingLabel, isHeadingTask, isHeadingText } from '../../api/taskHeading';
+import {
+    asHeadingText, asLiteralItemText, headingLabel, headingLabelOf, isHeadingTask, isHeadingText,
+} from '../../api/taskHeading';
 import { deriveQuickTitle, MAX_ITEM_LENGTH, type NoteRef } from './notesModel';
 import { htmlToMarkdown } from './pastedHtml';
 
@@ -56,16 +58,22 @@ export function deriveContentTitle(
  *  note pasted as a Markdown list converts cleanly. A Markdown heading line
  *  ("## Setup", "# Setup") becomes a HEADING item (api/taskHeading.ts), kept
  *  in the one form a heading is stored in — which is also what "Hide
- *  checkboxes" writes a heading back out as, so the two undo each other. */
+ *  checkboxes" writes a heading back out as, so the two undo each other.
+ *  Only a line that is NOTHING but a heading is one: a list line whose text
+ *  starts with "# " ("- # of guests") is an item, and so is a "# comment"
+ *  inside a fenced code block; both keep their "#" (asLiteralItemText). */
 export function bodyToItems(body: string): string[] {
+    let inFence = false;
     return body
         .split(/\r?\n/)
         .map(l => {
             const t = l.trim();
+            if (FENCE.test(t)) { inFence = !inFence; return t; }
+            if (inFence) return asLiteralItemText(t);
             if (isHeadingText(t)) return asHeadingText(t);
             // A list marker (- * + • or a number "1." / "1)"), then a task
             // box: the item is what follows.
-            return t.replace(/^(?:(?:[-*+•]|\d{1,3}[.)])\s+)?(?:\[[ xX]\]\s*)?/, '').trim();
+            return asLiteralItemText(t.replace(/^(?:(?:[-*+•]|\d{1,3}[.)])\s+)?(?:\[[ xX]\]\s*)?/, '').trim());
         })
         .filter(l => l !== '');
 }
@@ -86,7 +94,13 @@ export function bodyToItems(body: string): string[] {
 /** A list line: - * + • or "1." / "1)", then an optional task box; or a bare
  *  task box. [1] is the indent, [2] the item. */
 const LIST_LINE = /^(\s*)(?:(?:[-*+•]|\d{1,3}[.)])\s+(?:\[[ xX]\]\s+)?|\[[ xX]\]\s+)(.*\S)\s*$/;
-const HEADING = /^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/;
+/** A heading line's marks, with or without a label (api/taskHeading.ts is
+ *  what reads the label: "C#" keeps its hash there). */
+const HEADING_MARKS = /^[ \t]{0,3}#{1,6}[ \t]/;
+/** A line wholly in emphasis, "_pinned · labels: work_": what Notes' own
+ *  Copy as text writes under a note's title (noteText.ts noteToMarkdown),
+ *  and the subtitle a page puts there. Not "**bold**". */
+const EMPHASIS_LINE = /^\s*([_*])(?!\1)\S(?:.*\S)?\1\s*$/;
 const FENCE = /^\s*(?:```|~~~)/;
 /** "Here's a checklist for X:" → "Checklist for X" — the lead-in is chat,
  *  not a title. */
@@ -147,7 +161,8 @@ export interface ReadChecklist {
  *
  * - The first heading before the list is the title; failing that, a line
  *   that introduced the list ("Here's a checklist for X:" → "Checklist for
- *   X", "Steps:" → "Steps").
+ *   X", "Steps:" → "Steps"). A line wholly in emphasis before the list is a
+ *   subtitle — Copy as text's "_pinned · labels: work_" — never an item.
  * - A heading after that, or a line ending in a colon inside the list, is a
  *   section and becomes a HEADING item ("## Setup", api/taskHeading.ts), so
  *   the grouping is not lost and it is not one more box to tick. One left
@@ -157,6 +172,8 @@ export interface ReadChecklist {
  * - An indented line under an item, and a fenced code block under it (the
  *   command a step says to run), join that item.
  * - Nested items are flattened in order: the composer's list is flat.
+ * - A list line is an item even when its text starts with "# " ("- # of
+ *   guests"): it keeps its hash (api/taskHeading.ts asLiteralItemText).
  * - Inline Markdown is dropped (plainInline); [x] boxes arrive unticked.
  */
 export function readChecklist(text: string): ReadChecklist | null {
@@ -187,9 +204,8 @@ export function readChecklist(text: string): ReadChecklist | null {
             continue;
         }
         if (!raw.trim()) continue;
-        const h = HEADING.exec(raw);
-        if (h) {
-            const t = plainInline(h[1]);
+        if (HEADING_MARKS.test(raw)) {
+            const t = plainInline(headingLabelOf(raw) ?? '');
             if (!t) continue;
             if (items.length === 0 && title === null) title = titleFromLine(t);
             else pushSection(t);
@@ -197,7 +213,7 @@ export function readChecklist(text: string): ReadChecklist | null {
         }
         const m = LIST_LINE.exec(raw);
         if (m) {
-            push(plainInline(m[2]), false);
+            push(asLiteralItemText(plainInline(m[2])), false);
             listLines++;
             continue;
         }
@@ -205,7 +221,7 @@ export function readChecklist(text: string): ReadChecklist | null {
             join(plainInline(raw));
             continue;
         }
-        if (items.length === 0 && introduces(raw)) {
+        if (items.length === 0 && (introduces(raw) || EMPHASIS_LINE.test(raw))) {
             if (intro === null) intro = titleFromLine(raw);
             continue;
         }
@@ -265,18 +281,12 @@ export interface PastedItems {
  * `checklistOnly` is for a TITLE field, where only a real checklist is
  * taken and any other text pastes as a title.
  *
- * `html` is the clipboard's `text/html`, read FIRST. A copy of a RENDERED
- * checklist (an assistant's answer selected on the page rather than taken
- * with its Copy button, a list off a web page) carries no "#" or "- [ ]" in
- * its plain text, so on its own that reads as one item per line, the title
- * and every heading included; its HTML still has the <h1>/<h2>, the <li> and
- * the boxes (pastedHtml.ts turns them back into that Markdown). The HTML is
- * taken only when it reads as a checklist: anything else — a table, a
- * paragraph, a page too big to read — falls back to `text` exactly as
- * before. Every paste path comes through here (readPaste).
+ * `html` is the clipboard's `text/html` beside it (readBestChecklist says
+ * which of the two is read). Every paste path comes through here
+ * (readPaste).
  */
 export function readPastedItems(text: string, opts: { checklistOnly?: boolean; html?: string } = {}): PastedItems | null {
-    const list = readRenderedChecklist(opts.html) ?? readChecklist(text);
+    const list = readBestChecklist(text, opts.html);
     if (opts.checklistOnly && !list) return null;
     const lines = list?.items ?? linesFromPaste(text);
     if (lines.length < 2) return null;
@@ -287,11 +297,39 @@ export function readPastedItems(text: string, opts: { checklistOnly?: boolean; h
     };
 }
 
-/** A clipboard's HTML read as a checklist, or null when it is not one (or
- *  there is none, or it is not read: pastedHtml.ts). */
-export function readRenderedChecklist(html: string | null | undefined): ReadChecklist | null {
+/** Does this text have a Markdown heading line of its own? */
+const hasHeadingLine = (text: string): boolean => text.split(/\r?\n/).some(l => isHeadingText(l));
+
+/**
+ * The checklist a paste reads as, from whichever of the clipboard's two
+ * formats kept its structure — or null when neither is a checklist.
+ *
+ * A copy of a RENDERED checklist (an assistant's answer selected on the
+ * page rather than taken with its Copy button, a list off a web page) has
+ * lost its marks in the plain text: in Chromium no "#" and no "- [ ]" at
+ * all (measured), so on its own it reads as one item per line, the title
+ * and every heading included; and a browser that does keep a list's "1."
+ * and "*" in the plain text still writes no "#", so that reads as a
+ * checklist whose title and headings are items. Its HTML
+ * still has the <h1>/<h2>, the <li> and the boxes (pastedHtml.ts turns them
+ * back into that Markdown). So the HTML is read when the plain text is no
+ * checklist, or when it is one with no heading line while the HTML has one.
+ *
+ * Plain text that is Markdown with its own headings is the list AS IT WAS
+ * WRITTEN, and wins: the HTML beside it is only a picture of it — a code
+ * editor's highlighting (one <div> a line, its indents lost to white-space
+ * the reader collapses), an app's rendering of its Copy button's Markdown.
+ * Anything the HTML does not read as a checklist — a table, a paragraph, a
+ * page too big to read — leaves the plain text read exactly as before.
+ */
+export function readBestChecklist(text: string, html?: string | null): ReadChecklist | null {
+    const plain = readChecklist(text);
+    if (plain && hasHeadingLine(text)) return plain;
     const md = htmlToMarkdown(html);
-    return md ? readChecklist(md) : null;
+    if (!md) return plain;
+    const rendered = readChecklist(md);
+    if (!rendered || (plain && !hasHeadingLine(md))) return plain;
+    return rendered;
 }
 
 /** The minimum of a `DataTransfer` this module reads: a clipboard paste and

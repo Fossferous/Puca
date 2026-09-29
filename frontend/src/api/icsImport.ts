@@ -18,6 +18,7 @@ import { type IcsImportItem } from './ics';
 import { deriveDueAt, parseSchedule, serializeSchedule } from './taskSchedule';
 import { type NewTaskTiming, type Task } from './tasks';
 import { newOpKey } from './opKey';
+import { asLiteralItemText } from './taskHeading';
 
 export const PACE_MS = 50;
 /** An .ics bigger than this is refused before it is parsed. */
@@ -166,7 +167,9 @@ export async function runImport(
             const listId = await currentList(need);
             const schedule = serializeSchedule(it.schedule);
             const itemKey = newOpKey();
-            const created = await withRetry(() => io.createTask(listId, it.summary, undefined, { schedule, dueAt: deriveDueAt(it.schedule, opts.nowMs) }, itemKey));
+            // An event has a time, so it lands as an item, never a heading,
+            // whatever its title starts with ("# Team sync", api/taskHeading.ts).
+            const created = await withRetry(() => io.createTask(listId, asLiteralItemText(it.summary), undefined, { schedule, dueAt: deriveDueAt(it.schedule, opts.nowMs) }, itemKey));
             bump(listId);
             await io.sleep(PACE_MS);
             if (it.description) {

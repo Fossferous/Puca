@@ -9,8 +9,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-    addItemsLabel, asHeadingText, asItemText, countHeadingTexts, countItems, headingLabel, headingLabelOf,
-    isHeadingTask, isHeadingText,
+    addItemsLabel, asHeadingText, asItemText, asLiteralItemText, countHeadingTexts, countItems, headingLabel,
+    headingLabelOf, isHeadingTask, isHeadingText,
 } from '../api/taskHeading';
 import { type Task, planDropTarget } from '../api/tasks';
 import { TASK_DECRYPT_FAILED } from '../api/decryptMarkers';
@@ -115,5 +115,48 @@ describe('the drag never nests a heading, or under one (planDropTarget)', () => 
 
     it('POSITIVE CONTROL: an item indented under an ordinary item still nests', () => {
         expect(planDropTarget(tasks, b, [1, 2], 2, 1)).toEqual({ afterId: null, reparent: { parentId: 2 } });
+    });
+});
+
+describe('text that must stay an item although it reads as a heading (asLiteralItemText)', () => {
+    it('keeps "# of guests" looking the same, and no longer a heading', () => {
+        const t = asLiteralItemText('# of guests');
+        expect(t).toBe('#\u00a0of guests');
+        expect(isHeadingText(t)).toBe(false);
+        expect(headingLabel(t)).toBe(t);
+        expect(asItemText(t)).toBe(t);
+        expect(asLiteralItemText('### Deep  down')).toBe('###\u00a0Deep  down');
+    });
+
+    it('leaves anything that is not heading text exactly as it was', () => {
+        for (const t of ['Milk', '#hashtag', '#1 priority', '## ', 'C# notes']) expect(asLiteralItemText(t)).toBe(t);
+        // ...and is a no-op on its own output.
+        expect(asLiteralItemText(asLiteralItemText('# x'))).toBe('#\u00a0x');
+    });
+});
+
+describe('the drag never makes a heading of a timed "## x" sub-item (planDropTarget)', () => {
+    // Only an older client nests a "## x": to it, it is an item.
+    const parent = task(1, 'Parent');
+    const sub = (o: Partial<Task> = {}) => task(2, '## Setup', { parent_id: 1, ...o });
+    const after = task(3, 'After');
+
+    it('with a due time or a date & repeat, un-nesting it to the top level degrades to the plain drop', () => {
+        for (const timed of [sub({ due_at: '2026-09-30T09:00:00Z' }), sub({ schedule: '{"v":1}', due_at: '2026-09-30T09:00:00Z' })]) {
+            expect(planDropTarget([parent, timed, after], timed, [1, 3], 1, -1)).toEqual({ afterId: 1 });
+        }
+    });
+
+    it('POSITIVE CONTROLS: untimed it un-nests (and is a heading there); a timed ITEM un-nests too', () => {
+        const plain = sub();
+        expect(planDropTarget([parent, plain, after], plain, [1, 3], 1, -1)).toEqual({ afterId: 1, reparent: { parentId: null } });
+        const item = task(2, 'Setup', { parent_id: 1, due_at: '2026-09-30T09:00:00Z' });
+        expect(planDropTarget([parent, item, after], item, [1, 3], 1, -1)).toEqual({ afterId: 1, reparent: { parentId: null } });
+    });
+
+    it('POSITIVE CONTROL: out one level but still nested, a timed "## x" stays an item and may move', () => {
+        const grand = task(4, '## Deep', { parent_id: 2, due_at: '2026-09-30T09:00:00Z' });
+        const mid = task(2, 'Mid', { parent_id: 1 });
+        expect(planDropTarget([parent, mid, grand], grand, [1, 2], 2, -1)).toEqual({ afterId: 2, reparent: { parentId: 1 } });
     });
 });

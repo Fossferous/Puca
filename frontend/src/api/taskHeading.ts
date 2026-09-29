@@ -67,6 +67,26 @@ export function asItemText(text: string): string {
     return isHeadingText(text) ? asHeadingText(text) : text;
 }
 
+/** The white space between a heading's hashes and its label. */
+const AFTER_HASHES = /^([ \t]{0,3}#{1,6})[ \t]+/;
+
+/**
+ * Text that must stay an ITEM although it reads as a heading: a list line
+ * "- # of guests" (the list marker says what it is), a code comment inside
+ * a fence, a heading turned back into an item whose label starts with "# "
+ * itself, an item that has a time (a heading has none: a calendar entry
+ * titled "## Standup"). The white space after its hashes becomes ONE
+ * no-break space, which neither this rule nor Markdown reads as a heading
+ * (CommonMark wants a space or a tab there) and which looks the same, so
+ * "# of guests" is shown, copied and exported as it was written and reads
+ * back as the same item. Anything that is not heading text comes back as
+ * it is.
+ */
+export function asLiteralItemText(text: string): string {
+    const m = AFTER_HASHES.exec(text);
+    return m && isHeadingText(text) ? `${m[1]}\u00a0${text.slice(m[0].length)}` : text;
+}
+
 /** The fields of a row this rule reads — structural, so a Task, a feed row
  *  or a test's plain object all qualify. */
 export interface HeadingLike {

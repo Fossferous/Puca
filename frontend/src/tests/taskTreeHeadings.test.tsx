@@ -10,11 +10,13 @@
  * none of them passes by rendering nothing.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { act } from 'react';
+import { act, type ComponentProps } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
 import { TaskTree } from '../components/TaskTree';
 import type { Task } from '../api/tasks';
+import { isHeadingText } from '../api/taskHeading';
+import { readPastedItems } from '../notes/model/noteContent';
 
 const task = (id: number, description: string, o: Partial<Task> = {}): Task => ({
     id, channel_id: null, list_id: 1, parent_id: null, description, is_completed: false,
@@ -29,10 +31,11 @@ const onSetDue = vi.fn();
 const onSetSchedule = vi.fn();
 const onSnooze = vi.fn();
 
-function render(tasks: Task[]) {
+function render(tasks: Task[], extra: Partial<ComponentProps<typeof TaskTree>> = {}) {
     act(() => {
         root.render(
             <TaskTree
+                {...extra}
                 tasks={tasks}
                 onToggle={onToggle}
                 onDelete={() => {}}
@@ -202,5 +205,89 @@ describe('turning a row into a heading and back', () => {
         act(() => { (titled(rowOf('Calendar'), 'Turn into heading') as HTMLButtonElement).click(); });
         expect(confirm).not.toHaveBeenCalled();
         expect(onSetDue).not.toHaveBeenCalled();
+    });
+});
+
+/** Click a row's text, type `value` over it, press Enter. */
+function retype(text: string, value: string) {
+    act(() => { (rowOf(text).querySelector('.tt-description') as HTMLElement).click(); });
+    const input = host.querySelector<HTMLInputElement>('input.tt-edit-input')!;
+    typeInto(input, value);
+    act(() => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
+}
+
+describe('a heading is never ticked, never timed, and a "# " label can go back to being an item', () => {
+    it('"## x" typed over a TICKED item unticks it as it becomes a heading (a ticked one could never be dragged)', () => {
+        const calls: string[] = [];
+        onToggle.mockImplementation(() => { calls.push('untick'); });
+        onEdit.mockImplementation(() => { calls.push('edit'); });
+        render([task(1, 'Open item'), task(2, 'Done item', { is_completed: true })]);
+        retype('Done item', '## Section');
+        expect(onToggle).toHaveBeenCalledWith(expect.objectContaining({ id: 2 }), false);
+        expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: 2 }), '## Section');
+        expect(calls).toEqual(['untick', 'edit']);
+    });
+
+    it('POSITIVE CONTROL: "## x" over an OPEN item sends no untick', () => {
+        render([task(1, 'Open item')]);
+        retype('Open item', '## Section');
+        expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: 1 }), '## Section');
+        expect(onToggle).not.toHaveBeenCalled();
+    });
+
+    it('someone who may edit but not tick is told why, and nothing is written', () => {
+        const alert = vi.spyOn(window, 'alert').mockImplementation(() => {});
+        // Their own item (creator may edit), in a channel where they hold no
+        // right to tick (myPerms 0).
+        render([task(1, 'Open item'), task(2, 'Done item', { is_completed: true })], { myPerms: 0, currentUserId: 1 });
+        retype('Done item', '## Section');
+        expect(alert).toHaveBeenCalledTimes(1);
+        expect(onEdit).not.toHaveBeenCalled();
+        expect(onToggle).not.toHaveBeenCalled();
+        // POSITIVE CONTROL: an open item of theirs still becomes a heading.
+        retype('Open item', '## Section');
+        expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: 1 }), '## Section');
+    });
+
+    it('"Turn into item" on a heading whose label starts with "# " makes an ITEM of it, hash kept', () => {
+        render([task(1, '## # of guests')]);
+        act(() => { (titled(rowOf('# of guests'), 'Turn into item') as HTMLButtonElement).click(); });
+        const saved = onEdit.mock.calls[0]?.[1] as string;
+        expect(saved).toBe('#\u00a0of guests');
+        expect(isHeadingText(saved)).toBe(false);
+    });
+
+    it('a heading that still has a time shows the one control that takes it off — and nothing else of time', () => {
+        render([
+            task(1, '## Calendar', { due_at: '2026-09-30T09:00:00Z' }),
+            task(2, '## Standup', { due_at: '2026-09-30T09:00:00Z', schedule: '{"v":1}' }),
+            task(3, '## Plain'),
+            task(4, 'Timed item', { due_at: '2026-09-30T09:00:00Z' }),
+        ]);
+        act(() => { (titled(rowOf('Calendar'), 'Remove due time') as HTMLButtonElement).click(); });
+        expect(onSetDue).toHaveBeenCalledWith(expect.objectContaining({ id: 1 }), null);
+        expect(titled(rowOf('Calendar'), 'Edit due time')).toBeNull();
+        act(() => { (titled(rowOf('Standup'), 'Remove date & repeat') as HTMLButtonElement).click(); });
+        expect(onSetSchedule).toHaveBeenCalledWith(expect.objectContaining({ id: 2 }), null, null);
+        // POSITIVE CONTROLS: a heading with no time has neither; an item
+        // keeps its own editor and has no "Remove" button.
+        for (const t of ['Remove due time', 'Remove date & repeat']) {
+            expect(titled(rowOf('Plain'), t), `Plain: ${t}`).toBeNull();
+            expect(titled(rowOf('Timed item'), t), `item: ${t}`).toBeNull();
+        }
+        expect(titled(rowOf('Timed item'), 'Edit due time')).not.toBeNull();
+    });
+});
+
+describe("a selection of Púca's own list, pasted back", () => {
+    it('keeps its headings: the rows read as the Markdown they are', () => {
+        render([task(1, 'Pack'), task(2, '## Before you start'), task(3, 'Update the app'), task(4, '## Calls'), task(5, 'Join')]);
+        // The clipboard as a browser writes a copied selection: the markup,
+        // and a plain text with no marks at all.
+        const html = `<html><body><!--StartFragment-->${host.querySelector('.task-tree')?.outerHTML ?? host.innerHTML}<!--EndFragment--></body></html>`;
+        const plain = 'Pack\nBefore you start\nUpdate the app\nCalls\nJoin';
+        expect(readPastedItems(plain, { html })?.items).toEqual(['Pack', '## Before you start', 'Update the app', '## Calls', 'Join']);
+        // POSITIVE CONTROL: the plain text alone has no heading in it.
+        expect(readPastedItems(plain)?.items).toEqual(['Pack', 'Before you start', 'Update the app', 'Calls', 'Join']);
     });
 });

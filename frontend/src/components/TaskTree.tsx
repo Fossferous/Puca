@@ -11,8 +11,9 @@
  * title: no checkbox, no time, no subtasks, never in Completed. It is edited
  * as its label (the marks are put back on save), dragged, moved and deleted
  * like any row, and the row's own button turns it back into an item — or an
- * item into one. Headings are plain text to every callback here, so no owner
- * needed a new one.
+ * item into one (unticked, and without its time). A heading that arrives
+ * with a time anyway shows one button, the one that removes it. Headings are
+ * plain text to every callback here, so no owner needed a new one.
  */
 
 import { isUndecryptable } from '../api/decryptMarkers';
@@ -39,7 +40,7 @@ import {
     CalendarIcon, CheckboxIcon, ChevronDownIcon, ChevronRightIcon, ChevronUpIcon, ClockIcon, GripIcon, HeadingIcon, LockIcon,
     MapPinIcon, PaperclipIcon, PendingIcon, PlusIcon, TrashIcon, WarningIcon,
 } from './Icons';
-import { asHeadingText, headingLabel, isHeadingTask, isHeadingText } from '../api/taskHeading';
+import { asHeadingText, asLiteralItemText, headingLabel, isHeadingTask, isHeadingText } from '../api/taskHeading';
 import { ScheduleChip, SnoozeChip } from './schedule/ScheduleChip';
 import { ScheduleEditor } from './schedule/ScheduleEditor';
 import { SnoozeControl } from './reminders/SnoozeControl';
@@ -372,30 +373,45 @@ export function TaskTree({
 
     /**
      * Make a top-level item a heading (api/taskHeading.ts). A heading has no
-     * time: its row has no control that could show one, and nothing reminds
-     * about a section title. So an item with a due time or a date & repeat
-     * loses it — asked first, because that is the one thing this cannot give
-     * back. The phone's place reminder for it goes too.
+     * time and is never ticked: its row has no control that could show a
+     * time or untick it, and nothing reminds about a section title. So an
+     * item with a due time or a date & repeat loses it — asked first,
+     * because that is the one thing this cannot give back — and a ticked one
+     * (typed over in Completed) is unticked: left ticked, the server would
+     * keep it among the done items, where it could never be dragged into its
+     * section. The phone's place reminder for it goes too.
+     *
+     * The writes go out together: none of the owners' callbacks says whether
+     * its write landed, so waiting on one would order them without making
+     * them any safer. A clear that is refused can therefore still leave a
+     * heading with a time — and then the row shows the one control a heading
+     * has for it (Remove due time, below) instead of hiding a reminder
+     * nobody could stop.
      */
     const turnIntoHeading = (task: Task, text: string) => {
+        const label = headingLabel(text);
+        const name = label.length > 40 ? `${label.slice(0, 39)}…` : label;
+        if (task.is_completed && !canComplete) {
+            window.alert(`“${name}” is ticked, and only someone who may tick items can turn it into a heading.`);
+            return;
+        }
         const scheduled = task.schedule !== undefined && task.schedule !== null;
         if (scheduled || task.due_at) {
-            const label = headingLabel(text);
-            const name = label.length > 40 ? `${label.slice(0, 39)}…` : label;
             const what = scheduled ? 'date & repeat' : 'due time';
             if (!window.confirm(`A heading has no ${what}. Turn “${name}” into a heading and remove its ${what}?`)) return;
-            // The time goes FIRST: an edit that then fails leaves an item
-            // without its time, never a heading that still reminds.
-            if (scheduled && onSetSchedule) onSetSchedule(task, null, null);
-            else if (task.due_at) onSetDue?.(task, null);
         }
+        if (task.is_completed) onToggle(task, false);
+        if (scheduled && onSetSchedule) onSetSchedule(task, null, null);
+        else if (task.due_at) onSetDue?.(task, null);
         if (isAndroidApp()) unassignTasks([task.id]);
         onEdit(task, asHeadingText(text));
     };
 
-    /** A heading back to an ordinary item: its label, marks gone. */
+    /** A heading back to an ordinary item: its label, marks gone — and a
+     *  label that itself starts with "# " kept as the item it reads as
+     *  (asLiteralItemText), or the row would stay a heading. */
     const turnIntoItem = (task: Task) => {
-        onEdit(task, headingLabel(task.description));
+        onEdit(task, asLiteralItemText(headingLabel(task.description)));
     };
 
     const commitEdit = (task: Task) => {
@@ -527,6 +543,11 @@ export function TaskTree({
         // subtasks — but edited, moved and deleted like any row.
         const heading = isHeadingTask(task);
         const done = task.is_completed && !heading;
+        // A heading has no time, but one can arrive with one (an older
+        // client's; a clear that was refused): its row's one time control
+        // is the one that takes it off.
+        const leftoverTime = heading && editable
+            && (hasSchedule ? onSetSchedule !== undefined : !!task.due_at && onSetDue !== undefined);
         return (
         <li
             key={task.id}
@@ -709,6 +730,21 @@ export function TaskTree({
                         onClick={() => turnIntoItem(task)}
                     >
                         <CheckboxIcon />
+                    </button>
+                )}
+                {/* Hidden, a heading's time would still remind, with nothing
+                    on the row to say so or to stop it. */}
+                {leftoverTime && (
+                    <button
+                        className="tt-btn"
+                        title={hasSchedule ? 'Remove date & repeat' : 'Remove due time'}
+                        aria-label={hasSchedule ? 'Remove date & repeat' : 'Remove due time'}
+                        onClick={() => {
+                            if (hasSchedule) onSetSchedule?.(task, null, null);
+                            else onSetDue?.(task, null);
+                        }}
+                    >
+                        {hasSchedule ? <CalendarIcon /> : <ClockIcon />}
                     </button>
                 )}
                 {!heading && !task.is_completed && editable && (

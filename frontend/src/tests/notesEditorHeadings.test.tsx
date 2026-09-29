@@ -104,4 +104,19 @@ describe('a heading in the open note', () => {
         await add('Milk');
         expect(addTask).toHaveBeenLastCalledWith({ kind: 'list', id: 5 }, 'Milk');
     });
+
+    it('deleting a heading names it by its label in the Undo bar, never by its "## "', async () => {
+        vi.mocked(actions.deleteTaskFrom).mockResolvedValue(true);
+        render([task(1, '## Before you start'), task(2, 'Update the app')]);
+        const del = async (text: string) => {
+            const row = [...document.querySelectorAll('li.tt-item')].find(l => l.querySelector('.tt-description')?.textContent === text)!;
+            await act(async () => { ([...row.querySelectorAll('button')].find(b => b.getAttribute('title') === 'Delete') as HTMLButtonElement).click(); });
+        };
+        await del('Before you start');
+        expect(document.querySelector('.notes-undo')?.textContent).toContain('Deleted “Before you start”');
+        expect(document.body.textContent).not.toContain('##');
+        // POSITIVE CONTROL: an item is named as it is.
+        await del('Update the app');
+        expect(document.querySelector('.notes-undo')?.textContent).toContain('Deleted “Update the app”');
+    });
 });

@@ -878,7 +878,8 @@ export function subtreeHeight(tasks: Task[], rootId: number): number {
  *    differs — a completed parent is not in the moving task's group).
  *
  * Every impossible indent DEGRADES to the plain plan rather than dying: a
- * nest of a heading or under one (a heading stays a top-level row), a
+ * nest of a heading or under one (a heading stays a top-level row), an
+ * un-nest that would make a heading of a "## x" sub-item with a time, a
  * nest at the top slot, into the moving subtree (cycle), or past
  * MAX_TASK_DEPTH (the moving SUBTREE's height counts — pre-validating what
  * the server's depth rule will refuse) all fall back to the drop the
@@ -929,6 +930,14 @@ export function planDropTarget(
         if (moved.parent_id === null) return plain;
         const parent = tasks.find(t => t.id === moved.parent_id);
         if (!parent) return plain;
+        // A "## x" sub-item (only an older client nests one) that has a
+        // time stays where its time shows: at the top level it would be a
+        // heading, which has no control to show or clear that time — and
+        // it would still remind. Removing the time first lets it out.
+        if (parent.parent_id === null && isHeadingTask({ ...moved, parent_id: null })
+            && (moved.due_at || (moved.schedule !== undefined && moved.schedule !== null))) {
+            return plain;
+        }
         const afterId = parent.is_completed === moved.is_completed ? parent.id : null;
         return { afterId, reparent: { parentId: parent.parent_id } };
     }

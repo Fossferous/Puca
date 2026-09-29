@@ -9,7 +9,9 @@
  * browser puts beside it still has the <h1>/<h2>, the <li> and the checkbox.
  * This turns that back into the Markdown readChecklist already reads:
  *
- * - <h1>..<h6> as "#".."######" (inside a list item, only its text);
+ * - <h1>..<h6>, and role="heading" at its aria-level, as "#".."######"
+ *   (inside a list item, only its text — unless the item is nothing but
+ *   that heading, which is how Púca's own checklists render one);
  * - <li> as "- " or "1. ", a nested list indented under its item, and a
  *   second paragraph or a <br> in an item indented so it joins that item;
  * - a checkbox (<input type=checkbox>, or role="checkbox") as "[ ]", or
@@ -20,8 +22,10 @@
  *   image as its alt text;
  * - table cells as "a | b", one row a line.
  *
- * readPastedItems uses it only when it reads as a checklist, and falls back
- * to the plain text, exactly as before, whenever it does not.
+ * It is used only when it reads as a checklist AND the plain text beside it
+ * lost structure it still has (noteContent.ts readBestChecklist: Markdown
+ * with headings of its own wins); otherwise the plain text is read, exactly
+ * as before.
  *
  * INERT by construction. The markup is someone else's: a web page's, an
  * app's, whatever wrote the clipboard. DOMParser parses it into a DETACHED
@@ -335,6 +339,61 @@ function isHidden(el: Element): boolean {
     return /(?:^|;)\s*display\s*:\s*none\b/i.test(el.getAttribute('style') ?? '');
 }
 
+/** A heading's level: <h1>..<h6>, or role="heading" with its aria-level
+ *  (2 when it names none, as ARIA says) — how Púca's own checklists mark
+ *  one (components/TaskTree.tsx, NoteCard.tsx). Null for anything else. */
+function headingLevel(el: Element): number | null {
+    const tag = el.localName.toLowerCase();
+    if (/^h[1-6]$/.test(tag)) return Number(tag[1]);
+    if ((el.getAttribute('role') ?? '').toLowerCase() !== 'heading') return null;
+    const level = Number.parseInt(el.getAttribute('aria-level') ?? '', 10);
+    return Number.isFinite(level) ? Math.min(6, Math.max(1, level)) : 2;
+}
+
+/** The text a reader would see in `node`, white space collapsed: hidden
+ *  elements and what SKIP leaves out do not count. */
+function seenText(node: Node): string {
+    let s = '';
+    for (const c of Array.from(node.childNodes)) {
+        if (c.nodeType === TEXT) s += (c as Text).data;
+        else if (isElement(c) && !isHidden(c) && !SKIP.has(c.localName.toLowerCase())) {
+            s += c.localName.toLowerCase() === 'img' ? ` ${c.getAttribute('alt') ?? ''} ` : ` ${seenText(c)} `;
+        }
+    }
+    return s.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * The heading a list item is NOTHING BUT, or null: an <li> whose only text
+ * is one heading's (a copied row of Púca's own list, <li><span
+ * role="heading">Before you start</span>…buttons</li>, or <li><h2>…</h2>
+ * </li>). An item with more text than its heading (<li><h3>Step</h3><p>
+ * more</p></li>) is an item titled by it, and one with a box is an item.
+ */
+function headingOnly(li: Element): Element | null {
+    if ((li.getAttribute('role') ?? '').toLowerCase() === 'checkbox') return null;
+    // Not `let found: Element | null = null`: TypeScript would hold it null
+    // past the walk, which is what assigns it.
+    let found = null as Element | null;
+    let boxes = 0;
+    const walk = (el: Element) => {
+        for (const c of Array.from(el.children)) {
+            if (isHidden(c)) continue;
+            const tag = c.localName.toLowerCase();
+            const role = (c.getAttribute('role') ?? '').toLowerCase();
+            if ((tag === 'input' && (c.getAttribute('type') ?? '').toLowerCase() === 'checkbox') || role === 'checkbox') boxes++;
+            if (SKIP.has(tag)) continue;
+            // The first heading; a second one's text is more than its own.
+            if (headingLevel(c) !== null) found ??= c;
+            else walk(c);
+        }
+    };
+    walk(li);
+    if (!found || boxes > 0) return null;
+    const own = seenText(found);
+    return own !== '' && own === seenText(li) ? found : null;
+}
+
 /** The white-space an element's own style sets, if it sets one. */
 function keepsLines(el: Element, inherited: boolean): boolean {
     const m = /(?:^|;)\s*white-space(?:-collapse)?\s*:\s*([a-z-]+)/i.exec(el.getAttribute('style') ?? '');
@@ -446,8 +505,9 @@ class Writer {
         if (SKIP.has(tag) && role !== 'checkbox') return;
         const inner: Ctx = { ...ctx, keepLines: keepsLines(el, ctx.keepLines) };
 
-        if (/^h[1-6]$/.test(tag) && !ctx.inItem) {
-            this.start('#'.repeat(Number(tag[1])) + ' ');
+        const level = headingLevel(el);
+        if (level !== null && !ctx.inItem) {
+            this.start('#'.repeat(level) + ' ');
             this.children(el, inner);
             this.end(ctx.cont);
             return;
@@ -503,6 +563,15 @@ class Writer {
     /** A list item at `ctx.cont`'s indent: its marker, then its text; what
      *  it holds on later lines is indented under it. */
     private item(el: Element, marker: string, ctx: Ctx) {
+        // A top-level item that is nothing but a heading is that heading:
+        // Púca's own checklists render one as a row of the list.
+        const heading = ctx.cont === '' ? headingOnly(el) : null;
+        if (heading) {
+            this.start('#'.repeat(headingLevel(heading) ?? 2) + ' ');
+            this.children(heading, { ...ctx, inItem: true });
+            this.end(ctx.cont);
+            return;
+        }
         this.start(ctx.cont + marker);
         if ((el.getAttribute('role') ?? '').toLowerCase() === 'checkbox') {
             this.box(el.getAttribute('aria-checked') === 'true', ctx);

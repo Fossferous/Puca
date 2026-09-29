@@ -35,7 +35,7 @@ import { type NoteActions, SHARED_NOTE_POLL_MS, notesKeys } from '../model/notes
 import { CalendarAddSheet, type AddSheetResult } from '../../components/calendar/CalendarAddSheet';
 import { IcsImportDialog } from '../../components/calendar/IcsImportDialog';
 import { fileStamp } from '../model/noteText';
-import { isHeadingTask } from '../../api/taskHeading';
+import { asLiteralItemText, isHeadingTask } from '../../api/taskHeading';
 import '../timing.css';
 
 const VIEWS: CalView[] = ['month', 'week', 'day', 'agenda'];
@@ -162,8 +162,11 @@ export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled
     const addTargets = [...personal, ...cards.filter(c => c.ref.kind === 'channel')].map(c => ({ key: c.key, title: c.title, serverName: c.serverName }));
     const submitAdd = async (r: AddSheetResult): Promise<boolean> => {
         const timing = newItemTiming({ dayKey: r.dayKey, time: r.time, allDay: r.allDay, kind: r.kind }, scheduleOn, Date.now());
+        // What the calendar makes has a time, so it is an item, never a
+        // heading — whatever its title starts with (api/taskHeading.ts).
+        const title = asLiteralItemText(r.title);
         if (r.target === 'new') {
-            const ref = await actions.createNote(`Calendar ${fileStamp(Date.now())}`, [r.title], undefined, [timing]);
+            const ref = await actions.createNote(`Calendar ${fileStamp(Date.now())}`, [title], undefined, [timing]);
             if (!ref) { pushMessageToast({ title: 'Couldn’t add it — check your connection' }); return false; }
             // A note made offline has a temporary id until the outbox replays
             // it (notesOutbox.ts): not one to remember as the next target.
@@ -172,7 +175,7 @@ export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled
         }
         const ref = parseNoteKey(r.target);
         if (!ref) return false;
-        const created = await actions.addTask(ref, r.title, undefined, timing);
+        const created = await actions.addTask(ref, title, undefined, timing);
         if (!created) { pushMessageToast({ title: 'Couldn’t add it — check your connection' }); return false; }
         setCalendarPrefs({ lastNote: r.target });
         return true;

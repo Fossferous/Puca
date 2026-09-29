@@ -532,10 +532,12 @@ export function deriveQuickTitle(title: string, items: string[]): string {
 
 /** Items a quick-add will create, in order: trimmed, blanks dropped, and a
  *  heading typed as "# x" or "### x" stored the one way a heading is
- *  written ("## x", api/taskHeading.ts). */
+ *  written ("## x", api/taskHeading.ts). A no-break space is left as it is:
+ *  it is what keeps a pasted "- # of guests" the item it was
+ *  (asLiteralItemText), and collapsing it would make it a heading. */
 export function cleanQuickItems(items: string[]): string[] {
     return items
-        .map(i => i.replace(/\s+/g, ' ').trim())
+        .map(i => i.replace(/[^\S\u00a0]+/g, ' ').trim())
         .filter(i => i !== '')
         .map(asItemText);
 }
