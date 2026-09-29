@@ -12,7 +12,7 @@ import {
     allLabels, noteKey, parseNoteKey, normalizeLabel, normalizeForSearch, isNoteColor,
     moveNoteInOrder, applyVisibleOrder,
     countProgress, noteRoute, isLabelRoute, labelFromPath, MAX_LABEL_LENGTH, QUICK_TITLE_FROM_ITEM_LENGTH,
-    type NoteSource, type NoteCard, type NotesNoteState,
+    type NoteSource, type NoteCard, type NotesNoteState, type DueItem,
 } from '../notes/model/notesModel';
 
 function task(id: number, overrides: Partial<Task> = {}): Task {
@@ -212,6 +212,10 @@ describe('previewRows', () => {
 describe('due times', () => {
     const now = Date.parse('2026-09-16T12:00:00Z');
     const iso = (offsetMin: number) => new Date(now + offsetMin * 60_000).toISOString();
+    /** What each row IS: the item's id, or the note's own reminder (068) by
+     *  its key — so a note row that turned up where only items were expected
+     *  fails the comparison instead of reading `undefined.id`. */
+    const rowIds = (items: DueItem[]) => items.map(i => (i.kind === 'task' ? i.task.id : `note:${i.note.key}`));
 
     it('nearestDue picks the earliest OPEN due task, overdue included', () => {
         const tasks = [
@@ -240,10 +244,10 @@ describe('due times', () => {
             { colors: {}, labels: {}, archived: { 'list:2': true } },
         );
         const g = groupReminders(c, now);
-        expect(g.overdue.map(i => i.task.id)).toEqual([5, 1]);
+        expect(rowIds(g.overdue)).toEqual([5, 1]);
         expect(g.overdue[0].note.key).toBe('list:2');
-        expect(g.today.map(i => i.task.id)).toEqual([2]);
-        expect(g.upcoming.map(i => i.task.id)).toEqual([3]);
+        expect(rowIds(g.today)).toEqual([2]);
+        expect(rowIds(g.upcoming)).toEqual([3]);
         expect(reminderBadgeCount(g)).toBe(3);
     });
 
@@ -253,8 +257,8 @@ describe('due times', () => {
         const nextDay = new Date(2026, 8, 17, 0, 1, 0).toISOString();
         const c = cards([source('list', 1, 'a')], { 'list:1': [task(1, { due_at: endOfDay }), task(2, { due_at: nextDay })] });
         const g = groupReminders(c, local);
-        expect(g.today.map(i => i.task.id)).toEqual([1]);
-        expect(g.upcoming.map(i => i.task.id)).toEqual([2]);
+        expect(rowIds(g.today)).toEqual([1]);
+        expect(rowIds(g.upcoming)).toEqual([2]);
     });
 });
 

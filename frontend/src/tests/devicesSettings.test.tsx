@@ -22,7 +22,7 @@ const thisDeviceId = vi.fn<() => string | null>(() => 'thisDev');
 const deviceKeyCustody = vi.fn<() => 'os-protected' | 'browser-storage'>(() => 'os-protected');
 
 const isThisDeviceRevoked = vi.fn(() => false);
-const resetThisDeviceIdentity = vi.fn(async () => null);
+const resetThisDeviceIdentity = vi.fn<typeof import('../api/devices').resetThisDeviceIdentity>(async () => null);
 vi.mock('../api/devices', () => ({
     listDevices: (...a: unknown[]) => listDevices(...a),
     renameDevice: (...a: unknown[]) => renameDevice(...a),
@@ -30,7 +30,7 @@ vi.mock('../api/devices', () => ({
     currentUserId: () => currentUserId(),
     thisDeviceId: () => thisDeviceId(),
     isThisDeviceRevoked: () => isThisDeviceRevoked(),
-    resetThisDeviceIdentity: (...a: unknown[]) => resetThisDeviceIdentity(...a),
+    resetThisDeviceIdentity: (userId: number) => resetThisDeviceIdentity(userId),
 }));
 vi.mock('../api/devices/deviceKeyRc', () => ({
     deviceKeyCustody: () => deviceKeyCustody(),
@@ -412,7 +412,8 @@ describe('a device that was signed out', () => {
 
         await click(again);
 
-        expect(resetThisDeviceIdentity).toHaveBeenCalled();
+        // For the signed-in account (currentUserId, 42), not some other one.
+        expect(resetThisDeviceIdentity).toHaveBeenCalledWith(42);
     });
 
     /**

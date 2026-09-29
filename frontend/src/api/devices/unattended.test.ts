@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ed25519 } from '@noble/curves/ed25519';
 import { argon2id } from '@noble/hashes/argon2.js';
 import kat from '../../tests/fixtures/unattended-ua-kat.json';
@@ -140,25 +140,20 @@ describe('remembering a proved unattended seed', () => {
      * something.
      */
     const store = new Map<string, string>();
+    // setup.ts installs those vi.fn()s, so vi.mocked only states what is true.
     beforeEach(() => {
         store.clear();
-        const ls = localStorage as unknown as {
-            getItem: Mock; setItem: Mock; removeItem: Mock;
-        };
-        ls.getItem.mockImplementation((k: string) => store.get(k) ?? null);
-        ls.setItem.mockImplementation((k: string, v: string) => { store.set(k, v); });
-        ls.removeItem.mockImplementation((k: string) => { store.delete(k); });
+        vi.mocked(localStorage.getItem).mockImplementation((k) => store.get(k) ?? null);
+        vi.mocked(localStorage.setItem).mockImplementation((k, v) => { store.set(k, v); });
+        vi.mocked(localStorage.removeItem).mockImplementation((k) => { store.delete(k); });
         nativeShell = true;
         clearRememberedUaSeeds();
     });
 
     afterEach(() => {
-        const ls = localStorage as unknown as {
-            getItem: Mock; setItem: Mock; removeItem: Mock;
-        };
-        ls.getItem.mockReset();
-        ls.setItem.mockReset();
-        ls.removeItem.mockReset();
+        vi.mocked(localStorage.getItem).mockReset();
+        vi.mocked(localStorage.setItem).mockReset();
+        vi.mocked(localStorage.removeItem).mockReset();
     });
 
     it('is NOT written in a shared browser', async () => {
@@ -178,7 +173,7 @@ describe('remembering a proved unattended seed', () => {
         rememberUaSeed('dev-host', SALT, SEED); await flush();
         expect(await rememberedUaSeed('dev-host', SALT)).toEqual(SEED);
         // ...and what the desktop stores is the SEALED form, never the seed itself.
-        const stored = JSON.parse(String(localStorage.setItem.mock.calls.at(-1)?.[1] ?? '{}')) as Record<string, { seed?: string }>;
+        const stored = JSON.parse(vi.mocked(localStorage.setItem).mock.calls.at(-1)?.[1] ?? '{}') as Record<string, { seed?: string }>;
         expect(stored['dev-host']?.seed?.startsWith('dpapi:')).toBe(true);
     });
 

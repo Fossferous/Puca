@@ -13,7 +13,7 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('../api/tasks', () => ({ openReminderTiming: vi.fn(), patchTaskTiming: vi.fn() }));
 
 import {
-    MAX_ENTRIES_PER_ITEM, OCCURRENCE_HORIZON_MS, planEntries, toReminderEntries, type OpenedReminder,
+    MAX_ENTRIES_PER_ITEM, OCCURRENCE_HORIZON_MS, planEntries, toReminderEntries, type OpenedReminder, type ReminderEntry,
 } from '../api/reminderFeed';
 import {
     activeSnooze, effectiveReminderMs, parseSnooze, serializeSchedule, serializeSnooze, snoozeLocked, snoozeMovedDue, snoozePatch, type EventSchedule,
@@ -127,10 +127,11 @@ describe('(b) a repeating item’s upcoming reminders, as separate entries', () 
 describe('planEntries with several entries per id', () => {
     it('fires only the LATEST past entry, and a second pass fires nothing (no two marks taking turns)', () => {
         const now = T('2026-10-13T00:00:00Z');
-        const es = [
-            { id: 7, at: T('2026-10-05T19:00:00Z'), mark: 'a' },
-            { id: 7, at: T('2026-10-12T19:00:00Z'), mark: 'b' },
-            { id: 7, at: T('2026-10-19T19:00:00Z'), mark: 'c' },
+        // One series, so every occurrence came from the same server due_at.
+        const es: ReminderEntry[] = [
+            { id: 7, at: T('2026-10-05T19:00:00Z'), mark: 'a', due: DUE },
+            { id: 7, at: T('2026-10-12T19:00:00Z'), mark: 'b', due: DUE },
+            { id: 7, at: T('2026-10-19T19:00:00Z'), mark: 'c', due: DUE },
         ];
         const first = planEntries(es, {}, now);
         expect(first.toFire.map(e => e.mark)).toEqual(['b']);

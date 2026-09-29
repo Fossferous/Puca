@@ -89,7 +89,10 @@ describe('decryptToBlobUrl keys its cache on everything that determines the byte
     let created = 0;
     let fetchSpy: ReturnType<typeof vi.spyOn>;
 
-    async function sealed(plaintext: string): Promise<{ key: string; bytes: Uint8Array }> {
+    // `Uint8Array<ArrayBuffer>`, not the default `ArrayBufferLike`: these are
+    // the bytes a `Response` body carries, and a body cannot be backed by a
+    // SharedArrayBuffer. `new Uint8Array(n)` below is always ArrayBuffer-backed.
+    async function sealed(plaintext: string): Promise<{ key: string; bytes: Uint8Array<ArrayBuffer> }> {
         const raw = crypto.getRandomValues(new Uint8Array(32));
         const nonce = crypto.getRandomValues(new Uint8Array(12));
         const k = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt']);

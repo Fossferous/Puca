@@ -48,11 +48,13 @@ vi.stubGlobal('EncodedVideoChunk', FakeChunk);
  *  timestamp and carrying the input's index (so a demuxed packet says which
  *  sample it was). */
 let aacConfig: AudioDecoderConfig;
+type FakeAudioEncoderInit = { output: (c: FakeChunk, m?: unknown) => void; error: (e: Error) => void };
 class FakeAudioEncoder {
     static async isConfigSupported() { return { supported: true }; }
     state = 'configured';
     private first = true;
-    constructor(private init: { output: (c: FakeChunk, m?: unknown) => void; error: (e: Error) => void }) { }
+    private init: FakeAudioEncoderInit;
+    constructor(init: FakeAudioEncoderInit) { this.init = init; }
     configure() { }
     encode(d: { timestamp: number; index: number }) {
         const data = new Uint8Array(8);

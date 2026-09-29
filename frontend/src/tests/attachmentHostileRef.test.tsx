@@ -120,8 +120,11 @@ describe('MessageErrorBoundary contains one bad message', () => {
 
     it('is inert while its child renders normally', () => {
         act(() => {
-            root.render(createElement(MessageErrorBoundary, { resetKey: 'a' },
-                createElement('span', null, 'hello')));
+            // children rides in props: the boundary's Props require it, and
+            // createElement's typing only sees what the props object carries.
+            root.render(createElement(MessageErrorBoundary, {
+                resetKey: 'a', children: createElement('span', null, 'hello'),
+            }));
         });
         expect(container.textContent).toContain('hello');
         expect(container.textContent).not.toContain('could not be displayed');
@@ -130,7 +133,7 @@ describe('MessageErrorBoundary contains one bad message', () => {
     it('a throwing child does not take the tree down', () => {
         act(() => {
             root.render(createElement('div', null,
-                createElement(MessageErrorBoundary, { resetKey: 'bad' }, createElement(Boom)),
+                createElement(MessageErrorBoundary, { resetKey: 'bad', children: createElement(Boom) }),
                 createElement('span', null, 'sibling survives'),
             ));
         });
@@ -141,15 +144,16 @@ describe('MessageErrorBoundary contains one bad message', () => {
 
     it('re-arms when the message content changes, so an edit can recover', () => {
         act(() => {
-            root.render(createElement(MessageErrorBoundary, { resetKey: 'bad' }, createElement(Boom)));
+            root.render(createElement(MessageErrorBoundary, { resetKey: 'bad', children: createElement(Boom) }));
         });
         expect(container.textContent).toContain('could not be displayed');
 
         // Same boundary instance, new message text and a child that renders.
         // Without getDerivedStateFromProps this stays latched — which is the point.
         act(() => {
-            root.render(createElement(MessageErrorBoundary, { resetKey: 'fixed' },
-                createElement('span', null, 'edited into something valid')));
+            root.render(createElement(MessageErrorBoundary, {
+                resetKey: 'fixed', children: createElement('span', null, 'edited into something valid'),
+            }));
         });
         expect(container.textContent).toContain('edited into something valid');
         expect(container.textContent).not.toContain('could not be displayed');
@@ -157,10 +161,10 @@ describe('MessageErrorBoundary contains one bad message', () => {
 
     it('stays on the placeholder while the SAME bad message re-renders', () => {
         act(() => {
-            root.render(createElement(MessageErrorBoundary, { resetKey: 'bad' }, createElement(Boom)));
+            root.render(createElement(MessageErrorBoundary, { resetKey: 'bad', children: createElement(Boom) }));
         });
         act(() => {
-            root.render(createElement(MessageErrorBoundary, { resetKey: 'bad' }, createElement(Boom)));
+            root.render(createElement(MessageErrorBoundary, { resetKey: 'bad', children: createElement(Boom) }));
         });
         expect(container.textContent).toContain('could not be displayed');
     });

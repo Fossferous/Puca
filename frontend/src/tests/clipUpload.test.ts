@@ -1,10 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
-import { uploadParts, discardParts, ClipUploadError } from '../api/clips/clipUpload';
+import { uploadParts, discardParts, ClipUploadError, type UploadOptions } from '../api/clips/clipUpload';
 
 const part = (index: number, size = 100) => ({ index, wire: new Uint8Array(size).fill(index + 1) });
 const okJson = (id: string) => ({ ok: true, status: 200, json: async () => ({ id }) }) as unknown as Response;
 const httpErr = (status: number) => ({ ok: false, status, json: async () => ({}) }) as unknown as Response;
-const opts = (fetchImpl: typeof fetch, extra: Record<string, unknown> = {}) => ({ baseUrl: 'https://x', token: 'T', clipId: '9f2c1e0a-1234-4abc-8def-0123456789ab', fetchImpl, retryDelaysMs: [1, 1, 1], ...extra });
+const opts = (fetchImpl: typeof fetch, extra: Partial<UploadOptions> = {}): UploadOptions => ({ baseUrl: 'https://x', token: 'T', clipId: '9f2c1e0a-1234-4abc-8def-0123456789ab', fetchImpl, retryDelaysMs: [1, 1, 1], ...extra });
 
 /** Read the multipart field names in order (jsdom FormData is iterable). */
 function fieldOrder(init: RequestInit | undefined): string[] {

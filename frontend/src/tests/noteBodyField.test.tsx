@@ -20,7 +20,7 @@ import { createRoot, type Root } from 'react-dom/client';
 // The read view renders real links; opening one must not reach the shell.
 vi.mock('../api/openExternal', () => ({ openExternalUrl: vi.fn(), isExternalHref: () => true }));
 
-import { NoteBodyField } from '../components/NoteBodyField';
+import { NoteBodyField, type BodySaveOutcome } from '../components/NoteBodyField';
 import { openExternalUrl } from '../api/openExternal';
 import {
     TEXT_HISTORY_COALESCE_MS, TEXT_HISTORY_LIMIT, canRedoText, canUndoText, newTextHistory, pushText, redoText, undoText,
@@ -66,7 +66,9 @@ beforeEach(() => {
 afterEach(() => {
     act(() => { root.unmount(); });
     container.remove();
-    delete (HTMLTextAreaElement.prototype as Partial<HTMLTextAreaElement>).scrollHeight;
+    // The stub is an own property of the prototype; dropping it restores the
+    // inherited Element getter.
+    Reflect.deleteProperty(HTMLTextAreaElement.prototype, 'scrollHeight');
     vi.useRealTimers();
 });
 
@@ -244,8 +246,8 @@ describe('NoteBodyField', () => {
         });
 
         it('a save that lands moves the base, so words typed while it was out are not refused', async () => {
-            let release = (_v: unknown) => {};
-            const onSave = vi.fn(() => new Promise(res => { release = res; }));
+            let release = (_v: BodySaveOutcome) => {};
+            const onSave = vi.fn(() => new Promise<BodySaveOutcome>(res => { release = res; }));
             act(() => { root.render(<NoteBodyField value="" contentRev={3} onSave={onSave} />); });
             type(area(), 'first');
             act(() => { vi.advanceTimersByTime(BODY_SAVE_DELAY_MS); });

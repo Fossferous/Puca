@@ -131,7 +131,7 @@ async function hostSignal(id: string, key: Uint8Array, obj: Record<string, unkno
     await settle();
 }
 
-function sessionById(list: Array<{ id: string }>, id: string) {
+function sessionById<T extends { id: string }>(list: readonly T[], id: string): T | undefined {
     return list.find(s => s.id === id);
 }
 

@@ -69,7 +69,7 @@ let hasPowerAction = true;
 // What the host actually hands the agent when it grants file access. The only
 // observable that distinguishes "granted one folder a human picked" from
 // "granted the whole machine because nobody had to be asked".
-const setFileAccess = vi.fn(async () => {});
+const setFileAccess = vi.fn(async (..._a: unknown[]) => {});
 
 // The folder-picking dialog an UNARMED host shows. Mocked because the real one
 // fails closed after a 30s timeout when nothing is mounted to answer it, which

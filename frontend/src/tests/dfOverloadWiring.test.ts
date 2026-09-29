@@ -29,8 +29,14 @@ class FakeWorkletNode extends FakeNode {
     static last: FakeWorkletNode | null = null;
     port = { postMessage: vi.fn(), onmessage: null as null | ((e: { data: unknown }) => void) };
     onprocessorerror: null | (() => void) = null;
-    constructor(public ctx: unknown, public name: string, public opts: Record<string, unknown>) {
+    ctx: unknown;
+    name: string;
+    opts: Record<string, unknown>;
+    constructor(ctx: unknown, name: string, opts: Record<string, unknown>) {
         super();
+        this.ctx = ctx;
+        this.name = name;
+        this.opts = opts;
         FakeWorkletNode.last = this;
     }
 }

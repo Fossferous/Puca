@@ -16,18 +16,21 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type * as Reactions from '../api/reactions';
 
-const getReactions = vi.fn();
-const addReaction = vi.fn(async () => undefined);
-const removeReaction = vi.fn(async () => undefined);
-const listEmojis = vi.fn(async () => []);
-const onReactionChanged = vi.fn(() => () => undefined);
+// Typed as the real module's functions, so the stand-ins cannot drift from the
+// signatures MessageReactions actually calls.
+const getReactions = vi.fn<typeof Reactions.getReactions>();
+const addReaction = vi.fn<typeof Reactions.addReaction>(async () => undefined);
+const removeReaction = vi.fn<typeof Reactions.removeReaction>(async () => undefined);
+const listEmojis = vi.fn<typeof Reactions.listEmojis>(async () => []);
+const onReactionChanged = vi.fn<typeof Reactions.onReactionChanged>(() => () => undefined);
 vi.mock('../api/reactions', () => ({
-    getReactions: (...a: unknown[]) => getReactions(...a),
-    addReaction: (...a: unknown[]) => addReaction(...a),
-    removeReaction: (...a: unknown[]) => removeReaction(...a),
-    listEmojis: (...a: unknown[]) => listEmojis(...a),
-    onReactionChanged: (...a: unknown[]) => onReactionChanged(...a),
+    getReactions: (...a: Parameters<typeof Reactions.getReactions>) => getReactions(...a),
+    addReaction: (...a: Parameters<typeof Reactions.addReaction>) => addReaction(...a),
+    removeReaction: (...a: Parameters<typeof Reactions.removeReaction>) => removeReaction(...a),
+    listEmojis: (...a: Parameters<typeof Reactions.listEmojis>) => listEmojis(...a),
+    onReactionChanged: (...a: Parameters<typeof Reactions.onReactionChanged>) => onReactionChanged(...a),
 }));
 vi.mock('../api/websocket', () => ({
     wsClient: { on: vi.fn(), off: vi.fn() },
@@ -56,7 +59,7 @@ const picker = () => document.querySelector<HTMLElement>('.reaction-picker');
 
 describe('MessageReactions openRequest', () => {
     it('a request during the initial fetch shows a POSITIONED picker once loading resolves', async () => {
-        let resolveFetch: (v: unknown) => void = () => undefined;
+        let resolveFetch: (v: Reactions.Reaction[]) => void = () => undefined;
         getReactions.mockImplementation(() => new Promise(res => { resolveFetch = res; }));
 
         await act(async () => {

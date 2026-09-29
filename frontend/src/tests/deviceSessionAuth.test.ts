@@ -14,6 +14,8 @@
  * any flag.
  */
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
+import type { FileScopeRequest } from '../api/devices/hostBackend';
+import type { PowerAction } from '../api/devices/session';
 
 // --- the seams. Everything below the session layer is replaced so the test
 // --- observes exactly what would have hit the machine.
@@ -26,7 +28,7 @@ const setMonitor = vi.fn(async (..._a: unknown[]) => {});
  *  back out. */
 const updateStream = vi.fn(async (..._a: unknown[]) => {});
 const getStreamQuality = vi.fn(async (..._a: unknown[]) => ({ fps: 30, bitrate_kbps: 4000 }));
-const powerAction = vi.fn(async (..._a: unknown[]) => {});
+const powerAction = vi.fn(async (_action: PowerAction): Promise<string | void> => {});
 /** The privacy overlay — a topmost black window EXCLUDED from capture, so the
  *  person at the host sees black while the peer keeps the real picture. What
  *  the set-privacy arm reaches; mocked so the tests can see WHO may reach it. */
@@ -87,11 +89,11 @@ vi.mock('../api/devices/hostBackend', () => ({
         getStreamQuality: (...a: unknown[]) => getStreamQuality(...a),
         displayTopologyChanged: () => displayTopologyChanged(),
         setPrivacyMode: (...a: unknown[]) => setPrivacyMode(...a),
-        setFileAccess: (...a: unknown[]) => setFileAccess(...a),
+        setFileAccess: (sessionId: string, scope: FileScopeRequest | null) => setFileAccess(sessionId, scope),
         // Optional on the interface; a phone host has none. `hasPowerAction`
         // false leaves it undefined so the arm's "cannot lock or shut down
         // from here" branch is reachable from a test.
-        ...(hasPowerAction ? { powerAction: (...a: unknown[]) => powerAction(...a) } : {}),
+        ...(hasPowerAction ? { powerAction: (action: PowerAction) => powerAction(action) } : {}),
         injectEvent,
     }),
 }));
@@ -100,7 +102,7 @@ let hasPowerAction = true;
 // What the host actually hands the agent when it grants file access. The only
 // observable that distinguishes "granted one folder a human picked" from
 // "granted the whole machine because nobody had to be asked".
-const setFileAccess = vi.fn(async () => {});
+const setFileAccess = vi.fn(async (_sessionId: string, _scope: FileScopeRequest | null) => {});
 
 // The folder-picking dialog an UNARMED host shows. Mocked because the real one
 // fails closed after a 30s timeout when nothing is mounted to answer it, which

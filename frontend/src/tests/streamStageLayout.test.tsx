@@ -93,7 +93,7 @@ function render() {
 }
 
 const grid = () => container.querySelector('.stream-grid')!;
-const tiles = () => Array.from(container.querySelectorAll('.stream-tile'));
+const tiles = () => Array.from(container.querySelectorAll<HTMLElement>('.stream-tile'));
 const videos = () => Array.from(container.querySelectorAll('video'));
 /** The toggle is the only control rendered as "⊞ Grid" / "⬚ Focus". */
 const toggle = () => Array.from(container.querySelectorAll('button'))

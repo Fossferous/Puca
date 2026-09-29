@@ -8,20 +8,20 @@
  * established trick, see deviceStageVirtualMouse.test.tsx), and the
  * component's optional-call capture is exactly what lets this run.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { ImageLightbox } from '../components/ImageLightbox';
 
 let container: HTMLDivElement;
 let root: Root;
-let onClose: ReturnType<typeof vi.fn>;
+let onClose: Mock<() => void>;
 
 beforeEach(() => {
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
-    onClose = vi.fn();
+    onClose = vi.fn<() => void>();
 });
 
 afterEach(() => {

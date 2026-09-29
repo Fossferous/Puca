@@ -581,7 +581,11 @@ describe('DTLS fingerprint binding (the server cannot substitute the peer)', () 
         const offer = sent.find(m => m.type === 'FileOffer' && m.payload.transfer_id === id)!;
         expect(offer.payload.auth_v).toBe(2);
         expect(offer.payload.fp).toBe(PEER_FP);
-        expect(Math.abs(Date.now() - offer.payload.ts)).toBeLessThan(5000);
+        const ts = offer.payload.ts;
+        // The receiver's MAC is over a NUMBER; a string that merely coerces
+        // under subtraction would verify nowhere.
+        if (typeof ts !== 'number') throw new Error(`the offer's ts is ${JSON.stringify(ts)}, not a number`);
+        expect(Math.abs(Date.now() - ts)).toBeLessThan(5000);
     });
 
     it('the connection pins the certificate the record named', async () => {

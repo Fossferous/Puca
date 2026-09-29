@@ -43,10 +43,18 @@ afterEach(() => {
 const card = (myPerms: number | undefined, kind: 'list' | 'channel', t: Task = task): NoteCard => ({
     key: `${kind}:9`, ref: { kind, id: 9 }, title: 'home', tasks: [t], pinned: false, color: 'default', labels: [], archived: false,
     total: 1, completed: 0, myPerms,
-} as unknown as NoteCard);
+});
 
 function reminders(c: NoteCard, t: Task = task, opts: { canSchedule?: boolean; onOpen?: () => void; onModal?: (open: boolean) => void; empty?: boolean } = {}) {
-    const actions = { setDue: vi.fn(), setSchedule: vi.fn(), snoozeTask: vi.fn(), toggleTask: vi.fn() } as unknown as NoteActions;
+    // The four a task row can call; a note row's setNoteTiming is not reached here.
+    const spies = {
+        setDue: vi.fn<NoteActions['setDue']>(),
+        setSchedule: vi.fn<NoteActions['setSchedule']>(),
+        snoozeTask: vi.fn<NoteActions['snoozeTask']>(),
+        toggleTask: vi.fn<NoteActions['toggleTask']>(),
+    };
+    const provided: Partial<NoteActions> = spies;
+    const actions = provided as NoteActions;
     const host = document.createElement('div');
     document.body.appendChild(host);
     root = createRoot(host);
@@ -61,7 +69,7 @@ function reminders(c: NoteCard, t: Task = task, opts: { canSchedule?: boolean; o
     act(() => root!.render(view(false)));
     /** Re-render with the row gone, as a refresh that re-groups the feed does. */
     const dropTheRow = () => act(() => root!.render(view(true)));
-    return { host, actions, dropTheRow };
+    return { host, actions: spies, dropTheRow };
 }
 
 const retimeBtn = (host: HTMLElement) => host.querySelector<HTMLButtonElement>('.notes-retime button');
@@ -115,7 +123,7 @@ describe('what the retime opens', () => {
     it('a schedule this build cannot read opens, explains, and offers no Save', () => {
         const unreadable: Task = { ...task, schedule: '[unreadable: encrypted with a key this device does not have]' };
         reminders(card(undefined, 'list', unreadable), unreadable);
-        act(() => retimeBtn(document.body as unknown as HTMLElement)!.click());
+        act(() => retimeBtn(document.body)!.click());
         const dialog = document.body.querySelector('.sched-dialog')!;
         expect(dialog).not.toBeNull();
         expect([...dialog.querySelectorAll('button')].some(b => b.textContent === 'Save')).toBe(false);
@@ -143,9 +151,9 @@ describe('what the retime writes', () => {
         type(host.querySelector<HTMLInputElement>('.notes-retime input')!, '2030-10-09T18:30');
         act(() => [...host.querySelectorAll('button')].find(b => b.textContent === 'Set')!.click());
         expect(actions.setDue).toHaveBeenCalledTimes(1);
-        const [ref, t, iso] = (actions.setDue as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+        const [ref, t, iso] = actions.setDue.mock.calls[0];
         expect(ref).toEqual({ kind: 'list', id: 9 });
-        expect((t as Task).id).toBe(5);
+        expect(t.id).toBe(5);
         expect(iso).toBe(new Date('2030-10-09T18:30').toISOString());
         expect(actions.setSchedule).not.toHaveBeenCalled();
         expect(host.querySelector('.notes-retime input')).toBeNull();   // closed after the Set
@@ -160,13 +168,13 @@ describe('what the retime writes', () => {
 
     it('a repeating item: setSchedule, through the dialog', () => {
         const { actions } = reminders(card(undefined, 'list', scheduled), scheduled);
-        act(() => retimeBtn(document.body as unknown as HTMLElement)!.click());
-        act(() => [...document.body.querySelectorAll('.sched-dialog button')].find(b => b.textContent === 'Save')!.click());
+        act(() => retimeBtn(document.body)!.click());
+        act(() => [...document.body.querySelectorAll<HTMLButtonElement>('.sched-dialog button')].find(b => b.textContent === 'Save')!.click());
         expect(actions.setSchedule).toHaveBeenCalledTimes(1);
         expect(actions.setDue).not.toHaveBeenCalled();
-        const [ref, t, schedule] = (actions.setSchedule as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+        const [ref, t, schedule] = actions.setSchedule.mock.calls[0];
         expect(ref).toEqual({ kind: 'list', id: 9 });
-        expect((t as Task).id).toBe(5);
+        expect(t.id).toBe(5);
         expect(String(schedule)).toContain('FREQ=WEEKLY');            // the repeat survived the move
     });
 
@@ -178,12 +186,12 @@ describe('what the retime writes', () => {
         type(host.querySelector<HTMLInputElement>('.notes-retime input')!, '2030-10-11T08:00');
         act(() => [...host.querySelectorAll('button')].find(b => b.textContent === 'Set')!.click());
 
-        const iso = (actions.setDue as unknown as ReturnType<typeof vi.fn>).mock.calls[0][2] as string;
+        const iso = actions.setDue.mock.calls[0][2];
         expect(reminderSlotOf({ ...snoozed, due_at: iso }, NOW)!.snoozed).toBe(false);
         expect(actions.snoozeTask).not.toHaveBeenCalled();
         // setDue takes (note, task, dueAt) and nothing else: no snooze field,
         // no expect_due_at — the retime carries neither.
-        expect((actions.setDue as unknown as ReturnType<typeof vi.fn>).mock.calls[0]).toHaveLength(3);
+        expect(actions.setDue.mock.calls[0]).toHaveLength(3);
     });
 
     it('the control belongs to the row, not to the note: opening it never opens the note', () => {
@@ -212,7 +220,7 @@ describe('the shortcut flag always comes back', () => {
         const { host } = reminders(card(undefined, 'list', scheduled), scheduled, { onModal });
         act(() => retimeBtn(host)!.click());
         expect(onModal.mock.calls.map(c => c[0])).toEqual([true]);
-        act(() => [...document.body.querySelectorAll('.sched-dialog button')].find(b => b.textContent === 'Cancel')!.click());
+        act(() => [...document.body.querySelectorAll<HTMLButtonElement>('.sched-dialog button')].find(b => b.textContent === 'Cancel')!.click());
         expect(onModal.mock.calls.map(c => c[0])).toEqual([true, false]);
     });
 

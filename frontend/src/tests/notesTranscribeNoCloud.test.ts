@@ -19,6 +19,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import type {
+    AppendFileOptions, DeleteFileOptions, GetUriOptions, GetUriResult, WriteFileOptions, WriteFileResult,
+} from '@capacitor/filesystem';
+import type { nativeTranscribePcm } from '../notes/native/notesNative';
 
 // --- 1. the source gate ------------------------------------------------------------
 
@@ -76,25 +80,26 @@ describe('Púca Notes never uses a cloud speech recogniser', () => {
 
 // --- 2. what transcribeClip actually does ------------------------------------------
 
-const writeFile = vi.fn(async () => {});
-const appendFile = vi.fn(async () => {});
-const deleteFile = vi.fn(async () => {});
-const getUri = vi.fn(async () => ({ uri: 'file:///data/cache/clip.pcm' }));
+const CACHE_URI = 'file:///data/cache/clip.pcm';
+const writeFile = vi.fn(async (_o: WriteFileOptions): Promise<WriteFileResult> => ({ uri: CACHE_URI }));
+const appendFile = vi.fn(async (_o: AppendFileOptions) => {});
+const deleteFile = vi.fn(async (_o: DeleteFileOptions) => {});
+const getUri = vi.fn(async (_o: GetUriOptions): Promise<GetUriResult> => ({ uri: CACHE_URI }));
 vi.mock('@capacitor/filesystem', () => ({
     Directory: { Cache: 'CACHE' },
     Filesystem: {
-        writeFile: (o: unknown) => writeFile(o as never),
-        appendFile: (o: unknown) => appendFile(o as never),
-        deleteFile: (o: unknown) => deleteFile(o as never),
-        getUri: (o: unknown) => getUri(o as never),
+        writeFile: (o: WriteFileOptions) => writeFile(o),
+        appendFile: (o: AppendFileOptions) => appendFile(o),
+        deleteFile: (o: DeleteFileOptions) => deleteFile(o),
+        getUri: (o: GetUriOptions) => getUri(o),
     },
 }));
 
 let features: string[] = ['transcribe'];
-const transcribePcm = vi.fn(async () => ({ text: 'milk and bread' } as { text: string | null; reason?: string }));
+const transcribePcm = vi.fn<typeof nativeTranscribePcm>(async () => ({ text: 'milk and bread' }));
 vi.mock('../notes/native/notesNative', () => ({
     notesNativeFeatures: async () => features,
-    nativeTranscribePcm: (o: { path: string; sampleRate: number }) => transcribePcm(o as never),
+    nativeTranscribePcm: (o: { path: string; sampleRate: number }) => transcribePcm(o),
 }));
 
 const { transcribeClip } = await import('../notes/model/transcribe');
@@ -133,8 +138,8 @@ describe('transcribeClip', () => {
         const r = await transcribeClip(clip(), 1_000);
         expect(r.text).toBe('milk and bread');
         expect(transcribePcm).toHaveBeenCalledTimes(1);
-        const arg = transcribePcm.mock.calls[0][0] as unknown as { path: string; sampleRate: number };
-        expect(arg).toEqual({ path: 'file:///data/cache/clip.pcm', sampleRate: PCM_SAMPLE_RATE });
+        const arg = transcribePcm.mock.calls[0][0];
+        expect(arg).toEqual({ path: CACHE_URI, sampleRate: PCM_SAMPLE_RATE });
         // No base64 audio anywhere in what crossed the bridge.
         expect(/[A-Za-z0-9+/]{200,}/.test(JSON.stringify(arg))).toBe(false);
     });
@@ -143,8 +148,7 @@ describe('transcribeClip', () => {
         await transcribeClip(clip(), 1_000);
         expect(writeFile).toHaveBeenCalledTimes(1);
         expect(deleteFile).toHaveBeenCalledTimes(1);
-        expect((deleteFile.mock.calls[0][0] as unknown as { path: string }).path)
-            .toBe((writeFile.mock.calls[0][0] as unknown as { path: string }).path);
+        expect(deleteFile.mock.calls[0][0].path).toBe(writeFile.mock.calls[0][0].path);
     });
 
     it('deletes it after a REFUSAL too', async () => {

@@ -10,6 +10,7 @@
  * each test's positive/negative control against the other.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { ReminderEntry } from '../api/reminderFeed';
 
 let pluginPresent = true;
 const fake = {
@@ -36,6 +37,10 @@ vi.mock('@capacitor/core', () => ({
 }));
 
 const nn = await import('../notes/native/notesNative');
+
+/** One entry in the full {id, at, mark, due} contract: `due` is what the
+ *  background refresh compares, so it has to reach the plugin too. */
+const ENTRY: ReminderEntry = { id: 1, at: 1, mark: 'm', due: '2026-10-05T19:00:00Z' };
 
 function b64url(s: string): string {
     return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -96,7 +101,7 @@ describe('adoptNativeRenewedToken', () => {
 describe('degrading without the plugin', () => {
     it('answers unsupported instead of throwing', async () => {
         pluginPresent = false;
-        await expect(nn.syncNativeReminders('7', [{ id: 1, at: 1, mark: 'm' }])).resolves.toEqual({ ok: false, reason: 'unsupported' });
+        await expect(nn.syncNativeReminders('7', [ENTRY])).resolves.toEqual({ ok: false, reason: 'unsupported' });
         await expect(nn.shareText({ filename: 'a.md', mime: 'text/plain', text: 'x' })).resolves.toEqual({ ok: false, reason: 'unsupported' });
         await expect(nn.addToPhoneCalendar({ title: 't', beginMs: 1 })).resolves.toEqual({ ok: false, reason: 'unsupported' });
         await expect(nn.nativeNotificationStatus()).resolves.toBeNull();
@@ -121,8 +126,8 @@ describe('degrading without the plugin', () => {
     });
 
     it('with the plugin, the same calls reach it (positive control)', async () => {
-        await expect(nn.syncNativeReminders('7', [{ id: 1, at: 1, mark: 'm' }])).resolves.toEqual({ ok: true });
-        expect(fake.syncReminders).toHaveBeenCalledWith({ account: '7', entries: [{ id: 1, at: 1, mark: 'm' }] });
+        await expect(nn.syncNativeReminders('7', [ENTRY])).resolves.toEqual({ ok: true });
+        expect(fake.syncReminders).toHaveBeenCalledWith({ account: '7', entries: [{ id: 1, at: 1, mark: 'm', due: '2026-10-05T19:00:00Z' }] });
         await expect(nn.consumeNativeLaunchNav()).resolves.toEqual({ target: 'reminders', item: null });
         await expect(nn.requestNativeAddTile()).resolves.toBe(true);
         await nn.clearNativeSession();

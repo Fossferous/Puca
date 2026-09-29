@@ -9,7 +9,7 @@
  * leaving it would leak into other files) and drives the element lifecycle:
  * metadata → request, OS-close → onClose, deselect → onClose, unmount → exit.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
@@ -91,7 +91,7 @@ function removePipSurface() {
 
 let container: HTMLDivElement;
 let root: Root;
-let onClose: ReturnType<typeof vi.fn>;
+let onClose: Mock<() => void>;
 
 const hostVideo = () => container.querySelector<HTMLVideoElement>('video.stream-popout-host')!;
 const metadata = (v: HTMLVideoElement) => act(() => { v.dispatchEvent(new Event('loadedmetadata')); });
@@ -137,7 +137,7 @@ beforeEach(() => {
     STREAMS.set(1, { username: 'alice', stream: new MediaStream() });
     STREAMS.set(2, { username: 'bob', stream: new MediaStream() });
     selected = [1, 2];
-    onClose = vi.fn();
+    onClose = vi.fn<() => void>();
     vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(() => Promise.resolve());
     container = document.createElement('div');
     document.body.appendChild(container);

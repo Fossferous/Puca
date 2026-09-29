@@ -33,6 +33,7 @@ function mount(onHeight?: (px: number) => void) {
                 onCloseSession={() => {}}
                 activeMenu={null}
                 setActiveMenu={() => {}}
+                onCollapse={() => {}}
                 onMinimize={() => {}}
                 onHeight={onHeight}
             />,

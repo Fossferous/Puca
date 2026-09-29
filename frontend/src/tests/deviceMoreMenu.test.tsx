@@ -12,19 +12,23 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
+type SessionModule = typeof import('../api/devices/session');
+
+// Typed with the real signatures, so `mock.calls[n][1]` is the frame the menu
+// actually handed over rather than an index into an empty tuple.
 const h = vi.hoisted(() => ({
-    sendInput: vi.fn(() => true),
-    sendPowerAction: vi.fn(() => true),
-    sendClipboard: vi.fn(async () => null as string | null),
+    sendInput: vi.fn<SessionModule['sendInput']>(() => true),
+    sendPowerAction: vi.fn<SessionModule['sendPowerAction']>(() => true),
+    sendClipboard: vi.fn<SessionModule['sendClipboard']>(async () => null),
 }));
 
 vi.mock('../api/devices/session', async (importOriginal) => {
-    const real = await importOriginal<typeof import('../api/devices/session')>();
+    const real = await importOriginal<SessionModule>();
     return {
         ...real,
-        sendInput: (...a: unknown[]) => h.sendInput(...a),
-        sendPowerAction: (...a: unknown[]) => h.sendPowerAction(...a),
-        sendClipboard: (...a: unknown[]) => h.sendClipboard(...a),
+        sendInput: (...a: Parameters<SessionModule['sendInput']>) => h.sendInput(...a),
+        sendPowerAction: (...a: Parameters<SessionModule['sendPowerAction']>) => h.sendPowerAction(...a),
+        sendClipboard: (...a: Parameters<SessionModule['sendClipboard']>) => h.sendClipboard(...a),
         requestMonitor: vi.fn(),
         setPrivacyMode: vi.fn(),
     };

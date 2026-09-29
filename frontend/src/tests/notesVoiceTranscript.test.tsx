@@ -18,7 +18,7 @@
  * Every assertion below is on what the user would get, and each block carries
  * a positive control so it cannot pass by doing nothing at all.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
@@ -36,6 +36,9 @@ import { QuickAdd } from '../notes/components/QuickAdd';
 import { setMessageToastSink } from '../components/messageToastBus';
 import type { NoteActions } from '../notes/model/notesQueries';
 import type { NoteCard } from '../notes/model/notesModel';
+import type { ListContentActions, NoteExtras } from '../notes/model/useListContent';
+
+type OnCreate = (title: string, items: string[], extra?: NoteExtras) => Promise<boolean>;
 
 // --- a fake microphone, the same shape notesAudioUi.test.tsx installs -----------------
 
@@ -47,7 +50,13 @@ class FakeRecorder {
     state = 'inactive';
     ondataavailable: ((e: { data: Blob }) => void) | null = null;
     onstop: (() => void) | null = null;
-    constructor(public stream: unknown, public opts: { mimeType: string }) { recorderInstances.push(this); }
+    stream: unknown;
+    opts: { mimeType: string };
+    constructor(stream: unknown, opts: { mimeType: string }) {
+        this.stream = stream;
+        this.opts = opts;
+        recorderInstances.push(this);
+    }
     start() { this.state = 'recording'; }
     stop() {
         this.state = 'inactive';
@@ -158,8 +167,8 @@ const card = {
 } as unknown as NoteCard;
 
 function editorActions() {
-    const setBody = vi.fn(async () => true);
-    const addNoteMedia = vi.fn(async () => true);
+    const setBody = vi.fn<ListContentActions['setBody']>(async () => true);
+    const addNoteMedia = vi.fn<ListContentActions['addNoteMedia']>(async () => true);
     const actions = {
         content: { features: { body: true, attachments: true }, setBody, addNoteMedia, setNoteAttachments: vi.fn(async () => true) },
     } as unknown as NoteActions;
@@ -184,7 +193,7 @@ describe('an open note: the transcript goes through the text field, not behind i
         type(area(), 'Shopping\neggs');
         await resolveWith({ text: 'milk and bread', reason: null });
 
-        const saved = f.setBody.mock.calls.map(c => c[1] as string);
+        const saved = f.setBody.mock.calls.map(c => c[1]);
         expect(saved.at(-1), 'the transcript was not added to the typed draft').toBe('Shopping\neggs\n\nmilk and bread');
         // The old behaviour: appended to the SAVED body, so the draft's own
         // autosave would put "Shopping\neggs" back over it.
@@ -250,19 +259,26 @@ describe('an open note: the transcript goes through the text field, not behind i
 // --- the composer --------------------------------------------------------------------
 
 describe('the composer: a voice note is written down there too', () => {
-    const openComposer = async (onCreate: (t: string, i: string[], e?: unknown) => Promise<boolean>) => {
+    const openComposer = async (onCreate: OnCreate) => {
         await act(async () => {
             root.render(<QuickAdd
-                onCreate={onCreate as never}
+                onCreate={onCreate}
                 content={{ text: true, pictures: true }}
                 openSignal={1}
             />);
         });
         await settle();
     };
+    /** The extras the first save carried. A save without any fails HERE,
+     *  not as a TypeError on `undefined.body` further down. */
+    const extraOf = (onCreate: Mock<OnCreate>): NoteExtras => {
+        const extra = onCreate.mock.calls[0]?.[2];
+        if (!extra) throw new Error('onCreate was called without its extras');
+        return extra;
+    };
 
     it('the words it heard are saved WITH the note, in its text', async () => {
-        const onCreate = vi.fn(async () => true);
+        const onCreate = vi.fn<OnCreate>(async () => true);
         const resolveWith = pendingTranscribe();
         await openComposer(onCreate);
         await recordAndKeep('Voice note');
@@ -270,13 +286,13 @@ describe('the composer: a voice note is written down there too', () => {
         await act(async () => { byText('Done')!.click(); });
         await settle();
         expect(onCreate).toHaveBeenCalledTimes(1);
-        const extra = onCreate.mock.calls[0][2] as { body?: string; audio?: File[] };
+        const extra = extraOf(onCreate);
         expect(extra.audio, 'the recording itself was not saved').toHaveLength(1);
         expect(extra.body, 'the note was saved without what was said').toBe('pick up the prescription on Thursday');
     });
 
     it('Done WAITS for a transcript still being written', async () => {
-        const onCreate = vi.fn(async () => true);
+        const onCreate = vi.fn<OnCreate>(async () => true);
         const resolveWith = pendingTranscribe();
         await openComposer(onCreate);
         await recordAndKeep('Voice note');
@@ -288,11 +304,11 @@ describe('the composer: a voice note is written down there too', () => {
         await resolveWith({ text: 'pick up the prescription', reason: null });
         await settle();
         expect(onCreate).toHaveBeenCalledTimes(1);
-        expect((onCreate.mock.calls[0][2] as { body?: string }).body).toBe('pick up the prescription');
+        expect(extraOf(onCreate).body).toBe('pick up the prescription');
     });
 
     it('POSITIVE CONTROL: a refusal says so and still saves the recording', async () => {
-        const onCreate = vi.fn(async () => true);
+        const onCreate = vi.fn<OnCreate>(async () => true);
         const resolveWith = pendingTranscribe();
         await openComposer(onCreate);
         await recordAndKeep('Voice note');
@@ -300,13 +316,13 @@ describe('the composer: a voice note is written down there too', () => {
         expect(document.querySelector('.notes-transcribe-notice')?.textContent).toMatch(/can’t write down/);
         await act(async () => { byText('Done')!.click(); });
         await settle();
-        const extra = onCreate.mock.calls[0][2] as { body?: string; audio?: File[] };
+        const extra = extraOf(onCreate);
         expect(extra.audio).toHaveLength(1);
         expect(extra.body).toBeUndefined();
     });
 
     it('what is typed WHILE the phone is writing it down is in the note', async () => {
-        const onCreate = vi.fn(async () => true);
+        const onCreate = vi.fn<OnCreate>(async () => true);
         const resolveWith = pendingTranscribe();
         await openComposer(onCreate);
         await recordAndKeep('Voice note');
@@ -328,11 +344,11 @@ describe('the composer: a voice note is written down there too', () => {
         expect(onCreate.mock.calls[0][1], 'the item typed during the wait was dropped').toContain('eggs');
         // Positive control: the words it heard still made it in, so this is
         // not passing because the transcript path broke.
-        expect((onCreate.mock.calls[0][2] as { body?: string }).body).toBe('pick up the prescription');
+        expect(extraOf(onCreate).body).toBe('pick up the prescription');
     });
 
     it('Discard during that wait cancels the save — it does not land on the NEXT note', async () => {
-        const onCreate = vi.fn(async () => true);
+        const onCreate = vi.fn<OnCreate>(async () => true);
         const resolveWith = pendingTranscribe();
         await openComposer(onCreate);
         await recordAndKeep('Voice note');
@@ -375,9 +391,9 @@ describe('the composer: a voice note is written down there too', () => {
         // clearing it early lets an outside click create the note a second
         // time, with a second upload of the same pictures.
         let finishCreate!: (ok: boolean) => void;
-        const onCreate = vi.fn(() => new Promise<boolean>(r => { finishCreate = r; }));
+        const onCreate = vi.fn<OnCreate>(() => new Promise<boolean>(r => { finishCreate = r; }));
         const resolveWith = pendingTranscribe();
-        await openComposer(onCreate as never);
+        await openComposer(onCreate);
         await recordAndKeep('Voice note');
         await act(async () => { byText('Done')!.click(); });
         await settle();
@@ -418,7 +434,7 @@ describe('the composer: a voice note is written down there too', () => {
     });
 
     it('a take that is removed takes its words with it', async () => {
-        const onCreate = vi.fn(async () => true);
+        const onCreate = vi.fn<OnCreate>(async () => true);
         const resolveWith = pendingTranscribe();
         await openComposer(onCreate);
         await recordAndKeep('Voice note');

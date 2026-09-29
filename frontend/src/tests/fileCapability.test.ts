@@ -58,7 +58,7 @@ describe('asking for a capability', () => {
 });
 
 describe('presenting a capability', () => {
-    async function sealed(): Promise<{ key: string; bytes: Uint8Array }> {
+    async function sealed(): Promise<{ key: string; bytes: Uint8Array<ArrayBuffer> }> {
         const raw = crypto.getRandomValues(new Uint8Array(32));
         const nonce = crypto.getRandomValues(new Uint8Array(12));
         const k = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt']);

@@ -15,12 +15,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { MessageToastInput } from '../components/messageToastBus';
 
 const { setAttachments, deleteFiles, upload, toast } = vi.hoisted(() => ({
     setAttachments: vi.fn(async () => undefined),
-    deleteFiles: vi.fn(async () => undefined),
+    deleteFiles: vi.fn(async (_ids: string[]) => undefined),
     upload: vi.fn(),
-    toast: vi.fn(),
+    toast: vi.fn((_t: MessageToastInput) => {}),
 }));
 vi.mock('../api/listContent', async () => {
     const real = await vi.importActual<typeof import('../api/listContent')>('../api/listContent');
@@ -67,10 +68,18 @@ const encRef = (id: string, name: string, mime: string): TaskAttachmentRef => ({
 const png = (n: string): TaskAttachmentRef => encRef(`${n}-png`, `${n}.png`, 'image/png');
 const strokes = (n: string): TaskAttachmentRef => encRef(`${n}-json`, `${n}.json`, DRAWING_STROKES_MIME);
 const SIDECAR = JSON.stringify([png('drawing-1'), strokes('drawing-1')]);
-const FEATURES: ListFeatures = { body: true, attachments: true, trash: true, trashRetentionDays: 30, maxBodyLen: 65536, serverClockOffsetMs: 0 };
+// A server that predates note reminders (068), content revisions (069) and
+// idempotent creates (070): none of them is what these tests are about, and
+// `contentRev: false` keeps the sidecar write un-revisioned, as it has always
+// been here.
+const FEATURES: ListFeatures = {
+    body: true, attachments: true, trash: true, noteReminders: false, trashRetentionDays: 30, maxBodyLen: 65536,
+    serverClockOffsetMs: 0, contentRev: false, idempotentCreates: false,
+};
 const list = (attachments: string | null): TaskList => ({
-    id: 5, title: 'Sketch', created_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-01T00:00:00Z', body: null, attachments,
-} as unknown as TaskList);
+    id: 5, title: 'Sketch', created_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-01T00:00:00Z',
+    total_tasks: 0, completed_tasks: 0, body: null, attachments,
+});
 
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
@@ -153,8 +162,8 @@ describe('planDrawingReplace', () => {
 describe('a picture or drawing whose save answer was lost', () => {
     const lost = () => new TypeError('Failed to fetch');
     const flush = () => act(async () => { for (let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 0)); });
-    const deleted = () => deleteFiles.mock.calls.flatMap(c => (c as unknown as [string[]])[0]);
-    const toasts = () => toast.mock.calls.map(c => (c as unknown as [{ title: string }])[0].title);
+    const deleted = () => deleteFiles.mock.calls.flatMap(c => c[0]);
+    const toasts = () => toast.mock.calls.map(c => c[0].title);
 
     async function addPhoto(el: HTMLElement) {
         const input = el.querySelector<HTMLInputElement>('[data-testid="ni-pick"]')!;

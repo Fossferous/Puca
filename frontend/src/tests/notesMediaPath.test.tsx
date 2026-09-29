@@ -18,6 +18,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useEffect } from 'react';
+import type { sendNoteOp } from '../notes/model/notesOutbox';
 
 const H = vi.hoisted(() => ({
     uploadNoteMedia: vi.fn(),
@@ -25,7 +26,7 @@ const H = vi.hoisted(() => ({
     park: vi.fn(async () => undefined),
     setTaskListAttachments: vi.fn(async () => undefined),
     deleteFiles: vi.fn(async () => undefined),
-    sendNoteOp: vi.fn(async () => ({ queued: true as const })),
+    sendNoteOp: vi.fn<typeof sendNoteOp>(async () => ({ queued: true as const })),
     forgetParkedMedia: vi.fn(async () => undefined),
     pendingOutboxCount: vi.fn(() => 0),
     ensureOutboxLoaded: vi.fn(async () => undefined),
@@ -219,7 +220,7 @@ describe('a voice note that has to wait for the connection', () => {
         const audio = H.sealNoteMedia.mock.calls[0][3] as File[];
         expect(audio.map(f => f.name)).toEqual([`${nextAudioName([])}.webm`]);
         expect(H.park).toHaveBeenCalledWith([sealed]);
-        const queued = H.sendNoteOp.mock.calls.map(call => (call[0] as { k: string }).k);
+        const queued = H.sendNoteOp.mock.calls.map(call => call[0].k);
         expect(queued).toContain('addMedia');
         expect(H.sendCreateList).toHaveBeenCalledWith('Voice note');
     });

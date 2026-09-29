@@ -84,7 +84,7 @@ function render(actions: NoteActions) {
         root.render(
             <NoteEditor
                 card={card} actions={actions} onClose={noop} onMenu={noop} onPickColor={noop}
-                onPickLabels={noop} onArchive={noop} pucaHref={null}
+                onPickLabels={noop} onArchive={noop} onSendToPuca={noop} pucaHref={null}
             />,
         );
     });

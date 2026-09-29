@@ -90,7 +90,7 @@ describe('GET /config parsing', () => {
 
     it('fetches /config once and caches; a 404 from an old server is "unknown", not a throw', async () => {
         __resetPublicConfigForTest();
-        const fetchMock = vi.fn(async () => new Response('not found', { status: 404 }));
+        const fetchMock = vi.fn<typeof fetch>(async () => new Response('not found', { status: 404 }));
         vi.stubGlobal('fetch', fetchMock);
         const a = await fetchPublicConfig();
         expect(a).toEqual({ appUrl: null, registrationInviteRequired: null, srpVersion: null });

@@ -64,15 +64,19 @@ class Rig {
      *  nothing connected. Set it to model a bridge that is live, not loaded
      *  yet, or dies. */
     bridgeFn: ((i: number) => number) | null = null;
+    private transform: (x: number) => number;
+    private delayQuanta: number;
 
     constructor(
-        private transform: (x: number) => number = (x) => x * 0.5,
-        private delayQuanta = 0,
-        private modelDelayHops = 0,
+        transform: (x: number) => number = (x) => x * 0.5,
+        delayQuanta = 0,
+        modelDelayHops = 0,
         coreModelDelay = modelDelayHops * HOP,
         latency = LATENCY + coreModelDelay,
         bridgeDelay: number | null = null,
     ) {
+        this.transform = transform;
+        this.delayQuanta = delayQuanta;
         for (let i = 0; i < modelDelayHops; i++) this.modelQueue.push(new Float32Array(HOP));
         this.core = new DfCore(HOP, latency, (hopView: Float32Array) => {
             if (!this.respond) return;

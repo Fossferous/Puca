@@ -159,7 +159,7 @@ describe('a note’s text with no connection', () => {
         let s = enqueue({ queue: [], ids: {}, dead: [] }, ops.setBody(4, 'first'));
         const firstOid = s.queue[0].oid;
         s = enqueue(s, ops.setBody(4, 'second'));
-        expect(s.queue[0].body).toBe('second');
+        expect(s.queue[0]).toMatchObject({ k: 'setBody', body: 'second' });
         expect(s.queue[0].oid).not.toBe(firstOid);
     });
 
@@ -598,14 +598,14 @@ describe('text replayed onto a note that changed elsewhere', () => {
 
     it('keeps the offline words as a new note beside it, made ONCE however often it replays', async () => {
         const setTaskListBody = vi.fn(async () => { throw theirs('B text'); });
-        const createTaskListWithContent = vi.fn(async (title: string) => ({ id: 77, title }));
+        const createTaskListWithContent = vi.fn(async (title: string, _content: { body?: string }, _key: string) => ({ id: 77, title }));
         try {
             const fresh = await withApi(setTaskListBody, createTaskListWithContent);
             const op = fresh.ops.setBody(4, 'A text', 7);
             const answer = await fresh.execOp(op, {}, true);
             expect(setTaskListBody).toHaveBeenCalledWith(4, 'A text', 7);
             expect(createTaskListWithContent).toHaveBeenCalledTimes(1);
-            const [title, content, key] = createTaskListWithContent.mock.calls[0] as unknown as [string, { body?: string }, string];
+            const [title, content, key] = createTaskListWithContent.mock.calls[0];
             // The answer names the key the copy was made under, so the queue
             // can make the next text of this same typing land in it.
             expect(answer).toEqual({ offlineCopy: 'Trip (offline copy)', copyKey: key });
@@ -632,7 +632,7 @@ describe('text replayed onto a note that changed elsewhere', () => {
      */
     it('a copy the server already made from THIS typing is brought up to date, not made again', async () => {
         const setTaskListBody = vi.fn(async (id: number) => { if (id === 4) throw theirs('B text'); return 3; });
-        const createTaskListWithContent = vi.fn(async (title: string) => ({ id: 77, title, body: 'A text', content_rev: 2 }));
+        const createTaskListWithContent = vi.fn(async (title: string, _content: { body?: string }, _key: string) => ({ id: 77, title, body: 'A text', content_rev: 2 }));
         try {
             const fresh = await withApi(setTaskListBody, createTaskListWithContent);
             const op = { ...fresh.ops.setBody(4, 'A text and more', 7), copyKey: 'K-first', copySent: [await fresh.textDigest('A text')] };
@@ -654,7 +654,7 @@ describe('text replayed onto a note that changed elsewhere', () => {
             const answer = await fresh.execOp(op, {}, true) as { copyKey: string };
             expect(setTaskListBody).not.toHaveBeenCalledWith(77, expect.anything(), expect.anything());
             expect(createTaskListWithContent).toHaveBeenCalledTimes(2);
-            const second = createTaskListWithContent.mock.calls[1] as unknown as [string, { body?: string }, string];
+            const second = createTaskListWithContent.mock.calls[1];
             expect(second[1].body).toBe('A text and more');
             expect(second[2]).not.toBe('K-first');
             expect(answer.copyKey).toBe(second[2]);
@@ -676,7 +676,7 @@ describe('text replayed onto a note that changed elsewhere', () => {
                 await fresh.execOp(op, {}, true);
                 expect(setTaskListBody.mock.calls.filter(c => c[0] === 77)).toHaveLength(variant === 'trashed' ? 0 : 1);
                 expect(createTaskListWithContent).toHaveBeenCalledTimes(2);
-                expect((createTaskListWithContent.mock.calls[1] as unknown as [string, { body?: string }])[1].body).toBe('A text and more');
+                expect(createTaskListWithContent.mock.calls[1][1].body).toBe('A text and more');
             } finally { done(); }
         }
     });

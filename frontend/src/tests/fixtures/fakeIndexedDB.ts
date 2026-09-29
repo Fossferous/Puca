@@ -35,7 +35,8 @@ class FakeRequest<T> {
 }
 
 class FakeObjectStore {
-    constructor(private readonly store: Store) {}
+    private readonly store: Store;
+    constructor(store: Store) { this.store = store; }
     get(key: IDBValidKey) {
         const r = new FakeRequest<unknown>();
         settle(this.store.get(key), r);
@@ -66,7 +67,8 @@ class FakeObjectStore {
 }
 
 class FakeTransaction {
-    constructor(private readonly db: Db) {}
+    private readonly db: Db;
+    constructor(db: Db) { this.db = db; }
     objectStore(name: string) {
         const s = this.db.stores.get(name);
         if (!s) throw new DOMException(`no object store ${name}`, 'NotFoundError');
@@ -76,7 +78,8 @@ class FakeTransaction {
 
 class FakeDatabase {
     onversionchange: (() => void) | null = null;
-    constructor(private readonly db: Db) {}
+    private readonly db: Db;
+    constructor(db: Db) { this.db = db; }
     get version() { return this.db.version; }
     get objectStoreNames() {
         const names = [...this.db.stores.keys()];

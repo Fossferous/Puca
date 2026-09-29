@@ -276,6 +276,7 @@ describe('a revoke the server committed but this page never heard back from', ()
         stubFetch('offline');
         let swapped = false;
         vi.mocked(apiClient.post).mockImplementation(async (path: string, body?: unknown) => {
+            if (path !== '/devices') throw new Error('unexpected ' + path);
             const b = body as { device_pub: string; sign_pub: string };
             const id = deriveDeviceId(b.device_pub, b.sign_pub);
             if (!swapped) {
@@ -306,6 +307,7 @@ describe('a revoke the server committed but this page never heard back from', ()
         stubFetch('offline');
         let wrote = false;
         vi.mocked(apiClient.post).mockImplementation(async (path: string, body?: unknown) => {
+            if (path !== '/devices') throw new Error('unexpected ' + path);
             const b = body as { device_pub: string; sign_pub: string };
             const id = deriveDeviceId(b.device_pub, b.sign_pub);
             if (!wrote) {
@@ -426,6 +428,7 @@ describe('two tabs (Púca and Púca Notes) never both settle one marker', () => 
         let release!: () => void;
         const gate = new Promise<void>(r => { release = r; });
         vi.mocked(apiClient.post).mockImplementation(async (path: string, body?: unknown) => {
+            if (path !== '/devices') throw new Error('unexpected ' + path);
             await gate;
             if (fail) throw new TypeError('Failed to fetch');
             const b = body as { device_pub: string; sign_pub: string };

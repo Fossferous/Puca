@@ -30,9 +30,11 @@ class FakeDc {
     onopen: (() => void) | null = null;
     onclose: (() => void) | null = null;
     onmessage: ((ev: MessageEvent) => void) | null = null;
+    label: string;
     negotiated: boolean;
     id: number | null;
-    constructor(public label: string, init?: RTCDataChannelInit) {
+    constructor(label: string, init?: RTCDataChannelInit) {
+        this.label = label;
         this.negotiated = !!init?.negotiated;
         this.id = init?.id ?? null;
     }

@@ -35,6 +35,14 @@ const task = (id: number, description = `item ${id}`) => ({
     created_at: '', created_by: 7, attachments: null, due_at: null,
 });
 const LIST = { kind: 'list' as const, id: 1 };
+/** The create key an op carries. Only a CREATE has one (see "an op that is
+ *  not a create carries no key at all"), so asking any other op is a test
+ *  bug — and throwing here means a factory that stopped making a create
+ *  fails the test instead of comparing `undefined` with `undefined`. */
+function keyOf(op: NoteOp): string {
+    if (op.k !== 'createList' && op.k !== 'createTask') throw new Error(`a ${op.k} op carries no create key`);
+    return op.key;
+}
 /** A tick is a timing op (recurrence-aware), as toggleTask sends it. */
 const tick = (note: { kind: 'list' | 'channel'; id: number }, t: ReturnType<typeof task>, done: boolean) =>
     ops.timing(note, t, { is_completed: done }, done ? 'tick' : 'untick');
@@ -258,7 +266,7 @@ describe('a create carries the same key every time it is tried', () => {
         const ob = h.make();
         h.setOnline(false);
         const create = ops.createList(-1, 'Shopping');
-        expect(OP_KEY_SHAPE.test(create.key)).toBe(true);
+        expect(OP_KEY_SHAPE.test(keyOf(create))).toBe(true);
         await ob.send(create);
 
         // The first attempt 5xxs; the op stays queued.
@@ -274,39 +282,39 @@ describe('a create carries the same key every time it is tried', () => {
         await afterReload.load();
         await afterReload.replay();
         const keys = h.exec.mock.calls
-            .map(c => c[0] as NoteOp)
+            .map(c => c[0])
             .filter(o => o.k === 'createList')
-            .map(o => (o as { key: string }).key);
+            .map(keyOf);
         expect(keys.length).toBe(2);
-        expect(new Set(keys)).toEqual(new Set([create.key]));
+        expect(new Set(keys)).toEqual(new Set([keyOf(create)]));
     });
 
     it('two creates of the SAME text get DIFFERENT keys — a key is never a fingerprint', () => {
         const a = ops.createList(-1, 'Shopping');
         const b = ops.createList(-2, 'Shopping');
-        expect(a.key).not.toBe(b.key);
+        expect(keyOf(a)).not.toBe(keyOf(b));
         const i = ops.createTask(LIST, -3, 'Milk');
         const j = ops.createTask(LIST, -4, 'Milk');
-        expect(i.key).not.toBe(j.key);
-        expect([a.key, b.key, i.key, j.key].every(k => OP_KEY_SHAPE.test(k))).toBe(true);
+        expect(keyOf(i)).not.toBe(keyOf(j));
+        expect([keyOf(a), keyOf(b), keyOf(i), keyOf(j)].every(k => OP_KEY_SHAPE.test(k))).toBe(true);
     });
 
     it('the key the op holds is the key the request sends — through the real executor', async () => {
         const create = ops.createList(-1, 'Shopping');
         vi.mocked(realTasks.createTaskList).mockResolvedValue({ id: 80, title: 'Shopping', created_at: '', total_tasks: 0, completed_tasks: 0 });
         await execOp(create, {}, true);
-        expect(realTasks.createTaskList).toHaveBeenCalledWith('Shopping', create.key);
+        expect(realTasks.createTaskList).toHaveBeenCalledWith('Shopping', keyOf(create));
 
         const item = ops.createTask(LIST, -2, 'Milk');
         vi.mocked(realTasks.createListTask).mockResolvedValue(task(81, 'Milk'));
         await execOp(item, {}, true);
-        expect(realTasks.createListTask).toHaveBeenCalledWith(1, 'Milk', undefined, undefined, item.key);
+        expect(realTasks.createListTask).toHaveBeenCalledWith(1, 'Milk', undefined, undefined, keyOf(item));
 
         // A shared checklist item goes down the channel path with the same key.
         const chanItem = ops.createTask({ kind: 'channel', id: 12 }, -3, 'Milk');
         vi.mocked(realTasks.createTask).mockResolvedValue(task(82, 'Milk'));
         await execOp(chanItem, {}, true);
-        expect(realTasks.createTask).toHaveBeenCalledWith(12, 'Milk', undefined, undefined, chanItem.key);
+        expect(realTasks.createTask).toHaveBeenCalledWith(12, 'Milk', undefined, undefined, keyOf(chanItem));
     });
 
     it('an op that is not a create carries no key at all', () => {

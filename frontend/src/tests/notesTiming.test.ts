@@ -3,7 +3,7 @@
 // "Edited", the search haystack, export, and "Make a copy".
 import { describe, expect, it } from 'vitest';
 import type { Task } from '../api/tasks';
-import { buildNoteCards, groupReminders, nearestDue, noteMatches, reminderBadgeCount, type NoteSource } from '../notes/model/notesModel';
+import { buildNoteCards, dueItemKey, groupReminders, nearestDue, noteMatches, reminderBadgeCount, type NoteSource } from '../notes/model/notesModel';
 import { noteUpdatedAt } from '../notes/model/notesTiming';
 import { reminderSlotOf } from '../api/reminderSlots';
 import { copyPlanOf, notesToJson } from '../notes/model/noteText';
@@ -59,7 +59,9 @@ describe('groupReminders with timing', () => {
         const past = Array.from({ length: 30 }, (_, i) => task(i + 1, { schedule: ev({ uid: `uid-past-${i}0`, start: `2026-09-${String(i + 1).padStart(2, '0')}T09:00`, end: `2026-09-${String(i + 1).padStart(2, '0')}T10:00` }) }));
         const plain = task(99, { due_at: '2026-10-05T11:00:00Z' });
         const g = groupReminders(cardsOf([...past, plain]), NOW);
-        expect(g.overdue.map(i => i.task.id)).toEqual([99]);
+        // Keyed by kind as well as id: a NOTE's own reminder is a DueItem too,
+        // and it must not be able to stand in for the task.
+        expect(g.overdue.map(dueItemKey)).toEqual(['task:99']);
         expect(reminderBadgeCount(g)).toBe(1);
     });
 
@@ -68,7 +70,7 @@ describe('groupReminders with timing', () => {
         const b = task(2, { due_at: '2026-10-05T15:00:00.000Z' });
         const g = groupReminders(cardsOf([a, b]), NOW);
         expect(g.overdue).toHaveLength(0);
-        expect([...g.today, ...g.upcoming].map(i => i.task.id)).toEqual([2, 1]);
+        expect([...g.today, ...g.upcoming].map(dueItemKey)).toEqual(['task:2', 'task:1']);
     });
 
     it('the card "next due" chip ignores scheduled items (their due_at is a reminder, not a deadline)', () => {

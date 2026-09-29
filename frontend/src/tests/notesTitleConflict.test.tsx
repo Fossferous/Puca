@@ -99,7 +99,7 @@ describe('NoteEditor: the base a rename names', () => {
             root!.render(
                 <NoteEditor
                     card={c} actions={actions} onClose={() => {}} onMenu={() => {}}
-                    onPickColor={() => {}} onPickLabels={() => {}} onArchive={() => {}} pucaHref={null}
+                    onPickColor={() => {}} onPickLabels={() => {}} onArchive={() => {}} onSendToPuca={() => {}} pucaHref={null}
                 />,
             );
         });

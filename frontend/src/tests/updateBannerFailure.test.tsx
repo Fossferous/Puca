@@ -13,13 +13,13 @@ import { createRoot, type Root } from 'react-dom/client';
  * happened.
  */
 const installUpdateInPlace = vi.fn();
-const openDownloadPage = vi.fn(async () => {});
+const openDownloadPage = vi.fn(async (_url: string) => {});
 vi.mock('../api/appVersion', () => ({
     checkForNewVersion: async () => ({
         version: '0.8.3', download_url: 'https://example.test', notes: 'notes',
     }),
     installUpdateInPlace: (...a: unknown[]) => installUpdateInPlace(...a),
-    openDownloadPage: (...a: unknown[]) => openDownloadPage(...a),
+    openDownloadPage: (url: string) => openDownloadPage(url),
     isNewerVersion: () => true,
 }));
 vi.mock('../api/platform', () => ({ isTauri: () => true, isMobile: () => false }));

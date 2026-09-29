@@ -84,7 +84,9 @@ function fakeDc() {
         onmessage: null as ((ev: MessageEvent) => void) | null,
         onopen: null as (() => void) | null,
         onclose: null as (() => void) | null,
-        send: () => {},
+        /** What the product hands `dc.send` — a frame's own ArrayBuffer. A
+         *  test replaces this to capture the outbound frames. */
+        send: (_frame: ArrayBuffer): void => {},
         close: () => { dc.readyState = 'closed'; dc.onclose?.(); },
     };
     return { dc: dc as unknown as RTCDataChannel, raw: dc };
@@ -240,7 +242,7 @@ describe('two sessions at once — ending one must not touch the other', () => {
         const otherKey = await activeViewerWith(OTHER);
         const other = fakeDc();
         const otherFrames: Uint8Array[] = [];
-        (other.raw as unknown as { send: (b: ArrayBuffer) => void }).send = (b) => { otherFrames.push(new Uint8Array(b)); };
+        other.raw.send = (b) => { otherFrames.push(new Uint8Array(b)); };
         registerControlChannel(OTHER, other.dc);
         await helloFrom(other.raw, otherKey);
         expect(controlDcReady(OTHER, 'viewer'), 'the viewer session is on its lane').toBe(true);
@@ -263,7 +265,7 @@ describe('two sessions at once — ending one must not touch the other', () => {
         const myViewerKey = await activeViewerWith(VIEWER); // ...while I control them
         const { dc, raw } = fakeDc();
         const frames: Uint8Array[] = [];
-        (raw as unknown as { send: (b: ArrayBuffer) => void }).send = (b) => { frames.push(new Uint8Array(b)); };
+        raw.send = (b) => { frames.push(new Uint8Array(b)); };
         registerControlChannel(VIEWER, dc);
         // Their hello for MY viewer session (sealed under that session's key).
         await helloFrom(raw, myViewerKey);

@@ -22,18 +22,28 @@ import { describe, it, expect } from 'vitest';
 import { screenSharePublishOptions, publicationsHaveLadder } from '../api/rtc/sfuManager';
 import { Track } from 'livekit-client';
 
+/** The extra rungs of a laddered share. The field is optional on the options
+ *  (a share with the ladder off carries none — pinned below), so a laddered
+ *  share that lost it must fail HERE, loudly, rather than hand the loops below
+ *  nothing to iterate and let them pass. */
+function ladderLayers() {
+    const layers = screenSharePublishOptions(true).screenShareSimulcastLayers;
+    if (!layers) throw new Error('a share published with simulcast on carries no screenShareSimulcastLayers');
+    return layers;
+}
+
 describe('the screen-share publish contract', () => {
     it('publishes more than one rung', () => {
         const o = screenSharePublishOptions(true);
         expect(o.simulcast, 'one layer means nothing to fall back to').toBe(true);
-        expect(o.screenShareSimulcastLayers.length).toBeGreaterThan(0);
+        expect(ladderLayers().length).toBeGreaterThan(0);
     });
 
     it('orders the rungs lowest first, as LiveKit requires', () => {
         // "the layers need to be ordered from lowest to highest quality"
         // — livekit-client's own TrackPublishOptions docs. Out of order they
         // are not rejected; they are just wrong, which is the worst kind.
-        const layers = screenSharePublishOptions(true).screenShareSimulcastLayers;
+        const layers = ladderLayers();
         for (let i = 1; i < layers.length; i++) {
             expect(layers[i].width, `layer ${i} must be wider than ${i - 1}`)
                 .toBeGreaterThan(layers[i - 1].width);
@@ -50,7 +60,7 @@ describe('the screen-share publish contract', () => {
         // node's egress budget.
         const o = screenSharePublishOptions(true);
         const top = o.videoEncoding.maxBitrate;
-        for (const l of o.screenShareSimulcastLayers) {
+        for (const l of ladderLayers()) {
             expect(l.encoding.maxBitrate, 'no rung may exceed the primary').toBeLessThan(top);
             expect(l.width).toBeLessThan(1920);
         }
@@ -75,7 +85,7 @@ describe('the screen-share publish contract', () => {
         // guarantees a software encode on exactly the people the ladder is
         // meant to spare. The old bottom rung was 480x270.
         const SOFTWARE_FLOOR_LINES = 360;
-        for (const l of screenSharePublishOptions(true).screenShareSimulcastLayers) {
+        for (const l of ladderLayers()) {
             expect(l.height, `${l.width}x${l.height} is below Chromium's hardware floor`)
                 .toBeGreaterThanOrEqual(SOFTWARE_FLOOR_LINES);
         }

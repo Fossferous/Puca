@@ -53,21 +53,29 @@ function laggyChannel() {
 }
 
 /**
- * jsdom's Blob.slice() returns something without arrayBuffer(), so the real
- * send loop cannot read it. Minimal stand-in with the two members it uses.
+ * A real Blob, because that is what sendFile takes — but jsdom's Blob has no
+ * arrayBuffer(), so the real send loop could not read one of its slices. This
+ * subclass supplies the two members the loop uses from the bytes it holds,
+ * answering on a microtask rather than through FileReader's event loop: the
+ * backpressure case below must see the loop stop at the high-water mark, not
+ * merely run slowly.
  */
-function fakeFile(size: number) {
-    const data = new Uint8Array(size);
-    return {
-        size,
-        slice(start: number, end: number) {
-            const part = data.subarray(start, end);
-            return {
-                arrayBuffer: async () =>
-                    part.buffer.slice(part.byteOffset, part.byteOffset + part.byteLength),
-            };
-        },
-    };
+class InMemoryFile extends Blob {
+    readonly #data: Uint8Array<ArrayBuffer>;
+    constructor(data: Uint8Array<ArrayBuffer>) {
+        super([data]);
+        this.#data = data;
+    }
+    override slice(start?: number, end?: number): Blob {
+        return new InMemoryFile(this.#data.subarray(start, end));
+    }
+    override async arrayBuffer(): Promise<ArrayBuffer> {
+        return this.#data.slice().buffer;
+    }
+}
+
+function fakeFile(size: number): Blob {
+    return new InMemoryFile(new Uint8Array(size));
 }
 
 describe('sendFile completion semantics', () => {
@@ -77,7 +85,7 @@ describe('sendFile completion semantics', () => {
         // pauses and everything is still queued when sendFile returns.
         const file = fakeFile(CHUNK_SIZE * 3);
 
-        await sendFile(ch as never, file);
+        await sendFile(ch, file);
 
         // THE POINT: sendFile is done, but nothing has been delivered.
         expect(ch.bufferedAmount).toBeGreaterThan(0);
@@ -87,7 +95,7 @@ describe('sendFile completion semantics', () => {
     it('every chunk was handed over, so the tail is real data not an artefact', async () => {
         const ch = laggyChannel();
         const size = CHUNK_SIZE * 3;
-        await sendFile(ch as never, fakeFile(size));
+        await sendFile(ch, fakeFile(size));
 
         const bytesQueued = ch.queued.reduce((n, c) => n + c.byteLength, 0);
         // 4-byte big-endian index prefix on each chunk.
@@ -101,7 +109,7 @@ describe('sendFile completion semantics', () => {
      */
     it('draining is observable, so a sender CAN wait for it', async () => {
         const ch = laggyChannel();
-        await sendFile(ch as never, fakeFile(CHUNK_SIZE * 2));
+        await sendFile(ch, fakeFile(CHUNK_SIZE * 2));
         expect(ch.bufferedAmount).toBeGreaterThan(0);
 
         const lowFired = vi.fn();
@@ -121,7 +129,7 @@ describe('sendFile completion semantics', () => {
         const ch = laggyChannel();
         const big = fakeFile(CHUNK_SIZE * 400);   // ~6.5 MB
         const done = vi.fn();
-        void sendFile(ch as never, big).then(done);
+        void sendFile(ch, big).then(done);
 
         // Let the loop run until it blocks on the high-water mark.
         await new Promise(r => setTimeout(r, 50));

@@ -77,9 +77,16 @@ describe('noticing a resume without visibilitychange', () => {
         vi.resetModules();
         // The probe SAMPLES: an interval asks for one frame, and the frame
         // callback is what proves painting. Drive both by hand.
-        let frame: FrameRequestCallback | null = null;
+        // A holder, not a `let`: the stub assigns it inside a callback, which
+        // control-flow analysis cannot see, so a `let` would read as null for
+        // good.
+        const pending: { frame: FrameRequestCallback | null } = { frame: null };
+        const frame = (t: number) => {
+            if (!pending.frame) throw new Error('the probe never asked for a frame');
+            pending.frame(t);
+        };
         vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
-            frame = cb;
+            pending.frame = cb;
             return 1;
         });
         vi.stubGlobal('setInterval', () => 1 as unknown as ReturnType<typeof setInterval>);
@@ -89,16 +96,16 @@ describe('noticing a resume without visibilitychange', () => {
         mod.installPaintProbe(); // requests the first frame
 
         // First frame: establishes a baseline, nothing to report yet.
-        frame?.(0);
+        frame(0);
         expect(resumed).not.toHaveBeenCalled();
 
         // Frames stop for a long time (screen locked), then restart.
         mod.__setPaintProbeForTests({ running: true, lastFrameAt: Date.now() - 60_000 });
-        frame?.(0);
+        frame(0);
         expect(resumed).toHaveBeenCalledTimes(1);
 
         // A normal next frame is not a resume.
-        frame?.(0);
+        frame(0);
         expect(resumed).toHaveBeenCalledTimes(1);
 
         vi.unstubAllGlobals();

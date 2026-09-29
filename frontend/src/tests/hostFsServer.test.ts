@@ -135,14 +135,26 @@ describe('handleFsRequest', () => {
     });
 });
 
+/** One end of the pair: the slice of RTCDataChannel both sides touch, plus
+ *  the link to the other end. Named, because the end refers to its own type. */
+interface FakeChannel {
+    readyState: 'open';
+    onmessage: ((e: MessageEvent) => void) | null;
+    peer: FakeChannel | null;
+    addEventListener(type: string, fn: (e: MessageEvent) => void): void;
+    removeEventListener(type: string, fn: (e: MessageEvent) => void): void;
+    send(data: string): void;
+    deliver(ev: MessageEvent): void;
+}
+
 /** Paired in-memory RTCDataChannels: what one sends, the other receives. */
 function channelPair() {
-    const make = () => {
+    const make = (): FakeChannel => {
         const listeners = new Map<string, Set<(e: MessageEvent) => void>>();
         return {
-            readyState: 'open' as const,
-            onmessage: null as ((e: MessageEvent) => void) | null,
-            peer: null as ReturnType<typeof make> | null,
+            readyState: 'open',
+            onmessage: null,
+            peer: null,
             addEventListener(type: string, fn: (e: MessageEvent) => void) {
                 if (!listeners.has(type)) listeners.set(type, new Set());
                 listeners.get(type)!.add(fn);

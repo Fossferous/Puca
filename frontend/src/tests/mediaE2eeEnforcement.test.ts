@@ -120,7 +120,7 @@ describe('media-E2EE enforcement fails closed without Encoded Transform', () => 
         stubLocalStream(mgr);
 
         let surfaced = false;
-        mgr.onRemoteStream = () => { surfaced = true; };
+        mgr.setOnRemoteStream(() => { surfaced = true; });
         await mgr.callUser(2);
 
         const pc = (mgr as unknown as { peers: Map<number, { connection: FakeRTCPeerConnection }> })

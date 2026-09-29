@@ -47,13 +47,15 @@ describe('the {id, at, mark} contract', () => {
 
     it('fire once per mark; a new snooze time fires again', () => {
         const now = T('2026-10-05T21:00:00Z');
-        const first = planEntries([{ id: 7, at: T(due), mark: due }], {}, now);
+        const first = planEntries([{ id: 7, at: T(due), mark: due, due }], {}, now);
         expect(first.toFire).toHaveLength(1);
-        expect(planEntries([{ id: 7, at: T(due), mark: due }], first.prunedFired, now).toFire).toHaveLength(0);
-        const snoozed = { id: 7, at: T('2026-10-05T20:30:00Z'), mark: `${due}|2026-10-05T20:30:00.000Z` };
+        expect(planEntries([{ id: 7, at: T(due), mark: due, due }], first.prunedFired, now).toFire).toHaveLength(0);
+        // A snooze moves `at` and the mark; `due` stays the server's due_at.
+        const snoozed = { id: 7, at: T('2026-10-05T20:30:00Z'), mark: `${due}|2026-10-05T20:30:00.000Z`, due };
         expect(planEntries([snoozed], first.prunedFired, now).toFire).toHaveLength(1);
         // Positive control for the "not yet": a future entry arms, never fires.
-        const later = planEntries([{ id: 8, at: now + 5000, mark: 'x' }], {}, now);
+        const laterDue = new Date(now + 5000).toISOString();
+        const later = planEntries([{ id: 8, at: now + 5000, mark: 'x', due: laterDue }], {}, now);
         expect(later.toFire).toHaveLength(0);
         expect(later.nextAt).toBe(now + 5000);
     });

@@ -25,7 +25,7 @@ import {
 
 const prepareImageForUpload = vi.fn(async (f: File) => f);
 const encryptAndUploadRef = vi.fn(async (f: File) => ({ href: hrefFor(f.name, f.type), name: f.name, mime: f.type }));
-const deleteFiles = vi.fn(async () => {});
+const deleteFiles = vi.fn<(ids: string[]) => Promise<void>>(async () => {});
 
 vi.mock('../api/imagePrep', () => ({ prepareImageForUpload: (f: File) => prepareImageForUpload(f) }));
 vi.mock('../api/listContent', () => ({ deleteFiles: (ids: string[]) => deleteFiles(ids) }));
