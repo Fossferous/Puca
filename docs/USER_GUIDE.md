@@ -354,8 +354,8 @@ confirmation first.
 
 ### Paste a checklist
 - Paste step-by-step instructions — say, an AI assistant's answer — into **Add a task…** in a list, or **Add an item…** in a checklist channel, and Púca asks first
-- **Add N items** adds each step as its own item, in order, without the numbers, bold marks, headings or the "Here's how:" line; **Add as one item** puts the whole paste on one line in the box for you to add; **Cancel** adds nothing
-- Paste it into the **New list** name instead and the list is made with the steps in it, named after the checklist's heading (or after what you had typed there); **Add as one item** there makes the list with the whole paste as its one item
+- **Add N items** adds each step as its own item, in order, without the numbers, bold marks or the "Here's how:" line (a section heading inside the list, such as "Security", stays as an item of its own); **Add as one item** puts the whole paste on one line in the box for you to add; **Cancel** adds nothing
+- Paste it into the **New list** name instead and the question says it will make a new list, and what the list will be called: the checklist's heading, or what you had typed there. **Add N items** makes the list with the steps in it; **Add as one item** makes it with the whole paste as its one item
 - A one-line paste pastes as usual, and one paste adds at most 200 items
 
 ---
@@ -389,8 +389,8 @@ uses the account you are already signed in to.
   each step becomes an item. Press **Done** to save it. Pasted into a note
   that is already open (its title or **Add an item…**), the steps are added
   once you choose **Add N items**, and a note of yours with no name yet takes
-  the heading as its name. Púca's own Tasks view takes the same paste (see
-  *Tasks*, above).
+  the heading as its name (the question says so first). Púca's own Tasks view
+  takes the same paste (see *Tasks*, above).
 - Archiving or deleting a note offers **Undo** for a few seconds.
 - Shortcuts: `/` search, `c` new note, `r` refresh, `?` help.
 

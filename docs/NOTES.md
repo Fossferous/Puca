@@ -196,8 +196,9 @@ Púca's reminders. Anything you do in one is what you see in the other.
   joins that step. Closing sentences ("That's it!") are dropped. The reader
   (`readChecklist`, `notes/model/noteContent.ts`) takes at least two list lines and
   no more sentences than list lines around them, so a paragraph that happens to
-  mention a list stays a paragraph. Nothing is saved until **Done**, as with any
-  share or paste.
+  mention a list stays a paragraph. In the composer nothing is saved until
+  **Done**, as with any share or paste; in an open note and in Púca's Tasks view
+  there is no Done, and the steps are created when you choose *Add N items*.
 - **Faster ways in (Android app).** Long-press the app icon for **New note**,
   **New list** or **Reminders**; add a **quick-settings tile** that opens a new
   note from the notification shade (account menu → *Add the quick tile*); or
@@ -1425,7 +1426,20 @@ which is every channel checklist on the Púca page); the composer only fills
 its own fields, and saves nothing until **Done**. The Tasks view has no Undo
 for an item at all, so there too the question is the guard. *Add as one item* never creates
 anything by itself: in an open note or the Tasks view it puts the paste, on
-one line, into the add row, and Enter adds it.
+one line, into the add row, and Enter adds it. The one exception is the *New
+list* name, where either answer makes the list — with the steps, or with the
+paste as its one item.
+
+The question takes the focus when it opens: on the question itself, not on a
+button, because the paste it guards against is the one nobody meant, and a
+reflexive Enter after it must answer nothing. While it is open the field
+underneath ignores Enter too — its form would otherwise add what was typed
+there behind the question, or, in *New list*, make a list that the answer then
+made a second time. Cancel puts the focus back in the field, and the *New
+list* name stays open under the question even when it is empty. When an
+answer does more than add items, the question says so, with the name: *This
+makes a new list, “Router setup”.* from the *New list* name, and *Adding them
+as items also names this note “Router setup”.* from an untitled note's title.
 
 A paste takes at most `MAX_TAKEN_ITEMS` (200) items — the prompt says "Only
 the first 200 are added" when there were more — and each is truncated to the
@@ -1439,6 +1453,19 @@ belonged to then — so switching list while they land does not send the rest
 elsewhere. A run that stops at a refusal stops there, says why, and says how
 many items landed ("Added 3 of 7 items") rather than leaving an arbitrary
 prefix of the list unexplained.
+
+A list is often read again while a paste is still landing in it — opened
+again after a switch away, or re-read because another member changed it —
+and that read's answer can be older than rows already on screen. Those rows
+are kept: every create that answers while a read of the same list is out is
+noted, and the read gets back the ones it lacks
+(`components/createdWhileReading.ts`, in the Tasks view and `ChecklistBody`).
+Before, the older answer took them off the screen until the list was opened
+again. And a checklist that ANOTHER member is filling is read again quietly
+and together: `ChecklistBody` reads once when an update arrives, then once
+more for every update that came during that read or the pause after it —
+never through "Loading…", which swapped the tree out once per item and took
+any row being edited with it.
 
 **Links in a note.** A web address typed or pasted into a note's text, or
 into an item, becomes tappable. Púca Notes works out where it goes by looking

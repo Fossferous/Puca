@@ -11,23 +11,34 @@ one-line summary; this file is the full story. Versions follow
   note.** An assistant's answer (or any list) pasted into **Add a task…**,
   a checklist channel's **Add an item…**, or a note that is already open in
   Púca Notes now becomes one clean item per step, in order, without the
-  numbers, bold marks, headings or the "Here's how:" line. Pasted into the
-  **New list** name, it makes the list, named after the checklist's
+  numbers, bold marks or the "Here's how:" line. The checklist's own
+  heading names a new list or an untitled note, and a section heading
+  inside it stays as an item of its own, so the grouping survives. Pasted
+  into the **New list** name, it makes the list, named after the checklist's
   heading, with the steps in it; pasted into an open note's title, it adds
-  the steps and names a note of yours that has no name yet. Before, only a
-  new note in Púca Notes read a paste this way: an open note split it line
-  by line, keeping the intro, the closing sentence and the bold marks, and
-  Tasks took the whole paste as one long line. It still asks first
-  (**Add N items**, **Add as one item** or **Cancel**), nothing is added
-  until you answer, and one paste adds at most 200 items (the question says
-  so when there were more).
+  the steps and names a note of yours that has no name yet. The question
+  says when it will make a list or rename the note, and with what name.
+  Before, only a new note in Púca Notes read a paste this way: an open note
+  split it line by line, keeping the intro, the closing sentence and the
+  bold marks, and Tasks took the whole paste as one long line. It still asks
+  first (**Add N items**, **Add as one item** or **Cancel**), nothing is
+  added until you answer, pressing Enter while it asks does nothing, and one
+  paste adds at most 200 items (the question says so when there were more).
 
 ### Fixed
 - **Adding several tasks in a row in Tasks shows all of them.** A task added
   while the one before it was still saving could replace it on screen until
-  you switched lists, and a task, item or list the server refused failed
-  without a word. Now every one stays, and a refusal says what went wrong,
-  with your words still in the box to try again.
+  you switched lists, one added while the list was reloading could vanish
+  the same way, and a task, item or list the server refused failed without a
+  word. Now every one stays, and a refusal says what went wrong, with your
+  words still in the box to try again.
+- **A checklist someone else is adding to updates in place.** Each item
+  another member added swapped the whole checklist for "Loading…" and closed
+  any item you were in the middle of editing, so a pasted list of fifty did
+  that fifty times. Now it refreshes without leaving the screen, and a burst
+  of changes is read together. With the side panel open, switching channels
+  quickly could also leave the last channel's checklist showing; it no
+  longer does.
 - **Snoozing from the Púca Notes calendar is one snooze.** Each tap sent the
   snooze twice, and the two could disagree about when Tomorrow is, so the
   item sometimes woke at 9:00 instead of the morning time you chose. It now
