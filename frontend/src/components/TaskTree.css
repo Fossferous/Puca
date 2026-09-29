@@ -408,9 +408,16 @@ body.drag-reorder-active {
         margin-block: -11px;
     }
 
-    /* When they do wrap, keep the cluster to the right where it belongs. */
+    /* When they do wrap, keep the cluster to the right where it belongs.
+       And let the cluster itself wrap inside the row: a dated top-level item
+       carries nine buttons (with Turn into heading), wider than a ~300px
+       board card's row, and a nested row is 16px narrower per level — an
+       unshrinkable cluster ran out of the card instead. */
     .tt-actions {
         margin-left: auto;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        max-width: 100%;
     }
 
     .tt-btn {

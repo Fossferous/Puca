@@ -125,6 +125,16 @@ import './ServerTasksBoard.css';
  * "Tasks & notes" (NotesDesktopView.tsx; Chat's `notesInApp`), already signed
  * in.
  */
+/** The server's list counts, less the headings this view has read in each
+ *  list (see `headingsSeen` in TasksView): to the server a heading is one
+ *  more row, since it cannot tell one from an item (api/taskHeading.ts). */
+function withoutSeenHeadings(lists: TaskList[], seen: ReadonlyMap<number, { total: number; completed: number }>): TaskList[] {
+    return lists.map(l => {
+        const h = seen.get(l.id);
+        return h ? { ...l, total_tasks: Math.max(0, l.total_tasks - h.total), completed_tasks: Math.max(0, l.completed_tasks - h.completed) } : l;
+    });
+}
+
 function notesUrl(): string | null {
     if (typeof window === 'undefined' || isTauri() || isMobile()) return null;
     return `${window.location.origin}/notes/index.html`;
@@ -424,6 +434,14 @@ export function TasksView() {
         onSwipeRight: () => stepTab(-1),
     });
 
+    /** The lists as the server sent them, onto the screen, less the headings
+     *  this view has read (`headingsSeen`). Its own callback, not inline in
+     *  refreshLists: a ref read inside that one changes how the hooks lint
+     *  reads it, and its mount effect's directive went dead. */
+    const listsFromServer = useCallback((fetched: TaskList[]) => {
+        setLists(withoutSeenHeadings(fetched, headingsSeen.current));
+    }, []);
+
     /** Read the lists (and, `withPrefs`, the saved tab order) onto the
      *  screen. `current`, asked as each answer comes in, says whether it may
      *  still land (Refresh drops one that raced a change — see refresh).
@@ -432,12 +450,7 @@ export function TasksView() {
         let read = true;
         try {
             const fetched = await listTaskLists();
-            if (current()) {
-                setLists(fetched.map(l => {
-                    const h = headingsSeen.current.get(l.id);
-                    return h ? { ...l, total_tasks: Math.max(0, l.total_tasks - h.total), completed_tasks: Math.max(0, l.completed_tasks - h.completed) } : l;
-                }));
-            }
+            if (current()) listsFromServer(fetched);
         } catch (err) {
             console.error('Failed to load task lists:', err);
             read = false;
@@ -452,7 +465,7 @@ export function TasksView() {
         }
         setLoading(false);
         return read;
-    }, []);
+    }, [listsFromServer]);
 
     useEffect(() => {
         // eslint-disable-next-line react-hooks/set-state-in-effect -- initial data load on mount
