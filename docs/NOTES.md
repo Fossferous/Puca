@@ -223,6 +223,37 @@ Púca's reminders. Anything you do in one is what you see in the other.
   closing it untouched saves nothing. The choice is kept on that phone
   only, beside the grid/list view and the sort (a sign-out clears it with
   them); it is not on the web page or in the desktop app.
+
+  **From an automation app** (MacroDroid, Tasker, anything that can send an
+  Android intent) the same doors open with the intent the shortcuts carry:
+  an *activity* intent, action `android.intent.action.VIEW`, package
+  `com.sovereign.notes`, class `com.sovereign.notes.MainActivity`, and one
+  string extra, `notes_nav`, set to `compose-note` (a new note),
+  `compose-list` (a new list), `compose-draw` (a drawing), `compose-photo`
+  (a photo) or `reminders` (the Reminders view). From a computer with the
+  phone attached, `adb shell am start -a android.intent.action.VIEW -n
+  com.sovereign.notes/.MainActivity --es notes_nav compose-note` does the
+  same. That word is all the intent needs, and no text sent with it
+  reaches a note (text and pictures come in by sharing them to Púca
+  Notes). A word it does not know just opens the app, and signed out, any
+  of them opens the sign-in screen.
+
+  **Ready to type.** Whichever of these opens the composer — a shortcut, the
+  tile, the widget, an intent like the one above, or *Open Púca Notes to* —
+  a new note opens on its **text** and a new list on its **first item**,
+  the way Google Keep does, **with the keyboard up**, whether the app was
+  closed or already running. A drawing or a photo opens with the keyboard
+  down, and so does a request that had to wait behind the sign-in screen
+  (it still opens the composer once you are in, but you last typed a
+  password, and it may be old). Taking a note from inside the app — the
+  **New note** button, *Take a note…*, `c` — and a share are unchanged. An
+  Android WebView raises the keyboard for a tap, not for a field the
+  page focuses by itself, so the APK does it (`NotesNative.showKeyboard`,
+  which asks Android's input method only while a field in the page has the
+  focus, stops once the keyboard is up, and gives up after 1.5 s). That
+  needs the Notes APK from **the release after 0.9.826** or newer: an older
+  APK takes the same update over the air and lands on the same field, but
+  the keyboard waits for a tap, as before.
 - **Keyboard** — `/` search, `c` new note, `r` refresh, `Esc` close, `?` help.
 - **Installable, and it works offline** — a web app manifest lets a browser add
   Notes to the home screen or desktop, and a service worker scoped to

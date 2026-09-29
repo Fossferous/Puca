@@ -2,8 +2,9 @@
  * The JS handle on Púca Notes' own Android plugin (NotesNativePlugin.java in
  * frontend/notes-app): due reminders that fire with the app closed, the
  * ~hourly background refresh, notification / exact-alarm / battery status,
- * the share sheet, "add to the phone's calendar", and landing a notification
- * tap on the Reminders view.
+ * the share sheet, "add to the phone's calendar", landing a notification
+ * tap on the Reminders view, and the keyboard for a composer opened from
+ * outside the page.
  *
  * FEATURE-DETECTED, NEVER THROWS. The browser has no such plugin, and neither
  * does a Púca Notes APK built before it existed; there every call resolves to
@@ -47,6 +48,7 @@ interface NotesNativePlugin {
     consumeLaunchNav(): Promise<{ target: string | null; item?: number | null }>;
     consumeLaunchShare(): Promise<NativeSharedPayload>;
     requestAddTile(): Promise<{ ok: boolean; reason?: string }>;
+    showKeyboard(): Promise<{ shown: boolean }>;
     addListener(eventName: 'navigate', listener: (data: { target: string; item?: number | null }) => void): Promise<PluginListenerHandle>;
     addListener(eventName: 'share', listener: () => void): Promise<PluginListenerHandle>;
 }
@@ -275,6 +277,29 @@ export async function fetchSharedFiles(payload: NativeSharedPayload): Promise<Fi
  *  must add it from the shade's own edit screen. */
 export async function requestNativeAddTile(): Promise<boolean> {
     return (await call(() => Native.requestAddTile(), { ok: false })).ok === true;
+}
+
+/**
+ * Bring the phone's keyboard up for the field the page has JUST focused.
+ *
+ * Android's WebView raises the keyboard for a tap, not for a focus() the
+ * page makes itself. So a composer opened by a launcher shortcut, the quick
+ * tile, the widget, an app sending the same intent (MacroDroid, Tasker) or
+ * "Open Púca Notes to" had its field focused and still needed a tap before
+ * anything could be typed — always on a cold start, and on a warm one
+ * unless Android happened to restore the keyboard as the window came back
+ * (a race: it does so only if the field was focused first).
+ * NotesNativePlugin.showKeyboard asks Android's input method for it
+ * (NotesKeyboard.java). Content-free: no argument.
+ *
+ * Call it only AFTER focusing the field — the keyboard types into whatever
+ * the page has focused. true = the keyboard is up; false = it is not, and
+ * that is harmless: the browser, the desktop app's Notes and a Notes APK
+ * from before this method (Capacitor rejects a method the plugin does not
+ * have) all answer false, and the field stays focused as it always was.
+ */
+export async function raiseNativeKeyboard(): Promise<boolean> {
+    return (await call(() => Native.showKeyboard(), { shown: false }))?.shown === true;
 }
 
 function claims(token: string | null): { sub: string | null; exp: number } {

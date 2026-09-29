@@ -97,7 +97,21 @@ describe('useNotesReminderLoop', () => {
         pending = { target: 'compose-draw', item: null };
         act(() => root.render(<Shell />));
         await settle();
-        expect(compose).toHaveBeenCalledWith('draw');
+        // 'launch': the target the page drained at mount. The shell reads
+        // it to tell a fresh start from a request that waited behind the
+        // sign-in page (NotesShell's onNativeCompose — the keyboard).
+        expect(compose).toHaveBeenCalledWith('draw', 'launch');
+        expect(navigate).not.toHaveBeenCalled();
+    });
+
+    it('the same shortcut while the app is up (a warm start, a MacroDroid intent) arrives as an event', async () => {
+        act(() => root.render(<Shell />));
+        await settle();
+        expect(compose).not.toHaveBeenCalled();
+        act(() => navListener?.({ target: 'compose-note', item: null }));
+        await settle();
+        expect(compose).toHaveBeenCalledTimes(1);
+        expect(compose).toHaveBeenCalledWith('text', 'event');
         expect(navigate).not.toHaveBeenCalled();
     });
 

@@ -39,6 +39,7 @@ import { AudioRecorder, type RecordedClip } from './AudioRecorder';
 import { appendTranscript, canRecordAudio } from '../model/audioNote';
 import { followOutputDeviceRef } from '../../components/settingsStore';
 import { transcribeClip } from '../model/transcribe';
+import { raiseNativeKeyboard } from '../native/notesNative';
 import '../../components/NoteImages.css';
 import '../noteContent.css';
 
@@ -120,6 +121,7 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     // Previews are object URLs of files on this device; free them on the way out.
     useEffect(() => () => { for (const p of picturesRef.current) if (p.url) URL.revokeObjectURL(p.url); }, []);
     const itemRefs = useRef<(HTMLInputElement | null)[]>([]);
+    const bodyRef = useRef<HTMLTextAreaElement>(null);
     const rootRef = useRef<HTMLDivElement>(null);
     const cameraBtnRef = useRef<HTMLButtonElement>(null);
     /** The draft as the LAST render had it. `close()` waits for the phone to
@@ -135,6 +137,14 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
      *  Discard pressed while a save is waiting must not create the note. */
     const closeToken = useRef(0);
     const focusItem = (i: number) => requestAnimationFrame(() => itemRefs.current[i]?.focus());
+    /** A ready-to-type request (ComposeIntent.readyToType) waiting for its
+     *  field to be drawn: which composer it is for, or null. */
+    const typeInto = useRef<'text' | 'list' | null>(null);
+    /** Nothing in this composer keeps the focus (so no keyboard for it). */
+    const blurInside = () => {
+        const a = document.activeElement;
+        if (a instanceof HTMLElement && rootRef.current?.contains(a)) a.blur();
+    };
 
     useEffect(() => {
         if (openSignal > 0) { setOpen(true); focusItem(0); }
@@ -169,13 +179,44 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
         // The camera cannot be opened for the user: a programmatic click on a
         // file input needs a user activation, and a launch is not one. The
         // button is focused instead, so it is one tap away and never dead.
+        typeInto.current = null;
         if (want === 'photo') requestAnimationFrame(() => cameraBtnRef.current?.focus());
-        else if (want !== 'draw') focusItem(0);
+        else if (want === 'draw') {
+            // A drawing is not typed: nothing in the composer under the
+            // canvas keeps the focus, or Android puts the keyboard up over
+            // the canvas (it restores the IME for a focused field when the
+            // app comes back to the front — measured on the emulator with a
+            // checklist composer already open).
+            if (initial.readyToType) blurInside();
+        } else if (initial.readyToType) typeInto.current = want;   // the effect below, once that field is drawn
+        else focusItem(0);
         onInitialUsed?.();
         // `content` is read, not depended on: a server-features refetch must
         // not re-seed a composer the user is already typing in.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [initial]);
+
+    // Ready to type (ComposeIntent.readyToType): the field the person types
+    // in, the way Google Keep lands — a text note on its TEXT, not on the
+    // title the sheet focuses when it opens; a checklist on its first item —
+    // and then the keyboard (native/notesNative's raiseNativeKeyboard;
+    // nothing outside the Android app). Android's WebView raises it for a
+    // tap, not for a focus() the page makes itself: measured on the emulator,
+    // a cold start never got it, and a warm start only when the field
+    // happened to be focused before the window came back to the front.
+    // Waits for the commit that draws that field: the seed above switches
+    // the mode in the same breath, and until it lands the field does not
+    // exist (a field of the other mode is gone from its ref as soon as it
+    // unmounts). Once per request, whatever the outcome.
+    useEffect(() => {
+        const want = typeInto.current;
+        if (!want) return;
+        const field = want === 'text' ? bodyRef.current : itemRefs.current[0];
+        if (!field) return;
+        typeInto.current = null;
+        field.focus();
+        void raiseNativeKeyboard();
+    });
 
     /** Drop the take and everything that belongs to it. */
     const dropClip = () => {
@@ -210,6 +251,7 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
         })();
     };
     const reset = () => {
+        typeInto.current = null;
         setTitle(''); setItems(['']); setBody(''); setMode('list');
         // live, not the closure: reset() also runs after an await, and a
         // picture added during that wait has a URL of its own to free.
@@ -530,6 +572,7 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
                 )}
                 {mode === 'text' && (
                     <textarea
+                        ref={bodyRef}
                         className="notes-quickadd-body"
                         placeholder="Take a note…"
                         value={body}

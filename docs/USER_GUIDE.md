@@ -383,6 +383,11 @@ Inside Notes:
   In the Android app, **Open Púca Notes to** in the account menu can start the
   app on **A new note** or **A new list** instead — when it starts, and when
   you come back to it after five minutes or more — on that phone only.
+  A new note or list opened from outside the app — that setting, a
+  long-press shortcut, the quick tile, the widget, or an app such as
+  MacroDroid sending the shortcut's intent (the details are in
+  [Púca Notes](NOTES.md)) — opens ready to type, with the keyboard up, in
+  the Púca Notes app from the release after 0.9.826 on.
 - Click a note to open it. Inside, items work exactly as in Tasks: tick,
   edit, add subtasks, drag by the grip to reorder or nest, set a due time
   from the clock, attach pictures from the paperclip.

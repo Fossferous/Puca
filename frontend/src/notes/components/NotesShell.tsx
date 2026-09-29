@@ -65,7 +65,7 @@ import { CalendarView } from './CalendarView';
 import { UndoBar } from './UndoBar';
 import { useNotesShortcuts } from './useNotesShortcuts';
 import { useLiveRouteQuery } from './useLiveRouteQuery';
-import { onOpenReminders, useNotesReminderLoop } from '../native/useNativeReminders';
+import { type NativeComposeSource, onOpenReminders, useNotesReminderLoop } from '../native/useNativeReminders';
 import { canShareNotes, exportNotes, shareNote, shareNotes } from '../native/notesExport';
 import { usePlaceReminderItems } from '../native/useNotesPlaces';
 import { NativeReminderBanners } from '../native/NativeReminderBanners';
@@ -340,7 +340,17 @@ export function NotesShell({ onSignOut, expiredOffline = false, embedded, coldSt
             setQuickSignal(n => n + 1);
         }
     }, [navigate, path, query]);
-    const onNativeCompose = useCallback((mode: ComposeMode) => { openCompose({ mode }); }, [openCompose]);
+    // A shortcut, the tile, the widget, an app sending the same intent
+    // (MacroDroid, Tasker) or "Open Púca Notes to": ready to type, keyboard
+    // up (QuickAdd, ComposeIntent.readyToType). Except a LAUNCH drained by a
+    // shell a sign-in mounted: that request waited behind the sign-in page,
+    // perhaps for hours, and the person's last act was typing a password —
+    // it opens the composer as it always has, and the keyboard stays down.
+    // `source` is absent for Open Púca Notes to, which only ever acts at the
+    // app's own start or on a return to it.
+    const onNativeCompose = useCallback((mode: ComposeMode, source?: NativeComposeSource) => {
+        openCompose({ mode, readyToType: source !== 'launch' || coldStart });
+    }, [openCompose, coldStart]);
     const composeTaken = useCallback(() => setComposeIntent(null), []);
 
     // "Open Púca Notes to" (the account menu, Android app only): at the

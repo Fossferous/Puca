@@ -1,6 +1,7 @@
 package com.sovereign.notes;
 
 import android.Manifest;
+import android.app.Activity;
 import android.app.StatusBarManager;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
@@ -22,6 +23,7 @@ import android.provider.Settings;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
+import android.webkit.WebView;
 
 import androidx.annotation.RequiresApi;
 import androidx.core.app.NotificationManagerCompat;
@@ -52,8 +54,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * Púca Notes' own native bridge: due reminders that fire with the app
  * closed, the background refresh, notification / exact-alarm / battery
- * status, the share sheet, "add to the phone's calendar", and landing a
- * notification tap on the Reminders view.
+ * status, the share sheet, "add to the phone's calendar", landing a
+ * notification tap on the Reminders view, and the keyboard for a composer
+ * opened from outside the page (showKeyboard).
  *
  * Reached from frontend/src/notes/native/notesNative.ts, which feature-detects
  * the plugin (the browser and older Notes APKs have none) and never throws.
@@ -75,9 +78,10 @@ public class NotesNativePlugin extends Plugin {
      *  2: shareIn (share INTO Notes), navItem (a due notification names the
      *  one item that came due), tile (the quick-settings tile prompt) and
      *  transcribe (on-device speech-to-text for a voice note). All four ride
-     *  0.9.817, so they share ONE level. Feature strings are added HERE and
-     *  nowhere else. */
-    private static final int API_LEVEL = 2;
+     *  0.9.817, so they share ONE level. 3: keyboard (showKeyboard, the
+     *  keyboard for a composer opened from outside the page). Feature strings
+     *  are added HERE and nowhere else. */
+    private static final int API_LEVEL = 3;
 
     /** The nav target of the intent that started the activity, held until
      *  the page asks (it boots after the WebView loads). */
@@ -138,11 +142,40 @@ public class NotesNativePlugin extends Plugin {
         ret.put("api", API_LEVEL);
         JSArray features = new JSArray();
         for (String f : new String[] { "reminders", "backgroundRefresh", "exactAlarm", "battery",
-                "share", "calendar", "launchNav", "shareIn", "navItem", "tile", "transcribe" }) {
+                "share", "calendar", "launchNav", "shareIn", "navItem", "tile", "transcribe", "keyboard" }) {
             features.put(f);
         }
         ret.put("features", features);
         call.resolve(ret);
+    }
+
+    // --- the keyboard, for a composer opened from outside the page ---------------
+
+    /**
+     * Bring the soft keyboard up for the field the page has just focused.
+     * The page calls this only for a composer a shortcut, the tile, the
+     * widget, an intent from another app (MacroDroid, Tasker) or "Open Púca
+     * Notes to" opened, right after focusing its text (QuickAdd): the WebView
+     * raises the keyboard for a tap, not for a focus() the page makes itself.
+     * Content-free both ways. Resolves {shown} once NotesKeyboard knows;
+     * never rejects. An APK without this method makes Capacitor reject the
+     * call, which the page reads as "not shown" and carries on.
+     */
+    @PluginMethod
+    public void showKeyboard(PluginCall call) {
+        Activity activity = getActivity();
+        WebView view = getBridge() == null ? null : getBridge().getWebView();
+        if (activity == null || view == null) {
+            JSObject ret = new JSObject();
+            ret.put("shown", false);
+            call.resolve(ret);
+            return;
+        }
+        activity.runOnUiThread(() -> NotesKeyboard.raise(view, shown -> {
+            JSObject ret = new JSObject();
+            ret.put("shown", shown);
+            call.resolve(ret);
+        }));
     }
 
     // --- writing a voice note down, on this phone or not at all ----------------
