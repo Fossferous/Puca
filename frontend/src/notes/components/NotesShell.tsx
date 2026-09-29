@@ -32,7 +32,7 @@ import { PlusIcon, WarningIcon } from '../../components/Icons';
 import {
     type NoteCard, type NoteFilter, type NoteRef,
     allLabels, applyVisibleOrder, canDragReorder, canReorder, filterNotes, groupReminders, isLabelRoute, labelFromPath, moveNoteInOrder,
-    reminderBadgeCount, splitPinned,
+    reminderBadgeCount, sortNoteCards, splitPinned,
 } from '../model/notesModel';
 import {
     ALL_PAGE_KEY, hasPageForPath, pageIndexForPath, pageRoutes, routeForIndex, type NotesPage,
@@ -41,7 +41,7 @@ import { type ComposeIntent, type ComposeMode, takeShare } from '../model/compos
 import { useNativeShareIn, type SharedIntoNotes } from '../native/useNativeShareIn';
 import { useNotesOpenTo } from '../native/useNotesOpenTo';
 import { restoreLabels } from '../model/notesBulk';
-import { setNotesOpenTo, setNotesSort, setNotesView, setReminderTimes, type NotesSortMode } from '../model/notesPrefs';
+import { setNotesOpenTo, setNotesSort, setNotesView, setReminderTimes } from '../model/notesPrefs';
 import { useNotesPrefs, useNoteActions, useNoteCards } from '../model/notesQueries';
 import { copyBlockersOf, copyPlanOf, copyRefusal, noteToMarkdown } from '../model/noteText';
 import { SendToPucaSheet } from './SendToPucaSheet';
@@ -113,15 +113,6 @@ type Pending =
     // `returnTo` is the label route the change forced us OFF, if any: putting
     // the map back has to put the view back with it.
     | { kind: 'labels'; message: string; snapshot: Record<string, string[]>; returnTo: string | null; token: number };
-
-function sortCards(cards: NoteCard[], sort: NotesSortMode): NoteCard[] {
-    if (sort === 'puca') return cards;
-    const out = [...cards];
-    if (sort === 'title') out.sort((a, b) => a.title.localeCompare(b.title));
-    else if (sort === 'edited') out.sort((a, b) => (Date.parse(b.updatedAt ?? b.createdAt ?? '') || 0) - (Date.parse(a.updatedAt ?? a.createdAt ?? '') || 0));
-    else out.sort((a, b) => (Date.parse(b.createdAt ?? '') || 0) - (Date.parse(a.createdAt ?? '') || 0));
-    return out;
-}
 
 /** Notes mounted inside the Púca desktop app (components/NotesDesktopView.tsx). */
 export interface NotesEmbedding {
@@ -249,7 +240,7 @@ export function NotesShell({ onSignOut, expiredOffline = false, embedded, coldSt
         [allCards, pending, bulkHidden],
     );
     const cardsByKey = useMemo(() => new Map(cards.map(c => [c.key, c])), [cards]);
-    const visible = useMemo(() => sortCards(filterNotes(cards, filter), local.sort), [cards, filter, local.sort]);
+    const visible = useMemo(() => sortNoteCards(filterNotes(cards, filter), local.sort), [cards, filter, local.sort]);
     const { pinned, others } = useMemo(() => splitPinned(visible), [visible]);
     const labels = useMemo(() => allLabels(cards), [cards]);
     // --- Pages: All notes, then one per label (model/notesPages.ts) ----------------
@@ -733,7 +724,7 @@ export function NotesShell({ onSignOut, expiredOffline = false, embedded, coldSt
     const pageContent = (page: NotesPage, live: boolean, active: boolean) => {
         if (!live) return null;
         const pageFilter: NoteFilter = page.key === ALL_PAGE_KEY ? { kind: 'all' } : { kind: 'label', label: page.label };
-        const split = active ? { pinned, others } : splitPinned(sortCards(filterNotes(cards, pageFilter), local.sort));
+        const split = active ? { pinned, others } : splitPinned(sortNoteCards(filterNotes(cards, pageFilter), local.sort));
         return (
             <>
                 {page.key === ALL_PAGE_KEY

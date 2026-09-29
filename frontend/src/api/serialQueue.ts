@@ -13,6 +13,14 @@
  * replay. setLocalDescription starts ICE gathering, so onicecandidate fires
  * while the answer is still being sealed. The race is the normal case, not a
  * corner.
+ *
+ * The saved tab order has the same shape of race. A new note's place is
+ * READ from the server and then written back as an insert (api/listContent.ts
+ * placeNewListFirst, notes/model/notesOutbox.ts execOp), and a pin, a
+ * favourite or a drag saved between the read and the write is undone by it —
+ * so Púca's Tasks view and Púca Notes each send their tab-order writes through
+ * one of these. Shared, not remote-control code: the lite build keeps it
+ * (vite.shared.ts).
  */
 export class SerialQueue {
     private tail: Promise<void> = Promise.resolve();

@@ -52,6 +52,20 @@ one-line summary; this file is the full story. Versions follow
   read at all, so no paste can freeze the app. Everywhere a checklist can
   be pasted: the Notes composer, an open note, Púca's Tasks view and every
   checklist channel.
+- **A new note goes to the top.** In Púca Notes, a note you make now
+  appears first, directly under your pinned notes, instead of at the end:
+  from the composer, a share, a pasted checklist, the calendar's **New
+  note…** and a calendar imported into a new note, **Make a copy**, and
+  **Save to Notes** in a conversation. Púca's Tasks view does the same for
+  **New list**, typed or pasted, and for a calendar imported into a new note
+  on its **Calendar** tab: the new list is the first tab after your
+  favourites (an imported one now shows on the bar straight away, not only
+  after **Refresh** or leaving Tasks). Your pinned notes stay where they
+  are and the others keep their order, a pin or a move you have just made,
+  here or on another device, included. It is the one saved order both apps
+  share, so the note is still at the top after a reload and on your other
+  devices, and a note made offline takes its place there when it syncs.
+  Sorting by **Title**, **Newest** or **Edited** is unchanged.
 
 ### Fixed
 - **A pasted note copied with Copy as text gains no extra first item.** A

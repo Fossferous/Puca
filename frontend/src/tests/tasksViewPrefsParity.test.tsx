@@ -49,6 +49,12 @@ vi.mock('../notes/model/notesPrefsSync', async (orig) => ({
 // The view's children are not under test and pull in far more than a tab bar.
 vi.mock('../components/ChecklistBody', () => ({ ChecklistBody: () => null }));
 vi.mock('../components/TaskTree', () => ({ TaskTree: () => null }));
+// The Calendar tab's own content neither: only what the view hands it (a
+// note its import makes goes on the bar).
+const calendar = vi.hoisted(() => ({ props: null as null | { onListCreated?: (list: import('../api/tasks').TaskList) => void } }));
+vi.mock('../components/calendar/TasksCalendar', () => ({
+    TasksCalendar: (p: { onListCreated?: (list: import('../api/tasks').TaskList) => void }) => { calendar.props = p; return null; },
+}));
 // The tab bar's drop handler, as TasksView hands it to the drag hook.
 type DropEvent = { key: string; group: string; order: string[]; insertAt: number; crossDelta: number; sameSlot?: boolean };
 const drag = vi.hoisted(() => ({ onDrop: null as null | ((e: DropEvent) => void) }));
@@ -76,6 +82,9 @@ let trashSupported = true;
 /** Which lists the server actually returns (dropping 7 makes it an UNKNOWN
  *  saved ref — a tab nothing knows is hidden, which is the control). */
 let serverLists = [5, 7, 9];
+/** The saved order the server answers with, or 'unreadable' for a GET that
+ *  fails (an old server, a bad moment). */
+let serverPrefs: TaskTabPref[] | 'unreadable' = SAVED;
 let toasts: string[] = [];
 // Restored per test rather than with vi.restoreAllMocks(), which would also
 // clear the localStorage stand-ins the setup file installs.
@@ -95,7 +104,10 @@ function installServer() {
         }
         if (path === '/task-lists?trashed=true') return [];
         if (path === '/task-lists') return serverLists.map(row);
-        if (path === '/task-tab-prefs') return SAVED;
+        if (path === '/task-tab-prefs') {
+            if (serverPrefs === 'unreadable') throw new ApiError('Bad Gateway', 502);
+            return serverPrefs;
+        }
         if (path === '/servers') return [];
         if (/^\/task-lists\/\d+\/tasks$/.test(path)) return [];
         throw new Error(`unexpected GET ${path}`);
@@ -192,7 +204,9 @@ beforeEach(() => {
     get.mockReset(); post.mockReset(); patch.mockReset(); del.mockReset(); put.mockReset();
     trashSupported = true;
     serverLists = [5, 7, 9];
+    serverPrefs = SAVED;
     drag.onDrop = null;
+    calendar.props = null;
     syncHook.mounts = 0;
     toasts = [];
     setMessageToastSink(t => { toasts.push(t.title); });
@@ -367,6 +381,154 @@ describe('Púca Tasks view: a new list is not created behind a filter', () => {
         await mount();
         await createList('Fresh');
         expect(tabFor('Fresh')).toBeTruthy();
+    });
+});
+
+describe('Púca Tasks view: a new list goes first after the favourites', () => {
+    const createReturns = (id: number) => post.mockImplementation(async (path: string) => {
+        if (path === '/task-lists') return row(id);
+        return {};
+    });
+    /** The note tabs on the bar, in the order it shows them. */
+    const barOrder = () => [...container.querySelectorAll<HTMLElement>('.tasks-tab[data-drag-key]')].map(t => t.dataset.dragKey);
+    const savedOrders = () => put.mock.calls.filter(c => c[0] === '/task-tab-prefs')
+        .map(c => (c[1] as { prefs: TaskTabPref[] }).prefs.map(p => `${p.kind}:${p.ref_id}${p.is_favorite ? '*' : ''}`));
+
+    it('New list puts it right after the favourite — on the bar, and in the one order every device (and Púca Notes) reads', async () => {
+        serverPrefs = [{ kind: 'list', ref_id: 5, is_favorite: true }, ...SAVED.slice(1)];
+        createReturns(11);
+        await mount();
+        await createList('Fresh');
+        expect(savedOrders()).toEqual([['list:5*', 'list:11', 'list:7', 'list:9']]);
+        expect(barOrder()).toEqual(['list:5', 'list:11', 'list:7', 'list:9']);
+    });
+
+    it('it is saved into the order the server holds NOW: a reorder made on another device since the bar opened is kept', async () => {
+        createReturns(14);
+        await mount();
+        // While this view was open, another device put 9 first and pinned it.
+        serverPrefs = [{ kind: 'list', ref_id: 9, is_favorite: true }, { kind: 'list', ref_id: 5, is_favorite: false }, { kind: 'list', ref_id: 7, is_favorite: false }];
+        await createList('Fresh');
+        expect(savedOrders()).toEqual([['list:9*', 'list:14', 'list:5', 'list:7']]);   // not 14, 5, 7, 9 from this view's copy
+        expect(barOrder()).toEqual(['list:9', 'list:14', 'list:5', 'list:7']);         // and the bar takes that order
+    });
+
+    it('POSITIVE CONTROL: an order that could not be read is not replaced, and the list sits at the end, where a tab the order never saw goes', async () => {
+        serverPrefs = 'unreadable';
+        createReturns(12);
+        await mount();
+        await createList('Fresh');
+        expect(savedOrders()).toEqual([]);
+        expect(barOrder()).toEqual(['list:5', 'list:7', 'list:9', 'list:12']);
+    });
+
+    it('a calendar imported into a new note: on the bar at once, after the favourite — and the bar’s own copy holds it, so a favourite made next keeps it there', async () => {
+        serverPrefs = [{ kind: 'list', ref_id: 5, is_favorite: true }, ...SAVED.slice(1)];
+        await mount();
+        const calTab = container.querySelector<HTMLElement>('.tasks-tab-calendar');
+        expect(calTab, 'the Calendar tab').toBeTruthy();
+        await act(async () => { calTab!.click(); });
+        await settle();
+        expect(calendar.props?.onListCreated, 'the view hands the calendar a way to put a new note on its bar').toBeTypeOf('function');
+        // What the import dialog does once the server has made the note.
+        await act(async () => { calendar.props!.onListCreated!(row(15)); });
+        await settle();
+        expect(savedOrders()).toEqual([['list:5*', 'list:15', 'list:7', 'list:9']]);
+        expect(barOrder()).toEqual(['list:5', 'list:15', 'list:7', 'list:9']);
+        // The next full replace from this bar is built on the order it now
+        // holds: the imported note keeps its place rather than being dropped
+        // (it is neither in the lists nor in the order the bar first read).
+        serverPrefs = [{ kind: 'list', ref_id: 5, is_favorite: true }, { kind: 'list', ref_id: 15, is_favorite: false }, ...SAVED.slice(1)];
+        put.mockClear();
+        // (A new favourite leads the favourites — toggleFavoritePrefs' rule.)
+        expect(await favourite('List 9')).toEqual(['list:9*', 'list:5*', 'list:15', 'list:7']);
+    });
+
+    it('with a note ARCHIVED (off the bar, still in the order), it is only an insert: the archived note keeps its place', async () => {
+        seedPrefs({ archived: { 'list:7': true } });
+        createReturns(13);
+        await mount();
+        await createList('Fresh');
+        // No favourites, so first of all; list 7 stays between 5 and 9 rather
+        // than drifting to the tail as a save of the visible tabs would put it.
+        expect(savedOrders()).toEqual([['list:13', 'list:5', 'list:7', 'list:9']]);
+        expect(barOrder()).toEqual(['list:13', 'list:5', 'list:9']);
+    });
+
+    // The bar's order writes go out one at a time. A new list's place is a
+    // READ of the server's order and then a write of it; a favourite or a
+    // drag is a full replace. Sent side by side, whichever lands second wins,
+    // and the place's write was built on a read from before the other landed.
+    describe('a favourite made just before or just after it is not lost', () => {
+        /** The server's saved order, as the writes that reached it left it. */
+        let held: TaskTabPref[];
+        const shown = () => held.map(p => `${p.kind}:${p.ref_id}${p.is_favorite ? '*' : ''}`);
+        beforeEach(() => {
+            held = SAVED;
+            get.mockImplementation(async (path: string) => {
+                if (path === '/task-tab-prefs') return held;
+                if (path === '/task-lists/features') return { body: true, attachments: true, trash: true, trash_retention_days: 30, max_body_len: 65536 };
+                if (path === '/task-lists?trashed=true') return [];
+                if (path === '/task-lists') return serverLists.map(row);
+                if (path === '/servers') return [];
+                if (/^\/task-lists\/\d+\/tasks$/.test(path)) return [];
+                throw new Error(`unexpected GET ${path}`);
+            });
+            put.mockImplementation(async (path: string, body: { prefs: TaskTabPref[] }) => {
+                if (path === '/task-tab-prefs') held = body.prefs;
+                return {};
+            });
+        });
+        const favouriteNow = async (label: string) => { await openMenu(label); await clickMenuItem('Favourite'); };
+
+        it('a favourite made while the new list’s place is being read waits for it, and the server keeps both', async () => {
+            createReturns(11);
+            await mount();
+            // The place's read is answered from what the server holds when it
+            // arrives, and that answer is held in transit.
+            let deliver: () => void = () => {};
+            const readNow = get.getMockImplementation()!;
+            get.mockImplementation(async (path: string) => {
+                if (path !== '/task-tab-prefs') return readNow(path);
+                const answer = held;
+                await new Promise<void>(r => { deliver = r; });
+                return answer;
+            });
+            await createList('Fresh');
+            await favouriteNow('List 9');
+            expect(savedOrders(), 'the favourite waits its turn').toEqual([]);
+            await act(async () => { deliver(); });
+            await settle();
+            expect(savedOrders()).toEqual([
+                ['list:11', 'list:5', 'list:7', 'list:9'],
+                ['list:9*', 'list:11', 'list:5', 'list:7'],
+            ]);
+            expect(shown()).toEqual(['list:9*', 'list:11', 'list:5', 'list:7']);
+            expect(barOrder()).toEqual(['list:9', 'list:11', 'list:5', 'list:7']);   // the bar and the server agree
+        });
+
+        it('a list made while a favourite’s save is still out is placed once that has landed, into the order with the favourite', async () => {
+            createReturns(12);
+            await mount();
+            // The favourite's save — the first order written — is slow to land.
+            let land: () => void = () => {};
+            let first = true;
+            put.mockImplementation(async (path: string, body: { prefs: TaskTabPref[] }) => {
+                if (path !== '/task-tab-prefs') return {};
+                if (first) { first = false; await new Promise<void>(r => { land = r; }); }
+                held = body.prefs;
+                return {};
+            });
+            await favouriteNow('List 9');
+            const reads = () => get.mock.calls.filter(c => c[0] === '/task-tab-prefs').length;
+            const readsBefore = reads();
+            await createList('Fresh');
+            expect(reads(), 'the place is not read while the favourite is out').toBe(readsBefore);
+            await act(async () => { land(); });
+            await settle();
+            expect(shown()).toEqual(['list:9*', 'list:12', 'list:5', 'list:7']);
+            expect(barOrder()).toEqual(['list:9', 'list:12', 'list:5', 'list:7']);
+        });
     });
 });
 

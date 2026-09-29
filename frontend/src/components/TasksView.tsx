@@ -57,6 +57,7 @@ import {
     orderTaskTabs,
     isFavoriteTab,
     buildPrefsForOrder,
+    placeNewTabPrefs,
     taskTabKey,
 } from '../api/tasks';
 import { useServers, keys } from '../hooks/queries';
@@ -96,10 +97,11 @@ import { useSwipe } from '../hooks/useSwipe';
 import { useDragReorder } from '../hooks/useDragReorder';
 import { ListContentBlock, TasksTrash } from './ListContentBlock';
 import { listBodySnippet, listContentQueryKeys, useListContentSupport } from './useListContentSupport';
-import { fetchListFeatures, flushBodySave, keepHiddenSlots, listTrashedTaskLists, setTaskListTiming, toggleFavoriteKeepingHidden, trashTaskList } from '../api/listContent';
+import { fetchListFeatures, flushBodySave, keepHiddenSlots, listTrashedTaskLists, placeNewListFirst, setTaskListTiming, toggleFavoriteKeepingHidden, trashTaskList } from '../api/listContent';
 import { NoteDueChip, NoteReminderControl } from './schedule/NoteReminderControl';
 import { halfMinuteNow, subscribeHalfMinute } from './schedule/halfMinuteClock';
 import { heldOpKey } from '../api/opKey';
+import { SerialQueue } from '../api/serialQueue';
 import type { PastedItems } from '../notes/model/noteContent';
 import { textOutsideSelection, usePasteItems } from './usePasteItems';
 import { createdWhileReading } from './createdWhileReading';
@@ -222,6 +224,10 @@ export function TasksView() {
     const [flashTaskId, setFlashTaskId] = useState<number | null>(() => soleDueId(peekTasksIds()));
     const [lists, setLists] = useState<TaskList[]>([]);
     const [prefs, setPrefs] = useState<TaskTabPref[]>([]);
+    // The saved order as last put on screen, for a write that lands after an
+    // await (a new list is placed once its create answers).
+    const prefsNow = useRef(prefs);
+    useEffect(() => { prefsNow.current = prefs; }, [prefs]);
     const [tasks, setTasks] = useState<Task[]>([]);
     const [loading, setLoading] = useState(true);
     const [newListTitle, setNewListTitle] = useState('');
@@ -254,6 +260,11 @@ export function TasksView() {
     // tab order — so Refresh lets them land first and cannot put an older
     // copy over them (writesInFlight).
     const [writes] = useState(writesInFlight);
+    // The tab order's writes, one at a time and in the order they were made
+    // (api/serialQueue.ts): a new list's place is read from the server and
+    // then written back, and a favourite or a drag saved in between would be
+    // undone by that write.
+    const [prefsWrites] = useState(() => new SerialQueue());
     // Refresh: running (the button says it is busy and spins), and the
     // guard every tap meets while it runs — the button stays focusable and
     // clickable, and a state lags one render behind the tap anyway.
@@ -401,9 +412,31 @@ export function TasksView() {
         const prev = prefs;
         const seq = ++saveSeq.current;
         setPrefs(next);
-        writes.run(() => putTaskTabPrefs(next)).catch(err => {
+        writes.run(() => prefsWrites.run(() => putTaskTabPrefs(next))).catch(err => {
             console.error('Failed to save tab prefs:', err);
             if (saveSeq.current === seq) setPrefs(prev);
+        });
+    };
+    /** A list just made goes FIRST among the tabs that are not favourites
+     *  (api/tasks.ts placeNewTabPrefs) — the saved order, so Púca Notes shows
+     *  it directly under the pinned notes and every device has it there.
+     *  On the bar at once; SAVED into the order the server holds now
+     *  (api/listContent.ts placeNewListFirst), never as a full replace of this
+     *  view's copy: the bar reads the order once, when it opens, and that copy
+     *  would put back an order another device has changed since. The answer
+     *  becomes the bar's order; an order that cannot be read or written is
+     *  left alone, silently (nobody asked for a reorder), and the list goes
+     *  back to where a tab the order has never seen goes — the end. It is an
+     *  insert, so the trash need not have been read. */
+    const placeNewList = (listId: number) => {
+        const before = prefsNow.current;
+        const shown = placeNewTabPrefs(before, { kind: 'list', id: listId });
+        if (!shown) return;
+        const seq = ++saveSeq.current;
+        prefsNow.current = shown;
+        setPrefs(shown);
+        void writes.run(() => prefsWrites.run(() => placeNewListFirst(listId))).then(saved => {
+            if (saveSeq.current === seq) setPrefs(saved ?? before);
         });
     };
 
@@ -544,6 +577,7 @@ export function TasksView() {
             const created = await createTaskList(title, listKey.current.keyFor(title));
             listKey.current.landed();
             setLists(prev => [...prev, created]);
+            placeNewList(created.id);
             setSelected({ kind: 'list', id: created.id });
             // A brand-new list has no labels and is not archived, so ANY
             // filter hides it: the editor would open on a note with no tab and
@@ -1321,6 +1355,12 @@ export function TasksView() {
                         currentUserId={currentUserId}
                         noteReminders={support.features.noteReminders}
                         onOpen={(kind, id) => setSelected({ kind, id })}
+                        // A calendar imported into a new note: on the bar at
+                        // once, first among the unpinned, like New list.
+                        onListCreated={list => {
+                            setLists(prev => (prev.some(l => l.id === list.id) ? prev : [...prev, list]));
+                            placeNewList(list.id);
+                        }}
                     />
                 </div>
             ) : selected?.kind === 'reminders' ? (

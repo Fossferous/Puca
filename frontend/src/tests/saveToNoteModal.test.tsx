@@ -72,6 +72,8 @@ vi.mock('../api/listContent', async (orig) => {
             return { id: 99, title } as TaskList;
         }),
         setTaskListBody: vi.fn(async () => undefined),
+        // The read-insert-write of the saved order is newNoteFirst.test.ts's.
+        placeNewListFirst: vi.fn(async () => []),
         setTaskListAttachments: vi.fn(async () => { if (attachFails) throw new Error('the pictures would not go in'); }),
         addTaskListAttachments: vi.fn(async () => {
             if (attachFails) throw new Error('the pictures would not go in');
@@ -94,7 +96,7 @@ vi.mock('../api/captureToNote', async (orig) => {
 });
 
 import { SaveToNoteModal } from '../components/SaveToNoteModal';
-import { addTaskListAttachments, createTaskListWithContent, setTaskListAttachments, setTaskListBody } from '../api/listContent';
+import { addTaskListAttachments, createTaskListWithContent, placeNewListFirst, setTaskListAttachments, setTaskListBody } from '../api/listContent';
 import { NoteConflictError } from '../api/listConflict';
 import { deleteTaskList } from '../api/tasks';
 import { discardCopies } from '../api/captureToNote';
@@ -211,6 +213,47 @@ describe('saving', () => {
         expect(calls.tasks).toEqual([{ listId: 99, description: 'pack the tent' }]);
         expect(saved).toEqual(['pack the tent']);
         expect(isClosed()).toBe(true);
+    });
+
+    it('a NEW note goes first among the unpinned once it is whole; a line kept in an existing note moves nothing', async () => {
+        await mount('pack the tent');
+        click(rowNamed('New note'));
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        expect(placeNewListFirst).toHaveBeenCalledTimes(1);
+        expect(placeNewListFirst).toHaveBeenCalledWith(99);
+        // After the note and its item, never before them.
+        expect(vi.mocked(placeNewListFirst).mock.invocationCallOrder[0])
+            .toBeGreaterThan(vi.mocked(createTaskListWithContent).mock.invocationCallOrder[0]);
+        expect(calls.tasks).toEqual([{ listId: 99, description: 'pack the tent' }]);
+
+        document.body.innerHTML = '';
+        vi.mocked(placeNewListFirst).mockClear();
+        await mount('pack the tent');
+        click(rowNamed('Shopping'));
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        expect(calls.tasks.at(-1)).toEqual({ listId: 1, description: 'pack the tent' });   // POSITIVE CONTROL: it saved
+        expect(placeNewListFirst).not.toHaveBeenCalled();
+    });
+
+    it('a new note that half-saved and was undone leaves no place in the order; one that could NOT be undone goes to the top to be finished', async () => {
+        addItemFails = true;
+        await mount('pack the tent');
+        click(rowNamed('New note'));
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        expect(deleteTaskList).toHaveBeenCalledWith(99);
+        expect(placeNewListFirst).not.toHaveBeenCalled();
+
+        document.body.innerHTML = '';
+        deleteListFails = true;
+        await mount('pack the tent');
+        click(rowNamed('New note'));
+        click(document.querySelector('.save-note-go'));
+        await flush();
+        expect(document.querySelector('.save-note-error')!.textContent).toMatch(/open Notes to finish it/);
+        expect(placeNewListFirst).toHaveBeenCalledWith(99);
     });
 
     it('the copied picture is a NEW file, and its key never comes from the message', async () => {

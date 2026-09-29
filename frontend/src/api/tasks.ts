@@ -1046,6 +1046,28 @@ export function toggleFavoritePrefs(
 }
 
 /**
+ * Where a just-created list goes in the saved order: FIRST among the tabs
+ * that are not favourites. In Púca Notes that is directly under the pinned
+ * notes; on Púca's bar it is behind the favourites that lead it (a
+ * favourite dragged behind other tabs stays there, and the new list goes in
+ * front of the first tab that is not one — the same place Notes shows it).
+ *
+ * It works on the FULL saved set — trashed, archived and never-seen entries
+ * included — and only inserts, so every other entry keeps its order and every
+ * favourite its flag: no hidden slot has to be put back. Returns null when
+ * the tab is in the saved order already: its place has been decided (a
+ * replay of the same create, or the person has moved it since), and it is
+ * left where it is.
+ */
+export function placeNewTabPrefs(prefs: TaskTabPref[], created: TaskTabRef): TaskTabPref[] | null {
+    if (prefs.some(p => p.kind === created.kind && p.ref_id === created.id)) return null;
+    const firstPlain = prefs.findIndex(p => !p.is_favorite);
+    const next = [...prefs];
+    next.splice(firstPlain < 0 ? next.length : firstPlain, 0, { kind: created.kind, ref_id: created.id, is_favorite: false });
+    return next;
+}
+
+/**
  * Apply a completion toggle locally, mirroring the server's Notes-style
  * cascade at any depth: completing a task completes its whole subtree;
  * re-activating a task re-activates every ancestor above it.

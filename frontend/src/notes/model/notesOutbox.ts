@@ -38,7 +38,10 @@
  * elsewhere in the meantime (docs/NOTES.md says so). A RENAME replayed off
  * the queue is last-write-wins too, deliberately (see `renameList`). Pins
  * and order are replayed as intents against the server's CURRENT set, never
- * as a stale full replace.
+ * as a stale full replace — and a new note's place is such an intent even
+ * online. This page's pin and order writes go out one at a time, in the
+ * order they were made (`prefsTurn`), so a pin saved while a new note's
+ * place is between its read and its write is not undone by it.
  *
  * A NOTE'S TEXT IS NOT LAST-WRITE-WINS, queued or not. A replayed `setBody`
  * names the revision the typing started from (migration 069), and when
@@ -91,7 +94,7 @@ import {
     type NewTaskTiming, type StampClock, type Task, type TaskList, type TaskTabPref, type TaskTabRef, type TaskTimingPatch,
     timingPatchMovesClock, createTask, createListTask, createTaskList, renameTaskList, openSelfTaskText,
     updateTask, updateChannelTask, updateListTask, deleteTask, moveTask, reorderTask, patchTaskTiming,
-    getTaskTabPrefs, putTaskTabPrefs, isFavoriteTab, toggleFavoritePrefs, buildPrefsForOrder, taskTabKey,
+    getTaskTabPrefs, putTaskTabPrefs, isFavoriteTab, toggleFavoritePrefs, buildPrefsForOrder, placeNewTabPrefs, taskTabKey,
 } from '../../api/tasks';
 import {
     NoteConflictError, createTaskListWithContent, deleteFiles, keepHiddenSlots, restoreTaskList,
@@ -100,6 +103,7 @@ import {
 import { type ContentWrite, watchContentWrites } from '../../api/listConflict';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { isReplayGone, newOpKey } from '../../api/opKey';
+import { SerialQueue } from '../../api/serialQueue';
 import { type TaskAttachmentRef } from '../../api/tasks';
 import { addNoteRefs, fileIdsOf, removeNoteRefs, uploadParkedMedia } from '../../api/noteMedia';
 import { appParkedStore, type ParkedStore } from './notesBlobs';
@@ -114,7 +118,12 @@ import { MAX_TITLE_LENGTH, noteKey, type NoteRef } from './notesModel';
 export type PrefsIntent =
     | { type: 'pin'; tab: TaskTabRef; favorite: boolean }
     | { type: 'pins'; tabs: TaskTabRef[]; favorite: boolean }
-    | { type: 'order'; keys: string[] };
+    | { type: 'order'; keys: string[] }
+    // A note just made goes first among the unpinned (api/tasks.ts
+    // placeNewTabPrefs). Always placed against the server's order as it is
+    // when it runs — online at once, offline queued right behind its create —
+    // so no stale full replace puts back the order this device saw.
+    | { type: 'created'; tab: TaskTabRef };
 
 type OpBody =
     | { k: 'createList'; tempId: number; title: string; key: string }
@@ -238,7 +247,9 @@ export const ops = {
     removeMedia: (listId: number, removing: string[], refs: TaskAttachmentRef[], what: string) =>
         withMeta({ k: 'removeMedia', listId, removing, refs }, what),
     prefs: (prefs: TaskTabPref[], intent: PrefsIntent) =>
-        withMeta({ k: 'prefs', prefs, intent }, intent.type === 'order' ? 'reorder notes' : `${intent.favorite ? 'pin' : 'unpin'} ${intent.type === 'pins' ? `${intent.tabs.length} notes` : 'a note'}`),
+        withMeta({ k: 'prefs', prefs, intent }, intent.type === 'order' ? 'reorder notes'
+            : intent.type === 'created' ? 'put a new note at the top'
+                : `${intent.favorite ? 'pin' : 'unpin'} ${intent.type === 'pins' ? `${intent.tabs.length} notes` : 'a note'}`),
 };
 
 /** Which busy key (noteBusy.ts) an op holds. */
@@ -262,7 +273,7 @@ function idsOf(op: OpBody): number[] {
         case 'createTask': return [op.note.id, ...(op.parentId !== undefined ? [op.parentId] : [])];
         case 'editTask': case 'updateTask': case 'moveTask': case 'deleteTask': case 'timing': return [op.note.id, op.taskId];
         case 'reorderTask': return [op.note.id, op.taskId, ...(op.afterId !== null ? [op.afterId] : []), ...(op.reparent?.parentId != null ? [op.reparent.parentId] : [])];
-        case 'prefs': return op.intent.type === 'pin' ? [op.intent.tab.id] : op.intent.type === 'pins' ? op.intent.tabs.map(t => t.id) : [];
+        case 'prefs': return op.intent.type === 'pin' || op.intent.type === 'created' ? [op.intent.tab.id] : op.intent.type === 'pins' ? op.intent.tabs.map(t => t.id) : [];
     }
 }
 
@@ -287,7 +298,8 @@ type IdMap = Record<string, number>;
 export interface AddedParked { id: string; ref: TaskAttachmentRef }
 
 /** Run one op against the server. `fromQueue` = a replay: pins and order are
- *  re-derived from the server's current set instead of PUT as captured. */
+ *  re-derived from the server's current set instead of PUT as captured. A
+ *  new note's place always is, and answers the order as saved. */
 export async function execOp(op: OpBody, idMap: IdMap, fromQueue: boolean, parked: ParkedStore = appParkedStore): Promise<unknown> {
     const r = (id: number): number => {
         if (id >= 0) return id;
@@ -394,10 +406,19 @@ export async function execOp(op: OpBody, idMap: IdMap, fromQueue: boolean, parke
         // server really held is taken out, and only its uploads deleted.
         case 'removeMedia': return removeNoteRefs(r(op.listId), op.removing);
         case 'prefs': {
-            if (!fromQueue) return putTaskTabPrefs(op.prefs);
+            // Inline, a pin or a move is the set this page shows, PUT as it
+            // is. A new note's place never is: nobody asked for a reorder,
+            // and this page's copy of the order can be behind another
+            // device's pin or move (a cache restored at a cold start, a live
+            // stream still reconnecting), which a full replace of it would
+            // undo. It is an insert into the order the server holds NOW,
+            // inline as on replay.
+            if (!fromQueue && op.intent.type !== 'created') return putTaskTabPrefs(op.prefs);
             const current = await getTaskTabPrefs();
             const next = applyPrefsIntent(current, op.intent, idMap);
-            return next === null ? undefined : putTaskTabPrefs(next);
+            if (next !== null) await putTaskTabPrefs(next);
+            // The order as it is now saved: what the page shows next.
+            return next ?? current;
         }
     }
 }
@@ -575,6 +596,10 @@ export function applyPrefsIntent(current: TaskTabPref[], intent: PrefsIntent, id
             if (r) { next = r; changed = true; }
         }
         return changed ? next : null;
+    }
+    if (intent.type === 'created') {
+        const tab = realTab(intent.tab);
+        return tab ? placeNewTabPrefs(current, tab) : null;
     }
     if (intent.type === 'pin') {
         const tab = realTab(intent.tab);
@@ -790,6 +815,10 @@ export function createOutbox(deps: OutboxDeps): Outbox {
         collecting?.push(w);
     });
 
+    /** This page's pin and order writes sent inline, one at a time. Replay
+     *  needs none: while anything is queued, a new one queues behind it. */
+    const prefsTurn = new SerialQueue();
+
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let backoffMs = 2_000;
     const scheduleReplay = (ms: number) => {
@@ -931,7 +960,10 @@ export function createOutbox(deps: OutboxDeps): Outbox {
             }
             const done = beginNoteWrite(busyKeyOf(op));
             try {
-                const value = await execTracked(op, { ...view.ids }, false) as T;
+                const run = () => execTracked(op, { ...view.ids }, false);
+                // A pin or a move waits for a new note's place to be read and
+                // written, and that for them (the module header).
+                const value = await (op.k === 'prefs' ? prefsTurn.run(run) : run()) as T;
                 return { queued: false as const, value };
             } catch (err) {
                 if (!isNetworkError(err)) throw err;
@@ -967,7 +999,10 @@ export function createOutbox(deps: OutboxDeps): Outbox {
                         return next;
                     };
                     if (idsOf(head).some(id => state.dead.includes(id))) {
-                        summary.dropped.push(head);
+                        // A new note's place goes with the note: the toast
+                        // already names the note that was not made, and the
+                        // person never asked for a reorder.
+                        if (!(head.k === 'prefs' && head.intent.type === 'created')) summary.dropped.push(head);
                         await dropHead(head.k === 'createTask' || head.k === 'createList' ? head.tempId : undefined);
                         continue;
                     }

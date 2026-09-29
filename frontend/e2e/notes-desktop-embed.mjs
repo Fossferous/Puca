@@ -405,6 +405,12 @@ const router = () => page.locator('.notes-card', { hasText: 'Set up the new rout
 await until(page, () => [...document.querySelectorAll('.notes-card')].some(c => c.textContent.includes('Set up the new router') && c.querySelectorAll('.notes-card-item').length === 4), null, 15000);
 ck('paste: saved as a note with those four items',
     (await router().locator('.notes-card-item-text').allInnerTexts()).join('|') === CLEAN.join('|'));
+// A new note goes first among the unpinned — nothing is pinned here, so to
+// the very top: the note made second leads the grid, in the saved order
+// Púca's own Tasks bar reads (the same code as Notes' page).
+const cardTitles = async () => (await page.locator('.notes-card-title').allInnerTexts()).map(t => t.trim());
+ck('new note: the note just made is at the top, above the one before it',
+    (await cardTitles()).join('|') === 'Set up the new router|Groceries', (await cardTitles()).join('|'));
 
 // ---- Search ------------------------------------------------------------------
 await page.fill('.notes-search input', 'green');

@@ -56,7 +56,8 @@ export const src = (p: string) => fileURLToPath(new URL('./src/' + p, import.met
  *
  * Directory-level for api/devices (everything shared has been moved out of it:
  * pagePainting, thisDevice, deviceIdentity/*, androidStorage, logoutHooks,
- * rmoveScale) plus the RC-only components and the real remoteControl module.
+ * rmoveScale, serialQueue) plus the RC-only components and the real
+ * remoteControl module.
  *
  * Matched against resolved ids, so it catches a module reached by any path —
  * a re-export, a dynamic import, or an alias someone adds later.

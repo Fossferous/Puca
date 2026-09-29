@@ -26,6 +26,7 @@ import { buildIcs, parseIcs, type IcsItem, type IcsParseResult } from '../../api
 import { currentIcsUid } from '../../api/icsUid';
 import { deliverIcs } from '../../api/icsDelivery';
 import { toastRefusal } from '../../api/refusalToast';
+import { placeNewListFirst } from '../../api/listContent';
 import { pushMessageToast } from '../messageToastBus';
 import { heldOpKey } from '../../api/opKey';
 import { localDayKey } from '../../utils/calendarMath';
@@ -46,7 +47,7 @@ function useHalfMinute(): number {
     return now;
 }
 
-export function TasksCalendar({ lists, channels, currentUserId, onOpen, noteReminders = false }: {
+export function TasksCalendar({ lists, channels, currentUserId, onOpen, noteReminders = false, onListCreated }: {
     lists: TaskList[];
     channels: TasksCalendarChannel[];
     currentUserId?: number;
@@ -55,6 +56,13 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen, noteRemi
      *  this calendar as the note it is — a bell, nothing to tick and nothing
      *  to drag — exactly as it does in Púca Notes' calendar. */
     noteReminders?: boolean;
+    /** A note an import made. The Tasks view puts it on its bar at once,
+     *  first among the tabs that are not favourites, and saves that place
+     *  (TasksView placeNewList) — so the bar's own copy of the order holds
+     *  it, and a drag or a favourite there before the next read cannot drop
+     *  it again. Without one, the calendar saves the place itself
+     *  (api/listContent.ts placeNewListFirst). */
+    onListCreated?: (list: TaskList) => void;
 }) {
     const qc = useQueryClient();
     const prefs = useCalendarPrefs();
@@ -238,7 +246,14 @@ export function TasksCalendar({ lists, channels, currentUserId, onOpen, noteRemi
                     parsed={importing.parsed}
                     targets={importTargets}
                     io={{
-                        createList: title => createTaskList(title),
+                        // A new note goes first among the unpinned, as one made
+                        // in the tab bar does (onListCreated, above).
+                        createList: async title => {
+                            const list = await createTaskList(title);
+                            if (onListCreated) onListCreated(list);
+                            else void placeNewListFirst(list.id);
+                            return list;
+                        },
                         createTask: (listId, text, parentId, timing) => createListTask(listId, text, parentId, timing),
                         sleep: ms => new Promise(r => setTimeout(r, ms)),
                     }}

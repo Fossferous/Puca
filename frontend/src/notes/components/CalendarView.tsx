@@ -322,7 +322,13 @@ export function CalendarView({ cards, actions, now, onOpenNote, shortcutsEnabled
                     parsed={importing.parsed}
                     targets={importTargets}
                     io={{
-                        createList: (title, opKey) => createTaskList(title, opKey),
+                        // "A new note…" goes first among the unpinned, like
+                        // every note made in Notes (notesQueries.ts placeNewNote).
+                        createList: async (title, opKey) => {
+                            const list = await createTaskList(title, opKey);
+                            actions.placeNewNote({ kind: 'list', id: list.id });
+                            return list;
+                        },
                         createTask: (listId, text, parentId, timing, opKey) => createListTask(listId, text, parentId, timing, opKey),
                         sleep: ms => new Promise(r => setTimeout(r, ms)),
                     }}
