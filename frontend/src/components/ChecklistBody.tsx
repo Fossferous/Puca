@@ -29,7 +29,17 @@ import { heldOpKey } from '../api/opKey';
 import { invalidateTaskScope } from './taskSources';
 import { TaskTree } from './TaskTree';
 import { usePasteItems } from './usePasteItems';
+import { createdWhileReading } from './createdWhileReading';
 import { MAX_ITEM_LENGTH } from '../notes/model/notesModel';
+
+/** Which checklist a body shows: a channel's, or a personal list's. */
+interface Scope { isChannel: boolean; channelId?: number; listId?: number }
+const sameScope = (a: Scope, b: Scope) => a.isChannel === b.isChannel && a.channelId === b.channelId && a.listId === b.listId;
+const scopeKey = (s: Scope) => (s.isChannel ? `channel:${s.channelId}` : `list:${s.listId}`);
+
+/** After a live re-read, how long updates that arrived meanwhile wait to be
+ *  read together (the live-sync effect below). */
+const LIVE_REREAD_GAP_MS = 400;
 
 interface ChecklistBodyProps {
     /** Channel-scoped checklist (shared, E2EE under the channel group key). */
@@ -91,54 +101,103 @@ export function ChecklistBody({
         if (loadedOnce.current) onChangedRef.current?.(tasks);
     }, [tasks]);
 
+    // The latest scope, read when a read answers: a reply for a list or
+    // channel this body no longer shows must not land in it. Set before the
+    // load below runs, for the same render.
+    const scopeRef = useRef<Scope>({ isChannel, channelId, listId });
+    useEffect(() => { scopeRef.current = { isChannel, channelId, listId }; });
+    // Items created here while this checklist is being read: the read's
+    // answer is older than they are and must not take them off the screen
+    // (a pasted checklist is still landing when the side panel comes back
+    // to it, or another member's edit makes it read again).
+    const whileReading = useRef(createdWhileReading());
+
     const loadTasks = useCallback(async () => {
+        const asked: Scope = { isChannel, channelId, listId };
         setIsLoading(true);
+        const read = whileReading.current.reading(scopeKey(asked));
         try {
             const fetched = isChannel ? await listTasks(channelId!) : await listListTasks(listId!);
+            // The side panel follows the channel: a late answer for the one
+            // it showed before is not this one's, and this one's own load
+            // owns "Loading…".
+            if (!sameScope(scopeRef.current, asked)) return;
             loadedOnce.current = true;
-            setTasks(fetched);
+            setTasks(read.merge(fetched));
         } catch (err) {
             console.error('Failed to load tasks:', err);
         } finally {
-            setIsLoading(false);
+            read.done();
+            if (sameScope(scopeRef.current, asked)) setIsLoading(false);
         }
     }, [isChannel, channelId, listId]);
 
     useEffect(() => { loadTasks(); }, [loadTasks]);
 
-    // The latest scope, read when a quiet re-read answers: a reply for a
-    // list or channel this body no longer shows must not land in it.
-    const scopeRef = useRef({ isChannel, channelId, listId });
-    useEffect(() => { scopeRef.current = { isChannel, channelId, listId }; });
     /** Re-read from truth WITHOUT loadTasks' "Loading…" swap (which resets
      *  collapse and edit state — review W4-F5). */
     const rereadQuietly = async () => {
-        const asked = { isChannel, channelId, listId };
+        const asked: Scope = { isChannel, channelId, listId };
+        const read = whileReading.current.reading(scopeKey(asked));
         try {
             const fresh = isChannel ? await listTasks(channelId!) : await listListTasks(listId!);
-            const now = scopeRef.current;
-            if (now.isChannel !== asked.isChannel || now.channelId !== asked.channelId || now.listId !== asked.listId) return;
-            setTasks(fresh);
+            if (!sameScope(scopeRef.current, asked)) return;
+            loadedOnce.current = true;
+            setTasks(read.merge(fresh));
         } catch (err) {
             console.error('Failed to reload tasks:', err);
+        } finally {
+            read.done();
         }
     };
+    // The live re-read below outlives the render that started it.
+    const rereadRef = useRef(rereadQuietly);
+    useEffect(() => { rereadRef.current = rereadQuietly; });
 
-    // Live sync: another viewer changed this CHANNEL's checklist → refetch.
+    // Live sync: another viewer changed this CHANNEL's checklist → re-read.
     // Personal lists are owner-only, so they get no broadcast (nothing to sync).
+    //
+    // QUIETLY: loadTasks' "Loading…" swaps the tree out, and with it the row
+    // this viewer was editing and every group they had folded. And TOGETHER:
+    // another member's pasted checklist is up to MAX_TAKEN_ITEMS creates,
+    // each broadcast on its own (broadcast_checklist), and one read per
+    // create was a flicker per item for everyone watching. So an update is
+    // read at once; every update that arrives while that read is out, or in
+    // the LIVE_REREAD_GAP_MS after it, is read by ONE more read at the end
+    // of that pause; and two reads are never out at once, so an older answer
+    // cannot land last.
     useEffect(() => {
         if (!isChannel) return;
+        let busy = false;           // a read is out, or the pause after it runs
+        let again = false;          // an update arrived meanwhile
+        let gone = false;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const read = async () => {
+            busy = true;
+            again = false;          // this read covers every update before it
+            await rereadRef.current();   // never rejects: it logs its own failure
+            if (gone) return;
+            timer = setTimeout(() => {
+                timer = null;
+                busy = false;
+                if (again) void read();
+            }, LIVE_REREAD_GAP_MS);
+        };
         const handler = (msg: ServerMessage) => {
             const p = msg.payload as { channel_id?: number } | undefined;
-            if (p?.channel_id === channelId) loadTasks();
+            if (p?.channel_id !== channelId) return;
+            if (busy) { again = true; return; }
+            void read();
         };
         wsClient.on('ChecklistUpdate', handler);
         if (subscribeRoom) wsClient.joinRoom(`channel_${channelId}`);
         return () => {
+            gone = true;
+            if (timer !== null) clearTimeout(timer);
             wsClient.off('ChecklistUpdate', handler);
             if (subscribeRoom) wsClient.leaveRoom(`channel_${channelId}`);
         };
-    }, [isChannel, channelId, subscribeRoom, loadTasks]);
+    }, [isChannel, channelId, subscribeRoom]);
 
     /**
      * Create one item in `scope` — the add row, a subtask and every line of
@@ -152,17 +211,15 @@ export function ChecklistBody({
      * this form has no automatic one, so a failed create is re-sent by hand
      * and must not be able to make a second item.
      */
-    const addItem = async (scope: typeof scopeRef.current, description: string, parentId?: number): Promise<Task | null> => {
+    const addItem = async (scope: Scope, description: string, parentId?: number): Promise<Task | null> => {
         try {
             const key = itemKey.current.keyFor(`${scope.isChannel ? 'c' : 'l'}${scope.isChannel ? scope.channelId : scope.listId}\u0000${parentId ?? ''}\u0000${description}`);
             const created = scope.isChannel
                 ? await createTask(scope.channelId!, description, parentId, undefined, key)
                 : await createListTask(scope.listId!, description, parentId, undefined, key);
             itemKey.current.landed();
-            const now = scopeRef.current;
-            if (now.isChannel === scope.isChannel && now.channelId === scope.channelId && now.listId === scope.listId) {
-                setTasks(prev => [...prev, created]);
-            }
+            whileReading.current.created(scopeKey(scope), created);
+            if (sameScope(scopeRef.current, scope)) setTasks(prev => [...prev, created]);
             return created;
         } catch (err) {
             console.error('Failed to create task:', err);
@@ -319,6 +376,9 @@ export function ChecklistBody({
 
     const handleDelete = async (taskId: number) => {
         const original = tasks;
+        // An item that has only just landed must not come back with a read
+        // that is still out (createdWhileReading).
+        whileReading.current.forget(collectSubtreeIds(tasks, taskId));
         // The whole subtree goes server-side (FK cascade); mirror at any depth.
         setTasks(prev => {
             const doomed = collectSubtreeIds(prev, taskId);

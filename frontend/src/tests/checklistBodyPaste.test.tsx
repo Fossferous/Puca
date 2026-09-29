@@ -14,19 +14,32 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
-const { listTasks, listListTasks, createTask, createListTask } = vi.hoisted(() => ({
-    listTasks: vi.fn(), listListTasks: vi.fn(), createTask: vi.fn(), createListTask: vi.fn(),
+const { listTasks, listListTasks, createTask, createListTask, deleteTask, wsHandlers } = vi.hoisted(() => ({
+    listTasks: vi.fn(), listListTasks: vi.fn(), createTask: vi.fn(), createListTask: vi.fn(), deleteTask: vi.fn(),
+    wsHandlers: new Set<(msg: unknown) => void>(),
 }));
 vi.mock('../api/tasks', async () => {
     const real = await vi.importActual<typeof import('../api/tasks')>('../api/tasks');
-    return { ...real, listTasks, listListTasks, createTask, createListTask };
+    return { ...real, listTasks, listListTasks, createTask, createListTask, deleteTask };
 });
 vi.mock('../api/taskReminders', () => ({ pokeTaskReminders: () => {} }));
 vi.mock('../api/taskFeatures', () => ({ useTaskFeature: () => false, hasTaskFeature: () => false }));
-vi.mock('../api/websocket', () => ({ wsClient: { on: () => {}, off: () => {}, joinRoom: () => {}, leaveRoom: () => {} } }));
+// The socket: what another member's edit sends this body (broadcast_checklist).
+vi.mock('../api/websocket', () => ({
+    wsClient: {
+        on: (_type: string, h: (msg: unknown) => void) => { wsHandlers.add(h); },
+        off: (_type: string, h: (msg: unknown) => void) => { wsHandlers.delete(h); },
+        joinRoom: () => {}, leaveRoom: () => {},
+    },
+}));
 vi.mock('../components/TaskTree', () => ({
-    TaskTree: ({ tasks }: { tasks: Array<{ id: number; description: string }> }) => (
-        <ul className="rows">{tasks.map(t => <li key={t.id}>{t.description}</li>)}</ul>
+    TaskTree: ({ tasks, onDelete }: { tasks: Array<{ id: number; description: string }>; onDelete: (id: number) => void }) => (
+        <ul className="rows">{tasks.map(t => (
+            <li key={t.id}>
+                {t.description}
+                <button type="button" aria-label={`Delete ${t.description}`} onClick={() => onDelete(t.id)} />
+            </li>
+        ))}</ul>
     ),
 }));
 
@@ -48,8 +61,9 @@ const made = (text: string) => ({ id: nextId++, description: text, is_completed:
 beforeEach(() => {
     toasts = [];
     nextId = 1;
+    wsHandlers.clear();
     setMessageToastSink(t => { toasts.push(t.title); });
-    listTasks.mockReset(); listListTasks.mockReset(); createTask.mockReset(); createListTask.mockReset();
+    listTasks.mockReset(); listListTasks.mockReset(); createTask.mockReset(); createListTask.mockReset(); deleteTask.mockReset();
     listTasks.mockResolvedValue([]);
     listListTasks.mockResolvedValue([]);
     createTask.mockImplementation(async (_c: number, text: string) => made(text));
@@ -89,6 +103,52 @@ const dialogLines = () => [...document.querySelectorAll('.notes-paste-line')].ma
 const button = (text: string) => [...document.querySelectorAll<HTMLButtonElement>('.notes-paste-actions button')]
     .find(b => b.textContent === text)!;
 const addN = () => button(`Add ${ASSISTANT_ITEMS.length} items`);
+/** Real time in short act() slices, so the body's effects run meanwhile. */
+const wait = async (ms: number) => {
+    for (let t = 0; t < ms; t += 10) await act(async () => { await new Promise(r => { setTimeout(r, 10); }); });
+};
+/** Another member changed channel `channelId`'s checklist. */
+const liveUpdate = (channelId: number) => act(() => {
+    for (const h of wsHandlers) h({ type: 'ChecklistUpdate', payload: { channel_id: channelId } });
+});
+
+/**
+ * A small server: what is created is kept per channel, and a read answers
+ * with what it held when it was ASKED — late, for the channels in `slow`.
+ * That is the read that races a batch: it left before the last few items
+ * landed and comes back after they are on screen.
+ */
+function fakeServer() {
+    const held = new Map<number, ReturnType<typeof made>[]>([[9, []], [10, [made('ten')]]]);
+    const slow = new Set<number>();
+    /** Channels whose next read waits until the test lets it answer. */
+    const gates = new Map<number, Promise<void>>();
+    createTask.mockImplementation(async (c: number, text: string) => {
+        const t = made(text);
+        held.get(c)!.push(t);
+        return t;
+    });
+    listTasks.mockImplementation(async (c: number) => {
+        const snapshot = [...held.get(c)!];
+        if (slow.delete(c)) await new Promise(r => { setTimeout(r, PACE_MS * 3); });
+        const gate = gates.get(c);
+        if (gate) { gates.delete(c); await gate; }
+        return snapshot;
+    });
+    deleteTask.mockImplementation(async (id: number) => {
+        for (const items of held.values()) {
+            const at = items.findIndex(t => t.id === id);
+            if (at >= 0) items.splice(at, 1);
+        }
+    });
+    /** Hold `c`'s next read; the result lets it answer. */
+    const hold = (c: number) => {
+        let answer!: () => void;
+        gates.set(c, new Promise<void>(r => { answer = r; }));
+        return async () => { await act(async () => { answer(); }); await settle(); };
+    };
+    return { held, slow, gates, hold };
+}
 
 describe('a checklist pasted into a channel checklist', () => {
     it('asks first, then creates the clean steps in order, each with its own key', async () => {
@@ -191,5 +251,104 @@ describe('a checklist pasted into a channel checklist', () => {
         // POSITIVE CONTROL: with the bit, the row is there.
         await mount({ channelId: 9, myPerms: PERM.CREATE_TASKS | PERM.COMPLETE_TASKS });
         expect(input()).not.toBeNull();
+    });
+});
+
+describe('rows that land while the checklist is read again', () => {
+    const lines = Array.from({ length: 12 }, (_, i) => `step ${i + 1}`);
+
+    it('every pasted row stays when the body is handed another channel and back while they land', async () => {
+        const s = fakeServer();
+        await mount({ channelId: 9 });
+        paste(input()!, lines.join('\n'));
+        act(() => { button(`Add ${lines.length} items`).click(); });
+        await wait(PACE_MS * 3);
+        await mount({ channelId: 10 });                       // the side panel followed the channel...
+        s.slow.add(9);
+        await mount({ channelId: 9 });                        // ...and back, with a read that answers late
+        await wait(PACE_MS * (lines.length + 4));
+        expect(s.held.get(9)).toHaveLength(lines.length);
+        expect(rows()).toEqual(lines);
+    });
+
+    it('every pasted row stays when another member’s edit makes it read again while they land', async () => {
+        const s = fakeServer();
+        await mount({ channelId: 9 });
+        paste(input()!, lines.join('\n'));
+        act(() => { button(`Add ${lines.length} items`).click(); });
+        await wait(PACE_MS * 3);
+        s.slow.add(9);
+        liveUpdate(9);
+        await wait(PACE_MS * (lines.length + 4));
+        expect(s.held.get(9)).toHaveLength(lines.length);
+        expect(rows()).toEqual(lines);
+    });
+
+    it('an item deleted just after it landed does not come back with a read that was out', async () => {
+        const s = fakeServer();
+        await mount({ channelId: 9 });
+        const answer = s.hold(9);
+        liveUpdate(9);                                        // a read goes out, held until answer()
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+        act(() => { setter.call(input()!, 'Milk'); input()!.dispatchEvent(new Event('input', { bubbles: true })); });
+        const form = host!.querySelector('.checklist-add') as HTMLFormElement;
+        await act(async () => { form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
+        await settle();
+        expect(rows()).toEqual(['Milk']);
+        act(() => { host!.querySelector<HTMLButtonElement>('[aria-label="Delete Milk"]')!.click(); });
+        await settle();
+        expect(s.held.get(9)).toEqual([]);
+        expect(s.gates.size, 'the read went out and is still held').toBe(0);
+        await answer();
+        expect(rows()).toEqual([]);
+    });
+
+    it('a late read of the channel it showed before never lands in the one it shows now', async () => {
+        const s = fakeServer();
+        s.held.get(9)!.push(made('nine'));
+        s.slow.add(9);
+        await mount({ channelId: 9 });                        // its read is still out...
+        await mount({ channelId: 10 });                       // ...when the panel follows the channel
+        await wait(PACE_MS * 5);
+        expect(rows()).toEqual(['ten']);
+    });
+});
+
+describe('another member’s pasted batch, as this body sees it', () => {
+    it('is read again quietly, never through "Loading…", and a burst of updates is read twice, not once each', async () => {
+        const s = fakeServer();
+        await mount({ channelId: 9 });
+        listTasks.mockClear();
+        const remote = Array.from({ length: 20 }, (_, i) => `remote ${i + 1}`);
+        let loadingSeen = false;
+        const look = () => { if (host!.querySelector('.checklist-loading')) loadingSeen = true; };
+        // One broadcast per create, back to back, as a pasted batch sends
+        // them. The first read goes out with the first, holding only it.
+        for (const text of remote) {
+            s.held.get(9)!.push(made(text));
+            liveUpdate(9);
+            look();
+        }
+        await wait(1000);
+        // "Loading…" swaps the tree out, and with it whatever row this viewer was editing.
+        expect(loadingSeen, '"Loading…" during a live update').toBe(false);
+        // One read at once, and ONE for everything that came after it.
+        expect(listTasks).toHaveBeenCalledTimes(2);
+        // That second read went out after the LAST update: its change is on screen.
+        expect(rows()).toEqual(remote);
+    });
+
+    it('one update is still read at once', async () => {
+        const s = fakeServer();
+        await mount({ channelId: 9 });
+        s.held.get(9)!.push(made('remote'));
+        liveUpdate(9);
+        await settle();
+        expect(rows()).toEqual(['remote']);
+        // POSITIVE CONTROL: another channel's update is not this body's.
+        s.held.get(9)!.push(made('unseen'));
+        liveUpdate(11);
+        await wait(1000);
+        expect(rows()).toEqual(['remote']);
     });
 });
