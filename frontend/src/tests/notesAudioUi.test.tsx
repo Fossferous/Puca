@@ -45,7 +45,9 @@ class FakeRecorder {
     ondataavailable: ((e: { data: Blob }) => void) | null = null;
     onstop: (() => void) | null = null;
     pendingStop: (() => void) | null = null;
-    constructor(public stream: unknown, public opts: { mimeType: string }) { recorderInstances.push(this); }
+    stream: unknown;
+    opts: { mimeType: string };
+    constructor(stream: unknown, opts: { mimeType: string }) { this.stream = stream; this.opts = opts; recorderInstances.push(this); }
     start() { this.state = 'recording'; }
     stop() {
         this.state = 'inactive';
@@ -157,7 +159,7 @@ describe('AudioRecorder: the microphone', () => {
 
     it('records, previews without playing, and hands the clip over', async () => {
         vi.spyOn(window, 'confirm').mockReturnValue(true);
-        const onSave = vi.fn(() => true);
+        const onSave = vi.fn((_clip: unknown) => true);
         await act(async () => { root.render(<AudioRecorder onSave={onSave} onCancel={() => {}} />); });
         await settle();
         const stopBtn = sheet('button[aria-label="Stop recording"]') as HTMLButtonElement;
