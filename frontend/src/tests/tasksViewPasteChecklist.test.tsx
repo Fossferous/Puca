@@ -174,6 +174,14 @@ function paste(el: Element, text: string) {
     return ev;
 }
 
+/** Enter in a field: its form's submit, which is what the key does. */
+async function submit(selector: string) {
+    const form = container.querySelector(selector) as HTMLFormElement;
+    expect(form, selector).not.toBeNull();
+    await act(async () => { form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
+    await settle();
+}
+
 const addInput = () => container.querySelector<HTMLInputElement>('.tasks-add input')!;
 const rows = () => [...container.querySelectorAll('.rows li')].map(l => l.textContent);
 const dialog = () => document.querySelector('.notes-paste-dialog');
@@ -262,6 +270,24 @@ describe('"Add a task…" takes a pasted checklist', () => {
         expect(rows()).toEqual(ASSISTANT_ITEMS);
     });
 
+    it('the question takes the focus, so Enter adds nothing behind it; any answer gives the focus back', async () => {
+        await mount();
+        await openList('List 1');
+        typeInto(addInput(), 'Milk');
+        addInput().focus();
+        paste(addInput(), ASSISTANT_ANSWER);
+        expect(document.activeElement?.closest('.notes-paste-dialog'), 'focus in the question').not.toBeNull();
+        // Enter in the field, were it still there: nothing is added behind it.
+        await submit('.tasks-add');
+        expect(itemPosts()).toHaveLength(0);
+        expect(dialog()).not.toBeNull();
+        act(() => { button('Cancel').click(); });
+        expect(document.activeElement).toBe(addInput());
+        // POSITIVE CONTROL: with the question answered, Enter adds again.
+        await submit('.tasks-add');
+        expect(itemPosts(1)).toHaveLength(1);
+    });
+
     it('a typed item that is refused is SAID, and its words stay for the retry', async () => {
         await mount();
         await openList('List 1');
@@ -344,6 +370,64 @@ describe('the "New list" name takes a pasted checklist', () => {
         expect(container.querySelector('.tasks-editor-title')?.textContent).toBe(ASSISTANT_TITLE);
         expect(itemPosts(100)).toHaveLength(1);
         expect(rows()).toEqual([ASSISTANT_ITEMS.join(' ')]);
+    });
+
+    it('the question says it makes a list, and what the list is called', async () => {
+        await mount();
+        const name = await openNewList();
+        paste(name, ASSISTANT_ANSWER);
+        expect(dialog()?.textContent).toContain(`This makes a new list, “${ASSISTANT_TITLE}”.`);
+        act(() => { button('Cancel').click(); });
+        typeInto(name, 'Saturday');
+        paste(name, ASSISTANT_ANSWER);
+        expect(dialog()?.textContent).toContain('This makes a new list, “Saturday”.');
+        act(() => { button('Add as one item').click(); });
+        await paced(1);
+        // The name it said, for either answer.
+        expect(container.querySelector('.tasks-editor-title')?.textContent).toBe('Saturday');
+        // With no heading and nothing typed, the first step names it — for
+        // "Add as one item" too, not the whole paste run together.
+        const again = await openNewList();
+        paste(again, '- Milk\n- Bread\n- Eggs');
+        expect(dialog()?.textContent).toContain('This makes a new list, “Milk”.');
+        act(() => { button('Add as one item').click(); });
+        await paced(1);
+        expect(container.querySelector('.tasks-editor-title')?.textContent).toBe('Milk');
+        expect(rows()).toEqual(['Milk Bread Eggs']);
+        // POSITIVE CONTROL: a paste into a list that exists makes no list, and says none.
+        paste(addInput(), ASSISTANT_ANSWER);
+        expect(dialog()).not.toBeNull();
+        expect(dialog()?.textContent).not.toContain('new list');
+    });
+
+    it('Enter in the name while the question is open makes no second list', async () => {
+        await mount();
+        const name = await openNewList();
+        typeInto(name, 'Saturday');
+        paste(name, ASSISTANT_ANSWER);
+        await submit('.tasks-tab-newform');
+        expect(post.mock.calls.filter(c => c[0] === '/task-lists')).toHaveLength(0);
+        expect(dialog()).not.toBeNull();
+        act(() => { button(`Add ${ASSISTANT_ITEMS.length} items`).click(); });
+        await paced(ASSISTANT_ITEMS.length);
+        expect(post.mock.calls.filter(c => c[0] === '/task-lists')).toHaveLength(1);
+        expect(rows()).toEqual(ASSISTANT_ITEMS);
+    });
+
+    it('an empty name stays open under the question, and Cancel gives it the focus back', async () => {
+        await mount();
+        const name = await openNewList();
+        expect(document.activeElement).toBe(name);
+        paste(name, ASSISTANT_ANSWER);
+        // A tap on Cancel takes the focus before its click, as a real one does.
+        act(() => { button('Cancel').focus(); });
+        act(() => { button('Cancel').click(); });
+        const still = container.querySelector<HTMLInputElement>('.tasks-tab-newform input');
+        expect(still, 'the New list name is still open').not.toBeNull();
+        expect(document.activeElement).toBe(still);
+        // POSITIVE CONTROL: leaving it empty with no question open still closes it.
+        act(() => { still!.blur(); });
+        expect(container.querySelector('.tasks-tab-newform')).toBeNull();
     });
 
     it('Cancel makes no list; text that is not a checklist pastes as a name', async () => {

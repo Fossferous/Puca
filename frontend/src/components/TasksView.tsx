@@ -98,6 +98,7 @@ import { fetchListFeatures, flushBodySave, keepHiddenSlots, setTaskListTiming, t
 import { NoteDueChip, NoteReminderControl } from './schedule/NoteReminderControl';
 import { halfMinuteNow, subscribeHalfMinute } from './schedule/halfMinuteClock';
 import { heldOpKey } from '../api/opKey';
+import type { PastedItems } from '../notes/model/noteContent';
 import { textOutsideSelection, usePasteItems } from './usePasteItems';
 import { useQueryClient } from '@tanstack/react-query';
 import './TasksView.css';
@@ -193,6 +194,7 @@ export function TasksView() {
     const [addingList, setAddingList] = useState(false);
     const [newTaskText, setNewTaskText] = useState('');
     const addTaskRef = useRef<HTMLInputElement>(null);
+    const newListRef = useRef<HTMLInputElement>(null);
     // A step-by-step list pasted into "Add a task…" or "New list" asks first
     // and then lands item by item, in order (components/usePasteItems).
     const pasteItems = usePasteItems();
@@ -461,6 +463,8 @@ export function TasksView() {
 
     const handleCreateList = async (e: React.FormEvent) => {
         e.preventDefault();
+        // Enter under the paste question: its answer makes this list.
+        if (pasteItems.asking) return;
         const title = newListTitle.trim();
         if (!title) return;
         await createList(title);
@@ -587,7 +591,7 @@ export function TasksView() {
     const handleAddTask = async (e: React.FormEvent) => {
         e.preventDefault();
         const text = newTaskText.trim();
-        if (!text || selectedList === null) return;
+        if (!text || selectedList === null || pasteItems.asking) return;
         // A failed create leaves the words in the box for the retry.
         if (await addListItem(selectedList.id, text)) setNewTaskText('');
     };
@@ -603,7 +607,7 @@ export function TasksView() {
         if (selectedList === null) return;
         const listId = selectedList.id;
         pasteItems.onPaste(e, {
-            separate: items => { void pasteItems.addInOrder(items, async text => (await addListItem(listId, text)) !== null); },
+            separate: read => { void pasteItems.addInOrder(read.items, async text => (await addListItem(listId, text)) !== null); },
             // Into the box, not created: Enter adds it, as for typed text.
             one: line => setNewTaskText(v => `${v}${line}`.slice(0, MAX_ITEM_LENGTH)),
             after: () => addTaskRef.current?.focus(),
@@ -612,17 +616,19 @@ export function TasksView() {
 
     /**
      * A checklist pasted into the "New list" name makes the list AND its
-     * items, asked first. Named after what is typed there and staying (the
-     * paste replaces only the selection), else the checklist's heading, else
-     * its first item — the way Púca Notes names an untitled note. Anything
-     * that is not a checklist pastes as a name.
+     * items, asked first — and the question says so, with the name. Named
+     * after what is typed there and staying (the paste replaces only the
+     * selection), else the checklist's heading, else its first item — the
+     * way Púca Notes names an untitled note — whichever answer is chosen.
+     * Anything that is not a checklist pastes as a name.
      */
     const onPasteListName = (e: React.ClipboardEvent<HTMLInputElement>) => {
-        // Read now: this form closes itself when it loses focus empty, and a
-        // tap on the dialog is exactly that.
+        // Read now: the question takes the focus, and by the answer the
+        // field may hold something else.
         const typed = textOutsideSelection(e.currentTarget).trim();
-        const makeList = async (items: string[], title: string | null) => {
-            const list = await createList(deriveQuickTitle(typed || title || '', items));
+        const nameOf = (read: PastedItems) => deriveQuickTitle(typed || read.title || '', read.items);
+        const makeList = async (name: string, items: string[]) => {
+            const list = await createList(name);
             if (!list) return;
             await pasteItems.addInOrder(items, async text => (await addListItem(list.id, text)) !== null);
             // The new list opened before its items existed, and its first read
@@ -630,8 +636,11 @@ export function TasksView() {
             void rereadList(list.id);
         };
         pasteItems.onPaste(e, {
-            separate: (items, title) => { void makeList(items, title); },
-            one: (line, title) => { void makeList([line], title); },
+            separate: read => { void makeList(nameOf(read), read.items); },
+            one: (line, read) => { void makeList(nameOf(read), [line]); },
+            detail: read => `This makes a new list, “${nameOf(read)}”.`,
+            // Cancel: back to the name, which stayed open under the question.
+            after: answer => { if (answer === 'cancel') newListRef.current?.focus(); },
         }, { checklistOnly: true });
     };
 
@@ -1006,13 +1015,16 @@ export function TasksView() {
                     {addingList && (
                         <form className="tasks-tab-newform" onSubmit={handleCreateList}>
                             <input
+                                ref={newListRef}
                                 type="text"
                                 autoFocus
                                 placeholder="List name…"
                                 value={newListTitle}
                                 onChange={e => setNewListTitle(e.target.value)}
                                 onPaste={onPasteListName}
-                                onBlur={() => { if (!newListTitle.trim()) setAddingList(false); }}
+                                // Empty and left: closed. Not while the paste
+                                // question holds the focus — Cancel comes back here.
+                                onBlur={() => { if (!newListTitle.trim() && !pasteItems.asking) setAddingList(false); }}
                                 onKeyDown={e => { if (e.key === 'Escape') { setNewListTitle(''); setAddingList(false); } }}
                                 maxLength={100}
                             />

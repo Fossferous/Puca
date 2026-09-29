@@ -471,6 +471,46 @@ describe('a step-by-step checklist pasted into an OPEN note', () => {
         expect(dialog()).toBeNull();
     });
 
+    it('the question says when it will also name the note, and only then', () => {
+        const e = openEditor({ title: 'Untitled note' });
+        paste(e.title, { text: ASSISTANT_ANSWER });
+        expect(dialog()?.textContent).toContain(`Adding them as items also names this note “${ASSISTANT_TITLE}”.`);
+        act(() => { button('Cancel').click(); });
+        // POSITIVE CONTROL: a note with a name keeps it, and nothing says otherwise.
+        const named = openEditor({ title: 'Home network' });
+        paste(named.title, { text: ASSISTANT_ANSWER });
+        expect(dialog()).not.toBeNull();
+        expect(dialog()?.textContent).not.toContain('names this note');
+        act(() => { button('Cancel').click(); });
+        paste(named.input, { text: ASSISTANT_ANSWER });
+        expect(dialog()?.textContent).not.toContain('names this note');
+    });
+
+    it('the question takes the focus; Cancel gives it back to the title it was pasted into', () => {
+        const e = openEditor({ title: 'Untitled note' });
+        e.title.focus();
+        paste(e.title, { text: ASSISTANT_ANSWER });
+        expect(document.activeElement?.closest('.notes-paste-dialog'), 'focus in the question').not.toBeNull();
+        act(() => { button('Cancel').click(); });
+        expect(document.activeElement).toBe(e.title);
+    });
+
+    it('Enter in "Add an item…" while the question is open adds nothing behind it', async () => {
+        const e = openEditor();
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+        act(() => { setter.call(e.input, 'Milk'); e.input.dispatchEvent(new Event('input', { bubbles: true })); });
+        paste(e.input, { text: ASSISTANT_ANSWER });
+        const form = e.input.closest('form')!;
+        await act(async () => { form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
+        await flush();
+        expect(e.actions.addTask).not.toHaveBeenCalled();
+        act(() => { button('Cancel').click(); });
+        // POSITIVE CONTROL: answered, Enter adds what was typed.
+        await act(async () => { form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
+        await flush();
+        expect(e.added).toEqual(['Milk']);
+    });
+
     it(`a paste of more than ${MAX_TAKEN_ITEMS} lines creates the first ${MAX_TAKEN_ITEMS}, and the prompt says so`, async () => {
         const e = openEditor();
         paste(e.input, { text: Array.from({ length: 250 }, (_, i) => `line ${i + 1}`).join('\n') });

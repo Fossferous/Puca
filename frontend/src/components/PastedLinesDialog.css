@@ -2,6 +2,9 @@
    Púca Notes and Púca's Tasks view, so the rules live beside the component
    instead of in notes/noteContent.css, which Púca never loads. The dialog's
    shell, text buttons and hint are NotesDialog.css. */
+/* It takes the focus when it opens (see the component) as a place to stand,
+   not a control: no ring around the whole question. The buttons keep theirs. */
+.notes-paste-dialog:focus { outline: none; }
 .notes-paste-lines {
     margin: 8px 0;
     padding: 8px 10px;

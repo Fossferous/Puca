@@ -13,9 +13,14 @@
  *
  * WHERE the items go is decided at PASTE time, not at the answer: the
  * caller's callbacks close over the list or channel the field belonged to.
- * These fields commit or close on blur, and a tap on the dialog is a blur,
- * so reading the target when the answer comes would read whatever the view
- * shows by then.
+ * These fields commit or close on blur, and the question takes the focus
+ * (PastedLinesDialog), so reading the target when the answer comes would
+ * read whatever the view shows by then.
+ *
+ * While the question is open the field underneath does not act on Enter
+ * (`asking`): its form would otherwise add what is typed there behind the
+ * question, or — in "New list" — make a list that the answer then makes a
+ * second time.
  *
  * The creates run one after another, paced (icsImport's PACE_MS, well under
  * the server's per-IP limit), and never two batches at once: a second paste
@@ -32,15 +37,22 @@ import { pasteAsOneLine, readPastedItems, type PastedItems } from '../notes/mode
 
 const sleep = (ms: number) => new Promise<void>(r => { setTimeout(r, ms); });
 
-/** What the two answers do, bound to the target the paste was aimed at. */
+export type PasteAnswer = 'separate' | 'one' | 'cancel';
+
+/** What the two answers do, bound to the target the paste was aimed at.
+ *  Each is handed the paste as it was read: its items, in order, and the
+ *  checklist's own title when it read as one. */
 export interface PasteAnswers {
-    /** "Add N items": the items, in order, and the checklist's own title
-     *  when it read as one. */
-    separate: (items: string[], title: string | null) => void;
+    /** "Add N items". */
+    separate: (read: PastedItems) => void;
     /** "Add as one item": the whole paste on one line, cut to fit a field. */
-    one: (line: string, title: string | null) => void;
+    one: (line: string, read: PastedItems) => void;
+    /** What an answer does BESIDES adding items — makes a list, names the
+     *  note — said in the question, because the question is the only place
+     *  the person agrees to it. Null says nothing more. */
+    detail?: (read: PastedItems) => string | null;
     /** After any answer, Cancel included (put the focus back). */
-    after?: () => void;
+    after?: (answer: PasteAnswer) => void;
 }
 
 /**
@@ -70,7 +82,7 @@ export function textOutsideSelection(input: HTMLInputElement): string {
 }
 
 export function usePasteItems() {
-    const [asking, setAsking] = useState<{ read: PastedItems; text: string; answers: PasteAnswers } | null>(null);
+    const [asking, setAsking] = useState<{ read: PastedItems; text: string; answers: PasteAnswers; detail: string | null } | null>(null);
     // The batches, in the order they were confirmed.
     const queue = useRef<Promise<unknown>>(Promise.resolve());
 
@@ -87,7 +99,7 @@ export function usePasteItems() {
         e.preventDefault();
         // "As one item" of a name-field paste is the clean steps, not the
         // Markdown they came in: that field never showed the raw text.
-        setAsking({ read, text: opts.checklistOnly ? read.items.join('\n') : text, answers });
+        setAsking({ read, text: opts.checklistOnly ? read.items.join('\n') : text, answers, detail: answers.detail?.(read) ?? null });
         return true;
     };
 
@@ -102,19 +114,20 @@ export function usePasteItems() {
         <PastedLinesDialog
             lines={asking.read.items}
             total={asking.read.total}
+            detail={asking.detail}
             onAddSeparate={() => {
                 setAsking(null);
-                asking.answers.separate(asking.read.items, asking.read.title);
-                asking.answers.after?.();
+                asking.answers.separate(asking.read);
+                asking.answers.after?.('separate');
             }}
             onAddOne={() => {
                 setAsking(null);
-                asking.answers.one(pasteAsOneLine(asking.text).slice(0, MAX_ITEM_LENGTH), asking.read.title);
-                asking.answers.after?.();
+                asking.answers.one(pasteAsOneLine(asking.text).slice(0, MAX_ITEM_LENGTH), asking.read);
+                asking.answers.after?.('one');
             }}
-            onCancel={() => { setAsking(null); asking.answers.after?.(); }}
+            onCancel={() => { setAsking(null); asking.answers.after?.('cancel'); }}
         />
     ) : null;
 
-    return { onPaste, addInOrder, dialog };
+    return { onPaste, addInOrder, dialog, asking: asking !== null };
 }

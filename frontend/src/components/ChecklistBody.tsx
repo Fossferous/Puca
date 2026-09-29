@@ -175,7 +175,8 @@ export function ChecklistBody({
 
     const handleAddTask = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (!newTask.trim()) return;
+        // Enter under the paste question adds nothing behind it.
+        if (!newTask.trim() || pasteItems.asking) return;
         // A failed create leaves the words in the box for the retry.
         if (await addItem({ isChannel, channelId, listId }, newTask.trim())) setNewTask('');
     };
@@ -189,7 +190,7 @@ export function ChecklistBody({
     const onPasteItem = (e: React.ClipboardEvent<HTMLInputElement>) => {
         const scope = { isChannel, channelId, listId };
         pasteItems.onPaste(e, {
-            separate: items => { void pasteItems.addInOrder(items, async text => (await addItem(scope, text)) !== null); },
+            separate: read => { void pasteItems.addInOrder(read.items, async text => (await addItem(scope, text)) !== null); },
             // Into the box, not created: Enter adds it, as for typed text.
             one: line => setNewTask(v => `${v}${line}`.slice(0, MAX_ITEM_LENGTH)),
             after: () => addRef.current?.focus(),

@@ -109,6 +109,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
         setTitleDirty(true);
     };
     const addRef = useRef<HTMLInputElement>(null);
+    const titleRef = useRef<HTMLInputElement>(null);
     // Not Date.now() in render: the chip must flip to "overdue" while the
     // note is open, and an impure render call fails the lint gate.
     const now = useSyncExternalStore(subscribeHalfMinute, halfMinuteNow, halfMinuteNow);
@@ -239,32 +240,36 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
         });
     };
 
+    // A multi-line paste asks before it creates (components/usePasteItems):
+    // forty silent items would be forty deletes. A checklist from elsewhere
+    // — an assistant's answer — reads as one, exactly as in the composer.
+    const pasteItems = usePasteItems();
+
     const addItem = async (e: React.FormEvent) => {
         e.preventDefault();
         const text = newItem.trim();
-        if (!text) return;
+        // Enter under the paste question adds nothing behind it.
+        if (!text || pasteItems.asking) return;
         setNewItem('');
         const created = await actions.addTask(ref, text);
         if (!created) setNewItem(text);   // failed: give the text back
         addRef.current?.focus();
     };
 
-    // A multi-line paste asks before it creates (components/usePasteItems):
-    // forty silent items would be forty deletes. A checklist from elsewhere
-    // — an assistant's answer — reads as one, exactly as in the composer.
-    const pasteItems = usePasteItems();
     /** The answers for a paste into THIS note. Every item goes through the
      *  SAME addTask a typed one uses — sealed here, queued offline like any
      *  other — one at a time, paced, and a run that stops part-way says so.
-     *  `rename`: name the note after the checklist, from this revision. */
+     *  `rename`: name the note after the checklist, from this revision —
+     *  and the question says so, since answering is agreeing to it. */
     const pasteAnswers = (rename: { base: number | undefined } | null): PasteAnswers => ({
-        separate: (items, title) => {
-            if (rename && title) void actions.renameNote(ref, title.slice(0, MAX_TITLE_LENGTH), rename.base);
-            void pasteItems.addInOrder(items, async line => (await actions.addTask(ref, line)) !== null)
+        separate: read => {
+            if (rename && read.title) void actions.renameNote(ref, read.title.slice(0, MAX_TITLE_LENGTH), rename.base);
+            void pasteItems.addInOrder(read.items, async line => (await actions.addTask(ref, line)) !== null)
                 .then(() => addRef.current?.focus());
         },
         // Into the add row, not created: Enter adds it, as for typed text.
         one: line => { setNewItem(v => `${v}${line}`.slice(0, MAX_ITEM_LENGTH)); addRef.current?.focus(); },
+        detail: read => (rename && read.title ? `Adding them as items also names this note “${read.title.slice(0, MAX_TITLE_LENGTH)}”.` : null),
     });
     const onPasteNewItem = (e: React.ClipboardEvent<HTMLInputElement>) => {
         pasteItems.onPaste(e, { ...pasteAnswers(null), after: () => addRef.current?.focus() });
@@ -285,7 +290,12 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
         // any rename from it: a rename made elsewhere since is refused, not
         // overwritten.
         const base = titleDirty ? titleBase.current : card.contentRev;
-        pasteItems.onPaste(e, pasteAnswers(renames ? { base } : null), { checklistOnly: true });
+        pasteItems.onPaste(e, {
+            ...pasteAnswers(renames ? { base } : null),
+            // Cancel: back to the title it was pasted into. The answers move
+            // on to the add row themselves.
+            after: answer => { if (answer === 'cancel') titleRef.current?.focus(); },
+        }, { checklistOnly: true });
     };
 
     return createPortal(
@@ -293,6 +303,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
             <div className="notes-editor" data-color={card.color} role="dialog" aria-modal="true" aria-label={card.title || 'Untitled note'}>
                 <div className="notes-editor-head">
                     <input
+                        ref={titleRef}
                         className="notes-editor-title"
                         value={titleDraft}
                         placeholder="Title"

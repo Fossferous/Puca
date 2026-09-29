@@ -13,11 +13,18 @@
  * noteContent.ts) returns null for one line and the handler lets the browser
  * paste it normally.
  *
+ * It TAKES THE FOCUS when it opens, or it stays in the field that was pasted
+ * into, and Enter there submits that field's form behind the question. It
+ * goes to the question itself, not to a button: the paste this guards
+ * against is the one the person did not mean, and a reflexive Enter after it
+ * must answer nothing — least of all "Add N items". Tab reaches the answers.
+ *
  * SHARED: it was notes/components/PastedLinesDialog.tsx until Púca's own
  * Tasks view took pastes too. Its class names are unchanged (the Notes tests
  * name them) and its rules travel with it, because Púca never loads
  * notes/noteContent.css.
  */
+import { useEffect, useRef } from 'react';
 import { NotesDialog } from './NotesDialog';
 import './PastedLinesDialog.css';
 
@@ -29,6 +36,9 @@ interface PastedLinesDialogProps {
     /** How many the paste held, when `lines` was capped (readPastedItems'
      *  MAX_TAKEN_ITEMS): the rest are not added, and the dialog says so. */
     total?: number;
+    /** What answering does besides adding items ("This makes a new list,
+     *  …"), when it does more. */
+    detail?: string | null;
     /** One item per line. */
     onAddSeparate: () => void;
     /** The whole paste as a single item. */
@@ -36,16 +46,19 @@ interface PastedLinesDialogProps {
     onCancel: () => void;
 }
 
-export function PastedLinesDialog({ lines, total = lines.length, onAddSeparate, onAddOne, onCancel }: PastedLinesDialogProps) {
+export function PastedLinesDialog({ lines, total = lines.length, detail = null, onAddSeparate, onAddOne, onCancel }: PastedLinesDialogProps) {
     const shown = lines.slice(0, PASTE_PREVIEW_LIMIT);
     const hidden = lines.length - shown.length;
+    const bodyRef = useRef<HTMLDivElement>(null);
+    useEffect(() => { bodyRef.current?.focus({ preventScroll: true }); }, []);
     return (
         <NotesDialog title="Add these as items?" onClose={onCancel}>
-            <div className="notes-paste-dialog">
+            <div className="notes-paste-dialog" ref={bodyRef} tabIndex={-1}>
                 <p className="notes-labels-hint">
                     You pasted {total} lines. Items are removed one at a time, so this asks first.
                 </p>
                 {total > lines.length && <p className="notes-labels-hint">Only the first {lines.length} are added.</p>}
+                {detail && <p className="notes-labels-hint">{detail}</p>}
                 <ul className="notes-paste-lines">
                     {shown.map((l, i) => <li key={i} className="notes-paste-line">{l}</li>)}
                 </ul>

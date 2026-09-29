@@ -166,6 +166,25 @@ describe('a checklist pasted into a channel checklist', () => {
         expect(document.querySelector('.notes-paste-dialog')).toBeNull();
     });
 
+    it('the question takes the focus, so Enter adds nothing behind it; Cancel gives the focus back', async () => {
+        await mount({ channelId: 9 });
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+        act(() => { setter.call(input()!, 'Milk'); input()!.dispatchEvent(new Event('input', { bubbles: true })); });
+        input()!.focus();
+        paste(input()!, ASSISTANT_ANSWER);
+        expect(document.activeElement?.closest('.notes-paste-dialog'), 'focus in the question').not.toBeNull();
+        const form = host!.querySelector('.checklist-add') as HTMLFormElement;
+        await act(async () => { form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
+        await settle();
+        expect(createTask).not.toHaveBeenCalled();
+        act(() => { button('Cancel').click(); });
+        expect(document.activeElement).toBe(input());
+        // POSITIVE CONTROL: with the question answered, Enter adds again.
+        await act(async () => { form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
+        await settle();
+        expect(createTask.mock.calls.map(c => c[1])).toEqual(['Milk']);
+    });
+
     it('without CREATE_TASKS there is no add row to paste into', async () => {
         await mount({ channelId: 9, myPerms: PERM.COMPLETE_TASKS });
         expect(input()).toBeNull();
