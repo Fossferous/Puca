@@ -36,7 +36,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - name: Typecheck + build
-        run: npm run build           # tsc -b && vite build
+        run: npm run build           # tsc -b (app, node config AND the tests) && vite build
       - name: Unit tests (vitest)
         run: npm test                 # vitest run — offline, ~125 cases
       - name: Lite bundle (rc-exclusion-guard must pass)

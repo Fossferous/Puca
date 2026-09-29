@@ -12,6 +12,7 @@
     "notes:android:release": "node scripts/build-notes-app.mjs --release",
     "check:dist": "node scripts/check-dist-entries.mjs",
     "typecheck": "tsc -b",
+    "typecheck:tests": "tsc -b tsconfig.tests.json",
     "lint": "eslint . && node scripts/check-no-ui-emoji.mjs && node scripts/check-source-hygiene.mjs && node ../scripts/check-docs-links.mjs && node ../scripts/check-docs-consistency.mjs && node ../scripts/check-api-docs.mjs",
     "lint:icons": "node scripts/check-no-ui-emoji.mjs",
     "preview": "vite preview",

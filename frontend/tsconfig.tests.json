@@ -1,0 +1,37 @@
+{
+  // The unit tests, type-checked. vitest transpiles with esbuild, which DROPS
+  // types without checking them, and tsconfig.app.json excludes every test —
+  // so until this project existed a test could call a function with the wrong
+  // arguments, pass every gate, and keep passing for the wrong reason. Found
+  // 2026-09-29: 179 errors in 57 test files, several of them tests asserting
+  // something other than what they claimed (see CLAUDE.md, Gates).
+  //
+  // Extends the app project so the tests are compiled under exactly the rules
+  // of the code they test; only the file set, the ambient types and the
+  // build-info file differ. Referenced from tsconfig.json, so `tsc -b` — and
+  // with it `npm run typecheck` and `npm run build` — checks all three.
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.tests.tsbuildinfo",
+    "noEmit": true,
+    // vitest/globals: setupFiles and `globals: true` (vitest.config.ts).
+    // node: tests read fixtures and spawn scripts with node:fs / node:path.
+    "types": [
+      "vite/client",
+      "vitest/globals",
+      "node"
+    ]
+  },
+  // Mirrors vitest.config.ts's `include`, plus the shared setup and fixtures
+  // under src/tests and the ambient globals (__APP_VERSION__, __RC_ENABLED__).
+  "include": [
+    "src/tests",
+    "src/**/*.test.ts",
+    "src/**/*.test.tsx",
+    "src/**/*.spec.ts",
+    "src/**/*.spec.tsx",
+    "src/vite-env.d.ts"
+  ],
+  // The app project's exclude is exactly these files; nothing is left out here.
+  "exclude": []
+}
