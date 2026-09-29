@@ -31,6 +31,8 @@ const h = vi.hoisted(() => ({
     tauri: false, servers: [] as unknown[], dms: [] as unknown[], channels: [] as unknown[],
     viewProps: [] as { active: boolean }[], viewMounts: 0, viewUnmounts: 0,
     markRead: [] as number[], sounds: 0,
+    /** What the server says is unread in the server open (its unread poll). */
+    unread: { channels: [] as { channel_id: number; unread_count: number }[] },
     /** Streams being watched, and streams anyone is sending. */
     watching: [] as number[], streamers: [] as { userId: number }[],
 }));
@@ -91,6 +93,7 @@ vi.stubGlobal('IntersectionObserver', NoObserver);
 vi.stubGlobal('fetch', vi.fn(async (url: string) => {
     const u = String(url);
     const body = /\/servers$/.test(u) ? h.servers : /\/dms$/.test(u) ? h.dms : /\/servers\/[^/]+\/channels$/.test(u) ? h.channels
+        : /\/servers\/[^/]+\/unread$/.test(u) ? h.unread
         : /ice|features|version|keys|me$|settings|unread/.test(u) ? {} : [];
     return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body), headers: new Headers() } as unknown as Response;
 }));
@@ -130,6 +133,7 @@ beforeEach(() => {
     h.viewUnmounts = 0;
     h.markRead = [];
     h.sounds = 0;
+    h.unread = { channels: [] };
     h.watching = [];
     h.streamers = [];
 });
@@ -285,6 +289,41 @@ describe('Notes over the chat: the conversation under it is not on screen', () =
         await click(railNotes());
         expect(notesView()?.dataset.active).toBe('false');
         expect(h.markRead).toEqual([10]);
+    });
+
+    // The 30 s unread poll zeroes the badge of the channel being looked at —
+    // so a poll in flight when a mark-read lands cannot re-light it. Under
+    // Notes nobody is looking: the badge the server reports must stand.
+    // Only setInterval is faked, so the poll can be fired and nothing else
+    // in Chat changes pace.
+    const unreadPolls = () => vi.mocked(fetch).mock.calls.filter(c => /\/servers\/s1\/unread$/.test(String(c[0]))).length;
+    async function pollWith(count: number, withNotes: boolean) {
+        vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+        try {
+            await openGeneral();
+            if (withNotes) await click(railNotes());
+            h.unread = { channels: [{ channel_id: 10, unread_count: count }] };
+            const before = unreadPolls();
+            await act(async () => { vi.advanceTimersByTime(30_000); await new Promise(r => setTimeout(r, 0)); });
+            await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+            // The poll really ran, so a badge-less row below is its answer.
+            expect(unreadPolls()).toBeGreaterThan(before);
+        } finally {
+            vi.useRealTimers();
+        }
+        return channelRow('general');
+    }
+    const channelRow = (name: string) => [...host!.querySelectorAll<HTMLElement>('.channel')].find(el => el.textContent?.includes(name)) ?? null;
+
+    it('POSITIVE CONTROL: the unread poll zeroes the badge of the channel on screen', async () => {
+        const row = await pollWith(3, false);
+        expect(row).not.toBeNull();
+        expect(row!.classList.contains('has-unread')).toBe(false);
+    });
+
+    it('with Notes over the channel, the unread poll leaves its badge as the server says', async () => {
+        const row = await pollWith(3, true);
+        expect(row!.classList.contains('has-unread')).toBe(true);
     });
 
     const BOB_DM = { id: 'd1', other_user_id: 2, other_username: 'bob', other_display_name: null, last_message: null, last_message_at: null, created_at: '2026-09-01' };
