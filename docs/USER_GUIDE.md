@@ -220,7 +220,7 @@ you need a bigger reduction; both are in the Screen Share dialog.
 
 1. Join a voice channel
 2. Click **Share Screen** in the voice panel. The picker opens straight away
-3. Pick a window, screen or tab. You are live
+3. Pick a window, screen or tab. The **Share Screen** button turns on at once and pulses while the stream starts, which can take a few seconds for a game's window; then you are live
 4. Sound, in the desktop app: share a game's window and the stream carries that game's audio, found from the window itself. Share a whole screen and Púca asks which apps' audio to carry; tick them and click **Go Live**. Closing that list instead shares nothing
 5. Sound, in a browser: tick **Share audio** in the browser's own picker. The app cannot tick it for you
 

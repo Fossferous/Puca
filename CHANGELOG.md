@@ -23,6 +23,16 @@ one-line summary; this file is the full story. Versions follow
   use **Continue in the browser** there, or open the link in your normal
   browser.
 
+### Improved
+- **Share shows it worked the moment you click.** After you pick a window,
+  Windows' capture waits for that window to draw its first frame before the
+  stream can start, which took about four seconds with a game in the
+  background. The Share button now turns on as soon as you click it, pulses
+  while the stream starts, and says **Starting your stream…**, so it no
+  longer looks as if nothing happened. Cancelling the picker turns it back
+  off. The time itself is Windows' and Púca cannot skip it: each go-live's
+  `go-live` line in `puca.log` shows it as the picker step.
+
 ### Fixed
 - **Invite links open Púca's join screen.** Clicking an invite link to the
   server you are signed in to — in a message, a link preview or a note — now

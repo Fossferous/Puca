@@ -252,7 +252,7 @@ const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, launch = 's
     // status line instead of a dialog nobody needs to read.
     if (launch === 'quick' && !mixerApps) {
         return busy
-            ? <div className="stream-quick-status" role="status">Starting your stream…</div>
+            ? <div className="stream-quick-status" role="status">Starting your stream — it goes live in a few seconds…</div>
             : null;
     }
 
