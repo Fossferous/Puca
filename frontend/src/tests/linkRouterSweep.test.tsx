@@ -110,6 +110,9 @@ const INVENTORY: Covered[] = [
     { file: 'components/PrivacyDisclosure.tsx', count: 1, how: 'router' },
     { file: 'components/SettingsModal.tsx', count: 1, how: 'router' },
     { file: 'components/Login.tsx', count: 1, how: 'web', guard: '{!isTauri() && !isMobile() && (' },
+    // "Get the desktop app", under the web invite page's app offer, which
+    // offersDesktopAppLink() gives only to a desktop browser (never a shell).
+    { file: 'components/InviteLanding.tsx', count: 1, how: 'web', guard: 'const appLink = offersDesktopAppLink() ? appInviteLink(code, window.location.hostname) : null;' },
     { file: 'components/TasksView.tsx', count: 1, how: 'web', guard: "if (typeof window === 'undefined' || isTauri() || isMobile()) return null;" },
     { file: 'notes/components/AccountMenu.tsx', count: 1, how: 'web', guard: '{!NATIVE && !inPuca && <a' },
     { file: 'notes/components/NotesRail.tsx', count: 1, how: 'web', guard: '{!NATIVE && !inPuca && (' },
