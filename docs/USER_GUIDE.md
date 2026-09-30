@@ -499,7 +499,7 @@ members can delete only the ones they uploaded.
 2. Or click **Join a Server** at the bottom of the server rail, paste the link or code and click **Look Up Invite**
 3. Click **Join Server**. For a server you are already in, this takes you to it
 
-An invite link clicked OUTSIDE Púca — in an email, another chat app, or Púca Notes' own page or Android app — opens the web app in your browser at the invite, not the desktop app. Sign in there, or copy the link and paste it into **Join a Server** in the app.
+An invite link clicked outside Púca — in an email, another chat app, or Púca Notes' own page or Android app — opens the invite page in your browser. On a Windows PC that page can hand it to the desktop app; see below.
 
 ### Invite links clicked outside Púca
 An invite link clicked somewhere else — an email, a web page, a game launcher, another chat program — opens the invite page in your web browser: Windows only lets a browser open a web link.
