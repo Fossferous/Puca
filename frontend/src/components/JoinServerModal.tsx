@@ -23,6 +23,10 @@ const INVITE_PLACEHOLDER = 'https://example.com/invite/aBc123Xy';
 
 type Tab = 'invite' | 'discover';
 
+function isServer(v: unknown): v is Server {
+    return !!v && typeof v === 'object' && typeof (v as { id?: unknown }).id === 'string';
+}
+
 export function JoinServerModal({ isOpen, onClose, onServerJoined, initialCode }: JoinServerModalProps) {
     const [activeTab, setActiveTab] = useState<Tab>('invite');
     const [inviteCode, setInviteCode] = useState('');
@@ -97,7 +101,18 @@ export function JoinServerModal({ isOpen, onClose, onServerJoined, initialCode }
         setError(null);
 
         try {
-            const server = await joinViaInvite(inviteInfo.code);
+            const joined: unknown = await joinViaInvite(inviteInfo.code);
+            // Someone already in the server is answered 200 "Already a member"
+            // — text, which apiClient hands back as a string, not a server.
+            // Passing that on listed a server named nothing and switched to
+            // it. It is the server the invite points at, which the lookup
+            // already named.
+            const server: Server = isServer(joined) ? joined : {
+                id: inviteInfo.server_id,
+                name: inviteInfo.server_name,
+                owner_id: 0,
+                created_at: new Date().toISOString(),
+            };
             onServerJoined(server);
             handleClose();
         } catch {

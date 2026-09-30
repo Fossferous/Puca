@@ -421,10 +421,21 @@ mod tests {
     #[test]
     fn a_multibyte_character_at_the_prefix_boundary_does_not_panic() {
         // `get(..n)` rather than slicing: a byte index inside a character must
-        // be a refusal, never a panic in the single-instance callback.
-        for s in ["pucé://invite/abcd", "puca://invité/abcd", "é", "puca://inv"] {
+        // be a refusal, never a panic in the single-instance callback. The two
+        // prefixes the code cuts at are "puca:" (5 bytes) and
+        // "puca://invite/" (14), so the inputs that matter put byte 5 or byte
+        // 14 INSIDE a character: € is three bytes, and starting it at byte 3
+        // or 12 straddles exactly those cuts. Inputs merely shorter than a
+        // prefix, or whose multibyte character starts ON a cut, would pass a
+        // plain `&s[..n]` behind a length check — which panics here.
+        let straddling = ["puc€://invite/abcd", "puca://invit€/abcd", "puc€", "puca://invit€"];
+        for (s, cut) in straddling.iter().zip([5, 14, 5, 14]) {
+            assert!(s.len() > cut && !s.is_char_boundary(cut), "{s} must put byte {cut} inside a character");
+        }
+        for s in straddling.iter().copied().chain(["pucé://invite/abcd", "puca://invité/abcd", "é", "puca://inv"]) {
             assert_eq!(parse_invite_url(s), None, "{s}");
-            let _ = link_from_args([EXE, s]);
+            let want = if s.starts_with("puca:") { ArgLink::Refused(NOT_AN_INVITE) } else { ArgLink::None };
+            assert_eq!(link_from_args([EXE, s]), want, "{s}");
         }
     }
 

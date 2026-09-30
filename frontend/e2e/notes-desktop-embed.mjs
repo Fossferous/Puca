@@ -36,8 +36,15 @@
 //     Server with the code filled in and looked up, and nothing is joined;
 //     refused links (a short code, an extra parameter, javascript:) open
 //     nothing and look nothing up, and a link naming another server's web
-//     app shows "This invite is for ..." instead of a lookup. Against a
-//     bundle from before deep links (0.9.828 and earlier) the valid-link
+//     app shows "This invite is for ..." instead of a lookup — or, against a
+//     backend with no APP_URL (nothing to compare the host with), "could not
+//     check", never "another server"; the walk reads GET /config and asserts
+//     whichever this backend calls for, so start it WITH APP_URL (the web
+//     address, e.g. APP_URL=http://127.0.0.1:5181) to walk the first; and
+//     Join Server on an invite to this walk's own server, which the real
+//     backend answers "Already a member", switches to it — listed once, no
+//     crash — after which Notes opens again from the rail. Against
+//     a bundle from before deep links (0.9.828 and earlier) the valid-link
 //     checks FAIL: no page listens for the event, so no dialog opens;
 //   - Export notes as Markdown asks where (the shell's Save As), then writes
 //     through the shell's attachment_save with the note in the bytes — never
@@ -661,11 +668,23 @@ await page.click('.join-modal .join-modal-close', { timeout: 5000 }).catch(() =>
 await page.waitForSelector('.join-modal', { state: 'detached', timeout: 5000 }).catch(() => {});
 
 // A link for ANOTHER server's web app: the message, never a lookup here.
+// Which message depends on what this backend says its web app is (GET
+// /config app_url): named, and example.com is another server; not named
+// (no APP_URL), and the app cannot check — it must say THAT, not call an
+// invite that may be its own server's "another server".
+const walkAppUrl = await fetch(`${API}/config`).then(r => r.json()).then(b => b?.app_url ?? null).catch(() => null);
 const lookupsBefore = inviteRequests.length;
 await deepEmit(`puca://invite/${DEEP_CODE}?host=example.com`);
 const otherNotice = await page.waitForSelector('.deep-link-notice', { timeout: 10000 }).then(() => true).catch(() => false);
-ck('deep link: another server\'s invite says so, by name',
-    otherNotice && /This invite is for example\.com, not the server this app is signed in to\./.test(await page.locator('.deep-link-notice').innerText().catch(() => '')));
+const otherText = await page.locator('.deep-link-notice').innerText().catch(() => '');
+if (walkAppUrl) {
+    ck('deep link: another server\'s invite says so, by name',
+        otherNotice && /This invite is for example\.com, not the server this app is signed in to\./.test(otherText), otherText.slice(0, 160));
+} else {
+    ck('deep link: with no APP_URL to compare, it says it could not check - never "another server"',
+        otherNotice && /comes from example\.com, but the server this app is signed in to does not say what its web address is/.test(otherText)
+        && !/not the server this app/.test(otherText), otherText.slice(0, 160));
+}
 await sleep(500);
 ck('deep link: another server\'s invite opens no Join dialog and looks nothing up',
     await page.locator('.join-modal').count() === 0 && inviteRequests.length === lookupsBefore, JSON.stringify(inviteRequests.slice(lookupsBefore)));
@@ -674,6 +693,31 @@ await page.locator('.deep-link-notice button', { hasText: 'OK' }).click({ timeou
 await page.waitForSelector('.deep-link-notice', { state: 'detached', timeout: 5000 }).catch(() => {});
 page.off('request', onInviteRequest);
 ck('deep link: afterwards, Notes is still open inside the app', await notesInsideApp(page));
+
+// An invite to a server you are ALREADY in — this walk's own server, the
+// likeliest first real use of a link from outside. The REAL backend answers
+// Join Server with 200 and the plain text "Already a member"; the app must
+// switch to that server and list it once, where it used to list the string
+// as a server and crash the rail (server.name.charAt) to the error screen.
+await deepEmit(`puca://invite/${DEEP_CODE}?host=${API_HOST}`);
+const memberDialog = await page.waitForSelector(`.join-modal .invite-preview h3:text-is("${SERVER}")`, { timeout: 10000 }).then(() => true).catch(() => false);
+const memberAnswer = page.waitForResponse(r => r.request().method() === 'POST' && /\/invites\/[^/]+\/join$/.test(new URL(r.url()).pathname), { timeout: 10000 })
+    .then(async r => `${r.status()} ${await r.text()}`).catch(() => 'no answer');
+await page.click('.join-modal .join-btn.primary', { timeout: 5000 }).catch(() => {});
+const memberAnswered = await memberAnswer;
+await page.waitForSelector('.join-modal', { state: 'detached', timeout: 5000 }).catch(() => {});
+await sleep(800);
+const railAfterJoin = await page.evaluate(() => [...document.querySelectorAll('.server-icons .server-icon')].map(e => e.getAttribute('title')));
+ck('deep link: Join Server on an invite to a server you are in - the server answers "Already a member"',
+    memberDialog && memberAnswered === '200 Already a member', memberAnswered);
+ck('deep link: ...and the app switches to it, lists it once, and does not crash',
+    await page.locator('text=Something went wrong').count() === 0
+    && railAfterJoin.filter(t => t === SERVER).length === 1 && !railAfterJoin.includes('Already a member')
+    && await page.locator(`.server-icons .server-icon.active[title="${SERVER}"]`).count() === 1,
+    JSON.stringify(railAfterJoin));
+await page.click('.server-icon.notes-self', { timeout: 5000 }).catch(() => {});
+await page.waitForSelector('.notes-desktop-view:not([inert])', { timeout: 5000 }).catch(() => {});
+ck('deep link: Notes opens again from the rail', await notesInsideApp(page));
 
 // =============================================================================
 // 7. Export, through the shell

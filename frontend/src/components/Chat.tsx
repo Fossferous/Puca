@@ -4190,11 +4190,16 @@ export function Chat({ onLogout }: ChatProps) {
                 onClose={() => { setShowJoinModal(false); setPendingInviteCode(null); }}
                 onServerJoined={(server) => {
                     setPendingInviteCode(null);
-                    queryClient.setQueryData(keys.servers, (old: Server[] | undefined) => [...(old || []), server]);
+                    // A server you are ALREADY in (its invite is one click away
+                    // in any message it was posted to; the server answers
+                    // "Already a member") is switched to, never listed twice.
+                    const known = servers.find(s => s.id === server.id);
+                    queryClient.setQueryData(keys.servers, (old: Server[] | undefined) =>
+                        (old ?? []).some(s => s.id === server.id) ? old : [...(old || []), server]);
                     setShowFriendsPanel(false);
                     setShowDevicesView(false);
                     setShowNotesView(false);
-                    switchServer(server);
+                    switchServer(known ?? server);
                 }}
             />
 

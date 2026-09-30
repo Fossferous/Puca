@@ -4,6 +4,10 @@
  * the warm-start event or the cold-start link taken at boot — becomes a
  * pending invite and never anything more.
  *
+ * GET /config is the REAL client (api/publicConfig.ts) over a stubbed fetch:
+ * whether the server answered at all is part of the verdict, so the check
+ * must see a real failed probe, not a hand-made shape.
+ *
  * The parser must agree with the shell's (src-tauri/src/deep_link.rs) about
  * EVERY link, so both suites assert one table (fixtures/deep-link-cases.json).
  */
@@ -15,6 +19,8 @@ import { dirname, join } from 'node:path';
 const h = vi.hoisted(() => ({
     tauri: false,
     appUrl: null as string | null,
+    /** GET /config fails (a 503) instead of answering. */
+    configDown: false,
     configCalls: 0,
     listeners: new Map<string, (e: { payload: unknown }) => void>(),
     takes: [] as unknown[],
@@ -26,11 +32,15 @@ vi.mock('../api/platform', async importOriginal => ({
     isTauri: () => h.tauri,
     isMobile: () => false,
 }));
-vi.mock('../api/publicConfig', () => ({
-    fetchPublicConfig: async () => {
-        h.configCalls += 1;
-        return { appUrl: h.appUrl, registrationInviteRequired: null, srpVersion: null };
-    },
+vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (!/\/config$/.test(url)) throw new Error(`unexpected fetch ${url}`);
+    h.configCalls += 1;
+    if (h.configDown) return { ok: false, status: 503, json: async () => ({}) } as unknown as Response;
+    return {
+        ok: true, status: 200,
+        json: async () => ({ app_url: h.appUrl, registration_invite_required: false, srp_version: 2 }),
+    } as unknown as Response;
 }));
 vi.mock('@tauri-apps/api/event', () => ({
     listen: async (event: string, cb: (e: { payload: unknown }) => void) => {
@@ -47,9 +57,11 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 const {
-    parseDeepLink, appInviteLink, isPlainHostname, handleDeepLink, installDeepLinks, isThisServerHost,
-    getDeepLinkNotice, subscribeDeepLinkNotice, dismissDeepLinkNotice, DEEP_LINK_EVENT, __resetDeepLinksForTest,
+    parseDeepLink, appInviteLink, isPlainHostname, handleDeepLink, installDeepLinks, checkInviteHost,
+    getDeepLinkNotice, subscribeDeepLinkNotice, dismissDeepLinkNotice, retryDeepLinkNotice, DEEP_LINK_EVENT,
+    __resetDeepLinksForTest,
 } = await import('../api/deepLink');
+const { __resetPublicConfigForTest } = await import('../api/publicConfig');
 const { peekPendingInvite, onPendingInviteAnnounced, consumePendingInvite } = await import('../api/pendingInvite');
 const { API_BASE_URL } = await import('../api/config');
 
@@ -70,9 +82,11 @@ let announced = 0;
 let stopHearing: () => void = () => {};
 beforeEach(() => {
     __resetDeepLinksForTest();
+    __resetPublicConfigForTest();
     sessionStorage.clear();
     h.tauri = false;
     h.appUrl = null;
+    h.configDown = false;
     h.configCalls = 0;
     h.listeners.clear();
     h.takes = [];
@@ -125,22 +139,37 @@ describe('appInviteLink: what the web invite page offers', () => {
     });
 });
 
-describe('isThisServerHost', () => {
-    it('the API host is this server', async () => {
-        expect(await isThisServerHost(API_HOST)).toBe(true);
-        expect(await isThisServerHost(API_HOST.toUpperCase())).toBe(true);
+describe('checkInviteHost', () => {
+    it('the API host is this server — without asking GET /config', async () => {
+        h.configDown = true;
+        expect(await checkInviteHost(API_HOST)).toBe('this-server');
+        expect(await checkInviteHost(API_HOST.toUpperCase())).toBe('this-server');
+        expect(h.configCalls).toBe(0);
     });
 
     it('the web app address from GET /config is this server', async () => {
         h.appUrl = 'https://app.example.com';
-        expect(await isThisServerHost('app.example.com')).toBe(true);
+        expect(await checkInviteHost('app.example.com')).toBe('this-server');
+        expect(await checkInviteHost('APP.example.com')).toBe('this-server');
     });
 
-    it('anything else is not — including when /config cannot say', async () => {
+    it('"another server" ONLY when the server named its web app and it differs', async () => {
         h.appUrl = 'https://app.example.com';
-        expect(await isThisServerHost('other.example.com')).toBe(false);
+        expect(await checkInviteHost('other.example.com')).toBe('another-server');
+    });
+
+    it('GET /config gave no answer: unreachable — not "another server"', async () => {
+        h.configDown = true;
+        expect(await checkInviteHost('app.example.com')).toBe('unreachable');
+        // A failed probe is not remembered: once the server answers, it counts.
+        h.configDown = false;
+        h.appUrl = 'https://app.example.com';
+        expect(await checkInviteHost('app.example.com')).toBe('this-server');
+    });
+
+    it('an answer that names no web address: unconfirmed — not "another server"', async () => {
         h.appUrl = null;
-        expect(await isThisServerHost('app.example.com')).toBe(false);
+        expect(await checkInviteHost('app.example.com')).toBe('unconfirmed');
     });
 });
 
@@ -165,8 +194,8 @@ describe('handleDeepLink: a link becomes a pending invite, never more', () => {
         stop();
         expect(peekPendingInvite()).toBeNull();
         expect(announced).toBe(0);
-        expect(getDeepLinkNotice()).toEqual({ host: 'other.example.com' });
-        expect(seen).toEqual([{ host: 'other.example.com' }]);
+        expect(getDeepLinkNotice()).toEqual({ kind: 'another-server', host: 'other.example.com' });
+        expect(seen).toEqual([{ kind: 'another-server', host: 'other.example.com' }]);
         dismissDeepLinkNotice();
         expect(getDeepLinkNotice()).toBeNull();
     });
@@ -198,9 +227,80 @@ describe('handleDeepLink: a link becomes a pending invite, never more', () => {
     });
 
     it('a later good link clears an earlier "another server" notice', async () => {
+        h.appUrl = 'https://app.example.com';
         await handleDeepLink('puca://invite/aBc123Xy?host=other.example.com');
         expect(getDeepLinkNotice()).not.toBeNull();
         await handleDeepLink('puca://invite/aBc123Xy');
+        expect(getDeepLinkNotice()).toBeNull();
+    });
+
+    it('GET /config down: an "unreachable" notice, nothing stashed — and Try again settles it once the server answers', async () => {
+        h.configDown = true;
+        await handleDeepLink('puca://invite/aBc123Xy?host=app.example.com');
+        expect(getDeepLinkNotice()).toEqual({ kind: 'unreachable', host: 'app.example.com' });
+        expect(peekPendingInvite()).toBeNull();
+        expect(announced).toBe(0);
+        // Still down: asked again, the same notice, still nothing stashed.
+        const asked = h.configCalls;
+        await retryDeepLinkNotice();
+        expect(h.configCalls).toBe(asked + 1);
+        expect(getDeepLinkNotice()).toEqual({ kind: 'unreachable', host: 'app.example.com' });
+        expect(peekPendingInvite()).toBeNull();
+        // It answers, naming the link's host: the same code, stashed and announced.
+        h.configDown = false;
+        h.appUrl = 'https://app.example.com';
+        await retryDeepLinkNotice();
+        expect(getDeepLinkNotice()).toBeNull();
+        expect(peekPendingInvite()).toBe('aBc123Xy');
+        expect(announced).toBe(1);
+        // Nothing left to retry.
+        const after = h.configCalls;
+        await retryDeepLinkNotice();
+        expect(h.configCalls).toBe(after);
+    });
+
+    it('a retry that learns the host is ANOTHER server says so: same host, new reason', async () => {
+        h.configDown = true;
+        await handleDeepLink('puca://invite/aBc123Xy?host=other.example.com');
+        expect(getDeepLinkNotice()).toEqual({ kind: 'unreachable', host: 'other.example.com' });
+        h.configDown = false;
+        h.appUrl = 'https://app.example.com';
+        await retryDeepLinkNotice();
+        expect(getDeepLinkNotice()).toEqual({ kind: 'another-server', host: 'other.example.com' });
+        expect(peekPendingInvite()).toBeNull();
+    });
+
+    it('Try again is only for "unreachable": the other notices are answers, not failures to ask', async () => {
+        h.appUrl = 'https://app.example.com';
+        await handleDeepLink('puca://invite/aBc123Xy?host=other.example.com');
+        expect(getDeepLinkNotice()).toEqual({ kind: 'another-server', host: 'other.example.com' });
+        // Even were asking again to say yes now, this notice does not ask.
+        h.appUrl = 'https://other.example.com';
+        __resetPublicConfigForTest();
+        await retryDeepLinkNotice();
+        expect(getDeepLinkNotice()).toEqual({ kind: 'another-server', host: 'other.example.com' });
+        expect(peekPendingInvite()).toBeNull();
+        // A server that names no web address (a fresh page, so a fresh answer).
+        h.appUrl = null;
+        __resetPublicConfigForTest();
+        await handleDeepLink('puca://invite/dEf456Zw?host=app.example.com');
+        expect(getDeepLinkNotice()).toEqual({ kind: 'unconfirmed', host: 'app.example.com' });
+        h.appUrl = 'https://app.example.com';
+        __resetPublicConfigForTest();
+        await retryDeepLinkNotice();
+        expect(getDeepLinkNotice()).toEqual({ kind: 'unconfirmed', host: 'app.example.com' });
+        expect(peekPendingInvite()).toBeNull();
+        expect(announced).toBe(0);
+    });
+
+    it('a dismissed notice leaves nothing to retry', async () => {
+        h.configDown = true;
+        await handleDeepLink('puca://invite/aBc123Xy?host=app.example.com');
+        dismissDeepLinkNotice();
+        h.configDown = false;
+        h.appUrl = 'https://app.example.com';
+        await retryDeepLinkNotice();
+        expect(peekPendingInvite()).toBeNull();
         expect(getDeepLinkNotice()).toBeNull();
     });
 });

@@ -45,6 +45,16 @@ export function parsePublicConfig(body: unknown): PublicConfig {
     return { appUrl, registrationInviteRequired: gate, srpVersion };
 }
 
+/**
+ * Whether `config` is what a server SAID, rather than the stand-in for a
+ * probe that got no usable answer (no network, the server down or restarting,
+ * a 5xx, an old server's 404). Only in an answer does `appUrl === null` mean
+ * "the operator has not set APP_URL"; otherwise nothing is known about it.
+ */
+export function publicConfigAnswered(config: PublicConfig): boolean {
+    return config !== UNKNOWN;
+}
+
 export function fetchPublicConfig(): Promise<PublicConfig> {
     if (cached) return cached;
     cached = (async () => {

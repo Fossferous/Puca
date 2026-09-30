@@ -20,13 +20,26 @@
  * navigates, never runs anything. A link naming a DIFFERENT server's web app
  * (`?host=`) is not looked up here at all: this app talks to one server, and
  * a code looked up on the wrong one could name a different server entirely.
+ * Nor is one whose host this app cannot CONFIRM is its own (GET /config did
+ * not answer, or names no web address) — but that is said as what it is,
+ * "could not check", with Try again when asking again could help; never
+ * "another server" for an invite that may well be this server's.
+ *
+ * AN UPDATE AT LAUNCH does not lose a cold-start link. With "install updates
+ * automatically" on, UpdateGate may install before Chat ever mounts, and the
+ * link taken here dies with this process and its sessionStorage. But the
+ * Windows updater (tauri-plugin-updater 2.x, installMode "passive") hands
+ * the NSIS installer this process's own arguments after `/R /ARGS`, and the
+ * installer relaunches the app with them — so the relaunched app is started
+ * with the same `puca://` link and takes it again, exactly once.
+ * deepLinkUpdateRelaunch.test.ts pins the two settings that depends on.
  *
  * The parser below and the shell's must agree exactly; one table of cases
  * (tests/fixtures/deep-link-cases.json) is asserted by both test suites.
  */
 import { API_BASE_URL } from './config';
 import { isMobile, isTauri } from './platform';
-import { fetchPublicConfig } from './publicConfig';
+import { fetchPublicConfig, publicConfigAnswered } from './publicConfig';
 import { announcePendingInvite, INVITE_CODE } from './pendingInvite';
 
 /** The shell's event for a link that arrived while the app was running
@@ -160,12 +173,36 @@ export function fetchDesktopDownloadUrl(): Promise<string | null> {
 // ---------------------------------------------------------------------------
 // The desktop app's side
 
+/**
+ * What a link's `?host=` is to this app. Only `this-server` is looked up;
+ * the other three are refusals, and each is told to the person as what it
+ * is — a failure to CHECK is never reported as "another server".
+ */
+export type InviteHostVerdict =
+    /** The API's own host, or the web app address GET /config names. */
+    | 'this-server'
+    /** GET /config named this server's web app, and it is a different host. */
+    | 'another-server'
+    /** GET /config gave no usable answer (no network, the server down or
+     *  restarting, a 5xx): nothing is known either way, and asking again may
+     *  settle it. */
+    | 'unreachable'
+    /** The server answered but names no web address (the operator has not
+     *  set APP_URL), so there is nothing to compare the host with; asking
+     *  again changes nothing. */
+    | 'unconfirmed';
+
 export interface DeepLinkNotice {
-    /** The web app host the refused invite came from. */
+    /** Why the invite was not looked up. */
+    kind: Exclude<InviteHostVerdict, 'this-server'>;
+    /** The web app host the invite came from. */
     host: string;
 }
 
 let notice: DeepLinkNotice | null = null;
+/** The link the notice is about, parsed (never the raw text): what Try again
+ *  checks again. */
+let noticeLink: DeepLinkInvite | null = null;
 const noticeListeners = new Set<() => void>();
 
 /** What components/DeepLinkNotice.tsx shows (useSyncExternalStore). */
@@ -178,8 +215,9 @@ export function subscribeDeepLinkNotice(cb: () => void): () => void {
     return () => { noticeListeners.delete(cb); };
 }
 
-function setNotice(next: DeepLinkNotice | null): void {
-    if (notice?.host === next?.host) return;
+function setNotice(next: DeepLinkNotice | null, link: DeepLinkInvite | null = null): void {
+    noticeLink = next ? link : null;
+    if (notice?.host === next?.host && notice?.kind === next?.kind) return;
     notice = next;
     noticeListeners.forEach(cb => cb());
 }
@@ -189,20 +227,36 @@ export function dismissDeepLinkNotice(): void {
 }
 
 /**
- * Is `host` the web app of the server this app talks to? Its public address
- * (GET /config `app_url`, the one every invite link is built from) or the
- * API's own host. When neither can be established the answer is no: the code
- * is not looked up on a server that may not be the one it was made on.
+ * "Try again" on an `unreachable` notice: the same link, checked again (a
+ * failed GET /config is not cached, so this asks the server afresh). It
+ * resolves when that check has settled — the notice then either names the
+ * new verdict or is gone and Join a Server is open. Nothing for any other
+ * notice: their answer would not change.
  */
-export async function isThisServerHost(host: string): Promise<boolean> {
+export function retryDeepLinkNotice(): Promise<void> {
+    if (notice?.kind !== 'unreachable' || !noticeLink) return Promise.resolve();
+    const { code, host } = noticeLink;
+    return handleDeepLink(`puca://invite/${code}${host ? `?host=${host}` : ''}`);
+}
+
+/**
+ * Whose web app is `host`? This server's when it is the API's own host or
+ * the public address GET /config names (`app_url`, the one every invite
+ * link is built from). Anything short of that is not looked up — the code is
+ * never tried on a server that may not be the one it was made on — but WHY
+ * matters to the person: "another server" only when the server said so.
+ */
+export async function checkInviteHost(host: string): Promise<InviteHostVerdict> {
     const want = host.toLowerCase();
     const hostOf = (url: string | null | undefined): string | null => {
         if (!url) return null;
         try { return new URL(url).hostname.toLowerCase(); } catch { return null; }
     };
-    if (hostOf(API_BASE_URL) === want) return true;
-    const { appUrl } = await fetchPublicConfig();
-    return hostOf(appUrl) === want;
+    if (hostOf(API_BASE_URL) === want) return 'this-server';
+    const config = await fetchPublicConfig();
+    if (!publicConfigAnswered(config)) return 'unreachable';
+    if (config.appUrl === null) return 'unconfirmed';
+    return hostOf(config.appUrl) === want ? 'this-server' : 'another-server';
 }
 
 let queue: Promise<void> = Promise.resolve();
@@ -225,9 +279,12 @@ async function handleOne(raw: unknown): Promise<void> {
         console.warn('[deep-link] ignored a link that is not a Púca invite link');
         return;
     }
-    if (link.host !== null && !(await isThisServerHost(link.host))) {
-        setNotice({ host: link.host });
-        return;
+    if (link.host !== null) {
+        const verdict = await checkInviteHost(link.host);
+        if (verdict !== 'this-server') {
+            setNotice({ kind: verdict, host: link.host }, link);
+            return;
+        }
     }
     setNotice(null);
     // Chat opens the join flow with it: at once when it is on screen,
@@ -268,6 +325,7 @@ export function installDeepLinks(): void {
 /** Test seam: forget the notice, the queue, the install and the download URL. */
 export function __resetDeepLinksForTest(): void {
     notice = null;
+    noticeLink = null;
     noticeListeners.clear();
     queue = Promise.resolve();
     installed = false;

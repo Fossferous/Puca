@@ -531,7 +531,9 @@ serving push-to-talk and the remote-control kill switch.)
   exactly `puca://invite/<code>` with an optional `?host=<hostname>`, drops anything else
   without logging its text, and hands the page only a URL rebuilt from the parts it accepted
   ([`deep_link.rs`](../frontend/src-tauri/src/deep_link.rs)). It never joins, navigates the
-  webview or runs anything, and a link naming another server's web app is not looked up.
+  webview or runs anything, and a link naming another server's web app — or one it cannot
+  confirm is its own server's, when `GET /config` does not answer or names no web address —
+  is not looked up.
 - **No listening TCP socket.** `rg -c TcpListener crates/puca-agent/src/` → 0. Its only
   endpoint is a Windows named pipe with SDDL `D:(A;;GA;;;OW)(A;;GA;;;SY)` — owner and SYSTEM
   only, not "everyone" ([`pipe.rs:34`](../crates/puca-agent/src/pipe.rs#L34)) — gated by

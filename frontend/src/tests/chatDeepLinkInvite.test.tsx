@@ -10,6 +10,13 @@
  * any link no dialog is open, a refused link and a link for another server
  * open none and look nothing up, and signed out the code waits for sign-in
  * instead of opening anything.
+ *
+ * Also pinned, because a link from outside makes each of them one click away:
+ * a server that cannot be ASKED whether the link's host is its web app (GET
+ * /config down) is not called "another server" — the person is told it could
+ * not be checked and can try again; and pressing Join Server on an invite to
+ * a server you are already in (the server answers 200 "Already a member", as
+ * text) switches to it instead of crashing the rail.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
@@ -22,6 +29,13 @@ const h = vi.hoisted(() => ({
     listeners: new Map<string, (e: { payload: unknown }) => void>(),
     takes: [] as unknown[],
     requests: [] as { method: string; url: string }[],
+    /** GET /config: its status, and the web app address it names (null: none). */
+    configStatus: 200,
+    appUrl: 'https://app.example.com' as string | null,
+    /** GET /servers: the servers this account is in. */
+    servers: [] as unknown[],
+    /** POST /invites/:code/join: a server, or the server's plain-text answer. */
+    joinAnswer: null as unknown,
 }));
 
 vi.mock('../api/platform', async importOriginal => ({
@@ -68,11 +82,25 @@ vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit
     const json = (body: unknown, status = 200) => ({
         ok: status < 400, status, json: async () => body, text: async () => JSON.stringify(body), headers: new Headers(),
     } as unknown as Response);
+    /** A body that is not JSON, as the server's plain-text answers are. */
+    const text = (body: string, status = 200) => ({
+        ok: status < 400, status, json: async () => JSON.parse(body), text: async () => body, headers: new Headers(),
+    } as unknown as Response);
     if (new RegExp(`/invites/${CODE}$`).test(url) && method === 'GET') {
         return json({ code: CODE, server_id: 's-walk', server_name: SERVER, member_count: 3 });
     }
+    if (new RegExp(`/invites/${CODE}/join$`).test(url) && method === 'POST') {
+        return typeof h.joinAnswer === 'string' ? text(h.joinAnswer) : json(h.joinAnswer);
+    }
     if (/\/invites\//.test(url)) return json({ error: 'no such invite' }, 404);
-    if (/\/config$/.test(url)) return json({ app_url: 'https://app.example.com', registration_invite_required: false });
+    if (/\/config$/.test(url)) {
+        return h.configStatus === 200
+            ? json({ app_url: h.appUrl, registration_invite_required: false })
+            : text('Service Unavailable', h.configStatus);
+    }
+    if (/\/servers$/.test(url) && method === 'GET') return json(h.servers);
+    // Unread counts, the aggregate and the per-server shape alike: nothing unread.
+    if (/unread/.test(url)) return json({ servers: [], channels: [] });
     // As chatNotesDesktop.test.tsx: objects where Chat expects one, lists elsewhere.
     return json(/ice|features|version|keys|me$|settings|unread/.test(url) ? {} : []);
 }));
@@ -82,18 +110,21 @@ const { Login } = await import('../components/Login');
 const { DeepLinkNotice } = await import('../components/DeepLinkNotice');
 const { installDeepLinks, DEEP_LINK_EVENT, __resetDeepLinksForTest } = await import('../api/deepLink');
 const { peekPendingInvite } = await import('../api/pendingInvite');
+const { __resetPublicConfigForTest } = await import('../api/publicConfig');
 const { API_BASE_URL } = await import('../api/config');
 const API_HOST = new URL(API_BASE_URL).hostname;
 
 let root: Root | null = null;
 let host: HTMLElement | null = null;
+/** The page's query client: the server list lives in it. */
+let qc: QueryClient;
 const settle = async (ms = 30) => { await act(async () => { await new Promise(r => setTimeout(r, ms)); }); };
 
 async function mount(node: React.ReactNode) {
     host = document.createElement('div');
     document.body.appendChild(host);
     root = createRoot(host);
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     await act(async () => {
         root!.render(<QueryClientProvider client={qc}><MemoryRouter>{node}</MemoryRouter></QueryClientProvider>);
     });
@@ -122,14 +153,25 @@ const joinField = () => document.querySelector<HTMLInputElement>('.join-modal .i
 const lookedUp = () => document.querySelector('.join-modal .invite-preview h3')?.textContent ?? null;
 const lookups = () => h.requests.filter(r => r.method === 'GET' && /\/invites\//.test(r.url));
 const joins = () => h.requests.filter(r => r.method !== 'GET' && /\/invites\/.*\/join|\/servers\/.*\/join/.test(r.url));
+const notice = () => document.querySelector<HTMLElement>('.deep-link-notice');
+const noticeButton = (label: string) =>
+    [...document.querySelectorAll<HTMLButtonElement>('.deep-link-notice button')].find(b => b.textContent === label) ?? null;
+const rail = () => [...document.querySelectorAll('.server-icons .server-icon')].map(e => e.getAttribute('title'));
 
 beforeEach(() => {
     __resetDeepLinksForTest();
+    // The real GET /config client caches an answer for the page's lifetime;
+    // each test here is a fresh page.
+    __resetPublicConfigForTest();
     sessionStorage.clear();
     h.authed = true;
     h.listeners.clear();
     h.takes = [];
     h.requests = [];
+    h.configStatus = 200;
+    h.appUrl = 'https://app.example.com';
+    h.servers = [];
+    h.joinAnswer = null;
 });
 afterEach(async () => {
     await unmount();
@@ -227,6 +269,82 @@ describe('a puca:// invite reaches Join a Server — and stops there', () => {
         await installed();
         await emit(`puca://invite/${CODE}?host=app.example.com`);
         await vi.waitFor(() => expect(lookedUp()).toBe(SERVER));
+    });
+
+    it('the server cannot be ASKED (GET /config down): "could not check", never "another server" — and Try again looks it up once it answers', async () => {
+        h.configStatus = 503;
+        await mount(<><Chat onLogout={() => {}} /><DeepLinkNotice /></>);
+        await installed();
+        // This server's own web app address — but nothing can confirm it now.
+        await emit(`puca://invite/${CODE}?host=app.example.com`);
+        await vi.waitFor(() => expect(notice()).not.toBeNull());
+        expect(notice()!.textContent).toMatch('This invite link comes from app.example.com');
+        expect(notice()!.textContent).toMatch('could not get an answer from the server this app is signed in to');
+        expect(notice()!.textContent).not.toMatch(/not the server this app|another server/i);
+        expect(joinDialog()).toBeNull();
+        expect(lookups()).toEqual([]);
+        expect(peekPendingInvite()).toBeNull();
+
+        // Still down: Try again asks again, says the same, looks nothing up.
+        const configAsks = () => h.requests.filter(r => /\/config$/.test(r.url)).length;
+        const asked = configAsks();
+        await act(async () => { noticeButton('Try again')!.click(); });
+        await settle(50);
+        expect(configAsks()).toBeGreaterThan(asked);
+        expect(notice()).not.toBeNull();
+        expect(lookups()).toEqual([]);
+
+        // Back up: this time the answer names the link's host — looked up.
+        h.configStatus = 200;
+        await act(async () => { noticeButton('Try again')!.click(); });
+        await vi.waitFor(() => expect(lookedUp()).toBe(SERVER));
+        expect(notice()).toBeNull();
+        expect(joinField()?.value).toBe(CODE);
+        await settle(100);
+        expect(joins()).toEqual([]);
+    });
+
+    it('a server that publishes no web address: says it cannot check — never "another server" — and looks nothing up', async () => {
+        h.appUrl = null;
+        await mount(<><Chat onLogout={() => {}} /><DeepLinkNotice /></>);
+        await installed();
+        await emit(`puca://invite/${CODE}?host=app.example.com`);
+        await vi.waitFor(() => expect(notice()).not.toBeNull());
+        expect(notice()!.textContent).toMatch('does not say what its web address is');
+        expect(notice()!.textContent).not.toMatch(/not the server this app|another server/i);
+        // Asking again would change nothing, so it is not offered.
+        expect(noticeButton('Try again')).toBeNull();
+        expect(joinDialog()).toBeNull();
+        expect(lookups()).toEqual([]);
+        expect(peekPendingInvite()).toBeNull();
+        // Positive control: the API's own host needs no web address to match.
+        await act(async () => { noticeButton('OK')!.click(); });
+        await emit(`puca://invite/${CODE}?host=${API_HOST}`);
+        await vi.waitFor(() => expect(lookedUp()).toBe(SERVER));
+    });
+
+    it('an invite to a server you are ALREADY in: Join Server switches to it, listed once — the app does not crash', async () => {
+        h.servers = [{ id: 's-walk', name: SERVER, owner_id: 99, icon_file_id: null, created_at: '2026-01-01T00:00:00Z' }];
+        h.joinAnswer = 'Already a member';
+        await mount(<Chat onLogout={() => {}} />);
+        await installed();
+        await vi.waitFor(() => expect(rail()).toContain(SERVER));   // positive control: the rail lists it
+        await act(async () => { (document.querySelector('.server-icon.home-button') as HTMLElement).click(); });
+        await settle();
+        expect(document.querySelector(`.server-icon[title="${SERVER}"]`)!.classList.contains('active')).toBe(false);
+
+        await emit(`puca://invite/${CODE}?host=${API_HOST}`);
+        await vi.waitFor(() => expect(lookedUp()).toBe(SERVER));
+        await act(async () => { (document.querySelector('.join-modal .join-btn.primary') as HTMLElement).click(); });
+        await settle(50);
+
+        expect(joins().map(r => new URL(r.url).pathname)).toEqual([`/invites/${CODE}/join`]);
+        expect(joinDialog()).toBeNull();
+        expect(rail().filter(t => t === SERVER)).toHaveLength(1);
+        expect(rail()).not.toContain('Already a member');
+        // Every other reader of the list (pickers, counts) sees it once too.
+        expect((qc.getQueryData<{ id: string }[]>(['servers']) ?? []).map(s => s.id)).toEqual(['s-walk']);
+        expect(document.querySelector(`.server-icon[title="${SERVER}"]`)!.classList.contains('active')).toBe(true);
     });
 
     it('a refused link opens nothing and looks nothing up', async () => {
