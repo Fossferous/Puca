@@ -36,6 +36,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: (cmd: string, args?: unknown) =
 import { isMobile, isTauri } from '../api/platform';
 import { navigateAway } from '../api/openExternal';
 import { installLinkRouter, setInviteOpener, thisServerInviteCode } from '../api/linkRouter';
+import { setMessageToastSink } from '../components/messageToastBus';
 
 type Shell = 'desktop' | 'phone' | 'web';
 const SHELLS: Shell[] = ['desktop', 'phone', 'web'];
@@ -402,6 +403,58 @@ describe('links that stay in the app', () => {
         b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
         await flush();
         expect(opened()).toEqual({ ...NOTHING, shell: ['https://example.org/other'] });
+    });
+});
+
+/**
+ * The Android apps are served from https://localhost, and Capacitor keeps a
+ * navigation to that host (any path, any port) inside the app's WebView. A
+ * message saying "caddy is at https://localhost:8443/" must not let a tap
+ * reboot Púca in place — dropping its socket and any call — or replace it
+ * with an error page.
+ */
+describe('the phone: a link to the app\'s own host never navigates the app', () => {
+    const OWN = ['https://localhost/chat', 'https://localhost/', 'https://localhost:8443/', 'https://localhost/login?x=1'];
+    let page: ReturnType<typeof vi.spyOn>;
+    let toasts: string[];
+    beforeEach(() => {
+        page = vi.spyOn(navigateAway, 'pageHref').mockReturnValue('https://localhost/chat');
+        toasts = [];
+        setMessageToastSink(t => { toasts.push(t.title); });
+    });
+    afterEach(() => { page.mockRestore(); setMessageToastSink(null); });
+
+    it('each is prevented and refused with a word, never navigated — and a foreign host on the same page still is', async () => {
+        inShell('phone');
+        for (const href of OWN) expect((await click(href)).prevented, href).toBe(true);
+        expect(opened()).toEqual(NOTHING);
+        expect(toasts).toHaveLength(OWN.length);
+        // POSITIVE CONTROL, same page: the bridge hands these to the browser.
+        await click('https://example.org/page');
+        await click('http://localhost/other-scheme');
+        expect(opened().navigated).toEqual(['https://example.org/page', 'http://localhost/other-scheme']);
+    });
+
+    it('a pre-0.9.2 invite (https://localhost/invite/…) still opens the join flow where there is one', async () => {
+        inShell('phone');
+        await click('https://localhost/invite/abcd');
+        expect(opened()).toEqual({ ...NOTHING, invites: ['abcd'] });
+        expect(toasts).toEqual([]);
+    });
+
+    it('and where there is none (Púca Notes\' own Android app) it is refused, not a reload of Notes', async () => {
+        unregister();
+        inShell('phone');
+        expect((await click('https://localhost/invite/abcd')).prevented).toBe(true);
+        expect(opened()).toEqual(NOTHING);
+        expect(toasts).toHaveLength(1);
+    });
+
+    it('the desktop is not the bridge: the same link goes to the system browser as any other', async () => {
+        inShell('desktop');
+        await click('https://localhost:8443/');
+        expect(opened()).toEqual({ ...NOTHING, shell: ['https://localhost:8443/'] });
+        expect(toasts).toEqual([]);
     });
 });
 

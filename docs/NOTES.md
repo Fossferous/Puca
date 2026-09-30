@@ -1726,6 +1726,11 @@ records the same deletion for chat.
   not learn the origin and path of the page that was reading a sealed note.
   Where it goes is decided by the one link router every page installs
   (`frontend/src/api/linkRouter.ts`), never by the note's own renderer.
+  The one exception is the Android apps' OWN address, `https://localhost`
+  (any path, any port): the bridge keeps that navigation inside the app's
+  WebView, so following it would restart the app in place. It is refused
+  with a message instead (`loadsInsideTheApp` in
+  `frontend/src/api/openExternal.ts`).
 - An **invite link to this Púca server** in a note opens Púca's own **Join a
   Server** screen with the invite looked up, when Notes is inside Púca (the
   desktop app's Notes view, Púca's Tasks view). Notes' own page and its

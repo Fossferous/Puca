@@ -22,6 +22,9 @@ one-line summary; this file is the full story. Versions follow
   A link in a message, a link preview or Settings now goes to your browser by
   the same route a link in a note already takes, and so does every link in
   Púca Notes' own Android app.
+- **A link to `https://localhost` in the Android apps says why it cannot
+  open.** On the phone that is the app's own address, and following it
+  would reload the app in place — in Púca, dropping any call.
 
 ## 0.9.828 — 2026-09-29
 

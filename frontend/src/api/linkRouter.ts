@@ -28,7 +28,11 @@
  *   2. Desktop and phone: every other http(s)/mailto link goes through
  *      openExternalUrl — the system browser or mail app. Modified and middle
  *      clicks too: a shell has no tabs, and a Ctrl+click that did nothing
- *      would be the very bug this fixes.
+ *      would be the very bug this fixes. On the phone a link to the app's
+ *      OWN host (https://localhost, any path or port) is the exception:
+ *      Capacitor would load it in the app's WebView — the app navigating
+ *      itself away — so openExternalUrl says it cannot open it instead
+ *      (openExternal.ts, loadsInsideTheApp). The click is still prevented.
  *   3. The web: left alone, because the anchor's own target="_blank" works —
  *      except (1), and (1) only on a plain left click. Ctrl/Cmd/Shift/Alt or
  *      a middle click there is someone asking for a new tab, and gets it.

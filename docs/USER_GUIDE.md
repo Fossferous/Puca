@@ -88,6 +88,7 @@ instead of Leave.
 | ```` ``` ```` on its own lines | code block |
 | `> quote` | block quote |
 | `\|\|spoiler\|\|` | Blurred until clicked |
+| `[text](https://example.com)` | a link that reads *text* |
 
 ### Mention Users and Channels
 - Type `@` and pick from the **MEMBERS** list that appears
@@ -95,8 +96,10 @@ instead of Leave.
 - `@everyone` and `@here` are highlighted as mentions
 
 ### Links
-- Click a web address in a message (or a link preview under it) to open it. In the desktop app and the Android app it opens in your web browser — an email address in your mail app; in the browser it opens in a new tab
+- Click a web address in a message (or a link preview under it) to open it. In the desktop app and the Android app it opens in your web browser; in the browser it opens in a new tab
+- A plain email address is not a link. Write it as `[text](mailto:someone@example.com)` and clicking it opens your mail app
 - An **invite link to this server** opens Púca's own **Join a Server** screen instead, with the invite already looked up — see [Use an Invite](#use-an-invite). An invite link to any other site opens in your browser like any other link
+- In the Android app, a link to `https://localhost` (any path or port) other than an invite is not opened: on the phone that is the app's own address, and following it would restart Púca, so Púca says why instead
 
 ### Message actions
 Hover a message to see its toolbar. The tooltips are:
