@@ -4,6 +4,25 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+- **Invite links open Púca's join screen.** Clicking an invite link to the
+  server you are signed in to — in a message, a link preview or a note — now
+  opens Púca's own **Join a Server** screen with the invite already looked
+  up, in the desktop app, the Android app and the web app. Before, the
+  desktop app sent it to your browser, where the web app opened instead, and
+  the web app opened it in a second tab. Whatever you had open stays where it
+  was behind the screen. An invite link to any other site still opens in
+  your browser.
+- **The invite of a server you are already in takes you to it.** Before,
+  **Join Server** on it put a server with no name in the rail, and drawing
+  that crashed Púca to its error screen until a reload.
+- **Links in the Android app open your browser the way links in notes do.**
+  A link in a message, a link preview or Settings now goes to your browser by
+  the same route a link in a note already takes, and so does every link in
+  Púca Notes' own Android app.
+
 ## 0.9.828 — 2026-09-29
 
 Send diagnostics to the server owner in one click, and going live logs where its time goes.

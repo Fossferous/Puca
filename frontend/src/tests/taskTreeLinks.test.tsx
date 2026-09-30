@@ -15,6 +15,7 @@ vi.mock('../api/openExternal', () => ({ openExternalUrl: vi.fn(), isExternalHref
 
 import { TaskTree } from '../components/TaskTree';
 import { openExternalUrl } from '../api/openExternal';
+import { installLinkRouter, linkShell } from '../api/linkRouter';
 import { TASK_DECRYPT_FAILED } from '../api/decryptMarkers';
 import type { Task } from '../api/tasks';
 
@@ -42,14 +43,22 @@ function render(tasks: Task[]) {
     });
 }
 
+// Opening a link is the link router's (api/linkRouter.ts), installed at boot
+// on every page that renders these rows — here in a shell, where it shows.
+let uninstallRouter: () => void;
+let shell: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
     host = document.createElement('div');
     document.body.appendChild(host);
     root = createRoot(host);
+    shell = vi.spyOn(linkShell, 'kind').mockReturnValue('desktop');
+    uninstallRouter = installLinkRouter();
 });
 afterEach(() => {
     act(() => { root.unmount(); });
     host.remove();
+    uninstallRouter();
+    shell.mockRestore();
     vi.clearAllMocks();
 });
 
@@ -65,6 +74,7 @@ describe('links in a checklist item', () => {
         render([task(1, 'read https://example.com/a')]);
         const a = host.querySelector('.tt-description a.note-link')!;
         act(() => { a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); });
+        expect(openExternalUrl).toHaveBeenCalledTimes(1);
         expect(openExternalUrl).toHaveBeenCalledWith('https://example.com/a');
         expect(host.querySelector('input.tt-edit-input')).toBeNull();
     });

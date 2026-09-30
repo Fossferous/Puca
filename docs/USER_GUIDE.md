@@ -94,6 +94,10 @@ instead of Leave.
 - Type `#` and pick from the **CHANNELS** list
 - `@everyone` and `@here` are highlighted as mentions
 
+### Links
+- Click a web address in a message (or a link preview under it) to open it. In the desktop app and the Android app it opens in your web browser — an email address in your mail app; in the browser it opens in a new tab
+- An **invite link to this server** opens Púca's own **Join a Server** screen instead, with the invite already looked up — see [Use an Invite](#use-an-invite). An invite link to any other site opens in your browser like any other link
+
 ### Message actions
 Hover a message to see its toolbar. The tooltips are:
 
@@ -488,9 +492,11 @@ members can delete only the ones they uploaded.
 4. Click **Copy** on the new entry under **Active Invites** and share it. **Revoke invite** ends it early
 
 ### Use an Invite
-1. Click **Join a Server** at the bottom of the server rail
-2. Paste the link or code and click **Look Up Invite**
-3. Click **Join Server**
+1. Click the invite link where someone posted it in Púca — a message, a link preview, or a note in Púca's Tasks or Notes view. The **Join a Server** screen opens with the invite already looked up, in the desktop app, the Android app and the browser alike. Whatever you had open (a note, a call, a half-written message) stays where it was behind it
+2. Or click **Join a Server** at the bottom of the server rail, paste the link or code and click **Look Up Invite**
+3. Click **Join Server**. For a server you are already in, this takes you to it
+
+An invite link clicked OUTSIDE Púca — in an email, another chat app, or Púca Notes' own page or Android app — opens the web app in your browser at the invite, not the desktop app. Sign in there, or copy the link and paste it into **Join a Server** in the app.
 
 ---
 

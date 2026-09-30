@@ -38,11 +38,12 @@ if (typeof window !== 'undefined'
 const bootSettings = loadSettings()
 syncCloseToTray(bootSettings.closeToTray)
 applyAppearance(bootSettings)
-// Desktop shell: clicking an external link must open the system browser.
-// Tauri v2 denies target=_blank/new-window by default (no opener plugin is
-// registered), so without this interceptor links silently do nothing.
-import { installTauriLinkInterceptor } from './api/openExternal'
-installTauriLinkInterceptor()
+// Every link on the page, in every shell (api/linkRouter.ts): the desktop and
+// Android shells refuse target=_blank/new windows, so without the router a
+// link there silently does nothing; and an invite link to this server opens
+// Púca's own join flow, here as on the web, instead of a browser tab.
+import { installLinkRouter } from './api/linkRouter'
+installLinkRouter()
 
 // Desktop shell: the tray capture badge, the tooltip and the native clip
 // capture threads live in the PROCESS, but every one of them is driven from
@@ -51,7 +52,7 @@ installTauriLinkInterceptor()
 // tray claiming a capture that no longer had a consumer, and a DXGI/WASAPI
 // capture still recording the screen into a ring nobody would read.
 //
-// Run once, as early as the link interceptor, so the window a stale indicator
+// Run once, as early as the link router, so the window a stale indicator
 // or an orphaned capture can exist in is as short as possible.
 void (async () => {
     const { isTauri } = await import('./api/platform')

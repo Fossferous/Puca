@@ -29,6 +29,8 @@ export interface PublicConfig {
 const UNKNOWN: PublicConfig = { appUrl: null, registrationInviteRequired: null, srpVersion: null };
 
 let cached: Promise<PublicConfig> | null = null;
+/** What `cached` resolved to, once it has (peekPublicConfig). */
+let resolved: PublicConfig | null = null;
 
 /** Parse the wire shape defensively: a server that answers 200 with
  *  something else (a proxy's HTML error page, say) is "unknown", not a throw. */
@@ -62,11 +64,26 @@ export function fetchPublicConfig(): Promise<PublicConfig> {
     })();
     // A failed probe is not remembered forever: the next caller re-asks, so a
     // server that was briefly unreachable at boot is not "unknown" all day.
-    void cached.then(c => { if (c === UNKNOWN) cached = null; });
+    const asked = cached;
+    void asked.then(c => {
+        if (c === UNKNOWN) cached = null;
+        else if (cached === asked) resolved = c;
+    });
     return cached;
+}
+
+/**
+ * The answer, if one has ARRIVED — without waiting. For a decision that has
+ * to be made inside an event handler (api/linkRouter.ts: whether a clicked
+ * link is an invite to this server must be known before the click's default
+ * runs). null = not asked yet, still in flight, or the probe failed.
+ */
+export function peekPublicConfig(): PublicConfig | null {
+    return resolved;
 }
 
 /** Test seam: forget the cached answer. */
 export function __resetPublicConfigForTest(): void {
     cached = null;
+    resolved = null;
 }

@@ -16,6 +16,7 @@ import { ServerList } from './ServerList';
 import { ServerCreateWizard, type WizardResult } from './ServerCreateWizard';
 import { finishServerCreation } from '../api/serverTemplates';
 import { consumePendingInvite } from '../api/pendingInvite';
+import { setInviteOpener } from '../api/linkRouter';
 import { ReportModal, type ReportTarget } from './ReportModal';
 import { JoinServerModal } from './JoinServerModal';
 import { InviteModal } from './InviteModal';
@@ -3910,8 +3911,8 @@ export function Chat({ onLogout }: ChatProps) {
     }, [dmConversations, dmsLoaded]);
 
     // An invite link's code, stashed by InviteLanding before sign-in: open
-    // the join flow with it looked up. Once, on mount — a later link opens a
-    // fresh navigation and remounts.
+    // the join flow with it looked up. Once, on mount — a link opened from
+    // outside the app later is a fresh navigation and remounts.
     useEffect(() => {
         const code = consumePendingInvite();
         if (!code) return;
@@ -3919,6 +3920,19 @@ export function Chat({ onLogout }: ChatProps) {
         setShowJoinModal(true);
         setShowWelcomePopup(false);
     }, []);
+
+    // An invite link to this server CLICKED in the app — in a message, a link
+    // preview, a note — opens the same join flow, in place (api/linkRouter.ts),
+    // in the desktop app, the Android app and the web app alike: never a
+    // browser tab showing the web app. Whatever was on screen stays where it
+    // was behind the dialog (a note, a call, a half-typed message); a join
+    // switches to the server, closing it returns to it. A second link while
+    // the dialog is open replaces the code, and it is looked up at once.
+    useEffect(() => setInviteOpener(code => {
+        setPendingInviteCode(code);
+        setShowJoinModal(true);
+        setShowWelcomePopup(false);
+    }), []);
 
     // Handle server creation from wizard. Everything it collected is acted on
     // (api/serverTemplates.ts): the template's channel set, the icon, and the
@@ -4177,11 +4191,16 @@ export function Chat({ onLogout }: ChatProps) {
                 onClose={() => { setShowJoinModal(false); setPendingInviteCode(null); }}
                 onServerJoined={(server) => {
                     setPendingInviteCode(null);
-                    queryClient.setQueryData(keys.servers, (old: Server[] | undefined) => [...(old || []), server]);
+                    // A server you are ALREADY in (its invite is one click away
+                    // in any message it was posted to; the server answers
+                    // "Already a member") is switched to, never listed twice.
+                    const known = servers.find(s => s.id === server.id);
+                    queryClient.setQueryData(keys.servers, (old: Server[] | undefined) =>
+                        (old ?? []).some(s => s.id === server.id) ? old : [...(old || []), server]);
                     setShowFriendsPanel(false);
                     setShowDevicesView(false);
                     setShowNotesView(false);
-                    switchServer(server);
+                    switchServer(known ?? server);
                 }}
             />
 

@@ -16,7 +16,8 @@
  * own Android app (notes-app/), and there it blesses its OTA bundle first and
  * runs NotesUpdateGate. What it MUST replay: the appearance boot below, or
  * the theme, contrast, text scale and icon style a user chose in Púca do
- * nothing here.
+ * nothing here; and the link router, or a link in a note is dead in the
+ * Android app.
  */
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -44,6 +45,14 @@ if (typeof window !== 'undefined'
 // setting lives in root attributes / vars that CSS reads. The icon style is a
 // module store the icons subscribe to, so CSS alone could never swap it.
 applyAppearance(loadSettings())
+
+// The link router, as main.tsx installs it (api/linkRouter.ts): in Notes'
+// Android app a link in a note opens the system browser through it — the
+// WebView refuses target=_blank — and no component opens its own links. On
+// the web page it leaves links alone; there is no join flow on this page, so
+// an invite link opens Púca (the web app) at the invite in a new tab.
+import { installLinkRouter } from '../api/linkRouter'
+installLinkRouter()
 
 import './notes.css'
 // LAST — its coarse-pointer block must win the cascade at equal specificity

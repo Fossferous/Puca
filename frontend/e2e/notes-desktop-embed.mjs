@@ -35,13 +35,23 @@
 //     through the shell's attachment_save with the note in the bytes — never
 //     a browser download — and a non-ASCII folder arrives whole;
 //   - Sign out in Notes' menu lands on Púca's login with no Notes UI left, its
-//     query cache emptied and its sealed on-device cache deleted.
+//     query cache emptied and its sealed on-device cache deleted;
+//   - links (api/linkRouter.ts): in a chat message, an invite link to this
+//     server — the link Invite People gives out — opens Púca's own Join a
+//     Server dialog with the code filled in and looked up, and hands NOTHING
+//     to the shell; Join Server on it (the walk's own server) lists the
+//     server once; an ordinary https link in the same message goes to the
+//     shell as exactly one open_external with its URL; and the same invite
+//     in a note, inside the embedded Notes, opens the same dialog over it.
 // Negative controls, so none of that can pass vacuously: without the fake
 // shell the SAME rail button opens the Tasks view (the web app's behaviour)
 // and never fetches Notes' chunk; the "Notes is inside the app" check and the
 // export check are each run against a deliberately wrong target and must
 // report false there; and before sign-out the query-cache and the on-device
-// cache checks must see something to delete.
+// cache checks must see something to delete. For the links: run against a
+// bundle built from before the router (0.9.828 and earlier) the invite checks
+// FAIL — that click reached the shell as open_external with the invite's URL
+// (the system browser, at the web app) and no dialog opened.
 //
 // Every check prints PASS or FAIL; a precondition that did not happen is a
 // FAIL, never a silent pass. Any FAIL exits 1.
@@ -49,7 +59,11 @@
 // Needs (all on 127.0.0.1, all throwaway — never the dev or production DB):
 //   1. a backend against a fresh database, e.g. PORT=3301 with
 //      AUTH_RATE_LIMIT_PER_SECOND=1000 AUTH_RATE_LIMIT_BURST=1000 (the walk
-//      signs up and signs in); health is GET / == 200;
+//      signs up and signs in) and APP_URL=http://localhost:5181 — the web
+//      app's address as GET /config reports it, which invite links are built
+//      from. The APP address below with `localhost` for `127.0.0.1` on
+//      purpose: an origin the page is NOT on, so only GET /config can tell
+//      the app the link is its own. Health is GET / == 200;
 //   2. the main bundle built against it, into a directory of its own so the
 //      shippable dist/ is untouched:
 //        PUCA_ALLOW_LOCAL_BUILD=1 VITE_API_URL=http://127.0.0.1:3301 \
@@ -101,11 +115,12 @@ const shot = async (page, name) => {
 // Page-side scripts, installed before any page script runs.
 
 /** The desktop shell, faked. Every command is recorded in __shell.calls;
- *  attachment_save's body is decoded and kept whole in __shell.saves. An
+ *  attachment_save's body is decoded and kept whole in __shell.saves, and
+ *  every URL open_external was asked to open in __shell.opened. An
  *  unknown PLUGIN command throws (as a missing plugin would) and an unknown
  *  app command answers null — both recorded, so the walk can say which. */
 const FAKE_SHELL = `(() => {
-    const shell = window.__shell = { calls: [], unknown: [], saves: [], dialogs: [], notifications: [] };
+    const shell = window.__shell = { calls: [], unknown: [], saves: [], dialogs: [], notifications: [], opened: [] };
     const SAVE_AS = ${JSON.stringify(SAVE_AS)};
     const known = {
         reset_capture_state: () => null,
@@ -127,7 +142,12 @@ const FAKE_SHELL = `(() => {
         lan_info: () => null,
         rc_leftovers_status: () => null,
         log_stream_diag: () => null,
-        open_external: () => null,
+        // The clip reaper's once-a-minute question (api/clips/replayBuffer.ts,
+        // reapOrphanNativeCapture): a walk that runs past its first minute
+        // asks it. Answered as a machine with no capture running.
+        clip_capture_status: () => ({ video: null, audio: null }),
+        // Opens NOTHING: the URL is only recorded, in order.
+        open_external: (args) => { shell.opened.push(args && args.url); return null; },
         // Not under test, answered as a machine without them would be:
         // no device key (so this walk enrols no device), no autostart, no
         // lock-screen service.
@@ -209,6 +229,11 @@ const health = await fetch(`${API}/`).then(r => r.status).catch(e => String(e));
 ck('preflight: the throwaway backend answers GET /', health === 200, `status ${health}`);
 const index = await fetch(`${APP}/`).then(r => r.text()).catch(() => '');
 ck('preflight: the built bundle is served', /assets\/index-[\w-]+\.js/.test(index));
+const appUrl = await fetch(`${API}/config`).then(r => r.json()).then(b => b.app_url ?? null).catch(() => null);
+ck('preflight: the backend has an APP_URL (GET /config app_url), so Invite People gives out a link',
+    typeof appUrl === 'string' && /^https?:\/\//.test(appUrl), String(appUrl));
+ck('preflight: APP_URL is NOT the address the page is on, so only GET /config can say a link is this server\'s',
+    typeof appUrl === 'string' && new URL(appUrl).origin !== new URL(APP).origin, `${appUrl} vs ${APP}`);
 if (failures) {
     console.log(`\n${failures} FAIL — nothing to walk`);
     process.exit(1);
@@ -308,6 +333,67 @@ await page.keyboard.press('Enter');
 const posted = await page.waitForSelector(`.message:has-text("${MESSAGE}")`, { timeout: 15000 }).then(() => true).catch(() => false);
 ck('setup: a message posted in the channel', posted);
 ck('Notes\' chunk is not fetched before it is asked for', notesChunkRequests.length === 0, notesChunkRequests.join(','));
+
+// =============================================================================
+// 1b. Links in a message: an invite to this server opens Púca's own Join
+//     dialog; an ordinary link leaves through the shell, once
+// =============================================================================
+// The invite exactly as the app gives it out: Invite People → Generate → the
+// link it shows (inviteLink(code, GET /config's app_url)).
+await page.locator(`.server-icons .server-icon[title="${SERVER}"]`).click({ button: 'right' });
+await page.locator('.server-context-menu .context-menu-item', { hasText: 'Invite People' }).click({ timeout: 5000 });
+await page.click('.invite-create-btn', { timeout: 5000 });
+const inviteShown = (await page.locator('.invite-item .invite-code').first().innerText({ timeout: 10000 }).catch(() => '')).trim();
+const inviteParts = /^(https?:\/\/.+)\/invite\/([A-Za-z0-9_-]+)$/.exec(inviteShown);
+ck('invite: Invite People gives out a link on the web app\'s address', !!inviteParts && inviteParts[1] === appUrl, inviteShown);
+await page.click('.invite-modal-close');
+const INVITE = inviteParts ? inviteShown : `${appUrl}/invite/missing`;
+const CODE = inviteParts ? inviteParts[2] : 'missing';
+const OTHER = 'https://example.org/walk-docs';
+await page.locator('.message-textarea').fill(`Join us: ${INVITE} — and the docs: ${OTHER}`);
+await page.keyboard.press('Enter');
+const linkMessage = page.locator('.message', { hasText: 'Join us:' }).first();
+await linkMessage.waitFor({ timeout: 15000 }).catch(() => {});
+const inviteAnchor = linkMessage.locator(`a.message-link[href="${INVITE}"]`);
+const otherAnchor = linkMessage.locator(`a.message-link[href="${OTHER}"]`);
+ck('links: the message shows the invite and the ordinary address as links',
+    await inviteAnchor.count() === 1 && await otherAnchor.count() === 1,
+    `${await inviteAnchor.count()} invite, ${await otherAnchor.count()} other`);
+const shellOpened = () => page.evaluate(() => [...window.__shell.opened]);
+const railIcons = () => page.locator('.server-icons .server-icon').count();
+const railBefore = await railIcons();
+const openedBeforeInvite = (await shellOpened()).length;
+const stampBeforeInvite = await page.evaluate(() => window.__docStamp);
+
+await inviteAnchor.click();
+const joinShown = await page.waitForSelector('.join-modal', { timeout: 5000 }).then(() => true).catch(() => false);
+ck('invite link: opens Púca\'s own Join a Server dialog', joinShown);
+// The dialog mounts, then fills its field from the code (an effect): wait
+// for the value rather than read the first frame.
+ck('invite link: the code is filled in',
+    await until(page, c => document.querySelector('.join-modal .invite-input-group input')?.value === c, CODE, 5000),
+    await page.inputValue('.join-modal .invite-input-group input').catch(() => 'no field'));
+const joinLookedUp = await page.waitForSelector(`.join-modal .invite-preview h3:text-is("${SERVER}")`, { timeout: 10000 }).then(() => true).catch(() => false);
+ck('invite link: and looked up — the dialog names the server, with Join Server', joinLookedUp
+    && await page.locator('.join-modal .join-btn.primary', { hasText: 'Join Server' }).count() === 1);
+await sleep(300);
+const afterInvite = await shellOpened();
+ck('invite link: NOTHING handed to the shell — no browser', afterInvite.length === openedBeforeInvite, JSON.stringify(afterInvite));
+ck('invite link: still the same page, still /chat', await page.evaluate(s => window.__docStamp === s && location.pathname === '/chat', stampBeforeInvite));
+await shot(page, 'invite-join-dialog');
+// No dialog, nothing to press: a FAIL line below, not a crash here.
+const joinPressed = joinLookedUp && await page.locator('.join-modal .join-btn.primary').click({ timeout: 5000 }).then(() => true).catch(() => false);
+const joinClosed = await page.waitForSelector('.join-modal', { state: 'detached', timeout: 10000 }).then(() => true).catch(() => false);
+ck('invite to a server you are in: Join Server closes the dialog and lists the server ONCE',
+    joinPressed && joinClosed && await page.locator(`.server-icons .server-icon[title="${SERVER}"]`).count() === 1 && await railIcons() === railBefore,
+    `${await railIcons()} rail icons, were ${railBefore}`);
+
+await otherAnchor.click();
+await until(page, n => window.__shell.opened.length > n, openedBeforeInvite, 5000);
+await sleep(500);
+const afterOther = (await shellOpened()).slice(openedBeforeInvite);
+ck('ordinary link: exactly one open_external, with its URL', afterOther.length === 1 && afterOther[0] === OTHER, JSON.stringify(afterOther));
+ck('ordinary link: no Join dialog', await page.locator('.join-modal').count() === 0);
 
 // =============================================================================
 // 2. Tasks & notes → Púca Notes, inside the app
@@ -611,6 +697,45 @@ ck('export: Notes\' toast says where, in Púca\'s container', savedToast && awai
     return !!t && t.textContent.includes(where) && !t.closest('.notes-desktop-view');
 }, SAVE_AS) && await toastOwner() === 'app');
 await page.keyboard.press('Escape');
+
+// =============================================================================
+// 7b. The same invite, in a note: the Join dialog opens over Notes
+// =============================================================================
+// A link in a note is NoteLinkText's, which stops the click on its way up so
+// a tap on it does not also edit the row — the very case a router listening
+// in the bubble phase would never have seen.
+await page.waitForSelector('.notes-menu', { state: 'detached', timeout: 3000 }).catch(() => {});
+await openComposer();
+await page.fill('.notes-quickadd-title', 'Invite note');
+await item(0).fill(`Join ${INVITE}`);
+await page.getByRole('button', { name: 'Done' }).click();
+await until(page, () => [...document.querySelectorAll('.notes-card')].some(c => c.textContent.includes('Invite note')), null, 15000);
+await page.locator('.notes-card', { hasText: 'Invite note' }).locator('.notes-card-title').click();
+await page.waitForSelector('.notes-editor', { timeout: 10000 }).catch(() => {});
+const noteInvite = page.locator(`.notes-editor a.note-link[href="${INVITE}"]`);
+ck('note: the invite in an item is a link in the open note', await noteInvite.count() === 1, `${await noteInvite.count()} link(s)`);
+const openedBeforeNote = (await shellOpened()).length;
+await noteInvite.click({ timeout: 5000 }).catch(() => {});
+const noteJoin = await page.waitForSelector(`.join-modal .invite-preview h3:text-is("${SERVER}")`, { timeout: 10000 }).then(() => true).catch(() => false);
+ck('note: clicking it opens the Join a Server dialog with the code looked up',
+    noteJoin && await page.inputValue('.join-modal .invite-input-group input').catch(() => '') === CODE);
+ck('note: the dialog is over Notes, and the note is still open under it',
+    await notesInsideApp(page) && await page.locator('.notes-editor').count() === 1 && await page.evaluate(() => {
+        const dlg = document.querySelector('.join-modal');
+        if (!dlg) return false;
+        const r = dlg.getBoundingClientRect();
+        const top = document.elementFromPoint(r.left + r.width / 2, r.top + 20);
+        return !!top && dlg.contains(top);
+    }));
+await sleep(300);
+ck('note: nothing handed to the shell', (await shellOpened()).length === openedBeforeNote, JSON.stringify((await shellOpened()).slice(openedBeforeNote)));
+await shot(page, 'note-invite-join');
+const noteJoinClosed = noteJoin && await page.click('.join-modal .join-modal-close', { timeout: 5000 }).then(() => true).catch(() => false);
+await page.waitForSelector('.join-modal', { state: 'detached', timeout: 5000 }).catch(() => {});
+ck('note: closing the dialog leaves the note open, in Notes',
+    noteJoinClosed && await page.locator('.join-modal').count() === 0 && await page.locator('.notes-editor').count() === 1 && await notesInsideApp(page));
+await page.getByRole('button', { name: 'Close', exact: true }).click({ timeout: 5000 }).catch(() => {});
+await page.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 }).catch(() => {});
 
 // =============================================================================
 // 8. Sign out from Notes: Púca's login, and nothing of Notes left

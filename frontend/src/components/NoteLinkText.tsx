@@ -20,7 +20,6 @@
  */
 import { type ReactNode } from 'react';
 import { linkSegments } from '../utils/linkSegments';
-import { openExternalUrl } from '../api/openExternal';
 
 interface NoteLinkTextProps {
     text: string;
@@ -51,12 +50,16 @@ export function NoteLinkText({ text, interactive = true, renderText }: NoteLinkT
                         href={s.href}
                         target="_blank"
                         rel="noopener noreferrer"
-                        // The handler, not the anchor's own navigation: the
-                        // Tauri shell denies new windows, and the Notes
-                        // WebView has no multiple-window support either.
-                        // stopPropagation is what keeps a link tap from also
-                        // starting an inline item edit or opening the note.
-                        onClick={e => { e.preventDefault(); e.stopPropagation(); openExternalUrl(s.href); }}
+                        // Opening is the link router's (api/linkRouter.ts),
+                        // which has already run — in the capture phase — by
+                        // the time this does: the system browser in the two
+                        // shells, which refuse new windows; the join flow for
+                        // an invite to this server; the anchor's own new tab
+                        // on the web. All this handler does is keep the tap
+                        // from also starting an inline item edit or opening
+                        // the note. It must not open anything itself: the
+                        // link would open twice in the shells.
+                        onClick={e => e.stopPropagation()}
                     >
                         {s.text}
                     </a>

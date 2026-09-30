@@ -17,19 +17,29 @@ vi.mock('../api/openExternal', () => ({ openExternalUrl: vi.fn(), isExternalHref
 
 import { NoteLinkText } from '../components/NoteLinkText';
 import { openExternalUrl } from '../api/openExternal';
+import { installLinkRouter, linkShell, type LinkShell } from '../api/linkRouter';
 
 let root: Root;
 let host: HTMLDivElement;
 const anchor = () => host.querySelector('a.note-link') as HTMLAnchorElement | null;
+// Opening is the link router's (api/linkRouter.ts), installed at boot on
+// every page that renders this; the component only keeps the tap off its row.
+let uninstallRouter: () => void;
+let shell: ReturnType<typeof vi.spyOn>;
+const inShell = (s: LinkShell) => shell.mockReturnValue(s);
 
 beforeEach(() => {
     host = document.createElement('div');
     document.body.appendChild(host);
     root = createRoot(host);
+    shell = vi.spyOn(linkShell, 'kind').mockReturnValue('desktop');
+    uninstallRouter = installLinkRouter();
 });
 afterEach(() => {
     act(() => { root.unmount(); });
     host.remove();
+    uninstallRouter();
+    shell.mockRestore();
     vi.clearAllMocks();
 });
 
@@ -47,12 +57,15 @@ describe('NoteLinkText', () => {
         expect(host.textContent).toBe('see https://example.com/a now');
     });
 
-    it('a click opens the link outside the app and does NOT reach the row around it', () => {
+    it('a click opens the link outside the app ONCE and does NOT reach the row around it', () => {
         const parentClick = vi.fn();
         act(() => {
             root.render(<div onClick={parentClick}><NoteLinkText text="https://example.com/a" /></div>);
         });
         act(() => { anchor()!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); });
+        // Once: a component that also opened its own link would open it
+        // twice in the shells, the router having done it already.
+        expect(openExternalUrl).toHaveBeenCalledTimes(1);
         expect(openExternalUrl).toHaveBeenCalledWith('https://example.com/a');
         expect(parentClick).not.toHaveBeenCalled();
         // POSITIVE CONTROL: a click on the plain text DOES reach the row —
@@ -62,6 +75,23 @@ describe('NoteLinkText', () => {
             host.querySelector('div')!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
         });
         expect(parentClick).toHaveBeenCalledTimes(1);
+    });
+
+    it('on the web the anchor\'s own new tab opens it: nothing prevented, nothing opened by hand, and still not the row', () => {
+        inShell('web');
+        const parentClick = vi.fn();
+        act(() => {
+            root.render(<div onClick={parentClick}><NoteLinkText text="https://example.com/a" /></div>);
+        });
+        // Read on React's own root container, registered after React's: it
+        // runs once the component's handler has (stopPropagation spares
+        // listeners on the same node), and the event goes no higher.
+        let prevented: boolean | null = null;
+        host.addEventListener('click', e => { prevented = e.defaultPrevented; e.preventDefault(); });
+        act(() => { anchor()!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); });
+        expect(prevented).toBe(false);
+        expect(openExternalUrl).not.toHaveBeenCalled();
+        expect(parentClick).not.toHaveBeenCalled();
     });
 
     it('interactive={false} marks the link without making it one', () => {

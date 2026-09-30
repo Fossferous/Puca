@@ -22,6 +22,7 @@ vi.mock('../api/openExternal', () => ({ openExternalUrl: vi.fn(), isExternalHref
 
 import { NoteBodyField, type BodySaveOutcome } from '../components/NoteBodyField';
 import { openExternalUrl } from '../api/openExternal';
+import { installLinkRouter, linkShell } from '../api/linkRouter';
 import {
     TEXT_HISTORY_COALESCE_MS, TEXT_HISTORY_LIMIT, canRedoText, canUndoText, newTextHistory, pushText, redoText, undoText,
 } from '../components/textHistory';
@@ -415,12 +416,22 @@ describe('NoteBodyField', () => {
         // and mouseup and no click is ever dispatched at it — a web address
         // in a note's text could be seen and never followed.
         const onSave = vi.fn(async () => true);
-        act(() => { root.render(<NoteBodyField value="read https://example.com/a" onSave={onSave} />); });
-        const a = container.querySelector('.nb-rendered a.note-link') as HTMLAnchorElement;
-        expect(a).not.toBeNull();
-        act(() => { a.focus(); });
-        expect(container.querySelector('textarea')).toBeNull();   // still the read view...
-        act(() => { a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); });
+        // Opening is the link router's (api/linkRouter.ts), as on every page
+        // that renders this field — here in a shell, where it is visible.
+        const uninstallRouter = installLinkRouter();
+        const shell = vi.spyOn(linkShell, 'kind').mockReturnValue('desktop');
+        try {
+            act(() => { root.render(<NoteBodyField value="read https://example.com/a" onSave={onSave} />); });
+            const a = container.querySelector('.nb-rendered a.note-link') as HTMLAnchorElement;
+            expect(a).not.toBeNull();
+            act(() => { a.focus(); });
+            expect(container.querySelector('textarea')).toBeNull();   // still the read view...
+            act(() => { a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); });
+        } finally {
+            uninstallRouter();
+            shell.mockRestore();
+        }
+        expect(openExternalUrl).toHaveBeenCalledTimes(1);
         expect(openExternalUrl).toHaveBeenCalledWith('https://example.com/a');
         expect(container.querySelector('textarea')).toBeNull();   // ...and a tap on a link is not an edit
         // POSITIVE CONTROL: focus that lands anywhere ELSE in the read view

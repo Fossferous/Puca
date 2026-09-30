@@ -35,6 +35,7 @@ vi.mock('../api/taskFeatures', async (orig) => ({
 
 import { NoteEditor } from '../notes/components/NoteEditor';
 import { openExternalUrl } from '../api/openExternal';
+import { installLinkRouter, linkShell } from '../api/linkRouter';
 import { type Task } from '../api/tasks';
 import { type NoteCard } from '../notes/model/notesModel';
 import { type NoteActions } from '../notes/model/notesQueries';
@@ -83,15 +84,23 @@ function render(tasks: Task[], query?: string) {
 const itemLinks = () => [...document.querySelectorAll('.tt-description a.note-link')] as HTMLAnchorElement[];
 const itemMarks = () => [...document.querySelectorAll('.tt-description mark.notes-hl')].map(m => m.textContent);
 
+// Opening a link is the link router's (api/linkRouter.ts), installed at boot
+// on every page that renders the editor — here in a shell, where it shows.
+let uninstallRouter: () => void;
+let shell: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
+    shell = vi.spyOn(linkShell, 'kind').mockReturnValue('desktop');
+    uninstallRouter = installLinkRouter();
 });
 afterEach(() => {
     act(() => { root.unmount(); });
     container.remove();
     document.body.innerHTML = '';
+    uninstallRouter();
+    shell.mockRestore();
     vi.clearAllMocks();
 });
 
@@ -107,6 +116,7 @@ describe('a link inside an item of the open note', () => {
     it('opens through the shell when it is tapped, and does not start an edit', () => {
         render([task(1, 'book https://example.com/ferry today')]);
         act(() => { itemLinks()[0].click(); });
+        expect(openExternalUrl).toHaveBeenCalledTimes(1);
         expect(openExternalUrl).toHaveBeenCalledWith('https://example.com/ferry');
         // The row's own click handler starts an inline edit; the link's
         // stopPropagation is what keeps the tap from wiping the row.

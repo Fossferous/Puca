@@ -10,6 +10,11 @@
 // @capacitor/android never calls setSupportMultipleWindows, so window.open is
 // refused there too. They get a top-level navigation instead, which the
 // bridge turns into ACTION_VIEW. Only the browser keeps plain window.open.
+//
+// WHICH clicks come here is decided in one place, api/linkRouter.ts: every
+// link on the page in the two shells — except an invite link to this
+// server, which opens Púca's own join flow instead. Components do not call
+// this for their own anchors.
 
 import { isMobile, isTauri } from './platform';
 
@@ -52,32 +57,4 @@ export function openExternalUrl(url: string): void {
         return;
     }
     window.open(url, '_blank', 'noopener,noreferrer');
-}
-
-/**
- * One document-level click interceptor for the Tauri shell: any anchor with an
- * external href opens in the system browser. Registered once at boot
- * (main.tsx) and ONLY under Tauri — in a browser the anchors' own
- * target="_blank" already works and must stay untouched, and in the Capacitor
- * apps every link that matters routes through openExternalUrl by hand.
- */
-export function installTauriLinkInterceptor(): void {
-    if (!isTauri()) return;
-    const handle = (e: MouseEvent) => {
-        if (e.defaultPrevented) return;
-        const anchor = (e.target as Element | null)?.closest?.('a[href]');
-        if (!anchor) return;
-        const href = anchor.getAttribute('href') ?? '';
-        // Only external schemes: SPA-internal links (react-router) and
-        // in-app pseudo-hrefs must keep their default handling.
-        if (!isExternalHref(href)) return;
-        e.preventDefault();
-        openExternalUrl(href);
-    };
-    document.addEventListener('click', handle);
-    // Middle-click ("open in new tab") — there are no tabs in the shell, so
-    // it opens the system browser like a plain click.
-    document.addEventListener('auxclick', (e) => {
-        if (e.button === 1) handle(e);
-    });
 }

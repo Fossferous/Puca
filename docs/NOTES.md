@@ -1724,6 +1724,14 @@ records the same deletion for chat.
   turns into `ACTION_VIEW`, because `window.open` is not a path there.
   Every anchor carries `rel="noopener noreferrer"`, so the destination does
   not learn the origin and path of the page that was reading a sealed note.
+  Where it goes is decided by the one link router every page installs
+  (`frontend/src/api/linkRouter.ts`), never by the note's own renderer.
+- An **invite link to this Púca server** in a note opens Púca's own **Join a
+  Server** screen with the invite looked up, when Notes is inside Púca (the
+  desktop app's Notes view, Púca's Tasks view). Notes' own page and its
+  Android app have no join screen, so there the invite opens like any other
+  link — on the web a new tab of Púca at the invite, which lands on the same
+  screen after sign-in; from the Android app, the browser.
 - Text holding an address swaps to a read view when it is not being edited;
   tapping anywhere but the link puts the cursor back where you tapped. Text
   with no address never leaves its editing field.
