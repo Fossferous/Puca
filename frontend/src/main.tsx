@@ -155,6 +155,12 @@ import { ensureMobileNotificationPermission, installMobileNav, setNotifyKeepAliv
 import { syncTaskPlacesToNative } from './api/taskPlaces'
 import { installReconnectCatchup } from './api/reconnectCatchup'
 installMobileNav()
+// Desktop: the `puca://` invite link this launch carried, and any that arrive
+// while it runs (the web invite page's "Open in the Púca app"). Before React
+// renders, like the Android intent above: the link waits in the pending-
+// invite slot for Chat, across a sign-in if need be. No-op outside Tauri.
+import { installDeepLinks } from './api/deepLink'
+installDeepLinks()
 // Android: after a socket gap (Doze window, network handover), reconnecting
 // while still backgrounded notifies for what arrived during the gap — the
 // backend has no queue or replay, so without this every gap is silent loss.

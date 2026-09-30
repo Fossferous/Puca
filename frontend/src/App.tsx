@@ -33,6 +33,7 @@ import { IdentityBanner } from './components/IdentityBanner';
 import { wireSessionDmKeyPublish } from './api/dmKeys';
 import { HotkeyBlockedBanner } from './components/HotkeyBlockedBanner';
 import { InviteLanding } from './components/InviteLanding';
+import { DeepLinkNotice } from './components/DeepLinkNotice';
 import { discardSeal, onArmedChange as onClipArmedChange, wireSystemSuspendHook } from './api/clips/replayBuffer';
 import { cancelClip, getClipProposalState, setClipDiscardHandler, wireClipProposals } from './api/clips/clipProposals';
 import { API_BASE_URL } from './api/config';
@@ -430,6 +431,7 @@ function App() {
   }
 
   return (
+    <>
     <Routes>
       <Route path="/login" element={
         <PublicOnly>
@@ -478,6 +480,11 @@ function App() {
       <Route path="/" element={<Navigate to={isAuthenticated() ? "/chat" : "/login"} replace />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    {/* Desktop only in practice: a `puca://` invite for ANOTHER server's
+        web app (api/deepLink.ts). Beside the routes, so it shows over the
+        sign-in screen and over Chat alike. */}
+    <DeepLinkNotice />
+    </>
   );
 }
 

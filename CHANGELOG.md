@@ -6,6 +6,23 @@ one-line summary; this file is the full story. Versions follow
 
 ## Unreleased
 
+### Added
+- **Invite links clicked outside Púca can open the desktop app.** An invite
+  link clicked in another program opens the invite page in your browser,
+  which on a Windows PC now offers **Open in the Púca app** beside
+  **Continue in the browser**. The desktop app comes to the front on **Join
+  a Server** with the invite looked up — it never joins by itself, and a
+  signed-out app keeps the invite until you sign in. **Always open invites
+  in the app** remembers the choice in that browser. An invite for a
+  different Púca server than the one the app uses says so instead of being
+  looked up, and one the app cannot check (its server not answering, or
+  publishing no web address) says *that*, with **Try again** when asking
+  again can help. Both desktop installers now register Púca's `puca://` links
+  for your Windows account, and uninstalling removes them. Some programs'
+  built-in browsers (Steam's overlay, for one) refuse to open other apps:
+  use **Continue in the browser** there, or open the link in your normal
+  browser.
+
 ### Fixed
 - **Invite links open Púca's join screen.** Clicking an invite link to the
   server you are signed in to — in a message, a link preview or a note — now

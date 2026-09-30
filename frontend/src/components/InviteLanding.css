@@ -1,0 +1,68 @@
+/* The web invite page's "open in the app, or continue here" choice. Built on
+   Login.css (the same card, title and primary button) so the step before
+   sign-in looks like sign-in, themes included. */
+.invite-landing-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+/* A link dressed as Login's primary button. */
+.invite-landing-open {
+  display: block;
+  margin-top: 0;
+  text-align: center;
+  text-decoration: none;
+}
+
+.invite-landing-open:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 24px rgba(124, 58, 237, 0.4);
+}
+
+.invite-landing-browser {
+  padding: 0.875rem 1.5rem;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 10px;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s;
+}
+
+.invite-landing-browser:hover {
+  border-color: var(--login-accent, #00d9ff);
+  color: #fff;
+}
+
+.invite-landing-open:focus-visible,
+.invite-landing-browser:focus-visible {
+  outline: 2px solid var(--login-accent, #00d9ff);
+  outline-offset: 2px;
+}
+
+.invite-landing-remember {
+  margin-top: 1.25rem;
+}
+
+/* What to do when nothing opened: information, not an error (it is the
+   normal outcome on a computer without the app). Same voice as Login's
+   browser trust note. */
+.invite-landing-help {
+  margin: 1.25rem 0 0;
+  padding: 0.75rem 0.875rem;
+  border-left: 2px solid rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 0 4px 4px 0;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.invite-landing-help a {
+  color: rgba(255, 255, 255, 0.9);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}

@@ -501,7 +501,7 @@ serving push-to-talk and the remote-control kill switch.)
   registration name, because renaming it would orphan every already-installed copy.
 
   What is still true is the part that actually matters: **installing Púca registers
-  nothing.** No service is created, nothing is written to Program Files, and no elevation
+  no service.** No service is created, nothing is written to Program Files, and no elevation
   prompt is raised unless you turn on "Let me reach this computer's lock screen" in Devices,
   which states what it installs *before* you agree. If you do turn it on, it runs as
   LocalSystem and starts with Windows — that is the whole point, since the lock and sign-in
@@ -520,6 +520,20 @@ serving push-to-talk and the remote-control kill switch.)
   running `reg query`, and a sentence that loses to one command costs more trust than the
   entry itself. It starts the APP, never the agent — the app's agent has no persistence
   mechanism of any kind.
+- **One link scheme, `puca://`, written by the installer.** Both installers (full and Lite)
+  register `HKCU\Software\Classes\puca` — per-user, no admin rights — with
+  `shell\open\command` = `"<install dir>\Puca.exe" "%1"` (`Puca-Lite.exe` for Lite) and a
+  `DefaultIcon`, so the web invite page's **Open in the Púca app** can start the app
+  ([`installer-url-scheme.nsh`](../frontend/src-tauri/installer-url-scheme.nsh)). The
+  uninstaller deletes the key, but only while it still names that install's exe. Check it with
+  `reg query HKCU\Software\Classes\puca /s`. Any website can fire a `puca://` link, so the
+  most one can do is open **Join a Server** with an invite code looked up: the shell accepts
+  exactly `puca://invite/<code>` with an optional `?host=<hostname>`, drops anything else
+  without logging its text, and hands the page only a URL rebuilt from the parts it accepted
+  ([`deep_link.rs`](../frontend/src-tauri/src/deep_link.rs)). It never joins, navigates the
+  webview or runs anything, and a link naming another server's web app — or one it cannot
+  confirm is its own server's, when `GET /config` does not answer or names no web address —
+  is not looked up.
 - **No listening TCP socket.** `rg -c TcpListener crates/puca-agent/src/` → 0. Its only
   endpoint is a Windows named pipe with SDDL `D:(A;;GA;;;OW)(A;;GA;;;SY)` — owner and SYSTEM
   only, not "everyone" ([`pipe.rs:34`](../crates/puca-agent/src/pipe.rs#L34)) — gated by

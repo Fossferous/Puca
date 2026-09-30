@@ -25,6 +25,9 @@
 ; the installer fails to build at all. Caught only by actually running a real
 ; NSIS build; no amount of reading proved it.
 !include "${__FILEDIR__}\installer-migrate.nsh"
+; The puca:// invite-link scheme (HKCU\Software\Classes\puca): registered after
+; the files are in place, removed by the uninstaller. See that file.
+!include "${__FILEDIR__}\installer-url-scheme.nsh"
 
 !macro NSIS_HOOK_PREINSTALL
   !insertmacro StopOrphanedHelpers
@@ -41,10 +44,15 @@
   ; "app" is this product's pre-rename binary. The in-place rename kept the
   ; install directory, so it was left sitting there, launchable.
   !insertmacro RemoveSupersededBinary "app"
+  ; Last, once this build's binary is the one on disk: the key names it.
+  !insertmacro RegisterUrlScheme
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
+  ; After the files are gone (a cancelled uninstall must leave it working),
+  ; and only while the key still names THIS install's exe.
+  !insertmacro UnregisterUrlScheme
 !macroend
