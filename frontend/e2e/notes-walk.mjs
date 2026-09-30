@@ -510,18 +510,33 @@ ck('note links: nothing is fetched to render them', foreignRequests.length === 0
 // an anchor on mousedown; React's onFocus is `focusin`, which bubbles) swapped
 // the read view for the textarea before any click could reach the anchor.
 // Only a real click, with what it opened read back, can see that.
+// On the web page the link router (api/linkRouter.ts) leaves an ordinary link
+// to the anchor itself (target="_blank" opens the tab); only the app shells
+// route it through openExternalUrl, i.e. window.open. So both are read back:
+// what window.open was asked, and the tab the page actually opened.
 await page.evaluate(() => {
     window.__opened = [];
     window.__realOpen = window.open;
     window.open = url => { window.__opened.push(String(url)); return null; };
 });
+// The tab is answered here, never by the real example.com: a walk makes no
+// request off this machine.
+const stubTab = route => route.fulfill({ status: 200, contentType: 'text/plain', body: 'walk stub' });
+await ctx.route('https://example.com/**', stubTab);
+const popupP = page.waitForEvent('popup', { timeout: 3000 }).catch(() => null);
 await page.locator('.notes-editor-content a.note-link').click();
+const popup = await popupP;
+if (popup) await popup.waitForLoadState('domcontentloaded', { timeout: 3000 }).catch(() => {});
+const popupUrl = popup ? popup.url() : null;
+if (popup) await popup.close().catch(() => {});
+await ctx.unroute('https://example.com/**', stubTab);
 // Put window.open back before anything else runs on this page: a stub left
 // lying about would make a later step's link silently do nothing.
 const opened = await page.evaluate(() => { const o = window.__opened; window.open = window.__realOpen; return o; });
+if (popupUrl) opened.push(popupUrl);
 const stillRead = await page.locator('.notes-editor-content textarea.nb-text').count() === 0;
-ck('note links: a real tap opens the address outside the app, and does NOT open the editor',
-    opened.length === 1 && opened[0] === 'https://example.com/a' && stillRead,
+ck('note links: a real tap opens the address outside the app, once, and does NOT open the editor',
+    opened.length === 1 && /^https:\/\/example\.com\/a\/?$/.test(opened[0]) && stillRead,
     `${JSON.stringify(opened)} stillRead=${stillRead}`);
 await shot('note-links');
 // Clicking the text — not the link — puts the field back, still editable.
