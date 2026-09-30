@@ -22,6 +22,7 @@ import { sampleShareEncode, applyShareQuality, shareCaptureSize, OPEN_SHARE_QUAL
 import { ContextMenu } from './ContextMenu';
 import { copyDiagnostics } from '../api/diagnosticsReport';
 import { goLiveBegin, goLiveMark, goLiveEnd } from '../api/goLiveTiming';
+import { useShareStarting } from './useShareStarting';
 import { noteRender, startHealthLog, stopHealthLog } from '../api/healthLog';
 import { keepDetail, keepSummary } from './stableState';
 import { type NoiseSuppressionMode, type NoiseModeChange, NOISE_MODE_EVENT, getNoiseSuppressionMode, setNoiseSuppressionMode, changeNoiseModeLive, modeUsesWebAudio, rawInputHasHadSignal, hasLiveGainStage, isDeepFilterGateOpen, selectedInputDeviceId } from '../api/noiseFilter';
@@ -190,6 +191,11 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     const [error, setError] = useState<string | null>(null);
     const [showPermissionHelp, setShowPermissionHelp] = useState(false);
     const [isScreenSharing, setIsScreenSharing] = useState(false);
+    // From the Share click until the share is live: WebView2 holds a window
+    // capture for up to 5 s waiting for its first frame (useShareStarting.ts).
+    // Ended by the dialog closing (every outcome of a go-live closes it) and
+    // by a cancelled picker.
+    const shareStarting = useShareStarting(isScreenSharing);
     const [isCameraOn, setIsCameraOn] = useState(false);
     const [noiseMode, setNoiseMode] = useState<NoiseSuppressionMode>(() => getNoiseSuppressionMode());
     // Whether the DeepFilter option is offered — Settings → Advanced →
@@ -3505,8 +3511,11 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         {/* Hide screen share on mobile - not supported */}
                         {!isMobile && (
                             <button
-                                className={`voice-btn vp-screenshare ${isScreenSharing ? 'active screen-share' : ''}`}
+                                className={`voice-btn vp-screenshare ${isScreenSharing || shareStarting.showing ? 'active screen-share' : ''}${shareStarting.showing ? ' starting' : ''}`}
+                                aria-busy={shareStarting.showing}
                                 onClick={async () => {
+                                    // Already on its way: a second click would open a second picker.
+                                    if (shareStarting.showing) return;
                                     if (isScreenSharing) {
                                         void sfuManager.stopScreenShare(); // no-op on mesh calls
                                         webrtcManager.stopScreenShare();
@@ -3530,7 +3539,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                     }
                                 }}
 
-                                title={isScreenSharing ? 'Stop Sharing' : 'Share Screen'}
+                                title={isScreenSharing ? 'Stop Sharing' : shareStarting.showing ? 'Starting your stream…' : 'Share Screen'}
                             >
                                 <ScreenShareIcon size={18} />
                             </button>
@@ -3723,9 +3732,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             <ScreenShareModal
                 isOpen={showStreamSettings}
                 launch={shareLaunch}
-                onClose={() => setShowStreamSettings(false)}
+                onClose={() => { setShowStreamSettings(false); shareStarting.end(); }}
                 onCancelAfterCapture={() => {
                     // User backed out after the OS picker; drop the captured surface.
+                    shareStarting.end();
                     stopHidingCaptureBar();
                     webrtcManager.stopScreenShare();
                 }}
@@ -3762,6 +3772,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         // Desktop captures video-only (native audio is attached later);
                         // browsers must request audio at getDisplayMedia time.
                         goLiveBegin();
+                        shareStarting.begin();
                         const shareStream = await webrtcManager.getScreenShareStream({ width, height, fps, audio: !isDesktop });
                         goLiveMark('picker');
                         // WebView2's "… is sharing a window" bar appears a beat after
@@ -3798,6 +3809,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         // The appsPromise is safely orphaned and ignored.
                         console.warn('[VoicePanel] Screen capture cancelled/failed:', err);
                         goLiveEnd('cancelled');
+                        shareStarting.end();
                         webrtcManager.stopScreenShare();
                         return null;
                     }

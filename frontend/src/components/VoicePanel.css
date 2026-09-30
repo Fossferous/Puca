@@ -181,6 +181,14 @@
     background: rgba(67, 181, 129, 0.2);
 }
 
+/* Share clicked, not live yet: WebView2 holds the capture for up to 5 s
+   waiting for the window's first frame. Shown as on at once, with a few
+   opacity pulses (compositor-only, finite: cssAnimationBudget.test.ts). */
+.voice-btn.vp-screenshare.starting {
+    cursor: progress;
+    animation: pulse-live 1.2s ease-in-out 5;
+}
+
 /* Clip replay buffer (components/ClipControls.tsx). The bar already wraps
    (mute, deafen, an 80px select, camera, share) — the two clip buttons take
    only their own width so they do not force a third row at real sidebar
