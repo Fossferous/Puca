@@ -47,6 +47,7 @@ bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom)); /* nav  */
 | 1000+ | modals/pickers (component-local) | settings modal is 2000 |
 | 1500 | `.device-downloads` | device-download tray — above modals so progress survives them, below the 2000+ consent dialogs and the 2050 file browser (which shows the same rows inside itself via `.dd-strip`) |
 | 105 | `.devices-dashboard` | the Devices view — shares the chat slot with `.friends-dashboard`, same panel-transform contract |
+| 2040 | `.deep-link-notice-overlay` | "This invite is for another server" (a `puca://` link from outside the app) — above Settings (2000), since it answers something done in another program; below the 2050+ prompts that carry deadlines |
 | 2050 | `.device-file-browser` | remote file browser — above the settings modal because a Files session can be started while any modal is open and none of them close when it does |
 | 2100 | `.ua-prompt-backdrop` | unattended passphrase prompt — above the browser above, because connecting to an armed device raises it on top |
 | 2060 | `.clip-composer-backdrop` | clip composer — above Settings/ScreenShare (2000) because the save-clip hotkey fires while Settings can be open; below the 2100 live-connection prompts |

@@ -35,6 +35,7 @@ import {
 import { addReaction, notifyReactionChanged } from '../api/reactions';
 import { ForwardModal } from './ForwardModal';
 import { SupportReportModal } from './SupportReportModal';
+import { onPendingInviteAnnounced } from '../api/pendingInvite';
 import { SaveToNoteModal } from './SaveToNoteModal';
 import { getToken } from '../api/auth';
 import { appIsForeground, isMobile as isNativeMobile, isTauri, RC_ENABLED } from '../api/platform';
@@ -1054,6 +1055,18 @@ export function Chat({ onLogout }: ChatProps) {
         window.addEventListener('sovereign:send-diagnostics', open);
         return () => window.removeEventListener('sovereign:send-diagnostics', open);
     }, []);
+
+    // A `puca://` invite link that woke the desktop app while Chat is up
+    // (api/deepLink.ts): the same join flow as an invite link that arrived
+    // before sign-in (the mount effect below), code filled in and looked up.
+    // Never a join: the person still presses Join Server.
+    useEffect(() => onPendingInviteAnnounced(() => {
+        const code = consumePendingInvite();
+        if (!code) return;
+        setPendingInviteCode(code);
+        setShowJoinModal(true);
+        setShowWelcomePopup(false);
+    }), []);
 
     // Emoji settings
     const [draggingChannelId, setDraggingChannelId] = useState<number | null>(null);

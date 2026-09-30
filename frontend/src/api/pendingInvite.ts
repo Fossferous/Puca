@@ -20,8 +20,10 @@
 
 const KEY = 'puca_pending_invite_v1';
 
-/** Server-issued codes are short and URL-safe; anything else is not a code. */
-const CODE = /^[A-Za-z0-9_-]{4,64}$/;
+/** Server-issued codes are short and URL-safe; anything else is not a code.
+ *  The desktop shell's `puca://` parser holds the same rule
+ *  (src-tauri/src/deep_link.rs CODE_MIN/CODE_MAX), as does api/deepLink.ts. */
+export const INVITE_CODE = /^[A-Za-z0-9_-]{4,64}$/;
 
 /** Build the shareable link, or null when the web app's address is unknown. */
 export function inviteLink(code: string, appUrl: string | null): string | null {
@@ -42,7 +44,7 @@ export function parseInviteCode(input: string): string | null {
     if (at >= 0) s = s.slice(at + '/invite/'.length);
     s = s.split(/[?#]/)[0].replace(/\/+$/, '');
     try { s = decodeURIComponent(s); } catch { /* keep as typed */ }
-    return CODE.test(s) ? s : null;
+    return INVITE_CODE.test(s) ? s : null;
 }
 
 export function stashPendingInvite(code: string): void {
@@ -60,4 +62,25 @@ export function consumePendingInvite(): string | null {
         try { sessionStorage.removeItem(KEY); } catch { /* storage unavailable */ }
     }
     return c;
+}
+
+/**
+ * A code stashed while the page is ALREADY up — the desktop app woken by a
+ * `puca://` invite link (api/deepLink.ts). Chat consumed the slot once, on
+ * mount, so a code arriving later needs telling: this stashes it and says so,
+ * and a mounted Chat opens the join flow with it at once. With nobody signed
+ * in the stash simply waits for sign-in, as it does for the web's own links,
+ * and the Login screen re-reads it to say an invite is waiting.
+ */
+const ANNOUNCED = 'puca:pending-invite';
+
+export function announcePendingInvite(code: string): void {
+    stashPendingInvite(code);
+    window.dispatchEvent(new Event(ANNOUNCED));
+}
+
+/** Hear announcements (Chat: consume and open; Login: re-read the note). */
+export function onPendingInviteAnnounced(cb: () => void): () => void {
+    window.addEventListener(ANNOUNCED, cb);
+    return () => window.removeEventListener(ANNOUNCED, cb);
 }

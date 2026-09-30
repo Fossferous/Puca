@@ -4,7 +4,7 @@ import { login, register, resetPasswordMigration, REMEMBER_ME_KEY } from '../api
 import { wsClient } from '../api/websocket';
 import { isTauri, isMobile } from '../api/platform';
 import { fetchPublicConfig } from '../api/publicConfig';
-import { peekPendingInvite } from '../api/pendingInvite';
+import { onPendingInviteAnnounced, peekPendingInvite } from '../api/pendingInvite';
 import './Login.css';
 
 interface LoginProps {
@@ -66,6 +66,10 @@ export function Login({ onLoginSuccess }: LoginProps) {
     // labelled "Required to sign up", on every open-registration server.
     const [inviteRequired, setInviteRequired] = useState<boolean | null>(null);
     // An invite link brought the visitor here: say so, and carry it through.
+    // Re-read when one ARRIVES while this screen is up — the desktop app
+    // woken by a `puca://` invite link while nobody is signed in.
+    const [, rereadPendingInvite] = useState(0);
+    useEffect(() => onPendingInviteAnnounced(() => rereadPendingInvite(n => n + 1)), []);
     const pendingInvite = peekPendingInvite();
     // Two different things were both called "invite code" on this screen. The
     // link's code (pendingInvite) joins a SERVER once you have an account; the

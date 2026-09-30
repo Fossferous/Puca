@@ -1,0 +1,22 @@
+/* Above every ordinary modal (1000–2000, docs/DESIGN_PHILOSOPHY.md) — it
+   answers something the person just did in another program, and the app was
+   raised to show it — but below the 2050+ live-session prompts, which carry
+   deadlines. */
+.modal-overlay.deep-link-notice-overlay {
+    z-index: 2040;
+}
+
+.deep-link-notice-body {
+    margin: 0 0 12px;
+    color: var(--text-primary, #fff);
+    font-size: 15px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+}
+
+.deep-link-notice-hint {
+    margin: 0;
+    color: var(--text-secondary, #b9bbbe);
+    font-size: 13px;
+    line-height: 1.45;
+}

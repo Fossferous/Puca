@@ -492,6 +492,15 @@ members can delete only the ones they uploaded.
 2. Paste the link or code and click **Look Up Invite**
 3. Click **Join Server**
 
+### Invite links clicked outside Púca
+An invite link clicked somewhere else — an email, a web page, a game launcher, another chat program — opens the invite page in your web browser: Windows only lets a browser open a web link.
+- On a Windows PC that page offers **Open in the Púca app** beside **Continue in the browser**. Your browser may ask whether to open Púca first; allow it. The desktop app comes to the front with **Join a Server** open and the invite already looked up. Nothing is joined until you click **Join Server**, and if the app is signed out the invite waits until you sign in
+- Tick **Always open invites in the app** and invite links in that browser try the app straight away from then on, with **Continue in the browser** still one click away. Untick it to stop
+- If nothing opens, the desktop app is not installed on that computer: install it (the page links **Get the desktop app** when the server publishes a download page), or continue in the browser
+- An invite for a different Púca server than the one your desktop app uses is not looked up: the app says *This invite is for …, not the server this app is signed in to*. Accept it in the browser instead
+- Some programs open links in a browser of their own — the overlay browser in Steam, for example — and those can refuse to hand a link to another app. Click **Continue in the browser** there, or copy the link into your normal web browser
+- The button appears only in browsers on Windows: the Windows installer is the only one that registers Púca's `puca://` links. The Android apps and phone browsers always use the browser flow
+
 ---
 
 ## Keyboard Shortcuts

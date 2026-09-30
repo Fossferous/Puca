@@ -31,6 +31,14 @@
 //   - a chat toast still appears, rendered by Púca's own React root (not a
 //     second toast sink inside Notes), and clicking "Saved to …" opens Notes,
 //     where the message has arrived as an item;
+//   - a `puca://` invite link from outside the app (api/deepLink.ts): the
+//     shell's deep-link event with a valid link for this server opens Join a
+//     Server with the code filled in and looked up, and nothing is joined;
+//     refused links (a short code, an extra parameter, javascript:) open
+//     nothing and look nothing up, and a link naming another server's web
+//     app shows "This invite is for ..." instead of a lookup. Against a
+//     bundle from before deep links (0.9.828 and earlier) the valid-link
+//     checks FAIL: no page listens for the event, so no dialog opens;
 //   - Export notes as Markdown asks where (the shell's Save As), then writes
 //     through the shell's attachment_save with the note in the bytes — never
 //     a browser download — and a non-ASCII folder arrives whole;
@@ -149,11 +157,37 @@ const FAKE_SHELL = `(() => {
         'plugin:notification|is_permission_granted': () => false,
         'plugin:notification|request_permission': () => 'denied',
         'plugin:notification|notify': (args) => { shell.notifications.push(args); return null; },
-        'plugin:event|listen': () => Math.floor(Math.random() * 1e9),
-        'plugin:event|unlisten': () => null,
+        // Every listener is kept, so the walk can play the shell and emit.
+        'plugin:event|listen': (args) => {
+            const id = Math.floor(Math.random() * 1e9);
+            shell.listeners.push({ id, event: args && args.event, handler: args && args.handler });
+            return id;
+        },
+        'plugin:event|unlisten': (args) => {
+            shell.listeners = shell.listeners.filter(l => l.id !== (args && args.eventId));
+            return null;
+        },
         'plugin:event|emit': () => null,
         'plugin:updater|check': () => null,
         'plugin:app|version': () => '0.0.0-walk',
+        // No puca:// link parked by a launch: this walk's links arrive as
+        // the running app's event (shell.emit below).
+        deep_link_take: () => null,
+        // The clip orphan reaper asks once a minute (replayBuffer.ts); a walk
+        // that runs past a minute used to meet it unanswered. Nothing native
+        // is capturing in this shell.
+        clip_capture_status: () => ({ video: null, audio: null }),
+    };
+    shell.listeners = [];
+    /** What the real shell does with a second launch's link: emit it to the
+     *  page (deep_link.rs forward_second_instance). Returns how many heard. */
+    shell.emit = (event, payload) => {
+        let heard = 0;
+        for (const l of shell.listeners) {
+            const cb = l.event === event && window['_' + l.handler];
+            if (cb) { cb({ event, id: l.id, payload }); heard++; }
+        }
+        return heard;
     };
     window.__TAURI_INTERNALS__ = {
         metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main', windowLabel: 'main' } },
@@ -577,6 +611,69 @@ await page.waitForSelector('.notes-desktop-view:not([inert])', { timeout: 5000 }
 ck('toast: clicking "Saved to …" opens Notes', await notesInsideApp(page));
 const arrived = await until(page, (m) => [...document.querySelectorAll('.notes-card')].some(c => c.textContent.includes('Groceries') && c.textContent.includes(m)), MESSAGE, 20000);
 ck('toast: the kept message is in the note — Notes stayed live while hidden', arrived);
+
+// =============================================================================
+// 6b. A puca:// invite link from outside the app (the shell's deep-link event)
+// =============================================================================
+// An invite, made the way a person makes one: Invite People -> Generate.
+// Whatever the backend's APP_URL, the text shown ends in the code.
+await page.locator(`.server-icons .server-icon[title="${SERVER}"]`).click({ button: 'right' });
+await page.locator('.server-context-menu .context-menu-item', { hasText: 'Invite People' }).click({ timeout: 5000 });
+await page.click('.invite-create-btn', { timeout: 5000 });
+const deepInviteShown = (await page.locator('.invite-item .invite-code').first().innerText({ timeout: 10000 }).catch(() => '')).trim();
+await page.click('.invite-modal-close').catch(() => {});
+await page.waitForSelector('.invite-modal-close', { state: 'detached', timeout: 5000 }).catch(() => {});
+const DEEP_CODE = (/([A-Za-z0-9_-]{4,64})$/.exec(deepInviteShown) || [])[1] || 'missing';
+ck('deep link: setup - an invite of our own to open', DEEP_CODE !== 'missing', deepInviteShown);
+const API_HOST = new URL(API).hostname;
+const inviteRequests = [];
+const onInviteRequest = rq => { if (/\/invites\//.test(rq.url())) inviteRequests.push(`${rq.method()} ${new URL(rq.url()).pathname}`); };
+page.on('request', onInviteRequest);
+const deepEmit = (payload) => page.evaluate(p => window.__shell.emit('deep-link-invite', p), payload);
+ck('deep link: the page listens for the shell\'s event, and asked for a launch link at boot',
+    await page.evaluate(() => window.__shell.listeners.some(l => l.event === 'deep-link-invite') && window.__shell.calls.includes('deep_link_take')));
+const deepStamp = await page.evaluate(() => window.__docStamp);
+
+// Refused links first: nothing may open, nothing may be looked up.
+let heardBad = 0;
+for (const bad of ['puca://invite/abc', `puca://invite/${DEEP_CODE}?host=${API_HOST}&next=/chat`, 'javascript:alert(1)', `puca://settings/${DEEP_CODE}`]) {
+    heardBad += await deepEmit(bad);
+}
+await sleep(1500);
+ck('deep link: refused links - heard, and nothing opened, nothing looked up',
+    heardBad >= 4 && await page.locator('.join-modal, .deep-link-notice').count() === 0 && inviteRequests.length === 0,
+    `${heardBad} heard, ${JSON.stringify(inviteRequests)}`);
+
+// A valid link for this server: Join a Server, code in, looked up.
+const heardGood = await deepEmit(`puca://invite/${DEEP_CODE}?host=${API_HOST}`);
+const deepJoin = await page.waitForSelector(`.join-modal .invite-preview h3:text-is("${SERVER}")`, { timeout: 10000 }).then(() => true).catch(() => false);
+ck('deep link: a valid link opens Join a Server with the code looked up', heardGood >= 1 && deepJoin
+    && await page.inputValue('.join-modal .invite-input-group input').catch(() => '') === DEEP_CODE,
+    await page.inputValue('.join-modal .invite-input-group input').catch(() => 'no dialog'));
+await sleep(800);
+ck('deep link: looked up once, and NOT joined - Join Server is still the person\'s to press',
+    inviteRequests.filter(r => r.startsWith('GET ')).length === 1 && !inviteRequests.some(r => /join/.test(r))
+    && await page.locator('.join-modal .join-btn.primary', { hasText: 'Join Server' }).count() === 1,
+    JSON.stringify(inviteRequests));
+ck('deep link: the same page, still /chat - no navigation', await page.evaluate(s => window.__docStamp === s && location.pathname === '/chat', deepStamp));
+await shot(page, 'deep-link-join');
+await page.click('.join-modal .join-modal-close', { timeout: 5000 }).catch(() => {});
+await page.waitForSelector('.join-modal', { state: 'detached', timeout: 5000 }).catch(() => {});
+
+// A link for ANOTHER server's web app: the message, never a lookup here.
+const lookupsBefore = inviteRequests.length;
+await deepEmit(`puca://invite/${DEEP_CODE}?host=example.com`);
+const otherNotice = await page.waitForSelector('.deep-link-notice', { timeout: 10000 }).then(() => true).catch(() => false);
+ck('deep link: another server\'s invite says so, by name',
+    otherNotice && /This invite is for example\.com, not the server this app is signed in to\./.test(await page.locator('.deep-link-notice').innerText().catch(() => '')));
+await sleep(500);
+ck('deep link: another server\'s invite opens no Join dialog and looks nothing up',
+    await page.locator('.join-modal').count() === 0 && inviteRequests.length === lookupsBefore, JSON.stringify(inviteRequests.slice(lookupsBefore)));
+await shot(page, 'deep-link-other-server');
+await page.locator('.deep-link-notice button', { hasText: 'OK' }).click({ timeout: 5000 }).catch(() => {});
+await page.waitForSelector('.deep-link-notice', { state: 'detached', timeout: 5000 }).catch(() => {});
+page.off('request', onInviteRequest);
+ck('deep link: afterwards, Notes is still open inside the app', await notesInsideApp(page));
 
 // =============================================================================
 // 7. Export, through the shell

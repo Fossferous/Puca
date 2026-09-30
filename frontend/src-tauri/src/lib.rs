@@ -16,6 +16,9 @@ mod display_topology;
 // NOT gated: device attestation needs ensure()/sign() in every build. The
 // remote-control-only halves (dh, forget) are gated inside the module.
 mod device_key;
+// NOT gated: `puca://invite/...` links from outside the app (the web invite
+// page's "Open in the Púca app", registered by the installer in both builds).
+mod deep_link;
 mod file_transfer;
 // Detection + removal of remote-control machinery a previous FULL install left
 // on this machine (the SovereignRemote LocalSystem service and its secrets).
@@ -1250,9 +1253,10 @@ fn show_main_window(app: &tauri::AppHandle) {
 
 /// Launched by the OS (or with `--hidden`)? Then start in the tray instead of
 /// popping a window on every boot — the thing that makes people turn autostart
-/// straight back off.
+/// straight back off. Not when the same command line carries a `puca://`
+/// invite: opening it is why the app was launched (deep_link::starts_hidden).
 fn started_hidden() -> bool {
-    std::env::args().any(|a| a == "--hidden")
+    deep_link::starts_hidden(&std::env::args().collect::<Vec<_>>())
 }
 
 pub fn run() {
@@ -1268,15 +1272,30 @@ pub fn run() {
     #[cfg(windows)]
     webview_gpu_pin::apply_before_webview();
 
+    // A `puca://invite/...` link this launch was started with (a COLD start:
+    // Windows runs `"<exe>" "<link>"`). Parked BEFORE the builder runs, not in
+    // `setup`: the webview can be loading before `setup` finishes, and a page
+    // that asked first would find nothing. The page takes it once it is up
+    // (deep_link_take); the log line waits for the logger, attached in setup.
+    let cold_link = deep_link::link_from_args(std::env::args());
+    let cold_link_note = deep_link::describe(&cold_link);
+
     tauri::Builder::default()
+        // State, not a plugin: the single-instance plugin below is still the
+        // first PLUGIN, and its callback can already find this.
+        .manage(deep_link::DeepLinkState::new(deep_link::invite(cold_link)))
         // FIRST, before every other plugin — that is this plugin's documented
         // requirement, and the failure mode without it is silent (see the
         // Cargo.toml note on WebView2's user-data lock).
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // A second launch should surface the window that already exists
             // rather than doing nothing. Without this, clicking the shortcut
             // while the app sits hidden in the tray looks like a broken app.
             show_main_window(app);
+            // A WARM start: a `puca://` invite link clicked while the app runs
+            // arrives as that second launch's argv. Only a link that parses
+            // reaches the page, rebuilt from its parts (deep_link.rs).
+            deep_link::forward_second_instance(app, &argv);
         }))
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -1301,7 +1320,7 @@ pub fn run() {
                 }
             }
         })
-        .setup(|app| {
+        .setup(move |app| {
             // 0.9.0 renamed the executable (app.exe -> Puca.exe / Puca-Lite.exe).
             // The autostart Run value stores a PATH, so an entry written by an
             // older install points at a file that no longer exists while the
@@ -1495,6 +1514,10 @@ pub fn run() {
                 webview_gpu_pin::log_outcome();
                 webview_gpu_pin::confirm_running_webview();
             }
+            // Whether this launch carried a link — never the link's text.
+            if let Some(line) = cold_link_note {
+                log::info!("{line} (at launch)");
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1631,6 +1654,7 @@ pub fn run() {
             #[cfg(feature = "remote-control")]
             release_control_input,
             open_external,
+            deep_link::deep_link_take,
             set_unread_badge,
             get_idle_seconds,
             clear_webview_permissions,

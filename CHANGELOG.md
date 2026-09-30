@@ -4,6 +4,23 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Added
+- **Invite links clicked outside Púca can open the desktop app.** An invite
+  link clicked in another program opens the invite page in your browser,
+  which on a Windows PC now offers **Open in the Púca app** beside
+  **Continue in the browser**. The desktop app comes to the front on **Join
+  a Server** with the invite looked up — it never joins by itself, and a
+  signed-out app keeps the invite until you sign in. **Always open invites
+  in the app** remembers the choice in that browser. An invite for a
+  different Púca server than the one the app uses says so instead of being
+  looked up. Both desktop installers now register Púca's `puca://` links
+  for your Windows account, and uninstalling removes them. Some programs'
+  built-in browsers (Steam's overlay, for one) refuse to open other apps:
+  use **Continue in the browser** there, or open the link in your normal
+  browser.
+
 ## 0.9.828 — 2026-09-29
 
 Send diagnostics to the server owner in one click, and going live logs where its time goes.

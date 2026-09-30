@@ -22,6 +22,18 @@
  * came out equal, the compile would be "passing" without the conditional
  * having been evaluated at all.
  *
+ * THE puca:// SCHEME (installer-url-scheme.nsh) is checked by what the
+ * installer would DO, not by grepping the macro file: each variant's harness
+ * goes through makensis's preprocessor (/PPO), which expands every
+ * !insertmacro, !define and ${If}, and the INSTALL section must write
+ * HKCU\Software\Classes\puca with a shell\open\command of
+ * `"$INSTDIR\<exe>" "%1"`, while the UNINSTALL section must remove that key
+ * only while it still names the same exe. <exe> is read from the configs the
+ * bundler merges (tauri.conf.json, the untracked tauri.release.json when it
+ * exists, then tauri.lite.conf.json for Lite): productName and mainBinaryName
+ * are install identity, and a name typed into this script would prove nothing
+ * about the installer that ships.
+ *
  * Needs makensis. That is not optional and it does not skip: a gate that
  * quietly no-ops when its tool is missing reports success for a file nobody
  * compiled. The Tauri CLI downloads NSIS to %LOCALAPPDATA%\tauri\NSIS on the
@@ -53,7 +65,10 @@ function findMakensis() {
 
 /**
  * A stand-in for Tauri's generated installer.nsi: the defines the hooks read,
- * the includes they rely on, and every hook actually inserted.
+ * the includes they rely on, and every hook actually inserted. In the
+ * template's ORDER: it includes the hook file BEFORE it defines PRODUCTNAME
+ * and MAINBINARYNAME, so a hook that used either outside a macro body fails
+ * here exactly as it would in the real build.
  */
 function harness(hooksFile, productName, mainBinaryName) {
     return [
@@ -64,9 +79,9 @@ function harness(hooksFile, productName, mainBinaryName) {
         'RequestExecutionLevel user',
         '!include LogicLib.nsh',
         '!include FileFunc.nsh',
+        `!include "${join(tauriDir, hooksFile).replace(/\\/g, '\\\\')}"`,
         `!define PRODUCTNAME "${productName}"`,
         `!define MAINBINARYNAME "${mainBinaryName}"`,
-        `!include "${join(tauriDir, hooksFile).replace(/\\/g, '\\\\')}"`,
         '',
         'Section "Install"',
         '  !insertmacro NSIS_HOOK_PREINSTALL',
@@ -124,6 +139,124 @@ if (!(full > pinned)) {
     process.exit(1);
 }
 console.log(`  ok  positive control: renaming build ${full} > pinned build ${pinned} instructions`);
+
+// ---------------------------------------------------------------------------
+// The puca:// scheme: what each installer WRITES and what its uninstaller
+// REMOVES, read out of the preprocessed script (every macro, define and
+// ${If} expanded), for the exe name the bundler will actually use.
+
+/**
+ * productName and mainBinaryName as `tauri build` sees them: each config in
+ * the order scripts/tauri-build.mjs passes it (the tracked base, the untracked
+ * release overlay when it exists, then the lite config for Lite). Both are
+ * top-level strings, so the JSON merge is simply "the last file that sets it".
+ */
+function bundlerIdentity(files) {
+    const id = {};
+    for (const f of files) {
+        const path = join(tauriDir, f);
+        if (!existsSync(path)) continue;
+        const c = JSON.parse(readFileSync(path, 'utf8'));
+        if (typeof c.productName === 'string') id.productName = c.productName;
+        if (typeof c.mainBinaryName === 'string') id.mainBinaryName = c.mainBinaryName;
+    }
+    if (!id.productName || !id.mainBinaryName) {
+        console.error(`FAIL: ${files.join(' + ')} set no productName/mainBinaryName — the exe the scheme must name is unknown`);
+        process.exit(1);
+    }
+    return id;
+}
+
+/** The harness through makensis's preprocessor only: nothing is compiled or run. */
+function preprocess(tag, hooksFile, { productName, mainBinaryName }) {
+    const nsi = join(dir, `${tag}-ppo.nsi`);
+    writeFileSync(nsi, '﻿' + harness(hooksFile, productName, mainBinaryName), 'utf8');
+    try {
+        return execFileSync(makensis, ['/PPO', nsi], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (e) {
+        console.error(`FAIL ${tag}: makensis could not preprocess ${hooksFile}\n`);
+        console.error((e.stdout || '') + (e.stderr || ''));
+        process.exit(1);
+    }
+}
+
+/** One section's lines, trimmed, from preprocessor output. */
+function sectionLines(ppo, name) {
+    const lines = ppo.split(/\r?\n/).map(l => l.trim());
+    const start = lines.indexOf(`Section "${name}"`);
+    const end = start < 0 ? -1 : lines.indexOf('SectionEnd', start);
+    return start < 0 || end < 0 ? null : lines.slice(start + 1, end);
+}
+
+const KEY = 'Software\\Classes\\puca';
+/**
+ * Every way the scheme can be wrong, as a list of problems (empty = right):
+ * written in the Install section, AFTER the other variant's uninstaller has
+ * run (MigrateRenamedInstall's ExecWait), with `"$INSTDIR\<exe>" "%1"`; never
+ * deleted there; and in the Uninstall section read back, compared with that
+ * SAME command and only then deleted — never written.
+ */
+function schemeProblems(ppo, exe) {
+    const problems = [];
+    const install = sectionLines(ppo, 'Install');
+    const uninstall = sectionLines(ppo, 'Uninstall');
+    if (!install || !uninstall) return ['no Install/Uninstall section in the preprocessed script'];
+    const command = `"$\\"$INSTDIR\\${exe}$\\" $\\"%1$\\""`;
+    const writes = {
+        protocol: `WriteRegStr HKCU "${KEY}" "URL Protocol" ""`,
+        icon: `WriteRegStr HKCU "${KEY}\\DefaultIcon" "" "$\\"$INSTDIR\\${exe}$\\",0"`,
+        command: `WriteRegStr HKCU "${KEY}\\shell\\open\\command" "" ${command}`,
+    };
+    for (const [what, line] of Object.entries(writes)) {
+        if (!install.includes(line)) problems.push(`Install does not write the ${what}: ${line}`);
+    }
+    const lastUninstallerRun = install.reduce((at, l, i) => (/^ExecWait '\$R0 \/S _\?=\$R1'/.test(l) ? i : at), -1);
+    if (lastUninstallerRun < 0) problems.push('Install runs no other install\'s uninstaller (MigrateRenamedInstall) — the ordering check below would be vacuous');
+    if (install.indexOf(writes.command) <= lastUninstallerRun) {
+        problems.push('Install writes the command BEFORE the other variant\'s uninstaller runs, which would then delete it');
+    }
+    if (install.some(l => l.startsWith(`DeleteRegKey HKCU "${KEY}"`))) problems.push('Install deletes the key');
+    const read = uninstall.indexOf(`ReadRegStr $R7 HKCU "${KEY}\\shell\\open\\command" ""`);
+    const compare = uninstall.findIndex(l => l.startsWith('StrCmp `$R7` `' + command.slice(1, -1) + '`'));
+    const del = uninstall.indexOf(`DeleteRegKey HKCU "${KEY}"`);
+    if (read < 0) problems.push('Uninstall does not read the registered command back');
+    if (compare < 0) problems.push(`Uninstall does not compare it with ${command}`);
+    if (del < 0) problems.push('Uninstall does not delete the key');
+    if (read >= 0 && compare >= 0 && del >= 0 && !(read < compare && compare < del)) {
+        problems.push('Uninstall deletes the key without first checking it names this install\'s exe');
+    }
+    if (uninstall.some(l => l.startsWith(`WriteRegStr HKCU "${KEY}`))) problems.push('Uninstall writes the key');
+    return problems;
+}
+
+const fullId = bundlerIdentity(['tauri.conf.json', 'tauri.release.json']);
+const liteId = bundlerIdentity(['tauri.conf.json', 'tauri.release.json', 'tauri.lite.conf.json']);
+if (fullId.mainBinaryName === liteId.mainBinaryName) {
+    console.error(`FAIL: full and Lite both name ${fullId.mainBinaryName}.exe — the scheme could not tell them apart`);
+    process.exit(1);
+}
+const ppo = {
+    full: preprocess('full', 'installer-hooks.nsh', fullId),
+    lite: preprocess('lite', 'installer-hooks-lite.nsh', liteId),
+};
+for (const [tag, id] of [['full', fullId], ['lite', liteId]]) {
+    const problems = schemeProblems(ppo[tag], `${id.mainBinaryName}.exe`);
+    if (problems.length) {
+        console.error(`FAIL ${tag}: the puca:// scheme for ${id.mainBinaryName}.exe (from the bundler's config):`);
+        for (const p of problems) console.error('  - ' + p);
+        process.exit(1);
+    }
+    console.log(`  ok  ${tag}: installs HKCU\\${KEY} -> "$INSTDIR\\${id.mainBinaryName}.exe" "%1", after the other install's uninstaller; uninstall removes it only while it names that exe`);
+}
+// Negative control: the same checks against the OTHER variant's exe must
+// fail, or they would pass a hook that registered the wrong binary.
+for (const [tag, other] of [['full', liteId], ['lite', fullId]]) {
+    if (schemeProblems(ppo[tag], `${other.mainBinaryName}.exe`).length === 0) {
+        console.error(`FAIL control: ${tag}'s preprocessed installer also passes for ${other.mainBinaryName}.exe — the scheme check proves nothing`);
+        process.exit(1);
+    }
+}
+console.log('  ok  control: each variant\'s scheme check FAILS for the other variant\'s exe');
 
 // And the thing this gate was written for: every call site passes an OLD_BINARY.
 const macro = readFileSync(join(tauriDir, 'installer-migrate.nsh'), 'utf8');
