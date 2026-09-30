@@ -135,7 +135,7 @@ describe('the inventory: every target="_blank" anchor, and why the router covers
         for (const a of blankAnchors) found[a.file] = (found[a.file] ?? 0) + 1;
         const listed = Object.fromEntries(INVENTORY.map(c => [c.file, c.count]));
         expect(found).toEqual(listed);
-        expect(blankAnchors).toHaveLength(11);
+        expect(blankAnchors).toHaveLength(12);         // 11, plus the web invite page's download link
     });
 
     it('no anchor opens itself: the router already has, in the capture phase', () => {
