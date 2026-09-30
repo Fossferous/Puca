@@ -354,6 +354,23 @@ describe('lifecycle', () => {
         expect(lines()).toContain('health stopped');
     });
 
+    it('reads the Windows mic levels at call start, each minute, and at call end, and only then', async () => {
+        // Chromium lowered the owner's mics to 7.8 % through auto gain
+        // (mic_levels.rs); these reads are how a return of that shows in puca.log.
+        const phases = () => invoke.mock.calls.filter(c => c[0] === 'log_mic_levels').map(c => (c[1] as { phase: string }).phase);
+        vi.useFakeTimers();
+        startHealthLog();
+        await healthLogSettled();
+        expect(phases()).toEqual(['start']);
+        await vi.advanceTimersByTimeAsync(HEALTH_INTERVAL_MS * 2 + 5000);
+        await healthLogSettled();
+        expect(phases()).toEqual(['start', 'check', 'check']);
+        stopHealthLog();
+        await vi.advanceTimersByTimeAsync(HEALTH_INTERVAL_MS * 2);
+        await healthLogSettled();
+        expect(phases()).toEqual(['start', 'check', 'check', 'end']);
+    });
+
     it('never runs twice when started twice', async () => {
         vi.useFakeTimers();
         startHealthLog();
