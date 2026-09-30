@@ -47,6 +47,7 @@ mod sidecar;
 // invoke as best-effort. stream_boost.rs depends on nothing gated.
 mod stream_boost;
 mod support_log;
+mod mic_levels;
 #[cfg(feature = "remote-control")]
 mod tunnel;
 #[cfg(feature = "remote-control")]
@@ -1615,6 +1616,7 @@ pub fn run() {
             stream_boost::set_stream_boost,
             log_stream_diag,
             support_log::read_support_log,
+            mic_levels::log_mic_levels,
             #[cfg(feature = "remote-control")]
             agent_ipc::agent_probe,
             #[cfg(feature = "remote-control")]

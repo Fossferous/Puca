@@ -2624,8 +2624,10 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         <div className="option-info">
                                             <label>Auto Gain Control</label>
                                             <span className="option-hint">
-                                                Automatically adjusts your microphone volume - increases gain when
-                                                you're quiet, decreases when you're loud. Disable for manual control.
+                                                Evens out how loud you sound in calls: louder when you're quiet,
+                                                softer when you're loud. In the desktop app it works inside Púca and
+                                                never changes your microphone's Windows input level. Disable for
+                                                manual control.
                                             </span>
                                         </div>
                                         <input

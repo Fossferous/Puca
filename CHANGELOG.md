@@ -4,6 +4,22 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+- **Púca no longer turns your microphone down in Windows.** With **Auto
+  gain control** on (the default), the desktop app's built-in browser
+  applied its own volume advice to the Windows input level of the
+  microphone you called with, and could leave it very low: 7.8 % was seen on
+  three microphones, one of them a headset that then barely picked anything
+  up. The desktop app now never changes a Windows microphone level. Auto gain
+  still evens out your voice inside Púca, and noise suppression and echo
+  cancellation are unchanged. A microphone that was already turned down stays
+  where it is: set it back in Windows (Settings → System → Sound → your
+  microphone → Input volume). Each call now writes every microphone's Windows
+  level to `puca.log` when it starts, whenever one changes, and when it ends,
+  with a warning if one ended the call at a different level.
+
 ## 0.9.829 — 2026-09-30
 
 Invite links can open the desktop app, invite links open Púca's own join screen, and Share shows it worked the moment you click.

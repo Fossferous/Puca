@@ -432,7 +432,8 @@ export function startHealthLog(): void {
         observer.observe({ type: 'longtask', buffered: false });
     } catch { observer = null; /* no long-task timing in this engine */ }
     send('health started');
-    timer = setInterval(() => { void sampleHealth().then(send); }, HEALTH_INTERVAL_MS);
+    micLevels('start');
+    timer = setInterval(() => { void sampleHealth().then(send); micLevels('check'); }, HEALTH_INTERVAL_MS);
 }
 
 export function stopHealthLog(): void {
@@ -444,4 +445,20 @@ export function stopHealthLog(): void {
     observer?.disconnect();
     observer = null;
     send('health stopped');
+    micLevels('end');
+}
+
+/** Every microphone's WINDOWS input level into puca.log (mic_levels.rs): at
+ *  call start, whenever one moves during the call, and at the end with a
+ *  warning if one finished the call lower or higher than it started. Chromium
+ *  lowered the owner's mics to 7.8 % through getUserMedia's auto gain until
+ *  WebRtcAllowInputVolumeAdjustment was disabled (tauri.conf.json); this is
+ *  how that coming back would show. Read-only on the Rust side. */
+function micLevels(phase: 'start' | 'check' | 'end'): void {
+    chain = chain.then(async () => {
+        try {
+            const { invoke } = await import('@tauri-apps/api/core');
+            await invoke('log_mic_levels', { phase });
+        } catch { /* an older shell has no such command */ }
+    });
 }

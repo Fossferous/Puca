@@ -146,6 +146,8 @@ sysinfo = "0.32"
 # proves the deadline fires. Win32_System_Services = the read-only SCM query in
 # rc_leftovers.rs, which detects a SovereignRemote service a previous FULL
 # install left behind (needed in the LITE build especially).
-windows = { version = "0.58", features = ["Win32_Media_Audio", "Win32_Devices_Display", "Win32_System_Com", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_System_SystemInformation", "Win32_Security_Cryptography", "Win32_Security", "Win32_System_Shutdown", "Win32_System_RemoteDesktop", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Services"] }
+# Win32_Media_Audio_Endpoints = IAudioEndpointVolume for mic_levels.rs, which
+# only READS each microphone's Windows level into puca.log (never sets it).
+windows = { version = "0.58", features = ["Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_Devices_Display", "Win32_System_Com", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_System_SystemInformation", "Win32_Security_Cryptography", "Win32_Security", "Win32_System_Shutdown", "Win32_System_RemoteDesktop", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Services"] }
 
 
