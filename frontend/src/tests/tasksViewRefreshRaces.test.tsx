@@ -84,6 +84,32 @@ const settle = async () => {
     for (let i = 0; i < 12; i++) await act(async () => { await new Promise(r => setTimeout(r, 0)); });
 };
 
+/**
+ * Wait in REAL time for work the event loop finishes by itself: sealing a
+ * note's text is WebCrypto, whose promises settle from Node's thread pool,
+ * not from the fake clock. Advancing fake time does not wait for it.
+ *
+ * WHY (0.9.830 CI, 2026-09-30): on a slow runner the seal was still running
+ * when "a note text save that never answers" advanced its clock, so the save
+ * had not gone out yet ("expected [] to have a length of 1"), and when it did
+ * it landed in the NEXT test's fake server, spending that test's held gate
+ * and bumping its revision ("expected 3 to be 2"). Both reproduced on demand
+ * by holding the first test's seal until the second test set its hold.
+ *
+ * setImmediate is not among the faked timers below, and performance.now is
+ * real, so this turns the real loop while the fake clock stands still.
+ * It gives up well inside vitest's 5 s test timeout: a timed-out test is
+ * killed inside act() and takes the tests after it down with it, where
+ * this failure names what never happened.
+ */
+async function untilReally(what: string, done: () => boolean, ms = 3_000) {
+    const end = performance.now() + ms;
+    while (!done()) {
+        if (performance.now() > end) throw new Error(`gave up after ${ms} ms waiting for ${what}`);
+        await act(async () => { await new Promise<void>(r => setImmediate(r)); });
+    }
+}
+
 interface Row {
     id: number; title: string; created_at: string; body: string | null; attachments: string | null;
     trashed_at: string | null; is_self: boolean; content_rev: number;
@@ -319,8 +345,11 @@ describe('Refresh and the writes the Tasks view does not make itself', () => {
         hold('PATCH /task-lists/1');
         await typeNote('Words that are still saving');
         await tap('Refresh');
+        // The save really goes out (its seal is real work), and only then
+        // does the clock move: the bound is timed from the tap, not from here.
+        await untilReally('the note text save to go out', () => bodySaves.length === 1);
         await act(async () => { await vi.advanceTimersByTimeAsync(SAVE_WAIT_MS - 1_000); });
-        // The save really went out, and Refresh is waiting for it.
+        // It went out once, and Refresh is waiting for it.
         expect(bodySaves).toHaveLength(1);
         expect(busy()).toBe(true);
         expect(toasts).toEqual([]);
@@ -349,7 +378,10 @@ describe('Refresh and the writes the Tasks view does not make itself', () => {
         setTimeout(landNote, SAVE_WAIT_MS - 5_000);
         await typeNote('Slow words');
         await tap('Refresh');
+        await untilReally('the note text save to go out', () => bodySaves.length === 1);
         await act(async () => { await vi.advanceTimersByTimeAsync(SAVE_WAIT_MS - 1_000); });
+        // Exactly this test's one save, landed when its gate opened.
+        expect(bodySaves).toHaveLength(1);
         expect(lists[0].content_rev).toBe(2);
         expect(toasts).toEqual([]);
         // The bound runs out at SAVE_WAIT_MS from the tap, not SAVE_WAIT_MS
