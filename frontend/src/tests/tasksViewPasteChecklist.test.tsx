@@ -54,6 +54,7 @@ import { setActiveIdentity } from '../api/e2ee';
 import { setMessageToastSink } from '../components/messageToastBus';
 import { MAX_TAKEN_ITEMS } from '../notes/model/noteContent';
 import { testIdentity, warmIdentities, WARM_TIMEOUT_MS } from './fixtures/identities';
+import { cryptoInFlight, trackCrypto } from './fixtures/cryptoInFlight';
 import {
     ASSISTANT_ADD, ASSISTANT_ANSWER, ASSISTANT_HTML, ASSISTANT_ITEMS, ASSISTANT_RENDERED_LINES, ASSISTANT_RENDERED_TEXT,
     ASSISTANT_SHOWN, ASSISTANT_STEPS, ASSISTANT_TITLE,
@@ -102,7 +103,9 @@ beforeAll(async () => {
     setActiveIdentity(await testIdentity(...ME));
 }, WARM_TIMEOUT_MS);
 
+let untrackCrypto: () => void = () => {};
 beforeEach(() => {
+    untrackCrypto = trackCrypto();
     if (!window.matchMedia) {
         window.matchMedia = ((q: string) => ({
             matches: false, media: q, onchange: null,
@@ -167,6 +170,7 @@ beforeEach(() => {
     root = createRoot(container);
 });
 afterEach(() => {
+    untrackCrypto();
     act(() => { root.unmount(); });
     container.remove();
     document.body.innerHTML = '';
@@ -421,10 +425,17 @@ describe('"Add a task…" takes a pasted checklist', () => {
         // real, which settles on the event loop (setImmediate is left real).
         vi.useFakeTimers({ toFake: ['setTimeout'] });
         act(() => { button(`Add ${MAX_TAKEN_ITEMS} items`).click(); });
-        for (let i = 0; i < 20 * MAX_TAKEN_ITEMS && itemPosts(1).length < MAX_TAKEN_ITEMS; i++) {
+        // Bounded by real time, not by a count of turns: how many turns a
+        // seal takes is the machine's business (fixtures/cryptoInFlight.ts). A
+        // count ran out at 12 of 200 when sealing was slower, and the 188
+        // creates still to come went on landing in the NEXT tests.
+        const giveUp = performance.now() + 20_000;
+        while (itemPosts(1).length < MAX_TAKEN_ITEMS && performance.now() < giveUp) {
             await act(async () => {
                 await vi.advanceTimersByTimeAsync(PACE_MS);
-                await new Promise(r => setImmediate(r));
+                // The create that pause let out seals for real: let it finish
+                // before the next pause is skipped.
+                do { await new Promise(r => setImmediate(r)); } while (cryptoInFlight() > 0);
             });
         }
         // One pause more: a 201st create, were there one, would go out now.
