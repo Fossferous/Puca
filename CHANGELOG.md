@@ -4,6 +4,84 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Added
+- **Clip sizes before you record.** Settings › Clips, the clip composer and
+  Server Settings' *Longest clip* now show what a saved clip will take in
+  your clip storage and how many fit, and warn before you record when a clip
+  would pass an in-app limit: 64 parts to post, 1 GiB to download, 768 MiB to
+  trim. The part count matches how clips are really cut, so a 4K clip longer
+  than 10:30 is flagged as too big to post. With *Arm automatically* on, each
+  Quality option says what it really records on your monitor. On a 1080p
+  screen, 720p 60 fps records 24 fps, and 480p records 24 fps at about
+  8 Mbps, more than the 1080p 30 fps default.
+- **A 480p 30 fps clip quality** (about 2 Mbps), listed first. It saves memory
+  when you arm by hand.
+- **Load more in My Devices.** Very large folders open a page at a time with
+  **Load more** instead of timing out and stalling every later file action.
+  If the folder changes while you page through it, you are told some items
+  may be missing, and **Refresh** gives an exact list. The row you are reading
+  stays put as more items load. A computer you control needs this update too.
+
+### Improved
+- **Move to and the member menus.** Right-click a member, choose **Move to**,
+  and the voice channels now open right under it, on desktop and phone.
+  Before, nothing visible opened. Anyone with Move Members can move or
+  disconnect a member in any voice channel from the member list, even when
+  not in voice themselves. The menu fits the window and scrolls, and long
+  channel names wrap. The server icon's menu (Notification Settings and the
+  rest) now fits a short window and a phone screen.
+- **Member profile popup.** Clicking someone in the member list opens a popup
+  that scrolls and stays inside the window, so **Manage Roles** is always
+  reachable. On a phone it opens as a sheet above the bottom bar.
+- **Every stream you watch stays audible across the app**, each at its own
+  volume and mute, through your Output Device and Output Volume. While a
+  stream is popped out, the small in-app player shows your next watched
+  stream instead of a second copy, and it hides when all of them are popped
+  out. This works in every browser and on the phone's docked strip. The
+  desktop app's log now records whether picture-in-picture works on the
+  machine.
+- **Attachments in short previews.** Replies, the Replying-to bar, pinned
+  messages, search results, Quote and the collection feed show an attachment
+  as a file icon and its name, never a long string of text, and the file's
+  key is never shown. **Edit** changes only the words and keeps the files.
+  Search finds attachments by file name (not spoilered ones), and no longer
+  matches every attachment for 'image' or 'file'. The Tasks drag grip is
+  faintly visible on desktop before you hover it.
+- **Fewer system-wide mouse hooks (Windows).** Púca hooks your mouse only
+  while a mouse button is bound as a global hotkey, or during remote control
+  with **Stop when I touch my mouse or keyboard** on. Starting and stopping
+  remote control no longer waits on the app's main thread.
+- **Clip buffer sized to the server.** It never holds more than the call's
+  server lets you post.
+- **Fullscreen apps on All Displays.** A viewer is now told when a fullscreen
+  app is holding the remote computer's pointer.
+
+### Fixed
+- **The speaking ring no longer lights for keyboard clicks the noise filter
+  removed.** It judged a 5 ms snapshot every 50 ms, so the tiny tick DeepFilter
+  leaves of a keystroke could light it although nobody heard anything. It now
+  measures about 43 ms of the audio actually sent (after noise suppression,
+  gain and mute) and still lights on the first loud tick, so quiet talkers
+  light as promptly as before. Noise the room really does hear, such as typing
+  in Off, Standard or RNNoise mode, still lights it.
+- **Android: downloading a clip no longer closes the app.** Large clips and
+  files are written in pieces as `<name>.part` and get their real name in
+  Documents/Puca only when complete. On Android 10 and older, refusing storage
+  access no longer asks twice or removes an earlier export.
+- **Desktop app: drag files onto a chat** where you can send messages. Before,
+  the drop did nothing. A link dragged in from another app can no longer
+  replace Púca with a web page.
+- **Púca Notes (Android) no longer says 'A new Púca Notes app is available'
+  after every update.** It asks only when a newer app brings something an
+  update cannot. A closed strip stays closed (including when the offered app
+  is older than the one you closed it for), and **Check for updates** does not
+  bring it back. The Version row shows the installed app, for example
+  '0.9.831 (app 0.9.827)'.
+- **Phones: swiping between panels with a member's profile open** no longer
+  moves the panel underneath and leaves the profile floating.
+
 ## 0.9.830 — 2026-09-30
 
 Púca no longer turns your microphone down in Windows.
