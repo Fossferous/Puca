@@ -1104,6 +1104,16 @@ export function Chat({ onLogout }: ChatProps) {
         showingMessageListRef.current = showingMessageList;
     }, [showingMessageList]);
 
+    /** The composer (and its attachment chips) exists only in a plain
+     *  conversation — not a collection, a checklist channel or the
+     *  All-checklists board. */
+    const composerShown = !currentCollection && !showAllChecklists && !currentChannel?.has_checklist;
+    /** A dropped file is encrypted and uploaded at once, so the chat may only
+     *  take one where the composer could SEND it: an open conversation, the
+     *  composer shown, SEND_MESSAGES granted. Anywhere else the drop is left
+     *  unclaimed, and api/fileDropGuard refuses it. */
+    const acceptsFileDrop = composerShown && canSendHere && (currentChannel != null || currentDM != null);
+
     // PiP (Picture-in-Picture) mode: shows chat with stream overlay
     const [showPip, setShowPip] = useState(false);
     // OS-level picture-in-picture: which stream (if any) is popped out into
@@ -5264,11 +5274,13 @@ export function Chat({ onLogout }: ChatProps) {
                     className="messages-container"
                     // Drag-and-drop attachments: any file dropped on the chat
                     // area goes through the same E2EE encrypt-and-upload path
-                    // as the attach picker (dropping used to be a silent no-op).
+                    // as the attach picker (dropping used to be a silent no-op)
+                    // — only where the composer could send it (acceptsFileDrop).
                     onDragOver={(e) => {
-                        if (e.dataTransfer?.types?.includes('Files')) e.preventDefault();
+                        if (acceptsFileDrop && e.dataTransfer?.types?.includes('Files')) e.preventDefault();
                     }}
                     onDrop={(e) => {
+                        if (!acceptsFileDrop) return;
                         const files = Array.from(e.dataTransfer?.files ?? []);
                         if (files.length === 0) return;
                         e.preventDefault();
@@ -5812,7 +5824,7 @@ export function Chat({ onLogout }: ChatProps) {
                     already looking at that exact conversation was never told.
                     One surface, so a transfer can never appear twice. */}
 
-                {!currentCollection && !showAllChecklists && !currentChannel?.has_checklist && (
+                {composerShown && (
                     <>
                     <ComposerAttachments
                         attachments={pendingAttachments}

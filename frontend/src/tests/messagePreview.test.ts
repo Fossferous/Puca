@@ -20,7 +20,9 @@ import {
     messagePreviewText,
     splitEditableContent,
     joinEditedContent,
+    messageSearchText,
 } from '../api/messagePreview';
+import { parseMessage, type Node } from '../utils/messageParser';
 import { buildOutgoingContent, type PendingAttachment } from '../api/composerAttachments';
 import { encodeClipRef } from '../api/clips/clipRef';
 
@@ -211,5 +213,84 @@ describe('splitEditableContent / joinEditedContent: Edit shows the text, keeps t
         const { text, refs } = splitEditableContent(`see ${IMG} here`);
         expect(text).toBe('see here');
         expect(refs).toEqual([IMG]);
+    });
+});
+
+describe('Edit keeps what the message RENDERS: spoilers stay hidden, code stays code', () => {
+    /** Every image node in the parsed message, with whether a spoiler hides it. */
+    function images(content: string): Array<{ alt: string; hidden: boolean }> {
+        const out: Array<{ alt: string; hidden: boolean }> = [];
+        const walk = (nodes: Node[], hidden: boolean) => {
+            for (const n of nodes) {
+                if (n.type === 'image') out.push({ alt: n.alt, hidden });
+                if ('children' in n) walk(n.children, hidden || n.type === 'spoiler');
+            }
+        };
+        walk(parseMessage(content), false);
+        return out;
+    }
+    const A = `![a.png](sovereign-enc:${ID}?k=${KEY}&m=image%2Fpng)`;
+
+    it('a picture inside a WIDER spoiler span (text first) is still hidden after an edit', () => {
+        const original = `||secret text ${A}||`;
+        expect(images(original)).toEqual([{ alt: 'a.png', hidden: true }]); // positive control
+        const { text, refs } = splitEditableContent(original);
+        expectNoSecrets(text);
+        const saved = joinEditedContent(text.replace('secret', 'hidden'), refs);
+        expect(images(saved)).toEqual([{ alt: 'a.png', hidden: true }]);
+    });
+
+    it('a picture OPENING a wider spoiler span (caption after) is still hidden, and no stray bars', () => {
+        const original = `||${A} caption||`;
+        expect(images(original)).toEqual([{ alt: 'a.png', hidden: true }]); // positive control
+        const { text, refs } = splitEditableContent(original);
+        expectNoSecrets(text);
+        // The caption is still the spoilered caption, not "caption||".
+        expect(text).not.toMatch(/^caption\|\|$/);
+        expect(parseMessage(text).some(n => n.type === 'spoiler')).toBe(true);
+        const saved = joinEditedContent(text.replace('caption', 'changed'), refs);
+        expect(images(saved)).toEqual([{ alt: 'a.png', hidden: true }]);
+    });
+
+    it('an unchanged wide-spoiler message still round-trips to the same rendering', () => {
+        for (const original of [`||secret text ${A}||`, `||${A} caption||`]) {
+            const { text, refs } = splitEditableContent(original);
+            expect(images(joinEditedContent(text, refs)), original).toEqual(images(original));
+        }
+    });
+
+    it('a ref inside a code span is TEXT: Edit leaves it where it is, so it never becomes a live attachment', () => {
+        for (const original of [`look \`${A}\` here`, `look\n\`\`\`\n${A}\n\`\`\`\nafter`]) {
+            expect(images(original), original).toEqual([]); // positive control: renders as code, not a picture
+            const { text, refs } = splitEditableContent(original);
+            expect(refs, original).toEqual([]);
+            expect(text, original).toBe(original);
+            expect(images(joinEditedContent(text, refs)), original).toEqual([]);
+        }
+        // A real attachment next to the code span still comes out of the box.
+        const mixed = splitEditableContent(`\`code\` ${A}`);
+        expect(mixed).toEqual({ text: '`code`', refs: [A] });
+    });
+});
+
+describe('messageSearchText: what search matches', () => {
+    it('is the text plus each visible file NAME, never the generated kind words', () => {
+        const content = `hi ${IMG} ![doc.pdf](sovereign-enc:2?k=K2&m=application%2Fpdf)`;
+        const s = messageSearchText(content);
+        expect(s).toContain('hi');
+        expect(s).toContain('photo.png');
+        expect(s).toContain('doc.pdf');
+        expect(s).not.toMatch(/\bimage\b|\bfile\b/i);
+        expectNoSecrets(s);
+    });
+
+    it('a spoilered file is not searchable by name (that would reveal it), nor by "spoiler"', () => {
+        const s = messageSearchText(`||![twist.png](sovereign-enc:1?k=${KEY}&m=image%2Fpng)||`);
+        expect(s).not.toContain('twist');
+        expect(s).not.toMatch(/spoiler/i);
+    });
+
+    it('a clip post is not hit by its generated label', () => {
+        expect(messageSearchText('sovereign-clip:abc')).not.toMatch(/clip/i);
     });
 });

@@ -14,8 +14,10 @@
  *
  * Turning it off hands file drops back to the page — including drops OUTSIDE
  * the chat's drop zone, which a browser answers by navigating to the file. In
- * the desktop app that would replace Púca with the file. installFileDropGuard
- * refuses those, and leaves every real drop zone alone.
+ * the desktop app that would replace Púca with the file. And it hands over
+ * LINKS from other apps too, which Chromium loads in place of the page.
+ * installFileDropGuard refuses both, and leaves every real drop zone (and a
+ * link dropped into a text box) alone.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -67,6 +69,13 @@ function dropZone() {
     return { el, seen };
 }
 
+it('main.tsx installs the guard at top level (the app page)', () => {
+    const main = readFileSync(join(__dirname, '..', 'main.tsx'), 'utf8');
+    expect(main).toMatch(/^installFileDropGuard\(window\)$/m);
+    // Positive control: the same matcher does not accept a commented-out call.
+    expect('// installFileDropGuard(window)').not.toMatch(/^installFileDropGuard\(window\)$/m);
+});
+
 describe('installFileDropGuard', () => {
     it('a file dropped OUTSIDE any drop zone is refused, not opened', () => {
         uninstall = installFileDropGuard(window);
@@ -98,13 +107,81 @@ describe('installFileDropGuard', () => {
         expect(zone.seen).toEqual(['dragover', 'drop']);
     });
 
-    it('drags that are not files (text, links, in-page reorders) are left alone', () => {
+    it('a plain-text drag is left alone (dropping text on a plain area does nothing anyway)', () => {
         uninstall = installFileDropGuard(window);
         const area = plainArea();
         const over = dragEvent('dragover', ['text/plain']);
         area.dispatchEvent(over.e);
         expect(over.e.defaultPrevented).toBe(false);
         expect(over.dt.dropEffect).toBe('copy');
+    });
+
+    // With Tauri's handler off, WebView2 accepts EVERY external drop (wry only
+    // calls SetAllowExternalDrop(false) when a native handler exists), and
+    // Chromium answers a LINK dropped on a non-editable area by loading it in
+    // the main frame — which would replace Púca with that web page, with no
+    // back button. Same failure as a file, so the same refusal.
+    it('a LINK dropped outside any drop zone is refused, not opened', () => {
+        uninstall = installFileDropGuard(window);
+        const area = plainArea();
+        const over = dragEvent('dragover', ['text/uri-list', 'text/plain']);
+        area.dispatchEvent(over.e);
+        expect(over.e.defaultPrevented).toBe(true);
+        expect(over.dt.dropEffect).toBe('none');
+        const drop = dragEvent('drop', ['text/uri-list', 'text/plain']);
+        area.dispatchEvent(drop.e);
+        expect(drop.e.defaultPrevented).toBe(true);
+    });
+
+    it('a link dropped INTO a text box still lands there as text', () => {
+        uninstall = installFileDropGuard(window);
+        for (const tag of ['textarea', 'input']) {
+            const box = document.createElement(tag);
+            document.body.appendChild(box);
+            cleanup.push(box);
+            const over = dragEvent('dragover', ['text/uri-list', 'text/plain']);
+            box.dispatchEvent(over.e);
+            expect(over.e.defaultPrevented, tag).toBe(false);
+            const drop = dragEvent('drop', ['text/uri-list', 'text/plain']);
+            box.dispatchEvent(drop.e);
+            expect(drop.e.defaultPrevented, tag).toBe(false);
+        }
+        // contenteditable (the note editors), including a child of one.
+        const editor = plainArea();
+        editor.setAttribute('contenteditable', 'true');
+        const inner = document.createElement('span');
+        editor.appendChild(inner);
+        const drop = dragEvent('drop', ['text/uri-list']);
+        inner.dispatchEvent(drop.e);
+        expect(drop.e.defaultPrevented).toBe(false);
+    });
+
+    it('a link dropped on a box that cannot take text (disabled composer, checkbox) is refused', () => {
+        uninstall = installFileDropGuard(window);
+        const boxes: HTMLElement[] = [];
+        const disabled = document.createElement('textarea');
+        disabled.disabled = true;
+        boxes.push(disabled);
+        const check = document.createElement('input');
+        check.type = 'checkbox';
+        boxes.push(check);
+        for (const box of boxes) {
+            document.body.appendChild(box);
+            cleanup.push(box);
+            const drop = dragEvent('drop', ['text/uri-list', 'text/plain']);
+            box.dispatchEvent(drop.e);
+            expect(drop.e.defaultPrevented, box.outerHTML).toBe(true);
+        }
+    });
+
+    it('a FILE dropped on a text box is still refused (Chromium would open it)', () => {
+        uninstall = installFileDropGuard(window);
+        const box = document.createElement('textarea');
+        document.body.appendChild(box);
+        cleanup.push(box);
+        const drop = dragEvent('drop', ['Files']);
+        box.dispatchEvent(drop.e);
+        expect(drop.e.defaultPrevented).toBe(true);
     });
 
     it('uninstalls cleanly', () => {

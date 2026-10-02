@@ -159,6 +159,18 @@ describe('search matches the preview text, not the attachment ref', () => {
         expect((await searchChannel(1, 'beach', isBlocked)).hits).toHaveLength(1);
     });
 
+    it('is not hit by the words the preview GENERATES ("image", "file", "spoiler")', async () => {
+        const spoiler = '||![twist.png](sovereign-enc:9?k=K9&m=image%2Fpng)||';
+        const doc = '![report.pdf](sovereign-enc:8?k=K8&m=application%2Fpdf)';
+        for (const needle of ['image', 'file', 'spoiler', 'twist']) {
+            channelPages = [[msg('1', NORMAL, ref), msg('2', NORMAL, spoiler), msg('3', NORMAL, doc)]];
+            expect((await searchChannel(1, needle, isBlocked)).hits, needle).toEqual([]);
+        }
+        // Positive control: the same word TYPED in a caption is found.
+        channelPages = [[msg('4', NORMAL, `an image of the file ${ref}`)]];
+        expect((await searchChannel(1, 'image', isBlocked)).hits).toHaveLength(1);
+    });
+
     it('the same holds in a DM', async () => {
         dmRows = [dm('1', NORMAL, ref)];
         expect((await searchDM('c1', NORMAL, 'sovereign', isBlocked)).hits).toEqual([]);

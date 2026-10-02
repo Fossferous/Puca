@@ -1,8 +1,9 @@
 /**
  * Message text -> preview. The ONE rule for every surface that re-shows a
  * message somewhere other than the message list: the reply snapshot and the
- * "Replying to" bar, the pinned list, search (results AND matching), Quote,
- * the collection feed — plus the split Edit uses.
+ * "Replying to" bar, the pinned list, search (results, and — through
+ * messageSearchText — matching), Quote, the collection feed — plus the split
+ * Edit uses.
  *
  * Why it exists: an attachment is stored inside the (E2EE) message as
  * markdown, `![photo.png](sovereign-enc:<id>?k=<file key>&m=<mime>&c=<fetch
@@ -53,6 +54,9 @@ interface RefMatch {
     segment: Exclude<PreviewSegment, { type: 'text' }>;
     /** Not cut off (closing paren present, or a bare ref) — only these are movable by Edit. */
     complete: boolean;
+    /** `raw` starts with `||` but its closing bars were not its own: those
+     *  opening bars begin a WIDER spoiler span that runs on past the ref. */
+    opensWiderSpoiler: boolean;
 }
 
 function safeDecode(s: string): string {
@@ -96,7 +100,7 @@ function findRefs(content: string): RefMatch[] {
         if (m[6] !== undefined) {
             // A bare ref is whole by construction (it ends at whitespace), so
             // Edit moves it out of the box like any other: its key is a key.
-            out.push({ start, end: start + raw.length, raw, segment: segmentFor(content, start, false, false, undefined, m[6]), complete: true });
+            out.push({ start, end: start + raw.length, raw, segment: segmentFor(content, start, false, false, undefined, m[6]), complete: true, opensWiderSpoiler: false });
             continue;
         }
         const opened = m[1] !== undefined;
@@ -111,6 +115,7 @@ function findRefs(content: string): RefMatch[] {
             raw,
             segment: segmentFor(content, start, opened, m[2] === '!', m[3], m[4]),
             complete,
+            opensWiderSpoiler: opened && !closedSpoiler,
         });
     }
     // Cut off before the scheme finished: `…![photo.png](sover`.
@@ -124,6 +129,7 @@ function findRefs(content: string): RefMatch[] {
             raw: cut[0],
             segment: segmentFor(content, start, cut[1] !== undefined, cut[2] === '!', cut[3], 'sovereign-enc:'),
             complete: false,
+            opensWiderSpoiler: false,
         });
     }
     return out;
@@ -186,11 +192,29 @@ export function messagePreviewSegments(content: string, max?: number): PreviewSe
     return out;
 }
 
-/** The preview as plain text: what search matches and Quote inserts. */
+/** The preview as plain text: what Quote inserts. */
 export function messagePreviewText(content: string, max?: number): string {
     return messagePreviewSegments(content, max)
         .map(s => (s.type === 'text' ? s.text : segmentLabel(s)))
         .join('');
+}
+
+/**
+ * What search matches: the text plus each attachment's file NAME. Not the
+ * labels the preview generates ("Image: ", "File: ", "Spoiler image", "Clip ·
+ * 0:30") — matching those made "image" or "file" hit every attachment — and
+ * not a spoilered file's name, which the spoiler exists to hide.
+ */
+export function messageSearchText(content: string): string {
+    return messagePreviewSegments(content)
+        .map(s => (s.type === 'text' ? s.text : s.type === 'attachment' && !s.spoiler ? ` ${s.name} ` : ' '))
+        .join('');
+}
+
+/** Where the message renders CODE (```fenced``` blocks and `inline` spans,
+ *  as utils/messageParser reads them): a ref there is text, not a file. */
+function codeRanges(content: string): Array<[number, number]> {
+    return Array.from(content.matchAll(/```[\s\S]*?```|`[^`]+`/g), m => [m.index, m.index + m[0].length] as [number, number]);
 }
 
 /**
@@ -200,7 +224,14 @@ export function messagePreviewText(content: string, max?: number): string {
  * which showed the key and let one stray keystroke break the attachment.
  */
 export function splitEditableContent(content: string): { text: string; refs: string[] } {
-    const refs = findRefs(content).filter(r => r.complete);
+    // A ref inside a code span renders as code, not a file: it stays in the
+    // box as the text it is, or saving would turn it into a live attachment.
+    const code = codeRanges(content);
+    const refs = findRefs(content)
+        .filter(r => r.complete && !code.some(([a, b]) => r.start >= a && r.start < b))
+        // Opening bars that begin a wider spoiler span stay with that span's
+        // text (moving them out left "caption||" behind).
+        .map(r => (r.opensWiderSpoiler ? { ...r, start: r.start + 2, raw: r.raw.slice(2) } : r));
     if (refs.length === 0) return { text: content, refs: [] };
     let text = '';
     let at = 0;
@@ -217,7 +248,15 @@ export function splitEditableContent(content: string): { text: string; refs: str
         at = r.end;
     }
     glue(content.slice(at));
-    return { text: text.trim(), refs: refs.map(r => r.raw) };
+    // A file that rendered hidden stays hidden: one whose spoiler was a wider
+    // span (`||text <ref>||`) leaves that span when it leaves the text, so it
+    // takes bars of its own. One with its own bars keeps them verbatim.
+    const kept = refs.map(r => {
+        const hidden = r.segment.type === 'attachment' && r.segment.spoiler;
+        const own = /^\|\|[\s\S]*\|\|$/.test(r.raw);
+        return hidden && !own ? `||${r.raw}||` : r.raw;
+    });
+    return { text: text.trim(), refs: kept };
 }
 
 /** Put an edited text back together with its refs, in the shape the composer

@@ -22,7 +22,7 @@
 import { getMessages, decryptChannelMessages } from './servers';
 import { getDMMessages, decryptDMMessages } from './dms';
 import { isUndecryptable } from './decryptMarkers';
-import { messagePreviewText } from './messagePreview';
+import { messageSearchText } from './messagePreview';
 import { parseServerTimestamp } from '../utils/serverTime';
 
 export interface SearchHit {
@@ -53,11 +53,12 @@ const MAX_SCANNED = 2000;
 const DM_MAX = 200;
 
 /** Match what a reader SEES (api/messagePreview.ts): an attachment is its
- *  kind and file name, not its `sovereign-enc:<id>?k=…` ref — matching the raw
+ *  file name, not its `sovereign-enc:<id>?k=…` ref — matching the raw
  *  markdown made "png", "sovereign" or a fragment of a file key hit every
- *  attachment message. */
+ *  attachment message — and not the preview's generated "Image:"/"File:"
+ *  words either, which would hit every attachment of that kind. */
 const matches = (content: string, needle: string) =>
-    messagePreviewText(content).toLowerCase().includes(needle);
+    messageSearchText(content).toLowerCase().includes(needle);
 
 /**
  * Walk a channel backwards through its history, newest first.
