@@ -1180,19 +1180,6 @@ mod tests {
         }
     }
 
-    /// THE AVAILABILITY TEST. A dispatcher that is slow (a viewer query that
-    /// takes 50 ms) must not slow the LISTENER: across a burst of separate
-    /// task writes the receive loop reads every one of THIS test's
-    /// notifications promptly (dropping what the dispatcher cannot take, and
-    /// flagging the overflow).
-    ///
-    /// What it deliberately does NOT assert: that the writes commit quickly,
-    /// or that Postgres' notification queue stays empty. A NOTIFY blocks a
-    /// commit only once the ~8 GB queue is full, so 400 writes commit
-    /// promptly and the queue reads ~0 even with nobody reading at all — both
-    /// assertions passed with a stalled listener, so they proved nothing. The
-    /// listener draining on time is what keeps that queue from ever filling in
-    /// production, and it is the one thing here a stalled listener fails
     /// `SELECT server_id FROM channels WHERE id = $1` is ALSO the channel
     /// handlers' text (create/update/delete_channel, require_manage_channels)
     /// and ws::voice_roster_audience's, all binding INT4. sqlx caches a
@@ -1238,6 +1225,19 @@ mod tests {
         let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(owner as i32).execute(&setup).await;
     }
 
+    /// THE AVAILABILITY TEST. A dispatcher that is slow (a viewer query that
+    /// takes 50 ms) must not slow the LISTENER: across a burst of separate
+    /// task writes the receive loop reads every one of THIS test's
+    /// notifications promptly (dropping what the dispatcher cannot take, and
+    /// flagging the overflow).
+    ///
+    /// What it deliberately does NOT assert: that the writes commit quickly,
+    /// or that Postgres' notification queue stays empty. A NOTIFY blocks a
+    /// commit only once the ~8 GB queue is full, so 400 writes commit
+    /// promptly and the queue reads ~0 even with nobody reading at all — both
+    /// assertions passed with a stalled listener, so they proved nothing. The
+    /// listener draining on time is what keeps that queue from ever filling in
+    /// production, and it is the one thing here a stalled listener fails
     /// (measured: a receive loop that awaits the dispatcher read ~180 of 400).
     #[tokio::test]
     async fn a_notify_burst_with_a_slow_hub_never_blocks_task_writes() {
