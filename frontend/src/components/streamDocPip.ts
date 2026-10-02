@@ -87,6 +87,23 @@ export function inAppPipPlan(
 }
 
 /**
+ * The float's "+N more" badge: the OTHER watched streams it could show, i.e.
+ * not the one it shows and not the ones in the OS window (same engine rules
+ * as inAppPipPlan). It used to be selected.length - 1, so a popped stream
+ * the float deliberately no longer shows was still counted as "more".
+ */
+export function inAppPipMore(
+    selected: readonly number[],
+    popped: readonly number[],
+    mode: PopoutMode | null,
+): number {
+    const { show } = inAppPipPlan(selected, popped, mode);
+    if (show === null) return 0;
+    const ignoresPops = mode === 'native' || mode === null;
+    return selected.filter(id => id !== show && (ignoresPops || !popped.includes(id))).length;
+}
+
+/**
  * Give the Doc-PiP document the app's styling: clone every <style> and
  * stylesheet <link> into its head. The window is same-origin and same-realm,
  * but starts with an EMPTY document — without this the grid renders unstyled

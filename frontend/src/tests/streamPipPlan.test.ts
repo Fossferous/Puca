@@ -10,7 +10,7 @@
  *    voices, and at what level. Before: one element, for the first stream.
  */
 import { describe, it, expect } from 'vitest';
-import { inAppPipPlan } from '../components/streamDocPip';
+import { inAppPipMore, inAppPipPlan } from '../components/streamDocPip';
 import { streamAudioPlan } from '../components/streamAudioRouting';
 
 describe('inAppPipPlan — the float never shows a stream that is in the OS window', () => {
@@ -52,6 +52,29 @@ describe('inAppPipPlan — the float never shows a stream that is in the OS wind
 
     it('nothing watched: nothing to show, nothing hidden', () => {
         expect(inAppPipPlan([], [5], 'docpip')).toEqual({ show: null, hidden: false });
+    });
+});
+
+describe('inAppPipMore — the float’s "+N more" counts what it could still show', () => {
+    it('nothing popped: every other watched stream', () => {
+        expect(inAppPipMore([5, 6, 7], [], 'docpip')).toBe(2);
+        expect(inAppPipMore([5], [], 'standard')).toBe(0);
+    });
+
+    it('a popped stream is in the OS window, not "more" in the float', () => {
+        expect(inAppPipMore([5, 6, 7], [5], 'docpip')).toBe(1);
+        expect(inAppPipMore([5, 6], [5], 'standard')).toBe(0);
+        expect(inAppPipMore([5, 6], [6], 'webkit')).toBe(0);
+    });
+
+    it('everything popped (float hidden): nothing', () => {
+        expect(inAppPipMore([5, 6], [5, 6], 'docpip')).toBe(0);
+    });
+
+    it('native and no-PiP keep the plain count, like the plan', () => {
+        expect(inAppPipMore([5, 6], [5], 'native')).toBe(1);
+        expect(inAppPipMore([5, 6], [], null)).toBe(1);
+        expect(inAppPipMore([], [], 'docpip')).toBe(0);
     });
 });
 

@@ -131,6 +131,19 @@ describe('which stream the float shows', () => {
         expect(pip().classList.contains('is-hidden')).toBe(false);
     });
 
+    it('the "+N more" badge counts only streams the float could still show, not the popped ones', () => {
+        const badge = () => pip().querySelector('.pip-stream-count')?.textContent ?? null;
+        STREAMS.set(3, { username: 'carol', stream: new MediaStream() });
+        selected = [1, 2, 3];
+        render([], 'docpip');
+        expect(badge()).toBe('+2 more'); // positive control: the badge is there
+        render([1], 'docpip');
+        expect(streamer()).toBe('bob');
+        expect(badge()).toBe('+1 more'); // carol; alice is in the OS window
+        render([1, 3], 'docpip');
+        expect(badge()).toBeNull(); // only bob is left, and he is the one shown
+    });
+
     it('its Pop out pops the stream it SHOWS', () => {
         const toggle = vi.fn();
         render([1], 'docpip', { toggle });

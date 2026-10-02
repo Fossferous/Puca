@@ -134,6 +134,32 @@ describe('element PiP: the outcome of every attempt', () => {
         expect(h.lines).toEqual(['[pip] standard entered']);
     });
 
+    it('webkit: the request is logged as REQUESTED; "entered" only when WebKit confirms the mode', async () => {
+        // webkitSetPresentationMode is fire-and-forget: WebKit can decline
+        // after the call returns, so the call itself proves nothing.
+        let mode = 'inline';
+        const proto = HTMLVideoElement.prototype as unknown as Record<string, unknown>;
+        Object.defineProperty(proto, 'webkitSupportsPresentationMode', {
+            value: (m: string) => m === 'picture-in-picture', configurable: true, writable: true,
+        });
+        Object.defineProperty(proto, 'webkitSetPresentationMode', {
+            value: () => { /* the mode flips later, if at all */ }, configurable: true, writable: true,
+        });
+        Object.defineProperty(proto, 'webkitPresentationMode', { get: () => mode, configurable: true });
+        try {
+            mountPopout();
+            metadata();
+            await flush();
+            expect(h.lines).toEqual(['[pip] webkit requested']);
+            mode = 'picture-in-picture';
+            act(() => { container.querySelector('video')!.dispatchEvent(new Event('webkitpresentationmodechanged')); });
+            await flush();
+            expect(h.lines).toEqual(['[pip] webkit requested', '[pip] webkit entered']);
+        } finally {
+            for (const k of ['webkitSupportsPresentationMode', 'webkitSetPresentationMode', 'webkitPresentationMode']) delete proto[k];
+        }
+    });
+
     it('no metadata inside the activation window is logged', async () => {
         vi.useFakeTimers();
         installElementPip(() => Promise.resolve({}));

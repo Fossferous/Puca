@@ -19,7 +19,7 @@ import {
 import './StreamPip.css';
 import { installBackgroundResumeAll } from './deviceStageResume';
 import { pipSupported } from './streamPopout.utils';
-import { docPipSupported, inAppPipPlan, type PopoutMode } from './streamDocPip';
+import { docPipSupported, inAppPipMore, inAppPipPlan, type PopoutMode } from './streamDocPip';
 
 interface StreamPipProps {
     onExpand: () => void;
@@ -81,6 +81,7 @@ export function StreamPip({ onExpand, onClose, docked = false, onStopWatching, p
     // Which stream to show: never one that is in the OS window.
     const plan = inAppPipPlan(selectedStreams, poppedStreams, popoutMode);
     const shown = plan.show;
+    const more = inAppPipMore(selectedStreams, poppedStreams, popoutMode);
 
     // Attach the shown stream to the video. Nothing shown (every watched
     // stream is in the OS window) unbinds it: an invisible float has no
@@ -267,10 +268,11 @@ export function StreamPip({ onExpand, onClose, docked = false, onStopWatching, p
                 />
             )}
 
-            {/* Stream count badge */}
-            {selectedStreams.length > 1 && (
+            {/* Stream count badge: streams this float could still show
+                (popped ones are in the OS window, not "more" here) */}
+            {more > 0 && (
                 <div className="pip-stream-count">
-                    +{selectedStreams.length - 1} more
+                    +{more} more
                 </div>
             )}
         </div>

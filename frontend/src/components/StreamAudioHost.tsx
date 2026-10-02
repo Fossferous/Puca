@@ -36,8 +36,11 @@ import { stageOwnsStreamAudio, streamAudioPlan, subscribeStageAudio } from './st
 import { installBackgroundResumeAll } from './deviceStageResume';
 
 function currentPlan() {
+    const selected = getSelectedStreams();
+    // Nothing watched: skip the storage reads (mutes, volumes, settings).
+    if (selected.length === 0) return [];
     return streamAudioPlan({
-        selected: getSelectedStreams(),
+        selected,
         ownId: getCurrentStreamingUserId(),
         stageOwns: stageOwnsStreamAudio(),
         mutes: getStreamMutes(),
@@ -159,10 +162,16 @@ export function StreamAudioHost() {
     const containerRef = useRef<HTMLDivElement>(null);
     const [host] = useState(createHostController);
 
+    // Only when the ELEMENT SET changes (or the container mounts/unmounts
+    // with it): this is an unmemoized child of Chat, which re-renders on
+    // every voice-user bump, and every other input to the plan already has
+    // its own subscription below (stream bus, stage claim, settingsChanged,
+    // devicechange). Running on every render redid the whole reconcile,
+    // storage reads included, for nothing.
     useLayoutEffect(() => {
         host.attach(containerRef.current);
         host.adopt();
-    });
+    }, [ids, host]);
 
     useEffect(() => {
         const onStreams = () => {

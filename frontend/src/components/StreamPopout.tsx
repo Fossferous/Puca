@@ -117,9 +117,17 @@ export function StreamPopout({ userId, onClose }: StreamPopoutProps) {
         }
         if (engine === 'webkit') {
             // One event for every mode change; only leaving PiP is ours. The
-            // first change after mount is the entry itself.
+            // first change after mount is the entry itself — and the only
+            // proof it happened (webkitSetPresentationMode is fire-and-forget),
+            // so that is where "entered" is logged, once.
+            let entered = false;
             const onMode = () => {
-                if ((video as WebKitVideo).webkitPresentationMode !== 'picture-in-picture') onCloseRef.current();
+                if ((video as WebKitVideo).webkitPresentationMode !== 'picture-in-picture') {
+                    onCloseRef.current();
+                } else if (!entered) {
+                    entered = true;
+                    logPipDiag('[pip] webkit entered');
+                }
             };
             video.addEventListener('webkitpresentationmodechanged', onMode);
             return () => video.removeEventListener('webkitpresentationmodechanged', onMode);
@@ -172,7 +180,9 @@ export function StreamPopout({ userId, onClose }: StreamPopoutProps) {
                 if (wk.webkitSupportsPresentationMode?.('picture-in-picture') && wk.webkitSetPresentationMode) {
                     try {
                         wk.webkitSetPresentationMode('picture-in-picture');
-                        logPipDiag('[pip] webkit entered');
+                        // Fire-and-forget: WebKit may still decline. "entered"
+                        // is logged by the mode-change listener above.
+                        logPipDiag('[pip] webkit requested');
                     } catch (e) { fail(e); }
                 } else {
                     fail('this video cannot enter presentation mode');

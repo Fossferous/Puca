@@ -142,7 +142,7 @@ describe('every watched stream, exactly once', () => {
         expect(audioFor(2)).toBeNull();
     });
 
-    it('system audio that arrives after the video is picked up', async () => {
+    it('system audio that arrives after the video is picked up when the stream bus re-emits (the mesh and SFU ontrack paths)', async () => {
         const late = share(3, { audio: false });
         selected = [3];
         await renderHost();
@@ -150,6 +150,40 @@ describe('every watched stream, exactly once', () => {
         late.addTrack({ kind: 'audio', id: 'a-3' } as MediaStreamTrack);
         await act(async () => { notify(); await flushMicrotasks(); });
         expect(tracksOf(audioFor(3))).toEqual(['a-3']);
+    });
+
+    // A REMOTE MediaStream fires addtrack/removetrack when the peer
+    // connection changes its tracks (the test MediaStream is not an
+    // EventTarget, so give this one a real event surface). No notify() here:
+    // the stream bus is not what is under test, the listener is.
+    function evented(s: MediaStream): MediaStream {
+        const et = new EventTarget();
+        Object.assign(s, {
+            addEventListener: et.addEventListener.bind(et),
+            removeEventListener: et.removeEventListener.bind(et),
+            dispatchEvent: et.dispatchEvent.bind(et),
+        });
+        return s;
+    }
+
+    it('a track the source stream ANNOUNCES (addtrack event, no stream-bus re-emit) is bound', async () => {
+        const late = evented(share(3, { audio: false }));
+        selected = [3];
+        await renderHost();
+        expect(tracksOf(audioFor(3))).toEqual([]);
+        late.addTrack({ kind: 'audio', id: 'a-3' } as MediaStreamTrack);
+        await act(async () => { late.dispatchEvent(new Event('addtrack')); await flushMicrotasks(); });
+        expect(tracksOf(audioFor(3))).toEqual(['a-3']);
+    });
+
+    it('a track the source stream drops (removetrack event) is unbound', async () => {
+        const src = evented(share(3));
+        selected = [3];
+        await renderHost();
+        expect(tracksOf(audioFor(3))).toEqual(['a-3']);
+        src.removeTrack(src.getAudioTracks()[0]);
+        await act(async () => { src.dispatchEvent(new Event('removetrack')); await flushMicrotasks(); });
+        expect(tracksOf(audioFor(3))).toEqual([]);
     });
 
     it('a stream no longer watched loses its element', async () => {
@@ -190,6 +224,44 @@ describe('the single-audible-path rule: the stage, when mounted, owns stream aud
         expect(stageOwnsStreamAudio()).toBe(false);
         expect(audioFor(1)!.muted).toBe(false);
         expect(audioFor(2)!.muted).toBe(false);
+    });
+});
+
+describe('cost on the Chat render path', () => {
+    // The host is an unmemoized child of Chat, which re-renders on every
+    // voice-user bump. A re-render that changes nothing must do no work: the
+    // plan reads localStorage (mutes, volumes, settings) and every other input
+    // has its own subscription. Before: a dep-less layout effect re-ran
+    // adopt()+reconcile() on EVERY render, watched streams or not.
+    async function rerenderReads(): Promise<number> {
+        const reads = vi.spyOn(localStorage, 'getItem');
+        reads.mockClear();
+        for (let i = 0; i < 3; i++) {
+            await act(async () => { root.render(<StreamAudioHost />); });
+        }
+        const n = reads.mock.calls.length;
+        reads.mockRestore();
+        return n;
+    }
+
+    it('with streams watched, a parent re-render that changes nothing reads no storage', async () => {
+        await renderHost();
+        expect(audioFor(1)).not.toBeNull(); // positive control: there is work it COULD redo
+        expect(await rerenderReads()).toBe(0);
+    });
+
+    it('with nothing watched, a parent re-render reads no storage either', async () => {
+        selected = [];
+        await renderHost();
+        expect(await rerenderReads()).toBe(0);
+    });
+
+    it('…and still picks up a newly watched stream (the element set is what re-adopts)', async () => {
+        selected = [];
+        await renderHost();
+        await act(async () => { selected = [1]; notify(); await flushMicrotasks(); });
+        expect(tracksOf(audioFor(1))).toEqual(['a-1']);
+        expect(audioFor(1)!.muted).toBe(false);
     });
 });
 

@@ -26,6 +26,8 @@ import { MemoryRouter } from 'react-router-dom';
 
 const h = vi.hoisted(() => ({
     tauri: false, servers: [] as unknown[], channels: [] as unknown[],
+    /** A phone: Chat's isMobile media query matches (the docked strip). */
+    coarse: false,
     watching: [] as number[],
     data: new Map<number, { username: string; stream: MediaStream | null }>(),
     popouts: [] as number[],
@@ -78,7 +80,10 @@ vi.mock('../components/NotesDesktopView', () => ({ NotesDesktopView: () => null 
 
 Object.defineProperty(window, 'matchMedia', {
     configurable: true,
-    value: (q: string) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} }),
+    value: (q: string) => ({
+        matches: h.coarse && q === '(pointer: coarse) and (max-width: 1024px)',
+        media: q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
+    }),
 });
 if (!Element.prototype.scrollTo) Element.prototype.scrollTo = function scrollTo() {};
 class NoObserver { observe() {} unobserve() {} disconnect() {} }
@@ -186,6 +191,7 @@ function installDocPip() {
 
 beforeEach(() => {
     h.tauri = false;
+    h.coarse = false;
     h.servers = [];
     h.channels = [];
     h.watching = [];
@@ -241,6 +247,41 @@ describe('the in-app float never shows a stream that is in the OS window', () =>
         await click(floatPopButton());
         expect(host!.querySelector('[data-testid="docpip"]')?.getAttribute('data-users')).toBe('5,6');
         expect(float()!.style.visibility).toBe('hidden');
+    });
+});
+
+describe('the phone’s docked strip follows the same rule (390x844, coarse pointer)', () => {
+    const strip = () => host!.querySelector<HTMLElement>('.stream-pip.docked');
+
+    it('popping the strip’s stream to element PiP shows the OTHER watched stream in the strip', async () => {
+        h.coarse = true;
+        installElementPip();
+        share(5);
+        share(6);
+        h.watching = [5, 6];
+        await intoChatWithFloat();
+        expect(strip()).not.toBeNull(); // positive control: the phone mounts the docked strip
+        expect(strip()!.querySelector('.pip-streamer')!.textContent).toBe('user-5');
+
+        await click(floatPopButton());
+        expect(host!.querySelector('[data-testid="popout"]')?.getAttribute('data-user')).toBe('5');
+        // Stream 5 is in the OS window; the strip showing it too is the bug.
+        expect(strip()!.classList.contains('is-hidden')).toBe(false);
+        expect(strip()!.querySelector('.pip-streamer')!.textContent).toBe('user-6');
+        expect((strip()!.querySelector('video')!.srcObject as MediaStream)).toBe(h.data.get(6)!.stream);
+    });
+
+    it('with every watched stream popped the strip collapses (.is-hidden)', async () => {
+        h.coarse = true;
+        installElementPip();
+        share(5);
+        h.watching = [5];
+        await intoChatWithFloat();
+        expect(strip()!.classList.contains('is-hidden')).toBe(false);
+
+        await click(floatPopButton());
+        expect(host!.querySelector('[data-testid="popout"]')?.getAttribute('data-user')).toBe('5');
+        expect(strip()!.classList.contains('is-hidden')).toBe(true);
     });
 });
 
