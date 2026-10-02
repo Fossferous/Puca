@@ -20,6 +20,9 @@ const BANNED = [
     /\bMediaRecorder\b/, /\bindexedDB\b/, /\blocalStorage\b/, /\bsessionStorage\b/,
     /\bshowSaveFilePicker\b/, /\bshowOpenFilePicker\b/, /\bgetDirectory\s*\(/, /\bnavigator\.storage\b/,
     /\bsaveAttachment\b/, /\btransfer_write\b/, /\battachment_save\b/, /\bcaches\b/,
+    // The phone's file writer. Saving a POSTED clip on Android streams through
+    // it from api/clipDownload.ts — outside this directory, on purpose.
+    /@capacitor\/filesystem/, /\bFilesystem\./, /\bsave\w*ToDevice\b/,
 ];
 
 describe('api/clips never touches disk', () => {
@@ -32,6 +35,13 @@ describe('api/clips never touches disk', () => {
             for (const re of BANNED) expect(src, `${f} matches ${re}`).not.toMatch(re);
         });
     }
+    it('the phone-writer patterns can fire: they match the module that does save a clip (positive control)', () => {
+        const outside = ['clipDownload.ts', 'saveToDevice.ts']
+            .map(f => stripComments(readFileSync(join(__dirname, '..', 'api', f), 'utf8')));
+        for (const re of BANNED.slice(-3)) {
+            expect(outside.some(src => re.test(src)), `${re} matches neither writer`).toBe(true);
+        }
+    });
     it('`new Blob(` appears only in the viewer-side fallback (clipPlayback.ts) and clipUpload (the request body)', () => {
         for (const f of files) {
             const src = readFileSync(join(dir, f), 'utf8');

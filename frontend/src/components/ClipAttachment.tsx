@@ -13,7 +13,8 @@
  *
  * Download: once a clip is posted, every required approver already agreed to
  * release it — so anyone who can see the message can save the original file
- * (downloadClipBytes fetches + decrypts every part and concatenates them,
+ * (api/clipDownload.ts fetches + decrypts every part — concatenated on
+ * desktop/web, streamed part by part to Documents/Puca on Android —
  * byte-for-byte the muxer's original output), same as the Play button already
  * decrypts it into a <video>. Refused for the same reason Play is: a manifest
  * whose parts are not a subset of what was actually approved (clipBadge
@@ -21,11 +22,11 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { decodeClipRef, type ClipManifest } from '../api/clips/clipRef';
-import { CLIP_DOWNLOAD_MAX_BYTES, createClipPlayer, downloadClipBytes, type ClipDownloadProgress, type ClipPlayerHandle } from '../api/clips/clipPlayback';
+import { CLIP_DOWNLOAD_MAX_BYTES, createClipPlayer, type ClipDownloadProgress, type ClipPlayerHandle } from '../api/clips/clipPlayback';
 import { clipBadge, clipBadgeText } from '../api/clips/clipConsentBadge';
 import { formatClock, formatMB } from '../api/clips/clipPresets';
 import type { ClipConsent } from '../api/servers';
-import { saveAttachment } from '../api/saveAttachment';
+import { saveClip } from '../api/clipDownload';
 import { applyOutputDevice } from './settingsStore';
 import { useOutputDeviceRef } from '../hooks/useOutputDeviceRef';
 import { ClipIcon, DownloadIcon, LockIcon, PlayIcon, ShieldCheckIcon, WarningIcon } from './Icons';
@@ -105,18 +106,17 @@ export function ClipAttachment({ href, consent }: ClipAttachmentProps) {
     };
 
     // Independent of Play: someone may want the file without watching inline
-    // first. Builds the exact original bytes in memory, then saves them the
-    // same way every other attachment does (api/saveAttachment.ts): a native
-    // command on the desktop shell — a bare `<a download>` is NOT honoured in
-    // the Tauri webview — and a transient anchor on the web/phone.
+    // first. api/clipDownload.ts saves the exact original bytes: on the
+    // desktop shell through the native command every attachment uses (a bare
+    // `<a download>` is NOT honoured in the Tauri webview), in a browser
+    // through a transient anchor, and in the Android app STREAMED part by
+    // part into Documents/Puca — building the whole clip and handing it to
+    // the filesystem plugin in one piece closed the app.
     const download = async () => {
         if (refused || tooLargeToDownload || dlState === 'downloading') return;
         setDlState('downloading'); setDlProgress(null); setDlError(null); setSavedWhere(null);
-        let url: string | null = null;
         try {
-            const blob = await downloadClipBytes(manifest, setDlProgress);
-            url = URL.createObjectURL(blob);
-            const res = await saveAttachment(url, `puca-clip-${manifest.clipId.slice(0, 8)}.mp4`);
+            const res = await saveClip(manifest, setDlProgress);
             if (res.cancelled) { setDlState('idle'); return; } // the Save As dialog was dismissed
             setSavedWhere(res.onDisk ? res.where : null);
             setDlState('saved');
@@ -125,10 +125,6 @@ export function ClipAttachment({ href, consent }: ClipAttachmentProps) {
             if (status === 404 || status === 410) { setDlState('gone'); return; }
             setDlError(e instanceof Error ? e.message : String(e));
             setDlState('failed');
-        } finally {
-            // The desktop path has already read the bytes; the web anchor was
-            // clicked synchronously. Revoke after a grace period either way.
-            if (url) { const u = url; setTimeout(() => URL.revokeObjectURL(u), 30_000); }
         }
     };
 

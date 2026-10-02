@@ -1,0 +1,137 @@
+/**
+ * An in-memory stand-in for @capacitor/filesystem that records every BRIDGE
+ * call the way Android receives it: each writeFile/appendFile is one
+ * `postMessage` whose `data` string the native side parses whole, so the
+ * length of that string is what has to stay bounded (the clip-download crash
+ * was one 128 MB string). writeFile truncates, appendFile extends, and each
+ * call's base64 is decoded on its own — as FilesystemPlugin does — so the
+ * file contents here are exactly what a phone would hold.
+ *
+ * Failures are modelled on the plugin too (@capacitor/filesystem 8.1.3 over
+ * ionfilesystem-android 1.1.0):
+ *  - a STORAGE PERMISSION DENIAL (code OS-PLUG-FILE-0007, from
+ *    runWithPermission's prompt on Android 10 and older) is decided before
+ *    the operation runs: nothing on disk changes;
+ *  - any other writeFile failure happens INSIDE IONFILELocalFilesHelper
+ *    .saveFile, which creates the file (File.exists → createFile) before it
+ *    opens the stream — so a failed writeFile leaves a 0-byte file behind;
+ *  - rename is IONFILELocalFilesHelper.renameFile: the source must exist,
+ *    and the DESTINATION IS DELETED FIRST, then File.renameTo.
+ */
+export interface BridgeCall {
+    op: 'writeFile' | 'appendFile' | 'deleteFile' | 'rename';
+    /** The file the call names (rename: the source). */
+    path: string;
+    /** rename only: the destination. */
+    to?: string;
+    /** Length of the `data` string that crossed the bridge (0 for delete/rename). */
+    chars: number;
+    directory?: string;
+    encoding?: string;
+}
+
+/** The plugin's "user denied the storage permission" rejection. */
+export const PERMISSION_DENIED = 'OS-PLUG-FILE-0007';
+
+/** An error shaped like a Capacitor plugin rejection: `code` is what the
+ *  native side passed to call.reject(message, code). */
+export function pluginError(code: string, message = code): Error {
+    return Object.assign(new Error(message), { code });
+}
+
+type WriteOpts = { path: string; data: string; directory?: string; encoding?: string; recursive?: boolean };
+
+/**
+ * `latencyMs`: each bridge call takes effect only after this delay (a macrotask
+ * per call, as a native round trip is), so two saves running at once really do
+ * interleave. 0, the default, applies every call at once.
+ */
+export function fakeCapacitorFs(opts: { latencyMs?: number } = {}) {
+    const latency = opts.latencyMs ?? 0;
+    const tick = () => (latency > 0 ? new Promise<void>(r => setTimeout(r, latency)) : Promise.resolve());
+    const files = new Map<string, Buffer[]>();
+    const calls: BridgeCall[] = [];
+    /** Return an Error to make the Nth (1-based) write/append call reject. */
+    let failWrite: ((n: number, op: BridgeCall['op']) => Error | null) | null = null;
+    let writes = 0;
+
+    const decode = (o: WriteOpts): Buffer => {
+        if (o.encoding) return Buffer.from(o.data, 'utf8');
+        // Real base64, one call at a time: a slice that is not a whole
+        // number of quads would decode wrong on the device.
+        if (o.data.length % 4 !== 0) throw new Error(`not standalone base64 (${o.data.length} chars)`);
+        return Buffer.from(o.data, 'base64');
+    };
+    const put = (op: 'writeFile' | 'appendFile', o: WriteOpts) => {
+        calls.push({ op, path: o.path, chars: o.data.length, directory: o.directory, encoding: o.encoding });
+        writes++;
+        const err = failWrite?.(writes, op);
+        if (err) {
+            // saveFile got as far as creating the file before it failed.
+            const denied = (err as { code?: unknown }).code === PERMISSION_DENIED;
+            if (!denied && op === 'writeFile' && !files.has(o.path)) files.set(o.path, []);
+            throw err;
+        }
+        const bytes = decode(o);
+        if (op === 'writeFile') files.set(o.path, [bytes]);
+        else {
+            const f = files.get(o.path);
+            if (f) f.push(bytes); else files.set(o.path, [bytes]);
+        }
+    };
+
+    const api = {
+        writeFile: async (o: WriteOpts) => { await tick(); put('writeFile', o); return { uri: `file:///${o.path}` }; },
+        appendFile: async (o: WriteOpts) => { await tick(); put('appendFile', o); },
+        deleteFile: async (o: { path: string; directory?: string }) => {
+            await tick();
+            calls.push({ op: 'deleteFile', path: o.path, chars: 0, directory: o.directory });
+            if (!files.delete(o.path)) throw new Error(`deleteFile: ${o.path} does not exist`);
+        },
+        rename: async (o: { from: string; to: string; directory?: string; toDirectory?: string }) => {
+            await tick();
+            calls.push({ op: 'rename', path: o.from, to: o.to, chars: 0, directory: o.directory });
+            const src = files.get(o.from);
+            if (!src) throw pluginError('OS-PLUG-FILE-0008', `rename: ${o.from} does not exist`);
+            if ((o.toDirectory ?? o.directory) !== o.directory) throw new Error('rename across directories is not modelled');
+            files.delete(o.to); // renameFile deletes the destination first
+            files.delete(o.from);
+            files.set(o.to, src);
+        },
+    };
+
+    return {
+        api,
+        files,
+        calls,
+        /** The whole file as one buffer, or undefined. */
+        read(path: string): Buffer | undefined {
+            const f = files.get(path);
+            return f ? Buffer.concat(f) : undefined;
+        },
+        failOn(fn: ((n: number, op: BridgeCall['op']) => Error | null) | null) { failWrite = fn; },
+        reset() { files.clear(); calls.length = 0; writes = 0; failWrite = null; },
+        /** Longest `data` string any single bridge call carried. */
+        maxChars(): number { return calls.reduce((m, c) => Math.max(m, c.chars), 0); },
+        /** Bytes held on the fake disk across every file, right now. */
+        bytesOnDisk(): number {
+            let n = 0;
+            for (const f of files.values()) for (const b of f) n += b.length;
+            return n;
+        },
+    };
+}
+
+/** Deterministic, non-repeating-ish bytes so a dropped, duplicated or
+ *  reordered slice cannot compare equal by accident. */
+export function patternBytes(n: number, seed = 1): Uint8Array<ArrayBuffer> {
+    const out = new Uint8Array(n);
+    let x = seed >>> 0 || 1;
+    for (let i = 0; i < n; i++) {
+        x ^= x << 13; x >>>= 0;
+        x ^= x >>> 17;
+        x ^= x << 5; x >>>= 0;
+        out[i] = x & 0xff;
+    }
+    return out;
+}

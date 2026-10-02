@@ -57,26 +57,202 @@ export function timestampedName(name: string, now: Date = new Date()): string {
     return `${safe}-${stamp}`;
 }
 
+/** A DeviceWriteError, not a bare Error: "this APK has no filesystem plugin"
+ *  is a can't-write-here failure, and a caller that maps DeviceWriteError to
+ *  the device message (api/clipDownload.ts) must not show the raw text. */
 async function filesystem() {
     const { Capacitor } = await import('@capacitor/core');
     if (Capacitor.getPlatform() !== 'android' || !Capacitor.isPluginAvailable('Filesystem')) {
-        throw new Error('this app cannot write files on this platform');
+        throw new DeviceWriteError(new Error('this app cannot write files on this platform'));
     }
     return import('@capacitor/filesystem');
 }
 
+/*
+ * EVERY WRITE GOES OUT IN BOUNDED SLICES. Each Filesystem call is one bridge
+ * message: Capacitor JSON-stringifies it, and Android's MessageHandler parses
+ * the whole string on the UI thread, then the plugin decodes it — three
+ * copies of the payload on the Java heap, whose size is fixed per app (192 MB
+ * on a stock emulator, no largeHeap). Its `catch (Exception)` cannot catch an
+ * OutOfMemoryError, so an oversized message does not fail the call: Android
+ * KILLS THE APP. That is what tapping Download on a 92 MB clip did (one
+ * 128,625,344-character base64 string). Somewhat smaller files hit the caught
+ * half instead: a 0-byte file and a misleading error.
+ *
+ * So: each slice is at most DEVICE_WRITE_CHUNK_CHARS characters — a few tens
+ * of MB of Java heap at most, whatever the file's size.
+ *
+ * A file that fits in ONE slice is one writeFile to its real name, exactly as
+ * before slicing existed (the plugin media-scans it, so a saved photo shows in
+ * the gallery). A file that needs more is written as `<name>.part` — writeFile
+ * for the first slice (create / truncate), appendFile for the rest — and
+ * renamed to its real name only once complete. Several calls take seconds,
+ * the plugin media-scans after every one, and JS can die part-way (the app
+ * killed in the background, a crash): what is then left is an obvious
+ * `.part`, never a truncated mp4 wearing the real name and showing up in
+ * Files and the gallery as if it were the clip. To know which case it is, the
+ * first slice is held back until the second arrives (or the producer ends).
+ *
+ * A failure deletes what THIS save created — the .part, or the real name when
+ * its one writeFile failed after the plugin had created the file (saveFile
+ * creates it before it writes, so a failed write leaves a 0-byte file) — and
+ * nothing else, ever. Except after a storage-permission DENIAL (Android 10 and
+ * older): the plugin answers that before touching the disk, so there is
+ * nothing to delete, and a deleteFile would only ask for the permission AGAIN
+ * — and, if granted, delete whatever already wore the name.
+ *
+ * Slices are as LARGE as is safe, not as small as possible: every call is a
+ * stop-and-wait bridge round trip and, on external storage (Documents
+ * included), a MediaScannerConnection.scanFile of the file
+ * (FilesystemPlugin.kt). The P2P download sink (capacitorSink.ts) has shipped
+ * 4 MiB-raw writes since its throughput audit; 3 MiB raw stays under that.
+ *
+ * Slicing makes one save several calls, so two saves of the same name at
+ * once (the name is unique per SECOND; two attachments both called
+ * image.jpg) would interleave — B's writeFile truncating A's file mid-append
+ * — and both would report the same corrupt file. A name in use by a save
+ * still in flight is never reused: the later save gets a -2, -3, … suffix.
+ */
+
+/** Raw bytes per bridge call: 3 MiB. A multiple of 3, so every slice but the
+ *  last is whole base64 quads with no padding, and its base64 is exactly
+ *  DEVICE_WRITE_CHUNK_CHARS (4 MiB) long. */
+export const DEVICE_WRITE_CHUNK_BYTES = 3 * 1024 * 1024;
+/** Characters per bridge call, text and base64 alike. */
+export const DEVICE_WRITE_CHUNK_CHARS = (DEVICE_WRITE_CHUNK_BYTES / 3) * 4;
+
+/** A bridge write failed — as opposed to whatever produced the bytes (a
+ *  fetch, a decryption), which a caller may want to report differently. */
+export class DeviceWriteError extends Error {
+    /** What the filesystem plugin rejected with. */
+    readonly reason: unknown;
+    constructor(reason: unknown) {
+        super(`could not write to this device: ${reason instanceof Error ? reason.message : String(reason)}`);
+        this.name = 'DeviceWriteError';
+        this.reason = reason;
+    }
+}
+
+type Fs = Awaited<ReturnType<typeof filesystem>>;
+
+/** Documents-relative paths a save is writing right now. */
+const writing = new Set<string>();
+
+/** `name`, or `name-2.ext`, `name-3.ext`, … — the first not being written by
+ *  another save in flight. Synchronous: the check and the claim happen with
+ *  no await between them. */
+function claimFileName(folder: string, name: string): string {
+    const dot = name.lastIndexOf('.');
+    const [stem, ext] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ''];
+    let file = name;
+    for (let n = 2; writing.has(`${folder}/${file}`); n++) file = `${stem}-${n}${ext}`;
+    writing.add(`${folder}/${file}`);
+    return file;
+}
+
+/**
+ * One file in Documents, written by `fill` in bounded slices. `fill` gets a
+ * `put` that takes ONE slice (at most DEVICE_WRITE_CHUNK_CHARS characters).
+ * Whatever `fill` throws — its own error or a DeviceWriteError from `put` —
+ * deletes what this save created (see above) and is rethrown.
+ */
+async function writeInSlices(
+    fs: Fs, folder: string, name: string, utf8: boolean,
+    fill: (put: (data: string) => Promise<void>) => Promise<void>,
+): Promise<SaveResult> {
+    const file = claimFileName(folder, safeDeviceFileName(name));
+    const path = `${folder}/${file}`;
+    try {
+        return await writeClaimed(fs, folder, file, utf8, fill);
+    } finally {
+        writing.delete(path);
+    }
+}
+
+/** The plugin's rejection code for "the user denied the storage permission"
+ *  (FilesystemErrors.filePermissionsDenied: OS-PLUG-FILE-0007). */
+const PERMISSION_DENIED = 'OS-PLUG-FILE-0007';
+
+function permissionDenied(e: unknown): boolean {
+    const reason = e instanceof DeviceWriteError ? e.reason : e;
+    return typeof reason === 'object' && reason !== null && (reason as { code?: unknown }).code === PERMISSION_DENIED;
+}
+
+async function writeClaimed(
+    fs: Fs, folder: string, file: string, utf8: boolean,
+    fill: (put: (data: string) => Promise<void>) => Promise<void>,
+): Promise<SaveResult> {
+    const { Filesystem, Directory, Encoding } = fs;
+    const directory = Directory.Documents;
+    const path = `${folder}/${file}`;
+    const partPath = `${path}.part`;
+    const encoding = utf8 ? { encoding: Encoding.UTF8 } : {};
+    const bridge = async (call: () => Promise<unknown>) => {
+        try { await call(); } catch (e) { throw new DeviceWriteError(e); }
+    };
+    /** The first slice, until a second shows the file needs several calls. */
+    let held: string | null = null;
+    /** Writing `<name>.part` (several calls) rather than the real name. */
+    let streaming = false;
+    /** The path a failure has to clean up — set BEFORE the call that may
+     *  create it, since a writeFile that fails can still leave a 0-byte file. */
+    let created: string | null = null;
+    const put = async (data: string) => {
+        if (!streaming) {
+            if (held === null) { held = data; return; }
+            streaming = true;
+            created = partPath;
+            const first = held;
+            held = null;
+            await bridge(() => Filesystem.writeFile({ path: partPath, data: first, directory, recursive: true, ...encoding }));
+        }
+        await bridge(() => Filesystem.appendFile({ path: partPath, data, directory, ...encoding }));
+    };
+    try {
+        await fill(put);
+        if (streaming) {
+            // Same directory, so the plugin's File.renameTo; it deletes an
+            // existing file of that name first, as writeFile's truncate did.
+            await bridge(() => Filesystem.rename({ from: partPath, to: path, directory, toDirectory: directory }));
+        } else {
+            // One call: the whole file (an empty file still has to exist).
+            created = path;
+            const data = held ?? '';
+            await bridge(() => Filesystem.writeFile({ path, data, directory, recursive: true, ...encoding }));
+        }
+    } catch (e) {
+        if (created && !permissionDenied(e)) {
+            const doomed = created;
+            try { await Filesystem.deleteFile({ path: doomed, directory }); } catch { /* nothing there */ }
+        }
+        throw e;
+    }
+    return { where: `Documents/${folder}/${file}`, onDisk: true };
+}
+
+/** Text in slices of at most DEVICE_WRITE_CHUNK_CHARS UTF-16 units, never
+ *  cutting between the halves of a surrogate pair (each slice is encoded to
+ *  UTF-8 on its own, so a split pair would become two U+FFFD). */
+export function textSlices(text: string, max: number = DEVICE_WRITE_CHUNK_CHARS): string[] {
+    const out: string[] = [];
+    for (let i = 0; i < text.length;) {
+        let end = Math.min(i + max, text.length);
+        if (end < text.length && end - i > 1) {
+            const c = text.charCodeAt(end - 1);
+            if (c >= 0xd800 && c <= 0xdbff) end--; // a high surrogate: keep it with its pair
+        }
+        out.push(text.slice(i, end));
+        i = end;
+    }
+    return out;
+}
+
 /** Documents/<folder>/<name>, as text. */
 export async function saveTextToDevice(folder: string, name: string, text: string): Promise<SaveResult> {
-    const { Filesystem, Directory, Encoding } = await filesystem();
-    const file = safeDeviceFileName(name);
-    await Filesystem.writeFile({
-        path: `${folder}/${file}`,
-        data: text,
-        directory: Directory.Documents,
-        encoding: Encoding.UTF8,
-        recursive: true,
+    const fs = await filesystem();
+    return writeInSlices(fs, folder, name, true, async (put) => {
+        for (const slice of textSlices(text)) await put(slice);
     });
-    return { where: `Documents/${folder}/${file}`, onDisk: true };
 }
 
 /** Bytes as base64 (what Filesystem.writeFile takes for binary). Chunked:
@@ -90,18 +266,29 @@ export function bytesToBase64(bytes: Uint8Array): string {
     return btoa(bin);
 }
 
+/**
+ * Documents/<folder>/<name>, from bytes that arrive in pieces. `fill` gets a
+ * `write` for each piece — any size; it is sliced here — so a producer that
+ * decrypts one part at a time (a clip) never holds the whole file. This is the
+ * one binary write path on a phone.
+ */
+export async function saveStreamToDevice(
+    folder: string, name: string,
+    fill: (write: (bytes: Uint8Array) => Promise<void>) => Promise<void>,
+): Promise<SaveResult> {
+    const fs = await filesystem();
+    return writeInSlices(fs, folder, name, false, (put) => fill(async (bytes) => {
+        for (let i = 0; i < bytes.length; i += DEVICE_WRITE_CHUNK_BYTES) {
+            await put(bytesToBase64(bytes.subarray(i, i + DEVICE_WRITE_CHUNK_BYTES)));
+        }
+    }));
+}
+
 /** Documents/<folder>/<name>, from a blob URL (a decrypted attachment). */
 export async function saveBytesToDevice(folder: string, name: string, blobUrl: string): Promise<SaveResult> {
-    const { Filesystem, Directory } = await filesystem();
-    const file = safeDeviceFileName(name);
-    const bytes = new Uint8Array(await (await fetch(blobUrl)).arrayBuffer());
-    await Filesystem.writeFile({
-        path: `${folder}/${file}`,
-        data: bytesToBase64(bytes),
-        directory: Directory.Documents,
-        recursive: true,
+    return saveStreamToDevice(folder, name, async (write) => {
+        await write(new Uint8Array(await (await fetch(blobUrl)).arrayBuffer()));
     });
-    return { where: `Documents/${folder}/${file}`, onDisk: true };
 }
 
 /** What to tell someone when the write failed. Names the Android 10

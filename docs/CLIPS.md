@@ -189,10 +189,21 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
   (`downloadClipBytes`, tested round-trip). It is refused for the same
   reason Play is: a manifest whose parts are not a subset of what was
   actually approved — and above 1 GiB (`CLIP_DOWNLOAD_MAX_BYTES`), because
-  the download is built whole in the renderer's memory. On desktop it is
-  written through the native `attachment_save` command (a bare `<a
-  download>` is not honoured in the Tauri webview); on the web it is a
-  transient anchor.
+  on desktop and the web the download is built whole in the renderer's
+  memory. On desktop it is written through the native `attachment_save`
+  command (a bare `<a download>` is not honoured in the Tauri webview); on
+  the web it is a transient anchor. In the Android app it is STREAMED into
+  `Documents/Puca/puca-clip-<id>-<timestamp>.mp4`: one part fetched,
+  decrypted and written at a time (`forEachClipPart` →
+  `api/clipDownload.ts` → `saveStreamToDevice`), each bridge call at most
+  4 MiB of base64 (3 MiB of the file), into `<name>.part`, renamed to the
+  real name only once complete — the plugin media-scans after every call,
+  and a half-written mp4 under the real name, left by an app killed
+  mid-download, would look like the clip. Building the whole clip and handing it to the filesystem
+  plugin in one piece closed the app (a 2-minute 1080p clip was one 128 MB
+  string; Android's bridge handler ran out of memory on the UI thread). The
+  writer lives outside `api/clips/`, which `clipNoDiskWrite.test.ts` keeps
+  free of every file API, the Capacitor filesystem included.
 
 ## What is NOT guaranteed — read this
 
