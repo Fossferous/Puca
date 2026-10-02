@@ -15,19 +15,30 @@
  * (Chromium had been holding it at 7.8 %, 22 dB lower). See
  * tests/speakingIndicatorSent.test.ts and e2e/vad-filtered-real-browser.mjs.
  *
- * Two changes, each cheap:
- *  - the window covers the tick (vadWindowSize: 2048 samples ≈ 43 ms at
- *    48 kHz), so a tick's energy is averaged over the time it actually
- *    occupies instead of sampled at random phase;
- *  - ON needs the level over the threshold on ATTACK_TICKS consecutive ticks
- *    (~50-100 ms of sustained sound). A syllable lasts longer than that; a
- *    click does not. OFF is unchanged: RELEASE_TICKS quiet ticks (200 ms).
+ * The change: the window covers the tick (vadWindowSize: 2048 samples
+ * ≈ 43 ms at 48 kHz), so a tick's energy is averaged over the time it actually
+ * occupies instead of sampled at random phase. ON stays instant — one tick
+ * over the threshold — because that tick now means the sent track carried
+ * speech-level energy averaged over 43 ms, which the room heard. OFF is
+ * unchanged: RELEASE_TICKS quiet ticks (200 ms).
+ *
+ * Why not also require two loud ticks: it adds little against the residue and
+ * costs quiet talkers. The window alone keeps the residue dark. Production
+ * DeepFilter wasm offline, 20 s of clipped keys / mouse clicks / thocks at
+ * 8-12 per second, five tick phases: the 5 ms snapshot lit up to 13 times,
+ * the 43 ms window at most once (for keys and clicks, 0.3 s in, where the
+ * first keystroke reached a cold model and the sent track did carry it at
+ * speech level). Desk knocks (80 ms of low-frequency energy DeepFilter
+ * passes) lit 1-3 times against 10-35 for the snapshot. Meanwhile, at
+ * ~-35 dBFS speech (the fixture at -18 dB) two ticks cut lit time from ~55 %
+ * to ~40 % and put a median ~270 ms on every onset, against ~40 ms with one.
+ * Pinned by the quiet-speech tests in tests/speakingIndicatorSent.test.ts.
  */
 
 /** How often the detector reads its analyser. */
 export const VAD_TICK_MS = 50;
-/** Consecutive loud ticks before the ring lights. */
-export const VAD_ATTACK_TICKS = 2;
+/** Consecutive loud ticks before the ring lights (one: see the header). */
+export const VAD_ATTACK_TICKS = 1;
 /** Consecutive quiet ticks before it goes dark (4 × 50 ms = 200 ms). */
 export const VAD_RELEASE_TICKS = 4;
 

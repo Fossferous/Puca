@@ -707,7 +707,7 @@ export class MediaManager {
      * stream. HOW LONG it listens per tick, and how long a sound must last
      * before the ring lights, is speakingDecision.ts: through 0.9.830 it read a
      * 5 ms snapshot and lit on one, so a keystroke's residue that DeepFilter
-     * had already cut to inaudible lit it.
+     * had already cut to inaudible lit it. It now reads ~43 ms per tick.
      */
     createVoiceActivityDetector(
         stream: MediaStream,
@@ -758,12 +758,11 @@ export class MediaManager {
             // decision jitter on quantisation noise alone.
             const dataArray = new Float32Array(analyser.fftSize);
 
-            // Attack/release hysteresis (speakingDecision.ts): ON after the
-            // level holds over `threshold` for consecutive ticks — a syllable
-            // does, a click does not — OFF after ~200 ms below it. (No "hold
-            // zone": an earlier version held the ON state forever while the
-            // level idled between two thresholds, which is why indicators
-            // sometimes stuck lit.)
+            // Release hysteresis (speakingDecision.ts): ON at the first tick
+            // whose ~43 ms level is over `threshold`, OFF after ~200 ms below
+            // it. (No "hold zone": an earlier version held the ON state
+            // forever while the level idled between two thresholds, which is
+            // why indicators sometimes stuck lit.)
             const decision = new SpeakingDecision(threshold);
             const checkInterval = setInterval(() => {
                 // Frozen-context watchdog: a suspended AudioContext stops

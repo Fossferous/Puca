@@ -173,6 +173,46 @@ function windowRms(x: Float32Array, end: number, len: number): number {
     return Math.sqrt(s / len);
 }
 
+/** `x` delayed by `ms` (leading silence): moves the signal against the tick grid. */
+function shifted(x: Float32Array, ms: number): Float32Array {
+    const pad = Math.round((ms * SR) / 1000);
+    const y = new Float32Array(x.length + pad);
+    y.set(x, pad);
+    return y;
+}
+/** The 0.9.830 detector, as a baseline: a 256-sample snapshot per 50 ms tick,
+ *  ON at the first snapshot over the threshold, OFF after 4 quiet ticks. */
+function oldDetector(x: Float32Array) {
+    let on = false, quiet = 0, lit = 0, ticks = 0;
+    const onsets: number[] = [];
+    for (let e = 2400; e <= x.length; e += 2400) {
+        ticks++;
+        if (windowRms(x, e, 256) > THRESHOLD) {
+            quiet = 0;
+            if (!on) { on = true; onsets.push((e / SR) * 1000); }
+        } else if (on && ++quiet >= 4) {
+            on = false;
+        }
+        if (on) lit++;
+    }
+    return { onsets, litPct: (100 * lit) / ticks };
+}
+/** Ground truth for "the talker started an utterance": the first 10 ms frame
+ *  over the threshold after at least 300 ms without one. */
+function utteranceOnsets(x: Float32Array): number[] {
+    const out: number[] = [];
+    let quietFrames = Infinity;
+    for (let e = 480; e <= x.length; e += 480) {
+        if (windowRms(x, e, 480) > THRESHOLD) {
+            if (quietFrames >= 30) out.push((e / SR) * 1000);
+            quietFrames = 0;
+        } else {
+            quietFrames++;
+        }
+    }
+    return out;
+}
+
 /** Run the real detector over `track` for `seconds`; returns its state per tick
  *  and every ON edge (ms). */
 function runDetector(track: FakeTrack, seconds: number) {
@@ -214,10 +254,9 @@ describe('speaking indicator: what is sent, not what a 5 ms window caught', () =
     });
 
     it('fast typing (16 ticks a second) does not light it either: the window, not luck, decides', () => {
-        // With a 5 ms window, needing two loud ticks in a row only makes a
-        // false onset rarer; at this density two consecutive snapshots still
-        // land on ticks. Averaging each tick over the time it covers is what
-        // keeps the residue below speech level.
+        // At this density a 5 ms snapshot lands on a tick again and again;
+        // averaging each tick over the time it covers is what keeps the
+        // residue below speech level.
         const x = residualTicks(10, 0.14, 16, 9);
         let max50 = 0;
         for (let e = 2400; e <= x.length; e += 120) max50 = Math.max(max50, windowRms(x, e, 2400));
@@ -225,14 +264,25 @@ describe('speaking indicator: what is sent, not what a 5 ms window caught', () =
         expect(runDetector(new FakeTrack('sent', x), 10).onsets).toEqual([]);
     });
 
-    it('a lone sound shorter than a tick does not light it, even when that one tick reads over the threshold', () => {
-        // 20 ms at RMS 0.035: inside one 43 ms window it reads ~0.024 (over
-        // 0.02); split across two it reads ~0.017 in each. Speech holds the
-        // level for longer than a single tick; one knock or click does not.
-        for (const atS of [1.0, 1.004, 1.011, 1.019]) {
+    it('a lone short sound lights it exactly when a tick of the SENT track carries it at speech level', () => {
+        // 20 ms at RMS 0.035: when it falls inside one 43 ms window that tick
+        // reads ~0.024 (over 0.02) — the room hears a sound at speech level,
+        // so the ring lights; split across two windows it reads ~0.017 in
+        // each and stays dark. The ring follows the tick level, at every phase.
+        let lit = 0, dark = 0;
+        for (const atS of [1.0, 1.004, 1.011, 1.019, 1.026, 1.033, 1.041]) {
             const x = voiced(3, atS, 20, 0.035);
-            expect(runDetector(new FakeTrack('sent', x), 3).onsets).toEqual([]);
+            let loudTick = false;
+            for (let e = 2400; e <= x.length; e += 2400) {
+                if (windowRms(x, e, vadWindowSize(SR)) > THRESHOLD) loudTick = true;
+            }
+            const onsets = runDetector(new FakeTrack('sent', x), 3).onsets;
+            expect(onsets.length).toBe(loudTick ? 1 : 0);
+            if (loudTick) lit++; else dark++;
         }
+        // Both branches were exercised, so this cannot pass on one side alone.
+        expect(lit).toBeGreaterThan(0);
+        expect(dark).toBeGreaterThan(0);
     });
 
     it('POSITIVE CONTROL: real speech lights it, promptly and for most of the talk', () => {
@@ -249,10 +299,42 @@ describe('speaking indicator: what is sent, not what a 5 ms window caught', () =
         expect(r.litPct).toBeGreaterThan(50);
     });
 
-    it('POSITIVE CONTROL: quiet speech (-12 dB) still lights it', () => {
-        const r = runDetector(new FakeTrack('sent', speechWav(0.25)), 6);
-        expect(r.litPct).toBeGreaterThan(40);
-    });
+    // The speech fixture is TTS at ~-17.5 dBFS active RMS. "-18 dB" puts it at
+    // ~-35.5 dBFS — an ordinary quiet talker, a few dB over the threshold —
+    // where a slower onset would cost the ring most of what they say.
+    for (const gainDb of [-12, -18]) {
+        it(`POSITIVE CONTROL: quiet speech (${gainDb} dB, ~${(-17.5 + gainDb).toFixed(1)} dBFS) lights as much and as soon as it did before the fix`, () => {
+            const g = 10 ** (gainDb / 20);
+            const base = speechWav(g);
+            let litNew = 0, litOld = 0;
+            const delayNew: number[] = [], delayOld: number[] = [];
+            const PHASES = [0, 10, 20, 30, 40];
+            for (const ph of PHASES) {
+                const x = shifted(base, ph);
+                const secs = Math.ceil(x.length / SR);
+                const r = runDetector(new FakeTrack('sent', x), secs);
+                const o = oldDetector(x);
+                litNew += r.litPct / PHASES.length;
+                litOld += o.litPct / PHASES.length;
+                for (const t of utteranceOnsets(x)) {
+                    const hitNew = r.onsets.find(v => v >= t && v < t + 1000);
+                    const hitOld = o.onsets.find(v => v >= t && v < t + 1000);
+                    expect(hitNew, `utterance at ${t} ms (phase ${ph}) never lit`).toBeDefined();
+                    delayNew.push((hitNew as number) - t);
+                    if (hitOld !== undefined) delayOld.push(hitOld - t);
+                }
+            }
+            const q = (a: number[], p: number) => [...a].sort((m, n) => m - n)[Math.floor(a.length * p)];
+            // Lit share: within a few points of the 0.9.830 detector on the
+            // same signal (the 43 ms window averages away a little of the
+            // quietest syllables; it must not cost more than that).
+            expect(litNew).toBeGreaterThan(litOld - 5);
+            // Onset: the ring follows the talker's first syllable within a
+            // tick or so, as before — not a quarter-second later.
+            expect(q(delayNew, 0.5)).toBeLessThanOrEqual(60);
+            expect(q(delayNew, 0.9)).toBeLessThanOrEqual(q(delayOld, 0.9) + 30);
+        });
+    }
 
     it('POSITIVE CONTROL: a single short word (120 ms) lights it within 150 ms', () => {
         for (const atS of [1.0, 1.013, 1.027, 1.041]) { // every phase against the tick
@@ -274,15 +356,27 @@ describe('speaking indicator: what is sent, not what a 5 ms window caught', () =
         expect(after.some(Boolean)).toBe(false);
     });
 
-    it('a muted (disabled) sent track never lights it, whatever the mic carries', () => {
+    // FAKE-CONTRACT check, not a mute test: FakeAnalyser renders a disabled
+    // track as silence, which is the Web Audio/WebRTC rule the real mute and
+    // PTT gate rely on (applyMicGate -> track.enabled = false). That the
+    // browser really does so is measured by e2e/vad-filtered-real-browser.mjs
+    // ('muted' scenario, every noise mode). This pins only the detector half:
+    // a track that renders silence never lights the ring.
+    it('a disabled sent track renders silence, and silence never lights it (fake contract; browser half is the rig)', () => {
         const t = new FakeTrack('sent', speechWav());
         t.enabled = false;
         expect(runDetector(t, 4).onsets).toEqual([]);
     });
 });
 
-describe('speaking indicator: the tap is the PUBLISHED track', () => {
-    it('reads the processed track the call sends, on join and after a noise-mode swap, never the raw capture', async () => {
+// What this pins: MediaManager hands back the PROCESSED track (getLocalStream,
+// and reacquireAudioTrack after a noise-mode swap), and a detector built on
+// that stream reads it and rebuilds its source onto the new processed track
+// after a swap. What it does NOT pin: which stream VoicePanel passes in — that
+// is VoicePanel.tsx's createVoiceActivityDetector(localStream, ...) call, the
+// same localStream the SFU publishes and the mesh sends.
+describe('speaking indicator: MediaManager hands the detector the processed track', () => {
+    it('getLocalStream/reacquireAudioTrack return the processed track, and a detector on it reads it across a noise-mode swap, never the raw capture', async () => {
         const raw1 = new FakeTrack('raw-1'), sent1 = new FakeTrack('processed-1');
         const raw2 = new FakeTrack('raw-2'), sent2 = new FakeTrack('processed-2');
         processAudioStream
@@ -335,11 +429,12 @@ describe('SpeakingDecision', () => {
         expect(off[off.length - 1]).toBe(false);
     });
 
-    it('a loud tick between quiet ones never accumulates toward an onset', () => {
+    it('one tick at speech level lights it at once: a quiet talker is not made to wait', () => {
+        // A window already spans ~43 ms, so one loud tick IS a sound the room
+        // heard at speech level. Requiring two cost quiet talkers ~240 ms per
+        // onset and a third of their lit time (the -18 dB test above).
         const d = new SpeakingDecision(0.02);
-        for (let i = 0; i < 50; i++) {
-            expect(d.update(0.2)).toBeNull();
-            expect(d.update(0.001)).toBeNull();
-        }
+        expect(d.update(0.021)).toBe(true);
+        expect(d.update(0.001)).toBeNull();
     });
 });
