@@ -213,6 +213,13 @@
     position: fixed;
     z-index: 1000;
     min-width: 200px;
+    /* Never larger than the screen; scrolls inside instead (ServerList.tsx
+       clamps its position to an 8px edge whenever its size changes). */
+    max-width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px);
+    max-height: calc(100dvh - 16px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
     background: #111214;
     border-radius: 8px;
     padding: 6px 8px;
@@ -324,19 +331,21 @@
     cursor: grab;
 }
 
-/* Inline expandable submenu (notification levels) */
-.context-submenu {
+/* Inline expandable submenu (notification levels), in the menu's own flow.
+   Scoped to this menu: the user context menu once shipped a global
+   `.context-submenu` flyout rule that turned this into a side flyout too. */
+.server-context-menu .context-submenu {
     margin-left: 14px;
     border-left: 2px solid var(--border-separator, #2a2b2f);
 }
 
-.context-submenu .context-menu-item {
+.server-context-menu .context-submenu .context-menu-item {
     padding-top: 6px;
     padding-bottom: 6px;
     font-size: 0.85rem;
 }
 
-.context-submenu .menu-icon {
+.server-context-menu .context-submenu .menu-icon {
     width: 16px;
     color: var(--brand-primary, #5865f2);
 }

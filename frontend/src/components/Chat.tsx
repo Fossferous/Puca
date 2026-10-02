@@ -150,7 +150,7 @@ import './Chat.css';
 import { parseServerTimestampSecs } from '../utils/serverTime';
 import { mergeMissing } from './chatHistory.utils';
 import { resolveAfkTarget } from '../utils/afkMove';
-import { canMoveVoiceMember, voiceMoveTargets } from '../utils/voiceMove';
+import { canMoveVoiceMember, userMenuVoiceModeration } from '../utils/voiceMove';
 import { useVoiceMemberDrag } from '../hooks/useVoiceMemberDrag';
 import {
     useServers,
@@ -1189,7 +1189,10 @@ export function Chat({ onLogout }: ChatProps) {
         setMobilePanel(next);
     };
     const stepPanel = (delta: 1 | -1) => {
-        if (document.querySelector('.modal-overlay, .settings-modal, .paste-preview-modal, .welcome-popup, .user-context-menu, .format-menu, .stream-settings-modal')) return;
+        // Open overlays pin the panel. `.server-context-menu` is portaled to
+        // <body> (ServerList), so it no longer slides away with the rail: a
+        // swipe under it would leave it floating over the next panel.
+        if (document.querySelector('.modal-overlay, .settings-modal, .paste-preview-modal, .welcome-popup, .user-context-menu, .server-context-menu, .format-menu, .stream-settings-modal')) return;
         // Devices is a virtual fifth stop after 'members', mirroring its
         // bottom-nav position. It is an overlay FLAG rather than a panel
         // value, so entering and leaving it are side effects here: while it
@@ -1525,7 +1528,10 @@ export function Chat({ onLogout }: ChatProps) {
     const [userContextMenuTarget, setUserContextMenuTarget] = useState<{
         userId: number;
         username: string;
-        isInVoice: boolean;
+        /** Offer the LOCAL listener controls (volume, mute, give screen
+         *  control). Voice moderation is decided separately, from where the
+         *  member actually is — see userContextMenuVoice. */
+        listenerControls: boolean;
         position: { x: number; y: number };
     } | null>(null);
 
@@ -3726,17 +3732,23 @@ export function Chat({ onLogout }: ChatProps) {
         }
     }, [currentServer, showToast]);
 
-    // The voice channel the context-menu target is currently sitting in. Both
-    // voice-moderation actions target THAT channel, never the one being viewed.
+    // The voice channel of this server the context-menu target is sitting in,
+    // whichever surface opened the menu and wherever the VIEWER is (in no call,
+    // or another channel, still finds them — the member list used to look only
+    // in the viewer's own call). Both voice-moderation actions target THAT
+    // channel, never the one being viewed.
     // A plain const rather than a memo on purpose: the correct dependency is the
     // voice roster, which lives in a module-global Map that no dependency array
     // can observe — memoising it would serve a stale channel after someone moves.
-    const userContextMenuVoiceChannel = userContextMenuTarget?.isInVoice
-        ? channels.find(c =>
-            c.channel_type === 1
-            && getVoiceUsersInRoom(`voice_${c.id}`).some(u => u.id === userContextMenuTarget.userId))
-            ?? null
+    const userContextMenuVoice = userContextMenuTarget
+        ? userMenuVoiceModeration({
+            userId: userContextMenuTarget.userId,
+            channels,
+            rosterOf: (channelId) => getVoiceUsersInRoom(`voice_${channelId}`),
+            canMoveVoiceMembers,
+        })
         : null;
+    const userContextMenuVoiceChannel = userContextMenuVoice?.voiceChannel ?? null;
 
     // Switch to a different server
     const switchServer = (server: Server) => {
@@ -4384,35 +4396,31 @@ export function Chat({ onLogout }: ChatProps) {
                 <UserContextMenu
                     userId={userContextMenuTarget.userId}
                     username={userContextMenuTarget.username}
-                    isInVoice={userContextMenuTarget.isInVoice}
+                    showListenerControls={userContextMenuTarget.listenerControls}
                     position={userContextMenuTarget.position}
                     currentUserId={currentUserId}
                     canModerate={currentServer?.owner_id === currentUser?.sub}
                     onReport={currentServer && userContextMenuTarget.userId !== currentUserId
                         ? () => setReportTarget({
-                            // A voice participant is reported to the server whose
-                            // call they are in, which is not always the server
-                            // being viewed; the report route now checks the
-                            // reported user is a member of the named server.
-                            serverId: (userContextMenuTarget.isInVoice && userContextMenuVoiceChannel?.server_id) || currentServer.id,
+                            // Reported to the server being viewed. (The voice
+                            // channel found above always belongs to it, so it
+                            // never named another server; a stage tile for a
+                            // call elsewhere still lands here. The report route
+                            // checks the reported user is a member of it.)
+                            serverId: currentServer.id,
                             userId: userContextMenuTarget.userId,
                             username: userContextMenuTarget.username,
                         })
                         : undefined}
                     customSoundsDisabled={allMembers.find(m => m.id === userContextMenuTarget.userId)?.custom_sounds_disabled ?? false}
-                    // Voice moderation. Offered only when the menu was opened
-                    // from the voice list AND we can locate the channel they are
-                    // actually in — the target of both actions is that channel,
-                    // not the one being viewed.
-                    canMoveMembers={canMoveVoiceMembers && userContextMenuTarget.isInVoice && !!userContextMenuVoiceChannel}
-                    voiceMoveTargets={
-                        userContextMenuVoiceChannel
-                            ? voiceMoveTargets(
-                                channels.filter(c => c.channel_type === 1),
-                                userContextMenuVoiceChannel,
-                            ).map(c => ({ id: c.id, name: c.name, isAfk: c.is_afk }))
-                            : []
-                    }
+                    // Voice moderation, from ANY surface that opened the menu —
+                    // the member list included, whether or not the viewer is in
+                    // voice (Discord does the same) — whenever we can locate the
+                    // channel they are actually in: the target of both actions
+                    // is that channel, not the one being viewed.
+                    canMoveMembers={userContextMenuVoice?.canMoveMembers ?? false}
+                    voiceMoveTargets={(userContextMenuVoice?.targets ?? [])
+                        .map(c => ({ id: c.id, name: c.name, isAfk: c.is_afk }))}
                     onVoiceMove={(channelId) => {
                         if (!userContextMenuVoiceChannel) return;
                         void commitVoiceMove({
@@ -4915,7 +4923,7 @@ export function Chat({ onLogout }: ChatProps) {
                                                                 setUserContextMenuTarget({
                                                                     userId: user.id,
                                                                     username: user.username,
-                                                                    isInVoice: true,
+                                                                    listenerControls: true,
                                                                     position: { x: e.clientX, y: e.clientY }
                                                                 });
                                                             }
@@ -4925,7 +4933,7 @@ export function Chat({ onLogout }: ChatProps) {
                                                             setUserContextMenuTarget({
                                                                 userId: user.id,
                                                                 username: user.username,
-                                                                isInVoice: true,
+                                                                listenerControls: true,
                                                                 position: { x: e.clientX, y: e.clientY }
                                                             });
                                                         }}
@@ -5333,7 +5341,7 @@ export function Chat({ onLogout }: ChatProps) {
                             onUserMenu={(user, pos) => setUserContextMenuTarget({
                                 userId: user.userId,
                                 username: user.username,
-                                isInVoice: true,
+                                listenerControls: true,
                                 position: pos,
                             })}
                         />
@@ -6073,8 +6081,12 @@ export function Chat({ onLogout }: ChatProps) {
                     <h4 className="member-section-title">Online — {onlineMembers.length}</h4>
                     <ul className="member-list">
                         {onlineMembers.map(member => {
-                            // Check if member is in current voice channel
-                            const isInVoice = currentVoiceChannel
+                            // In a call WITH ME: gates only the local listener
+                            // controls (volume / mute / give screen control).
+                            // Voice moderation does not depend on it — the menu
+                            // finds the member in any voice channel of this
+                            // server (userContextMenuVoice).
+                            const inMyCall = currentVoiceChannel
                                 ? getVoiceUsersInRoom(`voice_${currentVoiceChannel.id}`).some(u => u.id === member.id)
                                 : false;
                             return (
@@ -6090,7 +6102,7 @@ export function Chat({ onLogout }: ChatProps) {
                                         setUserContextMenuTarget({
                                             userId: member.id,
                                             username: member.username,
-                                            isInVoice,
+                                            listenerControls: inMyCall,
                                             position: { x: e.clientX, y: e.clientY }
                                         });
                                     }}
@@ -6142,7 +6154,7 @@ export function Chat({ onLogout }: ChatProps) {
                                         setUserContextMenuTarget({
                                             userId: member.id,
                                             username: member.username,
-                                            isInVoice: false, // Offline users are never in voice
+                                            listenerControls: false, // Offline users are never in voice
                                             position: { x: e.clientX, y: e.clientY }
                                         });
                                     }}
