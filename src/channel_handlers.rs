@@ -711,8 +711,9 @@ pub async fn delete_channel(
     .execute(&state.pool)
     .await;
 
+    // INT4 as well: every other user of this text binds the column's width.
     let _ = sqlx::query("DELETE FROM channels WHERE id = $1")
-        .bind(channel_id)
+        .bind(channel_id as i32)
         .execute(&state.pool)
         .await;
 

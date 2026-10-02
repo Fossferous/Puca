@@ -300,8 +300,15 @@ pub struct DbViewers(pub sqlx::PgPool);
 #[async_trait::async_trait]
 impl ChannelViewers for DbViewers {
     async fn viewers(&self, channel_id: i64) -> Result<HashSet<i64>, sqlx::Error> {
+        // INT4, the width of channels.id and of every other caller of this
+        // text (the channel handlers, ws::voice_roster_audience). sqlx caches a
+        // prepared statement per connection keyed by the text alone, so binding
+        // i64 here failed with 22P03 on any connection one of them had used
+        // first (see the note in device_token.rs). An id beyond INT4 names no
+        // channel: nobody.
+        let Ok(cid) = i32::try_from(channel_id) else { return Ok(HashSet::new()) };
         let server: Option<(Option<String>,)> = sqlx::query_as("SELECT server_id FROM channels WHERE id = $1")
-            .bind(channel_id)
+            .bind(cid)
             .fetch_optional(&self.0)
             .await?;
         match server {
@@ -1123,7 +1130,7 @@ mod tests {
         assert!(chan(collect(&mut l, Duration::from_millis(800)).await).is_empty(), "updated_at alone raises nothing on the task trigger");
         sqlx::query("UPDATE ct_probe SET is_completed = TRUE, updated_at = NOW()").execute(&mut *c).await.unwrap();
         assert_eq!(chan(collect(&mut l, Duration::from_millis(800)).await).len(), 1, "a toggle does");
-        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(owner).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(owner as i32).execute(&pool).await;
     }
 
     #[tokio::test]
@@ -1147,7 +1154,7 @@ mod tests {
         assert_eq!(got, vec![want.clone()], "twenty inserts in one transaction fold into one event");
         assert_eq!(parse_notice(&want), Some(Notice::ToUser(owner, TaskEvent::List(list_id))));
         let _ = sqlx::query("DELETE FROM task_lists WHERE id = $1").bind(list_id).execute(&pool).await;
-        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(owner).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(owner as i32).execute(&pool).await;
     }
 
     /// Counts, beside the real listener, the payloads that name ONE channel:
@@ -1186,6 +1193,51 @@ mod tests {
     /// assertions passed with a stalled listener, so they proved nothing. The
     /// listener draining on time is what keeps that queue from ever filling in
     /// production, and it is the one thing here a stalled listener fails
+    /// `SELECT server_id FROM channels WHERE id = $1` is ALSO the channel
+    /// handlers' text (create/update/delete_channel, require_manage_channels)
+    /// and ws::voice_roster_audience's, all binding INT4. sqlx caches a
+    /// prepared statement per connection keyed by the text alone, so a viewer
+    /// lookup that bound i64 failed with 22P03 on every connection one of them
+    /// had used first (and the dispatcher dropped the event, failing closed) -
+    /// and, the other way round, broke those callers on a connection it had
+    /// prepared. Pinned on ONE connection, in both orders.
+    #[tokio::test]
+    async fn the_viewer_lookup_shares_its_sql_text_with_the_channel_handlers() {
+        let Some((setup, _url)) = test_pool().await else { return };
+        let owner = mk_user(&setup, "width").await;
+        let server_id = format!("srv-width-{}", uuid::Uuid::new_v4().simple());
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, 'w', $2)").bind(&server_id).bind(owner as i32).execute(&setup).await.unwrap();
+        let (cid,): (i32,) = sqlx::query_as("INSERT INTO channels (name, server_id) VALUES ('c', $1) RETURNING id").bind(&server_id).fetch_one(&setup).await.unwrap();
+
+        // The channel handlers' width, exactly as they bind it.
+        async fn handler_width(pool: &sqlx::PgPool, cid: i32) -> Result<Option<(Option<String>,)>, sqlx::Error> {
+            sqlx::query_as("SELECT server_id FROM channels WHERE id = $1").bind(cid).fetch_optional(pool).await
+        }
+
+        // 1. A channel handler prepares the text first (the common case in
+        //    production), then the dispatcher resolves viewers on that connection.
+        let one = crate::migrator::test_pool(1).await.expect("pool");
+        handler_width(&one, cid).await.expect("fixture: the handler's own query");
+        let seen = DbViewers(one.clone()).viewers(cid as i64).await;
+        assert!(
+            seen.as_ref().is_ok_and(|s| s.contains(&owner)),
+            "the viewer lookup on a connection a channel handler prepared: {seen:?}"
+        );
+
+        // 2. The dispatcher prepares it first; the channel handler must still work.
+        let two = crate::migrator::test_pool(1).await.expect("pool");
+        DbViewers(two.clone()).viewers(cid as i64).await.expect("fixture: viewers on a fresh connection");
+        let after = handler_width(&two, cid).await;
+        assert!(
+            after.as_ref().is_ok_and(|r| r.as_ref().is_some_and(|(s,)| s.as_deref() == Some(server_id.as_str()))),
+            "a channel handler on a connection the viewer lookup prepared: {after:?}"
+        );
+
+        let _ = sqlx::query("DELETE FROM channels WHERE id = $1").bind(cid).execute(&setup).await;
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&server_id).execute(&setup).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(owner as i32).execute(&setup).await;
+    }
+
     /// (measured: a receive loop that awaits the dispatcher read ~180 of 400).
     #[tokio::test]
     async fn a_notify_burst_with_a_slow_hub_never_blocks_task_writes() {
@@ -1229,7 +1281,7 @@ mod tests {
         disp.abort();
         let _ = sqlx::query("DELETE FROM channels WHERE id = $1").bind(cid).execute(&pool).await;
         let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&server_id).execute(&pool).await;
-        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(owner).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(owner as i32).execute(&pool).await;
     }
 
     /// THE LOST-LISTENER TEST (finding 9). Postgres does not queue a NOTIFY
@@ -1294,7 +1346,7 @@ mod tests {
         recv.abort();
         disp.abort();
         let _ = sqlx::query("DELETE FROM task_lists WHERE id = $1").bind(list_id).execute(&pool).await;
-        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(owner).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(owner as i32).execute(&pool).await;
     }
 
     /// A stream whose session is revoked ends at the next re-check.
@@ -1316,6 +1368,6 @@ mod tests {
         let bye = tokio::time::timeout(Duration::from_secs(2), s.next()).await.expect("ended within the interval").unwrap().unwrap();
         assert!(format!("{bye:?}").contains("revoked"), "{bye:?}");
         assert!(s.next().await.is_none(), "and then the stream is over");
-        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(user).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(user as i32).execute(&pool).await;
     }
 }
