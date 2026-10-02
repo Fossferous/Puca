@@ -1,0 +1,18 @@
+[package]
+name = "puca-games"
+version = "0.1.0"
+edition = "2021"
+description = "Pure, deterministic engines for in-call No-Limit Hold'em and Blackjack (no I/O, RNG injected)"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[dependencies]
+# The ONLY dependency, and it is already in the lockfile for the backend
+# (root Cargo.toml: rand = "0.8"), so this crate adds no new third-party code.
+# Used for exactly two things: `RngCore` as the source the engine's own
+# `GameRng` trait is blanket-implemented over, and `OsRng` (the OS CSPRNG,
+# via getrandom) as the production dealer. The shuffle itself is OUR
+# Fisher-Yates over rejection-sampled u64s (src/rng.rs), not
+# `SliceRandom::shuffle`, so the code the uniformity test exercises is the
+# code a later commit-reveal phase would drive from a different u64 stream.
+rand = "0.8"

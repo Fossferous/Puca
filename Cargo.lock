@@ -2270,6 +2270,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "puca-games"
+version = "0.1.0"
+dependencies = [
+ "rand 0.8.7",
+]
+
+[[package]]
 name = "puca-input"
 version = "0.1.0"
 dependencies = [
