@@ -36,10 +36,12 @@ export type ClipPlaybackMode = 'mse' | 'blob' | 'unsupported';
 /** Spike S10: no spill seen up to 512 MiB on a 32 GB desktop; keep the cap
  *  conservative for phones. */
 export const BLOB_FALLBACK_CAP_BYTES = 32 * 1024 * 1024;
-/** Download builds the WHOLE plaintext in memory (chunks + Blob, and the
- *  desktop save path reads it once more for the native command) — three
- *  copies of the clip in the renderer. A manifest can describe up to 64 × 24
- *  MiB = 1.5 GiB; above this cap the button refuses rather than thrash. */
+/** Download on desktop and the web builds the WHOLE plaintext in memory
+ *  (chunks + Blob, and the desktop save path reads it once more for the
+ *  native command) — three copies of the clip in the renderer. (The Android
+ *  app streams it part by part instead: forEachClipPart.) A manifest can
+ *  describe up to 64 × 24 MiB = 1.5 GiB; above this cap the button refuses
+ *  rather than thrash. */
 export const CLIP_DOWNLOAD_MAX_BYTES = 1024 * 1024 * 1024;
 
 export interface PlaybackEnv {
@@ -100,18 +102,34 @@ export async function downloadClipBytes(
     onProgress?: (p: ClipDownloadProgress) => void,
     fetchPart: (id: string, signal?: AbortSignal) => Promise<Uint8Array> = fetchPartBytes,
 ): Promise<Blob> {
+    const chunks: Uint8Array[] = [];
+    await forEachClipPart(m, async (plain) => { chunks.push(plain); }, onProgress, fetchPart);
+    return new Blob(chunks as BlobPart[], { type: 'video/mp4' });
+}
+
+/**
+ * The same bytes as downloadClipBytes, handed over ONE PART AT A TIME, in
+ * order: `onPart` is awaited before the next part is even fetched, so the
+ * caller holds about one part (≤ 24 MiB plaintext), never the whole clip.
+ * The phone's Download uses this (api/clipDownload.ts): building a whole clip
+ * there and pushing it through the Capacitor bridge in one piece killed the
+ * app. Hands bytes to a callback only — it writes nothing itself.
+ */
+export async function forEachClipPart(
+    m: ClipManifest,
+    onPart: (plain: Uint8Array, index: number) => Promise<void>,
+    onProgress?: (p: ClipDownloadProgress) => void,
+    fetchPart: (id: string, signal?: AbortSignal) => Promise<Uint8Array> = fetchPartBytes,
+): Promise<void> {
     if (m.totalCipherBytes > CLIP_DOWNLOAD_MAX_BYTES) throw new Error(`this clip is ${Math.round(m.totalCipherBytes / (1024 * 1024))} MB — too large to download in the app`);
     const secrets = secretsOf(m);
-    const chunks: Uint8Array[] = [];
     let bytesDone = 0;
     for (let i = 0; i < m.parts.length; i++) {
-        const wire = await fetchPart(m.parts[i]);
-        const plain = await openPart(secrets, i, wire);
-        chunks.push(plain);
+        const plain = await openPart(secrets, i, await fetchPart(m.parts[i]));
+        await onPart(plain, i);
         bytesDone += plain.byteLength;
         onProgress?.({ done: i + 1, total: m.parts.length, bytesDone, totalBytes: m.totalCipherBytes });
     }
-    return new Blob(chunks as BlobPart[], { type: 'video/mp4' });
 }
 
 export interface ClipPlayerHandle {

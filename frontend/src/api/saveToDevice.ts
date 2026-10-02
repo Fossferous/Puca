@@ -65,18 +65,108 @@ async function filesystem() {
     return import('@capacitor/filesystem');
 }
 
+/*
+ * EVERY WRITE GOES OUT IN BOUNDED SLICES. Each Filesystem call is one bridge
+ * message: Capacitor JSON-stringifies it, and Android's MessageHandler parses
+ * the whole string on the UI thread, then the plugin decodes it — three
+ * copies of the payload on the Java heap, whose size is fixed per app (192 MB
+ * on a stock emulator, no largeHeap). Its `catch (Exception)` cannot catch an
+ * OutOfMemoryError, so an oversized message does not fail the call: Android
+ * KILLS THE APP. That is what tapping Download on a 92 MB clip did (one
+ * 128,625,344-character base64 string). Somewhat smaller files hit the caught
+ * half instead: a 0-byte file and a misleading error.
+ *
+ * So: writeFile for the first slice (create / truncate), appendFile for the
+ * rest, each slice at most DEVICE_WRITE_CHUNK_CHARS characters — a few MB of
+ * Java heap whatever the file's size. A failure part-way deletes what was
+ * written: nothing half-written is left wearing the real name.
+ */
+
+/** Raw bytes per bridge call. A multiple of 3, so every slice but the last is
+ *  whole base64 quads with no padding, and its base64 is exactly
+ *  DEVICE_WRITE_CHUNK_CHARS long. */
+export const DEVICE_WRITE_CHUNK_BYTES = 768 * 1024;
+/** Characters per bridge call, text and base64 alike. */
+export const DEVICE_WRITE_CHUNK_CHARS = (DEVICE_WRITE_CHUNK_BYTES / 3) * 4;
+
+/** A bridge write failed — as opposed to whatever produced the bytes (a
+ *  fetch, a decryption), which a caller may want to report differently. */
+export class DeviceWriteError extends Error {
+    /** What the filesystem plugin rejected with. */
+    readonly reason: unknown;
+    constructor(reason: unknown) {
+        super(`could not write to this device: ${reason instanceof Error ? reason.message : String(reason)}`);
+        this.name = 'DeviceWriteError';
+        this.reason = reason;
+    }
+}
+
+type Fs = Awaited<ReturnType<typeof filesystem>>;
+
+/**
+ * One file in Documents, written by `fill` in bounded slices. `fill` gets a
+ * `put` that takes ONE slice (at most DEVICE_WRITE_CHUNK_CHARS characters).
+ * Whatever `fill` throws — its own error or a DeviceWriteError from `put` —
+ * deletes the file and is rethrown.
+ */
+async function writeInSlices(
+    fs: Fs, folder: string, name: string, utf8: boolean,
+    fill: (put: (data: string) => Promise<void>) => Promise<void>,
+): Promise<SaveResult> {
+    const { Filesystem, Directory, Encoding } = fs;
+    const file = safeDeviceFileName(name);
+    const path = `${folder}/${file}`;
+    let started = false;
+    const put = async (data: string) => {
+        const opts = { path, data, directory: Directory.Documents, ...(utf8 ? { encoding: Encoding.UTF8 } : {}) };
+        try {
+            if (!started) {
+                // Set BEFORE the call: a writeFile that fails can still
+                // leave a 0-byte file behind, and the cleanup must find it.
+                started = true;
+                await Filesystem.writeFile({ ...opts, recursive: true });
+            } else {
+                await Filesystem.appendFile(opts);
+            }
+        } catch (e) {
+            throw new DeviceWriteError(e);
+        }
+    };
+    try {
+        await fill(put);
+        if (!started) await put(''); // an empty file still has to exist
+    } catch (e) {
+        if (started) {
+            try { await Filesystem.deleteFile({ path, directory: Directory.Documents }); } catch { /* nothing there, or not ours */ }
+        }
+        throw e;
+    }
+    return { where: `Documents/${folder}/${file}`, onDisk: true };
+}
+
+/** Text in slices of at most DEVICE_WRITE_CHUNK_CHARS UTF-16 units, never
+ *  cutting between the halves of a surrogate pair (each slice is encoded to
+ *  UTF-8 on its own, so a split pair would become two U+FFFD). */
+export function textSlices(text: string, max: number = DEVICE_WRITE_CHUNK_CHARS): string[] {
+    const out: string[] = [];
+    for (let i = 0; i < text.length;) {
+        let end = Math.min(i + max, text.length);
+        if (end < text.length && end - i > 1) {
+            const c = text.charCodeAt(end - 1);
+            if (c >= 0xd800 && c <= 0xdbff) end--; // a high surrogate: keep it with its pair
+        }
+        out.push(text.slice(i, end));
+        i = end;
+    }
+    return out;
+}
+
 /** Documents/<folder>/<name>, as text. */
 export async function saveTextToDevice(folder: string, name: string, text: string): Promise<SaveResult> {
-    const { Filesystem, Directory, Encoding } = await filesystem();
-    const file = safeDeviceFileName(name);
-    await Filesystem.writeFile({
-        path: `${folder}/${file}`,
-        data: text,
-        directory: Directory.Documents,
-        encoding: Encoding.UTF8,
-        recursive: true,
+    const fs = await filesystem();
+    return writeInSlices(fs, folder, name, true, async (put) => {
+        for (const slice of textSlices(text)) await put(slice);
     });
-    return { where: `Documents/${folder}/${file}`, onDisk: true };
 }
 
 /** Bytes as base64 (what Filesystem.writeFile takes for binary). Chunked:
@@ -90,18 +180,29 @@ export function bytesToBase64(bytes: Uint8Array): string {
     return btoa(bin);
 }
 
+/**
+ * Documents/<folder>/<name>, from bytes that arrive in pieces. `fill` gets a
+ * `write` for each piece — any size; it is sliced here — so a producer that
+ * decrypts one part at a time (a clip) never holds the whole file. This is the
+ * one binary write path on a phone.
+ */
+export async function saveStreamToDevice(
+    folder: string, name: string,
+    fill: (write: (bytes: Uint8Array) => Promise<void>) => Promise<void>,
+): Promise<SaveResult> {
+    const fs = await filesystem();
+    return writeInSlices(fs, folder, name, false, (put) => fill(async (bytes) => {
+        for (let i = 0; i < bytes.length; i += DEVICE_WRITE_CHUNK_BYTES) {
+            await put(bytesToBase64(bytes.subarray(i, i + DEVICE_WRITE_CHUNK_BYTES)));
+        }
+    }));
+}
+
 /** Documents/<folder>/<name>, from a blob URL (a decrypted attachment). */
 export async function saveBytesToDevice(folder: string, name: string, blobUrl: string): Promise<SaveResult> {
-    const { Filesystem, Directory } = await filesystem();
-    const file = safeDeviceFileName(name);
-    const bytes = new Uint8Array(await (await fetch(blobUrl)).arrayBuffer());
-    await Filesystem.writeFile({
-        path: `${folder}/${file}`,
-        data: bytesToBase64(bytes),
-        directory: Directory.Documents,
-        recursive: true,
+    return saveStreamToDevice(folder, name, async (write) => {
+        await write(new Uint8Array(await (await fetch(blobUrl)).arrayBuffer()));
     });
-    return { where: `Documents/${folder}/${file}`, onDisk: true };
 }
 
 /** What to tell someone when the write failed. Names the Android 10
