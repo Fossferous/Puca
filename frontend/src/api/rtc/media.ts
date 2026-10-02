@@ -1,6 +1,7 @@
 import { processAudioStream, getMicConstraints, getNoiseSuppressionMode, setNoiseSuppressionMode, cleanupNoiseFilter, selectedInputDeviceId, type NoiseSuppressionMode } from '../noiseFilter';
 import { inputGain } from '../../components/settingsStore';
 import { capWouldReduce, recapDisplayTrack, shareVideoConstraints, type LiveCapture } from './shareHealth';
+import { SpeakingDecision, VAD_TICK_MS, vadWindowSize } from './speakingDecision';
 
 /** Errors that mean "the requested mic device can't be opened" — the cases
  *  where retrying on the OS default is the right degradation. Matched by NAME,
@@ -699,6 +700,14 @@ export class MediaManager {
      * RMS separates them by better than 10x, and the existing thresholds
      * (0.01 / 0.02) happen to land cleanly between hiss and speech, so callers
      * did not need retuning.
+     *
+     * WHAT it is fed is the caller's `stream`: VoicePanel passes the PUBLISHED
+     * local stream (after the noise suppressor, the gain stage and the
+     * mute/PTT gate, all of which act on that track) and each received remote
+     * stream. HOW LONG it listens per tick, and how long a sound must last
+     * before the ring lights, is speakingDecision.ts: through 0.9.830 it read a
+     * 5 ms snapshot and lit on one, so a keystroke's residue that DeepFilter
+     * had already cut to inaudible lit it. It now reads ~43 ms per tick.
      */
     createVoiceActivityDetector(
         stream: MediaStream,
@@ -712,10 +721,11 @@ export class MediaManager {
             }
             const ctx = this.vadContext;
             const analyser = ctx.createAnalyser();
-            analyser.fftSize = 256;
-            // smoothingTimeConstant only affects the FREQUENCY data, which this
-            // no longer reads — time-domain samples are never smoothed. Release
-            // hysteresis below is what stops the indicator flickering now.
+            // The window spans (nearly) the whole tick — 2048 samples at
+            // 48 kHz — so a level is the tick's energy, not a 5 ms sample of it
+            // (speakingDecision.ts). smoothingTimeConstant only affects the
+            // FREQUENCY data, which this does not read.
+            analyser.fftSize = vadWindowSize(ctx.sampleRate);
             let source: MediaStreamAudioSourceNode | null = ctx.createMediaStreamSource(stream);
             source.connect(analyser);
 
@@ -748,17 +758,12 @@ export class MediaManager {
             // decision jitter on quantisation noise alone.
             const dataArray = new Float32Array(analyser.fftSize);
 
-            // Hysteresis so the indicator doesn't flicker on every syllable gap:
-            // turn ON instantly above `threshold`, turn OFF after ~200 ms without
-            // going back above it. (No "hold zone": an earlier version held the
-            // ON state forever while the level idled between two thresholds,
-            // which is why indicators sometimes stuck lit.) Poll at 50 ms for a
-            // snappy reaction both ways; combined with the low analyser smoothing
-            // above, the indicator now snaps off almost as soon as speech stops.
-            const TICK_MS = 50;
-            const RELEASE_TICKS = 4; // 4 x 50 ms = 200 ms release
-            let wasSpeaking = false;
-            let quietTicks = 0;
+            // Release hysteresis (speakingDecision.ts): ON at the first tick
+            // whose ~43 ms level is over `threshold`, OFF after ~200 ms below
+            // it. (No "hold zone": an earlier version held the ON state
+            // forever while the level idled between two thresholds, which is
+            // why indicators sometimes stuck lit.)
+            const decision = new SpeakingDecision(threshold);
             const checkInterval = setInterval(() => {
                 // Frozen-context watchdog: a suspended AudioContext stops
                 // rendering, so the analyser returns the SAME data forever —
@@ -771,22 +776,9 @@ export class MediaManager {
                 }
 
                 analyser.getFloatTimeDomainData(dataArray);
-                const normalized = rmsAmplitude(dataArray);
-
-                if (normalized > threshold) {
-                    quietTicks = 0;
-                    if (!wasSpeaking) {
-                        wasSpeaking = true;
-                        onSpeaking(true);
-                    }
-                } else {
-                    quietTicks++;
-                    if (wasSpeaking && quietTicks >= RELEASE_TICKS) {
-                        wasSpeaking = false;
-                        onSpeaking(false);
-                    }
-                }
-            }, TICK_MS);
+                const flipped = decision.update(rmsAmplitude(dataArray));
+                if (flipped !== null) onSpeaking(flipped);
+            }, VAD_TICK_MS);
 
             return () => {
                 clearInterval(checkInterval);
