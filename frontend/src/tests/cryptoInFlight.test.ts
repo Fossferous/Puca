@@ -22,6 +22,24 @@ describe('fixtures/cryptoInFlight', () => {
         expect(cryptoInFlight()).toBe(0);
     });
 
+    it('a call still running from an earlier install never counts against the next one', async () => {
+        // A test that ends with WebCrypto still out, then the next test's
+        // install. The late call settling must not read as -1 there: a
+        // settle that waits for 0 would then never see it, and fail an
+        // unrelated test after its deadline.
+        untrack = trackCrypto();
+        const left = crypto.subtle.digest('SHA-256', new Uint8Array([9]));
+        untrack = trackCrypto();
+        expect(cryptoInFlight()).toBe(0);
+        await left;
+        expect(cryptoInFlight()).toBe(0);
+        // POSITIVE CONTROL: the new install still counts its own calls.
+        const mine = crypto.subtle.digest('SHA-256', new Uint8Array([10]));
+        expect(cryptoInFlight()).toBe(1);
+        await mine;
+        expect(cryptoInFlight()).toBe(0);
+    });
+
     it('the undo puts the methods back, and the answers are the real ones throughout', async () => {
         const own = Object.prototype.hasOwnProperty.call(crypto.subtle, 'digest');
         const real = new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array([7])));

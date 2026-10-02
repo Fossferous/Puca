@@ -110,13 +110,18 @@ async function until(done: () => boolean, what: () => string, ms = 3_000) {
 }
 const creates = () => createTask.mock.calls.length + createListTask.mock.calls.length;
 /** A batch is over: `n` creates were tried — the n-th may be the refusal
- *  that stops it — and a pause more passed, in which a create past the
- *  n-th, were there one, would have gone out. */
-const paced = async (n: number) => {
+ *  that stops it — and `trailing` pauses more passed, in which a create past
+ *  the n-th, were there one, would have gone out. A batch that stops early
+ *  passes the rest of its own length here, so a create that resumed later
+ *  than the next pause still shows. */
+const paced = async (n: number, trailing = 2) => {
     await until(() => creates() >= n, () => `${n} creates (${creates()} went out)`);
-    await wait(PACE_MS * 2);
+    await wait(PACE_MS * trailing);
     await settle();
 };
+/** ChecklistBody's pause after a live re-read (LIVE_REREAD_GAP_MS, not
+ *  exported): an update meanwhile is read once more at its end. */
+const LIVE_REREAD_GAP_MS = 400;
 const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 async function mount(props: { channelId?: number; listId?: number; myPerms?: number }) {
     await act(async () => { root!.render(<QueryClientProvider client={qc}><ChecklistBody {...props} /></QueryClientProvider>); });
@@ -265,7 +270,9 @@ describe('a checklist pasted into a channel checklist', () => {
         });
         paste(input()!, ASSISTANT_ANSWER);
         act(() => { addN().click(); });
-        await paced(3);
+        // The 3 it asserts, then the rest of the batch's length and two more:
+        // a create that resumed after a longer pause would still show.
+        await paced(3, ASSISTANT_ITEMS.length - 3 + 2);
         expect(createTask).toHaveBeenCalledTimes(3);
         expect(rows()).toEqual(ASSISTANT_ITEMS.slice(0, 2));
         expect(toasts).toEqual(['Missing Create Tasks permission', `Added 2 of ${ASSISTANT_ITEMS.length} items`]);
@@ -391,6 +398,11 @@ describe('another member’s pasted batch, as this body sees it', () => {
         // The second read goes out after a pause (LIVE_REREAD_GAP_MS); wait
         // for it to answer, not for a guess at how long that takes.
         await until(() => listTasks.mock.calls.length >= 2 && s.reads() === 0, () => `a second read to answer (${listTasks.mock.calls.length} asked)`);
+        // ...and then the pause after it, twice over, at whose end a THIRD
+        // read would go out were the burst not covered by the second.
+        // Without this window "exactly 2" held the moment the second
+        // answered, and passed with the re-read loop made endless.
+        await wait(LIVE_REREAD_GAP_MS * 2);
         // "Loading…" swaps the tree out, and with it whatever row this viewer was editing.
         expect(loadingSeen, '"Loading…" during a live update').toBe(false);
         // One read at once, and ONE for everything that came after it.

@@ -11,19 +11,24 @@
  * after it. Waiting until this reads 0 is a fact about the work instead.
  *
  * `trackCrypto()` wraps the instance's methods (composing with anything
- * already installed on them) and returns the undo for afterEach.
+ * already installed on them) and returns the undo for afterEach. Each install
+ * counts on its own: a call still running from an earlier one (a test that
+ * ended with WebCrypto out) settles against THAT count, so it can never take
+ * the next test's below 0, where a wait for 0 would never end.
  */
 const METHODS = [
     'encrypt', 'decrypt', 'sign', 'verify', 'digest', 'generateKey', 'deriveKey',
     'deriveBits', 'importKey', 'exportKey', 'wrapKey', 'unwrapKey',
 ] as const;
 
-let inFlight = 0;
+/** The current install's count; a fresh, unwatched one when not tracking. */
+let current = { n: 0 };
 let restore: (() => void) | null = null;
 
 export function trackCrypto(): () => void {
     restore?.();
-    inFlight = 0;
+    const count = { n: 0 };
+    current = count;
     const subtle = globalThis.crypto.subtle as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
     const saved: Array<[string, PropertyDescriptor | undefined]> = [];
     for (const m of METHODS) {
@@ -34,10 +39,10 @@ export function trackCrypto(): () => void {
             configurable: true,
             writable: true,
             value: (...a: unknown[]) => {
-                inFlight++;
+                count.n++;
                 let p: Promise<unknown>;
-                try { p = Promise.resolve(before.apply(subtle, a)); } catch (e) { inFlight--; throw e; }
-                return p.finally(() => { inFlight--; });
+                try { p = Promise.resolve(before.apply(subtle, a)); } catch (e) { count.n--; throw e; }
+                return p.finally(() => { count.n--; });
             },
         });
     }
@@ -47,11 +52,12 @@ export function trackCrypto(): () => void {
             else delete subtle[m];
         }
         restore = null;
+        current = { n: 0 };
     };
     return () => restore?.();
 }
 
 /** WebCrypto calls started and not yet settled (0 when not tracking). */
 export function cryptoInFlight(): number {
-    return inFlight;
+    return current.n;
 }

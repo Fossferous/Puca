@@ -110,7 +110,7 @@ const paced = async (lines: number) => {
 /** For a describe whose creates are paced: the clock is fake from before
  *  the first paste, so no pause is ever left on a real timer. */
 const pacedOnAFakeClock = () => {
-    beforeEach(() => { vi.useFakeTimers({ toFake: ['setTimeout'] }); });
+    beforeEach(() => { vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] }); });
     afterEach(() => { vi.useRealTimers(); });
 };
 

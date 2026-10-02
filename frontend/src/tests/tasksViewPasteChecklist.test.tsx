@@ -97,16 +97,18 @@ const wait = async (ms: number) => {
  * real. A fixed PACE_MS × N + 100 ms raced both, and on a loaded machine
  * every pause runs late and every seal runs long. So this waits, as `wait`
  * does, for the FACT: `n` item creates went out — the n-th may be the refusal
- * that stops a batch — then a pause more, in which a create past the n-th,
- * were there one, would go out; then settles. Bounded inside vitest's 5 s.
+ * that stops a batch — then `trailing` pauses more, in which a create past
+ * the n-th, were there one, would go out; then settles. A batch that stops
+ * early passes the rest of its own length, so a create that resumed later
+ * than the next pause still shows. Bounded inside vitest's 5 s.
  */
-const paced = async (n: number) => {
+const paced = async (n: number, trailing = 2) => {
     const giveUp = performance.now() + 3_000;
     while (itemPosts().length < n) {
         if (performance.now() > giveUp) throw new Error(`gave up after 3 s waiting for ${n} item creates; ${itemPosts().length} went out`);
         await act(async () => { await new Promise(r => { setTimeout(r, 10); }); });
     }
-    await wait(PACE_MS * 2);
+    await wait(PACE_MS * trailing);
     await settle();
 };
 
@@ -344,7 +346,9 @@ describe('"Add a task…" takes a pasted checklist', () => {
         refuseAt = 2;
         paste(addInput(), ASSISTANT_ANSWER);
         act(() => { button(ASSISTANT_ADD).click(); });
-        await paced(3);
+        // The 3 it asserts, then the rest of the batch's length and two more:
+        // a create that resumed after a longer pause would still show.
+        await paced(3, ASSISTANT_ITEMS.length - 3 + 2);
         expect(itemPosts(1)).toHaveLength(3);                // the third was tried, refused, and nothing after it
         expect(rows()).toEqual(ASSISTANT_ITEMS.slice(0, 2));
         expect(toasts).toContain(`Added 2 of ${ASSISTANT_ITEMS.length} items`);
