@@ -4,6 +4,47 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Added
+- **Idle and away.** The green dot beside someone online turns orange after
+  10 minutes with no activity on any of their devices, and shows a "zz" after
+  an hour. On the Windows app, input anywhere on the PC counts, so someone in
+  a game is not idle; in a browser or on a phone, using Púca counts, and
+  talking in a call counts everywhere. The server keeps the time, so a phone
+  in a pocket still goes idle and then away. The member list, Friends (which
+  now updates live), profile popups, the Tasks view and user search all show
+  it. New setting: **Settings › Privacy & Safety › Show when I'm idle or
+  away** (on by default); with **Show online status** off, nothing is shared.
+  Older apps keep seeing plain online and offline.
+- **Your call on another device: Leave or Move here.** When your account is
+  in a voice channel on one device, your other devices show "You're in
+  Lounge on your PC" with **Leave** (ends the call there) and **Move here**
+  (moves it to this device without the room hearing you leave). Tapping the
+  same channel on the second device moves the call instead of connecting
+  both. The device that lost the call says why ("You moved the call to your
+  phone"). A PC that was asleep or offline while you did this does not
+  rejoin when it wakes, and shows no error popup. Works on mesh and SFU
+  channels. On a phone, the bar and the voice panel never cover the end of
+  the member list, home or Devices.
+- **Pop-out windows (desktop).** Pop out puts each stream in its own Púca
+  window, titled with the streamer's name: up to eight at once, kept on top
+  unless you turn that off, and resizable up to the whole screen (Windows'
+  own picture-in-picture stopped at about 80%). Each window remembers its
+  size, place and pin, even if you quit with it open. Closing it, or **Back
+  to Púca**, puts the stream back; popping out a ninth replaces the oldest.
+  Sound still plays from the app. The web and Android apps keep
+  picture-in-picture.
+
+### Fixed
+- **SFU voice channels saying "Channel not found".** After any channel had
+  been edited, joining an SFU voice channel could intermittently fail until
+  the server restarted.
+- **Live updates of shared lists in Púca Notes.** A change to a channel's
+  list could fail to reach the other people who had it open in Notes until
+  they refreshed. The same server fault could make a channel edit fail, or
+  leave the sidebar's voice roster stale until its next refresh.
+
 ## 0.9.831 — 2026-10-02
 
 Move to works from the member list, profile popups and menus fit every screen, every watched stream stays audible, the speaking ring ignores filtered typing, and Android clip downloads no longer close the app.
