@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.832 — 2026-10-03
 
+Idle and away dots, Leave or Move here for a call on your other device, pop-out windows for streams, and fixes for SFU channels saying Channel not found and for Notes live updates.
 ### Added
 - **Idle and away.** The green dot beside someone online turns orange after
   10 minutes with no activity on any of their devices, and shows a "zz" after
