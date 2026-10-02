@@ -346,6 +346,53 @@ try {
     const away2 = await waitForDot(alice, BOB, 'away', 20000);
     check('...and away once the long clock runs out', away2.ok, `${away2.ms} ms`);
 
+    // ---- 7. a reconnect is not activity --------------------------------
+    // A new capable socket for Bob (a desktop reconnecting after a blip, its
+    // old socket not yet reaped) that has not reported yet must not flash
+    // him online for Alice. Watched both on her screen and on her raw
+    // capable socket, which hears every UserStatus.
+    const beforeReconnect = (await rawFrames(alice, newSock)).frames.length;
+    const bobExtra = await rawSocket(bobPc, API, true);
+    let flashed = null;
+    for (let i = 0; i < 30; i++) { // 3 s, every 100 ms
+        const d = await dotOf(alice, BOB);
+        if (d?.status !== 'away') { flashed = d; break; }
+        await alice.waitForTimeout(100);
+    }
+    const afterReconnect = (await rawFrames(alice, newSock)).frames.slice(beforeReconnect)
+        .filter(f => f.type === 'UserStatus' && String(f.payload.user_id) === bobId);
+    const extraFrames = await rawFrames(bobPc, bobExtra);
+    check('positive control: Bob\'s new socket was confirmed the capability',
+        extraFrames.frames.some(f => f.type === 'ServerFeatures'), extraFrames.frames.map(f => f.type).join(','));
+    check('a reconnect while away: Alice never sees Bob flash online', flashed === null && afterReconnect.length === 0,
+        JSON.stringify({ flashed, afterReconnect }));
+    await bobPc.evaluate((id) => window.__raw[id].ws.close(), bobExtra);
+
+    // ---- 8. quick tab switching cannot strand an active user ------------
+    // Each switch on a phone or in a browser is two reports (hidden =
+    // inactive at once, shown = active). Six switches is twelve frames, past
+    // the server's presence bucket (6 burst). The last one — back, active —
+    // must still be TAKEN: the client never repeats a report.
+    const sentBefore = await bobPhone.evaluate(() => window.__sent.length);
+    for (let i = 0; i < 6; i++) {
+        await setHidden(bobPhone, false);
+        await bobPhone.waitForTimeout(60);
+        await setHidden(bobPhone, true);
+        await bobPhone.waitForTimeout(60);
+    }
+    await setHidden(bobPhone, false); // back in the tab, and staying
+    await bobPhone.waitForTimeout(300);
+    const burst = await bobPhone.evaluate((n) => window.__sent.slice(n).map(f => f.payload.inactive_secs), sentBefore);
+    check('positive control: the switching sent more reports than the bucket holds', burst.length > 6, JSON.stringify(burst));
+    check('the last report sent says active', burst[burst.length - 1] === null);
+    const backAfterBurst = await waitForDot(alice, BOB, 'online', 8000);
+    check('after the burst: Alice sees Bob online (the sweep publishes the throttled report)', backAfterBurst.ok,
+        `${backAfterBurst.ms} ms, ${JSON.stringify(backAfterBurst.last)}`);
+    await alice.waitForTimeout(9000); // past the 6 s idle clock, with the phone shown and in use
+    const stillBack = await dotOf(alice, BOB);
+    check('...and he stays online past the idle clock (no stale "inactive" on the server)', stillBack?.status === 'online',
+        JSON.stringify(stillBack));
+
     // ---- 5b. an OLDER server: ?caps= is harmless, ServerFeatures never comes,
     // and the frame the gate holds back really would draw an Error there.
     if (OLD_API) {

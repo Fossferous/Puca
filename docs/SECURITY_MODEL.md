@@ -1425,9 +1425,14 @@ another user idle, and a connection that did not announce the capability
 cannot report at all. The server owns both clocks and coalesces each user's
 broadcasts (a drop at most once per 10 seconds, a return at once), and the
 report frame has its own small rate limit, so a client flapping its reports
-cannot turn each one into a fan-out to every member of every shared server.
+cannot turn each one into a fan-out to every member of every shared server
+(a report over that limit still updates the sender's own state, and the
+sweep publishes it; only the immediate fan-out is skipped).
 Headless device sessions (the LAN waker, the sign-in-screen service) never
-count as someone at a screen.
+count as someone at a screen. Turning **Show online status** off cannot be
+undone by a device connecting at the same moment: the server refuses to
+cache a read of the setting that began before a change of it, so a hidden
+status stays hidden for the life of the connection.
 
 **Two people who share no server cannot open a conversation** unless they are
 friends or the recipient wrote first. The Settings toggle **"Allow DMs from

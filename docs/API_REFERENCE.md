@@ -116,7 +116,6 @@ in this file is not registered there, so what IS listed is real.
 | GET | `/servers/:id/members` | ✅ | List members. `is_online` is false for anyone hiding their online status, and (since 0.9.5) for anyone with a block against the caller in either direction — the same rule as the live presence frames; if the block lookup fails, every member in that response reads offline. |
 | GET | `/servers/:id/members-with-roles` | ✅ | List members with roles. Same `is_online` rule as `/members`. |
 
-Both member lists, and `GET /friends`, also carry `status` (`online`, `idle` or `away`) for a row whose `is_online` is true, and omit it for an offline one. It is the status the live sockets were last sent (see *Idle and away presence* under WebSocket), so a poll never shows a change before the push does; it is `online` for anyone with "Show when I'm idle or away" off. `/users/search` deliberately does **not** carry it: search is instance-wide, and idle/away is shared only with the same audience as the live presence frames.
 | POST | `/servers/:id/kick/:user_id` | ✅ | Kick member |
 | POST | `/servers/:id/bans/:user_id` | ✅ | Ban member |
 | DELETE | `/servers/:id/bans/:user_id` | ✅ | Unban member |
@@ -128,6 +127,8 @@ Both member lists, and `GET /friends`, also carry `status` (`online`, `idle` or 
 | DELETE | `/users/:user_id/block` | ✅ | Unblock. Does **not** restore the friendship: when a block row is actually removed, any friends row still beside it and any friend request sent across it are deleted (to that request's sender this looks like a rejection). Pairs blocked before 0.9.5 had their friends and pending-request rows removed once at upgrade by migration 063. |
 | GET | `/blocked` | ✅ | The users you have blocked (your own direction only). |
 | GET | `/users/search` | ✅ | Search users by name. `is_online` is false for anyone hiding their online status and for anyone with a block against the caller in either direction (fail closed: a failed block lookup reads every result as offline). Deleted accounts are never listed. |
+
+Both member lists, and `GET /friends`, also carry `status` (`online`, `idle` or `away`) for a row whose `is_online` is true, and omit it for an offline one. It is the status the live sockets were last sent (see *Idle and away presence* under WebSocket), so a poll never shows a change before the push does; it is `online` for anyone with "Show when I'm idle or away" off. `/users/search` deliberately does **not** carry it: search is instance-wide, and idle/away is shared only with the same audience as the live presence frames.
 
 ---
 
@@ -409,8 +410,14 @@ capability (an older client) counts as active; the phone's delivery socket and
 headless device sessions (the LAN waker, the sign-in-screen service — their
 tokens come from `/devices/token`) do not count at all, and a user online
 through nothing else reads `away`. A `SetActivity` from a connection that did
-not announce the capability is ignored, never answered with an `Error`; one
-over its own small rate limit (6 burst, one per 5 s) is dropped silently.
+not announce the capability is ignored, never answered with an `Error`. One
+over its own small rate limit (6 burst, one per 5 s) is still **taken** —
+silently, with no `Error` — and only its immediate broadcast is skipped: the
+client reports transitions once and never repeats one, so dropping it would
+leave the server holding a stale state; the next sweep publishes the change.
+A new connection is not itself taken as activity: until its first report it
+carries whatever the user's other connections say (active if nothing is
+known), so a reconnect does not flash an idle or away user online.
 Changes go out as:
 
 ```json

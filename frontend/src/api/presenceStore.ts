@@ -33,10 +33,8 @@ interface Entry {
 
 const entries = new Map<number, Entry>();
 const listeners = new Set<() => void>();
-let version = 0;
 
 function emit() {
-    version++;
     listeners.forEach(l => l());
 }
 
@@ -110,12 +108,28 @@ export function usePresence(userId: number, restIsOnline?: boolean, restStatus?:
     );
 }
 
+type PresenceRow = { id: number; is_online?: boolean; status?: unknown };
+
+function presenceKeyOf(users: ReadonlyArray<PresenceRow>): string {
+    let key = '';
+    for (const u of users) key += `${u.id}:${presenceOf(u.id, u.is_online, u.status)},`;
+    return key;
+}
+
 /**
- * Re-render on ANY presence change, for a list that reads `presenceOf` for
- * many users at once (filtering into Online / Offline sections).
+ * For a list that reads `presenceOf` for many users at once (filtering into
+ * Online / Offline sections): re-renders the caller when the presence of one
+ * of THESE users changes, and not when anybody else's does. The snapshot is
+ * a string, compared by value, so an unrelated change is no render at all —
+ * the member list lives in the whole Chat view, which must not re-render for
+ * every status change of everyone on every server.
  */
-export function usePresenceVersion(): number {
-    return useSyncExternalStore(subscribe, () => version, () => 0);
+export function usePresenceKey(users: ReadonlyArray<PresenceRow>): string {
+    return useSyncExternalStore(
+        subscribe,
+        () => presenceKeyOf(users),
+        () => '',
+    );
 }
 
 /** Everything known may be stale after a socket gap: let the next snapshot win. */

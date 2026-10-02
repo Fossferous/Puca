@@ -526,7 +526,9 @@ On the Windows desktop app, activity means input **anywhere on the PC** — so
 someone playing a game with Púca in the background is not idle. In a browser
 or on a phone it means using Púca itself; a phone with Púca in the background
 or its screen off counts as inactive. Talking in a voice call counts as
-activity on every device. Any activity turns the dot green again straight away.
+activity on every device. Any activity turns the dot green again within a few
+seconds — at once for activity in Púca itself, and within about 15 seconds for
+input elsewhere on the PC.
 A game controller on its own is not seen as activity on the PC.
 
 **Settings → Privacy & Safety → Show when I'm idle or away** (on by default)

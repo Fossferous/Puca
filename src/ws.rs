@@ -266,18 +266,22 @@ async fn handle_socket(
     // Their sessions are minted by /devices/token and marked in
     // token_sessions; they hold a socket around the clock with nobody at it,
     // so they must not count toward idle/away at all. Looked up BEFORE
-    // registering, so the classification lands with no await in between.
+    // registering: the session is pushed already classified, under the
+    // registration's own lock, so no sweep ever sees it as anything else.
     let headless = !delivery && crate::presence::session_is_headless(&state, user_id, &claims.sid).await;
 
     // Register session (conn_id lets the disconnect path remove exactly this
     // connection; is_first tells us whether to announce the user online —
     // "first" meaning first VISIBLE connection; a delivery socket never is).
-    let (conn_id, is_first_session, kill) =
-        state.register_session(user_id, username.clone(), tx, delivery, claimed_device, claims.sid.clone());
-    if !delivery {
-        let (activity, frames) = crate::presence::classify(headless, caps);
-        state.set_session_presence(user_id, conn_id, activity, frames);
-    }
+    let (conn_id, is_first_session, kill) = state.register_session_classified(
+        user_id,
+        username.clone(),
+        tx,
+        delivery,
+        claimed_device,
+        claims.sid.clone(),
+        crate::presence::classify(headless, caps),
+    );
 
     tracing::info!(
         "User {} ({}) connected{}",
@@ -520,10 +524,10 @@ async fn handle_socket(
     // the tight bucket does not apply; this one only bounds relay CPU.
     let mut input_rate = RateLimiter::for_control_input();
     let mut wake_rate = RateLimiter::for_wake();
-    // Activity reports get their own small bucket, and an over-limit one is
-    // dropped SILENTLY: the stock client alerts on any Error frame, and a
-    // well-behaved one sends a frame only per transition. See
-    // RateLimiter::PRESENCE_CAPACITY.
+    // Activity reports get their own small bucket. An over-limit one is
+    // still TAKEN (its state; only the immediate fan-out is skipped) and
+    // never answered with an Error, which the stock client alerts on — see
+    // presence_gate and RateLimiter::PRESENCE_CAPACITY.
     let mut presence_rate = RateLimiter::for_presence();
 
     // Reap a socket that has gone quiet. Must stay comfortably above the
@@ -583,7 +587,7 @@ async fn handle_socket(
                         // their own bucket; a crafted frame faking the prefix merely
                         // lands in the larger bucket — still bounded, and auth and
                         // validation happen in the handler regardless.
-                        if is_presence_frame(&text) && !presence_rate.allow() {
+                        if !presence_gate(&state, user_id, conn_id, &text, &mut presence_rate) {
                             continue;
                         }
                         let limiter = if is_input_frame(&text) {
@@ -2360,10 +2364,13 @@ impl RateLimiter {
     /// server the user shares, so a client flapping its reports must not be
     /// able to drive that at the general bucket's 50/s. A real client sends
     /// one frame per transition (a pause in typing that crosses a minute, a
-    /// return) plus one per reconnect: 6 burst and one per 5 s sustained is
-    /// far above that and two orders of magnitude below the general bucket.
-    /// The broadcast side is separately coalesced (presence::Thresholds::
-    /// min_broadcast_gap). Also metered by the general bucket after this.
+    /// return) plus one per reconnect — but a tab or app switch on web and
+    /// Android is two (hidden, shown), so quick switching does reach this.
+    /// What it bounds is the immediate FAN-OUT: a report over the limit is
+    /// still taken, and the sweep publishes it (see presence_gate). The
+    /// broadcast side is separately coalesced (presence::Thresholds::
+    /// min_broadcast_gap). An admitted frame is also metered by the general
+    /// bucket after this.
     const PRESENCE_CAPACITY: f64 = 6.0;
     const PRESENCE_REFILL_PER_SEC: f64 = 0.2;
 
@@ -2421,6 +2428,36 @@ fn is_wake_frame(text: &str) -> bool {
 /// faking it only throttles itself.
 fn is_presence_frame(text: &str) -> bool {
     text.starts_with("{\"type\":\"SetActivity\"")
+}
+
+/// A real `SetActivity` is ~50 bytes; anything much bigger that fakes the
+/// prefix is not worth parsing on the throttled path.
+const MAX_THROTTLED_PRESENCE_FRAME: usize = 256;
+
+/// The read loop's presence bucket. Returns whether the frame goes on to the
+/// general bucket and `handle_message`.
+///
+/// A report over the limit is NOT dropped: the client marks a report as told
+/// once it is on the wire and never repeats it (it reports transitions only),
+/// so a dropped "active" would leave the server holding a stale "inactive"
+/// while the person keeps chatting — idle after ten minutes, away after an
+/// hour, in front of everyone. Each tab or app switch on web and Android is
+/// two frames, so a few quick switches empty the bucket. Instead its STATE is
+/// taken — in memory, one shard lock — and only the immediate refresh (the
+/// fan-out the bucket exists to bound) is skipped: the sweep delivers any
+/// change within `Thresholds::sweep_every`, and `min_broadcast_gap` still
+/// coalesces. Never an Error frame either way (the stock client alerts).
+fn presence_gate(state: &AppState, user: UserId, conn: u64, text: &str, bucket: &mut RateLimiter) -> bool {
+    if !is_presence_frame(text) || bucket.allow() {
+        return true;
+    }
+    if text.len() <= MAX_THROTTLED_PRESENCE_FRAME {
+        if let Ok(ClientMessage::SetActivity { inactive_secs }) = serde_json::from_str::<ClientMessage>(text) {
+            let since = inactive_secs.map(|s| crate::presence::Since::now_minus(std::time::Instant::now(), s));
+            state.report_session_activity(user, conn, since);
+        }
+    }
+    false
 }
 
 /// Max rooms a single connection may be joined to at once. A healthy client
@@ -7519,15 +7556,20 @@ mod presence_ws_tests {
     }
 
     impl Sock {
-        /// The connect path of handle_socket, minus the socket: register,
-        /// classify (no await between), then the presence half of connect.
+        /// The connect path of handle_socket, minus the socket: register
+        /// already classified, then the presence half of connect.
         async fn open(state: &Arc<AppState>, uid: i32, caps: bool, headless: bool) -> Sock {
             let (tx, rx) = mpsc::channel::<ServerMessage>(256);
-            let (conn, is_first, _) =
-                state.register_session(uid as UserId, format!("u{uid}"), tx, false, None, String::new());
             let caps = ClientCaps { presence: caps };
-            let (activity, frames) = presence::classify(headless, caps);
-            state.set_session_presence(uid as UserId, conn, activity, frames);
+            let (conn, is_first, _) = state.register_session_classified(
+                uid as UserId,
+                format!("u{uid}"),
+                tx,
+                false,
+                None,
+                String::new(),
+                presence::classify(headless, caps),
+            );
             presence::on_connect(state, uid as UserId, conn, caps, is_first).await;
             Sock { uid: uid as UserId, conn, rx, joined: HashSet::new() }
         }
@@ -7673,6 +7715,14 @@ mod presence_ws_tests {
         // (Hiding your own status does not hide others' from you: drop
         // the subject's frames this socket also received.)
         let hidden_self: Vec<_> = statuses(&s_hidden.drain()).into_iter().filter(|(u, _)| *u == hidden as UserId).collect();
+        // 5b. ...until they show it again while idle: update_profile's
+        // UserOnline reads as plain online, so the real status must follow
+        // it — the decision itself did not change (it was kept while hidden),
+        // so only the un-hide correction can send this.
+        sqlx::query("UPDATE users SET show_online_status = TRUE WHERE id = $1").bind(hidden).execute(&pool).await.unwrap();
+        presence::flags_changed(&state, hidden as UserId, Some(true), None, true).await;
+        let unhidden_watcher = statuses(&s_watcher.drain());
+        let _ = s_hidden.drain();
 
         // 6. "Show when I'm idle or away" off: plain online, nothing sent...
         s_quiet.report(&state, Some(3700)).await;
@@ -7714,6 +7764,7 @@ mod presence_ws_tests {
 
         assert!(hidden_watcher.is_empty(), "hidden means hidden: {hidden_watcher:?}");
         assert_eq!(hidden_self, vec![(hidden as UserId, PresenceStatus::Idle)]);
+        assert_eq!(unhidden_watcher, vec![(hidden as UserId, PresenceStatus::Idle)], "un-hiding while idle shows idle, not online");
 
         assert!(quiet_watcher.is_empty(), "sharing off reads plain online: {quiet_watcher:?}");
         assert_eq!(quiet_listed, PresenceStatus::Online);
@@ -7784,5 +7835,177 @@ mod presence_ws_tests {
         assert!(mixed_frames.iter().all(|(u, _)| *u != mixed as UserId), "an old client pins active: {mixed_frames:?}");
         assert_eq!(mixed_status, PresenceStatus::Online);
         assert!(!record_left, "the last visible session takes the record with it");
+    }
+
+    /// What one connection currently holds.
+    fn activity_of(state: &Arc<AppState>, uid: UserId, conn: u64) -> Option<presence::SessionActivity> {
+        state.sessions.get(&uid).and_then(|v| v.iter().find(|s| s.conn_id == conn).map(|s| s.activity))
+    }
+
+    /// The frame exactly as the client's JSON.stringify writes it — `type`
+    /// first, which is what the read loop's prefix check keys on.
+    fn wire_report(inactive_secs: Option<u32>) -> String {
+        let secs = inactive_secs.map_or("null".to_string(), |s| s.to_string());
+        format!(r#"{{"type":"SetActivity","payload":{{"inactive_secs":{secs}}}}}"#)
+    }
+
+    /// The client marks a report as told once it is on the wire and never
+    /// repeats it. So a report the read loop's bucket refuses must still be
+    /// TAKEN, or the server keeps a stale "inactive" while the person keeps
+    /// chatting — and they go idle, then away, in front of everyone. (Each
+    /// tab or app switch on web/Android is two frames, so a handful of quick
+    /// switches empties the bucket.)
+    #[tokio::test]
+    async fn a_report_over_the_rate_limit_is_still_taken() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let mk = |n: &str| format!("pr_{n}_{}", &tag[..12]);
+        let subject = user(&pool, &mk("subject")).await;
+        let watcher = user(&pool, &mk("watcher")).await;
+        let ids = vec![subject, watcher];
+        let sid = shared_server(&pool, &mk("srv"), subject, &[subject, watcher]).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let gap = state.presence.thresholds.min_broadcast_gap() + Duration::from_secs(1);
+
+        let mut s_watcher = Sock::open(&state, watcher, true, false).await;
+        let mut s_subject = Sock::open(&state, subject, true, false).await;
+        let _ = s_watcher.drain();
+
+        // Nine quick switches through the REAL read-loop gate: active,
+        // inactive, active, ... ending on "active" (back in the tab).
+        let mut bucket = super::RateLimiter::for_presence();
+        let reports: Vec<Option<u32>> = (0..9).map(|i| if i % 2 == 0 { None } else { Some(700) }).collect();
+        let mut refused = 0;
+        for r in &reports {
+            let text = wire_report(*r);
+            if super::presence_gate(&state, s_subject.uid, s_subject.conn, &text, &mut bucket) {
+                let res = handle_message(&state, s_subject.uid, s_subject.conn, "x", &text, &mut s_subject.joined, "").await;
+                assert_eq!(res, Ok(()));
+            } else {
+                refused += 1;
+            }
+        }
+        let held = activity_of(&state, subject as UserId, s_subject.conn);
+        // The sweep delivers what the refused frames changed.
+        presence::sweep(&state, Instant::now() + gap).await;
+        let listed = state.listing_status(subject as UserId);
+        let last_seen = statuses(&s_watcher.drain()).last().copied();
+
+        // A crafted, oversized frame faking the prefix is not parsed at all.
+        let mut empty = super::RateLimiter::with(0.0, 0.0);
+        let junk = format!(r#"{{"type":"SetActivity","payload":{{"inactive_secs":700}},"pad":"{}"}}"#, "x".repeat(4096));
+        let junk_admitted = super::presence_gate(&state, s_subject.uid, s_subject.conn, &junk, &mut empty);
+        let after_junk = activity_of(&state, subject as UserId, s_subject.conn);
+
+        for s in [&s_watcher, &s_subject] {
+            state.unregister_session(s.uid, s.conn);
+        }
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&sid).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(ids.clone()).execute(&pool).await;
+
+        assert!(refused >= 3, "positive control: the bucket did refuse the tail of the burst ({refused})");
+        assert_eq!(
+            held,
+            Some(presence::SessionActivity::Reporting(None)),
+            "the session holds the LAST report sent, not the last one admitted"
+        );
+        assert_eq!(listed, PresenceStatus::Online, "an active person is not left idle");
+        assert_eq!(last_seen, Some((subject as UserId, PresenceStatus::Online)), "and the watcher ends on online");
+        assert!(!junk_admitted);
+        assert_eq!(after_junk, Some(presence::SessionActivity::Reporting(None)), "an oversized frame changes nothing");
+    }
+
+    /// A new socket is not evidence that a person came back: a network blip
+    /// reconnects the desktop while its old socket lingers, a waker or an
+    /// open phone keeps the record alive. The away user must not flash
+    /// online (and cost two fan-outs) until the new socket's own report.
+    #[tokio::test]
+    async fn a_reconnect_is_not_evidence_of_activity() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let mk = |n: &str| format!("pc_{n}_{}", &tag[..12]);
+        let lingering = user(&pool, &mk("lingering")).await; // old socket still registered
+        let waked = user(&pool, &mk("waked")).await; // only a waker keeps them online
+        let watcher = user(&pool, &mk("watcher")).await;
+        let ids = vec![lingering, waked, watcher];
+        let sid = shared_server(&pool, &mk("srv"), watcher, &[lingering, waked, watcher]).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let gap = state.presence.thresholds.min_broadcast_gap() + Duration::from_secs(1);
+
+        let mut s_watcher = Sock::open(&state, watcher, true, false).await;
+        // 1. Away, with the old socket still registered when the new one lands.
+        let mut s_old = Sock::open(&state, lingering, true, false).await;
+        s_old.report(&state, Some(3700)).await;
+        let away_first = statuses(&s_watcher.drain());
+        let mut s_new = Sock::open(&state, lingering, true, false).await;
+        let on_reconnect = statuses(&s_watcher.drain());
+        s_new.report(&state, Some(3700)).await;
+        presence::sweep(&state, Instant::now() + gap).await;
+        let after_report = statuses(&s_watcher.drain());
+        // Positive control: a real return is still shown at once.
+        s_new.report(&state, None).await;
+        let back = statuses(&s_watcher.drain());
+
+        // 2. Away through a waker and the PC's tail; the PC reconnects.
+        let mut s_waker = Sock::open(&state, waked, false, true).await;
+        let mut s_pc = Sock::open(&state, waked, true, false).await;
+        s_pc.report(&state, Some(3700)).await;
+        state.unregister_session(waked as UserId, s_pc.conn);
+        presence::sweep(&state, Instant::now() + gap).await;
+        let _ = s_watcher.drain();
+        let mut s_pc2 = Sock::open(&state, waked, true, false).await;
+        let on_pc_reconnect = statuses(&s_watcher.drain());
+        let _ = (s_old.drain(), s_new.drain(), s_waker.drain(), s_pc.drain(), s_pc2.drain());
+
+        for (u, c) in [(watcher, s_watcher.conn), (lingering, s_old.conn), (lingering, s_new.conn), (waked, s_waker.conn), (waked, s_pc2.conn)] {
+            state.unregister_session(u as UserId, c);
+        }
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&sid).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(ids.clone()).execute(&pool).await;
+
+        let l = lingering as UserId;
+        assert_eq!(away_first, vec![(l, PresenceStatus::Away)], "positive control: the frames do arrive");
+        assert!(on_reconnect.is_empty(), "a reconnect alone shows no false online: {on_reconnect:?}");
+        assert!(after_report.is_empty(), "and its own 'still away' report changes nothing: {after_report:?}");
+        assert_eq!(back, vec![(l, PresenceStatus::Online)], "a real return is shown at once");
+        assert!(on_pc_reconnect.is_empty(), "the PC reconnecting beside a waker shows no false online: {on_pc_reconnect:?}");
+    }
+
+    /// The per-user session cap evicts a visible session without the socket
+    /// ever reaching unregister_session for it: its activity must still be
+    /// kept (the tail), or the user drops straight to what the rest say.
+    #[tokio::test]
+    async fn a_session_evicted_by_the_cap_leaves_its_activity_behind() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let mk = |n: &str| format!("pe_{n}_{}", &tag[..12]);
+        let subject = user(&pool, &mk("subject")).await;
+        let ids = vec![subject];
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let gap = state.presence.thresholds.min_broadcast_gap() + Duration::from_secs(1);
+
+        // The oldest socket is the one in use; nine more have been away.
+        let active = Sock::open(&state, subject, true, false).await;
+        let mut rest = Vec::new();
+        for _ in 0..9 {
+            let mut s = Sock::open(&state, subject, true, false).await;
+            s.report(&state, Some(3700)).await;
+            rest.push(s);
+        }
+        let before = state.listing_status(subject as UserId);
+        // An eleventh: the cap (10) evicts the oldest — the active one.
+        let newest = Sock::open(&state, subject, true, false).await;
+        let evicted = activity_of(&state, subject as UserId, active.conn).is_none();
+        presence::sweep(&state, Instant::now() + gap).await;
+        let after = state.listing_status(subject as UserId);
+
+        for s in rest.iter().chain([&newest]) {
+            state.unregister_session(s.uid, s.conn);
+        }
+        let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(ids.clone()).execute(&pool).await;
+
+        assert_eq!(before, PresenceStatus::Online);
+        assert!(evicted, "positive control: the cap did evict the oldest");
+        assert_eq!(after, PresenceStatus::Online, "the evicted session was active a moment ago");
     }
 }

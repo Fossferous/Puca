@@ -16,7 +16,7 @@ import { TasksView } from './TasksView';
 import { HomeSidebar } from './HomeSidebar';
 import { TasksIcon, MembersIcon, MessageIcon, CheckIcon, CloseIcon, SettingsIcon, UserRemoveIcon } from './Icons';
 import { PresenceDot } from './PresenceDot';
-import { ingestPresenceSnapshot, presenceOf, usePresenceVersion, PRESENCE_LABEL, type PresenceStatus } from '../api/presenceStore';
+import { ingestPresenceSnapshot, presenceOf, usePresenceKey, PRESENCE_LABEL, type PresenceStatus } from '../api/presenceStore';
 import './FriendsPanel.css';
 
 interface FriendsPanelProps {
@@ -191,8 +191,8 @@ export function FriendsPanel({ onStartDM, onClose, initialTab = 'online', onTabC
 
     // Presence comes from the store, which hears every pushed UserOnline /
     // UserOffline / UserStatus: this list used to change only on its 15 s
-    // poll. The version subscription re-renders on any change.
-    usePresenceVersion();
+    // poll. Re-renders when one of THESE friends changes.
+    usePresenceKey(friends);
     const presenceFor = (f: Friend): PresenceStatus => presenceOf(f.id, f.is_online, f.status);
     const onlineFriends = friends.filter(f => presenceFor(f) !== 'offline');
     const pendingCount = incoming.length + outgoing.length;

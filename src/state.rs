@@ -1511,6 +1511,11 @@ impl AppState {
     /// user-online presence only in that case — a second device coming online
     /// must not re-announce an already-online user), and the hangup handle the
     /// receive loop must select on so `disconnect_user` can drop this socket.
+    ///
+    /// Tests only: the real connect path (ws.rs) registers through
+    /// [`Self::register_session_classified`], which pushes the session
+    /// already classified for idle/away presence.
+    #[cfg(test)]
     pub fn register_session(
         &self,
         user_id: UserId,
@@ -1519,6 +1524,33 @@ impl AppState {
         delivery: bool,
         claimed_device_id: Option<String>,
         sid: String,
+    ) -> (u64, bool, Arc<Notify>) {
+        // A delivery socket never counts toward idle/away; anything else
+        // registered this way is an old UI client, i.e. active.
+        let activity = if delivery {
+            crate::presence::SessionActivity::Uncounted
+        } else {
+            crate::presence::SessionActivity::Legacy
+        };
+        self.register_session_classified(user_id, username, tx, delivery, claimed_device_id, sid, (activity, false))
+    }
+
+    /// [`Self::register_session`], with how the connection takes part in
+    /// idle/away presence (`crate::presence::classify`) decided by the
+    /// caller BEFORE it is visible: the Session is pushed already classified,
+    /// under the same shard lock, so a sweep on another worker thread can
+    /// never see it in between as something it is not (a waker read as an
+    /// old, always-active client flashed its away owner online).
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_session_classified(
+        &self,
+        user_id: UserId,
+        username: String,
+        tx: mpsc::Sender<ServerMessage>,
+        delivery: bool,
+        claimed_device_id: Option<String>,
+        sid: String,
+        presence: (crate::presence::SessionActivity, bool),
     ) -> (u64, bool, Arc<Notify>) {
         let conn_id = self.next_conn_id.fetch_add(1, Ordering::Relaxed);
         let kill = Arc::new(Notify::new());
@@ -1666,6 +1698,15 @@ impl AppState {
                 })
                 .unwrap_or(0);
             let evicted = entry.remove(victim);
+            // The evicted socket's own disconnect will find nothing left to
+            // unregister, so keep its activity here, as unregister_session
+            // would (lock order: sessions, then presence). A visible session
+            // is always survived by another: the cap is 10, delivery at most 4.
+            if !evicted.delivery {
+                if let Some(since) = evicted.activity.departure(Instant::now()) {
+                    self.presence.note_departure(user_id, since, Instant::now());
+                }
+            }
             let was_in_device_session = protected.contains(&evicted.conn_id);
             // This eviction used to be completely silent, which is why it took
             // three audits to find. It hangs a socket up that nobody asked to
@@ -1681,6 +1722,25 @@ impl AppState {
             );
             evicted.kill.notify_one();
         }
+        // A new REPORTING socket is not evidence that a person came back: a
+        // network blip reconnects the desktop while its old socket lingers,
+        // and a waker or an open phone keeps the record (and the PC's tail)
+        // alive. Until its own first report — about one round trip — it
+        // carries what the user's other sessions say (presence::arrival).
+        let (activity, presence_frames) = if delivery {
+            (crate::presence::SessionActivity::Uncounted, false)
+        } else {
+            let (activity, frames) = presence;
+            let activity = match activity {
+                crate::presence::SessionActivity::Reporting(None) => crate::presence::arrival(
+                    entry.iter().filter(|s| !s.delivery).map(|s| s.activity),
+                    self.presence.tail(user_id),
+                    Instant::now(),
+                ),
+                other => other,
+            };
+            (activity, frames)
+        };
         entry.push(Session {
             username,
             tx,
@@ -1690,16 +1750,13 @@ impl AppState {
             device_id: None,
             delivery,
             claimed_device_id,
-            // Until the caller classifies it (ws.rs, right after this call):
-            // a delivery socket never counts; anything else starts as an old
-            // UI client, i.e. active — the safe reading for presence.
-            activity: if delivery {
-                crate::presence::SessionActivity::Uncounted
-            } else {
-                crate::presence::SessionActivity::Legacy
-            },
-            presence_frames: false,
+            activity,
+            presence_frames,
         });
+        if !delivery {
+            // Under this shard lock: see PresenceRegistry::ensure.
+            self.presence.ensure(user_id);
+        }
         (conn_id, is_first, kill)
     }
 

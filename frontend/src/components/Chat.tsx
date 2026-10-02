@@ -162,7 +162,7 @@ import {
     fetchMembersWithPresence,
     keys
 } from '../hooks/queries';
-import { presenceOf, usePresence, usePresenceVersion, PRESENCE_LABEL } from '../api/presenceStore';
+import { presenceOf, usePresence, usePresenceKey, PRESENCE_LABEL } from '../api/presenceStore';
 import { startActivityReporter } from '../api/activityReporter';
 import { PresenceDot } from './PresenceDot';
 import { PERM, hasPerm } from '../api/permissionBits';
@@ -749,9 +749,10 @@ export function Chat({ onLogout }: ChatProps) {
 
     // Idle/away presence (src/presence.rs). Every status this view draws —
     // the member list and its Online/Offline split, your own profile bar,
-    // the profile popup — reads the presence store; the version subscription
-    // re-renders the lists on any pushed change. Above every early return.
-    usePresenceVersion();
+    // the profile popup — reads the presence store. This view re-renders only
+    // when one of the CURRENT server's members changes (usePresenceKey), not
+    // for every status change of everyone. Above every early return.
+    usePresenceKey(allMembers);
     const ownPresence = usePresence(currentUserId, true);
     // Tell the server whether the person at THIS device is active. It sends
     // nothing until this socket's server confirms the capability, so an older

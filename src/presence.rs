@@ -45,6 +45,7 @@ use crate::protocol::ServerMessage;
 use crate::state::{AppState, UserId};
 use dashmap::DashMap;
 use serde::Serialize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -180,6 +181,34 @@ pub fn combine(now: Instant, sessions: &[SessionActivity], tail: Option<Since>, 
     }
 }
 
+/// What a NEW reporting session starts as, until its own first report.
+///
+/// Connecting is not evidence that a person is there: a network blip
+/// reconnects the desktop while its old socket lingers until the liveness
+/// reaper takes it, and a LAN waker or an open phone keeps the user's record
+/// (and the PC's tail) alive. Counting the arrival as "active" flashed an
+/// away user online for 10–25 s (the client's "still away" report a round
+/// trip later fell inside the broadcast gap) and cost two fan-outs per blip.
+/// So it carries the user's current LEAST inactivity — or active when
+/// nothing at all is known (the first device of the day: someone opened the
+/// app). Its first report, a round trip later, then decides; a real return
+/// is a move up and goes out at once.
+pub fn arrival(others: impl Iterator<Item = SessionActivity>, tail: Option<Since>, now: Instant) -> SessionActivity {
+    let mut least: Option<Since> = tail;
+    for s in others {
+        match s {
+            SessionActivity::Uncounted => {}
+            SessionActivity::Legacy | SessionActivity::Reporting(None) => return SessionActivity::Reporting(None),
+            SessionActivity::Reporting(Some(since)) => {
+                if least.is_none_or(|l| since.idle_for(now) < l.idle_for(now)) {
+                    least = Some(since);
+                }
+            }
+        }
+    }
+    SessionActivity::Reporting(least)
+}
+
 impl PresenceStatus {
     /// Online > Idle > Away. A move UP is shown at once; only a move down
     /// waits out the broadcast gap.
@@ -250,16 +279,26 @@ pub struct PresenceRecord {
     pub sent_at: Option<Instant>,
     /// Activity of counting sessions that have gone (see the module header).
     pub tail: Option<Since>,
+    /// Changes with every write of the flags (and differs between a record
+    /// and the one that replaces it), so a database READ of the flags can be
+    /// refused if anything wrote them after the read began
+    /// ([`PresenceRegistry::set_flags_read`]).
+    pub flags_gen: u64,
 }
 
 pub struct PresenceRegistry {
     pub records: DashMap<UserId, PresenceRecord>,
     pub thresholds: Thresholds,
+    next_gen: AtomicU64,
 }
 
 impl PresenceRegistry {
     pub fn new(thresholds: Thresholds) -> Self {
-        Self { records: DashMap::new(), thresholds }
+        Self { records: DashMap::new(), thresholds, next_gen: AtomicU64::new(1) }
+    }
+
+    fn gen(&self) -> u64 {
+        self.next_gen.fetch_add(1, Ordering::Relaxed)
     }
 
     /// The status the user was last announced with, if they have a record.
@@ -282,13 +321,18 @@ impl PresenceRegistry {
         }
     }
 
+    /// Activity kept from counting sessions that have gone.
+    pub(crate) fn tail(&self, user: UserId) -> Option<Since> {
+        self.records.get(&user).and_then(|r| r.tail)
+    }
+
     /// The user's last visible session went: nothing to remember.
     pub(crate) fn forget(&self, user: UserId) {
         self.records.remove(&user);
     }
 
     /// A visible session exists: make sure there is a record. Called ONLY
-    /// under the `sessions` shard lock (from `set_session_presence`), as
+    /// under the `sessions` shard lock (from `register_session_classified`), as
     /// `forget` is (from `unregister_session`), so the two are serialised and
     /// a record exists exactly while the user has a visible session — a
     /// record created after an await could outlive its user, and one deleted
@@ -297,17 +341,24 @@ impl PresenceRegistry {
     /// A NEW record shares nothing until the user's real flags are read
     /// (`set_flags`, right after): fail closed for the moment in between.
     pub(crate) fn ensure(&self, user: UserId) {
+        if self.records.contains_key(&user) {
+            return;
+        }
+        let flags_gen = self.gen();
         self.records.entry(user).or_insert(PresenceRecord {
             show_online: false,
             show_idle: false,
             sent: PresenceStatus::Online,
             sent_at: None,
             tail: None,
+            flags_gen,
         });
     }
 
-    /// Store the privacy flags (no-op for a user with no record).
+    /// Store a CHANGE of the privacy flags (no-op for a user with no
+    /// record). Always wins: it is what the user just did.
     pub(crate) fn set_flags(&self, user: UserId, show_online: Option<bool>, show_idle: Option<bool>) {
+        let flags_gen = self.gen();
         if let Some(mut rec) = self.records.get_mut(&user) {
             if let Some(v) = show_online {
                 rec.show_online = v;
@@ -315,7 +366,35 @@ impl PresenceRegistry {
             if let Some(v) = show_idle {
                 rec.show_idle = v;
             }
+            rec.flags_gen = flags_gen;
         }
+    }
+
+    /// Taken BEFORE reading the flags from the database; hand it back to
+    /// [`Self::set_flags_read`]. None when the user has no record.
+    pub(crate) fn flags_token(&self, user: UserId) -> Option<u64> {
+        self.records.get(&user).map(|r| r.flags_gen)
+    }
+
+    /// Store flags READ from the database, unless anything wrote them since
+    /// `token` was taken — returns false then, and the caller reads again.
+    ///
+    /// on_connect reads with an await in between. If the user turns "Show
+    /// online status" OFF on another device meanwhile, update_profile's
+    /// flags_changed writes the cache AFTER its UPDATE commits — and a read
+    /// that began before that commit would otherwise put the old `true` back
+    /// for the life of the record (days, for a desktop), sending the hidden
+    /// user's status to their whole audience.
+    pub(crate) fn set_flags_read(&self, user: UserId, token: u64, show_online: bool, show_idle: bool) -> bool {
+        let flags_gen = self.gen();
+        let Some(mut rec) = self.records.get_mut(&user) else { return false };
+        if rec.flags_gen != token {
+            return false;
+        }
+        rec.show_online = show_online;
+        rec.show_idle = show_idle;
+        rec.flags_gen = flags_gen;
+        true
     }
 
     /// Decide the user's status as of `now` from a snapshot of their
@@ -361,22 +440,6 @@ impl SessionActivity {
 // ---- Session-level state (lives on crate::state::Session) -------------------
 
 impl AppState {
-    /// Classify a freshly registered connection. Called right after
-    /// `register_session`, with no await in between, so a sweep never sees
-    /// a headless session counted as an old UI client.
-    pub fn set_session_presence(&self, user: UserId, conn: u64, activity: SessionActivity, frames: bool) {
-        if let Some(mut sessions) = self.sessions.get_mut(&user) {
-            if let Some(s) = sessions.iter_mut().find(|s| s.conn_id == conn) {
-                s.activity = activity;
-                s.presence_frames = frames;
-                if !s.delivery {
-                    // Under the sessions lock: see PresenceRegistry::ensure.
-                    self.presence.ensure(user);
-                }
-            }
-        }
-    }
-
     /// Record a `SetActivity` from `conn`. Only a REPORTING session's state
     /// moves; a frame from any other kind (a crafted one from an old client,
     /// say) is ignored. Returns whether it was taken.
@@ -467,11 +530,19 @@ pub async fn on_connect(state: &Arc<AppState>, user: UserId, conn: u64, caps: Cl
     if !features.is_empty() {
         state.send_to_conn(user, conn, ServerMessage::ServerFeatures { features });
     }
-    // The record exists already (set_session_presence made it); fill in the
+    // The record exists already (register_session_classified made it); fill in the
     // user's real privacy flags, then decide — a second device arriving at an
     // idle desk, or a headless one connecting alone, can change the status.
-    let (show_online, show_idle) = presence_flags(state, user).await;
-    state.presence.set_flags(user, Some(show_online), Some(show_idle));
+    // A read that raced a settings change is refused and read again; one
+    // that keeps losing (a user flipping the switch in a loop) leaves the
+    // flags the CHANGES wrote, which are newer than any read anyway.
+    for _ in 0..4 {
+        let Some(token) = state.presence.flags_token(user) else { break };
+        let (show_online, show_idle) = presence_flags(state, user).await;
+        if state.presence.set_flags_read(user, token, show_online, show_idle) {
+            break;
+        }
+    }
     refresh(state, user, Instant::now()).await;
 }
 
@@ -625,18 +696,68 @@ mod rule_tests {
     }
 
     #[test]
+    fn an_arriving_session_carries_what_the_others_say_until_it_reports() {
+        let now = Instant::now();
+        let away = Since { at: now, before: mins(70) };
+        let idle = Since { at: now, before: mins(12) };
+        use SessionActivity::*;
+        // Beside an away socket that has not been reaped yet: away, not online.
+        assert_eq!(arrival([Reporting(Some(away))].into_iter(), None, now), Reporting(Some(away)));
+        // The least inactive of the others and the tail wins.
+        assert_eq!(arrival([Reporting(Some(away)), Uncounted].into_iter(), Some(idle), now), Reporting(Some(idle)));
+        assert_eq!(arrival([Reporting(Some(idle))].into_iter(), Some(away), now), Reporting(Some(idle)));
+        // Beside anything active, active (it changes nothing).
+        assert_eq!(arrival([Reporting(Some(away)), Legacy].into_iter(), None, now), Reporting(None));
+        assert_eq!(arrival([Reporting(None)].into_iter(), Some(away), now), Reporting(None));
+        // Nothing known (first device, or only a waker and no tail): active.
+        assert_eq!(arrival(std::iter::empty(), None, now), Reporting(None));
+        assert_eq!(arrival([Uncounted].into_iter(), None, now), Reporting(None));
+        // And the status it yields is the one already shown: no flash.
+        assert_eq!(
+            combine(now, &[Reporting(Some(away)), arrival([Reporting(Some(away))].into_iter(), None, now)], None, T),
+            PresenceStatus::Away
+        );
+    }
+
+    #[test]
     fn note_departure_keeps_the_most_recent_activity() {
         let reg = PresenceRegistry::new(T);
         let now = Instant::now();
         reg.records.insert(
             1,
-            PresenceRecord { show_online: true, show_idle: true, sent: PresenceStatus::Online, sent_at: None, tail: None },
+            PresenceRecord { show_online: true, show_idle: true, sent: PresenceStatus::Online, sent_at: None, tail: None, flags_gen: 0 },
         );
         reg.note_departure(1, Since::now_minus(now, 300), now);
         reg.note_departure(1, Since::now_minus(now, 900), now); // older activity: ignored
         assert_eq!(reg.records.get(&1).unwrap().tail.unwrap().idle_for(now), Duration::from_secs(300));
         reg.note_departure(1, Since::now_minus(now, 10), now); // newer: kept
         assert_eq!(reg.records.get(&1).unwrap().tail.unwrap().idle_for(now), Duration::from_secs(10));
+    }
+
+    /// on_connect reads the flags with an await in between; "Show online
+    /// status" turned OFF on another device during that read must win.
+    #[test]
+    fn a_stale_flags_read_never_overwrites_a_newer_change() {
+        let reg = PresenceRegistry::new(T);
+        reg.ensure(1);
+        // on_connect takes its token and starts its SELECT...
+        let token = reg.flags_token(1).expect("record");
+        // ...the user hides their status meanwhile (update_profile commits,
+        // then flags_changed writes the cache)...
+        reg.set_flags(1, Some(false), None);
+        // ...and the SELECT, begun before the UPDATE, returns the old value.
+        assert!(!reg.set_flags_read(1, token, true, true), "a read older than a change is refused");
+        assert!(!reg.records.get(&1).unwrap().show_online, "hidden stays hidden");
+        // A read begun after the change is taken (positive control).
+        let token = reg.flags_token(1).expect("record");
+        assert!(reg.set_flags_read(1, token, false, true));
+        assert!(reg.records.get(&1).unwrap().show_idle);
+        // A token from a record that was forgotten and made again is stale too.
+        let token = reg.flags_token(1).expect("record");
+        reg.forget(1);
+        reg.ensure(1);
+        assert!(!reg.set_flags_read(1, token, true, true));
+        assert!(!reg.records.get(&1).unwrap().show_online, "a new record still fails closed");
     }
 
     #[test]

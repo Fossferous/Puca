@@ -82,6 +82,21 @@ describe('presence store', () => {
         expect(presenceOf(6, true, 'online')).toBe('away');
     });
 
+    it('after a reconnect the next snapshot wins, even one older than the last push', () => {
+        // Pushed while connected: idle.
+        applyPresenceFrame(frame('UserStatus', { user_id: 5, status: 'idle' }));
+        const startedBeforePush = Date.now() - 5_000;
+        // Positive control: without a reconnect an older snapshot loses.
+        ingestPresenceSnapshot([{ id: 5, is_online: true, status: 'online' }], startedBeforePush);
+        expect(presenceOf(5)).toBe('idle');
+        // The socket dropped and came back: frames may have been missed in
+        // the gap (the UserStatus(online) that would have corrected this),
+        // so what the store holds is no longer evidence of anything.
+        window.dispatchEvent(new Event('wsConnected'));
+        ingestPresenceSnapshot([{ id: 5, is_online: true, status: 'online' }], startedBeforePush);
+        expect(presenceOf(5)).toBe('online');
+    });
+
     it('ignores frames for other types and malformed payloads', () => {
         applyPresenceFrame(frame('UserStatus', { user_id: '5', status: 'idle' }));
         applyPresenceFrame(frame('ChatMessage', { user_id: 5 }));

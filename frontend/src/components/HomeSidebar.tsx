@@ -3,7 +3,7 @@ import { searchUsers } from '../api/dms';
 import type { DMConversation, SearchUserResult } from '../api/dms';
 import { MembersIcon, TasksIcon } from './Icons';
 import { PresenceDot } from './PresenceDot';
-import { presenceOf, usePresenceVersion } from '../api/presenceStore';
+import { presenceOf, usePresenceKey } from '../api/presenceStore';
 // Owns the .friends-sidebar / .dm-* styles this component renders — imported
 // here so the styling doesn't silently depend on FriendsPanel being mounted.
 import './FriendsPanel.css';
@@ -53,7 +53,7 @@ export function HomeSidebar({
     // deliberately NOT given idle/away); the store adds idle/away only for
     // people this account can already see through a shared server or a
     // friendship.
-    usePresenceVersion();
+    usePresenceKey(searchResults);
 
     // Debounced user search for "find or start a conversation".
     useEffect(() => {
