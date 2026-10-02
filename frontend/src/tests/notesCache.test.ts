@@ -2,7 +2,7 @@
  * The sealed on-device cache (notes/model/notesCache.ts) and the offline
  * worker it relies on (scripts/notes-sw.mjs).
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { QueryClient } from '@tanstack/react-query';
 
 /** The token's account: 7, until a test signs it out. The keys the page
@@ -22,10 +22,61 @@ const { notesCacheDbName } = await import('../api/notesCacheScrub');
 const { makeFakeIndexedDB } = await import('./fixtures/fakeIndexedDB');
 // A plain .mjs build script; scripts/notes-sw.d.mts types it.
 const { renderNotesServiceWorker } = await import('../../scripts/notes-sw.mjs');
+const { cryptoInFlight, trackCrypto } = await import('./fixtures/cryptoInFlight');
 
 const me = makeIdentity(new Uint8Array(32).fill(2));
 const other = makeIdentity(new Uint8Array(32).fill(3));
 const settle = async () => { for (let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 0)); };
+let untrackCrypto: () => void = () => {};
+beforeEach(() => { untrackCrypto = trackCrypto(); });
+afterEach(() => { untrackCrypto(); });
+/** Real time until `done()` holds. Bounded inside vitest's 5 s, so what
+ *  never happens fails here and says what it was. */
+async function until(done: () => boolean | Promise<boolean>, what: () => string | Promise<string>) {
+    const giveUp = performance.now() + 3_000;
+    while (!(await done())) {
+        if (performance.now() > giveUp) throw new Error(`gave up after 3 s waiting for ${await what()}`);
+        await new Promise(r => setTimeout(r, 5));
+    }
+}
+/** Turns until no WebCrypto call is out (fixtures/cryptoInFlight.ts) for a
+ *  few in a row: a seal that was running, and the write after it, landed. */
+async function quiet() {
+    await until(async () => {
+        for (let calm = 0; calm < 3; calm++) {
+            if (cryptoInFlight() !== 0) return false;
+            await new Promise(r => setTimeout(r, 0));
+        }
+        return cryptoInFlight() === 0;
+    }, () => `${cryptoInFlight()} WebCrypto calls to finish`);
+    await settle();
+}
+/**
+ * Real time until `store` holds `n` records, and then until nothing is
+ * still being sealed, so a record past the n-th, were one written, would be
+ * there too. Each is sealed for real (WebCrypto, settling from Node's thread
+ * pool) and written one after another, so how long that takes is the
+ * machine's business: a fixed 30 ms and ten turns held 2 of 3 with a real
+ * 20 ms added to each encrypt/importKey (2026-10-02).
+ */
+async function persisted(store: { all(): Promise<unknown[]> }, n: number) {
+    await until(async () => (await store.all()).length >= n, async () => `${n} records (the store holds ${(await store.all()).length})`);
+    await quiet();
+}
+/**
+ * The persistence's deps, counting its write passes: each asks for the
+ * identity first. A test that asserts a write did NOT happen waits for the
+ * pass that would have made it, then for its sealing to finish, not for a
+ * guess at how long that takes: after a fixed 30 ms, a seal slowed to 150 ms
+ * had not landed, and both refusals below passed with their guard deleted.
+ */
+function counted(currentSub: () => number) {
+    let n = 0;
+    return {
+        deps: { sub: 7, currentSub, identity: () => { n++; return me; } },
+        passes: () => n,
+    };
+}
 
 const tasks = [{ id: 1, description: 'Buy oat milk', attachments: null }];
 
@@ -56,8 +107,7 @@ describe('persist, then hydrate on a cold start', () => {
         const stop = startNotesCachePersistence(a, { sub: 7, currentSub: () => 7, identity: () => me, store }, 5);
         a.setQueryData(['notes', 'tasks', 'list', 1], tasks);
         a.setQueryData(['notes', 'lists'], [{ id: 1, title: 'Groceries' }]);
-        await new Promise(r => setTimeout(r, 30));
-        await settle();
+        await persisted(store, 2);
         stop();
         expect(store.map.size).toBe(2);
         expect([...store.map.values()].join('')).not.toContain('oat');           // sealed at rest
@@ -84,8 +134,7 @@ describe('persist, then hydrate on a cold start', () => {
         const a = new QueryClient();
         const stop = startNotesCachePersistence(a, { sub: 7, currentSub: () => 7, identity: () => me, store }, 5);
         for (let i = 1; i <= 3; i++) a.setQueryData(['notes', 'tasks', 'list', i], tasks);
-        await new Promise(r => setTimeout(r, 30));
-        await settle();
+        await persisted(store, 3);
         stop();
         expect(store.map.size).toBe(3);
 
@@ -114,8 +163,7 @@ describe('persist, then hydrate on a cold start', () => {
             const a = new QueryClient();
             const stop = startNotesCachePersistence(a, { sub: 7, currentSub: () => 7, identity: () => me, store }, 5);
             for (let i = 1; i <= 3; i++) a.setQueryData(['notes', 'tasks', 'list', i], tasks);
-            await new Promise(r => setTimeout(r, 30));
-            await settle();
+            await persisted(store, 3);
             stop();
 
             // POSITIVE CONTROL: signed in throughout, the defaults bring all three back.
@@ -136,11 +184,12 @@ describe('persist, then hydrate on a cold start', () => {
         const store = memoryStore();
         let current = 7;
         const qc = new QueryClient();
-        const stop = startNotesCachePersistence(qc, { sub: 7, currentSub: () => current, identity: () => me, store }, 5);
+        const w = counted(() => current);
+        const stop = startNotesCachePersistence(qc, { ...w.deps, store }, 5);
         current = 8;
         qc.setQueryData(['notes', 'lists'], [{ id: 1, title: 'Theirs' }]);
-        await new Promise(r => setTimeout(r, 30));
-        await settle();
+        await until(() => w.passes() >= 1, () => 'the debounced write to run');
+        await quiet();
         stop();
         expect(store.map.size).toBe(0);
     });
@@ -148,12 +197,14 @@ describe('persist, then hydrate on a cold start', () => {
     it('a locked result never overwrites the last good copy', async () => {
         const store = memoryStore();
         const qc = new QueryClient();
-        const stop = startNotesCachePersistence(qc, { sub: 7, currentSub: () => 7, identity: () => me, store }, 5);
+        const w = counted(() => 7);
+        const stop = startNotesCachePersistence(qc, { ...w.deps, store }, 5);
         qc.setQueryData(['notes', 'tasks', 'list', 1], tasks);
-        await new Promise(r => setTimeout(r, 30));
+        await persisted(store, 1);
+        const before = w.passes();
         qc.setQueryData(['notes', 'tasks', 'list', 1], [{ id: 1, description: TASK_IDENTITY_LOCKED, attachments: null }]);
-        await new Promise(r => setTimeout(r, 30));
-        await settle();
+        await until(() => w.passes() > before, () => 'the debounced write of the locked result to run');
+        await quiet();
         stop();
         const b = new QueryClient();
         await hydrateNotesCache(b, { sub: 7, identity: me, store });

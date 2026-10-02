@@ -17,6 +17,7 @@
  * MediaStream — the CONTROLLER path constructs both, which jsdom lacks.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { cryptoInFlight, trackCrypto } from './fixtures/cryptoInFlight';
 
 const sent: Array<{ type: string; payload?: Record<string, unknown> }> = [];
 type Handler = (m: unknown) => void;
@@ -126,9 +127,20 @@ class FakePc {
 // connectionState transitions.
 vi.stubGlobal('RTCPeerConnection', FakePc);
 
+/**
+ * `rounds` turns, and then as many more as it takes for no WebCrypto call to
+ * be out for two in a row: the handshake derives its session key for real,
+ * settling from Node's thread pool in as many turns as the machine takes
+ * (fixtures/cryptoInFlight.ts). With a real 20 ms added to each WebCrypto
+ * call (2026-10-02), twelve turns left the harness 'connecting'. Bounded
+ * inside vitest's 5 s.
+ */
 async function settle(rounds = 12): Promise<void> {
-    for (let i = 0; i < rounds; i++) {
+    const giveUp = performance.now() + 3_000;
+    for (let i = 0, calm = 0; i < rounds || calm < 2; i++) {
+        if (performance.now() > giveUp) throw new Error(`${cryptoInFlight()} WebCrypto calls still out after 3 s`);
         await new Promise(r => setTimeout(r, 0));
+        calm = cryptoInFlight() === 0 ? calm + 1 : 0;
     }
 }
 
@@ -153,7 +165,9 @@ async function activeControllerSession(): Promise<string> {
 }
 
 let visibility: DocumentVisibilityState = 'visible';
+let untrackCrypto: () => void = () => {};
 beforeEach(() => {
+    untrackCrypto = trackCrypto();
     visibility = 'visible';
     Object.defineProperty(document, 'visibilityState', {
         configurable: true,
@@ -161,6 +175,7 @@ beforeEach(() => {
     });
 });
 afterEach(() => {
+    untrackCrypto();
     vi.useRealTimers();
 });
 

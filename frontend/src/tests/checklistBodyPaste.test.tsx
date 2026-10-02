@@ -84,10 +84,44 @@ afterEach(() => {
 });
 
 const settle = async () => { for (let i = 0; i < 6; i++) await act(async () => { await new Promise(r => setTimeout(r, 0)); }); };
-const paced = async (n: number) => {
-    await act(async () => { await new Promise(r => { setTimeout(r, PACE_MS * n + 100); }); });
+/** Real time in short act() slices, so the body's effects run meanwhile.
+ *  `ms` of the clock, however long a slice takes on a loaded machine: a
+ *  count of slices stretched a 1 s wait past vitest's 5 s timeout. */
+const wait = async (ms: number) => {
+    const end = performance.now() + ms;
+    while (performance.now() < end) await act(async () => { await new Promise(r => { setTimeout(r, 10); }); });
+};
+/**
+ * Wait, as `wait` does, until `done()` holds, then settle. Bounded well
+ * inside vitest's 5 s, so what never happens fails here and says what it was.
+ *
+ * The creates are PACED (icsImport's PACE_MS) on real timers, and on a loaded
+ * machine every pause runs late. A fixed sleep of PACE_MS × N was a guess
+ * about how late, and lost: 5 of 6 rows (2026-10-02). This waits for the
+ * fact the test asserts on instead.
+ */
+async function until(done: () => boolean, what: () => string, ms = 3_000) {
+    const giveUp = performance.now() + ms;
+    while (!done()) {
+        if (performance.now() > giveUp) throw new Error(`gave up after ${ms} ms waiting for ${what()}`);
+        await act(async () => { await new Promise(r => { setTimeout(r, 10); }); });
+    }
+    await settle();
+}
+const creates = () => createTask.mock.calls.length + createListTask.mock.calls.length;
+/** A batch is over: `n` creates were tried — the n-th may be the refusal
+ *  that stops it — and `trailing` pauses more passed, in which a create past
+ *  the n-th, were there one, would have gone out. A batch that stops early
+ *  passes the rest of its own length here, so a create that resumed later
+ *  than the next pause still shows. */
+const paced = async (n: number, trailing = 2) => {
+    await until(() => creates() >= n, () => `${n} creates (${creates()} went out)`);
+    await wait(PACE_MS * trailing);
     await settle();
 };
+/** ChecklistBody's pause after a live re-read (LIVE_REREAD_GAP_MS, not
+ *  exported): an update meanwhile is read once more at its end. */
+const LIVE_REREAD_GAP_MS = 400;
 const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 async function mount(props: { channelId?: number; listId?: number; myPerms?: number }) {
     await act(async () => { root!.render(<QueryClientProvider client={qc}><ChecklistBody {...props} /></QueryClientProvider>); });
@@ -111,10 +145,6 @@ const dialogLines = () => [...document.querySelectorAll('.notes-paste-line')].ma
 const button = (text: string) => [...document.querySelectorAll<HTMLButtonElement>('.notes-paste-actions button')]
     .find(b => b.textContent === text)!;
 const addN = () => button(ASSISTANT_ADD);
-/** Real time in short act() slices, so the body's effects run meanwhile. */
-const wait = async (ms: number) => {
-    for (let t = 0; t < ms; t += 10) await act(async () => { await new Promise(r => { setTimeout(r, 10); }); });
-};
 /** Another member changed channel `channelId`'s checklist. */
 const liveUpdate = (channelId: number) => act(() => {
     for (const h of wsHandlers) h({ type: 'ChecklistUpdate', payload: { channel_id: channelId } });
@@ -131,6 +161,8 @@ function fakeServer() {
     const slow = new Set<number>();
     /** Channels whose next read waits until the test lets it answer. */
     const gates = new Map<number, Promise<void>>();
+    /** Reads asked and not yet answered: the late one has landed at 0. */
+    let out = 0;
     createTask.mockImplementation(async (c: number, text: string) => {
         const t = made(text);
         held.get(c)!.push(t);
@@ -138,10 +170,15 @@ function fakeServer() {
     });
     listTasks.mockImplementation(async (c: number) => {
         const snapshot = [...held.get(c)!];
-        if (slow.delete(c)) await new Promise(r => { setTimeout(r, PACE_MS * 3); });
-        const gate = gates.get(c);
-        if (gate) { gates.delete(c); await gate; }
-        return snapshot;
+        out++;
+        try {
+            if (slow.delete(c)) await new Promise(r => { setTimeout(r, PACE_MS * 3); });
+            const gate = gates.get(c);
+            if (gate) { gates.delete(c); await gate; }
+            return snapshot;
+        } finally {
+            out--;
+        }
     });
     deleteTask.mockImplementation(async (id: number) => {
         for (const items of held.values()) {
@@ -155,7 +192,12 @@ function fakeServer() {
         gates.set(c, new Promise<void>(r => { answer = r; }));
         return async () => { await act(async () => { answer(); }); await settle(); };
     };
-    return { held, slow, gates, hold };
+    /** Every read answered, and channel `c` holds `n` items. */
+    const landed = (c: number, n: number) => until(
+        () => held.get(c)!.length >= n && out === 0,
+        () => `${n} items in channel ${c} (it holds ${held.get(c)!.length}) and no read out (${out} are)`,
+    );
+    return { held, slow, gates, hold, landed, reads: () => out };
 }
 
 describe('a checklist pasted into a channel checklist', () => {
@@ -228,7 +270,9 @@ describe('a checklist pasted into a channel checklist', () => {
         });
         paste(input()!, ASSISTANT_ANSWER);
         act(() => { addN().click(); });
-        await paced(ASSISTANT_ITEMS.length);
+        // The 3 it asserts, then the rest of the batch's length and two more:
+        // a create that resumed after a longer pause would still show.
+        await paced(3, ASSISTANT_ITEMS.length - 3 + 2);
         expect(createTask).toHaveBeenCalledTimes(3);
         expect(rows()).toEqual(ASSISTANT_ITEMS.slice(0, 2));
         expect(toasts).toEqual(['Missing Create Tasks permission', `Added 2 of ${ASSISTANT_ITEMS.length} items`]);
@@ -288,7 +332,7 @@ describe('rows that land while the checklist is read again', () => {
         await mount({ channelId: 10 });                       // the side panel followed the channel...
         s.slow.add(9);
         await mount({ channelId: 9 });                        // ...and back, with a read that answers late
-        await wait(PACE_MS * (lines.length + 4));
+        await s.landed(9, lines.length);
         expect(s.held.get(9)).toHaveLength(lines.length);
         expect(rows()).toEqual(lines);
     });
@@ -301,7 +345,7 @@ describe('rows that land while the checklist is read again', () => {
         await wait(PACE_MS * 3);
         s.slow.add(9);
         liveUpdate(9);
-        await wait(PACE_MS * (lines.length + 4));
+        await s.landed(9, lines.length);
         expect(s.held.get(9)).toHaveLength(lines.length);
         expect(rows()).toEqual(lines);
     });
@@ -331,7 +375,7 @@ describe('rows that land while the checklist is read again', () => {
         s.slow.add(9);
         await mount({ channelId: 9 });                        // its read is still out...
         await mount({ channelId: 10 });                       // ...when the panel follows the channel
-        await wait(PACE_MS * 5);
+        await until(() => s.reads() === 0, () => 'the late read of channel 9 to answer');
         expect(rows()).toEqual(['ten']);
     });
 });
@@ -351,7 +395,14 @@ describe('another member’s pasted batch, as this body sees it', () => {
             liveUpdate(9);
             look();
         }
-        await wait(1000);
+        // The second read goes out after a pause (LIVE_REREAD_GAP_MS); wait
+        // for it to answer, not for a guess at how long that takes.
+        await until(() => listTasks.mock.calls.length >= 2 && s.reads() === 0, () => `a second read to answer (${listTasks.mock.calls.length} asked)`);
+        // ...and then the pause after it, twice over, at whose end a THIRD
+        // read would go out were the burst not covered by the second.
+        // Without this window "exactly 2" held the moment the second
+        // answered, and passed with the re-read loop made endless.
+        await wait(LIVE_REREAD_GAP_MS * 2);
         // "Loading…" swaps the tree out, and with it whatever row this viewer was editing.
         expect(loadingSeen, '"Loading…" during a live update').toBe(false);
         // One read at once, and ONE for everything that came after it.
