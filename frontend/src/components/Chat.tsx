@@ -133,6 +133,8 @@ import { AllChecklistsView } from './AllChecklistsView';
 import { StreamPip } from './StreamPip';
 import { StreamPopout } from './StreamPopout';
 import { StreamDocPipWindow } from './StreamDocPipWindow';
+import { StreamPopoutWindows } from './StreamPopoutWindows';
+import { MAX_POPOUT_WINDOWS, noteOsWindowRefused, osWindowsSupported, primeOsWindowSupport } from './streamOsWindows';
 import { StreamAudioHost } from './StreamAudioHost';
 import { docPipSupported, popoutMode, togglePopped, type PopoutMode } from './streamDocPip';
 import { logPipDiag } from '../api/pipDiag';
@@ -1127,13 +1129,23 @@ export function Chat({ onLogout }: ChatProps) {
     // the rest of the session uses the engine that actually works.
     const [poppedStreams, setPoppedStreams] = useState<number[]>([]);
     const [docPipFailed, setDocPipFailed] = useState(false);
-    const usingDocPip = !docPipFailed && popoutMode() === 'docpip';
+    // The desktop shell's own pop-out windows (streamOsWindows.ts): one
+    // resizable, always-on-top window per stream. popoutMode() answers
+    // 'windows' once the shell has said so at boot; these two only make Chat
+    // re-render when that answer arrives, or when a refusal latches it off.
+    const [, setOsWindowsProbed] = useState(false);
+    const [osWindowsLatched, setOsWindowsLatched] = useState(false);
+    const usingOsWindows = !osWindowsLatched && popoutMode() === 'windows';
+    const usingDocPip = !usingOsWindows && !docPipFailed && popoutMode() === 'docpip';
     // The engine actually in use — after a Doc-PiP fallback that is the
     // element engine. The in-app float reads it to know which streams the
     // OS window is showing (inAppPipPlan), on EVERY engine, not just the grid.
-    const activePopoutMode: PopoutMode | null = usingDocPip ? 'docpip' : pipEngine();
+    const activePopoutMode: PopoutMode | null = usingOsWindows ? 'windows' : usingDocPip ? 'docpip' : pipEngine();
     const togglePopout = useCallback((userId: number) => {
-        setPoppedStreams(prev => togglePopped(prev, userId, !docPipFailed && popoutMode() === 'docpip'));
+        const mode = popoutMode();
+        const windows = mode === 'windows';
+        const multi = windows || (!docPipFailed && mode === 'docpip');
+        setPoppedStreams(prev => togglePopped(prev, userId, multi, windows ? MAX_POPOUT_WINDOWS : Infinity));
     }, [docPipFailed]);
     // The Android APP's PiP is native and only knowable by asking the plugin;
     // ask once, here, so pipSupported() can answer at render time by the time
@@ -1146,9 +1158,12 @@ export function Chat({ onLogout }: ChatProps) {
     // WebView console, so the measurement was never readable. After the
     // native probe, so the element engine it names is the settled one.
     useEffect(() => {
-        void primePipSupport().catch(() => false).then(() => {
-            logPipDiag(`[doc-pip] documentPictureInPicture is ${docPipSupported() ? 'AVAILABLE' : 'absent'} in this runtime; element PiP engine: ${pipEngine() ?? 'none'}`);
-        });
+        void primePipSupport().catch(() => false)
+            .then(() => primeOsWindowSupport())
+            .then(() => {
+                setOsWindowsProbed(true);
+                logPipDiag(`[doc-pip] documentPictureInPicture is ${docPipSupported() ? 'AVAILABLE' : 'absent'} in this runtime; element PiP engine: ${pipEngine() ?? 'none'}; pop-out windows: ${osWindowsSupported() ? 'AVAILABLE' : 'absent'}`);
+            });
     }, []);
     // A stream that ENDS must leave the popped set: nothing else clears it,
     // and the always-on-top window otherwise sits holding frozen tiles for
@@ -6347,7 +6362,27 @@ export function Chat({ onLogout }: ChatProps) {
                 this host is what lets the popped-out stream survive chat ↔
                 stream ↔ DM navigation. Moving it inside a viewMode condition
                 would kill the window on every click. */}
-            {poppedStreams.length > 0 && (usingDocPip ? (
+            {poppedStreams.length > 0 && (usingOsWindows ? (
+                <StreamPopoutWindows
+                    userIds={poppedStreams}
+                    onCloseOne={id => setPoppedStreams(l => l.filter(x => x !== id))}
+                    onRefused={id => {
+                        if (noteOsWindowRefused() === 'latched') {
+                            // The shell would not open even the first window:
+                            // the browser engines take over for the session,
+                            // keeping the newest pick (the same rule as the
+                            // Doc-PiP fallback below).
+                            setOsWindowsLatched(true);
+                            setPoppedStreams(l => l.slice(-1));
+                        } else {
+                            // One refused window (its slot's old window
+                            // would not close, a stream past the cap): that
+                            // stream stays in the app.
+                            setPoppedStreams(l => l.filter(x => x !== id));
+                        }
+                    }}
+                />
+            ) : usingDocPip ? (
                 <StreamDocPipWindow
                     userIds={poppedStreams}
                     onCloseOne={id => setPoppedStreams(l => l.filter(x => x !== id))}

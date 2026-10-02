@@ -534,6 +534,17 @@ serving push-to-talk and the remote-control kill switch.)
   webview or runs anything, and a link naming another server's web app — or one it cannot
   confirm is its own server's, when `GET /config` does not answer or names no web address —
   is not looked up.
+- **No new windows, except a stream's own pop-out.** The desktop shell refuses every request
+  a page makes to open a window (`window.open`, `target="_blank"`) — links leave through
+  the scheme-allowlisted `open_external` command instead. The one exception is exact:
+  `about:blank#puca-pop-<1-8>` becomes a stream pop-out window; anything else, including
+  a real URL carrying that fragment, is refused without its text being logged
+  ([`popout.rs`](../frontend/src-tauri/src/popout.rs), `requested_slot`). A pop-out can only
+  ever show `about:blank`: every navigation of it is refused, so nothing from the network
+  or a dropped file is ever loaded there. Its picture is the stream the app already decoded,
+  bound by the app's own page, and it has no sound. Its window size, place and
+  keep-on-top setting are saved in `popout-windows.json` in the app's config folder — no
+  names, no stream contents.
 - **No listening TCP socket.** `rg -c TcpListener crates/puca-agent/src/` → 0. Its only
   endpoint is a Windows named pipe with SDDL `D:(A;;GA;;;OW)(A;;GA;;;SY)` — owner and SYSTEM
   only, not "everyone" ([`pipe.rs:34`](../crates/puca-agent/src/pipe.rs#L34)) — gated by
