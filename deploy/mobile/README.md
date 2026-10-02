@@ -233,12 +233,14 @@ permission or manifest entry the web code needs — never on the command line.
 `mobile-notes` refuses a floor newer than the release, and one lower than what
 any host already serves unless `--lower-native-min` is passed (for a floor
 raised by mistake). `native.version`, the "a new Púca Notes app is available"
-nudge, is not a flag either (`--native-version` is refused): it is `latest` in
+nudge, is not a flag either (`--native-version` is ignored with a warning for
+one transition release, then refused): it is `latest` in
 the same file, the newest APK whose NATIVE layer changed, carried as
 `version.json` `nativeLatest` into the `.native-latest` sidecar. It used to be
 the release number, which nudged every installed app every release. A native
 change fails vitest and the Notes build until `latest` is raised with
-`node scripts/notes-native-min.mjs --record-latest <ver>` (from `frontend/`).
+`node scripts/notes-native-min.mjs --record-latest <ver>` (from `frontend/`;
+re-recording the same version is accepted until its `v<ver>` tag exists).
 `mobile-notes` refuses a missing sidecar, a `latest` newer than the release or
 older than `min`, and verifies the served value back; it may be LOWER than
 what a host serves. Neither is signed — a hostile manifest

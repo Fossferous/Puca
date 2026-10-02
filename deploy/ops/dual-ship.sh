@@ -697,7 +697,8 @@ MEOF
 #                what any host already serves, unless --lower-native-min says
 #                that is deliberate (a floor raised by mistake).
 #       version  the newest Notes APK whose NATIVE layer changed — the app's
-#                "A new Púca Notes app (X) is available" nudge. NOT a flag: it
+#                "A new Púca Notes app (X) is available" nudge. NOT a flag (a
+#                stray --native-version is ignored with a warning): it
 #                comes from the bundle's `.native-latest` sidecar, which
 #                encrypt-bundle.mjs --notes writes from the build's
 #                version.json, which takes it from native-min.json "latest"
@@ -721,10 +722,18 @@ cmd_mobile_notes() {
 	while [ $# -gt 0 ]; do
 		case "$1" in
 			--native-version)
-				echo "REFUSING: --native-version is gone. native.version is the newest Notes APK whose NATIVE layer changed,"
-				echo "recorded as \"latest\" in frontend/notes-app/native-min.json; it rides in $bundle.native-latest."
-				echo "Passing the release number here told every installed Notes app to reinstall after every release."
-				exit 2 ;;
+				# TRANSITION: ignored, loudly, not refused. The out-of-repo
+				# release tools pass --native-version "$VER", and mobile-notes is
+				# the LAST step of their ship-clients.sh: a refusal here would
+				# abort a release after every other surface had shipped. Once
+				# they stop passing it (release-tools.patch), make this a
+				# refusal like --native-min below.
+				[ $# -ge 2 ] && [ -n "$2" ] || { echo "REFUSING: --native-version needs a value (and is ignored anyway: see below)"; exit 2; }
+				echo "WARNING: --native-version $2 IGNORED. native.version is the newest Notes APK whose NATIVE layer changed,"
+				echo "         recorded as \"latest\" in frontend/notes-app/native-min.json; it rides in $bundle.native-latest."
+				echo "         Passing the release number told every installed Notes app to reinstall after every release."
+				echo "         Stop passing it: a later release refuses it."
+				shift 2 ;;
 			--lower-native-min) lower_native_min=1; shift ;;
 			--native-min)
 				echo "REFUSING: --native-min is gone. The floor is frontend/notes-app/native-min.json: raise \"min\" there,"

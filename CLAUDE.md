@@ -209,7 +209,7 @@ until its recorded surface matches), and ANY change to the Notes native layer
 fails the same gates until `latest` there is raised with
 `node scripts/notes-native-min.mjs --record-latest <ver>` — `latest` is the
 manifest's `native.version` (the "new app available" nudge, from the bundle's
-`.native-latest`; `--native-version` is refused); every `mobile-notes` then publishes that floor, never lower
+`.native-latest`; a `--native-version` flag is ignored with a warning); every `mobile-notes` then publishes that floor, never lower
 than a host already serves, so older APKs prompt for the new install instead of
 applying a bundle they cannot run; `check-versions.sh` FAILS until the page
 links an APK at least that new. The download page

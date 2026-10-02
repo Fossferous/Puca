@@ -53,8 +53,12 @@ export function nativeLayerHash(files: NativeLayerFile[]): string;
 /** What native-min.json records as latestFingerprint for a given latest. */
 export function latestFingerprint(latest: string, layerHash: string): string;
 
-/** The tree's native layer, listed by git, read from the working tree. */
+/** The tree's native layer: listed by git (tracked, plus untracked files git
+ *  does not ignore), read from the working tree. */
 export function nativeLayerFiles(frontendDir: string): NativeLayerFile[];
+
+/** Has this release shipped, i.e. does the repository hold its v<version> tag? */
+export function releaseTagged(frontendDir: string, version: string): boolean;
 
 /** The real tree's record, surface and native layer. */
 export function readNativeMin(frontendDir: string): {
@@ -64,13 +68,17 @@ export function readNativeMin(frontendDir: string): {
     layerHash: string;
 };
 
-/** Raise `latest` and seal it to the layer, or say why not. */
+/** Raise `latest` and seal it to the layer, or say why not. A version equal
+ *  to the current `latest` or to `appVersion` is accepted only while
+ *  `isShipped` says that release has not shipped; without `isShipped` it is
+ *  refused. */
 export function recordLatest(
     record: NativeMinRecord,
     version: string,
     layerHash: string,
     appVersion: string,
-): { record?: NativeMinRecord & { latest: string; latestFingerprint: string }; error?: string };
+    isShipped?: (version: string) => boolean,
+):{ record?: NativeMinRecord & { latest: string; latestFingerprint: string }; error?: string };
 
 export function checkNativeMin(
     record: NativeMinRecord | null | undefined,

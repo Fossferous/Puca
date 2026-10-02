@@ -48,9 +48,13 @@
  *
  *   node scripts/notes-native-min.mjs --record-latest <the release that first ships this APK>
  *
- * which refuses a version that does not raise `latest`. The layer is hashed
- * BROADLY — everything tracked under notes-app/android except the JVM and
- * instrumented tests, plus notes-app's package files and capacitor.config.ts
+ * which refuses a version whose APK already exists: one below `latest` or
+ * below the tree's version, or equal to either once its v<version> tag says
+ * it shipped (recordLatest). Re-recording the same UNSHIPPED version is how a
+ * second native change in one release cycle is sealed. The layer is hashed
+ * BROADLY — everything under notes-app/android that git does not ignore
+ * (tracked or not yet), except the JVM and instrumented tests, plus
+ * notes-app's package files and capacitor.config.ts
  * — so the failure mode is a nudge nobody needed, never a native change
  * shipped silently. (`min` still guards correctness either way: `latest` is
  * only ever a nudge.) Line endings are stripped before hashing (the tree is
@@ -63,7 +67,8 @@ import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from '
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-export const NATIVE_MIN_FILE = join('notes-app', 'native-min.json');
+/** Relative to frontend/. Forward slashes: it is printed, and it joins fine on Windows too. */
+export const NATIVE_MIN_FILE = 'notes-app/native-min.json';
 const VERSION_RE = /^\d+\.\d+\.\d+$/;
 
 /** a > b, both MAJOR.MINOR.PATCH. */
@@ -115,7 +120,7 @@ function javaFiles(dir) {
 
 /**
  * Is this path (relative to frontend/, forward slashes) part of the APK's
- * native layer? Everything tracked under notes-app/android except the tests
+ * native layer? Everything under notes-app/android except the tests
  * (not in the APK), plus the files Gradle and `cap sync` read from notes-app.
  */
 export function isNativeLayerPath(path) {
@@ -169,16 +174,19 @@ export function latestFingerprint(latest, layerHash) {
 }
 
 /**
- * The native layer's files as they are on disk now. The LIST comes from git
- * (tracked files only, so a cap sync's generated files never count); the
- * CONTENT is the working tree's, so an edit counts before it is staged.
+ * The native layer's files as they are on disk now. The LIST comes from git:
+ * tracked files AND untracked ones that are not ignored, because the APK
+ * build compiles a new .java file whether or not it has been committed yet;
+ * what .gitignore excludes (a cap sync's generated files, build output) never
+ * counts. The CONTENT is the working tree's, so an edit counts before it is
+ * staged. A deleted-but-still-tracked file is skipped: it is not in the APK.
  */
 export function nativeLayerFiles(frontendDir) {
-    const r = spawnSync('git', ['ls-files', '-z', '--', 'notes-app'], { cwd: frontendDir, encoding: 'utf8' });
+    const r = spawnSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', 'notes-app'], { cwd: frontendDir, encoding: 'utf8' });
     if (r.status !== 0) {
         throw new Error(`git ls-files failed in ${frontendDir} (${(r.stderr || r.error?.message || '').trim()}): the Púca Notes native layer cannot be listed, so nothing proves native-min.json "latest" is current`);
     }
-    return r.stdout.split('\0')
+    return [...new Set(r.stdout.split('\0'))]
         .filter(p => p && isNativeLayerPath(p))
         .filter(p => existsSync(join(frontendDir, p)))
         .map(p => ({ path: p, bytes: readFileSync(join(frontendDir, p)) }));
@@ -198,19 +206,48 @@ export function readNativeMin(frontendDir) {
     return { record, surface, layerFiles, layerHash: nativeLayerHash(layerFiles) };
 }
 
+/** Has release `version` shipped? It has when the repository holds its v<version> tag. */
+export function releaseTagged(frontendDir, version) {
+    if (!isVersion(version)) return false;
+    const r = spawnSync('git', ['tag', '--list', `v${version}`], { cwd: frontendDir, encoding: 'utf8' });
+    if (r.status !== 0) {
+        throw new Error(`git tag failed in ${frontendDir} (${(r.stderr || r.error?.message || '').trim()}): cannot tell whether ${version} has shipped`);
+    }
+    return r.stdout.trim() === `v${version}`;
+}
+
 /**
  * Raise `latest` and seal it to the current layer. Returns the new record,
- * or an error saying why not: `latest` only goes UP (re-recording the same
- * version is exactly the silent change this exists to stop), and never below
- * the version this tree already is (that APK has shipped without the change).
+ * or an error saying why not. The version named must be one whose APK does
+ * not exist yet, because the nudge's target must HAVE the change and every
+ * APK below it must lack it:
+ *
+ *  - never below the current `latest`, and never below this tree's version
+ *    (that APK has shipped without the change);
+ *  - EQUAL to either only while that release is unshipped (`isShipped` says
+ *    no). Re-sealing an unshipped `latest` is how a second native change in
+ *    the same release cycle (or a merge of two branches that both recorded
+ *    it) is sealed; any higher value would be refused by every ship gate as
+ *    "newer than this release". Re-sealing a SHIPPED one is the silent native
+ *    change this exists to stop: its installs would never be told.
+ *
+ * `isShipped(version)` is releaseTagged in the CLI. Without one, equality is
+ * refused: not knowing is treated as shipped.
  */
-export function recordLatest(record, version, layerHash, appVersion) {
+export function recordLatest(record, version, layerHash, appVersion, isShipped) {
     if (!isVersion(version)) return { error: `${JSON.stringify(version)} is not a MAJOR.MINOR.PATCH version` };
-    if (isVersion(record?.latest) && !versionGt(version, record.latest)) {
-        return { error: `${version} must be newer than the current "latest" (${record.latest}): an APK whose native layer changed is a NEW APK, and older installs are only told about it if the number rises` };
+    const shipped = v => (typeof isShipped === 'function' ? Boolean(isShipped(v)) : true);
+    if (isVersion(record?.latest) && versionGt(record.latest, version)) {
+        return { error: `${version} is older than the current "latest" (${record.latest}): "latest" never goes down` };
+    }
+    if (isVersion(record?.latest) && version === record.latest && shipped(version)) {
+        return { error: `${version} is the current "latest" and has already shipped (tag v${version}): an APK whose native layer changed is a NEW APK, and installs of ${version} are only told about it if the number rises. Name the release that will first ship it` };
     }
     if (isVersion(appVersion) && versionGt(appVersion, version)) {
         return { error: `${version} is older than this tree's version (${appVersion}): that APK already shipped without this change. Name the release that will first ship it` };
+    }
+    if (version === appVersion && shipped(version)) {
+        return { error: `${version} is this tree's version and has already shipped (tag v${version}) without this change: name the release that will first ship it` };
     }
     return { record: { ...record, latest: version, latestFingerprint: latestFingerprint(version, layerHash) } };
 }
@@ -257,7 +294,7 @@ export function checkNativeMin(record, surface, layerHash) {
             `the Púca Notes APK's native layer changed (or "latest" was edited by hand) since ${NATIVE_MIN_FILE} "latest" (${record.latest}) was recorded. `
             + 'Installed Notes apps are only told about a new APK when "latest" rises. Run: '
             + 'node scripts/notes-native-min.mjs --record-latest <the release that will first ship this APK> '
-            + '(from frontend/; it refuses a version that does not raise "latest"). Changed only a test or a comment? Record it anyway: '
+            + '(from frontend/; until that release ships, re-recording the same version is fine). Changed only a comment or a build setting? Record it anyway: '
             + 'an unneeded "new app" nudge is the cheap failure, a silent native change the expensive one.',
         );
     }
@@ -273,7 +310,7 @@ if (isMain) {
     const { record, surface, layerHash } = readNativeMin(frontendDir);
     if (args[0] === '--record-latest') {
         const appVersion = JSON.parse(readFileSync(join(frontendDir, 'src-tauri', 'tauri.conf.json'), 'utf8')).version;
-        const r = recordLatest(record, args[1], layerHash, appVersion);
+        const r = recordLatest(record, args[1], layerHash, appVersion, v => releaseTagged(frontendDir, v));
         if (r.error) { console.error(`REFUSING: ${r.error}`); process.exit(1); }
         writeFileSync(join(frontendDir, NATIVE_MIN_FILE), JSON.stringify(r.record, null, 2) + '\n');
         console.log(`${NATIVE_MIN_FILE}: latest ${record.latest} -> ${r.record.latest}, sealed to the current native layer. Say in "why" what changed.`);

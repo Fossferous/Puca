@@ -13,10 +13,12 @@
 import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-    checkNativeMin, isNativeLayerPath, latestFingerprint, nativeLayerHash, nativeSurface, readNativeMin, recordLatest, versionGt,
+    checkNativeMin, isNativeLayerPath, latestFingerprint, nativeLayerFiles, nativeLayerHash, nativeSurface, readNativeMin, recordLatest,
+    releaseTagged, versionGt,
     type NativeLayerFile, type NativeSurfaceSources,
 } from '../../scripts/notes-native-min.mjs';
 
@@ -107,6 +109,8 @@ describe('checkNativeMin: the native layer and "latest"', () => {
     const edit = (p: string, bytes: string): NativeLayerFile[] => LAYER.map(f => (f.path === p ? { path: p, bytes } : f));
     const JAVA = LAYER[0].path;
     const CHANGED_JAVA = 'final class KeyboardPlan {\n    static int rows() { return 2; }\n}\n';
+    /** isShipped for recordLatest: only these releases have a v<version> tag. */
+    const tagged = (...shipped: string[]) => (v: string) => shipped.includes(v);
 
     it('passes when the layer matches what "latest" was recorded against (positive control)', () => {
         expect(checkNativeMin(RECORD, surfaceOf(), LAYER_HASH).failures).toEqual([]);
@@ -125,18 +129,56 @@ describe('checkNativeMin: the native layer and "latest"', () => {
 
     it('a raised "latest", recorded against the new layer, passes (positive control)', () => {
         const changed = nativeLayerHash(edit(JAVA, CHANGED_JAVA));
-        const r = recordLatest(RECORD, '0.9.827', changed, '0.9.826');
+        const r = recordLatest(RECORD, '0.9.827', changed, '0.9.826', tagged('0.9.816', '0.9.826'));
         expect(r.error).toBeUndefined();
         expect(r.record?.latest).toBe('0.9.827');
         expect(r.record?.min, 'the floor is untouched').toBe(RECORD.min);
         expect(checkNativeMin(r.record, surfaceOf(), changed).failures).toEqual([]);
     });
 
-    it('re-recording WITHOUT raising "latest" is refused, and so is a version older than the tree', () => {
-        expect(recordLatest(RECORD, '0.9.816', 'x', '0.9.816').error).toMatch(/must be newer than the current "latest" \(0\.9\.816\)/);
-        expect(recordLatest(RECORD, '0.9.815', 'x', '0.9.816').error).toMatch(/must be newer/);
-        expect(recordLatest(RECORD, '0.9.820', 'x', '0.9.830').error).toMatch(/older than this tree's version \(0\.9\.830\)/);
-        expect(recordLatest(RECORD, '0.9', 'x', '0.9.830').error).toMatch(/MAJOR\.MINOR\.PATCH/);
+    it('re-recording a SHIPPED "latest" is refused, and so is a lower one or one older than the tree', () => {
+        expect(recordLatest(RECORD, '0.9.816', 'x', '0.9.816', tagged('0.9.816')).error).toMatch(/0\.9\.816 is the current "latest" and has already shipped \(tag v0\.9\.816\)/);
+        expect(recordLatest(RECORD, '0.9.815', 'x', '0.9.814', tagged()).error).toMatch(/older than the current "latest" \(0\.9\.816\)/);
+        expect(recordLatest(RECORD, '0.9.820', 'x', '0.9.830', tagged()).error).toMatch(/older than this tree's version \(0\.9\.830\)/);
+        expect(recordLatest(RECORD, '0.9', 'x', '0.9.830', tagged()).error).toMatch(/MAJOR\.MINOR\.PATCH/);
+    });
+
+    // One release cycle can hold several native changes (0.9.827 touched
+    // three native files), and two branches can each record the same next
+    // release. Until that release ships, re-sealing it is the only correct
+    // answer: the next free number would be refused by every ship gate as
+    // "newer than this release".
+    it('a second native change before the release ships re-seals the SAME version', () => {
+        const h1 = nativeLayerHash(edit(JAVA, CHANGED_JAVA));
+        const h2 = nativeLayerHash(edit(JAVA, `${CHANGED_JAVA}// and a second change\n`));
+        const first = recordLatest(RECORD, '0.9.831', h1, '0.9.830', tagged('0.9.830'));
+        expect(first.error).toBeUndefined();
+        expect(checkNativeMin(first.record, surfaceOf(), h2).failures.join('\n'), 'the second change trips the seal').toMatch(/native layer changed/);
+        const again = recordLatest(first.record!, '0.9.831', h2, '0.9.830', tagged('0.9.830'));
+        expect(again.error).toBeUndefined();
+        expect(again.record?.latest).toBe('0.9.831');
+        expect(checkNativeMin(again.record, surfaceOf(), h2).failures).toEqual([]);
+    });
+
+    it('...but once that version has shipped (its tag exists) it must rise', () => {
+        const record = { ...RECORD, latest: '0.9.831', latestFingerprint: latestFingerprint('0.9.831', LAYER_HASH) };
+        expect(recordLatest(record, '0.9.831', 'x', '0.9.831', tagged('0.9.830', '0.9.831')).error).toMatch(/0\.9\.831 is the current "latest" and has already shipped/);
+        expect(recordLatest(record, '0.9.832', 'x', '0.9.831', tagged('0.9.830', '0.9.831')).error, 'the next one is fine').toBeUndefined();
+    });
+
+    it('the tree\'s own version is accepted while it is being prepared (not tagged yet)...', () => {
+        expect(recordLatest(RECORD, '0.9.831', LAYER_HASH, '0.9.831', tagged('0.9.830')).error).toBeUndefined();
+    });
+
+    it('...and refused once it has shipped: those APKs lack the change and would never be nudged', () => {
+        expect(recordLatest(RECORD, '0.9.830', LAYER_HASH, '0.9.830', tagged('0.9.830')).error)
+            .toMatch(/0\.9\.830 is this tree's version and has already shipped \(tag v0\.9\.830\)/);
+    });
+
+    it('with no way to tell what shipped, equality is refused (the safe default)', () => {
+        expect(recordLatest(RECORD, '0.9.830', LAYER_HASH, '0.9.830').error).toMatch(/already shipped/);
+        expect(recordLatest(RECORD, '0.9.816', LAYER_HASH, '0.9.815').error).toMatch(/already shipped/);
+        expect(recordLatest(RECORD, '0.9.831', LAYER_HASH, '0.9.830').error, 'a strictly newer version needs no answer').toBeUndefined();
     });
 
     it('FAILS when "latest" is raised by hand without re-recording (the two are sealed together)', () => {
@@ -206,8 +248,72 @@ describe('checkNativeMin: the native layer and "latest"', () => {
         expect(checkNativeMin(record, surface, touched).failures.join('\n')).toMatch(/native layer changed/);
     });
 
-    it('the tree records 0.9.827: the last release whose Notes APK changed natively (KeyboardPlan)', () => {
-        expect(readNativeMin(FRONTEND).record.latest).toBe('0.9.827');
+    // A floor, not a pin: `--record-latest` raises it as part of the normal
+    // workflow, and a pin would turn this suite red the first time anyone
+    // followed the instructions the check prints.
+    it('the tree records at least 0.9.827: the last release before this whose Notes APK changed natively (KeyboardPlan)', () => {
+        const { latest } = readNativeMin(FRONTEND).record;
+        expect(latest).toMatch(/^\d+\.\d+\.\d+$/);
+        expect(versionGt('0.9.827', String(latest)), `${String(latest)} >= 0.9.827`).toBe(false);
+    });
+});
+
+/**
+ * What counts as "the tree" and as "shipped" comes from git, so these run
+ * against a throwaway repository: the real one's tags are not in a shallow CI
+ * clone, and its untracked files are whatever a developer has lying about.
+ */
+describe('nativeLayerFiles and releaseTagged against a scratch git repository', () => {
+    const git = (cwd: string, ...args: string[]) => {
+        const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t.invalid', '-c', 'commit.gpgsign=false', '-c', 'core.autocrlf=false', ...args], { cwd, encoding: 'utf8' });
+        expect(r.status, r.stderr).toBe(0);
+        return r.stdout;
+    };
+    const scratch = () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'notes-native-min-'));
+        git(dir, 'init', '-q');
+        const put = (p: string, text: string) => {
+            fs.mkdirSync(path.dirname(path.join(dir, p)), { recursive: true });
+            fs.writeFileSync(path.join(dir, p), text);
+        };
+        return { dir, put };
+    };
+    const MAIN = 'notes-app/android/app/src/main/java/com/sovereign/notes';
+
+    it('an UNTRACKED source file is part of the layer (the APK build compiles it); a gitignored one is not', () => {
+        const { dir, put } = scratch();
+        try {
+            put('notes-app/android/.gitignore', 'build/\n');
+            put(`${MAIN}/KeyboardPlan.java`, 'final class KeyboardPlan {}\n');
+            git(dir, 'add', '-A');
+            const tracked = nativeLayerFiles(dir).map(f => f.path);
+            expect(tracked, 'positive control: the tracked file is listed').toContain(`${MAIN}/KeyboardPlan.java`);
+            const before = nativeLayerHash(nativeLayerFiles(dir));
+
+            put(`${MAIN}/ReviewProbe.java`, 'final class ReviewProbe {}\n');
+            put('notes-app/android/app/build/generated/R.java', 'class R {}\n');
+            const paths = nativeLayerFiles(dir).map(f => f.path);
+            expect(paths).toContain(`${MAIN}/ReviewProbe.java`);
+            expect(paths.some(p => p.includes('/build/')), 'gitignored build output stays out').toBe(false);
+            expect(nativeLayerHash(nativeLayerFiles(dir))).not.toBe(before);
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('releaseTagged is true only for a release with a v<version> tag', () => {
+        const { dir, put } = scratch();
+        try {
+            put('notes-app/package.json', '{}\n');
+            git(dir, 'add', '-A');
+            git(dir, 'commit', '-q', '-m', 'x');
+            git(dir, 'tag', 'v1.2.3');
+            expect(releaseTagged(dir, '1.2.3')).toBe(true);
+            expect(releaseTagged(dir, '1.2.4')).toBe(false);
+            expect(releaseTagged(dir, '1.2')).toBe(false);
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
     });
 });
 
@@ -253,10 +359,12 @@ describe('emitVersionJson: the floor rides in the Notes bundle\'s version.json',
         const tree = JSON.parse(fs.readFileSync(path.join(FRONTEND, 'notes-app', 'native-min.json'), 'utf8')).latest;
         expect(tree).toMatch(/^\d+\.\d+\.\d+$/);
         const vj = emitted('notes');
+        // From native-min.json, not the release. (The two are EQUAL on the
+        // release that first ships a native change, so comparing them would
+        // go red exactly when --record-latest is used as documented; while
+        // they differ, which is most releases, this line already catches a
+        // nativeLatest that is really APP_VERSION.)
         expect(vj.nativeLatest).toBe(tree);
-        // The release this tree builds is newer than its last native change;
-        // were nativeLatest the release, every APK would be "out of date".
-        expect(versionGt(String(vj.version), tree), `${String(vj.version)} > ${tree}`).toBe(true);
     }, 30_000);
 
     it('Púca\'s build carries none (control: the field is the Notes channel\'s alone)', () => {
