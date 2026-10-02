@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import type { Server } from '../api/servers';
 import { markServerRead, reorderServers } from '../api/servers';
 import { useServers } from '../hooks/queries';
@@ -236,18 +237,38 @@ export function ServerList({
         e.preventDefault();
         e.stopPropagation();
 
-        // Position menu near click, but ensure it stays on screen
-        const x = Math.min(e.clientX, window.innerWidth - 220);
-        const y = Math.min(e.clientY, window.innerHeight - 350);
-
+        // Open at the pointer; the layout effect below moves it on screen
+        // once its real size is known.
         setShowNotifySubmenu(false);
         setContextMenu({
             visible: true,
-            x,
-            y,
+            x: e.clientX,
+            y: e.clientY,
             server,
         });
     };
+
+    // Keep the menu on screen, measured rather than assumed (it used to guess
+    // 220x350, and the menu is taller than that), and measured AGAIN whenever
+    // its size changes — opening Notification Settings adds a row per level.
+    // The CSS caps its height at the viewport and scrolls inside.
+    const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
+    useLayoutEffect(() => {
+        const menu = menuRef.current;
+        if (!contextMenu.visible || !menu) return;
+        const EDGE = 8;
+        const clamp = () => {
+            const r = menu.getBoundingClientRect();
+            const x = Math.max(EDGE, Math.min(contextMenu.x, window.innerWidth - r.width - EDGE));
+            const y = Math.max(EDGE, Math.min(contextMenu.y, window.innerHeight - r.height - EDGE));
+            setMenuPos(prev => (prev && prev.x === x && prev.y === y ? prev : { x, y }));
+        };
+        clamp();
+        if (typeof ResizeObserver === 'undefined') return;
+        const observer = new ResizeObserver(clamp);
+        observer.observe(menu);
+        return () => observer.disconnect();
+    }, [contextMenu.visible, contextMenu.x, contextMenu.y, contextMenu.server]);
 
     const closeMenu = () => {
         setShowNotifySubmenu(false);
@@ -404,12 +425,16 @@ export function ServerList({
                 </div>
             </div>
 
-            {/* Server Context Menu */}
-            {contextMenu.visible && contextMenu.server && (
+            {/* Server Context Menu. Portaled to the body: on a phone the rail
+                is a transformed, overflow-clipped 72px panel (mobile.css), and
+                a transformed ancestor is the containing block of a
+                position:fixed child — so inside it the menu was cut down to
+                the rail's width and almost nothing in it could be tapped. */}
+            {contextMenu.visible && contextMenu.server && createPortal(
                 <div
                     ref={menuRef}
                     className="server-context-menu"
-                    style={{ left: contextMenu.x, top: contextMenu.y }}
+                    style={{ left: menuPos?.x ?? contextMenu.x, top: menuPos?.y ?? contextMenu.y }}
                 >
                     <div className="context-menu-item" onClick={handleMarkAsRead}>
                         <span className="menu-icon"><MailOpenIcon /></span>
@@ -539,7 +564,8 @@ export function ServerList({
                         Copy Server ID
                         <span className="menu-badge">ID</span>
                     </div>
-                </div>
+                </div>,
+                document.body,
             )}
         </div>
     );

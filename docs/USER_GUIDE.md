@@ -192,6 +192,20 @@ The microphone is not reopened mid-call; disconnect and join the channel again.
 - **Mute**: others cannot hear you; you still hear them
 - **Deafen**: you hear nothing AND are muted
 
+### Move or disconnect someone in voice (Move Members)
+With the Move Members permission (or as the owner), right-click a member who
+is in one of the server's voice channels (under the channel in the channel
+list, on a voice tile, or in the member list on the right; on a phone, tap
+them under the voice channel) and use the **Voice** section. You do not have
+to be in voice yourself.
+- **Move to** opens the list of voice channels right under it; pick one
+- **Disconnect from voice** drops them out of the call; they can rejoin straight away
+
+A member sitting in the AFK channel can be disconnected but not moved out of it.
+Opened from the member list, the menu shows **User Volume** and **Mute** only
+when you are in the call with them. On a computer you can also drag them onto
+another voice channel in the channel list.
+
 ### Calls in the background (Android)
 Switching to another app does not drop your microphone: while a call is live
 (and the microphone permission is granted) the app's keep-alive service holds

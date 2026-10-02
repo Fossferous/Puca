@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useId } from 'react';
 import { sendFriendRequest } from '../api/friends';
 import { startDMConversation, type DMConversation } from '../api/dms';
 import './UserContextMenu.css';
@@ -24,6 +24,7 @@ import {
     GavelIcon,
     MusicIcon,
     TagIcon,
+    ChevronDownIcon,
     ChevronRightIcon,
     CopyIcon,
     DisconnectIcon,
@@ -35,7 +36,12 @@ import {
 export interface UserContextMenuProps {
     userId: number;
     username: string;
-    isInVoice: boolean;
+    /** Show the LOCAL listener controls — per-user volume, mute, and "Give
+     *  screen control" — which act on what this device hears of them. True
+     *  from the voice-channel surfaces, and from the member list only when
+     *  they are in a call with the viewer. Voice MODERATION (Move to /
+     *  Disconnect) does not depend on it: that follows `canMoveMembers`. */
+    showListenerControls: boolean;
     position: { x: number; y: number };
     currentUserId: number;
     canModerate?: boolean;
@@ -71,7 +77,7 @@ export interface UserContextMenuProps {
 export function UserContextMenu({
     userId,
     username,
-    isInVoice,
+    showListenerControls,
     position,
     currentUserId,
     canModerate = false,
@@ -104,26 +110,53 @@ export function UserContextMenu({
     // Developer mode, from the typed settings field (with legacy-key fallback).
     const devMode = isDeveloperMode();
 
-    // Adjust menu position to stay on screen
+    // Keep the menu on screen. Measured, not assumed, and measured AGAIN
+    // whenever the menu changes size: expanding "Move to" or "Roles" makes it
+    // taller, and a clamp that only ran when it opened left the bottom items
+    // (Kick, Ban, ...) pushed off the bottom of a short window. The CSS caps
+    // its height at the viewport minus the same margin and scrolls inside, so
+    // the clamp can always fit it. A layout effect so the first paint is
+    // already in place.
     const [adjustedPosition, setAdjustedPosition] = useState(position);
 
-    useEffect(() => {
-        if (menuRef.current) {
-            const rect = menuRef.current.getBoundingClientRect();
-            let x = position.x;
-            let y = position.y;
-
-            if (x + rect.width > window.innerWidth) {
-                x = window.innerWidth - rect.width - 10;
-            }
-            if (y + rect.height > window.innerHeight) {
-                y = window.innerHeight - rect.height - 10;
-            }
-
-            // eslint-disable-next-line react-hooks/set-state-in-effect -- reposition after measuring the rendered menu
-            setAdjustedPosition({ x, y });
-        }
+    useLayoutEffect(() => {
+        const menu = menuRef.current;
+        if (!menu) return;
+        const EDGE = 10;
+        const clamp = () => {
+            const rect = menu.getBoundingClientRect();
+            const x = Math.max(EDGE, Math.min(position.x, window.innerWidth - rect.width - EDGE));
+            const y = Math.max(EDGE, Math.min(position.y, window.innerHeight - rect.height - EDGE));
+            setAdjustedPosition(prev => (prev.x === x && prev.y === y ? prev : { x, y }));
+        };
+        clamp();
+        // jsdom has no ResizeObserver (and no layout to observe).
+        if (typeof ResizeObserver === 'undefined') return;
+        const observer = new ResizeObserver(clamp);
+        observer.observe(menu);
+        return () => observer.disconnect();
     }, [position]);
+
+    // Opening a section scrolls the MENU (never the page) just enough to show
+    // the whole section, without scrolling its own toggle out of the top. Only
+    // matters once the menu has hit its height cap; otherwise nothing moves.
+    const moveGroupRef = useRef<HTMLDivElement>(null);
+    const rolesGroupRef = useRef<HTMLDivElement>(null);
+    const revealInMenu = (group: HTMLElement | null) => {
+        const menu = menuRef.current;
+        const toggle = group?.previousElementSibling;
+        if (!menu || !group || !toggle) return;
+        const m = menu.getBoundingClientRect();
+        const g = group.getBoundingClientRect();
+        const overflowBelow = g.bottom - m.bottom;
+        if (overflowBelow <= 0) return;
+        const room = toggle.getBoundingClientRect().top - m.top;
+        menu.scrollTop += Math.max(0, Math.min(overflowBelow, room));
+    };
+    useLayoutEffect(() => { if (showMoveSubmenu) revealInMenu(moveGroupRef.current); }, [showMoveSubmenu]);
+    useLayoutEffect(() => { if (showRolesSubmenu) revealInMenu(rolesGroupRef.current); }, [showRolesSubmenu]);
+    const moveGroupId = useId();
+    const rolesGroupId = useId();
 
     // Close on click outside
     useEffect(() => {
@@ -223,40 +256,45 @@ export function UserContextMenu({
             className="user-context-menu"
             style={{ left: adjustedPosition.x, top: adjustedPosition.y }}
         >
-            {/* Voice Controls - only if user is in voice and not self */}
-            {isInVoice && !isSelf && (
+            {/* Voice: the local listener controls, and/or voice moderation.
+                Never for yourself. */}
+            {(showListenerControls || canMoveMembers) && !isSelf && (
                 <div className="context-section">
                     <div className="context-section-header">Voice</div>
-                    <div className="volume-control">
-                        <label>User Volume</label>
-                        <div className="volume-slider-row">
-                            <input
-                                type="range"
-                                min="0"
-                                max="200"
-                                value={volume}
-                                onChange={(e) => handleVolumeChange(parseInt(e.target.value))}
-                            />
-                            <span className="volume-value">{volume}%</span>
-                        </div>
-                    </div>
-                    <button
-                        className={`context-item ${isMuted ? 'active' : ''}`}
-                        onClick={handleMuteToggle}
-                    >
-                        <span className="context-icon">{isMuted ? <SpeakerOffIcon /> : <SpeakerIcon />}</span>
-                        {isMuted ? 'Unmute' : 'Mute'}
-                    </button>
-                    {/* Offer control of my screen — only while I'm sharing on desktop,
-                        and only in a build that HAS remote control. */}
-                    {RC_ENABLED && isTauri() && getCurrentStreamingUserId() === currentUserId && (
-                        <button
-                            className="context-item"
-                            onClick={() => { offerControl(userId, username); onClose(); }}
-                        >
-                            <span className="context-icon"><GamepadIcon /></span>
-                            Give screen control
-                        </button>
+                    {showListenerControls && (
+                        <>
+                            <div className="volume-control">
+                                <label>User Volume</label>
+                                <div className="volume-slider-row">
+                                    <input
+                                        type="range"
+                                        min="0"
+                                        max="200"
+                                        value={volume}
+                                        onChange={(e) => handleVolumeChange(parseInt(e.target.value))}
+                                    />
+                                    <span className="volume-value">{volume}%</span>
+                                </div>
+                            </div>
+                            <button
+                                className={`context-item ${isMuted ? 'active' : ''}`}
+                                onClick={handleMuteToggle}
+                            >
+                                <span className="context-icon">{isMuted ? <SpeakerOffIcon /> : <SpeakerIcon />}</span>
+                                {isMuted ? 'Unmute' : 'Mute'}
+                            </button>
+                            {/* Offer control of my screen — only while I'm sharing on desktop,
+                                and only in a build that HAS remote control. */}
+                            {RC_ENABLED && isTauri() && getCurrentStreamingUserId() === currentUserId && (
+                                <button
+                                    className="context-item"
+                                    onClick={() => { offerControl(userId, username); onClose(); }}
+                                >
+                                    <span className="context-icon"><GamepadIcon /></span>
+                                    Give screen control
+                                </button>
+                            )}
+                        </>
                     )}
 
                     {/* Voice moderation (MOVE_MEMBERS). Lives HERE, in the Voice
@@ -265,21 +303,29 @@ export function UserContextMenu({
                         be read as a relative of Kick/Ban one section down.
 
                         This is also the only path to either action on a phone —
-                        the sidebar drag is pointer-driven. */}
+                        the sidebar drag is pointer-driven.
+
+                        "Move to" expands INLINE, under its own button. It was a
+                        side flyout once, painted outside the menu's clip and so
+                        never visible to anyone; a flyout also has nowhere to go
+                        on a 390px phone. Same pattern as the server icon's
+                        Notification Settings. */}
                     {canMoveMembers && (
                         <>
                             {voiceMoveTargets.length > 0 && (
-                                <div className="context-submenu-wrapper">
+                                <div className="ucm-expander">
                                     <button
-                                        className="context-item has-submenu"
+                                        className="context-item ucm-toggle"
+                                        aria-expanded={showMoveSubmenu}
+                                        aria-controls={moveGroupId}
                                         onClick={() => setShowMoveSubmenu(!showMoveSubmenu)}
                                     >
                                         <span className="context-icon"><ForwardIcon /></span>
                                         Move to
-                                        <span className="submenu-arrow"><ChevronRightIcon /></span>
+                                        <span className="ucm-arrow">{showMoveSubmenu ? <ChevronDownIcon /> : <ChevronRightIcon />}</span>
                                     </button>
                                     {showMoveSubmenu && (
-                                        <div className="context-submenu">
+                                        <div className="ucm-submenu" id={moveGroupId} ref={moveGroupRef} role="group" aria-label="Move to">
                                             {voiceMoveTargets.map(ch => (
                                                 <button
                                                     key={ch.id}
@@ -402,19 +448,22 @@ export function UserContextMenu({
                         </button>
                     )}
 
-                    {/* Roles Submenu */}
+                    {/* Roles — inline, like "Move to". (No caller passes
+                        availableRoles yet, so this renders nothing today.) */}
                     {availableRoles.length > 0 && (
-                        <div className="context-submenu-wrapper">
+                        <div className="ucm-expander">
                             <button
-                                className="context-item has-submenu"
+                                className="context-item ucm-toggle"
+                                aria-expanded={showRolesSubmenu}
+                                aria-controls={rolesGroupId}
                                 onClick={() => setShowRolesSubmenu(!showRolesSubmenu)}
                             >
                                 <span className="context-icon"><TagIcon /></span>
                                 Roles
-                                <span className="submenu-arrow"><ChevronRightIcon /></span>
+                                <span className="ucm-arrow">{showRolesSubmenu ? <ChevronDownIcon /> : <ChevronRightIcon />}</span>
                             </button>
                             {showRolesSubmenu && (
-                                <div className="context-submenu">
+                                <div className="ucm-submenu" id={rolesGroupId} ref={rolesGroupRef} role="group" aria-label="Roles">
                                     {availableRoles.map(role => (
                                         <label key={role.id} className="role-checkbox">
                                             <input

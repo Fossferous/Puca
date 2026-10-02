@@ -74,3 +74,41 @@ export function voiceMoveTargets(
 ): VoiceMoveChannel[] {
     return channels.filter(c => canMoveVoiceMember(from, c).ok);
 }
+
+/**
+ * What the user context menu offers for voice moderation of `userId`, for
+ * EVERY surface that opens it (member list, sidebar voice rows, stage tiles).
+ *
+ * The member is located in whichever voice channel of the server lists them,
+ * not only the viewer's own call: a moderator who is not in voice, or sits in
+ * another channel, can still move or disconnect someone (Discord does the
+ * same). The member list used to find people only in the viewer's call, so it
+ * offered neither action unless the moderator was sitting beside them.
+ *
+ * Deliberately independent of the viewer's own call. Whether the LOCAL
+ * listener controls (per-user volume, mute, give screen control) show is a
+ * separate question the caller answers; those act on what this device hears.
+ *
+ * A stale roster is harmless: the server re-checks MOVE_MEMBERS and refuses to
+ * move someone who is no longer in voice.
+ */
+export function userMenuVoiceModeration<C extends VoiceMoveChannel>(opts: {
+    userId: number;
+    /** The channels of the server being viewed (any type; only voice is searched). */
+    channels: readonly C[];
+    /** Who is in a voice channel right now. */
+    rosterOf: (channelId: number) => ReadonlyArray<{ id: number }>;
+    /** The viewer holds MOVE_MEMBERS (or owns the server). */
+    canMoveVoiceMembers: boolean;
+}): { voiceChannel: C | null; canMoveMembers: boolean; targets: C[] } {
+    const voiceChannel = opts.channels.find(c =>
+        c.channel_type === 1 && opts.rosterOf(c.id).some(u => u.id === opts.userId)) ?? null;
+    if (!voiceChannel) return { voiceChannel: null, canMoveMembers: false, targets: [] };
+    return {
+        voiceChannel,
+        canMoveMembers: opts.canMoveVoiceMembers,
+        targets: opts.canMoveVoiceMembers
+            ? opts.channels.filter(c => c.channel_type === 1 && canMoveVoiceMember(voiceChannel, c).ok)
+            : [],
+    };
+}

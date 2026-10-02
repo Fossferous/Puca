@@ -44,7 +44,9 @@ async function mountAndOpenMenu(canInviteCurrent: boolean | undefined) {
     await act(async () => {
         icon!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }));
     });
-    return Array.from(container.querySelectorAll('.context-menu-item')).map(n => n.textContent?.trim());
+    // The menu is portaled to the body (on a phone the rail would clip it),
+    // so it is looked up there, not inside the rail's container.
+    return Array.from(document.querySelectorAll('.server-context-menu .context-menu-item')).map(n => n.textContent?.trim());
 }
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
 
