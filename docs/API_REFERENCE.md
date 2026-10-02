@@ -389,6 +389,13 @@ until it has the frame. The shape is pinned by
   connections in that voice room. There is no target: it acts only on the
   sender's own account, and a room the call is no longer in ends nothing (the
   sender is sent a fresh `OwnVoiceState`; never an `Error`).
+- A device whose socket died in a voice call is out of the room at once, but
+  the account's other devices are told only after the rejoin grace
+  (`WS_REJOIN_GRACE_SECS`), so their bar still offers Leave / Move here for
+  it. A `LeaveOwnVoice` for that room, or any deliberate voice `JoinRoom`
+  (with or without `take_over`), sent within the grace plus 15 s marks that
+  device's sign-in session like a displaced one, so its replay below does not
+  rejoin.
 - `JoinRoom { room_id, take_over: true }` ("Move here") joins this connection
   first and only then takes the account's other connections out of that room,
   so the room never sees the user leave: no `UserLeft`, no `StreamStopped`,
@@ -398,12 +405,16 @@ until it has the frame. The shape is pinned by
   session (`sfu-token` records which session minted each identity), never the
   new device's.
 - `JoinRoom { …, replay: true }` marks the client re-sending a room it
-  remembers after its socket came back. A voice room another device of the
-  account has since ended or moved away from this session (Leave, Move here,
-  or joining another voice channel) is refused for a replay — answered with
-  the `RoomLeft` the socket missed, never an `Error` — so a laptop that slept
-  through its `RoomLeft` does not rejoin with an open microphone. A
-  deliberate join (no `replay`) always works and clears that mark.
+  remembers after its socket came back. A replayed voice join is refused —
+  answered with a `RoomLeft` (`reason` `"moved"` or `"left_elsewhere"`),
+  never an `Error` — when another device of the account has since ended or
+  moved the call away from this session (Leave, Move here, or joining another
+  voice channel), and whenever the account's call is live on another device
+  at all (a connection of another sign-in session, in this or any other voice
+  room; a reconnect of the same device keeps its session and rejoins). So a
+  laptop that slept through its `RoomLeft`, or whose call moved while it was
+  already gone, neither rejoins with an open microphone nor takes the call
+  back. A deliberate join (no `replay`) always works and clears that mark.
 
 The displaced connection, and only it, is sent
 `RoomLeft { room_id, reason, by }`: `reason` is `"moved"` (Move here, the
@@ -411,10 +422,13 @@ same channel tapped on the other device, or another voice channel joined
 there) or `"left_elsewhere"` (Leave), and `by` the kind of device that did it.
 Every other `RoomLeft` is unchanged and carries neither field. A connection
 that is not itself in a voice room cannot touch the account's call in it:
-its `StopStream`, `ScreenShareStop` and `CameraStop` are no-ops, and its
-`StartStream`, `ScreenShareStart` and `CameraStart` are ignored without an
-`Error` — so a displaced client's ordinary teardown, which sends all of
-these, cannot retract the call that moved.
+its `StopStream`, `ScreenShareStop` and `CameraStop` are no-ops — so a
+displaced client's ordinary teardown, which sends all of these, cannot
+retract the call that moved. Its `StartStream`, `ScreenShareStart` and
+`CameraStart` are ignored without an `Error` when the account is in that room
+on another connection, or when this session's replay of the room was refused
+as above (the client re-claims its media right after its replay); any other
+connection that is not in the room is answered `Not in this room` as before.
 
 **Frames parked for an offline device are re-authorised when it connects.** A
 `MessageNotification` is dropped when the channel is no longer visible; a

@@ -1334,8 +1334,9 @@ can no longer stop or start media there on the account's behalf, so a
 displaced device's teardown cannot cut the call that moved. On an SFU
 channel a move removes only the LiveKit sessions minted by the old device's
 sign-in session (recorded per identity at `sfu-token`), and a session that
-was moved or ended from another device cannot rejoin that call by a
-reconnect replay — only by a deliberate join.
+was moved or ended from another device — or whose account is in voice on
+another device at all — cannot rejoin a call by a reconnect replay, only by
+a deliberate join.
 
 **Revoking a device reaches every socket it signed in (0.9.5).**
 `DELETE /devices/:id` used to hang up only the connection that had attested as

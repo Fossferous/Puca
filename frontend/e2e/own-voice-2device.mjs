@@ -20,7 +20,13 @@
 //      participant list holds exactly ONE session of the account — the
 //      phone's — next to the second account's;
 //   6. voice exclusivity: the PC joining ANOTHER channel takes the phone out
-//      with a notice too.
+//      with a notice too;
+//   7. the PC "sleeps" (its socket is closed and held down, so it is out of
+//      the room but the phone is told only after the 8 s rejoin grace):
+//      Move here, then Leave, pressed on the phone inside that grace. When
+//      the PC's socket comes back, its replayed join is refused - it shows
+//      the notice instead of rejoining next to the phone (or with an open
+//      mic after Leave), and its media re-claim raises no alert().
 // Each check is a PASS/FAIL line; the exit code is the number of failures.
 // Screenshots of the banner (phone and desktop) go to OUT.
 //
@@ -86,6 +92,9 @@ const browser = await chromium.launch({
 
 const consoleErrors = [];
 function watch(page, tag) {
+    // Every console line of every device, timestamped, for diagnosing a failed run.
+    page.on('console', m => fs.appendFileSync(path.join(OUT, 'console.txt'), `${new Date().toISOString()} ${tag} ${m.type()} ${m.text().slice(0, 400)}
+`));
     page.on('pageerror', e => { consoleErrors.push(`${tag} pageerror ${e.message}`); console.log(`  [${tag} pageerror]`, e.message.slice(0, 200)); });
     page.on('dialog', d => { consoleErrors.push(`${tag} dialog ${d.message()}`); console.log(`  [${tag} DIALOG]`, d.message()); d.dismiss().catch(() => {}); });
 }
@@ -189,6 +198,21 @@ async function bannerGeometry(page, phone) {
 
 try {
     const pcCtx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    // Step 7's "sleep": every socket the PC opens to the API is remembered,
+    // and while __ovBlockWs is set a new one goes to a closed port (its
+    // reconnects fail until the flag is cleared). Only the API's sockets:
+    // vite's HMR socket reloads the whole page when it is cut.
+    await pcCtx.addInitScript((apiHost) => {
+        const Orig = window.WebSocket;
+        window.__ovSockets = [];
+        window.WebSocket = class extends Orig {
+            constructor(url, protocols) {
+                const api = String(url).includes(apiHost);
+                super(api && window.__ovBlockWs ? 'ws://127.0.0.1:9/' : url, protocols);
+                if (api) window.__ovSockets.push(this);
+            }
+        };
+    }, new URL(process.env.API || 'http://127.0.0.1:5322').host);
     const phoneCtx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
     const bCtx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
 
@@ -336,6 +360,67 @@ try {
     } else {
         console.log('SKIP  SFU steps (LK_API / LK_KEY / LK_SECRET not set)');
     }
+
+    // ── 7. The PC sleeps through a Move here, then through a Leave.
+    const sleepPc = () => pc.evaluate(() => {
+        window.__ovBlockWs = true;
+        window.__ovMark = 'asleep'; // a page reload would lose this
+        let closed = 0;
+        for (const s of window.__ovSockets) if (s.readyState <= 1) { s.close(); closed++; }
+        return closed;
+    });
+    const wakePc = () => pc.evaluate(() => { window.__ovBlockWs = false; });
+    const bPanel = async () => (await b.locator('.voice-panel-compact').count()) ? await b.locator('.voice-panel-compact').innerText() : '';
+    if (!(await bPanel()).includes('Lounge') || !(await inCall(b).isVisible())) await clickVoice(b, 'Lounge', false);
+    check('7: B is in Lounge', !!await until(async () => (await bPanel()).includes('Lounge') && await inCall(b).isVisible(), 25000));
+    if (!(await inCall(pc).isVisible())) await clickVoice(pc, 'Lounge', false);
+    check('7: the PC is in Lounge', !!await until(() => inCall(pc).isVisible(), 25000));
+    const pcPeer = await until(async () => { const m = await meshPeer(b, A); return m && m.connection === 'connected' && m.audioIn > 0 ? m : null; }, 30000, 500);
+    check('7: control: B hears the PC (mesh connected, audio arriving)', !!pcPeer, JSON.stringify(pcPeer));
+    await until(() => banner(phone).isVisible(), 10000);
+    // Let step 5's notice on the PC (a 5 s toast) expire, so 7a's is its own.
+    await until(async () => !(await pc.locator('body').innerText()).includes('You moved the call to your phone'), 15000);
+
+    // 7a. Move here while the PC's socket is down (inside the rejoin grace).
+    check('7a: the PC API socket is closed and held down', (await sleepPc()) === 1);
+    await sleep(1200);
+    const stillOffered = await banner(phone).isVisible();
+    check('7a: inside the grace the phone still offers the call', stillOffered);
+    await banner(phone).getByRole('button', { name: 'Move here' }).tap();
+    check('7a: phone connected after Move here', !!await until(() => inCall(phone).isVisible(), 25000));
+    await sleep(2000);
+    check('7a: control: no stale notice on the PC before it wakes', !(await pc.locator('body').innerText()).includes('You moved the call to your phone'));
+    check('7a: control: the PC page was not reloaded and still holds the call while asleep', (await pc.evaluate(() => window.__ovMark)) === 'asleep' && await inCall(pc).isVisible());
+    await wakePc();
+    check('7a: the woken PC drops the call with "You moved the call to your phone"', !!await until(async () => !(await inCall(pc).isVisible()), 45000) && !!await toastSeen(pc, 'You moved the call to your phone'));
+    await sleep(3000);
+    const v7a = occupants(await voiceList(b, srv.id), lounge.id, A);
+    check('7a: server voice list: the account is in Lounge exactly once (the phone), the PC did not rejoin', v7a.n === 1 && !(await inCall(pc).isVisible()), v7a.json);
+    const phonePeer = await until(async () => {
+        const m = await meshPeer(b, A);
+        return m && m.connection === 'connected' && m.connId !== pcPeer?.connId ? m : null;
+    }, 30000, 500);
+    const pa1 = phonePeer?.audioIn ?? 0;
+    await sleep(3000);
+    const pa2 = (await meshPeer(b, A))?.audioIn ?? 0;
+    check('7a: B is connected to the phone, audio arriving (getStats, nothing played)', !!phonePeer && pa2 > pa1, `${JSON.stringify(phonePeer)} ${pa1} -> ${pa2}`);
+
+    // 7b. The PC takes the call back by a click, sleeps, and the phone presses Leave.
+    await clickVoice(pc, 'Lounge', false);
+    check('7b: the PC took the call back by a deliberate click', !!await until(() => inCall(pc).isVisible(), 25000) && !!await until(async () => !(await inCall(phone).isVisible()), 15000));
+    await until(() => banner(phone).isVisible(), 10000);
+    check('7b: the PC API socket is closed and held down', (await sleepPc()) === 1);
+    await sleep(1200);
+    check('7b: inside the grace the phone still offers Leave', await banner(phone).isVisible());
+    await banner(phone).getByRole('button', { name: 'Leave' }).tap();
+    await sleep(2000);
+    check('7b: control: no stale notice on the PC before it wakes', !(await pc.locator('body').innerText()).includes('You left voice from your phone'));
+    check('7b: control: the PC page was not reloaded and still holds the call while asleep', (await pc.evaluate(() => window.__ovMark)) === 'asleep' && await inCall(pc).isVisible());
+    await wakePc();
+    check('7b: the woken PC drops the call with "You left voice from your phone"', !!await until(async () => !(await inCall(pc).isVisible()), 45000) && !!await toastSeen(pc, 'You left voice from your phone'));
+    await sleep(3000);
+    const v7b = occupants(await voiceList(b, srv.id), lounge.id, A);
+    check('7b: server voice list: the account is out of Lounge - the PC did not rejoin with an open mic', v7b.n === 0 && !(await inCall(pc).isVisible()), v7b.json);
 
     check('no page errors and no alert() dialogs on any device', consoleErrors.length === 0, consoleErrors.join(' | '));
 } catch (e) {

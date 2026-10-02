@@ -235,10 +235,12 @@ different voice channel moves you there, and the PC drops out of its call
 with the same notice.
 
 It works the other way round too: a call on your phone shows the bar on your
-PC. The bar says **in a browser** for a web browser and **on another device**
-when the other device did not say what it is. A PC that was asleep when its
-call was moved or ended does not rejoin that call when it wakes up; click
-the channel again if you want it there. The bar needs a server and an app
+PC. The bar says **in a browser** for a computer's web browser (a phone's or
+tablet's browser counts as your phone) and **on another device** when the
+other device did not say what it is. A PC that was asleep or offline when its
+call was moved or ended does not rejoin that call when it wakes up, and does
+not rejoin any call while you are in voice on another device; click the
+channel again if you want it there. The bar needs a server and an app
 from this release or later: against an older server it is simply not shown.
 
 ### Calls in the background (Android)

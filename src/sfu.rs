@@ -118,16 +118,28 @@ const AVG_PACKET_BYTES: u64 = 1_100;
 /// on RoomLeft still ends it.
 const MINT_ATTRIBUTION_TTL: Duration = Duration::from_secs(24 * 3600);
 
-/// Who minted one LiveKit identity: [`AppState::sfu_minted`]. Identities are
-/// minted per TOKEN REQUEST (`u<id>#<nonce>`), not per WebSocket, so the
-/// minting session's `sid` is what ties an identity to a device.
+/// At most this many mints are attributed per (user, session, room), newest
+/// kept: one device holds one LiveKit connection to a room at a time, so the
+/// rest are its earlier reconnects. Slack for a reconnect whose predecessor
+/// LiveKit has not timed out yet.
+pub(crate) const MAX_MINTS_PER_SESSION_ROOM: usize = 4;
+
+/// One LiveKit identity a session minted: an entry of
+/// [`AppState::sfu_minted`], which is keyed by (user, session `sid`, room).
+/// Identities are minted per TOKEN REQUEST (`u<id>#<nonce>`), not per
+/// WebSocket, so the minting session is what ties an identity to a device.
 #[derive(Debug, Clone)]
 pub struct SfuMint {
-    pub room: String,
-    pub user_id: i64,
-    pub sid: String,
+    pub identity: String,
     pub at: Instant,
 }
+
+/// When [`prune`] last swept [`AppState::sfu_minted`] by age. `prune` runs on
+/// every mint and webhook; the age sweep walks every attributed session, so it
+/// runs at most once per [`MINT_SWEEP_EVERY`] - the per-key cap
+/// ([`MAX_MINTS_PER_SESSION_ROOM`]) is what bounds the map between sweeps.
+static MINT_SWEPT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+const MINT_SWEEP_EVERY: Duration = Duration::from_secs(60);
 
 /// Live + reserved usage of one LiveKit room. Held in
 /// [`AppState::sfu_rooms`], keyed by room name (`sfu_<channel id>`).
@@ -805,7 +817,19 @@ pub fn spawn_egress_sampler(state: Arc<AppState>) {
 /// Drop expired reservations and empty room entries.
 fn prune(state: &AppState) {
     let now = Instant::now();
-    state.sfu_minted.retain(|_, m| now.duration_since(m.at) < MINT_ATTRIBUTION_TTL);
+    let sweep_mints = MINT_SWEPT.lock().map_or(true, |mut last| {
+        let due = last.is_none_or(|t| now.duration_since(t) >= MINT_SWEEP_EVERY);
+        if due {
+            *last = Some(now);
+        }
+        due
+    });
+    if sweep_mints {
+        state.sfu_minted.retain(|_, mints| {
+            mints.retain(|m| now.duration_since(m.at) < MINT_ATTRIBUTION_TTL);
+            !mints.is_empty()
+        });
+    }
     for mut r in state.sfu_rooms.iter_mut() {
         r.reservations
             .retain(|_, minted| now.duration_since(*minted) < RESERVATION_TTL);
@@ -2127,16 +2151,39 @@ pub async fn evict_session_identities(state: &Arc<AppState>, channel_id: i64, us
     remove_identities(state, &cfg, &room, &identities).await
 }
 
+/// Record that session `sid` of `user_id` minted LiveKit `identity` in `room`.
+/// A legacy token with no sid is not recorded - it cannot be told apart.
+/// O(1) per mint and bounded per (user, session, room): the oldest of that
+/// session's mints in the room is dropped past [`MAX_MINTS_PER_SESSION_ROOM`].
+pub(crate) fn record_mint(state: &AppState, room: &str, user_id: i64, sid: &str, identity: &str) {
+    if sid.is_empty() {
+        return;
+    }
+    let now = Instant::now();
+    let mut mints = state.sfu_minted.entry((user_id, sid.to_string(), room.to_string())).or_default();
+    mints.retain(|m| now.duration_since(m.at) < MINT_ATTRIBUTION_TTL);
+    mints.push(SfuMint { identity: identity.to_string(), at: now });
+    let excess = mints.len().saturating_sub(MAX_MINTS_PER_SESSION_ROOM);
+    mints.drain(..excess);
+}
+
 /// The identities [`evict_session_identities`] would cut: minted in `room`,
 /// by `user_id`, on one of `sids` (never an empty sid).
 fn session_identities(state: &AppState, room: &str, user_id: i64, sids: &[String]) -> Vec<String> {
-    let mut out: Vec<String> = state
-        .sfu_minted
+    let mut out: Vec<String> = sids
         .iter()
-        .filter(|m| m.room == room && m.user_id == user_id && !m.sid.is_empty() && sids.contains(&m.sid))
-        .map(|m| m.key().clone())
+        .filter(|sid| !sid.is_empty())
+        .filter_map(|sid| state.sfu_minted.get(&(user_id, sid.clone(), room.to_string())))
+        .flat_map(|mints| {
+            mints
+                .iter()
+                .filter(|m| m.at.elapsed() < MINT_ATTRIBUTION_TTL)
+                .map(|m| m.identity.clone())
+                .collect::<Vec<_>>()
+        })
         .collect();
     out.sort();
+    out.dedup();
     out
 }
 
@@ -2171,6 +2218,7 @@ async fn remove_identities(state: &AppState, cfg: &SfuConfig, room: &str, identi
         }
     };
     let mut removed = 0;
+    let mut gone: Vec<&str> = Vec::new();
     for identity in identities {
         let identity = identity.as_str();
         // A perms sweep whose LiveKit already failed to answer sends no more:
@@ -2199,7 +2247,7 @@ async fn remove_identities(state: &AppState, cfg: &SfuConfig, room: &str, identi
                     u.grants.remove(identity);
                     u.unconfirmed.remove(identity);
                 }
-                state.sfu_minted.remove(identity);
+                gone.push(identity);
             }
             Ok(r) => tracing::warn!("SFU evict {identity}: LiveKit returned {}", r.status()),
             Err(e) => {
@@ -2207,6 +2255,16 @@ async fn remove_identities(state: &AppState, cfg: &SfuConfig, room: &str, identi
                 trip_breaker();
             }
         }
+    }
+    // A confirmed removal ends that identity: forget who minted it. One walk
+    // for the whole batch - evictions are rare, mints are not.
+    if !gone.is_empty() {
+        state.sfu_minted.retain(|key, mints| {
+            if key.2 == room {
+                mints.retain(|m| !gone.contains(&m.identity.as_str()));
+            }
+            !mints.is_empty()
+        });
     }
     Evicted { tried, removed }
 }
@@ -2908,12 +2966,7 @@ pub async fn get_sfu_token(
     // Which session holds this identity: "Move here" cuts the PC's LiveKit
     // session by it without touching the phone's (evict_session_identities).
     // A legacy token with no sid is not recorded - it cannot be told apart.
-    if !claims.sid.is_empty() {
-        state.sfu_minted.insert(
-            identity.clone(),
-            SfuMint { room: room.clone(), user_id: claims.sub, sid: claims.sid.clone(), at: Instant::now() },
-        );
-    }
+    record_mint(&state, &room, claims.sub, &claims.sid, &identity);
 
     Json(SfuTokenResponse {
         url: cfg.url,
@@ -3692,6 +3745,33 @@ pub(crate) mod resync_tests {
             .connect_lazy("postgres://localhost/does_not_connect")
             .expect("lazy pool");
         AppState::new(pool, "test-secret".into(), None, Arc::new(crate::wake::NullWake))
+    }
+
+    /// Session attribution of LiveKit identities (`record_mint`) is bounded per
+    /// (user, session, room): a client re-minting in a loop - every reconnect
+    /// mints a fresh identity, and nothing else removes a mint for 24 h -
+    /// cannot grow it without limit. The newest mints are the ones kept (the
+    /// live connection is the latest one), and another session's are untouched.
+    #[tokio::test]
+    async fn mint_attribution_is_bounded_per_session_and_keeps_the_newest() {
+        let state = test_state();
+        for i in 0..50 {
+            record_mint(&state, "sfu_7", 5, "sid-pc", &format!("u5#pc{i:02}"));
+        }
+        record_mint(&state, "sfu_7", 5, "sid-phone", "u5#phone");
+        record_mint(&state, "sfu_7", 5, "", "u5#legacy");
+        let pc = session_identities(&state, "sfu_7", 5, &["sid-pc".to_string()]);
+        let phone = session_identities(&state, "sfu_7", 5, &["sid-phone".to_string()]);
+        let other_room = session_identities(&state, "sfu_8", 5, &["sid-pc".to_string()]);
+        assert!(pc.len() <= MAX_MINTS_PER_SESSION_ROOM, "bounded: {} held", pc.len());
+        assert!(pc.contains(&"u5#pc49".to_string()), "the newest mint is kept: {pc:?}");
+        assert!(!pc.contains(&"u5#pc00".to_string()), "the oldest is the one dropped: {pc:?}");
+        assert_eq!(phone, vec!["u5#phone".to_string()], "another session is untouched");
+        assert!(other_room.is_empty());
+        assert!(
+            session_identities(&state, "sfu_7", 5, &[String::new()]).is_empty(),
+            "a legacy token's identity (no sid) is never attributed"
+        );
     }
 
     /// THE RACE, end to end: while the snapshot is in flight, a webhook says one
