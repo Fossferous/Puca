@@ -1,0 +1,86 @@
+<!doctype html>
+<!--
+  Real-browser harness for the user right-click menu (UserContextMenu), driven
+  by e2e/user-context-menu-reach.mjs.
+
+  It mounts the real component with the real global stylesheets (index.css,
+  App.css, ServerList.css — whose `.context-submenu` rule is global — then the
+  menu's own UserContextMenu.css, then mobile.css: the app's cascade order) and
+  fixture props: the member is in voice, the viewer may move members (a long
+  "Move to" list) and moderate, and the component is given a long Roles list.
+  jsdom cannot see any of what the rig checks (clipping, scrolling, placement),
+  so this is a layout check only — nothing here talks to a server.
+
+  Query: ?x=<clientX>&y=<clientY> is where the menu is opened (the right-click
+  point), default 1000,600.
+
+  Serve with the dev server (`npx vite --port 5402 --strictPort --host 127.0.0.1`
+  in frontend/) and open /e2e/user-context-menu.html.
+-->
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>User context menu — harness</title>
+    <style>
+        html, body { margin: 0; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="module">
+        const unstubbed = [];
+        const realFetch = window.fetch.bind(window);
+        window.fetch = async (input, init) => {
+            const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+            if (url.origin === location.origin) return realFetch(input, init);
+            unstubbed.push(`${init?.method || 'GET'} ${url.pathname}`);
+            return new Response('{}', { status: 404, headers: { 'content-type': 'application/json' } });
+        };
+
+        await import('/src/index.css');
+        await import('/src/App.css');
+        await import('/src/components/ServerList.css');
+        const [{ createRoot }, React, { UserContextMenu }] = await Promise.all([
+            import('react-dom/client'),
+            import('react'),
+            import('/src/components/UserContextMenu.tsx'),
+        ]);
+        await import('/src/mobile.css');
+
+        const q = new URLSearchParams(location.search);
+        const position = { x: Number(q.get('x') ?? 1000), y: Number(q.get('y') ?? 600) };
+        const MOVE_TARGETS = Array.from({ length: 14 }, (_, i) => ({ id: 100 + i, name: `Voice room ${String(i).padStart(2, '0')}`, isAfk: i === 13 }));
+        const ROLES = Array.from({ length: 12 }, (_, i) => ({ id: 200 + i, name: `harness-role-${String(i).padStart(2, '0')}`, color: '#89b4fa' }));
+
+        const moved = [];
+        function Harness() {
+            const [open, setOpen] = React.useState(true);
+            const [roleIds, setRoleIds] = React.useState([200, 203]);
+            window.__ctxHarnessReopen = () => setOpen(true);
+            if (!open) return null;
+            return React.createElement(UserContextMenu, {
+                userId: 7,
+                username: 'harness-member',
+                isInVoice: true,
+                showListenerControls: true,
+                position,
+                currentUserId: 42,
+                canModerate: true,
+                canMoveMembers: true,
+                voiceMoveTargets: MOVE_TARGETS,
+                availableRoles: ROLES,
+                userRoleIds: roleIds,
+                onRoleToggle: (id, on) => setRoleIds(ids => on ? [...ids, id] : ids.filter(x => x !== id)),
+                onVoiceMove: (id) => moved.push(id),
+                onVoiceDisconnect: () => {},
+                onKick: () => {},
+                onBan: () => {},
+                onClose: () => setOpen(false),
+            });
+        }
+        createRoot(document.getElementById('root')).render(React.createElement(Harness));
+        window.__ctxHarness = () => ({ unstubbed: [...unstubbed], moved: [...moved] });
+    </script>
+</body>
+</html>

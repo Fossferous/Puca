@@ -67,10 +67,18 @@
     font-size: 14px;
 }
 
+/* The 1px bottom border (none on the last section) used to arrive from
+   UserProfilePopup.css's unscoped `.profile-section`; that file is scoped now,
+   so it is stated here to keep these cards exactly as they were. */
 .profile-section {
     background: var(--bg-tertiary);
     border-radius: 8px;
     padding: 16px;
+    border-bottom: 1px solid var(--bg-secondary);
+}
+
+.profile-section:last-child {
+    border-bottom: none;
 }
 
 .profile-section h3 {
