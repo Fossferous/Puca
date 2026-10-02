@@ -1328,6 +1328,27 @@ who cannot VIEW it (`visible_clip_channel_id`,
 [`src/server_handlers.rs`](../src/server_handlers.rs)), on the server list and
 on join alike.
 
+**Leave / Move here from another device acts on your own account only.** The
+"You're in Lounge on your PC" bar ([`docs/USER_GUIDE.md`](USER_GUIDE.md),
+*Your call on another device*) sends `LeaveOwnVoice` or a `JoinRoom` with
+`take_over`. Neither names a user: the server takes the account from the
+socket's own token and touches only that account's other connections, so no
+one can end or take over anybody else's call with them, and a take-over join
+passes the same VIEW and `CONNECT` checks as any join before it removes
+anything. `OwnVoiceState` — which voice channel your account is in, its
+server's name, and the kind of device holding it — is sent only to your own
+connections that asked for it, never to anyone else and never to the phone's
+background delivery socket. The device kind is whatever that device reported
+about itself (`?kind=`) and labels your devices to each other; nothing
+privilege-bearing reads it. A connection that is not itself in a voice room
+can no longer stop or start media there on the account's behalf, so a
+displaced device's teardown cannot cut the call that moved. On an SFU
+channel a move removes only the LiveKit sessions minted by the old device's
+sign-in session (recorded per identity at `sfu-token`), and a session that
+was moved or ended from another device — or whose account is in voice on
+another device at all — cannot rejoin a call by a reconnect replay, only by
+a deliberate join.
+
 **Revoking a device reaches every socket it signed in (0.9.5).**
 `DELETE /devices/:id` used to hang up only the connection that had attested as
 that device; a second socket on the same session, or one opened with a token

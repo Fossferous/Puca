@@ -6,6 +6,8 @@ import { createPortal } from 'react-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { wsClient, type ServerMessage } from '../api/websocket';
 import { VoicePanel } from './VoicePanel';
+import { OwnVoiceBanner } from './OwnVoiceBanner';
+import { roomLeftNotice, type OwnVoiceState } from '../api/ownVoice';
 import { getVoiceUsersInRoom, globalVoiceUsers, globalCameraUsers, isUserStreaming, subscribeToStreamState, subscribeToVoiceUsers, getSelectedStreams, getStreamData, getAllStreamers, selectStream, deselectStream, upsertVoiceUser } from './voiceState';
 import { useStreamStore } from '../stores/streamStore';
 import type { VoiceUserStatus } from './voiceState';
@@ -1364,6 +1366,18 @@ export function Chat({ onLogout }: ChatProps) {
     const showToast = useCallback((text: string) => {
         setToast(prev => ({ text, seq: (prev?.seq ?? 0) + 1 }));
     }, []);
+
+    /**
+     * Leave on the "You're in Lounge on your PC" banner: end the account's
+     * call on its other device. The server takes that device out and tells
+     * it why; this device just watches the banner go. `leaveOwnVoice` sends
+     * nothing to a server that has not said it understands the frame.
+     */
+    const leaveOwnCallElsewhere = useCallback((call: OwnVoiceState) => {
+        if (!call.roomId || !wsClient.leaveOwnVoice(call.roomId)) {
+            showToast('Not connected to the server — try again in a moment.');
+        }
+    }, [showToast]);
     const [isSearching, setIsSearching] = useState(false);
     /** Cancels an in-flight search when the query changes or the view closes. */
     const searchAbortRef = useRef<{ aborted: boolean } | null>(null);
@@ -2584,6 +2598,14 @@ export function Chat({ onLogout }: ChatProps) {
                 voiceEventSeqRef.current += 1;
                 setVoiceUpdateTrigger(prev => prev + 1);
             }
+            // Another device of this account ended or took this device's call
+            // (Leave / Move here on its "You're in ... on your PC" banner). The
+            // server sends the reason ONLY to the connection it took out, so
+            // this device was in that call: say why it ended rather than
+            // dropping silently. VoicePanel's own RoomLeft handler does the
+            // teardown, exactly as for any eviction.
+            const notice = roomLeftNotice(msg.payload);
+            if (notice) showToast(notice);
         };
 
         // The remove-side mirror of UserJoined for VOICE rooms only: the
@@ -2700,6 +2722,43 @@ export function Chat({ onLogout }: ChatProps) {
         // queryClient and showToast are both stable identities (useQueryClient,
         // and a useCallback with no deps), so listing them re-registers nothing.
     }, [currentUserId, queryClient, showToast]);
+
+    /**
+     * Move here on the banner: join the account's call on THIS device. Only
+     * sets the voice channel - the voice panel mounts and joins as for any
+     * click, and its JoinRoom carries `take_over` because the own-voice store
+     * says the call is in that room on another device (VoicePanel joinVoice),
+     * so the server moves it rather than connecting both devices.
+     *
+     * The channel is resolved from ITS server's list (the call may be on a
+     * server this device is not viewing), fresh, as VoiceMoved does - ids are
+     * all the frame carries, and mounting the panel without the channel's
+     * real `sfu_mode` would negotiate the wrong transport.
+     */
+    const moveOwnCallHere = useCallback((call: OwnVoiceState) => {
+        const serverId = call.serverId;
+        const channelId = call.channelId;
+        if (!serverId || channelId === null) {
+            showToast("Couldn't find that voice channel.");
+            return;
+        }
+        queryClient.fetchQuery({
+            queryKey: keys.channels(serverId),
+            queryFn: () => listChannels(serverId),
+            staleTime: 0,
+        }).then((list: Channel[]) => {
+            const target = list.find(c => c.id === channelId);
+            if (!target) {
+                showToast("Couldn't find that voice channel.");
+                return;
+            }
+            // Never yank a device that joined something meanwhile.
+            setCurrentVoiceChannel(prev => prev ?? target);
+        }).catch((err: unknown) => {
+            console.error('Move here: failed to resolve the channel:', err);
+            showToast("Couldn't reach the server — try again in a moment.");
+        });
+    }, [queryClient, showToast]);
 
     // Cross-channel message ping: the backend notifies every online server
     // member (except the author) on each new channel message. Sound it unless
@@ -5039,6 +5098,24 @@ export function Chat({ onLogout }: ChatProps) {
                 {currentServer && <div className="sidebar-spacer"></div>}
 
                 </div>{/* /sidebar-scroll */}
+
+                {/* "You're in Lounge on your PC" - Leave / Move here. Only while
+                    this device is in no call; the store is filled only by a
+                    server that understands both actions. Desktop: in the
+                    sidebar where the voice panel sits. Mobile: portaled, like
+                    the voice panel, so it rides above the bottom nav on every
+                    panel. */}
+                {(() => {
+                    const banner = (
+                        <OwnVoiceBanner
+                            inCallHere={!!currentVoiceChannel}
+                            onLeave={leaveOwnCallElsewhere}
+                            onMoveHere={moveOwnCallHere}
+                            hereIsPhone={isMobile}
+                        />
+                    );
+                    return isMobile ? createPortal(banner, document.body) : banner;
+                })()}
 
                 {/* Voice Control Panel */}
                 {currentVoiceChannel && (() => {

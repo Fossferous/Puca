@@ -365,6 +365,71 @@ currently joined to that voice room is admitted on VIEW + `CONNECT` alone and
 skips the timeout check. A ping from a connection not in the room, or any
 other content, keeps the full gate.
 
+**The account's call on another device.** A client that can show "You're in
+Lounge on your PC" says so on the socket URL: `/ws?caps=own_voice&kind=<desktop|mobile|browser>`
+(both optional; `kind` outside the three is dropped, and it is self-reported —
+it only labels the account's own devices to each other). Only such a
+connection, never a delivery socket, is sent
+
+```json
+{"type":"OwnVoiceState","payload":{"room_id":"voice_42","channel_id":42,"server_id":"…","channel_name":"Lounge","server_name":"Friends","here":false,"device":"desktop"}}
+```
+
+once right after connecting (every key present, `null` when the account is in
+no voice room) and again to every such connection of the account whenever the
+account's voice membership changes. `here` is true on the connection(s) in
+the room; `device` is the kind another connection in the room reported. The
+frame's arrival is also the client's proof that THIS socket's server
+understands the two requests below; a server that predates them answers an
+unknown client frame with an `Error`, so the official client sends neither
+until it has the frame. The shape is pinned by
+`frontend/src/tests/fixtures/ownVoiceState.json`, parsed by both sides' tests.
+
+- `LeaveOwnVoice { room_id }` ends the call on the account's OTHER
+  connections in that voice room. There is no target: it acts only on the
+  sender's own account, and a room the call is no longer in ends nothing (the
+  sender is sent a fresh `OwnVoiceState`; never an `Error`).
+- A device whose socket died in a voice call is out of the room at once, but
+  the account's other devices are told only after the rejoin grace
+  (`WS_REJOIN_GRACE_SECS`), so their bar still offers Leave / Move here for
+  it. A `LeaveOwnVoice` for that room, or any deliberate voice `JoinRoom`
+  (with or without `take_over`), sent within the grace plus 15 s marks that
+  device's sign-in session like a displaced one, so its replay below does not
+  rejoin.
+- `JoinRoom { room_id, take_over: true }` ("Move here") joins this connection
+  first and only then takes the account's other connections out of that room,
+  so the room never sees the user leave: no `UserLeft`, no `StreamStopped`,
+  no `UserJoined`; the voice claim passes to the new connection, and only a
+  share or camera that lived on the old device is retracted. On an SFU channel
+  the server removes exactly the LiveKit sessions minted by the old device's
+  session (`sfu-token` records which session minted each identity), never the
+  new device's.
+- `JoinRoom { …, replay: true }` marks the client re-sending a room it
+  remembers after its socket came back. A replayed voice join is refused —
+  answered with a `RoomLeft` (`reason` `"moved"` or `"left_elsewhere"`),
+  never an `Error` — when another device of the account has since ended or
+  moved the call away from this session (Leave, Move here, or joining another
+  voice channel), and whenever the account's call is live on another device
+  at all (a connection of another sign-in session, in this or any other voice
+  room; a reconnect of the same device keeps its session and rejoins). So a
+  laptop that slept through its `RoomLeft`, or whose call moved while it was
+  already gone, neither rejoins with an open microphone nor takes the call
+  back. A deliberate join (no `replay`) always works and clears that mark.
+
+The displaced connection, and only it, is sent
+`RoomLeft { room_id, reason, by }`: `reason` is `"moved"` (Move here, the
+same channel tapped on the other device, or another voice channel joined
+there) or `"left_elsewhere"` (Leave), and `by` the kind of device that did it.
+Every other `RoomLeft` is unchanged and carries neither field. A connection
+that is not itself in a voice room cannot touch the account's call in it:
+its `StopStream`, `ScreenShareStop` and `CameraStop` are no-ops — so a
+displaced client's ordinary teardown, which sends all of these, cannot
+retract the call that moved. Its `StartStream`, `ScreenShareStart` and
+`CameraStart` are ignored without an `Error` when the account is in that room
+on another connection, or when this session's replay of the room was refused
+as above (the client re-claims its media right after its replay); any other
+connection that is not in the room is answered `Not in this room` as before.
+
 **Frames parked for an offline device are re-authorised when it connects.** A
 `MessageNotification` is dropped when the channel is no longer visible; a
 `ClipPending` when the recipient can no longer VIEW the clip's voice channel

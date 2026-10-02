@@ -312,6 +312,16 @@ pub struct Session {
     /// the attested `device_id` above: nothing privilege-bearing may ever read
     /// this one, because anyone can claim any id.
     pub claimed_device_id: Option<String>,
+    /// The client announced `?caps=own_voice`: it understands
+    /// `ServerMessage::OwnVoiceState` (and the new RoomLeft fields), so it may
+    /// be sent the account's voice state. False for every client that
+    /// predates the feature - those are never sent the frame.
+    pub own_voice: bool,
+    /// What kind of device this connection SAID it is (`?kind=`): one of
+    /// "desktop", "mobile", "browser", or None. Self-reported and unproven -
+    /// it only ever labels the account's own devices to each other ("on your
+    /// PC"), and nothing privilege-bearing reads it.
+    pub client_kind: Option<&'static str>,
 }
 
 /// One continuous stretch of a user's MEMBERSHIP of a voice room. `left_ms` is
@@ -852,6 +862,27 @@ pub struct VacatedRoom {
 /// generous for it.
 pub const PASSWORD_PROOF_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// One entry of `AppState::voice_tombstones`: the voice room a session was
+/// displaced from, why (`RoomLeft::reason`), by which kind of device, and when.
+#[derive(Debug, Clone)]
+pub struct VoiceTombstone {
+    pub room_id: RoomId,
+    pub reason: &'static str,
+    pub by: Option<&'static str>,
+    pub at: std::time::Instant,
+}
+
+/// How long a session displaced from a voice call by another device of the
+/// account keeps refusing a REPLAYED JoinRoom of that call
+/// (`AppState::voice_tombstones`). Long on purpose: the case it exists for is
+/// a laptop that slept through its RoomLeft and wakes days later; a deliberate
+/// click clears it at once.
+pub const VOICE_TOMBSTONE_TTL: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+
+/// How long a `voice_drops` entry is kept at most. Readers pass their own,
+/// shorter window (the rejoin grace plus slack); this only bounds the map.
+pub const VOICE_DROP_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
 pub struct AppState {
     /// Database connection pool
     pub pool: PgPool,
@@ -947,6 +978,29 @@ pub struct AppState {
     /// what makes a session that outlived a restart known here at all. Backs
     /// node-global egress admission control and every SFU ejection.
     pub sfu_rooms: DashMap<String, crate::sfu::SfuRoomUsage>,
+    /// Which LiveKit identities (`u<id>#<nonce>`) each SESSION (JWT `sid`)
+    /// minted, keyed by (user, sid, LiveKit room). LiveKit identities are
+    /// minted per token request, not per socket, so this is the only way to
+    /// tell a PC's session in a call from the phone's when "Move here" must
+    /// cut exactly the PC's (sfu::evict_session_identities). Bounded per key
+    /// (newest kept), dropped on a confirmed removal, swept by age.
+    pub sfu_minted: DashMap<(i64, String, String), Vec<crate::sfu::SfuMint>>,
+    /// A voice call another device of the account ENDED or MOVED away from a
+    /// session: (user, sid) -> (voice room, when). A JoinRoom flagged
+    /// `replay` from that session for that room is refused, so a PC that
+    /// slept through its RoomLeft does not rejoin with an open mic when its
+    /// socket comes back. Cleared by a deliberate (non-replay) voice join from
+    /// that session; expires after `VOICE_TOMBSTONE_TTL`.
+    pub voice_tombstones: DashMap<(UserId, String), VoiceTombstone>,
+    /// A voice room a session's connection was taken out of because its
+    /// SOCKET died (unregister_session), not by a Leave: (user, sid) ->
+    /// (voice room, when). The account's other devices are told about such a
+    /// drop only after the rejoin grace, so for that long the phone's banner
+    /// still offers Leave / Move here for a call the dead socket no longer
+    /// holds - which then finds nothing to displace and writes no tombstone,
+    /// and the PC's replay on waking would undo it. Read by
+    /// `tombstone_recent_voice_drops` (ws.rs). Bounded by `VOICE_DROP_TTL`.
+    pub voice_drops: DashMap<(UserId, String), (RoomId, std::time::Instant)>,
     /// Events seen while a resync's snapshot is in flight (None otherwise);
     /// the merge must not undo them. Lock order: this, then `sfu_rooms`.
     pub sfu_resync_journal: std::sync::Mutex<Option<crate::sfu::SfuResyncJournal>>,
@@ -1322,6 +1376,9 @@ impl AppState {
             event_streams: DashMap::new(),
             task_events: crate::task_events::TaskEventHub::new(),
             sfu_rooms: DashMap::new(),
+            sfu_minted: DashMap::new(),
+            voice_tombstones: DashMap::new(),
+            voice_drops: DashMap::new(),
             sfu_resync_journal: std::sync::Mutex::new(None),
             sfu_resync_running: std::sync::Mutex::new(false),
             server_perms_locks: DashMap::new(),
@@ -1679,8 +1736,106 @@ impl AppState {
             device_id: None,
             delivery,
             claimed_device_id,
+            own_voice: false,
+            client_kind: None,
         });
         (conn_id, is_first, kill)
+    }
+
+    /// Record what this connection announced on its WebSocket URL (see
+    /// `Session::own_voice` / `client_kind`). A separate call, like
+    /// `attest_device`, so the 80-odd `register_session` call sites keep
+    /// their signature; the connect path calls it before anything is sent.
+    /// A delivery socket is never marked capable: it is not a screen.
+    pub fn set_conn_caps(&self, user_id: UserId, conn_id: u64, own_voice: bool, kind: Option<&'static str>) {
+        if let Some(mut sessions) = self.sessions.get_mut(&user_id) {
+            if let Some(s) = sessions.iter_mut().find(|s| s.conn_id == conn_id) {
+                s.own_voice = own_voice && !s.delivery;
+                s.client_kind = kind;
+            }
+        }
+    }
+
+    /// The device kind `conn_id` reported, if it is live and said one.
+    pub fn conn_kind(&self, user_id: UserId, conn_id: u64) -> Option<&'static str> {
+        self.sessions
+            .get(&user_id)
+            .and_then(|sessions| sessions.iter().find(|s| s.conn_id == conn_id).and_then(|s| s.client_kind))
+    }
+
+    /// The account's connections that may be sent `OwnVoiceState`: visible,
+    /// and announced `own_voice`.
+    pub fn own_voice_conns(&self, user_id: UserId) -> Vec<u64> {
+        self.sessions
+            .get(&user_id)
+            .map(|sessions| sessions.iter().filter(|s| s.own_voice && !s.delivery).map(|s| s.conn_id).collect())
+            .unwrap_or_default()
+    }
+
+    /// Every live connection of the account (delivery sockets included) -
+    /// the per-connection form of `send_to_user`'s fan-out.
+    pub fn conn_ids_of(&self, user_id: UserId) -> Vec<u64> {
+        self.sessions
+            .get(&user_id)
+            .map(|sessions| sessions.iter().map(|s| s.conn_id).collect())
+            .unwrap_or_default()
+    }
+
+    /// Another device of `user_id` ended or moved the call in `room_id` away
+    /// from session `sid`: refuse that session's REPLAYED join of it (see
+    /// `voice_tombstones`). Expired entries are swept here, so the map stays
+    /// bounded by the sessions displaced within the TTL.
+    pub fn tombstone_voice(&self, user_id: UserId, sid: &str, room_id: &str, reason: &'static str, by: Option<&'static str>) {
+        if sid.is_empty() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        self.voice_tombstones.retain(|_, t| now.duration_since(t.at) < VOICE_TOMBSTONE_TTL);
+        self.voice_tombstones.insert(
+            (user_id, sid.to_string()),
+            VoiceTombstone { room_id: room_id.to_string(), reason, by, at: now },
+        );
+    }
+
+    /// The tombstone a REPLAYED join of `room_id` by session `sid` runs into,
+    /// if it must be refused.
+    pub fn voice_replay_tombstone(&self, user_id: UserId, sid: &str, room_id: &str) -> Option<VoiceTombstone> {
+        if sid.is_empty() {
+            return None;
+        }
+        self.voice_tombstones
+            .get(&(user_id, sid.to_string()))
+            .filter(|t| t.room_id == room_id && t.at.elapsed() < VOICE_TOMBSTONE_TTL)
+            .map(|t| t.clone())
+    }
+
+    /// Session `sid`'s socket died while it was in voice room `room_id`
+    /// (see `voice_drops`). Expired entries are swept here.
+    pub fn note_voice_drop(&self, user_id: UserId, sid: &str, room_id: &str) {
+        if sid.is_empty() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        self.voice_drops.retain(|_, (_, at)| now.duration_since(*at) < VOICE_DROP_TTL);
+        self.voice_drops.insert((user_id, sid.to_string()), (room_id.to_string(), now));
+    }
+
+    /// The account's sessions whose socket died in a voice room within
+    /// `within`, with that room: (sid, room).
+    pub fn recent_voice_drops(&self, user_id: UserId, within: std::time::Duration) -> Vec<(String, RoomId)> {
+        self.voice_drops
+            .iter()
+            .filter(|e| e.key().0 == user_id && e.value().1.elapsed() < within.min(VOICE_DROP_TTL))
+            .map(|e| (e.key().1.clone(), e.value().0.clone()))
+            .collect()
+    }
+
+    /// A deliberate voice join from session `sid`: whatever it was displaced
+    /// from before, the person is choosing voice on this device now.
+    pub fn clear_voice_tombstone(&self, user_id: UserId, sid: &str) {
+        if !sid.is_empty() {
+            self.voice_tombstones.remove(&(user_id, sid.to_string()));
+        }
     }
 
     /// The non-empty session id `conn_id` authenticated with, if any.
@@ -2201,12 +2356,14 @@ impl AppState {
         // a concurrent register_session for the same user serializes against
         // this block, so a fast reconnect can never observe a stale "empty"
         // and tear down state a brand-new connection depends on.
+        let mut dropped_sid: Option<String> = None;
         let last_visible_gone = match self.sessions.entry(user_id) {
             Entry::Occupied(mut occupied) => {
                 let was_visible = occupied
                     .get()
                     .iter()
                     .any(|s| s.conn_id == conn_id && !s.delivery);
+                dropped_sid = occupied.get().iter().find(|s| s.conn_id == conn_id).map(|s| s.sid.clone());
                 occupied.get_mut().retain(|s| s.conn_id != conn_id);
                 let visible_left = occupied.get().iter().any(|s| !s.delivery);
                 if occupied.get().is_empty() {
@@ -2264,6 +2421,13 @@ impl AppState {
         // join that repopulated the room is not clobbered.
         for room_id in emptied {
             self.drop_room_if_empty(&room_id);
+        }
+        // The voice room this socket's death took the session out of (one at
+        // most: voice is exclusive per user) - see `voice_drops`.
+        if let Some(sid) = dropped_sid.filter(|s| !s.is_empty()) {
+            for v in vacated.iter().filter(|v| v.fully_left && v.room_id.starts_with("voice_")) {
+                self.note_voice_drop(user_id, &sid, &v.room_id);
+            }
         }
         (fully_offline, vacated)
     }

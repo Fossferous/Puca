@@ -217,6 +217,32 @@ Opened from the member list, the menu shows **User Volume** and **Mute** only
 when you are in the call with them. On a computer you can also drag them onto
 another voice channel in the channel list.
 
+### Your call on another device
+If you are in a voice channel on one device (your PC, say) and open Púca on
+another (your phone), the second device shows a bar on every screen:
+**You're in Lounge on your PC**, with the server's name under it and two
+buttons:
+
+- **Leave** ends the call on the PC. The PC drops out of voice and says
+  **You left voice from your phone**.
+- **Move here** ends the call on the PC and joins it on this device instead.
+  The people in the call do not hear you leave and rejoin; the PC says
+  **You moved the call to your phone**.
+
+Tapping the same voice channel on the phone does the same as **Move here**:
+the call moves, it is never connected on both devices at once. Tapping a
+different voice channel moves you there, and the PC drops out of its call
+with the same notice.
+
+It works the other way round too: a call on your phone shows the bar on your
+PC. The bar says **in a browser** for a computer's web browser (a phone's or
+tablet's browser counts as your phone) and **on another device** when the
+other device did not say what it is. A PC that was asleep or offline when its
+call was moved or ended does not rejoin that call when it wakes up, and does
+not rejoin any call while you are in voice on another device; click the
+channel again if you want it there. The bar needs a server and an app
+from this release or later: against an older server it is simply not shown.
+
 ### Calls in the background (Android)
 Switching to another app does not drop your microphone: while a call is live
 (and the microphone permission is granted) the app's keep-alive service holds

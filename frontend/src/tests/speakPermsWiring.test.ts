@@ -167,7 +167,8 @@ const PINS: Pin[] = [
                 'if (canConnectRef.current === false) {', 'setError(CONNECT_DENIED_NOTICE);', 'return;',
                 'const deniedByHint = canSpeakRef.current === false;',
                 'webrtcManager.setSpeakDenied(deniedByHint);',
-                'wsClient.joinRoom(roomId);',
+                // takeOver: "Move here" (ownVoice.ts) rides the same join.
+                'wsClient.joinRoom(roomId, { takeOver: shouldTakeOver(roomId) });',
                 'webrtcManager.getLocalStream(true, false)')
                 && /if \(speakDeniedRef\.current && localStream\.getAudioTracks\(\)\.length > 0\) \{\s*await webrtcManager\.releaseMic\(\);/.test(b!);
         },

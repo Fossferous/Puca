@@ -43,6 +43,33 @@ pub struct WsQuery {
     /// the kill path reads.
     #[serde(default)]
     pub device: Option<String>,
+    /// What the client can read, comma-separated. Only `own_voice` exists:
+    /// the client understands `ServerMessage::OwnVoiceState` and the RoomLeft
+    /// `reason`/`by` fields, so the server may push the account's voice state
+    /// to it. Absent on every client that predates it - those are never sent
+    /// the frame. An old server ignores the parameter.
+    #[serde(default)]
+    pub caps: Option<String>,
+    /// The kind of device the client says it is: `desktop`, `mobile` or
+    /// `browser` (anything else is dropped). Labels the account's own devices
+    /// to each other ("You're in Lounge on your PC"); unproven, read by
+    /// nothing privilege-bearing.
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+/// `?caps=` / `?kind=` as the session records them: whether the client
+/// announced `own_voice` (an exact token in the comma list), and its device
+/// kind if it is one of the three this server knows.
+pub(crate) fn parse_ws_caps(caps: Option<&str>, kind: Option<&str>) -> (bool, Option<&'static str>) {
+    let own_voice = caps.is_some_and(|c| c.split(',').any(|t| t.trim() == "own_voice"));
+    let kind = match kind.map(str::trim) {
+        Some("desktop") => Some("desktop"),
+        Some("mobile") => Some("mobile"),
+        Some("browser") => Some("browser"),
+        _ => None,
+    };
+    (own_voice, kind)
 }
 
 /// What a refused upgrade says back.
@@ -209,8 +236,9 @@ pub async fn ws_handler(
             // ones kept working. Echo the marker, never the token: putting the
             // credential in a response header would undo the whole change.
             let ws = if offered_protocol.is_some() { ws.protocols(["bearer"]) } else { ws };
+            let caps = parse_ws_caps(query.caps.as_deref(), query.kind.as_deref());
             ws.on_upgrade(move |socket| {
-                handle_socket(socket, state, claims, ip_guard, delivery, claimed_device)
+                handle_socket(socket, state, claims, ip_guard, delivery, claimed_device, caps)
             })
         }
         Err(e) => {
@@ -228,6 +256,7 @@ async fn handle_socket(
     _ip_guard: crate::state::IpSlotGuard,
     delivery: bool,
     claimed_device: Option<String>,
+    caps: (bool, Option<&'static str>),
 ) {
     // _ip_guard is held for the whole connection; its Drop (on any return path
     // below, i.e. every disconnect) releases this IP's WS slot.
@@ -253,6 +282,9 @@ async fn handle_socket(
     // "first" meaning first VISIBLE connection; a delivery socket never is).
     let (conn_id, is_first_session, kill) =
         state.register_session(user_id, username.clone(), tx, delivery, claimed_device, claims.sid.clone());
+    // Before anything can be pushed to this connection: whether it may be
+    // sent OwnVoiceState (set_conn_caps never marks a delivery socket).
+    state.set_conn_caps(user_id, conn_id, caps.0, caps.1);
 
     tracing::info!(
         "User {} ({}) connected{}",
@@ -425,6 +457,13 @@ async fn handle_socket(
             nonce: device_nonce.clone(),
         },
     );
+
+    // Where the account's call is, right away - a phone opened while the PC
+    // is in voice must be able to say so before anything else happens. Sent
+    // only to a client that asked (an old client never sees the frame), and
+    // always, even when the account is in no call: its arrival is how the
+    // client learns this server understands LeaveOwnVoice and take_over.
+    send_own_voice_state_to(&state, user_id, conn_id).await;
 
     // Announce presence only to users who can see it: those who share a server
     // with this user, plus accepted friends. Previously this fanned out to EVERY
@@ -861,6 +900,14 @@ async fn handle_socket(
             }
         }
     }
+
+    // The account's other devices: this socket's call may have ended with it.
+    // After the rejoin grace above, so a blip that is already back in the
+    // call does not flash "You're in Lounge on another device" at the phone.
+    // Recomputed from LIVE state, like every announcement here.
+    if vacated_rooms.iter().any(|v| parse_voice_room(&v.room_id).is_some()) {
+        push_own_voice_state(&state, user_id).await;
+    }
 }
 
 /// The raw `show_online_status` lookup: `Some(value)` for a found row, `None`
@@ -1121,8 +1168,11 @@ async fn withdraw_refused_join(
     let released = state.leave_room(room_id, user_id, conn_id);
     joined_rooms.remove(room_id);
     if conn_was_joined || already_member {
-        state.send_to_conn(user_id, conn_id, ServerMessage::RoomLeft { room_id: room_id.to_string() });
+        state.send_to_conn(user_id, conn_id, ServerMessage::RoomLeft { room_id: room_id.to_string(), reason: None, by: None });
         announce_conn_departure(state, room_id, user_id, released).await;
+    }
+    if parse_voice_room(room_id).is_some() {
+        push_own_voice_state(state, user_id).await;
     }
 }
 
@@ -1359,6 +1409,16 @@ pub enum SelfNotice {
         from_channel_id: i64,
         moved_by: String,
     },
+    /// Voice exclusivity: the account joined ANOTHER voice room from
+    /// `actor_conn`. Every device is still told `RoomLeft` exactly as for
+    /// `Gone`, but the connections that were IN this room (other than the
+    /// actor) get it with `reason: "moved"` and the actor's device kind, so a
+    /// PC whose call the phone just took into another channel can say so
+    /// instead of dropping silently - and their sessions are tombstoned
+    /// against a replayed join of this room (a laptop that slept through the
+    /// RoomLeft must not steal the call back when it wakes). The actor itself
+    /// never gets a reason: it is mid-join and must not show a notice.
+    Displaced { actor_conn: u64 },
 }
 
 /// Force `user_id` out of the live voice room `room_id`, leaving no ghost
@@ -1393,7 +1453,7 @@ pub async fn evict_user_from_voice_room(
     // PRE-eviction member list: removing the last member deletes the room
     // outright, and a broadcast against a room that just vanished reaches
     // nobody, leaving every remaining client holding the ghost.
-    let (was_sharer, was_camera, members) = {
+    let (was_sharer, was_camera, members, held_by) = {
         let Some(room) = state.rooms.get(room_id) else {
             return false;
         };
@@ -1404,6 +1464,8 @@ pub async fn evict_user_from_voice_room(
             room.screen_sharers.contains(&user_id),
             room.camera_users.contains(&user_id),
             room.members.clone(),
+            // Which of the user's connections held the call (for Displaced).
+            room.conns_of(user_id).cloned().unwrap_or_default(),
         )
     }; // guard dropped before the await below
 
@@ -1468,25 +1530,59 @@ pub async fn evict_user_from_voice_room(
     // socket — which fires the client's "SFU disconnected, leave voice" path.
     // With the cut first, that teardown routinely beat this directive and the
     // move collapsed into a plain disconnect on every SFU channel.
-    state.send_to_user(
-        user_id,
-        match notice {
-            SelfNotice::Gone => ServerMessage::RoomLeft {
-                room_id: room_id.to_string(),
-            },
-            SelfNotice::MoveTo {
-                server_id,
-                channel_id,
-                from_channel_id,
-                moved_by,
-            } => ServerMessage::VoiceMoved {
-                server_id,
-                channel_id,
-                from_channel_id,
-                moved_by,
-            },
-        },
-    );
+    match notice {
+        SelfNotice::Gone => {
+            state.send_to_user(
+                user_id,
+                ServerMessage::RoomLeft {
+                    room_id: room_id.to_string(),
+                    reason: None,
+                    by: None,
+                },
+            );
+        }
+        SelfNotice::MoveTo {
+            server_id,
+            channel_id,
+            from_channel_id,
+            moved_by,
+        } => {
+            state.send_to_user(
+                user_id,
+                ServerMessage::VoiceMoved {
+                    server_id,
+                    channel_id,
+                    from_channel_id,
+                    moved_by,
+                },
+            );
+        }
+        SelfNotice::Displaced { actor_conn } => {
+            let by = state.conn_kind(user_id, actor_conn);
+            let actor_sid = state.session_sid(user_id, actor_conn);
+            let plain = ServerMessage::RoomLeft { room_id: room_id.to_string(), reason: None, by: None };
+            for c in state.conn_ids_of(user_id) {
+                if c != actor_conn && held_by.contains(&c) {
+                    state.send_to_conn(
+                        user_id,
+                        c,
+                        ServerMessage::RoomLeft {
+                            room_id: room_id.to_string(),
+                            reason: Some(Displace::Moved.reason().to_string()),
+                            by: by.map(str::to_string),
+                        },
+                    );
+                    if let Some(sid) = state.session_sid(user_id, c) {
+                        if Some(&sid) != actor_sid.as_ref() {
+                            state.tombstone_voice(user_id, &sid, room_id, Displace::Moved.reason(), by);
+                        }
+                    }
+                } else {
+                    state.send_to_conn(user_id, c, plain.clone());
+                }
+            }
+        }
+    }
 
     // Authoritative media cut for moderation (see `cut_sfu` above). Still runs
     // unconditionally: the directive above is advisory — a client that ignores
@@ -1497,6 +1593,9 @@ pub async fn evict_user_from_voice_room(
             crate::sfu::evict_user_from_channel(state, cid, user_id).await;
         }
     }
+    // The account's other devices: the call they were showing has ended (or
+    // moved - a JoinRoom that evicted this pushes again once it lands).
+    push_own_voice_state(state, user_id).await;
     true
 }
 
@@ -1513,6 +1612,417 @@ pub fn current_voice_room(state: &Arc<AppState>, user_id: UserId) -> Option<(Str
             .contains(&user_id)
             .then(|| (r.key().clone(), cid))
     })
+}
+
+// --- The account's call on another device ------------------------------------
+//
+// "You're in Lounge on your PC — Leave / Move here" (docs/USER_GUIDE.md, *Your
+// call on another device*). Three parts:
+//
+// - OwnVoiceState: every capable connection of the account learns which voice
+//   room the account is in and whether it is THIS connection, pushed at connect
+//   and on every membership change, so the banner works on any screen.
+// - take_over on JoinRoom (Move here): join the new connection, THEN take the
+//   others out of that room - the room never sees the user leave.
+// - LeaveOwnVoice (Leave): take the account's other connections out.
+//
+// Both removals go through `displace_own_conns`, which tells ONLY the displaced
+// connections (send_to_conn, never send_to_user - the device asking is often
+// mid-join and would tear itself down on a RoomLeft), leaves a replay
+// tombstone on their sessions, and cuts only their LiveKit sessions.
+
+/// Why `displace_own_conns` took a connection out: `RoomLeft::reason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Displace {
+    /// Another device of the account pressed Move here (or tapped the same
+    /// channel): the call continues there.
+    Moved,
+    /// Another device of the account pressed Leave: the call is over.
+    LeftElsewhere,
+}
+
+impl Displace {
+    fn reason(self) -> &'static str {
+        match self {
+            Displace::Moved => "moved",
+            Displace::LeftElsewhere => "left_elsewhere",
+        }
+    }
+}
+
+/// The voice room the account is in, its channel id, and which of the
+/// account's connections are in it - read under one room guard.
+fn own_voice_snapshot(state: &Arc<AppState>, user_id: UserId) -> Option<(String, i64, std::collections::HashSet<u64>)> {
+    state.rooms.iter().find_map(|r| {
+        let cid = parse_voice_room(r.key())?;
+        if !r.value().members.contains(&user_id) {
+            return None;
+        }
+        let conns = r.value().conns_of(user_id).cloned().unwrap_or_default();
+        Some((r.key().clone(), cid, conns))
+    })
+}
+
+/// (server id, channel name, server name) for a voice channel, for the
+/// account's own devices. None on any miss or error: the client then says
+/// "a voice channel" rather than nothing.
+async fn own_voice_labels(state: &Arc<AppState>, channel_id: i64) -> Option<(String, String, String)> {
+    // channels.id is INT4 (see the 22P03 note in device_token.rs).
+    sqlx::query_as::<_, (String, String, String)>(
+        "SELECT c.server_id, c.name, s.name FROM channels c JOIN servers s ON s.id = c.server_id WHERE c.id = $1",
+    )
+    .bind(channel_id as i32)
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!("own voice state: channel labels for {} failed: {}", channel_id, e);
+        None
+    })
+}
+
+/// The OwnVoiceState `conn_id` is sent for this snapshot.
+fn own_voice_frame(
+    state: &Arc<AppState>,
+    user_id: UserId,
+    conn_id: u64,
+    snap: Option<&(String, i64, std::collections::HashSet<u64>)>,
+    labels: Option<&(String, String, String)>,
+) -> ServerMessage {
+    match snap {
+        None => ServerMessage::OwnVoiceState {
+            room_id: None,
+            channel_id: None,
+            server_id: None,
+            channel_name: None,
+            server_name: None,
+            here: false,
+            device: None,
+        },
+        Some((room_id, cid, conns)) => {
+            let mut others: Vec<u64> = conns.iter().copied().filter(|&c| c != conn_id).collect();
+            others.sort_unstable();
+            ServerMessage::OwnVoiceState {
+                room_id: Some(room_id.clone()),
+                channel_id: Some(*cid),
+                server_id: labels.map(|l| l.0.clone()),
+                channel_name: labels.map(|l| l.1.clone()),
+                server_name: labels.map(|l| l.2.clone()),
+                here: conns.contains(&conn_id),
+                device: others.into_iter().find_map(|c| state.conn_kind(user_id, c)).map(str::to_string),
+            }
+        }
+    }
+}
+
+/// Send the account's voice state to its capable connections - all of them,
+/// or only `only`. Nothing at all (not even a database read) when no
+/// connection of the account asked for it, which is every account on a
+/// client that predates the feature.
+///
+/// The snapshot is re-read AFTER the label lookup's await and the labels
+/// re-fetched if the call moved meanwhile, so what is sent is live state, not
+/// a picture from before the await.
+async fn send_own_voice_state(state: &Arc<AppState>, user_id: UserId, only: Option<u64>) {
+    let targets: Vec<u64> = state
+        .own_voice_conns(user_id)
+        .into_iter()
+        .filter(|c| only.is_none_or(|o| o == *c))
+        .collect();
+    if targets.is_empty() {
+        return;
+    }
+    let mut labels: Option<(i64, Option<(String, String, String)>)> = None;
+    for attempt in 0..3 {
+        let snap = own_voice_snapshot(state, user_id);
+        let ready = match (&snap, &labels) {
+            (None, _) => true,
+            (Some((_, cid, _)), Some((have, _))) => have == cid,
+            (Some(_), None) => false,
+        };
+        if ready || attempt == 2 {
+            let l = match (&snap, &labels) {
+                (Some((_, cid, _)), Some((have, l))) if have == cid => l.as_ref(),
+                _ => None,
+            };
+            for conn in &targets {
+                state.send_to_conn(user_id, *conn, own_voice_frame(state, user_id, *conn, snap.as_ref(), l));
+            }
+            return;
+        }
+        if let Some((_, cid, _)) = &snap {
+            labels = Some((*cid, own_voice_labels(state, *cid).await));
+        }
+    }
+}
+
+/// Tell every capable connection of the account where its call is now. Call
+/// after ANY change to the account's voice membership.
+pub(crate) async fn push_own_voice_state(state: &Arc<AppState>, user_id: UserId) {
+    send_own_voice_state(state, user_id, None).await;
+}
+
+/// Tell ONE connection (a fresh socket) where the account's call is. A no-op
+/// for a connection that did not announce `own_voice`.
+pub(crate) async fn send_own_voice_state_to(state: &Arc<AppState>, user_id: UserId, conn_id: u64) {
+    send_own_voice_state(state, user_id, Some(conn_id)).await;
+}
+
+/// Whether THIS connection is in `room_id` (not merely its user, through
+/// another device).
+fn conn_in_room(state: &Arc<AppState>, room_id: &str, user_id: UserId, conn_id: u64) -> bool {
+    state
+        .rooms
+        .get(room_id)
+        .is_some_and(|r| r.conns_of(user_id).is_some_and(|c| c.contains(&conn_id)))
+}
+
+/// Whether `user_id` is in `room_id` through some connection OTHER than
+/// `conn_id` - i.e. a media mutation from `conn_id` would act on a call that
+/// lives on another device.
+fn only_another_conn_in_room(state: &Arc<AppState>, room_id: &str, user_id: UserId, conn_id: u64) -> bool {
+    state
+        .rooms
+        .get(room_id)
+        .is_some_and(|r| r.members.contains(&user_id) && !r.conns_of(user_id).is_some_and(|c| c.contains(&conn_id)))
+}
+
+/// Whether a media START (StartStream / ScreenShareStart / CameraStart) from
+/// `conn_id` comes from a device whose call in `room_id` was moved or ended
+/// from another device of the account, and must be ignored quietly - never
+/// answered "Not in this room": that is an Error frame, which the client
+/// alert()s. Two shapes: the account is in the room on another connection
+/// (Move here a moment ago), or this connection is not in the room and its
+/// sign-in session is tombstoned for it - a woken PC's re-claim right after
+/// its refused replay, when the call was ended (Leave) or moved to another
+/// channel, so the account is no longer in this room at all.
+fn start_from_displaced_conn(state: &Arc<AppState>, room_id: &str, user_id: UserId, conn_id: u64) -> bool {
+    if only_another_conn_in_room(state, room_id, user_id, conn_id) {
+        return true;
+    }
+    !conn_in_room(state, room_id, user_id, conn_id)
+        && state
+            .session_sid(user_id, conn_id)
+            .is_some_and(|sid| state.voice_replay_tombstone(user_id, &sid, room_id).is_some())
+}
+
+/// If the account holds a voice call on a connection of ANOTHER sign-in
+/// session than `sid` (another device - a reconnect of the same device keeps
+/// its session), the kind of device that holds it (`Some(None)` when that
+/// device did not say). `None` when no other device is in voice, or when
+/// `sid` is empty (a legacy token: same device or not cannot be told).
+fn voice_call_on_another_session(
+    state: &Arc<AppState>,
+    user_id: UserId,
+    conn_id: u64,
+    sid: &str,
+) -> Option<Option<&'static str>> {
+    if sid.is_empty() {
+        return None;
+    }
+    // Collect first: no rooms guard is held across the sessions lookups.
+    let holders: Vec<u64> = state
+        .rooms
+        .iter()
+        .filter(|r| parse_voice_room(r.key()).is_some())
+        .filter_map(|r| r.value().conns_of(user_id).map(|c| c.iter().copied().collect::<Vec<u64>>()))
+        .flatten()
+        .filter(|&c| c != conn_id)
+        .collect();
+    holders.into_iter().find_map(|c| {
+        state
+            .session_sid(user_id, c)
+            .filter(|other| other != sid)
+            .map(|_| state.conn_kind(user_id, c))
+    })
+}
+
+/// Leave or Move here (or any deliberate voice join) from `actor_conn` while
+/// another device's socket has JUST died in voice: that device is already
+/// out of the room, so `displace_own_conns` finds nothing and writes no
+/// tombstone - yet the other devices are told about the drop only after the
+/// rejoin grace, so the phone's banner offered exactly this. Tombstone those
+/// sessions (other than the actor's), so the dropped PC's replay on waking
+/// does not undo the Leave or take the call back. `only_room`: Leave names
+/// one room; a join moves the call off any. Own account only.
+fn tombstone_recent_voice_drops(
+    state: &Arc<AppState>,
+    user_id: UserId,
+    actor_conn: u64,
+    only_room: Option<&str>,
+    why: Displace,
+) {
+    let Some(actor_sid) = state.session_sid(user_id, actor_conn) else { return };
+    let by = state.conn_kind(user_id, actor_conn);
+    let window = rejoin_grace() + VOICE_DROP_SLACK;
+    for (sid, room) in state.recent_voice_drops(user_id, window) {
+        if sid != actor_sid && only_room.is_none_or(|r| r == room) {
+            state.tombstone_voice(user_id, &sid, &room, why.reason(), by);
+        }
+    }
+}
+
+/// How long after the rejoin grace a drop still counts as "just now" for
+/// [`tombstone_recent_voice_drops`]: the other devices' banner is hidden by
+/// the OwnVoiceState sent at the end of the grace, and a press can race it.
+const VOICE_DROP_SLACK: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Take every connection of `user_id` EXCEPT `actor_conn` out of voice room
+/// `room_id`, because the account asked from `actor_conn` (Move here, or
+/// Leave). Returns how many connections were taken out. Own account only: the
+/// caller passes the socket's own user and connection, never a target.
+///
+/// - If `actor_conn` is in the room (Move here: it has just joined), the user
+///   never leaves it: no UserLeft and no StreamStopped (the voice claim is
+///   inherited by the actor - `Room::remove_member_conn`), only the
+///   ScreenShareStopped / CameraStopped for media the displaced connection
+///   held, which is gone with it.
+/// - Otherwise (Leave) the user is out of the room, and the room is told
+///   exactly what a forced eviction tells it.
+///
+/// Each displaced connection - and ONLY it - is sent `RoomLeft` with `why`
+/// and the actor's device kind, BEFORE the LiveKit cut (the cut fires the
+/// client's own disconnect path, which must not win the race and drop the
+/// explanation). Each displaced session (other than the actor's own) is
+/// tombstoned against a replayed join of this room. LiveKit: a Leave cuts the
+/// user's sessions in the room; a Move cuts only those minted on the
+/// displaced sessions, never the actor's.
+pub(crate) async fn displace_own_conns(
+    state: &Arc<AppState>,
+    room_id: &str,
+    user_id: UserId,
+    actor_conn: u64,
+    why: Displace,
+) -> usize {
+    let Some(cid) = parse_voice_room(room_id) else { return 0 };
+    // Snapshot BEFORE mutating, as the eviction helper does: the room's
+    // pre-removal members and media, and whether this ends the user's call.
+    let (was_sharer, was_camera, members) = {
+        let Some(room) = state.rooms.get(room_id) else { return 0 };
+        let Some(conns) = room.conns_of(user_id) else { return 0 };
+        if !conns.iter().any(|&c| c != actor_conn) {
+            return 0;
+        }
+        (
+            room.screen_sharers.contains(&user_id),
+            room.camera_users.contains(&user_id),
+            room.members.clone(),
+        )
+    };
+    let (displaced, released, still_member) = {
+        let Some(mut room) = state.rooms.get_mut(room_id) else { return 0 };
+        // Re-read under the write guard: the await above may have changed it.
+        let mut live: Vec<u64> = room
+            .conns_of(user_id)
+            .map(|c| c.iter().copied().filter(|&c| c != actor_conn).collect())
+            .unwrap_or_default();
+        live.sort_unstable();
+        let mut released = crate::state::ReleasedMedia::default();
+        for &c in &live {
+            let r = room.remove_member_conn(user_id, c);
+            released.streamer |= r.streamer;
+            released.screen_sharer |= r.screen_sharer;
+            released.camera_user |= r.camera_user;
+        }
+        (live, released, room.members.contains(&user_id))
+    }; // guard dropped before any send re-reads rooms
+    if displaced.is_empty() {
+        return 0;
+    }
+    state.drop_room_if_empty(room_id);
+
+    let by = state.conn_kind(user_id, actor_conn);
+    for &c in &displaced {
+        state.send_to_conn(
+            user_id,
+            c,
+            ServerMessage::RoomLeft {
+                room_id: room_id.to_string(),
+                reason: Some(why.reason().to_string()),
+                by: by.map(str::to_string),
+            },
+        );
+    }
+
+    if still_member {
+        // The call moved, it did not end. Only media that lived on the
+        // displaced device stops; the voice claim was handed to the
+        // surviving connection, so nobody is told the user stopped talking.
+        if released.screen_sharer {
+            state.broadcast_to_room(
+                room_id,
+                ServerMessage::ScreenShareStopped { room_id: room_id.to_string(), streamer_id: user_id },
+                None,
+            );
+        }
+        if released.camera_user {
+            state.broadcast_to_room(
+                room_id,
+                ServerMessage::CameraStopped { room_id: room_id.to_string(), user_id },
+                None,
+            );
+        }
+    } else {
+        // The call is over: the same over-complete retraction a forced
+        // eviction sends (see evict_user_from_voice_room). The viewer
+        // audience is a database read of who can see the channel, so it is
+        // fetched only here, after the displaced connections were told.
+        let audience = voice_roster_audience(state, room_id, user_id).await;
+        let stopped = ServerMessage::StreamStopped { room_id: room_id.to_string(), streamer_id: user_id };
+        state.send_to_user(user_id, stopped.clone());
+        for &audience_id in &audience {
+            state.send_to_user(audience_id, stopped.clone());
+        }
+        let peers = || members.iter().copied().filter(|&m| m != user_id);
+        if was_sharer {
+            let msg = ServerMessage::ScreenShareStopped { room_id: room_id.to_string(), streamer_id: user_id };
+            for m in peers() {
+                state.send_to_user(m, msg.clone());
+            }
+        }
+        if was_camera {
+            let msg = ServerMessage::CameraStopped { room_id: room_id.to_string(), user_id };
+            for m in peers() {
+                state.send_to_user(m, msg.clone());
+            }
+        }
+        let left = ServerMessage::UserLeft { room_id: room_id.to_string(), user_id };
+        for m in peers() {
+            state.send_to_user(m, left.clone());
+        }
+    }
+
+    // A displaced device that never read its RoomLeft (a sleeping laptop)
+    // must not be put back in the call by its reconnect replay.
+    let actor_sid = state.session_sid(user_id, actor_conn);
+    let mut displaced_sids: Vec<String> = Vec::new();
+    for &c in &displaced {
+        if let Some(sid) = state.session_sid(user_id, c) {
+            if Some(&sid) != actor_sid.as_ref() && !displaced_sids.contains(&sid) {
+                state.tombstone_voice(user_id, &sid, room_id, why.reason(), by);
+                displaced_sids.push(sid);
+            }
+        }
+    }
+
+    // LiveKit, after every frame above.
+    if still_member {
+        if !displaced_sids.is_empty() {
+            crate::sfu::evict_session_identities(state, cid, user_id, &displaced_sids).await;
+        }
+    } else {
+        crate::sfu::evict_user_from_channel(state, cid, user_id).await;
+    }
+
+    tracing::info!(
+        "Own voice: user {} {} {} connection(s) in {} from conn {}",
+        user_id,
+        if why == Displace::Moved { "moved the call off" } else { "ended the call on" },
+        displaced.len(),
+        room_id,
+        actor_conn
+    );
+    push_own_voice_state(state, user_id).await;
+    displaced.len()
 }
 
 /// Parse a `channel_{id}` text-channel room name into its numeric channel id.
@@ -2410,7 +2920,7 @@ async fn handle_message(
             state.send_to_conn(user_id, conn_id, ServerMessage::Pong);
         }
 
-        ClientMessage::JoinRoom { room_id } => {
+        ClientMessage::JoinRoom { room_id, take_over, replay } => {
             // Bound room_id length and the number of rooms this connection may
             // join — otherwise a flood of unique room_ids grows the global rooms
             // DashMap without limit (one authenticated socket → OOM).
@@ -2419,6 +2929,58 @@ async fn handle_message(
             }
             if !joined_rooms.contains(&room_id) && joined_rooms.len() >= MAX_ROOMS_PER_CONN {
                 return Err("too many joined rooms".to_string());
+            }
+            // A REPLAYED voice join (the client re-sending what it remembers
+            // after its socket came back) from a session another device of the
+            // account has since ended or moved the call away from: refuse it,
+            // quietly. The PC slept through its RoomLeft; rejoining now would
+            // undo an explicit Leave with an open mic, or steal the call back
+            // from the phone. Checked before anything else - in particular
+            // before voice exclusivity, which would evict the phone. Told with
+            // the RoomLeft it missed (the client drops the room from its
+            // replay list on it); never an Error frame, which old clients
+            // alert(). A deliberate join (no `replay`) is never refused here.
+            //
+            // The tombstone is only written when the move or Leave found this
+            // device still in the room. A replay is ALSO refused whenever the
+            // account's call is live on another device at all (another
+            // sign-in session; a reconnect of this device keeps its own): the
+            // PC's zombie was reaped before the phone joined, or Move here was
+            // pressed during the PC's rejoin grace and displaced nothing. A
+            // replay must never put the PC back next to the phone, nor evict
+            // the phone's call in another channel. The refusal is tombstoned
+            // like any other, so the client's re-claim that follows the replay
+            // (StartStream...) is ignored quietly too.
+            let session = state.session_sid(user_id, conn_id).unwrap_or_default();
+            if parse_voice_room(&room_id).is_some() {
+                if replay {
+                    let refused = state.voice_replay_tombstone(user_id, &session, &room_id).map(|t| (t.reason, t.by)).or_else(|| {
+                        let by = voice_call_on_another_session(state, user_id, conn_id, &session)?;
+                        state.tombstone_voice(user_id, &session, &room_id, Displace::Moved.reason(), by);
+                        Some((Displace::Moved.reason(), by))
+                    });
+                    if let Some((reason, by)) = refused {
+                        joined_rooms.remove(&room_id);
+                        state.send_to_conn(
+                            user_id,
+                            conn_id,
+                            ServerMessage::RoomLeft {
+                                room_id: room_id.clone(),
+                                reason: Some(reason.to_string()),
+                                by: by.map(str::to_string),
+                            },
+                        );
+                        tracing::info!(
+                            "JoinRoom replay refused for user {} conn {}: {} was ended, moved or is live on another device",
+                            user_id,
+                            conn_id,
+                            room_id
+                        );
+                        return Ok(());
+                    }
+                } else {
+                    state.clear_voice_tombstone(user_id, &session);
+                }
             }
             // Gate text-channel rooms (channel_<id>) AND voice/stream rooms
             // (voice_<channelId>) on VIEW_CHANNEL — membership alone is no
@@ -2506,7 +3068,7 @@ async fn handle_message(
                         &old_room,
                         user_id,
                         false,
-                        SelfNotice::Gone,
+                        SelfNotice::Displaced { actor_conn: conn_id },
                     )
                     .await;
                     tracing::info!(
@@ -2582,6 +3144,24 @@ async fn handle_message(
                         }
                     }
                 }
+            }
+
+            // MOVE HERE. This connection is in the room now (and passed the
+            // recheck), so the account's other connections can be taken out
+            // without the user ever leaving it: join FIRST, remove SECOND. The
+            // displaced connections alone are told (RoomLeft, reason "moved");
+            // the room hears nothing, and the voice claim passes to this
+            // connection. Before the snapshot below, so this join's RoomJoined
+            // and media replay already describe the call as it is after the
+            // move. Never part of a replay - the client does not store it.
+            if take_over && parse_voice_room(&room_id).is_some() {
+                displace_own_conns(state, &room_id, user_id, conn_id, Displace::Moved).await;
+            }
+            // A deliberate voice join on this device also moves the call off a
+            // device whose socket died in voice moments ago (its replay must
+            // not take it back): see tombstone_recent_voice_drops.
+            if !replay && parse_voice_room(&room_id).is_some() {
+                tombstone_recent_voice_drops(state, user_id, conn_id, None, Displace::Moved);
             }
 
             // Get current members and active streams
@@ -2747,6 +3327,8 @@ async fn handle_message(
                         state.send_to_user(audience_id, msg.clone());
                     }
                 }
+                // The account's other devices: "You're in <channel> on ...".
+                push_own_voice_state(state, user_id).await;
             }
 
             tracing::info!("User {} joined room {}", user_id, room_id);
@@ -2759,6 +3341,10 @@ async fn handle_message(
             // broadcast a spoofed UserLeft (and, below, media retractions) into
             // a private call the caller cannot even VIEW. leave_room itself is
             // a no-op for a non-occupant, so nothing else needs the guard.
+            // (A connection whose call another device of the account took -
+            // Move here / Leave - still lists the room and its stock teardown
+            // sends LeaveRoom: announce_conn_departure re-reads LIVE membership,
+            // so a user still in the call on the phone is not retracted.)
             let was_joined = joined_rooms.remove(&room_id);
             let released = state.leave_room(&room_id, user_id, conn_id);
 
@@ -2770,14 +3356,35 @@ async fn handle_message(
                 conn_id,
                 ServerMessage::RoomLeft {
                     room_id: room_id.clone(),
+                    reason: None,
+                    by: None,
                 },
             );
 
             if was_joined {
                 announce_conn_departure(state, &room_id, user_id, released).await;
+                if parse_voice_room(&room_id).is_some() {
+                    push_own_voice_state(state, user_id).await;
+                }
             }
 
             tracing::info!("User {} left room {}", user_id, room_id);
+        }
+
+        ClientMessage::LeaveOwnVoice { room_id } => {
+            // "Leave" on the "You're in <channel> on your PC" banner: end THIS
+            // account's call on its other device(s). There is no target - the
+            // socket's own user is the only account it can touch - and it acts
+            // only on `room_id`, and only on the account's OTHER connections in
+            // it: a press that raced a move or a hang-up names a room the call
+            // is no longer in, ends nothing, and just refreshes this
+            // connection's picture. Never an Error (old clients alert() those,
+            // and a stale banner is not a fault).
+            let ended = displace_own_conns(state, &room_id, user_id, conn_id, Displace::LeftElsewhere).await;
+            tombstone_recent_voice_drops(state, user_id, conn_id, Some(&room_id), Displace::LeftElsewhere);
+            if ended == 0 {
+                send_own_voice_state_to(state, user_id, conn_id).await;
+            }
         }
 
         ClientMessage::ChatMessage { room_id, content } => {
@@ -2989,6 +3596,17 @@ async fn handle_message(
             // requiring STREAM would erase ordinary members from the roster.
             // Screen sharing is ScreenShareStart, which IS gated on STREAM;
             // joining voice at all is gated on CONNECT at JoinRoom.
+            //
+            // A connection of a member that is NOT itself in the room (its call
+            // was moved to another device a moment ago) is ignored quietly: it
+            // would plant a claim for a socket that holds no call, and an Error
+            // is an alert() on an old client that is mid-teardown. So is one
+            // whose session's replay of this room was just refused (a woken
+            // PC re-claiming after Leave, or after the call moved to another
+            // channel): see start_from_displaced_conn.
+            if start_from_displaced_conn(state, &room_id, user_id, conn_id) {
+                return Ok(());
+            }
             if !can_mutate_room(state, &room_id, user_id).await {
                 return Err("Not in this room".to_string());
             }
@@ -3020,6 +3638,22 @@ async fn handle_message(
             // a late stop against their own LeaveRoom (reconnects, panel
             // teardown). Erroring here surfaced "Not in this room" alerts on
             // ordinary channel switches. Starts stay strict (they mutate state).
+            //
+            // CONNECTION-level, not just user-level: the account may hold this
+            // call on ANOTHER device (Move here put it on the phone; the PC's
+            // stock teardown then sends StopStream). The stop below clears the
+            // claim for the whole USER and tells everyone they stopped - which
+            // drops their audio on every peer while they are still talking.
+            // Only a connection that is itself in the room may do that.
+            if !conn_in_room(state, &room_id, user_id, conn_id) {
+                tracing::debug!(
+                    "Ignoring StopStream from conn {} of user {}: not in {}",
+                    conn_id,
+                    user_id,
+                    room_id
+                );
+                return Ok(());
+            }
             if !can_mutate_room(state, &room_id, user_id).await {
                 tracing::debug!(
                     "Ignoring StopStream from non-member {} for {}",
@@ -3067,6 +3701,11 @@ async fn handle_message(
             // Two answers, because the stock client now waits for its own
             // ScreenShareStarted before publishing any track: a member without
             // the bit must get a message they can show, not the membership one.
+            // (A connection whose call moved to another device: ignored, as in
+            // StartStream.)
+            if start_from_displaced_conn(state, &room_id, user_id, conn_id) {
+                return Ok(());
+            }
             if !can_mutate_room(state, &room_id, user_id).await {
                 return Err("Not in this room".to_string());
             }
@@ -3109,7 +3748,12 @@ async fn handle_message(
         }
 
         ClientMessage::ScreenShareStop { room_id } => {
-            // Non-member stop = silent no-op (see StopStream above).
+            // Non-member stop = silent no-op (see StopStream above), and a
+            // stop from a connection that is not itself in the room is one too
+            // (same reason: the call may live on another device).
+            if !conn_in_room(state, &room_id, user_id, conn_id) {
+                return Ok(());
+            }
             if !can_mutate_room(state, &room_id, user_id).await {
                 tracing::debug!(
                     "Ignoring ScreenShareStop from non-member {} for {}",
@@ -3136,7 +3780,11 @@ async fn handle_message(
         ClientMessage::CameraStart { room_id } => {
             // M9: only a current member of the room may mutate camera state,
             // plus VIDEO ("Share video in voice channels") — an editable role
-            // bit that nothing checked until now.
+            // bit that nothing checked until now. (A connection whose call
+            // moved to another device: ignored, as in StartStream.)
+            if start_from_displaced_conn(state, &room_id, user_id, conn_id) {
+                return Ok(());
+            }
             if !can_mutate_room(state, &room_id, user_id).await {
                 return Err("Not in this room".to_string());
             }
@@ -3159,7 +3807,12 @@ async fn handle_message(
         }
 
         ClientMessage::CameraStop { room_id } => {
-            // Non-member stop = silent no-op (see StopStream above).
+            // Non-member stop = silent no-op (see StopStream above), and a
+            // stop from a connection that is not itself in the room is one too
+            // (same reason: the call may live on another device).
+            if !conn_in_room(state, &room_id, user_id, conn_id) {
+                return Ok(());
+            }
             if !can_mutate_room(state, &room_id, user_id).await {
                 tracing::debug!(
                     "Ignoring CameraStop from non-member {} for {}",
@@ -4840,6 +5493,8 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
                 member_id,
                 ServerMessage::RoomLeft {
                     room_id: room_id.clone(),
+                    reason: None,
+                    by: None,
                 },
             );
             state.broadcast_to_room(
@@ -4856,6 +5511,10 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
                 room_id,
                 server_id
             );
+            // Their other devices stop showing "You're in <channel> on ...".
+            if parse_voice_room(&room_id).is_some() {
+                push_own_voice_state(state, member_id).await;
+            }
         }
     }
 
@@ -6859,7 +7518,7 @@ mod refused_join_tests {
         withdraw_refused_join(&state, room, 4, x, true, true, &mut x_rooms).await;
         let x_gone = state.rooms.get(room).is_some_and(|r| !r.members.contains(&4));
         let after_3 = departed(&drain(&mut rv), 4);
-        let x_told = drain(&mut rx).iter().any(|m| matches!(m, ServerMessage::RoomLeft { room_id } if room_id == room));
+        let x_told = drain(&mut rx).iter().any(|m| matches!(m, ServerMessage::RoomLeft { room_id, .. } if room_id == room));
 
         // 4.
         let (zombie, _rz) = open(&state, 5);
@@ -6875,7 +7534,7 @@ mod refused_join_tests {
         let reap_said = departed(&drain(&mut rv), 5);
         withdraw_refused_join(&state, room, 5, fresh, false, true, &mut fresh_rooms).await;
         let after_4 = departed(&drain(&mut rv), 5);
-        let fresh_told = drain(&mut rfresh).iter().any(|m| matches!(m, ServerMessage::RoomLeft { room_id } if room_id == room));
+        let fresh_told = drain(&mut rfresh).iter().any(|m| matches!(m, ServerMessage::RoomLeft { room_id, .. } if room_id == room));
 
         assert_eq!(desk_kept, Some((true, false)), "the desktop stays, its deny with it");
         assert!(desk_heard, "and a later speak frame still reaches it");
@@ -7420,5 +8079,1148 @@ mod sfu_grant_sweep_tests {
         assert_eq!(answered.map_err(|_| "the handler outlived its cap"), Ok(false), "answered, sweep unfinished");
         assert!(reached, "fixture: the sweep was parked in its LiveKit call");
         assert_eq!(asked(srv).await.len(), 1);
+    }
+}
+
+/// "You're in <channel> on your PC — Leave / Move here" (docs/USER_GUIDE.md,
+/// *Your call on another device*). Everything here runs the REAL handler on
+/// registered sockets against a throwaway database (TEST_DATABASE_URL; each
+/// test skips without it).
+///
+/// One account, two devices: `pc` (sid S1) and `phone` (sid S2), plus a second
+/// account `b` sharing the call. The properties pinned:
+///
+/// - Move here (`JoinRoom { take_over }`) joins the new connection FIRST and
+///   only then removes the old one, so the room never sees the user leave:
+///   no UserLeft, no StreamStopped, no UserJoined, and the voice claim moves
+///   to the new connection.
+/// - The displaced connection, and ONLY it, is told `RoomLeft` - never the
+///   device asking, which is mid-join and would tear itself down (the
+///   self-kill race).
+/// - A displaced connection's StopStream / ScreenShareStop / CameraStop /
+///   LeaveRoom cannot clear the account's stream claim or announce a
+///   departure - old PC clients send all four from their teardown.
+/// - Leave (`LeaveOwnVoice`) ends exactly the other device's call; the
+///   account only.
+/// - A PC that slept through its RoomLeft and later REPLAYS the join is
+///   refused, so an explicit Leave/Move is not undone with an open mic.
+#[cfg(test)]
+mod own_voice_tests {
+    use super::handle_message;
+    use crate::permissions::Permissions;
+    use crate::protocol::ServerMessage;
+    use crate::state::{AppState, UserId};
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    struct Sock {
+        uid: UserId,
+        name: String,
+        conn: u64,
+        rx: mpsc::Receiver<ServerMessage>,
+        joined: HashSet<String>,
+    }
+
+    impl Sock {
+        fn open(state: &Arc<AppState>, uid: i32, name: &str, sid: &str) -> Sock {
+            let (tx, rx) = mpsc::channel::<ServerMessage>(256);
+            let (conn, _, _) = state.register_session(uid as UserId, name.to_string(), tx, false, None, sid.to_string());
+            Sock { uid: uid as UserId, name: name.to_string(), conn, rx, joined: HashSet::new() }
+        }
+
+        async fn send(&mut self, state: &Arc<AppState>, frame: serde_json::Value) -> Result<(), String> {
+            handle_message(state, self.uid, self.conn, &self.name, &frame.to_string(), &mut self.joined, "").await
+        }
+
+        async fn join(&mut self, state: &Arc<AppState>, room: &str) -> Result<(), String> {
+            self.send(state, serde_json::json!({ "type": "JoinRoom", "payload": { "room_id": room } })).await
+        }
+
+        async fn take_over(&mut self, state: &Arc<AppState>, room: &str) -> Result<(), String> {
+            self.send(state, serde_json::json!({ "type": "JoinRoom", "payload": { "room_id": room, "take_over": true } })).await
+        }
+
+        async fn replay(&mut self, state: &Arc<AppState>, room: &str) -> Result<(), String> {
+            self.send(state, serde_json::json!({ "type": "JoinRoom", "payload": { "room_id": room, "replay": true } })).await
+        }
+
+        async fn simple(&mut self, state: &Arc<AppState>, kind: &str, room: &str) -> Result<(), String> {
+            self.send(state, serde_json::json!({ "type": kind, "payload": { "room_id": room } })).await
+        }
+
+        fn drain(&mut self) -> Vec<ServerMessage> {
+            let mut out = Vec::new();
+            while let Ok(m) = self.rx.try_recv() {
+                out.push(m);
+            }
+            out
+        }
+    }
+
+    fn room_left(frames: &[ServerMessage], room: &str) -> bool {
+        frames.iter().any(|m| matches!(m, ServerMessage::RoomLeft { room_id, .. } if room_id == room))
+    }
+
+    fn user_left(frames: &[ServerMessage], who: UserId) -> bool {
+        frames.iter().any(|m| matches!(m, ServerMessage::UserLeft { user_id, .. } if *user_id == who))
+    }
+
+    fn user_joined(frames: &[ServerMessage], who: UserId) -> bool {
+        frames.iter().any(|m| matches!(m, ServerMessage::UserJoined { user, .. } if user.id == who))
+    }
+
+    fn stream_stopped(frames: &[ServerMessage], who: UserId) -> bool {
+        frames.iter().any(|m| matches!(m, ServerMessage::StreamStopped { streamer_id, .. } if *streamer_id == who))
+    }
+
+    fn conns(state: &Arc<AppState>, room: &str, uid: UserId) -> Vec<u64> {
+        let mut v: Vec<u64> = state
+            .rooms
+            .get(room)
+            .and_then(|r| r.conns_of(uid).map(|c| c.iter().copied().collect()))
+            .unwrap_or_default();
+        v.sort_unstable();
+        v
+    }
+
+    fn streams(state: &Arc<AppState>, room: &str, uid: UserId) -> bool {
+        state.rooms.get(room).is_some_and(|r| r.streamers.contains(&uid))
+    }
+
+    /// (voice claim, screen share, camera) of `uid` in `room`.
+    fn media(state: &Arc<AppState>, room: &str, uid: UserId) -> (bool, bool, bool) {
+        state.rooms.get(room).map_or((false, false, false), |r| {
+            (r.streamers.contains(&uid), r.screen_sharers.contains(&uid), r.camera_users.contains(&uid))
+        })
+    }
+
+    fn media_stopped(frames: &[ServerMessage], who: UserId) -> bool {
+        frames.iter().any(|m| {
+            matches!(m, ServerMessage::ScreenShareStopped { streamer_id, .. } if *streamer_id == who)
+                || matches!(m, ServerMessage::CameraStopped { user_id, .. } if *user_id == who)
+        })
+    }
+
+    /// Two users (the account `a`, and `b` in the same server), a mesh voice
+    /// channel, an SFU voice channel and a text channel. Returns
+    /// (a, b, server_id, voice, sfu_voice, text). The caller deletes the users.
+    async fn fixture(pool: &sqlx::PgPool) -> (i32, i32, String, i32, i32, i32) {
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let mk = |n: &str| format!("ov_{n}_{}", &tag[..12]);
+        let mut ids = Vec::new();
+        for n in ["a", "b"] {
+            let (id,): (i32,) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id")
+                .bind(mk(n))
+                .bind(b"s".as_ref())
+                .bind(b"v".as_ref())
+                .fetch_one(pool)
+                .await
+                .expect("user");
+            ids.push(id);
+        }
+        let sid = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, $2, $3)")
+            .bind(&sid)
+            .bind(mk("srv"))
+            .bind(ids[0])
+            .execute(pool)
+            .await
+            .expect("server");
+        for m in &ids {
+            sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)")
+                .bind(&sid)
+                .bind(m)
+                .execute(pool)
+                .await
+                .expect("member");
+        }
+        let everyone = (Permissions::VIEW_CHANNEL | Permissions::CONNECT | Permissions::SPEAK | Permissions::STREAM | Permissions::VIDEO).bits() as i64;
+        sqlx::query(
+            "INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) \
+             VALUES ($1, '@everyone', '#99AAB5', $2, 0, true)",
+        )
+        .bind(&sid)
+        .bind(everyone)
+        .execute(pool)
+        .await
+        .expect("@everyone");
+        let (voice,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type, sfu_mode) VALUES ($1, 'Lounge', 1, false) RETURNING id")
+            .bind(&sid)
+            .fetch_one(pool)
+            .await
+            .expect("voice");
+        let (sfu,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type, sfu_mode) VALUES ($1, 'Stage', 1, true) RETURNING id")
+            .bind(&sid)
+            .fetch_one(pool)
+            .await
+            .expect("sfu voice");
+        let (text,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type) VALUES ($1, 'general', 0) RETURNING id")
+            .bind(&sid)
+            .fetch_one(pool)
+            .await
+            .expect("text");
+        (ids[0], ids[1], sid, voice, sfu, text)
+    }
+
+    async fn cleanup(pool: &sqlx::PgPool, ids: &[i32], server: &str) {
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(server).execute(pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(ids.to_vec()).execute(pool).await;
+    }
+
+    /// MOVE HERE: join-then-remove, conn-scoped RoomLeft, nothing announced.
+    #[tokio::test]
+    async fn move_here_joins_the_phone_first_then_takes_the_pc_out_and_tells_only_the_pc() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let (a, b, server, voice, _sfu, _text) = fixture(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = format!("voice_{voice}");
+        let (au, bu) = (a as UserId, b as UserId);
+        let mut pc = Sock::open(&state, a, "a", "sid-pc");
+        let mut phone = Sock::open(&state, a, "a", "sid-phone");
+        let mut sb = Sock::open(&state, b, "b", "sid-b");
+
+        pc.join(&state, &room).await.expect("pc joins");
+        sb.join(&state, &room).await.expect("b joins");
+        // Positive control: the call is on the PC, voice claim included.
+        let before = (conns(&state, &room, au), streams(&state, &room, au));
+        let _ = (pc.drain(), phone.drain(), sb.drain());
+
+        let moved = phone.take_over(&state, &room).await;
+        let (f_pc, f_phone, f_b) = (pc.drain(), phone.drain(), sb.drain());
+        let after = (conns(&state, &room, au), streams(&state, &room, au));
+        cleanup(&pool, &[a, b], &server).await;
+
+        assert_eq!(before, (vec![pc.conn], true), "fixture: the call starts on the PC");
+        assert!(moved.is_ok(), "{moved:?}");
+        assert_eq!(after.0, vec![phone.conn], "the call is on the phone, and ONLY the phone");
+        assert!(after.1, "the account's voice claim moved with it - never released");
+        assert!(room_left(&f_pc, &room), "the PC is told its call ended");
+        assert!(!room_left(&f_phone, &room), "the phone is NOT told RoomLeft: it is mid-join and would tear itself down");
+        assert!(
+            f_phone.iter().any(|m| matches!(m, ServerMessage::RoomJoined { room_id, .. } if *room_id == room)),
+            "the phone's own join is answered as usual"
+        );
+        assert!(!user_left(&f_b, au), "the other caller never sees the user leave");
+        assert!(!stream_stopped(&f_b, au), "...nor their voice stop (that drops the mesh link and audio)");
+        assert!(!user_joined(&f_b, au), "...nor join again (a join chime for a call that never ended)");
+        let _ = bu;
+    }
+
+    /// The displaced PC's own teardown - the stock client sends StopStream,
+    /// ScreenShareStop, CameraStop and LeaveRoom - must not take the moved call
+    /// with it. Fixed on the SERVER, so a PC still on an old client is covered.
+    ///
+    /// Also the guard on its own, without a move: a connection of the user
+    /// that is NOT in the room (here the PC, while the call is on the phone)
+    /// cannot clear the claim either. The positive control is the phone's own
+    /// StopStream, which still does.
+    #[tokio::test]
+    async fn a_displaced_or_absent_connection_cannot_clear_the_accounts_call() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let (a, b, server, voice, _sfu, _text) = fixture(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = format!("voice_{voice}");
+        let au = a as UserId;
+        let mut pc = Sock::open(&state, a, "a", "sid-pc");
+        let mut phone = Sock::open(&state, a, "a", "sid-phone");
+        let mut sb = Sock::open(&state, b, "b", "sid-b");
+
+        // 1. The guard alone: the call is on the phone; the PC never joined.
+        phone.join(&state, &room).await.expect("phone joins");
+        sb.join(&state, &room).await.expect("b joins");
+        let _ = (pc.drain(), phone.drain(), sb.drain());
+        for kind in ["StopStream", "ScreenShareStop", "CameraStop", "LeaveRoom"] {
+            let _ = pc.simple(&state, kind, &room).await;
+        }
+        let absent = (conns(&state, &room, au), streams(&state, &room, au));
+        let f_b_absent = sb.drain();
+
+        // 2. After a move: the PC had the call, the phone took it over and
+        //    now shares its screen and its camera.
+        phone.simple(&state, "LeaveRoom", &room).await.expect("phone leaves");
+        pc.join(&state, &room).await.expect("pc joins");
+        let _ = phone.take_over(&state, &room).await;
+        phone.simple(&state, "ScreenShareStart", &room).await.expect("phone shares");
+        phone.simple(&state, "CameraStart", &room).await.expect("phone camera");
+        let phone_media = media(&state, &room, au);
+        let _ = (pc.drain(), phone.drain(), sb.drain());
+        for kind in ["StopStream", "ScreenShareStop", "CameraStop", "LeaveRoom"] {
+            let _ = pc.simple(&state, kind, &room).await;
+        }
+        let displaced = (conns(&state, &room, au), media(&state, &room, au));
+        let f_b_displaced = sb.drain();
+        // ...and its STARTS (a late StartStream from its teardown race, a
+        // stale share button) plant no claim on a socket that holds no call:
+        // the room would be told the account is sharing a screen nobody can
+        // receive (the PC has no media path into the call any more).
+        phone.simple(&state, "ScreenShareStop", &room).await.expect("phone stops sharing");
+        phone.simple(&state, "CameraStop", &room).await.expect("phone stops its camera");
+        let _ = sb.drain();
+        let mut starts: Vec<Result<(), String>> = Vec::new();
+        for kind in ["StartStream", "ScreenShareStart", "CameraStart"] {
+            starts.push(pc.simple(&state, kind, &room).await);
+        }
+        let after_pc_starts = media(&state, &room, au);
+        let f_b_starts = sb.drain();
+
+        // 3. Positive control: the device that HAS the call can still stop.
+        phone.simple(&state, "StopStream", &room).await.expect("phone stops");
+        let control = streams(&state, &room, au);
+        let f_b_control = sb.drain();
+        // The phone hangs up while B stays: nothing of the account may remain.
+        phone.simple(&state, "LeaveRoom", &room).await.expect("phone hangs up");
+        let after_hangup = media(&state, &room, au);
+        cleanup(&pool, &[a, b], &server).await;
+
+        assert_eq!(absent, (vec![phone.conn], true), "an absent connection's stops are no-ops");
+        assert!(!stream_stopped(&f_b_absent, au) && !user_left(&f_b_absent, au), "and announce nothing");
+        assert_eq!(phone_media, (true, true, true), "fixture: the phone holds voice, a share and its camera");
+        assert_eq!(
+            displaced,
+            (vec![phone.conn], (true, true, true)),
+            "a displaced connection's teardown leaves the moved call - voice, share and camera - alone"
+        );
+        assert!(!stream_stopped(&f_b_displaced, au), "no StreamStopped from the PC's StopStream");
+        assert!(!media_stopped(&f_b_displaced, au), "no ScreenShareStopped / CameraStopped from its stops");
+        assert!(!user_left(&f_b_displaced, au), "no UserLeft from the PC's LeaveRoom");
+        assert!(starts.iter().all(|r| r.is_ok()), "its starts are ignored quietly, never an Error (alert): {starts:?}");
+        assert_eq!(after_pc_starts, (true, false, false), "the PC's starts claim nothing: no share, no camera");
+        assert!(
+            !f_b_starts.iter().any(|m| matches!(
+                m,
+                ServerMessage::ScreenShareStarted { .. } | ServerMessage::CameraStarted { .. } | ServerMessage::StreamStarted { .. }
+            )),
+            "and the room is told nothing: {f_b_starts:?}"
+        );
+        assert!(!control, "positive control: the phone's own StopStream clears the claim");
+        assert!(stream_stopped(&f_b_control, au), "positive control: and is announced");
+        assert_eq!(after_hangup, (false, false, false), "no claim the PC planted outlives the phone's hang-up");
+    }
+
+    /// LEAVE from the phone ends exactly the PC's call: the PC is told, the
+    /// room sees the user go, the phone is not told RoomLeft. And ONLY the
+    /// account itself can do it: another user's LeaveOwnVoice and take_over
+    /// leave the call alone (their own voice state is all they can touch).
+    #[tokio::test]
+    async fn leave_from_another_device_ends_only_that_device_and_only_for_its_own_account() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let (a, b, server, voice, _sfu, text) = fixture(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = format!("voice_{voice}");
+        let text_room = format!("channel_{text}");
+        let (au, bu) = (a as UserId, b as UserId);
+        let mut pc = Sock::open(&state, a, "a", "sid-pc");
+        let mut phone = Sock::open(&state, a, "a", "sid-phone");
+        let mut sb = Sock::open(&state, b, "b", "sid-b");
+        let mut sb2 = Sock::open(&state, b, "b", "sid-b2");
+
+        pc.join(&state, &room).await.expect("pc joins");
+        phone.join(&state, &text_room).await.expect("phone reads a text channel");
+        sb.join(&state, &room).await.expect("b joins");
+        let _ = (pc.drain(), phone.drain(), sb.drain(), sb2.drain());
+
+        // Another account tries both levers on A's call.
+        let leave_frame = serde_json::json!({ "type": "LeaveOwnVoice", "payload": { "room_id": room } });
+        let _ = sb2.send(&state, leave_frame.clone()).await;
+        let _ = sb2.take_over(&state, &room).await;
+        let a_after_b = conns(&state, &room, au);
+        let pc_told_by_b = room_left(&pc.drain(), &room);
+        // b's second device taking over is b's OWN business: b's first device
+        // is displaced, a is untouched.
+        let b_after = conns(&state, &room, bu);
+        let _ = (sb.drain(), sb2.drain(), phone.drain());
+
+        // The account's own phone presses Leave.
+        let left = phone.send(&state, leave_frame).await;
+        let (f_pc, f_phone, f_b2) = (pc.drain(), phone.drain(), sb2.drain());
+        let a_after = conns(&state, &room, au);
+        cleanup(&pool, &[a, b], &server).await;
+
+        assert_eq!(a_after_b, vec![pc.conn], "another user cannot end your call");
+        assert!(!pc_told_by_b, "...or send your device a RoomLeft");
+        assert_eq!(b_after, vec![sb2.conn], "fixture: b's take_over moved b's own call");
+        assert!(left.is_ok(), "{left:?}");
+        assert!(a_after.is_empty(), "Leave ended the PC's call");
+        assert!(room_left(&f_pc, &room), "the PC is told");
+        assert!(!room_left(&f_phone, &room), "the phone (never in the call) is not told RoomLeft");
+        assert!(user_left(&f_b2, au), "the room sees the user leave");
+        assert!(stream_stopped(&f_b2, au), "and their voice retracted");
+    }
+
+    /// A PC that missed its RoomLeft (lid shut, half-open socket) comes back
+    /// and REPLAYS its JoinRoom. After an explicit Move or Leave from another
+    /// device that replay must not put the call back on the PC with an open
+    /// mic (or steal it back from the phone). A DELIBERATE join from that PC
+    /// still works, and so does an ordinary reconnect replay of a device that
+    /// was never displaced.
+    #[tokio::test]
+    async fn a_replayed_join_from_a_displaced_session_is_refused_but_a_deliberate_one_is_not() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let (a, b, server, voice, _sfu, _text) = fixture(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = format!("voice_{voice}");
+        let au = a as UserId;
+        let mut pc = Sock::open(&state, a, "a", "sid-pc");
+        let mut phone = Sock::open(&state, a, "a", "sid-phone");
+        let mut sb = Sock::open(&state, b, "b", "sid-b");
+
+        pc.join(&state, &room).await.expect("pc joins");
+        sb.join(&state, &room).await.expect("b joins");
+        phone.take_over(&state, &room).await.expect("phone takes over");
+        // The PC's socket was half-open: it never read that RoomLeft. It is
+        // reaped, and the PC reconnects on the same session and replays.
+        state.unregister_session(au, pc.conn);
+        let mut pc2 = Sock::open(&state, a, "a", "sid-pc");
+        let replay = pc2.replay(&state, &room).await;
+        let f_pc2 = pc2.drain();
+        let after_replay = conns(&state, &room, au);
+
+        // A phone blip: ITS replay is an ordinary reconnect and must work.
+        let mut phone2 = Sock::open(&state, a, "a", "sid-phone");
+        let phone_replay = phone2.replay(&state, &room).await;
+        let after_phone_replay = conns(&state, &room, au);
+
+        // The owner walks back to the PC and clicks the channel on purpose.
+        let mut pc3 = Sock::open(&state, a, "a", "sid-pc");
+        let deliberate = pc3.join(&state, &room).await;
+        let after_deliberate = conns(&state, &room, au);
+        cleanup(&pool, &[a, b], &server).await;
+
+        assert!(replay.is_ok(), "a refused replay is not an Error frame (old clients alert() those): {replay:?}");
+        assert_eq!(after_replay, vec![phone.conn], "the stale replay did not rejoin the PC");
+        assert!(room_left(&f_pc2, &room), "the PC is told, so it drops the room from its replay list");
+        assert!(phone_replay.is_ok() && after_phone_replay.contains(&phone2.conn), "a never-displaced device's replay rejoins");
+        assert!(deliberate.is_ok() && after_deliberate.contains(&pc3.conn), "a deliberate join from the PC still works");
+    }
+
+    /// A Leave pressed on a banner that is already out of date (the call moved
+    /// to another channel meanwhile) ends nothing: it names a room the account
+    /// is no longer in. The sender is just told where the call really is.
+    #[tokio::test]
+    async fn a_stale_leave_for_a_room_the_call_has_left_does_nothing() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let (a, b, server, voice, other, _text) = fixture(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let (room, other_room) = (format!("voice_{voice}"), format!("voice_{other}"));
+        let au = a as UserId;
+        let mut pc = Sock::open(&state, a, "a", "sid-pc");
+        let mut phone = Sock::open(&state, a, "a", "sid-phone");
+        state.set_conn_caps(au, phone.conn, true, Some("mobile"));
+
+        pc.join(&state, &other_room).await.expect("pc joins");
+        let _ = (pc.drain(), phone.drain());
+        let stale = phone.send(&state, serde_json::json!({ "type": "LeaveOwnVoice", "payload": { "room_id": room } })).await;
+        let (f_pc, f_phone) = (pc.drain(), phone.drain());
+        let still = conns(&state, &other_room, au);
+        cleanup(&pool, &[a, b], &server).await;
+
+        assert!(stale.is_ok(), "never an Error frame: {stale:?}");
+        assert_eq!(still, vec![pc.conn], "the call is untouched");
+        assert!(!room_left(&f_pc, &other_room) && !room_left(&f_pc, &room), "and the PC is told nothing");
+        assert!(
+            f_phone.iter().any(|m| matches!(m, ServerMessage::OwnVoiceState { room_id: Some(r), here: false, .. } if *r == other_room)),
+            "the phone learns where the call really is: {f_phone:?}"
+        );
+    }
+
+    /// The phone taps a DIFFERENT voice channel: voice exclusivity has always
+    /// taken the PC out, silently. Now the PC - and only the PC - is told why
+    /// (so it can say "You moved the call to your phone"), the phone's
+    /// RoomLeft for the old room stays the plain one (it is mid-join and must
+    /// show nothing), and the PC's later REPLAY of the old room is refused, so
+    /// a laptop that slept through it cannot steal the call back.
+    #[tokio::test]
+    async fn another_channel_on_the_phone_tells_only_the_pc_and_blocks_its_stale_replay() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let (a, b, server, voice, other, _text) = fixture(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = format!("voice_{voice}");
+        let other_room = format!("voice_{other}");
+        let au = a as UserId;
+        let mut pc = Sock::open(&state, a, "a", "sid-pc");
+        let mut phone = Sock::open(&state, a, "a", "sid-phone");
+        state.set_conn_caps(au, phone.conn, true, Some("mobile"));
+
+        pc.join(&state, &room).await.expect("pc joins");
+        let _ = (pc.drain(), phone.drain());
+        phone.join(&state, &other_room).await.expect("phone joins another channel");
+        let (f_pc, f_phone) = (pc.drain(), phone.drain());
+        let why = |frames: &[ServerMessage]| -> Vec<(Option<String>, Option<String>)> {
+            frames
+                .iter()
+                .filter_map(|m| match m {
+                    ServerMessage::RoomLeft { room_id, reason, by } if *room_id == room => Some((reason.clone(), by.clone())),
+                    _ => None,
+                })
+                .collect()
+        };
+        let (pc_why, phone_why) = (why(&f_pc), why(&f_phone));
+
+        state.unregister_session(au, pc.conn);
+        let mut pc2 = Sock::open(&state, a, "a", "sid-pc");
+        let replay = pc2.replay(&state, &room).await;
+        let after_replay = (conns(&state, &room, au), conns(&state, &other_room, au));
+        cleanup(&pool, &[a, b], &server).await;
+
+        assert_eq!(pc_why, vec![(Some("moved".into()), Some("mobile".into()))], "the PC is told why, and by what");
+        assert_eq!(phone_why, vec![(None, None)], "the phone gets the plain frame it always got");
+        assert!(replay.is_ok(), "{replay:?}");
+        assert_eq!(after_replay, (vec![], vec![phone.conn]), "the stale replay neither rejoins the PC nor evicts the phone");
+    }
+
+    /// The woken PC's client re-claims its media right after its replay
+    /// (VoicePanel's onReconnected: StartStream, plus ScreenShareStart /
+    /// CameraStart if they were on). When the replay was refused because the
+    /// call was ended (Leave) or moved to ANOTHER channel on the phone, the
+    /// account is no longer in that room at all - those starts must still be
+    /// ignored quietly, not answered "Not in this room" (an Error frame, which
+    /// the client alert()s: a native modal on the desktop app).
+    #[tokio::test]
+    async fn a_woken_pc_reclaiming_its_media_after_leave_or_a_move_elsewhere_is_not_an_error() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let (a, b, server, voice, other, _text) = fixture(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let (room, other_room) = (format!("voice_{voice}"), format!("voice_{other}"));
+        let au = a as UserId;
+        let kinds = ["StartStream", "ScreenShareStart", "CameraStart"];
+
+        // A: the phone pressed Leave while the PC slept.
+        let mut pc = Sock::open(&state, a, "a", "sid-pc");
+        let mut phone = Sock::open(&state, a, "a", "sid-phone");
+        state.set_conn_caps(au, phone.conn, true, Some("mobile"));
+        pc.join(&state, &room).await.expect("pc joins");
+        phone
+            .send(&state, serde_json::json!({ "type": "LeaveOwnVoice", "payload": { "room_id": room } }))
+            .await
+            .expect("leave");
+        state.unregister_session(au, pc.conn);
+        let mut pc2 = Sock::open(&state, a, "a", "sid-pc");
+        let replay_a = pc2.replay(&state, &room).await;
+        let mut starts_a = Vec::new();
+        for k in &kinds {
+            starts_a.push(pc2.simple(&state, k, &room).await);
+        }
+        let after_a = (conns(&state, &room, au), media(&state, &room, au));
+
+        // B: the phone joined ANOTHER voice channel while the PC slept.
+        state.unregister_session(au, pc2.conn);
+        let mut pc3 = Sock::open(&state, a, "a", "sid-pc");
+        pc3.join(&state, &room).await.expect("pc joins again, deliberately");
+        phone.join(&state, &other_room).await.expect("phone joins another channel");
+        state.unregister_session(au, pc3.conn);
+        let mut pc4 = Sock::open(&state, a, "a", "sid-pc");
+        let replay_b = pc4.replay(&state, &room).await;
+        let mut starts_b = Vec::new();
+        for k in &kinds {
+            starts_b.push(pc4.simple(&state, k, &room).await);
+        }
+        let after_b = (conns(&state, &room, au), media(&state, &room, au), conns(&state, &other_room, au));
+
+        // Positive control: a connection of an account that was NEVER
+        // displaced from this room still gets the plain refusal.
+        let mut sb = Sock::open(&state, b, "b", "sid-b");
+        let control = sb.simple(&state, "StartStream", &room).await;
+        cleanup(&pool, &[a, b], &server).await;
+
+        assert!(replay_a.is_ok() && replay_b.is_ok(), "{replay_a:?} {replay_b:?}");
+        assert!(starts_a.iter().all(|r| r.is_ok()), "after Leave: no Error frame for the re-claim: {starts_a:?}");
+        assert_eq!(after_a, (vec![], (false, false, false)), "and the starts claimed nothing");
+        assert!(starts_b.iter().all(|r| r.is_ok()), "after a move elsewhere: no Error frame either: {starts_b:?}");
+        assert_eq!(after_b, (vec![], (false, false, false), vec![phone.conn]), "nothing claimed, the phone's call untouched");
+        assert_eq!(control, Err("Not in this room".to_string()), "positive control: the ordinary refusal stands");
+    }
+
+    /// A REPLAY must never duplicate or displace a call that is live on
+    /// another device - even when no tombstone was written because the PC
+    /// was no longer in the room when the call moved: (1) its zombie socket
+    /// was reaped, and the phone then joined the channel normally; (2) Move
+    /// here was pressed during the PC's rejoin grace, so it displaced nothing.
+    /// And the phone's call in ANOTHER channel must not be evicted by the
+    /// replay through voice exclusivity. A deliberate join still can, a
+    /// same-device reconnect (same sign-in session) still rejoins, and with no
+    /// call anywhere a replay rejoins as it always did.
+    #[tokio::test]
+    async fn a_replay_never_duplicates_or_displaces_a_call_live_on_another_device() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let (a, b, server, voice, other, _text) = fixture(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let (room, other_room) = (format!("voice_{voice}"), format!("voice_{other}"));
+        let au = a as UserId;
+        let why = |frames: &[ServerMessage], r: &str| -> Vec<(Option<String>, Option<String>)> {
+            frames
+                .iter()
+                .filter_map(|m| match m {
+                    ServerMessage::RoomLeft { room_id, reason, by } if room_id == r => Some((reason.clone(), by.clone())),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Control first: no call anywhere - the replay rejoins.
+        let mut pc = Sock::open(&state, a, "a", "sid-pc");
+        pc.join(&state, &room).await.expect("pc joins");
+        state.unregister_session(au, pc.conn);
+        let mut pc2 = Sock::open(&state, a, "a", "sid-pc");
+        let control = pc2.replay(&state, &room).await;
+        let after_control = conns(&state, &room, au);
+
+        // Control: the same device's new socket while its old one is still a
+        // zombie in the room (same sign-in session) - an ordinary reconnect.
+        let mut pc3 = Sock::open(&state, a, "a", "sid-pc");
+        let same_device = pc3.replay(&state, &room).await;
+        let after_same_device = conns(&state, &room, au);
+        state.unregister_session(au, pc2.conn);
+        state.unregister_session(au, pc3.conn);
+
+        // (1) The PC was reaped; the phone then joined the channel normally.
+        let mut pc4 = Sock::open(&state, a, "a", "sid-pc");
+        pc4.join(&state, &room).await.expect("pc joins");
+        state.unregister_session(au, pc4.conn);
+        let mut phone = Sock::open(&state, a, "a", "sid-phone");
+        state.set_conn_caps(au, phone.conn, true, Some("mobile"));
+        phone.join(&state, &room).await.expect("phone joins");
+        let mut pc5 = Sock::open(&state, a, "a", "sid-pc");
+        let replay1 = pc5.replay(&state, &room).await;
+        let f_pc5 = pc5.drain();
+        let after1 = conns(&state, &room, au);
+        let streams1 = streams(&state, &room, au);
+        // Its re-claim right after is quiet too.
+        let start1 = pc5.simple(&state, "StartStream", &room).await;
+        state.unregister_session(au, pc5.conn);
+        phone.simple(&state, "LeaveRoom", &room).await.expect("phone hangs up");
+
+        // (2) Move here during the PC's rejoin grace: displaces nothing.
+        let mut pc6 = Sock::open(&state, a, "a", "sid-pc");
+        pc6.join(&state, &room).await.expect("pc joins");
+        state.unregister_session(au, pc6.conn);
+        phone.take_over(&state, &room).await.expect("phone moves here");
+        let mut pc7 = Sock::open(&state, a, "a", "sid-pc");
+        let replay2 = pc7.replay(&state, &room).await;
+        let after2 = conns(&state, &room, au);
+        state.unregister_session(au, pc7.conn);
+        phone.simple(&state, "LeaveRoom", &room).await.expect("phone hangs up");
+
+        // (3) The phone is in ANOTHER channel: the replay must not evict it.
+        let mut pc8 = Sock::open(&state, a, "a", "sid-pc");
+        pc8.join(&state, &room).await.expect("pc joins");
+        state.unregister_session(au, pc8.conn);
+        phone.join(&state, &other_room).await.expect("phone joins another channel");
+        let _ = phone.drain();
+        let mut pc9 = Sock::open(&state, a, "a", "sid-pc");
+        let replay3 = pc9.replay(&state, &room).await;
+        let after3 = (conns(&state, &room, au), conns(&state, &other_room, au));
+        let f_phone3 = phone.drain();
+        // The account is not in `room` at all now: only the refusal's own
+        // tombstone keeps the PC's re-claim from being an Error.
+        let start3 = pc9.simple(&state, "StartStream", &room).await;
+
+        // A deliberate click on the PC still takes the call (exclusivity).
+        let deliberate = pc9.join(&state, &room).await;
+        let after_deliberate = (conns(&state, &room, au), conns(&state, &other_room, au));
+        cleanup(&pool, &[a, b], &server).await;
+
+        assert!(control.is_ok() && after_control == vec![pc2.conn], "control: no call elsewhere, the replay rejoins: {after_control:?}");
+        assert!(same_device.is_ok() && after_same_device.contains(&pc3.conn), "control: a same-device reconnect rejoins: {after_same_device:?}");
+        assert!(replay1.is_ok(), "{replay1:?}");
+        assert_eq!(after1, vec![phone.conn], "(1) the replay did not put the PC back in the call next to the phone");
+        assert!(streams1, "(1) the phone's voice claim is untouched");
+        assert_eq!(why(&f_pc5, &room), vec![(Some("moved".into()), Some("mobile".into()))], "(1) the PC is told where the call went");
+        assert!(start1.is_ok(), "(1) its re-claim is not an Error: {start1:?}");
+        assert!(replay2.is_ok(), "{replay2:?}");
+        assert_eq!(after2, vec![phone.conn], "(2) Move here during the grace: the PC's replay is refused");
+        assert!(replay3.is_ok(), "{replay3:?}");
+        assert_eq!(after3, (vec![], vec![phone.conn]), "(3) the phone's call in another channel is not evicted");
+        assert!(!room_left(&f_phone3, &other_room), "(3) and the phone is told nothing");
+        assert!(start3.is_ok(), "(3) its re-claim is not an Error: {start3:?}");
+        assert!(deliberate.is_ok(), "{deliberate:?}");
+        assert_eq!(after_deliberate, (vec![pc9.conn], vec![]), "a deliberate join still moves the call to the PC");
+    }
+
+    /// The PC's socket died a moment ago (it is out of the room, but the other
+    /// devices are only told after the rejoin grace, so the phone's banner
+    /// still says "You're in Lounge on your PC"). Leave or Move here pressed
+    /// in that window found no connection to displace - and so wrote no
+    /// tombstone, and the PC's replay on waking put it back in the call (with
+    /// an open mic after a Leave). A Leave, or any deliberate voice join on
+    /// another device, now also marks the sessions that dropped out of voice
+    /// moments ago. Control: with nothing pressed, the dropped PC's replay
+    /// rejoins exactly as before.
+    #[tokio::test]
+    async fn leave_or_move_during_the_pcs_rejoin_grace_is_not_undone_by_its_replay() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let (a, b, server, voice, _other, _text) = fixture(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = format!("voice_{voice}");
+        let au = a as UserId;
+        let mut phone = Sock::open(&state, a, "a", "sid-phone");
+        state.set_conn_caps(au, phone.conn, true, Some("mobile"));
+        let why = |frames: &[ServerMessage]| -> Vec<(Option<String>, Option<String>)> {
+            frames
+                .iter()
+                .filter_map(|m| match m {
+                    ServerMessage::RoomLeft { room_id, reason, by } if *room_id == room => Some((reason.clone(), by.clone())),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Leave pressed while the PC's socket is in its grace.
+        let mut pc = Sock::open(&state, a, "a", "sid-pc");
+        pc.join(&state, &room).await.expect("pc joins");
+        state.unregister_session(au, pc.conn);
+        phone
+            .send(&state, serde_json::json!({ "type": "LeaveOwnVoice", "payload": { "room_id": room } }))
+            .await
+            .expect("leave");
+        let mut pc2 = Sock::open(&state, a, "a", "sid-pc");
+        let replay1 = pc2.replay(&state, &room).await;
+        let f1 = pc2.drain();
+        let after1 = conns(&state, &room, au);
+        let start1 = pc2.simple(&state, "StartStream", &room).await;
+
+        // Move here pressed in the grace, then the phone hangs up before the
+        // PC wakes: nothing is live anywhere, but the call was moved off it.
+        pc2.join(&state, &room).await.expect("pc joins again, deliberately");
+        state.unregister_session(au, pc2.conn);
+        phone.take_over(&state, &room).await.expect("move here");
+        phone.simple(&state, "LeaveRoom", &room).await.expect("phone hangs up");
+        let mut pc3 = Sock::open(&state, a, "a", "sid-pc");
+        let replay2 = pc3.replay(&state, &room).await;
+        let f2 = pc3.drain();
+        let after2 = conns(&state, &room, au);
+
+        // Control: the PC drops and nobody presses anything - it rejoins.
+        pc3.join(&state, &room).await.expect("pc joins again, deliberately");
+        state.unregister_session(au, pc3.conn);
+        let mut pc4 = Sock::open(&state, a, "a", "sid-pc");
+        let control = pc4.replay(&state, &room).await;
+        let after_control = conns(&state, &room, au);
+        cleanup(&pool, &[a, b], &server).await;
+
+        assert!(replay1.is_ok(), "{replay1:?}");
+        assert_eq!(after1, Vec::<u64>::new(), "Leave in the grace: the PC's replay does not rejoin");
+        assert_eq!(why(&f1), vec![(Some("left_elsewhere".into()), Some("mobile".into()))], "and the PC is told why");
+        assert!(start1.is_ok(), "its re-claim is quiet: {start1:?}");
+        assert!(replay2.is_ok(), "{replay2:?}");
+        assert_eq!(after2, Vec::<u64>::new(), "Move here in the grace: the PC's later replay does not rejoin");
+        assert_eq!(why(&f2), vec![(Some("moved".into()), Some("mobile".into()))]);
+        assert!(control.is_ok() && after_control == vec![pc4.conn], "control: an untouched drop rejoins: {after_control:?}");
+    }
+
+    /// Found by the live two-device check, where the SFU half failed only on
+    /// some runs ("Channel not found" on the sfu-token request, so the phone
+    /// never reached LiveKit): `update_channel` and `get_sfu_token` run the
+    /// SAME SQL text against channels.id (INT4), one binding i32 and the other
+    /// i64. sqlx caches the prepared statement per connection keyed by the
+    /// text alone, so once a pooled connection had served a channel edit,
+    /// every SFU join that landed on it failed with 22P03 (incorrect binary
+    /// data format) - swallowed as "not found". One connection, so the two
+    /// handlers are forced onto the same one.
+    #[tokio::test]
+    async fn an_sfu_join_still_mints_after_a_channel_edit_on_the_same_connection() {
+        use crate::sfu::resync_tests::{livekit_stand_in, no_env_proxy};
+        use axum::response::IntoResponse;
+        let Some(pool) = crate::migrator::test_pool(1).await else { return };
+        no_env_proxy();
+        let (a, b, server, _voice, sfu, _text) = fixture(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let claims: crate::auth::Claims = serde_json::from_value(serde_json::json!({
+            "sub": a, "username": "a", "exp": chrono::Utc::now().timestamp() + 3600, "sid": "sid-pc",
+        }))
+        .expect("claims");
+        let (base, _srv) = livekit_stand_in(vec![], None).await;
+        let run = async {
+            let edit = crate::channel_handlers::update_channel(
+                axum::extract::State(state.clone()),
+                axum::extract::Path(sfu as i64),
+                axum::Extension(claims.clone()),
+                axum::Json(serde_json::from_value(serde_json::json!({ "sfu_mode": true })).expect("payload")),
+            )
+            .await
+            .into_response()
+            .status();
+            let mint = crate::sfu::get_sfu_token(
+                axum::extract::State(state.clone()),
+                axum::extract::Path(sfu as i64),
+                axum::Extension(claims.clone()),
+            )
+            .await
+            .into_response()
+            .status();
+            (edit, mint)
+        };
+        let (edit, mint) = crate::sfu::TEST_LIVEKIT.scope(base, run).await;
+        cleanup(&pool, &[a, b], &server).await;
+
+        assert!(edit.is_success(), "fixture: the owner's channel edit succeeds: {edit}");
+        assert_eq!(mint, axum::http::StatusCode::OK, "the SFU join after it still mints a token");
+    }
+
+    /// SFU: LiveKit identities are minted per TOKEN REQUEST, not per socket,
+    /// so "cut the user" would cut the phone too. Move here must cut exactly
+    /// the PC's LiveKit session - the one minted on the PC's session - and
+    /// leave the phone's alone, even when the phone already holds one.
+    #[tokio::test]
+    async fn move_here_cuts_only_the_pcs_livekit_session() {
+        use crate::sfu::resync_tests::{asked, livekit_stand_in, no_env_proxy};
+        use axum::response::IntoResponse;
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        no_env_proxy();
+        let (a, b, server, _voice, sfu, _text) = fixture(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = format!("voice_{sfu}");
+        let au = a as UserId;
+        let claims = |sid: &str| -> crate::auth::Claims {
+            serde_json::from_value(serde_json::json!({
+                "sub": a, "username": "a", "exp": chrono::Utc::now().timestamp() + 3600, "sid": sid,
+            }))
+            .expect("claims")
+        };
+        let (base, srv) = livekit_stand_in(
+            vec![("/twirp/livekit.RoomService/RemoveParticipant", 200, "{}".to_string())],
+            None,
+        )
+        .await;
+        let mint = |sid: &'static str| {
+            let state = state.clone();
+            let c = claims(sid);
+            async move {
+                let resp = crate::sfu::get_sfu_token(
+                    axum::extract::State(state),
+                    axum::extract::Path(sfu as i64),
+                    axum::Extension(c),
+                )
+                .await
+                .into_response();
+                assert_eq!(resp.status(), 200, "fixture: the mint answers");
+                let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.expect("body");
+                let v: serde_json::Value = serde_json::from_slice(&body).expect("json");
+                v["identity"].as_str().expect("identity").to_string()
+            }
+        };
+        let mut pc = Sock::open(&state, a, "a", "sid-pc");
+        let mut phone = Sock::open(&state, a, "a", "sid-phone");
+        let run = async {
+            let pc_identity = mint("sid-pc").await;
+            pc.join(&state, &room).await.expect("pc joins");
+            // The phone's LiveKit session already exists when the move lands.
+            let phone_identity = mint("sid-phone").await;
+            phone.take_over(&state, &room).await.expect("phone takes over");
+            (pc_identity, phone_identity)
+        };
+        let (pc_identity, phone_identity) = crate::sfu::TEST_LIVEKIT.scope(base, run).await;
+        let seen = asked(srv).await;
+        let on_phone = conns(&state, &room, au);
+        // Who-minted-what: the cut identity is forgotten, the phone's kept.
+        let minted = |sid: &str| -> Vec<String> {
+            state
+                .sfu_minted
+                .get(&(au, sid.to_string(), format!("sfu_{sfu}")))
+                .map(|m| m.iter().map(|m| m.identity.clone()).collect())
+                .unwrap_or_default()
+        };
+        let (pc_minted, phone_minted) = (minted("sid-pc"), minted("sid-phone"));
+        cleanup(&pool, &[a, b], &server).await;
+
+        assert_eq!(on_phone, vec![phone.conn]);
+        assert!(pc_minted.is_empty(), "a confirmed cut forgets the identity: {pc_minted:?}");
+        assert_eq!(phone_minted, vec![phone_identity.clone()], "the phone's attribution stays");
+        assert_eq!(seen.len(), 1, "exactly one LiveKit session is cut");
+        assert!(seen[0].body.contains(&pc_identity), "the PC's: {}", seen[0].body);
+        assert!(!seen[0].body.contains(&phone_identity), "never the phone's");
+    }
+}
+
+/// The account's own voice state, pushed to its OTHER devices - and only to
+/// connections that announced they can read it (`?caps=own_voice`): an old
+/// client must never be handed a frame it does not know.
+#[cfg(test)]
+mod own_voice_state_tests {
+    use super::{handle_message, parse_ws_caps, push_own_voice_state, send_own_voice_state_to};
+    use crate::permissions::Permissions;
+    use crate::protocol::ServerMessage;
+    use crate::state::{AppState, UserId};
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    struct Sock {
+        uid: UserId,
+        conn: u64,
+        rx: mpsc::Receiver<ServerMessage>,
+        joined: HashSet<String>,
+    }
+
+    impl Sock {
+        fn open(state: &Arc<AppState>, uid: i32, sid: &str, caps: Option<&str>, kind: Option<&str>) -> Sock {
+            let (tx, rx) = mpsc::channel::<ServerMessage>(256);
+            let (conn, _, _) = state.register_session(uid as UserId, "a".to_string(), tx, false, None, sid.to_string());
+            let (own_voice, kind) = parse_ws_caps(caps, kind);
+            state.set_conn_caps(uid as UserId, conn, own_voice, kind);
+            Sock { uid: uid as UserId, conn, rx, joined: HashSet::new() }
+        }
+
+        async fn send(&mut self, state: &Arc<AppState>, frame: serde_json::Value) -> Result<(), String> {
+            handle_message(state, self.uid, self.conn, "a", &frame.to_string(), &mut self.joined, "").await
+        }
+
+        fn drain(&mut self) -> Vec<ServerMessage> {
+            let mut out = Vec::new();
+            while let Ok(m) = self.rx.try_recv() {
+                out.push(m);
+            }
+            out
+        }
+    }
+
+    type Own = (Option<String>, Option<i64>, Option<String>, Option<String>, bool, Option<String>);
+
+    /// The LAST OwnVoiceState in `frames`, flattened.
+    fn last_own(frames: &[ServerMessage]) -> Option<Own> {
+        frames.iter().rev().find_map(|m| match m {
+            ServerMessage::OwnVoiceState { room_id, channel_id, channel_name, server_name, here, device, .. } => {
+                Some((room_id.clone(), *channel_id, channel_name.clone(), server_name.clone(), *here, device.clone()))
+            }
+            _ => None,
+        })
+    }
+
+    fn any_own(frames: &[ServerMessage]) -> bool {
+        frames.iter().any(|m| matches!(m, ServerMessage::OwnVoiceState { .. }))
+    }
+
+    #[test]
+    fn caps_are_read_from_the_query_and_the_device_kind_is_one_of_three() {
+        assert_eq!(parse_ws_caps(None, None), (false, None));
+        assert_eq!(parse_ws_caps(Some("own_voice"), Some("desktop")), (true, Some("desktop")));
+        assert_eq!(parse_ws_caps(Some("x,own_voice,y"), Some("mobile")), (true, Some("mobile")));
+        assert_eq!(parse_ws_caps(Some("own_voices"), Some("browser")), (false, Some("browser")), "exact token only");
+        assert_eq!(parse_ws_caps(Some("own_voice"), Some("<script>")), (true, None), "a kind outside the three is dropped");
+        assert_eq!(parse_ws_caps(Some("own_voice"), None), (true, None));
+    }
+
+    #[tokio::test]
+    async fn the_other_devices_learn_where_the_call_is_and_old_clients_learn_nothing() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let mut ids = Vec::new();
+        for n in ["a", "b"] {
+            let (id,): (i32,) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id")
+                .bind(format!("ovs_{n}_{}", &tag[..12]))
+                .bind(b"s".as_ref())
+                .bind(b"v".as_ref())
+                .fetch_one(&pool)
+                .await
+                .expect("user");
+            ids.push(id);
+        }
+        let (a, b) = (ids[0], ids[1]);
+        let server = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, 'Friends', $2)")
+            .bind(&server)
+            .bind(a)
+            .execute(&pool)
+            .await
+            .expect("server");
+        for m in [a, b] {
+            sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)")
+                .bind(&server)
+                .bind(m)
+                .execute(&pool)
+                .await
+                .expect("member");
+        }
+        let everyone = (Permissions::VIEW_CHANNEL | Permissions::CONNECT | Permissions::SPEAK).bits() as i64;
+        sqlx::query(
+            "INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) \
+             VALUES ($1, '@everyone', '#99AAB5', $2, 0, true)",
+        )
+        .bind(&server)
+        .bind(everyone)
+        .execute(&pool)
+        .await
+        .expect("@everyone");
+        let (voice,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type, sfu_mode) VALUES ($1, 'Lounge', 1, false) RETURNING id")
+            .bind(&server)
+            .fetch_one(&pool)
+            .await
+            .expect("voice");
+        let room = format!("voice_{voice}");
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+
+        let mut pc = Sock::open(&state, a, "s1", Some("own_voice"), Some("desktop"));
+        let mut phone = Sock::open(&state, a, "s2", Some("own_voice"), Some("mobile"));
+        let mut old = Sock::open(&state, a, "s3", None, None);
+        let mut sb = Sock::open(&state, b, "s4", Some("own_voice"), Some("mobile"));
+
+        // On connect, a capable socket is told the state at once - that frame
+        // is also how the client learns this server supports the feature.
+        send_own_voice_state_to(&state, a as UserId, phone.conn).await;
+        let at_connect = last_own(&phone.drain());
+
+        pc.send(&state, serde_json::json!({ "type": "JoinRoom", "payload": { "room_id": room } })).await.expect("pc joins");
+        let (f_pc, f_phone, f_old, f_b) = (pc.drain(), phone.drain(), old.drain(), sb.drain());
+
+        // A device that connects while the call is on the PC.
+        let mut tablet = Sock::open(&state, a, "s5", Some("own_voice"), Some("browser"));
+        send_own_voice_state_to(&state, a as UserId, tablet.conn).await;
+        let tablet_sees = last_own(&tablet.drain());
+
+        // The phone takes the call: now the PC is the one told "elsewhere".
+        phone.send(&state, serde_json::json!({ "type": "JoinRoom", "payload": { "room_id": room, "take_over": true } }))
+            .await
+            .expect("move here");
+        let (pc_after_move, phone_after_move) = (last_own(&pc.drain()), last_own(&phone.drain()));
+
+        // The phone hangs up: every device learns the account is out of voice.
+        phone.send(&state, serde_json::json!({ "type": "StopStream", "payload": { "room_id": room } })).await.ok();
+        phone.send(&state, serde_json::json!({ "type": "LeaveRoom", "payload": { "room_id": room } })).await.ok();
+        let (pc_after_leave, old_after_leave) = (last_own(&pc.drain()), old.drain());
+
+        // A direct push with no capable socket left costs nothing and sends nothing.
+        state.unregister_session(a as UserId, pc.conn);
+        state.unregister_session(a as UserId, phone.conn);
+        state.unregister_session(a as UserId, tablet.conn);
+        push_own_voice_state(&state, a as UserId).await;
+        let old_last = old.drain();
+
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&server).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(vec![a, b]).execute(&pool).await;
+
+        let none: Own = (None, None, None, None, false, None);
+        let lounge = |here: bool, device: Option<&str>| -> Own {
+            (Some(room.clone()), Some(voice as i64), Some("Lounge".into()), Some("Friends".into()), here, device.map(str::to_string))
+        };
+        assert_eq!(at_connect, Some(none.clone()), "connect: told at once, even when not in voice");
+        assert_eq!(last_own(&f_phone), Some(lounge(false, Some("desktop"))), "the phone: in Lounge, on the desktop");
+        assert_eq!(last_own(&f_pc), Some(lounge(true, None)), "the PC: here");
+        assert!(!any_own(&f_old), "an old client is never sent the frame");
+        assert!(!any_own(&f_b), "another account learns nothing about this one");
+        assert_eq!(tablet_sees, Some(lounge(false, Some("desktop"))), "a device connecting mid-call is told");
+        assert_eq!(pc_after_move, Some(lounge(false, Some("mobile"))), "after Move here the PC sees the call on the phone");
+        assert_eq!(phone_after_move, Some(lounge(true, None)));
+        assert_eq!(pc_after_leave, Some(none), "hang up: nobody is in voice any more");
+        assert!(!any_own(&old_after_leave) && !any_own(&old_last), "still nothing for the old client");
+    }
+
+    /// The displaced device is told WHY, and by which kind of device, so it can
+    /// say "You moved the call to your phone" instead of dropping silently. A
+    /// LeaveRoom's own RoomLeft stays the plain frame.
+    #[tokio::test]
+    async fn the_displaced_device_is_told_why_and_by_which_kind_of_device() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let (a,): (i32,) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id")
+            .bind(format!("ovr_{}", &tag[..12]))
+            .bind(b"s".as_ref())
+            .bind(b"v".as_ref())
+            .fetch_one(&pool)
+            .await
+            .expect("user");
+        let server = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, 'S', $2)").bind(&server).bind(a).execute(&pool).await.expect("server");
+        sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)").bind(&server).bind(a).execute(&pool).await.expect("member");
+        let (voice,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type, sfu_mode) VALUES ($1, 'v', 1, false) RETURNING id")
+            .bind(&server)
+            .fetch_one(&pool)
+            .await
+            .expect("voice");
+        let room = format!("voice_{voice}");
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let mut pc = Sock::open(&state, a, "s1", Some("own_voice"), Some("desktop"));
+        let mut phone = Sock::open(&state, a, "s2", Some("own_voice"), Some("mobile"));
+        let join = |r: &str, t: bool| serde_json::json!({ "type": "JoinRoom", "payload": { "room_id": r, "take_over": t } });
+
+        pc.send(&state, join(&room, false)).await.expect("pc joins");
+        phone.send(&state, join(&room, true)).await.expect("move here");
+        let moved = pc.drain();
+        pc.send(&state, join(&room, true)).await.expect("move back to the pc");
+        let _ = pc.drain();
+        phone.send(&state, serde_json::json!({ "type": "LeaveOwnVoice", "payload": { "room_id": room } })).await.expect("leave");
+        let left = pc.drain();
+        pc.send(&state, join(&room, false)).await.expect("pc joins again");
+        pc.send(&state, serde_json::json!({ "type": "LeaveRoom", "payload": { "room_id": room } })).await.expect("hang up");
+        let own_leave = pc.drain();
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&server).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(a).execute(&pool).await;
+
+        let why = |frames: &[ServerMessage]| -> Vec<(Option<String>, Option<String>)> {
+            frames
+                .iter()
+                .filter_map(|m| match m {
+                    ServerMessage::RoomLeft { room_id, reason, by } if *room_id == room => Some((reason.clone(), by.clone())),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(why(&moved), vec![(Some("moved".into()), Some("mobile".into()))]);
+        assert_eq!(why(&left), vec![(Some("left_elsewhere".into()), Some("mobile".into()))]);
+        assert_eq!(why(&own_leave), vec![(None, None)], "an ordinary hang-up is the plain RoomLeft");
+    }
+    /// The phone's background DELIVERY socket (`?mode=delivery`) is not a
+    /// screen: it is never sent OwnVoiceState, even if it announced the
+    /// capability, and the account's voice changes skip it. Both halves are
+    /// pinned on their own - `set_conn_caps` refuses to mark it, and
+    /// `own_voice_conns` would not list it even if something had.
+    #[tokio::test]
+    async fn a_delivery_socket_is_never_sent_own_voice_state() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let (a,): (i32,) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id")
+            .bind(format!("ovd_{}", &tag[..12]))
+            .bind(b"s".as_ref())
+            .bind(b"v".as_ref())
+            .fetch_one(&pool)
+            .await
+            .expect("user");
+        let server = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, 'S', $2)").bind(&server).bind(a).execute(&pool).await.expect("server");
+        sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)").bind(&server).bind(a).execute(&pool).await.expect("member");
+        let (voice,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type, sfu_mode) VALUES ($1, 'v', 1, false) RETURNING id")
+            .bind(&server)
+            .fetch_one(&pool)
+            .await
+            .expect("voice");
+        let room = format!("voice_{voice}");
+        let au = a as UserId;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+
+        // The delivery socket announces the capability anyway.
+        let (dtx, mut drx) = mpsc::channel::<ServerMessage>(256);
+        let (dconn, _, _) = state.register_session(au, "a".to_string(), dtx, true, None, "s-phone".to_string());
+        state.set_conn_caps(au, dconn, true, Some("mobile"));
+        let marked = state.sessions.get(&au).is_some_and(|s| s.iter().any(|s| s.conn_id == dconn && s.own_voice));
+        // A capable screen of the same account, as the positive control.
+        let mut phone = Sock::open(&state, a, "s-phone", Some("own_voice"), Some("mobile"));
+        let mut pc = Sock::open(&state, a, "s-pc", Some("own_voice"), Some("desktop"));
+
+        send_own_voice_state_to(&state, au, dconn).await;
+        pc.send(&state, serde_json::json!({ "type": "JoinRoom", "payload": { "room_id": room } })).await.expect("pc joins");
+        pc.send(&state, serde_json::json!({ "type": "LeaveRoom", "payload": { "room_id": room } })).await.expect("pc leaves");
+        let mut to_delivery = Vec::new();
+        while let Ok(m) = drx.try_recv() {
+            to_delivery.push(m);
+        }
+        let to_phone = phone.drain();
+        let listed = state.own_voice_conns(au);
+
+        // The second half alone: even a delivery session that somehow carried
+        // the flag is not listed.
+        if let Some(mut s) = state.sessions.get_mut(&au) {
+            if let Some(s) = s.iter_mut().find(|s| s.conn_id == dconn) {
+                s.own_voice = true;
+            }
+        }
+        let listed_forced = state.own_voice_conns(au);
+        let _ = pc.drain();
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&server).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(a).execute(&pool).await;
+
+        assert!(!marked, "set_conn_caps does not mark a delivery socket capable");
+        assert!(!any_own(&to_delivery), "the delivery socket is sent no OwnVoiceState: {to_delivery:?}");
+        assert!(any_own(&to_phone), "positive control: the capable phone screen is told");
+        assert!(!listed.contains(&dconn) && listed.contains(&phone.conn), "{listed:?}");
+        assert!(!listed_forced.contains(&dconn), "own_voice_conns skips a delivery session on its own: {listed_forced:?}");
     }
 }
