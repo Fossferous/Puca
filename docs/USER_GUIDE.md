@@ -287,7 +287,10 @@ what is holding the stream back (**Limited by**: CPU, bandwidth, or nothing).
 
 ### Assign Roles (Owner)
 1. Click a member in the member list
-2. Under **Manage Roles** in their popup, tick or untick roles
+2. Under **Manage Roles** in their popup, tick or untick roles. The popup
+   scrolls when it holds more than fits (many roles, or a small window); on a
+   phone it opens as a card above the bottom bar, and tapping outside it
+   closes it
 
 ### Permissions
 The role editor groups them; the labels are: View Channels, Attach Files,

@@ -137,11 +137,16 @@
     z-index: 3001;
 }
 
+/* The background, the checkbox's margin/flex-shrink and the name's flex/colour/size below
+   used to reach this menu from UserProfilePopup.css's unscoped
+   `.role-checkbox` rules. That file is scoped now; they are stated here so
+   the menu looks exactly as it did. */
 .role-checkbox {
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 6px 8px;
+    background: var(--bg-secondary);
     border-radius: 4px;
     cursor: pointer;
     transition: background 0.15s;
@@ -154,8 +159,16 @@
 .role-checkbox input[type="checkbox"] {
     width: 16px;
     height: 16px;
+    margin: 0;
     accent-color: var(--brand-primary);
     cursor: pointer;
+    flex-shrink: 0;
+}
+
+.role-checkbox .role-name {
+    flex: 1;
+    color: var(--text-normal);
+    font-size: 14px;
 }
 
 .role-name {

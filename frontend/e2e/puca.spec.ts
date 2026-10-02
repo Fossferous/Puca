@@ -825,7 +825,7 @@ test.describe('Puca End-to-End Chat App Tests', () => {
 
         // Assign role Moderator to User B
         await pageA.locator('.member-item.online', { hasText: 'user_b' }).click();
-        await pageA.locator('.role-checkbox:has-text("Moderator") input').check();
+        await pageA.locator('.user-profile-popup .upp-role-checkbox:has-text("Moderator") input').check();
         await pageA.locator('.user-profile-popup').dispatchEvent('mousedown'); // Close popup
 
         // Verify User B has Moderator role tag

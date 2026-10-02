@@ -1,15 +1,53 @@
+/*
+ * Member profile popup (click a user in the member list).
+ *
+ * Every rule here is scoped under .user-profile-popup, and the class names it
+ * renders are ones no other stylesheet uses. All component CSS is global once
+ * imported: this file and UserProfileSettings.css both styled a bare
+ * `.profile-section`, so the settings cards' padding/radius/margins landed on
+ * the popup and this file's border landed in Settings.
+ * src/tests/userProfilePopupCssScope.test.ts keeps it that way.
+ *
+ * The popup itself is the ONE scroll area. It used to be `overflow: hidden`
+ * with a nested 200px Manage Roles scroller that the flex column squeezed to
+ * a 38px strip, so the lower sections were clipped and unreachable. Its
+ * position and max-height are set by UserProfilePopup.tsx from the measured
+ * content and the real window (userProfilePopupPlacement.ts); the values here
+ * are the fallback before that runs.
+ */
 .user-profile-popup {
     position: fixed;
     width: 320px;
-    max-height: 450px;
+    max-width: calc(100vw - 32px);
+    max-height: min(450px, calc(100dvh - 32px));
     background: var(--bg-primary);
     border-radius: 8px;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
     z-index: 1000;
     animation: popupSlide 0.15s ease;
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
+    overflow-x: hidden;
+    overflow-y: auto;
+    /* Wheeling/dragging past either end must not scroll the chat behind it. */
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+}
+
+/*
+ * Phone (Chat passes presentation="sheet" exactly when it renders the mobile
+ * chrome): a sheet pinned above the bottom nav, inside the safe areas, never
+ * taller than 75% of the screen so the member list above it stays visible
+ * and scrollable. The JS placement is not applied in this mode.
+ */
+.user-profile-popup.upp-sheet {
+    left: 8px;
+    right: 8px;
+    top: auto;
+    bottom: calc(var(--mobile-nav-height, 60px) + var(--safe-area-bottom, 0px) + 8px);
+    width: auto;
+    max-width: 480px;
+    margin: 0 auto;
+    max-height: min(75dvh, calc(100dvh - var(--safe-area-top, 0px) - var(--mobile-nav-height, 60px) - var(--safe-area-bottom, 0px) - 16px));
+    border-radius: 12px;
 }
 
 @keyframes popupSlide {
@@ -24,8 +62,25 @@
     }
 }
 
+.user-profile-popup::-webkit-scrollbar {
+    width: 6px;
+}
+
+.user-profile-popup::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.user-profile-popup::-webkit-scrollbar-thumb {
+    background: var(--bg-secondary);
+    border-radius: 3px;
+}
+
+.user-profile-popup::-webkit-scrollbar-thumb:hover {
+    background: #40444b;
+}
+
 /* Profile Header */
-.profile-header {
+.user-profile-popup .profile-header {
     display: flex;
     align-items: center;
     gap: 16px;
@@ -34,7 +89,7 @@
     border-bottom: 3px solid var(--brand-primary);
 }
 
-.profile-avatar {
+.user-profile-popup .profile-avatar {
     width: 64px;
     height: 64px;
     border-radius: 50%;
@@ -49,14 +104,14 @@
     flex-shrink: 0;
 }
 
-.profile-info {
+.user-profile-popup .profile-info {
     display: flex;
     flex-direction: column;
     gap: 4px;
     min-width: 0;
 }
 
-.profile-info h3 {
+.user-profile-popup .profile-info h3 {
     margin: 0;
     color: #fff;
     font-size: 20px;
@@ -66,56 +121,56 @@
     white-space: nowrap;
 }
 
-.profile-info .owner-badge {
+.user-profile-popup .profile-info .owner-badge {
     margin-right: 6px;
 }
 
-.profile-username {
+.user-profile-popup .profile-username {
     font-size: 13px;
     color: var(--text-faint);
 }
 
-.status-indicator {
+.user-profile-popup .upp-status {
     font-size: 12px;
     display: flex;
     align-items: center;
     gap: 6px;
 }
 
-.status-indicator::before {
+.user-profile-popup .upp-status::before {
     content: '';
     width: 10px;
     height: 10px;
     border-radius: 50%;
 }
 
-.status-indicator.online {
+.user-profile-popup .upp-status.online {
     color: var(--color-success);
 }
 
-.status-indicator.online::before {
+.user-profile-popup .upp-status.online::before {
     background: var(--color-success);
 }
 
-.status-indicator.offline {
+.user-profile-popup .upp-status.offline {
     color: var(--status-offline);
 }
 
-.status-indicator.offline::before {
+.user-profile-popup .upp-status.offline::before {
     background: var(--status-offline);
 }
 
 /* Profile Sections */
-.profile-section {
+.user-profile-popup .upp-section {
     padding: 12px 16px;
     border-bottom: 1px solid var(--bg-secondary);
 }
 
-.profile-section:last-child {
+.user-profile-popup .upp-section:last-child {
     border-bottom: none;
 }
 
-.profile-section h4 {
+.user-profile-popup .upp-section h4 {
     color: var(--header-secondary);
     font-size: 11px;
     font-weight: 700;
@@ -125,13 +180,13 @@
 }
 
 /* Current Roles */
-.current-roles {
+.user-profile-popup .current-roles {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
 }
 
-.role-tag {
+.user-profile-popup .role-tag {
     display: inline-flex;
     align-items: center;
     gap: 6px;
@@ -143,37 +198,32 @@
     font-weight: 500;
 }
 
-.role-dot {
+.user-profile-popup .role-dot {
     width: 8px;
     height: 8px;
     border-radius: 50%;
     flex-shrink: 0;
 }
 
-.no-roles {
+.user-profile-popup .no-roles {
     color: var(--text-faint);
     font-size: 13px;
 }
 
-/* Role Management */
-.role-management {
-    max-height: 200px;
-    overflow-y: auto;
-}
-
-.loading-roles {
+/* Role Management — no scroller of its own: the popup scrolls. */
+.user-profile-popup .loading-roles {
     color: var(--text-faint);
     font-size: 13px;
     padding: 8px 0;
 }
 
-.assignable-roles {
+.user-profile-popup .assignable-roles {
     display: flex;
     flex-direction: column;
     gap: 4px;
 }
 
-.role-checkbox {
+.user-profile-popup .upp-role-checkbox {
     display: flex;
     align-items: center;
     gap: 10px;
@@ -184,16 +234,16 @@
     transition: background 0.15s ease;
 }
 
-.role-checkbox:hover {
+.user-profile-popup .upp-role-checkbox:hover {
     background: var(--bg-tertiary);
 }
 
-.role-checkbox.updating {
+.user-profile-popup .upp-role-checkbox.updating {
     opacity: 0.6;
     pointer-events: none;
 }
 
-.role-checkbox input[type="checkbox"] {
+.user-profile-popup .upp-role-checkbox input[type="checkbox"] {
     width: 18px;
     height: 18px;
     margin: 0;
@@ -202,13 +252,13 @@
     flex-shrink: 0;
 }
 
-.role-checkbox .role-name {
+.user-profile-popup .upp-role-checkbox .upp-role-name {
     flex: 1;
     color: var(--text-normal);
     font-size: 14px;
 }
 
-.updating-spinner {
+.user-profile-popup .updating-spinner {
     width: 14px;
     height: 14px;
     border: 2px solid var(--brand-primary);
@@ -223,43 +273,25 @@
     }
 }
 
-.no-assignable-roles {
+.user-profile-popup .no-assignable-roles {
     color: var(--text-faint);
     font-size: 12px;
     margin: 8px 0;
 }
 
 /* Owner Notice */
-.owner-notice {
+.user-profile-popup .owner-notice {
     background: rgba(245, 166, 35, 0.1);
 }
 
-.owner-notice p {
+.user-profile-popup .owner-notice p {
     color: #f5a623;
     font-size: 13px;
     margin: 0;
 }
 
-/* Scrollbar */
-.role-management::-webkit-scrollbar {
-    width: 6px;
-}
-
-.role-management::-webkit-scrollbar-track {
-    background: transparent;
-}
-
-.role-management::-webkit-scrollbar-thumb {
-    background: var(--bg-secondary);
-    border-radius: 3px;
-}
-
-.role-management::-webkit-scrollbar-thumb:hover {
-    background: #40444b;
-}
-
 /* Send DM Button */
-.send-dm-btn {
+.user-profile-popup .send-dm-btn {
     width: 100%;
     padding: 10px 16px;
     background: var(--brand-primary);
@@ -276,28 +308,28 @@
     transition: background 0.15s ease;
 }
 
-.send-dm-btn:hover {
+.user-profile-popup .send-dm-btn:hover {
     background: #4752c4;
 }
 
-.send-dm-btn:disabled {
+.user-profile-popup .send-dm-btn:disabled {
     opacity: 0.6;
     cursor: not-allowed;
 }
 
 /* Profile Actions (side by side buttons) */
-.profile-actions {
+.user-profile-popup .profile-actions {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
 }
 
-.profile-actions .send-dm-btn {
+.user-profile-popup .profile-actions .send-dm-btn {
     flex: 1;
 }
 
 /* Verify-encryption button (full-width row under the action buttons) */
-.verify-btn {
+.user-profile-popup .verify-btn {
     flex: 1 1 100%;
     padding: 9px 16px;
     background: #2a2f38;
@@ -309,12 +341,12 @@
     cursor: pointer;
     transition: background 0.15s ease;
 }
-.verify-btn:hover { background: #333a44; }
-.verify-btn.verified { color: #b8f5c8; border-color: #248046; }
-.verify-btn.changed { color: #ffc4c4; border-color: #a33; background: rgba(191, 60, 60, 0.12); }
+.user-profile-popup .verify-btn:hover { background: #333a44; }
+.user-profile-popup .verify-btn.verified { color: #b8f5c8; border-color: #248046; }
+.user-profile-popup .verify-btn.changed { color: #ffc4c4; border-color: #a33; background: rgba(191, 60, 60, 0.12); }
 
 /* Friend Button */
-.friend-btn {
+.user-profile-popup .friend-btn {
     flex: 1;
     padding: 10px 16px;
     border: none;
@@ -329,46 +361,46 @@
     transition: background 0.15s ease;
 }
 
-.friend-btn.add {
+.user-profile-popup .friend-btn.add {
     background: var(--color-success);
     color: #fff;
 }
 
-.friend-btn.add:hover {
+.user-profile-popup .friend-btn.add:hover {
     background: #2d8049;
 }
 
-.friend-btn.accept {
+.user-profile-popup .friend-btn.accept {
     background: var(--color-success);
     color: #fff;
 }
 
-.friend-btn.accept:hover {
+.user-profile-popup .friend-btn.accept:hover {
     background: #2d8049;
 }
 
-.friend-btn.remove {
+.user-profile-popup .friend-btn.remove {
     background: var(--color-danger);
     color: #fff;
 }
 
-.friend-btn.remove:hover {
+.user-profile-popup .friend-btn.remove:hover {
     background: #c73538;
 }
 
-.friend-btn.pending {
+.user-profile-popup .friend-btn.pending {
     background: #4f545c;
     color: #8e9297;
 }
 
-.friend-btn:disabled {
+.user-profile-popup .friend-btn:disabled {
     opacity: 0.6;
     cursor: not-allowed;
 }
 
 /* Kick/Ban Buttons */
-.kick-btn,
-.ban-btn {
+.user-profile-popup .kick-btn,
+.user-profile-popup .ban-btn {
     padding: 8px 12px;
     border: none;
     border-radius: 4px;
@@ -377,22 +409,20 @@
     transition: all 0.15s;
 }
 
-.kick-btn {
+.user-profile-popup .kick-btn {
     background: #faa61a;
     color: var(--bg-primary);
 }
 
-.kick-btn:hover {
+.user-profile-popup .kick-btn:hover {
     background: #f9c449;
 }
 
-.ban-btn {
+.user-profile-popup .ban-btn {
     background: var(--color-danger);
     color: white;
 }
 
-.ban-btn:hover {
+.user-profile-popup .ban-btn:hover {
     background: #f04747;
 }
-
-

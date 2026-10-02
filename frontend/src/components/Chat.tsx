@@ -4482,6 +4482,7 @@ export function Chat({ onLogout }: ChatProps) {
                     onClose={() => setSelectedMember(null)}
                     onRolesUpdated={() => queryClient.invalidateQueries({ queryKey: keys.members(currentServer.id) })}
                     onStartDM={openDMConversation}
+                    presentation={isMobile ? 'sheet' : 'anchored'}
                 />
             )}
 
