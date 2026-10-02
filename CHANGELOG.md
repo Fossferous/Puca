@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.831 — 2026-10-02
 
+Move to works from the member list, profile popups and menus fit every screen, every watched stream stays audible, the speaking ring ignores filtered typing, and Android clip downloads no longer close the app.
 ### Added
 - **Clip sizes before you record.** Settings › Clips, the clip composer and
   Server Settings' *Longest clip* now show what a saved clip will take in
