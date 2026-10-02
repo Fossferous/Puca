@@ -43,6 +43,13 @@ pub struct WsQuery {
     /// the kill path reads.
     #[serde(default)]
     pub device: Option<String>,
+    /// Capabilities the client announces, comma-separated (`presence`). A
+    /// query parameter because an older server ignores one it does not know —
+    /// announcing costs nothing there — while a new client→server FRAME would
+    /// draw an Error. Latched for the life of the socket; the server confirms
+    /// what it supports with `ServerFeatures` (see `crate::presence`).
+    #[serde(default)]
+    pub caps: Option<String>,
 }
 
 /// What a refused upgrade says back.
@@ -209,8 +216,14 @@ pub async fn ws_handler(
             // ones kept working. Echo the marker, never the token: putting the
             // credential in a response header would undo the whole change.
             let ws = if offered_protocol.is_some() { ws.protocols(["bearer"]) } else { ws };
+            // A delivery socket takes no part in presence, whatever it says.
+            let caps = if delivery {
+                crate::presence::ClientCaps::default()
+            } else {
+                crate::presence::ClientCaps::parse(query.caps.as_deref())
+            };
             ws.on_upgrade(move |socket| {
-                handle_socket(socket, state, claims, ip_guard, delivery, claimed_device)
+                handle_socket(socket, state, claims, ip_guard, delivery, claimed_device, caps)
             })
         }
         Err(e) => {
@@ -228,6 +241,7 @@ async fn handle_socket(
     _ip_guard: crate::state::IpSlotGuard,
     delivery: bool,
     claimed_device: Option<String>,
+    caps: crate::presence::ClientCaps,
 ) {
     // _ip_guard is held for the whole connection; its Drop (on any return path
     // below, i.e. every disconnect) releases this IP's WS slot.
@@ -248,11 +262,22 @@ async fn handle_socket(
     // client (which drains continuously) yet caps a stalled one.
     let (tx, mut rx) = mpsc::channel::<ServerMessage>(256);
 
+    // Is this a headless device (the LAN waker, the sign-in-screen service)?
+    // Their sessions are minted by /devices/token and marked in
+    // token_sessions; they hold a socket around the clock with nobody at it,
+    // so they must not count toward idle/away at all. Looked up BEFORE
+    // registering, so the classification lands with no await in between.
+    let headless = !delivery && crate::presence::session_is_headless(&state, user_id, &claims.sid).await;
+
     // Register session (conn_id lets the disconnect path remove exactly this
     // connection; is_first tells us whether to announce the user online —
     // "first" meaning first VISIBLE connection; a delivery socket never is).
     let (conn_id, is_first_session, kill) =
         state.register_session(user_id, username.clone(), tx, delivery, claimed_device, claims.sid.clone());
+    if !delivery {
+        let (activity, frames) = crate::presence::classify(headless, caps);
+        state.set_session_presence(user_id, conn_id, activity, frames);
+    }
 
     tracing::info!(
         "User {} ({}) connected{}",
@@ -442,6 +467,13 @@ async fn handle_socket(
         }
     }
 
+    // Idle/away: confirm the capability to this connection (and only to one
+    // that announced it), then bring the user's status up to date — a second
+    // device arriving at an idle desk, or a waker reconnecting, can change it.
+    if !delivery {
+        crate::presence::on_connect(&state, user_id, conn_id, caps, is_first_session).await;
+    }
+
     // Server-driven liveness. Without this the server only learns a socket died
     // when the OS delivers a FIN/RST — which never happens for Wi-Fi off, a
     // closed lid, a pulled cable or a killed VM. Those sessions stayed
@@ -488,6 +520,11 @@ async fn handle_socket(
     // the tight bucket does not apply; this one only bounds relay CPU.
     let mut input_rate = RateLimiter::for_control_input();
     let mut wake_rate = RateLimiter::for_wake();
+    // Activity reports get their own small bucket, and an over-limit one is
+    // dropped SILENTLY: the stock client alerts on any Error frame, and a
+    // well-behaved one sends a frame only per transition. See
+    // RateLimiter::PRESENCE_CAPACITY.
+    let mut presence_rate = RateLimiter::for_presence();
 
     // Reap a socket that has gone quiet. Must stay comfortably above the
     // client's own 30s app-level heartbeat, or a briefly-backgrounded phone
@@ -546,6 +583,9 @@ async fn handle_socket(
                         // their own bucket; a crafted frame faking the prefix merely
                         // lands in the larger bucket — still bounded, and auth and
                         // validation happen in the handler regardless.
+                        if is_presence_frame(&text) && !presence_rate.allow() {
+                            continue;
+                        }
                         let limiter = if is_input_frame(&text) {
                             &mut input_rate
                         } else if is_wake_frame(&text) {
@@ -2316,6 +2356,21 @@ impl RateLimiter {
         Self::with(Self::WAKE_CAPACITY, Self::WAKE_REFILL_PER_SEC)
     }
 
+    /// `SetActivity`: a status change fans out to every member of every
+    /// server the user shares, so a client flapping its reports must not be
+    /// able to drive that at the general bucket's 50/s. A real client sends
+    /// one frame per transition (a pause in typing that crosses a minute, a
+    /// return) plus one per reconnect: 6 burst and one per 5 s sustained is
+    /// far above that and two orders of magnitude below the general bucket.
+    /// The broadcast side is separately coalesced (presence::Thresholds::
+    /// min_broadcast_gap). Also metered by the general bucket after this.
+    const PRESENCE_CAPACITY: f64 = 6.0;
+    const PRESENCE_REFILL_PER_SEC: f64 = 0.2;
+
+    fn for_presence() -> Self {
+        Self::with(Self::PRESENCE_CAPACITY, Self::PRESENCE_REFILL_PER_SEC)
+    }
+
     fn with(capacity: f64, refill_per_sec: f64) -> Self {
         Self {
             tokens: capacity,
@@ -2358,6 +2413,14 @@ fn is_input_frame(text: &str) -> bool {
 /// falls back to the general bucket — i.e. exactly today's behaviour.
 fn is_wake_frame(text: &str) -> bool {
     text.starts_with("{\"type\":\"DeviceWake\"")
+}
+
+/// Same prefix trick, for the presence bucket. A real `SetActivity` that
+/// misses the prefix only skips the extra bucket (the general one still
+/// meters it, and the broadcast gap still coalesces); a crafted frame
+/// faking it only throttles itself.
+fn is_presence_frame(text: &str) -> bool {
+    text.starts_with("{\"type\":\"SetActivity\"")
 }
 
 /// Max rooms a single connection may be joined to at once. A healthy client
@@ -2408,6 +2471,18 @@ async fn handle_message(
         ClientMessage::Ping => {
             tracing::debug!("Received Ping from user {}, sending Pong", user_id);
             state.send_to_conn(user_id, conn_id, ServerMessage::Pong);
+        }
+
+        // Idle/away (crate::presence): this connection's own local activity.
+        // Only a connection that announced the capability is a reporting
+        // one; from any other the frame changes nothing. Never an Error:
+        // nothing a client can say here is worth an alert on its screen.
+        ClientMessage::SetActivity { inactive_secs } => {
+            let now = std::time::Instant::now();
+            let since = inactive_secs.map(|s| crate::presence::Since::now_minus(now, s));
+            if state.report_session_activity(user_id, conn_id, since) {
+                crate::presence::refresh(state, user_id, now).await;
+            }
         }
 
         ClientMessage::JoinRoom { room_id } => {
@@ -7420,5 +7495,294 @@ mod sfu_grant_sweep_tests {
         assert_eq!(answered.map_err(|_| "the handler outlived its cap"), Ok(false), "answered, sweep unfinished");
         assert!(reached, "fixture: the sweep was parked in its LiveKit call");
         assert_eq!(asked(srv).await.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod presence_ws_tests {
+    //! Idle/away over the socket, against a real database: who is told, who
+    //! is not, and that an old client never sees a frame it does not know.
+    use super::handle_message;
+    use crate::presence::{self, ClientCaps, PresenceStatus};
+    use crate::protocol::ServerMessage;
+    use crate::state::{AppState, UserId};
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tokio::sync::mpsc;
+
+    struct Sock {
+        uid: UserId,
+        conn: u64,
+        rx: mpsc::Receiver<ServerMessage>,
+        joined: HashSet<String>,
+    }
+
+    impl Sock {
+        /// The connect path of handle_socket, minus the socket: register,
+        /// classify (no await between), then the presence half of connect.
+        async fn open(state: &Arc<AppState>, uid: i32, caps: bool, headless: bool) -> Sock {
+            let (tx, rx) = mpsc::channel::<ServerMessage>(256);
+            let (conn, is_first, _) =
+                state.register_session(uid as UserId, format!("u{uid}"), tx, false, None, String::new());
+            let caps = ClientCaps { presence: caps };
+            let (activity, frames) = presence::classify(headless, caps);
+            state.set_session_presence(uid as UserId, conn, activity, frames);
+            presence::on_connect(state, uid as UserId, conn, caps, is_first).await;
+            Sock { uid: uid as UserId, conn, rx, joined: HashSet::new() }
+        }
+
+        async fn report(&mut self, state: &Arc<AppState>, inactive_secs: Option<u32>) {
+            let frame = serde_json::json!({ "type": "SetActivity", "payload": { "inactive_secs": inactive_secs } }).to_string();
+            let r = handle_message(state, self.uid, self.conn, "x", &frame, &mut self.joined, "").await;
+            assert_eq!(r, Ok(()), "SetActivity is never an error");
+        }
+
+        fn drain(&mut self) -> Vec<ServerMessage> {
+            let mut out = Vec::new();
+            while let Ok(m) = self.rx.try_recv() {
+                out.push(m);
+            }
+            out
+        }
+    }
+
+    /// The (user, status) of every UserStatus in `frames`.
+    fn statuses(frames: &[ServerMessage]) -> Vec<(UserId, PresenceStatus)> {
+        frames
+            .iter()
+            .filter_map(|m| match m {
+                ServerMessage::UserStatus { user_id, status } => Some((*user_id, *status)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn features(frames: &[ServerMessage]) -> Vec<Vec<String>> {
+        frames
+            .iter()
+            .filter_map(|m| match m {
+                ServerMessage::ServerFeatures { features } => Some(features.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    async fn user(pool: &sqlx::PgPool, name: &str) -> i32 {
+        let (id,): (i32,) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id")
+            .bind(name)
+            .bind(b"s".as_ref())
+            .bind(b"v".as_ref())
+            .fetch_one(pool)
+            .await
+            .expect("user");
+        id
+    }
+
+    async fn shared_server(pool: &sqlx::PgPool, name: &str, owner: i32, members: &[i32]) -> String {
+        let sid = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, $2, $3)")
+            .bind(&sid)
+            .bind(name)
+            .bind(owner)
+            .execute(pool)
+            .await
+            .expect("server");
+        for m in members {
+            sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)")
+                .bind(&sid)
+                .bind(m)
+                .execute(pool)
+                .await
+                .expect("member");
+        }
+        sid
+    }
+
+    #[tokio::test]
+    async fn status_reaches_capable_watchers_only_and_never_an_old_client() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let mk = |n: &str| format!("ps_{n}_{}", &tag[..12]);
+        let subject = user(&pool, &mk("subject")).await; // reports, shares the server
+        let watcher = user(&pool, &mk("watcher")).await; // new client, shares the server
+        let oldie = user(&pool, &mk("oldie")).await; // OLD client, shares the server
+        let stranger = user(&pool, &mk("stranger")).await; // new client, no relationship
+        let blocked = user(&pool, &mk("blocked")).await; // shares the server, blocked by subject
+        let hidden = user(&pool, &mk("hidden")).await; // "Show online status" off
+        let quiet = user(&pool, &mk("quiet")).await; // "Show when I'm idle or away" off
+        let ids = vec![subject, watcher, oldie, stranger, blocked, hidden, quiet];
+        let sid = shared_server(&pool, &mk("srv"), subject, &[subject, watcher, oldie, blocked, hidden, quiet]).await;
+        sqlx::query("INSERT INTO blocked_users (blocker_id, blocked_id) VALUES ($1, $2)")
+            .bind(subject)
+            .bind(blocked)
+            .execute(&pool)
+            .await
+            .expect("block");
+        sqlx::query("UPDATE users SET show_online_status = FALSE WHERE id = $1").bind(hidden).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE users SET show_idle_status = FALSE WHERE id = $1").bind(quiet).execute(&pool).await.unwrap();
+
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let gap = state.presence.thresholds.min_broadcast_gap() + Duration::from_secs(1);
+
+        let mut s_watcher = Sock::open(&state, watcher, true, false).await;
+        let mut s_oldie = Sock::open(&state, oldie, false, false).await;
+        let mut s_stranger = Sock::open(&state, stranger, true, false).await;
+        let mut s_blocked = Sock::open(&state, blocked, true, false).await;
+        let mut s_subject = Sock::open(&state, subject, true, false).await;
+        let mut s_hidden = Sock::open(&state, hidden, true, false).await;
+        let mut s_quiet = Sock::open(&state, quiet, true, false).await;
+
+        // The capability is confirmed to every connection that announced it,
+        // and to no other.
+        let connect_watcher = s_watcher.drain();
+        let connect_oldie = s_oldie.drain();
+        let connect_subject = s_subject.drain();
+        let _ = (s_stranger.drain(), s_blocked.drain(), s_hidden.drain(), s_quiet.drain());
+
+        // 1. Ten minutes and more without input: idle.
+        s_subject.report(&state, Some(700)).await;
+        let idle_watcher = statuses(&s_watcher.drain());
+        let idle_oldie = s_oldie.drain();
+        let idle_stranger = statuses(&s_stranger.drain());
+        let idle_blocked = statuses(&s_blocked.drain());
+        let idle_self = statuses(&s_subject.drain());
+        let idle_listed = state.listing_status(subject as UserId);
+
+        // 2. Back at the keyboard: shown at once, whatever the gap.
+        s_subject.report(&state, None).await;
+        let back_immediately = statuses(&s_watcher.drain());
+        // 3. Quiet again INSIDE the broadcast gap: held, not lost — the sweep
+        // delivers it once the gap has passed (trailing edge). This is what
+        // bounds a client flapping its reports to two fan-outs per gap.
+        s_subject.report(&state, Some(700)).await;
+        let idle_again_immediately = statuses(&s_watcher.drain());
+        let t1 = Instant::now() + gap;
+        presence::sweep(&state, t1).await;
+        let idle_after_gap = statuses(&s_watcher.drain());
+
+        // 4. A report of a long absence: away, again after the gap.
+        s_subject.report(&state, Some(3700)).await;
+        presence::sweep(&state, t1 + gap).await;
+        let away_watcher = statuses(&s_watcher.drain());
+
+        // 5. Hidden users share nothing, idle included — but their OWN
+        // devices still see their status.
+        s_hidden.report(&state, Some(700)).await;
+        let hidden_watcher = statuses(&s_watcher.drain());
+        // (Hiding your own status does not hide others' from you: drop
+        // the subject's frames this socket also received.)
+        let hidden_self: Vec<_> = statuses(&s_hidden.drain()).into_iter().filter(|(u, _)| *u == hidden as UserId).collect();
+
+        // 6. "Show when I'm idle or away" off: plain online, nothing sent...
+        s_quiet.report(&state, Some(3700)).await;
+        let quiet_watcher = statuses(&s_watcher.drain());
+        let quiet_listed = state.listing_status(quiet as UserId);
+        // ...until they turn it on, which corrects everyone at once.
+        sqlx::query("UPDATE users SET show_idle_status = TRUE WHERE id = $1").bind(quiet).execute(&pool).await.unwrap();
+        presence::flags_changed(&state, quiet as UserId, None, Some(true), false).await;
+        let quiet_on_watcher = statuses(&s_watcher.drain());
+
+        for s in [&s_watcher, &s_oldie, &s_stranger, &s_blocked, &s_subject, &s_hidden, &s_quiet] {
+            state.unregister_session(s.uid, s.conn);
+        }
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&sid).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(ids.clone()).execute(&pool).await;
+
+        let presence_feature = vec![vec!["presence".to_string()]];
+        assert_eq!(features(&connect_watcher), presence_feature, "a new client is told: {connect_watcher:?}");
+        assert_eq!(features(&connect_subject), presence_feature);
+        assert!(features(&connect_oldie).is_empty(), "an OLD client is never sent ServerFeatures: {connect_oldie:?}");
+
+        let s = subject as UserId;
+        // Positive control first: the frame IS delivered, so every empty
+        // list below proves a filter, not a broken pipe.
+        assert_eq!(idle_watcher, vec![(s, PresenceStatus::Idle)]);
+        assert_eq!(idle_self, vec![(s, PresenceStatus::Idle)], "the user's own devices follow too");
+        assert!(
+            !idle_oldie.iter().any(|m| matches!(m, ServerMessage::UserStatus { .. } | ServerMessage::ServerFeatures { .. })),
+            "an OLD client never receives a frame it cannot parse: {idle_oldie:?}"
+        );
+        assert!(idle_stranger.is_empty(), "no relationship, no presence: {idle_stranger:?}");
+        assert!(idle_blocked.is_empty(), "a block stops status like it stops UserOnline: {idle_blocked:?}");
+        assert_eq!(idle_listed, PresenceStatus::Idle, "REST reports what the sockets were told");
+
+        assert_eq!(back_immediately, vec![(s, PresenceStatus::Online)], "coming back is never held");
+        assert!(idle_again_immediately.is_empty(), "inside the broadcast gap a demotion waits: {idle_again_immediately:?}");
+        assert_eq!(idle_after_gap, vec![(s, PresenceStatus::Idle)]);
+        assert_eq!(away_watcher, vec![(s, PresenceStatus::Away)]);
+
+        assert!(hidden_watcher.is_empty(), "hidden means hidden: {hidden_watcher:?}");
+        assert_eq!(hidden_self, vec![(hidden as UserId, PresenceStatus::Idle)]);
+
+        assert!(quiet_watcher.is_empty(), "sharing off reads plain online: {quiet_watcher:?}");
+        assert_eq!(quiet_listed, PresenceStatus::Online);
+        assert_eq!(quiet_on_watcher, vec![(quiet as UserId, PresenceStatus::Away)]);
+    }
+
+    /// The server's clock promotes without any new report, a headless device
+    /// session never pins its owner active, and an old client does.
+    #[tokio::test]
+    async fn the_sweep_promotes_and_only_ui_sessions_count() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let mk = |n: &str| format!("pw_{n}_{}", &tag[..12]);
+        let owner = user(&pool, &mk("owner")).await; // a PC and a LAN waker
+        let mixed = user(&pool, &mk("mixed")).await; // an old client beside a new one
+        let watcher = user(&pool, &mk("watcher")).await;
+        let ids = vec![owner, mixed, watcher];
+        let sid = shared_server(&pool, &mk("srv"), owner, &[owner, mixed, watcher]).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let t = state.presence.thresholds;
+
+        let mut s_watcher = Sock::open(&state, watcher, true, false).await;
+        let mut s_waker = Sock::open(&state, owner, false, true).await; // headless, never reports
+        let after_waker_alone = statuses(&s_watcher.drain());
+        let mut s_pc = Sock::open(&state, owner, true, false).await;
+        let after_pc = statuses(&s_watcher.drain());
+
+        // One report — "quiet for 9 minutes" — then only the clock moves.
+        s_pc.report(&state, Some(540)).await;
+        let at_nine = statuses(&s_watcher.drain());
+        let t0 = Instant::now();
+        presence::sweep(&state, t0 + Duration::from_secs(70)).await;
+        let at_ten = statuses(&s_watcher.drain());
+
+        // The PC closes; the waker keeps the user online, but the PC's last
+        // activity is kept, so the hour still runs out.
+        state.unregister_session(owner as UserId, s_pc.conn);
+        presence::sweep(&state, t0 + Duration::from_secs(80)).await;
+        let pc_gone = statuses(&s_watcher.drain());
+        presence::sweep(&state, t0 + t.away).await;
+        let at_hour = statuses(&s_watcher.drain());
+
+        // An old UI client beside a reporting one: never idle.
+        let mut s_old = Sock::open(&state, mixed, false, false).await;
+        let mut s_new = Sock::open(&state, mixed, true, false).await;
+        s_new.report(&state, Some(3700)).await;
+        presence::sweep(&state, t0 + t.away + t.away).await;
+        let mixed_frames = statuses(&s_watcher.drain());
+        let mixed_status = state.listing_status(mixed as UserId);
+        let _ = (s_old.drain(), s_waker.drain(), s_new.drain());
+
+        for (u, c) in [(watcher, s_watcher.conn), (owner, s_waker.conn), (mixed, s_old.conn), (mixed, s_new.conn)] {
+            state.unregister_session(u as UserId, c);
+        }
+        let record_left = state.presence.records.contains_key(&(owner as UserId));
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&sid).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(ids.clone()).execute(&pool).await;
+
+        let o = owner as UserId;
+        // A waker alone: online (UserOnline went out) but nobody is at a
+        // screen, so away — it does not paint its owner green around the clock.
+        assert_eq!(after_waker_alone, vec![(o, PresenceStatus::Away)]);
+        assert_eq!(after_pc, vec![(o, PresenceStatus::Online)], "a person arrived");
+        assert!(at_nine.is_empty(), "nine minutes is not idle: {at_nine:?}");
+        assert_eq!(at_ten, vec![(o, PresenceStatus::Idle)], "the server's clock made it idle");
+        assert!(pc_gone.is_empty(), "the PC leaving changes nothing yet: {pc_gone:?}");
+        assert_eq!(at_hour, vec![(o, PresenceStatus::Away)]);
+        assert!(mixed_frames.iter().all(|(u, _)| *u != mixed as UserId), "an old client pins active: {mixed_frames:?}");
+        assert_eq!(mixed_status, PresenceStatus::Online);
+        assert!(!record_left, "the last visible session takes the record with it");
     }
 }

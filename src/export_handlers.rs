@@ -129,7 +129,7 @@ const PROFILE_SQL: &str = "SELECT COALESCE((SELECT row_to_json(t) FROM ( \
            (created_at AT TIME ZONE 'UTC') AS created_at, \
            public_key, account_sign_pub, key_version, avatar_file_id, \
            join_sound_file_id, leave_sound_file_id, \
-           allow_dms_from_server_members, show_online_status \
+           allow_dms_from_server_members, show_online_status, show_idle_status \
     FROM users WHERE id = $1::bigint) t), 'null'::json)::text";
 
 const SERVERS_SQL: &str = "SELECT COALESCE(json_agg(t), '[]'::json)::text FROM ( \

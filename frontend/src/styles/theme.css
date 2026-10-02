@@ -73,8 +73,10 @@
     /* Status colors */
     --status-online: #23a55a;
     /* Green online dot */
-    --status-idle: #f0b232;
-    /* Yellow/orange idle */
+    --status-idle: #f28c28;
+    /* Orange idle/away presence (PresenceDot). Was the stock amber #f0b232,
+       unused until presence grew idle; the owner asked for orange, and this
+       holds 6.6:1 or better on every dark and tinted theme. */
     --status-dnd: #f23f43;
     /* Red DND */
     --status-offline: #80848e;
@@ -246,6 +248,10 @@
     --border-faint: rgba(0, 0, 0, 0.12);
 
     --input-bg: #e3e5e8;
+
+    /* The dark-theme orange is 2.4:1 on white: too faint for a 14px dot
+       or the thin strokes of the away badge. 4.2:1 here. */
+    --status-idle: #c4610c;
 }
 
 /* ==================== AMOLED Theme ==================== */
@@ -371,6 +377,7 @@
 }
 
 [data-theme="light"][data-contrast="high"] {
+    --status-idle: #b85c00;
     --text-normal: #000000;
     --text-muted: #26282d;
     --text-faint: #43464e;

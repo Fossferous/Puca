@@ -1802,12 +1802,11 @@ button.message-attachment.error { color: #ffb4b4; }
     border: 2.5px solid var(--bg-primary);
 }
 
-.status-dot.online {
-    background: var(--color-success);
-}
-
-.status-dot.offline {
-    background: var(--text-faint);
+/* Colours (online / idle / away / offline) come from PresenceDot.css. Away
+   is a "zz" badge, which needs the whole 14px: drop the ring (its disc is
+   the same surface colour, so nothing visible changes but the letters). */
+.member-avatar .status-dot.is-away {
+    border-width: 0;
 }
 
 .member-name {
@@ -2029,6 +2028,12 @@ button.message-attachment.error { color: #ffb4b4; }
 .user-profile-bar .user-status {
     font-size: 0.7rem;
     color: var(--color-success);
+}
+
+/* Your own idle/away, as everyone else sees it (PresenceDot's colour). */
+.user-profile-bar .user-status.idle,
+.user-profile-bar .user-status.away {
+    color: var(--status-idle);
 }
 
 .user-actions {

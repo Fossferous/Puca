@@ -287,6 +287,10 @@ export interface MemberWithRoles {
     display_name?: string | null;
     server_nickname?: string | null;
     is_online: boolean;
+    /** `online` | `idle` | `away` for an online member (src/presence.rs);
+     *  absent when offline or from an older server. Read it through the
+     *  presence store (presenceOf / usePresence), never directly. */
+    status?: string;
     roles: Role[];
     top_role_color: string;
     is_owner: boolean;

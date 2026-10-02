@@ -358,16 +358,20 @@
     position: relative;
 }
 
-.friend-avatar.online .status-dot,
-.status-dot {
+/* Placement only; the colour (online / idle / away) is PresenceDot.css. */
+.friend-avatar .status-dot {
     position: absolute;
     bottom: -2px;
     right: -2px;
     width: 14px;
     height: 14px;
-    background: var(--color-success);
     border-radius: 50%;
     border: 3px solid var(--bg-primary);
+}
+
+/* Away is a "zz" badge and needs the whole 14px (see PresenceDot.css). */
+.friend-avatar .status-dot.is-away {
+    border-width: 0;
 }
 
 .friend-info {
@@ -576,8 +580,14 @@
     border: 3px solid var(--bg-secondary);
 }
 
-.status-indicator.online {
-    background: var(--color-success);
+/* Colour from PresenceDot.css; this panel is --bg-secondary, so the away
+   badge's disc matches it instead of the default --bg-primary. */
+.status-indicator {
+    --presence-surface: var(--bg-secondary);
+}
+
+.status-indicator.is-away {
+    border-width: 0;
 }
 
 .active-info {
@@ -594,8 +604,13 @@
 
 .active-status {
     display: block;
-    color: var(--color-success);
+    color: var(--status-online);
     font-size: 0.8rem;
+}
+
+.active-status.idle,
+.active-status.away {
+    color: var(--status-idle);
 }
 
 .active-empty {
@@ -871,4 +886,18 @@
     color: inherit;
     cursor: pointer;
     border-radius: 6px;
+}
+
+/* DM search results: an inline presence dot at the end of the row (was an
+   unstyled text bullet). Away is the 14px "zz" badge, so it gets the size. */
+.search-result .search-presence {
+    width: 10px;
+    height: 10px;
+    margin-left: auto;
+}
+
+.search-result .search-presence.is-away {
+    width: 14px;
+    height: 14px;
+    --presence-surface: transparent;
 }

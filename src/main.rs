@@ -37,6 +37,7 @@ mod migrator;
 mod models;
 mod moderation_handlers;
 mod permissions;
+mod presence;
 mod protocol;
 mod public_config;
 mod push_handlers;
@@ -1029,6 +1030,10 @@ async fn main() -> anyhow::Result<()> {
     // the measured branch of SFU admission (no-op when the SFU tier or the
     // metrics endpoint isn't deployed; admission then stays worst-case only).
     sfu::spawn_egress_sampler(app_state.clone());
+
+    // Idle/away presence: the server owns both clocks (src/presence.rs), so
+    // a sweep promotes users a backgrounded phone could never report.
+    presence::spawn_sweeper(app_state.clone());
 
     // Learn who is ALREADY in each LiveKit room: a restart forgets them, and a
     // session this process does not know about can neither be ejected by a

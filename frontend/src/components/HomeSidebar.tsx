@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from 'react';
 import { searchUsers } from '../api/dms';
 import type { DMConversation, SearchUserResult } from '../api/dms';
 import { MembersIcon, TasksIcon } from './Icons';
+import { PresenceDot } from './PresenceDot';
+import { presenceOf, usePresenceVersion } from '../api/presenceStore';
 // Owns the .friends-sidebar / .dm-* styles this component renders — imported
 // here so the styling doesn't silently depend on FriendsPanel being mounted.
 import './FriendsPanel.css';
@@ -46,6 +48,12 @@ export function HomeSidebar({
     const [searchResults, setSearchResults] = useState<SearchUserResult[]>([]);
     const [isSearching, setIsSearching] = useState(false);
     const searchInputRef = useRef<HTMLInputElement>(null);
+    // Re-render search results when a pushed status changes. The search
+    // endpoint itself carries only is_online (it is instance-wide, so it is
+    // deliberately NOT given idle/away); the store adds idle/away only for
+    // people this account can already see through a shared server or a
+    // friendship.
+    usePresenceVersion();
 
     // Debounced user search for "find or start a conversation".
     useEffect(() => {
@@ -121,19 +129,22 @@ export function HomeSidebar({
                             {isSearching ? (
                                 <div className="dm-empty">Searching...</div>
                             ) : searchResults.length > 0 ? (
-                                searchResults.map(user => (
+                                searchResults.map(user => {
+                                    const presence = presenceOf(user.id, user.is_online);
+                                    return (
                                     <div
                                         key={user.id}
                                         className="dm-item search-result"
                                         onClick={() => onStartUserDM(user)}
                                     >
-                                        <div className={`dm-avatar ${user.is_online ? 'online' : ''}`}>
+                                        <div className={`dm-avatar ${presence !== 'offline' ? 'online' : ''}`}>
                                             {user.username.charAt(0).toUpperCase()}
                                         </div>
                                         <span className="dm-username">{user.username}</span>
-                                        {user.is_online && <span className="online-indicator">●</span>}
+                                        {presence !== 'offline' && <PresenceDot status={presence} className="search-presence" />}
                                     </div>
-                                ))
+                                    );
+                                })
                             ) : (
                                 <div className="dm-empty">No users found</div>
                             )}

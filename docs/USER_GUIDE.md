@@ -512,6 +512,28 @@ The cog beside your name (tooltip **Settings**) opens **My Account**,
 **Voice & Video**, **Keybinds** (not on phones), **Language** and **Advanced**.
 **Log Out** is at the bottom of that list.
 
+### Online, idle and away
+The dot on someone's avatar (member list, Friends, the profile popup, user
+search) says whether they are around:
+
+| Dot | Tooltip | Means |
+|---|---|---|
+| Green | **Online** | Active on at least one device |
+| Orange | **Idle** | No activity on any of their devices for 10 minutes |
+| Orange "zz" | **Away** | No activity for an hour |
+
+On the Windows desktop app, activity means input **anywhere on the PC** — so
+someone playing a game with Púca in the background is not idle. In a browser
+or on a phone it means using Púca itself; a phone with Púca in the background
+or its screen off counts as inactive. Talking in a voice call counts as
+activity on every device. Any activity turns the dot green again straight away.
+A game controller on its own is not seen as activity on the PC.
+
+**Settings → Privacy & Safety → Show when I'm idle or away** (on by default)
+turns this off for you: you then show as plain online while connected.
+**Show online status** off hides all of it — you appear offline. Voice
+channels' AFK move (**Server Settings**) is separate and unchanged.
+
 ---
 
 ## Custom Emojis

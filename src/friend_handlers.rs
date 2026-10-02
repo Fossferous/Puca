@@ -26,6 +26,9 @@ pub struct FriendResponse {
     pub id: i64,
     pub username: String,
     pub is_online: bool,
+    /// Idle/away for an online friend; absent when offline (src/presence.rs).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<crate::presence::PresenceStatus>,
     pub since: String,
 }
 
@@ -196,6 +199,7 @@ pub async fn list_friends(
                 id: friend_id,
                 username,
                 is_online,
+                status: is_online.then(|| state.listing_status(friend_id)),
                 since: created_at,
             });
         }

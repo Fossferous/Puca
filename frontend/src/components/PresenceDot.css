@@ -1,0 +1,45 @@
+/* The presence dot (PresenceDot.tsx). Colour only — where it sits beside an
+   avatar is the caller's positioning class (`.member-avatar .status-dot`,
+   FriendsPanel's `.status-dot`), which also draws the background-coloured
+   ring that separates it from the avatar.
+
+   All colours are theme tokens (styles/theme.css), so the eight themes and
+   [data-contrast="high"] follow: --status-idle is re-darkened for the light
+   theme, where the dark-theme orange is too faint. */
+
+.presence-dot {
+    display: inline-block;
+    flex-shrink: 0;
+    border-radius: 50%;
+    background: var(--status-offline);
+}
+
+.presence-dot.is-online {
+    background: var(--status-online);
+}
+
+.presence-dot.is-idle {
+    background: var(--status-idle);
+}
+
+.presence-dot.is-offline {
+    background: var(--text-faint);
+}
+
+/* Away: the dot becomes a "zz" badge in the idle colour. The disc behind it
+   is the surface colour (the same as the ring; a placement on another
+   surface sets --presence-surface), so the letters read against
+   the panel rather than against an avatar photo. Shape AND colour change, so
+   away never depends on colour alone. Each placement drops its ring for
+   away (Chat.css, FriendsPanel.css) so the letters get the whole 14px — a
+   9px inner circle is too small for two letters. */
+.presence-dot.is-away {
+    background: var(--presence-surface, var(--bg-primary));
+    color: var(--status-idle);
+}
+
+.presence-dot.is-away .presence-dot-badge {
+    display: block;
+    width: 100%;
+    height: 100%;
+}

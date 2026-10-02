@@ -403,6 +403,11 @@ pub struct MemberResponse {
     pub username: String,
     pub display_name: Option<String>,
     pub is_online: bool,
+    /// Idle/away for an ONLINE member (`online`, `idle`, `away`); absent when
+    /// offline. What the sockets were last told (src/presence.rs), so a poll
+    /// never announces a change a push has not. Older clients ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<crate::presence::PresenceStatus>,
 }
 
 /// List all members of a server with online status
@@ -474,6 +479,7 @@ pub async fn list_server_members(
                 username,
                 display_name,
                 is_online,
+                status: is_online.then(|| state.listing_status(id)),
             }
         })
         .collect();

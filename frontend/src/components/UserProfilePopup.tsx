@@ -7,8 +7,9 @@ import { getVerificationState, type VerificationState } from '../api/keyVerifica
 import { SafetyNumberModal } from './SafetyNumberModal';
 import {
     CrownIcon, MessageIcon, ShieldCheckIcon, WarningIcon,
-    UserAddIcon, UserRemoveIcon, UserCheckIcon, PendingIcon, GavelIcon,
+    UserAddIcon, UserRemoveIcon, UserCheckIcon, PendingIcon, GavelIcon, AwayIcon,
 } from './Icons';
+import { usePresence, PRESENCE_LABEL } from '../api/presenceStore';
 import { placeProfilePopup } from './userProfilePopupPlacement';
 import './UserProfilePopup.css';
 
@@ -52,6 +53,9 @@ export function UserProfilePopup({
     const [verifyState, setVerifyState] = useState<VerificationState>('unverified');
     const popupRef = useRef<HTMLDivElement>(null);
     const contentRef = useRef<HTMLDivElement>(null);
+    // Live, from the presence store: `member` is a snapshot of the row the
+    // popup was opened from, and someone can go idle while it is open.
+    const presence = usePresence(member.id, member.is_online, member.status);
 
     // Close on click outside
     useEffect(() => {
@@ -194,8 +198,12 @@ export function UserProfilePopup({
                         {member.display_name && (
                             <span className="profile-username">@{member.username}</span>
                         )}
-                        <span className={`upp-status ${member.is_online ? 'online' : 'offline'}`}>
-                            {member.is_online ? 'Online' : 'Offline'}
+                        {/* The modifiers are spelled out as literals on purpose:
+                            userProfilePopupCssScope.test.ts scans them to prove no
+                            other stylesheet styles .upp-status.<modifier>. */}
+                        <span className={`upp-status ${presence === 'away' ? 'away' : presence === 'idle' ? 'idle' : presence === 'online' ? 'online' : 'offline'}`}>
+                            {presence === 'away' && <AwayIcon size={14} className="upp-status-badge" />}
+                            {PRESENCE_LABEL[presence]}
                         </span>
                     </div>
                 </div>

@@ -312,6 +312,13 @@ pub struct Session {
     /// the attested `device_id` above: nothing privilege-bearing may ever read
     /// this one, because anyone can claim any id.
     pub claimed_device_id: Option<String>,
+    /// How this connection takes part in idle/away presence
+    /// (`crate::presence`): a delivery or headless session not at all, an
+    /// old UI client as always-active, a reporting client by its reports.
+    pub activity: crate::presence::SessionActivity,
+    /// Announced the `presence` capability: the only connections that are
+    /// sent `UserStatus` frames (an older client must never get one).
+    pub presence_frames: bool,
 }
 
 /// One continuous stretch of a user's MEMBERSHIP of a voice room. `left_ms` is
@@ -865,6 +872,9 @@ pub struct AppState {
     /// Invariant: the Vec is never empty while its map entry exists.
     pub sessions: DashMap<UserId, Vec<Session>>,
 
+    /// Idle/away presence per visibly-online user (`crate::presence`).
+    pub presence: crate::presence::PresenceRegistry,
+
     /// Active rooms: RoomId -> Room
     pub rooms: DashMap<RoomId, Room>,
 
@@ -1305,6 +1315,7 @@ impl AppState {
             clip_rate: DashMap::new(),
             clip_denials: DashMap::new(),
             sessions: DashMap::new(),
+            presence: crate::presence::PresenceRegistry::new(crate::presence::Thresholds::from_env()),
             rooms: DashMap::new(),
             jwt_secret,
             device_challenges: std::sync::Arc::new(
@@ -1679,6 +1690,15 @@ impl AppState {
             device_id: None,
             delivery,
             claimed_device_id,
+            // Until the caller classifies it (ws.rs, right after this call):
+            // a delivery socket never counts; anything else starts as an old
+            // UI client, i.e. active — the safe reading for presence.
+            activity: if delivery {
+                crate::presence::SessionActivity::Uncounted
+            } else {
+                crate::presence::SessionActivity::Legacy
+            },
+            presence_frames: false,
         });
         (conn_id, is_first, kill)
     }
@@ -2207,8 +2227,26 @@ impl AppState {
                     .get()
                     .iter()
                     .any(|s| s.conn_id == conn_id && !s.delivery);
+                let departing = occupied
+                    .get()
+                    .iter()
+                    .find(|s| s.conn_id == conn_id && !s.delivery)
+                    .map(|s| s.activity);
                 occupied.get_mut().retain(|s| s.conn_id != conn_id);
                 let visible_left = occupied.get().iter().any(|s| !s.delivery);
+                // Idle/away bookkeeping, under this shard lock so a sweep can
+                // never see the session gone AND its activity not yet kept
+                // (lock order: sessions, then presence). A counting session
+                // leaves its last activity behind for a user still online
+                // through a headless one; the last visible one takes the
+                // whole record with it.
+                if was_visible {
+                    if !visible_left {
+                        self.presence.forget(user_id);
+                    } else if let Some(since) = departing.and_then(|a| a.departure(Instant::now())) {
+                        self.presence.note_departure(user_id, since, Instant::now());
+                    }
+                }
                 if occupied.get().is_empty() {
                     occupied.remove();
                 }

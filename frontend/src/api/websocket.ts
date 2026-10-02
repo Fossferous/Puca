@@ -26,6 +26,21 @@ export const MEDIA_ANNOUNCE_REFUSALS: readonly string[] = [
     'Not in this room',
 ];
 
+/**
+ * Capabilities this client announces on every socket (`/ws?caps=`). A query
+ * parameter, not a frame: an older server ignores a parameter it does not
+ * know, whereas an unknown client→server FRAME draws an Error, which the chat
+ * view shows as a blocking alert. The server confirms what it supports with
+ * `ServerFeatures`, per socket — see `hasServerFeature`.
+ */
+export const CLIENT_CAPS: readonly string[] = ['presence'];
+
+/** `base` with the capability announcement appended. */
+export function wsUrlWithCaps(base: string): string {
+    if (CLIENT_CAPS.length === 0) return base;
+    return `${base}${base.includes('?') ? '&' : '?'}caps=${CLIENT_CAPS.join(',')}`;
+}
+
 class WebSocketClient {
     private ws: WebSocket | null = null;
     private token: string | null = null;
@@ -52,6 +67,10 @@ class WebSocketClient {
     // timer. One seed disconnect then self-sustains a kill/reconnect chain
     // forever (connection lifetimes exactly tracking the backoff sequence).
     private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    // What THIS socket's server confirmed in ServerFeatures. Per socket on
+    // purpose: a reconnect can land on an older host (a rollback box), so a
+    // new socket starts knowing nothing until its own server says so.
+    private serverFeatures: Set<string> = new Set();
 
     constructor() {
         // Coming back to the app is the moment the user most wants the
@@ -147,6 +166,7 @@ class WebSocketClient {
         }
 
         this.token = token;
+        this.serverFeatures = new Set();
         // Per-socket: did THIS socket reach onopen? Decides whether the
         // connect() promise rejects (initial attempt) vs. is swallowed (retry).
         let opened = false;
@@ -170,7 +190,7 @@ class WebSocketClient {
             //
             // The backend accepts both forms and ships BEFORE this, so a client
             // can never meet a server that understands neither.
-            const socket = new WebSocket(WS_URL, ['bearer', token]);
+            const socket = new WebSocket(wsUrlWithCaps(WS_URL), ['bearer', token]);
             this.ws = socket;
 
             socket.onopen = () => {
@@ -228,6 +248,7 @@ class WebSocketClient {
                 // cut) — essential when diagnosing reconnect loops in the field.
                 console.log(`WebSocket closed (code=${event.code}${event.reason ? `, reason=${event.reason}` : ''}, clean=${event.wasClean})`);
                 this.stopHeartbeat();
+                this.serverFeatures = new Set();
                 // Reset the backoff only when the connection proved STABLE.
                 // Resetting on every open turned an accept-then-drop server
                 // (deploy window, crash loop) into an infinite full-speed
@@ -337,6 +358,14 @@ class WebSocketClient {
         if (message.type === 'VoiceMoved') {
             const from = (message.payload as { from_channel_id?: number } | undefined)?.from_channel_id;
             if (typeof from === 'number') this.joinedRooms.delete(`voice_${from}`);
+        }
+        // Latch BEFORE dispatching, so a handler (or anyone who subscribes
+        // later, after React mounts) can ask hasServerFeature and be right.
+        if (message.type === 'ServerFeatures') {
+            const features = (message.payload as { features?: unknown } | undefined)?.features;
+            this.serverFeatures = new Set(
+                Array.isArray(features) ? features.filter((f): f is string => typeof f === 'string') : [],
+            );
         }
         const handlers = this.handlers.get(message.type) || [];
         handlers.forEach(handler => handler(message));
@@ -569,6 +598,7 @@ class WebSocketClient {
         this.token = null;
         this.everConnected = false; // Intentional teardown: stop reconnecting
         this.reconnectAttempts = 0;
+        this.serverFeatures = new Set();
         if (this.reconnectTimer) {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
@@ -595,6 +625,16 @@ class WebSocketClient {
 
     get isConnected(): boolean {
         return this.ws?.readyState === WebSocket.OPEN;
+    }
+
+    /**
+     * Has the server on the CURRENT socket confirmed `name` in ServerFeatures?
+     * A new client→server frame may be sent only when this is true: an older
+     * server answers an unknown frame with an Error, which the chat view
+     * shows as an alert. False on a new socket until its server says so.
+     */
+    hasServerFeature(name: string): boolean {
+        return this.serverFeatures.has(name);
     }
 }
 
