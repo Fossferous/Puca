@@ -276,15 +276,20 @@ What each choice costs is shown where it is made, all from one pure module
 says how big a saved clip of the longest allowed length is and how many fit
 in the member's clip storage (`GET /clips/usage`), and warns when that clip
 would exceed the in-app download (1 GiB) or trim (768 MiB) limit, or the
-64-part limit. The Quality line says what **automatic arming** really records
+64-part limit (`clipPartCount` counts parts the way `Fmp4Splitter` cuts them:
+an init-only part 0, then whole 2 s fragments under 24 MiB each — a test runs
+the real splitter to keep the two in step). The Quality line says what **automatic arming** really records
 on a monitor like the current one — `nativeEncodeEstimate`, a TS port of
 `clip_capture.rs::effective_encode_settings`, pinned to the Rust by a shared
 table (`frontend/src/tests/fixtures/clip-native-encode-table.json`, asserted
 by both `clipNativeEstimate.test.ts` and the Rust test that reads it). With
 *Arm automatically* chosen, every figure is priced at that rate instead of
-the preset's label. The composer's duration chips carry their size (priced
+the preset's label, and each Quality option adds what it records on this
+monitor (on 1080p, 480p records 24 fps at 8.1 Mbps — no saving over the
+default). The composer's duration chips carry their size (priced
 from the ring's measured bytes once 10 s are buffered), and Server Settings'
-*Longest clip* prices each length at the default quality and at 4K. On web
+*Longest clip* prices each length at the default quality, and its help line
+gives the selected length at the default and at the largest preset. On web
 and phones the card stays one line, plus the servers' longest clip.
 Arming is gated only by the server owner's per-server clips switch — there
 is no client-side experimental toggle (`settingsClips.test.ts` pins its

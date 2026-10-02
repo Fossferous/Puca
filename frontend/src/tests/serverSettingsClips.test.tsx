@@ -158,7 +158,7 @@ describe('ServerSettingsModal — Clips', () => {
         expect(help).toMatch(/at most 10 minutes/);
         // The selected length, at the default quality and at the largest preset (4K, 2:00 ≈ 260 MB).
         expect(help).toMatch(/about 88 MB at the default 1080p 30 fps/);
-        expect(help).toMatch(/up to 260 MB at 4K/);
+        expect(help).toMatch(/up to 260 MB at 4K 30 fps,/);
     });
 
     it('REFUSES to CREATE clips-on with no channel, and says why', async () => {

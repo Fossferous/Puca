@@ -9,7 +9,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { isTauri } from '../api/platform';
 import {
-    CLIP_PRESETS, CLIP_RING_GOP_SECONDS, clipLimits, clipPreset, clipStorageBytes, estimateRing, formatClock, formatMB, formatMbps,
+    CLIP_PRESETS, CLIP_RING_GOP_SECONDS, clipLimits, clipPreset, estimateRing, formatClock, formatMB, formatMbps,
     maxRingBytesForBudget, memoryBudgetBytes, MIB, nativeEncodeEstimate, presetMbPerMinute, ringSecondsFor,
 } from '../api/clips/clipPresets';
 import { setClipMicGain } from '../api/clips/replayBuffer';
@@ -97,8 +97,16 @@ export function ClipSettings({ settings, updateSetting, bindControl }: Props) {
     // the readout prices the most it will ever hold in any of your servers.
     const ringSeconds = ringSecondsFor(bufferSeconds, maxCap);
     const est = estimateRing(rate, ringSeconds, capMB * MIB);
-    const savedBytes = maxCap !== null ? clipStorageBytes(rate, maxCap) : 0;
-    const savedLimits = clipLimits(savedBytes, usage?.quotaBytes);
+    // With automatic arming on, each option says what it records HERE: a
+    // preset below the monitor's size is no saving then (480p records the
+    // whole 1080p monitor at 24 fps, 8.1 Mbps — more than 1080p30's 6.0).
+    const qualityLabel = (p: typeof preset) => {
+        if (!priceNative || !monitor) return p.label;
+        const n = nativeEncodeEstimate(p, monitor.w, monitor.h);
+        return `${p.label} · automatic here: ${n.fps} fps, ${formatMbps(n.videoBitrate)}`;
+    };
+    const savedLimits = clipLimits(rate, maxCap ?? 0, usage?.quotaBytes);
+    const savedBytes = savedLimits.bytes;
     return (
         <div className="settings-card">
             <div className="settings-option">
@@ -117,7 +125,7 @@ export function ClipSettings({ settings, updateSetting, bindControl }: Props) {
                     )}
                 </div>
                 <select value={preset.id} onChange={(e) => updateSetting('clipQuality', e.target.value)}>
-                    {CLIP_PRESETS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+                    {CLIP_PRESETS.map(p => <option key={p.id} value={p.id}>{qualityLabel(p)}</option>)}
                 </select>
             </div>
             <div className="settings-option">

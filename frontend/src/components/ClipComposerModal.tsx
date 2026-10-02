@@ -109,9 +109,10 @@ export function ClipComposerModal({ isOpen, onClose, bufferedSeconds, maxSeconds
     const chosen = chosenRaw !== null && chips.includes(chosenRaw) ? chosenRaw : (chips.length ? chips[chips.length - 1] : null);
     // What each length will cost, BEFORE the seal is paid for (VBR: "about").
     const clipBps = clipBytesPerSecond(replay);
-    const chipBytes = (secs: number) => clipStorageBytes({ videoBitrate: clipBps * 8, audioBitrate: 0 }, secs);
-    const chosenBytes = chosen !== null ? chipBytes(chosen) : 0;
-    const chosenLimits = chosen !== null ? clipLimits(chosenBytes) : null;
+    const clipRate = { videoBitrate: clipBps * 8, audioBitrate: 0 };
+    const chipBytes = (secs: number) => clipStorageBytes(clipRate, secs);
+    const chosenLimits = chosen !== null ? clipLimits(clipRate, chosen) : null;
+    const chosenBytes = chosenLimits?.bytes ?? 0;
     // NO PICKER, no fallback chain. The pinned clips channel is the only
     // destination — everyone who approved knew where it would land — and each
     // way that can fail renders its own explanation (resolveClipTarget).

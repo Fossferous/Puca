@@ -10,7 +10,7 @@
  * jsdom has no worker or audio graph: stubs record the 'arm' message.
  */
 // @vitest-environment jsdom
-import { describe, test, expect, vi, beforeEach } from 'vitest';
+import { describe, test, expect, vi, beforeAll, beforeEach } from 'vitest';
 
 vi.mock('../api/clips/nativeCapture', () => ({
     isNativeCaptureSupported: () => true,
@@ -58,9 +58,30 @@ beforeEach(() => {
 
 const armCfg = () => posted.find(m => m.t === 'arm')?.cfg;
 
+// Import once, outside any test's timeout: the module graph is large and a
+// cold transform under load used to eat the first test's 5 s.
+let rbMod: typeof import('../api/clips/replayBuffer');
+beforeAll(async () => { rbMod = await import('../api/clips/replayBuffer'); }, 60_000);
+
+async function pastWipeGrace<T>(f: () => Promise<T>): Promise<T> {
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
+    try {
+        const done = f();
+        await vi.advanceTimersByTimeAsync(1500);
+        return await done;
+    } finally {
+        vi.useRealTimers();
+    }
+}
+
 async function fresh() {
-    const rb = await import('../api/clips/replayBuffer');
-    await rb.disarm('test');
+    const rb = rbMod;
+    // disarm() always waits out its 1.5 s wipe grace: handleWorker drops the
+    // worker's 'wiped' reply because disarm has already cleared `session`, so
+    // answering the wipe from the stub would not help. Spend that grace on a
+    // fake clock: in real time it made each test 1.5-3 s long, and one that
+    // timed out under load raced the next test's arm ('already armed').
+    await pastWipeGrace(() => rb.disarm('test'));
     rb.__resetReplayForTests();
     posted.length = 0;
     return rb;
@@ -90,7 +111,7 @@ describe('the clip ring never holds more than the server lets you post', () => {
         await rb.arm({ maxSeconds: 60 });
         expect(armCfg()?.ringMs).toBe(62_000);
         posted.length = 0;
-        await rb.arm({ repick: true });
+        await pastWipeGrace(() => rb.arm({ repick: true })); // a repick disarms first
         expect(armCfg()?.ringMs).toBe(62_000);
     });
 });

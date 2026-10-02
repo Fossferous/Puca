@@ -24,7 +24,7 @@ export interface ClipPreset {
 }
 
 export const CLIP_PRESETS: readonly ClipPreset[] = [
-    // 480p30: the low-memory / low-storage choice (2:00 ≈ 30 MB). 2 Mbps keeps
+    // 480p30: the low-memory / low-storage choice when armed by hand (2:00 ≈ 30 MB). 2 Mbps keeps
     // the ladder's shape — 2.25x the pixels costs ~1.7x the bits at each step
     // (720p30 3.5, 1080p30 6) — and stays above clip_capture.rs's 1.5 Mbps
     // scale_bitrate floor. It saves memory only when armed by hand: automatic
@@ -47,6 +47,11 @@ export const DEFAULT_CLIP_PRESET: ClipPresetId = '1080p30';
 
 export function clipPreset(id: string | null | undefined): ClipPreset {
     return CLIP_PRESETS.find(p => p.id === id) ?? CLIP_PRESETS.find(p => p.id === DEFAULT_CLIP_PRESET)!;
+}
+
+/** A preset's name without its bitrate ("1080p 30 fps"), for prose. */
+export function presetName(p: ClipPreset): string {
+    return p.label.split(' — ')[0];
 }
 
 /** Bytes per second the ring grows at for a preset (video + audio). */
@@ -140,19 +145,46 @@ export const CLIP_DOWNLOAD_LIMIT_BYTES = GIB;
 /** clipTrim.TRIM_MAX_CIPHER_BYTES — larger clips cannot be trimmed in the app. */
 export const CLIP_TRIM_LIMIT_BYTES = 768 * MIB;
 
+type ClipRate = Pick<ClipPreset, 'videoBitrate' | 'audioBitrate'>;
+
+const clipMediaBytes = (p: ClipRate, seconds: number) => Math.round(Math.max(0, seconds) * (p.videoBitrate + p.audioBitrate) / 8);
+
+/**
+ * Parts the seal cuts a clip of `seconds` into, counted the way
+ * fmp4Split.ts's Fmp4Splitter cuts: part 0 is the init segment on its own,
+ * then media parts are cut only IN FRONT of a moof, so each holds whole
+ * fragments — one keyframe interval (CLIP_RING_GOP_SECONDS) each, since the
+ * mux fragments at every keyframe — and stays under `partBytes` by up to one
+ * fragment. replayWorker's seal refuses a clip whose part count (init part
+ * included) exceeds CLIP_MAX_PARTS. Nominal bitrate: a VBR encoder can need
+ * more. `partBytes` is a parameter only so a test can cross-check this against
+ * the real splitter at a small scale.
+ */
+export function clipPartCount(p: ClipRate, seconds: number, partBytes: number = CLIP_PART_PLAIN_BYTES): number {
+    const s = Math.max(0, seconds);
+    if (clipMediaBytes(p, s) <= 0) return 0;
+    const fragments = Math.max(1, Math.ceil(s / CLIP_RING_GOP_SECONDS));
+    const fragBytes = (p.videoBitrate + p.audioBitrate) / 8 * CLIP_RING_GOP_SECONDS;
+    const perPart = Math.max(1, Math.floor(partBytes / fragBytes));
+    return 1 + Math.ceil(fragments / perPart);
+}
+
 /**
  * Bytes a saved (sealed, uploaded) clip of `seconds` takes at a bitrate: the
- * encoded media plus the per-part sealing overhead. An ESTIMATE — the encoder
- * is VBR — so every readout built on it says "about". Pass a preset, or
- * `{ videoBitrate: measuredBitsPerSecond, audioBitrate: 0 }` for a measured rate.
+ * encoded media plus the sealing overhead of every part (the init part
+ * included). An ESTIMATE — the encoder is VBR — so every readout built on it
+ * says "about". Pass a preset, or `{ videoBitrate: measuredBitsPerSecond,
+ * audioBitrate: 0 }` for a measured rate.
  */
-export function clipStorageBytes(p: Pick<ClipPreset, 'videoBitrate' | 'audioBitrate'>, seconds: number): number {
-    const media = Math.round(Math.max(0, seconds) * (p.videoBitrate + p.audioBitrate) / 8);
+export function clipStorageBytes(p: ClipRate, seconds: number): number {
+    const media = clipMediaBytes(p, seconds);
     if (media <= 0) return 0;
-    return media + Math.ceil(media / CLIP_PART_PLAIN_BYTES) * CLIP_PART_OVERHEAD_BYTES;
+    return media + clipPartCount(p, seconds) * CLIP_PART_OVERHEAD_BYTES;
 }
 
 export interface ClipLimits {
+    /** About how big the saved clip is (clipStorageBytes). */
+    bytes: number;
     parts: number;
     /** More parts than a clip reference can carry: the seal itself fails. */
     overParts: boolean;
@@ -164,9 +196,12 @@ export interface ClipLimits {
     quotaShare: number | null;
 }
 
-export function clipLimits(bytes: number, quotaBytes?: number | null): ClipLimits {
-    const parts = Math.max(1, Math.ceil(bytes / CLIP_PART_PLAIN_BYTES));
+/** Which of the app's limits a clip of `seconds` at rate `p` runs into. */
+export function clipLimits(p: ClipRate, seconds: number, quotaBytes?: number | null): ClipLimits {
+    const bytes = clipStorageBytes(p, seconds);
+    const parts = clipPartCount(p, seconds);
     return {
+        bytes,
         parts,
         overParts: parts > CLIP_MAX_PARTS,
         overDownload: bytes > CLIP_DOWNLOAD_LIMIT_BYTES,

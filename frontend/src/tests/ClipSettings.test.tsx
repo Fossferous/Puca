@@ -136,6 +136,27 @@ describe('ClipSettings — sizes, server caps and the auto-arm truth', () => {
         expect(text()).toMatch(/24 fps at about 8\.1 Mbps/);
     });
 
+    it('with automatic arming on, every Quality option says what it records HERE (480p is no saving on 1080p)', async () => {
+        // Native capture records the whole monitor: on 1920×1080 the 480p
+        // preset records 24 fps at 8.1 Mbps — more bits than the 1080p30
+        // default's 30 fps at 6.0 Mbps. A label that only says "about 2 Mbps"
+        // is a trap for anyone picking it to save memory.
+        setScreen(1920, 1080);
+        await render({ clipQuality: '1080p30', clipArmOnJoin: 'auto' });
+        const quality = [...container.querySelectorAll<HTMLOptionElement>('select option')].filter(o => /fps/.test(o.textContent ?? ''));
+        const byId = (id: string) => quality.find(o => o.value === id)!.textContent;
+        expect(byId('480p30')).toBe('480p 30 fps — about 2 Mbps · automatic here: 24 fps, 8.1 Mbps');
+        expect(byId('1080p30')).toBe('1080p 30 fps — about 6 Mbps · automatic here: 30 fps, 6.0 Mbps');
+        expect(byId('720p60')).toBe('720p 60 fps — about 5 Mbps · automatic here: 24 fps, 4.5 Mbps');
+    });
+
+    it('positive control: armed by hand, the Quality options are the presets as labelled', async () => {
+        setScreen(1920, 1080);
+        await render({ clipQuality: '1080p30', clipArmOnJoin: 'prompt' });
+        const quality = [...container.querySelectorAll<HTMLOptionElement>('select option')].filter(o => /fps/.test(o.textContent ?? ''));
+        expect(quality.every(o => !/automatic here/.test(o.textContent ?? ''))).toBe(true);
+    });
+
     it('web and mobile get the one honest line, plus the servers’ longest clip', async () => {
         tauri = false;
         await render();

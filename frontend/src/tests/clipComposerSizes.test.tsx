@@ -67,6 +67,26 @@ describe('composer chips carry their size', () => {
         expect(container.textContent).toMatch(/too large to download or trim in the app/);
     });
 
+    it('between the trim and the download limit, only the trim is called out', async () => {
+        // 1.4 MB/s × 600 s = 840 MB ≈ 801 MiB: over the 768 MiB trim cap, under the 1 GiB download cap.
+        replayState = { ...replayState, bufferedMs: 600_000, ringBytes: 600 * 1_400_000 };
+        await open(600, 600);
+        expect(container.textContent).toMatch(/would be too large to trim in the app/);
+        expect(container.textContent).not.toMatch(/download/);
+    });
+
+    it('a length that needs more parts than a clip can carry says it cannot be posted at all', async () => {
+        // 2.7 MB/s (a 4K buffer running over its 20 Mbps target): 5.4 MB fragments,
+        // 4 per 24 MiB part; 300 fragments = 75 media parts + init > 64.
+        replayState = { ...replayState, bufferedMs: 600_000, ringBytes: 600 * 2_700_000 };
+        await open(600, 600);
+        expect(container.textContent).toMatch(/too big to post at this quality/);
+        // Shorter chips do fit: 2:00 is 15 parts.
+        const two = [...container.querySelectorAll('.clip-duration-chip')].find(c => (c.textContent ?? '').startsWith('2:00')) as HTMLButtonElement;
+        await act(async () => { two.click(); });
+        expect(container.textContent).not.toMatch(/too big to post|too large to/);
+    });
+
     it('positive control: a clip within the limits carries no such warning', async () => {
         replayState = { ...replayState, bufferedMs: 120_000, ringBytes: 120 * 765_000 };
         await open(120, 120);

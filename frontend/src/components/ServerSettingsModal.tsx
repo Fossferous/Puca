@@ -17,7 +17,7 @@ import { AFK_TIMEOUT_CHOICES_MIN } from '../utils/afkIdle';
 import './ServerSettingsModal.css';
 import { parseServerTimestamp } from '../utils/serverTime';
 import { fetchFileUrl } from '../api/authedMedia';
-import { CLIP_PRESETS, DEFAULT_CLIP_PRESET, clipPreset, clipStorageBytes, formatClock, formatMB } from '../api/clips/clipPresets';
+import { CLIP_PRESETS, DEFAULT_CLIP_PRESET, clipPreset, clipStorageBytes, formatClock, formatMB, presetName } from '../api/clips/clipPresets';
 
 /** Server timestamps arrive as RFC3339 UTC (older rows naive UTC) — render
  *  them in the viewer's locale instead of leaking the wire format. */
@@ -38,8 +38,10 @@ const CLIP_LENGTH_MAX_SECONDS = 600;
 /** What a clip of `secs` costs a member: priced at the default quality (most
  *  members never change it) and at the largest preset, so the owner sees the
  *  range their choice allows. */
-const clipSizeAtDefault = (secs: number) => clipStorageBytes(clipPreset(DEFAULT_CLIP_PRESET), secs);
-const clipSizeAtLargest = (secs: number) => Math.max(...CLIP_PRESETS.map(p => clipStorageBytes(p, secs)));
+const DEFAULT_PRESET = clipPreset(DEFAULT_CLIP_PRESET);
+const LARGEST_PRESET = CLIP_PRESETS.reduce((a, p) => (clipStorageBytes(p, 60) > clipStorageBytes(a, 60) ? p : a));
+const clipSizeAtDefault = (secs: number) => clipStorageBytes(DEFAULT_PRESET, secs);
+const clipSizeAtLargest = (secs: number) => clipStorageBytes(LARGEST_PRESET, secs);
 
 interface ServerSettingsModalProps {
     isOpen: boolean;
@@ -506,8 +508,8 @@ export function ServerSettingsModal({
                                             </select>
                                             <span className="setting-help">
                                                 Members can post clips up to this long; a server allows at most {CLIP_LENGTH_MAX_SECONDS / 60} minutes.
-                                                A {formatClock(clipMaxSeconds)} clip is about {formatMB(clipSizeAtDefault(clipMaxSeconds))} at the default 1080p 30 fps,
-                                                up to {formatMB(clipSizeAtLargest(clipMaxSeconds))} at 4K, and counts against the clipper’s own clip storage.
+                                                A {formatClock(clipMaxSeconds)} clip is about {formatMB(clipSizeAtDefault(clipMaxSeconds))} at the default {presetName(DEFAULT_PRESET)},
+                                                up to {formatMB(clipSizeAtLargest(clipMaxSeconds))} at {presetName(LARGEST_PRESET)}, and counts against the clipper’s own clip storage.
                                             </span>
                                         </div>
                                         <div className="form-group">

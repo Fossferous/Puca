@@ -9,9 +9,10 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-    CLIP_DOWNLOAD_LIMIT_BYTES, CLIP_MAX_PARTS, CLIP_PART_OVERHEAD_BYTES, CLIP_PART_PLAIN_BYTES, CLIP_TRIM_LIMIT_BYTES, GIB,
-    clipLimits, clipPreset, clipStorageBytes, formatMB, ringSecondsFor,
+    CLIP_DOWNLOAD_LIMIT_BYTES, CLIP_MAX_PARTS, CLIP_PART_OVERHEAD_BYTES, CLIP_PART_PLAIN_BYTES, CLIP_RING_GOP_SECONDS, CLIP_TRIM_LIMIT_BYTES, GIB,
+    clipLimits, clipPartCount, clipPreset, clipStorageBytes, formatMB, ringSecondsFor,
 } from '../api/clips/clipPresets';
+import { Fmp4Splitter, type SplitPart } from '../api/clips/fmp4Split';
 import { MAX_CLIP_PARTS } from '../api/clips/clipRef';
 import { PART_HEADER_BYTES, PART_MAX_PLAINTEXT, PART_TAG_BYTES } from '../api/clips/clipCrypto';
 import { CLIP_DOWNLOAD_MAX_BYTES } from '../api/clips/clipPlayback';
@@ -26,51 +27,100 @@ describe('clipStorageBytes — the size of a saved clip', () => {
         expect(CLIP_TRIM_LIMIT_BYTES).toBe(TRIM_MAX_CIPHER_BYTES);
     });
 
-    it('1080p30 for 2:00 is 91.92 MB of media in 4 parts, about 88 MB', () => {
-        // (6 000 000 + 128 000) / 8 × 120 = 91 920 000; ceil(/24 MiB) = 4 parts × 35 B.
+    // Parts are counted the way fmp4Split cuts them: an init-only part 0, then
+    // whole 2 s fragments packed under 24 MiB (perPart = floor(24 MiB / frag)).
+    it('1080p30 for 2:00 is 91.92 MB of media in 5 parts (init + 4), about 88 MB', () => {
+        // (6 000 000 + 128 000) / 8 = 766 000 B/s; a 2 s fragment is 1 532 000 B,
+        // 16 fit a part; 60 fragments -> 4 media parts + the init part.
         const b = clipStorageBytes(clipPreset('1080p30'), 120);
-        expect(b).toBe(91_920_000 + 4 * 35);
+        expect(b).toBe(91_920_000 + 5 * 35);
         expect(formatMB(b)).toBe('88 MB');
-        const l = clipLimits(b, 2 * GIB);
-        expect(l).toMatchObject({ parts: 4, overParts: false, overDownload: false, overTrim: false });
-        expect(l.quotaShare!).toBeCloseTo(91_920_140 / (2 * GIB), 9);
+        const l = clipLimits(clipPreset('1080p30'), 120, 2 * GIB);
+        expect(l).toMatchObject({ bytes: b, parts: 5, overParts: false, overDownload: false, overTrim: false });
+        expect(l.quotaShare!).toBeCloseTo(b / (2 * GIB), 9);
     });
 
-    it('480p for 2:00 is 31.92 MB of media in 2 parts, about 30 MB — a third of 1080p30', () => {
-        // (2 000 000 + 128 000) / 8 × 120 = 31 920 000; ceil(/24 MiB) = 2 parts × 35 B.
+    it('480p for 2:00 is 31.92 MB of media in 3 parts, about 30 MB — a third of 1080p30', () => {
+        // 266 000 B/s; 532 000 B fragments, 47 per part; 60 fragments -> 2 + init.
         const b = clipStorageBytes(clipPreset('480p30'), 120);
-        expect(b).toBe(31_920_000 + 2 * 35);
+        expect(b).toBe(31_920_000 + 3 * 35);
         expect(formatMB(b)).toBe('30 MB');
-        // Even the server maximum (10:00) fits every in-app limit.
-        expect(clipLimits(clipStorageBytes(clipPreset('480p30'), 600))).toMatchObject({ parts: 7, overParts: false, overDownload: false, overTrim: false });
+        // Even the server maximum (10:00) fits every in-app limit: 300 fragments -> 7 + init.
+        expect(clipLimits(clipPreset('480p30'), 600)).toMatchObject({ parts: 8, overParts: false, overDownload: false, overTrim: false });
     });
 
     it('4K for 10:00 is over BOTH the download and the trim limit, and most of the storage', () => {
+        // 2 270 000 B/s; 4 540 000 B fragments, only 5 fit a part; 300 -> 60 + init.
         const b = clipStorageBytes(clipPreset('2160p30'), 600);
-        expect(b).toBe(1_362_000_000 + 55 * 35);
-        const l = clipLimits(b, 2 * GIB);
-        expect(l).toMatchObject({ parts: 55, overParts: false, overDownload: true, overTrim: true });
+        expect(b).toBe(1_362_000_000 + 61 * 35);
+        const l = clipLimits(clipPreset('2160p30'), 600, 2 * GIB);
+        expect(l).toMatchObject({ parts: 61, overParts: false, overDownload: true, overTrim: true });
         expect(l.quotaShare!).toBeGreaterThan(0.63);
         expect(l.quotaShare!).toBeLessThan(0.64);
     });
 
     it('positive control between the two limits: Native for 10:00 can be downloaded but not trimmed', () => {
-        const l = clipLimits(clipStorageBytes(clipPreset('native'), 600));
-        expect(l).toMatchObject({ parts: 43, overDownload: false, overTrim: true, quotaShare: null });
+        // 1 770 000 B/s; 7 fragments a part; 300 -> 43 + init.
+        const l = clipLimits(clipPreset('native'), 600);
+        expect(l).toMatchObject({ parts: 44, overDownload: false, overTrim: true, quotaShare: null });
     });
 
-    it('flags a clip that needs more parts than a clip reference can carry', () => {
-        const l = clipLimits(clipStorageBytes(clipPreset('2160p30'), 900));
-        expect(l.parts).toBe(82);
-        expect(l.overParts).toBe(true);
-        expect(clipLimits(64 * PART_MAX_PLAINTEXT).overParts).toBe(false);
-        expect(clipLimits(64 * PART_MAX_PLAINTEXT + 1).overParts).toBe(true);
+    it('flags a clip that needs more parts than a clip reference can carry — the init part counts', () => {
+        expect(clipLimits(clipPreset('2160p30'), 900)).toMatchObject({ parts: 91, overParts: true });
+        // The exact edge at 4K: 315 fragments = 63 media parts + init = 64 posts;
+        // one more fragment needs a 65th part and the seal refuses it. Counting
+        // bytes / 24 MiB (no init part, no whole-fragment packing) put this
+        // edge near 11:05 instead of 10:30.
+        expect(clipLimits(clipPreset('2160p30'), 630)).toMatchObject({ parts: CLIP_MAX_PARTS, overParts: false });
+        expect(clipLimits(clipPreset('2160p30'), 632)).toMatchObject({ parts: CLIP_MAX_PARTS + 1, overParts: true });
     });
 
     it('a measured bitrate can be priced too (the composer uses the live kbps)', () => {
-        expect(clipStorageBytes({ videoBitrate: 8_000_000, audioBitrate: 0 }, 60)).toBe(60_000_000 + 3 * 35);
+        // 1 000 000 B/s; 2 000 000 B fragments, 12 a part; 30 -> 3 + init.
+        expect(clipStorageBytes({ videoBitrate: 8_000_000, audioBitrate: 0 }, 60)).toBe(60_000_000 + 4 * 35);
         expect(clipStorageBytes(clipPreset('1080p30'), 0)).toBe(0);
+        expect(clipLimits(clipPreset('1080p30'), 0)).toMatchObject({ bytes: 0, parts: 0, overParts: false });
     });
+});
+
+// ---- the part count is the REAL splitter's -----------------------------------
+// The same rule at 1/1024 scale (24 KiB parts, rates in bytes per second /
+// 1024), run through the Fmp4Splitter the seal uses on a synthetic stream of
+// one fragment per 2 s keyframe interval. If either side changes how it packs,
+// this goes red.
+const enc = new TextEncoder();
+function box(type: string, payloadBytes: number): Uint8Array {
+    const out = new Uint8Array(8 + payloadBytes);
+    new DataView(out.buffer).setUint32(0, out.byteLength);
+    out.set(enc.encode(type), 4);
+    return out;
+}
+function splitterParts(bytesPerSecond: number, seconds: number, budget: number): number {
+    const frag = bytesPerSecond * CLIP_RING_GOP_SECONDS;
+    const parts: SplitPart[] = [];
+    const sp = new Fmp4Splitter(budget, p => parts.push(p));
+    sp.push(box('ftyp', 8));
+    sp.push(box('moov', 0));
+    for (let i = 0; i < Math.ceil(seconds / CLIP_RING_GOP_SECONDS); i++) {
+        sp.push(box('moof', 0));
+        sp.push(box('mdat', frag - 16)); // moof + mdat = exactly one fragment
+    }
+    sp.end();
+    expect(parts[0].isInit).toBe(true);
+    return parts.length;
+}
+
+describe('clipPartCount matches what Fmp4Splitter really produces', () => {
+    const budget = CLIP_PART_PLAIN_BYTES / 1024;
+    // The real presets' rates, scaled: 4K, Native, 1080p30, 480p.
+    for (const bps of [2270, 1770, 766, 266]) {
+        for (const seconds of [2, 60, 120, 600, 630, 632, 900]) {
+            it(`${bps * 1024} B/s for ${seconds} s`, () => {
+                const helper = clipPartCount({ videoBitrate: bps * 8, audioBitrate: 0 }, seconds, budget);
+                expect(helper).toBe(splitterParts(bps, seconds, budget));
+            });
+        }
+    }
 });
 
 describe('ringSecondsFor — the buffer never holds more than the server lets you post', () => {
