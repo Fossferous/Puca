@@ -125,22 +125,23 @@ async function walk(label, page, { x, y, cdp = null }) {
         const cs = getComputedStyle(s);
         const m = document.querySelector('.user-context-menu');
         const sr = s.getBoundingClientRect(), mr = m.getBoundingClientRect();
-        // ServerList.css styles the SERVER menu's submenu with a
-        // --border-separator left border; the user menu's own .ucm-submenu has
-        // a --bg-tertiary one. Compare colours, not widths: both are 2px.
+        // ServerList.css's submenu rule must stay scoped to the server menu
+        // (.server-context-menu .context-submenu). A probe carrying that class
+        // INSIDE the user menu picks up its 2px left border only if the rule
+        // leaks out globally again — which is what re-skinned this menu once.
         const probe = document.createElement('div');
-        probe.style.borderLeft = '2px solid var(--border-separator, #2a2b2f)';
-        document.body.appendChild(probe);
-        const serverListColour = getComputedStyle(probe).borderLeftColor;
+        probe.className = 'context-submenu';
+        m.appendChild(probe);
+        const leakedBorder = getComputedStyle(probe).borderLeftWidth;
         probe.remove();
-        return { borderLeft: cs.borderLeftWidth, borderColour: cs.borderLeftColor, serverListColour, notServerClass: !s.classList.contains('context-submenu'), left: Math.round(sr.left), right: Math.round(sr.right), menuLeft: Math.round(mr.left), menuRight: Math.round(mr.right), scrollLeft: m.scrollLeft };
+        return { leakedBorder, notServerClass: !s.classList.contains('context-submenu'), left: Math.round(sr.left), right: Math.round(sr.right), menuLeft: Math.round(mr.left), menuRight: Math.round(mr.right), scrollLeft: m.scrollLeft };
     });
     check(`${label}: "Move to" opens its list`, !!sub);
     if (!sub) return;
     // Inside the menu's own box, with the menu not shifted sideways: a flyout
     // beside an overflow box is clipped (or drags the whole menu sideways).
     check(`${label}: the opened list sits inside the menu, not beside it`, sub.left >= sub.menuLeft && sub.right <= sub.menuRight && sub.scrollLeft === 0, JSON.stringify(sub));
-    check(`${label}: ServerList.css's submenu border does not leak into the user menu`, sub.notServerClass && (sub.borderLeft === '0px' || sub.borderColour !== sub.serverListColour), `border=${sub.borderLeft} ${sub.borderColour} vs ServerList ${sub.serverListColour}`);
+    check(`${label}: ServerList.css's submenu rule does not leak into the user menu`, sub.notServerClass && sub.leakedBorder === '0px', `probe border-left-width=${sub.leakedBorder}`);
     const lastRoom = { sel: '.ucm-submenu .context-item', idx: -1 };
     p = await page.evaluate(PROBE, lastRoom);
     check(`${label}: the menu is still inside the window with "Move to" open`, inWindow(p), box(p));

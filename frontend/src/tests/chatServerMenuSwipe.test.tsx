@@ -139,4 +139,24 @@ describe('phone: the server icon menu and the panel swipe', () => {
         expect(panel()).toBe(before);
         expect(document.querySelector('.server-context-menu')).not.toBeNull();
     });
+
+    // The member profile popup became a fixed phone SHEET above the bottom
+    // nav (w1-scroll). It closes only on mousedown outside it, and a swipe
+    // makes no mouse events: without the guard the panel changed under it and
+    // left the sheet floating over the next panel (integration review).
+    it('with the member profile sheet open, a swipe leaves the panel (and the sheet) where they are', async () => {
+        h.members = [
+            { id: ME, username: 'me', display_name: null, is_online: true, roles: [], top_role_color: '', is_owner: true, avatar_file_id: null },
+            { id: 2, username: 'bob', display_name: null, is_online: true, roles: [], top_role_color: '', is_owner: false, avatar_file_id: null },
+        ];
+        await mountChat();
+        const bob = [...host!.querySelectorAll<HTMLElement>('.member-item')].find(el => el.textContent?.includes('bob'));
+        expect(bob, 'bob in the member list').toBeTruthy();
+        await act(async () => { bob!.click(); });
+        expect(document.querySelector('.user-profile-popup')).not.toBeNull();
+        const before = panel();
+        await swipeLeft();
+        expect(panel()).toBe(before);
+        expect(document.querySelector('.user-profile-popup')).not.toBeNull();
+    });
 });

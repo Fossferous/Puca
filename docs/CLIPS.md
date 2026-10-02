@@ -197,7 +197,8 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
   reason Play is: a manifest whose parts are not a subset of what was
   actually approved — and above 1 GiB (`CLIP_DOWNLOAD_MAX_BYTES`), because
   on desktop and the web the download is built whole in the renderer's
-  memory. On desktop it is written through the native `attachment_save`
+  memory. The cap also applies to the streamed Android download
+  (`forEachClipPart`), although nothing there would need it. On desktop it is written through the native `attachment_save`
   command (a bare `<a download>` is not honoured in the Tauri webview); on
   the web it is a transient anchor. In the Android app it is STREAMED into
   `Documents/Puca/puca-clip-<id>-<timestamp>.mp4`: one part fetched,
@@ -296,8 +297,9 @@ table (`frontend/src/tests/fixtures/clip-native-encode-table.json`, asserted
 by both `clipNativeEstimate.test.ts` and the Rust test that reads it). With
 *Arm automatically* chosen, every figure is priced at that rate instead of
 the preset's label, and each Quality option adds what it records on this
-monitor (on 1080p, 480p records 24 fps at 8.1 Mbps — no saving over the
-default). The composer's duration chips carry their size (priced
+monitor (on 1080p, 480p records 24 fps at 8.1 Mbps — more than the
+1080p 30 fps default's 6 Mbps, because automatic arming records the whole
+monitor whatever the preset). The composer's duration chips carry their size (priced
 from the ring's measured bytes once 10 s are buffered), and Server Settings'
 *Longest clip* prices each length at the default quality, and its help line
 gives the selected length at the default and at the largest preset. On web

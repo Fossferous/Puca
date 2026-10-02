@@ -1218,8 +1218,11 @@ export function Chat({ onLogout }: ChatProps) {
     const stepPanel = (delta: 1 | -1) => {
         // Open overlays pin the panel. `.server-context-menu` is portaled to
         // <body> (ServerList), so it no longer slides away with the rail: a
-        // swipe under it would leave it floating over the next panel.
-        if (document.querySelector('.modal-overlay, .settings-modal, .paste-preview-modal, .welcome-popup, .user-context-menu, .server-context-menu, .format-menu, .stream-settings-modal')) return;
+        // swipe under it would leave it floating over the next panel. The
+        // member profile popup is the same kind of overlay (a fixed sheet on
+        // phones) and closes only on a mousedown outside it, which a swipe
+        // never makes.
+        if (document.querySelector('.modal-overlay, .settings-modal, .paste-preview-modal, .welcome-popup, .user-context-menu, .server-context-menu, .user-profile-popup, .format-menu, .stream-settings-modal')) return;
         // Devices is a virtual fifth stop after 'members', mirroring its
         // bottom-nav position. It is an overlay FLAG rather than a panel
         // value, so entering and leaving it are side effects here: while it

@@ -729,6 +729,9 @@ cmd_mobile_notes() {
 				# they stop passing it (release-tools.patch), make this a
 				# refusal like --native-min below.
 				[ $# -ge 2 ] && [ -n "$2" ] || { echo "REFUSING: --native-version needs a value (and is ignored anyway: see below)"; exit 2; }
+				# A following flag is not a value: swallowing it as one would
+				# silently drop e.g. --lower-native-min.
+				case "$2" in --*) echo "REFUSING: --native-version needs a value, got the flag '$2'"; exit 2 ;; esac
 				echo "WARNING: --native-version $2 IGNORED. native.version is the newest Notes APK whose NATIVE layer changed,"
 				echo "         recorded as \"latest\" in frontend/notes-app/native-min.json; it rides in $bundle.native-latest."
 				echo "         Passing the release number told every installed Notes app to reinstall after every release."

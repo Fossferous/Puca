@@ -37,6 +37,7 @@ import {
     dismissNudgeFor, downloadPage, getNativePrompt, nativePromptFor, readNudgeDismissal,
     registerNotesUpdateRunner, setNativePrompt, subscribeNativePrompt,
 } from '../model/notesUpdate';
+import { isNewerVersion } from '../../components/updateGate.utils';
 import { CheckCircleIcon, CloseIcon, DownloadIcon, NoteIcon, WarningIcon } from '../../components/Icons';
 import './NotesUpdateGate.css';
 
@@ -212,7 +213,14 @@ export function NotesUpdateGate({ children, native = isMobile() }: NotesUpdateGa
     }
 
     const nudgeVersion = prompt?.kind === 'required' ? prompt.need : prompt?.version;
-    const strip = native && showApp && !screen && prompt && nudgeVersion && nudgeDismissed !== nudgeVersion ? (
+    // A closed 'new app' strip stays closed for that version AND any older
+    // one: the first release after native.version came to mean 'newest app
+    // with a native change' advertises 0.9.827 where 0.9.830 was closed. A
+    // 'required' strip says something different, so it keeps the exact match.
+    const nudgeHidden = !!nudgeDismissed && !!nudgeVersion && (
+        nudgeDismissed === nudgeVersion
+        || (prompt?.kind !== 'required' && !isNewerVersion(nudgeVersion, nudgeDismissed)));
+    const strip = native && showApp && !screen && prompt && nudgeVersion && !nudgeHidden ? (
         <div className="notes-update-strip" role="status">
             <span className="notes-update-strip-text">
                 {prompt.kind === 'required'

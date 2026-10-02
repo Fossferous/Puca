@@ -207,11 +207,13 @@ plugin or permission to the Notes app raises `min` in
 `frontend/notes-app/native-min.json` (vitest and `build-notes-app.mjs` fail
 until its recorded surface matches), and ANY change to the Notes native layer
 fails the same gates until `latest` there is raised with
-`node scripts/notes-native-min.mjs --record-latest <ver>` — `latest` is the
-manifest's `native.version` (the "new app available" nudge, from the bundle's
-`.native-latest`; a `--native-version` flag is ignored with a warning); every `mobile-notes` then publishes that floor, never lower
-than a host already serves, so older APKs prompt for the new install instead of
-applying a bundle they cannot run; `check-versions.sh` FAILS until the page
+`node scripts/notes-native-min.mjs --record-latest <ver>`. Every `mobile-notes`
+publishes the `min` floor, never lower than a host already serves, so older
+APKs prompt for the new install instead of applying a bundle they cannot run.
+`latest` becomes the manifest's `native.version` (the optional "new app
+available" nudge), carried in the bundle's `.native-latest`; it MAY be lower
+than what a host serves today (0.9.831 publishes 0.9.827 where hosts served
+0.9.830), and a `--native-version` flag is ignored with a warning; `check-versions.sh` FAILS until the page
 links an APK at least that new. The download page
 (`deploy/download-site/index.html`) understands `?variant=lite` too, so the
 client's own "no update path" fallback (`api/appVersion.ts`'s
@@ -674,6 +676,10 @@ Do not assume a feature exists because a doc says so — one doc claimed push
 notifications were "fully implemented in `pushNotifications.ts`", a file that
 has never existed.
 
+- **Games (Poker, Blackjack)**: only the pure engine exists
+  (`crates/puca-games`, tested). The server tables, WS frames, permission bit,
+  `games_enabled` and every UI are NOT built — the design is `docs/GAMES.md`
+  (one table per call, server deals, free chips per table).
 - **Push/background delivery** (rewritten three times on 2026-08-13 — read
   `src/wake/mod.rs`'s header before touching it): data NEVER rides a relay.
   Android delivery is `NativeDelivery.java`'s OkHttp socket to the user's own

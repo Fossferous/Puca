@@ -872,6 +872,8 @@ PYEOF
 	check "mobile-notes REFUSES a Notes bundle signed with Púca's key" "$([ $rc -ne 0 ] && [ "$(has "$out" 'does not verify under the key the Púca Notes app embeds')" = 1 ] && [ ! -s "$LOG" ] && echo 1 || echo 0)" "$out"
 	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK" --native-version)"; rc=$?
 	check "mobile-notes REFUSES a --native-version with no value (and does not loop on it)" "$([ $rc -eq 2 ] && [ "$(has "$out" 'REFUSING: --native-version needs a value')" = 1 ] && [ ! -s "$LOG" ] && echo 1 || echo 0)" "rc=$rc $out"
+	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK" --native-version --lower-native-min)"; rc=$?
+	check "mobile-notes REFUSES a --native-version whose 'value' is the next flag (never swallows --lower-native-min)" "$([ $rc -eq 2 ] && [ "$(has "$out" "got the flag '--lower-native-min'")" = 1 ] && [ ! -s "$LOG" ] && echo 1 || echo 0)" "rc=$rc $out"
 	# The floor is not a flag any more: a flag applied to ONE release, and the
 	# next release shipped without it published no floor at all.
 	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK" --native-min 9.9.9)"; rc=$?

@@ -442,8 +442,8 @@ Inside Notes:
   the Púca Notes app from the release after 0.9.826 on.
 - Click a note to open it. Inside, items work exactly as in Tasks: tick,
   edit, add subtasks, drag by the grip (the faint dotted handle at the left
-  of the item) to reorder, or to the right to nest, set a due time
-  from the clock, attach pictures from the paperclip.
+  of the item) to reorder it or drag it to the right to nest it, set a due
+  time from the clock, attach pictures from the paperclip.
 - An item that starts with `## ` is a **heading** — a section title with no
   checkbox, never counted as a step; **Turn into heading** on an item makes
   one, and **Turn into item** turns it back. One that still has a due time

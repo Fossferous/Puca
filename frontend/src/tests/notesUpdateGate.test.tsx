@@ -432,10 +432,14 @@ describe('the APK prompts (the manifest\'s native block)', () => {
     });
 });
 
-describe('a dismissed nudge stays dismissed for that version only', () => {
+describe('a dismissed nudge covers that version and any older one, never a newer one', () => {
     it.each([
         ['99.1.0', false],
         ['99.0.9', true],
+        // The first release after native.version stopped meaning 'the release
+        // number' advertises an OLDER app than before (0.9.830 -> 0.9.827): a
+        // strip closed for 0.9.830 must not come back for 0.9.827.
+        ['99.2.0', false],
     ])('dismissed for %s: strip shown = %s', async (dismissed, shown) => {
         vi.mocked(localStorage.getItem).mockImplementation(k => (k === 'pucaNotesNativeNudgeDismissed' ? dismissed : null));
         h.current = { bundle: { id: 'abc', version: __APP_VERSION__ }, native: '0.9.815' };
@@ -443,6 +447,19 @@ describe('a dismissed nudge stays dismissed for that version only', () => {
         await mountGate();
         await advance(100);
         expect(container.textContent?.includes('is available')).toBe(shown);
+    });
+
+    it("a 'the latest update needs app X' strip is NOT covered by a dismissal of a newer version (exact match only)", async () => {
+        vi.mocked(localStorage.getItem).mockImplementation(k => (k === 'pucaNotesNativeNudgeDismissed' ? '99.2.0' : null));
+        h.current = { bundle: { id: 'abc', version: __APP_VERSION__ }, native: '0.9.815' };
+        serve({ version: __APP_VERSION__, url: BUNDLE, variant: 'notes', native: { min: '99.1.0', version: '99.1.0', download_url: PAGE }, ...SIGNED });
+        await mountGate();
+        await advance(100);
+        const cont = [...container.querySelectorAll('button')].find(b => b.textContent === 'Continue');
+        expect(cont, 'the required screen offers Continue').toBeTruthy();
+        await act(async () => { cont!.click(); });
+        await advance(10);
+        expect(container.textContent).toContain('The latest update needs Púca Notes 99.1.0');
     });
 });
 
