@@ -127,13 +127,21 @@
         font-size: 0.9rem;
     }
 
-    /* Same reservation the voice panel makes (mobile.css): the chat, the
-       rail, the channel sidebar and the checklist drawer end above the bar. */
+    /* Same reservation the voice panel makes (mobile.css): every panel that
+       scrolls ends above the bar - the chat, the rail, the channel sidebar,
+       the checklist drawer, the Members panel and the home (friends / tasks)
+       and Devices dashboards. A panel left out runs on under this z-250 bar,
+       and its last rows can never be scrolled clear of it (at 390x844 the
+       last two members of a long list sat behind it). Pinned by
+       e2e/own-voice-2device.mjs (1b). */
     body:has(.own-voice-banner) .chat-main,
     body:has(.own-voice-banner) .server-list-container,
     body:has(.own-voice-banner) [class*="server-list"],
     body:has(.own-voice-banner) .sidebar,
-    body:has(.own-voice-banner) .checklist-panel {
+    body:has(.own-voice-banner) .checklist-panel,
+    body:has(.own-voice-banner) .member-sidebar,
+    body:has(.own-voice-banner) .friends-dashboard,
+    body:has(.own-voice-banner) .devices-dashboard {
         bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom) + var(--own-voice-banner-h, 120px));
     }
 }

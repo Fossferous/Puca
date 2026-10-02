@@ -5,6 +5,9 @@
 // What it proves, against a REAL backend + the REAL web client:
 //   1. the phone, sitting on the DM home screen, shows the banner while the
 //      PC is in a mesh call (OwnVoiceState reaches every screen);
+//   1b. at 390x844, every panel the phone scrolls (home dashboard, a
+//      server's Members, Devices) ends above the banner, so no row is left
+//      under it - and (3b) above the voice panel once the call is on the phone;
 //   2. Leave on the phone ends the PC's call: the PC's voice panel goes, it
 //      says why, and the server's voice list no longer has the account;
 //   3. Move here on the phone moves a call the second account is in: the PC
@@ -196,6 +199,61 @@ async function bannerGeometry(page, phone) {
     }, phone);
 }
 
+/** The phone's bottom-nav tab with this label. */
+const navTab = (page, label) => page.locator('.mobile-bottom-nav .mobile-nav-btn', { hasText: label }).first();
+
+/**
+ * On the phone, the panel `panelSel` ends at or above the top of the fixed
+ * overlay `overlaySel` (the own-voice banner or the voice panel, both z-250
+ * over every panel). A scroller that runs on under the overlay has rows that
+ * cannot be scrolled clear of it - at 390x844 the last two members of a long
+ * list sat behind the banner. Both must exist, or the check proves nothing.
+ */
+async function panelClearOf(page, panelSel, overlaySel) {
+    return page.evaluate(({ panelSel, overlaySel }) => {
+        const panel = document.querySelector(panelSel);
+        const overlay = document.querySelector(overlaySel);
+        if (!panel || !overlay) return { ok: false, why: `missing ${!panel ? panelSel : overlaySel}` };
+        const bottom = panel.getBoundingClientRect().bottom;
+        const top = overlay.getBoundingClientRect().top;
+        return { ok: top > 0 && bottom <= top + 0.5, panelBottom: Math.round(bottom), overlayTop: Math.round(top) };
+    }, { panelSel, overlaySel });
+}
+
+/**
+ * Walk the phone through the panels that scroll under a bottom overlay -
+ * home (the friends/tasks dashboard), a server's Members panel, and Devices -
+ * checking each ends above it, then go back to the home screen. `tag` names
+ * the overlay in the check lines.
+ */
+async function phonePanelsClear(phone, srvName, overlaySel, tag) {
+    await navTab(phone, 'Chat').tap();
+    await sleep(500);
+    const home = await panelClearOf(phone, '.friends-dashboard', overlaySel);
+    check(`phone home dashboard ends above the ${tag}`, home.ok, JSON.stringify(home));
+    await openServer(phone, srvName, true);
+    await navTab(phone, 'Members').tap();
+    await sleep(600);
+    const members = await panelClearOf(phone, '.member-sidebar', overlaySel);
+    check(`phone Members panel ends above the ${tag} (its last rows can be scrolled clear)`, members.ok, JSON.stringify(members));
+    await phone.screenshot({ path: path.join(OUT, `phone-members-${tag.replace(/\W+/g, '-')}.png`) });
+    if (await navTab(phone, 'Devices').count()) {
+        await navTab(phone, 'Devices').tap();
+        // A lazily loaded view: the first open waits for its chunk.
+        await until(async () => (await phone.locator('.devices-dashboard').count()) > 0, 15000);
+        await sleep(400);
+        const devices = await panelClearOf(phone, '.devices-dashboard', overlaySel);
+        check(`phone Devices view ends above the ${tag}`, devices.ok, JSON.stringify(devices));
+    } else {
+        console.log('SKIP  Devices panel (no Devices tab: a Lite build)');
+    }
+    // Back to the DM home screen, where every later step expects the phone.
+    await navTab(phone, 'Servers').tap();
+    await sleep(400);
+    await phone.locator('.server-icon.home-button').tap();
+    await sleep(800);
+}
+
 try {
     const pcCtx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     // Step 7's "sleep": every socket the PC opens to the API is remembered,
@@ -254,6 +312,9 @@ try {
     check('banner at 390x844: in view, above the nav, 44px buttons that a tap hits, no sideways scroll', g1.ok, JSON.stringify(g1));
     await phone.screenshot({ path: path.join(OUT, 'phone-banner-home.png') });
     check('the PC itself shows no banner (the call is here)', !(await banner(pc).isVisible()));
+    // 1b. Nothing the phone scrolls runs on under the banner.
+    await phonePanelsClear(phone, srvName, '.own-voice-banner', 'banner');
+    check('phone back on the home screen, banner still up', await banner(phone).isVisible());
 
     // ── 2. Leave on the phone ends the PC's call.
     await banner(phone).getByRole('button', { name: 'Leave' }).tap();
@@ -282,13 +343,23 @@ try {
         return m && m.connection === 'connected' && before && m.connId !== before.connId ? m : null;
     }, 30000, 500);
     check('B\'s mesh peer for the account is connected again, on a NEW connection (the phone)', !!after, JSON.stringify(after));
-    const a1 = after?.audioIn ?? 0;
+    // The first bytes, read on THAT connection: `after` resolves at the first
+    // poll that sees it connected, which can land in the ~100 ms before its
+    // first packet is counted (measured: "connected 0" at one 100 ms sample,
+    // 532 bytes at the next) - so reading a1 off `after` failed at random.
+    const a1 = (after && await until(async () => {
+        const m = await meshPeer(b, A);
+        return m && m.connId === after.connId && m.audioIn > 0 ? m.audioIn : null;
+    }, 10000, 100)) || 0;
     await sleep(3000);
     const a2 = (await meshPeer(b, A))?.audioIn ?? 0;
     check('...and audio packets from the phone keep arriving at B (getStats, nothing played)', a2 > a1 && a1 > 0, `${a1} -> ${a2}`);
     const v3 = occupants(await voiceList(b, srv.id), lounge.id, A);
     check('server voice list: the account is in Lounge exactly once', v3.n === 1, v3.json);
     check('B is still in the call', await inCall(b).isVisible());
+    // 3b. The phone is in the call now: nothing it scrolls runs on under its voice panel.
+    await phonePanelsClear(phone, srvName, '.voice-panel-compact', 'voice panel');
+    check('phone still in the call after walking its panels', await inCall(phone).isVisible());
 
     // ── 4. The desktop banner, and Move here back to the PC.
     const deskBanner = await until(() => banner(pc).isVisible(), 10000);

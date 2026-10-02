@@ -272,14 +272,20 @@
         bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom) + var(--mobile-voice-panel-h, 172px));
     }
 
-    /* Same reservation for the rail, channel sidebar, and checklist drawer —
+    /* Same reservation for the rail, channel sidebar, checklist drawer,
+       Members panel and the home (friends / tasks) and Devices dashboards —
        their bottom-docked actions (Notes/Join/Create on the rail, the profile
-       bar in the sidebar) and long task lists are otherwise covered by the
-       z-250 voice panel and unreachable while voice is connected. */
+       bar in the sidebar) and the ends of long lists (tasks, members, devices)
+       are otherwise covered by the z-250 voice panel and unreachable while
+       voice is connected. OwnVoiceBanner.css makes the same list for the
+       banner; keep the two in step (e2e/own-voice-2device.mjs 1b / 3b). */
     body:has(.voice-panel-compact) .server-list-container,
     body:has(.voice-panel-compact) [class*="server-list"],
     body:has(.voice-panel-compact) .sidebar,
-    body:has(.voice-panel-compact) .checklist-panel {
+    body:has(.voice-panel-compact) .checklist-panel,
+    body:has(.voice-panel-compact) .member-sidebar,
+    body:has(.voice-panel-compact) .friends-dashboard,
+    body:has(.voice-panel-compact) .devices-dashboard {
         bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom) + var(--mobile-voice-panel-h, 172px));
     }
 
