@@ -26,8 +26,7 @@ const rosters = (r: Record<number, number[]>) => (channelId: number) =>
     (r[channelId] ?? []).map(id => ({ id }));
 
 describe('userMenuVoiceModeration', () => {
-    it('member in a voice channel the viewer is NOT in: offered, aimed at THEIR channel', () => {
-        // The viewer (7) is in no call at all.
+    it('member in a voice channel: offered, aimed at THEIR channel', () => {
         const v = userMenuVoiceModeration({
             userId: MEMBER, channels, canMoveVoiceMembers: true,
             rosterOf: rosters({ [gaming.id]: [MEMBER] }),
@@ -37,7 +36,11 @@ describe('userMenuVoiceModeration', () => {
         expect(v.targets.map(c => c.id)).toEqual([lounge.id, afk.id]);
     });
 
-    it('viewer in a DIFFERENT voice channel: still offered', () => {
+    // The helper takes no viewer input at all, by design; that the MEMBER LIST
+    // reaches it whatever call the viewer is in is pinned through the real Chat
+    // in chatMemberListVoiceModeration.test.tsx. This case pins only that the
+    // search matches the member, not whoever sits in the first voice channel.
+    it('someone else in an earlier voice channel does not mislocate the member', () => {
         const v = userMenuVoiceModeration({
             userId: MEMBER, channels, canMoveVoiceMembers: true,
             rosterOf: rosters({ [lounge.id]: [7], [gaming.id]: [MEMBER] }),

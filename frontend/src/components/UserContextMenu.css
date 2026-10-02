@@ -54,6 +54,15 @@
     text-align: left;
 }
 
+/* A label with no break opportunity (a long unspaced channel or user name)
+   wraps inside the menu instead of widening it: with no `overflow: hidden` on
+   the menu any more, it would otherwise make the menu scroll sideways. Scoped
+   to this menu so other menus' rows keep their own rules. */
+.user-context-menu .context-item {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
 .context-item:hover {
     background: rgba(137, 180, 250, 0.15);
 }

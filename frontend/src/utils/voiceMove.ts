@@ -68,10 +68,10 @@ export function canMoveVoiceMember(
  * to" submenu. Empty when they are in AFK — which is exactly the case that must
  * offer no destinations at all rather than a list that every click rejects.
  */
-export function voiceMoveTargets(
-    channels: VoiceMoveChannel[],
+export function voiceMoveTargets<C extends VoiceMoveChannel>(
+    channels: readonly C[],
     from: VoiceMoveChannel,
-): VoiceMoveChannel[] {
+): C[] {
     return channels.filter(c => canMoveVoiceMember(from, c).ok);
 }
 
@@ -108,7 +108,7 @@ export function userMenuVoiceModeration<C extends VoiceMoveChannel>(opts: {
         voiceChannel,
         canMoveMembers: opts.canMoveVoiceMembers,
         targets: opts.canMoveVoiceMembers
-            ? opts.channels.filter(c => c.channel_type === 1 && canMoveVoiceMember(voiceChannel, c).ok)
+            ? voiceMoveTargets(opts.channels.filter(c => c.channel_type === 1), voiceChannel)
             : [],
     };
 }

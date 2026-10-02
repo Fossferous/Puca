@@ -1189,7 +1189,10 @@ export function Chat({ onLogout }: ChatProps) {
         setMobilePanel(next);
     };
     const stepPanel = (delta: 1 | -1) => {
-        if (document.querySelector('.modal-overlay, .settings-modal, .paste-preview-modal, .welcome-popup, .user-context-menu, .format-menu, .stream-settings-modal')) return;
+        // Open overlays pin the panel. `.server-context-menu` is portaled to
+        // <body> (ServerList), so it no longer slides away with the rail: a
+        // swipe under it would leave it floating over the next panel.
+        if (document.querySelector('.modal-overlay, .settings-modal, .paste-preview-modal, .welcome-popup, .user-context-menu, .server-context-menu, .format-menu, .stream-settings-modal')) return;
         // Devices is a virtual fifth stop after 'members', mirroring its
         // bottom-nav position. It is an overlay FLAG rather than a panel
         // value, so entering and leaving it are side effects here: while it
@@ -4399,11 +4402,12 @@ export function Chat({ onLogout }: ChatProps) {
                     canModerate={currentServer?.owner_id === currentUser?.sub}
                     onReport={currentServer && userContextMenuTarget.userId !== currentUserId
                         ? () => setReportTarget({
-                            // A voice participant is reported to the server whose
-                            // call they are in, which is not always the server
-                            // being viewed; the report route now checks the
-                            // reported user is a member of the named server.
-                            serverId: userContextMenuVoiceChannel?.server_id || currentServer.id,
+                            // Reported to the server being viewed. (The voice
+                            // channel found above always belongs to it, so it
+                            // never named another server; a stage tile for a
+                            // call elsewhere still lands here. The report route
+                            // checks the reported user is a member of it.)
+                            serverId: currentServer.id,
                             userId: userContextMenuTarget.userId,
                             username: userContextMenuTarget.username,
                         })

@@ -30,6 +30,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
+/** A voice channel name with no break opportunity anywhere in it. */
+const LONG_NAME = 'TheVeryLongVoiceChannelNameWithoutAnySpacesAtAll_x';
 const entry = `
 import './index.css';
 import './mobile.css';
@@ -65,6 +67,10 @@ function App() {
                         { id: 11, name: 'General voice' },
                         { id: 12, name: 'AFK', isAfk: true },
                         { id: 13, name: 'Gaming' },
+                        // A channel name with no break opportunity (names are
+                        // capped at 100 bytes, nothing about spaces): it must
+                        // wrap inside the menu, not make it scroll sideways.
+                        { id: 14, name: ${JSON.stringify(LONG_NAME)} },
                     ]}
                     availableRoles={mount.roles ? [
                         { id: 21, name: 'Moderator', color: '#f9e2af' },
@@ -242,7 +248,7 @@ async function menuBox(page, sel) {
 }
 
 const MENU = '.user-context-menu';
-const TARGETS = ['General voice', 'AFK', 'Gaming'];
+const TARGETS = ['General voice', 'AFK', 'Gaming', LONG_NAME];
 const PHONE = { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3 };
 const SURFACES = [
     // The triage's own coordinates: a right-click on a sidebar voice row.
@@ -288,6 +294,13 @@ for (const s of SURFACES) {
         return { scrollWidth: el.scrollWidth, clientWidth: el.clientWidth };
     }, MENU);
     ck(sideways.scrollWidth <= sideways.clientWidth, `${s.name}: nothing in the menu overflows sideways`, JSON.stringify(sideways));
+    // ...and the long name is wrapped, whole, inside its own row rather than
+    // clipped (the row's text must not overflow the row).
+    const longRow = await page.evaluate(([sel, name]) => {
+        const el = window.__rigFind(sel, name, 'button');
+        return el ? { scrollWidth: el.scrollWidth, clientWidth: el.clientWidth, height: Math.round(el.getBoundingClientRect().height) } : null;
+    }, [MENU, LONG_NAME]);
+    ck(!!longRow && longRow.scrollWidth <= longRow.clientWidth, `${s.name}: the long channel name wraps inside its row`, JSON.stringify(longRow));
 
     // A real press on a listed channel moves the member there.
     await page.evaluate(() => { window.__log.length = 0; });
