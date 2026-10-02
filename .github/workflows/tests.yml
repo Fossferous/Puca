@@ -303,6 +303,15 @@ jobs:
 
       - name: Rust unit + integration tests
         run: cargo test --release -- --test-threads=1
+      # sqlx caches a prepared statement per connection keyed by the SQL TEXT
+      # alone, so one text bound as i32 here and i64 there fails with 22P03 /
+      # 08P01 on whichever runs second on a pooled connection - intermittent,
+      # invisible to every test above, and shipped three times (device-token
+      # cold boot, SFU join after a channel edit, task-events viewers). The check
+      # asks rustc for each .bind() argument's type, in a temp copy of the crate,
+      # and plants a known pair so it cannot pass while blind.
+      - name: One bind type per SQL text (sqlx statement cache)
+        run: python3 scripts/check-sql-bind-types.py
 
       - name: API regression sweep (feature-flows)
         working-directory: frontend

@@ -323,6 +323,7 @@ migration.
 ```bash
 cd frontend && npm run typecheck && npx vitest run && npm run build && npm run lint
 cargo test                                   # repo root
+python3 scripts/check-sql-bind-types.py     # one SQL text, one bind type per parameter (sqlx caches statements by TEXT: a second width is an intermittent 22P03/08P01 in production). Asks rustc for every .bind() type; ~35 s; also in CI
 cd frontend/android && ./gradlew testDebugUnitTest    # the pure-Java logic
 cd frontend/notes-app/android && ./gradlew testDebugUnitTest   # Púca Notes' pure-Java logic (reminder plan/merge, token rule, geofence parity with Púca); needs a cap sync first (npm run notes:android) and ANDROID_HOME
 cd frontend/notes-app/android && ./gradlew :app:connectedDebugAndroidTest   # on a HEADLESS emulator (-no-window -no-audio): the bridge-typing test the JVM cannot reach (PluginArgsBridgeTest)
