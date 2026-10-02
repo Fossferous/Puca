@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import {
     subscribeToStreamState,
     getSelectedStreams,
@@ -38,6 +38,7 @@ import {
 } from '../api/remoteControl';
 import { isMobile, isTauri, RC_ENABLED } from '../api/platform';
 import { outputGain, applyOutputDevice, applyOutputDeviceToContext } from './settingsStore';
+import { claimStageAudio } from './streamAudioRouting';
 import { requestShareQualityPanel } from '../api/rtc/shareHealthLive';
 import { sfuManager } from '../api/rtc/sfuManager';
 import { useStreamStore } from '../stores/streamStore';
@@ -528,6 +529,26 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
             graphs.clear();
             audioCtxRef.current?.close().catch(() => { /* already closed */ });
             audioCtxRef.current = null;
+        };
+    }, []);
+
+    // While this stage is mounted its graph is THE stream audio path, and
+    // StreamAudioHost (always mounted, at Chat level) goes silent — one
+    // audible path per stream (streamAudioRouting.ts). Claimed in a LAYOUT
+    // effect, before any passive effect can build a graph; released in a
+    // PASSIVE cleanup declared AFTER the teardown above, so on unmount the
+    // graph is disconnected before the host unmutes. Both setups claim only
+    // if no claim is held, so StrictMode's simulated unmount/remount ends
+    // with exactly one claim whichever order it re-runs the two in.
+    const stageAudioRelease = useRef<(() => void) | null>(null);
+    useLayoutEffect(() => {
+        if (!stageAudioRelease.current) stageAudioRelease.current = claimStageAudio();
+    }, []);
+    useEffect(() => {
+        if (!stageAudioRelease.current) stageAudioRelease.current = claimStageAudio();
+        return () => {
+            stageAudioRelease.current?.();
+            stageAudioRelease.current = null;
         };
     }, []);
 

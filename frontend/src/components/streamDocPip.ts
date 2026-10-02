@@ -51,6 +51,41 @@ export function togglePopped(list: number[], id: number, multi: boolean): number
     return multi ? [...list, id] : [id];
 }
 
+/** What the in-app float (StreamPip) shows while streams are popped out. */
+export interface InAppPipPlan {
+    /** The stream the float binds and names; null = none (nothing watched,
+     *  or every watched stream is in the OS window). */
+    show: number | null;
+    /** Keep the float MOUNTED but invisible. */
+    hidden: boolean;
+}
+
+/**
+ * The float never shows a stream that is in the OS window — on every engine
+ * that puts the stream in a SEPARATE window: the Doc-PiP grid, element PiP
+ * ('standard') and Safari's 'webkit'. It shows the first watched stream that
+ * is NOT popped, and hides only when every watched stream is popped.
+ *
+ * Before this the rule was `usingDocPip && popped.length > 0`: the single-
+ * video engines never hid the float (the same stream on screen twice), and
+ * the grid hid it as soon as ANY stream was popped — so a watched stream that
+ * was NOT popped was on screen nowhere.
+ *
+ * 'native' (the Android app) is left as it was: PipActivity floats the whole
+ * WebView with a full-viewport host over the page, so the docked strip is
+ * never what that window shows. null (no PiP at all) cannot have pops.
+ */
+export function inAppPipPlan(
+    selected: readonly number[],
+    popped: readonly number[],
+    mode: PopoutMode | null,
+): InAppPipPlan {
+    if (selected.length === 0) return { show: null, hidden: false };
+    if (mode === 'native' || mode === null) return { show: selected[0], hidden: false };
+    const free = selected.find(id => !popped.includes(id));
+    return free === undefined ? { show: null, hidden: true } : { show: free, hidden: false };
+}
+
 /**
  * Give the Doc-PiP document the app's styling: clone every <style> and
  * stylesheet <link> into its head. The window is same-origin and same-realm,

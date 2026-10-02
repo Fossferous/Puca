@@ -131,8 +131,10 @@ import { AllChecklistsView } from './AllChecklistsView';
 import { StreamPip } from './StreamPip';
 import { StreamPopout } from './StreamPopout';
 import { StreamDocPipWindow } from './StreamDocPipWindow';
-import { docPipSupported, popoutMode, togglePopped } from './streamDocPip';
-import { primePipSupport } from './streamPopout.utils';
+import { StreamAudioHost } from './StreamAudioHost';
+import { docPipSupported, popoutMode, togglePopped, type PopoutMode } from './streamDocPip';
+import { logPipDiag } from '../api/pipDiag';
+import { pipEngine, primePipSupport } from './streamPopout.utils';
 import {
     HomeIcon, ChannelsIcon, ChatIcon, MembersIcon, TasksIcon, MonitorIcon,
     HashIcon, ChecklistIcon, FolderIcon, NoteIcon, MessageIcon, CrownIcon,
@@ -1110,6 +1112,10 @@ export function Chat({ onLogout }: ChatProps) {
     const [poppedStreams, setPoppedStreams] = useState<number[]>([]);
     const [docPipFailed, setDocPipFailed] = useState(false);
     const usingDocPip = !docPipFailed && popoutMode() === 'docpip';
+    // The engine actually in use — after a Doc-PiP fallback that is the
+    // element engine. The in-app float reads it to know which streams the
+    // OS window is showing (inAppPipPlan), on EVERY engine, not just the grid.
+    const activePopoutMode: PopoutMode | null = usingDocPip ? 'docpip' : pipEngine();
     const togglePopout = useCallback((userId: number) => {
         setPoppedStreams(prev => togglePopped(prev, userId, !docPipFailed && popoutMode() === 'docpip'));
     }, [docPipFailed]);
@@ -1118,10 +1124,15 @@ export function Chat({ onLogout }: ChatProps) {
     // any stream tile exists. A no-op on every other platform. The [doc-pip]
     // line is the W4 spike's field answer: whether THIS embedder (WebView2 /
     // a browser) implements documentPictureInPicture is not documented
-    // anywhere — the log on the real machine is the measurement.
+    // anywhere — the log on the real machine is the measurement. It goes
+    // through logPipDiag, i.e. into puca.log on the desktop: as a bare
+    // console.info it never left the WebView, and release builds keep no
+    // WebView console, so the measurement was never readable. After the
+    // native probe, so the element engine it names is the settled one.
     useEffect(() => {
-        void primePipSupport();
-        console.info(`[doc-pip] documentPictureInPicture is ${docPipSupported() ? 'AVAILABLE' : 'absent'} in this runtime`);
+        void primePipSupport().catch(() => false).then(() => {
+            logPipDiag(`[doc-pip] documentPictureInPicture is ${docPipSupported() ? 'AVAILABLE' : 'absent'} in this runtime; element PiP engine: ${pipEngine() ?? 'none'}`);
+        });
     }, []);
     // A stream that ENDS must leave the popped set: nothing else clears it,
     // and the always-on-top window otherwise sits holding frozen tiles for
@@ -5245,8 +5256,9 @@ export function Chat({ onLogout }: ChatProps) {
                     desktop) is mouse-only and floated over the composer and
                     voice bar on phones; docked, the video reserves its own row
                     so you can watch, read replies and type at the same time.
-                    Same component either way — it is the chat-view audio path,
-                    and only ONE instance ever mounts (isMobile picks which). */}
+                    Same component either way (picture only — stream audio is
+                    StreamAudioHost's), and only ONE instance ever mounts
+                    (isMobile picks which). */}
                 {isMobile && showPip && viewMode === 'chat' && (
                     <StreamPip
                         docked
@@ -5263,7 +5275,10 @@ export function Chat({ onLogout }: ChatProps) {
                         }}
                         poppedStreams={poppedStreams}
                         onTogglePopout={togglePopout}
-                        hidden={usingDocPip && poppedStreams.length > 0}
+                        // Never shows a stream that is in the OS window, on
+                        // any engine; hidden (row collapsed) only when every
+                        // watched stream is out there.
+                        popoutMode={activePopoutMode}
                     />
                 )}
 
@@ -6291,14 +6306,22 @@ export function Chat({ onLogout }: ChatProps) {
                     onClose={() => setShowPip(false)}
                     poppedStreams={poppedStreams}
                     onTogglePopout={togglePopout}
-                    // While the Doc-PiP grid is up the in-app float would be a
-                    // redundant SECOND copy of the same streams — but its
-                    // <video> is the chat-view AUDIO PATH, so it stays MOUNTED
-                    // and merely invisible. Unmounting it silences every
-                    // stream the moment the grid opens.
-                    hidden={usingDocPip && poppedStreams.length > 0}
+                    // The float never shows a stream that is in the OS window
+                    // (grid, element PiP or webkit): it shows the next watched
+                    // stream, and goes invisible only when every one is out
+                    // there. It is picture only — audio is the host below.
+                    popoutMode={activePopoutMode}
                 />
             )}
+
+            {/* Stream AUDIO outside the stage: every watched stream, once,
+                wherever you are (chat, the voice view, Notes, a DM). Like the
+                popout host below it is NOT behind any viewMode gate — the
+                float voiced only the first stream, and the voice view with
+                the float up mounted no audio path at all. Silent while
+                StreamStage is mounted: its graph owns stream audio then
+                (streamAudioRouting.ts). */}
+            <StreamAudioHost />
 
             {/* OS-level picture-in-picture host. Deliberately a SIBLING of the
                 block above and NOT behind any viewMode gate: StreamStage and

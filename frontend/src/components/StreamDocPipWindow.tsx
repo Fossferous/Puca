@@ -4,10 +4,10 @@
  * portal renders into the PiP document, so MediaStreams and voiceState
  * subscriptions just work; nothing is serialized or re-negotiated.
  *
- * AUDIO OWNERSHIP IS UNCHANGED: every tile's <video> is hard-MUTED. The
- * chat-view audio path is StreamPip's element (kept mounted, hidden, by
- * Chat) and the stream view's is StreamStage's graph — a second audible
- * element here would double every stream's audio.
+ * AUDIO OWNERSHIP IS UNCHANGED: every tile's <video> is hard-MUTED. Stream
+ * audio is StreamStage's graph while the stage is mounted and
+ * StreamAudioHost's everywhere else (streamAudioRouting.ts) — a second
+ * audible element here would double every stream's audio.
  *
  * Lifecycle: `requestWindow` runs in the mount effect — inside the click's
  * transient-activation window, which is why Chat mounts this synchronously
@@ -23,6 +23,7 @@ import { getStreamData, subscribeToStreamState } from './voiceState';
 import { copyStyleSheetsInto } from './streamDocPip';
 import { CloseIcon } from './Icons';
 import { installBackgroundResumeAll } from './deviceStageResume';
+import { describePipError, logPipDiag } from '../api/pipDiag';
 
 interface DocPipWindowApi {
     documentPictureInPicture?: {
@@ -91,11 +92,21 @@ export function StreamDocPipWindow({ userIds, onCloseOne, onCloseAll, onFallback
         let cancelled = false;
         const api = (window as DocPipWindowApi).documentPictureInPicture;
         if (!api?.requestWindow) {
+            logPipDiag('[doc-pip] requestWindow unavailable at click; falling back to element PiP');
             cbRef.current.onFallback();
             return;
         }
         if (!winPromiseRef.current) {
             winPromiseRef.current = api.requestWindow({ width: 520, height: 340 });
+            // The field answer to "does THIS shell's Doc PiP actually work?"
+            // — logged once per request, where the request is made, so the
+            // StrictMode re-run (which reuses the promise) cannot double it.
+            // An API that exists but rejects is exactly the case the startup
+            // line alone cannot see.
+            winPromiseRef.current.then(
+                () => logPipDiag('[doc-pip] requestWindow ok'),
+                err => logPipDiag(`[doc-pip] requestWindow rejected: ${describePipError(err)}`),
+            );
         }
         winPromiseRef.current
             .then(w => {

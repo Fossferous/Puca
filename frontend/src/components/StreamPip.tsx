@@ -7,11 +7,6 @@ import {
     getCurrentStreamingUserId,
 } from './voiceState';
 import {
-    getStreamVolumes,
-    getStreamMutes,
-    DEFAULT_STREAM_VOLUME,
-} from './streamVolumeStore';
-import {
     requestControl,
     stopControlling,
     subscribeControl,
@@ -23,9 +18,8 @@ import {
 } from './Icons';
 import './StreamPip.css';
 import { installBackgroundResumeAll } from './deviceStageResume';
-import { applyOutputDevice, outputGain } from './settingsStore';
 import { pipSupported } from './streamPopout.utils';
-import { docPipSupported } from './streamDocPip';
+import { docPipSupported, inAppPipPlan, type PopoutMode } from './streamDocPip';
 
 interface StreamPipProps {
     onExpand: () => void;
@@ -47,13 +41,16 @@ interface StreamPipProps {
      *  at most one), and the toggle. Optional: absent → no control. */
     poppedStreams?: number[];
     onTogglePopout?: (userId: number) => void;
-    /** Keep the element (it is the chat-view AUDIO path) but show nothing —
-     *  the Doc-PiP grid is on screen and a second visible copy is noise.
-     *  visibility, not display: a display:none <video> can pause playback. */
-    hidden?: boolean;
+    /** The popout engine Chat is actually using (after any Doc-PiP
+     *  fallback). Decides, with poppedStreams, which stream this float may
+     *  show: never one that is in the OS window (inAppPipPlan). When every
+     *  watched stream is out there the float stays MOUNTED but invisible —
+     *  visibility, not display: a display:none <video> can pause, and the
+     *  float must come straight back when the OS window closes. */
+    popoutMode?: PopoutMode | null;
 }
 
-export function StreamPip({ onExpand, onClose, docked = false, onStopWatching, poppedStreams = [], onTogglePopout, hidden = false }: StreamPipProps) {
+export function StreamPip({ onExpand, onClose, docked = false, onStopWatching, poppedStreams = [], onTogglePopout, popoutMode = null }: StreamPipProps) {
     const [selectedStreams, setSelectedStreams] = useState<number[]>([]);
     const [position, setPosition] = useState({ x: window.innerWidth - 420, y: window.innerHeight - 280 });
     const [size, setSize] = useState({ width: 400, height: 250 });
@@ -63,9 +60,6 @@ export function StreamPip({ onExpand, onClose, docked = false, onStopWatching, p
     const [control, setControl] = useState<ControlState>(getControlState);
     const videoRef = useRef<HTMLVideoElement>(null);
     const pipRef = useRef<HTMLDivElement>(null);
-    // The <video> that has reached Settings > Output Device. Any other one is
-    // held muted: autoPlay starts a bound stream at once, on the OS default.
-    const [routedVideo, setRoutedVideo] = useState<HTMLVideoElement | null>(null);
 
     useEffect(() => subscribeControl(setControl), []);
 
@@ -84,73 +78,31 @@ export function StreamPip({ onExpand, onClose, docked = false, onStopWatching, p
         return subscribeToStreamState(update);
     }, [onClose]);
 
-    // PiP is the audible stream path in chat view (see the audio effect
-    // below), so it follows Output Device like voice and StreamStage: routed
-    // as the element mounts (it only exists while a stream is selected),
-    // re-routed when Settings change or the chosen device leaves and returns.
-    // Before this it always played on the OS default.
-    const hasVideo = selectedStreams.length > 0;
+    // Which stream to show: never one that is in the OS window.
+    const plan = inAppPipPlan(selectedStreams, poppedStreams, popoutMode);
+    const shown = plan.show;
+
+    // Attach the shown stream to the video. Nothing shown (every watched
+    // stream is in the OS window) unbinds it: an invisible float has no
+    // business composing frames of a stream another window is showing.
     useEffect(() => {
         const video = videoRef.current;
-        if (!hasVideo || !video) return;
-        let live = true;
-        const reroute = () => {
-            void applyOutputDevice(video).then(() => { if (live) setRoutedVideo(video); });
-        };
-        reroute();
-        window.addEventListener('settingsChanged', reroute);
-        navigator.mediaDevices?.addEventListener?.('devicechange', reroute);
-        return () => {
-            live = false;
-            window.removeEventListener('settingsChanged', reroute);
-            navigator.mediaDevices?.removeEventListener?.('devicechange', reroute);
-        };
-    }, [hasVideo]);
-
-    // Attach stream to video
-    useEffect(() => {
-        if (selectedStreams.length > 0 && videoRef.current) {
-            const userId = selectedStreams[0]; // Show first selected stream
-            const data = getStreamData(userId);
-            if (data?.stream && videoRef.current.srcObject !== data.stream) {
-                videoRef.current.srcObject = data.stream;
-                videoRef.current.play().catch(err => console.warn('PiP video play failed:', err));
-            }
+        if (!video) return;
+        if (shown === null) {
+            if (video.srcObject) video.srcObject = null;
+            return;
         }
-    }, [selectedStreams]);
+        const stream = getStreamData(shown)?.stream;
+        if (stream && video.srcObject !== stream) {
+            video.srcObject = stream;
+            video.play().catch(err => console.warn('PiP video play failed:', err));
+        }
+    }, [selectedStreams, shown]);
 
     // Android/iOS pause the <video> when the app backgrounds and never
     // un-pause it; the bind effect above only acts on stream identity, so a
     // returned PiP froze on its last frame. Same fix as the stages.
     useEffect(() => installBackgroundResumeAll(() => [videoRef.current]), []);
-
-    // PiP owns stream-audio playback while it's up: StreamStage (the Web Audio
-    // gain graph) is UNMOUNTED in chat view — before this, PiP viewers had NO
-    // audio path at all (video hard-muted + no graph = silent game audio every
-    // time you tabbed back to chat). StreamStage and PiP never render
-    // simultaneously (viewMode), so this can't double up. Element audio only —
-    // volume caps at 100% here; boost/attenuation live in the full stream view.
-    // Deafen does not reach here on purpose (see StreamStage's graph comment):
-    // per-stream mute is the way to silence a stream.
-    // Master Output Volume applies here as on every other stream path
-    // (StreamStage's gainFor): it used to be skipped, so turning it down left
-    // a stream watched from chat at full volume. Re-applied on settingsChanged
-    // so a change reaches a PiP that is already playing.
-    useEffect(() => {
-        const video = videoRef.current;
-        if (!video || selectedStreams.length === 0) return;
-        const userId = selectedStreams[0];
-        const apply = () => {
-            const own = userId === getCurrentStreamingUserId();
-            const muted = own || !!getStreamMutes()[userId];
-            video.muted = muted || routedVideo !== video;
-            const level = ((getStreamVolumes()[userId] ?? DEFAULT_STREAM_VOLUME) / 100) * outputGain();
-            video.volume = Math.min(Math.max(level, 0), 1);
-        };
-        apply();
-        window.addEventListener('settingsChanged', apply);
-        return () => window.removeEventListener('settingsChanged', apply);
-    }, [selectedStreams, routedVideo]);
 
     // Handle dragging
     const handleMouseDown = (e: React.MouseEvent) => {
@@ -198,7 +150,8 @@ export function StreamPip({ onExpand, onClose, docked = false, onStopWatching, p
 
     if (selectedStreams.length === 0) return null;
 
-    const primaryUserId = selectedStreams[0];
+    const hidden = plan.hidden;
+    const primaryUserId = shown ?? selectedStreams[0];
     const primaryData = getStreamData(primaryUserId);
 
     return (
@@ -292,13 +245,16 @@ export function StreamPip({ onExpand, onClose, docked = false, onStopWatching, p
                 </div>
             </div>
 
-            {/* Video — NOT hard-muted: PiP is the only audio path while the full
-                stream view is closed (muted/volume driven by the effect above).
-                Docked, the video itself is the big tap target for "expand". */}
+            {/* Video — PICTURE ONLY, hard-muted. Stream audio outside the
+                stage is StreamAudioHost's, which plays EVERY watched stream
+                (this element used to voice the first one alone, and nothing
+                at all where the float was not mounted). Docked, the video
+                itself is the big tap target for "expand". */}
             <video
                 ref={videoRef}
                 autoPlay
                 playsInline
+                muted
                 className="pip-video"
                 onClick={docked ? onExpand : undefined}
             />

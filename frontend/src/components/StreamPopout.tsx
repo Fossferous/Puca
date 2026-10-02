@@ -28,8 +28,9 @@
  *    the page is itself again.
  *
  * MUTED, ALWAYS. Audio keeps flowing on the existing paths (StreamStage's Web
- * Audio graph in the stream view, StreamPip's element in chat view). This
- * element is video-only; unmuting it would play every stream twice.
+ * Audio graph while the stage is mounted, StreamAudioHost everywhere else —
+ * streamAudioRouting.ts). This element is video-only; unmuting it would play
+ * the stream twice.
  *
  * HIDDEN, BUT RENDERED (standard/webkit). 1x1 and transparent, never
  * display:none — an unrendered element is the classic way
@@ -51,6 +52,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { getSelectedStreams, getStreamData, subscribeToStreamState } from './voiceState';
 import { pipEngine, PIP_METADATA_TIMEOUT_MS, PIP_NATIVE_CONFIRM_TIMEOUT_MS, type WebKitVideo } from './streamPopout.utils';
 import { enterNativePip, exitNativePip, onNativePipChange } from '../api/mobileApp';
+import { describePipError, logPipDiag } from '../api/pipDiag';
 
 interface StreamPopoutProps {
     /** The stream to pop out (pinned — a floating window that silently
@@ -149,8 +151,12 @@ export function StreamPopout({ userId, onClose }: StreamPopoutProps) {
         let unmounted = false;
         let timer: ReturnType<typeof setTimeout> | null = null;
         let confirmTimer: ReturnType<typeof setTimeout> | null = null;
+        // Every outcome reaches puca.log on the desktop (pipDiag): whether
+        // element PiP works in the shell is the fallback half of the open
+        // Doc-PiP question, and a console.warn alone never left the WebView.
         const fail = (why: unknown) => {
             console.warn('[StreamPopout] picture-in-picture refused:', why);
+            logPipDiag(`[pip] ${engine} refused: ${describePipError(why)}`);
             onCloseRef.current();
         };
         const enter = () => {
@@ -158,11 +164,16 @@ export function StreamPopout({ userId, onClose }: StreamPopoutProps) {
             done = true;
             if (timer !== null) clearTimeout(timer);
             if (engine === 'standard') {
-                video.requestPictureInPicture().catch(fail);
+                video.requestPictureInPicture()
+                    .then(() => logPipDiag('[pip] standard entered'))
+                    .catch(fail);
             } else if (engine === 'webkit') {
                 const wk = video as WebKitVideo;
                 if (wk.webkitSupportsPresentationMode?.('picture-in-picture') && wk.webkitSetPresentationMode) {
-                    try { wk.webkitSetPresentationMode('picture-in-picture'); } catch (e) { fail(e); }
+                    try {
+                        wk.webkitSetPresentationMode('picture-in-picture');
+                        logPipDiag('[pip] webkit entered');
+                    } catch (e) { fail(e); }
                 } else {
                     fail('this video cannot enter presentation mode');
                 }
@@ -196,6 +207,7 @@ export function StreamPopout({ userId, onClose }: StreamPopoutProps) {
                 if (done) return;
                 done = true;
                 console.warn('[StreamPopout] no metadata within the activation window — not popping out');
+                logPipDiag(`[pip] ${engine}: no metadata within ${PIP_METADATA_TIMEOUT_MS} ms of the click; not popping out`);
                 onCloseRef.current();
             }, PIP_METADATA_TIMEOUT_MS);
         }

@@ -13,6 +13,11 @@
  * Both now route, re-route on settingsChanged/devicechange, and make no sound
  * before the first routing has landed (a fresh context or element starts on
  * the default).
+ *
+ * 2026-10-02: the path outside the stage is now StreamAudioHost (one hidden
+ * <audio> per watched stream — StreamPip voiced only the first, and nothing
+ * where it was not mounted); the float's <video> is picture only. The same
+ * routing guarantees moved with it (more in streamAudioHost.test.tsx).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
@@ -61,7 +66,7 @@ vi.mock('../api/rtc/sfuManager', () => ({
 }));
 
 import { StreamStage } from '../components/StreamStage';
-import { StreamPip } from '../components/StreamPip';
+import { StreamAudioHost } from '../components/StreamAudioHost';
 import { useStreamStore } from '../stores/streamStore';
 import { loadSettings, saveSettings } from '../components/settingsStore';
 
@@ -222,28 +227,29 @@ describe('StreamStage — the Web Audio path', () => {
     });
 });
 
-describe('StreamPip — the chat-view path', () => {
-    function renderPip() {
-        act(() => { root.render(<StreamPip onExpand={() => {}} onClose={() => {}} />); });
+describe('StreamAudioHost — the path everywhere the stage is not', () => {
+    const audio = () => container.querySelector<HTMLAudioElement>('audio[data-stream-audio="1"]')!;
+    function renderHost() {
+        act(() => { root.render(<StreamAudioHost />); });
     }
 
-    it('routes its <video> to the chosen device and holds it muted until the switch lands', async () => {
+    it('routes its <audio> to the chosen device and holds it muted until the switch lands', async () => {
         choose('headset-1');
-        renderPip();
-        const sink = elementSinks.sinkOf(video());
+        renderHost();
+        const sink = elementSinks.sinkOf(audio());
         expect(sink.calls).toEqual(['headset-1']);
-        expect(video().srcObject).toBe(STREAMS.get(1)!.stream);
+        expect((audio().srcObject as MediaStream).getAudioTracks()).toEqual(STREAMS.get(1)!.stream.getAudioTracks());
         // Bound and autoplaying, but still on the OS default: must be silent.
-        expect(video().muted).toBe(true);
+        expect(audio().muted).toBe(true);
         await act(async () => { await sink.settle(); });
         expect(sink.sinkId).toBe('headset-1');
-        expect(video().muted).toBe(false);
+        expect(audio().muted).toBe(false);
     });
 
     it('follows a Settings change', async () => {
         choose('headset-1');
-        renderPip();
-        const sink = elementSinks.sinkOf(video());
+        renderHost();
+        const sink = elementSinks.sinkOf(audio());
         await act(async () => { await sink.settle(); });
 
         act(() => { choose('speakers-2'); });
@@ -254,11 +260,11 @@ describe('StreamPip — the chat-view path', () => {
     it('chases a chosen device that was missing and comes back (devicechange)', async () => {
         devices.delete('headset-1');
         choose('headset-1');
-        renderPip();
-        const sink = elementSinks.sinkOf(video());
+        renderHost();
+        const sink = elementSinks.sinkOf(audio());
         await act(async () => { await sink.settle(); });
         expect(sink.sinkId).toBe(''); // fell back: still audible
-        expect(video().muted).toBe(false);
+        expect(audio().muted).toBe(false);
 
         devices.add('headset-1');
         act(() => { deviceEvents.fire(); });
@@ -266,19 +272,19 @@ describe('StreamPip — the chat-view path', () => {
         expect(sink.sinkId).toBe('headset-1');
     });
 
-    it('a <video> remounted after the selection emptied is held muted until IT is routed', async () => {
-        // PiP renders nothing while no stream is selected, so the element is
-        // a new one each time a selection comes back — with a fresh sinkId.
+    it('an <audio> remounted after the selection emptied is held muted until IT is routed', async () => {
+        // The host renders nothing while no stream is selected, so the element
+        // is a new one each time a selection comes back — with a fresh sinkId.
         choose('headset-1');
-        renderPip();
-        const first = video();
+        renderHost();
+        const first = audio();
         await act(async () => { await elementSinks.sinkOf(first).settle(); });
         expect(first.muted).toBe(false);
 
         act(() => { selected = []; notify(); });
-        expect(container.querySelector('video')).toBeNull();
+        expect(container.querySelector('audio')).toBeNull();
         act(() => { selected = [1]; notify(); });
-        const second = video();
+        const second = audio();
         expect(second).not.toBe(first);
         expect(elementSinks.sinkOf(second).calls).toEqual(['headset-1']);
         expect(second.muted).toBe(true);
@@ -287,9 +293,9 @@ describe('StreamPip — the chat-view path', () => {
     });
 
     it('on the default device it plays at once, with no routing call', async () => {
-        renderPip();
+        renderHost();
         await act(async () => { await flushMicrotasks(); });
-        expect(elementSinks.sinkOf(video()).calls).toEqual([]);
-        expect(video().muted).toBe(false);
+        expect(elementSinks.sinkOf(audio()).calls).toEqual([]);
+        expect(audio().muted).toBe(false);
     });
 });

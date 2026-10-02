@@ -459,8 +459,10 @@ describe('the Pop out control', () => {
     // blank band above the messages while the stream was popped out. Hidden
     // is a class there, and StreamPip.css collapses the row under it.
     it('hides the DOCKED strip with a row-collapsing class, never an inline visibility', () => {
+        // Hidden = every watched stream is in the OS window (inAppPipPlan).
+        selected = [1];
         act(() => {
-            root.render(<StreamPip docked hidden onExpand={() => {}} onClose={() => {}} poppedStreams={[1]} onTogglePopout={vi.fn()} />);
+            root.render(<StreamPip docked popoutMode="docpip" onExpand={() => {}} onClose={() => {}} poppedStreams={[1]} onTogglePopout={vi.fn()} />);
         });
         const pip = container.querySelector<HTMLElement>('.stream-pip')!;
         expect(pip.classList.contains('docked')).toBe(true);
@@ -475,7 +477,7 @@ describe('the Pop out control', () => {
 
         // The floating desktop box keeps its inline hide: it has drag state to preserve.
         act(() => {
-            root.render(<StreamPip hidden onExpand={() => {}} onClose={() => {}} poppedStreams={[1]} onTogglePopout={vi.fn()} />);
+            root.render(<StreamPip popoutMode="docpip" onExpand={() => {}} onClose={() => {}} poppedStreams={[1]} onTogglePopout={vi.fn()} />);
         });
         expect(container.querySelector<HTMLElement>('.stream-pip')!.style.visibility).toBe('hidden');
     });
