@@ -22,7 +22,7 @@
  * (clipDownloadAndroid.test.tsx).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { fakeCapacitorFs, patternBytes } from './fixtures/fakeCapacitorFs';
+import { fakeCapacitorFs, patternBytes, pluginError, PERMISSION_DENIED } from './fixtures/fakeCapacitorFs';
 
 /** 3 MiB of raw bytes is exactly 4 MiB of base64. A bridge message of this
  *  size costs the Java heap a few tens of MB at most, against the ~96 MB a
@@ -51,6 +51,7 @@ vi.mock('@capacitor/filesystem', () => ({
         writeFile: (o: never) => fs.current!.api.writeFile(o),
         appendFile: (o: never) => fs.current!.api.appendFile(o),
         deleteFile: (o: never) => fs.current!.api.deleteFile(o),
+        rename: (o: never) => fs.current!.api.rename(o),
     },
     Directory: { Documents: 'DOCUMENTS' },
     Encoding: { UTF8: 'utf8' },
@@ -62,7 +63,7 @@ vi.mock('../api/platform', async (importOriginal) => ({
 }));
 
 const { saveAttachment } = await import('../api/saveAttachment');
-const { saveTextToDevice, DEVICE_WRITE_CHUNK_CHARS } = await import('../api/saveToDevice');
+const { saveTextToDevice, saveStreamToDevice, DeviceWriteError, DEVICE_WRITE_CHUNK_CHARS } = await import('../api/saveToDevice');
 const { saveExportFile } = await import('../api/accountExport');
 const { saveNotesExport } = await import('../notes/model/noteText');
 
@@ -101,14 +102,16 @@ describe('saveAttachment on Android — a large file never crosses the bridge wh
         expect(disk.maxChars(), 'largest single bridge message, in characters').toBeLessThanOrEqual(BRIDGE_MAX_CHARS);
         const ops = disk.calls.map(c => c.op);
         expect(ops[0]).toBe('writeFile'); // creates/truncates
-        expect(ops.slice(1).every(o => o === 'appendFile')).toBe(true);
+        expect(ops.slice(1, -1).every(o => o === 'appendFile')).toBe(true);
+        expect(ops.at(-1)).toBe('rename'); // .part -> the real name, once complete
         expect(disk.calls.every(c => c.directory === 'DOCUMENTS' && c.encoding === undefined)).toBe(true);
         const onDisk = disk.read(pathOf(r.where));
         expect(onDisk?.length).toBe(input.length);
         expect(onDisk!.equals(Buffer.from(input.buffer, input.byteOffset, input.byteLength))).toBe(true);
         expect([...disk.files.keys()]).toEqual([pathOf(r.where)]); // nothing else left behind
         // Not needlessly many round trips: each one also costs a media scan.
-        expect(disk.calls.length, 'bridge calls for 60 MB').toBeLessThanOrEqual(Math.ceil(input.length / SLICE_RAW_BYTES));
+        const writes = disk.calls.filter(c => c.op === 'writeFile' || c.op === 'appendFile');
+        expect(writes.length, 'write calls for 60 MB').toBeLessThanOrEqual(Math.ceil(input.length / SLICE_RAW_BYTES));
     }, 120_000);
 
     it('a write that fails part-way deletes what it wrote and says so — never "saved", never a crash', async () => {
@@ -217,7 +220,8 @@ describe('text written on Android — the account export and the Notes export', 
         const r = await saveTextToDevice('Puca', 'big.json', text);
         expect(disk.maxChars()).toBeLessThanOrEqual(BRIDGE_MAX_CHARS);
         expect(disk.calls.length).toBeGreaterThan(1);
-        expect(disk.calls.every(c => c.encoding === 'utf8' && c.directory === 'DOCUMENTS')).toBe(true);
+        expect(disk.calls.every(c => c.directory === 'DOCUMENTS')).toBe(true);
+        expect(disk.calls.filter(c => c.op !== 'rename').every(c => c.encoding === 'utf8')).toBe(true);
         expect(disk.read(pathOf(r.where))!.toString('utf8')).toBe(text);
         // A slice that ended between the halves of a pair would have been
         // written as two U+FFFD replacement characters.
@@ -247,5 +251,77 @@ describe('text written on Android — the account export and the Notes export', 
     it('positive control: short text is one writeFile with the text as given', async () => {
         await saveTextToDevice('Puca Notes', 'n.md', 'hello');
         expect(disk.calls).toEqual([expect.objectContaining({ op: 'writeFile', path: 'Puca Notes/n.md', chars: 5, encoding: 'utf8' })]);
+    });
+});
+
+/*
+ * Where a save writes, and what a failure may clean up (adversarial review of
+ * the first version of this fix). A save that takes several bridge calls must
+ * not leave a truncated file under the REAL name if the app dies part-way —
+ * the plugin media-scans after every call, so a half-written mp4 was visible
+ * in Files and Gallery during the save and stayed there after a kill. And a
+ * failure's cleanup may only ever delete what this save created: on Android 10
+ * and older a storage-permission DENIAL is answered by the plugin before
+ * anything is written, and a cleanup deleteFile there both re-prompts for the
+ * permission and, if granted, deletes whatever already wore the name (the
+ * account export's name is per DAY, so an earlier export from today).
+ */
+describe('a save leaves nothing it did not finish, and deletes nothing it did not write', () => {
+    it('a multi-call save streams into <name>.part; only the final rename gives it the real name', async () => {
+        const input = patternBytes(10 * 1024 * 1024 + 3, 41);
+        const r = await saveAttachment(blobUrlOf(input), 'video.mp4');
+        const real = pathOf(r.where);
+        const writes = disk.calls.filter(c => c.op === 'writeFile' || c.op === 'appendFile');
+        expect(writes.length).toBeGreaterThan(1);
+        expect(writes.every(c => c.path === `${real}.part`), `write paths: ${[...new Set(writes.map(c => c.path))].join(', ')}`).toBe(true);
+        expect(disk.calls.at(-1)).toMatchObject({ op: 'rename', path: `${real}.part`, to: real, directory: 'DOCUMENTS' });
+        expect(disk.read(real)!.equals(Buffer.from(input))).toBe(true);
+        expect([...disk.files.keys()]).toEqual([real]);
+    });
+
+    it('the app dying part-way leaves a .part, never a truncated file under the real name', async () => {
+        // JS stops mid-save (process killed): the producer simply never
+        // finishes. What is on disk at that moment is what the user finds.
+        const slice = patternBytes(3 * 1024 * 1024, 43);
+        let wrote = 0;
+        void saveStreamToDevice('Puca', 'puca-clip-0000abcd-20261002-120000.mp4', async (write) => {
+            await write(slice); await write(slice); await write(slice);
+            wrote = 3;
+            await new Promise(() => { /* killed */ });
+        });
+        for (let i = 0; i < 200 && wrote < 3; i++) await new Promise(r => setTimeout(r, 1));
+        expect(wrote).toBe(3);
+        expect(disk.bytesOnDisk(), 'part of the clip was written').toBeGreaterThan(0);
+        expect([...disk.files.keys()]).toEqual(['Puca/puca-clip-0000abcd-20261002-120000.mp4.part']);
+    });
+
+    it('storage permission denied on the first write: no cleanup call, and the earlier same-day export is untouched', async () => {
+        const doc = { messages: [{ id: 1, body: 'kept' }] };
+        const first = await saveExportFile(doc, 'w1clipdl-user');
+        const earlier = disk.read(pathOf(first.where))!;
+        disk.calls.length = 0;
+        disk.failOn((n) => (n === 2 ? pluginError(PERMISSION_DENIED, 'Unable to do file operation, user denied permission request.') : null));
+        await expect(saveExportFile({ messages: [] }, 'w1clipdl-user')).rejects.toThrow(/Could not save/);
+        expect(disk.calls.map(c => c.op), 'a deleteFile here would prompt for the permission again').toEqual(['writeFile']);
+        expect(disk.read(pathOf(first.where))?.equals(earlier), 'the earlier export survives').toBe(true);
+    });
+
+    it('storage permission denied on a multi-call save: no cleanup call either', async () => {
+        disk.failOn((n) => (n === 1 ? pluginError(PERMISSION_DENIED) : null));
+        const text = 'x'.repeat(2 * DEVICE_WRITE_CHUNK_CHARS + 5);
+        await expect(saveTextToDevice('Puca', 'big.json', text)).rejects.toBeInstanceOf(DeviceWriteError);
+        expect(disk.calls.map(c => c.op)).toEqual(['writeFile']);
+        expect(disk.files.size).toBe(0);
+    });
+
+    it('a first writeFile that fails after creating its file (disk full) leaves no 0-byte file — one call or many', async () => {
+        disk.failOn((n) => (n === 1 ? pluginError('OS-PLUG-FILE-0013', 'No space left on device') : null));
+        await expect(saveTextToDevice('Puca', 'small.json', 'hello')).rejects.toBeInstanceOf(DeviceWriteError);
+        expect([...disk.files.keys()], 'the 0-byte file the plugin created is cleaned up').toEqual([]);
+
+        disk.reset();
+        disk.failOn((n) => (n === 1 ? pluginError('OS-PLUG-FILE-0013', 'No space left on device') : null));
+        await expect(saveTextToDevice('Puca', 'big.json', 'y'.repeat(2 * DEVICE_WRITE_CHUNK_CHARS + 5))).rejects.toBeInstanceOf(DeviceWriteError);
+        expect([...disk.files.keys()]).toEqual([]);
     });
 });

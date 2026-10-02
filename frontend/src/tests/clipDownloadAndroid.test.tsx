@@ -9,10 +9,13 @@
  *   1. No bridge message is larger than BRIDGE_MAX_CHARS. Before the fix the
  *      whole clip was one base64 writeFile (a 92 MB clip = a 128 MB string,
  *      OutOfMemoryError on the UI thread, process killed).
- *   2. It STREAMS: the first part is on disk before the last part has even
- *      been fetched, so JS holds about one part, not the whole clip.
- *   3. The file on disk is the plaintext, byte for byte, and a failure
- *      part-way shows "Download failed" inline and leaves no partial file.
+ *   2. It STREAMS: when each part is fetched, everything before it is
+ *      already on disk (bar at most one held slice), so JS holds about one
+ *      part, not the whole clip.
+ *   3. The file on disk is the plaintext, byte for byte — written as
+ *      `<name>.part` and renamed only once complete, so a dead app never
+ *      leaves half a clip under the real name — and a failure part-way shows
+ *      "Download failed" inline and leaves no partial file.
  *
  * The positive control is a clip small enough for one bridge call, which the
  * old code already saved correctly — it shows the harness itself is sound.
@@ -25,10 +28,14 @@ import { memoryLocalStorage } from './fixtures/fakeSink';
 
 /** 3 MiB raw = 4 MiB of base64 per bridge call (see saveToDeviceBounded.test.ts). */
 const BRIDGE_MAX_CHARS = 4 * 1024 * 1024;
+/** Raw bytes a save may hold back before its first write: one slice. */
+const HELD_MAX_BYTES = 3 * 1024 * 1024;
 
 const h = vi.hoisted(() => ({
     fs: null as ReturnType<typeof import('./fixtures/fakeCapacitorFs').fakeCapacitorFs> | null,
     events: [] as string[],
+    /** Bytes on the fake disk at each part fetch, in fetch order. */
+    diskAtFetch: [] as number[],
     /** false: an APK without the Filesystem plugin registered. */
     filesystemPlugin: true,
 }));
@@ -45,6 +52,7 @@ vi.mock('@capacitor/filesystem', () => ({
         writeFile: (o: never) => { h.events.push('write'); return h.fs!.api.writeFile(o); },
         appendFile: (o: never) => { h.events.push('write'); return h.fs!.api.appendFile(o); },
         deleteFile: (o: never) => h.fs!.api.deleteFile(o),
+        rename: (o: never) => h.fs!.api.rename(o),
     },
     Directory: { Documents: 'DOCUMENTS' },
     Encoding: { UTF8: 'utf8' },
@@ -116,6 +124,7 @@ beforeEach(() => {
     disk = fakeCapacitorFs();
     h.fs = disk;
     h.events.length = 0;
+    h.diskAtFetch.length = 0;
     h.filesystemPlugin = true;
     served.clear();
     blobs.clear();
@@ -124,6 +133,7 @@ beforeEach(() => {
         const part = /\/files\/([0-9a-f-]+)$/.exec(url);
         if (part) {
             h.events.push(`fetch:${part[1]}`);
+            h.diskAtFetch.push(disk.bytesOnDisk());
             const wire = served.get(part[1]);
             return wire ? new Response(wire) : new Response('gone', { status: 404 });
         }
@@ -146,7 +156,8 @@ afterEach(() => {
 
 describe('Android: Download on a clip', () => {
     it('streams a multi-part clip to Documents/Puca in bounded bridge calls, byte for byte', async () => {
-        const { href, plain } = await sealedClip([1024, 6 * 1024 * 1024, 6 * 1024 * 1024, 6 * 1024 * 1024, 6 * 1024 * 1024 - 5]);
+        const sizes = [1024, 6 * 1024 * 1024, 6 * 1024 * 1024, 6 * 1024 * 1024, 6 * 1024 * 1024 - 5];
+        const { href, plain } = await sealedClip(sizes);
         await act(async () => { root.render(<ClipAttachment href={href} />); });
         await clickDownloadAndWait();
 
@@ -160,16 +171,20 @@ describe('Android: Download on a clip', () => {
         expect(onDisk.length).toBe(plain.length);
         expect(onDisk.equals(plain)).toBe(true);
         expect([...disk.files.keys()]).toEqual([path]);
+        // Written as <name>.part, renamed only once complete.
+        const writes = disk.calls.filter(c => c.op === 'writeFile' || c.op === 'appendFile');
+        expect(writes.every(c => c.path === `${path}.part`)).toBe(true);
+        expect(disk.calls.at(-1)).toMatchObject({ op: 'rename', path: `${path}.part`, to: path });
 
         // Streaming, not "build the whole clip, then write" — and not "write
-        // part 0, then prefetch the rest" either: every part is written
-        // before the NEXT part is fetched, so JS holds one part at a time.
-        const order = h.events.join(' ');
-        const fetches = h.events.flatMap((e, i) => (e.startsWith('fetch:') ? [i] : []));
-        expect(fetches.length).toBe(5);
-        for (let k = 1; k <= fetches.length; k++) {
-            const from = fetches[k - 1], to = k < fetches.length ? fetches[k] : h.events.length;
-            expect(h.events.slice(from + 1, to).includes('write'), `part ${k - 1} written before part ${k} is fetched: ${order}`).toBe(true);
+        // part 0, then prefetch the rest" either: when part k is fetched,
+        // parts 0..k-1 are on disk, bar at most the one slice a save holds
+        // back until it knows whether the file takes more than one call.
+        expect(h.diskAtFetch.length).toBe(5);
+        let before = 0;
+        for (let k = 1; k < sizes.length; k++) {
+            before += sizes[k - 1];
+            expect(h.diskAtFetch[k], `bytes on disk when part ${k} is fetched (parts before it: ${before})`).toBeGreaterThanOrEqual(before - HELD_MAX_BYTES);
         }
     }, 120_000);
 

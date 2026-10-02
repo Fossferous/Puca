@@ -13,7 +13,8 @@
  *
  * Download: once a clip is posted, every required approver already agreed to
  * release it — so anyone who can see the message can save the original file
- * (api/clipDownload.ts fetches + decrypts every part and concatenates them,
+ * (api/clipDownload.ts fetches + decrypts every part — concatenated on
+ * desktop/web, streamed part by part to Documents/Puca on Android —
  * byte-for-byte the muxer's original output), same as the Play button already
  * decrypts it into a <video>. Refused for the same reason Play is: a manifest
  * whose parts are not a subset of what was actually approved (clipBadge

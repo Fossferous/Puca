@@ -79,11 +79,27 @@ async function filesystem() {
  * 128,625,344-character base64 string). Somewhat smaller files hit the caught
  * half instead: a 0-byte file and a misleading error.
  *
- * So: writeFile for the first slice (create / truncate), appendFile for the
- * rest, each slice at most DEVICE_WRITE_CHUNK_CHARS characters — a few tens of
- * MB of Java heap at most, whatever the file's size. A failure part-way
- * deletes what was written: nothing half-written is left wearing the real
- * name.
+ * So: each slice is at most DEVICE_WRITE_CHUNK_CHARS characters — a few tens
+ * of MB of Java heap at most, whatever the file's size.
+ *
+ * A file that fits in ONE slice is one writeFile to its real name, exactly as
+ * before slicing existed (the plugin media-scans it, so a saved photo shows in
+ * the gallery). A file that needs more is written as `<name>.part` — writeFile
+ * for the first slice (create / truncate), appendFile for the rest — and
+ * renamed to its real name only once complete. Several calls take seconds,
+ * the plugin media-scans after every one, and JS can die part-way (the app
+ * killed in the background, a crash): what is then left is an obvious
+ * `.part`, never a truncated mp4 wearing the real name and showing up in
+ * Files and the gallery as if it were the clip. To know which case it is, the
+ * first slice is held back until the second arrives (or the producer ends).
+ *
+ * A failure deletes what THIS save created — the .part, or the real name when
+ * its one writeFile failed after the plugin had created the file (saveFile
+ * creates it before it writes, so a failed write leaves a 0-byte file) — and
+ * nothing else, ever. Except after a storage-permission DENIAL (Android 10 and
+ * older): the plugin answers that before touching the disk, so there is
+ * nothing to delete, and a deleteFile would only ask for the permission AGAIN
+ * — and, if granted, delete whatever already wore the name.
  *
  * Slices are as LARGE as is safe, not as small as possible: every call is a
  * stop-and-wait bridge round trip and, on external storage (Documents
@@ -138,7 +154,7 @@ function claimFileName(folder: string, name: string): string {
  * One file in Documents, written by `fill` in bounded slices. `fill` gets a
  * `put` that takes ONE slice (at most DEVICE_WRITE_CHUNK_CHARS characters).
  * Whatever `fill` throws — its own error or a DeviceWriteError from `put` —
- * deletes the file and is rethrown.
+ * deletes what this save created (see above) and is rethrown.
  */
 async function writeInSlices(
     fs: Fs, folder: string, name: string, utf8: boolean,
@@ -153,34 +169,61 @@ async function writeInSlices(
     }
 }
 
+/** The plugin's rejection code for "the user denied the storage permission"
+ *  (FilesystemErrors.filePermissionsDenied: OS-PLUG-FILE-0007). */
+const PERMISSION_DENIED = 'OS-PLUG-FILE-0007';
+
+function permissionDenied(e: unknown): boolean {
+    const reason = e instanceof DeviceWriteError ? e.reason : e;
+    return typeof reason === 'object' && reason !== null && (reason as { code?: unknown }).code === PERMISSION_DENIED;
+}
+
 async function writeClaimed(
     fs: Fs, folder: string, file: string, utf8: boolean,
     fill: (put: (data: string) => Promise<void>) => Promise<void>,
 ): Promise<SaveResult> {
     const { Filesystem, Directory, Encoding } = fs;
+    const directory = Directory.Documents;
     const path = `${folder}/${file}`;
-    let started = false;
+    const partPath = `${path}.part`;
+    const encoding = utf8 ? { encoding: Encoding.UTF8 } : {};
+    const bridge = async (call: () => Promise<unknown>) => {
+        try { await call(); } catch (e) { throw new DeviceWriteError(e); }
+    };
+    /** The first slice, until a second shows the file needs several calls. */
+    let held: string | null = null;
+    /** Writing `<name>.part` (several calls) rather than the real name. */
+    let streaming = false;
+    /** The path a failure has to clean up — set BEFORE the call that may
+     *  create it, since a writeFile that fails can still leave a 0-byte file. */
+    let created: string | null = null;
     const put = async (data: string) => {
-        const opts = { path, data, directory: Directory.Documents, ...(utf8 ? { encoding: Encoding.UTF8 } : {}) };
-        try {
-            if (!started) {
-                // Set BEFORE the call: a writeFile that fails can still
-                // leave a 0-byte file behind, and the cleanup must find it.
-                started = true;
-                await Filesystem.writeFile({ ...opts, recursive: true });
-            } else {
-                await Filesystem.appendFile(opts);
-            }
-        } catch (e) {
-            throw new DeviceWriteError(e);
+        if (!streaming) {
+            if (held === null) { held = data; return; }
+            streaming = true;
+            created = partPath;
+            const first = held;
+            held = null;
+            await bridge(() => Filesystem.writeFile({ path: partPath, data: first, directory, recursive: true, ...encoding }));
         }
+        await bridge(() => Filesystem.appendFile({ path: partPath, data, directory, ...encoding }));
     };
     try {
         await fill(put);
-        if (!started) await put(''); // an empty file still has to exist
+        if (streaming) {
+            // Same directory, so the plugin's File.renameTo; it deletes an
+            // existing file of that name first, as writeFile's truncate did.
+            await bridge(() => Filesystem.rename({ from: partPath, to: path, directory, toDirectory: directory }));
+        } else {
+            // One call: the whole file (an empty file still has to exist).
+            created = path;
+            const data = held ?? '';
+            await bridge(() => Filesystem.writeFile({ path, data, directory, recursive: true, ...encoding }));
+        }
     } catch (e) {
-        if (started) {
-            try { await Filesystem.deleteFile({ path, directory: Directory.Documents }); } catch { /* nothing there, or not ours */ }
+        if (created && !permissionDenied(e)) {
+            const doomed = created;
+            try { await Filesystem.deleteFile({ path: doomed, directory }); } catch { /* nothing there */ }
         }
         throw e;
     }

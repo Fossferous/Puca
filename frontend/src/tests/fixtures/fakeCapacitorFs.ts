@@ -6,14 +6,37 @@
  * was one 128 MB string). writeFile truncates, appendFile extends, and each
  * call's base64 is decoded on its own — as FilesystemPlugin does — so the
  * file contents here are exactly what a phone would hold.
+ *
+ * Failures are modelled on the plugin too (@capacitor/filesystem 8.1.3 over
+ * ionfilesystem-android 1.1.0):
+ *  - a STORAGE PERMISSION DENIAL (code OS-PLUG-FILE-0007, from
+ *    runWithPermission's prompt on Android 10 and older) is decided before
+ *    the operation runs: nothing on disk changes;
+ *  - any other writeFile failure happens INSIDE IONFILELocalFilesHelper
+ *    .saveFile, which creates the file (File.exists → createFile) before it
+ *    opens the stream — so a failed writeFile leaves a 0-byte file behind;
+ *  - rename is IONFILELocalFilesHelper.renameFile: the source must exist,
+ *    and the DESTINATION IS DELETED FIRST, then File.renameTo.
  */
 export interface BridgeCall {
-    op: 'writeFile' | 'appendFile' | 'deleteFile';
+    op: 'writeFile' | 'appendFile' | 'deleteFile' | 'rename';
+    /** The file the call names (rename: the source). */
     path: string;
-    /** Length of the `data` string that crossed the bridge (0 for delete). */
+    /** rename only: the destination. */
+    to?: string;
+    /** Length of the `data` string that crossed the bridge (0 for delete/rename). */
     chars: number;
     directory?: string;
     encoding?: string;
+}
+
+/** The plugin's "user denied the storage permission" rejection. */
+export const PERMISSION_DENIED = 'OS-PLUG-FILE-0007';
+
+/** An error shaped like a Capacitor plugin rejection: `code` is what the
+ *  native side passed to call.reject(message, code). */
+export function pluginError(code: string, message = code): Error {
+    return Object.assign(new Error(message), { code });
 }
 
 type WriteOpts = { path: string; data: string; directory?: string; encoding?: string; recursive?: boolean };
@@ -43,7 +66,12 @@ export function fakeCapacitorFs(opts: { latencyMs?: number } = {}) {
         calls.push({ op, path: o.path, chars: o.data.length, directory: o.directory, encoding: o.encoding });
         writes++;
         const err = failWrite?.(writes, op);
-        if (err) throw err;
+        if (err) {
+            // saveFile got as far as creating the file before it failed.
+            const denied = (err as { code?: unknown }).code === PERMISSION_DENIED;
+            if (!denied && op === 'writeFile' && !files.has(o.path)) files.set(o.path, []);
+            throw err;
+        }
         const bytes = decode(o);
         if (op === 'writeFile') files.set(o.path, [bytes]);
         else {
@@ -60,6 +88,16 @@ export function fakeCapacitorFs(opts: { latencyMs?: number } = {}) {
             calls.push({ op: 'deleteFile', path: o.path, chars: 0, directory: o.directory });
             if (!files.delete(o.path)) throw new Error(`deleteFile: ${o.path} does not exist`);
         },
+        rename: async (o: { from: string; to: string; directory?: string; toDirectory?: string }) => {
+            await tick();
+            calls.push({ op: 'rename', path: o.from, to: o.to, chars: 0, directory: o.directory });
+            const src = files.get(o.from);
+            if (!src) throw pluginError('OS-PLUG-FILE-0008', `rename: ${o.from} does not exist`);
+            if ((o.toDirectory ?? o.directory) !== o.directory) throw new Error('rename across directories is not modelled');
+            files.delete(o.to); // renameFile deletes the destination first
+            files.delete(o.from);
+            files.set(o.to, src);
+        },
     };
 
     return {
@@ -75,6 +113,12 @@ export function fakeCapacitorFs(opts: { latencyMs?: number } = {}) {
         reset() { files.clear(); calls.length = 0; writes = 0; failWrite = null; },
         /** Longest `data` string any single bridge call carried. */
         maxChars(): number { return calls.reduce((m, c) => Math.max(m, c.chars), 0); },
+        /** Bytes held on the fake disk across every file, right now. */
+        bytesOnDisk(): number {
+            let n = 0;
+            for (const f of files.values()) for (const b of f) n += b.length;
+            return n;
+        },
     };
 }
 
