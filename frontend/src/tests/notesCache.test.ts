@@ -26,6 +26,21 @@ const { renderNotesServiceWorker } = await import('../../scripts/notes-sw.mjs');
 const me = makeIdentity(new Uint8Array(32).fill(2));
 const other = makeIdentity(new Uint8Array(32).fill(3));
 const settle = async () => { for (let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 0)); };
+/**
+ * Real time until `store` holds `n` records. Each is sealed for real
+ * (WebCrypto, settling from Node's thread pool) and written one after
+ * another, so how long that takes is the machine's business: a fixed 30 ms
+ * and ten turns held 2 of 3 with a real 20 ms added to each
+ * encrypt/importKey (2026-10-02). Bounded inside vitest's 5 s.
+ */
+async function persisted(store: { all(): Promise<unknown[]> }, n: number) {
+    const giveUp = performance.now() + 3_000;
+    for (let held = (await store.all()).length; held < n; held = (await store.all()).length) {
+        if (performance.now() > giveUp) throw new Error(`the store holds ${held} of ${n} records after 3 s`);
+        await new Promise(r => setTimeout(r, 5));
+    }
+    await settle();
+}
 
 const tasks = [{ id: 1, description: 'Buy oat milk', attachments: null }];
 
@@ -56,8 +71,7 @@ describe('persist, then hydrate on a cold start', () => {
         const stop = startNotesCachePersistence(a, { sub: 7, currentSub: () => 7, identity: () => me, store }, 5);
         a.setQueryData(['notes', 'tasks', 'list', 1], tasks);
         a.setQueryData(['notes', 'lists'], [{ id: 1, title: 'Groceries' }]);
-        await new Promise(r => setTimeout(r, 30));
-        await settle();
+        await persisted(store, 2);
         stop();
         expect(store.map.size).toBe(2);
         expect([...store.map.values()].join('')).not.toContain('oat');           // sealed at rest
@@ -84,8 +98,7 @@ describe('persist, then hydrate on a cold start', () => {
         const a = new QueryClient();
         const stop = startNotesCachePersistence(a, { sub: 7, currentSub: () => 7, identity: () => me, store }, 5);
         for (let i = 1; i <= 3; i++) a.setQueryData(['notes', 'tasks', 'list', i], tasks);
-        await new Promise(r => setTimeout(r, 30));
-        await settle();
+        await persisted(store, 3);
         stop();
         expect(store.map.size).toBe(3);
 
@@ -114,8 +127,7 @@ describe('persist, then hydrate on a cold start', () => {
             const a = new QueryClient();
             const stop = startNotesCachePersistence(a, { sub: 7, currentSub: () => 7, identity: () => me, store }, 5);
             for (let i = 1; i <= 3; i++) a.setQueryData(['notes', 'tasks', 'list', i], tasks);
-            await new Promise(r => setTimeout(r, 30));
-            await settle();
+            await persisted(store, 3);
             stop();
 
             // POSITIVE CONTROL: signed in throughout, the defaults bring all three back.
@@ -150,7 +162,7 @@ describe('persist, then hydrate on a cold start', () => {
         const qc = new QueryClient();
         const stop = startNotesCachePersistence(qc, { sub: 7, currentSub: () => 7, identity: () => me, store }, 5);
         qc.setQueryData(['notes', 'tasks', 'list', 1], tasks);
-        await new Promise(r => setTimeout(r, 30));
+        await persisted(store, 1);
         qc.setQueryData(['notes', 'tasks', 'list', 1], [{ id: 1, description: TASK_IDENTITY_LOCKED, attachments: null }]);
         await new Promise(r => setTimeout(r, 30));
         await settle();

@@ -17,7 +17,8 @@
  * desktop, so that is what these tests count.
  */
 // @vitest-environment jsdom
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { cryptoInFlight, trackCrypto } from './fixtures/cryptoInFlight';
 
 const sent: Array<{ type: string; payload?: Record<string, unknown> }> = [];
 type Handler = (m: unknown) => void;
@@ -92,8 +93,21 @@ function fakeDc() {
     return { dc: dc as unknown as RTCDataChannel, raw: dc };
 }
 
+/**
+ * `rounds` turns, and then as many more as it takes for no WebCrypto call to
+ * be out for two in a row. A frame is opened for real, settling from Node's
+ * thread pool in as many turns as the machine takes (fixtures/cryptoInFlight.ts):
+ * with a real 20 ms added to each decrypt (2026-10-02), two turns after a
+ * sealed frame left it still unopened, and "batch 1 is in flight" read [].
+ * Bounded inside vitest's 5 s.
+ */
 const settle = async (rounds = 10) => {
-    for (let i = 0; i < rounds; i++) await new Promise(r => setTimeout(r, 0));
+    const giveUp = performance.now() + 3_000;
+    for (let i = 0, calm = 0; i < rounds || calm < 2; i++) {
+        if (performance.now() > giveUp) throw new Error(`${cryptoInFlight()} WebCrypto calls still out after 3 s`);
+        await new Promise(r => setTimeout(r, 0));
+        calm = cryptoInFlight() === 0 ? calm + 1 : 0;
+    }
 };
 
 /** Drive a HOST session to granted; returns the key the VIEWER holds. */
@@ -136,7 +150,10 @@ async function frameFor(key: Uint8Array, seq: number, kind = FRAME_SEALED_INPUT)
     return wire.buffer.slice(0);
 }
 
+let untrackCrypto: () => void = () => {};
+afterEach(() => { untrackCrypto(); });
 beforeEach(async () => {
+    untrackCrypto = trackCrypto();
     const rc = await import('../api/remoteControl');
     rc.resetRemoteControl();
     resetControlChannels();

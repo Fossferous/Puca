@@ -94,11 +94,24 @@ let toasts: string[];
 let onLine = true;
 let onLineSpy: ReturnType<typeof vi.spyOn> | null = null;
 const flush = async () => { for (let i = 0; i < 5; i++) await act(async () => { await Promise.resolve(); }); };
-/** Real time, not microtasks: a fan-out of creates is PACED (icsImport's
- *  PACE_MS), so a paste of N lines takes (N-1) pauses to finish. */
+/** A fan-out of creates is PACED (icsImport's PACE_MS): a paste of N lines
+ *  takes N-1 pauses. Those pauses run on a FAKE clock (`pacedOnAFakeClock`),
+ *  skipped here with room for one more: a create past the N-th, were there
+ *  one, would go out too. Every create in this file is a mock that settles
+ *  in microtasks, and the clock lets those run between the pauses.
+ *
+ *  Not real time. This slept PACE_MS × N + 60 ms of it while the product's
+ *  N-1 pauses ran on real timers too, and on a loaded machine each of those
+ *  fires late: 5 of 6 rows had landed (2026-10-02, twice in full runs). */
 const paced = async (lines: number) => {
-    await act(async () => { await new Promise(r => { setTimeout(r, PACE_MS * lines + 60); }); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(PACE_MS * (lines + 1)); });
     await flush();
+};
+/** For a describe whose creates are paced: the clock is fake from before
+ *  the first paste, so no pause is ever left on a real timer. */
+const pacedOnAFakeClock = () => {
+    beforeEach(() => { vi.useFakeTimers({ toFake: ['setTimeout'] }); });
+    afterEach(() => { vi.useRealTimers(); });
 };
 
 beforeEach(() => {
@@ -311,6 +324,7 @@ describe('a picture pasted or dropped onto the open note', () => {
 // --- The open note's "Add an item…" row ---------------------------------------------
 
 describe('a multi-line paste into "Add an item…"', () => {
+    pacedOnAFakeClock();
     function editor(opts: { addOk?: (text: string) => boolean } = {}) {
         const added: string[] = [];
         const actions = {
@@ -398,6 +412,7 @@ describe('a multi-line paste into "Add an item…"', () => {
  * into it. A typed item's create comes back the same way, sooner.
  */
 describe('after a create, the add row takes the focus back only from where it was left', () => {
+    pacedOnAFakeClock();
     function editor(onScreen = true, batch = true) {
         const actions = {
             addTask: vi.fn(async () => ({ id: 1 }) as never),
@@ -491,6 +506,7 @@ describe('after a create, the add row takes the focus back only from where it wa
 // --- A checklist from elsewhere, pasted into the open note -------------------------
 
 describe('a step-by-step checklist pasted into an OPEN note', () => {
+    pacedOnAFakeClock();
     /** The open note, with the two writes a paste can make recorded. */
     function openEditor(over: Partial<NoteCard> = {}) {
         const added: string[] = [];
@@ -656,13 +672,8 @@ describe('a step-by-step checklist pasted into an OPEN note', () => {
         paste(e.input, { text: Array.from({ length: 250 }, (_, i) => `line ${i + 1}`).join('\n') });
         expect(document.body.textContent).toContain('You pasted 250 lines');
         expect(document.body.textContent).toContain(`Only the first ${MAX_TAKEN_ITEMS} are added`);
-        vi.useFakeTimers({ toFake: ['setTimeout'] });
-        try {
-            act(() => { button(`Add ${MAX_TAKEN_ITEMS} items`).click(); });
-            await act(async () => { await vi.advanceTimersByTimeAsync(PACE_MS * (MAX_TAKEN_ITEMS + 5)); });
-        } finally {
-            vi.useRealTimers();
-        }
+        act(() => { button(`Add ${MAX_TAKEN_ITEMS} items`).click(); });
+        await paced(MAX_TAKEN_ITEMS + 4);
         expect(e.added).toHaveLength(MAX_TAKEN_ITEMS);
         expect(e.added.at(-1)).toBe(`line ${MAX_TAKEN_ITEMS}`);
     });

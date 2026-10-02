@@ -62,17 +62,51 @@ import {
 
 const ME = ['paste-checklist-pw', 'ab'.repeat(16)] as const;
 
+/** Nothing the view started is still running: no WebCrypto call out
+ *  (fixtures/cryptoInFlight.ts) and no slow read still to answer. A read the
+ *  TEST holds (`heldReads`) does not count: only the test can end it. */
+const quiet = () => cryptoInFlight() === 0 && slowReadsOut === 0;
+/**
+ * React's turns, and then as many more as it takes to be `quiet` for a few
+ * in a row. Sealing and opening settle from Node's thread pool, in as many
+ * turns as the machine takes, so twelve turns alone was a guess: with a real
+ * 20 ms added to each encrypt/decrypt/importKey (2026-10-02) the list opened
+ * after a batch was still being opened when it was asserted on. Bounded
+ * inside vitest's 5 s.
+ */
 const settle = async () => {
-    for (let i = 0; i < 12; i++) await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+    const giveUp = performance.now() + 3_000;
+    for (let i = 0, calm = 0; i < 12 || calm < 3; i++) {
+        if (performance.now() > giveUp) {
+            throw new Error(`not settled after 3 s: ${cryptoInFlight()} WebCrypto calls and ${slowReadsOut} slow reads still out`);
+        }
+        await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+        calm = quiet() ? calm + 1 : 0;
+    }
 };
-/** Real time: the creates are PACED, so N items take N-1 pauses. Waited out
- *  in short act() slices, not one long one: an act() holds back effects until
- *  it ends, and the view's own effects (the list it opens, the one it reads)
- *  must run WHILE the items land, as they do in the app. */
+/** Real time in short act() slices, not one long one: an act() holds back
+ *  effects until it ends, and the view's own effects (the list it opens, the
+ *  one it reads) must run WHILE the items land, as they do in the app. `ms`
+ *  of the clock, however long a slice takes on a loaded machine. */
+const wait = async (ms: number) => {
+    const end = performance.now() + ms;
+    while (performance.now() < end) await act(async () => { await new Promise(r => { setTimeout(r, 10); }); });
+};
+/**
+ * The creates are PACED (icsImport's PACE_MS) on real timers, each sealed for
+ * real. A fixed PACE_MS × N + 100 ms raced both, and on a loaded machine
+ * every pause runs late and every seal runs long. So this waits, as `wait`
+ * does, for the FACT: `n` item creates went out — the n-th may be the refusal
+ * that stops a batch — then a pause more, in which a create past the n-th,
+ * were there one, would go out; then settles. Bounded inside vitest's 5 s.
+ */
 const paced = async (n: number) => {
-    for (let t = 0; t < PACE_MS * n + 100; t += 10) {
+    const giveUp = performance.now() + 3_000;
+    while (itemPosts().length < n) {
+        if (performance.now() > giveUp) throw new Error(`gave up after 3 s waiting for ${n} item creates; ${itemPosts().length} went out`);
         await act(async () => { await new Promise(r => { setTimeout(r, 10); }); });
     }
+    await wait(PACE_MS * 2);
     await settle();
 };
 
@@ -91,6 +125,8 @@ let refuseAt: number | null;
 let slowFirstRead: Set<number>;
 /** Lists whose next read is held until the test lets it answer. */
 let heldReads: Map<number, Promise<void>>;
+/** `slowFirstRead` reads asked and not yet answered. */
+let slowReadsOut = 0;
 let toasts: string[];
 /** The saved tab order the server answers with. */
 let savedPrefs: Array<{ kind: 'list' | 'channel'; ref_id: number; is_favorite: boolean }>;
@@ -118,6 +154,7 @@ beforeEach(() => {
     refuseAt = null;
     slowFirstRead = new Set();
     heldReads = new Map();
+    slowReadsOut = 0;
     toasts = [];
     savedPrefs = [];
     setMessageToastSink(t => { toasts.push(t.title); });
@@ -132,7 +169,10 @@ beforeEach(() => {
         if (m) {
             const id = Number(m[1]);
             const snapshot = [...(stored.get(id) ?? [])];
-            if (slowFirstRead.delete(id)) await new Promise(r => { setTimeout(r, PACE_MS * 3); });
+            if (slowFirstRead.delete(id)) {
+                slowReadsOut++;
+                try { await new Promise(r => { setTimeout(r, PACE_MS * 3); }); } finally { slowReadsOut--; }
+            }
             const held = heldReads.get(id);
             if (held) { heldReads.delete(id); await held; }
             return snapshot;
@@ -220,10 +260,6 @@ async function submit(selector: string) {
     await act(async () => { form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
     await settle();
 }
-/** Real time in short act() slices, as `paced` waits. */
-const wait = async (ms: number) => {
-    for (let t = 0; t < ms; t += 10) await act(async () => { await new Promise(r => { setTimeout(r, 10); }); });
-};
 
 const addInput = () => container.querySelector<HTMLInputElement>('.tasks-add input')!;
 const rows = () => [...container.querySelectorAll('.rows li')].map(l => l.textContent);
@@ -308,7 +344,7 @@ describe('"Add a task…" takes a pasted checklist', () => {
         refuseAt = 2;
         paste(addInput(), ASSISTANT_ANSWER);
         act(() => { button(ASSISTANT_ADD).click(); });
-        await paced(ASSISTANT_ITEMS.length);
+        await paced(3);
         expect(itemPosts(1)).toHaveLength(3);                // the third was tried, refused, and nothing after it
         expect(rows()).toEqual(ASSISTANT_ITEMS.slice(0, 2));
         expect(toasts).toContain(`Added 2 of ${ASSISTANT_ITEMS.length} items`);

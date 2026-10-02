@@ -414,23 +414,45 @@ mod tests {
     #[test]
     fn the_ticker_actually_rebroadcasts_until_disengaged() {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        TEST_TICK_MS.store(10, Ordering::SeqCst);
+        /// However this test ends, the tick goes back and the ticker stops:
+        /// a failure must not leave one recording "off" into the next test.
+        struct Restore(Arc<DisplayPower>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                self.0.disengage();
+                TEST_TICK_MS.store(KEEPOFF_TICK_MS, Ordering::SeqCst);
+            }
+        }
+        const TICK_MS: u64 = 10;
+        TEST_TICK_MS.store(TICK_MS, Ordering::SeqCst);
         let dp = Arc::new(DisplayPower::default());
+        let _restore = Restore(Arc::clone(&dp));
         let _ = backend::take();
         dp.displays_off().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(60));
+        // Wait for the FACT — the immediate off plus two re-asserts — not for
+        // a fixed 60 ms. A 10 ms sleep is ~15.6 ms on Windows' default timer
+        // and longer on a loaded machine, and the fixed window once held only
+        // two offs (2026-10-02). Bounded, so a ticker that stopped
+        // re-asserting fails here with what it did instead of hanging.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut calls = Vec::new();
+        while calls.iter().filter(|c| **c == "off").count() < 3 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "expected the immediate off plus two re-asserts within 5 s, saw {calls:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(TICK_MS));
+            calls.extend(backend::take());
+        }
         dp.disengage();
-        std::thread::sleep(std::time::Duration::from_millis(40));
-        let calls = backend::take();
-        let offs = calls.iter().filter(|c| **c == "off").count();
-        assert!(offs >= 3, "expected the immediate off plus re-asserts, saw {calls:?}");
+        std::thread::sleep(std::time::Duration::from_millis(4 * TICK_MS));
+        let _ = backend::take();
         // Nothing fired after disengage: allow one in-flight tick of slack.
-        std::thread::sleep(std::time::Duration::from_millis(40));
+        std::thread::sleep(std::time::Duration::from_millis(4 * TICK_MS));
         assert!(
             backend::take().iter().filter(|c| **c == "off").count() <= 1,
             "the ticker kept firing after disengage"
         );
-        TEST_TICK_MS.store(KEEPOFF_TICK_MS, Ordering::SeqCst);
     }
 
     #[test]
