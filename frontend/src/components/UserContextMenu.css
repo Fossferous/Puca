@@ -1,13 +1,25 @@
 /* User Context Menu */
 .user-context-menu {
     position: fixed;
+    /* Its own width wherever it opens: shrink-to-fit near the right edge
+       measured narrower than the menu then rendered, so the clamp put it
+       flush against the window. */
+    width: max-content;
     min-width: 200px;
     max-width: 280px;
     background: var(--bg-primary);
     border-radius: 8px;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
     z-index: 3000;
-    overflow: hidden;
+    /* Never taller than the window: what does not fit scrolls. This was
+       `overflow: hidden`, which clipped every submenu (they were flyouts
+       outside the box) and, in a window shorter than the menu, left its top
+       items above the window with no way to reach them. */
+    max-height: calc(100vh - 20px);
+    max-height: calc(100dvh - 20px);
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
     padding: 6px;
 }
 
@@ -122,19 +134,22 @@
     margin-left: auto;
     font-size: 0.8rem;
     color: var(--text-faint);
+    display: inline-flex;
+    transition: transform 0.15s;
 }
 
-.context-submenu {
-    position: absolute;
-    left: 100%;
-    top: 0;
-    min-width: 180px;
-    background: var(--bg-primary);
-    border-radius: 8px;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-    padding: 8px;
-    margin-left: 4px;
-    z-index: 3001;
+.context-item.has-submenu[aria-expanded="true"] .submenu-arrow {
+    transform: rotate(90deg);
+}
+
+/* Submenus expand INLINE, under their row, inside the (scrolling) menu — the
+   same pattern as the server menu's notification levels. A flyout beside the
+   menu was clipped by it, and on a 390px phone has nowhere to go. */
+.user-context-menu .context-submenu {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 2px 0 4px 14px;
 }
 
 /* The background, the checkbox's margin/flex-shrink and the name's flex/colour/size below

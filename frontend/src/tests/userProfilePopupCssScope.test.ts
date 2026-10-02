@@ -16,7 +16,9 @@
  *  1. every rule in UserProfilePopup.css is scoped under `.user-profile-popup`
  *     (nothing leaks OUT);
  *  2. no class the popup renders is a class another stylesheet styles
- *     (nothing leaks IN).
+ *     (nothing leaks IN) — including the modifiers a className switches in,
+ *     `upp-sheet` (the whole phone box) above all, which an earlier version
+ *     of this scan dropped with the rest of every `${...}`.
  */
 import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
@@ -68,16 +70,45 @@ function selectors(css: string): string[] {
     return out;
 }
 
-/** Static class tokens the popup renders: the literal parts of every
- *  className="..." / className={`...`} (not the ${...} modifiers, which only
- *  ever apply in compound with one of these). */
-function popupClasses(tsx: string): string[] {
-    const found = new Set<string>();
+const CLASS_TOKEN = /^[a-z][a-z0-9-]*$/;
+
+/** Class tokens the popup renders, from every className="..." /
+ *  className={`...`}: `statics` are the literal parts; `modifiers` are the
+ *  string literals a ${...} switches in (`cond ? ' upp-sheet' : ''`, `a ? 'online'
+ *  : 'offline'`). Only literals that are a branch of `?` / `:` / `&&` count — a
+ *  comparison operand such as `presentation === 'sheet'` is not a class. */
+function popupClassTokens(tsx: string): { statics: string[]; modifiers: string[] } {
+    const statics = new Set<string>();
+    const modifiers = new Set<string>();
     for (const m of tsx.matchAll(/className=(?:"([^"]*)"|\{`([^`]*)`\})/g)) {
-        const literal = (m[1] ?? m[2] ?? '').replace(/\$\{[^}]*\}/g, ' ');
-        for (const t of literal.split(/\s+/)) if (/^[a-z][a-z0-9-]*$/.test(t)) found.add(t);
+        const text = m[1] ?? m[2] ?? '';
+        for (const t of text.replace(/\$\{[^}]*\}/g, ' ').split(/\s+/)) if (CLASS_TOKEN.test(t)) statics.add(t);
+        for (const expr of text.matchAll(/\$\{([^}]*)\}/g)) {
+            for (const lit of expr[1].matchAll(/(?:\?|:|&&)\s*(['"])([^'"]*)\1/g)) {
+                for (const t of lit[2].split(/\s+/)) if (CLASS_TOKEN.test(t)) modifiers.add(t);
+            }
+        }
     }
-    return [...found];
+    for (const t of statics) modifiers.delete(t);
+    return { statics: [...statics], modifiers: [...modifiers] };
+}
+
+/** The static class tokens (checked strictly: no other stylesheet may name them at all). */
+function popupClasses(tsx: string): string[] {
+    return popupClassTokens(tsx).statics;
+}
+
+/** Does `selector` style a popup element through one of its modifiers? A
+ *  modifier is a generic word (`online`, `pending`), so it only reaches the
+ *  popup through a compound whose every class is one the popup renders —
+ *  `.upp-sheet` alone or `.upp-status.online` does; `.member-item.online`
+ *  cannot. */
+function modifierLeak(selector: string, modifiers: string[], popupAll: string[]): boolean {
+    for (const compound of selector.split(/\s*[\s>+~]\s*/)) {
+        const classes = [...compound.matchAll(/\.([\w-]+)/g)].map(c => c[1]);
+        if (classes.some(c => modifiers.includes(c)) && classes.every(c => popupAll.includes(c))) return true;
+    }
+    return false;
 }
 
 const hasClass = (selector: string, cls: string) =>
@@ -95,6 +126,22 @@ describe('UserProfilePopup CSS scope', () => {
         expect(selectors('.x-btn-wide { color: red }').some(s => hasClass(s, 'x-btn'))).toBe(false);
     });
 
+    it('also checks the class-name modifiers the popup switches on, upp-sheet (the phone box) above all', () => {
+        const { modifiers } = popupClassTokens(fs.readFileSync(POPUP_TSX, 'utf8'));
+        expect(modifiers).toContain('upp-sheet');
+        // A comparison operand inside ${...} is not a class.
+        expect(modifiers).not.toContain('sheet');
+        const all = [...popupClasses(fs.readFileSync(POPUP_TSX, 'utf8')), ...modifiers];
+        // Positive controls: a modifier on its own, or compounded only with
+        // popup classes, styles the popup; compounded with some other
+        // component's class it cannot.
+        expect(modifierLeak('.upp-sheet', modifiers, all)).toBe(true);
+        expect(modifierLeak('.app .upp-sheet:hover', modifiers, all)).toBe(true);
+        expect(modifierLeak('.upp-status.online', modifiers, all)).toBe(true);
+        expect(modifierLeak('.member-item.online', modifiers, all)).toBe(false);
+        expect(modifierLeak('.online-count', modifiers, all)).toBe(false);
+    });
+
     it('every rule in UserProfilePopup.css is scoped under .user-profile-popup (nothing leaks out)', () => {
         const unscoped = selectors(fs.readFileSync(POPUP_CSS, 'utf8'))
             .filter(s => !/^\.user-profile-popup(?![\w-])/.test(s));
@@ -102,7 +149,8 @@ describe('UserProfilePopup CSS scope', () => {
     });
 
     it('no class the popup renders is styled by another stylesheet (nothing leaks in)', () => {
-        const classes = popupClasses(fs.readFileSync(POPUP_TSX, 'utf8'));
+        const { statics: classes, modifiers } = popupClassTokens(fs.readFileSync(POPUP_TSX, 'utf8'));
+        const all = [...classes, ...modifiers];
         const collisions: string[] = [];
         for (const file of walk(SRC)) {
             if (path.resolve(file) === path.resolve(POPUP_CSS)) continue;
@@ -110,6 +158,7 @@ describe('UserProfilePopup CSS scope', () => {
                 for (const cls of classes) {
                     if (hasClass(sel, cls)) collisions.push(`${path.relative(SRC, file)}: ${sel}  (.${cls})`);
                 }
+                if (modifierLeak(sel, modifiers, all)) collisions.push(`${path.relative(SRC, file)}: ${sel}  (modifier)`);
             }
         }
         expect(collisions).toEqual([]);

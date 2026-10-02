@@ -324,19 +324,34 @@
     cursor: grab;
 }
 
-/* Inline expandable submenu (notification levels) */
-.context-submenu {
-    margin-left: 14px;
+/* Notification-levels submenu. Scoped to this menu: `.context-submenu` is
+   also the user right-click menu's class, and every stylesheet is global once
+   imported. Written as an inline list, this ALWAYS rendered as a flyout
+   beside the menu, because UserContextMenu.css's unscoped `.context-submenu`
+   (its own flyout, loaded later) applied here too — while this file's
+   border leaked back into that menu. Both are scoped now, and the flyout
+   this menu has always shown is stated here so it looks exactly as it did. */
+.server-context-menu .context-submenu {
+    position: absolute;
+    left: 100%;
+    top: 0;
+    min-width: 180px;
+    background: var(--bg-primary);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    padding: 8px;
+    margin-left: 4px;
+    z-index: 3001;
     border-left: 2px solid var(--border-separator, #2a2b2f);
 }
 
-.context-submenu .context-menu-item {
+.server-context-menu .context-submenu .context-menu-item {
     padding-top: 6px;
     padding-bottom: 6px;
     font-size: 0.85rem;
 }
 
-.context-submenu .menu-icon {
+.server-context-menu .context-submenu .menu-icon {
     width: 16px;
     color: var(--brand-primary, #5865f2);
 }

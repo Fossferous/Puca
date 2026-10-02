@@ -331,6 +331,8 @@ cd frontend && node e2e/notes-dialog-escape-real-browser.mjs   # one REAL Escape
 cd frontend && node e2e/paste-html-real-browser.mjs     # a pasted checklist's clipboard HTML is READ in real Chromium and nothing in it loads, runs or stalls the parser (jsdom fetches nothing and is not Chromium's parser); no server needed
 cd frontend && node e2e/notes-walk.mjs                  # Púca Notes end to end; needs a dist built against a throwaway backend + serve-dist (header of the file)
 cd frontend && node e2e/notes-desktop-embed.mjs         # Púca Notes INSIDE the desktop app, under a fake Tauri shell; needs the main bundle built against a throwaway backend into its own --outDir + serve-dist (header of the file)
+cd frontend && node e2e/member-popup-scroll.mjs <outdir>   # member profile popup: last role reachable by wheel (1280x720, 1280x460) and touch (390x844 sheet); needs API= and APP= against a throwaway backend (header of the file)
+cd frontend && node e2e/user-context-menu-reach.mjs <outdir> [baseURL]   # right-click user menu: Move to / Roles lists reachable by wheel and touch, menu inside the window (fixture harness, no backend; needs a vite dev server)
 ```
 
 **`h264-profile-real-browser.mjs` exists because the share encoded in SOFTWARE

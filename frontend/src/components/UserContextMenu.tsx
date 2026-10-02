@@ -119,11 +119,26 @@ export function UserContextMenu({
             if (y + rect.height > window.innerHeight) {
                 y = window.innerHeight - rect.height - 10;
             }
+            // Never above or left of the window. The CSS caps the menu at the
+            // window height minus 20px (the rest scrolls), so this only bites
+            // in a window narrower than the menu.
+            x = Math.max(10, x);
+            y = Math.max(10, y);
 
             // eslint-disable-next-line react-hooks/set-state-in-effect -- reposition after measuring the rendered menu
             setAdjustedPosition({ x, y });
         }
-    }, [position]);
+        // Re-placed when a submenu opens: it expands inline and grows the menu.
+    }, [position, showRolesSubmenu, showMoveSubmenu]);
+
+    // A submenu expands below its row, possibly past the menu's scrolled
+    // edge: bring the one just opened into view (both can be open at once).
+    useEffect(() => {
+        if (showMoveSubmenu) menuRef.current?.querySelector('[data-submenu="move"]')?.scrollIntoView?.({ block: 'nearest' });
+    }, [showMoveSubmenu]);
+    useEffect(() => {
+        if (showRolesSubmenu) menuRef.current?.querySelector('[data-submenu="roles"]')?.scrollIntoView?.({ block: 'nearest' });
+    }, [showRolesSubmenu]);
 
     // Close on click outside
     useEffect(() => {
@@ -272,6 +287,7 @@ export function UserContextMenu({
                                 <div className="context-submenu-wrapper">
                                     <button
                                         className="context-item has-submenu"
+                                        aria-expanded={showMoveSubmenu}
                                         onClick={() => setShowMoveSubmenu(!showMoveSubmenu)}
                                     >
                                         <span className="context-icon"><ForwardIcon /></span>
@@ -279,7 +295,7 @@ export function UserContextMenu({
                                         <span className="submenu-arrow"><ChevronRightIcon /></span>
                                     </button>
                                     {showMoveSubmenu && (
-                                        <div className="context-submenu">
+                                        <div className="context-submenu" data-submenu="move">
                                             {voiceMoveTargets.map(ch => (
                                                 <button
                                                     key={ch.id}
@@ -407,6 +423,7 @@ export function UserContextMenu({
                         <div className="context-submenu-wrapper">
                             <button
                                 className="context-item has-submenu"
+                                aria-expanded={showRolesSubmenu}
                                 onClick={() => setShowRolesSubmenu(!showRolesSubmenu)}
                             >
                                 <span className="context-icon"><TagIcon /></span>
@@ -414,7 +431,7 @@ export function UserContextMenu({
                                 <span className="submenu-arrow"><ChevronRightIcon /></span>
                             </button>
                             {showRolesSubmenu && (
-                                <div className="context-submenu">
+                                <div className="context-submenu" data-submenu="roles">
                                     {availableRoles.map(role => (
                                         <label key={role.id} className="role-checkbox">
                                             <input

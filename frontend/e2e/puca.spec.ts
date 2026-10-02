@@ -626,7 +626,9 @@ test.describe('Puca End-to-End Chat App Tests', () => {
         await pageA.locator('.member-item.online', { hasText: 'user_b' }).click();
         await pageA.locator('.friend-btn:has-text("Add Friend")').click();
         await expect(pageA.locator('.friend-btn')).toContainText('Request Sent');
-        await pageA.locator('.user-profile-popup').dispatchEvent('mousedown'); // Close popup
+        // Close popup: the outside-click handler closes only for a mousedown OUTSIDE it
+        await pageA.locator('body').dispatchEvent('mousedown');
+        await expect(pageA.locator('.user-profile-popup')).toHaveCount(0);
 
         // B accepts friend request
         await pageB.bringToFront();
@@ -826,12 +828,16 @@ test.describe('Puca End-to-End Chat App Tests', () => {
         // Assign role Moderator to User B
         await pageA.locator('.member-item.online', { hasText: 'user_b' }).click();
         await pageA.locator('.user-profile-popup .upp-role-checkbox:has-text("Moderator") input').check();
-        await pageA.locator('.user-profile-popup').dispatchEvent('mousedown'); // Close popup
+        // Close popup: the outside-click handler closes only for a mousedown OUTSIDE it
+        await pageA.locator('body').dispatchEvent('mousedown');
+        await expect(pageA.locator('.user-profile-popup')).toHaveCount(0);
 
         // Verify User B has Moderator role tag
         await pageA.locator('.member-item.online', { hasText: 'user_b' }).click();
         await expect(pageA.locator('.role-tag', { hasText: 'Moderator' })).toBeVisible();
-        await pageA.locator('.user-profile-popup').dispatchEvent('mousedown'); // Close popup
+        // Close popup: the outside-click handler closes only for a mousedown OUTSIDE it
+        await pageA.locator('body').dispatchEvent('mousedown');
+        await expect(pageA.locator('.user-profile-popup')).toHaveCount(0);
 
         // 7.2 Timeout User B (API fallback since no UI). Absolute API base —
         // relative URLs hit the Vite dev server and silently no-op.

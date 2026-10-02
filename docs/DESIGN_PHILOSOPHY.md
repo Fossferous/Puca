@@ -218,6 +218,7 @@ node e2e/mobile-voice-test.mjs <outdir>               # voice panel + drawer beh
 node e2e/clips-mobile-walk.mjs <outdir> [baseURL]     # clip approval prompt / posted clip / owner block at 390x844 (fixture harness, no login)
 node e2e/devices-mobile-walk.mjs <outdir> [baseURL]   # Devices view, both tabs, at 390x844 (fixture harness, no login)
 node e2e/member-popup-scroll.mjs <outdir>             # member profile popup: everything reachable by wheel (1280x720, 1280x460) and touch (390x844, a sheet above the nav); needs API= and APP= (header of the file)
+node e2e/user-context-menu-reach.mjs <outdir> [baseURL]   # right-click user menu: inline Move to / Roles lists reachable by wheel and touch at 1280x720, 1280x400 and 390x844 (fixture harness, no login)
 node e2e/desktop-regression-check.mjs <outdir>        # desktop must be unchanged
 ```
 
