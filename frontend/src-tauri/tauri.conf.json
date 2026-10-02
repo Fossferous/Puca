@@ -13,6 +13,8 @@
   "app": {
     "windows": [
       {
+        "label": "main",
+        "create": false,
         "title": "Puca",
         "dragDropEnabled": false,
         "width": 1200,

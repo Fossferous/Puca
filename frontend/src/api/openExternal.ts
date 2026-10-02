@@ -1,8 +1,11 @@
 // Cross-platform "open this link outside the app".
 //
 // The Tauri v2 webview registers no shell/opener plugin and denies new-window
-// requests by default, so target="_blank" anchors and window.open are silent
-// no-ops in the desktop shell. Desktop routes through the existing
+// requests, so target="_blank" anchors and window.open are silent no-ops in
+// the desktop shell. The ONE exception is exact: `about:blank#puca-pop-<n>`
+// becomes a stream pop-out window (src-tauri/src/popout.rs, opened only by
+// components/streamOsWindows.ts); any real URL is still refused. Desktop
+// routes through the existing
 // `open_external` Rust command (scheme-allowlisted, same one the update
 // banner uses).
 //

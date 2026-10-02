@@ -51,6 +51,8 @@ mod sidecar;
 mod stream_boost;
 mod support_log;
 mod mic_levels;
+// NOT gated: stream pop-out windows are a viewing feature, in Lite too.
+mod popout;
 #[cfg(feature = "remote-control")]
 mod tunnel;
 #[cfg(feature = "remote-control")]
@@ -1337,10 +1339,20 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // Pop-out windows keep their OWN per-slot geometry (popout.rs): left to
+        // this plugin too, two restorers would fight over the same window.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_filter(|label| !popout::is_popout_label(label))
+                .build(),
+        )
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if CLOSE_TO_TRAY.load(std::sync::atomic::Ordering::Relaxed) {
+                // MAIN only: a pop-out's X must close the pop-out (popout.rs).
+                if popout::close_hides_to_tray(
+                    window.label(),
+                    CLOSE_TO_TRAY.load(std::sync::atomic::Ordering::Relaxed),
+                ) {
                     // Hide, don't exit. The WebSocket stays connected, so
                     // MessageNotification keeps arriving and the OS keeps
                     // showing notifications. Quit from the tray menu really
@@ -1349,8 +1361,47 @@ pub fn run() {
                     let _ = window.hide();
                 }
             }
+            // The main window really going away (close-to-tray off) takes the
+            // pop-outs with it: they have no opener left, and as open windows
+            // they would keep the process alive with nothing to come back to.
+            if let tauri::WindowEvent::Destroyed = event {
+                if window.label() == "main" {
+                    popout::close_all(window.app_handle());
+                }
+            }
         })
         .setup(move |app| {
+            // The main window is built HERE rather than from the config at
+            // startup ("create": false in tauri.conf.json): a new-window
+            // handler can only be attached at build time, and it is what turns
+            // the app's `window.open("about:blank#puca-pop-<n>")` into a stream
+            // pop-out window (popout.rs). Everything else stays denied, as it
+            // was. Same config entry, so size, args and drag-drop are unchanged.
+            app.manage(popout::PopoutState::load(app.handle()));
+            {
+                let main_cfg = app
+                    .config()
+                    .app
+                    .windows
+                    .iter()
+                    .find(|w| w.label == "main")
+                    .cloned()
+                    .ok_or("tauri.conf.json has no \"main\" window")?;
+                let opener = app.handle().clone();
+                let reloader = app.handle().clone();
+                tauri::WebviewWindowBuilder::from_config(app.handle(), &main_cfg)?
+                    .on_new_window(move |url, features| popout::open_requested(&opener, &url, features))
+                    // A reload (or any navigation) of the main page orphans
+                    // every pop-out: nothing can fill or close them from the
+                    // new page. Close them as it starts.
+                    .on_page_load(move |_webview, payload| {
+                        if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                            popout::close_all(&reloader);
+                        }
+                    })
+                    .build()?;
+            }
+
             // 0.9.0 renamed the executable (app.exe -> Puca.exe / Puca-Lite.exe).
             // The autostart Run value stores a PATH, so an entry written by an
             // older install points at a file that no longer exists while the
@@ -1652,6 +1703,9 @@ pub fn run() {
             power::display_power_session_end,
             stream_boost::set_stream_boost,
             log_stream_diag,
+            popout::popout_supported,
+            popout::popout_pin,
+            popout::popout_close,
             support_log::read_support_log,
             mic_levels::log_mic_levels,
             #[cfg(feature = "remote-control")]

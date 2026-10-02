@@ -48,6 +48,7 @@ import {
     SpeakerOffIcon, StopIcon, StopSharingIcon,
 } from './Icons';
 import { pipSupported } from './streamPopout.utils';
+import { osWindowsSupported } from './streamOsWindows';
 import { CameraRail } from './CameraRail';
 import { StreamStatsOverlay } from './StreamStatsOverlay';
 import { docPipSupported } from './streamDocPip';
@@ -911,7 +912,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                                     })()}
                                     {/* OS-level picture-in-picture: stays on top when
                                         Púca is tabbed out. Only where the API exists. */}
-                                    {onTogglePopout && (pipSupported() || docPipSupported()) && (
+                                    {onTogglePopout && (pipSupported() || docPipSupported() || osWindowsSupported()) && (
                                         <button
                                             className={`tile-btn ${poppedStreams.includes(userId) ? 'active' : ''}`}
                                             onClick={(e) => { e.stopPropagation(); onTogglePopout(userId); }}

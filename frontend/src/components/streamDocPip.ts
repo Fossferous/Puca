@@ -13,8 +13,12 @@
  * the single-video engines when it is absent or `requestWindow` rejects.
  */
 import { pipEngine, type PipEngine } from './streamPopout.utils';
+import { osWindowsSupported } from './streamOsWindows';
 
-export type PopoutMode = 'docpip' | PipEngine;
+/** 'windows' = Púca's own pop-out windows (the desktop shell, one window per
+ *  stream, streamOsWindows.ts); 'docpip' = the one-window grid; the rest are
+ *  the single-video engines. */
+export type PopoutMode = 'windows' | 'docpip' | PipEngine;
 
 /** Window with the Doc-PiP entry point, where the runtime has it. */
 interface DocPipWindow extends Window {
@@ -29,26 +33,32 @@ export function docPipSupported(): boolean {
 }
 
 /**
- * Which popout the button drives here. 'docpip' wins where it exists —
- * EXCEPT on the Android app, whose native PipActivity (the Java side
- * floating the whole WebView) stays exactly as it is: the grid is a
- * desktop/browser feature and the phone's OS PiP is already right.
+ * Which popout the button drives here. On the desktop shell, Púca's own
+ * windows ('windows': any size, one per stream) once the shell has answered
+ * the probe; otherwise 'docpip' where it exists — EXCEPT on the Android app,
+ * whose native PipActivity (the Java side floating the whole WebView) stays
+ * exactly as it is: the grid is a desktop/browser feature and the phone's OS
+ * PiP is already right. The web never gets 'windows' (no shell to ask).
  */
 export function popoutMode(): PopoutMode | null {
     const engine = pipEngine();
     if (engine === 'native') return 'native';
+    if (osWindowsSupported()) return 'windows';
     if (docPipSupported()) return 'docpip';
     return engine;
 }
 
 /**
- * The popped set after clicking `id`'s button. Multi (docpip): membership
- * toggles — the grid holds any number. Single (legacy engines): the newest
- * pick REPLACES the old one, because those engines can only show one.
+ * The popped set after clicking `id`'s button. Multi (windows, docpip):
+ * membership toggles. Single (legacy engines): the newest pick REPLACES the
+ * old one, because those engines can only show one. `max` caps a multi set
+ * (the shell's window limit): at the cap the OLDEST pop goes back.
  */
-export function togglePopped(list: number[], id: number, multi: boolean): number[] {
+export function togglePopped(list: number[], id: number, multi: boolean, max = Infinity): number[] {
     if (list.includes(id)) return list.filter(x => x !== id);
-    return multi ? [...list, id] : [id];
+    if (!multi) return [id];
+    const next = [...list, id];
+    return next.length > max ? next.slice(next.length - max) : next;
 }
 
 /** What the in-app float (StreamPip) shows while streams are popped out. */

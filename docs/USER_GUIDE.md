@@ -292,7 +292,7 @@ Hover a stream for its buttons, or right-click it for the same items as a menu:
 |---------|--------|
 | **Mute stream** / **Unmute stream** | Silence that stream's audio (the menu row is **Mute**) |
 | **Fullscreen** | Expand that stream to the whole screen |
-| **Pop out (stays on top when Púca is tabbed out)** | Picture-in-picture, where the browser or app supports it |
+| **Pop out (stays on top when Púca is tabbed out)** | In the desktop app: that stream in its own window (see **Pop-out windows**, below). In a browser, picture-in-picture where the browser supports it |
 | **Stop Watching** | Remove it from your view |
 | **Request Control** | Ask the sharer for keyboard and mouse control of their screen; they must accept |
 | **Stream Attenuation** | Automatically reduce stream volume when people are talking |
@@ -303,6 +303,31 @@ Sharing**, **Stream Quality** (the same panel as the arrow) and **Show Stream
 Stats**. On your own stream the readout shows the
 encoding side: what you are sending, whether it is encoded in hardware, and
 what is holding the stream back (**Limited by**: CPU, bandwidth, or nothing).
+
+### Pop-out windows (desktop app)
+In the desktop app, **Pop out** puts that stream in a window of its own. Pop
+out several streams and each gets its own window (up to eight; a ninth puts
+the oldest back in the app). Every window can be dragged anywhere and resized
+to any size, up to the whole screen; double-click its title bar to maximize
+it. The window title is the name of the person sharing.
+
+Hover a pop-out window for its two buttons:
+
+| Control | Action |
+|---------|--------|
+| **Keep on top** | On (the default): the window stays above other windows. Off: it behaves like an ordinary window |
+| **Back to Púca** | Close the window and put the stream back in the app (the window's own close button does the same) |
+
+Púca remembers each window's size, place and **Keep on top** setting: the
+first window you pop out opens where the first one was last time, the second
+where the second was, and so on. A window whose screen has been unplugged
+reopens on the screen Púca is on. The sound of a popped-out stream still plays
+from the app, at the volume and mute you set there. While a stream is in its
+own window, the small player in the app does not show it a second time.
+Leaving the call, or the sharer stopping, closes its window.
+
+In a browser, and in the Android app, **Pop out** uses the browser's or the
+phone's own picture-in-picture instead, which the system limits in size.
 
 ---
 

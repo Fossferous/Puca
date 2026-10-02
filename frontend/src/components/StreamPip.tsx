@@ -19,6 +19,7 @@ import {
 import './StreamPip.css';
 import { installBackgroundResumeAll } from './deviceStageResume';
 import { pipSupported } from './streamPopout.utils';
+import { osWindowsSupported } from './streamOsWindows';
 import { docPipSupported, inAppPipMore, inAppPipPlan, type PopoutMode } from './streamDocPip';
 
 interface StreamPipProps {
@@ -221,7 +222,7 @@ export function StreamPip({ onExpand, onClose, docked = false, onStopWatching, p
                     })()}
                     {/* OS-level picture-in-picture: stays on top when
                         Púca is tabbed out. Only where the API exists. */}
-                    {onTogglePopout && (pipSupported() || docPipSupported()) && (
+                    {onTogglePopout && (pipSupported() || docPipSupported() || osWindowsSupported()) && (
                         <button
                             className={`pip-btn ${poppedStreams.includes(primaryUserId) ? 'active' : ''}`}
                             onClick={() => onTogglePopout(primaryUserId)}

@@ -171,7 +171,14 @@ describe('the inventory: every target="_blank" anchor, and why the router covers
         const callers = files.filter(f => /\bwindow\.open\(/.test(code(readFileSync(f, 'utf8')))).map(rel).sort();
         // openExternal.ts: its web branch. NotesShell.tsx: "Open in Púca",
         // offered only when pucaHref is set, which it never is in a shell.
-        expect(callers).toEqual(['api/openExternal.ts', 'notes/components/NotesShell.tsx']);
+        // streamOsWindows.ts: the desktop shell's stream pop-out windows —
+        // the one request the shell's new-window handler accepts, and only
+        // ever with an about:blank pop-out URL (popout.rs requested_slot).
+        expect(callers).toEqual(['api/openExternal.ts', 'components/streamOsWindows.ts', 'notes/components/NotesShell.tsx']);
+        const pop = code(readFileSync(join(SRC, 'components/streamOsWindows.ts'), 'utf8'));
+        expect(pop.match(/\bwindow\.open\(/g)).toHaveLength(1);
+        expect(pop).toMatch(/window\.open\(popoutWindowUrl\(slot\), popoutWindowName\(slot\)\)/);
+        expect(readFileSync(join(SRC, 'components/streamOsWindows.ts'), 'utf8')).toMatch(/return `about:blank#puca-pop-\$\{slot\}`;/);
         expect(readFileSync(join(SRC, 'notes/components/NotesShell.tsx'), 'utf8')).toMatch(/if \(pucaHref\) \{\s+items\.push\(\{ id: 'puca'[^\n]*window\.open\(pucaHref/);
     });
 
