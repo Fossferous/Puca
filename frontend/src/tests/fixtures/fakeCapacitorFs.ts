@@ -18,7 +18,14 @@ export interface BridgeCall {
 
 type WriteOpts = { path: string; data: string; directory?: string; encoding?: string; recursive?: boolean };
 
-export function fakeCapacitorFs() {
+/**
+ * `latencyMs`: each bridge call takes effect only after this delay (a macrotask
+ * per call, as a native round trip is), so two saves running at once really do
+ * interleave. 0, the default, applies every call at once.
+ */
+export function fakeCapacitorFs(opts: { latencyMs?: number } = {}) {
+    const latency = opts.latencyMs ?? 0;
+    const tick = () => (latency > 0 ? new Promise<void>(r => setTimeout(r, latency)) : Promise.resolve());
     const files = new Map<string, Buffer[]>();
     const calls: BridgeCall[] = [];
     /** Return an Error to make the Nth (1-based) write/append call reject. */
@@ -46,9 +53,10 @@ export function fakeCapacitorFs() {
     };
 
     const api = {
-        writeFile: async (o: WriteOpts) => { put('writeFile', o); return { uri: `file:///${o.path}` }; },
-        appendFile: async (o: WriteOpts) => { put('appendFile', o); },
+        writeFile: async (o: WriteOpts) => { await tick(); put('writeFile', o); return { uri: `file:///${o.path}` }; },
+        appendFile: async (o: WriteOpts) => { await tick(); put('appendFile', o); },
         deleteFile: async (o: { path: string; directory?: string }) => {
+            await tick();
             calls.push({ op: 'deleteFile', path: o.path, chars: 0, directory: o.directory });
             if (!files.delete(o.path)) throw new Error(`deleteFile: ${o.path} does not exist`);
         },

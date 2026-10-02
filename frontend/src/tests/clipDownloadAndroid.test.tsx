@@ -23,16 +23,19 @@ import { createRoot, type Root } from 'react-dom/client';
 import { fakeCapacitorFs, patternBytes } from './fixtures/fakeCapacitorFs';
 import { memoryLocalStorage } from './fixtures/fakeSink';
 
-const BRIDGE_MAX_CHARS = 1024 * 1024;
+/** 3 MiB raw = 4 MiB of base64 per bridge call (see saveToDeviceBounded.test.ts). */
+const BRIDGE_MAX_CHARS = 4 * 1024 * 1024;
 
 const h = vi.hoisted(() => ({
     fs: null as ReturnType<typeof import('./fixtures/fakeCapacitorFs').fakeCapacitorFs> | null,
     events: [] as string[],
+    /** false: an APK without the Filesystem plugin registered. */
+    filesystemPlugin: true,
 }));
 vi.mock('@capacitor/core', () => ({
     Capacitor: {
         getPlatform: () => 'android',
-        isPluginAvailable: (n: string) => n === 'Filesystem',
+        isPluginAvailable: (n: string) => h.filesystemPlugin && n === 'Filesystem',
         isNativePlatform: () => true,
     },
     registerPlugin: () => ({}),
@@ -113,6 +116,7 @@ beforeEach(() => {
     disk = fakeCapacitorFs();
     h.fs = disk;
     h.events.length = 0;
+    h.filesystemPlugin = true;
     served.clear();
     blobs.clear();
     vi.stubGlobal('fetch', vi.fn(async (u: string | URL | Request) => {
@@ -157,10 +161,16 @@ describe('Android: Download on a clip', () => {
         expect(onDisk.equals(plain)).toBe(true);
         expect([...disk.files.keys()]).toEqual([path]);
 
-        // Streaming, not "build the whole clip, then write": the first write
-        // happens before the LAST part is fetched.
-        const lastFetch = h.events.lastIndexOf(h.events.filter(e => e.startsWith('fetch:')).pop()!);
-        expect(h.events.indexOf('write'), `event order: ${h.events.slice(0, 12).join(' ')} …`).toBeLessThan(lastFetch);
+        // Streaming, not "build the whole clip, then write" — and not "write
+        // part 0, then prefetch the rest" either: every part is written
+        // before the NEXT part is fetched, so JS holds one part at a time.
+        const order = h.events.join(' ');
+        const fetches = h.events.flatMap((e, i) => (e.startsWith('fetch:') ? [i] : []));
+        expect(fetches.length).toBe(5);
+        for (let k = 1; k <= fetches.length; k++) {
+            const from = fetches[k - 1], to = k < fetches.length ? fetches[k] : h.events.length;
+            expect(h.events.slice(from + 1, to).includes('write'), `part ${k - 1} written before part ${k} is fetched: ${order}`).toBe(true);
+        }
     }, 120_000);
 
     it('a write failing part-way shows the error inline and leaves no partial clip', async () => {
@@ -181,6 +191,16 @@ describe('Android: Download on a clip', () => {
         await clickDownloadAndWait();
         expect(container.textContent).toMatch(/This clip is no longer on the server/);
         expect(disk.files.size).toBe(0);
+    });
+
+    it('an app without the filesystem plugin says the clip could not be saved — the device message, not a raw error', async () => {
+        const { href } = await sealedClip([1024, 4096]);
+        h.filesystemPlugin = false;
+        await act(async () => { root.render(<ClipAttachment href={href} />); });
+        await clickDownloadAndWait();
+        expect(container.textContent).toMatch(/Download failed: Could not save the clip to this device/);
+        expect(container.textContent).not.toMatch(/cannot write files on this platform/);
+        expect(disk.calls).toEqual([]);
     });
 
     it('positive control: a clip small enough for one bridge call saves exactly', async () => {

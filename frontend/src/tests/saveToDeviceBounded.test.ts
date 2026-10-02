@@ -21,13 +21,20 @@
  * (saveNotesExport → saveTextToDevice). The clip download has its own file
  * (clipDownloadAndroid.test.tsx).
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fakeCapacitorFs, patternBytes } from './fixtures/fakeCapacitorFs';
 
-/** 768 KiB of raw bytes is exactly 1 MiB of base64. A bridge message of this
- *  size costs the Java heap a few MB, against the ~96 MB a 92 MB clip needed
- *  before it died. */
-const BRIDGE_MAX_CHARS = 1024 * 1024;
+/** 3 MiB of raw bytes is exactly 4 MiB of base64. A bridge message of this
+ *  size costs the Java heap a few tens of MB at most, against the ~96 MB a
+ *  92 MB clip needed before it died — and the P2P download sink
+ *  (capacitorSink.ts) has shipped 4 MiB-raw writes, i.e. larger messages than
+ *  this, since its throughput audit. */
+const BRIDGE_MAX_CHARS = 4 * 1024 * 1024;
+/** Raw bytes per bridge call the slicing should reach. Every call is a
+ *  stop-and-wait round trip PLUS a MediaScanner scan of the file (the plugin
+ *  scans after every write to external storage, Documents included), so
+ *  slices far smaller than the bound multiply both for nothing. */
+const SLICE_RAW_BYTES = 3 * 1024 * 1024;
 
 const fs = vi.hoisted(() => ({ current: null as ReturnType<typeof import('./fixtures/fakeCapacitorFs').fakeCapacitorFs> | null }));
 let android = true;
@@ -55,7 +62,7 @@ vi.mock('../api/platform', async (importOriginal) => ({
 }));
 
 const { saveAttachment } = await import('../api/saveAttachment');
-const { saveTextToDevice } = await import('../api/saveToDevice');
+const { saveTextToDevice, DEVICE_WRITE_CHUNK_CHARS } = await import('../api/saveToDevice');
 const { saveExportFile } = await import('../api/accountExport');
 const { saveNotesExport } = await import('../notes/model/noteText');
 
@@ -100,10 +107,12 @@ describe('saveAttachment on Android — a large file never crosses the bridge wh
         expect(onDisk?.length).toBe(input.length);
         expect(onDisk!.equals(Buffer.from(input.buffer, input.byteOffset, input.byteLength))).toBe(true);
         expect([...disk.files.keys()]).toEqual([pathOf(r.where)]); // nothing else left behind
+        // Not needlessly many round trips: each one also costs a media scan.
+        expect(disk.calls.length, 'bridge calls for 60 MB').toBeLessThanOrEqual(Math.ceil(input.length / SLICE_RAW_BYTES));
     }, 120_000);
 
     it('a write that fails part-way deletes what it wrote and says so — never "saved", never a crash', async () => {
-        const input = patternBytes(5 * 1024 * 1024, 5);
+        const input = patternBytes(10 * 1024 * 1024, 5); // four slices; the third fails
         disk.failOn((n) => (n === 3 ? new Error('OS-PLUG-FILE-0013') : null));
         await expect(saveAttachment(blobUrlOf(input), 'big.bin')).rejects.toThrow(/Could not save the file/);
         expect(disk.calls.filter(c => c.op !== 'deleteFile').length, 'stopped at the failing call').toBe(3);
@@ -124,12 +133,80 @@ describe('saveAttachment on Android — a large file never crosses the bridge wh
     });
 });
 
+/*
+ * Two saves of the same name in the same second. timestampedName is unique per
+ * SECOND, and the per-button busy guards do not stop two different buttons (two
+ * pasted "image.png" attachments, or one clip rendered twice). With one
+ * writeFile per save the last writer simply won; with writeFile + appendFile
+ * per slice, save B's writeFile truncates in the middle of save A's appends and
+ * both then append into one file — corrupt, and both report "Saved to" it.
+ */
+describe('two saves of the same name at once (same second)', () => {
+    const NOON = new Date(2026, 9, 2, 12, 0, 0);
+    beforeEach(() => {
+        vi.useFakeTimers({ toFake: ['Date'] }); // freeze the clock only; setTimeout stays real
+        vi.setSystemTime(NOON);
+        disk = fakeCapacitorFs({ latencyMs: 1 }); // a real round trip: the saves interleave
+        fs.current = disk;
+    });
+    afterEach(() => { vi.useRealTimers(); });
+
+    /** Each save starts once the previous one is part-way through its bridge
+     *  calls — two taps, not one tick. (Starting them in the same tick also
+     *  trips a vitest quirk: concurrent first `import()`s of a vi.mock'ed
+     *  module hand all but one the REAL module, here a "web" Capacitor.) */
+    async function staggered<T>(starts: Array<() => Promise<T>>): Promise<PromiseSettledResult<T>[]> {
+        const running: Promise<T>[] = [];
+        for (const start of starts) {
+            const before = disk.calls.length;
+            running.push(start());
+            for (let i = 0; i < 5000 && disk.calls.length === before; i++) await new Promise(r => setTimeout(r, 1));
+        }
+        return Promise.allSettled(running);
+    }
+
+    it('each save gets its own file, byte for byte, and each reports its own path', async () => {
+        const inputs = [patternBytes(7 * 1024 * 1024 + 100, 21), patternBytes(7 * 1024 * 1024 + 200, 22), patternBytes(2 * 1024 * 1024, 23)];
+        const settled = await staggered(inputs.map(b => () => saveAttachment(blobUrlOf(b), 'image.jpg')));
+        expect(settled.map(r => r.status)).toEqual(['fulfilled', 'fulfilled', 'fulfilled']);
+        // The saves really overlapped: the second began before the first finished.
+        const firstPath = disk.calls[0].path;
+        const firstDone = disk.calls.map(c => c.path).lastIndexOf(firstPath);
+        expect(disk.calls.slice(0, firstDone).some(c => c.path !== firstPath || c.op === 'writeFile' && c !== disk.calls[0]), 'interleaved').toBe(true);
+
+        const wheres = settled.map(r => (r as PromiseFulfilledResult<{ where: string }>).value.where);
+        expect(new Set(wheres).size, `reported paths: ${wheres.join(', ')}`).toBe(3);
+        expect(wheres[0]).toBe('Documents/Puca/image-20261002-120000.jpg'); // the first keeps the plain name
+        for (let i = 0; i < inputs.length; i++) {
+            const onDisk = disk.read(pathOf(wheres[i]));
+            expect(onDisk?.length, `file ${i} length`).toBe(inputs[i].length);
+            expect(onDisk!.equals(Buffer.from(inputs[i])), `file ${i} is its own input`).toBe(true);
+        }
+        expect(disk.files.size).toBe(3);
+    }, 60_000);
+
+    it("a second save that fails cannot delete the first save's file", async () => {
+        const a = patternBytes(7 * 1024 * 1024 + 100, 31);
+        const b = patternBytes(1000, 32);
+        let writeFiles = 0;
+        disk.failOn((_n, op) => (op === 'writeFile' && ++writeFiles === 2 ? new Error('OS-PLUG-FILE-0013') : null));
+        const [ra, rb] = await staggered([() => saveAttachment(blobUrlOf(a), 'image.jpg'), () => saveAttachment(blobUrlOf(b), 'image.jpg')]);
+
+        expect(rb.status).toBe('rejected');
+        expect(ra.status).toBe('fulfilled');
+        const where = (ra as PromiseFulfilledResult<{ where: string }>).value.where;
+        expect(disk.read(pathOf(where))?.equals(Buffer.from(a)), 'the first save is intact').toBe(true);
+        expect([...disk.files.keys()]).toEqual([pathOf(where)]);
+    }, 60_000);
+});
+
 /** Text with a surrogate pair straddling every slice boundary a naive cut
- *  would make, plus 2- and 3-byte UTF-8 characters. */
+ *  would make, plus 2- and 3-byte UTF-8 characters. Positioned on the
+ *  module's OWN slice size: the point is to land a pair on its cut. */
 function awkwardText(minChars: number): string {
     const parts: string[] = [];
     let n = 0;
-    const unit = 'a'.repeat(BRIDGE_MAX_CHARS - 1) + '\u{1F600}' + 'é€\n';
+    const unit = 'a'.repeat(DEVICE_WRITE_CHUNK_CHARS - 1) + '\u{1F600}' + 'é€\n';
     while (n < minChars) { parts.push(unit); n += unit.length; }
     return parts.join('');
 }

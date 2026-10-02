@@ -11,7 +11,7 @@
  * it to the filesystem plugin in one piece is what closed the app on Download:
  * a 2-minute 1080p clip is ~92 MB, one 128 MB string over the Capacitor
  * bridge, OutOfMemoryError on the UI thread. Now the phone holds about one
- * part (≤ 24 MiB) and each bridge message is ≤ 1 MiB, whatever the clip's
+ * part (≤ 24 MiB) and each bridge message is ≤ 4 MiB, whatever the clip's
  * length.
  *
  * Lives OUTSIDE api/clips on purpose: that directory may not reach any

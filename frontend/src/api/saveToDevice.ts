@@ -57,10 +57,13 @@ export function timestampedName(name: string, now: Date = new Date()): string {
     return `${safe}-${stamp}`;
 }
 
+/** A DeviceWriteError, not a bare Error: "this APK has no filesystem plugin"
+ *  is a can't-write-here failure, and a caller that maps DeviceWriteError to
+ *  the device message (api/clipDownload.ts) must not show the raw text. */
 async function filesystem() {
     const { Capacitor } = await import('@capacitor/core');
     if (Capacitor.getPlatform() !== 'android' || !Capacitor.isPluginAvailable('Filesystem')) {
-        throw new Error('this app cannot write files on this platform');
+        throw new DeviceWriteError(new Error('this app cannot write files on this platform'));
     }
     return import('@capacitor/filesystem');
 }
@@ -77,15 +80,28 @@ async function filesystem() {
  * half instead: a 0-byte file and a misleading error.
  *
  * So: writeFile for the first slice (create / truncate), appendFile for the
- * rest, each slice at most DEVICE_WRITE_CHUNK_CHARS characters — a few MB of
- * Java heap whatever the file's size. A failure part-way deletes what was
- * written: nothing half-written is left wearing the real name.
+ * rest, each slice at most DEVICE_WRITE_CHUNK_CHARS characters — a few tens of
+ * MB of Java heap at most, whatever the file's size. A failure part-way
+ * deletes what was written: nothing half-written is left wearing the real
+ * name.
+ *
+ * Slices are as LARGE as is safe, not as small as possible: every call is a
+ * stop-and-wait bridge round trip and, on external storage (Documents
+ * included), a MediaScannerConnection.scanFile of the file
+ * (FilesystemPlugin.kt). The P2P download sink (capacitorSink.ts) has shipped
+ * 4 MiB-raw writes since its throughput audit; 3 MiB raw stays under that.
+ *
+ * Slicing makes one save several calls, so two saves of the same name at
+ * once (the name is unique per SECOND; two attachments both called
+ * image.jpg) would interleave — B's writeFile truncating A's file mid-append
+ * — and both would report the same corrupt file. A name in use by a save
+ * still in flight is never reused: the later save gets a -2, -3, … suffix.
  */
 
-/** Raw bytes per bridge call. A multiple of 3, so every slice but the last is
- *  whole base64 quads with no padding, and its base64 is exactly
- *  DEVICE_WRITE_CHUNK_CHARS long. */
-export const DEVICE_WRITE_CHUNK_BYTES = 768 * 1024;
+/** Raw bytes per bridge call: 3 MiB. A multiple of 3, so every slice but the
+ *  last is whole base64 quads with no padding, and its base64 is exactly
+ *  DEVICE_WRITE_CHUNK_CHARS (4 MiB) long. */
+export const DEVICE_WRITE_CHUNK_BYTES = 3 * 1024 * 1024;
 /** Characters per bridge call, text and base64 alike. */
 export const DEVICE_WRITE_CHUNK_CHARS = (DEVICE_WRITE_CHUNK_BYTES / 3) * 4;
 
@@ -103,6 +119,21 @@ export class DeviceWriteError extends Error {
 
 type Fs = Awaited<ReturnType<typeof filesystem>>;
 
+/** Documents-relative paths a save is writing right now. */
+const writing = new Set<string>();
+
+/** `name`, or `name-2.ext`, `name-3.ext`, … — the first not being written by
+ *  another save in flight. Synchronous: the check and the claim happen with
+ *  no await between them. */
+function claimFileName(folder: string, name: string): string {
+    const dot = name.lastIndexOf('.');
+    const [stem, ext] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ''];
+    let file = name;
+    for (let n = 2; writing.has(`${folder}/${file}`); n++) file = `${stem}-${n}${ext}`;
+    writing.add(`${folder}/${file}`);
+    return file;
+}
+
 /**
  * One file in Documents, written by `fill` in bounded slices. `fill` gets a
  * `put` that takes ONE slice (at most DEVICE_WRITE_CHUNK_CHARS characters).
@@ -113,8 +144,20 @@ async function writeInSlices(
     fs: Fs, folder: string, name: string, utf8: boolean,
     fill: (put: (data: string) => Promise<void>) => Promise<void>,
 ): Promise<SaveResult> {
+    const file = claimFileName(folder, safeDeviceFileName(name));
+    const path = `${folder}/${file}`;
+    try {
+        return await writeClaimed(fs, folder, file, utf8, fill);
+    } finally {
+        writing.delete(path);
+    }
+}
+
+async function writeClaimed(
+    fs: Fs, folder: string, file: string, utf8: boolean,
+    fill: (put: (data: string) => Promise<void>) => Promise<void>,
+): Promise<SaveResult> {
     const { Filesystem, Directory, Encoding } = fs;
-    const file = safeDeviceFileName(name);
     const path = `${folder}/${file}`;
     let started = false;
     const put = async (data: string) => {

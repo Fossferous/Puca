@@ -196,7 +196,7 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
   `Documents/Puca/puca-clip-<id>-<timestamp>.mp4`: one part fetched,
   decrypted and written at a time (`forEachClipPart` →
   `api/clipDownload.ts` → `saveStreamToDevice`), each bridge call at most
-  1 MiB of base64. Building the whole clip and handing it to the filesystem
+  4 MiB of base64 (3 MiB of the file). Building the whole clip and handing it to the filesystem
   plugin in one piece closed the app (a 2-minute 1080p clip was one 128 MB
   string; Android's bridge handler ran out of memory on the UI thread). The
   writer lives outside `api/clips/`, which `clipNoDiskWrite.test.ts` keeps
