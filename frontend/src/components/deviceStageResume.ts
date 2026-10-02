@@ -30,7 +30,8 @@
  */
 /**
  * The same un-pause duty for surfaces with MANY videos — the voice-channel
- * stages (StreamStage tiles, the PiP, camera tiles), which Android pauses
+ * stages (StreamStage tiles, the PiP, camera tiles) and the stream audio
+ * host's <audio> elements, which Android pauses
  * exactly like the device stage. No `onForeground` here on purpose: that
  * hook exists to request a keyframe from the agent's infinite-GOP encoder,
  * and voice-channel media comes from BROWSER encoders whose decoders recover
@@ -41,7 +42,7 @@
  * registration bookkeeping — hand back whatever is mounted right now.
  */
 export function installBackgroundResumeAll(
-    getVideos: () => Iterable<HTMLVideoElement | null | undefined>,
+    getVideos: () => Iterable<HTMLMediaElement | null | undefined>,
 ): () => void {
     const onVisibility = () => {
         if (document.visibilityState !== 'visible') return;

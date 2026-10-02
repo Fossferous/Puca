@@ -270,6 +270,14 @@ When someone shares, their entry in the voice view shows a **LIVE** badge and a
 button. Several streams can be watched at once; **Switch to Grid View** /
 **Switch to Focus View** changes the layout.
 
+Opening a text channel or a DM while you watch keeps the stream in a small
+player over the chat (docked under the header on a phone). Every stream you
+watch stays audible wherever you are in the app, at its own volume and mute;
+boosting a stream above 100% and **Stream Attenuation** work in the stream
+view. While a stream is popped out (**Pop out**, below), the small player
+shows the next stream you are watching instead of a second copy, and hides
+when every stream you watch is popped out.
+
 ### Stream Controls
 Hover a stream for its buttons, or right-click it for the same items as a menu:
 

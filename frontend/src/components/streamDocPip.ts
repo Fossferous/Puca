@@ -51,6 +51,58 @@ export function togglePopped(list: number[], id: number, multi: boolean): number
     return multi ? [...list, id] : [id];
 }
 
+/** What the in-app float (StreamPip) shows while streams are popped out. */
+export interface InAppPipPlan {
+    /** The stream the float binds and names; null = none (nothing watched,
+     *  or every watched stream is in the OS window). */
+    show: number | null;
+    /** Keep the float MOUNTED but invisible. */
+    hidden: boolean;
+}
+
+/**
+ * The float never shows a stream that is in the OS window — on every engine
+ * that puts the stream in a SEPARATE window: the Doc-PiP grid, element PiP
+ * ('standard') and Safari's 'webkit'. It shows the first watched stream that
+ * is NOT popped, and hides only when every watched stream is popped.
+ *
+ * Before this the rule was `usingDocPip && popped.length > 0`: the single-
+ * video engines never hid the float (the same stream on screen twice), and
+ * the grid hid it as soon as ANY stream was popped — so a watched stream that
+ * was NOT popped was on screen nowhere.
+ *
+ * 'native' (the Android app) is left as it was: PipActivity floats the whole
+ * WebView with a full-viewport host over the page, so the docked strip is
+ * never what that window shows. null (no PiP at all) cannot have pops.
+ */
+export function inAppPipPlan(
+    selected: readonly number[],
+    popped: readonly number[],
+    mode: PopoutMode | null,
+): InAppPipPlan {
+    if (selected.length === 0) return { show: null, hidden: false };
+    if (mode === 'native' || mode === null) return { show: selected[0], hidden: false };
+    const free = selected.find(id => !popped.includes(id));
+    return free === undefined ? { show: null, hidden: true } : { show: free, hidden: false };
+}
+
+/**
+ * The float's "+N more" badge: the OTHER watched streams it could show, i.e.
+ * not the one it shows and not the ones in the OS window (same engine rules
+ * as inAppPipPlan). It used to be selected.length - 1, so a popped stream
+ * the float deliberately no longer shows was still counted as "more".
+ */
+export function inAppPipMore(
+    selected: readonly number[],
+    popped: readonly number[],
+    mode: PopoutMode | null,
+): number {
+    const { show } = inAppPipPlan(selected, popped, mode);
+    if (show === null) return 0;
+    const ignoresPops = mode === 'native' || mode === null;
+    return selected.filter(id => id !== show && (ignoresPops || !popped.includes(id))).length;
+}
+
 /**
  * Give the Doc-PiP document the app's styling: clone every <style> and
  * stylesheet <link> into its head. The window is same-origin and same-realm,

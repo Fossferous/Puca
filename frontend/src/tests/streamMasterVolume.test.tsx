@@ -14,7 +14,9 @@
  * see that, so these record EVERY automation and element-volume write.
  *
  * StreamPip, the only stream audio path in chat view, never applied the
- * master at all, and never re-applied on a Settings change.
+ * master at all, and never re-applied on a Settings change. That path is now
+ * StreamAudioHost (2026-10-02: one element per watched stream; the float is
+ * picture only), and the master rule moved with it.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
@@ -56,7 +58,7 @@ vi.mock('../api/remoteControl', () => ({
 vi.mock('../api/rtc/sfuManager', () => ({ sfuManager: { setFocusedRemote: () => {} } }));
 
 import { StreamStage } from '../components/StreamStage';
-import { StreamPip } from '../components/StreamPip';
+import { StreamAudioHost } from '../components/StreamAudioHost';
 import { useStreamStore } from '../stores/streamStore';
 import { loadSettings, saveSettings } from '../components/settingsStore';
 import { setStreamVolume } from '../components/streamVolumeStore';
@@ -238,29 +240,30 @@ describe('StreamStage — the element-audio fallback', () => {
     });
 });
 
-describe('StreamPip — the chat-view path', () => {
-    async function renderPip() {
-        await act(async () => { root.render(<StreamPip onExpand={() => {}} onClose={() => {}} />); });
+describe('StreamAudioHost — the path everywhere the stage is not', () => {
+    const audio = () => container.querySelector<HTMLAudioElement>('audio[data-stream-audio="1"]')!;
+    async function renderHost() {
+        await act(async () => { root.render(<StreamAudioHost />); });
         await act(async () => { await Promise.resolve(); });
     }
 
     it('plays at stream volume × master', async () => {
-        await renderPip();
-        expect(video().volume).toBeCloseTo(0.5, 9); // 100% × 50%
+        await renderHost();
+        expect(audio().volume).toBeCloseTo(0.5, 9); // 100% × 50%
     });
 
     it('a boosted stream is capped at full scale after the master is applied', async () => {
         setStreamVolume(1, 150);
-        await renderPip();
-        expect(video().volume).toBeCloseTo(0.75, 9); // 150% × 50%
+        await renderHost();
+        expect(audio().volume).toBeCloseTo(0.75, 9); // 150% × 50%
         master(100);
         await act(async () => { await Promise.resolve(); });
-        expect(video().volume).toBe(1); // 150% × 100%, capped
+        expect(audio().volume).toBe(1); // 150% × 100%, capped
     });
 
     it('follows a Settings change to Output Volume', async () => {
-        await renderPip();
+        await renderHost();
         act(() => { master(20); });
-        expect(video().volume).toBeCloseTo(0.2, 9);
+        expect(audio().volume).toBeCloseTo(0.2, 9);
     });
 });
