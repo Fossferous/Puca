@@ -1011,6 +1011,12 @@ pub struct AppState {
     /// and the PC's replay on waking would undo it. Read by
     /// `tombstone_recent_voice_drops` (ws.rs). Bounded by `VOICE_DROP_TTL`.
     pub voice_drops: DashMap<(UserId, String), (RoomId, std::time::Instant)>,
+    /// conn -> sid of a session the per-user cap EVICTED (register_session),
+    /// handed to that conn's own `unregister_session`: the eviction removed
+    /// its Session, so without this its teardown has no sid and records no
+    /// `voice_drops` entry for a call the eviction ended. Consumed by that
+    /// teardown; one entry per eviction, and evictions are bounded by the cap.
+    pub evicted_sids: DashMap<u64, String>,
     /// Events seen while a resync's snapshot is in flight (None otherwise);
     /// the merge must not undo them. Lock order: this, then `sfu_rooms`.
     pub sfu_resync_journal: std::sync::Mutex<Option<crate::sfu::SfuResyncJournal>>,
@@ -1390,6 +1396,7 @@ impl AppState {
             sfu_minted: DashMap::new(),
             voice_tombstones: DashMap::new(),
             voice_drops: DashMap::new(),
+            evicted_sids: DashMap::new(),
             sfu_resync_journal: std::sync::Mutex::new(None),
             sfu_resync_running: std::sync::Mutex::new(false),
             server_perms_locks: DashMap::new(),
@@ -1763,6 +1770,11 @@ impl AppState {
                 if let Some(since) = evicted.activity.departure(Instant::now()) {
                     self.presence.note_departure(user_id, since, Instant::now());
                 }
+            }
+            // Likewise its sid, for the voice drop its teardown records
+            // (rooms are reaped there, outside this shard lock).
+            if !evicted.sid.is_empty() {
+                self.evicted_sids.insert(evicted.conn_id, evicted.sid.clone());
             }
             let was_in_device_session = protected.contains(&evicted.conn_id);
             // This eviction used to be completely silent, which is why it took
@@ -2468,6 +2480,10 @@ impl AppState {
             }
             Entry::Vacant(_) => false,
         };
+        // A conn the cap evicted has no Session left to name its sid; the
+        // eviction handed it over (`evicted_sids`). Always consumed here.
+        let handed_over = self.evicted_sids.remove(&conn_id).map(|(_, sid)| sid);
+        let dropped_sid = dropped_sid.or(handed_over);
         let fully_offline = last_visible_gone;
 
         // A user who vanishes mid-transfer must not stay counted against the
@@ -4442,6 +4458,46 @@ mod session_cap_tests {
             "visible clients are untouched by delivery churn"
         );
         assert!(live.contains(&newest));
+    }
+
+    /// A session evicted by the cap while it is in voice leaves the same
+    /// voice-drop record its own disconnect would have: Leave / Move here
+    /// pressed on another device during the rejoin grace tombstones it, so its
+    /// replayed join is refused. Unregister found no Session for the evicted
+    /// conn (the eviction removed it), so it had no sid and recorded nothing.
+    #[tokio::test]
+    async fn a_session_evicted_in_voice_still_leaves_its_voice_drop() {
+        let state = test_state();
+        let mut held = Vec::new();
+        for i in 0..10 {
+            let (tx, rx) = mpsc::channel::<ServerMessage>(8);
+            let (conn, _, _) = state.register_session(1, "tester".into(), tx, false, None, format!("sid-{i}"));
+            held.push((conn, rx));
+        }
+        let in_voice = held[0].0;
+        state.join_room("voice_42", 1, in_voice);
+        // Control: an ordinary disconnect in voice records the drop.
+        state.join_room("voice_43", 1, held[5].0);
+        state.unregister_session(1, held[5].0);
+        assert!(state.recent_voice_drops(1, Duration::from_secs(60)).contains(&("sid-5".to_string(), "voice_43".to_string())));
+
+        // Two more connections: the second evicts the oldest - the one in voice.
+        for i in 10..12 {
+            let (tx, rx) = mpsc::channel::<ServerMessage>(8);
+            let (conn, _, _) = state.register_session(1, "tester".into(), tx, false, None, format!("sid-{i}"));
+            held.push((conn, rx));
+        }
+        assert!(!live_conns(&state).contains(&in_voice), "the oldest session was the victim");
+        // ...and then its socket task runs its own teardown.
+        let (_, vacated) = state.unregister_session(1, in_voice);
+        assert!(vacated.iter().any(|v| v.room_id == "voice_42" && v.fully_left), "it was taken out of the room");
+        assert!(
+            state.recent_voice_drops(1, Duration::from_secs(60)).contains(&("sid-0".to_string(), "voice_42".to_string())),
+            "the evicted session's drop is recorded: {:?}",
+            state.recent_voice_drops(1, Duration::from_secs(60))
+        );
+        // The hand-off is consumed: a second teardown of the same conn records nothing new.
+        assert!(state.evicted_sids.get(&in_voice).is_none());
     }
 
     #[tokio::test]
