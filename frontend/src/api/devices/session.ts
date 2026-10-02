@@ -366,9 +366,12 @@ export interface DeviceControlSession {
      *  transport cannot fix that. */
     secureDesktop: boolean;
     /** A ClipCursor region on the host — a fullscreen game, typically — is
-     *  holding the pointer entirely off the streamed monitor, so injected
-     *  clicks get clamped somewhere the viewer cannot see, with no error from
-     *  the injection itself. Same trust rule as `secureDesktop`: HOST polled
+     *  holding the pointer away from a screen the viewer is driving, so
+     *  injected clicks get clamped somewhere the viewer cannot see, with no
+     *  error from the injection itself. One screen: the streamed monitor is
+     *  entirely outside the clip. All Displays: ANY captured screen is (the
+     *  agent's `session_cursor_clipped` / puca-input
+     *  `any_monitor_unreachable_under_clip`). Same trust rule as `secureDesktop`: HOST polled
      *  from the agent, CONTROLLER only ever told by the host's
      *  `cursor-clipped` notice, never guessed. Absent machinery (webview host,
      *  old agent) leaves it false — the pre-feature behaviour. */

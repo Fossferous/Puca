@@ -27,10 +27,36 @@
 
 import { FS_MAX_IO, resolveJailed, type FsProvider } from './fsJail';
 
-/** Mirrors the native agent's MAX_LIST_ENTRIES (file_transfer.rs): a folder
- *  with more entries answers the first page plus `truncated: true` rather
- *  than serialising an unbounded listing into one frame on the phone's heap. */
-export const FS_MAX_LIST = 5000;
+/** Mirrors the native agent's MAX_LIST_ENTRIES (file_transfer.rs): the most
+ *  entries one list reply (one PAGE) carries. A folder with more answers a
+ *  page plus `truncated: true` and a `next` cursor, rather than serialising an
+ *  unbounded listing into one frame on the phone's heap. */
+export const FS_MAX_LIST = 2000;
+
+/** Mirrors the agent's LIST_REPLY_BUDGET: the most UTF-8 bytes one list reply
+ *  may serialise to, envelope and id included.
+ *
+ *  THE WIRE LIMIT IS BYTES. `RTCDataChannel.send` throws for a message longer
+ *  than the controller's maxMessageSize (256 KiB for a Chromium controller),
+ *  and a count cap alone let a folder of long names (5,000 x 40 characters is
+ *  ~400 KB) produce exactly that: the throw was swallowed, and the controller
+ *  waited 15 s for "the other computer did not answer". Same 96 KiB as the
+ *  agent, so a controller pages the same way whichever kind of host it is
+ *  browsing. */
+export const FS_LIST_REPLY_BUDGET = 96 * 1024;
+
+/** Bytes reserved in the budget for the reply around its entries
+ *  (`{"ok":"list","entries":[],"truncated":false,"next":…,"id":…}`). */
+const FS_LIST_ENVELOPE = 256;
+
+const utf8 = new TextEncoder();
+
+/** One entry's exact contribution to a list reply: its JSON in UTF-8 plus
+ *  the separating comma. Bytes, not string length — a three-byte character
+ *  is one UTF-16 unit. */
+function entryWireBytes(e: unknown): number {
+    return utf8.encode(JSON.stringify(e)).length + 1;
+}
 
 interface FsReplyBase {
     ok: string;
@@ -83,11 +109,29 @@ export async function handleFsRequest(
     if (cmd === 'list') {
         try {
             const all = await provider.readdir(resolved);
-            return {
-                ok: 'list',
-                entries: all.length > FS_MAX_LIST ? all.slice(0, FS_MAX_LIST) : all,
-                truncated: all.length > FS_MAX_LIST,
-            };
+            // `cursor` is a position in this enumeration: at or a little
+            // before the previous page's `next` (the controller re-reads a
+            // few entries to resume after a name it has; listPaging.ts).
+            // Absent (every controller before paging) or malformed means the
+            // first page.
+            const c = req.cursor;
+            const start = typeof c === 'number' && Number.isInteger(c) && c >= 0 ? c : 0;
+            const entries: typeof all = [];
+            let bytes = FS_LIST_ENVELOPE;
+            let i = start;
+            for (; i < all.length; i++) {
+                if (entries.length >= FS_MAX_LIST) break;
+                const n = entryWireBytes(all[i]);
+                // The first entry of a page always goes in, so every page
+                // makes progress; one name is a few hundred bytes at most.
+                if (entries.length > 0 && bytes + n > FS_LIST_REPLY_BUDGET) break;
+                bytes += n;
+                entries.push(all[i]);
+            }
+            const truncated = i < all.length;
+            return truncated
+                ? { ok: 'list', entries, truncated, next: start + entries.length }
+                : { ok: 'list', entries, truncated };
         } catch (e) {
             return err(`could not read dir: ${e instanceof Error ? e.message : String(e)}`);
         }
@@ -188,8 +232,22 @@ export function attachFilesServer(
             if (reqId !== undefined) reply.id = reqId;
             try {
                 dc.send(JSON.stringify(reply));
-            } catch {
-                // The channel died mid-answer; the session teardown owns it.
+            } catch (e) {
+                // The send THREW: the reply is over the controller's
+                // maxMessageSize, or the channel is going away. Swallowing it
+                // left the request unanswered and the controller timed out
+                // 15 s later with nothing anywhere saying why. Answer the
+                // same id with an error instead; if even that cannot be sent,
+                // the channel really is gone and the session teardown owns it.
+                const why = e instanceof Error ? e.message : String(e);
+                console.warn(`[files] a ${String(reply.ok)} reply could not be sent: ${why}`);
+                const fallback = err(`that answer could not be sent over the connection (${why})`);
+                if (reqId !== undefined) fallback.id = reqId;
+                try {
+                    if (dc.readyState === 'open') dc.send(JSON.stringify(fallback));
+                } catch {
+                    // The channel died mid-answer; the session teardown owns it.
+                }
             }
         });
     };

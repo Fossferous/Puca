@@ -504,10 +504,13 @@ pub enum Response {
     /// closes). `false` is the ordinary case.
     ///
     /// `cursor_clipped: true` means a `ClipCursor` region (a fullscreen game,
-    /// typically) is holding the pointer entirely OFF the monitor this agent is
-    /// injecting onto, so absolute moves get clamped back into the clip and
-    /// clicks land in the wrong place with no error from `SendInput`
-    /// (puca-input `cursor_clip_conflict`). ADDITIVE, both directions of skew
+    /// typically) is holding the pointer away from a screen the controller is
+    /// driving, so absolute moves get clamped back into the clip and clicks
+    /// land in the wrong place with no error from `SendInput`. On a single
+    /// screen: the streamed monitor is entirely outside the clip. On All
+    /// Displays: ANY captured screen in the picture is (session.rs
+    /// `session_cursor_clipped`, puca-input `any_monitor_unreachable_under_clip`).
+    /// ADDITIVE, both directions of skew
     /// safe: an old app never reads it, and an old agent never writes it —
     /// the app's `=== true` check reads absence as false (pinned on the TS
     /// side, secureDesktopStatus.test.ts).

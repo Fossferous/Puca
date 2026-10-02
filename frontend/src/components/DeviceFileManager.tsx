@@ -1,5 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { listRoots, listDir, uploadFile, type FsEntry } from '../api/devices/fileTransfer';
+import {
+    continuationCursor,
+    continuePage,
+    firstContinuation,
+    scrollKeepingTopRow,
+    type ListContinuation,
+} from '../api/devices/listPaging';
 import { activeSessions, requestFileAccess, subscribeSessions } from '../api/devices/session';
 import { startDeviceDownload } from '../api/devices/deviceDownloads';
 import { CloseIcon, DownloadIcon, FileIcon, FolderIcon } from './Icons';
@@ -15,11 +22,48 @@ export const DFM_ROW_H_COARSE = 48;
 /** Rows rendered above/below the viewport so fast scrolling never shows a gap. */
 const DFM_OVERSCAN = 8;
 
+/** Folders first, then by name — the order every listing is shown in. */
+function sortEntries(list: FsEntry[]): FsEntry[] {
+    return list.sort((a, b) => {
+        if (a.is_dir === b.is_dir) return a.name.localeCompare(b.name);
+        return a.is_dir ? -1 : 1;
+    });
+}
+
+/** A further page added to what is shown, once per name: a page re-sends the
+ *  entries around its anchor (listPaging.ts), a folder that changed between
+ *  pages can repeat one — and the row list is keyed by name. */
+function mergePage(shown: FsEntry[], page: FsEntry[]): FsEntry[] {
+    const seen = new Set(shown.map(e => e.name));
+    const merged = shown.slice();
+    for (const e of page) {
+        if (seen.has(e.name)) continue;
+        seen.add(e.name);
+        merged.push(e);
+    }
+    return sortEntries(merged);
+}
+
 export function DeviceFileManager({ sessionId, onClose }: { sessionId: string; onClose: () => void }) {
     const [path, setPath] = useState<string>('');
     const [entries, setEntries] = useState<FsEntry[]>([]);
     // The host capped a very large directory; show only what it sent, and say so.
     const [truncated, setTruncated] = useState(false);
+    /** Where this folder's next page starts, or null when there is none —
+     *  including from a host that predates paging, which never names one. */
+    const [more, setMore] = useState<ListContinuation | null>(null);
+    const [loadingMore, setLoadingMore] = useState(false);
+    /** The folder changed between pages further than a page's overlap can
+     *  resume across, so entries may be missing until a fresh listing. */
+    const [changed, setChanged] = useState(false);
+    /** A scroll offset to apply once the merged rows are in the DOM (before
+     *  that, the list is not tall enough to scroll to it). */
+    const pendingScroll = useRef<number | null>(null);
+    /** Bumped by every folder load, so an answer that lands after the user
+     *  has moved on (to another folder, or a fresh load of this one) is
+     *  dropped rather than shown — or, for a further page, appended to a
+     *  folder it does not belong to. */
+    const listGen = useRef(0);
     const [error, setError] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
     const [progress, setProgress] = useState<string | null>(null);
@@ -50,8 +94,9 @@ export function DeviceFileManager({ sessionId, onClose }: { sessionId: string; o
     /** Mirror of `asking` readable from the long-lived subscription below. */
     const askingRef = useRef(false);
     /** Windowed-list state: only the rows near the viewport are in the DOM.
-     *  A capped listing is still 5000 rows, and mounting 5000 divs with
-     *  per-row buttons froze the panel for seconds on a phone. */
+     *  A big folder paged in with Load more runs to thousands of rows, and
+     *  mounting 5000 divs with per-row buttons froze the panel for seconds
+     *  on a phone. */
     const listRef = useRef<HTMLDivElement | null>(null);
     const [scrollTop, setScrollTop] = useState(0);
     // Default before the ResizeObserver reports (and in jsdom, which never
@@ -106,31 +151,78 @@ export function DeviceFileManager({ sessionId, onClose }: { sessionId: string; o
     }), [sessionId]);
 
     const loadPath = async (p: string) => {
+        const gen = ++listGen.current;
         setLoading(true);
+        setLoadingMore(false);
         setError(null);
         try {
             if (p === '') {
                 const roots = await listRoots(sessionId);
+                if (gen !== listGen.current) return;
                 setEntries(roots.map(r => ({ name: r, is_dir: true, size: 0 })));
                 setTruncated(false);
+                setMore(null);
             } else {
-                const { entries: list, truncated: cut } = await listDir(sessionId, p);
-                setEntries(list.sort((a, b) => {
-                    if (a.is_dir === b.is_dir) return a.name.localeCompare(b.name);
-                    return a.is_dir ? -1 : 1;
-                }));
-                setTruncated(cut);
+                const page = await listDir(sessionId, p);
+                if (gen !== listGen.current) return;
+                // The continuation is read BEFORE sorting: its anchor is the
+                // last name in the host's order, which is where the host resumes.
+                setMore(firstContinuation(page));
+                setEntries(sortEntries(page.entries));
+                setTruncated(page.truncated);
             }
+            setChanged(false);
             setPath(p);
             // A new folder starts at its top; a stale scroll offset would
             // window the wrong slice of the fresh listing.
             listRef.current?.scrollTo?.(0, 0);
             setScrollTop(0);
         } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
+            if (gen === listGen.current) setError(e instanceof Error ? e.message : String(e));
         }
-        setLoading(false);
+        if (gen === listGen.current) setLoading(false);
     };
+
+    /** Fetch the folder's next page and add it to what is shown. The row the
+     *  user is reading stays where it is: they are partway through the folder,
+     *  and rows that sort in above it must not push it out of view. */
+    const loadMore = async () => {
+        if (more === null || loadingMore) return;
+        const gen = listGen.current;
+        setLoadingMore(true);
+        setError(null);
+        try {
+            const page = continuePage(more, await listDir(sessionId, path, continuationCursor(more)));
+            if (gen !== listGen.current) return;
+            // `entries` is current here: everything else that replaces the
+            // rows goes through loadPath, which bumps the generation checked
+            // just above.
+            const merged = mergePage(entries, page.entries);
+            const top = listRef.current?.scrollTop ?? scrollTop;
+            const keep = scrollKeepingTopRow(entries, merged, top, rowH);
+            if (keep !== top) {
+                pendingScroll.current = keep;
+                setScrollTop(keep);
+            }
+            setEntries(merged);
+            setTruncated(page.truncated);
+            setMore(page.more);
+            if (page.gap) setChanged(true);
+        } catch (e) {
+            if (gen === listGen.current) setError(e instanceof Error ? e.message : String(e));
+        } finally {
+            if (gen === listGen.current) setLoadingMore(false);
+        }
+    };
+
+    // Rows merged by Load more are in the DOM now, so the list is tall enough
+    // to hold the offset that keeps the user's row in place.
+    useLayoutEffect(() => {
+        const el = listRef.current;
+        if (pendingScroll.current === null || !el) return;
+        el.scrollTop = pendingScroll.current;
+        pendingScroll.current = null;
+    }, [entries]);
 
     // Only browse once access has been granted AND the channel is open —
     // both arrive asynchronously, in either order, and a listing sent before
@@ -251,9 +343,38 @@ export function DeviceFileManager({ sessionId, onClose }: { sessionId: string; o
                         read as "Empty directory" — a wrong answer, not a wait. */}
                     {!channelReady && <div className="dfm-loading">Connecting to the other device…</div>}
 
-                    {truncated && (
+                    {more !== null ? (
+                        // The host pages: say how much is here and offer the
+                        // rest. Above the list rather than at its foot, so it
+                        // is one tap away wherever the list is scrolled. Pages
+                        // come in the HOST's order and are shown sorted, so
+                        // what is loaded is not the first stretch of A-Z —
+                        // the words must not suggest it is.
+                        <div className="dfm-truncated dfm-has-more" role="status">
+                            <span>
+                                {entries.length.toLocaleString()} items loaded so far. The rest of this folder can land anywhere in the list.
+                            </span>
+                            <button
+                                type="button"
+                                className="dfm-load-more"
+                                onClick={() => void loadMore()}
+                                disabled={loadingMore || loading}
+                            >
+                                {loadingMore ? 'Loading…' : 'Load more'}
+                            </button>
+                        </div>
+                    ) : truncated && (
+                        // A host from before paging: it capped the folder and
+                        // cannot hand over the rest.
                         <div className="dfm-truncated" role="status">
                             This folder has more items than can be shown at once — the first {entries.length.toLocaleString()} are listed. Open a subfolder to narrow it down.
+                        </div>
+                    )}
+                    {changed && (
+                        // Load more could not find where it left off: the
+                        // folder changed between pages (listPaging.ts).
+                        <div className="dfm-truncated dfm-changed" role="status">
+                            This folder changed while it was loading, so some items may be missing. Refresh for an exact list.
                         </div>
                     )}
                     <div

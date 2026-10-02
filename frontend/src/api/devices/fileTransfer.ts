@@ -13,6 +13,9 @@ export interface FsResponse {
     /** The directory had more than the host's cap; `entries` is the first
      *  page. Absent from an agent that predates the cap (reads as false). */
     truncated?: boolean;
+    /** The cursor for the folder's next page, when there is one. Absent from
+     *  a host that predates paging — the browser then offers no Load more. */
+    next?: number;
     data?: string;
     len?: number;
     message?: string;
@@ -36,8 +39,9 @@ export const FS_CHUNK = 16 * 1024;
 /** A reply that never comes must not hang the file browser forever.
  *
  *  Reachable in practice: a host whose backend cannot serve files at all
- *  answers nothing, and the agent silently drops a reply that does not fit the
- *  channel buffer. */
+ *  answers nothing, and an agent from before the send-budget guard never
+ *  delivers a reply longer than its 128 KiB channel budget (a big folder
+ *  listing was the one that did it). */
 const FS_TIMEOUT_MS = 15_000;
 
 /**
@@ -140,12 +144,27 @@ export async function listRoots(sessionId: string): Promise<string[]> {
     return resp.roots || [];
 }
 
+/**
+ * One page of a folder, from position `cursor` in the host's enumeration
+ * (listPaging.ts picks it from the previous page's `next`); leave it out
+ * for the first page (the request is then exactly what it was before paging,
+ * so an older host answers it unchanged).
+ *
+ * `next` is non-null only when the host offered a further page AND it moves
+ * forward: a host from before paging never sends one, and a `next` that does
+ * not advance past `cursor` would loop the Load more button forever.
+ */
 export async function listDir(
     sessionId: string,
     path: string,
-): Promise<{ entries: FsEntry[]; truncated: boolean }> {
-    const resp = await sendCommand(sessionId, { cmd: 'list', path });
-    return { entries: resp.entries || [], truncated: resp.truncated === true };
+    cursor?: number,
+): Promise<{ entries: FsEntry[]; truncated: boolean; next: number | null }> {
+    const cmd: Record<string, unknown> = { cmd: 'list', path };
+    if (cursor !== undefined) cmd.cursor = cursor;
+    const resp = await sendCommand(sessionId, cmd);
+    const n = resp.next;
+    const next = typeof n === 'number' && Number.isSafeInteger(n) && n > (cursor ?? 0) ? n : null;
+    return { entries: resp.entries || [], truncated: resp.truncated === true, next };
 }
 
 export async function readFileChunk(sessionId: string, path: string, offset: number, len: number): Promise<string> {
