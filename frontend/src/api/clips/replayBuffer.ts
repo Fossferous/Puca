@@ -15,7 +15,7 @@ import { isTauri } from '../platform';
 import { hideCaptureBar, releaseCaptureBar } from '../captureBar';
 import { webrtcManager } from '../webrtc';
 import { loadSettings } from '../../components/settingsStore';
-import { clipPreset, maxRingBytesForBudget, memoryBudgetBytes, MIB } from './clipPresets';
+import { clipPreset, maxRingBytesForBudget, memoryBudgetBytes, MIB, ringSecondsFor } from './clipPresets';
 import { isNativeCaptureSupported, preferredLoopbackDeviceName, startNativeSystemAudioTrack, startNativeVideo, type NativeCaptureTarget } from './nativeCapture';
 import type { ArmConfig, FromWorker, SealedInfo, ToWorker, WorkerStatus } from './clipTypes';
 
@@ -188,6 +188,16 @@ interface Session {
 }
 let session: Session | null = null;
 let armGeneration = 0;
+/** The server cap (clip_max_seconds) the current/last session was armed
+ *  under, so a repick keeps it. null = armed with no known cap. */
+let armedCapSeconds: number | null = null;
+
+/** How long the ring keeps: the user's buffer length, clamped to the call's
+ *  server cap (ringSecondsFor) — footage older than the longest clip that
+ *  server allows can never be posted, so holding it only costs memory. */
+function ringMsFor(bufferSeconds: number | undefined, capSeconds: number | null): number {
+    return Math.max(10_000, ringSecondsFor(bufferSeconds ?? 300, capSeconds) * 1000);
+}
 
 function displayConstraints(maxW: number, maxH: number, fps: number): DisplayMediaStreamOptions {
     const o: DisplayMediaStreamOptions & { systemAudio?: string; selfBrowserSurface?: string; surfaceSwitching?: string } = {
@@ -266,12 +276,14 @@ function buildMixedAudio(s: Session, sysTrack: MediaStreamTrack | null): { audio
  * isNativeCaptureSupported() gates the caller the same way
  * isClipCaptureSupported() gates arm().
  */
-export async function armNative(): Promise<void> {
+export async function armNative(opts: { maxSeconds?: number } = {}): Promise<void> {
     if (!isNativeCaptureSupported()) throw new Error('native clip capture is not supported here');
     if (session) throw new Error('already armed');
     const gen = ++armGeneration;
     const settings = loadSettings();
     const preset = clipPreset(settings.clipQuality);
+    const capSeconds = opts.maxSeconds ?? null;
+    armedCapSeconds = capSeconds;
     emit({ ...initial(), phase: 'arming', presetId: preset.id, notice: null, error: null });
 
     const worker = new Worker(new URL('./replayWorker.ts', import.meta.url), { type: 'module' });
@@ -361,7 +373,7 @@ export async function armNative(): Promise<void> {
 
         const cfg: ArmConfig = {
             preset: { ...preset, videoBitrate: target.bitrate }, width: target.width, height: target.height,
-            ringMs: Math.max(10_000, (settings.clipBufferSeconds ?? 300) * 1000),
+            ringMs: ringMsFor(settings.clipBufferSeconds, capSeconds),
             maxRingBytes: Math.min((settings.clipMemoryCapMB ?? 1024) * MIB, maxRingBytesForBudget(memoryBudgetBytes((navigator as Navigator & { deviceMemory?: number }).deviceMemory))),
             audioOffsetUs: NATIVE_AUDIO_OFFSET_US, audioCodec: 'mp4a.40.2', verbose: false,
             nativeVideo: { fps: preset.fps },
@@ -533,14 +545,18 @@ function postNativeVideoChunk(s: Session, c: { keyframe: boolean; tsUs: number; 
  * Arm the buffer. MUST be called from a user gesture (getDisplayMedia).
  * `repick` re-runs the picker for an already-armed session (e.g. the user
  * forgot the system-audio toggle) — the old session is torn down first.
+ * `maxSeconds` is the call's server cap (clip_max_seconds); a repick without
+ * one keeps the cap the session was armed under.
  */
-export async function arm(opts: { repick?: boolean } = {}): Promise<void> {
+export async function arm(opts: { repick?: boolean; maxSeconds?: number } = {}): Promise<void> {
     if (!isClipCaptureSupported()) throw new Error('clip capture is not supported here');
     if (session && !opts.repick) throw new Error('already armed');
     if (session) await disarm('repick');
     const gen = ++armGeneration;
     const settings = loadSettings();
     const preset = clipPreset(settings.clipQuality);
+    const capSeconds = opts.maxSeconds ?? (opts.repick ? armedCapSeconds : null);
+    armedCapSeconds = capSeconds;
     emit({ ...initial(), phase: 'arming', presetId: preset.id, notice: null, error: null });
 
     let stream: MediaStream;
@@ -560,7 +576,7 @@ export async function arm(opts: { repick?: boolean } = {}): Promise<void> {
     // Ring size: whichever of seconds / user memory cap / machine budget binds first.
     const budget = memoryBudgetBytes((navigator as Navigator & { deviceMemory?: number }).deviceMemory);
     const maxRingBytes = Math.min((settings.clipMemoryCapMB ?? 1024) * MIB, maxRingBytesForBudget(budget));
-    const ringMs = Math.max(10_000, (settings.clipBufferSeconds ?? 300) * 1000);
+    const ringMs = ringMsFor(settings.clipBufferSeconds, capSeconds);
 
     const worker = new Worker(new URL('./replayWorker.ts', import.meta.url), { type: 'module' });
     const s: Session = { worker, stream, ctx: null, dest: null, sysGain: null, micGain: null, micSrc: null, micDelay: null, unMic: null, resumeTimer: null, pending: new Map(), onWiped: null, previewEl: null, previewSeq: 0, nativeStop: null, sysAudioStop: null, sysSrc: null };
@@ -888,5 +904,5 @@ export function __stopOrphanReaperForTests(): void {
 
 /** Test hook. */
 export function __resetReplayForTests(): void {
-    session = null; state = initial(); listeners.clear(); armedListeners.clear();
+    session = null; state = initial(); listeners.clear(); armedListeners.clear(); armedCapSeconds = null;
 }

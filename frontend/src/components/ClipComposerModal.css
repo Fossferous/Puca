@@ -82,6 +82,8 @@
     cursor: pointer;
 }
 .clip-duration-chip.selected { background: var(--brand-experiment, #5865f2); border-color: transparent; color: #fff; }
+/* The size under each length: what the chip will cost before the seal is paid for. */
+.clip-duration-chip-size { display: block; font-size: 11px; line-height: 1.2; opacity: 0.8; font-variant-numeric: tabular-nums; }
 .clip-duration-chip:focus-visible { outline: 2px solid var(--brand-experiment, #5865f2); outline-offset: 2px; }
 
 /* Post-approval preview + trim (the `approved` phase only — see the .tsx header). */

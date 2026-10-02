@@ -73,3 +73,25 @@ describe('clipPresets — the 720p60 / 2160p30 additions', () => {
         expect(clipPreset('8k120').id).toBe(DEFAULT_CLIP_PRESET);
     });
 });
+
+describe('clipPresets — the 480p preset (owner decision 2026-10)', () => {
+    it('exists at 854x480, 30 fps, about 2 Mbps, and is listed first (cheapest)', () => {
+        expect(clipPreset('480p30')).toMatchObject({ id: '480p30', label: '480p 30 fps — about 2 Mbps', maxWidth: 854, maxHeight: 480, fps: 30, videoBitrate: 2_000_000, audioBitrate: 128_000 });
+        expect(CLIP_PRESETS[0].id).toBe('480p30');
+        expect(presetBytesPerSecond(CLIP_PRESETS[0])).toBe(Math.min(...CLIP_PRESETS.map(presetBytesPerSecond)));
+    });
+
+    it('sits on the ladder: the 30 fps presets cost more with every step up in pixels, but fewer bits per pixel', () => {
+        const ladder = CLIP_PRESETS.filter(p => p.fps === 30).sort((a, b) => a.maxWidth * a.maxHeight - b.maxWidth * b.maxHeight);
+        expect(ladder.map(p => p.id)).toEqual(['480p30', '720p30', '1080p30', '1440p30', '2160p30']);
+        const bpp = ladder.map(p => p.videoBitrate / (p.maxWidth * p.maxHeight * p.fps));
+        for (let i = 1; i < ladder.length; i++) {
+            expect(ladder[i].videoBitrate).toBeGreaterThan(ladder[i - 1].videoBitrate);
+            expect(bpp[i]).toBeLessThan(bpp[i - 1]);
+        }
+    });
+
+    it('stays above clip_capture.rs scale_bitrate floor (1.5 Mbps), so a 480p capture gets the rate its label says', () => {
+        expect(clipPreset('480p30').videoBitrate).toBeGreaterThanOrEqual(1_500_000);
+    });
+});

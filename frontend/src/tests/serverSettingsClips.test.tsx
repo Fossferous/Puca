@@ -135,7 +135,8 @@ describe('ServerSettingsModal — Clips', () => {
         const length = selectLabelled('Longest clip');
         expect(length).toBeTruthy();
         expect(length!.value).toBe('120');
-        expect(length!.selectedOptions[0].textContent).toBe('2 minutes');
+        // The label leads with the length; the size it costs follows (below).
+        expect(length!.selectedOptions[0].textContent).toMatch(/^2 minutes \(/);
 
         const target = selectLabelled('Post clips to');
         expect(target).toBeTruthy();
@@ -144,6 +145,20 @@ describe('ServerSettingsModal — Clips', () => {
         // The voice channel came back from listChannels and must not be offered.
         expect(target!.textContent).not.toContain('Lounge');
         expect(listChannels).toHaveBeenCalledWith('s1');
+    });
+
+    it('prices every Longest clip option and says what the range is', async () => {
+        await open({ initialClipsEnabled: true, initialClipMaxSeconds: 120 });
+        const length = selectLabelled('Longest clip')!;
+        // At the default 1080p30: 1:00 ≈ 44 MB, 2:00 ≈ 88 MB, 10:00 ≈ 438 MB.
+        expect([...length.options].map(o => o.textContent)).toEqual([
+            '1 minute (≈ 44 MB)', '2 minutes (≈ 88 MB)', '3 minutes (≈ 131 MB)', '5 minutes (≈ 219 MB)', '10 minutes (≈ 438 MB)',
+        ]);
+        const help = length.closest('.form-group')!.textContent!;
+        expect(help).toMatch(/at most 10 minutes/);
+        // The selected length, at the default quality and at the largest preset (4K, 2:00 ≈ 260 MB).
+        expect(help).toMatch(/about 88 MB at the default 1080p 30 fps/);
+        expect(help).toMatch(/up to 260 MB at 4K/);
     });
 
     it('REFUSES to CREATE clips-on with no channel, and says why', async () => {

@@ -1,5 +1,6 @@
 /** Pure helpers for the clip composer (tested without React). */
 import { MIN_CLIP_SECONDS } from './clipsGate';
+import { clipPreset, presetBytesPerSecond } from './clipPresets';
 import { hasPerm, PERM } from '../permissionBits';
 import type { Channel } from '../servers';
 import type { OutgoingProposal } from './clipProposals';
@@ -16,6 +17,18 @@ export function durationChips(maxSeconds: number, bufferedSeconds: number): numb
     const chips = CHIP_SECONDS.filter(c => c <= cap);
     if (!chips.includes(cap)) chips.push(cap);
     return chips;
+}
+
+/** Below this much footage the ring's rate is dominated by its first keyframe. */
+export const MEASURED_RATE_MIN_MS = 10_000;
+
+/** Bytes per second to price a clip of THIS buffer at: what it has actually
+ *  been recording (ring bytes over buffered time — the real encoder, the real
+ *  monitor, automatic arming's fps fold included) once there is enough of it
+ *  to mean something, and the preset's nominal rate before that. */
+export function clipBytesPerSecond(r: { ringBytes: number; bufferedMs: number; presetId: string }): number {
+    if (r.bufferedMs >= MEASURED_RATE_MIN_MS && r.ringBytes > 0) return r.ringBytes / (r.bufferedMs / 1000);
+    return presetBytesPerSecond(clipPreset(r.presetId));
 }
 
 /** Text channels of the voice server this user can post in (VIEW + SEND). A

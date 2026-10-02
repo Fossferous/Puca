@@ -16,7 +16,8 @@ import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vite
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
-const armNativeMock = vi.fn<() => Promise<void>>();
+const armNativeMock = vi.fn<(opts?: { maxSeconds?: number }) => Promise<void>>();
+const armMock = vi.fn<(opts?: { repick?: boolean; maxSeconds?: number }) => Promise<void>>(async () => {});
 let nativeSupported = true;
 const listeners = new Set<(s: unknown) => void>();
 let replayState: Record<string, unknown> = { phase: 'idle', bufferedMs: 0, ringBytes: 0, hasSystemAudio: true, notice: null, error: null, sealed: null, upload: null };
@@ -26,8 +27,8 @@ const setReplay = (patch: Record<string, unknown>) => { replayState = { ...repla
 // module (autoArmSchedule.ts) precisely so these timing assertions run against
 // the real backoff rather than a copy that could drift from it.
 vi.mock('../api/clips/replayBuffer', () => ({
-    arm: vi.fn(async () => {}),
-    armNative: (...a: unknown[]) => armNativeMock(...(a as [])),
+    arm: (...a: unknown[]) => armMock(...(a as [{ repick?: boolean; maxSeconds?: number }?])),
+    armNative: (...a: unknown[]) => armNativeMock(...(a as [{ maxSeconds?: number }?])),
     disarm: vi.fn(async () => {}),
     seal: vi.fn(),
     discardSeal: vi.fn(),
@@ -80,6 +81,7 @@ beforeEach(() => {
     vi.useFakeTimers();
     localStorage.clear();
     armNativeMock.mockReset();
+    armMock.mockClear();
     nativeSupported = true;
     replayState = { phase: 'idle', bufferedMs: 0, ringBytes: 0, hasSystemAudio: true, notice: null, error: null, sealed: null, upload: null };
     container = document.createElement('div');
@@ -277,3 +279,23 @@ describe('automatic really is automatic, on every server that allows clips', () 
     });
 });
         expect(armNativeMock).not.toHaveBeenCalled();
+
+describe('arming is sized to the call’s server', () => {
+    it('automatic arming passes the server’s longest clip, so the ring is clamped to it', async () => {
+        setMode('auto');
+        armNativeMock.mockImplementation(async () => { setReplay({ phase: 'armed' }); });
+        mount();
+        await act(async () => { vi.advanceTimersByTime(800); });
+        expect(armNativeMock).toHaveBeenCalledWith({ maxSeconds: 120 });
+    });
+
+    it('arming by hand passes it too, and the Arm button says the clamped length', async () => {
+        setMode('off');
+        const r = mount();
+        const btn = r.container.querySelector<HTMLButtonElement>('.voice-clip-arm')!;
+        // Default buffer 5:00 in a 2:00 server: it keeps the 2:00 that can be posted (+2 s keyframe slack).
+        expect(btn.getAttribute('title')).toMatch(/keep the last 2:02/);
+        await act(async () => { btn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+        expect(armMock).toHaveBeenCalledWith({ maxSeconds: 120 });
+    });
+});

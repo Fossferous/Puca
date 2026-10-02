@@ -18,7 +18,7 @@ import { autoArmDelayMs } from '../api/clips/autoArmSchedule';
 import { isNativeCaptureSupported } from '../api/clips/nativeCapture';
 import { NO_CLIP_POLICY, useReplayState, type ClipPolicy } from '../api/clips/clipsUiState';
 import { clipUiState, clipReasonCopy } from '../api/clips/clipsGate';
-import { clipPreset, formatClock, formatMB } from '../api/clips/clipPresets';
+import { clipPreset, formatClock, formatMB, ringSecondsFor } from '../api/clips/clipPresets';
 import { ClipIcon, ClipOffIcon, WarningIcon } from './Icons';
 import { ClipComposerModal } from './ClipComposerModal';
 
@@ -47,6 +47,13 @@ export function ClipButtons({ inVoice, isAfkChannel, listenOnly, roomId, policy 
     const voiceChannelId = roomId.startsWith('voice_') ? Number(roomId.slice(6)) : NaN;
     // The longest clip is the SERVER's cap, bounded by the user's own buffer length.
     const maxSeconds = Math.min(policy.available ? policy.maxSeconds : Infinity, loadSettings().clipBufferSeconds ?? 300);
+    // Arming is sized to this server: the ring keeps at most its longest clip
+    // (+ one keyframe interval) — older footage could never be posted. Read
+    // through a ref by the auto-arm chain, so a policy re-render neither
+    // restarts nor cancels it, and each attempt uses the CURRENT cap.
+    const armOpts = armOptionsFor(policy);
+    const armOptsRef = useRef(armOpts);
+    useEffect(() => { armOptsRef.current = armOpts; });
 
     const openComposer = useCallback(() => {
         if (!isArmedPhase(getReplayState().phase) || getReplayState().phase === 'sealing') return;
@@ -130,7 +137,7 @@ export function ClipButtons({ inVoice, isAfkChannel, listenOnly, roomId, policy 
             timer = setTimeout(() => {
                 if (cancelled) return;
                 setAutoState('trying');
-                armNative()
+                armNative(armOptsRef.current)
                     .then(() => {
                         if (cancelled) return;
                         // armNative resolves even when the buffer did not
@@ -166,13 +173,13 @@ export function ClipButtons({ inVoice, isAfkChannel, listenOnly, roomId, policy 
     const onArm = async () => {
         if (armed) { await disarm('user'); return; }
         try {
-            await arm();
+            await arm(armOpts);
         } catch (e) { console.warn('[clips] arm failed:', e); }
     };
     const armTitle = armed
         ? 'Clip buffer on — nothing has left your PC. Click to turn off.'
         : gate.armEnabled
-            ? (autoState === 'failed' ? 'Auto-arm did not start the buffer — press to arm manually' : `Arm clip buffer — keep the last ${formatClock(loadSettings().clipBufferSeconds ?? 300)} of this call in memory`)
+            ? (autoState === 'failed' ? 'Auto-arm did not start the buffer — press to arm manually' : `Arm clip buffer — keep the last ${formatClock(ringSecondsFor(loadSettings().clipBufferSeconds ?? 300, armOpts.maxSeconds))} of this call in memory`)
             : clipReasonCopy(gate.reason);
     const saveTitle = gate.clipEnabled ? 'Save the last few minutes as a clip' : (armed ? clipReasonCopy(gate.reason || 'buffer-too-short') : 'Arm the clip buffer first');
 
@@ -216,8 +223,14 @@ export function ClipButtons({ inVoice, isAfkChannel, listenOnly, roomId, policy 
     );
 }
 
-/** The status row under the control bar. Renders nothing while idle. */
-export function ClipStatusRow() {
+/** What arm()/armNative() need from the call's server: its longest clip. */
+function armOptionsFor(policy: ClipPolicy): { maxSeconds?: number } {
+    return policy.available ? { maxSeconds: policy.maxSeconds } : {};
+}
+
+/** The status row under the control bar. Renders nothing while idle. `policy`
+ *  is the voice server's, so a restart from here is sized like the first arm. */
+export function ClipStatusRow({ policy = NO_CLIP_POLICY }: { policy?: ClipPolicy } = {}) {
     const r = useReplayState();
     const [audioBusy, setAudioBusy] = useState(false);
     if (r.phase === 'idle' && !r.notice && !r.error) return null;
@@ -302,7 +315,7 @@ export function ClipStatusRow() {
                             onClick={() => {
                                 setAudioBusy(true);
                                 disarm('audio-restart')
-                                    .then(() => armNative())
+                                    .then(() => armNative(armOptionsFor(policy)))
                                     .catch((e) => console.warn('[clips] audio restart failed:', e))
                                     .finally(() => setAudioBusy(false));
                             }}
@@ -319,7 +332,7 @@ export function ClipStatusRow() {
                 <span className="voice-clip-notice"><WarningIcon size={14} /> {r.notice}</span>
             )}
             {r.phase === 'error' && (
-                <button className="voice-clip-link" onClick={() => void arm()}>Retry</button>
+                <button className="voice-clip-link" onClick={() => void arm(armOptionsFor(policy))}>Retry</button>
             )}
         </div>
     );
