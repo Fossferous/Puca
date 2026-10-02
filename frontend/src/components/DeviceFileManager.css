@@ -260,9 +260,12 @@
     cursor: default;
 }
 
+/* 44px, the floor for a real button (docs/DESIGN_PHILOSOPHY.md). It has to
+   be said HERE: this class outranks mobile.css's blanket `button` rule, so a
+   smaller value in this block would win over it rather than lose. */
 @media (pointer: coarse) {
     .dfm-load-more {
-        min-height: 40px;
+        min-height: 44px;
         padding: 8px 14px;
         font-size: 14px;
     }

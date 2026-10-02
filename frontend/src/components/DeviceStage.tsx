@@ -3023,10 +3023,12 @@ export function DeviceStage() {
                         menu.
                     </div>
                 )}
-                {/* A ClipCursor conflict: a fullscreen app on ANOTHER screen is
-                    holding the host's pointer, so injected clicks here get
-                    clamped back into it — SendInput reports success and the
-                    click lands in the game. Host-asserted only (the
+                {/* A ClipCursor conflict: a fullscreen app is holding the
+                    host's pointer away from a screen this view drives — the
+                    watched screen, or on All Displays any screen in the
+                    picture (the agent's session_cursor_clipped) — so injected
+                    clicks there get clamped back into it: SendInput reports
+                    success and the click lands in the game. Host-asserted only (the
                     `cursor-clipped` notice off the 1Hz status poll), same
                     trust rule as the secure banner above, and yielding to it:
                     a security screen is the bigger story and the clip usually

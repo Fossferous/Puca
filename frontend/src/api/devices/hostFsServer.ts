@@ -109,9 +109,11 @@ export async function handleFsRequest(
     if (cmd === 'list') {
         try {
             const all = await provider.readdir(resolved);
-            // `cursor` is the previous page's `next`: a count of entries
-            // already listed. Absent (every controller before paging) or
-            // malformed means the first page.
+            // `cursor` is a position in this enumeration: at or a little
+            // before the previous page's `next` (the controller re-reads a
+            // few entries to resume after a name it has; listPaging.ts).
+            // Absent (every controller before paging) or malformed means the
+            // first page.
             const c = req.cursor;
             const start = typeof c === 'number' && Number.isInteger(c) && c >= 0 ? c : 0;
             const entries: typeof all = [];

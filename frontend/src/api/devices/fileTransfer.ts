@@ -145,7 +145,8 @@ export async function listRoots(sessionId: string): Promise<string[]> {
 }
 
 /**
- * One page of a folder. `cursor` is the previous page's `next`; leave it out
+ * One page of a folder, from position `cursor` in the host's enumeration
+ * (listPaging.ts picks it from the previous page's `next`); leave it out
  * for the first page (the request is then exactly what it was before paging,
  * so an older host answers it unchanged).
  *

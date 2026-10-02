@@ -125,7 +125,10 @@ cross, so nobody ships or markets it beyond what it actually guarantees.
   picture is (each screen is checked on its own, matched to the capture by
   `HMONITOR`), and its wording says the app's own screen still works. Closing
   the app or switching away from it (Alt+Tab) releases the clip. A game that
-  re-centres the pointer every frame without a clip is not detected.
+  re-centres the pointer every frame without a clip is not detected. A
+  controller from before the All Displays check shows its only wording ("on
+  another screen... switch to that screen") there too; harmless, but not quite
+  right until it is updated.
 
 ## My Devices file browser — big folders
 
@@ -135,12 +138,26 @@ send budget outright, and a browser controller refuses one over its 256 KiB
 `maxMessageSize`. So the host (the desktop agent, or a phone sharing a folder)
 answers a big folder a page at a time — at most 2,000 entries and 96 KiB of
 JSON per page, whichever comes first — and names the next page's cursor. The
-browser shows "N items listed so far" with a **Load more** button until the
-folder is complete. A host from before paging sends one capped page and no
-cursor; the browser then says "the first N are listed" and offers no button.
-If a host ever produces a reply too large to send, it answers that request
-with an error instead, so later file requests in the session are not stuck
-behind it.
+browser shows "N items loaded so far" with a **Load more** button until the
+folder is complete. Pages arrive in the host's own order and are shown sorted,
+so later pages can land anywhere in the list; the row being read stays where
+it is.
+
+The cursor is a position in the folder, so a folder that changes between pages
+shifts it. Each further page is asked for a few entries early and resumes after
+the last name already shown, which absorbs files created or deleted meanwhile.
+When that name cannot be found, the browser says "This folder changed while it
+was loading" — **Refresh** is the only way to get an exact listing of a folder
+that keeps changing.
+
+A phone host from before paging sends one capped page and no cursor; the
+browser then says "the first N are listed" and offers no button. A **desktop
+agent** from before paging never gets that far on a big folder: its reply for
+a folder of more than about 1,700-2,700 entries (depending on name length) is
+too large to send at all, so the browser times out after 15 s and later file
+actions in that session stall until the agent is updated. If a current host
+ever produces a reply too large to send, it answers that request with an error
+instead, so later file requests in the session are not stuck behind it.
 
 ## Latency — what to read when it feels behind
 

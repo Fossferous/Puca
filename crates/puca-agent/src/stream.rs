@@ -518,6 +518,39 @@ fn admit_fs_reply(bytes: Vec<u8>) -> Vec<u8> {
     .unwrap_or_default()
 }
 
+/// Drain queued file replies head-first through `write`, which answers like
+/// str0m's `Channel::write`: `Some(Ok(true))` sent, `Some(Ok(false))` no room
+/// yet, `Some(Err(_))` failed, and `None` when the channel is gone. Stops at
+/// the first "no room": the queue is FIFO, and order is the matching rule for
+/// id-less clients.
+///
+/// "No room" means "retry next pass" — which, for a reply longer than str0m's
+/// whole send budget, is FOREVER, with every later reply stuck behind it. No
+/// producer should enqueue one (both go through `encode_fs_reply`), but the
+/// head is where a wedge would happen, so the head is passed through
+/// [`admit_fs_reply`] here too. Pure over the writer so that rule is tested
+/// against a stand-in that refuses exactly what str0m refuses.
+fn flush_fs_replies<C: Copy>(
+    queue: &mut std::collections::VecDeque<(C, Vec<u8>)>,
+    mut write: impl FnMut(C, &[u8]) -> Option<Result<bool, String>>,
+) {
+    while let Some((cid, bytes)) = queue.front_mut() {
+        if bytes.len() > SCTP_SEND_BUDGET {
+            *bytes = admit_fs_reply(std::mem::take(bytes));
+        }
+        match write(*cid, bytes) {
+            None | Some(Ok(true)) => {
+                queue.pop_front();
+            }
+            Some(Ok(false)) => break, // still no room; next pass
+            Some(Err(e)) => {
+                eprintln!("[stream] fs reply failed: {e}");
+                queue.pop_front();
+            }
+        }
+    }
+}
+
 /// The file-request worker: answers `FsRequest`s OFF the stream thread.
 ///
 /// A directory listing is `read_dir` plus a stat per entry plus one big JSON
@@ -1403,31 +1436,11 @@ fn run(
         // budget these were refused against frees on the peer's SACK, and a
         // SACK arriving is a socket wake — so the retry cadence is the loop's
         // own, with no timer needed.
-        while let Some((cid, bytes)) = pending_fs_replies.front_mut() {
-            // `Ok(false)` below means "retry next pass" — which, for a reply
-            // longer than str0m's whole send budget, is forever, with every
-            // later reply stuck behind it. Nothing should enqueue one (every
-            // producer goes through encode_fs_reply), but the head is where
-            // a wedge would happen, so it is checked here too.
-            if bytes.len() > SCTP_SEND_BUDGET {
-                *bytes = admit_fs_reply(std::mem::take(bytes));
-            }
-            let Some(mut c) = sender.rtc_mut().channel(*cid) else {
-                // The channel is gone; there is nobody to deliver to.
-                pending_fs_replies.pop_front();
-                continue;
-            };
-            match c.write(false, bytes) {
-                Ok(true) => {
-                    pending_fs_replies.pop_front();
-                }
-                Ok(false) => break, // still no room; next pass
-                Err(e) => {
-                    eprintln!("[stream] fs reply failed: {e}");
-                    pending_fs_replies.pop_front();
-                }
-            }
-        }
+        flush_fs_replies(&mut pending_fs_replies, |cid, bytes| {
+            // `None` = the channel is gone; there is nobody to deliver to.
+            let mut c = sender.rtc_mut().channel(cid)?;
+            Some(c.write(false, bytes).map_err(|e| e.to_string()))
+        });
         while let Ok(cmd) = command_rx.try_recv() {
             match cmd {
                 StreamCommand::SetMonitor { generation: gen, request_id: _, deadline, cancelled, monitor: target_monitor, reply_tx } => {
@@ -3537,9 +3550,10 @@ mod tests {
         assert_eq!(v.get("id").and_then(|x| x.as_u64()), Some(7));
     }
 
-    /// The flush's own guard: whatever bytes are at the head of the queue, an
-    /// unsendable reply is replaced by an error carrying the id read back out
-    /// of it, and a sendable one is left byte-for-byte alone.
+    /// The rule the flush applies to its queue head (`admit_fs_reply` on raw
+    /// bytes): an unsendable reply is replaced by an error carrying the id
+    /// read back out of it, and a sendable one is left byte-for-byte alone.
+    /// The flush loop itself is driven by the `flush_*` tests below.
     #[test]
     fn the_queue_head_rule_reads_the_id_back_out_of_the_bytes() {
         let raw = encode_fs_reply_unchecked(
@@ -3568,6 +3582,70 @@ mod tests {
         .unwrap();
         assert_eq!(at.len(), STR0M_SEND_BUDGET);
         assert_eq!(admit_fs_reply(at.clone()), at, "a reply at the limit goes out unchanged");
+    }
+
+    /// A stand-in for str0m's `Channel::write`: refuses (`Ok(false)`) anything
+    /// longer than its send budget, every time, and records what it sent.
+    fn str0m_like_writer(sent: &mut Vec<(u8, Vec<u8>)>) -> impl FnMut(u8, &[u8]) -> Option<Result<bool, String>> + '_ {
+        move |cid, bytes| {
+            if bytes.len() > STR0M_SEND_BUDGET {
+                return Some(Ok(false));
+            }
+            sent.push((cid, bytes.to_vec()));
+            Some(Ok(true))
+        }
+    }
+
+    /// THE WEDGE, through the flush loop itself: an unsendable reply at the
+    /// head of the queue (however it got there) is answered with an error for
+    /// its own id, and the reply queued behind it still goes out, in order.
+    #[test]
+    fn flush_an_unsendable_head_does_not_wedge_the_replies_behind_it() {
+        let huge = encode_fs_reply_unchecked(
+            &crate::file_transfer::FsResponse::Data { data: "D".repeat(STR0M_SEND_BUDGET) },
+            Some(7),
+        )
+        .unwrap();
+        assert!(huge.len() > STR0M_SEND_BUDGET, "fixture: the head must be unsendable");
+        let small = encode_fs_reply(&crate::file_transfer::FsResponse::error("x"), Some(8)).unwrap();
+        let mut queue = std::collections::VecDeque::from([(1u8, huge), (1u8, small.clone())]);
+
+        let mut sent = Vec::new();
+        flush_fs_replies(&mut queue, str0m_like_writer(&mut sent));
+
+        assert!(queue.is_empty(), "{} replies still stuck in the queue", queue.len());
+        assert_eq!(sent.len(), 2);
+        let first: serde_json::Value = serde_json::from_slice(&sent[0].1).unwrap();
+        assert_eq!(first.get("ok").and_then(|x| x.as_str()), Some("error"));
+        assert_eq!(first.get("id").and_then(|x| x.as_u64()), Some(7), "the unsendable request is ANSWERED");
+        assert_eq!(sent[1].1, small, "and the next reply goes out unchanged, after it");
+    }
+
+    /// Positive control for the loop's other arms: a head with no room yet
+    /// stays queued (and blocks those behind it — FIFO is the id-less match
+    /// rule); a gone channel or a failed write drops just that reply.
+    #[test]
+    fn flush_waits_on_no_room_and_drops_gone_or_failed_replies() {
+        let a = encode_fs_reply(&crate::file_transfer::FsResponse::error("a"), Some(1)).unwrap();
+        let b = encode_fs_reply(&crate::file_transfer::FsResponse::error("b"), Some(2)).unwrap();
+
+        let mut queue = std::collections::VecDeque::from([(1u8, a.clone()), (1u8, b.clone())]);
+        let mut calls = 0;
+        flush_fs_replies(&mut queue, |_, _| {
+            calls += 1;
+            Some(Ok(false))
+        });
+        assert_eq!(calls, 1, "stops at the first reply with no room");
+        assert_eq!(queue.len(), 2, "and keeps both, in order");
+        assert_eq!(queue[0].1, a, "a sendable head is never rewritten");
+
+        let mut seen = Vec::new();
+        flush_fs_replies(&mut queue, |cid, bytes| {
+            seen.push(bytes.to_vec());
+            if seen.len() == 1 { None } else { Some(Err(format!("channel {cid} closed"))) }
+        });
+        assert!(queue.is_empty());
+        assert_eq!(seen, vec![a, b]);
     }
 
     /// The request parser must tolerate the extra `id` field — serde ignores

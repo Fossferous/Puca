@@ -222,12 +222,14 @@ pub enum FsRequest {
     ListRoots,
     List {
         path: String,
-        /// Where this page starts, as a count of entries already listed —
-        /// the previous reply's `next`. Absent from every controller before
-        /// paging, which therefore gets the first page exactly as before.
-        /// The enumeration order is the filesystem's; a folder that changes
-        /// between pages can repeat or skip an entry, and the controller
-        /// de-duplicates by name.
+        /// Where this page starts, as a position in the folder's enumeration
+        /// — at or a little before the previous reply's `next`. Absent from
+        /// every controller before paging, which therefore gets the first
+        /// page exactly as before. The enumeration order is the filesystem's;
+        /// a folder that changes between pages shifts positions, so the
+        /// controller asks a little early, resumes after the last name it
+        /// already has, and de-duplicates by name (frontend
+        /// `api/devices/listPaging.ts`).
         #[serde(default)]
         cursor: Option<u64>,
     },

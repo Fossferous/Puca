@@ -1,5 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { listRoots, listDir, uploadFile, type FsEntry } from '../api/devices/fileTransfer';
+import {
+    continuationCursor,
+    continuePage,
+    firstContinuation,
+    scrollKeepingTopRow,
+    type ListContinuation,
+} from '../api/devices/listPaging';
 import { activeSessions, requestFileAccess, subscribeSessions } from '../api/devices/session';
 import { startDeviceDownload } from '../api/devices/deviceDownloads';
 import { CloseIcon, DownloadIcon, FileIcon, FolderIcon } from './Icons';
@@ -23,9 +30,9 @@ function sortEntries(list: FsEntry[]): FsEntry[] {
     });
 }
 
-/** A further page appended to what is shown, once per name: the host pages
- *  by position in the folder, so a folder that changed between pages can
- *  repeat an entry — and the row list is keyed by name. */
+/** A further page added to what is shown, once per name: a page re-sends the
+ *  entries around its anchor (listPaging.ts), a folder that changed between
+ *  pages can repeat one — and the row list is keyed by name. */
 function mergePage(shown: FsEntry[], page: FsEntry[]): FsEntry[] {
     const seen = new Set(shown.map(e => e.name));
     const merged = shown.slice();
@@ -42,10 +49,16 @@ export function DeviceFileManager({ sessionId, onClose }: { sessionId: string; o
     const [entries, setEntries] = useState<FsEntry[]>([]);
     // The host capped a very large directory; show only what it sent, and say so.
     const [truncated, setTruncated] = useState(false);
-    /** The cursor for this folder's next page, or null when there is none —
+    /** Where this folder's next page starts, or null when there is none —
      *  including from a host that predates paging, which never names one. */
-    const [next, setNext] = useState<number | null>(null);
+    const [more, setMore] = useState<ListContinuation | null>(null);
     const [loadingMore, setLoadingMore] = useState(false);
+    /** The folder changed between pages further than a page's overlap can
+     *  resume across, so entries may be missing until a fresh listing. */
+    const [changed, setChanged] = useState(false);
+    /** A scroll offset to apply once the merged rows are in the DOM (before
+     *  that, the list is not tall enough to scroll to it). */
+    const pendingScroll = useRef<number | null>(null);
     /** Bumped by every folder load, so an answer that lands after the user
      *  has moved on (to another folder, or a fresh load of this one) is
      *  dropped rather than shown — or, for a further page, appended to a
@@ -148,14 +161,17 @@ export function DeviceFileManager({ sessionId, onClose }: { sessionId: string; o
                 if (gen !== listGen.current) return;
                 setEntries(roots.map(r => ({ name: r, is_dir: true, size: 0 })));
                 setTruncated(false);
-                setNext(null);
+                setMore(null);
             } else {
-                const { entries: list, truncated: cut, next: more } = await listDir(sessionId, p);
+                const page = await listDir(sessionId, p);
                 if (gen !== listGen.current) return;
-                setEntries(sortEntries(list));
-                setTruncated(cut);
-                setNext(more ?? null);
+                // The continuation is read BEFORE sorting: its anchor is the
+                // last name in the host's order, which is where the host resumes.
+                setMore(firstContinuation(page));
+                setEntries(sortEntries(page.entries));
+                setTruncated(page.truncated);
             }
+            setChanged(false);
             setPath(p);
             // A new folder starts at its top; a stale scroll offset would
             // window the wrong slice of the fresh listing.
@@ -167,25 +183,46 @@ export function DeviceFileManager({ sessionId, onClose }: { sessionId: string; o
         if (gen === listGen.current) setLoading(false);
     };
 
-    /** Fetch the folder's next page and add it to what is shown. The scroll
-     *  position is kept: the user is partway through the folder. */
+    /** Fetch the folder's next page and add it to what is shown. The row the
+     *  user is reading stays where it is: they are partway through the folder,
+     *  and rows that sort in above it must not push it out of view. */
     const loadMore = async () => {
-        if (next === null || loadingMore) return;
+        if (more === null || loadingMore) return;
         const gen = listGen.current;
         setLoadingMore(true);
         setError(null);
         try {
-            const page = await listDir(sessionId, path, next);
+            const page = continuePage(more, await listDir(sessionId, path, continuationCursor(more)));
             if (gen !== listGen.current) return;
-            setEntries(shown => mergePage(shown, page.entries));
+            // `entries` is current here: everything else that replaces the
+            // rows goes through loadPath, which bumps the generation checked
+            // just above.
+            const merged = mergePage(entries, page.entries);
+            const top = listRef.current?.scrollTop ?? scrollTop;
+            const keep = scrollKeepingTopRow(entries, merged, top, rowH);
+            if (keep !== top) {
+                pendingScroll.current = keep;
+                setScrollTop(keep);
+            }
+            setEntries(merged);
             setTruncated(page.truncated);
-            setNext(page.next ?? null);
+            setMore(page.more);
+            if (page.gap) setChanged(true);
         } catch (e) {
             if (gen === listGen.current) setError(e instanceof Error ? e.message : String(e));
         } finally {
             if (gen === listGen.current) setLoadingMore(false);
         }
     };
+
+    // Rows merged by Load more are in the DOM now, so the list is tall enough
+    // to hold the offset that keeps the user's row in place.
+    useLayoutEffect(() => {
+        const el = listRef.current;
+        if (pendingScroll.current === null || !el) return;
+        el.scrollTop = pendingScroll.current;
+        pendingScroll.current = null;
+    }, [entries]);
 
     // Only browse once access has been granted AND the channel is open —
     // both arrive asynchronously, in either order, and a listing sent before
@@ -306,13 +343,16 @@ export function DeviceFileManager({ sessionId, onClose }: { sessionId: string; o
                         read as "Empty directory" — a wrong answer, not a wait. */}
                     {!channelReady && <div className="dfm-loading">Connecting to the other device…</div>}
 
-                    {next !== null ? (
+                    {more !== null ? (
                         // The host pages: say how much is here and offer the
                         // rest. Above the list rather than at its foot, so it
-                        // is one tap away wherever the list is scrolled.
+                        // is one tap away wherever the list is scrolled. Pages
+                        // come in the HOST's order and are shown sorted, so
+                        // what is loaded is not the first stretch of A-Z —
+                        // the words must not suggest it is.
                         <div className="dfm-truncated dfm-has-more" role="status">
                             <span>
-                                {entries.length.toLocaleString()} items listed so far — this folder has more.
+                                {entries.length.toLocaleString()} items loaded so far. The rest of this folder can land anywhere in the list.
                             </span>
                             <button
                                 type="button"
@@ -328,6 +368,13 @@ export function DeviceFileManager({ sessionId, onClose }: { sessionId: string; o
                         // cannot hand over the rest.
                         <div className="dfm-truncated" role="status">
                             This folder has more items than can be shown at once — the first {entries.length.toLocaleString()} are listed. Open a subfolder to narrow it down.
+                        </div>
+                    )}
+                    {changed && (
+                        // Load more could not find where it left off: the
+                        // folder changed between pages (listPaging.ts).
+                        <div className="dfm-truncated dfm-changed" role="status">
+                            This folder changed while it was loading, so some items may be missing. Refresh for an exact list.
                         </div>
                     )}
                     <div
