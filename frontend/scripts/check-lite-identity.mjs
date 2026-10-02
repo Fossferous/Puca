@@ -114,10 +114,12 @@ if (!existsSync(notesGradle)) {
 
 // Púca Notes' native floor (notes-app/native-min.json) still describes the
 // APK's native surface — a new plugin or permission cannot land without a
-// decision about native.min. scripts/notes-native-min.mjs has the reasons.
+// decision about native.min — and its "latest" is still sealed to the native
+// layer, so a native change cannot land without raising the native.version
+// nudge. scripts/notes-native-min.mjs has the reasons.
 {
-    const { record, surface } = readNativeMin(join(here, '..'));
-    const r = checkNativeMin(record, surface);
+    const { record, surface, layerHash } = readNativeMin(join(here, '..'));
+    const r = checkNativeMin(record, surface, layerHash);
     ok.push(...r.ok);
     r.failures.forEach(fail);
 }

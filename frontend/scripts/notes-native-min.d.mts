@@ -31,13 +31,49 @@ export function nativeSurface(sources: NativeSurfaceSources): NativeSurface;
  *  the thing that validates it, so nothing here is trusted to be well formed. */
 export interface NativeMinRecord {
     min?: unknown;
+    /** The newest Notes APK whose native layer changed: the manifest's native.version. */
+    latest?: unknown;
+    /** latestFingerprint(latest, nativeLayerHash(layer)) when `latest` was recorded. */
+    latestFingerprint?: unknown;
     surface?: { packages?: unknown; plugins?: unknown; permissions?: unknown };
 }
 
-/** The real tree's record and surface. */
-export function readNativeMin(frontendDir: string): { record: NativeMinRecord; surface: NativeSurface };
+/** One file of the APK's native layer: its path relative to frontend/ and its bytes. */
+export interface NativeLayerFile {
+    path: string;
+    bytes: string | Uint8Array;
+}
+
+/** Whether a path (relative to frontend/) is part of the APK's native layer. */
+export function isNativeLayerPath(path: string): boolean;
+
+/** sha256 over every file's path and normalised bytes (no CRs, no release number). */
+export function nativeLayerHash(files: NativeLayerFile[]): string;
+
+/** What native-min.json records as latestFingerprint for a given latest. */
+export function latestFingerprint(latest: string, layerHash: string): string;
+
+/** The tree's native layer, listed by git, read from the working tree. */
+export function nativeLayerFiles(frontendDir: string): NativeLayerFile[];
+
+/** The real tree's record, surface and native layer. */
+export function readNativeMin(frontendDir: string): {
+    record: NativeMinRecord;
+    surface: NativeSurface;
+    layerFiles: NativeLayerFile[];
+    layerHash: string;
+};
+
+/** Raise `latest` and seal it to the layer, or say why not. */
+export function recordLatest(
+    record: NativeMinRecord,
+    version: string,
+    layerHash: string,
+    appVersion: string,
+): { record?: NativeMinRecord & { latest: string; latestFingerprint: string }; error?: string };
 
 export function checkNativeMin(
     record: NativeMinRecord | null | undefined,
     surface: NativeSurface,
+    layerHash: string,
 ): { ok: string[]; failures: string[] };

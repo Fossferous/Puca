@@ -29,9 +29,39 @@
  * in the lite builds) whenever the
  * surface changes and the record does not, so the change that adds a plugin
  * cannot land without someone deciding what `min` must now be.
+ *
+ * `latest`: THE NEWEST NOTES APK WHOSE NATIVE LAYER CHANGED. The manifest's
+ * native.version is a nudge: an installed APK older than it shows "A new
+ * Púca Notes app (X) is available". It used to be the release number
+ * (`--native-version "$VER"` on every ship), and every release rebuilds the
+ * APK, so every installed app was "out of date" the day after it updated
+ * — although 12 of the 13 APKs from 0.9.818 to 0.9.830 differed from the one
+ * before only in versionName and the built-in web bundle the OTA already
+ * delivers. Only 0.9.827 (KeyboardPlan) changed the native layer.
+ *
+ * So `latest` rides the same road as `min` (version.json "nativeLatest" →
+ * <bundle>.native-latest → the manifest's native.version), and it is SEALED
+ * to a fingerprint of the native layer: `latestFingerprint` is a hash of
+ * `latest` together with every file the APK's native half is built from
+ * (nativeLayerHash below). Change any of them, or edit `latest` by hand, and
+ * checkNativeMin fails until someone runs
+ *
+ *   node scripts/notes-native-min.mjs --record-latest <the release that first ships this APK>
+ *
+ * which refuses a version that does not raise `latest`. The layer is hashed
+ * BROADLY — everything tracked under notes-app/android except the JVM and
+ * instrumented tests, plus notes-app's package files and capacitor.config.ts
+ * — so the failure mode is a nudge nobody needed, never a native change
+ * shipped silently. (`min` still guards correctness either way: `latest` is
+ * only ever a nudge.) Line endings are stripped before hashing (the tree is
+ * checked out CRLF on Windows and LF on Linux CI), and so are the release
+ * number's own appearances (versionName/versionCode, the package's version).
  */
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const NATIVE_MIN_FILE = join('notes-app', 'native-min.json');
 const VERSION_RE = /^\d+\.\d+\.\d+$/;
@@ -83,7 +113,78 @@ function javaFiles(dir) {
     return out;
 }
 
-/** The real tree's record and surface. */
+/**
+ * Is this path (relative to frontend/, forward slashes) part of the APK's
+ * native layer? Everything tracked under notes-app/android except the tests
+ * (not in the APK), plus the files Gradle and `cap sync` read from notes-app.
+ */
+export function isNativeLayerPath(path) {
+    const p = String(path).replace(/\\/g, '/');
+    if (p.startsWith('notes-app/android/')) return !/\/src\/(test|androidTest)\//.test(p);
+    return p === 'notes-app/package.json' || p === 'notes-app/package-lock.json' || p === 'notes-app/capacitor.config.ts';
+}
+
+/** One file's bytes as hashed: no CRs, and no release number. */
+function normalisedLayerBytes(path, bytes) {
+    const raw = typeof bytes === 'string' ? Buffer.from(bytes, 'utf8') : Buffer.from(bytes);
+    // Line endings: autocrlf checks text out CRLF on Windows and LF on Linux.
+    // A binary (a PNG, the wrapper jar) is never converted, so dropping its
+    // 0x0D bytes is the same on both and changes nothing that matters here.
+    const noCr = Buffer.from(raw.filter(b => b !== 0x0d));
+    const name = path.split('/').pop();
+    if (name === 'package.json' || name === 'package-lock.json') {
+        // The package's OWN version (and the lockfile's copy of it) is not
+        // native; every dependency's version is.
+        try {
+            const json = JSON.parse(noCr.toString('utf8'));
+            delete json.version;
+            if (json?.packages?.['']) delete json.packages[''].version;
+            return Buffer.from(JSON.stringify(json), 'utf8');
+        } catch { return noCr; }
+    }
+    if (name.endsWith('.gradle')) {
+        return Buffer.from(noCr.toString('utf8').replace(/^[ \t]*(versionName|versionCode)\b.*$/gm, ''), 'utf8');
+    }
+    return noCr;
+}
+
+/**
+ * A fingerprint of the native layer: sha256 over every file's path and its
+ * normalised bytes, in path order.
+ * @param {{path: string, bytes: string | Uint8Array}[]} files
+ */
+export function nativeLayerHash(files) {
+    const h = createHash('sha256');
+    for (const f of [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
+        const body = normalisedLayerBytes(f.path, f.bytes);
+        h.update(`${f.path}\0${body.length}\0`);
+        h.update(body);
+    }
+    return h.digest('hex');
+}
+
+/** What native-min.json records for `latest`: the version sealed to the layer. */
+export function latestFingerprint(latest, layerHash) {
+    return createHash('sha256').update(`puca-notes-native-latest\n${latest}\n${layerHash}`).digest('hex');
+}
+
+/**
+ * The native layer's files as they are on disk now. The LIST comes from git
+ * (tracked files only, so a cap sync's generated files never count); the
+ * CONTENT is the working tree's, so an edit counts before it is staged.
+ */
+export function nativeLayerFiles(frontendDir) {
+    const r = spawnSync('git', ['ls-files', '-z', '--', 'notes-app'], { cwd: frontendDir, encoding: 'utf8' });
+    if (r.status !== 0) {
+        throw new Error(`git ls-files failed in ${frontendDir} (${(r.stderr || r.error?.message || '').trim()}): the Púca Notes native layer cannot be listed, so nothing proves native-min.json "latest" is current`);
+    }
+    return r.stdout.split('\0')
+        .filter(p => p && isNativeLayerPath(p))
+        .filter(p => existsSync(join(frontendDir, p)))
+        .map(p => ({ path: p, bytes: readFileSync(join(frontendDir, p)) }));
+}
+
+/** The real tree's record, surface and native layer. */
 export function readNativeMin(frontendDir) {
     const record = JSON.parse(readFileSync(join(frontendDir, NATIVE_MIN_FILE), 'utf8'));
     const app = join(frontendDir, 'notes-app', 'android', 'app', 'src', 'main');
@@ -93,14 +194,33 @@ export function readNativeMin(frontendDir) {
         javaSources: javaFiles(join(app, 'java')),
         manifestXml: existsSync(manifestPath) ? readFileSync(manifestPath, 'utf8') : '',
     });
-    return { record, surface };
+    const layerFiles = nativeLayerFiles(frontendDir);
+    return { record, surface, layerFiles, layerHash: nativeLayerHash(layerFiles) };
+}
+
+/**
+ * Raise `latest` and seal it to the current layer. Returns the new record,
+ * or an error saying why not: `latest` only goes UP (re-recording the same
+ * version is exactly the silent change this exists to stop), and never below
+ * the version this tree already is (that APK has shipped without the change).
+ */
+export function recordLatest(record, version, layerHash, appVersion) {
+    if (!isVersion(version)) return { error: `${JSON.stringify(version)} is not a MAJOR.MINOR.PATCH version` };
+    if (isVersion(record?.latest) && !versionGt(version, record.latest)) {
+        return { error: `${version} must be newer than the current "latest" (${record.latest}): an APK whose native layer changed is a NEW APK, and older installs are only told about it if the number rises` };
+    }
+    if (isVersion(appVersion) && versionGt(appVersion, version)) {
+        return { error: `${version} is older than this tree's version (${appVersion}): that APK already shipped without this change. Name the release that will first ship it` };
+    }
+    return { record: { ...record, latest: version, latestFingerprint: latestFingerprint(version, layerHash) } };
 }
 
 /**
  * @param {object} record   notes-app/native-min.json, parsed
  * @param {{packages: string[], plugins: string[], permissions: string[]}} surface
+ * @param {string} layerHash  nativeLayerHash of the tree's native layer
  */
-export function checkNativeMin(record, surface) {
+export function checkNativeMin(record, surface, layerHash) {
     const ok = [];
     const failures = [];
     if (!isVersion(record?.min)) {
@@ -125,5 +245,45 @@ export function checkNativeMin(record, surface) {
     } else {
         ok.push(`Notes native floor: min ${record.min}, surface recorded (${surface.packages.length} packages, ${surface.plugins.length} plugins, ${surface.permissions.length} permissions)`);
     }
+    const before = failures.length;
+    if (typeof layerHash !== 'string' || !layerHash) {
+        failures.push(`no native-layer fingerprint was given, so nothing proves ${NATIVE_MIN_FILE} "latest" is current (a caller of checkNativeMin must pass readNativeMin's layerHash)`);
+    } else if (!isVersion(record?.latest)) {
+        failures.push(`${NATIVE_MIN_FILE} "latest" is ${JSON.stringify(record?.latest)}, not a MAJOR.MINOR.PATCH version — the Notes OTA manifest would carry no native.version`);
+    } else if (versionGt(record.min, record.latest)) {
+        failures.push(`${NATIVE_MIN_FILE} "latest" ${record.latest} is older than "min" ${record.min}: the floor is itself a native change, so the newest native change cannot predate it`);
+    } else if (record.latestFingerprint !== latestFingerprint(record.latest, layerHash)) {
+        failures.push(
+            `the Púca Notes APK's native layer changed (or "latest" was edited by hand) since ${NATIVE_MIN_FILE} "latest" (${record.latest}) was recorded. `
+            + 'Installed Notes apps are only told about a new APK when "latest" rises. Run: '
+            + 'node scripts/notes-native-min.mjs --record-latest <the release that will first ship this APK> '
+            + '(from frontend/; it refuses a version that does not raise "latest"). Changed only a test or a comment? Record it anyway: '
+            + 'an unneeded "new app" nudge is the cheap failure, a silent native change the expensive one.',
+        );
+    }
+    if (failures.length === before) ok.push(`Notes native latest: ${record.latest}, sealed to the current native layer`);
     return { ok, failures };
+}
+
+// --- CLI: node scripts/notes-native-min.mjs [--check | --record-latest <version>]
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+if (isMain) {
+    const frontendDir = join(dirname(fileURLToPath(import.meta.url)), '..');
+    const args = process.argv.slice(2);
+    const { record, surface, layerHash } = readNativeMin(frontendDir);
+    if (args[0] === '--record-latest') {
+        const appVersion = JSON.parse(readFileSync(join(frontendDir, 'src-tauri', 'tauri.conf.json'), 'utf8')).version;
+        const r = recordLatest(record, args[1], layerHash, appVersion);
+        if (r.error) { console.error(`REFUSING: ${r.error}`); process.exit(1); }
+        writeFileSync(join(frontendDir, NATIVE_MIN_FILE), JSON.stringify(r.record, null, 2) + '\n');
+        console.log(`${NATIVE_MIN_FILE}: latest ${record.latest} -> ${r.record.latest}, sealed to the current native layer. Say in "why" what changed.`);
+    } else if (args.length === 0 || args[0] === '--check') {
+        const r = checkNativeMin(record, surface, layerHash);
+        r.ok.forEach(l => console.log(`ok  ${l}`));
+        r.failures.forEach(l => console.error(`FAIL  ${l}`));
+        process.exit(r.failures.length ? 1 : 0);
+    } else {
+        console.error('usage: node scripts/notes-native-min.mjs [--check | --record-latest <version>]');
+        process.exit(2);
+    }
 }

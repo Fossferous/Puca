@@ -830,7 +830,7 @@ STUB
 		chmod +x "$TMP/bin/ssh"
 	}
 	restore_recording_ssh
-	echo '{"version":"9.9.9","app":"notes","nativeMin":"9.9.8"}' > "$TMP/notes-version.json"
+	echo '{"version":"9.9.9","app":"notes","nativeMin":"9.9.8","nativeLatest":"9.9.8"}' > "$TMP/notes-version.json"
 	echo '{"version":"9.9.9","app":"puca"}' > "$TMP/puca-version.json"
 	"$PY" - "$TMP" <<'PYEOF'
 import sys, zipfile
@@ -838,7 +838,7 @@ t = sys.argv[1]
 csp = '<meta http-equiv="Content-Security-Policy" content="default-src \'self\'">'
 with zipfile.ZipFile(t + '/notes-app.zip', 'w', zipfile.ZIP_DEFLATED) as z:
     z.writestr('index.html', '<html><head>' + csp + '</head></html>')
-    z.writestr('version.json', '{"version":"9.9.9","app":"notes","nativeMin":"9.9.8"}')
+    z.writestr('version.json', '{"version":"9.9.9","app":"notes","nativeMin":"9.9.8","nativeLatest":"9.9.8"}')
 with zipfile.ZipFile(t + '/puca-app.zip', 'w', zipfile.ZIP_DEFLATED) as z:
     z.writestr('index.html', '<html><head></head></html>')
     z.writestr('version.json', '{"version":"9.9.9","app":"puca"}')
@@ -854,6 +854,7 @@ PYEOF
 	signed notes-wrongkey --notes "$TMP/notes-app.zip" "$TMP/puca-fixture.key" "$TMP/notes-version.json"
 	signed puca-good "" "$TMP/puca-app.zip" "$TMP/puca-fixture.key" "$TMP/puca-version.json"
 	check "the signer writes the Notes bundle's native floor beside it" "$([ "$(tr -d '\r\n' < "$TMP/notes-good.enc.zip.native-min" 2>/dev/null)" = 9.9.8 ] && [ ! -e "$TMP/puca-good.enc.zip.native-min" ] && echo 1 || echo 0)" "$(ls "$TMP" | grep native-min)"
+	check "and the newest native APK (native-min.json \"latest\") beside that" "$([ "$(tr -d '\r\n' < "$TMP/notes-good.enc.zip.native-latest" 2>/dev/null)" = 9.9.8 ] && [ ! -e "$TMP/puca-good.enc.zip.native-latest" ] && echo 1 || echo 0)" "$(ls "$TMP" | grep native-latest)"
 
 	out="$(ship mobile "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
 	check "mobile REFUSES a Púca Notes bundle, and names mobile-notes" "$([ $rc -ne 0 ] && [ "$(has "$out" "REFUSING: $TMP/notes-good.enc.zip was signed for the 'notes' app")" = 1 ] && [ "$(has "$out" 'dual-ship.sh mobile-notes')" = 1 ] && [ ! -s "$LOG" ] && echo 1 || echo 0)" "$out"
@@ -869,14 +870,15 @@ PYEOF
 	check "mobile-notes REFUSES a bundle with no .channel sidecar" "$([ $rc -ne 0 ] && [ "$(has "$out" 'nothing says this is a Púca Notes bundle')" = 1 ] && echo 1 || echo 0)" "$out"
 	out="$(ship mobile-notes "$TMP/notes-wrongkey.enc.zip" 9.9.9 "$notes_wrongkey_SK" "$notes_wrongkey_CK")"; rc=$?
 	check "mobile-notes REFUSES a Notes bundle signed with Púca's key" "$([ $rc -ne 0 ] && [ "$(has "$out" 'does not verify under the key the Púca Notes app embeds')" = 1 ] && [ ! -s "$LOG" ] && echo 1 || echo 0)" "$out"
-	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK" --native-version 9.9)"; rc=$?
-	check "mobile-notes REFUSES a malformed native version" "$([ $rc -ne 0 ] && [ "$(has "$out" "REFUSING: '9.9' is not a MAJOR.MINOR.PATCH version")" = 1 ] && echo 1 || echo 0)" "$out"
+	# native.version is not a flag any more either. Every release passed
+	# --native-version "$VER", so every release told every installed Notes app
+	# that a new APK was out although 12 of 13 differed only in versionName.
+	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK" --native-version 9.9.9)"; rc=$?
+	check "mobile-notes REFUSES --native-version and points at native-min.json \"latest\"" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING: --native-version is gone')" = 1 ] && [ "$(has "$out" 'notes-app/native-min.json')" = 1 ] && [ ! -s "$LOG" ] && echo 1 || echo 0)" "$out"
 	# The floor is not a flag any more: a flag applied to ONE release, and the
 	# next release shipped without it published no floor at all.
 	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK" --native-min 9.9.9)"; rc=$?
 	check "mobile-notes REFUSES --native-min and points at native-min.json" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING: --native-min is gone')" = 1 ] && [ "$(has "$out" 'notes-app/native-min.json')" = 1 ] && [ ! -s "$LOG" ] && echo 1 || echo 0)" "$out"
-	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK" --native-version 9.9.10)"; rc=$?
-	check "mobile-notes REFUSES a --native-version newer than the release" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING: --native-version 9.9.10 is newer than this release (9.9.9)')" = 1 ] && [ ! -s "$LOG" ] && echo 1 || echo 0)" "$out"
 	nomin() { cp "$TMP/notes-good.enc.zip" "$TMP/$1.enc.zip"; cp "$TMP/notes-good.enc.zip.version" "$TMP/$1.enc.zip.version"; cp "$TMP/notes-good.enc.zip.channel" "$TMP/$1.enc.zip.channel"; }
 	nomin nomin
 	out="$(ship mobile-notes "$TMP/nomin.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
@@ -887,6 +889,20 @@ PYEOF
 	nomin next; printf '9.9.10\n' > "$TMP/next.enc.zip.native-min"
 	out="$(ship mobile-notes "$TMP/next.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
 	check "and one naming the NEXT release" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING: native.min 9.9.10')" = 1 ] && echo 1 || echo 0)" "$out"
+	# native.version rides with the bundle the same way (<bundle>.native-latest).
+	nolatest() { nomin "$1"; cp "$TMP/notes-good.enc.zip.native-min" "$TMP/$1.enc.zip.native-min"; }
+	nolatest nolatest
+	out="$(ship mobile-notes "$TMP/nolatest.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
+	check "mobile-notes REFUSES a bundle with no .native-latest sidecar" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING: no '"$TMP"'/nolatest.enc.zip.native-latest')" = 1 ] && [ ! -s "$LOG" ] && echo 1 || echo 0)" "$out"
+	nolatest badlatest; printf '9.9\n' > "$TMP/badlatest.enc.zip.native-latest"
+	out="$(ship mobile-notes "$TMP/badlatest.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
+	check "mobile-notes REFUSES a malformed .native-latest" "$([ $rc -ne 0 ] && [ "$(has "$out" "native-latest says '9.9', not a MAJOR.MINOR.PATCH version")" = 1 ] && [ ! -s "$LOG" ] && echo 1 || echo 0)" "$out"
+	nolatest nextlatest; printf '9.9.10\n' > "$TMP/nextlatest.enc.zip.native-latest"
+	out="$(ship mobile-notes "$TMP/nextlatest.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
+	check "mobile-notes REFUSES a native.version newer than the release (no such APK is on the page)" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING: native.version 9.9.10')" = 1 ] && [ "$(has "$out" 'is newer than this release (9.9.9)')" = 1 ] && [ ! -s "$LOG" ] && echo 1 || echo 0)" "$out"
+	nolatest oldlatest; printf '9.9.7\n' > "$TMP/oldlatest.enc.zip.native-latest"
+	out="$(ship mobile-notes "$TMP/oldlatest.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
+	check "mobile-notes REFUSES a native.version older than its own native.min" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING: native.version 9.9.7')" = 1 ] && [ "$(has "$out" 'is older than its native.min 9.9.8')" = 1 ] && [ ! -s "$LOG" ] && echo 1 || echo 0)" "$out"
 	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.8 "$notes_good_SK" "$notes_good_CK")"; rc=$?
 	check "mobile-notes REFUSES a manifest version the bundle was not built as" "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING: the manifest says 9.9.8 but')" = 1 ] && echo 1 || echo 0)" "$out"
 
@@ -894,18 +910,27 @@ PYEOF
 	# Púca's FULL manifest, untagged, for the SAME release number — so the
 	# version alone would read as a successful ship. Only the tag tells.
 	printf '{"version":"9.9.9","url":"x"}\n' > "$TMP/notes-ota.json"
-	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK" --native-version 9.9.9)"; rc=$?
+	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
 	check "a good Notes bundle passes every gate and is uploaded" "$([ "$(has "$out" 'REFUSING')" = 0 ] && [ "$(has "$out" 'PASS  OK ')" = 1 ] && grep -q 'puca-notes-web-9.9.9.enc.zip' "$LOG" && echo 1 || echo 0)" "$out"
 	check "its manifest is mobile-update-notes.json, tagged notes, with the bundle's native floor" "$(grep -q 'cat > mobile-update-notes.json' "$LOG" && grep -q '"variant": "notes"' "$LOG" && grep -q '"min": "9.9.8"' "$LOG" && grep -q '"version": "9.9.9",' "$LOG" && grep -q '"download_url": "https://dl.invalid/#notes-app"' "$LOG" && echo 1 || echo 0)" "$(cat "$LOG")"
+	check "and native.version is the bundle's newest native APK (9.9.8), NOT the release (9.9.9)" "$(grep -A3 '"native": {' "$LOG" | grep -q '"version": "9.9.8",' && ! grep -A3 '"native": {' "$LOG" | grep -q '"version": "9.9.9"' && echo 1 || echo 0)" "$(cat "$LOG")"
 	check "it never writes the full or lite manifest" "$(! grep -q 'cat > mobile-update.json' "$LOG" && ! grep -q 'cat > mobile-update-lite.json' "$LOG" && echo 1 || echo 0)" "$(cat "$LOG")"
 	check "an UNTAGGED answer on ?variant=notes FAILS and says to ship the backend first" "$([ $rc -ne 0 ] && [ "$(has "$out" 'WITHOUT "variant":"notes"')" = 1 ] && [ "$(has "$out" 'Ship the backend first')" = 1 ] && echo 1 || echo 0)" "$out"
-	printf '{"version":"9.9.9","url":"x","variant":"notes","native":{"min":"9.9.8"}}\n' > "$TMP/notes-ota.json"
+	printf '{"version":"9.9.9","url":"x","variant":"notes","native":{"min":"9.9.8","version":"9.9.8"}}\n' > "$TMP/notes-ota.json"
 	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"
 	check "a tagged answer with the version PASSES (positive control)" "$([ "$(has "$out" 'PASS  sandbox notes OTA endpoint reports 9.9.9 with variant:notes')" = 1 ] && [ "$(has "$out" 'mobile-notes-variant')" = 0 ] && echo 1 || echo 0)" "$out"
 	# THE FLOOR CARRIES OVER. The release after the one that raised it is
 	# shipped with the plain recipe — no flags — and must still publish it.
 	check "with NO flags the manifest still carries native.min from the bundle (the floor carries over)" "$(grep -q '"native": {' "$LOG" && grep -q '"min": "9.9.8"' "$LOG" && echo 1 || echo 0)" "$(cat "$LOG")"
 	check "and the served floor is verified back" "$([ "$(has "$out" 'PASS  sandbox notes OTA endpoint serves native.min 9.9.8')" = 1 ] && [ "$(has "$out" 'mobile-notes-native-min')" = 0 ] && echo 1 || echo 0)" "$out"
+	check "and the served native.version is verified back" "$([ "$(has "$out" 'PASS  sandbox notes OTA endpoint serves native.version 9.9.8')" = 1 ] && [ "$(has "$out" 'mobile-notes-native-version')" = 0 ] && echo 1 || echo 0)" "$out"
+	# The FIRST release after native.version stopped being the release number
+	# publishes the tree's 0.9.827 to hosts serving 0.9.830. Lowering it is the
+	# point, so nothing may refuse it (the floor, native.min, still only rises).
+	printf '{"version":"9.9.9","url":"x","variant":"notes","native":{"min":"9.9.8","version":"9.9.9"}}\n' > "$TMP/notes-ota.json"
+	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
+	check "a native.version LOWER than a host serves ships (no monotonic rule on the nudge)" "$([ "$(has "$out" 'REFUSING')" = 0 ] && [ "$(has "$out" 'WARNING')" = 0 ] && grep -q 'cat > mobile-update-notes.json' "$LOG" && grep -A3 '"native": {' "$LOG" | grep -q '"version": "9.9.8",' && echo 1 || echo 0)" "$out"
+	check "and a host still serving the old native.version after the write FAILS the ship" "$([ $rc -ne 0 ] && [ "$(has "$out" "FAIL  sandbox notes OTA endpoint serves native.version '9.9.9', expected 9.9.8")" = 1 ] && [ "$(has "$out" 'sandbox:mobile-notes-native-version')" = 1 ] && echo 1 || echo 0)" "$out"
 	printf '{"version":"9.9.9","url":"x","variant":"notes"}\n' > "$TMP/notes-ota.json"
 	out="$(ship mobile-notes "$TMP/notes-good.enc.zip" 9.9.9 "$notes_good_SK" "$notes_good_CK")"; rc=$?
 	check "a host that serves NO floor after the write FAILS the ship" "$([ $rc -ne 0 ] && [ "$(has "$out" "FAIL  sandbox notes OTA endpoint serves native.min '<none>', expected 9.9.8")" = 1 ] && [ "$(has "$out" 'sandbox:mobile-notes-native-min')" = 1 ] && echo 1 || echo 0)" "$out"
@@ -952,7 +977,7 @@ STUB
 	# (src/update_routes.rs serve_json_file), and a corrupt manifest still
 	# carried a floor: a 404 makes the ship probe the file, and only a
 	# missing file means "no floor".
-	printf '{"version":"9.9.9","url":"x","variant":"notes","native":{"min":"9.9.8"}}
+	printf '{"version":"9.9.9","url":"x","variant":"notes","native":{"min":"9.9.8","version":"9.9.8"}}
 ' > "$TMP/notes-ota.json"
 	echo 404 > "$TMP/notes-code"
 	touch "$TMP/notes-file"
@@ -970,7 +995,7 @@ STUB
 	# full and lite endpoints with the same (empty) body before and after, so
 	# a check that compared nothing would pass there too. Here the stub's full
 	# (then lite) answer changes between the two reads.
-	printf '{"version":"9.9.9","url":"x","variant":"notes","native":{"min":"9.9.8"}}\n' > "$TMP/notes-ota.json"
+	printf '{"version":"9.9.9","url":"x","variant":"notes","native":{"min":"9.9.8","version":"9.9.8"}}\n' > "$TMP/notes-ota.json"
 	for which in full lite; do
 		rm -f "$TMP/reads"
 		cat > "$TMP/bin/ssh" <<STUB
@@ -1000,7 +1025,7 @@ STUB
 	# stub serves $TMP/served-bundle at the bundle URL. (Every run here also
 	# FAILs SHA256SUMS.txt — this stub serves none — so the exit code proves
 	# nothing: the assertions are on the bundle lines.)
-	printf '{"version":"9.9.9","url":"x","variant":"notes","native":{"min":"9.9.8"}}\n' > "$TMP/notes-ota.json"
+	printf '{"version":"9.9.9","url":"x","variant":"notes","native":{"min":"9.9.8","version":"9.9.8"}}\n' > "$TMP/notes-ota.json"
 	for sub in mobile mobile-lite mobile-notes; do
 		case "$sub" in
 			mobile)       b=puca-good;  b_sk="$puca_good_SK";  b_ck="$puca_good_CK";  what='bundle';       id=mobile-bundle ;;

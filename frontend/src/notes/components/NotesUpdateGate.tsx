@@ -25,7 +25,8 @@
  * for updates"; a 'required' strip returns for every new version.
  *
  * The account menu's "Check for updates" re-runs the same check through
- * registerNotesUpdateRunner. Once the app has been shown it stays mounted: a
+ * registerNotesUpdateRunner, and leaves a dismissed strip dismissed (the menu
+ * names the newer app itself). Once the app has been shown it stays mounted: a
  * later download/error screen covers it rather than replacing it, so an open
  * note is not thrown away by asking.
  */
@@ -33,7 +34,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, us
 import { isMobile } from '../../api/platform';
 import { runCapacitorOta, type OtaOutcome, type OtaUiState } from '../../api/mobileOta';
 import {
-    clearNudgeDismissal, dismissNudgeFor, downloadPage, getNativePrompt, nativePromptFor, readNudgeDismissal,
+    dismissNudgeFor, downloadPage, getNativePrompt, nativePromptFor, readNudgeDismissal,
     registerNotesUpdateRunner, setNativePrompt, subscribeNativePrompt,
 } from '../model/notesUpdate';
 import { CheckCircleIcon, CloseIcon, DownloadIcon, NoteIcon, WarningIcon } from '../../components/Icons';
@@ -130,13 +131,14 @@ export function NotesUpdateGate({ children, native = isMobile() }: NotesUpdateGa
     useEffect(() => {
         if (!native) return;
         void run();
-        const manual = () => {
-            // Asking again is asking to be told again.
-            clearNudgeDismissal();
-            setNudgeDismissed(null);
-            return run();
-        };
-        registerNotesUpdateRunner(manual);
+        // "Check for updates" does NOT clear a dismissed "new app" strip. It
+        // used to ("asking again is asking to be told again"), but the menu
+        // that asks always offers "Get Púca Notes X" itself and now says a
+        // newer app is on offer, so the strip coming back told nothing new: it
+        // only made a dismissal last until the next look at the menu, which is
+        // how the owner's strip "would not go away". A NEWER app still brings
+        // the strip back, because the dismissal is kept per version.
+        registerNotesUpdateRunner(run);
         return () => registerNotesUpdateRunner(null);
     }, [native, run]);
 

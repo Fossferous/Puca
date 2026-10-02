@@ -29,7 +29,9 @@
  * channel is written to `<out>.channel`, which dual-ship.sh reads: `mobile` /
  * `mobile-lite` refuse a notes bundle and `mobile-notes` refuses anything else.
  * A Notes bundle's native floor (version.json "nativeMin") goes to
- * `<out>.native-min`, which `mobile-notes` publishes as native.min.
+ * `<out>.native-min`, which `mobile-notes` publishes as native.min, and its
+ * newest native APK (version.json "nativeLatest") to `<out>.native-latest`,
+ * which `mobile-notes` publishes as native.version.
  */
 import { createCipheriv, privateEncrypt, randomBytes, createHash, constants } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -115,6 +117,38 @@ if (NOTES) {
         refuse([
             `${versionJsonPath} says nativeMin ${nativeMin}, newer than the bundle itself (${builtVersion}):`,
             'every Púca Notes install would refuse this update. Fix frontend/notes-app/native-min.json or bump the release.',
+        ]);
+    }
+}
+
+// ...and its NEWEST NATIVE APK: the last release whose Notes APK changed
+// natively (native-min.json "latest", sealed to the native layer by
+// frontend/scripts/notes-native-min.mjs). Written to `<out>.native-latest`,
+// which dual-ship.sh mobile-notes publishes as native.version — the nudge
+// "A new Púca Notes app (X) is available". It used to be the RELEASE number,
+// which told every installed app to reinstall after every release. Refused
+// when absent, newer than the bundle (no such APK is on the page), or older
+// than the floor (the floor is itself a native change).
+let nativeLatest = '';
+if (NOTES) {
+    nativeLatest = typeof parsedVersion?.nativeLatest === 'string' ? parsedVersion.nativeLatest.trim() : '';
+    if (!/^\d+\.\d+\.\d+$/.test(nativeLatest)) {
+        refuse([
+            `${versionJsonPath} carries no usable nativeLatest (${JSON.stringify(parsedVersion?.nativeLatest)}).`,
+            'The Notes native build writes it from frontend/notes-app/native-min.json "latest": rebuild with',
+            'cd frontend && node scripts/build-notes-app.mjs --ota',
+        ]);
+    }
+    if (versionGt(nativeLatest, builtVersion)) {
+        refuse([
+            `${versionJsonPath} says nativeLatest ${nativeLatest}, newer than the bundle itself (${builtVersion}):`,
+            'no such Púca Notes APK is on the download page. Fix frontend/notes-app/native-min.json "latest" or bump the release.',
+        ]);
+    }
+    if (versionGt(nativeMin, nativeLatest)) {
+        refuse([
+            `${versionJsonPath} says nativeLatest ${nativeLatest} is older than its nativeMin ${nativeMin}:`,
+            'the floor is itself a native change. Re-record frontend/notes-app/native-min.json "latest".',
         ]);
     }
 }
@@ -219,6 +253,7 @@ if (!NOTES) {
     else if (inZip.app !== 'notes') problems.push(`the zip's own version.json says app ${JSON.stringify(inZip.app ?? 'puca')}, not "notes"`);
     else if (String(inZip.version ?? '').trim() !== builtVersion) problems.push(`the zip's own version.json says ${inZip.version}, but ${versionJsonPath} says ${builtVersion}`);
     else if (String(inZip.nativeMin ?? '').trim() !== nativeMin) problems.push(`the zip's own version.json says nativeMin ${JSON.stringify(inZip.nativeMin)}, but ${versionJsonPath} says ${nativeMin}`);
+    else if (String(inZip.nativeLatest ?? '').trim() !== nativeLatest) problems.push(`the zip's own version.json says nativeLatest ${JSON.stringify(inZip.nativeLatest)}, but ${versionJsonPath} says ${nativeLatest}`);
     if (index) {
         let html = '';
         try { html = readEntry(plaintext, index).toString('utf8'); } catch (e) { problems.push(`index.html cannot be read (${e.message})`); }
@@ -248,6 +283,7 @@ writeFileSync(outPath, encrypted);
 writeFileSync(`${outPath}.version`, `${builtVersion}\n`);
 writeFileSync(`${outPath}.channel`, `${NOTES ? 'notes' : 'puca'}\n`);
 if (NOTES) writeFileSync(`${outPath}.native-min`, `${nativeMin}\n`);
+if (NOTES) writeFileSync(`${outPath}.native-latest`, `${nativeLatest}\n`);
 
 // RSA private-encrypt the AES key (client public-decrypts it).
 const encAesKey = privateEncrypt({ key: privateKey, padding: constants.RSA_PKCS1_PADDING }, aesKey);

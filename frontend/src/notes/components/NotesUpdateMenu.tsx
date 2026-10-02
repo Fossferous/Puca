@@ -2,12 +2,16 @@
  * The account menu's update rows — the Notes Android app only (AccountMenu
  * renders this when NATIVE): which version is running, "Check for updates"
  * (re-runs NotesUpdateGate's check through the model's runner), and, when
- * the server says a newer APK exists, a way to the download page.
+ * the server says a newer APK exists, a way to the download page. The
+ * Version row names the installed APK too: it is what the "new app" strip
+ * and that download row are about, and no OTA can change it.
  */
 import { useEffect, useState, useSyncExternalStore } from 'react';
-import { currentAppVersion } from '../../api/appVersion';
+import { currentAppVersion, installedNativeVersion } from '../../api/appVersion';
 import { DownloadIcon, RefreshIcon } from '../../components/Icons';
-import { checkNotesForUpdates, describeOutcome, downloadPage, getNativePrompt, subscribeNativePrompt } from '../model/notesUpdate';
+import {
+    checkNotesForUpdates, describeOutcome, downloadPage, getNativePrompt, notesVersionLabel, subscribeNativePrompt,
+} from '../model/notesUpdate';
 
 export function NotesUpdateMenu() {
     const [version, setVersion] = useState<string | null>(null);
@@ -17,7 +21,10 @@ export function NotesUpdateMenu() {
 
     useEffect(() => {
         let live = true;
-        currentAppVersion().then(v => { if (live) setVersion(v); }, () => { /* the row just stays blank */ });
+        (async () => notesVersionLabel(await currentAppVersion(), await installedNativeVersion()))().then(
+            label => { if (live) setVersion(label); },
+            () => { /* the row just stays blank */ },
+        );
         return () => { live = false; };
     }, []);
 
@@ -25,7 +32,9 @@ export function NotesUpdateMenu() {
         setChecking(true);
         setResult(null);
         try {
-            setResult(describeOutcome(await checkNotesForUpdates()));
+            const outcome = await checkNotesForUpdates();
+            // The prompt as this check left it, not as the last render saw it.
+            setResult(describeOutcome(outcome, getNativePrompt()));
         } finally {
             setChecking(false);
         }

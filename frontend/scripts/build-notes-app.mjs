@@ -90,9 +90,10 @@ if (!ota && !existsSync(android)) {
         notesPkg: JSON.parse(readFileSync(join(notesApp, 'package.json'), 'utf8')),
         frontendUpdaterVersion: lock?.packages?.['node_modules/@capgo/capacitor-updater']?.version ?? null,
     });
-    // ...and its native floor still describes the APK (notes-native-min.mjs).
+    // ...and its native floor still describes the APK, and "latest" is still
+    // sealed to its native layer (notes-native-min.mjs).
     const floor = readNativeMin(frontend);
-    r.failures.push(...checkNativeMin(floor.record, floor.surface).failures);
+    r.failures.push(...checkNativeMin(floor.record, floor.surface, floor.layerHash).failures);
     if (r.failures.length) {
         for (const f of r.failures) console.error(`[notes-app] ${f}`);
         process.exit(1);
@@ -123,9 +124,13 @@ if (ota) {
     // The native floor rides every bundle (scripts/notes-native-min.mjs): the
     // build must have written the tree's, and it cannot be newer than the
     // release itself — every Notes install would then refuse this update.
-    const treeMin = readNativeMin(frontend).record.min;
+    const { min: treeMin, latest: treeLatest } = readNativeMin(frontend).record;
     if (vj?.nativeMin !== treeMin) problems.push(`dist-notes-app/version.json says nativeMin ${JSON.stringify(vj?.nativeMin)}, notes-app/native-min.json says ${treeMin}`);
     else if (versionGt(treeMin, tauriVersion)) problems.push(`notes-app/native-min.json says ${treeMin}, newer than this release (${tauriVersion}) — every Notes app would refuse the bundle. Bump the release, or fix the floor`);
+    // ...and so does the newest native APK, the manifest's native.version: no
+    // newer than the release (no such APK is on the download page).
+    if (vj?.nativeLatest !== treeLatest) problems.push(`dist-notes-app/version.json says nativeLatest ${JSON.stringify(vj?.nativeLatest)}, notes-app/native-min.json says latest ${treeLatest}`);
+    else if (versionGt(treeLatest, tauriVersion)) problems.push(`notes-app/native-min.json says latest ${treeLatest}, newer than this release (${tauriVersion}) — no such Notes APK is on the download page. Bump the release, or re-record "latest"`);
     if (problems.length) {
         for (const p of problems) console.error(`[notes-app] --ota: ${p}`);
         process.exit(1);
@@ -139,8 +144,8 @@ if (ota) {
     console.log('[notes-app] Sign it with the NOTES key (never Púca\'s), from the repo root:');
     console.log(`  node deploy/mobile/encrypt-bundle.mjs --notes ${rel(zip)} <keys dir>/notes-updater-rsa.key ${rel(zip).replace(/\.zip$/, '.enc.zip')} ${rel(join(out, 'version.json'))}`);
     console.log('[notes-app] then ship it (after the backend that serves ?variant=notes):');
-    console.log(`  deploy/ops/dual-ship.sh mobile-notes ${rel(zip).replace(/\.zip$/, '.enc.zip')} ${tauriVersion} <ivSessionKey> <checksum> [--native-version <v>]`);
-    console.log(`[notes-app] native.min ${treeMin} rides along from notes-app/native-min.json (the .native-min sidecar).`);
+    console.log(`  deploy/ops/dual-ship.sh mobile-notes ${rel(zip).replace(/\.zip$/, '.enc.zip')} ${tauriVersion} <ivSessionKey> <checksum>`);
+    console.log(`[notes-app] native.min ${treeMin} and native.version ${treeLatest} ride along from notes-app/native-min.json (the .native-min and .native-latest sidecars).`);
     process.exit(0);
 }
 run('npx', ['cap', 'sync', 'android'], notesApp);

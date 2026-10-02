@@ -176,24 +176,31 @@ export const liteAliases = RC_ENABLED ? [] : [
  * why it lives in the tree). encrypt-bundle.mjs --notes refuses a bundle
  * without it and copies it into the `.native-min` sidecar that
  * dual-ship.sh mobile-notes publishes as native.min on every release.
+ * And `nativeLatest`: the newest Notes APK whose NATIVE layer changed (the
+ * same file's "latest"), which travels the same way (`.native-latest`) to
+ * become the manifest's native.version — the "a new app is available" nudge.
+ * It is NOT the release number: that nudged every installed app every release.
  */
 export function emitVersionJson(app: 'puca' | 'notes'): Plugin {
   return {
     name: 'puca-version-json',
     generateBundle() {
-      const body = app === 'notes' ? { version: APP_VERSION, app, nativeMin: notesNativeMin() } : { version: APP_VERSION, app }
+      const body = app === 'notes'
+        ? { version: APP_VERSION, app, nativeMin: notesNativeField('min'), nativeLatest: notesNativeField('latest') }
+        : { version: APP_VERSION, app }
       this.emitFile({ type: 'asset', fileName: 'version.json', source: JSON.stringify(body) + '\n' })
     },
   }
 }
 
-/** notes-app/native-min.json's `min`; a Notes build with no valid floor fails. */
-function notesNativeMin(): string {
-  const min: unknown = JSON.parse(readFileSync(new URL('./notes-app/native-min.json', import.meta.url), 'utf8'))?.min
-  if (typeof min !== 'string' || !/^\d+\.\d+\.\d+$/.test(min)) {
-    throw new Error(`notes-app/native-min.json "min" is ${JSON.stringify(min)}, not MAJOR.MINOR.PATCH — a Notes bundle must carry its native floor`)
+/** notes-app/native-min.json's `min` (the floor) or `latest` (the newest
+ *  APK whose native layer changed); a Notes build without either fails. */
+function notesNativeField(field: 'min' | 'latest'): string {
+  const v: unknown = JSON.parse(readFileSync(new URL('./notes-app/native-min.json', import.meta.url), 'utf8'))?.[field]
+  if (typeof v !== 'string' || !/^\d+\.\d+\.\d+$/.test(v)) {
+    throw new Error(`notes-app/native-min.json "${field}" is ${JSON.stringify(v)}, not MAJOR.MINOR.PATCH — a Notes bundle must carry its native ${field === 'min' ? 'floor' : 'latest'}`)
   }
-  return min
+  return v
 }
 
 /** The two compile-time literals every build injects. */

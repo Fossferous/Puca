@@ -148,6 +148,22 @@ export async function currentAppVersion(): Promise<string> {
 }
 
 /**
+ * The installed Capacitor APK's own version (its versionName, as the updater
+ * plugin reports it), or null off-device or when the plugin cannot say. The
+ * OTA bundle changes under it; this does not until a new APK is installed.
+ */
+export async function installedNativeVersion(): Promise<string | null> {
+    if (!isMobile()) return null;
+    try {
+        const { CapacitorUpdater } = await import('@capgo/capacitor-updater');
+        const native = (await CapacitorUpdater.current() as { native?: unknown } | undefined)?.native;
+        return typeof native === 'string' && native ? native : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
  * Open the release download page in the system browser.
  *
  * VARIANT-AWARE. The `download_url` comes from the server's `/app-version`,
