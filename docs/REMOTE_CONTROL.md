@@ -115,6 +115,32 @@ cross, so nobody ships or markets it beyond what it actually guarantees.
 - **Multi-monitor edge:** a host sharing a **window** (not a full monitor), or an
   unusual scaled/rotated layout, may map approximately; full-monitor share is the
   supported path.
+- **A fullscreen app holding the pointer.** A game that confines the pointer to
+  its own window (`ClipCursor`) makes every other screen unreachable: Windows
+  clamps injected moves back into the game and still reports success, so
+  nothing in Púca can override it without fighting the game every frame. The
+  viewer is told instead — a banner on the stage, read from the host on the
+  1 Hz status poll. On one screen it shows when the watched screen is entirely
+  outside the clip; on **All Displays** it shows when ANY captured screen in the
+  picture is (each screen is checked on its own, matched to the capture by
+  `HMONITOR`), and its wording says the app's own screen still works. Closing
+  the app or switching away from it (Alt+Tab) releases the clip. A game that
+  re-centres the pointer every frame without a clip is not detected.
+
+## My Devices file browser — big folders
+
+A folder listing travels as ONE data-channel message, and the limit that
+matters is bytes: the agent's WebRTC stack refuses a message over its 128 KiB
+send budget outright, and a browser controller refuses one over its 256 KiB
+`maxMessageSize`. So the host (the desktop agent, or a phone sharing a folder)
+answers a big folder a page at a time — at most 2,000 entries and 96 KiB of
+JSON per page, whichever comes first — and names the next page's cursor. The
+browser shows "N items listed so far" with a **Load more** button until the
+folder is complete. A host from before paging sends one capped page and no
+cursor; the browser then says "the first N are listed" and offers no button.
+If a host ever produces a reply too large to send, it answers that request
+with an error instead, so later file requests in the session are not stuck
+behind it.
 
 ## Latency — what to read when it feels behind
 

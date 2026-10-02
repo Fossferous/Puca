@@ -3034,10 +3034,24 @@ export function DeviceStage() {
                     the stage is the picture the viewer is trying to use. */}
                 {session.cursorClipped && !session.secureDesktop && !session.reconnecting && (
                     <div className="device-stage-secure">
-                        A fullscreen app on another screen is holding that
-                        computer&rsquo;s mouse pointer, so clicks here may land in it
-                        instead. Switch to that screen, or close the app on the
-                        controlled computer.
+                        {/* On All Displays the app's own screen is IN the
+                            picture and still clickable; it is the others
+                            that are not, and the words must say which. */}
+                        {session.activeMonitor === ALL_DISPLAYS ? (
+                            <>
+                                A fullscreen app on one of that computer&rsquo;s screens is
+                                holding its mouse pointer, so clicks on its other screens
+                                may land in the app instead. Close the app, or switch away
+                                from it, on the controlled computer.
+                            </>
+                        ) : (
+                            <>
+                                A fullscreen app on another screen is holding that
+                                computer&rsquo;s mouse pointer, so clicks here may land in it
+                                instead. Switch to that screen, or close the app on the
+                                controlled computer.
+                            </>
+                        )}
                     </div>
                 )}
                 {(session.awaitingMedia || !session.stream) && !session.secureDesktop && (

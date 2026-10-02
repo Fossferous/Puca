@@ -5,7 +5,9 @@
  * can drift apart while both stay green.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { FS_MAX_LIST, handleFsRequest, attachFilesServer, type GrantedRoot } from '../api/devices/hostFsServer';
+import {
+    FS_LIST_REPLY_BUDGET, FS_MAX_LIST, handleFsRequest, attachFilesServer, type GrantedRoot,
+} from '../api/devices/hostFsServer';
 import type { FsProvider } from '../api/devices/fsJail';
 
 const ROOT = '/storage/emulated/0/Download';
@@ -135,6 +137,138 @@ describe('handleFsRequest', () => {
     });
 });
 
+/** Chromium's SCTP maxMessageSize, which a Chromium controller advertises:
+ *  `RTCDataChannel.send` THROWS for a longer message. Written out here so the
+ *  test pins the external fact, not the product's own budget. */
+const CHROMIUM_MAX_MESSAGE = 256 * 1024;
+
+/** The UTF-8 size of a reply as `dc.send` would carry it — bytes, not
+ *  UTF-16 code units, and with the widest id a session can produce. */
+function wireBytes(reply: object): number {
+    return new TextEncoder().encode(JSON.stringify({ ...reply, id: Number.MAX_SAFE_INTEGER })).length;
+}
+
+function bigFolder(n: number, name: (i: number) => string): Record<string, string> {
+    const files: Record<string, string> = {};
+    for (let i = 0; i < n; i++) files[`${ROOT}/big/${name(i)}`] = b64('x');
+    return files;
+}
+
+describe('a big folder listing is bounded in BYTES and pages', () => {
+    // THE BUG: the cap was a COUNT (5,000 entries). With 40-character names a
+    // capped reply is ~400 KB, past what a Chromium controller accepts in one
+    // message; dc.send threw, the throw was swallowed, and the controller
+    // waited 15 s for "the other computer did not answer".
+    it('a capped listing of long names fits one data-channel message', async () => {
+        const { provider } = memProvider(bigFolder(5_003, i => `${String(i).padStart(5, '0')}-${'n'.repeat(34)}`));
+        const r = await handleFsRequest({ cmd: 'list', path: 'big' }, GRANT, provider);
+        expect(r.ok).toBe('list');
+        expect(wireBytes(r), 'over what the controller can ever receive').toBeLessThanOrEqual(CHROMIUM_MAX_MESSAGE);
+        expect(wireBytes(r)).toBeLessThanOrEqual(FS_LIST_REPLY_BUDGET);
+        expect(r.truncated).toBe(true);
+    });
+
+    it('counts multibyte names in bytes, not characters', async () => {
+        const long = '長いファイル名'.repeat(11); // 77 chars, 231 UTF-8 bytes
+        const { provider } = memProvider(bigFolder(2_000, i => `${String(i).padStart(4, '0')}${long}`));
+        const r = await handleFsRequest({ cmd: 'list', path: 'big' }, GRANT, provider);
+        expect(wireBytes(r)).toBeLessThanOrEqual(CHROMIUM_MAX_MESSAGE);
+        expect(wireBytes(r)).toBeLessThanOrEqual(FS_LIST_REPLY_BUDGET);
+        // Exact accounting, not a timid one: the page nearly fills the budget.
+        expect(wireBytes(r)).toBeGreaterThan(FS_LIST_REPLY_BUDGET - 1024);
+        expect(r.truncated).toBe(true);
+    });
+
+    it('a 10,000-entry folder pages through completely, following next', async () => {
+        const { provider } = memProvider(bigFolder(10_000, i => `photo-${String(i).padStart(5, '0')}.jpg`));
+        const seen: string[] = [];
+        let cursor: number | undefined;
+        let pages = 0;
+        for (;;) {
+            pages++;
+            expect(pages, 'paging must terminate').toBeLessThan(100);
+            const req: Record<string, unknown> = { cmd: 'list', path: 'big' };
+            if (cursor !== undefined) req.cursor = cursor;
+            const r = await handleFsRequest(req, GRANT, provider);
+            expect(wireBytes(r)).toBeLessThanOrEqual(FS_LIST_REPLY_BUDGET);
+            seen.push(...(r.entries as { name: string }[]).map(e => e.name));
+            if (typeof r.next !== 'number') {
+                expect(r.truncated, 'the last page completes the folder').toBe(false);
+                break;
+            }
+            expect(r.truncated).toBe(true);
+            expect(r.next).toBeGreaterThan(cursor ?? 0);
+            cursor = r.next;
+        }
+        expect(pages).toBeGreaterThan(1);
+        expect(seen.length).toBe(10_000);
+        expect(new Set(seen).size).toBe(10_000);
+    });
+
+    it('is additive: no cursor is the first page; a small folder has no next', async () => {
+        const { provider } = memProvider(bigFolder(3, i => `f${i}`));
+        const r = await handleFsRequest({ cmd: 'list', path: 'big' }, GRANT, provider);
+        expect((r.entries as unknown[]).length).toBe(3);
+        expect(r.truncated).toBe(false);
+        expect('next' in r).toBe(false);
+        const past = await handleFsRequest({ cmd: 'list', path: 'big', cursor: 50 }, GRANT, provider);
+        expect(past.entries).toEqual([]);
+        expect(past.truncated).toBe(false);
+        // A malformed cursor is the first page, never a crash.
+        const junk = await handleFsRequest({ cmd: 'list', path: 'big', cursor: -4 }, GRANT, provider);
+        expect((junk.entries as unknown[]).length).toBe(3);
+    });
+});
+
+describe('a reply the channel refuses is still answered', () => {
+    // dc.send THROWS for a message over the peer's maxMessageSize (and for a
+    // channel that is closing). That throw used to be swallowed whole — the
+    // request was never answered and the controller timed out 15 s later
+    // with nothing in any log to say why.
+    it('answers the same id with an error when the first send throws', async () => {
+        const { provider } = memProvider({ [`${ROOT}/a.txt`]: b64('hello') });
+        const sent: string[] = [];
+        let throwNext = true;
+        const dc = {
+            readyState: 'open',
+            onmessage: null as ((e: MessageEvent) => void) | null,
+            send(data: string) {
+                if (throwNext) {
+                    throwNext = false;
+                    throw new TypeError('message too large');
+                }
+                sent.push(data);
+            },
+        };
+        attachFilesServer(dc as unknown as RTCDataChannel, () => GRANT, provider);
+        dc.onmessage!(new MessageEvent('message', {
+            data: JSON.stringify({ cmd: 'read', path: 'a.txt', offset: 0, len: 16, id: 77 }),
+        }));
+        await new Promise(r => setTimeout(r, 0));
+        expect(sent.length, 'the request must be answered').toBe(1);
+        const reply = JSON.parse(sent[0]) as { ok: string; id: number; message: string };
+        expect(reply.ok).toBe('error');
+        expect(reply.id).toBe(77);
+        expect(reply.message).toMatch(/could not be sent/);
+    });
+
+    it('a send that works is sent once, unchanged (positive control)', async () => {
+        const { provider } = memProvider({ [`${ROOT}/a.txt`]: b64('hello') });
+        const sent: string[] = [];
+        const dc = {
+            readyState: 'open',
+            onmessage: null as ((e: MessageEvent) => void) | null,
+            send(data: string) { sent.push(data); },
+        };
+        attachFilesServer(dc as unknown as RTCDataChannel, () => GRANT, provider);
+        dc.onmessage!(new MessageEvent('message', {
+            data: JSON.stringify({ cmd: 'read', path: 'a.txt', offset: 0, len: 16, id: 5 }),
+        }));
+        await new Promise(r => setTimeout(r, 0));
+        expect(sent).toEqual([JSON.stringify({ ok: 'data', data: b64('hello'), id: 5 })]);
+    });
+});
+
 /** One end of the pair: the slice of RTCDataChannel both sides touch, plus
  *  the link to the other end. Named, because the end refers to its own type. */
 interface FakeChannel {
@@ -229,6 +363,22 @@ describe('the real client against the real server', () => {
         } as unknown as Blob;
         await client.uploadFile('loop-test', `${ROOT}/up.bin`, file);
         expect(atob(store.get(`${ROOT}/up.bin`)!)).toBe(up);
+    });
+
+    it('the real client pages a 10,000-entry folder through listDir cursors', async () => {
+        const { client } = await rig(bigFolder(10_000, i => `photo-${String(i).padStart(5, '0')}.jpg`));
+        const names = new Set<string>();
+        let page = await client.listDir('loop-test', `${ROOT}/big`);
+        page.entries.forEach(e => names.add(e.name));
+        let pages = 1;
+        while (page.next !== null) {
+            expect(pages++).toBeLessThan(100);
+            page = await client.listDir('loop-test', `${ROOT}/big`, page.next);
+            page.entries.forEach(e => names.add(e.name));
+        }
+        expect(pages).toBeGreaterThan(1);
+        expect(names.size).toBe(10_000);
+        expect(page.truncated).toBe(false);
     });
 
     it('revocation mid-session takes effect on the next request', async () => {

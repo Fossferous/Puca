@@ -267,8 +267,8 @@ impl ClipRect {
 ///   deliberately. Only a clip entirely elsewhere — pointer provably unable to
 ///   reach any pixel the viewer can see — is a conflict.
 ///
-/// Pure and OS-free so it can be table-tested; `cursor_clip_conflict_for` is
-/// the thin OS shim that feeds it.
+/// Pure and OS-free so it can be table-tested; [`read_cursor_clip`] is the
+/// thin OS shim that feeds it.
 pub fn monitor_unreachable_under_clip(clip: ClipRect, monitor: ClipRect, virt: ClipRect) -> bool {
     if clip == virt {
         return false;
@@ -282,40 +282,73 @@ pub fn monitor_unreachable_under_clip(clip: ClipRect, monitor: ClipRect, virt: C
     !clip.intersects(&monitor)
 }
 
-/// Read the live clip state against ONE monitor — the one the asking
-/// SESSION streams, not the process-global input target (two concurrent
-/// sessions stream different screens, and the global answers only for
-/// whichever aimed last).
+/// The "All Displays" form of [`monitor_unreachable_under_clip`]: does a
+/// cursor clip make ANY of the screens in a composite unreachable?
 ///
-/// `false` on every unknowable path (the OS call failing, stale geometry):
-/// this feeds a banner asserting the machine is unreachable, and a probe
-/// hiccup must not paste that over a working session. The monitor rect and
-/// `GetClipCursor` come from the SAME process's GDI coordinate space — the
-/// target was built from this process's own `list_monitors` — so DPI
-/// virtualization cancels out. The virtual-screen rect is read LIVE
-/// (`GetSystemMetrics`), never from the target snapshot: a display change
-/// makes the snapshot stale, and a stale `virt` broke the "no clip in
-/// force" equality — the unplugged-monitor false banner.
+/// The single-screen rule cannot answer this by being handed the composite's
+/// bounding box. A game clipping the pointer to its own window on one screen
+/// always OVERLAPS the box of every screen, so the single-screen rule said
+/// "reachable" — while every OTHER screen in the picture the viewer is
+/// clicking on was unreachable. All Displays is the default view of an
+/// unattended multi-monitor host, so the explanation was missing in exactly
+/// the case it was written for.
+///
+/// So the question is asked per MEMBER screen, each with the single-screen
+/// rule and therefore with its guards: no clip in force (`clip == virt`) is
+/// never a conflict, and a member whose rectangle misses the live desktop is
+/// stale geometry and is skipped, never counted as unreachable. A clip that
+/// overlaps every member (a game spanning them, or a clip straddling the
+/// shared edge) leaves every screen reachable and is not flagged.
+///
+/// `monitors` are the composite's member screens in the same (GDI) space as
+/// `clip` and `virt` — the caller joins capture outputs to GDI monitors by
+/// HMONITOR, never by position.
+pub fn any_monitor_unreachable_under_clip(clip: ClipRect, monitors: &[ClipRect], virt: ClipRect) -> bool {
+    monitors.iter().any(|m| monitor_unreachable_under_clip(clip, *m, virt))
+}
+
+impl ClipRect {
+    /// The rectangle a [`TargetMonitor`] aims at, as left/top inclusive and
+    /// right/bottom exclusive (the Win32 RECT convention).
+    pub fn of_target(t: &TargetMonitor) -> ClipRect {
+        ClipRect {
+            left: t.left,
+            top: t.top,
+            right: t.left.saturating_add(t.width),
+            bottom: t.top.saturating_add(t.height),
+        }
+    }
+}
+
+/// Read the live cursor clip and the live virtual-screen rectangle, as
+/// `(clip, virt)`, for the clip-conflict rules above to judge against the
+/// screens the asking SESSION streams (not the process-global input target:
+/// two concurrent sessions stream different screens, and the global answers
+/// only for whichever aimed last).
+///
+/// `None` on every unknowable path (the OS call failing, a platform with no
+/// `ClipCursor`): this feeds a banner asserting the machine is unreachable,
+/// and a probe hiccup must not paste that over a working session. The clip
+/// and the monitor rectangles the caller compares it with come from the SAME
+/// process's GDI coordinate space — the targets were built from this
+/// process's own `list_monitors` — so DPI virtualization cancels out. The
+/// virtual-screen rect is read LIVE (`GetSystemMetrics`), never from a target
+/// snapshot: a display change makes the snapshot stale, and a stale `virt`
+/// broke the "no clip in force" equality — the unplugged-monitor false banner.
 ///
 /// Cheap enough for its caller's cadence (the app's 1 Hz `session_status`
 /// poll): two `user32` reads, no allocation. Do not call it per input event.
 #[cfg(windows)]
-pub fn cursor_clip_conflict_for(t: TargetMonitor) -> bool {
+pub fn read_cursor_clip() -> Option<(ClipRect, ClipRect)> {
     use windows::Win32::UI::WindowsAndMessaging::{
         GetClipCursor, GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
         SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
     };
     let mut r = windows::Win32::Foundation::RECT::default();
     if unsafe { GetClipCursor(&mut r) }.is_err() {
-        return false;
+        return None;
     }
     let clip = ClipRect { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
-    let monitor = ClipRect {
-        left: t.left,
-        top: t.top,
-        right: t.left.saturating_add(t.width),
-        bottom: t.top.saturating_add(t.height),
-    };
     let (vl, vt, vw, vh) = unsafe {
         (
             GetSystemMetrics(SM_XVIRTUALSCREEN),
@@ -326,14 +359,14 @@ pub fn cursor_clip_conflict_for(t: TargetMonitor) -> bool {
     };
     let virt =
         ClipRect { left: vl, top: vt, right: vl.saturating_add(vw), bottom: vt.saturating_add(vh) };
-    monitor_unreachable_under_clip(clip, monitor, virt)
+    Some((clip, virt))
 }
 
 #[cfg(not(windows))]
-pub fn cursor_clip_conflict_for(_t: TargetMonitor) -> bool {
+pub fn read_cursor_clip() -> Option<(ClipRect, ClipRect)> {
     // No ClipCursor equivalent is read on other platforms; "no conflict" is
     // the honest default, matching how session_status answers elsewhere.
-    false
+    None
 }
 
 /// Stamped into `dwExtraInfo` of every INPUT this crate injects, so a
@@ -1976,6 +2009,67 @@ mod tests {
         assert!(
             !monitor_unreachable_under_clip(game_on_primary, unplugged, virt),
             "a monitor outside the live desktop is stale geometry, not a conflict"
+        );
+    }
+
+    /// The All Displays rule, on the same two-monitor geometry. The composite
+    /// is BOTH screens, so a game clipping the pointer to the primary leaves
+    /// the secondary half of the picture unclickable — which the single-screen
+    /// rule, handed the composite's bounding box, reported as reachable.
+    #[test]
+    fn on_all_displays_a_clip_is_a_conflict_when_any_member_screen_is_outside_it() {
+        let virt = ClipRect { left: 0, top: 0, right: 3840, bottom: 1080 };
+        let primary = ClipRect { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let secondary = ClipRect { left: 1920, top: 0, right: 3840, bottom: 1080 };
+        let both = [primary, secondary];
+        let game_on_primary = ClipRect { left: 100, top: 100, right: 1820, bottom: 980 };
+
+        // THE BUG, as the old code computed it: the composite's box overlaps
+        // every clip on a member screen, so the old answer was always "no".
+        // Kept as the negative control — if this ever flips, the fixture no
+        // longer shows the gap and the assertion below proves nothing.
+        assert!(
+            !monitor_unreachable_under_clip(game_on_primary, virt, virt),
+            "fixture: the bounding-box question must miss the conflict"
+        );
+        assert!(
+            any_monitor_unreachable_under_clip(game_on_primary, &both, virt),
+            "a game holding the pointer on the primary makes the secondary half \
+             of the All Displays picture unclickable — THE conflict"
+        );
+        // The same game on the SECONDARY: symmetric, still a conflict.
+        let game_on_secondary = ClipRect { left: 2000, top: 0, right: 3840, bottom: 1080 };
+        assert!(any_monitor_unreachable_under_clip(game_on_secondary, &both, virt));
+
+        // Positive controls, each a way the new rule could over-fire.
+        assert!(
+            !any_monitor_unreachable_under_clip(virt, &both, virt),
+            "no clip in force (clip == virtual desktop) is the normal state"
+        );
+        let straddle = ClipRect { left: 1800, top: 0, right: 2100, bottom: 1080 };
+        assert!(
+            !any_monitor_unreachable_under_clip(straddle, &both, virt),
+            "a clip reaching into BOTH screens leaves both reachable"
+        );
+        let spanning = ClipRect { left: 10, top: 10, right: 3830, bottom: 1070 };
+        assert!(
+            !any_monitor_unreachable_under_clip(spanning, &both, virt),
+            "a game spanning every screen is not a conflict"
+        );
+        // A stale member (unplugged since the composite was built) is skipped,
+        // never counted as unreachable: with the live screens all reachable,
+        // a missing one must not raise the banner.
+        let unplugged = ClipRect { left: 3840, top: 0, right: 5760, bottom: 1080 };
+        assert!(
+            !any_monitor_unreachable_under_clip(spanning, &[primary, secondary, unplugged], virt),
+            "stale geometry is unknowable, not a conflict"
+        );
+        // One screen alone through the new rule agrees with the old one.
+        assert!(any_monitor_unreachable_under_clip(game_on_primary, &[secondary], virt));
+        assert!(!any_monitor_unreachable_under_clip(game_on_primary, &[primary], virt));
+        assert!(
+            !any_monitor_unreachable_under_clip(game_on_primary, &[], virt),
+            "no member screens: nothing is known to be unreachable"
         );
     }
 

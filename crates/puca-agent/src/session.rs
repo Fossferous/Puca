@@ -311,6 +311,42 @@ pub(crate) fn resolve_target(
     })
 }
 
+/// Is a cursor clip (`clip`, read live with the live virtual screen `virt`)
+/// keeping this session's viewer from reaching what they are looking at?
+/// Pure, so the `SessionStatus` answer can be tested without a desktop.
+///
+/// One screen: the watched-screen rule (`monitor_unreachable_under_clip`).
+/// All Displays: the same rule asked of EVERY captured screen in the
+/// composite. Asking it of the composite's bounding box — what this did
+/// before — can never fire, because a game's clip on any member screen
+/// overlaps the box; so the default view of an unattended multi-monitor host
+/// never explained why clicks on the other screens landed in the game.
+///
+/// The members are the capture outputs, each resolved exactly as a single
+/// screen is (`resolve_target` by capture index, joined to its GDI rectangle
+/// by HMONITOR — never the GDI list by position: the two enumerations order
+/// screens differently, and a screen that is not captured is not in the
+/// picture).
+pub(crate) fn session_cursor_clipped(
+    monitor: usize,
+    outputs: &[puca_capture::OutputInfo],
+    list: &puca_input::MonitorList,
+    clip: puca_input::ClipRect,
+    virt: puca_input::ClipRect,
+) -> bool {
+    if monitor == crate::composite::ALL_DISPLAYS {
+        let members: Vec<puca_input::ClipRect> = outputs
+            .iter()
+            .filter_map(|o| resolve_target(o.index, outputs, list))
+            .map(|t| puca_input::ClipRect::of_target(&t))
+            .collect();
+        return puca_input::any_monitor_unreachable_under_clip(clip, &members, virt);
+    }
+    resolve_target(monitor, outputs, list)
+        .map(|t| puca_input::monitor_unreachable_under_clip(clip, puca_input::ClipRect::of_target(&t), virt))
+        .unwrap_or(false)
+}
+
 /// What the CURRENT capture actually shows, in PHYSICAL desktop pixels.
 ///
 /// Separate from `TargetMonitor`, and deliberately not built from it. Injection
@@ -1495,11 +1531,11 @@ impl Agent {
                         .sessions
                         .get(&session_id)
                         .and_then(|&mon| {
+                            let (clip, virt) = puca_input::read_cursor_clip()?;
                             let outputs = puca_capture::outputs();
                             let list = puca_input::list_monitors();
-                            resolve_target(mon, &outputs, &list)
+                            Some(session_cursor_clipped(mon, &outputs, &list, clip, virt))
                         })
-                        .map(puca_input::cursor_clip_conflict_for)
                         .unwrap_or(false);
                 // Does THIS agent hold the stream? `streams`, not `sessions`:
                 // the stream is what carries the video and the input channel,
@@ -2346,6 +2382,87 @@ mod tests {
         // this session never showed.
         assert!(resolve_target(0, &[], &list).is_none());
         assert!(resolve_target(crate::composite::ALL_DISPLAYS, &[], &list).is_none());
+    }
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> puca_input::ClipRect {
+        puca_input::ClipRect { left, top, right, bottom }
+    }
+
+    /// The reporter's live virtual desktop, as `GetSystemMetrics` reports it.
+    fn reporter_virt() -> puca_input::ClipRect {
+        rect(-1440, -692, 4000, 1875)
+    }
+
+    /// THE GAP: on All Displays a game clipping the pointer to one screen
+    /// never raised the "a fullscreen app is holding the pointer" banner,
+    /// because the composite's bounding box overlaps any clip on a member
+    /// screen — while every OTHER screen in the picture was unclickable.
+    /// All Displays is the default view of an unattended multi-monitor host.
+    #[test]
+    fn all_displays_reports_a_clip_that_strands_the_other_screens() {
+        let outputs = reporter_outputs();
+        let list = reporter_gdi();
+        // A fullscreen game on DISPLAY3 (the primary, 0,0..2560,1440).
+        let game_on_primary = rect(100, 100, 2460, 1340);
+        assert!(
+            session_cursor_clipped(crate::composite::ALL_DISPLAYS, &outputs, &list, game_on_primary, reporter_virt()),
+            "DISPLAY1 and DISPLAY2 are in the picture and the pointer cannot reach them"
+        );
+        // Positive controls: no clip, and a clip reaching every screen.
+        assert!(!session_cursor_clipped(
+            crate::composite::ALL_DISPLAYS, &outputs, &list, reporter_virt(), reporter_virt(),
+        ));
+        assert!(!session_cursor_clipped(
+            crate::composite::ALL_DISPLAYS, &outputs, &list, rect(-1400, -600, 3900, 1800), reporter_virt(),
+        ));
+    }
+
+    /// One screen keeps today's rule: overlap with the WATCHED screen is never
+    /// flagged; a clip entirely elsewhere is. Capture indexes are DXGI order
+    /// (0 = DISPLAY3, 1 = DISPLAY1, 2 = DISPLAY2) and resolve by HMONITOR.
+    #[test]
+    fn a_single_screen_keeps_the_watched_screen_rule() {
+        let outputs = reporter_outputs();
+        let list = reporter_gdi();
+        let game_on_primary = rect(100, 100, 2460, 1340);
+        assert!(!session_cursor_clipped(0, &outputs, &list, game_on_primary, reporter_virt()));
+        assert!(session_cursor_clipped(1, &outputs, &list, game_on_primary, reporter_virt()));
+        assert!(session_cursor_clipped(2, &outputs, &list, game_on_primary, reporter_virt()));
+        // An index that resolves to nothing is unknowable, never a banner.
+        assert!(!session_cursor_clipped(7, &outputs, &list, game_on_primary, reporter_virt()));
+    }
+
+    /// The composite's members are the CAPTURED outputs, joined to GDI by
+    /// HMONITOR — never the GDI list by position. Here GDI knows three
+    /// screens (A, B, C left to right) but only C and B are capturable, in
+    /// that DXGI order. A game spanning B and C leaves everything in the
+    /// picture reachable; screen A is unreachable but is not in the picture.
+    /// Pairing by position would take gdi[0] = A as a member and raise a
+    /// banner about a screen the viewer cannot even see.
+    #[test]
+    fn all_displays_members_are_the_captured_screens_joined_by_hmonitor() {
+        let outputs = vec![out(0, 3840, 0, 1920, 1080, 0xC), out(1, 1920, 0, 1920, 1080, 0xB)];
+        let list = puca_input::MonitorList {
+            monitors: vec![
+                gdi(0, 0, 0, 1920, 1080, 0xA, true),
+                gdi(1, 1920, 0, 1920, 1080, 0xB, false),
+                gdi(2, 3840, 0, 1920, 1080, 0xC, false),
+            ],
+            virt_left: 0,
+            virt_top: 0,
+            virt_width: 5760,
+            virt_height: 1080,
+        };
+        let virt = rect(0, 0, 5760, 1080);
+        let game_on_b_and_c = rect(1920, 0, 5760, 1080);
+        assert!(
+            !session_cursor_clipped(crate::composite::ALL_DISPLAYS, &outputs, &list, game_on_b_and_c, virt),
+            "every screen in the picture is reachable"
+        );
+        // And the fixture can fail: a game on C alone strands B, which IS in
+        // the picture.
+        let game_on_c = rect(3840, 0, 5760, 1080);
+        assert!(session_cursor_clipped(crate::composite::ALL_DISPLAYS, &outputs, &list, game_on_c, virt));
     }
 
     /// `outputs()` reports the WALK position and omits anything it could not

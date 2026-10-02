@@ -15,11 +15,42 @@ export const DFM_ROW_H_COARSE = 48;
 /** Rows rendered above/below the viewport so fast scrolling never shows a gap. */
 const DFM_OVERSCAN = 8;
 
+/** Folders first, then by name — the order every listing is shown in. */
+function sortEntries(list: FsEntry[]): FsEntry[] {
+    return list.sort((a, b) => {
+        if (a.is_dir === b.is_dir) return a.name.localeCompare(b.name);
+        return a.is_dir ? -1 : 1;
+    });
+}
+
+/** A further page appended to what is shown, once per name: the host pages
+ *  by position in the folder, so a folder that changed between pages can
+ *  repeat an entry — and the row list is keyed by name. */
+function mergePage(shown: FsEntry[], page: FsEntry[]): FsEntry[] {
+    const seen = new Set(shown.map(e => e.name));
+    const merged = shown.slice();
+    for (const e of page) {
+        if (seen.has(e.name)) continue;
+        seen.add(e.name);
+        merged.push(e);
+    }
+    return sortEntries(merged);
+}
+
 export function DeviceFileManager({ sessionId, onClose }: { sessionId: string; onClose: () => void }) {
     const [path, setPath] = useState<string>('');
     const [entries, setEntries] = useState<FsEntry[]>([]);
     // The host capped a very large directory; show only what it sent, and say so.
     const [truncated, setTruncated] = useState(false);
+    /** The cursor for this folder's next page, or null when there is none —
+     *  including from a host that predates paging, which never names one. */
+    const [next, setNext] = useState<number | null>(null);
+    const [loadingMore, setLoadingMore] = useState(false);
+    /** Bumped by every folder load, so an answer that lands after the user
+     *  has moved on (to another folder, or a fresh load of this one) is
+     *  dropped rather than shown — or, for a further page, appended to a
+     *  folder it does not belong to. */
+    const listGen = useRef(0);
     const [error, setError] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
     const [progress, setProgress] = useState<string | null>(null);
@@ -50,8 +81,9 @@ export function DeviceFileManager({ sessionId, onClose }: { sessionId: string; o
     /** Mirror of `asking` readable from the long-lived subscription below. */
     const askingRef = useRef(false);
     /** Windowed-list state: only the rows near the viewport are in the DOM.
-     *  A capped listing is still 5000 rows, and mounting 5000 divs with
-     *  per-row buttons froze the panel for seconds on a phone. */
+     *  A big folder paged in with Load more runs to thousands of rows, and
+     *  mounting 5000 divs with per-row buttons froze the panel for seconds
+     *  on a phone. */
     const listRef = useRef<HTMLDivElement | null>(null);
     const [scrollTop, setScrollTop] = useState(0);
     // Default before the ResizeObserver reports (and in jsdom, which never
@@ -106,20 +138,23 @@ export function DeviceFileManager({ sessionId, onClose }: { sessionId: string; o
     }), [sessionId]);
 
     const loadPath = async (p: string) => {
+        const gen = ++listGen.current;
         setLoading(true);
+        setLoadingMore(false);
         setError(null);
         try {
             if (p === '') {
                 const roots = await listRoots(sessionId);
+                if (gen !== listGen.current) return;
                 setEntries(roots.map(r => ({ name: r, is_dir: true, size: 0 })));
                 setTruncated(false);
+                setNext(null);
             } else {
-                const { entries: list, truncated: cut } = await listDir(sessionId, p);
-                setEntries(list.sort((a, b) => {
-                    if (a.is_dir === b.is_dir) return a.name.localeCompare(b.name);
-                    return a.is_dir ? -1 : 1;
-                }));
+                const { entries: list, truncated: cut, next: more } = await listDir(sessionId, p);
+                if (gen !== listGen.current) return;
+                setEntries(sortEntries(list));
                 setTruncated(cut);
+                setNext(more ?? null);
             }
             setPath(p);
             // A new folder starts at its top; a stale scroll offset would
@@ -127,9 +162,29 @@ export function DeviceFileManager({ sessionId, onClose }: { sessionId: string; o
             listRef.current?.scrollTo?.(0, 0);
             setScrollTop(0);
         } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
+            if (gen === listGen.current) setError(e instanceof Error ? e.message : String(e));
         }
-        setLoading(false);
+        if (gen === listGen.current) setLoading(false);
+    };
+
+    /** Fetch the folder's next page and add it to what is shown. The scroll
+     *  position is kept: the user is partway through the folder. */
+    const loadMore = async () => {
+        if (next === null || loadingMore) return;
+        const gen = listGen.current;
+        setLoadingMore(true);
+        setError(null);
+        try {
+            const page = await listDir(sessionId, path, next);
+            if (gen !== listGen.current) return;
+            setEntries(shown => mergePage(shown, page.entries));
+            setTruncated(page.truncated);
+            setNext(page.next ?? null);
+        } catch (e) {
+            if (gen === listGen.current) setError(e instanceof Error ? e.message : String(e));
+        } finally {
+            if (gen === listGen.current) setLoadingMore(false);
+        }
     };
 
     // Only browse once access has been granted AND the channel is open —
@@ -251,7 +306,26 @@ export function DeviceFileManager({ sessionId, onClose }: { sessionId: string; o
                         read as "Empty directory" — a wrong answer, not a wait. */}
                     {!channelReady && <div className="dfm-loading">Connecting to the other device…</div>}
 
-                    {truncated && (
+                    {next !== null ? (
+                        // The host pages: say how much is here and offer the
+                        // rest. Above the list rather than at its foot, so it
+                        // is one tap away wherever the list is scrolled.
+                        <div className="dfm-truncated dfm-has-more" role="status">
+                            <span>
+                                {entries.length.toLocaleString()} items listed so far — this folder has more.
+                            </span>
+                            <button
+                                type="button"
+                                className="dfm-load-more"
+                                onClick={() => void loadMore()}
+                                disabled={loadingMore || loading}
+                            >
+                                {loadingMore ? 'Loading…' : 'Load more'}
+                            </button>
+                        </div>
+                    ) : truncated && (
+                        // A host from before paging: it capped the folder and
+                        // cannot hand over the rest.
                         <div className="dfm-truncated" role="status">
                             This folder has more items than can be shown at once — the first {entries.length.toLocaleString()} are listed. Open a subfolder to narrow it down.
                         </div>

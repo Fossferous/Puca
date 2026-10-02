@@ -212,8 +212,8 @@
     cursor: default;
 }
 
-/* Shown when the host capped a very large directory (MAX_LIST_ENTRIES). A
-   partial folder must announce itself rather than look complete. */
+/* Shown when the host sent only part of a very large directory. A partial
+   folder must announce itself rather than look complete. */
 .dfm-truncated {
     padding: 6px 10px;
     margin: 0 0 6px;
@@ -223,4 +223,47 @@
     background: rgba(249, 226, 175, 0.10);
     border: 1px solid rgba(249, 226, 175, 0.35);
     border-radius: 4px;
+}
+
+/* A host that pages offers the rest of the folder. The button sits in the
+   notice above the list, so it is reachable wherever the list is scrolled. */
+.dfm-has-more {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.dfm-has-more span {
+    flex: 1 1 160px;
+    min-width: 0;
+}
+
+.dfm-load-more {
+    flex: none;
+    background: #333;
+    color: #e0e0e0;
+    border: 1px solid #555;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.dfm-load-more:hover:not(:disabled) {
+    background: #444;
+    color: #fff;
+}
+
+.dfm-load-more:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+@media (pointer: coarse) {
+    .dfm-load-more {
+        min-height: 40px;
+        padding: 8px 14px;
+        font-size: 14px;
+    }
 }

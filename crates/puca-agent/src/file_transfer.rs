@@ -96,17 +96,49 @@ use crate::file_log::FileAudit;
 /// RAM. Callers page through a large file instead.
 pub const MAX_READ_LEN: u64 = 64 * 1024;
 
-/// The most directory entries one List response carries.
+/// The most directory entries one List response (one PAGE) carries.
 ///
 /// A directory with tens of thousands of entries used to be enumerated in full
 /// — a per-entry `metadata()` syscall each — INLINE on the session's stream
 /// thread, which drives video, ICE keepalives and every other command. A huge
 /// folder therefore froze the whole remote session while it churned, and shipped
-/// a payload the controller then choked on rendering. Capping bounds all three:
-/// the host's work, the wire size, and the controller's row count. The overflow
-/// is reported (`truncated`) rather than hidden, so a user is told there is more
-/// rather than silently shown a partial folder as if it were whole.
-pub const MAX_LIST_ENTRIES: usize = 5000;
+/// a payload the controller then choked on rendering. This count bounds the
+/// host's work per request and the controller's rows per page; the WIRE is
+/// bounded by [`LIST_REPLY_BUDGET`], which is the limit that actually bites
+/// for long names. The overflow is reported (`truncated`, plus `next` to page
+/// on) rather than hidden, so a user is told there is more rather than
+/// silently shown a partial folder as if it were whole.
+///
+/// 2,000 rather than the old 5,000: the byte budget below holds at most
+/// ~2,800 of even the shortest possible entries, so 5,000 could never bind
+/// and a guard that cannot fire is decoration. At 2,000 it is the bound for
+/// short names (up to ~12 characters) and the byte budget is for longer ones.
+pub const MAX_LIST_ENTRIES: usize = 2000;
+
+/// The most bytes one List reply may serialise to, envelope and id included.
+///
+/// THE WIRE LIMIT IS BYTES, NOT ENTRIES. str0m (0.23) refuses a data-channel
+/// write longer than its 128 KiB send budget shared across all streams
+/// (`MAX_BUFFERED_ACROSS_STREAMS`) — on every attempt, forever; it does not
+/// fragment. A 5,000-entry listing was 230–380 KB depending on name length,
+/// so any folder past roughly 1,700–2,700 entries could never be sent: the
+/// controller waited 15 s for "the other computer did not answer", and the
+/// stuck reply wedged every later file request in the session behind it.
+/// 96 KiB leaves headroom under 128 KiB for a file reply already in flight.
+/// Each entry is charged its EXACT serialised length (multibyte names and
+/// JSON escapes included), never an estimate.
+pub const LIST_REPLY_BUDGET: usize = 96 * 1024;
+
+/// Bytes reserved in [`LIST_REPLY_BUDGET`] for everything around the entries:
+/// `{"ok":"list","entries":[],"truncated":false,"next":<u64>,"id":<u64>}` is
+/// about 100 bytes at the widest numbers; the rest is margin.
+const LIST_REPLY_ENVELOPE: usize = 256;
+
+/// One entry's exact contribution to a List reply: its JSON plus the comma
+/// that separates it from the next.
+fn list_entry_wire_len(e: &FsEntry) -> usize {
+    serde_json::to_vec(e).map(|v| v.len() + 1).unwrap_or(usize::MAX)
+}
 
 /// Ceiling on a single write, for the same reason in the other direction.
 pub const MAX_WRITE_LEN: usize = 64 * 1024;
@@ -190,6 +222,14 @@ pub enum FsRequest {
     ListRoots,
     List {
         path: String,
+        /// Where this page starts, as a count of entries already listed —
+        /// the previous reply's `next`. Absent from every controller before
+        /// paging, which therefore gets the first page exactly as before.
+        /// The enumeration order is the filesystem's; a folder that changes
+        /// between pages can repeat or skip an entry, and the controller
+        /// de-duplicates by name.
+        #[serde(default)]
+        cursor: Option<u64>,
     },
     Read {
         path: String,
@@ -212,7 +252,16 @@ pub enum FsRequest {
 #[serde(tag = "ok", rename_all = "snake_case")]
 pub enum FsResponse {
     Roots { roots: Vec<String> },
-    List { entries: Vec<FsEntry>, truncated: bool },
+    List {
+        entries: Vec<FsEntry>,
+        /// More entries exist past this page.
+        truncated: bool,
+        /// The `cursor` that fetches the next page; present only when there
+        /// is one. An agent from before paging never sends it, which is how
+        /// a controller knows not to offer "Load more".
+        #[serde(skip_serializing_if = "Option::is_none")]
+        next: Option<u64>,
+    },
     Data { data: String }, // base64
     Wrote { len: u64 },
     Error { message: String },
@@ -844,7 +893,7 @@ pub fn handle_request(req: FsRequest, scope: &FileScope, audit: Option<&FileAudi
             FsResponse::Roots { roots }
         }
 
-        FsRequest::List { path } => {
+        FsRequest::List { path, cursor } => {
             // The handle is bound to `_dir` and HELD for the whole enumeration
             // on purpose: it was opened without FILE_SHARE_DELETE, so this
             // directory cannot be renamed or deleted out from under the read
@@ -858,11 +907,16 @@ pub fn handle_request(req: FsRequest, scope: &FileScope, audit: Option<&FileAudi
             };
             match fs::read_dir(&dir) {
                 Ok(entries) => {
+                    let start = cursor.unwrap_or(0);
                     let mut result = Vec::new();
                     let mut truncated = false;
-                    for entry in entries.flatten() {
+                    let mut wire = LIST_REPLY_ENVELOPE;
+                    // Skipping costs no stat: the earlier pages' entries are
+                    // passed over by name only.
+                    let skip = usize::try_from(start).unwrap_or(usize::MAX);
+                    for entry in entries.flatten().skip(skip) {
                         // STOP at the cap. Past it, every extra entry is another
-                        // stat syscall on the stream thread and another row the
+                        // stat syscall on the fs worker and another row the
                         // controller has to lay out — the exact cost that froze
                         // the session on a giant folder. The peer is told the
                         // list is partial (`truncated`) rather than shown a lie.
@@ -873,15 +927,29 @@ pub fn handle_request(req: FsRequest, scope: &FileScope, audit: Option<&FileAudi
                         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
                         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
                         let name = entry.file_name().to_string_lossy().to_string();
-                        result.push(FsEntry { name, is_dir, size });
+                        let e = FsEntry { name, is_dir, size };
+                        // AND stop before the reply outgrows one data-channel
+                        // write (LIST_REPLY_BUDGET). The first entry of a page
+                        // always goes in, so a page always makes progress — a
+                        // single name is a few hundred bytes at most.
+                        let n = list_entry_wire_len(&e);
+                        if !result.is_empty() && wire.saturating_add(n) > LIST_REPLY_BUDGET {
+                            truncated = true;
+                            break;
+                        }
+                        wire = wire.saturating_add(n);
+                        result.push(e);
                     }
+                    // Only a cut page names a next one; the last page (and a
+                    // cursor past the end) completes the folder.
+                    let next = truncated.then(|| start.saturating_add(result.len() as u64));
                     log(
                         "list",
                         &dir.to_string_lossy(),
                         result.len() as u64,
                         if truncated { "ok (truncated)" } else { "ok" },
                     );
-                    FsResponse::List { entries: result, truncated }
+                    FsResponse::List { entries: result, truncated, next }
                 }
                 Err(e) => {
                     log("list", &dir.to_string_lossy(), 0, &format!("error: {e}"));
@@ -1462,7 +1530,7 @@ mod tests {
         // a redaction that made the root unusable would pass the assertions
         // above while breaking every browse.
         fs::write(dir.join("notes.txt"), b"hi").unwrap();
-        match handle_request(FsRequest::List { path: JAILED_ROOT.into() }, &scope, None) {
+        match handle_request(FsRequest::List { path: JAILED_ROOT.into(), cursor: None }, &scope, None) {
             FsResponse::List { entries, .. } => {
                 assert!(
                     entries.iter().any(|e| e.name == "notes.txt"),
@@ -1532,22 +1600,27 @@ mod tests {
     fn a_huge_directory_is_capped_and_marked_truncated() {
         // THE FREEZE FIX, pinned. An uncapped directory was enumerated in full
         // on the session's stream thread (a metadata() syscall per entry) and
-        // shipped whole, freezing the remote session on a giant folder. The cap
-        // bounds the work and the wire, and says so rather than silently showing
-        // a partial folder as if it were the whole thing.
+        // shipped whole, freezing the remote session on a giant folder. The
+        // count cap bounds the work and the rows per page, and says so rather
+        // than silently showing a partial folder as if it were the whole
+        // thing. It does NOT by itself bound the wire — this fixture at the
+        // old 5,000 cap was 230 KB, past what str0m can ever send; the byte
+        // budget does that (`a_two_thousand_entry_listing_fits_...` below).
+        // Short names, so it is the COUNT that binds here, not the bytes.
         let dir = tempdir("list-cap");
         for i in 0..(MAX_LIST_ENTRIES + 3) {
             fs::write(dir.join(format!("f{i:05}.txt")), b"").unwrap();
         }
         let scope = FileScope::Jailed(dir.to_path_buf());
         match handle_request(
-            FsRequest::List { path: dir.to_string_lossy().to_string() },
+            FsRequest::List { path: dir.to_string_lossy().to_string(), cursor: None },
             &scope,
             None,
         ) {
-            FsResponse::List { entries, truncated } => {
+            FsResponse::List { entries, truncated, next } => {
                 assert_eq!(entries.len(), MAX_LIST_ENTRIES, "must cap at the limit");
                 assert!(truncated, "the overflow must be reported");
+                assert_eq!(next, Some(MAX_LIST_ENTRIES as u64), "and the next page starts after it");
             }
             other => panic!("expected a list, got {other:?}"),
         }
@@ -1564,16 +1637,149 @@ mod tests {
         }
         let scope = FileScope::Jailed(dir.to_path_buf());
         match handle_request(
-            FsRequest::List { path: dir.to_string_lossy().to_string() },
+            FsRequest::List { path: dir.to_string_lossy().to_string(), cursor: None },
             &scope,
             None,
         ) {
-            FsResponse::List { entries, truncated } => {
+            FsResponse::List { entries, truncated, .. } => {
                 assert_eq!(entries.len(), 5);
                 assert!(!truncated, "a small directory is complete, not truncated");
             }
             other => panic!("expected a list, got {other:?}"),
         }
+    }
+
+    /// str0m 0.23's `MAX_BUFFERED_ACROSS_STREAMS` (src/sctp/mod.rs): the
+    /// most a data-channel write can EVER be accepted at. `Channel::write`
+    /// answers `Ok(false)` — "no room, try later" — for anything longer, on
+    /// every attempt, forever; it does not fragment. Written out here rather
+    /// than borrowed from the product constant, so the test pins the external
+    /// fact and not whatever the code currently believes.
+    const STR0M_SEND_BUDGET: usize = 128 * 1024;
+
+    /// One List exchange exactly as the wire carries it: the request parsed
+    /// from JSON (so these tests speak the protocol, not the Rust enum), the
+    /// reply serialised the way `stream.rs` frames it, with the widest id.
+    fn list_on_the_wire(dir: &Path, cursor: Option<u64>) -> (serde_json::Value, usize) {
+        let mut req = serde_json::json!({ "cmd": "list", "path": dir.to_string_lossy() });
+        if let Some(c) = cursor {
+            req["cursor"] = c.into();
+        }
+        let req: FsRequest = serde_json::from_value(req).expect("a list request parses");
+        let resp = handle_request(req, &FileScope::Jailed(dir.to_path_buf()), None);
+        let mut v = serde_json::to_value(&resp).unwrap();
+        v.as_object_mut().unwrap().insert("id".into(), u64::MAX.into());
+        let len = serde_json::to_vec(&v).unwrap().len();
+        (v, len)
+    }
+
+    fn names_of(v: &serde_json::Value) -> Vec<String> {
+        v["entries"]
+            .as_array()
+            .expect("a list reply carries entries")
+            .iter()
+            .map(|e| e["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// THE WEDGE. A listing was capped by COUNT, but the wire limit is BYTES:
+    /// 2,000 forty-character names serialise to ~150 KB, which str0m refuses
+    /// forever, so the reply sat at the head of the agent's send queue and
+    /// every later file request in the session queued behind it.
+    #[test]
+    fn a_two_thousand_entry_listing_fits_one_data_channel_write() {
+        let dir = tempdir("list-bytes");
+        for i in 0..2_003 {
+            fs::write(dir.join(format!("{i:05}-{}.txt", "n".repeat(30))), b"").unwrap();
+        }
+        let (v, len) = list_on_the_wire(&dir, None);
+        assert!(
+            len <= STR0M_SEND_BUDGET,
+            "a {len}-byte list reply can never be sent (str0m accepts at most {STR0M_SEND_BUDGET})"
+        );
+        assert_eq!(v["truncated"], serde_json::Value::Bool(true), "the cut must be reported");
+        // Exact accounting, not a timid estimate: the page fills the budget
+        // to within the envelope reserve and one entry.
+        assert!(len <= LIST_REPLY_BUDGET, "{len} is over the product budget");
+        assert!(len > LIST_REPLY_BUDGET - 1024, "{len} leaves most of the budget unused");
+    }
+
+    /// Bytes, not characters: three-byte UTF-8 names hold a third as many
+    /// entries in the same budget, and a char-count estimate would overshoot.
+    #[test]
+    fn a_listing_of_long_multibyte_names_fits_one_data_channel_write() {
+        let dir = tempdir("list-multibyte");
+        let long = "長いファイル名".repeat(11); // 77 chars, 231 UTF-8 bytes
+        for i in 0..700 {
+            fs::write(dir.join(format!("{i:03}{long}")), b"").unwrap();
+        }
+        let (v, len) = list_on_the_wire(&dir, None);
+        assert!(
+            len <= STR0M_SEND_BUDGET,
+            "a {len}-byte list reply can never be sent (str0m accepts at most {STR0M_SEND_BUDGET})"
+        );
+        assert_eq!(v["truncated"], serde_json::Value::Bool(true));
+        assert!(len <= LIST_REPLY_BUDGET, "{len} is over the product budget");
+        assert!(len > LIST_REPLY_BUDGET - 1024, "{len} leaves most of the budget unused");
+    }
+
+    /// PAGING: a folder far past one reply is still fully browsable. The
+    /// controller follows `next` until there is none; every page fits one
+    /// write, no name is lost or repeated, and only the last page says the
+    /// folder is complete.
+    #[test]
+    fn a_large_folder_pages_through_completely() {
+        let dir = tempdir("list-pages");
+        let mut want: Vec<String> = (0..4_500).map(|i| format!("{i:05}-page-fixture.bin")).collect();
+        for n in &want {
+            fs::write(dir.join(n), b"").unwrap();
+        }
+        let mut got: Vec<String> = Vec::new();
+        let mut cursor = None;
+        let mut pages = 0;
+        loop {
+            pages += 1;
+            assert!(pages < 100, "paging must terminate");
+            let (v, len) = list_on_the_wire(&dir, cursor);
+            assert!(len <= STR0M_SEND_BUDGET, "page {pages} is {len} bytes");
+            got.extend(names_of(&v));
+            match v.get("next").and_then(|n| n.as_u64()) {
+                Some(n) => {
+                    assert_eq!(v["truncated"], serde_json::Value::Bool(true), "a page with more after it is truncated");
+                    assert!(Some(n) > cursor, "next must move forward");
+                    cursor = Some(n);
+                }
+                None => {
+                    assert_eq!(v["truncated"], serde_json::Value::Bool(false), "the last page completes the folder");
+                    break;
+                }
+            }
+        }
+        assert!(pages > 1, "the fixture must need more than one page");
+        got.sort();
+        want.sort();
+        assert_eq!(got.len(), want.len(), "no entry may be lost or repeated across pages");
+        assert_eq!(got, want);
+    }
+
+    /// The protocol is additive. A request without `cursor` (every controller
+    /// before paging) gets the first page; a small folder's reply carries no
+    /// `next`, so a controller that knows paging shows no Load more.
+    #[test]
+    fn paging_is_additive_on_the_wire() {
+        let dir = tempdir("list-additive");
+        for i in 0..5 {
+            fs::write(dir.join(format!("f{i}.txt")), b"").unwrap();
+        }
+        let (v, _) = list_on_the_wire(&dir, None);
+        assert_eq!(names_of(&v).len(), 5);
+        assert!(v.get("next").is_none(), "a complete folder has no next page");
+        let (v0, _) = list_on_the_wire(&dir, Some(0));
+        assert_eq!(names_of(&v0), names_of(&v), "cursor 0 is the first page");
+        let (past, _) = list_on_the_wire(&dir, Some(10_000));
+        assert!(names_of(&past).is_empty(), "a cursor past the end is an empty, final page");
+        assert_eq!(past["truncated"], serde_json::Value::Bool(false));
+        assert!(past.get("next").is_none());
     }
 
     #[test]
@@ -1600,6 +1806,7 @@ mod tests {
         for req in [
             FsRequest::List {
                 path: "../..".into(),
+                cursor: None,
             },
             FsRequest::Read {
                 path: "../secrets.txt".into(),
@@ -1636,6 +1843,7 @@ mod tests {
         for req in [
             FsRequest::List {
                 path: sysroot.clone(),
+                cursor: None,
             },
             FsRequest::Read {
                 path: format!("{sysroot}\\System32\\config\\SAM"),
@@ -1657,7 +1865,7 @@ mod tests {
 
         // And pin that the DENYLIST specifically is what refuses a path it can
         // resolve, so the loop above cannot be satisfied purely by I/O errors.
-        match handle_request(FsRequest::List { path: sysroot }, &FileScope::Policy, None) {
+        match handle_request(FsRequest::List { path: sysroot, cursor: None }, &FileScope::Policy, None) {
             FsResponse::Error { message } => {
                 assert!(message.contains("system or protected"), "{message}")
             }

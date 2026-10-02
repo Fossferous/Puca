@@ -456,12 +456,66 @@ const MAX_PENDING_FS_REPLIES: usize = 256;
 /// does not model ids — they belong to the transport matching, not to the
 /// filesystem answer — and an id-less request (an older app) must get an
 /// id-less reply, matched by order exactly as before ids existed.
+///
+/// Never longer than [`SCTP_SEND_BUDGET`]: see [`admit_fs_reply`].
 fn encode_fs_reply(resp: &crate::file_transfer::FsResponse, req_id: Option<u64>) -> Option<Vec<u8>> {
+    encode_fs_reply_unchecked(resp, req_id).map(admit_fs_reply)
+}
+
+fn encode_fs_reply_unchecked(
+    resp: &crate::file_transfer::FsResponse,
+    req_id: Option<u64>,
+) -> Option<Vec<u8>> {
     let mut v = serde_json::to_value(resp).ok()?;
     if let (Some(id), Some(obj)) = (req_id, v.as_object_mut()) {
         obj.insert("id".to_string(), serde_json::Value::from(id));
     }
     serde_json::to_vec(&v).ok()
+}
+
+/// The longest data-channel message str0m will EVER accept: its send budget
+/// shared across all streams (`MAX_BUFFERED_ACROSS_STREAMS`, 128 KiB in
+/// 0.23). `Channel::write` answers `Ok(false)` — "no room yet" — for anything
+/// longer on every attempt, forever; it does not fragment.
+const SCTP_SEND_BUDGET: usize = 128 * 1024;
+
+/// A file reply that can NEVER be sent becomes one that can: an error
+/// carrying the same id. Everything else passes through untouched.
+///
+/// THE WEDGE THIS PREVENTS. The flush below treats `Ok(false)` as "retry next
+/// pass" and never pops the head, so a reply longer than the send budget sat
+/// at the head of the FIFO forever and every later file reply in the session
+/// queued behind it — a big folder listing (230–380 KB at the old 5,000-entry
+/// cap) broke Up, Refresh, downloads and uploads until the session died, with
+/// the controller seeing only 15 s timeouts. The List arm now stays under
+/// `LIST_REPLY_BUDGET`, so this should never fire; it is here so that no
+/// future reply shape can wedge the queue again, and it says so in the log
+/// when it does.
+///
+/// The id is read back out of the bytes rather than passed in, so the flush
+/// can apply the same rule to whatever is at the head of its queue.
+fn admit_fs_reply(bytes: Vec<u8>) -> Vec<u8> {
+    if bytes.len() <= SCTP_SEND_BUDGET {
+        return bytes;
+    }
+    let id = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|v| v.get("id").and_then(|i| i.as_u64()));
+    eprintln!(
+        "[stream] a {}-byte file reply can never fit one data-channel write ({SCTP_SEND_BUDGET} max); \
+         answering {} with an error instead",
+        bytes.len(),
+        id.map_or_else(|| "an id-less request".to_string(), |i| format!("request {i}")),
+    );
+    encode_fs_reply_unchecked(
+        &crate::file_transfer::FsResponse::error(
+            "that answer was too large to send over the connection",
+        ),
+        id,
+    )
+    // Serialising a short error cannot fail; if it somehow did, an empty
+    // frame still unblocks the queue, which is the point.
+    .unwrap_or_default()
 }
 
 /// The file-request worker: answers `FsRequest`s OFF the stream thread.
@@ -1349,7 +1403,15 @@ fn run(
         // budget these were refused against frees on the peer's SACK, and a
         // SACK arriving is a socket wake — so the retry cadence is the loop's
         // own, with no timer needed.
-        while let Some((cid, bytes)) = pending_fs_replies.front() {
+        while let Some((cid, bytes)) = pending_fs_replies.front_mut() {
+            // `Ok(false)` below means "retry next pass" — which, for a reply
+            // longer than str0m's whole send budget, is forever, with every
+            // later reply stuck behind it. Nothing should enqueue one (every
+            // producer goes through encode_fs_reply), but the head is where
+            // a wedge would happen, so it is checked here too.
+            if bytes.len() > SCTP_SEND_BUDGET {
+                *bytes = admit_fs_reply(std::mem::take(bytes));
+            }
             let Some(mut c) = sender.rtc_mut().channel(*cid) else {
                 // The channel is gone; there is nobody to deliver to.
                 pending_fs_replies.pop_front();
@@ -3430,6 +3492,84 @@ mod tests {
         assert!(v.get("id").is_none(), "an id-less request gets an id-less reply");
     }
 
+    /// str0m 0.23's `MAX_BUFFERED_ACROSS_STREAMS`: a data-channel write longer
+    /// than this is refused (`Ok(false)`) on every attempt, forever. Spelled
+    /// out here so the tests pin str0m's fact, not the product's constant.
+    const STR0M_SEND_BUDGET: usize = 128 * 1024;
+
+    /// THE WEDGE. A reply longer than str0m's send budget was queued like any
+    /// other, refused on every flush, and never popped — so it sat at the
+    /// head of the FIFO and every later file reply in that session queued
+    /// behind it until the session died. Whatever produced it, a reply that
+    /// can never be sent must become an ANSWER: an error carrying the same id,
+    /// so the client stops waiting and the queue keeps moving.
+    #[test]
+    fn a_reply_that_can_never_be_sent_becomes_an_error_with_the_same_id() {
+        let huge = crate::file_transfer::FsResponse::Data { data: "A".repeat(200_000) };
+
+        let with = encode_fs_reply(&huge, Some(42)).expect("encodes");
+        assert!(
+            with.len() <= STR0M_SEND_BUDGET,
+            "a {}-byte reply would wedge the file queue forever",
+            with.len()
+        );
+        let v: serde_json::Value = serde_json::from_slice(&with).unwrap();
+        assert_eq!(v.get("ok").and_then(|x| x.as_str()), Some("error"));
+        assert_eq!(v.get("id").and_then(|x| x.as_u64()), Some(42), "the SAME id, or the client keeps waiting");
+
+        // An id-less (older) client matches by order: still an answer, still id-less.
+        let without = encode_fs_reply(&huge, None).expect("encodes");
+        assert!(without.len() <= STR0M_SEND_BUDGET);
+        let v: serde_json::Value = serde_json::from_slice(&without).unwrap();
+        assert_eq!(v.get("ok").and_then(|x| x.as_str()), Some("error"));
+        assert!(v.get("id").is_none());
+    }
+
+    /// Positive control: the replacement is about SIZE. A big reply that DOES
+    /// fit (a full 64 KiB read is ~87 KB framed) goes out byte-for-byte.
+    #[test]
+    fn a_reply_that_fits_is_sent_unchanged() {
+        let big = crate::file_transfer::FsResponse::Data { data: "A".repeat(100_000) };
+        let bytes = encode_fs_reply(&big, Some(7)).expect("encodes");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v.get("ok").and_then(|x| x.as_str()), Some("data"));
+        assert_eq!(v.get("data").and_then(|x| x.as_str()).map(str::len), Some(100_000));
+        assert_eq!(v.get("id").and_then(|x| x.as_u64()), Some(7));
+    }
+
+    /// The flush's own guard: whatever bytes are at the head of the queue, an
+    /// unsendable reply is replaced by an error carrying the id read back out
+    /// of it, and a sendable one is left byte-for-byte alone.
+    #[test]
+    fn the_queue_head_rule_reads_the_id_back_out_of_the_bytes() {
+        let raw = encode_fs_reply_unchecked(
+            &crate::file_transfer::FsResponse::Data { data: "B".repeat(STR0M_SEND_BUDGET) },
+            Some(u64::MAX),
+        )
+        .unwrap();
+        assert!(raw.len() > STR0M_SEND_BUDGET, "fixture: the head must be unsendable");
+        let fixed = admit_fs_reply(raw);
+        assert!(fixed.len() <= STR0M_SEND_BUDGET);
+        let v: serde_json::Value = serde_json::from_slice(&fixed).unwrap();
+        assert_eq!(v.get("ok").and_then(|x| x.as_str()), Some("error"));
+        assert_eq!(v.get("id").and_then(|x| x.as_u64()), Some(u64::MAX));
+
+        // Exactly at the budget is sendable (str0m refuses only LONGER).
+        let mut at = encode_fs_reply_unchecked(
+            &crate::file_transfer::FsResponse::Data { data: String::new() },
+            Some(1),
+        )
+        .unwrap();
+        let pad = STR0M_SEND_BUDGET - at.len();
+        at = encode_fs_reply_unchecked(
+            &crate::file_transfer::FsResponse::Data { data: "C".repeat(pad) },
+            Some(1),
+        )
+        .unwrap();
+        assert_eq!(at.len(), STR0M_SEND_BUDGET);
+        assert_eq!(admit_fs_reply(at.clone()), at, "a reply at the limit goes out unchanged");
+    }
+
     /// The request parser must tolerate the extra `id` field — serde ignores
     /// unknown fields on this enum, and this pins that, because adding
     /// `deny_unknown_fields` later would break every new client against this
@@ -4704,7 +4844,7 @@ mod tests {
 
         for (i, req) in [
             crate::file_transfer::FsRequest::ListRoots,
-            crate::file_transfer::FsRequest::List { path: dir.to_string_lossy().into_owned() },
+            crate::file_transfer::FsRequest::List { path: dir.to_string_lossy().into_owned(), cursor: None },
             crate::file_transfer::FsRequest::ListRoots,
         ]
         .into_iter()
