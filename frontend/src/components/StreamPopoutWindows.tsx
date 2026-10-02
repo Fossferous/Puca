@@ -15,14 +15,20 @@
  *    and the stream comes back to the app;
  *  - the APP removing the stream (Bring back, the stream ending, leaving the
  *    call) unmounts it → `popout_close` through the shell;
- *  - a refused window.open → onRefused, never a toggle pointing at nothing.
+ *  - a refused window.open → onRefused, never a toggle pointing at nothing;
+ *    so is a stream past the window cap (it would otherwise be "popped" with
+ *    no window, and hidden from the in-app float too);
+ *  - a slot freed in the same change (a 9th pop at the cap takes the oldest's
+ *    slot) is opened only once the shell has destroyed the old window — see
+ *    `noteSlotClosing` in streamOsWindows.ts.
  */
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { getStreamData, subscribeToStreamState } from './voiceState';
 import { copyStyleSheetsInto } from './streamDocPip';
 import {
-    assignSlots, closeOsWindow, noteOsWindowOpened, openOsWindow, osWindowPin, sameSlots,
+    assignSlots, closeOsWindow, noteOsWindowOpened, noteSlotClosing, openOsWindow, osWindowPin, sameSlots,
+    slotClosing,
 } from './streamOsWindows';
 import { CloseIcon, PinIcon } from './Icons';
 import { installBackgroundResumeAll } from './deviceStageResume';
@@ -44,6 +50,15 @@ export function StreamPopoutWindows({ userIds, onCloseOne, onRefused }: StreamPo
     const [slots, setSlots] = useState<Map<number, number>>(() => new Map());
     const next = assignSlots(slots, userIds);
     if (!sameSlots(next, slots)) setSlots(next);
+    // A stream with no slot (past the cap) must not stay "popped" with no
+    // window anywhere: report it, as a refused window is.
+    const unplaced = userIds.filter(id => !next.has(id)).join(',');
+    const refusedRef = useRef(onRefused);
+    useEffect(() => { refusedRef.current = onRefused; });
+    useEffect(() => {
+        if (!unplaced) return;
+        for (const id of unplaced.split(',')) refusedRef.current(Number(id));
+    }, [unplaced]);
     return (
         <>
             {[...next].map(([id, slot]) => (
@@ -72,7 +87,9 @@ function StreamOsWindow({ userId, slot, onClose, onRefused }: StreamOsWindowProp
     const aliveRef = useRef(true);
 
     useEffect(() => {
-        if (!openedRef.current) {
+        let cancelled = false;
+        let detach: (() => void) | null = null;
+        const openNow = () => {
             const w = openOsWindow(slot);
             openedRef.current = { w };
             if (w) {
@@ -88,29 +105,55 @@ function StreamOsWindow({ userId, slot, onClose, onRefused }: StreamOsWindowProp
             } else {
                 logPipDiag(`[pop-out] window ${slot} refused by the shell`);
             }
-        }
-        const w = openedRef.current.w;
-        if (!w) {
-            cbRef.current.onRefused(userId);
-            return;
-        }
-        let gone = false;
-        const closedByUser = () => {
-            if (gone) return;
-            gone = true;
-            cbRef.current.onClose(userId);
         };
-        w.addEventListener('pagehide', closedByUser);
-        // Belt and braces: pagehide fires for the title-bar close (measured),
-        // but a window that went away by any other road must not leave the
-        // toggle saying "popped" for ever.
-        const poll = window.setInterval(() => { if (w.closed) closedByUser(); }, 1000);
-        // The window exists only once this effect has opened it (window.open
-        // must not run during render); the portal needs it as state.
-        setWin(w);
+        const attach = () => {
+            const w = openedRef.current?.w ?? null;
+            if (!w) {
+                cbRef.current.onRefused(userId);
+                return;
+            }
+            let gone = false;
+            const closedByUser = () => {
+                if (gone) return;
+                gone = true;
+                cbRef.current.onClose(userId);
+            };
+            w.addEventListener('pagehide', closedByUser);
+            // Belt and braces: pagehide fires for the title-bar close
+            // (measured), but a window that went away by any other road must
+            // not leave the toggle saying "popped" for ever.
+            const poll = window.setInterval(() => { if (w.closed) closedByUser(); }, 1000);
+            // The window exists only once this effect has opened it
+            // (window.open must not run during render); the portal needs it
+            // as state.
+            setWin(w);
+            detach = () => {
+                w.removeEventListener('pagehide', closedByUser);
+                window.clearInterval(poll);
+            };
+        };
+        if (openedRef.current) {
+            attach();
+        } else {
+            const pending = slotClosing(slot);
+            if (!pending) {
+                openNow();
+                attach();
+            } else {
+                // The slot's previous window is still being destroyed (a 9th
+                // pop at the cap reuses the oldest's slot). Open once it is
+                // gone — unless this window was itself taken down meanwhile.
+                logPipDiag(`[pop-out] window ${slot} waits for its previous window to close`);
+                void pending.then(() => {
+                    if (cancelled) return;
+                    if (!openedRef.current) openNow();
+                    attach();
+                });
+            }
+        }
         return () => {
-            w.removeEventListener('pagehide', closedByUser);
-            window.clearInterval(poll);
+            cancelled = true;
+            detach?.();
         };
     }, [userId, slot]);
 
@@ -118,11 +161,20 @@ function StreamOsWindow({ userId, slot, onClose, onRefused }: StreamOsWindowProp
         aliveRef.current = true;
         return () => {
             aliveRef.current = false;
-            queueMicrotask(() => {
-                if (aliveRef.current) return;
-                const w = openedRef.current?.w ?? null;
-                if (w && !w.closed) closeOsWindow(slot, w);
-            });
+            const w = openedRef.current?.w ?? null;
+            if (!w) return;
+            // Recorded NOW, not in the microtask: a window mounting for this
+            // slot in the same commit must see that it is still taken.
+            noteSlotClosing(slot, new Promise<void>(resolve => {
+                queueMicrotask(() => {
+                    // StrictMode's simulated unmount: it is back, keep it.
+                    if (aliveRef.current) { resolve(); return; }
+                    // Through the shell even when the user already closed it
+                    // (w.closed): popout_close is idempotent and answers only
+                    // once the slot's label is free.
+                    void closeOsWindow(slot, w).then(resolve);
+                });
+            }));
         };
     }, [slot]);
 

@@ -64,8 +64,9 @@ export function assignSlots(
         const taken = new Set(next.values());
         let slot: number | null = null;
         for (let s = 1; s <= max && slot === null; s++) if (!taken.has(s) && !freedNow.has(s)) slot = s;
-        // Only when every other slot is taken: a just-freed one is better
-        // than no window at all (the shell may refuse it; that is reported).
+        // Only when every other slot is taken (a 9th pop at the cap): the
+        // just-freed one. Its window opens once the old one is destroyed —
+        // see noteSlotClosing below.
         for (let s = 1; s <= max && slot === null; s++) if (!taken.has(s)) slot = s;
         if (slot !== null) next.set(id, slot);
     }
@@ -114,7 +115,8 @@ export function noteOsWindowOpened(): void {
  * A window.open the shell refused. Before any window has ever opened this
  * session it means the engine does not work here — latch it off so the
  * browser engines take over. After one has opened it is about THIS request
- * (a slot still closing, the cap): un-pop that stream and keep the engine.
+ * (a window that would not close in time, a stream past the cap): un-pop
+ * that stream and keep the engine.
  */
 export function noteOsWindowRefused(): 'latched' | 'transient' {
     if (everOpened) return 'transient';
@@ -123,6 +125,7 @@ export function noteOsWindowRefused(): 'latched' | 'transient' {
 }
 
 export function __resetOsWindowsForTests(): void {
+    closing.clear();
     support = 'unknown';
     latchedOff = false;
     everOpened = false;
@@ -139,11 +142,36 @@ export function openOsWindow(slot: number): Window | null {
 }
 
 /** Close a pop-out from the app. `fallback` is the popup's Window, closed
- *  directly only if the shell call itself fails. */
-export function closeOsWindow(slot: number, fallback: Window | null): void {
-    invoke('popout_close', { slot }).catch(() => {
+ *  directly only if the shell call itself fails. Resolves once the shell
+ *  says the slot is free (popout_close waits for the window's Destroyed). */
+export function closeOsWindow(slot: number, fallback: Window | null): Promise<void> {
+    return invoke('popout_close', { slot }).then(() => undefined, () => {
         try { fallback?.close(); } catch { /* already gone */ }
     });
+}
+
+// --- Slots still closing ------------------------------------------------
+//
+// A slot's window is destroyed asynchronously, and until the shell has freed
+// its label a window.open for that slot is refused — or WebView2 hands back
+// the DYING window under its old name and the new pop-out vanishes with it.
+// That is exactly what a 9th pop at the cap does: the oldest stream goes back
+// and the newest takes its slot in the same change. So whoever frees a slot
+// records it here SYNCHRONOUSLY (React runs the removed window's cleanup
+// before the new window's mount effect in the same commit), and an open for
+// that slot waits for it.
+const closing = new Map<number, Promise<void>>();
+
+/** Record that `slot` is being freed until `done` settles. */
+export function noteSlotClosing(slot: number, done: Promise<void>): void {
+    const p = done.then(() => undefined, () => undefined);
+    closing.set(slot, p);
+    void p.then(() => { if (closing.get(slot) === p) closing.delete(slot); });
+}
+
+/** The pending close of `slot`, if one is still in flight. */
+export function slotClosing(slot: number): Promise<void> | undefined {
+    return closing.get(slot);
 }
 
 /** Read (`pinned` omitted) or set a slot's always-on-top pin; resolves to the

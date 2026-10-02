@@ -1764,13 +1764,13 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|handle, event| {
-            // Only read when the remote-control feature is compiled in (below);
-            // a lite build never touches `handle` in this closure otherwise.
-            #[cfg(not(feature = "remote-control"))]
-            let _ = &handle;
             // On exit, release any keys/buttons a control session left held so a
             // crash/quit mid-control can't strand input down in the target app.
             if let tauri::RunEvent::Exit = event {
+                // Quitting (tray Quit, an update restart) ends the loop with no
+                // per-window Destroyed: the open pop-outs' size and place for
+                // this session are written out here or never.
+                popout::save_on_exit(handle);
                 #[cfg(feature = "remote-control")]
                 {
                     remote_control::release_all_ordered();

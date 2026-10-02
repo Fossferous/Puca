@@ -6375,8 +6375,9 @@ export function Chat({ onLogout }: ChatProps) {
                             setOsWindowsLatched(true);
                             setPoppedStreams(l => l.slice(-1));
                         } else {
-                            // One refused window (a slot still closing, the
-                            // cap): that stream stays in the app.
+                            // One refused window (its slot's old window
+                            // would not close, a stream past the cap): that
+                            // stream stays in the app.
                             setPoppedStreams(l => l.filter(x => x !== id));
                         }
                     }}

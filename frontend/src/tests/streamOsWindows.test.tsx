@@ -19,7 +19,7 @@
  */
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { act, StrictMode } from 'react';
+import { act, StrictMode, useEffect, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
 const h = vi.hoisted(() => ({
@@ -29,6 +29,8 @@ const h = vi.hoisted(() => ({
     supported: true as boolean | 'reject',
     pinned: new Map<number, boolean>(),
     stream: { id: 'ms-7' } as unknown as MediaStream,
+    /** popout_close as the shell answers it; null = resolve at once. */
+    close: null as null | ((slot: number) => Promise<unknown>),
 }));
 
 vi.mock('../api/platform', async importOriginal => ({
@@ -49,6 +51,7 @@ vi.mock('@tauri-apps/api/core', async importOriginal => ({
             if (typeof args?.pinned === 'boolean') h.pinned.set(slot, args.pinned);
             return h.pinned.get(slot) ?? true;
         }
+        if (cmd === 'popout_close' && h.close) return h.close(args?.slot as number);
         if (cmd === 'popout_close' || cmd === 'log_stream_diag') return null;
         throw new Error(`no shell command ${cmd}`);
     },
@@ -78,6 +81,7 @@ beforeEach(() => {
     h.supported = true;
     h.calls = [];
     h.pinned = new Map();
+    h.close = null;
     __resetOsWindowsForTests();
 });
 
@@ -116,6 +120,17 @@ describe('assignSlots', () => {
         const m = assignSlots(new Map(), ids);
         expect(m.size).toBe(MAX_POPOUT_WINDOWS);
         expect(new Set(m.values()).size).toBe(MAX_POPOUT_WINDOWS);
+    });
+});
+
+describe('togglePopped at the window cap', () => {
+    const eight = [1, 2, 3, 4, 5, 6, 7, 8];
+    it('a 9th pop sends the OLDEST back and keeps the newest', () => {
+        expect(togglePopped(eight, 9, true, MAX_POPOUT_WINDOWS)).toEqual([2, 3, 4, 5, 6, 7, 8, 9]);
+        expect(togglePopped(eight, 9, true, MAX_POPOUT_WINDOWS)).toHaveLength(MAX_POPOUT_WINDOWS);
+    });
+    it('toggling a stream that is already out at the cap brings just that one back', () => {
+        expect(togglePopped(eight, 4, true, MAX_POPOUT_WINDOWS)).toEqual([1, 2, 3, 5, 6, 7, 8]);
     });
 });
 
@@ -271,6 +286,77 @@ describe('StreamPopoutWindows', () => {
         const onRefused = vi.fn();
         await render(<StreamPopoutWindows userIds={[7]} onCloseOne={() => {}} onRefused={onRefused} />);
         expect(onRefused).toHaveBeenCalledWith(7);
+    });
+
+    it('ids past the window cap are REPORTED, never left popped with no window', async () => {
+        const onRefused = vi.fn();
+        const ids = Array.from({ length: MAX_POPOUT_WINDOWS + 1 }, (_, i) => 100 + i);
+        await render(<StreamPopoutWindows userIds={ids} onCloseOne={() => {}} onRefused={onRefused} />);
+        expect(opened).toHaveLength(MAX_POPOUT_WINDOWS);
+        expect(onRefused.mock.calls.map(c => c[0])).toEqual([100 + MAX_POPOUT_WINDOWS]);
+    });
+
+    /**
+     * The reviewer's case, against a model of the SHELL: a slot's label is
+     * taken from window.open until popout_close has destroyed that window
+     * (window.open returns null for an occupied slot, as open_requested
+     * does), and popout_close answers only once the label is free. At the
+     * cap a 9th pop removes the oldest and adds the new one in ONE change, so
+     * the new stream can only get the slot that is still closing.
+     */
+    it('at the cap, popping a 9th opens it in the slot the oldest leaves — after that window is gone', async () => {
+        const occupied = new Set<string>();
+        const log: string[] = [];
+        vi.mocked(window.open).mockImplementation(((url: string, name: string) => {
+            if (occupied.has(name)) { log.push(`REFUSED ${name}`); return null; }
+            occupied.add(name);
+            log.push(`open ${name}`);
+            const win = fakeWin();
+            opened.push({ url, name, win });
+            return win as unknown as Window;
+        }) as typeof window.open);
+        h.close = slot => new Promise(resolve => setTimeout(() => {
+            occupied.delete(popoutWindowName(slot));
+            log.push(`close puca-pop-${slot}`);
+            resolve(null);
+        }, 20));
+
+        const host = { popped: [] as number[], toggle: (_id: number) => {} };
+        const refused: number[] = [];
+        const Host = () => {
+            const [list, setList] = useState<number[]>([]);
+            useEffect(() => {
+                host.popped = list;
+                host.toggle = id => setList(l => togglePopped(l, id, true, MAX_POPOUT_WINDOWS));
+            });
+            return (
+                <StreamPopoutWindows
+                    userIds={list}
+                    onCloseOne={id => setList(l => l.filter(x => x !== id))}
+                    onRefused={id => { refused.push(id); setList(l => l.filter(x => x !== id)); }}
+                />
+            );
+        };
+        await render(<Host />);
+        for (let id = 1; id <= MAX_POPOUT_WINDOWS; id++) {
+            await act(async () => { host.toggle(id); await flush(); });
+        }
+        expect(occupied.size).toBe(MAX_POPOUT_WINDOWS);
+        await act(async () => { host.toggle(9); await flush(); });
+        // Bounded: the modelled close takes 20 ms.
+        const reopened = () => log.lastIndexOf('open puca-pop-1') > log.indexOf('close puca-pop-1')
+            && log.includes('close puca-pop-1');
+        for (let i = 0; i < 50 && !reopened() && !log.includes('REFUSED puca-pop-1'); i++) {
+            await act(async () => { await new Promise(r => setTimeout(r, 10)); });
+        }
+        expect(refused).toEqual([]);
+        expect(log).not.toContain('REFUSED puca-pop-1');
+        expect(host.popped).toEqual([2, 3, 4, 5, 6, 7, 8, 9]);
+        // Slot 1 closed, THEN reopened for stream 9.
+        const tail = log.slice(log.indexOf('close puca-pop-1'));
+        expect(tail).toContain('open puca-pop-1');
+        expect(occupied.size).toBe(MAX_POPOUT_WINDOWS);
+        expect(opened.at(-1)!.win.document.title).toBe('user-9');
     });
 
     it('the pin reads the shell for its slot and toggles always-on-top there', async () => {

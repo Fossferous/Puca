@@ -306,10 +306,11 @@ what is holding the stream back (**Limited by**: CPU, bandwidth, or nothing).
 
 ### Pop-out windows (desktop app)
 In the desktop app, **Pop out** puts that stream in a window of its own. Pop
-out several streams and each gets its own window (up to eight; a ninth puts
-the oldest back in the app). Every window can be dragged anywhere and resized
-to any size, up to the whole screen; double-click its title bar to maximize
-it. The window title is the name of the person sharing.
+out several streams and each gets its own window (up to eight; popping out a
+ninth opens it in place of the oldest, which goes back to the app). Every
+window can be dragged anywhere and resized to any size, up to the whole
+screen; double-click its title bar to maximize it. The window title is the
+name of the person sharing.
 
 Hover a pop-out window for its two buttons:
 
@@ -318,10 +319,11 @@ Hover a pop-out window for its two buttons:
 | **Keep on top** | On (the default): the window stays above other windows. Off: it behaves like an ordinary window |
 | **Back to Púca** | Close the window and put the stream back in the app (the window's own close button does the same) |
 
-Púca remembers each window's size, place and **Keep on top** setting: the
-first window you pop out opens where the first one was last time, the second
-where the second was, and so on. A window whose screen has been unplugged
-reopens on the screen Púca is on. The sound of a popped-out stream still plays
+Púca remembers each window's size, place and **Keep on top** setting, even
+if you quit Púca with the window still open: the first window you pop out
+opens where the first one was last time, the second where the second was, and
+so on. A window whose screen has been unplugged reopens on the screen Púca is
+on. The sound of a popped-out stream still plays
 from the app, at the volume and mute you set there. While a stream is in its
 own window, the small player in the app does not show it a second time.
 Leaving the call, or the sharer stopping, closes its window.

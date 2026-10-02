@@ -69,6 +69,8 @@ const MIN_H: f64 = 90.0;
 const MARGIN: i32 = 24;
 const CASCADE: i32 = 32;
 const STORE_FILE: &str = "popout-windows.json";
+/// How long popout_close waits for a destroyed window to release its slot.
+const CLOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// The slot a `window.open` URL asks for — `None` for anything that is not
 /// exactly `about:blank#puca-pop-<1..=MAX_POPOUTS>`. This is the whole filter
@@ -123,7 +125,9 @@ pub fn popout_navigation_allowed(url: &str) -> bool {
 pub fn window_title(doc_title: &str) -> String {
     let t: String = doc_title.chars().filter(|c| !c.is_control()).take(100).collect();
     let t = t.trim();
-    if t.is_empty() || t == "about:blank" {
+    // WebView2 reports the URL as the title until the page names itself —
+    // for a pop-out that is `about:blank#puca-pop-<n>`, never worth showing.
+    if t.is_empty() || popout_navigation_allowed(t) {
         "Púca".to_string()
     } else {
         t.to_string()
@@ -402,6 +406,19 @@ pub fn open_requested<R: Runtime>(
     }
 }
 
+/// The app is quitting (tray Quit, an update restart: `app.exit`). That path
+/// ends the event loop without a per-window Destroyed, so the geometry the
+/// open pop-outs have this session would be lost — write it out here (lib.rs
+/// calls this from RunEvent::Exit, as tauri-plugin-window-state does).
+pub fn save_on_exit<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(state) = app.try_state::<PopoutState>() {
+        // Nothing remembered (pop-outs never used): leave no file behind.
+        if state.records.lock().map(|m| !m.is_empty()).unwrap_or(false) {
+            state.save();
+        }
+    }
+}
+
 /// Close every pop-out. The main page reloading or going away leaves them
 /// with no opener — blank windows nothing can ever fill again.
 pub fn close_all<R: Runtime>(app: &AppHandle<R>) {
@@ -420,20 +437,57 @@ pub fn popout_supported() -> bool {
     true
 }
 
+/// Poll `done` every `step` until it holds or `limit` has passed; true if it
+/// held. How [`popout_close`] waits for a destroyed window's label to free.
+pub fn wait_until(mut done: impl FnMut() -> bool, limit: std::time::Duration, step: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        if done() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(step);
+    }
+}
+
 /// Close a pop-out from the app ("Bring back", the stream ending, the app
 /// navigating away). NOT the popup's own `window.close()`: wry answers a
 /// script close by destroying only the webview's container HWND, which left
 /// the top-level window standing as an empty, always-on-top frame — and its
 /// label taken, so the slot could never open again (measured in the spike).
+///
+/// It answers only once the slot is FREE. `destroy()` is queued to the event
+/// loop, and the label is released only when the window's Destroyed event has
+/// run; until then a window.open for the same slot is refused, or (the spike
+/// measured it) WebView2 hands back the dying window under its old name and
+/// the reopened pop-out vanishes. The app opens a slot that was just closed —
+/// a 9th pop at the cap puts the oldest back and reuses its slot — only after
+/// this resolves. Bounded: a window that will not go answers an error.
 #[tauri::command]
-pub fn popout_close<R: Runtime>(app: AppHandle<R>, slot: u32) -> Result<(), String> {
+pub async fn popout_close<R: Runtime>(app: AppHandle<R>, slot: u32) -> Result<(), String> {
     if !(1..=MAX_POPOUTS).contains(&slot) {
         return Err(format!("no pop-out slot {slot}"));
     }
-    if let Some(w) = app.get_webview_window(&label_for(slot)) {
+    let label = label_for(slot);
+    if let Some(w) = app.get_webview_window(&label) {
         w.destroy().map_err(|e| e.to_string())?;
     }
-    Ok(())
+    let freed = tauri::async_runtime::spawn_blocking(move || {
+        wait_until(
+            || app.get_webview_window(&label).is_none(),
+            CLOSE_WAIT,
+            std::time::Duration::from_millis(10),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    if freed {
+        Ok(())
+    } else {
+        Err(format!("pop-out slot {slot} is still closing"))
+    }
 }
 
 /// Read (`pinned: None`) or set a pop-out slot's always-on-top pin. The
@@ -545,8 +599,31 @@ mod tests {
         assert_eq!(window_title("Alice"), "Alice");
         assert_eq!(window_title("  "), "Púca");
         assert_eq!(window_title("about:blank"), "Púca");
+        // WebView2 reports the URL as the title until the page sets one, and
+        // a pop-out's URL carries its slot fragment.
+        assert_eq!(window_title("about:blank#puca-pop-1"), "Púca");
+        assert_eq!(window_title(&format!("about:blank#puca-pop-{MAX_POPOUTS}")), "Púca");
+        // A real name that merely looks like a URL is still shown.
+        assert_eq!(window_title("about:blankety"), "about:blankety");
         assert_eq!(window_title("a\u{7}b\nc"), "abc");
         assert_eq!(window_title(&"x".repeat(500)).chars().count(), 100);
+    }
+
+    /// popout_close answers only once the window's label is free (destroy()
+    /// is queued to the event loop), and never waits for ever.
+    #[test]
+    fn waiting_for_a_closing_window_is_bounded() {
+        use std::cell::Cell;
+        use std::time::{Duration, Instant};
+        let n = Cell::new(0);
+        assert!(wait_until(|| { n.set(n.get() + 1); n.get() >= 3 }, Duration::from_secs(2), Duration::from_millis(1)));
+        assert_eq!(n.get(), 3, "it stops polling as soon as the label is gone");
+        let t = Instant::now();
+        assert!(!wait_until(|| false, Duration::from_millis(40), Duration::from_millis(5)));
+        let took = t.elapsed();
+        assert!(took >= Duration::from_millis(40) && took < Duration::from_millis(1000), "{took:?}");
+        // Already free: no wait at all.
+        assert!(wait_until(|| true, Duration::ZERO, Duration::from_millis(5)));
     }
 
     const FHD: Rect = Rect { x: 0, y: 0, w: 1920, h: 1040 }; // 1080 minus a taskbar
