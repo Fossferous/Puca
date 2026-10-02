@@ -15,6 +15,8 @@ import type { DMConversation, SearchUserResult } from '../api/dms';
 import { TasksView } from './TasksView';
 import { HomeSidebar } from './HomeSidebar';
 import { TasksIcon, MembersIcon, MessageIcon, CheckIcon, CloseIcon, SettingsIcon, UserRemoveIcon } from './Icons';
+import { PresenceDot } from './PresenceDot';
+import { ingestPresenceSnapshot, presenceOf, usePresenceKey, PRESENCE_LABEL, type PresenceStatus } from '../api/presenceStore';
 import './FriendsPanel.css';
 
 interface FriendsPanelProps {
@@ -64,6 +66,9 @@ export function FriendsPanel({ onStartDM, onClose, initialTab = 'online', onTabC
 
     const loadData = useCallback(async (background = false) => {
         if (!background) setLoading(true);
+        // Stamped with the moment the request STARTED: a status pushed while
+        // the poll travelled is newer than what it brings back.
+        const startedAt = Date.now();
         try {
             const [friendsList, incomingList, outgoingList, dmList] = await Promise.all([
                 listFriends(),
@@ -71,6 +76,7 @@ export function FriendsPanel({ onStartDM, onClose, initialTab = 'online', onTabC
                 listOutgoingRequests(),
                 listDMConversations(),
             ]);
+            ingestPresenceSnapshot(friendsList, startedAt);
             setFriends(friendsList);
             setIncoming(incomingList);
             setOutgoing(outgoingList);
@@ -183,7 +189,12 @@ export function FriendsPanel({ onStartDM, onClose, initialTab = 'online', onTabC
         }
     };
 
-    const onlineFriends = friends.filter(f => f.is_online);
+    // Presence comes from the store, which hears every pushed UserOnline /
+    // UserOffline / UserStatus: this list used to change only on its 15 s
+    // poll. Re-renders when one of THESE friends changes.
+    usePresenceKey(friends);
+    const presenceFor = (f: Friend): PresenceStatus => presenceOf(f.id, f.is_online, f.status);
+    const onlineFriends = friends.filter(f => presenceFor(f) !== 'offline');
     const pendingCount = incoming.length + outgoing.length;
 
     const filteredFriends = activeTab === 'online'
@@ -393,16 +404,18 @@ export function FriendsPanel({ onStartDM, onClose, initialTab = 'online', onTabC
                                     {activeTab === 'online' ? 'No friends online' : 'No friends yet'}
                                 </div>
                             ) : (
-                                filteredFriends.map(friend => (
+                                filteredFriends.map(friend => {
+                                    const presence = presenceFor(friend);
+                                    return (
                                     <div key={friend.id} className="friend-row">
-                                        <div className={`friend-avatar ${friend.is_online ? 'online' : ''}`}>
+                                        <div className={`friend-avatar ${presence !== 'offline' ? 'online' : ''}`}>
                                             {friend.username.charAt(0).toUpperCase()}
-                                            {friend.is_online && <span className="status-dot"></span>}
+                                            {presence !== 'offline' && <PresenceDot status={presence} className="status-dot" />}
                                         </div>
                                         <div className="friend-info">
                                             <span className="friend-name">{friend.username}</span>
                                             <span className="friend-status">
-                                                {friend.is_online ? 'Online' : 'Offline'}
+                                                {PRESENCE_LABEL[presence]}
                                             </span>
                                         </div>
                                         <div className="friend-actions">
@@ -427,7 +440,8 @@ export function FriendsPanel({ onStartDM, onClose, initialTab = 'online', onTabC
                                             </button>
                                         </div>
                                     </div>
-                                ))
+                                    );
+                                })
                             )}
                         </div>
                     )}
@@ -442,18 +456,21 @@ export function FriendsPanel({ onStartDM, onClose, initialTab = 'online', onTabC
                 <h3>Active Now</h3>
                 <div className="active-list">
                     {onlineFriends.length > 0 ? (
-                        onlineFriends.slice(0, 5).map(friend => (
+                        onlineFriends.slice(0, 5).map(friend => {
+                            const presence = presenceFor(friend);
+                            return (
                             <div key={friend.id} className="active-user" onClick={() => handleMessage(friend)}>
                                 <div className="active-avatar">
                                     {friend.username.charAt(0).toUpperCase()}
-                                    <span className="status-indicator online"></span>
+                                    <PresenceDot status={presence} className="status-indicator" />
                                 </div>
                                 <div className="active-info">
                                     <span className="active-name">{friend.username}</span>
-                                    <span className="active-status">Online</span>
+                                    <span className={`active-status ${presence}`}>{PRESENCE_LABEL[presence]}</span>
                                 </div>
                             </div>
-                        ))
+                            );
+                        })
                     ) : (
                         <div className="active-empty">
                             <p>It's quiet for now...</p>

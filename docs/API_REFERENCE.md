@@ -115,6 +115,7 @@ in this file is not registered there, so what IS listed is real.
 |--------|----------|------|-------------|
 | GET | `/servers/:id/members` | ✅ | List members. `is_online` is false for anyone hiding their online status, and (since 0.9.5) for anyone with a block against the caller in either direction — the same rule as the live presence frames; if the block lookup fails, every member in that response reads offline. |
 | GET | `/servers/:id/members-with-roles` | ✅ | List members with roles. Same `is_online` rule as `/members`. |
+
 | POST | `/servers/:id/kick/:user_id` | ✅ | Kick member |
 | POST | `/servers/:id/bans/:user_id` | ✅ | Ban member |
 | DELETE | `/servers/:id/bans/:user_id` | ✅ | Unban member |
@@ -126,6 +127,8 @@ in this file is not registered there, so what IS listed is real.
 | DELETE | `/users/:user_id/block` | ✅ | Unblock. Does **not** restore the friendship: when a block row is actually removed, any friends row still beside it and any friend request sent across it are deleted (to that request's sender this looks like a rejection). Pairs blocked before 0.9.5 had their friends and pending-request rows removed once at upgrade by migration 063. |
 | GET | `/blocked` | ✅ | The users you have blocked (your own direction only). |
 | GET | `/users/search` | ✅ | Search users by name. `is_online` is false for anyone hiding their online status and for anyone with a block against the caller in either direction (fail closed: a failed block lookup reads every result as offline). Deleted accounts are never listed. |
+
+Both member lists, and `GET /friends`, also carry `status` (`online`, `idle` or `away`) for a row whose `is_online` is true, and omit it for an offline one. It is the status the live sockets were last sent (see *Idle and away presence* under WebSocket), so a poll never shows a change before the push does; it is `online` for anyone with "Show when I'm idle or away" off. `/users/search` deliberately does **not** carry it: search is instance-wide, and idle/away is shared only with the same audience as the live presence frames.
 
 ---
 
@@ -222,7 +225,7 @@ Neither route carries content the server can read.
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
-| GET | `/friends` | ✅ | List friends. Never a deleted account, and never someone with a block in either direction, even where a friends row from before 0.9.5 survives. |
+| GET | `/friends` | ✅ | List friends. Never a deleted account, and never someone with a block in either direction, even where a friends row from before 0.9.5 survives. An online friend's row carries `status` (`online`, `idle`, `away`), as the member lists do. |
 | GET | `/friends/:user_id/status` | ✅ | Friendship status with a user (`is_friend`, pending direction). Across a block `is_friend` is false and a request *received* from that user is masked (`request_received` false, `request_id` null); a request you *sent* across a block is reported as sent, like any other. |
 | GET | `/friends/requests/incoming` | ✅ | List incoming friend requests. Never a deleted account, and never a request from someone with a block against you in either direction (a failed block lookup lists nothing). |
 | GET | `/friends/requests/outgoing` | ✅ | List outgoing friend requests (deleted accounts are never listed). A request you sent across a block is listed — it is a real pending request on your side. |
@@ -441,6 +444,65 @@ online"). `UserOnline` / `UserOffline` are never sent to an account with a
 block in either direction, and the REST member lists and user search report
 the same pair as offline.
 
+**Idle and away presence; client capabilities.** A client announces what it
+understands in the URL, `/ws?caps=presence` (comma-separated, unknown names
+ignored), because an older server simply ignores a query parameter it does not
+know, whereas an unknown client→server **frame** draws an `Error` (which the
+stock client shows as an alert). The announcement is latched for the life of
+the socket. A server that supports a capability confirms it to that connection
+only, right after connect:
+
+```json
+{"type":"ServerFeatures","payload":{"features":["presence"]}}
+```
+
+An older server sends nothing, so a client assumes nothing until this arrives,
+per socket — a reconnect may land on an older host. With `presence`
+confirmed, the client reports its own local activity on a **transition** only
+(and once on each socket that confirms it):
+
+```json
+{"type":"SetActivity","payload":{"inactive_secs":null}}
+{"type":"SetActivity","payload":{"inactive_secs":75}}
+```
+
+`null` means someone is active at this device; a number means nobody has been,
+for that many seconds (clamped to a day). The server owns both clocks: a user
+is `idle` after **10 minutes** and `away` after **1 hour** of combined
+inactivity, the most active of their connections deciding; any report of
+activity brings them straight back. A connection that never announced the
+capability (an older client) counts as active; the phone's delivery socket and
+headless device sessions (the LAN waker, the sign-in-screen service — their
+tokens come from `/devices/token`) do not count at all, and a user online
+through nothing else reads `away`. A `SetActivity` from a connection that did
+not announce the capability is ignored, never answered with an `Error`. One
+over its own small rate limit (6 burst, one per 5 s) is still **taken** —
+silently, with no `Error` — and only its immediate broadcast is skipped: the
+client reports transitions once and never repeats one, so dropping it would
+leave the server holding a stale state; the next sweep publishes the change.
+A new connection is not itself taken as activity: until its first report it
+carries whatever the user's other connections say (active if nothing is
+known), so a reconnect does not flash an idle or away user online.
+Changes go out as:
+
+```json
+{"type":"UserStatus","payload":{"user_id":7,"status":"idle"}}
+```
+
+`status` is `online`, `idle` or `away` (a client reads any other value as
+online). It is sent **only** to connections that announced `presence` — an
+older client keeps receiving just `UserOnline` / `UserOffline` — to the same
+audience as `UserOnline` (shared servers and friends, blocks removed) plus the
+user's own devices; never for a user with "Show online status" off (their own
+devices still see it); and as plain `online` to others when the user has
+"Show when I'm idle or away" off (`show_idle_status` in `GET`/`PATCH
+/profile`, default on; absent from an older server's profile). A
+`UserOnline` means plain `online` until a `UserStatus` says otherwise. A
+user's status is broadcast at most once per 10 seconds when it drops (a
+return to online is never held); a held change is delivered by the server's
+sweep. The shapes are pinned by `frontend/src/tests/fixtures/userStatus.json`
+and `serverFeatures.json`, which both sides' tests parse.
+
 ---
 
-*Last Updated: 2026-09-06*
+*Last Updated: 2026-10-02*

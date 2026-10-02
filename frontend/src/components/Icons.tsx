@@ -1127,6 +1127,18 @@ export const SnoozeIcon = makeIcon('SnoozeIcon', <>
     <path d="M19.75 5.25 17.5 3.25" />
 </>);
 
+/** Presence "away" (an hour with no activity): the sleeping "zz". Two
+ *  letters, not three — a third is one element too many to survive the 14px
+ *  presence badge it is drawn for, and the size step between the two already
+ *  reads as "z z z". Not MoonIcon (do-not-disturb hours) or SnoozeIcon (a
+ *  reminder's alarm clock): this is a state of a PERSON. No LEGACY_GLYPHS
+ *  entry — a brand-new icon has no classic form (and MoonIcon's classic glyph
+ *  is already the zzz emoji). */
+export const AwayIcon = makeIcon('AwayIcon', <>
+    <path d="M3.5 11.5h8l-8 9h8" />
+    <path d="M14 3.5h6.5l-6.5 7h6.5" />
+</>);
+
 /** Previous period (the calendar's back step); mirrors ChevronRightIcon. */
 export const ChevronLeftIcon = makeIcon('ChevronLeftIcon', <>
     <path d="m14.75 5.75-6.25 6.25 6.25 6.25" />
@@ -1334,6 +1346,7 @@ export const ICONS = {
     calendar: CalendarIcon,
     repeat: RepeatIcon,
     snooze: SnoozeIcon,
+    away: AwayIcon,
     'chevron-left': ChevronLeftIcon,
     leaf: LeafIcon,
     food: FoodIcon,

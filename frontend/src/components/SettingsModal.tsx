@@ -297,7 +297,9 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
     // Server-side privacy flags (PATCH /profile) — unlike the rest of this
     // modal these are NOT localStorage: a privacy control the server never
     // hears about protects nothing. null = not loaded yet.
-    const [privacy, setPrivacy] = useState<{ allowDMs: boolean; showOnline: boolean } | null>(null);
+    // showIdle is undefined when the server predates idle/away presence (its
+    // profile has no show_idle_status): the toggle is then not shown at all.
+    const [privacy, setPrivacy] = useState<{ allowDMs: boolean; showOnline: boolean; showIdle?: boolean } | null>(null);
     // Blocked users (GET /blocked). null = not loaded yet.
     const [blocked, setBlocked] = useState<BlockedUser[] | null>(null);
     const [unblocking, setUnblocking] = useState<number | null>(null);
@@ -561,6 +563,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                 setPrivacy({
                     allowDMs: profile.allow_dms_from_server_members ?? true,
                     showOnline: profile.show_online_status ?? true,
+                    showIdle: typeof profile.show_idle_status === 'boolean' ? profile.show_idle_status : undefined,
                 });
             }).catch(console.error);
 
@@ -595,11 +598,13 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
     }, [isOpen, activeSection]);
 
     /** Flip a server-side privacy flag: optimistic, reverts on failure. */
-    const setPrivacyFlag = (key: 'allowDMs' | 'showOnline', value: boolean) => {
+    const setPrivacyFlag = (key: 'allowDMs' | 'showOnline' | 'showIdle', value: boolean) => {
         const prev = privacy;
         if (!prev) return; // not loaded — the control is disabled anyway
         setPrivacy({ ...prev, [key]: value });
-        const field = key === 'allowDMs' ? 'allow_dms_from_server_members' : 'show_online_status';
+        const field = key === 'allowDMs'
+            ? 'allow_dms_from_server_members'
+            : key === 'showOnline' ? 'show_online_status' : 'show_idle_status';
         updateProfile({ [field]: value }).catch(err => {
             console.error('Failed to update privacy setting:', err);
             setPrivacy(prev);
@@ -1676,6 +1681,28 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             onChange={(e) => setPrivacyFlag('showOnline', e.target.checked)}
                                         />
                                     </div>
+                                    {privacy?.showIdle !== undefined && (
+                                        <div className="settings-option">
+                                            <div className="option-info">
+                                                <label htmlFor="privacy-show-idle">Show when I'm idle or away</label>
+                                                <span className="option-hint">
+                                                    {privacy.showOnline
+                                                        ? <>Your dot turns orange after 10 minutes with no activity
+                                                            on any of your devices, and shows a "zz" after an hour.
+                                                            People who share a server with you, and your friends, see
+                                                            it. When off, you simply show as online while connected.</>
+                                                        : <>Nothing is shared while "Show online status" is off.</>}
+                                                </span>
+                                            </div>
+                                            <input
+                                                id="privacy-show-idle"
+                                                type="checkbox"
+                                                checked={privacy.showIdle}
+                                                disabled={!privacy.showOnline}
+                                                onChange={(e) => setPrivacyFlag('showIdle', e.target.checked)}
+                                            />
+                                        </div>
+                                    )}
                                     <div className="settings-option">
                                         <div className="option-info">
                                             <label>Hidden messages</label>

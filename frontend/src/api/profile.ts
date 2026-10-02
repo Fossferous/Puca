@@ -14,6 +14,11 @@ export interface Profile {
     allow_dms_from_server_members: boolean;
     /** Privacy: when false, presence reports this user as offline to others. Server-enforced. */
     show_online_status: boolean;
+    /** Privacy: when false, others see plain "online" instead of idle/away.
+     *  ABSENT from an older server, which has no idle/away at all — the
+     *  Settings toggle is hidden then rather than offering a switch that
+     *  would do nothing. Server-enforced. */
+    show_idle_status?: boolean;
     /** Uploaded clip played to others when you join/leave voice (null = default chime). */
     join_sound_file_id?: string | null;
     leave_sound_file_id?: string | null;
@@ -53,6 +58,7 @@ export async function updateProfile(updates: {
     display_name?: string;
     allow_dms_from_server_members?: boolean;
     show_online_status?: boolean;
+    show_idle_status?: boolean;
     /** File id of an uploaded audio clip; empty string clears back to the default chime. */
     join_sound_file_id?: string;
     leave_sound_file_id?: string;

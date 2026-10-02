@@ -1187,6 +1187,9 @@ pub struct UpdateProfileRequest {
     pub allow_dms_from_server_members: Option<bool>,
     /// Privacy: when false, presence reports this user as offline to others.
     pub show_online_status: Option<bool>,
+    /// Privacy: when false, others see plain "online" instead of idle/away
+    /// (src/presence.rs). An older client never sends it.
+    pub show_idle_status: Option<bool>,
     /// Custom voice join/leave clips OTHERS hear (empty string clears).
     pub join_sound_file_id: Option<String>,
     pub leave_sound_file_id: Option<String>,
@@ -1200,6 +1203,10 @@ pub struct ProfileResponse {
     pub avatar_url: Option<String>,
     pub allow_dms_from_server_members: bool,
     pub show_online_status: bool,
+    /// "Show when I'm idle or away". Its presence in this response is how a
+    /// client knows the server has the feature — it hides the toggle when
+    /// the field is missing (an older server).
+    pub show_idle_status: bool,
     pub join_sound_file_id: Option<String>,
     pub leave_sound_file_id: Option<String>,
 }
@@ -1214,9 +1221,9 @@ pub async fn get_profile(
     tracing::info!(">>> get_profile called for user_id={}", claims.sub);
 
     // users.id is INTEGER (i32) in PostgreSQL
-    let user: Option<(i32, String, Option<String>, Option<String>, bool, bool, Option<String>, Option<String>)> = sqlx::query_as(
+    let user: Option<(i32, String, Option<String>, Option<String>, bool, bool, bool, Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT id, username, display_name, avatar_file_id, allow_dms_from_server_members, show_online_status, \
-                join_sound_file_id, leave_sound_file_id \
+                show_idle_status, join_sound_file_id, leave_sound_file_id \
          FROM users WHERE id = $1"
     )
     .bind(claims.sub as i32)
@@ -1232,6 +1239,7 @@ pub async fn get_profile(
             avatar_file_id,
             allow_dms,
             show_online,
+            show_idle,
             join_sound,
             leave_sound,
         )) => {
@@ -1249,6 +1257,7 @@ pub async fn get_profile(
                 avatar_url,
                 allow_dms_from_server_members: allow_dms,
                 show_online_status: show_online,
+                show_idle_status: show_idle,
                 join_sound_file_id: join_sound,
                 leave_sound_file_id: leave_sound,
             })
@@ -1313,6 +1322,19 @@ pub async fn update_profile(
     // nothing but the global per-IP limiter in front of it.
     let prev_show_online: Option<bool> = if payload.show_online_status.is_some() {
         sqlx::query_as::<_, (bool,)>("SELECT show_online_status FROM users WHERE id = $1")
+            .bind(claims.sub as i32)
+            .fetch_optional(&state.pool)
+            .await
+            .ok()
+            .flatten()
+            .map(|(b,)| b)
+    } else {
+        None
+    };
+    // Same for "Show when I'm idle or away": only a real flip corrects
+    // anyone's picture.
+    let prev_show_idle: Option<bool> = if payload.show_idle_status.is_some() {
+        sqlx::query_as::<_, (bool,)>("SELECT show_idle_status FROM users WHERE id = $1")
             .bind(claims.sub as i32)
             .fetch_optional(&state.pool)
             .await
@@ -1421,6 +1443,11 @@ pub async fn update_profile(
         param_idx += 1;
     }
 
+    if payload.show_idle_status.is_some() {
+        updates.push(format!("show_idle_status = ${}", param_idx));
+        param_idx += 1;
+    }
+
     if payload.join_sound_file_id.is_some() {
         updates.push(format!("join_sound_file_id = ${}", param_idx));
         param_idx += 1;
@@ -1460,6 +1487,9 @@ pub async fn update_profile(
     }
     if let Some(show_online) = payload.show_online_status {
         query_builder = query_builder.bind(show_online);
+    }
+    if let Some(show_idle) = payload.show_idle_status {
+        query_builder = query_builder.bind(show_idle);
     }
     if let Some(ref join_sound) = payload.join_sound_file_id {
         // Empty string clears (same convention as display_name).
@@ -1539,6 +1569,22 @@ pub async fn update_profile(
                         state.send_to_user(audience_id, msg.clone());
                     }
                 }
+            }
+            // Idle/away follows both switches (src/presence.rs): the cached
+            // flags change, and everyone who can see this user is corrected
+            // — UserOnline above reads as plain online, so an idle user who
+            // just un-hid is followed by their real status.
+            let online_flip = matches!((payload.show_online_status, prev_show_online), (Some(n), Some(p)) if n != p);
+            let idle_flip = matches!((payload.show_idle_status, prev_show_idle), (Some(n), Some(p)) if n != p);
+            if online_flip || idle_flip {
+                crate::presence::flags_changed(
+                    &state,
+                    claims.sub,
+                    payload.show_online_status.filter(|_| online_flip),
+                    payload.show_idle_status.filter(|_| idle_flip),
+                    online_flip && payload.show_online_status == Some(true),
+                )
+                .await;
             }
             StatusCode::OK.into_response()
         }

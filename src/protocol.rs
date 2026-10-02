@@ -309,6 +309,18 @@ pub enum ClientMessage {
         transfer_id: String,
         payload: String,
     },
+
+    /// Presence (capability `presence`, see `crate::presence`): this
+    /// connection's LOCAL activity changed. `None` = active; `Some(n)` =
+    /// inactive, and has been for `n` seconds (clamped to a day). Sent only
+    /// on a transition, and on every socket once the server has confirmed
+    /// the capability with `ServerFeatures` — never to a server that has not
+    /// (an older one answers an unknown variant with an Error frame). The
+    /// server owns the idle and away clocks; a client never claims either.
+    SetActivity {
+        #[serde(default)]
+        inactive_secs: Option<u32>,
+    },
 }
 
 /// Messages sent from the server to the client
@@ -593,6 +605,27 @@ pub enum ServerMessage {
 
     /// User went offline (Global presence)
     UserOffline { user_id: UserId },
+
+    /// An online user's status changed: `online`, `idle` (10 minutes with no
+    /// activity) or `away` (an hour). Sent ONLY to connections that announced
+    /// the `presence` capability (`/ws?caps=presence`) — an older client
+    /// keeps getting just UserOnline / UserOffline — to the same audience as
+    /// UserOnline plus the user's own devices, and never for a user with
+    /// "Show online status" off. A UserOnline means plain `online` until a
+    /// UserStatus says otherwise; an unknown status reads as online. Shape
+    /// pinned by `frontend/src/tests/fixtures/userStatus.json`.
+    UserStatus {
+        user_id: UserId,
+        status: crate::presence::PresenceStatus,
+    },
+
+    /// Sent once, right after connect, ONLY to a connection that announced
+    /// capabilities in `/ws?caps=`: the ones this server supports, so the
+    /// client knows which new client→server frames it may send on THIS
+    /// socket. An older server sends nothing, so a client must assume
+    /// nothing until this arrives, per socket. Shape pinned by
+    /// `frontend/src/tests/fixtures/serverFeatures.json`.
+    ServerFeatures { features: Vec<String> },
 
     // --- Remote control (host receives these; see ClientMessage above) ---
     /// A viewer is asking to control this (host) user's shared screen. Username
@@ -1255,5 +1288,50 @@ mod own_voice_wire_tests {
         assert!(matches!(new, ClientMessage::JoinRoom { take_over: true, replay: true, .. }));
         let leave: ClientMessage = serde_json::from_str(r#"{"type":"LeaveOwnVoice","payload":{"room_id":"voice_1"}}"#).unwrap();
         assert!(matches!(leave, ClientMessage::LeaveOwnVoice { ref room_id } if room_id == "voice_1"));
+    }
+}
+
+#[cfg(test)]
+mod presence_frame_tests {
+    use super::*;
+    use crate::presence::PresenceStatus;
+
+    /// The server and the client are pinned to ONE file each, as with
+    /// VoiceSpeakState: the client's tests parse the same fixtures.
+    #[test]
+    fn user_status_is_the_fixture_the_client_parses() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../frontend/src/tests/fixtures/userStatus.json")).expect("JSON");
+        let ours = serde_json::to_value(ServerMessage::UserStatus { user_id: 7, status: PresenceStatus::Idle }).unwrap();
+        assert_eq!(ours, fixture);
+        // Not vacuous: another status is a different frame, and each status
+        // has the lowercase wire name the client switches on.
+        let away = serde_json::to_value(ServerMessage::UserStatus { user_id: 7, status: PresenceStatus::Away }).unwrap();
+        assert_ne!(away, fixture);
+        assert_eq!(away["payload"]["status"], "away");
+        let online = serde_json::to_value(ServerMessage::UserStatus { user_id: 7, status: PresenceStatus::Online }).unwrap();
+        assert_eq!(online["payload"]["status"], "online");
+    }
+
+    #[test]
+    fn server_features_is_the_fixture_the_client_parses() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../frontend/src/tests/fixtures/serverFeatures.json")).expect("JSON");
+        let ours = serde_json::to_value(ServerMessage::ServerFeatures { features: vec!["presence".into()] }).unwrap();
+        assert_eq!(ours, fixture);
+        assert_ne!(serde_json::to_value(ServerMessage::ServerFeatures { features: vec![] }).unwrap(), fixture);
+    }
+
+    #[test]
+    fn set_activity_parses_the_client_shapes() {
+        let idle: ClientMessage =
+            serde_json::from_str(r#"{"type":"SetActivity","payload":{"inactive_secs":700}}"#).unwrap();
+        assert!(matches!(idle, ClientMessage::SetActivity { inactive_secs: Some(700) }));
+        let active: ClientMessage =
+            serde_json::from_str(r#"{"type":"SetActivity","payload":{"inactive_secs":null}}"#).unwrap();
+        assert!(matches!(active, ClientMessage::SetActivity { inactive_secs: None }));
+        // A negative or fractional number is refused, not wrapped.
+        assert!(serde_json::from_str::<ClientMessage>(r#"{"type":"SetActivity","payload":{"inactive_secs":-1}}"#).is_err());
+        assert!(serde_json::from_str::<ClientMessage>(r#"{"type":"SetActivity","payload":{"inactive_secs":1.5}}"#).is_err());
     }
 }

@@ -103,7 +103,8 @@ by a real client** (see §3 and §4 for what that proviso is doing).
 
 - Who talks to whom, and when
 - Message sizes and timing; channel membership; epoch numbers
-- Presence/online state, voice-channel join and leave events
+- Presence/online state, voice-channel join and leave events, and when each
+  of your devices last went quiet or came back (idle/away presence, below)
 - For a personal note (Púca Notes, migration 065): whether it has text,
   pictures or a voice note and roughly how much (the sealed envelopes' sizes,
   which also hint at how many pictures), the encrypted uploads themselves as
@@ -1436,6 +1437,34 @@ recipient (`target_is_hidden` / `show_online_status`,
 setting cannot be read — a database error, or no row — is treated as hidden,
 so an outage does not hand the sender the online bit; only a row that
 positively says "show online status" keeps the parked/delivered distinction.
+
+**Idle and away are new information about a person, shared narrowly.** A
+dot that turns idle after ten minutes and away after an hour tells everyone
+who can see it roughly when you stop and start using your devices — over a
+large public server that is a sleep and work pattern. So:
+`UserStatus` reaches exactly the `UserOnline` audience (people who share a
+server with you and your friends, a block in either direction removed —
+`presence_audience`), never search (`/users/search` is instance-wide and
+carries no status); nothing is sent at all for someone with **Show online
+status** off; **Show when I'm idle or away** (`users.show_idle_status`,
+migration 072, default on) off makes others see plain online while you are
+connected. What a device reports is one number — how long nobody has used
+it (the desktop's OS-wide last-input time, or the page's own input and
+visibility) — never what was typed or clicked; the server keeps it in memory
+on the socket and stores nothing ([`src/presence.rs`](../src/presence.rs)).
+A report changes only the sender's own connection, so nobody can make
+another user idle, and a connection that did not announce the capability
+cannot report at all. The server owns both clocks and coalesces each user's
+broadcasts (a drop at most once per 10 seconds, a return at once), and the
+report frame has its own small rate limit, so a client flapping its reports
+cannot turn each one into a fan-out to every member of every shared server
+(a report over that limit still updates the sender's own state, and the
+sweep publishes it; only the immediate fan-out is skipped).
+Headless device sessions (the LAN waker, the sign-in-screen service) never
+count as someone at a screen. Turning **Show online status** off cannot be
+undone by a device connecting at the same moment: the server refuses to
+cache a read of the setting that began before a change of it, so a hidden
+status stays hidden for the life of the connection.
 
 **Two people who share no server cannot open a conversation** unless they are
 friends or the recipient wrote first. The Settings toggle **"Allow DMs from

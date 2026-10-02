@@ -160,6 +160,26 @@
     background: var(--status-offline);
 }
 
+.user-profile-popup .upp-status.idle,
+.user-profile-popup .upp-status.away {
+    color: var(--status-idle);
+}
+
+.user-profile-popup .upp-status.idle::before {
+    background: var(--status-idle);
+}
+
+/* Away swaps the dot for the "zz" badge (AwayIcon), as the member list does. */
+.user-profile-popup .upp-status.away::before {
+    display: none;
+}
+
+.user-profile-popup .upp-status-badge {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+}
+
 /* Profile Sections */
 .user-profile-popup .upp-section {
     padding: 12px 16px;

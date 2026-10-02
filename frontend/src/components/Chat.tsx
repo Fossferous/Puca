@@ -67,7 +67,6 @@ import {
     toggleTaskCompletion,
     reorderChannels,
     setServerNickname,
-    listMembersWithRoles,
     kickMember,
     banMember,
     moveMemberVoice,
@@ -164,8 +163,12 @@ import {
     useServers,
     useChannels,
     useServerMembers,
+    fetchMembersWithPresence,
     keys
 } from '../hooks/queries';
+import { presenceOf, usePresence, usePresenceKey, PRESENCE_LABEL } from '../api/presenceStore';
+import { startActivityReporter } from '../api/activityReporter';
+import { PresenceDot } from './PresenceDot';
 import { PERM, hasPerm } from '../api/permissionBits';
 import { useSwipe } from '../hooks/useSwipe';
 import { isServerMuted, isServerQuiet } from './mutedServersStore';
@@ -747,6 +750,21 @@ export function Chat({ onLogout }: ChatProps) {
     const token = getToken();
     const currentUser = token ? decodeJwt(token) : null;
     const currentUserId = currentUser?.sub ?? 0;
+
+    // Idle/away presence (src/presence.rs). Every status this view draws —
+    // the member list and its Online/Offline split, your own profile bar,
+    // the profile popup — reads the presence store. This view re-renders only
+    // when one of the CURRENT server's members changes (usePresenceKey), not
+    // for every status change of everyone. Above every early return.
+    usePresenceKey(allMembers);
+    const ownPresence = usePresence(currentUserId, true);
+    // Tell the server whether the person at THIS device is active. It sends
+    // nothing until this socket's server confirms the capability, so an older
+    // server never sees a frame it would answer with an Error.
+    useEffect(() => {
+        if (!currentUserId) return;
+        return startActivityReporter({ userId: currentUserId });
+    }, [currentUserId]);
 
     // May this user create invites on the CURRENT server? Server carries no
     // resolved bits, but every channel's my_permissions is resolved from the
@@ -2348,37 +2366,9 @@ export function Chat({ onLogout }: ChatProps) {
         // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the selection id, not the object identity
     }, [currentCollection?.id, channels]);
 
-    // Global presence listener
-    useEffect(() => {
-        if (!currentServer) return;
-
-        const handleUserOnline = (msg: ServerMessage) => {
-            const payload = msg.payload as { user: { id: number; username: string } };
-            queryClient.setQueryData(keys.members(currentServer.id), (old: MemberWithRoles[] | undefined) => {
-                return (old || []).map(m =>
-                    m.id === payload.user.id ? { ...m, is_online: true } : m
-                );
-            });
-        };
-
-        const handleUserOffline = (msg: ServerMessage) => {
-            const payload = msg.payload as { user_id: number };
-            queryClient.setQueryData(keys.members(currentServer.id), (old: MemberWithRoles[] | undefined) => {
-                return (old || []).map(m =>
-                    m.id === payload.user_id ? { ...m, is_online: false } : m
-                );
-            });
-        };
-
-        wsClient.on('UserOnline', handleUserOnline);
-        wsClient.on('UserOffline', handleUserOffline);
-
-        return () => {
-            wsClient.off('UserOnline', handleUserOnline);
-            wsClient.off('UserOffline', handleUserOffline);
-        };
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the selection id, not the object identity
-    }, [currentServer?.id, queryClient]);
+    // Presence (UserOnline / UserOffline / UserStatus) is no longer patched
+    // into the members query here: the presence store hears every frame
+    // whichever view is mounted, and every status render reads it.
 
     // Real-time removal: if we get kicked/banned from a server, drop it
     // immediately instead of showing a stale server until the next reload.
@@ -4191,8 +4181,9 @@ export function Chat({ onLogout }: ChatProps) {
     // The "no channels" message will be shown in the main content area instead
 
     // Split members into online and offline
-    const onlineMembers = allMembers.filter(m => m.is_online);
-    const offlineMembers = allMembers.filter(m => !m.is_online);
+    const memberPresence = (m: MemberWithRoles) => presenceOf(m.id, m.is_online, m.status);
+    const onlineMembers = allMembers.filter(m => memberPresence(m) !== 'offline');
+    const offlineMembers = allMembers.filter(m => memberPresence(m) === 'offline');
 
     return (
         <div className="chat-container" data-mobile-panel={isMobile ? mobilePanel : undefined} {...panelSwipe}>
@@ -4650,7 +4641,7 @@ export function Chat({ onLogout }: ChatProps) {
                     queryClient
                         .fetchQuery({
                             queryKey: keys.members(server.id),
-                            queryFn: () => listMembersWithRoles(server.id),
+                            queryFn: () => fetchMembersWithPresence(server.id),
                         })
                         .then((members: MemberWithRoles[]) => {
                             if (nickFetchServerRef.current !== server.id) return; // dialog moved on
@@ -5223,7 +5214,7 @@ export function Chat({ onLogout }: ChatProps) {
                         </div>
                         <div className="user-details">
                             <span className="user-username">{currentUser?.username || 'Unknown'}</span>
-                            <span className="user-status">Online</span>
+                            <span className={`user-status ${ownPresence}`}>{PRESENCE_LABEL[ownPresence === 'offline' ? 'online' : ownPresence]}</span>
                         </div>
                     </div>
                     <div className="user-actions">
@@ -6227,7 +6218,7 @@ export function Chat({ onLogout }: ChatProps) {
                                             fileId={member.avatar_file_id}
                                             fallback={null}
                                         />
-                                        <div className="status-dot online"></div>
+                                        <PresenceDot status={memberPresence(member)} className="status-dot" />
                                     </div>
                                     <span className="member-name" style={{ color: member.top_role_color }}>
                                         {member.is_owner && <span className="owner-crown" title="Server Owner"><CrownIcon /></span>}
@@ -6273,7 +6264,7 @@ export function Chat({ onLogout }: ChatProps) {
                                 >
                                     <div className="member-avatar">
                                         <span>{avatarInitial(member.server_nickname, member.display_name, member.username)}</span>
-                                        <div className="status-dot offline"></div>
+                                        <PresenceDot status="offline" className="status-dot" />
                                     </div>
                                     <span className="member-name">
                                         {member.is_owner && <span className="owner-crown" title="Server Owner"><CrownIcon /></span>}

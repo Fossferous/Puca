@@ -6,6 +6,10 @@ export interface Friend {
     id: number;
     username: string;
     is_online: boolean;
+    /** `online` | `idle` | `away` for an online friend (src/presence.rs);
+     *  absent when offline or from an older server. Read it through the
+     *  presence store (presenceOf), never directly. */
+    status?: string;
     since: string;
 }
 

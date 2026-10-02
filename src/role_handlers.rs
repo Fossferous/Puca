@@ -119,6 +119,11 @@ pub struct MemberWithRoles {
     pub display_name: Option<String>,
     pub server_nickname: Option<String>,
     pub is_online: bool,
+    /// Idle/away for an ONLINE member (`online`, `idle`, `away`); absent when
+    /// offline. What the sockets were last told (src/presence.rs), so a poll
+    /// never announces a change a push has not. Older clients ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<crate::presence::PresenceStatus>,
     pub roles: Vec<RoleResponse>,
     pub top_role_color: String,
     pub is_owner: bool,
@@ -799,18 +804,20 @@ pub async fn list_members_with_roles(
             .unwrap_or("#99AAB5".to_string());
         let is_owner = user_id == owner_id.0;
 
+        // Hidden status reads as offline to everyone but the user themself;
+        // a blocked pair (either direction) reads as offline outright.
+        let is_online = blocked
+            .as_ref()
+            .is_some_and(|set| !set.contains(&(user_id as i64)))
+            && state.is_user_visibly_online(user_id as i64)
+            && (shows_online || user_id as i64 == claims.sub);
         result.push(MemberWithRoles {
             id: user_id as i64,
             username,
             display_name,
             server_nickname,
-            // Hidden status reads as offline to everyone but the user themself;
-            // a blocked pair (either direction) reads as offline outright.
-            is_online: blocked
-                .as_ref()
-                .is_some_and(|set| !set.contains(&(user_id as i64)))
-                && state.is_user_visibly_online(user_id as i64)
-                && (shows_online || user_id as i64 == claims.sub),
+            is_online,
+            status: is_online.then(|| state.listing_status(user_id as i64)),
             roles,
             top_role_color: top_color,
             is_owner,

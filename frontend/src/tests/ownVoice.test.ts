@@ -112,7 +112,10 @@ describe('the capability gate: nothing new is sent before this socket saw OwnVoi
     it('announces the capability and the device kind on the WebSocket URL', async () => {
         const sock = await openSocket();
         const url = new URL(sock.url);
-        expect(url.searchParams.get('caps')).toBe('own_voice');
+        // ONE caps list carrying every capability: the server reads `caps`
+        // once, so a repeated key would fail the upgrade (w2 integration).
+        expect(url.searchParams.getAll('caps')).toHaveLength(1);
+        expect(url.searchParams.get('caps')?.split(',')).toEqual(expect.arrayContaining(['own_voice', 'presence']));
         expect(['desktop', 'mobile', 'browser']).toContain(url.searchParams.get('kind'));
         expect(sock.protocols).toEqual(['bearer', 'token']);
     });
