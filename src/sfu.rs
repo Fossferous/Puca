@@ -2787,9 +2787,14 @@ pub async fn get_sfu_token(
         }
     };
 
+    // i32, MATCHING update_channel's copy of this exact text (channels.id is
+    // INT4): sqlx caches the prepared statement per connection keyed by the
+    // text alone, so with i64 here every SFU join that landed on a pooled
+    // connection which had served a channel edit failed with 22P03 - read
+    // below as "Channel not found" (see the 22P03 note in device_token.rs).
     let row: Option<(i32, bool)> =
         sqlx::query_as("SELECT type, COALESCE(sfu_mode, false) FROM channels WHERE id = $1")
-            .bind(channel_id)
+            .bind(channel_id as i32)
             .fetch_optional(&state.pool)
             .await
             .unwrap_or(None);

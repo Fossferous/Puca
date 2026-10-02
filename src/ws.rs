@@ -8463,6 +8463,55 @@ mod own_voice_tests {
         assert_eq!(after_replay, (vec![], vec![phone.conn]), "the stale replay neither rejoins the PC nor evicts the phone");
     }
 
+    /// Found by the live two-device check, where the SFU half failed only on
+    /// some runs ("Channel not found" on the sfu-token request, so the phone
+    /// never reached LiveKit): `update_channel` and `get_sfu_token` run the
+    /// SAME SQL text against channels.id (INT4), one binding i32 and the other
+    /// i64. sqlx caches the prepared statement per connection keyed by the
+    /// text alone, so once a pooled connection had served a channel edit,
+    /// every SFU join that landed on it failed with 22P03 (incorrect binary
+    /// data format) - swallowed as "not found". One connection, so the two
+    /// handlers are forced onto the same one.
+    #[tokio::test]
+    async fn an_sfu_join_still_mints_after_a_channel_edit_on_the_same_connection() {
+        use crate::sfu::resync_tests::{livekit_stand_in, no_env_proxy};
+        use axum::response::IntoResponse;
+        let Some(pool) = crate::migrator::test_pool(1).await else { return };
+        no_env_proxy();
+        let (a, b, server, _voice, sfu, _text) = fixture(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let claims: crate::auth::Claims = serde_json::from_value(serde_json::json!({
+            "sub": a, "username": "a", "exp": chrono::Utc::now().timestamp() + 3600, "sid": "sid-pc",
+        }))
+        .expect("claims");
+        let (base, _srv) = livekit_stand_in(vec![], None).await;
+        let run = async {
+            let edit = crate::channel_handlers::update_channel(
+                axum::extract::State(state.clone()),
+                axum::extract::Path(sfu as i64),
+                axum::Extension(claims.clone()),
+                axum::Json(serde_json::from_value(serde_json::json!({ "sfu_mode": true })).expect("payload")),
+            )
+            .await
+            .into_response()
+            .status();
+            let mint = crate::sfu::get_sfu_token(
+                axum::extract::State(state.clone()),
+                axum::extract::Path(sfu as i64),
+                axum::Extension(claims.clone()),
+            )
+            .await
+            .into_response()
+            .status();
+            (edit, mint)
+        };
+        let (edit, mint) = crate::sfu::TEST_LIVEKIT.scope(base, run).await;
+        cleanup(&pool, &[a, b], &server).await;
+
+        assert!(edit.is_success(), "fixture: the owner's channel edit succeeds: {edit}");
+        assert_eq!(mint, axum::http::StatusCode::OK, "the SFU join after it still mints a token");
+    }
+
     /// SFU: LiveKit identities are minted per TOKEN REQUEST, not per socket,
     /// so "cut the user" would cut the phone too. Move here must cut exactly
     /// the PC's LiveKit session - the one minted on the PC's session - and
