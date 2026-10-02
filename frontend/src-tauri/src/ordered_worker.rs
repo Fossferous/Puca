@@ -7,11 +7,16 @@
 //! command. Anything that can wait there (a thread join, a bounded sleep, an
 //! acknowledgement from another worker) stalls the whole window for as long
 //! as it waits. Making such a command `async` moves the work off the main
-//! thread but throws away ORDER: each async invoke becomes its own task on a
-//! thread pool, so a stop can overtake the start in front of it. A sync
-//! command that only does `send` here keeps both: the send happens on the
-//! main thread in arrival order and never waits (an unbounded channel append),
-//! and the work runs on one dedicated thread in that same order.
+//! thread but adds REORDERING: each async invoke becomes its own task on a
+//! thread pool, so a stop can overtake the start delivered before it. A sync
+//! command that only does `send` here avoids both: the send happens on the
+//! main thread in the order the IPC layer delivers the invokes and never
+//! waits (an unbounded channel append), and the work runs on one dedicated
+//! thread in that same order.
+//!
+//! What this cannot fix: the IPC layer does not promise to deliver two
+//! separate invokes in the order JS issued them. Work whose order matters
+//! across invokes must travel in ONE invoke (`inject_input_batch`).
 
 /// A named worker thread consuming jobs strictly in the order `send` was
 /// called. Dropping the worker closes the queue; the thread drains what was

@@ -37,8 +37,9 @@
 //! POLL_CONFIRM consecutive ticks emits the edge the hook lost, so a lost
 //! release costs ~40 ms of extra mic, not the rest of the call; a dead hook
 //! degrades to 20 ms polling latency — and a press the poll had to supply
-//! is proof the hook is gone, so both hooks are re-installed on the spot
-//! rather than at the next 60 s tick. All counted in `diag`, so a rising
+//! is proof the hook is gone, so the hooks (the mouse hook only while a
+//! mouse button is bound) are re-installed on the spot rather than at the
+//! next 60 s tick. All counted in `diag`, so a rising
 //! `poll_*` number says the hook is losing input.
 //!
 //! THE POLL MUST NOT SEE OUR OWN INJECTIONS. The hooks ignore input stamped
@@ -93,6 +94,135 @@ fn arm_for_watch<O: HookOps>(set: &mut HookSet<O::Hook>, ops: &mut O, watch: &[u
 #[cfg(any(windows, test))]
 fn on_watch_changed<O: HookOps>(set: &mut HookSet<O::Hook>, ops: &mut O, watch: &[u32]) -> HookStep {
     set.sync_mouse(ops, wants_mouse_hook(watch))
+}
+
+/// Posted to the hook thread by `start()` when the watch list changed, so the
+/// thread adds or removes its mouse hook in place. `WM_APP + 0x31` (WM_APP is
+/// 0x8000; `imp` asserts the two agree at compile time). Defined out here so
+/// the pure dispatch below — and its tests — speak the same number.
+#[cfg(any(windows, test))]
+const WM_WATCH_CHANGED: u32 = 0x8000 + 0x31;
+/// `WM_TIMER`, for the same reason (`imp` asserts it too).
+#[cfg(any(windows, test))]
+const WM_TIMER_MSG: u32 = 0x0113;
+
+/// Whom `start()` must tell that the watch list changed: the running hook
+/// thread, and only when something changed. `tid` 0 = no thread has
+/// published its id yet; such a thread reads the new list when it installs,
+/// because `start()` writes WATCH before it reads THREAD_ID.
+#[cfg(any(windows, test))]
+fn watch_change_post_target(changed: bool, tid: u32) -> Option<u32> {
+    (changed && tid != 0).then_some(tid)
+}
+
+/// What one message on the hook thread's queue is.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PumpMsg {
+    WatchChanged,
+    RearmTimer,
+    PollTimer,
+    Other,
+}
+
+/// Name a message from the hook thread's queue. The two timers are
+/// thread-scoped, so `WM_TIMER` carries the timer id in wParam; an id of 0
+/// means that timer could not be created and must match nothing.
+#[cfg(any(windows, test))]
+fn classify_pump_msg(message: u32, wparam: usize, rearm_timer: usize, poll_timer: usize) -> PumpMsg {
+    match message {
+        WM_WATCH_CHANGED => PumpMsg::WatchChanged,
+        WM_TIMER_MSG if poll_timer != 0 && wparam == poll_timer => PumpMsg::PollTimer,
+        WM_TIMER_MSG if rearm_timer != 0 && wparam == rearm_timer => PumpMsg::RearmTimer,
+        _ => PumpMsg::Other,
+    }
+}
+
+/// How the first install went for the mouse hook.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MouseInstall {
+    /// No mouse button is watched: not installed, by design.
+    NotNeeded,
+    Live,
+    /// Wanted, but Windows refused it (mouse binds fall back to the poll).
+    Refused,
+}
+
+/// What `HotkeyHooks::on_message` did, for the hook thread to report.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Handled {
+    /// WM_WATCH_CHANGED: the mouse hook was synced in place.
+    Mouse(HookStep),
+    /// The 60 s timer: everything was re-armed for the current watch list.
+    Rearmed,
+    /// The poll timer: the caller polls (GetAsyncKeyState lives in `imp`)
+    /// and calls `rearm` itself when the poll finds evidence.
+    Poll,
+    Ignored,
+}
+
+/// Every hook decision the hotkey hook thread makes, behind the `HookOps`
+/// seam. The thread in `imp` owns one of these over the real Win32 hooks and
+/// does nothing to a hook except through it; the tests drive the same code
+/// with a recorder, so "the thread installs the mouse hook for a
+/// keyboard-only feed" is a test failure, not just a helper's.
+#[cfg(any(windows, test))]
+struct HotkeyHooks<O: HookOps> {
+    ops: O,
+    set: HookSet<O::Hook>,
+}
+
+#[cfg(any(windows, test))]
+impl<O: HookOps> HotkeyHooks<O> {
+    fn new(ops: O) -> Self {
+        Self { ops, set: HookSet::new() }
+    }
+
+    /// The hook thread's first install.
+    fn install(&mut self, watch: &[u32]) -> MouseInstall {
+        arm_for_watch(&mut self.set, &mut self.ops, watch);
+        if self.set.mouse.is_some() {
+            MouseInstall::Live
+        } else if wants_mouse_hook(watch) {
+            MouseInstall::Refused
+        } else {
+            MouseInstall::NotNeeded
+        }
+    }
+
+    /// Tear down and re-install for the CURRENT watch list (the 60 s timer
+    /// and the evidence re-arm). This is also what retries a mouse hook that
+    /// Windows refused while the binds stayed the same.
+    fn rearm(&mut self, watch: &[u32]) {
+        arm_for_watch(&mut self.set, &mut self.ops, watch);
+    }
+
+    /// Act on one message from the hook thread's queue.
+    fn on_message(&mut self, msg: PumpMsg, watch: &[u32]) -> Handled {
+        match msg {
+            PumpMsg::WatchChanged => Handled::Mouse(on_watch_changed(&mut self.set, &mut self.ops, watch)),
+            PumpMsg::RearmTimer => {
+                self.rearm(watch);
+                Handled::Rearmed
+            }
+            PumpMsg::PollTimer => Handled::Poll,
+            PumpMsg::Other => Handled::Ignored,
+        }
+    }
+
+    fn keyboard_live(&self) -> bool {
+        self.set.keyboard.is_some()
+    }
+
+    fn mouse_live(&self) -> bool {
+        self.set.mouse.is_some()
+    }
+
+    fn disarm(&mut self) {
+        self.set.disarm(&mut self.ops);
+    }
 }
 
 #[cfg(test)]
@@ -170,12 +300,125 @@ mod mouse_hook_tests {
         assert_eq!(on_watch_changed(&mut set, &mut ops, &[MOUSE4, M]), HookStep::Keep);
         assert!(ops.calls.is_empty());
     }
+
+    // --- The hook thread's own decisions (HotkeyHooks) ----------------------
+    //
+    // `imp::hook_thread` touches hooks ONLY through HotkeyHooks, and names its
+    // messages ONLY through classify_pump_msg; `imp::start` decides whether to
+    // post ONLY through watch_change_post_target. These drive that same code.
+
+    use super::{classify_pump_msg, watch_change_post_target, Handled, HotkeyHooks, MouseInstall, PumpMsg};
+    use super::{WM_TIMER_MSG, WM_WATCH_CHANGED};
+
+    const REARM_TIMER: usize = 7;
+    const POLL_TIMER: usize = 8;
+
+    /// One hook thread's life: first install, then each queued message (named
+    /// exactly as the real pump names it), then teardown.
+    fn run_thread(first_watch: &[u32], queue: &[(u32, usize, &[u32])]) -> (FakeHooks, MouseInstall, Vec<Handled>) {
+        let mut hooks = HotkeyHooks::new(FakeHooks::default());
+        let first = hooks.install(first_watch);
+        let mut handled = Vec::new();
+        for (message, wparam, watch) in queue {
+            let msg = classify_pump_msg(*message, *wparam, REARM_TIMER, POLL_TIMER);
+            handled.push(hooks.on_message(msg, watch));
+        }
+        hooks.disarm();
+        (hooks.ops, first, handled)
+    }
+
+    #[test]
+    fn the_hook_thread_never_installs_the_mouse_hook_for_a_keyboard_only_feed() {
+        // First install, three 60 s re-arms, a poll tick, a rebind that stays
+        // keyboard-only: zero mouse installs from start to teardown.
+        let (ops, first, handled) = run_thread(
+            &[M, SPACE],
+            &[
+                (WM_TIMER_MSG, REARM_TIMER, &[M, SPACE]),
+                (WM_TIMER_MSG, POLL_TIMER, &[M, SPACE]),
+                (WM_TIMER_MSG, REARM_TIMER, &[M, SPACE]),
+                (WM_WATCH_CHANGED, 0, &[M]),
+                (WM_TIMER_MSG, REARM_TIMER, &[M]),
+            ],
+        );
+        assert_eq!(first, MouseInstall::NotNeeded);
+        assert_eq!(
+            handled,
+            vec![Handled::Rearmed, Handled::Poll, Handled::Rearmed, Handled::Mouse(HookStep::Keep), Handled::Rearmed]
+        );
+        assert_eq!(ops.mouse_installs(), 0, "a keyboard-only feed put every mouse event on the machine through our hook");
+    }
+
+    #[test]
+    fn positive_control_the_hook_thread_installs_it_for_a_mouse4_bind_and_keeps_it_across_rearms() {
+        let (ops, first, _) = run_thread(&[M, MOUSE4], &[(WM_TIMER_MSG, REARM_TIMER, &[M, MOUSE4])]);
+        assert_eq!(first, MouseInstall::Live);
+        assert_eq!(ops.mouse_installs(), 2, "first install + one re-arm");
+    }
+
+    #[test]
+    fn a_watch_changed_message_adds_and_removes_the_mouse_hook_in_place() {
+        let (ops, _, handled) = run_thread(
+            &[M],
+            &[(WM_WATCH_CHANGED, 0, &[M, MOUSE4]), (WM_WATCH_CHANGED, 0, &[M])],
+        );
+        assert_eq!(handled, vec![Handled::Mouse(HookStep::Install), Handled::Mouse(HookStep::Remove)]);
+        assert_eq!(
+            ops.calls,
+            vec![
+                Call::Install(Kind::Keyboard),
+                Call::Install(Kind::Mouse),
+                Call::Remove(Kind::Mouse),
+                Call::Remove(Kind::Keyboard),
+            ],
+            "the rebinds touch only the mouse hook; teardown removes what is left"
+        );
+    }
+
+    #[test]
+    fn a_rearm_follows_the_watch_list_at_the_time_it_fires() {
+        // A rebind whose WM_WATCH_CHANGED has not been processed yet is still
+        // honoured by a re-arm that runs first: it reads the current list.
+        let (ops, _, _) = run_thread(&[M, MOUSE4], &[(WM_TIMER_MSG, REARM_TIMER, &[M])]);
+        assert_eq!(ops.mouse_installs(), 1, "the re-arm must not re-install a mouse hook the list no longer wants");
+    }
+
+    #[test]
+    fn a_refused_mouse_hook_is_reported_and_retried_by_the_next_rearm() {
+        let mut hooks = HotkeyHooks::new(FakeHooks { refuse_mouse: true, ..Default::default() });
+        assert_eq!(hooks.install(&[M, MOUSE4]), MouseInstall::Refused);
+        assert!(hooks.keyboard_live(), "keyboard bindings must survive a refused mouse hook");
+        hooks.ops.refuse_mouse = false;
+        assert_eq!(hooks.on_message(PumpMsg::RearmTimer, &[M, MOUSE4]), Handled::Rearmed);
+        assert!(hooks.mouse_live(), "binds unchanged: the 60 s re-arm is the retry");
+    }
+
+    #[test]
+    fn pump_messages_are_named_by_message_and_timer_id() {
+        assert_eq!(classify_pump_msg(WM_WATCH_CHANGED, 0, REARM_TIMER, POLL_TIMER), PumpMsg::WatchChanged);
+        assert_eq!(classify_pump_msg(WM_TIMER_MSG, REARM_TIMER, REARM_TIMER, POLL_TIMER), PumpMsg::RearmTimer);
+        assert_eq!(classify_pump_msg(WM_TIMER_MSG, POLL_TIMER, REARM_TIMER, POLL_TIMER), PumpMsg::PollTimer);
+        assert_eq!(classify_pump_msg(WM_TIMER_MSG, 99, REARM_TIMER, POLL_TIMER), PumpMsg::Other);
+        assert_eq!(classify_pump_msg(0x0401, 0, REARM_TIMER, POLL_TIMER), PumpMsg::Other);
+        // A timer SetTimer refused (id 0) matches nothing, even a wParam of 0.
+        assert_eq!(classify_pump_msg(WM_TIMER_MSG, 0, 0, 0), PumpMsg::Other);
+    }
+
+    #[test]
+    fn start_posts_the_watch_change_to_a_published_thread_only_when_it_changed() {
+        assert_eq!(watch_change_post_target(true, 4242), Some(4242));
+        assert_eq!(watch_change_post_target(false, 4242), None, "an unchanged list needs no message");
+        assert_eq!(watch_change_post_target(true, 0), None, "an unpublished thread reads the list itself");
+    }
 }
 
 #[cfg(windows)]
 mod imp {
-    use super::{arm_for_watch, on_watch_changed, wants_mouse_hook};
-    use crate::ll_hook::{HookSet, HookStep, Win32LowLevelHooks};
+    use super::{
+        classify_pump_msg, wants_mouse_hook, watch_change_post_target, Handled, HotkeyHooks, MouseInstall,
+        WM_TIMER_MSG, WM_WATCH_CHANGED,
+    };
+    use crate::ll_hook::{HookStep, Win32LowLevelHooks};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::{Mutex, OnceLock};
     use tauri::{AppHandle, Emitter};
@@ -197,7 +440,7 @@ mod imp {
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, GetMessageW, KillTimer, PeekMessageW, PostThreadMessageW, SetTimer,
-        HHOOK, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, WM_APP,
+        KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, WM_APP,
         WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
         WM_MOUSEMOVE, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_TIMER, WM_USER,
         WM_XBUTTONDOWN, WM_XBUTTONUP,
@@ -214,9 +457,8 @@ mod imp {
     /// the watch list means Windows refused it (that button then works
     /// through the 20 ms poll only); false without one is the normal case.
     static MOUSE_HOOK_LIVE: AtomicBool = AtomicBool::new(false);
-    /// Posted to the hook thread by `start()` when the watch list changed, so
-    /// the thread adds or removes its mouse hook in place.
-    const WM_WATCH_CHANGED: u32 = WM_APP + 0x31;
+    // The pure dispatch outside `imp` spells these numerically; keep it honest.
+    const _: () = assert!(WM_WATCH_CHANGED == WM_APP + 0x31 && WM_TIMER_MSG == WM_TIMER);
     /// True from the moment a hook thread is spawned until it has fully
     /// unwound. THREAD_ID cannot carry that invariant on its own: it is
     /// published from INSIDE the thread, so `stop()` immediately followed by
@@ -341,7 +583,8 @@ mod imp {
     static STARTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     static STOPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-    /// How often the hook thread tears down and re-installs both hooks.
+    /// How often the hook thread tears down and re-installs its hooks (the
+    /// mouse hook only while a mouse button is bound).
     ///
     /// THE BUG THIS EXISTS FOR. Windows silently REMOVES a low-level hook whose
     /// callback exceeds its latency budget (LowLevelHooksTimeout). No error, no
@@ -556,22 +799,24 @@ mod imp {
         std::array::from_fn(|i| WATCH[i].load(Ordering::SeqCst))
     }
 
-    fn publish_hook_state(hooks: &HookSet<HHOOK>) {
-        HOOK_LIVE.store(hooks.keyboard.is_some(), Ordering::SeqCst);
-        MOUSE_HOOK_LIVE.store(hooks.mouse.is_some(), Ordering::SeqCst);
+    type Hooks = HotkeyHooks<Win32LowLevelHooks>;
+
+    fn publish_hook_state(hooks: &Hooks) {
+        HOOK_LIVE.store(hooks.keyboard_live(), Ordering::SeqCst);
+        MOUSE_HOOK_LIVE.store(hooks.mouse_live(), Ordering::SeqCst);
     }
 
-    /// Tear down and re-install the hooks — the mouse hook only if the watch
-    /// list still needs it. Unconditional: there is no way to ASK Windows
-    /// whether it dropped a hook, so re-arming only when a check says so is
-    /// not an option. A few microseconds; any edge that lands in the gap is
-    /// the poll's to supply.
-    fn rearm(hooks: &mut HookSet<HHOOK>, ops: &mut Win32LowLevelHooks) {
-        arm_for_watch(hooks, ops, &watch_snapshot());
+    /// Bookkeeping after a re-arm (the 60 s timer or the evidence re-arm),
+    /// which tore down and re-installed the hooks — the mouse hook only if
+    /// the watch list still needs it. Unconditional by design: there is no
+    /// way to ASK Windows whether it dropped a hook, so re-arming only when a
+    /// check says so is not an option. A few microseconds; any edge that
+    /// lands in the gap is the poll's to supply.
+    fn after_rearm(hooks: &Hooks) {
         publish_hook_state(hooks);
         REARMS.fetch_add(1, Ordering::Relaxed);
-        if hooks.keyboard.is_none() {
-            note(HookNote::RearmFailed(ops.keyboard_error.unwrap_or(0)));
+        if !hooks.keyboard_live() {
+            note(HookNote::RearmFailed(hooks.ops.keyboard_error.unwrap_or(0)));
         }
     }
 
@@ -1131,22 +1376,18 @@ mod imp {
 
             // Keyboard hook always; mouse hook only while a mouse button is
             // watched (module doc). Best-effort: keyboard bindings must keep
-            // working even if the mouse hook is refused.
-            let mut ops = Win32LowLevelHooks::new(Some(kbd_proc), Some(mouse_proc));
-            let mut hooks: HookSet<HHOOK> = HookSet::new();
-            let watch = watch_snapshot();
-            arm_for_watch(&mut hooks, &mut ops, &watch);
-            publish_hook_state(&hooks);
-            let mouse = if hooks.mouse.is_some() {
-                MouseNote::Live
-            } else if wants_mouse_hook(&watch) {
-                MouseNote::Refused(ops.mouse_error.unwrap_or(0))
-            } else {
-                MouseNote::NotNeeded
+            // working even if the mouse hook is refused. Every hook decision
+            // below goes through HotkeyHooks — the code the tests drive.
+            let mut hooks: Hooks = HotkeyHooks::new(Win32LowLevelHooks::new(Some(kbd_proc), Some(mouse_proc)));
+            let mouse = match hooks.install(&watch_snapshot()) {
+                MouseInstall::Live => MouseNote::Live,
+                MouseInstall::Refused => MouseNote::Refused(hooks.ops.mouse_error.unwrap_or(0)),
+                MouseInstall::NotNeeded => MouseNote::NotNeeded,
             };
-            let installed = hooks.keyboard.is_some();
+            publish_hook_state(&hooks);
+            let installed = hooks.keyboard_live();
             note(HookNote::Installed {
-                keyboard: if installed { None } else { Some(ops.keyboard_error.unwrap_or(0)) },
+                keyboard: if installed { None } else { Some(hooks.ops.keyboard_error.unwrap_or(0)) },
                 mouse,
             });
 
@@ -1171,50 +1412,48 @@ mod imp {
                     if r == 0 || r == -1 {
                         break; // WM_QUIT (0) or error (-1)
                     }
-                    if msg.message == WM_WATCH_CHANGED {
-                        // A rebind: add or remove the mouse hook in place.
-                        let watch = watch_snapshot();
-                        let step = on_watch_changed(&mut hooks, &mut ops, &watch);
-                        publish_hook_state(&hooks);
-                        match step {
-                            HookStep::Install if hooks.mouse.is_some() => note(HookNote::Mouse(MouseNote::Live)),
-                            HookStep::Install => {
-                                note(HookNote::Mouse(MouseNote::Refused(ops.mouse_error.unwrap_or(0))))
+                    let kind = classify_pump_msg(msg.message, msg.wParam.0, timer, poll_timer);
+                    match hooks.on_message(kind, &watch_snapshot()) {
+                        // A rebind: the mouse hook was added or removed in place.
+                        Handled::Mouse(step) => {
+                            publish_hook_state(&hooks);
+                            match step {
+                                HookStep::Install if hooks.mouse_live() => note(HookNote::Mouse(MouseNote::Live)),
+                                HookStep::Install => {
+                                    note(HookNote::Mouse(MouseNote::Refused(hooks.ops.mouse_error.unwrap_or(0))))
+                                }
+                                HookStep::Remove => note(HookNote::Mouse(MouseNote::Removed)),
+                                HookStep::Keep => {}
                             }
-                            HookStep::Remove => note(HookNote::Mouse(MouseNote::Removed)),
-                            HookStep::Keep => {}
                         }
-                        continue;
-                    }
-                    if msg.message != WM_TIMER {
-                        continue;
-                    }
-                    // Two thread-scoped timers; WM_TIMER carries the id.
-                    let id = msg.wParam.0;
-                    if poll_timer != 0 && id == poll_timer {
-                        // While a higher-integrity window is in front,
-                        // GetAsyncKeyState returns 0 for EVERYTHING — the
-                        // documented UIPI failure return, indistinguishable
-                        // from "up". Tabbing back out of such a game then
-                        // looks exactly like a press the hook missed. It is
-                        // not evidence about the hook, so the evidence
-                        // re-arm stands down around it.
-                        if BLOCKED.load(Ordering::SeqCst) {
-                            last_blocked = std::time::Instant::now();
-                        }
-                        let hook_missed_a_press = poll_watched_keys(&mut disagree);
-                        if hook_missed_a_press
-                            && last_rearm.elapsed() >= std::time::Duration::from_millis(EVIDENCE_REARM_MIN_MS)
-                            && last_blocked.elapsed() >= std::time::Duration::from_millis(EVIDENCE_REARM_BLOCKED_QUIET_MS)
-                        {
-                            note(HookNote::EvidenceRearm);
-                            rearm(&mut hooks, &mut ops);
-                            REARMS_ON_EVIDENCE.fetch_add(1, Ordering::Relaxed);
+                        Handled::Rearmed => {
+                            after_rearm(&hooks);
                             last_rearm = std::time::Instant::now();
                         }
-                    } else if timer != 0 && id == timer {
-                        rearm(&mut hooks, &mut ops);
-                        last_rearm = std::time::Instant::now();
+                        Handled::Poll => {
+                            // While a higher-integrity window is in front,
+                            // GetAsyncKeyState returns 0 for EVERYTHING — the
+                            // documented UIPI failure return, indistinguishable
+                            // from "up". Tabbing back out of such a game then
+                            // looks exactly like a press the hook missed. It is
+                            // not evidence about the hook, so the evidence
+                            // re-arm stands down around it.
+                            if BLOCKED.load(Ordering::SeqCst) {
+                                last_blocked = std::time::Instant::now();
+                            }
+                            let hook_missed_a_press = poll_watched_keys(&mut disagree);
+                            if hook_missed_a_press
+                                && last_rearm.elapsed() >= std::time::Duration::from_millis(EVIDENCE_REARM_MIN_MS)
+                                && last_blocked.elapsed() >= std::time::Duration::from_millis(EVIDENCE_REARM_BLOCKED_QUIET_MS)
+                            {
+                                note(HookNote::EvidenceRearm);
+                                hooks.rearm(&watch_snapshot());
+                                after_rearm(&hooks);
+                                REARMS_ON_EVIDENCE.fetch_add(1, Ordering::Relaxed);
+                                last_rearm = std::time::Instant::now();
+                            }
+                        }
+                        Handled::Ignored => {}
                     }
                 }
                 for t in [timer, poll_timer] {
@@ -1224,7 +1463,7 @@ mod imp {
                 }
             }
 
-            hooks.disarm(&mut ops);
+            hooks.disarm();
             publish_hook_state(&hooks);
             // Clear the slot only if it is still OURS. Belt-and-braces beside
             // THREAD_RUNNING: an unconditional store here let a thread finishing
@@ -1275,12 +1514,9 @@ mod imp {
         // or remove a hook it services. Never a second thread. A thread that
         // has not published its id yet reads the new list when it installs
         // (WATCH is written above, before this read of THREAD_ID).
-        if changed {
-            let tid = THREAD_ID.load(Ordering::SeqCst);
-            if tid != 0 {
-                unsafe {
-                    let _ = PostThreadMessageW(tid, WM_WATCH_CHANGED, WPARAM(0), LPARAM(0));
-                }
+        if let Some(tid) = watch_change_post_target(changed, THREAD_ID.load(Ordering::SeqCst)) {
+            unsafe {
+                let _ = PostThreadMessageW(tid, WM_WATCH_CHANGED, WPARAM(0), LPARAM(0));
             }
         }
         // Already hooked? The new watch list above is all that was needed.

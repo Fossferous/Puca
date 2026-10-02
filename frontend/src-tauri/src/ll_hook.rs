@@ -267,15 +267,25 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_mouse_hook_is_retried_by_the_next_sync_and_keyboard_survives() {
-        let mut ops = FakeHooks { refuse_mouse: true, ..Default::default() };
-        let mut set = HookSet::new();
-        set.arm(&mut ops, true);
-        assert!(set.keyboard.is_some(), "keyboard bindings must survive a refused mouse hook");
-        assert!(set.mouse.is_none());
-        ops.refuse_mouse = false;
-        assert_eq!(set.sync_mouse(&mut ops, true), HookStep::Install);
-        assert!(set.mouse.is_some());
+    fn a_refused_mouse_hook_is_installed_by_a_later_rearm_or_sync_and_keyboard_survives() {
+        // With the binds unchanged nothing posts a sync, so in production the
+        // retry is the next re-arm (60 s timer, or evidence). A rebind that
+        // still wants the mouse hook retries it through sync_mouse.
+        for retry_by_rearm in [true, false] {
+            let mut ops = FakeHooks { refuse_mouse: true, ..Default::default() };
+            let mut set = HookSet::new();
+            set.arm(&mut ops, true);
+            assert!(set.keyboard.is_some(), "keyboard bindings must survive a refused mouse hook");
+            assert!(set.mouse.is_none());
+            ops.refuse_mouse = false;
+            if retry_by_rearm {
+                set.arm(&mut ops, true);
+            } else {
+                assert_eq!(set.sync_mouse(&mut ops, true), HookStep::Install);
+            }
+            assert!(set.mouse.is_some(), "retry_by_rearm = {retry_by_rearm}");
+            assert!(set.keyboard.is_some());
+        }
     }
 
     #[test]

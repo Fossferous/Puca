@@ -385,9 +385,12 @@ async fn hide_screen_capture_bar() -> u32 {
 ///
 /// Which is why this stays a SYNC command even though sync commands run on
 /// the main thread: all it does there is append to an unbounded channel (no
-/// lock, no wait — `ordered_worker.rs`), and the main thread's dispatch is
-/// what puts concurrent invokes in their arrival order. An `async` command
-/// would spawn one task per invoke and give that order up.
+/// lock, no wait — `ordered_worker.rs`). A sync command keeps the order in
+/// which the IPC layer DELIVERS invokes; an `async` one would spawn a task per
+/// invoke and add task-pool reordering on top. Delivery order is not issue
+/// order, though: two separate invokes are not guaranteed to arrive in the
+/// order JS sent them, which is why dependent events go through
+/// `inject_input_batch` below.
 #[cfg(feature = "remote-control")]
 #[tauri::command]
 fn inject_input(event: remote_control::ControlInput) -> Result<(), String> {
@@ -964,10 +967,12 @@ fn release_attention_topmost(app: tauri::AppHandle) {
 /// thread — the one the tray menu's modal loop also runs on — so this only
 /// appends the request to the guard's own worker thread and returns; the
 /// hook-thread lifecycle (which may wait for a predecessor to unwind) runs
-/// there. It stays sync because the main thread is where invokes arrive in
-/// order: an `async` command would let a later `stop_control_guard` overtake
-/// it on the task pool. The frontend never awaits the outcome (it is
-/// best-effort; the Stop button always works).
+/// there. It stays sync so start and stop run in the order the IPC layer
+/// delivers them: an `async` command would add task-pool reordering, letting
+/// a `stop_control_guard` delivered later overtake it. (Delivery order is
+/// still not a promise that two separate invokes arrive in the order JS
+/// issued them.) The frontend never awaits the outcome (it is best-effort;
+/// the Stop button always works).
 #[cfg(feature = "remote-control")]
 #[tauri::command]
 fn start_control_guard(app: tauri::AppHandle, any_input: bool, kill_vk: u32, kill_mods: u32) {
@@ -976,9 +981,11 @@ fn start_control_guard(app: tauri::AppHandle, any_input: bool, kill_vk: u32, kil
 
 /// Stop the physical-input kill switch and release held input. Same shape as
 /// `start_control_guard`: the release is queued behind every injected event
-/// right here (its order is unchanged), and everything that waits — the hook
-/// thread's unwind, the release's acknowledgement and its inline fallback —
-/// runs on the guard's worker, never on the UI thread.
+/// delivered before it, right here (its place in the injection FIFO is
+/// unchanged), and everything that waits — the hook thread's unwind, the
+/// release's acknowledgement and its inline fallback — runs on the guard's
+/// worker, never on the UI thread. So the invoke resolves BEFORE the release
+/// has run; no caller waits on it (teardown awaits `release_control_input`).
 #[cfg(feature = "remote-control")]
 #[tauri::command]
 fn stop_control_guard() {

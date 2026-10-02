@@ -22,9 +22,12 @@ use crate::ordered_worker::OrderedWorker;
 // thing. A single consumer keeps arrival order by construction.
 //
 // The queue is an `OrderedWorker`: the command thread only appends to an
-// unbounded channel (no lock, no wait), so `inject_input` stays a SYNC command
-// — the sync dispatch on the main thread is what fixes the arrival order, and
-// an `async` command would lose it to the task pool.
+// unbounded channel (no lock, no wait), so `inject_input` stays a SYNC command.
+// A sync command keeps the order in which the IPC layer DELIVERS invokes; an
+// `async` one would add task-pool reordering on top. That is all it keeps:
+// separate invokes are NOT guaranteed to be delivered in the order JS issued
+// them, which is why an event that depends on another rides in the same
+// `inject_input_batch`.
 
 enum InjectJob {
     Event(ControlInput),
@@ -480,10 +483,169 @@ fn on_guard_reconfig<O: crate::ll_hook::HookOps>(
     set.sync_mouse(ops, guard_wants_mouse_hook(any_input))
 }
 
+/// Leave now (unless a later start took the thread back). `WM_APP + 0x51`;
+/// WM_APP is 0x8000, and `guard` asserts the two agree at compile time.
+#[cfg(any(windows, test))]
+const WM_GUARD_STOP: u32 = 0x8000 + 0x51;
+/// The configuration changed: re-read whether the mouse hook is wanted.
+#[cfg(any(windows, test))]
+const WM_GUARD_RECONFIG: u32 = 0x8000 + 0x52;
+
+/// A hook Windows refused, for the hook thread to report off-thread.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuardWarn {
+    KeyboardRefused,
+    MouseRefused,
+}
+
+/// Everything the guard's hook thread does once its message queue exists:
+/// publish, install, pump, tear down. Generic over the hooks, the setting
+/// and the message source, so the tests run this very function with a
+/// recorder and a scripted mailbox — the thread in `guard` adds nothing to a
+/// hook decision but the Win32 handles and `GetMessageW`.
+///
+/// `next_msg` returns `None` for WM_QUIT or a GetMessageW error.
+#[cfg(any(windows, test))]
+fn guard_thread_body<O: crate::ll_hook::HookOps>(
+    life: &GuardLifecycle,
+    tid: u32,
+    ops: &mut O,
+    any_input: impl Fn() -> bool,
+    mut next_msg: impl FnMut() -> Option<u32>,
+    mut warn: impl FnMut(GuardWarn, &O),
+) {
+    // FIRST act: make the thread reachable (see GuardLifecycle).
+    life.thread_publish(tid);
+
+    let mut hooks = crate::ll_hook::HookSet::new();
+    let want_mouse = any_input();
+    arm_guard(&mut hooks, ops, want_mouse);
+    if hooks.keyboard.is_none() {
+        warn(GuardWarn::KeyboardRefused, ops);
+    }
+    if want_mouse && hooks.mouse.is_none() {
+        warn(GuardWarn::MouseRefused, ops);
+    }
+
+    if life.thread_may_pump() {
+        while let Some(message) = next_msg() {
+            match message {
+                WM_GUARD_STOP => {
+                    if life.thread_on_stop_request() {
+                        break;
+                    }
+                }
+                WM_GUARD_RECONFIG => {
+                    if on_guard_reconfig(&mut hooks, ops, any_input()) == crate::ll_hook::HookStep::Install
+                        && hooks.mouse.is_none()
+                    {
+                        warn(GuardWarn::MouseRefused, ops);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    hooks.disarm(ops);
+    life.thread_exited(tid);
+}
+
+/// How `guard_start_with` ended.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuardStarted {
+    Spawned,
+    /// The OS refused the thread; ownership was handed back (IDLE).
+    SpawnFailed,
+    /// A thread already owns the guard; it was told to re-read the config
+    /// (`Some(tid)`), or has not published yet and will read it itself.
+    Reconfigured(Option<u32>),
+    /// The previous thread never finished unwinding within the bound.
+    GaveUp,
+}
+
+/// Ownership side of `guard::start`, after the new config is stored. At most
+/// `max_waits` calls to `wait` (each ~2 ms in production) for a predecessor's
+/// unwind — bounded so a wedged thread cannot hold the lifecycle worker, and
+/// every later start/stop behind it, forever.
+#[cfg(any(windows, test))]
+fn guard_start_with(
+    life: &GuardLifecycle,
+    max_waits: u32,
+    spawn: impl FnOnce() -> bool,
+    mut post: impl FnMut(u32, u32),
+    mut wait: impl FnMut(),
+) -> GuardStarted {
+    let mut spawn = Some(spawn);
+    for _ in 0..max_waits {
+        match life.begin_start() {
+            StartPlan::Spawn => {
+                // Exactly one Spawn plan can be issued per call: it returns.
+                let spawned = spawn.take().is_some_and(|f| f());
+                if spawned {
+                    return GuardStarted::Spawned;
+                }
+                life.thread_exited(0);
+                return GuardStarted::SpawnFailed;
+            }
+            StartPlan::Reconfigure(tid) => {
+                if tid != 0 {
+                    post(tid, WM_GUARD_RECONFIG);
+                    return GuardStarted::Reconfigured(Some(tid));
+                }
+                return GuardStarted::Reconfigured(None);
+            }
+            StartPlan::WaitForUnwind => wait(),
+        }
+    }
+    GuardStarted::GaveUp
+}
+
+/// Ownership side of `guard::stop`: ask the thread to leave, then wait (at
+/// most `max_waits` calls to `wait`) until no thread exists. `true` = it is
+/// gone, so no system-wide hook outlives the session.
+#[cfg(any(windows, test))]
+fn guard_stop_with(life: &GuardLifecycle, max_waits: u32, mut post: impl FnMut(u32, u32), mut wait: impl FnMut()) -> bool {
+    if let Some(tid) = life.begin_stop() {
+        post(tid, WM_GUARD_STOP);
+    }
+    for _ in 0..max_waits {
+        if life.is_idle() {
+            return true;
+        }
+        wait();
+    }
+    life.is_idle()
+}
+
+/// `stop_guard`'s ordering, generic over its two queues so it can be tested.
+///
+/// The release is queued FIRST, on the calling thread, so it lands in the
+/// injection FIFO behind every event queued before this stop and ahead of
+/// every event queued after it. Only then is the waiting (the hook thread's
+/// unwind, the release's acknowledgement and its inline fallback) handed to
+/// the guard's worker; if there is no worker, `finish_here` does it inline.
+#[cfg(any(windows, test))]
+fn stop_guard_via<R>(
+    queue_release: impl FnOnce() -> Option<R>,
+    hand_to_worker: impl FnOnce(Option<R>) -> Result<(), Option<R>>,
+    finish_here: impl FnOnce(Option<R>),
+) {
+    let release_ack = queue_release();
+    if let Err(release_ack) = hand_to_worker(release_ack) {
+        finish_here(release_ack);
+    }
+}
+
 #[cfg(windows)]
 mod guard {
-    use super::{arm_guard, on_guard_reconfig, GuardLifecycle, StartPlan};
-    use crate::ll_hook::{HookSet, HookStep, Win32LowLevelHooks};
+    use super::{
+        guard_start_with, guard_stop_with, guard_thread_body, GuardLifecycle, GuardStarted, GuardWarn,
+        WM_GUARD_RECONFIG, WM_GUARD_STOP,
+    };
+    use crate::ll_hook::Win32LowLevelHooks;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::{Mutex, OnceLock};
     use tauri::{AppHandle, Emitter};
@@ -507,10 +669,8 @@ mod guard {
     /// never by the hook thread or its procs.
     static LIFECYCLE: Mutex<()> = Mutex::new(());
 
-    /// Leave now (unless a later start took the thread back).
-    const WM_GUARD_STOP: u32 = WM_APP + 0x51;
-    /// The configuration changed: re-read whether the mouse hook is wanted.
-    const WM_GUARD_RECONFIG: u32 = WM_APP + 0x52;
+    // The generic thread body spells these numerically; keep it honest.
+    const _: () = assert!(WM_GUARD_STOP == WM_APP + 0x51 && WM_GUARD_RECONFIG == WM_APP + 0x52);
 
     // Config (set by start(), read on the hook thread):
     // ANY_INPUT — revoke on ANY physical host input (opt-in).
@@ -618,17 +778,17 @@ mod guard {
 
     /// The hook thread. Nothing here logs or emits directly once a hook is
     /// installed: this thread services the hooks, so any wait on it is a wait
-    /// on every input event on the machine.
+    /// on every input event on the machine. Every hook and ownership decision
+    /// is `guard_thread_body`'s, the code the tests drive.
     fn hook_thread() {
         unsafe {
             let my_tid = GetCurrentThreadId();
-            // Create this thread's message queue BEFORE publishing the id:
-            // PostThreadMessageW to a thread that has no queue yet fails, and
-            // a stop request lost that way is exactly the orphan this
+            // Create this thread's message queue BEFORE the body publishes the
+            // id: PostThreadMessageW to a thread that has no queue yet fails,
+            // and a stop request lost that way is exactly the orphan this
             // ordering exists to prevent.
             let mut msg = MSG::default();
             let _ = PeekMessageW(&mut msg, None, WM_USER, WM_USER, PM_NOREMOVE);
-            LIFE.thread_publish(my_tid);
 
             // Same reasoning as the hotkey hook thread: the callback's
             // latency budget is wall time, including waiting to be scheduled
@@ -638,48 +798,27 @@ mod guard {
             }
 
             let mut ops = Win32LowLevelHooks::new(Some(kbd_proc), Some(mouse_proc));
-            let mut hooks = HookSet::new();
-            arm_guard(&mut hooks, &mut ops, ANY_INPUT.load(Ordering::SeqCst));
-            if hooks.keyboard.is_none() {
-                out(GuardOut::Warn(
-                    "keyboard hook refused: the kill-switch key is inactive (the Stop button still works)",
-                    ops.keyboard_error.unwrap_or(0),
-                ));
-            }
-            if ANY_INPUT.load(Ordering::SeqCst) && hooks.mouse.is_none() {
-                out(GuardOut::Warn("mouse hook refused: mouse input will not revoke control", ops.mouse_error.unwrap_or(0)));
-            }
-
-            if LIFE.thread_may_pump() {
-                loop {
+            guard_thread_body(
+                &LIFE,
+                my_tid,
+                &mut ops,
+                || ANY_INPUT.load(Ordering::SeqCst),
+                || {
                     let r = GetMessageW(&mut msg, None, 0, 0).0;
-                    if r == 0 || r == -1 {
-                        break; // WM_QUIT (0) or error (-1)
-                    }
-                    match msg.message {
-                        WM_GUARD_STOP => {
-                            if LIFE.thread_on_stop_request() {
-                                break;
-                            }
-                        }
-                        WM_GUARD_RECONFIG => {
-                            let want = ANY_INPUT.load(Ordering::SeqCst);
-                            if on_guard_reconfig(&mut hooks, &mut ops, want) == HookStep::Install
-                                && hooks.mouse.is_none()
-                            {
-                                out(GuardOut::Warn(
-                                    "mouse hook refused: mouse input will not revoke control",
-                                    ops.mouse_error.unwrap_or(0),
-                                ));
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            hooks.disarm(&mut ops);
-            LIFE.thread_exited(my_tid);
+                    // WM_QUIT (0) or error (-1) ends the pump.
+                    (r != 0 && r != -1).then_some(msg.message)
+                },
+                |w, ops| match w {
+                    GuardWarn::KeyboardRefused => out(GuardOut::Warn(
+                        "keyboard hook refused: the kill-switch key is inactive (the Stop button still works)",
+                        ops.keyboard_error.unwrap_or(0),
+                    )),
+                    GuardWarn::MouseRefused => out(GuardOut::Warn(
+                        "mouse hook refused: mouse input will not revoke control",
+                        ops.mouse_error.unwrap_or(0),
+                    )),
+                },
+            );
         }
     }
 
@@ -692,6 +831,14 @@ mod guard {
         }
     }
 
+    /// ~1 s (500 x 2 ms) for a predecessor's unwind (two UnhookWindowsHookEx
+    /// calls; normally microseconds), or for the thread to leave on stop.
+    const UNWIND_WAITS: u32 = 500;
+
+    fn wait_a_tick() {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
     /// Runs on the guard's lifecycle worker (see `start_guard`), never on the
     /// UI thread: it may wait for a predecessor to unwind.
     pub fn start(app: AppHandle, any_input: bool, kill_vk: u32, kill_mods: u32) {
@@ -699,60 +846,39 @@ mod guard {
         let _ = APP.set(app);
         ensure_emitter();
         FIRED.store(false, Ordering::SeqCst);
+        // The config is live for the procs as soon as it is stored; a running
+        // thread is then told to re-check whether it needs the mouse hook.
         ANY_INPUT.store(any_input, Ordering::SeqCst);
         KILL_VK.store(kill_vk, Ordering::SeqCst);
         KILL_MODS.store(kill_mods, Ordering::SeqCst);
-        // ~1 s for a predecessor's unwind (two UnhookWindowsHookEx calls;
-        // normally microseconds). Bounded so a wedged thread cannot hold the
-        // worker, and every later start/stop behind it, forever.
-        for _ in 0..500 {
-            match LIFE.begin_start() {
-                StartPlan::Spawn => {
-                    let spawned = std::thread::Builder::new()
-                        .name("control-guard-hooks".into())
-                        .spawn(hook_thread);
-                    if let Err(e) = spawned {
-                        log::error!("[control-guard] could not start the hook thread: {e} (the Stop button still works)");
-                        LIFE.thread_exited(0);
-                    }
-                    return;
-                }
-                StartPlan::Reconfigure(tid) => {
-                    // Already running: the config above is live for the procs;
-                    // the thread re-checks whether it needs the mouse hook. A
-                    // thread that has not published its id reads it itself.
-                    if tid != 0 {
-                        post(tid, WM_GUARD_RECONFIG);
-                    }
-                    return;
-                }
-                StartPlan::WaitForUnwind => std::thread::sleep(std::time::Duration::from_millis(2)),
+        let spawn = || match std::thread::Builder::new().name("control-guard-hooks".into()).spawn(hook_thread) {
+            Ok(_) => true,
+            Err(e) => {
+                log::error!("[control-guard] could not start the hook thread: {e} (the Stop button still works)");
+                false
             }
+        };
+        if guard_start_with(&LIFE, UNWIND_WAITS, spawn, post, wait_a_tick) == GuardStarted::GaveUp {
+            log::error!("[control-guard] previous hook thread never finished unwinding: guard NOT started (the Stop button still works)");
         }
-        log::error!("[control-guard] previous hook thread never finished unwinding: guard NOT started (the Stop button still works)");
     }
 
     /// Runs on the guard's lifecycle worker. Returns once the hook thread has
     /// unwound (bounded), so no system-wide hook outlives the session.
     pub fn stop() {
         let _lifecycle = LIFECYCLE.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(tid) = LIFE.begin_stop() {
-            post(tid, WM_GUARD_STOP);
+        if !guard_stop_with(&LIFE, UNWIND_WAITS, post, wait_a_tick) {
+            log::warn!("[control-guard] stop: hook thread did not exit within 1 s");
         }
-        for _ in 0..500 {
-            if LIFE.is_idle() {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        log::warn!("[control-guard] stop: hook thread did not exit within 1 s");
     }
 }
 
-/// Work for the guard's lifecycle worker. The guard commands are SYNC so the
-/// order they arrive in is the order they run in (a `stop` must never
-/// overtake the `start` in front of it); all they do on the UI thread is
-/// append here.
+/// Work for the guard's lifecycle worker. The guard commands are SYNC so they
+/// run in the order the IPC layer delivers them, with no task-pool
+/// reordering added on top (an `async` command could let a `stop` overtake
+/// the `start` delivered before it); all they do on the UI thread is append
+/// here. Delivery order itself is not guaranteed to be the order JS issued
+/// two separate invokes in — see `inject_input_batch` in lib.rs.
 #[cfg(windows)]
 enum GuardJob {
     Start { app: tauri::AppHandle, any_input: bool, kill_vk: u32, kill_mods: u32 },
@@ -798,11 +924,17 @@ pub fn start_guard(app: tauri::AppHandle, any_input: bool, kill_vk: u32, kill_mo
 /// release's acknowledgement and its inline fallback) moves to the worker.
 #[cfg(windows)]
 pub fn stop_guard() {
-    let release_ack = queue_release_all();
-    if let Err(GuardJob::Stop { release_ack }) = guard_jobs().send(GuardJob::Stop { release_ack }) {
+    stop_guard_via(
+        queue_release_all,
+        |release_ack| {
+            guard_jobs().send(GuardJob::Stop { release_ack }).map_err(|job| match job {
+                GuardJob::Stop { release_ack } => release_ack,
+                GuardJob::Start { .. } => None,
+            })
+        },
         // No worker: do it here rather than not at all.
-        finish_release_all(release_ack);
-    }
+        finish_release_all,
+    );
 }
 
 #[cfg(not(windows))]
@@ -1153,5 +1285,334 @@ mod guard_tests {
     fn every_interleaving_of_a_settings_restart_mid_session_keeps_one_owner() {
         // settingsChanged re-invokes start while armed, around a session end.
         explore_all(&[Op::Start, Op::Start, Op::Stop, Op::Start]).unwrap();
+    }
+}
+
+
+/// The guard's thread, start and stop as they actually run: `guard` hands
+/// these generic functions nothing but Win32 handles, `GetMessageW` and
+/// `PostThreadMessageW`, so driving them with a recorder and a mailbox is
+/// driving the production decisions. No test here installs a hook.
+#[cfg(test)]
+mod guard_wiring_tests {
+    use super::{
+        guard_start_with, guard_stop_with, guard_thread_body, stop_guard_via, GuardLifecycle, GuardStarted,
+        GuardWarn, StartPlan, WM_GUARD_RECONFIG, WM_GUARD_STOP,
+    };
+    use crate::ll_hook::fake::{Call, FakeHooks, Kind};
+    use crate::ordered_worker::OrderedWorker;
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    const TID: u32 = 4242;
+
+    /// A started guard: state WANTED, as `start` leaves it before the thread
+    /// has run.
+    fn spawned_life() -> GuardLifecycle {
+        let life = GuardLifecycle::new();
+        assert_eq!(life.begin_start(), StartPlan::Spawn);
+        life
+    }
+
+    /// Run the thread body to completion. `script` is called for each
+    /// GetMessageW and returns the next message; `None` ends the pump the
+    /// way WM_QUIT does.
+    fn run_body(
+        life: &GuardLifecycle,
+        any_input: &Cell<bool>,
+        script: impl FnMut() -> Option<u32>,
+    ) -> (FakeHooks, Vec<GuardWarn>) {
+        let mut ops = FakeHooks::default();
+        let mut warns = Vec::new();
+        guard_thread_body(life, TID, &mut ops, || any_input.get(), script, |w, _| warns.push(w));
+        (ops, warns)
+    }
+
+    #[test]
+    fn the_guard_thread_installs_no_mouse_hook_in_the_default_configuration() {
+        let life = spawned_life();
+        let any = Cell::new(false);
+        let mailbox = RefCell::new(VecDeque::new());
+        let (ops, warns) = run_body(&life, &any, || {
+            assert!(!guard_stop_with(&life, 0, |tid, m| mailbox.borrow_mut().push_back((tid, m)), || {}));
+            mailbox.borrow_mut().pop_front().map(|(tid, m)| {
+                assert_eq!(tid, TID, "stop must reach the thread that published");
+                m
+            })
+        });
+        assert_eq!(ops.mouse_installs(), 0, "a mouse hook nobody reads delays every mouse event on the machine");
+        assert_eq!(ops.calls, vec![Call::Install(Kind::Keyboard), Call::Remove(Kind::Keyboard)]);
+        assert!(warns.is_empty());
+        assert!(life.is_idle(), "the thread released ownership on its way out");
+    }
+
+    #[test]
+    fn positive_control_with_the_any_input_kill_the_guard_thread_installs_it() {
+        let life = spawned_life();
+        let any = Cell::new(true);
+        let (ops, _) = run_body(&life, &any, || {
+            life.begin_stop();
+            Some(WM_GUARD_STOP)
+        });
+        assert_eq!(ops.mouse_installs(), 1);
+        assert!(life.is_idle());
+    }
+
+    #[test]
+    fn a_start_while_running_reaches_the_thread_and_adds_the_mouse_hook_in_place() {
+        // The real sequence: the setting changes while a session runs, so
+        // start() stores any_input = true and posts WM_GUARD_RECONFIG to the
+        // ONE thread, which installs the mouse hook without touching the
+        // keyboard hook. Then a stop.
+        let life = spawned_life();
+        let any = Cell::new(false);
+        let mailbox = RefCell::new(VecDeque::new());
+        let post = |tid: u32, m: u32| mailbox.borrow_mut().push_back((tid, m));
+        let step = Cell::new(0);
+        let (ops, _) = run_body(&life, &any, || {
+            step.set(step.get() + 1);
+            match step.get() {
+                1 => {
+                    any.set(true);
+                    let started = guard_start_with(&life, 10, || panic!("a second hook thread was spawned"), post, || {});
+                    assert_eq!(started, GuardStarted::Reconfigured(Some(TID)));
+                }
+                2 => {
+                    guard_stop_with(&life, 0, post, || {});
+                }
+                _ => {}
+            }
+            mailbox.borrow_mut().pop_front().map(|(_, m)| m)
+        });
+        assert_eq!(
+            ops.calls,
+            vec![
+                Call::Install(Kind::Keyboard),
+                Call::Install(Kind::Mouse),
+                Call::Remove(Kind::Keyboard),
+                Call::Remove(Kind::Mouse),
+            ],
+            "start must post the reconfig and the thread must act on it"
+        );
+        assert_eq!(step.get(), 2, "the thread left on the stop, not on an empty queue");
+        assert!(life.is_idle());
+    }
+
+    #[test]
+    fn turning_the_any_input_kill_off_mid_session_removes_the_mouse_hook() {
+        let life = spawned_life();
+        let any = Cell::new(true);
+        let mut script = VecDeque::from([WM_GUARD_RECONFIG, WM_GUARD_STOP]);
+        let (ops, _) = run_body(&life, &any, || {
+            let m = script.pop_front();
+            if m == Some(WM_GUARD_RECONFIG) {
+                any.set(false);
+            } else if m == Some(WM_GUARD_STOP) {
+                life.begin_stop();
+            }
+            m
+        });
+        assert_eq!(
+            ops.calls,
+            vec![
+                Call::Install(Kind::Keyboard),
+                Call::Install(Kind::Mouse),
+                Call::Remove(Kind::Mouse),
+                Call::Remove(Kind::Keyboard),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_stop_before_the_thread_is_reachable_ends_it_without_pumping() {
+        let life = spawned_life();
+        // Nothing to post to yet: the thread has not published its id.
+        assert_eq!(life.begin_stop(), None);
+        let any = Cell::new(false);
+        let (ops, _) = run_body(&life, &any, || panic!("the thread pumped after an early stop: a live hook nothing will quit"));
+        assert_eq!(ops.calls, vec![Call::Install(Kind::Keyboard), Call::Remove(Kind::Keyboard)]);
+        assert!(life.is_idle());
+    }
+
+    #[test]
+    fn a_start_landing_after_a_stop_keeps_the_thread() {
+        // stop() posts WM_GUARD_STOP, then a start() takes the thread back
+        // before it reads that message: the stale stop must not end it.
+        let life = spawned_life();
+        let any = Cell::new(false);
+        let mailbox = RefCell::new(VecDeque::new());
+        let post = |tid: u32, m: u32| mailbox.borrow_mut().push_back((tid, m));
+        let reads = Cell::new(0);
+        let _ = run_body(&life, &any, || {
+            reads.set(reads.get() + 1);
+            match reads.get() {
+                1 => {
+                    guard_stop_with(&life, 0, post, || {});
+                    let started = guard_start_with(&life, 10, || panic!("spawned beside a live thread"), post, || {});
+                    assert_eq!(started, GuardStarted::Reconfigured(Some(TID)));
+                }
+                3 => {
+                    guard_stop_with(&life, 0, post, || {});
+                }
+                _ => {}
+            }
+            mailbox.borrow_mut().pop_front().map(|(_, m)| m)
+        });
+        // Read 1: the stale STOP (ignored). 2: the RECONFIG. 3: the real STOP.
+        assert_eq!(reads.get(), 3);
+        assert!(life.is_idle());
+    }
+
+    #[test]
+    fn a_refused_hook_is_warned_about_through_the_callback() {
+        let life = spawned_life();
+        life.begin_stop();
+        let mut ops = FakeHooks { refuse_keyboard: true, refuse_mouse: true, ..Default::default() };
+        let mut warns = Vec::new();
+        guard_thread_body(&life, TID, &mut ops, || true, || None, |w, _| warns.push(w));
+        assert_eq!(warns, vec![GuardWarn::KeyboardRefused, GuardWarn::MouseRefused]);
+    }
+
+    #[test]
+    fn start_spawns_once_and_a_refused_spawn_hands_ownership_back() {
+        let life = GuardLifecycle::new();
+        let spawned = Cell::new(0);
+        let r = guard_start_with(
+            &life,
+            10,
+            || {
+                spawned.set(spawned.get() + 1);
+                false
+            },
+            |_, _| panic!("nothing to post to"),
+            || {},
+        );
+        assert_eq!(r, GuardStarted::SpawnFailed);
+        assert!(life.is_idle(), "a refused spawn must not leave the guard owned by no thread");
+        let r = guard_start_with(
+            &life,
+            10,
+            || {
+                spawned.set(spawned.get() + 1);
+                true
+            },
+            |_, _| panic!("nothing to post to"),
+            || {},
+        );
+        assert_eq!(r, GuardStarted::Spawned);
+        assert_eq!(spawned.get(), 2);
+    }
+
+    #[test]
+    fn start_waits_for_an_unwinding_predecessor_and_then_spawns() {
+        let life = spawned_life();
+        life.thread_publish(7);
+        assert_eq!(life.begin_stop(), Some(7));
+        assert!(life.thread_on_stop_request(), "the old thread is now unwinding");
+        let waits = Cell::new(0);
+        let r = guard_start_with(&life, 10, || true, |_, _| panic!("posted to an unwinding thread"), || {
+            waits.set(waits.get() + 1);
+            if waits.get() == 3 {
+                life.thread_exited(7);
+            }
+        });
+        assert_eq!(r, GuardStarted::Spawned);
+        assert_eq!(waits.get(), 3);
+    }
+
+    #[test]
+    fn start_gives_up_on_a_wedged_predecessor_after_its_bound() {
+        let life = spawned_life();
+        life.thread_publish(7);
+        life.begin_stop();
+        assert!(life.thread_on_stop_request());
+        let waits = Cell::new(0);
+        let r = guard_start_with(&life, 10, || panic!("spawned beside a live thread"), |_, _| {}, || {
+            waits.set(waits.get() + 1)
+        });
+        assert_eq!(r, GuardStarted::GaveUp);
+        assert_eq!(waits.get(), 10);
+    }
+
+    #[test]
+    fn stop_posts_to_the_published_thread_and_waits_until_it_is_gone() {
+        let life = spawned_life();
+        life.thread_publish(9);
+        let posted = RefCell::new(Vec::new());
+        let gone = guard_stop_with(&life, 10, |tid, m| posted.borrow_mut().push((tid, m)), || {
+            // The thread reads its STOP and unwinds.
+            if life.thread_on_stop_request() {
+                life.thread_exited(9);
+            }
+        });
+        assert!(gone);
+        assert_eq!(*posted.borrow(), vec![(9, WM_GUARD_STOP)]);
+    }
+
+    #[test]
+    fn stop_reports_a_thread_that_never_leaves() {
+        let life = spawned_life();
+        life.thread_publish(9);
+        let waits = Cell::new(0);
+        assert!(!guard_stop_with(&life, 10, |_, _| {}, || waits.set(waits.get() + 1)));
+        assert_eq!(waits.get(), 10, "bounded");
+    }
+
+    // --- stop_guard: the release keeps its place in the injection FIFO -----
+
+    enum Job {
+        Event(&'static str),
+        ReleaseAll(mpsc::Sender<()>),
+    }
+
+    #[test]
+    fn stop_queues_the_release_between_the_events_before_and_after_it() {
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (out_tx, out_rx) = mpsc::channel::<&'static str>();
+        // The injection worker is held on its first event until every send
+        // below has returned, so all three jobs sit in the queue together and
+        // only their queue order decides what runs when.
+        let inject = OrderedWorker::spawn("test-inject-order", move |job: Job| match job {
+            Job::Event(e) => {
+                if e == "a" {
+                    let _ = gate_rx.recv_timeout(Duration::from_secs(3));
+                }
+                let _ = out_tx.send(e);
+            }
+            Job::ReleaseAll(ack) => {
+                let _ = out_tx.send("release");
+                let _ = ack.send(());
+            }
+        });
+        assert!(inject.send(Job::Event("a")).is_ok());
+        let mut handed = None;
+        stop_guard_via(
+            || {
+                let (tx, rx) = mpsc::channel();
+                inject.send(Job::ReleaseAll(tx)).ok().map(|_| rx)
+            },
+            |ack| {
+                handed = Some(ack);
+                Ok(())
+            },
+            |_| panic!("the worker accepted the stop; nothing may run inline"),
+        );
+        assert!(inject.send(Job::Event("b")).is_ok());
+        gate_tx.send(()).unwrap();
+        let got: Vec<_> = (0..3)
+            .map(|_| out_rx.recv_timeout(Duration::from_secs(5)).expect("a queued job never ran"))
+            .collect();
+        assert_eq!(got, vec!["a", "release", "b"], "the release must sit exactly where the stop arrived");
+        let ack = handed.expect("the stop was handed to the worker").expect("with the release's ack to wait on");
+        assert!(ack.recv_timeout(Duration::from_secs(5)).is_ok());
+    }
+
+    #[test]
+    fn with_no_worker_the_stop_finishes_inline_with_the_same_release() {
+        let finished = Cell::new(None);
+        stop_guard_via(|| Some(17u32), Err, |ack| finished.set(Some(ack)));
+        assert_eq!(finished.get(), Some(Some(17)), "the queued release's ack must not be dropped on the fallback path");
     }
 }

@@ -41,7 +41,8 @@ What that buys: a lost release costs ~40 ms of extra mic instead of the rest
 of the call; a removed hook degrades to 20 ms polling latency instead of to
 nothing. And a **press** the poll had to supply is proof the hook is gone —
 a live hook reports a key-down before the key-state table even updates — so
-both hooks are re-installed on the spot (`rearms_on_evidence`) instead of at
+the hooks (the mouse hook only while a mouse button is bound) are
+re-installed on the spot (`rearms_on_evidence`) instead of at
 the next 60 s tick. `poll_presses` / `poll_releases` count how often the
 poll had to step in.
 
