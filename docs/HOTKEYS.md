@@ -8,7 +8,7 @@ time", and how to prove they work now.
 
 | Where | What |
 |---|---|
-| `frontend/src-tauri/src/hotkeys.rs` | The native feed. A dedicated **time-critical** thread installs `WH_KEYBOARD_LL` + `WH_MOUSE_LL` hooks and pumps messages. The hook callbacks do microseconds of work (a watch-slot lookup, an edge check against a down-state bitmap, a channel append). Two timers on that thread: a **20 ms key-state poll** and a **60 s hook re-arm**. Two other threads keep everything else off it: the **emitter** (the Tauri `emit`) and the **foreground probe** (once a second; it opens another process and reads its token, which is far too much for the thread Windows times). |
+| `frontend/src-tauri/src/hotkeys.rs` | The native feed. A dedicated **time-critical** thread installs a `WH_KEYBOARD_LL` hook — plus a `WH_MOUSE_LL` hook **only while a mouse button is bound** (every mouse event on the machine waits on a mouse hook, so none is installed that nothing reads; a rebind mid-call adds or removes it in place on that thread) — and pumps messages. The hook callbacks do microseconds of work (a watch-slot lookup, an edge check against a down-state bitmap, a channel append). Two timers on that thread: a **20 ms key-state poll** and a **60 s hook re-arm**. Two other threads keep everything else off it: the **emitter** (the Tauri `emit`, and every log line the hook thread has to write) and the **foreground probe** (once a second; it opens another process and reads its token, which is far too much for the thread Windows times). |
 | `frontend/src/api/hotkeys.ts` | The registry. Hold actions (PTT/PTM) and press actions (toggles), fed by the in-app `keydown`/`keyup` listeners and, on the desktop, by the native feed's `global-hotkey` events. |
 | `frontend/src/api/hotkeyScope.ts` | Which binds are watched system-wide (the switch, or a bind the user chose). |
 | `frontend/src/components/VoicePanel.tsx` | Arms the feed while in a call; re-syncs on every settings save. |
@@ -41,7 +41,8 @@ What that buys: a lost release costs ~40 ms of extra mic instead of the rest
 of the call; a removed hook degrades to 20 ms polling latency instead of to
 nothing. And a **press** the poll had to supply is proof the hook is gone —
 a live hook reports a key-down before the key-state table even updates — so
-both hooks are re-installed on the spot (`rearms_on_evidence`) instead of at
+the hooks (the mouse hook only while a mouse button is bound) are
+re-installed on the spot (`rearms_on_evidence`) instead of at
 the next 60 s tick. `poll_presses` / `poll_releases` count how often the
 poll had to step in.
 
@@ -154,6 +155,7 @@ await __pucaHotkeysDebug.snapshot()
 |---|---|
 | `feed.active` false | the feed was never asked for — check `host.lastComputed.ids` and `hotkeyScope.ts` |
 | `native.hook_live` false | `SetWindowsHookExW` refused |
+| `native.mouse_hook_wanted` true, `native.mouse_hook_live` false | a mouse button is bound but Windows refused the mouse hook: that bind runs on the 20 ms poll only. Both false is the normal keyboard-only case |
 | `native.watching` missing a VK | the bind never reached the native side. A key bound to two actions appears ONCE: one slot per key, or the poll would read the second slot as a press the hook missed |
 | `native.events_seen` stuck | the hook receives nothing — is the game elevated? (`native.foreground_blocker`) |
 | `native.poll_presses` rising | the hook is being removed under load; the poll covered it |

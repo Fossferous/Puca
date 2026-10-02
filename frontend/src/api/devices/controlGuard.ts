@@ -102,7 +102,8 @@ async function startNative(): Promise<void> {
  * Stop the native hook — but only once nothing needs it.
  *
  * `stop_control_guard` also releases every held key and button
- * (`remote_control::stop_guard` → `release_all_ordered`), so calling it while
+ * (`remote_control::stop_guard` queues an ordered release behind any pending
+ * injection; the invoke does not wait for it to run), so calling it while
  * the LEGACY in-call path is mid-session would both disarm that session's kill
  * switch and drop whatever it is holding down. The legacy module is consulted
  * dynamically: a lite build has neither module, and a build that has them must

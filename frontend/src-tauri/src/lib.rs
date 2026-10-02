@@ -26,6 +26,9 @@ mod file_transfer;
 // control from the artifact does not remove it from the host.
 mod rc_leftovers;
 mod hotkeys;
+mod ll_hook;
+#[cfg(feature = "remote-control")]
+mod ordered_worker;
 #[cfg(feature = "remote-control")]
 mod lan;
 #[cfg(feature = "remote-control")]
@@ -379,6 +382,15 @@ async fn hide_screen_capture_bar() -> u32 {
 ///   two events out of order — a `down` overtaking the move that placed it
 ///   clicks the wrong thing on the host. One thread + one FIFO channel keeps
 ///   the order the events arrived in.
+///
+/// Which is why this stays a SYNC command even though sync commands run on
+/// the main thread: all it does there is append to an unbounded channel (no
+/// lock, no wait — `ordered_worker.rs`). A sync command keeps the order in
+/// which the IPC layer DELIVERS invokes; an `async` one would spawn a task per
+/// invoke and add task-pool reordering on top. Delivery order is not issue
+/// order, though: two separate invokes are not guaranteed to arrive in the
+/// order JS sent them, which is why dependent events go through
+/// `inject_input_batch` below.
 #[cfg(feature = "remote-control")]
 #[tauri::command]
 fn inject_input(event: remote_control::ControlInput) -> Result<(), String> {
@@ -950,13 +962,30 @@ fn release_attention_topmost(app: tauri::AppHandle) {
 /// has focus, via a one-shot `host-killswitch-hotkey` event. When `any_input`
 /// is true, ANY real host mouse/keyboard input also revokes (one-shot
 /// `host-input-detected`).
+///
+/// SYNC ON PURPOSE, AND NON-BLOCKING. A sync command runs on the main (UI)
+/// thread — the one the tray menu's modal loop also runs on — so this only
+/// appends the request to the guard's own worker thread and returns; the
+/// hook-thread lifecycle (which may wait for a predecessor to unwind) runs
+/// there. It stays sync so start and stop run in the order the IPC layer
+/// delivers them: an `async` command would add task-pool reordering, letting
+/// a `stop_control_guard` delivered later overtake it. (Delivery order is
+/// still not a promise that two separate invokes arrive in the order JS
+/// issued them.) The frontend never awaits the outcome (it is best-effort;
+/// the Stop button always works).
 #[cfg(feature = "remote-control")]
 #[tauri::command]
 fn start_control_guard(app: tauri::AppHandle, any_input: bool, kill_vk: u32, kill_mods: u32) {
     remote_control::start_guard(app, any_input, kill_vk, kill_mods);
 }
 
-/// Stop the physical-input kill switch.
+/// Stop the physical-input kill switch and release held input. Same shape as
+/// `start_control_guard`: the release is queued behind every injected event
+/// delivered before it, right here (its place in the injection FIFO is
+/// unchanged), and everything that waits — the hook thread's unwind, the
+/// release's acknowledgement and its inline fallback — runs on the guard's
+/// worker, never on the UI thread. So the invoke resolves BEFORE the release
+/// has run; no caller waits on it (teardown awaits `release_control_input`).
 #[cfg(feature = "remote-control")]
 #[tauri::command]
 fn stop_control_guard() {
@@ -1437,20 +1466,28 @@ pub fn run() {
                         }
                         // INSTRUMENTATION for the "right-clicking the tray
                         // freezes the remote mouse" report: the context menu
-                        // that follows this event pumps a modal message loop
-                        // on the MAIN thread, which also dispatches every
-                        // Tauri invoke (including input injection). This
-                        // stamp brackets the stall window in the log; pair it
-                        // with the host webview's [inject-slow] lines. RC-only
-                        // (the stall it investigates can't happen without live
-                        // input injection) — the native context menu itself
-                        // still opens on right-click regardless, that's Tauri's
+                        // that follows this event runs a modal message loop
+                        // on the MAIN thread until it is dismissed, and that
+                        // thread also dispatches every Tauri invoke (including
+                        // the webview host's input injection). This stamp
+                        // marks the window in agent.log; pair it with the
+                        // host's [inject-slow] lines. RC-only (the stall it
+                        // investigates can't happen without live input
+                        // injection) — the native context menu itself still
+                        // opens on right-click regardless, that's Tauri's
                         // default tray behaviour, not this handler.
+                        //
+                        // The write itself is handed OFF the main thread: a
+                        // synchronous file append here ran on the very thread
+                        // whose stalls this line exists to catch, right as the
+                        // menu took input.
                         #[cfg(feature = "remote-control")]
                         TrayIconEvent::Click { button: tauri::tray::MouseButton::Right, button_state: tauri::tray::MouseButtonState::Up, .. } => {
-                            agent_ipc::agent_log(
-                                "[tray] context menu opening - main thread blocks until dismissed".into(),
-                            );
+                            drop(tauri::async_runtime::spawn_blocking(|| {
+                                agent_ipc::agent_log(
+                                    "[tray] context menu opening (its modal loop runs on the main thread until dismissed)".into(),
+                                )
+                            }));
                         }
                         _ => {}
                     }
