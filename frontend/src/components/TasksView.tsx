@@ -60,14 +60,14 @@ import {
     placeNewTabPrefs,
     taskTabKey,
 } from '../api/tasks';
-import { useServers, keys } from '../hooks/queries';
+import { useServers, keys, fetchMembersWithPresence } from '../hooks/queries';
 import { pokeTaskReminders } from '../api/taskReminders';
 import { invalidateTaskScope, taskScopesKey } from './taskSources';
 import { consumeTasksTab, peekTasksIds, peekTasksTab, soleDueId } from '../api/tasksViewIntent';
 import { planToggle } from '../api/taskCompletion';
 import { useTaskFeature } from '../api/taskFeatures';
 import { useScheduleSetter, useSnoozeSetter } from './schedule/useScheduleSetter';
-import { listChannels, listMembersWithRoles, type Channel, type MemberWithRoles, type Server } from '../api/servers';
+import { listChannels, type Channel, type MemberWithRoles, type Server } from '../api/servers';
 import { getToken } from '../api/auth';
 import { isMobile, isTauri } from '../api/platform';
 import { TaskTree } from './TaskTree';
@@ -337,7 +337,9 @@ export function TasksView() {
     const memberQueries = useQueries({
         queries: servers.map((s: Server) => ({
             queryKey: keys.members(s.id),
-            queryFn: () => listMembersWithRoles(s.id),
+            // The member list's own fetcher: this key's rows feed the
+            // presence store (queries.ts), whichever observer runs it.
+            queryFn: () => fetchMembersWithPresence(s.id),
             staleTime: 30_000,
         })),
     });
