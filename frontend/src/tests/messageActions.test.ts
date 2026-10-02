@@ -113,9 +113,12 @@ describe('buildForwardText refuses to carry a clip key (review #2)', () => {
     });
 });
 
-describe('replyPreviewText', () => {
+// The preview rule moved to api/messagePreview.ts (one function for every
+// preview surface; attachment refs are covered in tests/messagePreview.test.ts).
+// Its ellipsis is now the single '…' the pinned list and search always used.
+describe('messagePreviewText (was replyPreviewText)', () => {
     it('summarises a clip post as "Clip · m:ss" instead of leaking the 1.6k href; slices plain text', async () => {
-        const { replyPreviewText } = await import('../components/contextMenuUtils');
+        const { messagePreviewText: replyPreviewText } = await import('../api/messagePreview');
         const { encodeClipRef } = await import('../api/clips/clipRef');
         const href = encodeClipRef({
             key: new Uint8Array(32).fill(1), noncePrefix: new Uint8Array(8).fill(2), clipId: '0f5b4b1a-6a1c-4d5e-8f2b-1c3d4e5f6a7b',
@@ -124,7 +127,7 @@ describe('replyPreviewText', () => {
         });
         expect(replyPreviewText(`[Clip 2:04](${href})`, 50)).toBe('Clip · 2:04');
         expect(replyPreviewText('[Clip 2:04](sovereign-clip:v1)', 50)).toBe('Clip (removed)');
-        expect(replyPreviewText('hello world', 5)).toBe('hello...');
+        expect(replyPreviewText('hello world', 5)).toBe('hello…');
         expect(replyPreviewText('hi', 5)).toBe('hi');
     });
 });

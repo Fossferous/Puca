@@ -108,9 +108,9 @@ Hover a message to see its toolbar. The tooltips are:
 |---------|--------------|-------------|
 | **Add Reaction** | Opens the emoji picker for a reaction | everyone |
 | **Reply** | Replies to the message; your reply shows which one it answers | everyone |
-| **Quote** | Copies the message text into the message box as a `> quote` for you to add to | everyone |
+| **Quote** | Copies the message text into the message box as a `> quote` for you to add to. An attachment is quoted as its name (`Image: photo.png`), not as the file | everyone |
 | **Forward** | Sends the text to another channel or DM | everyone |
-| **Edit** | Opens an **Edit message:** prompt | your own messages |
+| **Edit** | Opens an **Edit message:** prompt with the message's text. A message with attachments says **Edit message (attachments are kept):** — you change the words, and the files stay as they were | your own messages |
 | **Pin Message** | Pins it; the **Pinned messages** button in the chat header lists pins | moderators |
 | **Delete for me (hides it only for you)** | Hides the message on your devices only | everyone |
 | **Delete for everyone** | Removes it for all members, after a confirmation | your own messages, and moderators |
@@ -124,6 +124,13 @@ DM.
 1. Click **Attach file** (the paperclip beside the message box)
 2. Select one or more files. Each appears as a chip above the box while it uploads; a chip has **Mark as spoiler** and **Remove** buttons
 3. Press **Enter** to send. The send button waits until every upload has finished
+
+You can also drag files from your computer onto the messages, in the desktop
+app as in the browser. Wherever a message is shown in short — the
+**Replying to** bar, the line above a reply, **Pinned messages**, search
+results — an attachment appears as a small icon and its file name; a spoiler
+shows only **Spoiler image** (or file). Search finds an attachment by its file
+name.
 
 ### Paste Images
 1. Copy an image (or a file) to the clipboard
@@ -397,7 +404,8 @@ Inside Notes:
   [Púca Notes](NOTES.md)) — opens ready to type, with the keyboard up, in
   the Púca Notes app from the release after 0.9.826 on.
 - Click a note to open it. Inside, items work exactly as in Tasks: tick,
-  edit, add subtasks, drag by the grip to reorder or nest, set a due time
+  edit, add subtasks, drag by the grip (the faint dotted handle at the left
+  of the item) to reorder, or to the right to nest, set a due time
   from the clock, attach pictures from the paperclip.
 - An item that starts with `## ` is a **heading** — a section title with no
   checkbox, never counted as a step; **Turn into heading** on an item makes

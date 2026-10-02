@@ -45,6 +45,13 @@ applyAppearance(bootSettings)
 import { installLinkRouter } from './api/linkRouter'
 installLinkRouter()
 
+// A file dropped outside a drop zone must not navigate the page to the file —
+// in the desktop app that would replace Púca with it, now that Tauri's native
+// drop handler (which swallowed every drop, the chat's included) is off
+// (api/fileDropGuard.ts).
+import { installFileDropGuard } from './api/fileDropGuard'
+installFileDropGuard(window)
+
 // Desktop shell: the tray capture badge, the tooltip and the native clip
 // capture threads live in the PROCESS, but every one of them is driven from
 // here. A webview reload (F5, a crash recovery, a dev reload) throws away the

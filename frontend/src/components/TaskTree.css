@@ -115,7 +115,11 @@
     touch-action: none;
     user-select: none;
     -webkit-user-select: none;
-    opacity: 0;
+    /* Faintly visible at rest, not hidden: at opacity 0 the only handle a
+       drag (and drag-right-to-nest) can start from could not be seen until
+       the row was hovered, so the feature read as missing. Full strength on
+       hover; touch overrides this below. */
+    opacity: 0.35;
 }
 .tt-item:hover .tt-grip { opacity: 1; }
 .tt-grip svg { width: 14px; height: 14px; }

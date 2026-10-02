@@ -22,7 +22,8 @@ vi.mock('../api/auth', async (orig) => ({ ...(await orig<typeof import('../api/a
 
 import { isEncAttachment, parseEncAttachment, decryptToBlobUrl, clearBlobCache } from '../api/attachments';
 import { isClipRef, isScrubbedClipRef, hasClipRef } from '../api/clips/clipRef';
-import { stripAttachmentKeys, scrubClipRefs, replyPreviewText } from '../components/contextMenuUtils';
+import { stripAttachmentKeys, scrubClipRefs } from '../components/contextMenuUtils';
+import { messagePreviewText } from '../api/messagePreview';
 import { isSafeUrl } from '../utils/messageParser';
 
 describe('the enc scheme is recognised however it is cased', () => {
@@ -73,7 +74,7 @@ describe('the clipboard scrub is case-insensitive', () => {
         expect(hasClipRef('look: SOVEREIGN-CLIP:v1?AQEB')).toBe(true);
         expect(isScrubbedClipRef('SOVEREIGN-CLIP:v1')).toBe(true);
         // …and the reply preview summarises it rather than echoing the key.
-        expect(replyPreviewText('[Clip](SOVEREIGN-CLIP:v1?AQEB)', 50)).not.toContain('AQEB');
+        expect(messagePreviewText('[Clip](SOVEREIGN-CLIP:v1?AQEB)', 50)).not.toContain('AQEB');
     });
 });
 

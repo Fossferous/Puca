@@ -23,7 +23,9 @@ import { InviteModal } from './InviteModal';
 import { ServerSettingsModal } from './ServerSettingsModal';
 import { UserProfilePopup } from './UserProfilePopup';
 import { ContextMenu } from './ContextMenu';
-import { useContextMenu, menuItems, imageMenuItems, formatQuote, stripAttachmentKeys, replyPreviewText, canSaveToNotes } from './contextMenuUtils';
+import { useContextMenu, menuItems, imageMenuItems, formatQuote, canSaveToNotes } from './contextMenuUtils';
+import { MessagePreview } from './MessagePreview';
+import { messagePreviewText, splitEditableContent, joinEditedContent } from '../api/messagePreview';
 import { clipsAvailable, focusClipProposal, refreshPendingClips } from '../api/clips/clipProposals';
 import { hasClipRef } from '../api/clips/clipRef';
 import { Toast } from './Toast';
@@ -277,10 +279,14 @@ function toDisplayMessages(history: ApiMessage[]): DisplayMessage[] {
         if (msg.reply_to_id) {
             const parentMsg = messagesById.get(msg.reply_to_id);
             if (parentMsg) {
+                // The WHOLE text, not a slice: the snapshot is display-only and
+                // in memory already, and `.slice(0, 100)` cut an attachment ref
+                // mid-key, which no ref parser can turn back into a label.
+                // MessagePreview caps it at render time.
                 msg.reply_to = {
                     id: parentMsg.id,
                     username: parentMsg.sender.username,
-                    content: parentMsg.content.slice(0, 100),
+                    content: parentMsg.content,
                 };
             }
         }
@@ -1809,22 +1815,6 @@ export function Chat({ onLogout }: ChatProps) {
         }
     }, [isServersLoading]);
 
-    // Debug: Document-level drag event listener to test WebView2
-    useEffect(() => {
-        const handleDocDragOver = (e: DragEvent) => {
-            console.log('[DRAG] DOCUMENT dragover fired! target:', (e.target as HTMLElement)?.className);
-        };
-        const handleDocDrop = (_e: DragEvent) => {
-            console.log('[DRAG] DOCUMENT drop fired!');
-        };
-        document.addEventListener('dragover', handleDocDragOver, { capture: true });
-        document.addEventListener('drop', handleDocDrop, { capture: true });
-        return () => {
-            document.removeEventListener('dragover', handleDocDragOver, { capture: true });
-            document.removeEventListener('drop', handleDocDrop, { capture: true });
-        };
-    }, []);
-
     // Member polling handled by useServerMembers hook (refetchInterval)
 
     // Fetch unread counts when server changes
@@ -3148,7 +3138,7 @@ export function Chat({ onLogout }: ChatProps) {
             reply_to: replyToMessage ? {
                 id: replyToMessage.id,
                 username: replyToMessage.sender.username,
-                content: replyPreviewText(replyToMessage.content, 100),
+                content: replyToMessage.content,
             } : undefined,
             is_task: isTaskMode,
             is_completed: false,
@@ -3214,8 +3204,11 @@ export function Chat({ onLogout }: ChatProps) {
     // would silently persist and later leak into another channel's composer.
     const handleQuote = (content: string) => {
         if (currentCollection) return;
-        // Strip attachment keys before they land in the composer as plaintext. (audit LOW)
-        const quoted = formatQuote(stripAttachmentKeys(content));
+        // Quote what a reader SEES: an attachment becomes its label ("Image:
+        // photo.png"), never its ref. The old key-stripped ref was a dead link
+        // that also put `sovereign-enc:<id>?m=…` in the composer. (audit LOW
+        // still holds: no key reaches the composer.)
+        const quoted = formatQuote(messagePreviewText(content));
         setInput(prev => prev && !prev.endsWith('\n') ? `${prev}\n${quoted}` : prev + quoted);
         inputRef.current?.focus();
     };
@@ -3230,7 +3223,13 @@ export function Chat({ onLogout }: ChatProps) {
     const editOwnMessage = async (msg: DisplayMessage) => {
         const channelId = messageChannelId(msg);
         if (!channelId) return;
-        const newContent = prompt('Edit message:', msg.content);
+        // Edit the TEXT; the attachments ride along untouched. Prefilling the
+        // raw content put each file's key and fetch capability in the box and
+        // let one stray keystroke break the attachment.
+        const { text, refs } = splitEditableContent(msg.content);
+        const edited = prompt(refs.length ? 'Edit message (attachments are kept):' : 'Edit message:', text);
+        if (edited === null || edited === text) return;
+        const newContent = joinEditedContent(edited, refs);
         if (newContent && newContent !== msg.content) {
             try {
                 // Encrypt the edit under the current channel-key epoch, exactly like
@@ -4044,7 +4043,7 @@ export function Chat({ onLogout }: ChatProps) {
                             title="Jump to this message"
                         >
                             <strong>{hit.senderName}:</strong>
-                            <span>{hit.content.length > 60 ? hit.content.slice(0, 60) + '…' : hit.content}</span>
+                            <span><MessagePreview content={hit.content} max={60} /></span>
                         </div>
                     ))}
                     {jumpNotice && <div className="search-jump-notice">{jumpNotice}</div>}
@@ -4678,17 +4677,7 @@ export function Chat({ onLogout }: ChatProps) {
                             +
                         </button>
                     </div>
-                    <ul
-                        className="channel-list"
-                        onDragOver={(e) => {
-                            console.log('[DRAG] UL DragOver fired!');
-                            e.preventDefault();
-                        }}
-                        onDrop={(e) => {
-                            console.log('[DRAG] UL Drop fired!');
-                            e.preventDefault();
-                        }}
-                    >
+                    <ul className="channel-list">
 
                         {/* Server-wide "All checklists" board — only when the server
                             has at least one checklist channel. */}
@@ -5205,7 +5194,7 @@ export function Chat({ onLogout }: ChatProps) {
                                                     <div key={p.id} className="pin-item">
                                                         <div className="pin-item-body">
                                                             <strong>{p.display_name || p.username}</strong>
-                                                            <span>{p.content.length > 120 ? p.content.slice(0, 120) + '…' : p.content}</span>
+                                                            <span><MessagePreview content={p.content} max={120} /></span>
                                                         </div>
                                                         <button
                                                             className="pin-unpin-btn"
@@ -5660,7 +5649,7 @@ export function Chat({ onLogout }: ChatProps) {
                                                         ) : (
                                                             <>
                                                                 <span className="reply-author">@{msg.reply_to.username}</span>
-                                                                <span className="reply-preview">{replyPreviewText(msg.reply_to.content, 50)}</span>
+                                                                <span className="reply-preview"><MessagePreview content={msg.reply_to.content} max={50} /></span>
                                                             </>
                                                         )}
                                                     </div>
@@ -5797,7 +5786,7 @@ export function Chat({ onLogout }: ChatProps) {
                         <div className="reply-preview-banner">
                             <span className="reply-icon"><ReplyIcon /></span>
                             <span className="replying-to">Replying to <strong>@{replyingTo.sender.username}</strong></span>
-                            <span className="reply-content-preview">{replyPreviewText(replyingTo.content, 60)}</span>
+                            <span className="reply-content-preview"><MessagePreview content={replyingTo.content} max={60} /></span>
                             <button
                                 className="cancel-reply-btn"
                                 onClick={() => setReplyingTo(null)}
