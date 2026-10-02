@@ -1,12 +1,23 @@
 //! Global hotkey listener — the desktop half of frontend/src/api/hotkeys.ts.
 //!
-//! WH_KEYBOARD_LL + WH_MOUSE_LL hooks (same proven plumbing as
-//! remote_control's kill-switch guard: dedicated thread + message pump,
-//! WM_QUIT teardown) that emit one `global-hotkey` event per TRANSITION of a
-//! WATCHED input, with the live modifier state. Mouse buttons ride the same
-//! watch slots and wire format as keys — their VKs (1/2/4/5/6) never collide
-//! with keyboard codes. The JS registry does the matching; this side only
-//! answers "did a bound key or button go down or up, anywhere on the system".
+//! A WH_KEYBOARD_LL hook, plus a WH_MOUSE_LL hook ONLY while a mouse button is
+//! bound (dedicated thread + message pump, WM_QUIT teardown), that emit one
+//! `global-hotkey` event per TRANSITION of a WATCHED input, with the live
+//! modifier state. Mouse buttons ride the same watch slots and wire format as
+//! keys — their VKs (1/2/4/5/6) never collide with keyboard codes. The JS
+//! registry does the matching; this side only answers "did a bound key or
+//! button go down or up, anywhere on the system".
+//!
+//! WHY THE MOUSE HOOK IS OPTIONAL. While it exists, every mouse event on the
+//! machine — a gaming mouse reports at 1-8 kHz — makes a round trip through
+//! this process's hook thread before any application sees it, and waits for
+//! it. It used to be installed for every call with any global binding, mouse
+//! or not. Now it exists only while the watch list holds a mouse button, and
+//! a rebind mid-call adds or removes it in place on the hook thread
+//! (`WM_WATCH_CHANGED`), never by starting a second hook thread. See
+//! `ll_hook.rs`. The hook thread also never logs: its notes go to the
+//! emitter thread, so no file write ever runs on the thread that services the
+//! hooks.
 //!
 //! Deliberately NOT a keystroke feed: only virtual-keys the frontend has
 //! actually bound are ever forwarded (at most WATCH_SLOTS of them), so the
@@ -50,17 +61,129 @@
 //! process are fine (Windows chains them); each has its own thread, statics
 //! and WM_QUIT, so teardown of one never touches the other.
 
+// The mouse-hook decision is pure and cross-platform so its tests run
+// anywhere; outside Windows nothing else needs it.
+#[cfg(any(windows, test))]
+use crate::ll_hook::{HookOps, HookSet, HookStep};
+
+/// The mouse-button virtual keys a binding can name (left, right, middle,
+/// X1 "Mouse 4", X2 "Mouse 5"). VK 3 is VK_CANCEL, a keyboard code.
+#[cfg(any(windows, test))]
+const MOUSE_BUTTON_VKS: [u32; 5] = [1, 2, 4, 5, 6];
+
+/// Does this watch list need the system-wide mouse hook at all? Only a bound
+/// mouse button is ever read from it.
+#[cfg(any(windows, test))]
+fn wants_mouse_hook(watch: &[u32]) -> bool {
+    watch.iter().any(|vk| MOUSE_BUTTON_VKS.contains(vk))
+}
+
+/// Install (or re-arm) the hooks for this watch list: the keyboard hook
+/// always, the mouse hook only when a mouse button is watched. The hook
+/// thread's first install and every re-arm go through here.
+#[cfg(any(windows, test))]
+fn arm_for_watch<O: HookOps>(set: &mut HookSet<O::Hook>, ops: &mut O, watch: &[u32]) {
+    set.arm(ops, wants_mouse_hook(watch));
+}
+
+/// The watch list was rewritten while the feed runs (a rebind mid-call):
+/// add or remove the mouse hook in place. Binding Mouse 4 mid-call must
+/// install it NOW — otherwise that push-to-talk only works through the 20 ms
+/// poll until the next call.
+#[cfg(any(windows, test))]
+fn on_watch_changed<O: HookOps>(set: &mut HookSet<O::Hook>, ops: &mut O, watch: &[u32]) -> HookStep {
+    set.sync_mouse(ops, wants_mouse_hook(watch))
+}
+
+#[cfg(test)]
+mod mouse_hook_tests {
+    use super::{arm_for_watch, on_watch_changed, wants_mouse_hook};
+    use crate::ll_hook::fake::{Call, FakeHooks, Kind};
+    use crate::ll_hook::{HookSet, HookStep};
+
+    const M: u32 = 0x4D; // the M key
+    const SPACE: u32 = 0x20;
+    const MOUSE4: u32 = 5; // VK_XBUTTON1
+
+    #[test]
+    fn mouse_hook_is_not_wanted_for_keyboard_only_binds() {
+        assert!(!wants_mouse_hook(&[M, SPACE]));
+        assert!(!wants_mouse_hook(&[]));
+        assert!(!wants_mouse_hook(&[3]), "VK 3 is VK_CANCEL, not a mouse button");
+    }
+
+    #[test]
+    fn mouse_hook_is_wanted_for_every_mouse_button() {
+        for vk in [1, 2, 4, 5, 6] {
+            assert!(wants_mouse_hook(&[SPACE, vk]), "VK {vk} is a mouse button");
+        }
+    }
+
+    #[test]
+    fn a_keyboard_only_feed_never_installs_the_mouse_hook() {
+        let mut ops = FakeHooks::default();
+        let mut set = HookSet::new();
+        arm_for_watch(&mut set, &mut ops, &[M, SPACE]);
+        // ...and neither does any re-arm (every 60 s, and on evidence).
+        arm_for_watch(&mut set, &mut ops, &[M, SPACE]);
+        assert_eq!(ops.mouse_installs(), 0, "a keyboard-only feed put every mouse event on the machine through our hook");
+        assert!(set.keyboard.is_some());
+    }
+
+    #[test]
+    fn positive_control_a_mouse4_bind_does_install_it() {
+        let mut ops = FakeHooks::default();
+        let mut set = HookSet::new();
+        arm_for_watch(&mut set, &mut ops, &[M, MOUSE4]);
+        assert_eq!(ops.mouse_installs(), 1);
+        assert!(set.mouse.is_some());
+    }
+
+    #[test]
+    fn binding_mouse4_mid_call_installs_the_mouse_hook_in_place() {
+        let mut ops = FakeHooks::default();
+        let mut set = HookSet::new();
+        arm_for_watch(&mut set, &mut ops, &[M]);
+        ops.calls.clear();
+        assert_eq!(on_watch_changed(&mut set, &mut ops, &[M, MOUSE4]), HookStep::Install);
+        assert!(set.mouse.is_some(), "Mouse 4 push-to-talk bound mid-call must work at once");
+        assert_eq!(ops.calls, vec![Call::Install(Kind::Mouse)], "the keyboard hook must not be touched");
+    }
+
+    #[test]
+    fn unbinding_the_last_mouse_button_removes_the_mouse_hook() {
+        let mut ops = FakeHooks::default();
+        let mut set = HookSet::new();
+        arm_for_watch(&mut set, &mut ops, &[M, MOUSE4]);
+        ops.calls.clear();
+        assert_eq!(on_watch_changed(&mut set, &mut ops, &[M]), HookStep::Remove);
+        assert!(set.mouse.is_none());
+        assert_eq!(ops.calls, vec![Call::Remove(Kind::Mouse)]);
+    }
+
+    #[test]
+    fn a_rebind_that_keeps_a_mouse_button_touches_no_hook() {
+        let mut ops = FakeHooks::default();
+        let mut set = HookSet::new();
+        arm_for_watch(&mut set, &mut ops, &[MOUSE4]);
+        ops.calls.clear();
+        assert_eq!(on_watch_changed(&mut set, &mut ops, &[MOUSE4, M]), HookStep::Keep);
+        assert!(ops.calls.is_empty());
+    }
+}
+
 #[cfg(windows)]
 mod imp {
+    use super::{arm_for_watch, on_watch_changed, wants_mouse_hook};
+    use crate::ll_hook::{HookSet, HookStep, Win32LowLevelHooks};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::{Mutex, OnceLock};
     use tauri::{AppHandle, Emitter};
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::Security::{
         GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
         TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
     };
-    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Threading::{
         GetCurrentProcess, GetCurrentThread, GetCurrentThreadId, OpenProcess, OpenProcessToken,
         QueryFullProcessImageNameW, SetThreadPriority, PROCESS_NAME_FORMAT,
@@ -73,12 +196,11 @@ mod imp {
         GetAsyncKeyState, VK_CONTROL, VK_MENU, VK_SHIFT,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, GetMessageW, KillTimer, PostThreadMessageW, SetTimer, SetWindowsHookExW,
-        UnhookWindowsHookEx,
-        HHOOK, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL,
-        WH_MOUSE_LL, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-        WM_MOUSEMOVE, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_TIMER, WM_XBUTTONDOWN,
-        WM_XBUTTONUP,
+        CallNextHookEx, GetMessageW, KillTimer, PeekMessageW, PostThreadMessageW, SetTimer,
+        HHOOK, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, WM_APP,
+        WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+        WM_MOUSEMOVE, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_TIMER, WM_USER,
+        WM_XBUTTONDOWN, WM_XBUTTONUP,
     };
 
     static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -88,6 +210,13 @@ mod imp {
     /// cleared when it tears down. `start()` waits briefly on this so it can
     /// report the truth to the frontend rather than "the command returned".
     static HOOK_LIVE: AtomicBool = AtomicBool::new(false);
+    /// The mouse hook is installed right now. False with a mouse button in
+    /// the watch list means Windows refused it (that button then works
+    /// through the 20 ms poll only); false without one is the normal case.
+    static MOUSE_HOOK_LIVE: AtomicBool = AtomicBool::new(false);
+    /// Posted to the hook thread by `start()` when the watch list changed, so
+    /// the thread adds or removes its mouse hook in place.
+    const WM_WATCH_CHANGED: u32 = WM_APP + 0x31;
     /// True from the moment a hook thread is spawned until it has fully
     /// unwound. THREAD_ID cannot carry that invariant on its own: it is
     /// published from INSIDE the thread, so `stop()` immediately followed by
@@ -422,23 +551,27 @@ mod imp {
         supplied_press
     }
 
-    /// Tear down and re-install both hooks. Unconditional: there is no way to
-    /// ASK Windows whether it dropped a hook, so re-arming only when a check
-    /// says so is not an option. A few microseconds; any edge that lands in
-    /// the gap is the poll's to supply.
-    unsafe fn rearm(
-        kbd_hook: &mut windows::core::Result<HHOOK>,
-        mouse_hook: &mut windows::core::Result<HHOOK>,
-        hinst: HINSTANCE,
-    ) {
-        if let Ok(h) = *kbd_hook { let _ = UnhookWindowsHookEx(h); }
-        if let Ok(h) = *mouse_hook { let _ = UnhookWindowsHookEx(h); }
-        *kbd_hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kbd_proc), hinst, 0);
-        *mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hinst, 0);
-        HOOK_LIVE.store(kbd_hook.is_ok(), Ordering::SeqCst);
+    /// The watch list as it stands right now.
+    fn watch_snapshot() -> [u32; WATCH_SLOTS] {
+        std::array::from_fn(|i| WATCH[i].load(Ordering::SeqCst))
+    }
+
+    fn publish_hook_state(hooks: &HookSet<HHOOK>) {
+        HOOK_LIVE.store(hooks.keyboard.is_some(), Ordering::SeqCst);
+        MOUSE_HOOK_LIVE.store(hooks.mouse.is_some(), Ordering::SeqCst);
+    }
+
+    /// Tear down and re-install the hooks — the mouse hook only if the watch
+    /// list still needs it. Unconditional: there is no way to ASK Windows
+    /// whether it dropped a hook, so re-arming only when a check says so is
+    /// not an option. A few microseconds; any edge that lands in the gap is
+    /// the poll's to supply.
+    fn rearm(hooks: &mut HookSet<HHOOK>, ops: &mut Win32LowLevelHooks) {
+        arm_for_watch(hooks, ops, &watch_snapshot());
+        publish_hook_state(hooks);
         REARMS.fetch_add(1, Ordering::Relaxed);
-        if let Err(e) = kbd_hook {
-            log::warn!("[hotkeys] re-arm FAILED, the poll is the only source until the next one: {e:?}");
+        if hooks.keyboard.is_none() {
+            note(HookNote::RearmFailed(ops.keyboard_error.unwrap_or(0)));
         }
     }
 
@@ -701,6 +834,11 @@ mod imp {
             "platform": "windows",
             "active": ACTIVE.load(Ordering::SeqCst),
             "hook_live": HOOK_LIVE.load(Ordering::SeqCst),
+            // The system-wide mouse hook exists only while a mouse button is
+            // watched. wanted && !live = Windows refused it (mouse binds then
+            // run on the 20 ms poll); !wanted && !live is the normal case.
+            "mouse_hook_wanted": wants_mouse_hook(&watching),
+            "mouse_hook_live": MOUSE_HOOK_LIVE.load(Ordering::SeqCst),
             "watching": watching,
             "events_seen": EVENTS_SEEN.load(Ordering::SeqCst),
             "starts": STARTS.load(Ordering::SeqCst),
@@ -751,15 +889,83 @@ mod imp {
     /// was "hotkeys sometimes stop working". The hook proc now only pushes
     /// onto an unbounded channel (an atomic-list append, never blocking) and
     /// the emitter thread does the slow part at its leisure.
-    static EMITTER: OnceLock<std::sync::mpsc::Sender<KeyEvent>> = OnceLock::new();
+    ///
+    /// The hook THREAD's log lines ride the same channel (`Out::Note`): a
+    /// file write on the thread that services the hooks holds every input
+    /// event on the machine for as long as the disk takes.
+    static EMITTER: OnceLock<std::sync::mpsc::Sender<Out>> = OnceLock::new();
 
-    fn emitter() -> &'static std::sync::mpsc::Sender<KeyEvent> {
+    enum Out {
+        Key(KeyEvent),
+        Note(HookNote),
+    }
+
+    /// What the hook thread has to say. Formatted and logged on the emitter
+    /// thread, never on the hook thread. Codes are HRESULTs.
+    enum HookNote {
+        PriorityRefused(i32),
+        Installed { keyboard: Option<i32>, mouse: MouseNote },
+        Mouse(MouseNote),
+        PollTimerUnavailable,
+        EvidenceRearm,
+        RearmFailed(i32),
+    }
+
+    enum MouseNote {
+        NotNeeded,
+        Live,
+        Removed,
+        Refused(i32),
+    }
+
+    fn mouse_note_text(m: &MouseNote) -> String {
+        match m {
+            MouseNote::NotNeeded => "not needed (no mouse button bound)".into(),
+            MouseNote::Live => "ok".into(),
+            MouseNote::Removed => "removed (no mouse button bound any more)".into(),
+            MouseNote::Refused(c) => format!("REFUSED 0x{:08X} (mouse bindings fall back to the 20 ms poll)", *c as u32),
+        }
+    }
+
+    fn log_note(n: HookNote) {
+        match n {
+            HookNote::PriorityRefused(c) => {
+                log::warn!("[hotkeys] could not raise hook thread priority: 0x{:08X}", c as u32)
+            }
+            HookNote::Installed { keyboard: None, mouse } => {
+                log::info!("[hotkeys] WH_KEYBOARD_LL hook installed (mouse: {})", mouse_note_text(&mouse))
+            }
+            HookNote::Installed { keyboard: Some(c), .. } => {
+                log::error!("[hotkeys] hook install FAILED: 0x{:08X}", c as u32)
+            }
+            HookNote::Mouse(m) => log::info!("[hotkeys] WH_MOUSE_LL: {}", mouse_note_text(&m)),
+            HookNote::PollTimerUnavailable => {
+                log::warn!("[hotkeys] poll timer unavailable: the hook is the only source")
+            }
+            HookNote::EvidenceRearm => {
+                log::warn!("[hotkeys] the poll saw a press the hook did not: re-arming now")
+            }
+            HookNote::RearmFailed(c) => log::warn!(
+                "[hotkeys] re-arm FAILED, the poll is the only source until the next one: 0x{:08X}",
+                c as u32
+            ),
+        }
+    }
+
+    fn emitter() -> &'static std::sync::mpsc::Sender<Out> {
         EMITTER.get_or_init(|| {
-            let (tx, rx) = std::sync::mpsc::channel::<KeyEvent>();
+            let (tx, rx) = std::sync::mpsc::channel::<Out>();
             // Process-lifetime thread; parks on recv when idle. Torn down with
             // the process — the ACTIVE gate already stops events at the source.
             std::thread::spawn(move || {
-                while let Ok(mut ev) = rx.recv() {
+                while let Ok(out) = rx.recv() {
+                    let mut ev = match out {
+                        Out::Key(ev) => ev,
+                        Out::Note(n) => {
+                            log_note(n);
+                            continue;
+                        }
+                    };
                     ev.foreground = foreground_is_us();
                     if let Some(app) = APP.get() {
                         if let Err(e) = app.emit("global-hotkey", ev) {
@@ -772,6 +978,15 @@ mod imp {
             });
             tx
         })
+    }
+
+    /// Hand a note to the emitter thread. Never creates it (start() does,
+    /// before any hook thread exists), so this cannot spawn a thread from the
+    /// hook thread.
+    fn note(n: HookNote) {
+        if let Some(tx) = EMITTER.get() {
+            let _ = tx.send(Out::Note(n));
+        }
     }
 
     /// Shared edge detector for both hooks. Only real transitions: keyboard
@@ -799,7 +1014,12 @@ mod imp {
             foreground: false, // set by the emitter thread
         };
         EVENTS_SEEN.fetch_add(1, Ordering::Relaxed);
-        let _ = emitter().send(ev); // receiver lives for the process
+        // `get`, never `emitter()`: start() created the channel before any
+        // hook existed, and a lazy init here would be a thread spawn inside a
+        // hook callback. The receiver lives for the process.
+        if let Some(tx) = EMITTER.get() {
+            let _ = tx.send(Out::Key(ev));
+        }
     }
 
     unsafe extern "system" fn kbd_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -880,13 +1100,22 @@ mod imp {
         CallNextHookEx(None, code, wparam, lparam)
     }
 
+    /// The hook thread. Once a hook exists, nothing here may wait on anything
+    /// but its own message queue: this thread services the hooks, so a stall
+    /// on it is a stall of every key or mouse event on the machine. Its log
+    /// lines go to the emitter thread (`note`).
     fn hook_thread() {
         unsafe {
             // Publish the id BEFORE installing the hook. stop() can only reach
             // a thread whose id it can see, and the install plus its readiness
             // wait was a wide enough window for a stop() to miss the thread
             // entirely — orphaning a live system-wide hook nothing could quit.
+            // The message queue is created first (PeekMessageW): a thread
+            // message posted to a thread that has no queue yet is LOST, and
+            // that includes start()'s WM_WATCH_CHANGED.
             let my_tid = GetCurrentThreadId();
+            let mut msg = MSG::default();
+            let _ = PeekMessageW(&mut msg, None, WM_USER, WM_USER, PM_NOREMOVE);
             THREAD_ID.store(my_tid, Ordering::SeqCst);
 
             // The hook callback's latency budget (LowLevelHooksTimeout) is
@@ -897,31 +1126,29 @@ mod imp {
             // normal priority class allows is safe and is what keeps it on
             // the CPU when it matters.
             if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL) {
-                log::warn!("[hotkeys] could not raise hook thread priority: {e:?}");
+                note(HookNote::PriorityRefused(e.code().0));
             }
 
-            let hmod = GetModuleHandleW(None).unwrap_or_default();
-            let hinst = HINSTANCE(hmod.0);
-            let mut kbd_hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kbd_proc), hinst, 0);
-            // Mouse hook rides the same thread/pump (the remote_control guard
-            // proves the pattern). Best-effort: keyboard bindings must keep
+            // Keyboard hook always; mouse hook only while a mouse button is
+            // watched (module doc). Best-effort: keyboard bindings must keep
             // working even if the mouse hook is refused.
-            let mut mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hinst, 0);
-            if let Err(e) = &mouse_hook {
-                log::warn!("[hotkeys] WH_MOUSE_LL install FAILED (mouse bindings inactive): {e:?}");
-            }
-            let installed = match &kbd_hook {
-                Ok(_) => {
-                    HOOK_LIVE.store(true, Ordering::SeqCst);
-                    log::info!("[hotkeys] WH_KEYBOARD_LL hook installed (mouse: {})",
-                        if mouse_hook.is_ok() { "ok" } else { "unavailable" });
-                    true
-                }
-                Err(e) => {
-                    log::error!("[hotkeys] hook install FAILED: {e:?}");
-                    false
-                }
+            let mut ops = Win32LowLevelHooks::new(Some(kbd_proc), Some(mouse_proc));
+            let mut hooks: HookSet<HHOOK> = HookSet::new();
+            let watch = watch_snapshot();
+            arm_for_watch(&mut hooks, &mut ops, &watch);
+            publish_hook_state(&hooks);
+            let mouse = if hooks.mouse.is_some() {
+                MouseNote::Live
+            } else if wants_mouse_hook(&watch) {
+                MouseNote::Refused(ops.mouse_error.unwrap_or(0))
+            } else {
+                MouseNote::NotNeeded
             };
+            let installed = hooks.keyboard.is_some();
+            note(HookNote::Installed {
+                keyboard: if installed { None } else { Some(ops.keyboard_error.unwrap_or(0)) },
+                mouse,
+            });
 
             // Pump messages until PostThreadMessage(WM_QUIT) from stop().
             // Skipped when there is no hook to service (nothing would ever be
@@ -934,16 +1161,30 @@ mod imp {
                 let timer = SetTimer(None, 0, REARM_EVERY_MS, None);
                 let poll_timer = SetTimer(None, 0, POLL_EVERY_MS, None);
                 if poll_timer == 0 {
-                    log::warn!("[hotkeys] poll timer unavailable: the hook is the only source");
+                    note(HookNote::PollTimerUnavailable);
                 }
                 let mut disagree = [0u8; WATCH_SLOTS];
                 let mut last_rearm = std::time::Instant::now();
                 let mut last_blocked = std::time::Instant::now();
-                let mut msg = MSG::default();
                 loop {
                     let r = GetMessageW(&mut msg, None, 0, 0).0;
                     if r == 0 || r == -1 {
                         break; // WM_QUIT (0) or error (-1)
+                    }
+                    if msg.message == WM_WATCH_CHANGED {
+                        // A rebind: add or remove the mouse hook in place.
+                        let watch = watch_snapshot();
+                        let step = on_watch_changed(&mut hooks, &mut ops, &watch);
+                        publish_hook_state(&hooks);
+                        match step {
+                            HookStep::Install if hooks.mouse.is_some() => note(HookNote::Mouse(MouseNote::Live)),
+                            HookStep::Install => {
+                                note(HookNote::Mouse(MouseNote::Refused(ops.mouse_error.unwrap_or(0))))
+                            }
+                            HookStep::Remove => note(HookNote::Mouse(MouseNote::Removed)),
+                            HookStep::Keep => {}
+                        }
+                        continue;
                     }
                     if msg.message != WM_TIMER {
                         continue;
@@ -966,13 +1207,13 @@ mod imp {
                             && last_rearm.elapsed() >= std::time::Duration::from_millis(EVIDENCE_REARM_MIN_MS)
                             && last_blocked.elapsed() >= std::time::Duration::from_millis(EVIDENCE_REARM_BLOCKED_QUIET_MS)
                         {
-                            log::warn!("[hotkeys] the poll saw a press the hook did not: re-arming now");
-                            rearm(&mut kbd_hook, &mut mouse_hook, hinst);
+                            note(HookNote::EvidenceRearm);
+                            rearm(&mut hooks, &mut ops);
                             REARMS_ON_EVIDENCE.fetch_add(1, Ordering::Relaxed);
                             last_rearm = std::time::Instant::now();
                         }
                     } else if timer != 0 && id == timer {
-                        rearm(&mut kbd_hook, &mut mouse_hook, hinst);
+                        rearm(&mut hooks, &mut ops);
                         last_rearm = std::time::Instant::now();
                     }
                 }
@@ -983,13 +1224,8 @@ mod imp {
                 }
             }
 
-            if let Ok(h) = kbd_hook {
-                let _ = UnhookWindowsHookEx(h);
-            }
-            if let Ok(h) = mouse_hook {
-                let _ = UnhookWindowsHookEx(h);
-            }
-            HOOK_LIVE.store(false, Ordering::SeqCst);
+            hooks.disarm(&mut ops);
+            publish_hook_state(&hooks);
             // Clear the slot only if it is still OURS. Belt-and-braces beside
             // THREAD_RUNNING: an unconditional store here let a thread finishing
             // its WM_QUIT unwind zero a replacement's id, after which stop()
@@ -1022,9 +1258,11 @@ mod imp {
         // its release. Only changed slots are cleared, so rebinding one action
         // cannot disturb another key the user is currently holding.
         let wanted = dedupe_slots(&keys);
+        let mut changed = false;
         for (i, slot) in WATCH.iter().enumerate() {
             let next = wanted[i];
             if slot.swap(next, Ordering::SeqCst) != next {
+                changed = true;
                 DOWN.fetch_and(!(1u32 << i), Ordering::SeqCst);
                 // The mask describes a KEY, not a slot: a slot that now
                 // holds a different key inherits nothing.
@@ -1032,6 +1270,19 @@ mod imp {
             }
         }
         ACTIVE.store(true, Ordering::SeqCst);
+        // A running hook thread re-checks whether it needs its mouse hook —
+        // in place, on that thread, which is the only one that may install
+        // or remove a hook it services. Never a second thread. A thread that
+        // has not published its id yet reads the new list when it installs
+        // (WATCH is written above, before this read of THREAD_ID).
+        if changed {
+            let tid = THREAD_ID.load(Ordering::SeqCst);
+            if tid != 0 {
+                unsafe {
+                    let _ = PostThreadMessageW(tid, WM_WATCH_CHANGED, WPARAM(0), LPARAM(0));
+                }
+            }
+        }
         // Already hooked? The new watch list above is all that was needed.
         if THREAD_RUNNING.load(Ordering::SeqCst) && HOOK_LIVE.load(Ordering::SeqCst) {
             return true;
@@ -1305,7 +1556,9 @@ pub fn stop() {
 /// different causes.
 ///
 /// `active`: the feed was asked to run. `hook_live`: SetWindowsHookExW
-/// actually succeeded. `watching`: the virtual-key codes in the watch list — a
+/// actually succeeded (the keyboard hook). `mouse_hook_live`: the mouse hook
+/// is installed — it exists only while `mouse_hook_wanted` (a mouse button is
+/// in the watch list). `watching`: the virtual-key codes in the watch list — a
 /// missing key here means the problem is upstream in the frontend, not in the
 /// hook. `events_seen`: transitions emitted since start; still zero while
 /// pressing the key means the hook is not receiving at all. `starts` /
@@ -1323,6 +1576,8 @@ pub fn diag() -> serde_json::Value {
         "platform": "non-windows",
         "active": false,
         "hook_live": false,
+        "mouse_hook_wanted": false,
+        "mouse_hook_live": false,
         "watching": Vec::<u32>::new(),
         "events_seen": 0,
         "starts": 0,

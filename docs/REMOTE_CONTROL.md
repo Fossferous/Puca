@@ -39,7 +39,9 @@ cross, so nobody ships or markets it beyond what it actually guarantees.
   1. the visible **Stop** button on the banner,
   2. the **Esc** hotkey (when the Púca window has focus),
   3. **touching your own mouse/keyboard** — a low-level hook detects real
-     (non-injected) host input and drops control instantly.
+     (non-injected) host input and drops control instantly. This one is
+     opt-in (Settings); the kill-switch key needs only a keyboard hook, so
+     the guard installs its system-wide mouse hook only while it is on.
   Control also ends on the partner disconnecting, the host's own WS dropping,
   stopping the share, leaving voice, an inactivity timeout, and app exit.
 - **No stuck input.** The host tracks every held key/button and releases them all
