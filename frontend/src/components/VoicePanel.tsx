@@ -3602,7 +3602,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                             <DisconnectIcon size={18} />
                         </button>
                     </div>
-                    <ClipStatusRow />
+                    <ClipStatusRow policy={clipPolicy} />
 
                     {/* Camera Preview (when camera is on) - Draggable PiP */}
                     {isCameraOn && !isFullscreen && (

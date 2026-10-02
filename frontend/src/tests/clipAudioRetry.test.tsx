@@ -20,7 +20,7 @@ import { createRoot, type Root } from 'react-dom/client';
 
 const retryMock = vi.fn<() => Promise<void>>(async () => {});
 const armMock = vi.fn(async () => {});
-const armNativeMock = vi.fn(async () => {});
+const armNativeMock = vi.fn(async (_opts?: unknown) => {});
 const disarmMock = vi.fn(async () => {});
 const listeners = new Set<(s: unknown) => void>();
 let replayState: Record<string, unknown> = {};
@@ -35,7 +35,7 @@ const baseArmed = () => ({
 
 vi.mock('../api/clips/replayBuffer', () => ({
     arm: (...a: unknown[]) => armMock(...(a as [])),
-    armNative: () => armNativeMock(),
+    armNative: (opts?: unknown) => armNativeMock(opts),
     disarm: (...a: unknown[]) => disarmMock(...(a as [])),
     seal: vi.fn(),
     discardSeal: vi.fn(),
@@ -50,11 +50,14 @@ vi.mock('../api/hotkeys', () => ({ registerPress: vi.fn(), unregisterPress: vi.f
 vi.mock('../components/ClipComposerModal', () => ({ ClipComposerModal: () => null }));
 
 import { ClipStatusRow } from '../components/ClipControls';
+import { NO_CLIP_POLICY, type ClipPolicy } from '../api/clips/clipsUiState';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 let container: HTMLDivElement;
 let root: Root;
-function mount() {
-    act(() => { root.render(<ClipStatusRow />); });
+function mount(policy?: ClipPolicy) {
+    act(() => { root.render(policy ? <ClipStatusRow policy={policy} /> : <ClipStatusRow />); });
 }
 function buttons(): string[] {
     return [...container.querySelectorAll('button')].map(b => b.textContent ?? '');
@@ -120,5 +123,48 @@ describe('the broken-system-audio recovery routing', () => {
         replayState = { ...baseArmed(), hasSystemAudio: true, systemAudioLost: null, notice: null };
         mount();
         expect(buttons()).toEqual([]);
+    });
+});
+
+/**
+ * A restart from the status row is sized like the first arm. ClipButtons arms
+ * with the call server's cap (the ring keeps at most its longest clip + one
+ * GOP); the status row's Retry and "Restart buffer" re-arm the same session,
+ * so they must pass the same cap, or the restarted ring comes back holding
+ * the full un-clamped buffer setting.
+ */
+describe('restarts from the status row keep the server cap', () => {
+    const policy: ClipPolicy = { ...NO_CLIP_POLICY, available: true, serverClipsEnabled: true, serverId: 's1', maxSeconds: 90 };
+
+    it('Restart buffer re-arms natively with the server cap', async () => {
+        replayState = { ...baseArmed(), hasMic: false, systemAudioLost: 'start-failed', notice: 'No system audio' };
+        mount(policy);
+        const btn = [...container.querySelectorAll('button')]
+            .find(b => (b.textContent ?? '').startsWith('Restart buffer'))!;
+        await act(async () => { btn.click(); });
+        expect(armNativeMock).toHaveBeenCalledWith({ maxSeconds: 90 });
+    });
+
+    it('Retry after an error re-arms with the server cap', async () => {
+        replayState = { ...baseArmed(), phase: 'error', error: 'encoder: gone', hasSystemAudio: true, systemAudioLost: null, notice: null };
+        mount(policy);
+        const btn = [...container.querySelectorAll('button')].find(b => b.textContent === 'Retry')!;
+        await act(async () => { btn.click(); });
+        expect(armMock).toHaveBeenCalledWith({ maxSeconds: 90 });
+    });
+
+    it('POSITIVE CONTROL: with no clip policy there is no cap to pass', async () => {
+        replayState = { ...baseArmed(), phase: 'error', error: 'encoder: gone', hasSystemAudio: true, systemAudioLost: null, notice: null };
+        mount();
+        const btn = [...container.querySelectorAll('button')].find(b => b.textContent === 'Retry')!;
+        await act(async () => { btn.click(); });
+        expect(armMock).toHaveBeenCalledWith({});
+    });
+
+    it('VoicePanel hands the status row the call server policy', () => {
+        const vp = readFileSync(join(__dirname, '..', 'components', 'VoicePanel.tsx'), 'utf8');
+        const rows = vp.split('<ClipStatusRow').slice(1).map(r => r.slice(0, r.indexOf('/>')));
+        expect(rows.length).toBeGreaterThan(0);
+        for (const r of rows) expect(r).toContain('policy={clipPolicy}');
     });
 });

@@ -8,7 +8,10 @@
  */
 import { useEffect, useState, type ReactNode } from 'react';
 import { isTauri } from '../api/platform';
-import { CLIP_PRESETS, clipPreset, estimateRing, formatClock, formatMB, maxRingBytesForBudget, memoryBudgetBytes, MIB, presetMbPerMinute } from '../api/clips/clipPresets';
+import {
+    CLIP_PRESETS, CLIP_RING_GOP_SECONDS, clipLimits, clipPreset, estimateRing, formatClock, formatMB, formatMbps,
+    maxRingBytesForBudget, memoryBudgetBytes, MIB, nativeEncodeEstimate, presetMbPerMinute, ringSecondsFor,
+} from '../api/clips/clipPresets';
 import { setClipMicGain } from '../api/clips/replayBuffer';
 import { getClipUsage, type ClipUsage } from '../api/clips/clipUpload';
 import { useServers } from '../hooks/queries';
@@ -24,6 +27,16 @@ const BUFFER_LENGTH_OPTIONS = [30, 60, 120, 180, 300, 600, 900];
 
 const lengthLabel = (s: number) =>
     s < 60 ? `${s} seconds` : `${s / 60} minute${s > 60 ? 's' : ''}`;
+
+/** This screen in PHYSICAL pixels — what native capture records (it never
+ *  scales). null when the browser reports nothing usable. Automatic arming
+ *  captures the monitor a fullscreen game is on (else the primary), which is
+ *  usually but not always this one; the copy says "a monitor like this one". */
+function monitorPixels(): { w: number; h: number } | null {
+    const dpr = typeof window.devicePixelRatio === 'number' && window.devicePixelRatio > 0 ? window.devicePixelRatio : 1;
+    const w = Math.round((window.screen?.width ?? 0) * dpr), h = Math.round((window.screen?.height ?? 0) * dpr);
+    return w > 0 && h > 0 ? { w, h } : null;
+}
 
 interface Props {
     settings: Settings;
@@ -50,27 +63,69 @@ export function ClipSettings({ settings, updateSetting, bindControl }: Props) {
     const serverCaps = servers
         .filter(s => s.clips_enabled === true && typeof s.clip_max_seconds === 'number')
         .map(s => ({ id: s.id, name: s.name, maxSeconds: s.clip_max_seconds as number }));
+    // The longest clip ANY of your servers allows — nothing longer can ever be
+    // posted, so it bounds what a saved clip can cost and what the ring keeps.
+    const maxCap = serverCaps.length > 0 ? Math.max(...serverCaps.map(c => c.maxSeconds)) : null;
+    const minCap = serverCaps.length > 0 ? Math.min(...serverCaps.map(c => c.maxSeconds)) : null;
     if (!isTauri()) {
         return (
             <div className="settings-card">
                 <p className="settings-description">
                     Clips are recorded on the desktop app. On this device you can watch clips and answer approval requests.
+                    {maxCap !== null && ` Clips on your servers can be up to ${formatClock(maxCap)} long.`}
                 </p>
             </div>
         );
     }
     const preset = clipPreset(settings.clipQuality);
+    const bufferSeconds = settings.clipBufferSeconds ?? 300;
     const budget = memoryBudgetBytes((navigator as Navigator & { deviceMemory?: number }).deviceMemory);
     // The slider can never offer a value the ring clamp would reject.
     const sliderMaxMB = Math.max(256, Math.floor(maxRingBytesForBudget(budget) / MIB / 256) * 256);
     const capMB = Math.min(settings.clipMemoryCapMB ?? 1024, sliderMaxMB);
-    const est = estimateRing(preset, settings.clipBufferSeconds ?? 300, capMB * MIB);
+    // WHAT IS ACTUALLY RECORDED. Arming by hand (the picker) records this
+    // preset. Automatic arming records the monitor at its own size and trades
+    // frame rate for the extra pixels (clip_capture.rs effective_encode_settings,
+    // ported as nativeEncodeEstimate) — so with automatic arming on, every
+    // figure below is priced at what IT records, not at the preset's label.
+    const monitor = monitorPixels();
+    const native = monitor ? nativeEncodeEstimate(preset, monitor.w, monitor.h) : null;
+    const priceNative = settings.clipArmOnJoin === 'auto' && native !== null;
+    const rate = priceNative ? { ...preset, videoBitrate: native.videoBitrate } : preset;
+    const rateName = priceNative ? `${native.width}×${native.height} ${native.fps} fps` : preset.id;
+    // In a call the ring keeps at most the server's longest clip (+ one GOP);
+    // the readout prices the most it will ever hold in any of your servers.
+    const ringSeconds = ringSecondsFor(bufferSeconds, maxCap);
+    const est = estimateRing(rate, ringSeconds, capMB * MIB);
+    // With automatic arming on, each option says what it records HERE: a
+    // preset below the monitor's size is no saving then (480p records the
+    // whole 1080p monitor at 24 fps, 8.1 Mbps — more than 1080p30's 6.0).
+    const qualityLabel = (p: typeof preset) => {
+        if (!priceNative || !monitor) return p.label;
+        const n = nativeEncodeEstimate(p, monitor.w, monitor.h);
+        return `${p.label} · automatic here: ${n.fps} fps, ${formatMbps(n.videoBitrate)}`;
+    };
+    const savedLimits = clipLimits(rate, maxCap ?? 0, usage?.quotaBytes);
+    const savedBytes = savedLimits.bytes;
     return (
         <div className="settings-card">
             <div className="settings-option">
-                <label>Quality</label>
+                <div className="option-info">
+                    <label>Quality</label>
+                    {native && (
+                        <span className="option-hint">
+                            Arming by hand records at this size. Automatic arming records your monitor at its own size
+                            instead: on a {native.width}×{native.height} monitor like this one that is{' '}
+                            <strong>{native.fps} fps at about {formatMbps(native.videoBitrate)}</strong>{' '}
+                            (≈ {formatMB(native.bytesPerSecond * 60)} a minute)
+                            {native.reducedFps
+                                ? ` — fewer frames than this preset’s ${preset.fps}, because the monitor has more pixels than ${preset.maxWidth}×${preset.maxHeight}.`
+                                : '.'}
+                        </span>
+                    )}
+                </div>
                 <select value={preset.id} onChange={(e) => updateSetting('clipQuality', e.target.value)}>
-                    {CLIP_PRESETS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+                    {CLIP_PRESETS.map(p => <option key={p.id} value={p.id}>{qualityLabel(p)}</option>)}
                 </select>
             </div>
             <div className="settings-option">
@@ -84,11 +139,35 @@ export function ClipSettings({ settings, updateSetting, bindControl }: Props) {
                             serverCaps.slice(0, 4).map(c => `${c.name} ${formatClock(c.maxSeconds)}`).join(' · ')
                         }{serverCaps.length > 4 && ` · +${serverCaps.length - 4} more`}</>}.
                     </span>
+                    {maxCap !== null && (
+                        <span className="option-hint">
+                            A saved clip of the longest your servers allow ({formatClock(maxCap)}) is about{' '}
+                            <strong>{formatMB(savedBytes)}</strong> at {rateName}
+                            {usage !== null && usage.quotaBytes > 0
+                                ? ` — your ${formatMB(usage.quotaBytes)} of clip storage holds about ${Math.floor(usage.quotaBytes / Math.max(1, savedBytes))} of them.`
+                                : '.'}
+                            {savedLimits.overParts
+                                ? ' At this quality a clip that long is too big to post; choose a lower quality.'
+                                : savedLimits.overDownload
+                                    ? ' A clip that large cannot be downloaded or trimmed in the app.'
+                                    : savedLimits.overTrim
+                                        ? ' A clip that large cannot be trimmed in the app.'
+                                        : ''}
+                        </span>
+                    )}
+                    {maxCap !== null && minCap !== null && bufferSeconds > minCap && (
+                        <span className="option-hint">
+                            {bufferSeconds > maxCap
+                                ? `Your ${formatClock(bufferSeconds)} buffer is longer than any of your servers allow, so in a call it never holds more than ${formatClock(maxCap + CLIP_RING_GOP_SECONDS)} (≈ ${formatMB(estimateRing(rate, ringSeconds, Infinity).bytes)} of memory, not ${formatMB(estimateRing(rate, bufferSeconds, Infinity).bytes)}) — older footage could never be posted.`
+                                : `In a call, the buffer keeps only what that call’s server lets you post: its longest clip plus ${CLIP_RING_GOP_SECONDS} seconds.`}
+                        </span>
+                    )}
                 </div>
-                <select value={settings.clipBufferSeconds ?? 300} onChange={(e) => updateSetting('clipBufferSeconds', parseInt(e.target.value))}>
+                <select value={bufferSeconds} onChange={(e) => updateSetting('clipBufferSeconds', parseInt(e.target.value))}>
                     {BUFFER_LENGTH_OPTIONS.map(s => (
                         <option key={s} value={s}>
-                            {lengthLabel(s)} (≈ {formatMB((s / 60) * presetMbPerMinute(preset) * MIB)})
+                            {lengthLabel(s)} (≈ {formatMB((s / 60) * presetMbPerMinute(rate) * MIB)})
+                            {maxCap !== null && s > maxCap ? ' (longer than your servers allow)' : ''}
                         </option>
                     ))}
                 </select>
@@ -98,9 +177,8 @@ export function ClipSettings({ settings, updateSetting, bindControl }: Props) {
                     <label>Memory limit</label>
                     <span className="option-hint">
                         {est.boundBy === 'seconds'
-                            ? <>At {preset.id} this holds about <strong>{formatClock(est.seconds)}</strong> (≈ {formatMB(est.bytes)}).</>
-                            : <>Your {formatClock(settings.clipBufferSeconds ?? 300)} buffer would need {formatMB(est.wantBytes)} — at this limit it keeps about <strong>{formatClock(est.seconds)}</strong>.</>}
-                        {' '}An auto-armed capture of a monitor larger than this preset uses a proportionally higher bitrate, so it keeps less than the estimate.
+                            ? <>At {rateName} this holds about <strong>{formatClock(est.seconds)}</strong> (≈ {formatMB(est.bytes)}).</>
+                            : <>Your {formatClock(ringSeconds)} buffer would need {formatMB(est.wantBytes)} — at this limit it keeps about <strong>{formatClock(est.seconds)}</strong>.</>}
                     </span>
                 </div>
                 <div className="slider-row">

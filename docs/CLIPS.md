@@ -65,6 +65,13 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
   2 s; AAC or Opus) and keeps **GOP units**. Every closed unit is AES-256-GCM
   ciphertext under a key created `extractable: false` — its material never
   exists in the JS heap. Eviction is by seconds AND bytes (Settings › Clips).
+- **The ring is sized to the call's server.** Both arm paths take the voice
+  server's `clip_max_seconds` and keep at most that plus one 2 s keyframe
+  interval (`ringSecondsFor`), whatever the buffer-length setting says: the
+  composer never seals more than the cap and the server refuses more, so
+  older footage could only cost memory. A repick keeps the cap it was armed
+  under; an owner who RAISES the cap mid-call gets the longer buffer on the
+  next arm, not the current one.
 - **Clip** seals the last D seconds: units are decrypted, muxed by mediabunny
   into fragmented MP4, split into an **init part + moof-aligned ≤24 MiB
   parts**, each sealed under a fresh clip key bound to the clip id and part
@@ -266,12 +273,35 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
 
 ## Settings (Voice & Video › Clips)
 
-Quality preset (its resolution cap applies only to manual/prompt arms — see
-below), buffer length, memory limit (slider max derived from the machine's
+Quality preset — 480p30 (2 Mbps), 720p30/60, 1080p30/60, 1440p30, 4K30 and
+Native (its resolution cap applies only to manual/prompt arms — see
+below; so 480p saves memory only when armed by hand), buffer length, memory limit (slider max derived from the machine's
 memory budget so the ring clamp can never reject it), mic level in clips,
 "When I join a voice call" — `clipArmOnJoin`: *Do nothing* / *Remind me to
 arm* (highlights the Arm button for ~12 s) / **Arm automatically**, and the
 **Save clip** hotkey (works from a fullscreen game via the native hook).
+
+What each choice costs is shown where it is made, all from one pure module
+(`clipPresets.ts`): every buffer length is priced in memory and marked
+*(longer than your servers allow)* when it exceeds every server's cap; a line
+says how big a saved clip of the longest allowed length is and how many fit
+in the member's clip storage (`GET /clips/usage`), and warns when that clip
+would exceed the in-app download (1 GiB) or trim (768 MiB) limit, or the
+64-part limit (`clipPartCount` counts parts the way `Fmp4Splitter` cuts them:
+an init-only part 0, then whole 2 s fragments under 24 MiB each — a test runs
+the real splitter to keep the two in step). The Quality line says what **automatic arming** really records
+on a monitor like the current one — `nativeEncodeEstimate`, a TS port of
+`clip_capture.rs::effective_encode_settings`, pinned to the Rust by a shared
+table (`frontend/src/tests/fixtures/clip-native-encode-table.json`, asserted
+by both `clipNativeEstimate.test.ts` and the Rust test that reads it). With
+*Arm automatically* chosen, every figure is priced at that rate instead of
+the preset's label, and each Quality option adds what it records on this
+monitor (on 1080p, 480p records 24 fps at 8.1 Mbps — no saving over the
+default). The composer's duration chips carry their size (priced
+from the ring's measured bytes once 10 s are buffered), and Server Settings'
+*Longest clip* prices each length at the default quality, and its help line
+gives the selected length at the default and at the largest preset. On web
+and phones the card stays one line, plus the servers' longest clip.
 Arming is gated only by the server owner's per-server clips switch — there
 is no client-side experimental toggle (`settingsClips.test.ts` pins its
 absence).
@@ -300,7 +330,10 @@ needs no picker).
 - **Bitrate is scaled** to the captured monitor's actual resolution relative
   to the quality preset's assumed one (clamped 1.5–20 Mbps) — native capture
   always runs at the monitor's NATIVE resolution, never scaled down to the
-  preset's max width/height the way a manual/prompt arm is.
+  preset's max width/height the way a manual/prompt arm is. When the monitor
+  is bigger than the preset, the frame rate drops instead (24/30/48 fps
+  cadences) and the bitrate follows it — so the 720p 60 fps preset records
+  24 fps on a 1080p monitor. Settings says so (see above).
 - **The bitstream is Annex-B**, unconverted — mediabunny (the muxer) derives
   the AVCDecoderConfigurationRecord from the SPS/PPS in the first keyframe it
   is given, the same way it already handles a WebCodecs `annexb` stream. A

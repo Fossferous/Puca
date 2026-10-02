@@ -1309,6 +1309,41 @@ mod tests {
         assert_eq!(fps, 60, "an unknown assumption cannot justify changing the cadence");
     }
 
+    /// THE FRONTEND'S ESTIMATE IS THIS FUNCTION. Settings > Clips tells a
+    /// member what automatic arming really records on their monitor (the
+    /// 720p60 preset records 24 fps on a 1080p one), using a TS port of
+    /// `effective_encode_settings` (clipPresets.ts `nativeEncodeEstimate`).
+    /// Both sides assert the SAME table — every preset on common monitors —
+    /// so a change here that the port does not share turns one of them red
+    /// (frontend/src/tests/clipNativeEstimate.test.ts reads it too).
+    #[test]
+    fn the_native_estimate_table_matches_the_frontend_fixture() {
+        let table: serde_json::Value = serde_json::from_str(include_str!(
+            "../../src/tests/fixtures/clip-native-encode-table.json"
+        ))
+        .expect("fixture parses");
+        let rows = table["rows"].as_array().expect("rows");
+        assert!(rows.len() >= 50, "the table covers every preset on every listed monitor");
+        let n = |r: &serde_json::Value, k: &str| r[k].as_u64().unwrap_or_else(|| panic!("{k} missing"));
+        let mut cadences = std::collections::BTreeSet::new();
+        for r in rows {
+            let got = effective_encode_settings(
+                n(r, "fps") as u32,
+                n(r, "bitrate") as u32,
+                n(r, "assumedW") * n(r, "assumedH"),
+                n(r, "monitorW") * n(r, "monitorH"),
+            );
+            let want = (n(r, "expectFps") as u32, n(r, "expectBitrate") as u32);
+            assert_eq!(got, want, "{} on {}x{}", r["preset"], n(r, "monitorW"), n(r, "monitorH"));
+            if want.0 < n(r, "fps") as u32 {
+                cadences.insert(want.0);
+            }
+        }
+        // Positive control on the table itself: it must exercise EVERY
+        // cadence the fold can land on, not only monitors that fit their preset.
+        assert_eq!(cadences.into_iter().collect::<Vec<_>>(), vec![24, 30, 48], "the table must reach each fps fold");
+    }
+
     #[test]
     fn bitrate_scales_with_pixel_count_and_clamps_both_ends() {
         let assumed = 1920u64 * 1080; // the 1080p30 preset's assumption

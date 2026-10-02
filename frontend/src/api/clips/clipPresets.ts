@@ -10,7 +10,7 @@
  * figure for a native capture.
  */
 
-export type ClipPresetId = '720p30' | '720p60' | '1080p30' | '1080p60' | '1440p30' | '2160p30' | 'native';
+export type ClipPresetId = '480p30' | '720p30' | '720p60' | '1080p30' | '1080p60' | '1440p30' | '2160p30' | 'native';
 
 export interface ClipPreset {
     id: ClipPresetId;
@@ -24,6 +24,12 @@ export interface ClipPreset {
 }
 
 export const CLIP_PRESETS: readonly ClipPreset[] = [
+    // 480p30: the low-memory / low-storage choice when armed by hand (2:00 ≈ 30 MB). 2 Mbps keeps
+    // the ladder's shape — 2.25x the pixels costs ~1.7x the bits at each step
+    // (720p30 3.5, 1080p30 6) — and stays above clip_capture.rs's 1.5 Mbps
+    // scale_bitrate floor. It saves memory only when armed by hand: automatic
+    // arming records the whole monitor (Settings says what that costs).
+    { id: '480p30', label: '480p 30 fps — about 2 Mbps', maxWidth: 854, maxHeight: 480, fps: 30, videoBitrate: 2_000_000, audioBitrate: 128_000 },
     { id: '720p30', label: '720p 30 fps — about 3.5 Mbps', maxWidth: 1280, maxHeight: 720, fps: 30, videoBitrate: 3_500_000, audioBitrate: 128_000 },
     // 720p60: smoothness on a budget — the low-RAM answer to "my game is 60fps".
     { id: '720p60', label: '720p 60 fps — about 5 Mbps', maxWidth: 1280, maxHeight: 720, fps: 60, videoBitrate: 5_000_000, audioBitrate: 128_000 },
@@ -41,6 +47,11 @@ export const DEFAULT_CLIP_PRESET: ClipPresetId = '1080p30';
 
 export function clipPreset(id: string | null | undefined): ClipPreset {
     return CLIP_PRESETS.find(p => p.id === id) ?? CLIP_PRESETS.find(p => p.id === DEFAULT_CLIP_PRESET)!;
+}
+
+/** A preset's name without its bitrate ("1080p 30 fps"), for prose. */
+export function presetName(p: ClipPreset): string {
+    return p.label.split(' — ')[0];
 }
 
 /** Bytes per second the ring grows at for a preset (video + audio). */
@@ -115,4 +126,155 @@ export function formatMB(bytes: number): string {
 export function formatClock(seconds: number): string {
     const s = Math.max(0, Math.round(seconds));
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+// ---- what a SAVED clip costs, and which limit it hits ------------------------
+//
+// Copies of the limits the app enforces elsewhere, kept here so this module
+// stays pure and importable everywhere (the trim module pulls in a muxer).
+// clipStorageEstimate.test.ts asserts each equals its source, so none can drift.
+
+/** clipCrypto.PART_MAX_PLAINTEXT — a sealed clip is cut into parts this big. */
+export const CLIP_PART_PLAIN_BYTES = 24 * MIB;
+/** clipCrypto.PART_HEADER_BYTES + PART_TAG_BYTES — what sealing adds per part. */
+export const CLIP_PART_OVERHEAD_BYTES = 19 + 16;
+/** clipRef.MAX_CLIP_PARTS — the most parts a clip reference can carry. */
+export const CLIP_MAX_PARTS = 64;
+/** clipPlayback.CLIP_DOWNLOAD_MAX_BYTES — larger clips cannot be downloaded in the app. */
+export const CLIP_DOWNLOAD_LIMIT_BYTES = GIB;
+/** clipTrim.TRIM_MAX_CIPHER_BYTES — larger clips cannot be trimmed in the app. */
+export const CLIP_TRIM_LIMIT_BYTES = 768 * MIB;
+
+type ClipRate = Pick<ClipPreset, 'videoBitrate' | 'audioBitrate'>;
+
+const clipMediaBytes = (p: ClipRate, seconds: number) => Math.round(Math.max(0, seconds) * (p.videoBitrate + p.audioBitrate) / 8);
+
+/**
+ * Parts the seal cuts a clip of `seconds` into, counted the way
+ * fmp4Split.ts's Fmp4Splitter cuts: part 0 is the init segment on its own,
+ * then media parts are cut only IN FRONT of a moof, so each holds whole
+ * fragments — one keyframe interval (CLIP_RING_GOP_SECONDS) each, since the
+ * mux fragments at every keyframe — and stays under `partBytes` by up to one
+ * fragment. replayWorker's seal refuses a clip whose part count (init part
+ * included) exceeds CLIP_MAX_PARTS. Nominal bitrate: a VBR encoder can need
+ * more. `partBytes` is a parameter only so a test can cross-check this against
+ * the real splitter at a small scale.
+ */
+export function clipPartCount(p: ClipRate, seconds: number, partBytes: number = CLIP_PART_PLAIN_BYTES): number {
+    const s = Math.max(0, seconds);
+    if (clipMediaBytes(p, s) <= 0) return 0;
+    const fragments = Math.max(1, Math.ceil(s / CLIP_RING_GOP_SECONDS));
+    const fragBytes = (p.videoBitrate + p.audioBitrate) / 8 * CLIP_RING_GOP_SECONDS;
+    const perPart = Math.max(1, Math.floor(partBytes / fragBytes));
+    return 1 + Math.ceil(fragments / perPart);
+}
+
+/**
+ * Bytes a saved (sealed, uploaded) clip of `seconds` takes at a bitrate: the
+ * encoded media plus the sealing overhead of every part (the init part
+ * included). An ESTIMATE — the encoder is VBR — so every readout built on it
+ * says "about". Pass a preset, or `{ videoBitrate: measuredBitsPerSecond,
+ * audioBitrate: 0 }` for a measured rate.
+ */
+export function clipStorageBytes(p: ClipRate, seconds: number): number {
+    const media = clipMediaBytes(p, seconds);
+    if (media <= 0) return 0;
+    return media + clipPartCount(p, seconds) * CLIP_PART_OVERHEAD_BYTES;
+}
+
+export interface ClipLimits {
+    /** About how big the saved clip is (clipStorageBytes). */
+    bytes: number;
+    parts: number;
+    /** More parts than a clip reference can carry: the seal itself fails. */
+    overParts: boolean;
+    /** Posts, but cannot be downloaded in the app. */
+    overDownload: boolean;
+    /** Posts, but cannot be trimmed in the app. */
+    overTrim: boolean;
+    /** Fraction of the member's clip storage one such clip takes; null = quota unknown. */
+    quotaShare: number | null;
+}
+
+/** Which of the app's limits a clip of `seconds` at rate `p` runs into. */
+export function clipLimits(p: ClipRate, seconds: number, quotaBytes?: number | null): ClipLimits {
+    const bytes = clipStorageBytes(p, seconds);
+    const parts = clipPartCount(p, seconds);
+    return {
+        bytes,
+        parts,
+        overParts: parts > CLIP_MAX_PARTS,
+        overDownload: bytes > CLIP_DOWNLOAD_LIMIT_BYTES,
+        overTrim: bytes > CLIP_TRIM_LIMIT_BYTES,
+        quotaShare: typeof quotaBytes === 'number' && quotaBytes > 0 ? bytes / quotaBytes : null,
+    };
+}
+
+// ---- the ring never holds what can never be posted -----------------------------
+
+/** The keyframe interval both capture paths encode at (replayBuffer gopMs). */
+export const CLIP_RING_GOP_SECONDS = 2;
+
+/**
+ * Seconds the ring keeps when armed in a server whose longest clip is
+ * `serverMaxSeconds`. A clip can never be longer than that cap (the composer
+ * seals at most the cap and the server refuses more), so footage older than
+ * it only costs memory. One keyframe interval of slack lets a full-length
+ * clip still find a keyframe at its start. No (valid) cap: the setting stands.
+ */
+export function ringSecondsFor(bufferSeconds: number, serverMaxSeconds?: number | null): number {
+    if (typeof serverMaxSeconds !== 'number' || !Number.isFinite(serverMaxSeconds) || serverMaxSeconds <= 0) return bufferSeconds;
+    return Math.min(bufferSeconds, serverMaxSeconds + CLIP_RING_GOP_SECONDS);
+}
+
+// ---- what AUTOMATIC arming really records ---------------------------------------
+//
+// A TS port of frontend/src-tauri/src/clip_capture.rs `scale_bitrate` and
+// `effective_encode_settings`. Native capture (armNative) never scales frames:
+// it records the monitor at its own size, and when that is bigger than the
+// preset assumed it trades FRAME RATE for the pixels and rescales the bitrate.
+// So "720p 60 fps" records 24 fps on a 1080p monitor. Integer arithmetic
+// mirrors the Rust (u64 division floors). Both sides are pinned to ONE table:
+// src/tests/fixtures/clip-native-encode-table.json.
+
+const BITRATE_FLOOR = 1_500_000;
+const BITRATE_CEIL = 20_000_000;
+const clampBitrate = (v: number) => Math.min(BITRATE_CEIL, Math.max(BITRATE_FLOOR, v));
+
+export function scaleBitrate(requested: number, assumedPixels: number, actualPixels: number): number {
+    if (assumedPixels === 0) return clampBitrate(requested);
+    return clampBitrate(Math.floor((requested * actualPixels) / assumedPixels));
+}
+
+export function effectiveEncodeSettings(requestedFps: number, requestedBitrate: number, assumedPixels: number, actualPixels: number): { fps: number; bitrate: number } {
+    const bitrate = scaleBitrate(requestedBitrate, assumedPixels, actualPixels);
+    if (assumedPixels === 0 || actualPixels <= assumedPixels || requestedFps === 0) return { fps: requestedFps, bitrate };
+    const budget = Math.floor((requestedFps * assumedPixels) / actualPixels);
+    const fps = Math.min(budget <= 29 ? 24 : budget <= 47 ? 30 : budget <= 59 ? 48 : requestedFps, requestedFps);
+    return { fps, bitrate: clampBitrate(Math.floor((bitrate * fps) / requestedFps)) };
+}
+
+export interface NativeEncodeEstimate {
+    width: number;
+    height: number;
+    fps: number;
+    videoBitrate: number;
+    audioBitrate: number;
+    /** Ring/clip growth, video + audio. */
+    bytesPerSecond: number;
+    /** The monitor is bigger than the preset assumed, so it records fewer frames than the preset's. */
+    reducedFps: boolean;
+}
+
+/** What automatic arming records on a `monitorW` x `monitorH` monitor (physical pixels). */
+export function nativeEncodeEstimate(p: ClipPreset, monitorW: number, monitorH: number): NativeEncodeEstimate {
+    // replayBuffer.armNative passes assumedPixels = max(1, maxWidth * maxHeight).
+    const assumed = Math.max(1, p.maxWidth * p.maxHeight);
+    const width = Math.max(0, Math.round(monitorW)), height = Math.max(0, Math.round(monitorH));
+    const { fps, bitrate } = effectiveEncodeSettings(p.fps, p.videoBitrate, assumed, width * height);
+    return { width, height, fps, videoBitrate: bitrate, audioBitrate: p.audioBitrate, bytesPerSecond: (bitrate + p.audioBitrate) / 8, reducedFps: fps < p.fps };
+}
+
+export function formatMbps(bitsPerSecond: number): string {
+    return `${(bitsPerSecond / 1_000_000).toFixed(1)} Mbps`;
 }

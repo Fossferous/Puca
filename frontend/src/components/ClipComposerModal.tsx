@@ -38,8 +38,8 @@ import { useEffect, useRef, useState } from 'react';
 import { attachPreview, discardSeal, getReplayState, subscribeReplay, trimSeal, undoTrim, uploadAndBuild, type ReplayState } from '../api/clips/replayBuffer';
 import type { SealedInfo } from '../api/clips/clipTypes';
 import { clipWindowFor } from '../api/clips/clipParticipants';
-import { formatClock, formatMB } from '../api/clips/clipPresets';
-import { CHIP_SECONDS, durationChips, outcomeCopy, resolveClipTarget } from '../api/clips/clipComposerLogic';
+import { clipLimits, clipStorageBytes, formatClock, formatMB } from '../api/clips/clipPresets';
+import { CHIP_SECONDS, clipBytesPerSecond, durationChips, outcomeCopy, resolveClipTarget } from '../api/clips/clipComposerLogic';
 import type { ClipPolicy } from '../api/clips/clipsUiState';
 import { clipLabel } from '../api/clips/clipRef';
 import { TRIM_MAX_CIPHER_BYTES, TRIM_MIN_CLIP_MS } from '../api/clips/clipTrim';
@@ -107,6 +107,12 @@ export function ClipComposerModal({ isOpen, onClose, bufferedSeconds, maxSeconds
     // Default chip: the longest available (what a "clip that" impulse wants) —
     // derived, not synced through an effect.
     const chosen = chosenRaw !== null && chips.includes(chosenRaw) ? chosenRaw : (chips.length ? chips[chips.length - 1] : null);
+    // What each length will cost, BEFORE the seal is paid for (VBR: "about").
+    const clipBps = clipBytesPerSecond(replay);
+    const clipRate = { videoBitrate: clipBps * 8, audioBitrate: 0 };
+    const chipBytes = (secs: number) => clipStorageBytes(clipRate, secs);
+    const chosenLimits = chosen !== null ? clipLimits(clipRate, chosen) : null;
+    const chosenBytes = chosenLimits?.bytes ?? 0;
     // NO PICKER, no fallback chain. The pinned clips channel is the only
     // destination — everyone who approved knew where it would land — and each
     // way that can fail renders its own explanation (resolveClipTarget).
@@ -420,6 +426,7 @@ export function ClipComposerModal({ isOpen, onClose, bufferedSeconds, maxSeconds
                                             onClick={() => setChosen(c)}
                                         >
                                             {formatClock(c)}{c === chips[chips.length - 1] && !CHIP_SECONDS.includes(c) ? ' (all)' : ''}
+                                            <span className="clip-duration-chip-size">≈ {formatMB(chipBytes(c))}</span>
                                         </button>
                                     ))}
                                 </div>
@@ -428,6 +435,16 @@ export function ClipComposerModal({ isOpen, onClose, bufferedSeconds, maxSeconds
                                 Buffered {formatClock(bufferedSeconds)} · you can clip up to {formatClock(maxSeconds)}
                                 {!replay.hasSystemAudio && <><br /><WarningIcon size={13} /> This buffer has no system audio — only your microphone.</>}
                             </p>
+                            {/* The app's own limits, said while the length can still change. */}
+                            {chosenLimits && (chosenLimits.overParts || chosenLimits.overTrim) && (
+                                <p className="clip-composer-hint">
+                                    <WarningIcon size={13} /> {chosenLimits.overParts
+                                        ? 'A clip this long is too big to post at this quality — choose a shorter length.'
+                                        : chosenLimits.overDownload
+                                            ? 'A clip this long (about ' + formatMB(chosenBytes) + ') would be too large to download or trim in the app — a shorter one can be.'
+                                            : 'A clip this long (about ' + formatMB(chosenBytes) + ') would be too large to trim in the app — a shorter one can be.'}
+                                </p>
+                            )}
                             {/* The dead end, announced BEFORE the seal is paid for
                                 (a seal doubles peak memory by design): a user who
                                 reads "no clips channel" only on the post screen
