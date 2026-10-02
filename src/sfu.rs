@@ -112,6 +112,23 @@ const MEASURE_LAG: Duration = Duration::from_secs(25);
 /// approximation stops being used at all.
 const AVG_PACKET_BYTES: u64 = 1_100;
 
+/// How long a mint's session attribution ([`SfuMint`]) is kept. Longer than
+/// any call in practice; a session older than this simply cannot be cut by
+/// session (see [`evict_session_identities`]), and its device's own teardown
+/// on RoomLeft still ends it.
+const MINT_ATTRIBUTION_TTL: Duration = Duration::from_secs(24 * 3600);
+
+/// Who minted one LiveKit identity: [`AppState::sfu_minted`]. Identities are
+/// minted per TOKEN REQUEST (`u<id>#<nonce>`), not per WebSocket, so the
+/// minting session's `sid` is what ties an identity to a device.
+#[derive(Debug, Clone)]
+pub struct SfuMint {
+    pub room: String,
+    pub user_id: i64,
+    pub sid: String,
+    pub at: Instant,
+}
+
 /// Live + reserved usage of one LiveKit room. Held in
 /// [`AppState::sfu_rooms`], keyed by room name (`sfu_<channel id>`).
 #[derive(Default)]
@@ -788,6 +805,7 @@ pub fn spawn_egress_sampler(state: Arc<AppState>) {
 /// Drop expired reservations and empty room entries.
 fn prune(state: &AppState) {
     let now = Instant::now();
+    state.sfu_minted.retain(|_, m| now.duration_since(m.at) < MINT_ATTRIBUTION_TTL);
     for mut r in state.sfu_rooms.iter_mut() {
         r.reservations
             .retain(|_, minted| now.duration_since(*minted) < RESERVATION_TTL);
@@ -2090,6 +2108,38 @@ async fn evict_with(state: &AppState, cfg: &SfuConfig, channel_id: i64, user_id:
     out
 }
 
+/// Cut the LiveKit sessions of `user_id` in the channel's room that were
+/// minted on one of `sids` - and no other. "Move here" uses it: the user stays
+/// in the call (on the phone), so [`evict_user_from_channel`] - every
+/// `u<id>#` identity - would cut the phone too, and no eviction INTENT is
+/// journaled for the same reason (the resync would apply it to the user).
+///
+/// Best-effort like every eviction: an identity minted before this process
+/// started, or by a legacy token, is not attributed and is left to the
+/// displaced device's own teardown on its RoomLeft.
+pub async fn evict_session_identities(state: &Arc<AppState>, channel_id: i64, user_id: i64, sids: &[String]) -> Evicted {
+    let Some(cfg) = sfu_config() else { return Evicted::default() };
+    let room = room_name_for_channel(channel_id);
+    let identities = session_identities(state, &room, user_id, sids);
+    if identities.is_empty() {
+        return Evicted::default();
+    }
+    remove_identities(state, &cfg, &room, &identities).await
+}
+
+/// The identities [`evict_session_identities`] would cut: minted in `room`,
+/// by `user_id`, on one of `sids` (never an empty sid).
+fn session_identities(state: &AppState, room: &str, user_id: i64, sids: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = state
+        .sfu_minted
+        .iter()
+        .filter(|m| m.room == room && m.user_id == user_id && !m.sid.is_empty() && sids.contains(&m.sid))
+        .map(|m| m.key().clone())
+        .collect();
+    out.sort();
+    out
+}
+
 /// RemoveParticipant for each identity in `room`; a confirmed removal is
 /// journaled and dropped from `sfu_rooms`.
 async fn remove_identities(state: &AppState, cfg: &SfuConfig, room: &str, identities: &[String]) -> Evicted {
@@ -2149,6 +2199,7 @@ async fn remove_identities(state: &AppState, cfg: &SfuConfig, room: &str, identi
                     u.grants.remove(identity);
                     u.unconfirmed.remove(identity);
                 }
+                state.sfu_minted.remove(identity);
             }
             Ok(r) => tracing::warn!("SFU evict {identity}: LiveKit returned {}", r.status()),
             Err(e) => {
@@ -2849,6 +2900,15 @@ pub async fn get_sfu_token(
         .or_default()
         .reservations
         .insert(identity.clone(), Instant::now());
+    // Which session holds this identity: "Move here" cuts the PC's LiveKit
+    // session by it without touching the phone's (evict_session_identities).
+    // A legacy token with no sid is not recorded - it cannot be told apart.
+    if !claims.sid.is_empty() {
+        state.sfu_minted.insert(
+            identity.clone(),
+            SfuMint { room: room.clone(), user_id: claims.sub, sid: claims.sid.clone(), at: Instant::now() },
+        );
+    }
 
     Json(SfuTokenResponse {
         url: cfg.url,

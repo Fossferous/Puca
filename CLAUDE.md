@@ -327,6 +327,7 @@ cd frontend/android && ./gradlew testDebugUnitTest    # the pure-Java logic
 cd frontend/notes-app/android && ./gradlew testDebugUnitTest   # Púca Notes' pure-Java logic (reminder plan/merge, token rule, geofence parity with Púca); needs a cap sync first (npm run notes:android) and ANDROID_HOME
 cd frontend/notes-app/android && ./gradlew :app:connectedDebugAndroidTest   # on a HEADLESS emulator (-no-window -no-audio): the bridge-typing test the JVM cannot reach (PluginArgsBridgeTest)
 node frontend/e2e/feature-flows.mjs          # needs a backend + isolated DB
+cd frontend && node e2e/own-voice-2device.mjs   # Leave / Move here: ONE account on a desktop and a 390x844 phone context plus a second account in the call, mesh and (with LK_*) SFU; needs APP= / API= against a throwaway backend (header of the file)
 cd frontend && npm run check:installer-hooks # NSIS hook macros compile and every migrate call names the OLD binary (needs makensis; Tauri caches one under LOCALAPPDATA/tauri/NSIS)
 node scripts/gen-third-party-notices.mjs      # regenerates THIRD_PARTY_NOTICES.md; exits 1 on a dependency with no licence — commit the result before a release
 cd frontend && node e2e/ice-url-real-browser.mjs   # real RTCPeerConnection; no server needed

@@ -1,0 +1,6 @@
+[
+  {"type":"OwnVoiceState","payload":{"room_id":"voice_42","channel_id":42,"server_id":"5f1d2c3e-0000-4000-8000-000000000042","channel_name":"Lounge","server_name":"Friends","here":false,"device":"desktop"}},
+  {"type":"OwnVoiceState","payload":{"room_id":null,"channel_id":null,"server_id":null,"channel_name":null,"server_name":null,"here":false,"device":null}},
+  {"type":"RoomLeft","payload":{"room_id":"voice_42","reason":"moved","by":"mobile"}},
+  {"type":"RoomLeft","payload":{"room_id":"voice_42"}}
+]

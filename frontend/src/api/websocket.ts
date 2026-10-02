@@ -1,5 +1,19 @@
 import { WS_URL } from './config';
 import { onPaintResumed } from './pagePainting';
+import { isMobile, isTauri } from './platform';
+import { applyOwnVoiceFrame, currentClientKind, ownVoiceSupported, resetOwnVoice } from './ownVoice';
+
+/**
+ * The socket URL, with what this client can read (`caps=own_voice`: the
+ * account's voice state, ownVoice.ts) and what kind of device it is. A server
+ * that predates them ignores both; a server that knows them sends
+ * OwnVoiceState ONLY to a socket that asked, so no older client is ever handed
+ * a frame it does not know. Never carries a credential (see connect()).
+ */
+export function socketUrl(base: string = WS_URL): string {
+    const kind = currentClientKind(isTauri(), isMobile());
+    return `${base}${base.includes('?') ? '&' : '?'}caps=own_voice&kind=${kind}`;
+}
 
 // The authoritative wire-protocol definition lives in the Rust backend
 // (src/ws.rs); payloads arrive as untyped JSON and are cast at use sites.
@@ -141,6 +155,9 @@ class WebSocketClient {
             this.ws.onclose = null;
             this.ws.close();
             this.ws = null;
+            // What the old socket's server told us does not carry over: the
+            // new one may be an older (rollback) host. See ownVoice.ts.
+            resetOwnVoice();
             if (typeof window !== 'undefined') {
                 window.dispatchEvent(new CustomEvent('wsClosed'));
             }
@@ -170,7 +187,7 @@ class WebSocketClient {
             //
             // The backend accepts both forms and ships BEFORE this, so a client
             // can never meet a server that understands neither.
-            const socket = new WebSocket(WS_URL, ['bearer', token]);
+            const socket = new WebSocket(socketUrl(), ['bearer', token]);
             this.ws = socket;
 
             socket.onopen = () => {
@@ -181,10 +198,17 @@ class WebSocketClient {
                 this.lastPongTime = Date.now();
                 this.startHeartbeat();
                 // Re-establish room memberships lost with the previous socket.
+                //
+                // Marked `replay`: a voice call another device of this account
+                // has since ended or moved is refused (with the RoomLeft this
+                // socket missed) instead of rejoined with an open mic. Never
+                // `take_over` — that is one deliberate press, not a memory; a
+                // replayed take-over would steal the call back from the phone.
+                // An old server ignores the field.
                 if (this.joinedRooms.size > 0) {
                     console.log(`[WS] Re-joining ${this.joinedRooms.size} room(s) after (re)connect`);
                     for (const room of this.joinedRooms) {
-                        this.send({ type: 'JoinRoom', payload: { room_id: room } });
+                        this.send({ type: 'JoinRoom', payload: { room_id: room, replay: true } });
                     }
                 }
                 // Event-driven presence lost during a socket gap is gone for
@@ -228,6 +252,8 @@ class WebSocketClient {
                 // cut) — essential when diagnosing reconnect loops in the field.
                 console.log(`WebSocket closed (code=${event.code}${event.reason ? `, reason=${event.reason}` : ''}, clean=${event.wasClean})`);
                 this.stopHeartbeat();
+                // Per socket: the next one must prove its server again.
+                resetOwnVoice();
                 // Reset the backoff only when the connection proved STABLE.
                 // Resetting on every open turned an accept-then-drop server
                 // (deploy window, crash loop) into an infinite full-speed
@@ -338,6 +364,12 @@ class WebSocketClient {
             const from = (message.payload as { from_channel_id?: number } | undefined)?.from_channel_id;
             if (typeof from === 'number') this.joinedRooms.delete(`voice_${from}`);
         }
+        // Latched HERE, not in a component: the server sends it right after
+        // the socket opens, before any React listener may have mounted, and
+        // it is what proves this socket's server understands LeaveOwnVoice.
+        if (message.type === 'OwnVoiceState') {
+            applyOwnVoiceFrame(message.payload);
+        }
         const handlers = this.handlers.get(message.type) || [];
         handlers.forEach(handler => handler(message));
     }
@@ -436,9 +468,29 @@ class WebSocketClient {
         return this.ws?.bufferedAmount ?? 0;
     }
 
-    joinRoom(roomId: string) {
+    /**
+     * `takeOver` — "Move here": this account is in `roomId` on another device;
+     * join here and end it there (see ownVoice.ts shouldTakeOver). Rides THIS
+     * frame only; the rejoin list remembers the room, never the flag.
+     */
+    joinRoom(roomId: string, opts?: { takeOver?: boolean }) {
         this.joinedRooms.add(roomId);
-        this.send({ type: 'JoinRoom', payload: { room_id: roomId } });
+        this.send({
+            type: 'JoinRoom',
+            payload: opts?.takeOver ? { room_id: roomId, take_over: true } : { room_id: roomId },
+        });
+    }
+
+    /**
+     * End this account's call on its OTHER device — Leave on the "You're in
+     * Lounge on your PC" banner. Returns false, sending nothing, unless this
+     * socket's server has said it understands the frame (it sent
+     * OwnVoiceState): an older server would answer with an Error, which is an
+     * alert() in this client.
+     */
+    leaveOwnVoice(roomId: string): boolean {
+        if (!ownVoiceSupported()) return false;
+        return this.send({ type: 'LeaveOwnVoice', payload: { room_id: roomId } });
     }
 
     leaveRoom(roomId: string) {
@@ -582,6 +634,7 @@ class WebSocketClient {
             this.ws.onclose = null;
             this.ws.close();
             this.ws = null;
+            resetOwnVoice();
             if (typeof window !== 'undefined') {
                 // DELIBERATE: sign-out and session expiry come through here.
                 // Device sessions grace an accidental drop for a reconnect,

@@ -13,7 +13,41 @@ pub enum ClientMessage {
     Ping,
 
     /// Join a room/channel
-    JoinRoom { room_id: String },
+    ///
+    /// `take_over` (voice rooms only): "move the call here". When another
+    /// connection of the SAME account is in this voice room, this connection
+    /// joins first and the other one is then taken out (`RoomLeft` to it
+    /// alone, with `reason: "moved"`), so the room never sees the user leave.
+    /// Sent only by a client that has received `OwnVoiceState` on this socket
+    /// (the server's sign that it understands the flag); never replayed.
+    ///
+    /// `replay`: this join is the client re-sending a room it remembers after
+    /// its socket came back, not a click. A replay of a voice room that
+    /// another device of the account has since ended or moved (see
+    /// `LeaveOwnVoice`, `take_over`) is refused with a plain-reason RoomLeft,
+    /// so a PC that slept through its RoomLeft does not rejoin with an open
+    /// mic.
+    ///
+    /// Both `default`: every client that predates them is a plain join, and
+    /// servers that predate them ignore the fields (unknown fields of a known
+    /// variant are not an error).
+    JoinRoom {
+        room_id: String,
+        #[serde(default)]
+        take_over: bool,
+        #[serde(default)]
+        replay: bool,
+    },
+
+    /// End this account's call on its OTHER device(s): "Leave" on the
+    /// "You're in <channel> on your PC" banner. Acts only on the sender's own
+    /// account, and only when `room_id` is still the voice room the account
+    /// is in (a stale press does nothing but refresh the sender's
+    /// `OwnVoiceState`). Each other connection in the room is told `RoomLeft`
+    /// with `reason: "left_elsewhere"`. NEW: an old server answers it with an
+    /// Error, so a client sends it only after `OwnVoiceState` has arrived on
+    /// this socket.
+    LeaveOwnVoice { room_id: String },
 
     /// Leave a room/channel
     LeaveRoom { room_id: String },
@@ -293,8 +327,50 @@ pub enum ServerMessage {
         members: Vec<UserInfo>,
     },
 
-    /// Successfully left a room
-    RoomLeft { room_id: String },
+    /// Successfully left a room - or, for a voice room, were taken out of it.
+    ///
+    /// `reason`/`by` are present ONLY when another device of the same account
+    /// ended this connection's call: `reason` is `"moved"` (that device pressed
+    /// Move here, or tapped the same channel) or `"left_elsewhere"` (it pressed
+    /// Leave), and `by` is the kind of device that did it (`"desktop"`,
+    /// `"mobile"`, `"browser"`) when that device said. Absent otherwise, so
+    /// the frame stays byte-identical to the one every client already parses;
+    /// an old client ignores the two fields and tears down exactly as before.
+    RoomLeft {
+        room_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<String>,
+    },
+
+    /// This ACCOUNT's voice state, as THIS connection should see it - so a
+    /// phone opened while the PC is in a call can say "You're in Lounge on
+    /// your PC" and offer Leave / Move here, on any screen.
+    ///
+    /// Sent only to connections that announced `?caps=own_voice` on the
+    /// WebSocket URL (an old client is never handed a frame it does not
+    /// know), and never to a delivery socket: once at connect - which is
+    /// also how the client learns this server supports `LeaveOwnVoice` and
+    /// `take_over` - and again to every such connection of the account
+    /// whenever the account's voice membership changes.
+    ///
+    /// Every key is always present: `room_id` and the rest are null when the
+    /// account is in no voice room. `here` is true when THIS connection is in
+    /// it. `device` is the kind of device (`"desktop"`, `"mobile"`,
+    /// `"browser"`) of another connection that holds the call, as that
+    /// connection reported itself, or null. Names come from the database at
+    /// send time; they reach only the account's own devices. The byte shape
+    /// is pinned by `frontend/src/tests/fixtures/ownVoiceState.json`.
+    OwnVoiceState {
+        room_id: Option<String>,
+        channel_id: Option<i64>,
+        server_id: Option<String>,
+        channel_name: Option<String>,
+        server_name: Option<String>,
+        here: bool,
+        device: Option<String>,
+    },
 
     /// A moderator moved you into a different voice channel. Join
     /// `voice_<channel_id>`.
@@ -1097,5 +1173,87 @@ mod voice_speak_state_tests {
         .unwrap();
         let back: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(back["payload"]["user_id"].as_i64(), Some(2_147_483_647));
+    }
+}
+
+#[cfg(test)]
+mod own_voice_wire_tests {
+    use super::*;
+
+    /// One file pins the server and the client: `ownVoiceState.json` holds the
+    /// "your call is on another device" frame in both its shapes, and the two
+    /// RoomLeft shapes - the one a displaced device is sent (with why, and by
+    /// which kind of device) and the plain one, which must stay byte-identical
+    /// to the frame every client already parses. The client's tests read the
+    /// same file (`ownVoice.test.ts`).
+    #[test]
+    fn the_own_voice_frames_are_the_fixture_the_client_parses() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../frontend/src/tests/fixtures/ownVoiceState.json"))
+                .expect("the fixture is JSON");
+        let elsewhere = serde_json::to_value(ServerMessage::OwnVoiceState {
+            room_id: Some("voice_42".into()),
+            channel_id: Some(42),
+            server_id: Some("5f1d2c3e-0000-4000-8000-000000000042".into()),
+            channel_name: Some("Lounge".into()),
+            server_name: Some("Friends".into()),
+            here: false,
+            device: Some("desktop".into()),
+        })
+        .unwrap();
+        let none = serde_json::to_value(ServerMessage::OwnVoiceState {
+            room_id: None,
+            channel_id: None,
+            server_id: None,
+            channel_name: None,
+            server_name: None,
+            here: false,
+            device: None,
+        })
+        .unwrap();
+        let displaced = serde_json::to_value(ServerMessage::RoomLeft {
+            room_id: "voice_42".into(),
+            reason: Some("moved".into()),
+            by: Some("mobile".into()),
+        })
+        .unwrap();
+        let plain = serde_json::to_value(ServerMessage::RoomLeft { room_id: "voice_42".into(), reason: None, by: None }).unwrap();
+        assert_eq!(fixture[0], elsewhere);
+        assert_eq!(fixture[1], none, "every key present, as null: one shape for the client to read");
+        assert_eq!(fixture[2], displaced);
+        assert_eq!(fixture[3], plain);
+        // The plain RoomLeft is EXACTLY the pre-feature bytes.
+        assert_eq!(
+            serde_json::to_string(&ServerMessage::RoomLeft { room_id: "voice_42".into(), reason: None, by: None }).unwrap(),
+            r#"{"type":"RoomLeft","payload":{"room_id":"voice_42"}}"#
+        );
+        // Not vacuous: `here` and the channel id really are what the fixture says.
+        assert_eq!(fixture[0]["payload"]["here"], false);
+        assert_eq!(fixture[0]["payload"]["channel_id"].as_i64(), Some(42));
+        let here = serde_json::to_value(ServerMessage::OwnVoiceState {
+            room_id: Some("voice_42".into()),
+            channel_id: Some(42),
+            server_id: Some("5f1d2c3e-0000-4000-8000-000000000042".into()),
+            channel_name: Some("Lounge".into()),
+            server_name: Some("Friends".into()),
+            here: true,
+            device: Some("desktop".into()),
+        })
+        .unwrap();
+        assert_ne!(here, fixture[0]);
+    }
+
+    /// Old servers ignored unknown JoinRoom fields; THIS server reads the two
+    /// new ones and defaults both to false, so every client that predates them
+    /// keeps today's join.
+    #[test]
+    fn join_room_reads_take_over_and_replay_and_defaults_them_off() {
+        let old: ClientMessage = serde_json::from_str(r#"{"type":"JoinRoom","payload":{"room_id":"voice_1"}}"#).unwrap();
+        assert!(matches!(old, ClientMessage::JoinRoom { take_over: false, replay: false, .. }));
+        let new: ClientMessage =
+            serde_json::from_str(r#"{"type":"JoinRoom","payload":{"room_id":"voice_1","take_over":true,"replay":true}}"#).unwrap();
+        assert!(matches!(new, ClientMessage::JoinRoom { take_over: true, replay: true, .. }));
+        let leave: ClientMessage = serde_json::from_str(r#"{"type":"LeaveOwnVoice","payload":{"room_id":"voice_1"}}"#).unwrap();
+        assert!(matches!(leave, ClientMessage::LeaveOwnVoice { ref room_id } if room_id == "voice_1"));
     }
 }

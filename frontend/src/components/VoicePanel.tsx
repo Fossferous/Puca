@@ -52,6 +52,7 @@ import { holdStreamBoost, releaseStreamBoost } from '../api/streamBoost';
 import { holdStreamDiag, releaseStreamDiag } from '../api/streamDiag';
 import { isTauri, isAndroidApp } from '../api/platform';
 import { SpeakGate, parseVoiceSpeakState } from '../api/rtc/speakGate';
+import { shouldTakeOver } from '../api/ownVoice';
 import { setVoiceKeepAlive, openMobileAppSettings } from '../api/mobileApp';
 import { phonePanelQuery } from '../utils/phonePanel';
 import { isTouchDevice } from './settingsModal.utils';
@@ -1504,7 +1505,12 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             speechMuteUntilRef.current = Date.now() + 2500;
 
             // CRITICAL: Join the WebSocket room FIRST so we can receive events from others
-            wsClient.joinRoom(roomId);
+            // `takeOver`: this account is in THIS room on another device (the
+            // own-voice store says so, and only a server that understands the
+            // flag fills it) - "Move here", or the same channel tapped here.
+            // The server moves the call to this connection instead of leaving
+            // both devices connected. Decided now, never replayed.
+            wsClient.joinRoom(roomId, { takeOver: shouldTakeOver(roomId) });
 
             const localStream = await webrtcManager.getLocalStream(true, false);
             // The server said "no SPEAK" while the mic prompt was up: close
