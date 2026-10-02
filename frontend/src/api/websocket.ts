@@ -4,11 +4,12 @@ import { isMobile, isTauri } from './platform';
 import { applyOwnVoiceFrame, currentClientKind, ownVoiceSupported, resetOwnVoice } from './ownVoice';
 
 /**
- * The socket URL, with what this client can read (`caps=own_voice`: the
- * account's voice state, ownVoice.ts) and what kind of device it is. A server
- * that predates them ignores both; a server that knows them sends
- * OwnVoiceState ONLY to a socket that asked, so no older client is ever handed
- * a frame it does not know. Never carries a credential (see connect()).
+ * The socket URL, with what this client can read (`caps=own_voice,presence`,
+ * one list - see CLIENT_CAPS: the account's voice state, ownVoice.ts, and
+ * idle/away presence) and what kind of device it is (`kind=`). A server that
+ * predates them ignores both; a server that knows them sends OwnVoiceState /
+ * UserStatus ONLY to a socket that asked, so no older client is ever handed a
+ * frame it does not know. Never carries a credential (see connect()).
  */
 export function socketUrl(base: string = WS_URL): string {
     const kind = currentClientKind(isTauri(), isMobile());

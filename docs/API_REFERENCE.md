@@ -115,7 +115,6 @@ in this file is not registered there, so what IS listed is real.
 |--------|----------|------|-------------|
 | GET | `/servers/:id/members` | ✅ | List members. `is_online` is false for anyone hiding their online status, and (since 0.9.5) for anyone with a block against the caller in either direction — the same rule as the live presence frames; if the block lookup fails, every member in that response reads offline. |
 | GET | `/servers/:id/members-with-roles` | ✅ | List members with roles. Same `is_online` rule as `/members`. |
-
 | POST | `/servers/:id/kick/:user_id` | ✅ | Kick member |
 | POST | `/servers/:id/bans/:user_id` | ✅ | Ban member |
 | DELETE | `/servers/:id/bans/:user_id` | ✅ | Unban member |
@@ -282,6 +281,22 @@ subprotocol header `Sec-WebSocket-Protocol: bearer, <JWT>` (the server echoes
 (`?token=`) is **refused** since 0.9.1 — it used to land verbatim in every
 proxy access log.
 
+**Client capabilities and device kind.** The URL also says what the client
+can read and what it is: `/ws?caps=own_voice,presence&kind=<desktop|mobile|browser>`,
+both optional. `caps` is ONE comma-separated list carrying every capability
+(`own_voice`: the account's call on another device, below; `presence`: idle
+and away, below); names are trimmed and compared case-insensitively, and an
+unknown name is ignored, so a client can announce what an older server has
+never heard of. A query parameter rather than a frame because an older server
+ignores a parameter it does not know, whereas an unknown client→server frame
+draws an `Error`. **Send each parameter at most once:** a repeated `caps=` (or
+`kind=`, or any other parameter the server reads) fails the upgrade with
+`400 Bad Request` (`Failed to deserialize query string: duplicate field ...`)
+before authentication, so two features must share the one list, never each
+append their own `caps=`. `kind` outside the three is
+dropped, and it is self-reported — it only labels the account's own devices
+to each other.
+
 Frames are `{"type": "<Variant>", "payload": {...}}`; the variants and their
 payloads are defined in `src/protocol.rs` (`ClientMessage` / `ServerMessage`),
 which is the source of truth — the list is long and changes with every release.
@@ -369,10 +384,9 @@ skips the timeout check. A ping from a connection not in the room, or any
 other content, keeps the full gate.
 
 **The account's call on another device.** A client that can show "You're in
-Lounge on your PC" says so on the socket URL: `/ws?caps=own_voice&kind=<desktop|mobile|browser>`
-(both optional; `kind` outside the three is dropped, and it is self-reported —
-it only labels the account's own devices to each other). Only such a
-connection, never a delivery socket, is sent
+Lounge on your PC" says so by putting `own_voice` in its `caps` list, and its
+device kind in `kind` (see *Client capabilities and device kind* above). Only
+such a connection, never a delivery socket, is sent
 
 ```json
 {"type":"OwnVoiceState","payload":{"room_id":"voice_42","channel_id":42,"server_id":"…","channel_name":"Lounge","server_name":"Friends","here":false,"device":"desktop"}}
@@ -444,13 +458,12 @@ online"). `UserOnline` / `UserOffline` are never sent to an account with a
 block in either direction, and the REST member lists and user search report
 the same pair as offline.
 
-**Idle and away presence; client capabilities.** A client announces what it
-understands in the URL, `/ws?caps=presence` (comma-separated, unknown names
-ignored), because an older server simply ignores a query parameter it does not
-know, whereas an unknown client→server **frame** draws an `Error` (which the
-stock client shows as an alert). The announcement is latched for the life of
-the socket. A server that supports a capability confirms it to that connection
-only, right after connect:
+**Idle and away presence.** A client announces it by putting `presence` in
+its `caps` list (see *Client capabilities and device kind* above) — not by a
+frame, because an older server answers an unknown client→server **frame**
+with an `Error` (which the stock client shows as an alert). The announcement is
+latched for the life of the socket. A server that supports a capability
+confirms it to that connection only, right after connect:
 
 ```json
 {"type":"ServerFeatures","payload":{"features":["presence"]}}

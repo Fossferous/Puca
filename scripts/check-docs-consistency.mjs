@@ -343,9 +343,38 @@ for (const f of ['docs/USER_GUIDE.md', 'docs/GETTING_STARTED.md']) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 14. The socket's `caps=` is ONE list, and the docs show the one the client
+//     sends. Two features each documented their own `/ws?caps=<name>` and the
+//     merge kept both paragraphs; the server reads `caps` once (src/ws.rs
+//     WsQuery), so a client following both sends `caps=` twice and its
+//     upgrade is refused with 400 (duplicate field). Every `caps=` a doc
+//     shows must be the client's CLIENT_CAPS list, joined as it sends it.
+{
+    const ws = read('frontend/src/api/websocket.ts');
+    const m = /export const CLIENT_CAPS[^=]*=\s*\[([^\]]*)\]/.exec(ws);
+    if (!m) fail('frontend/src/api/websocket.ts', 'no `export const CLIENT_CAPS = [...]` — update this check if the capability list moved');
+    else {
+        const list = [...m[1].matchAll(/'([^']+)'|"([^"]+)"/g)].map((x) => x[1] ?? x[2]).join(',');
+        let shown = 0;
+        for (const f of tracked(['docs/*.md', 'README.md'])) {
+            const lines = read(f).split('\n');
+            lines.forEach((line, i) => {
+                for (const c of line.matchAll(/caps=([A-Za-z0-9_,]+)/g)) {
+                    if (f === 'docs/API_REFERENCE.md') shown++;
+                    if (c[1] !== list) fail(`${f}:${i + 1}`, `shows \`caps=${c[1]}\`; the client sends ONE list, \`caps=${list}\` (CLIENT_CAPS in frontend/src/api/websocket.ts), and a second \`caps=\` fails the upgrade — show that list once and refer back to it`);
+                }
+            });
+        }
+        // Positive control: the reference must actually show the list, or this
+        // rule matches nothing and passes for that reason alone.
+        if (shown === 0) fail('docs/API_REFERENCE.md', `never shows the socket's \`caps=${list}\` — document the one list in the WebSocket section`);
+    }
+}
+
 if (problems.length) {
     console.error(`\ndocs consistency: ${problems.length} problem${problems.length === 1 ? '' : 's'}\n`);
     for (const p of problems) console.error(`  ${p.where}\n    ${p.what}\n`);
     process.exit(1);
 }
-console.log('docs consistency: clean (stale claims, TURN TTL, KDF, recovery docs, ops listing, env coverage, pool default, ExecStart, nginx body size, migration attrs, user-guide control names, merged release notes and Not-built list)');
+console.log('docs consistency: clean (stale claims, TURN TTL, KDF, recovery docs, ops listing, env coverage, pool default, ExecStart, nginx body size, migration attrs, user-guide control names, merged release notes and Not-built list, the socket caps list)');

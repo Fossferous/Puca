@@ -15,7 +15,9 @@
  * in src/main.rs or src/update_routes.rs (path parameters compared by
  * position, not by name, so `:id` in the doc matches `:server_id` in code).
  * The direction is deliberate: UNDOCUMENTED routes are allowed (the page says
- * it is a subset); WRONG ones are not.
+ * it is a subset); WRONG ones are not. Every route row must also sit INSIDE a
+ * table (the line above it a row or the |---| delimiter): a blank line ends a
+ * GFM table, and the rows after it render as a paragraph of pipes.
  *
  * Positive control, run when this was written: a fabricated `/servers/none`
  * row is reported; adding a route to main.rs without documenting it is not.
@@ -51,10 +53,17 @@ const METHOD = /^\|\s*(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s*\|\s*`([^`]+)`/
 const problems = [];
 const lines = fs.readFileSync(path.join(ROOT, DOC), 'utf8').split(/\r?\n/);
 let documented = 0;
+const tableBreaks = [];
 lines.forEach((line, i) => {
     const m = METHOD.exec(line);
     if (!m) return;
     documented++;
+    // A route row is only a table row if the line above it is one too (a row
+    // or the |---| delimiter). A blank line ends a GFM table, so every row
+    // after it renders as a paragraph of pipes - which this check, matching
+    // line by line, would otherwise count as documented (2026-10-02: a merge
+    // left one between /members-with-roles and /kick).
+    if (!/^\s*\|/.test(lines[i - 1] ?? '')) tableBreaks.push({ line: i + 1, method: m[1], raw: m[2].trim() });
     const raw = m[2].trim();
     const p = normalise(raw);
     if (registered.has(p)) return;
@@ -66,6 +75,13 @@ lines.forEach((line, i) => {
 
 if (documented === 0) {
     console.error(`api docs: found no route rows in ${DOC} — the table format changed and this check is matching nothing`);
+    process.exit(1);
+}
+
+if (tableBreaks.length) {
+    console.error(`\napi docs: ${tableBreaks.length} route row${tableBreaks.length === 1 ? '' : 's'} outside a table (the line above is not a table row, so the table ended there)\n`);
+    for (const p of tableBreaks) console.error(`  ${DOC}:${p.line}  ${p.method} ${p.raw}`);
+    console.error('\nDelete the blank (or prose) line above it, or give the rows that follow their own header and |---| row.');
     process.exit(1);
 }
 

@@ -9,8 +9,9 @@
  * understands it, on THIS socket: a reconnect can land on an older rollback
  * host, so the answer is latched per socket and forgotten when it closes.
  *
- * The client announces itself in the URL (`?caps=presence`): a query parameter
- * an older server's WsQuery simply ignores, so announcing costs nothing there.
+ * The client announces itself in the URL (`presence` in the one
+ * `?caps=own_voice,presence` list, CLIENT_CAPS): a query parameter an older
+ * server's WsQuery simply ignores, so announcing costs nothing there.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { wsClient } from '../api/websocket';
