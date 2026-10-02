@@ -134,3 +134,10 @@ split-debuginfo = "off"
 incremental = false
 debug = 0
 split-debuginfo = "off"
+
+# puca-games (the in-call card-game engine) is optimised even in test builds:
+# its suite enumerates all 20,358,520 six-card hands and plays thousands of
+# seeded random hands: ~50 s of CPU unoptimised, under 10 s optimised
+# (measured 2026-10-02). Only that crate is affected; debug info stays as above.
+[profile.dev.package.puca-games]
+opt-level = 3
