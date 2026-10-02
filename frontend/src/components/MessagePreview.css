@@ -1,0 +1,25 @@
+/* An attachment inside a one-line message preview (MessagePreview.tsx): an
+   icon and the file name, inline with the surrounding text so the host span's
+   ellipsis, colour and font size still apply. */
+.msg-preview-att {
+    /* A long file name may wrap where its host wraps (the pinned list) —
+       never push a 390px-wide panel sideways. */
+    overflow-wrap: anywhere;
+}
+
+.msg-preview-att-icon {
+    display: inline-block;
+    width: 1.1em;
+    margin-right: 0.25em;
+    vertical-align: -0.2em;
+    line-height: 1;
+}
+
+.msg-preview-att-icon svg {
+    width: 1.1em;
+    height: 1.1em;
+}
+
+.msg-preview-att-name {
+    font-style: italic;
+}

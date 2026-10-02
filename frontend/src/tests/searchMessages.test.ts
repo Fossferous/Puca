@@ -135,3 +135,45 @@ describe('searchDM', () => {
         expect(out.searched).toBe(200);
     });
 });
+
+/**
+ * Search matches what a person SEES, not the attachment ref underneath it.
+ * Matching the raw markdown meant "png", "sovereign", "enc" or any fragment of
+ * a file key hit every attachment message — and the row then printed that ref.
+ * The file NAME stays searchable.
+ */
+describe('search matches the preview text, not the attachment ref', () => {
+    const ref = '![holiday.png](sovereign-enc:0a1b2c3d?k=SeCrEtKeY123&m=image%2Fpng&c=CaPaBiLiTy9)';
+
+    it('a channel message that is only an image is not hit by its scheme, key or capability', async () => {
+        for (const needle of ['sovereign', 'enc:', 'secretkey', 'capability', 'image%2f']) {
+            channelPages = [[msg('1', NORMAL, ref)]];
+            expect((await searchChannel(1, needle, isBlocked)).hits, needle).toEqual([]);
+        }
+    });
+
+    it('but IS hit by its file name, or by its caption (positive control)', async () => {
+        channelPages = [[msg('1', NORMAL, ref)]];
+        expect((await searchChannel(1, 'holiday', isBlocked)).hits).toHaveLength(1);
+        channelPages = [[msg('2', NORMAL, `beach day ${ref}`)]];
+        expect((await searchChannel(1, 'beach', isBlocked)).hits).toHaveLength(1);
+    });
+
+    it('is not hit by the words the preview GENERATES ("image", "file", "spoiler")', async () => {
+        const spoiler = '||![twist.png](sovereign-enc:9?k=K9&m=image%2Fpng)||';
+        const doc = '![report.pdf](sovereign-enc:8?k=K8&m=application%2Fpdf)';
+        for (const needle of ['image', 'file', 'spoiler', 'twist']) {
+            channelPages = [[msg('1', NORMAL, ref), msg('2', NORMAL, spoiler), msg('3', NORMAL, doc)]];
+            expect((await searchChannel(1, needle, isBlocked)).hits, needle).toEqual([]);
+        }
+        // Positive control: the same word TYPED in a caption is found.
+        channelPages = [[msg('4', NORMAL, `an image of the file ${ref}`)]];
+        expect((await searchChannel(1, 'image', isBlocked)).hits).toHaveLength(1);
+    });
+
+    it('the same holds in a DM', async () => {
+        dmRows = [dm('1', NORMAL, ref)];
+        expect((await searchDM('c1', NORMAL, 'sovereign', isBlocked)).hits).toEqual([]);
+        expect((await searchDM('c1', NORMAL, 'holiday', isBlocked)).hits).toHaveLength(1);
+    });
+});

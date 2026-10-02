@@ -13,6 +13,7 @@
     "windows": [
       {
         "title": "Puca Lite",
+        "dragDropEnabled": false,
         "width": 1200,
         "height": 800,
         "resizable": true,

@@ -6,9 +6,8 @@ import {
     copyImageToClipboard,
     describeCopyFailure,
 } from '../api/copyImage';
-import { decodeClipRef, hasClipRef } from '../api/clips/clipRef';
+import { hasClipRef } from '../api/clips/clipRef';
 import { isUndecryptable } from '../api/decryptMarkers';
-import { formatClock } from '../api/clips/clipPresets';
 
 // --- Pure message-action text helpers (unit-tested in tests/messageActions.test.ts) ---
 
@@ -49,21 +48,9 @@ export function scrubClipRefs(content: string): string {
     return content.replace(/sovereign-clip:v1\?[^\s)]*/gi, 'sovereign-clip:v1');
 }
 
-/**
- * The short text a reply banner/preview shows for a message. A clip post is
- * summarised as `Clip · 2:04` — never its href, which is 1.6k of base64 that
- * carries the key. Anything else is sliced with an ellipsis like before.
- */
-export function replyPreviewText(content: string, max: number): string {
-    const m = /sovereign-clip:v1\?[A-Za-z0-9_-]+/i.exec(content);
-    if (m) {
-        const manifest = decodeClipRef(m[0]);
-        if (manifest) return `Clip · ${formatClock(manifest.durationMs / 1000)}`;
-        return 'Clip';
-    }
-    if (/sovereign-clip:v1(?![?])/i.test(content)) return 'Clip (removed)';
-    return content.length > max ? `${content.slice(0, max)}...` : content;
-}
+// The short text a reply banner, pin, search row or Quote shows for a message
+// is api/messagePreview.ts (messagePreviewText / components/MessagePreview):
+// ONE rule for every preview surface, clip refs and attachment refs alike.
 
 /**
  * Remove the embedded AES decryption key (`k=…`) from any `sovereign-enc:`

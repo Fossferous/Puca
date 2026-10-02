@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getChannelFeed, decryptChannelContent, type Channel } from '../api/servers';
 import type { FeedMessage } from '../api/servers';
+import { MessagePreview } from './MessagePreview';
 import './ChannelDashboard.css';
 import { parseServerTimestamp } from '../utils/serverTime';
 
@@ -36,7 +37,9 @@ const FeedChild: React.FC<{ name: string; messages: FeedMessage[] }> = ({ name, 
                             <span className="feed-time">
                                 {new Date(parseServerTimestamp(msg.created_at)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                             </span>
-                            <p className="feed-content">{texts[msg.id] ?? '…'}</p>
+                            {/* MessagePreview, not the raw text: an attachment's text
+                                is `![name](sovereign-enc:…?k=<file key>…)`. */}
+                            <p className="feed-content">{texts[msg.id] === undefined ? '…' : <MessagePreview content={texts[msg.id]} />}</p>
                         </div>
                     ))
                 )}

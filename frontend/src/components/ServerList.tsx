@@ -120,10 +120,12 @@ export function ServerList({
 
     // --- Rail drag-to-reorder ------------------------------------------------
     // Pointer-events based, NOT HTML5 drag-and-drop: WebView2 (the desktop app)
-    // never fires dragover/drop for webview content while Tauri's native
-    // drag-drop handler is active (same reason Chat.tsx's file-drop uses mouse
-    // events), so `draggable` silently did nothing there. Pointer events work
-    // on every surface. Mouse-only for now — the mobile rail scrolls by touch.
+    // never fired dragover/drop for webview content while Tauri's native
+    // drag-drop handler was active, so `draggable` silently did nothing there.
+    // That handler is now off (`dragDropEnabled: false`, which is what lets
+    // Chat.tsx's HTML5 file drop work in the desktop app), but pointer events
+    // work on every surface regardless. Mouse-only for now — the mobile rail
+    // scrolls by touch.
     const railRef = useRef<HTMLDivElement>(null);
     const dragRef = useRef<{ id: string; startY: number; moved: boolean } | null>(null);
     const suppressClickRef = useRef(false);
