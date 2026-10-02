@@ -15,8 +15,11 @@
 //! earlier at the attestation check.
 //!
 //! The fix is a DISCIPLINE, not a call-site patch: every user of a duplicated
-//! SQL text binds the width of the column (i32 for the INT4 ids). This test
-//! pins the mechanism both ways:
+//! SQL text binds the width of the column (i32 for the INT4 ids). A discipline
+//! alone did not hold - two more pairs shipped after this one (the SFU join
+//! after a channel edit, and the task-events viewer lookup) - so it is enforced
+//! by scripts/check-sql-bind-types.py, in CI, which asks rustc for the type of
+//! every bound argument. This test pins the mechanism both ways:
 //!  - POSITIVE CONTROL: i64 after i32 on the same text and connection really
 //!    does produce the binary-format error (a rig that cannot see the failure
 //!    proves nothing — see memory: test-needs-a-positive-control);

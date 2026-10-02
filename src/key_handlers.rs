@@ -210,7 +210,9 @@ pub async fn publish_channel_keys(
     // DoS. Read MAX under the advisory lock so it reflects the latest commit.
     let max_epoch: (Option<i32>,) =
         sqlx::query_as("SELECT MAX(epoch) FROM channel_keys WHERE channel_id = $1")
-            .bind(channel_id)
+            // channel_keys.channel_id is INT4: bind its width, as every other
+            // user of this text does (sqlx caches statements by text; 22P03).
+            .bind(channel_id as i32)
             .fetch_one(&mut *tx)
             .await
             .unwrap_or((None,));
@@ -451,7 +453,10 @@ pub async fn get_channel_keys(
     // in-module regression test runs the exact text the handler does. A test
     // that pasted its own copy would stay green after someone reverted this.
     let epochs: (Option<i32>, Option<i32>) = match sqlx::query_as(CURRENT_EPOCH_FOR_CALLER_SQL)
-        .bind(channel_id)
+        // INT4 for both (channel_keys.channel_id / recipient_id), the widths
+        // the regression test below binds too: one text, one width per
+        // parameter, or the cached statement answers 22P03.
+        .bind(channel_id as i32)
         .bind(claims.sub as i32)
         .fetch_one(&state.pool)
         .await

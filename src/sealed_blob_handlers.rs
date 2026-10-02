@@ -272,7 +272,7 @@ mod tests {
         assert_eq!(cas_write(&pool, bob, "notes-prefs", 1, "b").await.unwrap(), CasOutcome::Conflict(None));
         assert_eq!(current(&pool, alice, "notes-prefs").await.unwrap(), Some((2, "two".into())));
 
-        let _ = sqlx::query("DELETE FROM users WHERE id = $1 OR id = $2").bind(alice).bind(bob).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1 OR id = $2").bind(alice as i32).bind(bob as i32).execute(&pool).await;
     }
 
     /// Account deletion is a tombstone UPDATE, so the FK cascade never fires:
@@ -293,6 +293,6 @@ mod tests {
 
         assert_eq!(current(&pool, gone, "notes-prefs").await.unwrap(), None, "the deleted account's blob is gone");
         assert_eq!(current(&pool, stays, "notes-prefs").await.unwrap(), Some((1, "s".into())), "nobody else's is touched");
-        let _ = sqlx::query("DELETE FROM users WHERE id = $1 OR id = $2").bind(gone).bind(stays).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1 OR id = $2").bind(gone as i32).bind(stays as i32).execute(&pool).await;
     }
 }
