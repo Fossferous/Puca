@@ -43,6 +43,7 @@ import { NotesUpdateGate, NotesUpdateStripSlot } from '../notes/components/Notes
 import { CHECKING_DEADLINE_MS, DOWNLOAD_STALL_MS } from '../api/mobileOta';
 import { checkNotesForUpdates, downloadPage, nativePromptFor, setNativePrompt } from '../notes/model/notesUpdate';
 import { useState } from 'react';
+import { Capacitor } from '@capacitor/core';
 
 const BASE = 'https://chat.example.com';
 const BUNDLE = 'https://download.example.com/mobile/puca-notes-web-99.0.0.enc.zip';
@@ -505,5 +506,111 @@ describe('the account menu rows', () => {
         expect(menu.textContent).toContain('Púca Notes is up to date.');
         await act(async () => { menuRoot.unmount(); });
         menu.remove();
+    });
+});
+
+/**
+ * The owner's bug: "A new Púca Notes app (0.9.830) is available" at the top
+ * of the app that would not go away. Dismissing it lasted only until the next
+ * time anyone pressed "Check for updates" — the manual check cleared the
+ * dismissal — while the same menu answered "Púca Notes is up to date.", and
+ * the menu's Version row showed the OTA bundle (0.9.830), never the APK
+ * (0.9.827) the strip was about. The manifest below is production's on
+ * 2026-10-01 against an installed 0.9.827 APK running the 0.9.830 bundle.
+ */
+describe('the "new app" strip and the account menu agree', () => {
+    const PROD_NATIVE = { min: '0.9.817', version: '0.9.830', download_url: PAGE };
+    /** setup.ts's localStorage is three vi.fn()s; give it a memory for these. */
+    function rememberingStorage(): Map<string, string> {
+        const store = new Map<string, string>();
+        vi.mocked(localStorage.getItem).mockImplementation(k => store.get(k) ?? null);
+        vi.mocked(localStorage.setItem).mockImplementation((k, v) => { store.set(k, String(v)); });
+        vi.mocked(localStorage.removeItem).mockReset();
+        vi.mocked(localStorage.removeItem).mockImplementation(k => { store.delete(k); });
+        return store;
+    }
+    async function renderMenu(): Promise<{ menu: HTMLDivElement; unmount: () => Promise<void> }> {
+        const { NotesUpdateMenu } = await import('../notes/components/NotesUpdateMenu');
+        const menu = document.createElement('div');
+        document.body.appendChild(menu);
+        const menuRoot = createRoot(menu);
+        await act(async () => { menuRoot.render(<NotesUpdateMenu />); });
+        await advance(10);
+        return { menu, unmount: async () => { await act(async () => { menuRoot.unmount(); }); menu.remove(); } };
+    }
+    const strip = () => container.querySelector('.notes-update-strip');
+    /** The Version row once its (dynamic-import) lookups have settled. */
+    async function versionRow(menu: HTMLElement): Promise<string> {
+        const row = () => menu.querySelector('[data-testid="notes-app-version"]')?.textContent ?? '';
+        for (let i = 0; i < 50 && row() === '…'; i++) {
+            await act(async () => { await import('@capgo/capacitor-updater'); await vi.advanceTimersByTimeAsync(10); });
+        }
+        return row();
+    }
+
+    it('a dismissed nudge stays dismissed through Check for updates', async () => {
+        const store = rememberingStorage();
+        h.current = { bundle: { id: 'abc', version: __APP_VERSION__ }, native: '0.9.827' };
+        serve({ version: __APP_VERSION__, url: BUNDLE, variant: 'notes', native: PROD_NATIVE, ...SIGNED });
+        await mountGate();
+        await advance(100);
+        expect(strip()?.textContent, 'positive control: the strip is up before the dismiss').toContain('A new Púca Notes app (0.9.830) is available');
+        await act(async () => { (container.querySelector('[aria-label="Dismiss"]') as HTMLButtonElement).click(); });
+        expect(strip()).toBeNull();
+
+        let outcome: unknown;
+        await act(async () => { outcome = await checkNotesForUpdates(); });
+        await advance(100);
+        expect(outcome).toBe('nothing');
+        expect(fetched, 'the manual check really asked the server again').toHaveLength(2);
+        expect(strip(), 'asking for updates does not bring a dismissed nudge back').toBeNull();
+        expect(localStorage.removeItem).not.toHaveBeenCalledWith('pucaNotesNativeNudgeDismissed');
+        expect(store.get('pucaNotesNativeNudgeDismissed')).toBe('0.9.830');
+    });
+
+    it('a dismissed nudge still returns for a NEWER app (control: the dismissal is per version)', async () => {
+        rememberingStorage();
+        h.current = { bundle: { id: 'abc', version: __APP_VERSION__ }, native: '0.9.827' };
+        serve({ version: __APP_VERSION__, url: BUNDLE, variant: 'notes', native: PROD_NATIVE, ...SIGNED });
+        await mountGate();
+        await advance(100);
+        await act(async () => { (container.querySelector('[aria-label="Dismiss"]') as HTMLButtonElement).click(); });
+        serve({ version: __APP_VERSION__, url: BUNDLE, variant: 'notes', native: { ...PROD_NATIVE, version: '99.2.0' }, ...SIGNED });
+        await act(async () => { await checkNotesForUpdates(); });
+        await advance(100);
+        expect(strip()?.textContent).toContain('A new Púca Notes app (99.2.0) is available');
+    });
+
+    it('the menu does not say plainly "up to date" while a newer app is on offer', async () => {
+        h.current = { bundle: { id: 'abc', version: __APP_VERSION__ }, native: '0.9.827' };
+        serve({ version: __APP_VERSION__, url: BUNDLE, variant: 'notes', native: PROD_NATIVE, ...SIGNED });
+        await mountGate();
+        await advance(100);
+        const { menu, unmount } = await renderMenu();
+        const btn = [...menu.querySelectorAll('button')].find(b => b.textContent?.includes('Check for updates'))!;
+        await act(async () => { btn.click(); });
+        await advance(10);
+        const said = menu.querySelector('[role="status"]')?.textContent ?? '';
+        expect(said, 'the check finished and reported something').not.toBe('');
+        expect(said).not.toBe('Púca Notes is up to date.');
+        expect(said).toContain('0.9.830');
+        expect(menu.textContent, 'and the way to it is right there').toContain('Get Púca Notes 0.9.830');
+        await unmount();
+    });
+
+    it('the Version row names the installed APK as well as the running bundle', async () => {
+        vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
+        h.current = { bundle: { id: 'abc', version: '0.9.830' }, native: '0.9.827' };
+        const { menu, unmount } = await renderMenu();
+        expect(await versionRow(menu)).toBe('0.9.830 (app 0.9.827)');
+        await unmount();
+    });
+
+    it('on the APK\'s built-in bundle the row already names the APK, once (control)', async () => {
+        vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
+        h.current = { bundle: { id: 'builtin', version: 'builtin' }, native: '0.9.827' };
+        const { menu, unmount } = await renderMenu();
+        expect(await versionRow(menu)).toBe('0.9.827 (built-in)');
+        await unmount();
     });
 });

@@ -1430,9 +1430,38 @@ launch — on **its own channel**:
   `native` block: an APK older than `native.min` does not apply the bundle and
   shows *Install the new Púca Notes app* with a Download button to the download
   page's `#notes-app` section (same-site HTTPS only); a newer `native.version`
-  (`dual-ship.sh mobile-notes ... --native-version <v>`) is a strip in its own
-  row below the top bar (never over it: the account button there is the way to
-  *Check for updates*), dismissable once per version.
+  is a strip in its own row below the top bar (never over it: the account
+  button there is the way to *Check for updates*), dismissable once per
+  version. *Check for updates* leaves a dismissed strip dismissed (it used to
+  clear the dismissal — "asking again is asking to be told again" — but the
+  menu itself offers *Get Púca Notes X* and says a newer app is optional, so
+  the strip coming back only made a dismissal last until the next look at the
+  menu). The menu's Version row shows the running bundle and the installed
+  APK: `0.9.830 (app 0.9.827)`.
+- **`native.version` is the newest APK whose NATIVE layer changed**, not the
+  release: `latest` in `frontend/notes-app/native-min.json`, carried as
+  `version.json` `nativeLatest` → the bundle's `.native-latest` sidecar →
+  `mobile-notes`, which refuses a missing sidecar, one newer than the release
+  and one older than `min`, but NOT one lower than a host serves (the first
+  release after this publishes 0.9.827 where hosts served 0.9.830; that is
+  the fix). It was `--native-version "$VER"` on every release, and every
+  release rebuilds the APK, so every installed app was told to reinstall the
+  day after it updated — 12 of the 13 APKs from 0.9.818 to 0.9.830 changed
+  only their versionName. `latest` is sealed to a fingerprint of the native
+  layer (`latestFingerprint`: everything under `notes-app/android` that git
+  does not ignore, committed or not, except the tests, plus `notes-app/package.json`, its lockfile and
+  `capacitor.config.ts`, CRs and versionName/versionCode stripped), so
+  `scripts/notes-native-min.mjs` fails vitest, `build-notes-app.mjs` and
+  `check-lite-identity.mjs` on ANY native change until someone runs
+  `node scripts/notes-native-min.mjs --record-latest <the release that first
+  ships the new APK>` from `frontend/`. That refuses a version whose APK
+  already exists: one below `latest` or below the tree's version, or equal to
+  either once its `v<ver>` tag says it shipped. Re-recording the same
+  UNSHIPPED release is how a second native change in one release cycle (or a
+  merge of two branches that both recorded it) is sealed. Broad on purpose:
+  an unneeded nudge is the cheap failure. For one transition release
+  `mobile-notes` still accepts `--native-version`, which the out-of-repo
+  release tools pass, but warns and IGNORES it in favour of the sidecar.
 - **`native.min` is a floor that lives in the tree**:
   `frontend/notes-app/native-min.json`. It only goes up. The Notes build writes
   it into `version.json`, `encrypt-bundle.mjs --notes` copies it into the

@@ -12,7 +12,10 @@
  *  - `min`: the oldest APK this bundle can run on. An older APK must NOT
  *    apply the bundle (it would call a plugin that is not there), and says
  *    so: "install the new app from the download page".
- *  - `version`: the newest APK on the download page. Only a nudge.
+ *  - `version`: the newest APK whose NATIVE layer changed (notes-app/
+ *    native-min.json "latest", scripts/notes-native-min.mjs). Only a nudge.
+ *    It used to be the release number, so every release told every
+ *    installed app "a new Púca Notes app is available".
  *
  * Unsigned is acceptable: a hostile manifest host can raise `min` to withhold
  * updates or nag — which it could do anyway by withholding the manifest — but
@@ -68,14 +71,17 @@ export function dismissNudgeFor(version: string): void {
     try { localStorage.setItem(DISMISS_KEY, version); } catch { /* private window: it simply returns next launch */ }
 }
 
-export function clearNudgeDismissal(): void {
-    try { localStorage.removeItem(DISMISS_KEY); } catch { /* nothing to clear */ }
-}
-
-/** What "Check for updates" reports when no new bundle applies. */
-export function describeOutcome(outcome: OtaOutcome | 'unavailable'): string {
+/**
+ * What "Check for updates" reports when no new bundle applies. With a newer
+ * APK on offer, 'nothing' is not plainly "up to date": the strip says a new
+ * app is available, and the menu used to contradict it.
+ */
+export function describeOutcome(outcome: OtaOutcome | 'unavailable', prompt: NativePrompt | null = null): string {
     switch (outcome) {
-        case 'nothing': return 'Púca Notes is up to date.';
+        case 'nothing':
+            return prompt?.kind === 'available'
+                ? `This version is up to date. A newer Púca Notes app (${prompt.version}) is optional.`
+                : 'Púca Notes is up to date.';
         case 'unreachable': return 'Could not reach the server to check.';
         case 'deadline': return 'The server took too long to answer. Try again later.';
         case 'refused': return 'The server offered an update this app will not install.';
@@ -84,6 +90,18 @@ export function describeOutcome(outcome: OtaOutcome | 'unavailable'): string {
         case 'applying': return 'Restarting with the update…';
         case 'unavailable': return 'Updates are not available in this app.';
     }
+}
+
+/**
+ * The account menu's Version row: the running web bundle, and the installed
+ * APK beside it: "0.9.830 (app 0.9.827)". The bundle alone put "Version
+ * 0.9.830" next to "A new Púca Notes app (0.9.830) is available". A label
+ * that already says where it comes from ("0.9.827 (built-in)", the APK's own
+ * bundle) is left as it is.
+ */
+export function notesVersionLabel(bundle: string, nativeVersion: string | null): string {
+    if (!nativeVersion || bundle.includes('(')) return bundle;
+    return `${bundle} (app ${nativeVersion})`;
 }
 
 // --- the menu's line to the gate ------------------------------------------

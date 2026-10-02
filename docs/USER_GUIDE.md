@@ -387,6 +387,14 @@ account you are already signed in to.
 - **In the browser** it is at `/notes/` on your server's web address. Open it
   with **Open in Púca Notes** (the note button beside **New list** in the
   Tasks view of the web app).
+- **The Android app updates itself** over the air. The account menu's
+  **Version** row shows the update it is running and the app you installed,
+  e.g. `0.9.830 (app 0.9.827)`. A strip *A new Púca Notes app (X) is
+  available* appears only when a newer app changes something an update cannot
+  bring; installing it is optional. Close the strip and it stays closed until
+  an even newer app comes out — **Check for updates** does not bring it back.
+  The menu still says a newer app is optional, with a **Get Púca Notes X**
+  button when your server links its own download page.
 
 Inside Notes:
 

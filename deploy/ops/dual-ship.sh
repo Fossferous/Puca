@@ -18,7 +18,7 @@
 #   dual-ship.sh webapp        <dist-tarball.tar.gz>
 #   dual-ship.sh mobile        <enc-bundle.zip> <version> <sessionKey> <checksum>
 #   dual-ship.sh mobile-lite   <enc-bundle.zip> <version> <sessionKey> <checksum>
-#   dual-ship.sh mobile-notes  <enc-bundle.zip> <version> <sessionKey> <checksum> [--native-version v] [--lower-native-min]
+#   dual-ship.sh mobile-notes  <enc-bundle.zip> <version> <sessionKey> <checksum> [--lower-native-min]
 #   dual-ship.sh installer     <setup.exe> <sig-file> <version> <notes>
 #   dual-ship.sh installer-lite <setup.exe> <sig-file> <version> <notes>
 #   dual-ship.sh backend       <src-tarball.tar.gz>
@@ -531,6 +531,18 @@ notes_served_min() {
 	printf '%s' "$body" | grep -oE '"min"[[:space:]]*:[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"' | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true
 }
 
+# The native.version (the newest native APK) a TAGGED ?variant=notes answer
+# carries, from inside its "native" block — the manifest's own top-level
+# "version" is the bundle's. The file is served as written, over several
+# lines, so it is flattened first. Empty when there is none.
+notes_served_native_version() {
+	local body="$1" tagged
+	tagged="$(printf '%s' "$body" | grep -cE '"variant"[[:space:]]*:[[:space:]]*"notes"' || true)"
+	[ "${tagged:-0}" -gt 0 ] || return 0
+	printf '%s' "$body" | tr -d '\r\n' | grep -oE '"native"[[:space:]]*:[[:space:]]*[{][^}]*[}]' | head -1 \
+		| grep -oE '"version"[[:space:]]*:[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"' | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true
+}
+
 cmd_mobile() {
 	local bundle="${1:?enc bundle}" version="${2:?version}" session_key="${3:?sessionKey}" checksum="${4:?checksum}"
 	# Same lengths verify.sh and the original ship enforce — a manifest with
@@ -684,35 +696,56 @@ MEOF
 #                (every Notes app would refuse the update), and when LOWER than
 #                what any host already serves, unless --lower-native-min says
 #                that is deliberate (a floor raised by mistake).
-#       version  --native-version <v>: the newest Notes APK on the download
-#                page (a one-per-version nudge in the app); never newer than
-#                the release.
+#       version  the newest Notes APK whose NATIVE layer changed — the app's
+#                "A new Púca Notes app (X) is available" nudge. NOT a flag (a
+#                stray --native-version is ignored with a warning): it
+#                comes from the bundle's `.native-latest` sidecar, which
+#                encrypt-bundle.mjs --notes writes from the build's
+#                version.json, which takes it from native-min.json "latest"
+#                (sealed to a fingerprint of the native layer by
+#                frontend/scripts/notes-native-min.mjs). It used to be
+#                `--native-version "$VER"` on every release, and every release
+#                rebuilds the APK, so every installed app was told to reinstall
+#                every release although almost none changed natively. Refused
+#                when newer than the release (no such APK is on the page) or
+#                older than its own min. It MAY be lower than a host serves:
+#                the first release after the change publishes 0.9.827 where
+#                hosts served 0.9.830, and that is the fix, not a regression.
 #     download_url points at the page's #notes-app section.
 # Never touches mobile-update.json or mobile-update-lite.json, and PROVES it by
 # comparing both endpoints before and after.
 cmd_mobile_notes() {
-	local bundle="${1:?usage: dual-ship.sh mobile-notes <enc.zip> <version> <sessionKey> <checksum> [--native-version v] [--lower-native-min]}"
+	local bundle="${1:?usage: dual-ship.sh mobile-notes <enc.zip> <version> <sessionKey> <checksum> [--lower-native-min]}"
 	local version="${2:?version}" session_key="${3:?sessionKey}" checksum="${4:?checksum}"
 	shift 4
 	local native_min="" native_version="" lower_native_min=0
 	while [ $# -gt 0 ]; do
 		case "$1" in
-			--native-version) native_version="${2:?--native-version needs a version}"; shift 2 ;;
+			--native-version)
+				# TRANSITION: ignored, loudly, not refused. The out-of-repo
+				# release tools pass --native-version "$VER", and mobile-notes is
+				# the LAST step of their ship-clients.sh: a refusal here would
+				# abort a release after every other surface had shipped. Once
+				# they stop passing it (release-tools.patch), make this a
+				# refusal like --native-min below.
+				[ $# -ge 2 ] && [ -n "$2" ] || { echo "REFUSING: --native-version needs a value (and is ignored anyway: see below)"; exit 2; }
+				echo "WARNING: --native-version $2 IGNORED. native.version is the newest Notes APK whose NATIVE layer changed,"
+				echo "         recorded as \"latest\" in frontend/notes-app/native-min.json; it rides in $bundle.native-latest."
+				echo "         Passing the release number told every installed Notes app to reinstall after every release."
+				echo "         Stop passing it: a later release refuses it."
+				shift 2 ;;
 			--lower-native-min) lower_native_min=1; shift ;;
 			--native-min)
 				echo "REFUSING: --native-min is gone. The floor is frontend/notes-app/native-min.json: raise \"min\" there,"
 				echo "rebuild (node scripts/build-notes-app.mjs --ota) and re-sign; it rides in $bundle.native-min."
 				exit 2 ;;
-			*) echo "REFUSING: unknown option '$1' (expected --native-version <v> / --lower-native-min)"; exit 2 ;;
+			*) echo "REFUSING: unknown option '$1' (expected --lower-native-min)"; exit 2 ;;
 		esac
 	done
 	: "${MOBILE_BUNDLE_PREFIX_NOTES:?MOBILE_BUNDLE_PREFIX_NOTES is not set in hosts.conf (see hosts.conf.example)}"
 	# Every value below is pasted into a JSON file on the host: hold each one
 	# to the shape it must have, so nothing else can ride along.
-	local v
-	for v in "$version" ${native_version:+"$native_version"}; do
-		[[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "REFUSING: '$v' is not a MAJOR.MINOR.PATCH version"; exit 1; }
-	done
+	[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "REFUSING: '$version' is not a MAJOR.MINOR.PATCH version"; exit 1; }
 	[ "${#session_key}" -eq 369 ] || { echo "REFUSING: sessionKey is ${#session_key} chars, expected 369"; exit 1; }
 	[ "${#checksum}" -eq 512 ] || { echo "REFUSING: checksum is ${#checksum} chars, expected 512"; exit 1; }
 	[[ "$session_key" =~ ^[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$ ]] || { echo "REFUSING: sessionKey is not base64:base64"; exit 1; }
@@ -736,10 +769,27 @@ cmd_mobile_notes() {
 		echo "Every Púca Notes app would refuse the update. Fix frontend/notes-app/native-min.json, rebuild and re-sign."
 		exit 1
 	fi
-	if [ -n "$native_version" ] && ver_gt "$native_version" "$version"; then
-		echo "REFUSING: --native-version $native_version is newer than this release ($version): no such APK is on the page."
+	# The newest native APK rides with the bundle the same way; see the header.
+	if [ ! -f "$bundle.native-latest" ]; then
+		echo "REFUSING: no $bundle.native-latest, so nothing says which Notes APK is the newest one worth installing."
+		echo "Rebuild (cd frontend && node scripts/build-notes-app.mjs --ota) and re-sign with encrypt-bundle.mjs --notes."
 		exit 1
 	fi
+	native_version="$(tr -d '[:space:]' < "$bundle.native-latest")"
+	[[ "$native_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "REFUSING: $bundle.native-latest says '$native_version', not a MAJOR.MINOR.PATCH version"; exit 1; }
+	if ver_gt "$native_version" "$version"; then
+		echo "REFUSING: native.version $native_version (from $bundle.native-latest) is newer than this release ($version): no such APK is on the page."
+		echo "Fix frontend/notes-app/native-min.json \"latest\", rebuild and re-sign."
+		exit 1
+	fi
+	if ver_gt "$native_min" "$native_version"; then
+		echo "REFUSING: native.version $native_version (from $bundle.native-latest) is older than its native.min $native_min:"
+		echo "the floor is itself a native change. Re-record frontend/notes-app/native-min.json \"latest\", rebuild and re-sign."
+		exit 1
+	fi
+	# Deliberately NO "only goes up" rule here, unlike native.min: a lower
+	# native.version than a host serves is what ends the per-release nudge.
+
 	# The floor only goes UP. Read what every host serves now, BEFORE writing
 	# anywhere: lowering it re-exposes every APK between the two versions to
 	# web code calling a plugin they do not have.
@@ -799,8 +849,8 @@ cmd_mobile_notes() {
 	fi
 	local native_json=",
   \"native\": {
-    \"min\": \"$native_min\",${native_version:+
-    \"version\": \"$native_version\",}
+    \"min\": \"$native_min\",
+    \"version\": \"$native_version\",
     \"download_url\": \"https://$DOWNLOAD_HOST/#notes-app\"
   }"
 	ensure_download_dirs
@@ -848,6 +898,14 @@ MEOF
 			FAILED+=("$label:mobile-notes-native-min")
 		elif [ "${tag_hits:-0}" -gt 0 ]; then
 			echo "PASS  $label notes OTA endpoint serves native.min $native_min"
+		fi
+		local seen_native_version
+		seen_native_version="$(notes_served_native_version "$check")"
+		if [ "${tag_hits:-0}" -gt 0 ] && [ "$seen_native_version" != "$native_version" ]; then
+			echo "FAIL  $label notes OTA endpoint serves native.version '${seen_native_version:-<none>}', expected $native_version"
+			FAILED+=("$label:mobile-notes-native-version")
+		elif [ "${tag_hits:-0}" -gt 0 ]; then
+			echo "PASS  $label notes OTA endpoint serves native.version $native_version"
 		fi
 		others_after="$(remote_code "$entry" "$API_HOST" /api/mobile-updates/check):$(remote_body "$entry" "$API_HOST" /api/mobile-updates/check)|$(remote_code "$entry" "$API_HOST" '/api/mobile-updates/check?variant=lite'):$(remote_body "$entry" "$API_HOST" '/api/mobile-updates/check?variant=lite')"
 		if [ "$others_after" = "$others_before" ]; then

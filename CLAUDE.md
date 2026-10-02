@@ -205,7 +205,11 @@ verifies under the key the TARGET app embeds (`deploy/mobile/verify-bundle.mjs`)
 and refuses the other app's `<bundle>.channel`. A change that adds a native
 plugin or permission to the Notes app raises `min` in
 `frontend/notes-app/native-min.json` (vitest and `build-notes-app.mjs` fail
-until its recorded surface matches); every `mobile-notes` then publishes that floor, never lower
+until its recorded surface matches), and ANY change to the Notes native layer
+fails the same gates until `latest` there is raised with
+`node scripts/notes-native-min.mjs --record-latest <ver>` — `latest` is the
+manifest's `native.version` (the "new app available" nudge, from the bundle's
+`.native-latest`; a `--native-version` flag is ignored with a warning); every `mobile-notes` then publishes that floor, never lower
 than a host already serves, so older APKs prompt for the new install instead of
 applying a bundle they cannot run; `check-versions.sh` FAILS until the page
 links an APK at least that new. The download page

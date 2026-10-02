@@ -208,9 +208,10 @@ node deploy/mobile/encrypt-bundle.mjs --notes \
     frontend/notes-ota/puca-notes-web-<ver>.zip <keys dir>/notes-updater-rsa.key \
     frontend/notes-ota/puca-notes-web-<ver>.enc.zip frontend/dist-notes-app/version.json
                          # prints {ivSessionKey, checksum}; writes .version,
-                         # .channel (= notes) and .native-min beside the bundle
+                         # .channel (= notes), .native-min and .native-latest
+                         # beside the bundle
 deploy/ops/dual-ship.sh mobile-notes frontend/notes-ota/puca-notes-web-<ver>.enc.zip <ver> \
-    <ivSessionKey> <checksum> [--native-version <v>] [--lower-native-min]
+    <ivSessionKey> <checksum> [--lower-native-min]
 deploy/ops/dual-ship.sh apk-notes <Puca-Notes-<ver>.apk> <ver>   # every release too
 ```
 
@@ -231,8 +232,18 @@ run). Raise it in the file — to the release that first ships the plugin,
 permission or manifest entry the web code needs — never on the command line.
 `mobile-notes` refuses a floor newer than the release, and one lower than what
 any host already serves unless `--lower-native-min` is passed (for a floor
-raised by mistake). `--native-version <v>`: nudge (once per version) about a
-newer APK; never newer than the release. Neither is signed — a hostile manifest
+raised by mistake). `native.version`, the "a new Púca Notes app is available"
+nudge, is not a flag either (`--native-version` is ignored with a warning for
+one transition release, then refused): it is `latest` in
+the same file, the newest APK whose NATIVE layer changed, carried as
+`version.json` `nativeLatest` into the `.native-latest` sidecar. It used to be
+the release number, which nudged every installed app every release. A native
+change fails vitest and the Notes build until `latest` is raised with
+`node scripts/notes-native-min.mjs --record-latest <ver>` (from `frontend/`;
+re-recording the same version is accepted until its `v<ver>` tag exists).
+`mobile-notes` refuses a missing sidecar, a `latest` newer than the release or
+older than `min`, and verifies the served value back; it may be LOWER than
+what a host serves. Neither is signed — a hostile manifest
 host could withhold updates or nag, not deliver an APK (Android refuses one
 signed with another key).
 
