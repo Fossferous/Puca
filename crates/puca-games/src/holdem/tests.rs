@@ -180,18 +180,21 @@ fn a_raise_must_be_at_least_the_last_full_raise() {
 
 #[test]
 fn an_all_in_below_the_minimum_is_allowed_but_only_for_the_whole_stack() {
-    let mut t = table_with(&[0, 1]);
+    let mut t = table_with(&[0, 1, 2]);
     t.set_stack(1, 16);
     t.start_hand_stacked(&[], "").unwrap();
-    // Heads-up: seat 0 is button/SB, seat 1 is BB with 16 (6 behind).
+    // Button 0, SB 1 with 16 (6 behind after calling), BB 2.
     act(&mut t, 0, Action::Call);
-    act(&mut t, 1, Action::Check);
-    // Flop: BB acts first with 6 chips — less than a minimum bet.
+    act(&mut t, 1, Action::Call);
+    act(&mut t, 2, Action::Check);
+    // Flop: the SB acts first with 6 chips — less than a minimum bet.
     assert_eq!(try_act(&mut t, 1, Action::BetOrRaiseTo(5)), Err(HoldemError::BetBelowMinimum { min_to: 6 }));
     act(&mut t, 1, Action::BetOrRaiseTo(6));
-    let la = t.legal_actions(0).unwrap();
+    let la = t.legal_actions(2).unwrap();
     assert_eq!(la.to_call, 6);
-    // Seat 0 checked to no one (it has not acted this street), so it may raise.
+    // Seat 2 has not acted this street, and seat 0 behind it could answer a
+    // raise, so it may raise. (Heads-up against the all-in it could not:
+    // see a_lone_player_facing_a_bigger_all_in_may_only_call_or_fold.)
     assert!(la.can_raise);
 }
 
@@ -247,7 +250,7 @@ fn short_all_ins_that_add_up_to_a_full_raise_do_reopen_the_betting() {
     act(&mut t, 2, Action::BetOrRaiseTo(100));
     act(&mut t, 3, Action::AllIn); // 150: +50, incomplete
     act(&mut t, 0, Action::AllIn); // 220: +70, incomplete — but 120 over seat 2's bet
-    act(&mut t, 1, Action::Fold);
+    act(&mut t, 1, Action::Call); // still has chips: someone can answer a raise by seat 2
     let la = t.legal_actions(2).unwrap();
     assert!(la.can_raise, "two short raises totalling >= a full raise reopen: {la:?}");
     assert_eq!(la.min_raise_to, 320, "the minimum raise is still the last FULL raise (100)");
@@ -350,6 +353,86 @@ fn a_short_big_blind_all_in_still_makes_everyone_call_the_full_blind() {
     assert_eq!(pots[0], (0, 12, vec![0, 1, 2], vec![PotShare { seat: 2, amount: 12 }]));
     assert_eq!(pots[1], (1, 12, vec![0, 1], vec![PotShare { seat: 0, amount: 12 }]));
     assert_eq!(stacks(&t)[..3], [1_002, 990, 12]);
+}
+
+// A player who already covers every all-in opponent has nothing to decide:
+// nobody can call a raise, and the excess comes back uncalled. Giving such a
+// player a turn would let the clock FOLD chips that already cover the pot.
+
+/// Asserts the hand ran out with no decision at all and the uncalled chip
+/// went back.
+fn assert_ran_out_with_no_decision(t: &HoldemTable, ev: &[Event], returned_to: usize) {
+    assert_eq!(t.turn(), None, "no decision is due: {ev:?}");
+    assert!(!t.hand_in_progress(), "the board runs out and the hand settles: {ev:?}");
+    assert!(ev.contains(&Event::UncalledReturned { seat: returned_to, amount: 1 }), "{ev:?}");
+    assert_eq!(
+        ev.iter().filter(|e| matches!(e, Event::BoardDealt { .. })).count(),
+        3,
+        "flop, turn and river are dealt: {ev:?}"
+    );
+}
+
+#[test]
+fn heads_up_a_small_blind_that_covers_an_all_in_big_blind_is_not_given_a_turn() {
+    let mut t = table_with(&[0, 1]);
+    t.set_stack(1, 4);
+    // Button/SB 0 posts 5; BB 1 is all-in for 4.
+    let ev = t.start_hand_stacked(&[(0, "Kh Kd"), (1, "Ah Ad")], "Qc 9d 5h 4s 3c").unwrap();
+    assert_ran_out_with_no_decision(&t, &ev, 0);
+    assert_eq!(awarded(&ev), vec![(0, 8, vec![0, 1], vec![PotShare { seat: 1, amount: 8 }])]);
+    assert_eq!(stacks(&t)[..2], [996, 8]);
+}
+
+#[test]
+fn folds_to_a_small_blind_that_covers_an_all_in_big_blind_end_the_betting() {
+    let mut t = table_with(&[0, 1, 2]);
+    t.set_stack(2, 4);
+    t.start_hand_stacked(&[(0, "Kh Kd"), (1, "7c 2d"), (2, "Ah Ad")], "Qc 9d 5h 4s 3c").unwrap();
+    let ev = act(&mut t, 0, Action::Fold);
+    assert_ran_out_with_no_decision(&t, &ev, 1);
+    assert_eq!(awarded(&ev), vec![(0, 8, vec![1, 2], vec![PotShare { seat: 2, amount: 8 }])]);
+    assert_eq!(stacks(&t)[..3], [1_000, 996, 8]);
+}
+
+#[test]
+fn a_departure_that_leaves_the_player_to_act_covering_every_all_in_ends_the_betting() {
+    let mut t = table_with(&[0, 1, 2]);
+    t.set_stack(2, 4);
+    t.start_hand_stacked(&[(0, "Kh Kd"), (1, "7c 2d"), (2, "Ah Ad")], "Qc 9d 5h 4s 3c").unwrap();
+    act(&mut t, 0, Action::Call); // 10 in
+    assert_eq!(t.to_act(), Some(1), "the SB owes 5 more to match seat 0");
+    // Seat 0 leaves out of turn: its 10 are dead, and the SB's 5 already
+    // cover the all-in big blind's 4. Nothing is left to decide.
+    let ev = t.leave(0).unwrap();
+    assert_eq!(t.turn(), None, "no decision is due: {ev:?}");
+    assert!(!t.hand_in_progress(), "{ev:?}");
+    // Main pot 4 x 3 to the aces; seat 0's dead 6 above that level plus the
+    // SB's extra chip are a side pot only the SB contests.
+    assert_eq!(
+        awarded(&ev),
+        vec![
+            (0, 12, vec![1, 2], vec![PotShare { seat: 2, amount: 12 }]),
+            (1, 7, vec![1], vec![PotShare { seat: 1, amount: 7 }]),
+        ]
+    );
+    assert!(ev.contains(&Event::PlayerLeft { seat: 0, player: p(100), stack: 990 }), "{ev:?}");
+    assert_eq!(stacks(&t)[1..3], [1_002, 12]);
+}
+
+#[test]
+fn a_lone_player_facing_a_bigger_all_in_may_only_call_or_fold() {
+    let mut t = table_with(&[0, 1]);
+    t.set_stack(1, 2_000);
+    t.start_hand_stacked(&[], "").unwrap();
+    act(&mut t, 0, Action::AllIn); // button/SB: all-in for 1,000
+    let la = t.legal_actions(1).unwrap();
+    assert_eq!((la.to_call, la.call_amount), (990, 990));
+    assert!(!la.can_raise, "nobody is left who could answer a raise: {la:?}");
+    assert_eq!(try_act(&mut t, 1, Action::BetOrRaiseTo(2_000)), Err(HoldemError::NobodyToRaise));
+    assert_eq!(try_act(&mut t, 1, Action::AllIn), Err(HoldemError::NobodyToRaise));
+    let ev = act(&mut t, 1, Action::Call);
+    assert!(ev.iter().any(|e| matches!(e, Event::Acted { seat: 1, kind: ActedKind::Call, added: 990, .. })), "{ev:?}");
+    assert!(!t.hand_in_progress());
 }
 
 // ---------------------------------------------------------------------------

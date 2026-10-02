@@ -10,15 +10,22 @@
 //!    that were actually shown. In particular never another seat's hole cards
 //!    before showdown, never a mucked hand, never the undealt deck.
 //! 3. ONE DECK. Hole cards across seats and the board never repeat a card.
+//! 4. NO POINTLESS DECISION. A player is given a turn only when there is
+//!    something to decide: if nobody else can still act, the player must be
+//!    facing more than they have put in (else the clock could fold chips that
+//!    already cover every all-in), and may then only call or fold.
 //!
-//! Plus: a refused action (`Err`) leaves the table byte-for-byte unchanged.
+//! Plus: a refused action (`Err`) leaves every view — each seat's and the
+//! spectator's — unchanged. That is what clients can observe; the engine's
+//! hidden state (deck order, per-seat bookkeeping) is not compared here, and
+//! is kept unchanged by validating before mutating (`HoldemTable::apply`).
 //!
 //! The run also counts what it exercised (side pots, split pots, timeouts,
 //! departures mid-hand, incomplete raises…) and fails if any of those never
 //! happened, so it cannot pass by playing nothing but folds.
 
 use puca_games::cards::Card;
-use puca_games::holdem::{Action, Event, HoldemConfig, HoldemError, HoldemTable, LegalActions};
+use puca_games::holdem::{Action, Event, HoldemConfig, HoldemError, HoldemTable, LegalActions, SeatStatus};
 use puca_games::rng::{below, seeded};
 use puca_games::{PlayerId, TurnRef};
 use std::collections::HashSet;
@@ -55,6 +62,9 @@ struct Coverage {
     not_reopened: u64,
     voluntary_shows: u64,
     rebuys: u64,
+    /// Turns given to the only player who can still act (facing a bigger
+    /// all-in): the call-or-fold branch of invariant 4.
+    lone_decisions: u64,
 }
 
 struct Sim {
@@ -112,7 +122,7 @@ impl Sim {
         }
     }
 
-    fn check(&self) {
+    fn check(&mut self) {
         let public = self.table.view_for(None);
         // 1. Conservation.
         let on_table: u64 = public.seats.iter().flatten().map(|s| s.stack).sum::<u64>() + public.pot_total;
@@ -144,6 +154,26 @@ impl Sim {
         assert_eq!(unique.len(), dealt.len(), "a card was dealt twice: {dealt:?}");
         // The table's own Debug never shows a card at all.
         assert!(card_tokens(&format!("{:?}", self.table)).is_empty(), "table Debug is not redacted");
+        // 4. No pointless decision.
+        if let Some(s) = public.to_act {
+            let me = public.seats[s].as_ref().expect("the seat to act is occupied");
+            let others: Vec<_> = public
+                .seats
+                .iter()
+                .flatten()
+                .filter(|o| o.seat != s && matches!(o.status, SeatStatus::InHand | SeatStatus::AllIn))
+                .collect();
+            if !others.iter().any(|o| o.status == SeatStatus::InHand) {
+                let top = others.iter().map(|o| o.street_commit).max().unwrap_or(0);
+                assert!(
+                    me.street_commit < top,
+                    "seat {s} was given a turn with nothing to decide (covers every all-in): {public:?}"
+                );
+                let la = self.table.legal_actions(s).expect("legal actions for the seat to act");
+                assert!(!la.can_raise, "seat {s} offered a raise nobody could answer: {la:?}");
+                self.cov.lone_decisions += 1;
+            }
+        }
     }
 
     /// Runs `op`; on Err asserts nothing changed, on Ok absorbs and checks.
@@ -298,11 +328,13 @@ impl Sim {
             let action = self.random_action(la);
             match self.run(|t| t.act(seat, turn, action)) {
                 Ok(()) => {}
-                Err(HoldemError::RaiseNotReopened) => {
+                Err(e @ (HoldemError::RaiseNotReopened | HoldemError::NobodyToRaise)) => {
                     // legal_actions said can_raise = false then; a raise or
                     // all-in-for-more is the refused move. Call instead.
                     assert!(!la.can_raise);
-                    self.cov.not_reopened += 1;
+                    if e == HoldemError::RaiseNotReopened {
+                        self.cov.not_reopened += 1;
+                    }
                     self.run(|t| t.act(seat, turn, Action::Call)).unwrap();
                 }
                 Err(e) => panic!("legal-looking {action:?} refused: {e:?} with {la:?}"),
@@ -363,6 +395,7 @@ fn chips_are_conserved_and_no_view_leaks_over_thousands_of_random_hands() {
         total.not_reopened += c.not_reopened;
         total.voluntary_shows += c.voluntary_shows;
         total.rebuys += c.rebuys;
+        total.lone_decisions += c.lone_decisions;
     }
     eprintln!("coverage: {total:?}");
     assert!(total.hands >= 3_000, "{total:?}");
@@ -377,6 +410,7 @@ fn chips_are_conserved_and_no_view_leaks_over_thousands_of_random_hands() {
         ("incomplete raises that did not reopen", total.not_reopened),
         ("voluntary shows", total.voluntary_shows),
         ("rebuys", total.rebuys),
+        ("call-or-fold turns facing a bigger all-in", total.lone_decisions),
     ] {
         assert!(n > 0, "the random run never exercised {name}: {total:?}");
     }

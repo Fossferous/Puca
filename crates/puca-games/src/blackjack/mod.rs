@@ -334,7 +334,13 @@ pub fn hand_total(cards: &[Card]) -> (u8, bool) {
 }
 
 /// A multi-deck shoe with a cut card and a discard tray.
-pub struct Shoe {
+///
+/// Crate-private on purpose: only [`BlackjackTable`] holds one, and the table
+/// is what guarantees the preconditions — `decks` validated to 1..=8 by
+/// `BlackjackConfig::validate`, and a shuffle before the first card. A shoe built
+/// with zero decks, or drawn from unshuffled, is not a state any caller
+/// outside this module can reach.
+pub(crate) struct Shoe {
     decks: u8,
     cut: usize,
     size: usize,
@@ -346,7 +352,7 @@ pub struct Shoe {
 }
 
 impl Shoe {
-    pub fn new(decks: u8, penetration_percent: u8) -> Shoe {
+    pub(crate) fn new(decks: u8, penetration_percent: u8) -> Shoe {
         let size = decks as usize * 52;
         Shoe {
             decks,
@@ -364,25 +370,27 @@ impl Shoe {
     }
 
     /// Cards the shoe owns in total: undealt + discarded + on the table.
-    pub fn size(&self) -> usize {
+    pub(crate) fn size(&self) -> usize {
         self.size
     }
 
-    pub fn remaining(&self) -> usize {
+    pub(crate) fn remaining(&self) -> usize {
         self.cards.len()
     }
 
-    pub fn discarded(&self) -> usize {
+    /// Only the card census in tests needs it.
+    #[cfg(test)]
+    pub(crate) fn discarded(&self) -> usize {
         self.discards.len()
     }
 
     /// True before the first shuffle and once the cut card has come out.
-    pub fn needs_shuffle(&self) -> bool {
+    pub(crate) fn needs_shuffle(&self) -> bool {
         !self.shuffled || self.dealt_since_shuffle >= self.cut
     }
 
     /// A full reshuffle — only between rounds, with no card on the table.
-    pub fn shuffle<R: GameRng + ?Sized>(&mut self, rng: &mut R) {
+    pub(crate) fn shuffle<R: GameRng + ?Sized>(&mut self, rng: &mut R) {
         self.cards = Self::composition(self.decks);
         self.size = self.cards.len();
         self.discards.clear();
@@ -394,7 +402,7 @@ impl Shoe {
     /// Next card, and whether the shoe had to be refilled mid-round to give
     /// it. The refill is the discard tray: every card from earlier rounds,
     /// none of them in play.
-    pub fn draw<R: GameRng + ?Sized>(&mut self, rng: &mut R) -> (Card, bool) {
+    pub(crate) fn draw<R: GameRng + ?Sized>(&mut self, rng: &mut R) -> (Card, bool) {
         let mut refilled = false;
         if self.cards.is_empty() {
             refilled = true;
@@ -414,7 +422,7 @@ impl Shoe {
         (self.cards.pop().expect("refilled above"), refilled)
     }
 
-    pub fn discard(&mut self, cards: &[Card]) {
+    pub(crate) fn discard(&mut self, cards: &[Card]) {
         self.discards.extend_from_slice(cards);
     }
 

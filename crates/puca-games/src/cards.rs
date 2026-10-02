@@ -175,9 +175,11 @@ pub fn full_deck() -> Vec<Card> {
     (0..52).map(Card).collect()
 }
 
-/// Parses whitespace-separated codes: `"Ah Kd 7c"`. Panics on a bad code —
-/// a convenience for tests and fixtures, never for input from a client.
-pub fn cards(s: &str) -> Vec<Card> {
+/// Parses whitespace-separated codes: `"Ah Kd 7c"`. Panics on a bad code, so
+/// it exists only in the crate's own unit tests: outside them, card codes
+/// are parsed with [`Card::parse`], which refuses a bad code instead.
+#[cfg(test)]
+pub(crate) fn cards(s: &str) -> Vec<Card> {
     s.split_whitespace()
         .map(|c| Card::parse(c).unwrap_or_else(|| panic!("bad card code {c:?}")))
         .collect()

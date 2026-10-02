@@ -16,7 +16,7 @@
 // Nested index loops are the plainest way to enumerate k-card combinations.
 #![allow(clippy::needless_range_loop)]
 
-use puca_games::cards::{cards, full_deck, Card, Rank};
+use puca_games::cards::{full_deck, Card, Rank};
 use puca_games::eval::{evaluate, evaluate5, Category, HandValue};
 use puca_games::rng::{below, seeded};
 use std::collections::HashSet;
@@ -35,6 +35,12 @@ const CATS: [Category; 9] = [
 
 fn cat_index(c: Category) -> usize {
     CATS.iter().position(|&x| x == c).unwrap()
+}
+
+/// `"Ah Kd 7c"` -> cards. A fixture typo fails the test, which is all a
+/// test-only parser needs to do.
+fn cards(s: &str) -> Vec<Card> {
+    s.split_whitespace().map(|c| Card::parse(c).unwrap_or_else(|| panic!("bad card code {c:?}"))).collect()
 }
 
 fn v(s: &str) -> HandValue {

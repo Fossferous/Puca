@@ -53,7 +53,7 @@ in the engine, so changing one is a one-line decision, not a rewrite.
 | Coming back | you get the stack you left with (leaving is never a refill) | — |
 | Busted player | may take a fresh starting stack | `allow_rebuy` |
 | Blackjack | against the house only | — |
-| Shoe | 6 decks, reshuffle at the cut card (75%), never mid-round | `decks`, `penetration_percent` |
+| Shoe | 6 decks, reshuffle at the cut card (75%), never mid-round — except that if one round empties the shoe, the discard tray is shuffled back in | `decks`, `penetration_percent` |
 | Dealer soft 17 | stands (S17) | `dealer_hits_soft_17` |
 | Blackjack pays | 3:2, odd bets rounded down (15 pays 22) | `blackjack_pays` |
 | Double | on any first two cards | — |
@@ -158,7 +158,12 @@ it has and the others still owe the full big blind. Minimum bet = big blind;
 a raise must be at least the largest full raise of the street. An all-in for
 less is an *incomplete* raise: it does not change the minimum and does not
 reopen the betting to a player who already acted — unless several short
-all-ins add up to a full raise since they acted. Uncalled chips go back
+all-ins add up to a full raise since they acted. When everyone else still
+in is all-in, nobody could answer a raise: the one player who can still act
+gets a turn only if facing more than they have put in, and may then only
+call or fold — and a player who already covers every all-in (a small blind
+against a big blind all-in for less) gets no turn at all, so the turn clock
+can never fold chips that already cover the pot. Uncalled chips go back
 first; the rest splits into a main pot and side pots by contribution level;
 folded players' chips stay in the level they reached. Showdown: the last
 river aggressor shows first, else the first live seat left of the button;
@@ -188,14 +193,19 @@ cards (with a uniform shuffle they change nothing).
 - **Hold'em on stacked decks**: heads-up and 3+ handed blind order and
   rotation, min-raise, incomplete all-ins that do and do not reopen, three
   all-ins of different sizes (main pot + two side pots + uncalled return),
-  odd chips, short big blind, showdown order and mucking, timeouts and
-  stale timers, leaving mid-hand, rebuys, config lock.
+  odd chips, short big blind, a player who covers every all-in getting no
+  turn (heads-up, after folds, and after a departure), call-or-fold only
+  against a bigger all-in, showdown order and mucking, timeouts and stale
+  timers, leaving mid-hand, rebuys, config lock.
 - **Hold'em at random**: 3,000+ seeded hands with random legal actions,
   refused illegal ones, timeouts, departures and rebuys. After every
   operation: chips conserved; no view (and no event) holds a card other than
-  the viewer's own, the board and shown hands; no card dealt twice; a refused
-  action changed nothing. The run fails if it never exercised side pots,
-  split pots, incomplete raises, timeouts or departures.
+  the viewer's own, the board and shown hands; no card dealt twice; a turn
+  is only ever given when there is something to decide (never to a player
+  who covers every all-in, never with a raise nobody could answer); a refused
+  action changed no view (the engine validates before it mutates). The run fails if it never exercised side pots,
+  split pots, incomplete raises, timeouts, departures or a call-or-fold
+  turn against a bigger all-in.
 - **One table per call**: a second table of either game is refused and the
   first is untouched; other calls are independent; a stale id cannot reach or
   close a newer table; the cap refuses without changing anything.

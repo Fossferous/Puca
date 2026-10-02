@@ -19,9 +19,6 @@ use std::collections::HashMap;
 use std::fmt;
 use std::hash::Hash;
 
-/// The owner's rule: one game table per voice room at a time.
-pub const MAX_TABLES_PER_ROOM: usize = 1;
-
 /// The server-wide cap the design suggests (docs/GAMES.md).
 pub const DEFAULT_MAX_OPEN_TABLES: usize = 500;
 
@@ -165,7 +162,6 @@ mod tests {
 
     #[test]
     fn a_call_holds_one_table_and_a_second_of_either_game_is_refused() {
-        assert_eq!(MAX_TABLES_PER_ROOM, 1);
         for (first, second) in [
             (GameKind::Holdem, GameKind::Holdem),
             (GameKind::Holdem, GameKind::Blackjack),

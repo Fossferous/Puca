@@ -21,6 +21,12 @@
 //!   may only call or fold unless the bet they now face has grown by at least
 //!   one full raise since they last acted (several short all-ins can add up
 //!   to that, and then it does reopen).
+//! * **Nobody left to answer.** When every other live player is all-in, the
+//!   one player who can still act gets a turn only if they face more than
+//!   they have put in, and then may only call or fold. A player who already
+//!   covers every all-in (say the small blind against a big blind all-in for
+//!   less than the small blind) is given no turn at all: the board runs out
+//!   and the excess comes back uncalled.
 //! * **Pots.** Uncalled chips go back to the bettor first. The rest splits
 //!   into a main pot and side pots by contribution level; a player is
 //!   eligible for every level they matched. Chips from players who folded
@@ -131,7 +137,8 @@ pub enum Action {
     /// Bet (nothing to call yet) or raise, to this street total.
     BetOrRaiseTo(u64),
     /// Everything: a call if the stack does not exceed the call, else a raise
-    /// (allowed below the minimum, as an incomplete raise).
+    /// (allowed below the minimum, as an incomplete raise). A raise is refused
+    /// where any raise would be (`RaiseNotReopened`, `NobodyToRaise`).
     AllIn,
 }
 
@@ -224,8 +231,9 @@ pub struct LegalActions {
     pub can_check: bool,
     /// What a Call actually puts in (less than `to_call` when it is all-in).
     pub call_amount: u64,
-    /// False when the stack only covers a call, or when an incomplete raise
-    /// did not reopen the betting for this player.
+    /// False when the stack only covers a call, when an incomplete raise did
+    /// not reopen the betting for this player, or when everyone else is
+    /// all-in (nobody could answer a raise).
     pub can_raise: bool,
     /// Smallest legal `BetOrRaiseTo` (the all-in total when that is less).
     pub min_raise_to: u64,
@@ -292,6 +300,9 @@ pub enum HoldemError {
     BetAboveStack { max_to: u64 },
     /// Facing only an incomplete raise after having acted: call or fold.
     RaiseNotReopened,
+    /// Every other live player is all-in, so nobody could answer a raise:
+    /// call or fold.
+    NobodyToRaise,
     NoChips,
     NotBusted,
     RebuyNotAllowed,
@@ -317,6 +328,7 @@ impl fmt::Display for HoldemError {
             HoldemError::BetBelowMinimum { min_to } => write!(f, "the minimum is {min_to}"),
             HoldemError::BetAboveStack { max_to } => write!(f, "the most you can bet is {max_to}"),
             HoldemError::RaiseNotReopened => write!(f, "the betting was not reopened: call or fold"),
+            HoldemError::NobodyToRaise => write!(f, "everyone else is all-in: call or fold"),
             HoldemError::NoChips => write!(f, "no chips"),
             HoldemError::NotBusted => write!(f, "only a player with no chips can rebuy"),
             HoldemError::RebuyNotAllowed => write!(f, "this table does not allow rebuys"),
@@ -389,17 +401,46 @@ impl Hand {
             .collect()
     }
 
+    /// Whether a player other than `seat` can still act (is in the hand and
+    /// not all-in) — i.e. whether anyone could answer a raise by `seat`.
+    fn someone_else_can_act(&self, seat: usize) -> bool {
+        self.players
+            .iter()
+            .enumerate()
+            .any(|(i, p)| i != seat && matches!(p, Some(h) if h.status == PStatus::Active))
+    }
+
+    /// No decision is left on this street: nobody can act, or the ONE player
+    /// who can has already put in at least as much as every other live
+    /// player (all of whom are all-in). Nobody could answer a raise, and a
+    /// call would match nothing, so the board runs out; any excess comes back
+    /// through `return_uncalled`. Compared with what the others actually put
+    /// in, NOT `current_bet`: after a short all-in big blind `current_bet` is
+    /// the full blind, and a covering player made to "call" it would be a
+    /// player the turn clock could fold out of a pot they already cover.
+    fn betting_closed(&self) -> bool {
+        let mut actionable = (0..self.players.len())
+            .filter(|&i| matches!(&self.players[i], Some(h) if h.status == PStatus::Active));
+        let (Some(only), None) = (actionable.next(), actionable.next()) else {
+            // Nobody (closed), or two or more (open).
+            return self.players.iter().flatten().all(|h| h.status != PStatus::Active);
+        };
+        let mine = self.players[only].as_ref().unwrap().street_commit;
+        let top_other = self
+            .players
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != only)
+            .filter_map(|(_, p)| p.as_ref().filter(|h| h.status != PStatus::Folded).map(|h| h.street_commit))
+            .max()
+            .unwrap_or(0);
+        mine >= top_other
+    }
+
     fn next_to_act(&self, after: usize) -> Option<usize> {
         let n = self.players.len();
-        let actionable: Vec<usize> = (0..n)
-            .filter(|&i| matches!(&self.players[i], Some(h) if h.status == PStatus::Active))
-            .collect();
-        match actionable.as_slice() {
-            [] => return None,
-            // One player with chips and nothing to call: nobody can respond to
-            // a bet, so there is no betting — run the board out.
-            [only] if self.players[*only].as_ref().unwrap().street_commit >= self.current_bet => return None,
-            _ => {}
+        if self.betting_closed() {
+            return None;
         }
         (1..=n).map(|k| (after + k) % n).find(|&i| {
             matches!(&self.players[i], Some(h)
@@ -577,6 +618,11 @@ impl HoldemTable {
                     self.progress(&mut ev, seat);
                 } else if hand.live().len() == 1 {
                     self.finish_uncontested(&mut ev);
+                } else if let Some(waiting) = hand.to_act.filter(|_| hand.betting_closed()) {
+                    // The leaver's chips were what the player to act was
+                    // facing; that player now covers every all-in and has
+                    // nothing left to decide.
+                    self.progress(&mut ev, waiting);
                 }
             }
             return Ok(ev);
@@ -898,6 +944,7 @@ impl HoldemTable {
         let hand = self.hand.as_mut().unwrap();
         let current = hand.current_bet;
         let full_raise = hand.last_full_raise;
+        let answerable = hand.someone_else_can_act(seat);
         let hs = hand.players[seat].as_mut().unwrap();
         let to_call = current.saturating_sub(hs.street_commit);
         let max_to = hs.street_commit + st.stack;
@@ -910,6 +957,9 @@ impl HoldemTable {
             RaiseTo(u64),
         }
         let check_raise = |to: u64| -> Result<Resolved, HoldemError> {
+            if !answerable {
+                return Err(HoldemError::NobodyToRaise);
+            }
             if !reopened {
                 return Err(HoldemError::RaiseNotReopened);
             }
@@ -1049,7 +1099,7 @@ impl HoldemTable {
             to_call,
             can_check: to_call == 0,
             call_amount: to_call.min(stack),
-            can_raise: reopened && max_to > hand.current_bet,
+            can_raise: reopened && hand.someone_else_can_act(seat) && max_to > hand.current_bet,
             min_raise_to: min_to.min(max_to),
             max_raise_to: max_to,
         })
