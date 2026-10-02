@@ -63,10 +63,11 @@ pub struct WsQuery {
 }
 
 /// `?caps=` / `?kind=` as the session records them: whether the client
-/// announced `own_voice` (an exact token in the comma list), and its device
+/// announced `own_voice` (a whole name in the comma list, by the one rule
+/// every capability is read with - `ClientCaps::announced`), and its device
 /// kind if it is one of the three this server knows.
 pub(crate) fn parse_ws_caps(caps: Option<&str>, kind: Option<&str>) -> (bool, Option<&'static str>) {
-    let own_voice = caps.is_some_and(|c| c.split(',').any(|t| t.trim() == "own_voice"));
+    let own_voice = crate::presence::ClientCaps::announced(caps, "own_voice");
     let kind = match kind.map(str::trim) {
         Some("desktop") => Some("desktop"),
         Some("mobile") => Some("mobile"),
@@ -9107,6 +9108,44 @@ mod own_voice_state_tests {
         assert_eq!(parse_ws_caps(Some("own_voices"), Some("browser")), (false, Some("browser")), "exact token only");
         assert_eq!(parse_ws_caps(Some("own_voice"), Some("<script>")), (true, None), "a kind outside the three is dropped");
         assert_eq!(parse_ws_caps(Some("own_voice"), None), (true, None));
+    }
+
+    /// ONE `caps=` list carries both capabilities, so both readers of it must
+    /// tokenise it the same way. They did not: presence lowercased, own_voice
+    /// compared exactly, so `OWN_VOICE,PRESENCE` turned on presence alone.
+    #[test]
+    fn both_readers_of_the_one_caps_list_agree_on_every_spelling() {
+        use crate::presence::ClientCaps;
+        for raw in ["own_voice,presence", " own_voice , presence ", "OWN_VOICE,PRESENCE", "Own_Voice,Presence", ",,own_voice,,presence,,"] {
+            assert!(parse_ws_caps(Some(raw), None).0, "own_voice from {raw:?}");
+            assert!(ClientCaps::parse(Some(raw)).presence, "presence from {raw:?}");
+        }
+        for raw in ["own_voice presence", "own_voices,presences", "", "x"] {
+            assert!(!parse_ws_caps(Some(raw), None).0, "no own_voice from {raw:?}");
+            assert!(!ClientCaps::parse(Some(raw)).presence, "no presence from {raw:?}");
+        }
+    }
+
+    /// The query as the upgrade extracts it. The documented form is ONE
+    /// comma list; a repeated key fails extraction (serde: duplicate field),
+    /// which axum answers with 400 before auth. docs/API_REFERENCE.md says so -
+    /// this pins it, so a server that starts accepting (or a client that
+    /// starts sending) repeats is a decision, not an accident.
+    #[test]
+    fn the_upgrade_query_takes_one_caps_list_and_refuses_a_repeated_key() {
+        use axum::extract::Query;
+        use axum::http::Uri;
+        let parse = |q: &str| Query::<super::WsQuery>::try_from_uri(&format!("http://h/ws?{q}").parse::<Uri>().unwrap());
+
+        let Query(q) = parse("caps=own_voice,presence&kind=desktop").expect("the client's own URL parses");
+        assert_eq!(parse_ws_caps(q.caps.as_deref(), q.kind.as_deref()), (true, Some("desktop")));
+        assert!(crate::presence::ClientCaps::parse(q.caps.as_deref()).presence);
+
+        let dup = parse("caps=own_voice&caps=presence").expect_err("a repeated caps= is refused");
+        assert!(dup.body_text().contains("duplicate field `caps`"), "{}", dup.body_text());
+        assert_eq!(dup.status(), axum::http::StatusCode::BAD_REQUEST);
+        let dup = parse("caps=own_voice,presence&kind=desktop&kind=mobile").expect_err("a repeated kind= is refused");
+        assert!(dup.body_text().contains("duplicate field `kind`"), "{}", dup.body_text());
     }
 
     #[tokio::test]

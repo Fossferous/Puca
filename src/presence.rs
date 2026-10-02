@@ -228,16 +228,20 @@ pub struct ClientCaps {
 }
 
 impl ClientCaps {
-    /// Comma-separated, case-insensitive, unknown names ignored (a newer
-    /// client may announce things this server has never heard of).
+    /// Whether `name` is in the `caps=` list: comma-separated, each name
+    /// trimmed and compared case-insensitively, unknown names ignored (a
+    /// newer client may announce things this server has never heard of).
+    ///
+    /// The ONE tokeniser for that list. The list carries every capability
+    /// (`own_voice` too, read by `crate::ws::parse_ws_caps`), so every reader
+    /// goes through here: two readers with two rules once meant
+    /// `OWN_VOICE,PRESENCE` turned on presence and not own_voice.
+    pub fn announced(raw: Option<&str>, name: &str) -> bool {
+        raw.unwrap_or("").split(',').any(|t| t.trim().eq_ignore_ascii_case(name))
+    }
+
     pub fn parse(raw: Option<&str>) -> Self {
-        let mut caps = ClientCaps::default();
-        for name in raw.unwrap_or("").split(',').map(|s| s.trim().to_ascii_lowercase()) {
-            if name == CAP_PRESENCE {
-                caps.presence = true;
-            }
-        }
-        caps
+        ClientCaps { presence: Self::announced(raw, CAP_PRESENCE) }
     }
 
     /// The features to confirm back: what was announced AND is supported.
