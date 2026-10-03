@@ -958,6 +958,16 @@ export const CardsIcon = makeIcon('CardsIcon', <>
     <path d="M14.6 8.5 16.6 11.25 14.6 14l-2-2.75Z" />
 </>);
 
+/** Activities (the launcher in a call's controls, docs/GAMES.md): a rocket,
+ *  Discord's own mark for them, upright, nose to the top of the live area. */
+export const RocketIcon = makeIcon('RocketIcon', <>
+    <path d="M12 2.75c2.95 2.05 4.5 5.3 4.5 8.95v3.55h-9V11.7c0-3.65 1.55-6.9 4.5-8.95Z" />
+    <path d="M7.5 12.4 4.75 15.2v3.3l2.75-1.75" />
+    <path d="M16.5 12.4l2.75 2.8v3.3l-2.75-1.75" />
+    <path d="M10 17.75v1.25a2 2 0 0 0 4 0v-1.25" />
+    <path d="M13.6 9.5a1.6 1.6 0 1 1-3.2 0 1.6 1.6 0 0 1 3.2 0Z" />
+</>);
+
 /*
  * The four suits are SOLID (docs/ICON_LANGUAGE.md §4): a suit pip is a printed
  * glyph, and an outlined heart reads as "favourite" and an outlined spade as
@@ -1354,6 +1364,7 @@ export const ICONS = {
 
     // games
     cards: CardsIcon,
+    rocket: RocketIcon,
     'suit-spade': SuitSpadeIcon,
     'suit-heart': SuitHeartIcon,
     'suit-diamond': SuitDiamondIcon,

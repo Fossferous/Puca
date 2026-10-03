@@ -16,6 +16,9 @@ interface PlayingCardProps {
     size?: 'sm' | 'md' | 'lg';
     /** Dim it (a folded hand, a busted Blackjack hand). */
     muted?: boolean;
+    /** A picture, not a card in play (the activity art): no `data-card`, no
+     *  accessible name - nothing that reads as a dealt card. */
+    decorative?: boolean;
 }
 
 /**
@@ -24,7 +27,7 @@ interface PlayingCardProps {
  * surface with fixed ink in every theme (PlayingCard.css), because a card's
  * legibility must not depend on which of the eight themes is on.
  */
-export function PlayingCard({ code, size = 'md', muted = false }: PlayingCardProps) {
+export function PlayingCard({ code, size = 'md', muted = false, decorative = false }: PlayingCardProps) {
     if (code === HIDDEN_CARD) {
         return (
             <span className={`pcard pcard-${size} pcard-back${muted ? ' pcard-muted' : ''}`} role="img" aria-label={cardName(code)} />
@@ -36,9 +39,7 @@ export function PlayingCard({ code, size = 'md', muted = false }: PlayingCardPro
     return (
         <span
             className={`pcard pcard-${size}${red ? ' pcard-red' : ' pcard-black'}${muted ? ' pcard-muted' : ''}`}
-            role="img"
-            aria-label={cardName(code)}
-            data-card={code}
+            {...(decorative ? { 'aria-hidden': true } : { role: 'img', 'aria-label': cardName(code), 'data-card': code })}
         >
             <span className="pcard-rank" aria-hidden="true">{rankLabel(code)}</span>
             <span className="pcard-suit" aria-hidden="true">{Suit ? <Suit /> : null}</span>

@@ -405,7 +405,9 @@ export type GameEventsFrame =
     | (FrameBase & { type: 'GameEvents'; version: number; view: BlackjackView; events: BlackjackEvent[] });
 
 export type GameServerFrame =
-    | (FrameBase & { type: 'GameTable'; version: number; view: GameView })
+    /** `opened_by`: who opened the table (the user id of its GameCreate),
+     *  for "<name> started Poker"; null when the server did not say. */
+    | (FrameBase & { type: 'GameTable'; version: number; view: GameView; opened_by: number | null })
     | GameEventsFrame
     /** `reason: 'other'` is an ending this client does not know: still drop the table. */
     | (FrameBase & { type: 'GameEnded'; reason: GameEndReason | 'other' })
@@ -799,7 +801,15 @@ export function parseGameFrame(msg: { type: string; payload?: unknown }): GameSe
         const p = obj(msg.payload);
         switch (msg.type) {
             case 'GameTable':
-                return { type: 'GameTable', room_id: roomId(p.room_id), table_id: tableId(p.table_id), version: nat(p.version), view: view(p.view) };
+                return {
+                    type: 'GameTable',
+                    room_id: roomId(p.room_id),
+                    table_id: tableId(p.table_id),
+                    version: nat(p.version),
+                    view: view(p.view),
+                    // Absent (an older server, the contract fixtures): null.
+                    opened_by: p.opened_by === undefined || p.opened_by === null ? null : int(p.opened_by),
+                };
             case 'GameEvents': {
                 const base = { type: 'GameEvents' as const, room_id: roomId(p.room_id), table_id: tableId(p.table_id), version: nat(p.version) };
                 const v = view(p.view);
@@ -836,6 +846,30 @@ export function parseGameFrame(msg: { type: string; payload?: unknown }): GameSe
             default:
                 return null;
         }
+    } catch (e) {
+        if (e instanceof Junk) return null;
+        throw e;
+    }
+}
+
+/** The owner switched games on or off for a server (server -> client). */
+export interface GamesEnabledFrame {
+    server_id: string;
+    games_enabled: boolean;
+}
+
+/**
+ * `GamesEnabled`, checked; `null` for any other frame or a malformed one.
+ * Sent only to a socket that announced `games` (docs/GAMES.md, *Activities*),
+ * after the owner's switch committed; switching off has already ended every
+ * table of the server (`GameEnded { disabled }`).
+ */
+export function parseGamesEnabled(msg: { type: string; payload?: unknown }): GamesEnabledFrame | null {
+    if (msg.type !== 'GamesEnabled') return null;
+    try {
+        const p = obj(msg.payload);
+        if (typeof p.server_id !== 'string' || p.server_id === '') throw new Junk('no server id');
+        return { server_id: p.server_id, games_enabled: bool(p.games_enabled) };
     } catch (e) {
         if (e instanceof Junk) return null;
         throw e;

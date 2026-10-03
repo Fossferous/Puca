@@ -26,11 +26,10 @@ import blackjackTable from './fixtures/games/blackjack-table.json';
 import holdemEvents from './fixtures/games/holdem-events.json';
 import refusals from './fixtures/games/refusals.json';
 import ended from './fixtures/games/ended.json';
-import { attachGamesSocket, resetGamesStoreForTests, setGamesRoom } from '../api/games/gamesStore';
+import { attachGamesSocket, getGamesState, requestJoin, resetGamesStoreForTests, setGamesRoom, startActivity } from '../api/games/gamesStore';
 import { GAMES_DISCLOSURE } from '../api/games/gameWords';
 import { gamesGate, type GamesGate } from '../api/games/gamesGate';
 import { GamesView } from '../components/games/GamesView';
-import { VoiceStage } from '../components/VoiceStage';
 import { PERM } from '../api/permissionBits';
 import { FakeGamesSocket, withVersion } from './gamesTestSocket';
 
@@ -385,29 +384,83 @@ describe('phone layout', () => {
     });
 });
 
-describe('the Games entry point on the call\'s stage', () => {
-    it('VoiceStage shows the Games button only when games are offered, with its label', async () => {
-        const open = vi.fn();
-        const stage = (onOpenGames?: () => void) => (
-            <VoiceStage
-                roomId={ROOM}
-                channelName="Lounge"
-                currentUserId={8}
-                memberAvatars={new Map()}
-                memberNames={new Map()}
-                onBackToChat={() => {}}
-                onWatchStream={() => {}}
-                onOpenGames={onOpenGames}
-                gamesLabel="Join the table"
-            />
-        );
-        await act(async () => { root.render(stage(undefined)); });
-        expect(document.querySelector('.voice-stage-games')).toBeNull();
-        await act(async () => { root.render(stage(open)); });
-        const b = document.querySelector('.voice-stage-games');
-        expect(b?.textContent).toContain('Join the table');
-        await click(b);
-        expect(open).toHaveBeenCalledTimes(1);
+describe('Join from the notice or the tile, and Back to call', () => {
+    it('Join seats me at the first open seat - after the disclosure the first time', async () => {
+        await deliver(spectator);
+        await show({ currentUserId: 99 });
+        await act(async () => { requestJoin(); });
+        const dialog = document.querySelector('.games-disclosure');
+        expect(dialog?.textContent).toContain(GAMES_DISCLOSURE);
+        expect(ws.sentOf('GameSit')).toHaveLength(0);
+        await click(button('Sit down', dialog!));
+        expect(ws.sentOf('GameSit')).toEqual([{ type: 'GameSit', payload: { room_id: ROOM, table_id: TABLE, seat: 1 } }]);
+        expect(getGamesState().joinRequest).toBeNull();
+    });
+
+    it('...and straight away once the disclosure was seen; once per request', async () => {
+        const { markDisclosureSeen } = await import('../api/games/gamesDisclosure');
+        markDisclosureSeen(99, 's1');
+        await deliver(spectator);
+        await show({ currentUserId: 99 });
+        await act(async () => { requestJoin(); });
+        expect(document.querySelector('.games-disclosure')).toBeNull();
+        expect(ws.sentOf('GameSit')).toEqual([{ type: 'GameSit', payload: { room_id: ROOM, table_id: TABLE, seat: 1 } }]);
+        await deliver(withVersion(spectator, 9)); // a later frame does not sit again
+        expect(ws.sentOf('GameSit')).toHaveLength(1);
+    });
+
+    it('a join request waits for the view: made before it mounted, it is taken when it does', async () => {
+        const { markDisclosureSeen } = await import('../api/games/gamesDisclosure');
+        markDisclosureSeen(99, 's1');
+        await deliver(spectator);
+        await act(async () => { requestJoin(); });
+        expect(ws.sentOf('GameSit')).toHaveLength(0);
+        await show({ currentUserId: 99 });
+        expect(ws.sentOf('GameSit')).toHaveLength(1);
+    });
+
+    it('without Play Games, or at a full table, a join request seats nobody', async () => {
+        const { markDisclosureSeen } = await import('../api/games/gamesDisclosure');
+        markDisclosureSeen(99, 's1');
+        await deliver(spectator);
+        await show({ currentUserId: 99, gate: gate({ perms: PERM.CONNECT }) });
+        await act(async () => { requestJoin(); });
+        expect(ws.sentOf('GameSit')).toHaveLength(0);
+        expect(getGamesState().joinRequest).toBeNull();
+        const full = JSON.parse(JSON.stringify(spectator));
+        full.payload.version = 9;
+        for (const i of [1, 3, 5]) full.payload.view.seats[i] = { ...full.payload.view.seats[0], seat: i, user_id: 100 + i, cards: null };
+        await deliver(full);
+        await show({ currentUserId: 99 });
+        await act(async () => { requestJoin(); });
+        expect(ws.sentOf('GameSit')).toHaveLength(0);
+        expect(container.textContent).toContain('Every seat is taken');
+    });
+
+    it('a start from the launcher says "Starting Poker…" until its table arrives (no form in the way)', async () => {
+        startActivity(ROOM, 'holdem');
+        await show();
+        expect(container.textContent).toContain('Starting Poker…');
+        expect(document.querySelector('.games-open')).toBeNull();
+        await deliver(spectator);
+        expect(container.textContent).not.toContain('Starting Poker…');
+        expect(document.querySelector('.gtable-holdem')).not.toBeNull();
+    });
+
+    it('"Back to call" on a desktop and on a phone; it never touches the call', async () => {
+        const onBack = vi.fn();
+        await deliver(spectator);
+        await act(async () => {
+            root.render(
+                <GamesView roomId={ROOM} serverId="s1" channelName="Lounge" currentUserId={8} memberNames={NAMES}
+                    gate={gate()} isPhone onBack={onBack} />,
+            );
+        });
+        await click(button(/Back to call/));
+        expect(onBack).toHaveBeenCalledTimes(1);
+        expect(ws.sent.filter(f => !f.type.startsWith('Game'))).toEqual([]);
+        await show({ isPhone: false });
+        expect(button(/Back to call/)).toBeDefined();
     });
 });
 

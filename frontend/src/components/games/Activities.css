@@ -1,0 +1,324 @@
+/* Games as ACTIVITIES (docs/GAMES.md, *Activities*): the picker the launcher
+   opens, the "<name> started Poker" notice, the tile in the call grid and the
+   sidebar's playing marks. In the MAIN bundle (the table itself, GamesView,
+   is lazy), so nothing here may lean on GamesView.css: these components carry
+   their own buttons. Every rule is scoped to .activity-* / .voice-activity-*. */
+
+/* ---- Buttons --------------------------------------------------------------- */
+.activity-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    min-height: 32px;
+    padding: 0 0.85rem;
+    border: 1px solid var(--border-separator, #2a2b2f);
+    border-radius: 8px;
+    background: var(--bg-quaternary, #232428);
+    color: var(--text-normal, #dbdee1);
+    font: inherit;
+    font-size: 0.875rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.activity-btn:focus-visible,
+.activity-icon-btn:focus-visible,
+.activity-card:focus-visible,
+.activity-tile-body:focus-visible {
+    outline: 2px solid var(--brand-primary, #5865f2);
+    outline-offset: 2px;
+}
+
+/* White on the DEEPEST brand shade, as at the table (GamesView.css):
+   --brand-primary is under 4.5:1 against white in two themes. */
+.activity-btn-primary {
+    background: var(--brand-active, #3c45a5);
+    border-color: transparent;
+    color: #fff;
+}
+
+.activity-icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 32px;
+    min-height: 32px;
+    padding: 0;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-muted, #949ba4);
+    cursor: pointer;
+}
+
+@media (pointer: fine) {
+    .activity-btn:hover { filter: brightness(1.12); }
+    .activity-icon-btn:hover { background: var(--bg-hover, #1e1f22); color: var(--text-normal, #dbdee1); }
+    .activity-card:not(:disabled):hover { border-color: var(--brand-primary, #5865f2); }
+}
+
+/* ---- The art: a little felt, two fanned cards ------------------------------- */
+/* Fixed felt and fixed card faces in every theme, like the table itself. */
+.activity-art {
+    --felt: #1f5c3d;
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 64px;
+    height: 48px;
+    border-radius: 8px;
+    background: radial-gradient(ellipse at 50% 30%, rgba(255, 255, 255, 0.12), transparent 70%), var(--felt);
+    overflow: hidden;
+}
+
+.activity-art-blackjack { --felt: #17473a; }
+
+.activity-art-cards { display: inline-flex; }
+
+.activity-art-cards .pcard:first-child { transform: rotate(-10deg) translateX(4px); }
+
+.activity-art-cards .pcard:last-child { transform: rotate(8deg) translate(-4px, 2px); }
+
+.activity-art-chips {
+    position: absolute;
+    right: 3px;
+    bottom: 2px;
+}
+
+[data-contrast="high"] .activity-art { outline: 2px solid var(--text-normal, #fff); outline-offset: -2px; }
+
+/* ---- The picker (portaled to <body>) --------------------------------------- */
+/* z 1100: the modal band (DESIGN_PHILOSOPHY §1) - above the voice bar (250)
+   and the bottom nav (300), below Settings (2000). */
+.activity-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 1100;
+    background: rgba(0, 0, 0, 0.5);
+}
+
+.activity-picker {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: min(440px, calc(100vw - 32px));
+    max-height: calc(100vh - 32px);
+    /* It scrolls DOWN only: overflow-y alone makes overflow-x auto as well,
+       and a too-wide row would turn the sheet into a sideways scroller that
+       the walk's overflow check (rightly) does not treat as page overflow. */
+    overflow-x: hidden;
+    overflow-y: auto;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px;
+    border-radius: 12px;
+    background: var(--bg-floating, #0d0e10);
+    color: var(--text-normal, #dbdee1);
+    border: 1px solid var(--border-separator, #2a2b2f);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+}
+
+/* Phone: a sheet on the bottom edge (no transform: the sheet hugs it). */
+.activity-picker.activity-sheet {
+    left: 0;
+    right: 0;
+    top: auto;
+    bottom: 0;
+    width: auto;
+    max-height: 85vh;
+    transform: none;
+    border-radius: 14px 14px 0 0;
+    border-width: 1px 0 0;
+    padding: 14px 16px calc(14px + var(--safe-area-bottom, 0px));
+}
+
+.activity-picker-head { display: flex; align-items: center; gap: 10px; }
+
+.activity-picker-icon { display: inline-flex; font-size: 1.3rem; color: var(--brand-primary, #5865f2); }
+
+.activity-picker-titles { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+
+.activity-picker-title { margin: 0; font-size: 1.05rem; font-weight: 700; }
+
+.activity-picker-sub {
+    color: var(--text-muted, #949ba4);
+    font-size: 0.85rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.activity-cards { display: flex; flex-direction: column; gap: 8px; }
+
+.activity-card-wrap { display: flex; flex-direction: column; gap: 6px; }
+
+.activity-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    padding: 10px;
+    border: 1px solid var(--border-separator, #2a2b2f);
+    border-radius: 10px;
+    background: var(--bg-secondary, #111214);
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.activity-card:disabled { opacity: 0.5; cursor: default; }
+
+.activity-running .activity-card { border-color: var(--brand-primary, #5865f2); }
+
+.activity-card-text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+
+.activity-card-name { font-size: 0.98rem; }
+
+.activity-card-blurb { color: var(--text-muted, #949ba4); font-size: 0.82rem; line-height: 1.3; }
+
+.activity-card-go {
+    flex-shrink: 0;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: var(--brand-active, #3c45a5);
+    color: #fff;
+    font-size: 0.8rem;
+    font-weight: 700;
+}
+
+.activity-card-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+.activity-picker-note,
+.activity-picker-fine {
+    margin: 0;
+    color: var(--text-muted, #949ba4);
+    font-size: 0.8rem;
+    line-height: 1.35;
+}
+
+.activity-picker-note { color: var(--text-normal, #dbdee1); }
+
+/* ---- The notice: a status line at the top of the main area ------------------ */
+.activity-notice {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+    margin: 6px 12px 0;
+    padding: 6px 8px;
+    border-radius: 10px;
+    background: var(--bg-floating, #0d0e10);
+    border: 1px solid var(--brand-primary, #5865f2);
+    color: var(--text-normal, #dbdee1);
+    min-width: 0;
+}
+
+.activity-notice .activity-art { width: 44px; height: 34px; }
+
+.activity-notice .activity-art .pcard-sm { width: 18px; height: 25px; font-size: 10px; }
+
+.activity-notice .activity-art-chips { display: none; }
+
+.activity-notice-text {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.9rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.activity-notice-actions { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+
+/* ---- The tile in the call grid (VoiceStage) -------------------------------- */
+/* Two classes: VoiceStage.css loads AFTER this file and its .voice-stage-tile
+   (16:9, a transparent border) would otherwise win every tie. */
+.voice-stage-tile.activity-tile {
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+    cursor: default;
+    border-color: var(--brand-primary, #5865f2);
+    /* Its content sets the height: a 16:9 box on a phone (318 x 179) is
+       shorter than the art, the name and a 44 px row of buttons, and the
+       overflow hid the top of the art under the stage header. The grid row
+       still stretches it to its neighbours' height on a desktop. */
+    aspect-ratio: auto;
+}
+
+.activity-tile-body {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border: none;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--text-normal, #dbdee1);
+    font: inherit;
+    cursor: pointer;
+}
+
+.activity-tile .activity-art { width: 96px; height: 64px; }
+
+.activity-tile-name { font-weight: 700; font-size: 1.05rem; }
+
+.activity-tile-count { color: var(--text-muted, #949ba4); font-size: 0.85rem; }
+
+.activity-tile-actions { display: flex; gap: 8px; flex-shrink: 0; }
+
+/* ---- The sidebar: the channel row and the seated players ------------------- */
+.voice-activity-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    margin-left: auto;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--brand-active, #3c45a5);
+    color: #fff;
+    font-size: 0.7rem;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.voice-activity-chip .svrn-icon { width: 12px; height: 12px; }
+
+.voice-status-icon.playing { color: var(--brand-primary, #5865f2); }
+
+/* ---- Phone: 390x844, coarse pointer (mirrors mobile.css's gate) ----------- */
+/* Every target at least 44 px; nothing hover-only. */
+@media (pointer: coarse) and (max-width: 1024px) {
+    .activity-btn { min-height: 44px; min-width: 44px; padding: 0 0.75rem; font-size: 0.95rem; }
+
+    .activity-icon-btn { min-height: 44px; min-width: 44px; }
+
+    .activity-card { min-height: 64px; }
+
+    .activity-notice { margin: 6px 8px 0; gap: 8px; }
+
+    .activity-notice .activity-art { display: none; }
+
+    .activity-notice-actions { gap: 4px; }
+
+    /* A long name wraps to a second line rather than cutting off the game. */
+    .activity-notice-text {
+        white-space: normal;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        line-height: 1.25;
+    }
+
+    .activity-notice-actions .activity-btn { padding: 0 0.6rem; }
+}

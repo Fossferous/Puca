@@ -15,6 +15,11 @@
  * Watching needs only the first three: GAMES.md, "PLAY_GAMES gates opening
  * and sitting, not watching" — a spectator sees the public table.
  *
+ * The LAUNCHER (the Activities button in the call's controls, docs/GAMES.md
+ * *Activities*) is for someone who may PLAY here: with no table it starts
+ * one, with a table it offers Join. Someone who may only watch reaches a
+ * running table through its tile and the notice, never the launcher.
+ *
  * The permission bits must be PRESENT for anything that acts. hasPerm()
  * fails open on a missing bitset (right for showing content on a pre-
  * permissions server), but every server that plays games sends
@@ -40,8 +45,10 @@ export interface GamesGateInput {
 export type GamesUnavailable = 'no_feature' | 'disabled' | 'not_in_call' | 'no_permission';
 
 export interface GamesGate {
-    /** Show the Games entry points at all. */
+    /** Show the Games entry points at all (the table's tile, the notice). */
     available: boolean;
+    /** Show the Activities launcher: in the call, games on, may play here. */
+    launcher: boolean;
     /** May open a table (when the call has none). */
     canOpen: boolean;
     /** May take a seat. */
@@ -55,7 +62,7 @@ export interface GamesGate {
 const has = (perms: number | null | undefined, bit: number) => perms !== null && perms !== undefined && hasPerm(perms, bit);
 
 export function gamesGate(i: GamesGateInput): GamesGate {
-    const off = (why: GamesUnavailable): GamesGate => ({ available: false, canOpen: false, canSit: false, canModerate: false, why });
+    const off = (why: GamesUnavailable): GamesGate => ({ available: false, launcher: false, canOpen: false, canSit: false, canModerate: false, why });
     if (!i.feature) return off('no_feature');
     // The server row is fetched once and nothing pushes a change to it, so a
     // person online when the owner switched games on still holds `false`. A
@@ -72,6 +79,7 @@ export function gamesGate(i: GamesGateInput): GamesGate {
     if (!play && !i.hasTable) return off('no_permission');
     return {
         available: true,
+        launcher: play,
         canOpen: play && !i.hasTable,
         canSit: play,
         canModerate,

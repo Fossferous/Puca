@@ -42,7 +42,7 @@ describe('gamesGate', () => {
     const base = { feature: true, gamesEnabled: true, perms: PLAY, inCall: true, hasTable: false };
 
     it('offers opening and sitting only with the feature, the switch, the call and CONNECT + PLAY_GAMES', () => {
-        expect(gamesGate(base)).toEqual({ available: true, canOpen: true, canSit: true, canModerate: false, why: null });
+        expect(gamesGate(base)).toEqual({ available: true, launcher: true, canOpen: true, canSit: true, canModerate: false, why: null });
     });
 
     it.each([

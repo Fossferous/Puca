@@ -27,6 +27,14 @@
  *   - Leaving the call (RoomLeft, VoiceMoved, another call): drop the table
  *     silently — the server sends no GameEnded for that.
  *
+ * ACTIVITIES (docs/GAMES.md, *Activities* - Discord's model): a table that
+ * appears in this client's call is ANNOUNCED ("<name> started Poker - Join /
+ * Watch") unless this client started it or is already seated at it; a table
+ * this client started (`startActivity`) instead opens for it and seats it
+ * (`openViewAt`, `joinRequest`). Join from the notice or the tile is
+ * `requestJoin`: the table view takes the request (`consumeJoinRequest`) and
+ * sits at the first open seat, after the disclosure the first time.
+ *
  * Nothing is sent unless this socket's server confirmed `games` in
  * ServerFeatures: an older server answers an unknown frame with an Error,
  * which the chat view shows as an alert.
@@ -39,6 +47,7 @@ import {
     type BlackjackEvent,
     type GameClientFrame,
     type GameEndReason,
+    type GameKind,
     type GameOp,
     type GameRefusal,
     type GameView,
@@ -60,6 +69,8 @@ export interface HeldTable {
     table_id: number;
     version: number;
     view: GameView;
+    /** Who opened it (GameTable.opened_by), kept across GameEvents. */
+    opened_by: number | null;
     /** `performance.now()`-style ms when the view arrived; the clocks in the
      *  view (`clock_ms`, `next_deal_in_ms`) are relative to this moment. */
     receivedAt: number;
@@ -97,6 +108,26 @@ export interface GamesState {
      *  (Date.now()): the answer to a GameCreate, kept after that table ends,
      *  so "Opening…" stops waiting even once the table is gone again. */
     lastTableAt: number | null;
+    /** "<who> started <game>": a table that appeared in this call, until it
+     *  is dismissed, acted on, or ends. Never for a table this client
+     *  started, nor for one it is seated at. */
+    announce: ActivityAnnouncement | null;
+    /** Date.now() when a table THIS client started arrived: the call view
+     *  switches to the table for the starter (Chat watches it). */
+    openViewAt: number | null;
+    /** Sit me at this table: the table view takes it once
+     *  (`consumeJoinRequest`) and sits at the first open seat. */
+    joinRequest: { room_id: string; table_id: number } | null;
+    /** The activity this client just asked for, until its table arrives, the
+     *  start is refused, or START_ANSWER_MS passes ("Starting Poker…"). */
+    starting: GameKind | null;
+}
+
+export interface ActivityAnnouncement {
+    room_id: string;
+    table_id: number;
+    kind: GameKind;
+    opened_by: number | null;
 }
 
 /** How long past a turn clock's end, with no frame since, before we stop
@@ -105,7 +136,7 @@ export const CLOCK_STALE_GRACE_MS = 8_000;
 /** The server refuses a second resync inside one second (`rate_limited`). */
 export const RESYNC_MIN_INTERVAL_MS = 1_000;
 
-const EMPTY: GamesState = { room: null, joined: null, feature: false, table: null, notice: null, lastRefusalAt: null, lastTableAt: null };
+const EMPTY: GamesState = { room: null, joined: null, feature: false, table: null, notice: null, lastRefusalAt: null, lastTableAt: null, announce: null, openViewAt: null, joinRequest: null, starting: null };
 
 /** How long a refusal's words stay up; an ending stays until dismissed. */
 export const REFUSAL_NOTICE_MS = 8_000;
@@ -125,6 +156,12 @@ let resyncTimer: ReturnType<typeof setTimeout> | null = null;
 let resyncPending = false;
 let clockTimer: ReturnType<typeof setTimeout> | null = null;
 let noticeTimer: ReturnType<typeof setTimeout> | null = null;
+// The activity this client asked for (startActivity): the table that answers
+// it is the starter's, not something to announce.
+let pendingStart: { room: string; kind: GameKind; at: number } | null = null;
+let startTimer: ReturnType<typeof setTimeout> | null = null;
+// Tables already announced (or answered) on this page: one notice per table.
+const announced = new Set<number>();
 
 function emit() {
     for (const l of [...listeners]) l();
@@ -209,7 +246,7 @@ function armClockWatchdog(t: HeldTable) {
 function dropTable(notice: GamesNotice | null = state.notice) {
     clearTimers();
     resyncPending = false;
-    set({ table: null, notice });
+    set({ table: null, notice, announce: null, joinRequest: null });
 }
 
 /** The call this client is in (Chat's currentVoiceChannel). Another call, or
@@ -219,7 +256,7 @@ export function setGamesRoom(room: string | null): void {
     if (state.table && state.table.room_id !== room) {
         clearTimers();
         resyncPending = false;
-        state = { ...state, table: null, notice: null };
+        state = { ...state, table: null, notice: null, announce: null, joinRequest: null };
     }
     set({ room, notice: state.notice && state.notice.room_id === room ? state.notice : null });
 }
@@ -229,7 +266,7 @@ export function clearGamesNotice(): void {
     if (state.notice) set({ notice: null });
 }
 
-function applyView(room_id: string, table_id: number, version: number, view: GameView, events: GameEvent[] | null) {
+function applyView(room_id: string, table_id: number, version: number, view: GameView, events: GameEvent[] | null, openedBy?: number | null) {
     const prev = state.table;
     const sameTable = prev !== null && prev.room_id === room_id && prev.table_id === table_id;
     const log = sameTable ? prev.log : [];
@@ -238,6 +275,7 @@ function applyView(room_id: string, table_id: number, version: number, view: Gam
         table_id,
         version,
         view,
+        opened_by: openedBy !== undefined && openedBy !== null ? openedBy : (sameTable ? prev.opened_by : null),
         receivedAt: now(),
         events: events ?? [],
         eventsVersion: events ? version : (sameTable ? prev.eventsVersion : 0),
@@ -246,8 +284,33 @@ function applyView(room_id: string, table_id: number, version: number, view: Gam
     // A table arriving clears an ending notice for the call (a new one opened);
     // a refusal fades on its own timer (showRefusal).
     const notice = state.notice && state.notice.kind === 'ended' ? null : state.notice;
-    set(sameTable ? { table: next, notice } : { table: next, notice, lastTableAt: Date.now() });
+    if (sameTable) {
+        // Seated since (or meanwhile): the announcement has nothing to offer.
+        const announce = state.announce && view.viewer_seat !== null ? null : state.announce;
+        set({ table: next, notice, announce });
+    } else {
+        set({ table: next, notice, lastTableAt: Date.now(), ...activityArrived(next) });
+    }
     armClockWatchdog(next);
+}
+
+/** A table this client did not hold before: is it the one it started, or one
+ *  to announce? (See ACTIVITIES at the top.) */
+function activityArrived(t: HeldTable): Partial<GamesState> {
+    const first = !announced.has(t.table_id);
+    announced.add(t.table_id);
+    // The game this client asked for, in its call, in time. A table of the
+    // OTHER game is someone else's that won the race (mine is about to be
+    // refused): announced, never taken for mine. Two people starting the
+    // same game at once both get the one table, which is what both wanted.
+    const mine = pendingStart !== null && pendingStart.room === t.room_id && pendingStart.kind === t.view.game
+        && Date.now() - pendingStart.at <= START_ANSWER_MS;
+    if (mine) {
+        endStart();
+        return { announce: null, starting: null, openViewAt: Date.now(), joinRequest: { room_id: t.room_id, table_id: t.table_id } };
+    }
+    if (!first || t.view.viewer_seat !== null) return { announce: null };
+    return { announce: { room_id: t.room_id, table_id: t.table_id, kind: t.view.game, opened_by: t.opened_by } };
 }
 
 /**
@@ -314,6 +377,11 @@ export function handleGamesMessage(msg: { type: string; payload?: unknown }): st
     if (f.type === 'GameRefused') {
         if (f.room_id !== state.room) return 'ignored';
         if (f.refusal.code === 'stale_turn') return 'stale';
+        // A refused start is no start: the next table is someone else's.
+        if (f.op === 'create' && pendingStart) {
+            endStart();
+            set({ starting: null });
+        }
         // A refused resync is the throttle or a race; the next one fixes it.
         if (f.op === 'resync' && f.refusal.code === 'rate_limited') {
             resyncPending = true;
@@ -338,7 +406,7 @@ export function handleGamesMessage(msg: { type: string; payload?: unknown }): st
         applyView(f.room_id, f.table_id, f.version, f.view, f.events);
         return 'applied';
     }
-    applyView(f.room_id, f.table_id, f.version, f.view, null);
+    applyView(f.room_id, f.table_id, f.version, f.view, null, f.type === 'GameTable' ? f.opened_by : undefined);
     return step === 'apply_after_gap' ? 'applied-after-gap' : 'applied';
 }
 
@@ -364,6 +432,58 @@ export function attachGamesSocket(ws: GamesSocket): () => void {
     };
 }
 
+/** How long after a start its answering table still counts as this
+ *  client's (a table arriving later was opened by someone else). */
+export const START_ANSWER_MS = 15_000;
+
+/**
+ * Start an activity in the call: GameCreate with the owner's table (no
+ * settings of the starter's own; the table view's own form still takes
+ * them). The table that answers opens for this client and seats it.
+ * False when this socket's server does not play games, or the socket is down.
+ */
+export function startActivity(room: string, kind: GameKind): boolean {
+    if (!sendGame(gameFrames.create(room, kind))) return false;
+    endStart();
+    const started = { room, kind, at: Date.now() };
+    pendingStart = started;
+    startTimer = setTimeout(() => {
+        startTimer = null;
+        if (pendingStart === started) {
+            pendingStart = null;
+            set({ starting: null });
+        }
+    }, START_ANSWER_MS);
+    set({ starting: kind });
+    return true;
+}
+
+/** Forget the pending start (answered, refused or given up). */
+function endStart() {
+    pendingStart = null;
+    if (startTimer) { clearTimeout(startTimer); startTimer = null; }
+}
+
+/** The person closed the "<who> started <game>" notice. */
+export function dismissActivityNotice(): void {
+    if (state.announce) set({ announce: null });
+}
+
+/** Join from the notice or the tile: sit me at the table on screen. */
+export function requestJoin(): void {
+    const t = state.table;
+    if (!t) return;
+    set({ joinRequest: { room_id: t.room_id, table_id: t.table_id }, announce: null });
+}
+
+/** The table view takes a join request for `tableId` (once). */
+export function consumeJoinRequest(tableId: number): boolean {
+    const r = state.joinRequest;
+    if (!r || r.table_id !== tableId) return false;
+    set({ joinRequest: null });
+    return true;
+}
+
 /** Tests only: a clean store, optionally with a fake clock. */
 export function resetGamesStoreForTests(clock?: () => number): void {
     clearTimers();
@@ -371,6 +491,8 @@ export function resetGamesStoreForTests(clock?: () => number): void {
     state = EMPTY;
     listeners.clear();
     socket = null;
+    endStart();
+    announced.clear();
     lastResyncAt = -Infinity;
     resyncPending = false;
     now = clock ?? (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));

@@ -76,7 +76,13 @@
     display: flex;
     flex-direction: column;
     align-items: center;
+    /* SAFE centre: a plain `center` pushes a grid taller than the body above
+       its top edge, where no scrolling can reach it - on a phone a full call
+       (and the activity tile, which leads the grid) was cut off and could not
+       be tapped (e2e/games-live.mjs, 2026-10-03). `safe` falls back to the
+       start when the content overflows. */
     justify-content: center;
+    justify-content: safe center;
     gap: 1rem;
     padding: 1rem;
 }

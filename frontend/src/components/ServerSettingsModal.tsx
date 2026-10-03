@@ -108,9 +108,10 @@ export function ServerSettingsModal({
     const afkSupported = typeof initialAfkTimeoutMinutes === 'number';
     const [afkTimeoutMinutes, setAfkTimeoutMinutes] = useState(initialAfkTimeoutMinutes ?? 15);
 
-    // Games in voice calls (docs/GAMES.md) — owner-only, per server, off by
-    // default. Same older-backend rule as AFK: a server that never returned
-    // the field would silently drop the write.
+    // Games in voice calls (docs/GAMES.md) — owner-only, per server, ON by
+    // default since 2026-10-03 (Discord-style activities). Same older-backend
+    // rule as AFK: a server that never returned the field would silently drop
+    // the write.
     const gamesSupported = typeof initialGamesEnabled === 'boolean';
     const [gamesEnabled, setGamesEnabled] = useState(initialGamesEnabled === true);
 
@@ -566,8 +567,9 @@ export function ServerSettingsModal({
 
                             {/* Games (docs/GAMES.md), next to Clips: the owner decides
                                 whether calls on this server may hold a card table at
-                                all. Off by default; switching it off ends every
-                                table on the server. */}
+                                all. On by default; switching it off ends every
+                                table on the server and takes the Activities button
+                                away from everyone at once. */}
                             <div className="form-group">
                                 <label className="toggle-row">
                                     <span><CardsIcon /> Allow games in voice calls</span>
@@ -581,10 +583,11 @@ export function ServerSettingsModal({
                                     <span className="toggle-switch"></span>
                                 </label>
                                 <span className="setting-help">
-                                    People in a call can open one table of Poker or Blackjack and play for free
-                                    chips that are worth nothing and vanish when the table closes. This server
-                                    deals the cards, so whoever runs it could see them. Who may play is the
-                                    Play Games permission; Move Members can close a table.
+                                    On for every server unless you turn it off. People in a call can start Poker
+                                    or Blackjack from the Activities button and play for free chips that are worth
+                                    nothing and vanish when the table closes. This server deals the cards, so
+                                    whoever runs it could see them. Who may play is the Play Games permission;
+                                    Move Members can close a table.
                                 </span>
                                 {!gamesSupported && (
                                     <span className="setting-help">This server runs an older version without games.</span>

@@ -1,7 +1,7 @@
 /**
  * Server Settings › Overview › "Allow games in voice calls" — the owner's
  * per-server switch for docs/GAMES.md (servers.games_enabled, migration 073,
- * off by default), next to Clips. A setting ships with its UI:
+ * ON by default since 2026-10-03), next to Clips. A setting ships with its UI:
  *
  *  - it reflects the server's value and saves `games_enabled` both ways;
  *  - only the owner can change it (disabled, and Save absent, otherwise);
@@ -54,7 +54,7 @@ async function save() {
 const body = () => (updateServerSettings.mock.calls[0] as unknown as [string, Record<string, unknown>])[1];
 
 describe('ServerSettingsModal — Games', () => {
-    it('sits next to Clips and reflects the server (off by default)', async () => {
+    it("sits next to Clips and reflects the server's value (here: off)", async () => {
         await open({ initialGamesEnabled: false });
         expect(toggle()).toBeTruthy();
         expect(toggle()!.checked).toBe(false);

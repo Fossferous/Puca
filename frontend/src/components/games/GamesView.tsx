@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useGames } from '../../api/games/useGames';
-import { clearGamesNotice, sendGame } from '../../api/games/gamesStore';
+import { clearGamesNotice, consumeJoinRequest, sendGame } from '../../api/games/gamesStore';
+import { firstOpenSeat } from '../../api/games/activities';
 import type { GamesGate } from '../../api/games/gamesGate';
 import { GAME_NAMES, GAMES_DISCLOSURE, chips, endText, refusalText } from '../../api/games/gameWords';
 import { disclosureSeen, markDisclosureSeen } from '../../api/games/gamesDisclosure';
@@ -26,7 +27,8 @@ interface GamesViewProps {
     gate: GamesGate;
     /** The JS half of the coarse-pointer gate (DESIGN_PHILOSOPHY §2). */
     isPhone: boolean;
-    /** Back to the call's stage. Never touches the call itself. */
+    /** "Back to call": the call's stage (Discord's grid). Never touches the
+     *  call itself; on a phone it also brings the composer back. */
     onBack: () => void;
 }
 
@@ -116,6 +118,8 @@ export function GamesView({ roomId, serverId, channelName, currentUserId, member
     const [createdAt, setCreatedAt] = useState<number | null>(null);
     const [pendingSit, setPendingSit] = useState<number | null>(null);
     const [offline, setOffline] = useState(false);
+    /** A Join (notice, tile, picker) that found every seat taken. */
+    const [full, setFull] = useState(false);
 
     const send = (frame: GameClientFrame) => {
         const ok = sendGame(frame);
@@ -128,6 +132,21 @@ export function GamesView({ roomId, serverId, channelName, currentUserId, member
         if (!disclosureSeen(currentUserId, serverId)) { setPendingSit(seat); return; }
         send(gameFrames.sit(roomId, table.table_id, seat));
     };
+    // Join from the notice, the tile or the picker - or the starter's own
+    // table arriving (docs/GAMES.md, *Activities*): sit at the first open
+    // seat, through the disclosure the first time. Taken once, and only for
+    // the table on screen; without PLAY_GAMES it is dropped (they watch).
+    const joinFor = g.joinRequest && table && g.joinRequest.table_id === table.table_id ? table.table_id : null;
+    useEffect(() => {
+        if (joinFor === null || !table || !consumeJoinRequest(joinFor)) return;
+        if (!gate.canSit || table.view.viewer_seat !== null) return;
+        const seat = firstOpenSeat(table.view);
+        if (seat === null) setFull(true);
+        else sit(seat);
+        // `table` and `sit` are read at the moment the request is taken; the
+        // request id is the trigger.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [joinFor, gate.canSit]);
     const refusedAt = g.lastRefusalAt;
     // "Opening…" until the table (or a refusal of the create) arrives. A table
     // that arrived and has since ended answered it too: without that the
@@ -164,11 +183,21 @@ export function GamesView({ roomId, serverId, channelName, currentUserId, member
                             Close table
                         </button>
                     )}
-                    <button type="button" className="games-btn games-btn-ghost games-header-btn" onClick={onBack} aria-label="Back to the call">
-                        <ArrowLeftIcon /> {isPhone ? 'Call' : 'Back to the call'}
+                    <button type="button" className="games-btn games-btn-ghost games-header-btn games-back" onClick={onBack} aria-label="Back to call">
+                        <ArrowLeftIcon /> Back to call
                     </button>
                 </div>
             </div>
+
+            {full && table && table.view.viewer_seat === null && (
+                <div className="games-notice" role="status">
+                    <span className="games-notice-icon"><InfoIcon /></span>
+                    <span className="games-notice-text">Every seat is taken, so you are watching. Sit down when a seat frees up.</span>
+                    <button type="button" className="games-btn games-btn-ghost games-notice-close" aria-label="Dismiss" onClick={() => setFull(false)}>
+                        <CloseIcon />
+                    </button>
+                </div>
+            )}
 
             {(notice || offline) && (
                 <div className={`games-notice${notice?.kind === 'ended' ? ' games-notice-ended' : ''}`} role="status">
@@ -215,7 +244,10 @@ export function GamesView({ roomId, serverId, channelName, currentUserId, member
                 />
             ) : (
                 <div className="games-scroll games-empty">
-                    {gate.canOpen ? (
+                    {g.starting ? (
+                        /* Started from the Activities picker: its table is on the way. */
+                        <p className="games-watch games-starting" role="status">Starting {GAME_NAMES[g.starting]}…</p>
+                    ) : gate.canOpen ? (
                         <OpenTablePanel
                             busy={creating}
                             onOpen={(k, f) => {

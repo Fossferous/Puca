@@ -88,7 +88,7 @@ import { PendingJoins, JOIN_PRESENT_GRACE_MS, JOIN_ANNOUNCE_TIMEOUT_MS, PENDING_
 import { shouldTearDownDepartedPeer } from '../utils/departedPeer';
 import { getLocalUserVolumes, getLocalUserMutes } from './userVolumeStore';
 import { keepVoiceAudioAlive, installVoiceAudioResume } from './voiceAudioKeepAlive';
-import { MicIcon, MicOffIcon, HeadphonesIcon, HeadphonesOffIcon, CameraIcon, CameraOffIcon, ScreenShareIcon, DisconnectIcon, FlipCameraIcon, FullscreenIcon, CloseIcon, MoonIcon, SignalIcon, InfoIcon, ChevronUpIcon, ChevronDownIcon, WarningIcon, SlidersIcon, CardsIcon } from './Icons';
+import { MicIcon, MicOffIcon, HeadphonesIcon, HeadphonesOffIcon, CameraIcon, CameraOffIcon, ScreenShareIcon, DisconnectIcon, FlipCameraIcon, FullscreenIcon, CloseIcon, MoonIcon, SignalIcon, InfoIcon, ChevronUpIcon, ChevronDownIcon, WarningIcon, SlidersIcon, RocketIcon } from './Icons';
 import { Toast } from './Toast';
 import { useDfSettledOffer, keepRnnoiseForSession, KEEP_RNNOISE_NOTICE } from './useDfSettledOffer';
 import './VoicePanel.css';
@@ -135,12 +135,12 @@ interface VoicePanelProps {
     /** This channel's CONNECT, same source. false: the join is refused locally
      *  (the server refuses it too) before any microphone prompt. */
     canConnect?: boolean;
-    /** Open the call's card table (docs/GAMES.md). Absent: games are not
-     *  offered in this call. On a phone it sits behind the "more controls"
-     *  chevron with the other secondary controls. */
-    onOpenGames?: () => void;
-    /** "Open a table" / "Join the table" / "Watch the table". */
-    gamesLabel?: string;
+    /** The Activities launcher (docs/GAMES.md, *Activities*): opens the
+     *  picker (Poker, Blackjack). Absent: this person may not play here, or
+     *  games are off or not served. On a phone it sits with the camera
+     *  behind the "more controls" chevron: measured, a sixth button in the
+     *  collapsed bar pushed the mic under the "Encrypted" pill. */
+    onOpenActivities?: () => void;
 }
 
 // Remote camera feeds used to render here in a floating `remote-cameras-grid`
@@ -164,7 +164,7 @@ function clipPresence(roomId: string): number[] {
     return [...ids];
 }
 
-export function VoicePanel({ roomId, channelName, currentUserId, currentUsername, memberAvatars: _memberAvatars, memberSounds, onDisconnect, serverRequireMediaE2ee = false, isAfkChannel = false, afkTimeoutMs = DEFAULT_AFK_TIMEOUT_MS, onInactive, sfuMode = false, clipPolicy, onOpenGames, gamesLabel, canSpeak = true, canConnect = true }: VoicePanelProps) {
+export function VoicePanel({ roomId, channelName, currentUserId, currentUsername, memberAvatars: _memberAvatars, memberSounds, onDisconnect, serverRequireMediaE2ee = false, isAfkChannel = false, afkTimeoutMs = DEFAULT_AFK_TIMEOUT_MS, onInactive, sfuMode = false, clipPolicy, onOpenActivities, canSpeak = true, canConnect = true }: VoicePanelProps) {
     noteRender('voicePanel');
     const [isInVoice, setIsInVoice] = useState(false);
     /** RIGHT-CLICK THE PANEL FOR DIAGNOSTICS.
@@ -3505,19 +3505,19 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         >
                             {isCameraOn ? <CameraIcon size={18} /> : <CameraOffIcon size={18} />}
                         </button>
-                        {/* The call's card table (docs/GAMES.md). A secondary
-                            control: hidden in the phone's collapsed bar with
-                            the camera and noise picker (.vp-collapsed). */}
-                        {onOpenGames && (
+                        {/* Activities (docs/GAMES.md): the rocket beside the
+                            camera and screen share, as in Discord. On a phone,
+                            behind the chevron with the camera (.vp-collapsed);
+                            opening the picker folds the expanded controls away -
+                            the table needs the height. */}
+                        {onOpenActivities && (
                             <button
-                                className="voice-btn vp-games"
-                                // Folds the phone's expanded controls away: the
-                                // table needs the height they take.
-                                onClick={() => { setControlsExpanded(false); onOpenGames(); }}
-                                title={gamesLabel ?? 'Games'}
-                                aria-label={gamesLabel ?? 'Games'}
+                                className="voice-btn vp-activities"
+                                onClick={() => { setControlsExpanded(false); onOpenActivities(); }}
+                                title="Activities"
+                                aria-label="Activities"
                             >
-                                <CardsIcon size={18} />
+                                <RocketIcon size={18} />
                             </button>
                         )}
                         {/* Mobile only: collapsed, the bar shows just mic /
