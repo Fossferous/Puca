@@ -93,6 +93,10 @@ export interface GamesState {
     /** When the last refusal arrived (Date.now()), kept after its notice
      *  fades: the action bar re-enables on it. */
     lastRefusalAt: number | null;
+    /** When a table this client did not hold before last arrived
+     *  (Date.now()): the answer to a GameCreate, kept after that table ends,
+     *  so "Opening…" stops waiting even once the table is gone again. */
+    lastTableAt: number | null;
 }
 
 /** How long past a turn clock's end, with no frame since, before we stop
@@ -101,7 +105,7 @@ export const CLOCK_STALE_GRACE_MS = 8_000;
 /** The server refuses a second resync inside one second (`rate_limited`). */
 export const RESYNC_MIN_INTERVAL_MS = 1_000;
 
-const EMPTY: GamesState = { room: null, joined: null, feature: false, table: null, notice: null, lastRefusalAt: null };
+const EMPTY: GamesState = { room: null, joined: null, feature: false, table: null, notice: null, lastRefusalAt: null, lastTableAt: null };
 
 /** How long a refusal's words stay up; an ending stays until dismissed. */
 export const REFUSAL_NOTICE_MS = 8_000;
@@ -242,7 +246,7 @@ function applyView(room_id: string, table_id: number, version: number, view: Gam
     // A table arriving clears an ending notice for the call (a new one opened);
     // a refusal fades on its own timer (showRefusal).
     const notice = state.notice && state.notice.kind === 'ended' ? null : state.notice;
-    set({ table: next, notice });
+    set(sameTable ? { table: next, notice } : { table: next, notice, lastTableAt: Date.now() });
     armClockWatchdog(next);
 }
 

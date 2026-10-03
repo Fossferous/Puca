@@ -172,7 +172,7 @@ import { PresenceDot } from './PresenceDot';
 import { PERM, hasPerm } from '../api/permissionBits';
 import { attachGamesSocket, setGamesRoom } from '../api/games/gamesStore';
 import { useGames } from '../api/games/useGames';
-import { gamesGate } from '../api/games/gamesGate';
+import { gamesGate, gamesRowContradicted } from '../api/games/gamesGate';
 import { useSwipe } from '../hooks/useSwipe';
 import { isServerMuted, isServerQuiet } from './mutedServersStore';
 import { isChannelMuted, toggleChannelMute, isHideMutedChannels } from './mutedChannelsStore';
@@ -3801,11 +3801,22 @@ export function Chat({ onLogout }: ChatProps) {
     // row when the voice channel is on the viewed server, else the row
     // captured when it was clicked — the same resolution as canSpeak.
     const voiceRoomId = currentVoiceChannel ? `voice_${currentVoiceChannel.id}` : null;
+    const voiceGamesEnabled = currentVoiceChannel
+        ? (servers.find(s => s.id === currentVoiceChannel.server_id) ?? currentServer)?.games_enabled
+        : undefined;
+    // Nothing pushes a changed server row, so the owner switching games on or
+    // off leaves everyone else's cached `games_enabled` stale. When the
+    // server's own frames say otherwise (a table in this call; an ending or a
+    // refusal that says `disabled`), refetch the rows. Found live
+    // (e2e/games-live.mjs): after the owner switched games off, members were
+    // still offered "Open a table".
+    const gamesRowStale = gamesRowContradicted(voiceGamesEnabled, games, voiceRoomId);
+    useEffect(() => {
+        if (gamesRowStale) void queryClient.invalidateQueries({ queryKey: keys.servers });
+    }, [gamesRowStale, queryClient]);
     const voiceGamesGate = gamesGate({
         feature: games.feature,
-        gamesEnabled: currentVoiceChannel
-            ? (servers.find(s => s.id === currentVoiceChannel.server_id) ?? currentServer)?.games_enabled
-            : undefined,
+        gamesEnabled: voiceGamesEnabled,
         perms: currentVoiceChannel
             ? (channels.find(c => c.id === currentVoiceChannel.id) ?? currentVoiceChannel).my_permissions
             : undefined,

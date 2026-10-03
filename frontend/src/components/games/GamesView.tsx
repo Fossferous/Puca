@@ -129,8 +129,12 @@ export function GamesView({ roomId, serverId, channelName, currentUserId, member
         send(gameFrames.sit(roomId, table.table_id, seat));
     };
     const refusedAt = g.lastRefusalAt;
-    // "Opening…" until the table (or a refusal of the create) arrives.
-    const creating = createdAt !== null && !table && !((g.lastRefusalAt ?? 0) >= createdAt);
+    // "Opening…" until the table (or a refusal of the create) arrives. A table
+    // that arrived and has since ended answered it too: without that the
+    // opener's button stayed "Opening…" after their table closed.
+    const creating = createdAt !== null && !table
+        && !((g.lastRefusalAt ?? 0) >= createdAt)
+        && !((g.lastTableAt ?? 0) >= createdAt);
 
     const kind: GameKind | null = table ? table.view.game : null;
     const stakes = !table ? null

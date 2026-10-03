@@ -13,7 +13,7 @@ import blackjackEvents from './fixtures/games/blackjack-events.json';
 import refusals from './fixtures/games/refusals.json';
 import ended from './fixtures/games/ended.json';
 import { parseGameFrame, type BlackjackView, type HoldemView, type GameServerFrame } from '../api/games/protocol';
-import { gamesGate } from '../api/games/gamesGate';
+import { gamesGate, gamesRowContradicted } from '../api/games/gamesGate';
 import { clampRaise, holdemBar, holdemBusted, raiseAction, raisePresets, stepRaise } from '../api/games/holdemActions';
 import { betPresets, betRange, blackjackBusted, blackjackMyTurn, clampBet } from '../api/games/blackjackActions';
 import { configFor, defaultForm, formProblem } from '../api/games/openTableConfig';
@@ -70,9 +70,56 @@ describe('gamesGate', () => {
         expect(gamesGate({ ...base, hasTable: true })).toMatchObject({ canOpen: false, canSit: true });
     });
 
+    // Found live (e2e/games-live.mjs): the server row is fetched once and no
+    // frame refreshes it, so someone online when the owner switched games on
+    // still holds games_enabled=false. The table the server sent for THIS call
+    // is its own word that the call plays games (switching games off ends every
+    // table), so it must not be hidden behind the stale row.
+    it('a table the server sent for this call is offered even when the cached server row still says games are off', () => {
+        expect(gamesGate({ ...base, gamesEnabled: false, hasTable: true })).toMatchObject({ available: true, canOpen: false, canSit: true, why: null });
+        expect(gamesGate({ ...base, gamesEnabled: false, hasTable: true, perms: PERM.CONNECT })).toMatchObject({ available: true, canSit: false, why: 'no_permission' });
+        // ...and with no table, the row still decides (nothing to open on a server with games off).
+        expect(gamesGate({ ...base, gamesEnabled: false, hasTable: false }).why).toBe('disabled');
+    });
+
     it('MOVE_MEMBERS moderates; ADMINISTRATOR implies everything', () => {
         expect(gamesGate({ ...base, perms: PLAY | PERM.MOVE_MEMBERS }).canModerate).toBe(true);
         expect(gamesGate({ ...base, perms: PERM.ADMINISTRATOR })).toMatchObject({ canOpen: true, canSit: true, canModerate: true });
+    });
+});
+
+// Found live (e2e/games-live.mjs): nothing pushes a changed server row, so
+// after the owner switched games OFF a member who loaded the row while they
+// were on was still offered "Open a table" (and the reverse while switching
+// ON). When the server's own frames contradict the cached row, Chat refetches
+// the row; this is the decision.
+describe('gamesRowContradicted', () => {
+    const ROOM = 'voice_42';
+    const at = 1;
+    const tableHere = { table: { room_id: ROOM }, notice: null };
+    const endedOff = { table: null, notice: { kind: 'ended' as const, room_id: ROOM, table_id: 5, reason: 'disabled' as const, at } };
+    const refusedOff = { table: null, notice: { kind: 'refused' as const, room_id: ROOM, table_id: null, op: 'create' as const, refusal: { code: 'disabled' as const }, at } };
+
+    it('a table in this call while the row says games are off (or predates them): refetch', () => {
+        expect(gamesRowContradicted(false, tableHere, ROOM)).toBe(true);
+        expect(gamesRowContradicted(undefined, tableHere, ROOM)).toBe(true);
+        expect(gamesRowContradicted(true, tableHere, ROOM)).toBe(false);
+    });
+
+    it('the server saying games are off (an ending or a refusal) while the row says on: refetch', () => {
+        expect(gamesRowContradicted(true, endedOff, ROOM)).toBe(true);
+        expect(gamesRowContradicted(true, refusedOff, ROOM)).toBe(true);
+        expect(gamesRowContradicted(false, endedOff, ROOM)).toBe(false);
+        expect(gamesRowContradicted(false, refusedOff, ROOM)).toBe(false);
+    });
+
+    it('anything else agrees with the row: other reasons, other calls, no call', () => {
+        expect(gamesRowContradicted(true, { table: null, notice: { ...endedOff.notice, reason: 'closed' as const } }, ROOM)).toBe(false);
+        expect(gamesRowContradicted(true, { table: null, notice: { ...refusedOff.notice, refusal: { code: 'no_permission' as const } } }, ROOM)).toBe(false);
+        expect(gamesRowContradicted(false, { table: { room_id: 'voice_7' }, notice: null }, ROOM)).toBe(false);
+        expect(gamesRowContradicted(true, { ...endedOff, notice: { ...endedOff.notice, room_id: 'voice_7' } }, ROOM)).toBe(false);
+        expect(gamesRowContradicted(false, tableHere, null)).toBe(false);
+        expect(gamesRowContradicted(true, { table: null, notice: null }, ROOM)).toBe(false);
     });
 });
 

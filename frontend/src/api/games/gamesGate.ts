@@ -7,7 +7,8 @@
  *   - this socket's server confirmed `games` (ServerFeatures; a reconnect can
  *     reach an older host, so it is per socket);
  *   - the voice channel's server has `games_enabled` (the owner's switch, off
- *     by default; absent on a server that predates games);
+ *     by default; absent on a server that predates games) — or the server
+ *     has already sent a table for this call, which outranks a stale row;
  *   - the person is in that call;
  *   - for OPENING and SITTING: `CONNECT` and `PLAY_GAMES` in that channel.
  *
@@ -21,6 +22,7 @@
  * server — offering a seat the server would refuse helps nobody.
  */
 import { PERM, hasPerm } from '../permissionBits';
+import type { GamesNotice } from './gamesStore';
 
 export interface GamesGateInput {
     /** This socket's server confirmed `games`. */
@@ -55,7 +57,13 @@ const has = (perms: number | null | undefined, bit: number) => perms !== null &&
 export function gamesGate(i: GamesGateInput): GamesGate {
     const off = (why: GamesUnavailable): GamesGate => ({ available: false, canOpen: false, canSit: false, canModerate: false, why });
     if (!i.feature) return off('no_feature');
-    if (i.gamesEnabled !== true) return off('disabled');
+    // The server row is fetched once and nothing pushes a change to it, so a
+    // person online when the owner switched games on still holds `false`. A
+    // table the server sent for this call is its own word that the call plays
+    // games (switching games off ends every table), so it wins over the row.
+    // With no table the row still decides: there is nothing to open on a
+    // server whose owner has games off.
+    if (i.gamesEnabled !== true && !i.hasTable) return off('disabled');
     if (!i.inCall) return off('not_in_call');
     const play = has(i.perms, PERM.CONNECT) && has(i.perms, PERM.PLAY_GAMES);
     const canModerate = has(i.perms, PERM.MOVE_MEMBERS);
@@ -69,4 +77,29 @@ export function gamesGate(i: GamesGateInput): GamesGate {
         canModerate,
         why: play ? null : 'no_permission',
     };
+}
+
+/**
+ * Whether the server's own games frames contradict the cached server row's
+ * `games_enabled` for the call on screen. Nothing pushes a changed server row
+ * (the owner's save refreshes only the owner's copy), so a member online when
+ * games were switched ON holds `false`, and one online when they were switched
+ * OFF holds `true` and is still offered "Open a table". The frames are the
+ * server's word:
+ *   - a table in this call means games are on here;
+ *   - an ending or a refusal with `disabled` means they are off.
+ * Chat refetches the server rows when this is true. The gate itself already
+ * lets a table outrank a stale `false` (above), so this only has to bring the
+ * row back in line for what comes after the table.
+ */
+export function gamesRowContradicted(
+    gamesEnabled: boolean | undefined,
+    s: { table: { room_id: string } | null; notice: GamesNotice | null },
+    room: string | null,
+): boolean {
+    if (!room) return false;
+    if (s.table && s.table.room_id === room && gamesEnabled !== true) return true;
+    const n = s.notice;
+    if (!n || n.room_id !== room || gamesEnabled !== true) return false;
+    return (n.kind === 'ended' && n.reason === 'disabled') || (n.kind === 'refused' && n.refusal.code === 'disabled');
 }

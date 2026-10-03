@@ -279,6 +279,29 @@ describe('notices and the disclosure', () => {
         expect(button(/Opening/)).toBeFalsy();
     });
 
+    // Found live (e2e/games-live.mjs): the moderator who opened a table, closed
+    // it and wanted the other game found the button stuck on "Opening…" — the
+    // view still waited for an answer to its FIRST create, which the table that
+    // came (and went) had already given.
+    it('the opener can open again once their table has ended: "Opening…" ends when the table arrives', async () => {
+        await show({ gate: gate({ hasTable: false }) });
+        await click(button(/Open a Poker table/));
+        expect(button(/Opening/)).toBeTruthy();
+        await new Promise(r => setTimeout(r, 2));
+        await deliver(seated);
+        await deliver(ended[0]);
+        expect(document.querySelector('.games-notice')?.textContent).toContain('A moderator closed the table.');
+        const again = button(/Open a Poker table/) as HTMLButtonElement | undefined;
+        expect(again, 'the open button is back, not "Opening…"').toBeTruthy();
+        expect(again!.disabled).toBe(false);
+        // ...and it still holds after the person dismisses the ending.
+        await click(document.querySelector('.games-notice-close'));
+        expect(button(/Open a Poker table/)).toBeTruthy();
+        await click(document.querySelector('button[role="radio"][aria-checked="false"]'));
+        await click(button(/Open a Blackjack table/));
+        expect(ws.sentOf('GameCreate').map(f => f.payload.kind)).toEqual(['holdem', 'blackjack']);
+    });
+
     it('the disclosure comes before the FIRST sit, with the owner\'s words, and only once', async () => {
         await deliver(spectator);
         await show({ currentUserId: 99 });
