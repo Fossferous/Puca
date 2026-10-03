@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.833 — 2026-10-03
 
+Poker and Blackjack in voice calls, like Discord's Activities: start one from the rocket button, everyone in the call sees it and can join or watch.
 ### Added
 - **Poker and Blackjack in voice calls, like Discord's Activities.** In a
   call, press the new **Activities** button (the rocket, beside camera and
