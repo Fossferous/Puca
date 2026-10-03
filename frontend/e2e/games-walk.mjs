@@ -35,7 +35,13 @@
 //      from the notice: bet, deal (1.5 s after the last bet), hit/stand, results;
 //   8. "Back to call" never touches the call, and the tile brings you back;
 //   9. the felt, the card faces and the buttons keep >= 4.5:1 text contrast in
-//      all eight themes, with and without high contrast.
+//      all eight themes, with and without high contrast - and so do the
+//      ACTIVITY surfaces: the picker, the notice, the call-grid tile and the
+//      sidebar's channel chip, with the sidebar's playing mark >= 3:1 (a
+//      non-text mark; its own opacity and its parents' are counted; a disabled
+//      control and the aria-hidden art are exempt, as WCAG exempts them). The
+//      light theme once put dark ink on a dark picker (1.05:1) and nothing
+//      measured it.
 // Each check prints PASS/FAIL; the exit code is the number of failures.
 // Screenshots go to OUT (SHOT <file>) — look at them.
 //
@@ -254,6 +260,60 @@ function contrast(a, b) {
     const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p);
     return (x + 0.05) / (y + 0.05);
 }
+
+/**
+ * In the page: every visible element under `roots` that carries its own text,
+ * as [its colour, what it is painted on, a label, the ratio it needs] - text
+ * 4.5:1; the sidebar's playing mark (an icon, no text) 3:1. Colours are
+ * composited: a translucent background down to the first opaque one, and the
+ * ink blended by the element's opacity and its ancestors' (a 0.7 icon on the
+ * sidebar is what a person sees, not its computed colour).
+ */
+const activityPairs = (roots) => {
+    const rgba = (s) => { const m = s.match(/[\d.]+/g); if (!m) return null; const [r, g, b2, a = 1] = m.map(Number); return [r, g, b2, a]; };
+    const paint = (el) => {
+        const layers = [];
+        for (let e = el; e; e = e.parentElement) {
+            const c = rgba(getComputedStyle(e).backgroundColor);
+            if (!c || c[3] === 0) continue;
+            layers.push(c);
+            if (c[3] >= 1) break;
+        }
+        let [r, g, b2] = layers.length && layers[layers.length - 1][3] >= 1 ? layers.pop() : [255, 255, 255];
+        for (const [lr, lg, lb, la] of layers.reverse()) {
+            r = lr * la + r * (1 - la); g = lg * la + g * (1 - la); b2 = lb * la + b2 * (1 - la);
+        }
+        return [r, g, b2];
+    };
+    const ink = (el, bg) => {
+        let [r, g, b2, a] = rgba(getComputedStyle(el).color);
+        for (let e = el; e; e = e.parentElement) a *= Number(getComputedStyle(e).opacity);
+        return [r * a + bg[0] * (1 - a), g * a + bg[1] * (1 - a), b2 * a + bg[2] * (1 - a)];
+    };
+    const css = ([r, g, b2]) => `rgb(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b2)})`;
+    const out = [];
+    for (const sel of roots) {
+        for (const root of document.querySelectorAll(sel)) {
+            for (const el of [root, ...root.querySelectorAll('*')]) {
+                const rect = el.getBoundingClientRect();
+                if (rect.width === 0 || rect.height === 0) continue;
+                const mark = el.matches('.voice-status-icon.playing');
+                // Exempt, as WCAG 1.4.3 / 1.4.11 exempt them: a DISABLED
+                // control (the picker's waiting game, dimmed on purpose; the
+                // note under it says why in full contrast) and pure
+                // decoration (the aria-hidden art, whose SVG paints with
+                // fill, not color).
+                if (el.closest('[aria-hidden="true"], button:disabled, [aria-disabled="true"]')) continue;
+                if (!mark && el instanceof SVGElement) continue;
+                const ownText = [...el.childNodes].some(n => n.nodeType === 3 && n.textContent.trim());
+                if (!mark && !ownText) continue;
+                const bg = paint(el);
+                out.push([css(ink(el, bg)), css(bg), `${sel} ${mark ? 'playing-mark' : el.textContent.trim().slice(0, 24)}`, mark ? 3 : 4.5]);
+            }
+        }
+    }
+    return out;
+};
 
 try {
     const aCtx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
@@ -505,6 +565,8 @@ try {
     // ── 7. Themes: felt, card faces and buttons keep their contrast.
     const themes = ['dark', 'light', 'amoled', 'pink', 'purple', 'green', 'orange', 'yellow'];
     const poor = [];
+    const activityPoor = [];
+    const activityMeasured = [];
     for (const theme of themes) {
         for (const hc of ['normal', 'high']) {
             await A.evaluate(([theme, hc]) => {
@@ -555,9 +617,34 @@ try {
             }
             // One screenshot per theme and contrast: the set a person checks by eye.
             await shot(A, `10-desktop-theme-${theme}-${hc}`);
+            // The activity surfaces in the same theme: the picker (from the
+            // launcher), then the call grid's tile and the sidebar's chip and
+            // playing marks (Back to call), then back to the table.
+            await A.locator('.vp-activities').click();
+            await A.locator('.activity-picker').waitFor({ timeout: 5000 });
+            await sleep(250);
+            const picker = await A.evaluate(activityPairs, ['.activity-picker']);
+            if (hc === 'normal' && (theme === 'light' || theme === 'dark')) await shot(A, `10b-desktop-picker-${theme}`);
+            await A.keyboard.press('Escape');
+            await until(async () => (await A.locator('.activity-picker').count()) === 0, 3000);
+            await A.getByRole('button', { name: 'Back to call' }).click();
+            await A.locator('.activity-tile').waitFor({ timeout: 5000 });
+            await sleep(250);
+            const grid = await A.evaluate(activityPairs, ['.activity-tile', '.voice-activity-chip', '.voice-status-icon.playing']);
+            if (hc === 'normal' && (theme === 'light' || theme === 'dark')) await shot(A, `10c-desktop-grid-${theme}`);
+            await A.locator('.activity-tile').getByRole('button', { name: 'Open', exact: true }).click();
+            await A.locator('.gtable-holdem').waitFor({ timeout: 5000 });
+            const marks = grid.filter(p => / playing-mark$/.test(p[2])).length;
+            activityMeasured.push(`${theme}/${hc}: picker ${picker.length}, grid ${grid.length} (${marks} playing marks)`);
+            if (picker.length < 5 || !grid.some(p => /\.activity-tile /.test(p[2])) || marks < 2) activityPoor.push(`${theme}/${hc}: too little measured (picker ${picker.length}, grid ${grid.length}, marks ${marks})`);
+            for (const [fg, bg, label, need] of [...picker, ...grid]) {
+                const r = contrast(fg, bg);
+                if (r < need) activityPoor.push(`${theme}/${hc} ${label} ${r.toFixed(2)} ${fg} on ${bg}`);
+            }
         }
     }
     check('all eight themes, normal and high contrast: felt, card, button and page text >= 4.5:1', poor.length === 0, poor);
+    check('all eight themes, normal and high contrast: the picker, the tile and the sidebar chip >= 4.5:1, the playing mark >= 3:1', activityPoor.length === 0, activityPoor.length ? activityPoor : activityMeasured.slice(0, 4));
     await A.evaluate(() => { document.documentElement.setAttribute('data-theme', 'dark'); document.documentElement.setAttribute('data-contrast', 'normal'); });
 
     // ── 8. The owner closes the table; Blackjack opens in the same call.
@@ -574,6 +661,29 @@ try {
     check('phone: the Blackjack notice', !!await until(async () => /started Blackjack/.test(await B.locator('.activity-notice').textContent().catch(() => '')), 5000));
     const gN2 = await phoneGeometry(B, ACTIVITY_ROOTS);
     check('phone: the Blackjack notice and tile fit, 44 px targets', geometryOk(gN2), gN2);
+    // The notice is only ever on screen here: measure it (and the tile) in
+    // every theme while it is up.
+    const noticePoor = [];
+    let noticeMeasured = 0;
+    for (const theme of themes) {
+        for (const hc of ['normal', 'high']) {
+            await B.evaluate(([theme, hc]) => {
+                document.documentElement.setAttribute('data-theme', theme);
+                document.documentElement.setAttribute('data-contrast', hc);
+            }, [theme, hc]);
+            await sleep(700);
+            const pairs = await B.evaluate(activityPairs, ['.activity-notice', '.activity-tile']);
+            if (!pairs.some(p => /^\.activity-notice /.test(p[2]))) noticePoor.push(`${theme}/${hc}: no notice measured`);
+            noticeMeasured += pairs.length;
+            for (const [fg, bg, label, need] of pairs) {
+                const r = contrast(fg, bg);
+                if (r < need) noticePoor.push(`${theme}/${hc} ${label} ${r.toFixed(2)} ${fg} on ${bg}`);
+            }
+            if (hc === 'normal' && theme === 'light') await shot(B, '11a-phone-notice-light');
+        }
+    }
+    await B.evaluate(() => { document.documentElement.setAttribute('data-theme', 'dark'); document.documentElement.setAttribute('data-contrast', 'normal'); });
+    check('phone, all eight themes, normal and high contrast: the notice and the tile >= 4.5:1', noticePoor.length === 0, noticePoor.length ? noticePoor : { measured: noticeMeasured });
     await B.locator('.activity-notice').getByRole('button', { name: 'Join', exact: true }).tap();
     check('phone: Join from the notice seats it, no disclosure the second time', !!await until(async () => (await B.locator('.gtable-blackjack').count()) > 0 && (await B.locator('.games-me .games-me-info').count()) > 0, 8000) && !(await B.locator('.games-disclosure').count()));
     check('both seated at Blackjack with a bet bar', !!await until(async () => (await A.locator('.games-footer .games-actions').count()) > 0 && (await B.locator('.games-footer .games-actions').count()) > 0, 10000));
