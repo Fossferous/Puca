@@ -1195,6 +1195,50 @@ async fn create_rechecks_the_call_after_the_gate() {
     assert_eq!(codes, ["not_in_call"], "five opens after the refused one, none refused");
 }
 
+/// `GameClose` / `GameRemovePlayer` check the call AGAIN after their
+/// MOVE_MEMBERS gate, as `GameCreate` and `GameSit` do: a moderator whose
+/// connection left (or was moved or kicked) while the gate awaited the
+/// database closes nothing and removes nobody - "in the call, MOVE_MEMBERS"
+/// is not bypassed by timing.
+#[tokio::test(start_paused = true)]
+async fn close_and_remove_recheck_the_call_after_the_gate() {
+    for op in ["close", "remove"] {
+        let rig = Rig::new(&[1, 2], &[1]);
+        let (mut a, mut b) = (rig.connect(1), rig.connect(2));
+        rig.join(&a);
+        rig.join(&b);
+        rig.create(&b, GameKindWire::Holdem).await;
+        rig.sit(&b, 0).await;
+        let tid = rig.table();
+        let conn = a.conn;
+        rig.state.games.set_gate_hook(move |state: &AppState| {
+            state.leave_room(ROOM, 1, conn);
+        });
+        let msg = |tid: u64| {
+            if op == "close" {
+                ClientMessage::GameClose { room_id: ROOM.into(), table_id: tid }
+            } else {
+                ClientMessage::GameRemovePlayer { room_id: ROOM.into(), table_id: tid, seat: 0 }
+            }
+        };
+        rig.send(&a, msg(tid)).await;
+        a.drain();
+        b.drain();
+        assert_eq!(rig.state.games.open_tables(), 1, "{op}: the table is still open");
+        assert_eq!(rig.peek().map(|p| p.occupants), Some(vec![(0, 2)]), "{op}: B is still seated");
+        let codes: Vec<&str> = a.refusals().iter().map(|r| r["code"].as_str().unwrap()).collect();
+        assert_eq!(codes, ["not_in_call"], "{op}: refused, not done");
+        // Positive control: back in the call, the same frame does it.
+        rig.join(&a);
+        rig.send(&a, msg(tid)).await;
+        if op == "close" {
+            assert_eq!(rig.state.games.open_tables(), 0, "close: done once back in the call");
+        } else {
+            assert_eq!(rig.peek().map(|p| p.occupants), Some(vec![]), "remove: done once back in the call");
+        }
+    }
+}
+
 /// Blackjack: when every player at the table has bet, the round is dealt
 /// LAST_BET_DELAY (1.5 s) after the last bet, not at once - the last bettor
 /// sees the bets on the table first. The countdown is in the view.

@@ -1034,28 +1034,34 @@ pub async fn update_server_settings(
             return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save settings").into_response();
         }
     };
-    match tx.commit().await {
+    // The commit and the games switch's tail run DETACHED, as one task this
+    // handler waits for: axum drops the handler when the client goes away,
+    // and a request dropped after the commit must still end the server's
+    // tables (off) and still tell every online member (GamesEnabled) - the
+    // shape start_perms_change has for kicks and bans. settle_switch ends
+    // the tables (after the commit, so a GameCreate that re-reads the switch
+    // after opening sees it off and closes its own table too) BEFORE the
+    // push, so nobody sees the launcher go while their table is still up.
+    let games_switch = payload.games_enabled;
+    let committed = {
+        let state = Arc::clone(&state);
+        let server_id = server_id.clone();
+        tokio::spawn(async move {
+            tx.commit().await?;
+            if let Some(asked) = games_switch {
+                crate::games::settle_switch(&state, &server_id, asked).await;
+            }
+            Ok::<(), sqlx::Error>(())
+        })
+        .await
+        .unwrap_or_else(|e| Err(sqlx::Error::Protocol(format!("the settings commit task failed: {e}"))))
+    };
+    match committed {
         Ok(()) => {
             tracing::info!(
                 "update_server_settings: rows_affected={}",
                 updated.rows_affected()
             );
-            // Games switched off: every table of this server ends now
-            // (after the commit, so a GameCreate that re-reads the switch
-            // after opening sees it off and closes its own table too).
-            if payload.games_enabled == Some(false) {
-                let ended = state.games.close_server(&state, &server_id, crate::games_wire::GameEndReason::Disabled);
-                if ended > 0 {
-                    tracing::info!("update_server_settings: games off on {}: {} table(s) ended", server_id, ended);
-                }
-            }
-            // ...and every online member hears the switch at once
-            // (GamesEnabled), so the launcher appears or goes without a
-            // reload - after the tables ended, so nobody sees the launcher go
-            // while their table is still up.
-            if let Some(enabled) = payload.games_enabled {
-                crate::games::push_enabled(&state, &server_id, enabled).await;
-            }
             if let (Some((Some(old),)), Some(new)) = (&old_icon, &payload.icon_file_id) {
                 if old != new {
                     // Reclaim scoped to the CALLER, never the old blob's true

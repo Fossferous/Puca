@@ -3177,6 +3177,9 @@ async fn handle_message(
                 );
                 return Err(refusal.to_string());
             }
+            // Tests: hold this join here, where a channel switch's awaits sit.
+            #[cfg(test)]
+            join_pause_point(user_id).await;
 
             // VOICE EXCLUSIVITY: one voice room per USER across all devices.
             // Joining a voice room from any connection evicts the user from
@@ -3259,10 +3262,14 @@ async fn handle_message(
             // (`voice_can_speak`, None for a text room): the newest answer
             // this join has, and one that already saw any deny it raced.
             // Same bits as the gate above: a voice room needs CONNECT too.
-            let voice_can_speak = match join_verdict(
-                &get_user_channel_permissions(&state.pool, cid, user_id).await,
-                need_connect,
-            ) {
+            //
+            // And the joiner's PLAY_GAMES (`may_play`, for the call's card
+            // table, below): the first resolution is older than the insert,
+            // so a deny whose sweep ran in between (the player not yet in
+            // the call, so the sweep could not stand them up) is seen only
+            // here.
+            let access_after = get_user_channel_permissions(&state.pool, cid, user_id).await;
+            let voice_can_speak = match join_verdict(&access_after, need_connect) {
                 Ok(can_speak) => can_speak,
                 Err(refusal) => {
                     withdraw_refused_join(state, &room_id, user_id, conn_id, conn_was_joined, already_member, joined_rooms).await;
@@ -3368,9 +3375,10 @@ async fn handle_message(
             // seat in its disconnect grace is its player's again - unless this
             // join's own resolution says they may no longer play here
             // (PLAY_GAMES or CONNECT denied while they were away or in another
-            // channel, where no sweep could see them): then they get up.
+            // channel, where no sweep could see them): then they get up. The
+            // POST-insert resolution, the one that saw any deny it raced.
             if parse_voice_room(&room_id).is_some() {
-                let may_play = matches!(&access, ChannelPermAccess::Allowed { perms, .. }
+                let may_play = matches!(&access_after, ChannelPermAccess::Allowed { perms, .. }
                     if perms.has(Permissions::CONNECT) && perms.has(Permissions::PLAY_GAMES));
                 state.games.on_join(state, &room_id, user_id, conn_id, may_play);
             }
@@ -9952,5 +9960,341 @@ mod presence_ws_tests {
         assert_eq!(before, PresenceStatus::Online);
         assert!(evicted, "positive control: the cap did evict the oldest");
         assert_eq!(after, PresenceStatus::Online, "the evicted session was active a moment ago");
+    }
+}
+
+/// Tests: pause ONE JoinRoom of a user right after its first permission
+/// resolution - where a channel switch's voice-exclusivity awaits sit - so a
+/// test can commit a deny and run its sweep inside that window
+/// (`games_join_db_tests`). `(user, reached, go)`; taken by the first join of
+/// that user, so a parallel test's joins never stop here.
+#[cfg(test)]
+#[allow(clippy::type_complexity)]
+static JOIN_PAUSE: std::sync::Mutex<Option<(UserId, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+async fn join_pause_point(user: UserId) {
+    let hook = {
+        let mut g = JOIN_PAUSE.lock().unwrap_or_else(|e| e.into_inner());
+        if g.as_ref().is_some_and(|h| h.0 == user) {
+            g.take()
+        } else {
+            None
+        }
+    };
+    if let Some((_, reached, go)) = hook {
+        reached.notify_one();
+        go.notified().await;
+    }
+}
+
+/// The games' share of JoinRoom and of the owner's switch, through the REAL
+/// handlers against a database (TEST_DATABASE_URL; skips without it).
+#[cfg(test)]
+mod games_join_db_tests {
+    use super::{broadcast_perms_changed_and_evict, handle_message, JOIN_PAUSE};
+    use crate::games_wire::GameKindWire;
+    use crate::permissions::Permissions as P;
+    use crate::protocol::{ClientMessage, ServerMessage};
+    use crate::state::{AppState, UserId};
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, Notify};
+
+    struct Sock {
+        uid: UserId,
+        conn: u64,
+        rx: mpsc::Receiver<ServerMessage>,
+        joined: HashSet<String>,
+    }
+
+    impl Sock {
+        /// A socket that announced `games`.
+        fn open(state: &Arc<AppState>, uid: UserId) -> Sock {
+            let (tx, rx) = mpsc::channel::<ServerMessage>(4096);
+            let (conn, _, _) = state.register_session(uid, format!("u{uid}"), tx, false, None, String::new());
+            state.set_conn_games(uid, conn, true);
+            Sock { uid, conn, rx, joined: HashSet::new() }
+        }
+
+        async fn join(&mut self, state: &Arc<AppState>, room: &str) -> Result<(), String> {
+            let frame = serde_json::json!({ "type": "JoinRoom", "payload": { "room_id": room } }).to_string();
+            handle_message(state, self.uid, self.conn, "x", &frame, &mut self.joined, "").await
+        }
+
+        fn drain(&mut self) -> Vec<ServerMessage> {
+            let mut out = Vec::new();
+            while let Ok(m) = self.rx.try_recv() {
+                out.push(m);
+            }
+            out
+        }
+    }
+
+    struct Fx {
+        sid: String,
+        cid: i64,
+        users: Vec<i32>,
+        /// A role whose holders are denied PLAY_GAMES in the voice channel.
+        nogames: i64,
+    }
+
+    /// An owner and three members; @everyone has VIEW + CONNECT + SPEAK +
+    /// PLAY_GAMES; one voice channel with a role that denies PLAY_GAMES there.
+    async fn setup(pool: &sqlx::PgPool) -> Fx {
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let mk = |n: &str| format!("gj_{n}_{}", &tag[..12]);
+        let mut users = Vec::new();
+        for n in ["owner", "a", "b", "c"] {
+            let (id,): (i32,) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id")
+                .bind(mk(n))
+                .bind(b"s".as_ref())
+                .bind(b"v".as_ref())
+                .fetch_one(pool)
+                .await
+                .expect("user");
+            users.push(id);
+        }
+        let sid = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, $2, $3)")
+            .bind(&sid)
+            .bind(mk("srv"))
+            .bind(users[0])
+            .execute(pool)
+            .await
+            .expect("server");
+        for &u in &users {
+            sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)")
+                .bind(&sid)
+                .bind(u)
+                .execute(pool)
+                .await
+                .expect("member");
+        }
+        let everyone = (P::VIEW_CHANNEL | P::CONNECT | P::SPEAK | P::PLAY_GAMES).bits() as i64;
+        sqlx::query(
+            "INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) \
+             VALUES ($1, '@everyone', '#99AAB5', $2, 0, true)",
+        )
+        .bind(&sid)
+        .bind(everyone)
+        .execute(pool)
+        .await
+        .expect("@everyone");
+        let (cid,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type) VALUES ($1, 'v', 1) RETURNING id")
+            .bind(&sid)
+            .fetch_one(pool)
+            .await
+            .expect("channel");
+        let (nogames,): (i64,) = sqlx::query_as(
+            "INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) \
+             VALUES ($1, 'nogames', '#99AAB5', 0, 1, false) RETURNING id",
+        )
+        .bind(&sid)
+        .fetch_one(pool)
+        .await
+        .expect("role");
+        sqlx::query("INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny) VALUES ($1, $2, 0, $3)")
+            .bind(cid as i64)
+            .bind(nogames)
+            .bind(P::PLAY_GAMES.bits() as i64)
+            .execute(pool)
+            .await
+            .expect("deny");
+        Fx { sid, cid: cid as i64, users, nogames }
+    }
+
+    /// Give `user` the role that denies PLAY_GAMES in the voice channel.
+    async fn deny_play(pool: &sqlx::PgPool, f: &Fx, user: UserId) {
+        sqlx::query("INSERT INTO member_roles (server_id, user_id, role_id) VALUES ($1, $2, $3)")
+            .bind(&f.sid)
+            .bind(user as i32)
+            .bind(f.nogames)
+            .execute(pool)
+            .await
+            .expect("member role");
+    }
+
+    async fn teardown(pool: &sqlx::PgPool, f: &Fx) {
+        let _ = sqlx::query("DELETE FROM channels WHERE id = $1").bind(f.cid as i32).execute(pool).await;
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&f.sid).execute(pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(f.users.clone()).execute(pool).await;
+    }
+
+    /// A, B and C seated at a Hold'em table in the call; B and C then drop
+    /// (inside the disconnect grace, so their seats are kept for them).
+    async fn table_with_two_away(state: &Arc<AppState>, room: &str, f: &Fx) -> (Sock, u64) {
+        let (a, b, c) = (f.users[1] as UserId, f.users[2] as UserId, f.users[3] as UserId);
+        let mut sa = Sock::open(state, a);
+        let mut sb = Sock::open(state, b);
+        let mut sc = Sock::open(state, c);
+        for s in [&mut sa, &mut sb, &mut sc] {
+            s.join(state, room).await.expect("join");
+        }
+        crate::games::handle_frame(state, a, sa.conn, ClientMessage::GameCreate { room_id: room.into(), kind: GameKindWire::Holdem, config: None })
+            .await;
+        let tid = state.games.peek(room).expect("the table opened").id;
+        for (u, conn, seat) in [(a, sa.conn, 0usize), (b, sb.conn, 1), (c, sc.conn, 2)] {
+            crate::games::handle_frame(state, u, conn, ClientMessage::GameSit { room_id: room.into(), table_id: tid, seat }).await;
+        }
+        assert_eq!(state.games.peek(room).unwrap().occupants, vec![(0, a), (1, b), (2, c)], "all three seated");
+        state.unregister_session(b, sb.conn);
+        state.unregister_session(c, sc.conn);
+        assert_eq!(state.games.peek(room).unwrap().away, vec![1, 2], "B and C away, seats kept");
+        (sa, tid)
+    }
+
+    /// PLAY_GAMES denied while a seated player was away (in the grace, where
+    /// no sweep can see them): their rejoin through the REAL JoinRoom stands
+    /// them up. Red if JoinRoom stops telling `on_join` what it resolved.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_seat_denied_while_away_is_stood_up_by_the_rejoin() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = format!("voice_{}", f.cid);
+        let (_sa, _tid) = table_with_two_away(&state, &room, &f).await;
+        let (a, b, c) = (f.users[1] as UserId, f.users[2] as UserId, f.users[3] as UserId);
+
+        deny_play(&pool, &f, c).await;
+        broadcast_perms_changed_and_evict(&state, &f.sid).await;
+        assert!(state.games.peek(&room).unwrap().occupants.contains(&(2, c)), "the sweep cannot see C (away)");
+
+        let mut sc2 = Sock::open(&state, c);
+        sc2.join(&state, &room).await.expect("C rejoins: CONNECT is kept");
+        // B, not denied, comes back to the seat (the positive control).
+        let mut sb2 = Sock::open(&state, b);
+        sb2.join(&state, &room).await.expect("B rejoins");
+        let occ = state.games.peek(&room).unwrap().occupants;
+        teardown(&pool, &f).await;
+        assert_eq!(occ, vec![(0, a), (1, b)], "C stood up on the rejoin; B kept the seat");
+    }
+
+    /// The race the post-insert resolution closes: B's rejoin has resolved
+    /// (allowed) when a PLAY_GAMES deny commits and its sweep runs (B not yet
+    /// in the call, so the sweep cannot stand B up). JoinRoom's SECOND
+    /// resolution, after the insert, is the one guaranteed to see the deny;
+    /// `on_join` must be told that one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_deny_racing_the_rejoin_still_stands_the_seat_up() {
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = format!("voice_{}", f.cid);
+        let (_sa, tid) = table_with_two_away(&state, &room, &f).await;
+        let (a, b, c) = (f.users[1] as UserId, f.users[2] as UserId, f.users[3] as UserId);
+
+        let (reached, go) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        *JOIN_PAUSE.lock().unwrap() = Some((b, Arc::clone(&reached), Arc::clone(&go)));
+        let rejoin = {
+            let state = Arc::clone(&state);
+            let room = room.clone();
+            tokio::spawn(async move {
+                let mut sb2 = Sock::open(&state, b);
+                let r = sb2.join(&state, &room).await;
+                (r, sb2)
+            })
+        };
+        reached.notified().await;
+        deny_play(&pool, &f, b).await;
+        broadcast_perms_changed_and_evict(&state, &f.sid).await;
+        assert!(state.games.peek(&room).unwrap().occupants.contains(&(1, b)), "the sweep could not see B (not yet back)");
+        go.notify_one();
+        let (r, mut sb2) = rejoin.await.unwrap();
+        r.expect("B rejoins: CONNECT is kept");
+        let occ = state.games.peek(&room).unwrap().occupants;
+        // B's own-seat frame finds no seat.
+        sb2.drain();
+        crate::games::handle_frame(&state, b, sb2.conn, ClientMessage::GameSitOut { room_id: room.clone(), table_id: tid }).await;
+        let not_seated = sb2.drain().iter().any(|m| {
+            matches!(m, ServerMessage::GameRefused { refusal, .. } if format!("{refusal:?}").contains("NotSeated"))
+        });
+        teardown(&pool, &f).await;
+        assert_eq!(occ, vec![(0, a), (2, c)], "B stood up by the rejoin's post-insert resolution; C (away) untouched");
+        assert!(not_seated, "B's own-seat frame is refused not_seated");
+    }
+
+    /// The owner's switch reaches everyone even when the owner's request is
+    /// dropped after the commit (axum drops the handler future when the client
+    /// goes away): the commit and the switch's tail run detached. And the push
+    /// says what is STORED.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_switch_push_survives_a_request_dropped_after_the_commit() {
+        use axum::extract::{Json, Path, State};
+        use axum::response::IntoResponse;
+        use axum::Extension;
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let a = f.users[1] as UserId;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let mut sa = Sock::open(&state, a);
+        let owner = crate::auth::Claims {
+            sub: f.users[0] as i64,
+            username: "o".into(),
+            exp: 0,
+            tv: 0,
+            sst: 0,
+            sid: String::new(),
+            ls: false,
+        };
+        let patch = |on: bool| -> crate::server_handlers::UpdateServerRequest {
+            serde_json::from_value(serde_json::json!({ "games_enabled": on })).unwrap()
+        };
+        let pushes = |frames: Vec<ServerMessage>| -> Vec<bool> {
+            frames
+                .into_iter()
+                .filter_map(|m| match m {
+                    ServerMessage::GamesEnabled { games_enabled, .. } => Some(games_enabled),
+                    _ => None,
+                })
+                .collect()
+        };
+        // Positive control: an undisturbed switch-off reaches A.
+        let _ = crate::server_handlers::update_server_settings(
+            State(Arc::clone(&state)),
+            Path(f.sid.clone()),
+            Extension(owner.clone()),
+            Json(patch(false)),
+        )
+        .await
+        .into_response();
+        let control = pushes(sa.drain());
+
+        // The member list is slow (a held table lock); the client gives up
+        // after 300 ms, which drops the handler after its commit.
+        let mut locker = pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL lock_timeout = '5s'").execute(&mut *locker).await.unwrap();
+        sqlx::query("LOCK TABLE server_members IN ACCESS EXCLUSIVE MODE").execute(&mut *locker).await.unwrap();
+        let dropped = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            crate::server_handlers::update_server_settings(
+                State(Arc::clone(&state)),
+                Path(f.sid.clone()),
+                Extension(owner.clone()),
+                Json(patch(true)),
+            ),
+        )
+        .await
+        .is_err();
+        locker.rollback().await.unwrap();
+        let mut after = Vec::new();
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            after.extend(pushes(sa.drain()));
+            if !after.is_empty() {
+                break;
+            }
+        }
+        let (stored,): (bool,) = sqlx::query_as("SELECT games_enabled FROM servers WHERE id = $1")
+            .bind(&f.sid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        teardown(&pool, &f).await;
+        assert_eq!(control, vec![false], "control: the switch-off was pushed");
+        assert!(dropped, "the request was dropped while the push was still waiting");
+        assert!(stored, "the switch-on committed");
+        assert_eq!(after, vec![true], "the switch-on still reached A");
     }
 }

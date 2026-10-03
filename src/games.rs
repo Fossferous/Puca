@@ -72,7 +72,8 @@ pub const BET_WINDOW: Duration = Duration::from_secs(15);
 /// docs/GAMES.md).
 pub const LAST_BET_DELAY: Duration = Duration::from_millis(1_500);
 /// A table nobody sits at stops holding the call's one slot after this
-/// (`GameEnded { idle }`; owner to confirm the value, docs/GAMES.md).
+/// (`GameEnded { idle }`; the value confirmed by the lead 2026-10-03,
+/// docs/GAMES.md "Owner decisions").
 pub const IDLE_LIMIT: Duration = Duration::from_secs(300);
 /// Above this many entries a rate map drops what has aged out.
 const RATE_MAP_PRUNE_AT: usize = 4096;
@@ -892,6 +893,37 @@ impl Games {
     }
 }
 
+/// The owner's switch committed: settle it. Reads the STORED value back (so
+/// two quick toggles converge on what is in the row, whatever order their
+/// requests finish in; `asked` only if the read fails), ends every table of
+/// the server when it is off, then tells every online member
+/// ([`push_enabled`]). The settings handler runs this in a detached task
+/// with its commit, so an owner's request dropped after the commit (axum
+/// drops the handler when the client goes away) still ends the tables and
+/// still reaches everyone - the shape `start_perms_change` has for kicks.
+pub async fn settle_switch(state: &AppState, server_id: &str, asked: bool) {
+    let stored = match sqlx::query_scalar::<_, bool>("SELECT games_enabled FROM servers WHERE id = $1")
+        .bind(server_id)
+        .fetch_optional(&state.pool)
+        .await
+    {
+        Ok(Some(v)) => v,
+        // The server was deleted meanwhile: nothing to settle.
+        Ok(None) => return,
+        Err(e) => {
+            tracing::error!("games: re-reading the games switch of server {} failed: {}", server_id, e);
+            asked
+        }
+    };
+    if !stored {
+        let ended = state.games.close_server(state, server_id, GameEndReason::Disabled);
+        if ended > 0 {
+            tracing::info!("games: switched off on {}: {} table(s) ended", server_id, ended);
+        }
+    }
+    push_enabled(state, server_id, stored).await;
+}
+
 /// The owner switched games on or off for `server_id`: tell every online
 /// member at once (`ServerMessage::GamesEnabled`), so the launcher appears or
 /// goes without a reload. Called after the change committed (and, for off,
@@ -1175,6 +1207,12 @@ pub async fn handle_frame(state: &Arc<AppState>, user: UserId, conn: u64, msg: C
         }
 
         ClientMessage::GameClose { table_id, .. } => {
+            // (3) again, after the MOVE_MEMBERS gate's await (as GameCreate
+            // and GameSit): a moderator moved or kicked out of the call
+            // meanwhile closes nothing.
+            if !conn_in_call(state, &room, user, conn) {
+                return refuse(GameRefusal::NotInCall);
+            }
             let Some(cell) = games.lookup_id(&room, table_id) else { return gone(table_id) };
             if !games.close_cell(state, &cell, GameEndReason::Closed) {
                 gone(table_id);
@@ -1184,6 +1222,10 @@ pub async fn handle_frame(state: &Arc<AppState>, user: UserId, conn: u64, msg: C
         }
 
         ClientMessage::GameRemovePlayer { table_id, seat, .. } => {
+            // (3) again, as for GameClose.
+            if !conn_in_call(state, &room, user, conn) {
+                return refuse(GameRefusal::NotInCall);
+            }
             let Some(cell) = games.lookup_id(&room, table_id) else { return gone(table_id) };
             let recips = recipients(state, &room);
             let ctx = Ctx { games, state, cell: &cell, recips: &recips };
