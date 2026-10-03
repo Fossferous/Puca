@@ -1,62 +1,73 @@
-// LIVE: four players and a spectator at one card table in one voice call,
-// through the REAL web client and the REAL games server (docs/GAMES.md).
+// LIVE: games as Discord-style ACTIVITIES (docs/GAMES.md, *Activities*) -
+// four players, a spectator and an old client in one voice call, through the
+// REAL web client and the REAL games server, with NO reload anywhere.
 //
 // games-walk.mjs proves the layout (two accounts, desktop + phone). This proves
-// the two halves TOGETHER under play, and above all that no connection ever
-// receives a card it may not see. Every WebSocket frame each page receives is
-// recorded (page.on('websocket')) and scanned afterwards.
+// the two halves TOGETHER under play: that everyone in the call sees an
+// activity start, live; that the owner's switch reaches everyone live; and
+// above all that no connection ever receives a card it may not see. Every
+// WebSocket frame each page receives is recorded (page.on('websocket')) and
+// scanned afterwards.
 //
 // The cast, all in one MESH voice call (fake media, --mute-audio):
-//   P1  owner, desktop 1280x800 — opens and closes tables (MOVE_MEMBERS), and
-//       switches games on and off in Server Settings
+//   P1  owner, desktop 1280x800 - starts activities from the launcher, closes
+//       a table (MOVE_MEMBERS), switches games off and on in Server Settings
 //   P2  desktop          P3  desktop          P4  phone 390x844 (isMobile, hasTouch)
-//   S   spectator, desktop — in the call WITHOUT Play Games (@everyone loses
-//       the bit; a "Players" role gives it back to P2..P4). S was online and
-//       in the call BEFORE the owner switched games on.
-//   OLD a raw socket that announces only `own_voice,presence` — a 0.9.832-era
-//       client — in the same call, on its own account.
+//   S   spectator, desktop - in the call WITHOUT Play Games (@everyone loses
+//       the bit; a "Players" role gives it back to P2..P4 - while they are
+//       already in the call, so the launcher must appear for them LIVE)
+//   OLD a raw socket that announces only `own_voice,presence` - a 0.9.832-era
+//       client - in the same call, on its own account.
 //
-// What it plays and asserts (each prints PASS/FAIL; exit code = failures):
-//   - games are off until the owner's switch; S (no Play Games) is offered no
-//     Open and no Sit, only "Watch the table" once a table exists;
-//   - Hold'em through the UI: >= 10 hands played to the end, including a
-//     showdown, a hand where someone mucks, an all-in, a fold-out and a turn
-//     the clock ran out (we let it expire);
-//   - a player whose socket drops and reconnects inside the rejoin grace keeps
-//     seat, stack and cards; one kept away past the grace is folded/stood and
-//     must sit again;
-//   - the moderator closes the table; a second table in the call is refused
-//     INLINE (two people opening at once — or, if the race is lost, a raw
-//     GameCreate on the app's own socket); Blackjack: >= 5 rounds with a
-//     double (and a split when a pair comes);
-//   - the owner switches games OFF: the table ends for everyone, worded;
+// What it asserts (each prints PASS/FAIL; exit code = failures):
+//   - games are AVAILABLE BY DEFAULT: a fresh server has games_enabled, the
+//     owner's launcher is there at once; a role granting Play Games while P2..P4
+//     sit in the call brings their launcher live; S never has one;
+//   - P1 starts Poker from the launcher (the picker's card) and is seated; EVERY
+//     other page shows the notice ("<P1> started Poker", Join for the players,
+//     Watch only for S), the activity TILE in the call grid and the sidebar's
+//     playing marks within a second or two - measured, no reload;
+//   - they Join from the tile and the notice; Hold'em: >= 10 hands to the end,
+//     a showdown, a muck, an all-in, a fold-out, a clock that runs out; a socket
+//     drop inside the rejoin grace (seat, stack and cards kept) and one kept away
+//     past it (folded, stood, sits again); "Back to call" and back keeps the seat
+//     (on the phone the composer returns on the call and goes at the table);
+//   - the owner switches games OFF: the table ends for everyone at once
+//     (GameEnded disabled on every page), the tile, the marks and the notice go,
+//     the launcher goes everywhere (GamesEnabled pushed); ON: the launcher comes
+//     back everywhere - no reload;
+//   - P1 starts Blackjack from the launcher the same way; everyone joins; a
+//     second activity in the call is refused INLINE; >= 5 rounds with a double or
+//     a split; when everyone has bet the deal comes ~1.5 s after the last bet;
+//   - the moderator closes the table: tile, marks and notice gone everywhere;
 //   - PRIVACY, from the recorded frames: the spectator never received a hole
-//     card; no player ever received another player's hole card unless that
-//     hand was shown (showdown / voluntary show); a mucked hand is never
-//     revealed; the Blackjack hole card is "??" until the dealer turns it;
-//     OLD received no game frame at all. The oracle (who holds which card) is
-//     built from each player's OWN frames; a planted leak must be caught
-//     (positive control).
+//     card; no player ever received another player's hole card unless that hand
+//     was shown; a mucked hand is never revealed; the Blackjack hole card is
+//     "??" until the dealer turns it; OLD received no game frame and no settings
+//     frame at all. The oracle (who holds which card) is built from each
+//     player's OWN frames; a planted leak must be caught (positive control).
 //
 // Prereqs: a THROWAWAY backend that plays games (APP_ENV=development, raised
-// AUTH_RATE_LIMIT_PER_SECOND / _BURST, its own fresh database — never a real
+// AUTH_RATE_LIMIT_PER_SECOND / _BURST, its own fresh database - never a real
 // one, no LiveKit so the call is mesh) at API, and vite of THIS tree at APP
-// started with VITE_API_URL=API. ~10 minutes (two turn clocks run out).
+// started with VITE_API_URL=API. ~12 minutes (two turn clocks run out).
 //
 // Usage (from frontend/):
-//   APP=http://127.0.0.1:5431 API=http://127.0.0.1:5331 OUT=<dir> node e2e/games-live.mjs
+//   APP=http://127.0.0.1:5481 API=http://127.0.0.1:5381 OUT=<dir> node e2e/games-live.mjs
 import { chromium } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const APP = process.env.APP || 'http://127.0.0.1:5431';
-const API = process.env.API || 'http://127.0.0.1:5331';
+const APP = process.env.APP || 'http://127.0.0.1:5481';
+const API = process.env.API || 'http://127.0.0.1:5381';
 const WS_BASE = API.replace(/^http/, 'ws') + '/ws';
 const OUT = process.env.OUT || 'e2e/shots-games-live';
 const MIN_HANDS = Number(process.env.HANDS || 10);
 const MAX_HANDS = Number(process.env.MAX_HANDS || 20);
 const MIN_ROUNDS = Number(process.env.ROUNDS || 5);
 const GRACE_MS = Number(process.env.GRACE_MS || 8000); // WS_REJOIN_GRACE_SECS on the backend
+/** "Within a second or two": every page shows a started activity this soon. */
+const LIVE_MS = Number(process.env.LIVE_MS || 2500);
 const PASS = 'Password123!pw';
 const stamp = Date.now().toString(36);
 fs.mkdirSync(OUT, { recursive: true });
@@ -99,7 +110,7 @@ const browser = await chromium.launch({
 const recs = [];
 const alerts = [];
 function makeRec(label, page, phone) {
-    const R = { label, page, phone, frames: [], sockets: 0, cur: null, userId: null, dropped: false, acted: null, ended: [] };
+    const R = { label, page, phone, frames: [], sockets: 0, cur: null, userId: null, dropped: false, acted: null, ended: [], switched: [] };
     page.on('websocket', (ws) => {
         if (!ws.url().startsWith(WS_BASE)) return;
         const sock = ++R.sockets;
@@ -110,7 +121,8 @@ function makeRec(label, page, phone) {
             R.frames.push({ t: Date.now(), sock, m });
             const p = m.payload;
             if ((m.type === 'GameTable' || m.type === 'GameEvents') && p && p.view) R.cur = { table_id: p.table_id, version: p.version, view: p.view, at: Date.now() };
-            if (m.type === 'GameEnded' && p) { R.ended.push(p.reason); if (R.cur && R.cur.table_id === p.table_id) R.cur = null; }
+            if (m.type === 'GameEnded' && p) { R.ended.push({ reason: p.reason, t: Date.now() }); if (R.cur && R.cur.table_id === p.table_id) R.cur = null; }
+            if (m.type === 'GamesEnabled' && p) R.switched.push({ on: p.games_enabled, t: Date.now() });
         });
     });
     page.on('console', m => fs.appendFileSync(path.join(OUT, 'console.txt'), `${new Date().toISOString()} ${label} ${m.type()} ${m.text().slice(0, 300)}\n`));
@@ -121,6 +133,9 @@ function makeRec(label, page, phone) {
         if (d.type() === 'alert') { alerts.push(`${label}: ${d.message()}`); console.log(`  [${label} ALERT]`, d.message()); }
         d.type() === 'confirm' ? d.accept().catch(() => {}) : d.dismiss().catch(() => {});
     });
+    // Any navigation after sign-in is a reload this run promised not to need.
+    R.loads = 0;
+    page.on('load', () => { R.loads++; });
     recs.push(R);
     return R;
 }
@@ -190,53 +205,71 @@ const reload = async (R) => { await R.page.reload({ waitUntil: 'domcontentloaded
 const inCall = async (R) => (await R.page.locator('.voice-panel-compact .voice-connected-label').count()) > 0;
 
 async function openServer(R, srvName) {
-    if (R.phone) { await R.page.locator('.mobile-nav-btn').first().tap(); await sleep(400); }
+    if (R.phone) { await R.page.locator('.mobile-nav-btn').nth(0).tap(); await sleep(400); }
     await press(R, R.page.locator(`.server-icon[title="${srvName}"]`));
     await sleep(800);
 }
+const channelRow = (R) => R.page.locator('.voice-channel-list .voice-channel', { hasText: 'Table' }).first();
 async function joinCall(R) {
-    await press(R, R.page.locator('.voice-channel-list .voice-channel', { hasText: 'Table' }).first());
+    await press(R, channelRow(R));
     return !!await until(() => inCall(R), 20000);
 }
-/** The Games entry point: the VoiceStage header on a desktop (after the
- *  connected channel is clicked, which shows its stage), the voice panel's
- *  expanded controls on a phone. Returns its label, or null when not offered. */
-async function entry(R) {
-    if (!R.phone && !(await R.page.locator('.voice-stage').count())) {
-        await R.page.locator('.voice-channel-list .voice-channel', { hasText: 'Table' }).first().click();
-        await sleep(400);
-    }
-    if (R.phone) {
-        if (!(await R.page.locator('.vp-games').count())) return null;
-        return (await R.page.locator('.vp-games').getAttribute('aria-label')) || (await R.page.locator('.vp-games').textContent());
-    }
-    const b = R.page.locator('.voice-stage-games');
-    return (await b.count()) ? (await b.textContent()).trim() : null;
+/** The call's stage (the grid with the activity tile): the connected channel's
+ *  row on a desktop; on a phone through the Channels tab, which lands on it. */
+async function toStage(R) {
+    if (R.phone) { await R.page.locator('.mobile-nav-btn').nth(1).tap(); await sleep(400); }
+    await press(R, channelRow(R));
+    await R.page.locator('.voice-stage').waitFor({ timeout: 10000 });
 }
-async function openTableView(R) {
-    if (R.phone) {
-        if (!(await R.page.locator('.vp-games').isVisible())) await R.page.locator('.vp-expand').tap();
-        await R.page.locator('.vp-games').tap();
-    } else {
-        await R.page.locator('.voice-channel-list .voice-channel', { hasText: 'Table' }).first().click(); // the stage
-        await R.page.locator('.voice-stage-games').click();
-    }
-    await R.page.locator('.games-view').waitFor({ timeout: 15000 });
+/** The launcher is offered (attached: on a phone it waits behind the chevron). */
+const hasLauncher = async (R) => (await R.page.locator('.vp-activities').count()) > 0;
+async function openLauncher(R) {
+    if (R.phone && !(await R.page.locator('.vp-activities').isVisible())) await R.page.locator('.vp-expand').tap();
+    await press(R, R.page.locator('.vp-activities'));
+    await R.page.locator('.activity-picker').waitFor({ timeout: 8000 });
 }
-const noticeText = (R) => R.page.locator('.games-notice-text').textContent().catch(() => '');
+const tile = (R) => R.page.locator('.activity-tile');
+const noticeBar = (R) => R.page.locator('.activity-notice');
+const playingMarks = (R) => R.page.locator('.voice-status-icon.playing');
+const tableNotice = (R) => R.page.locator('.games-notice-text').first().textContent().catch(() => '');
 
-/** Sit in the first open seat; the owner's disclosure comes first, once. */
-async function sit(R, expectDisclosure) {
-    await R.page.locator('.gseat-sit').first().waitFor({ timeout: 15000 });
-    await press(R, R.page.locator('.gseat-sit').first());
+/** Sit at the first open seat; the owner's disclosure comes first, once. */
+async function acceptDisclosure(R, expectDisclosure) {
     const disc = R.page.locator('.games-disclosure');
-    const shown = !!await until(() => disc.isVisible(), expectDisclosure ? 5000 : 1200);
+    const shown = !!await until(() => disc.isVisible(), expectDisclosure ? 6000 : 1200);
     if (expectDisclosure !== undefined) {
         check(`${R.label}: the disclosure ${expectDisclosure ? 'comes before the first sit, in the owner\'s words' : 'is not shown again'}`,
             expectDisclosure ? shown && (await disc.textContent()).includes('Chips are free and worth nothing. This server deals the cards and its operator could see them.') : !shown);
     }
     if (shown) await press(R, disc.getByRole('button', { name: 'Sit down' }));
     return !!await until(() => R.cur && R.cur.view.viewer_seat !== null, 10000);
+}
+async function sit(R, expectDisclosure) {
+    await R.page.locator('.gseat-sit').first().waitFor({ timeout: 15000 });
+    await press(R, R.page.locator('.gseat-sit').first());
+    return acceptDisclosure(R, expectDisclosure);
+}
+
+/**
+ * Time from `t0` until EVERY page in `pages` shows `kind` started by the
+ * owner: the notice (Join for a player, Watch only for S), the tile in the
+ * grid, the sidebar's playing mark for the starter. Polls each page.
+ */
+async function everyoneSeesActivity(pages, kind, t0) {
+    const seen = {};
+    await until(async () => {
+        for (const R of pages) {
+            if (seen[R.label]) continue;
+            const n = noticeBar(R);
+            const ok = (await n.count()) > 0
+                && new RegExp(`started ${kind}`).test(await n.textContent())
+                && (await tile(R).count()) > 0
+                && (await playingMarks(R).count()) > 0;
+            if (ok) seen[R.label] = Date.now() - t0;
+        }
+        return pages.every(R => seen[R.label] !== undefined);
+    }, 15000, 100);
+    return seen;
 }
 
 // ── Hold'em through the UI ──────────────────────────────────────────────────
@@ -260,6 +293,21 @@ async function holdemAct(R, what) {
     return true;
 }
 
+/** The owner's switch in Server Settings, through the real control. */
+async function setGames(P1, on) {
+    await P1.page.locator('.server-settings-btn').first().click();
+    const toggle = P1.page.locator('input[aria-label="Allow games in voice calls"]');
+    await toggle.waitFor({ state: 'attached', timeout: 10000 });
+    if ((await toggle.isChecked()) !== on) await P1.page.locator('label.toggle-row', { hasText: 'Allow games in voice calls' }).click();
+    const flipped = (await toggle.isChecked()) === on;
+    await P1.page.getByRole('button', { name: 'Save Changes' }).click();
+    const saved = !!await until(async () => (await P1.page.locator('body').innerText()).includes('Settings saved'), 8000);
+    const t = Date.now();
+    await P1.page.locator('.server-settings-content .close-btn').click();
+    await P1.page.locator('.server-settings-overlay').waitFor({ state: 'detached', timeout: 5000 }).catch(() => {});
+    return { flipped, saved, t };
+}
+
 // ── Main ────────────────────────────────────────────────────────────────────
 const summary = {};
 let OLD = null;
@@ -271,10 +319,13 @@ try {
     const P4 = await newPlayer('P4', true);
     const players = [P1, P2, P3, P4];
     const everyone = [P1, P2, P3, P4, S];
+    const others = [P2, P3, P4, S];
 
-    // ── 0. Server, voice channel, roles: S keeps CONNECT but loses Play Games.
+    // ── 0. A fresh server: games are on by default. S keeps CONNECT but no
+    // Play Games; P2..P4 get it back through a role once they are in the call.
     const srvName = 'GL ' + stamp.slice(-4);
     const srv = await call(P1.page, '/src/api/servers.ts', 'createServer', [srvName]);
+    check('a NEW server has games on by default (the create answer)', srv.games_enabled === true, srv);
     const vc = await call(P1.page, '/src/api/servers.ts', 'createChannel', [srv.id, 'Table', 1]);
     const ROOM = `voice_${vc.id}`;
     const PLAY_GAMES = 1 << 28;
@@ -284,19 +335,27 @@ try {
     await call(P1.page, '/src/api/servers.ts', 'updateRole', [srv.id, everyoneRole.id, { permissions: everyoneRole.permissions & ~PLAY_GAMES }]);
     const playersRole = await call(P1.page, '/src/api/servers.ts', 'createRole', [srv.id, { name: 'Players', permissions: PLAY_GAMES }]);
     const inv = await call(P1.page, '/src/api/servers.ts', 'createInvite', [srv.id, {}]);
+    for (const R of others) await call(R.page, '/src/api/servers.ts', 'joinViaInvite', [inv.code]);
+    const listed = await call(S.page, '/src/api/servers.ts', 'listServers');
+    check('...and the server list says so to a member', listed.find(s => s.id === srv.id)?.games_enabled === true);
+    // Sign-in is over: from here on, nobody reloads.
+    for (const R of everyone) { await reload(R); await openServer(R, srvName); check(`${R.label} joined the call`, await joinCall(R)); }
+    for (const R of everyone) R.loadsAtStart = R.loads;
 
-    // S joins BEFORE games are switched on, and is in the call when they are.
-    await call(S.page, '/src/api/servers.ts', 'joinViaInvite', [inv.code]);
-    await reload(S);
-    await reload(P1);
-    await openServer(P1, srvName);
-    await openServer(S, srvName);
-    check('P1 (owner) joined the call', await joinCall(P1));
-    check('S joined the call', await joinCall(S));
-    await P1.page.locator('.voice-channel-list .voice-channel', { hasText: 'Table' }).first().click();
-    await S.page.locator('.voice-channel-list .voice-channel', { hasText: 'Table' }).first().click();
-    await sleep(1000);
-    check('games are off by default: the call offers no table (owner)', (await entry(P1)) === null);
+    const members = await call(P1.page, '/src/api/servers.ts', 'listMembersWithRoles', [srv.id]);
+    for (const R of everyone) R.userId = members.find(m => m.username === R.username)?.id ?? null;
+    check('every account is a member with a known id', everyone.every(R => typeof R.userId === 'number'), everyone.map(R => [R.label, R.userId]));
+    const ownerName = members.find(m => m.id === P1.userId)?.username;
+
+    check('owner: the Activities launcher is in the call\'s controls on a fresh server', !!await until(() => hasLauncher(P1), 8000));
+    for (const R of [P2, P3, P4, S]) check(`${R.label} (no Play Games yet): no launcher`, !(await hasLauncher(R)));
+
+    // P2..P4 get the Players role WHILE in the call: the launcher must appear
+    // without a reload (ChannelPermsChanged refetches the channel's perms).
+    const tRole = Date.now();
+    for (const R of [P2, P3, P4]) await call(P1.page, '/src/api/servers.ts', 'assignRole', [srv.id, R.userId, playersRole.id]);
+    for (const R of [P2, P3, P4]) check(`${R.label}: the launcher appears live once a role grants Play Games`, !!await until(() => hasLauncher(R), 10000), { ms: Date.now() - tRole });
+    check('S (no Play Games): still no launcher', !(await hasLauncher(S)));
 
     // ── OLD: a 0.9.832-era client, a raw socket without the `games` cap, in the call.
     const oldCtx = await browser.newContext({ viewport: { width: 800, height: 600 } });
@@ -326,69 +385,48 @@ try {
     check('OLD (caps own_voice,presence) is in the call', !!await until(() => OLD.frames.some(f => f.m.type === 'RoomJoined' && f.m.payload?.room_id === ROOM), 10000));
     check('the server does not confirm `games` to OLD', Array.isArray(OLD.features) && !OLD.features.includes('games'), OLD.features);
 
-    // ── 1. The owner switches games ON in Server Settings (the real control).
-    await P1.page.locator('.server-settings-btn').first().click();
-    const toggle = P1.page.locator('input[aria-label="Allow games in voice calls"]');
-    await toggle.waitFor({ state: 'attached', timeout: 10000 });
-    if (!(await toggle.isChecked())) await P1.page.locator('label.toggle-row', { hasText: 'Allow games in voice calls' }).click();
-    await P1.page.getByRole('button', { name: 'Save Changes' }).click();
-    check('owner: Server Settings saved with games on', !!await until(async () => (await P1.page.locator('body').innerText()).includes('Settings saved'), 8000));
-    await P1.page.locator('.server-settings-content .close-btn').click();
-    await P1.page.locator('.server-settings-overlay').waitFor({ state: 'detached', timeout: 5000 });
+    // Everyone else on the call's stage, where the tile shows.
+    for (const R of others) await toStage(R);
 
-    // P2..P4 join now (their server rows are fresh) and get the Players role.
-    for (const R of [P2, P3, P4]) { await call(R.page, '/src/api/servers.ts', 'joinViaInvite', [inv.code]); }
-    const members = await call(P1.page, '/src/api/servers.ts', 'listMembersWithRoles', [srv.id]);
-    for (const R of everyone) R.userId = members.find(m => m.username === R.username)?.id ?? null;
-    check('every account is a member with a known id', everyone.every(R => typeof R.userId === 'number'), everyone.map(R => [R.label, R.userId]));
-    for (const R of [P2, P3, P4]) await call(P1.page, '/src/api/servers.ts', 'assignRole', [srv.id, R.userId, playersRole.id]);
-    for (const R of [P2, P3, P4]) { await reload(R); await openServer(R, srvName); check(`${R.label} joined the call`, await joinCall(R)); }
-
-    // ── 2. S has no Play Games: no Open, and (no table yet) nothing at all.
-    await S.page.locator('.voice-channel-list .voice-channel', { hasText: 'Table' }).first().click();
-    await sleep(800);
-    check('S (no Play Games): no table is offered while the call has none', (await entry(S)) === null);
-
-    // ── 3. P1 opens Hold'em from the stage.
-    await P1.page.locator('.voice-channel-list .voice-channel', { hasText: 'Table' }).first().click();
-    check('owner: the stage offers "Open a table"', /Open a table/.test(await until(() => entry(P1), 10000) || ''));
-    await openTableView(P1);
-    await shot(P1.page, '01-p1-open-panel');
-    await P1.page.getByRole('button', { name: /Open a Poker table/ }).click();
-    check('owner: a Poker table opened', !!await until(async () => (await P1.page.locator('.gtable-holdem').count()) > 0, 10000));
+    // ── 1. P1 starts Poker from the launcher: the picker's Poker card.
+    await openLauncher(P1);
+    check('owner: the picker offers Poker and Blackjack as cards', (await P1.page.locator('.activity-card').count()) === 2
+        && (await P1.page.locator('.activity-card[data-kind="holdem"] svg').count()) > 0);
+    await shot(P1.page, '01-p1-picker');
+    const tPoker = Date.now();
+    await P1.page.locator('.activity-card[data-kind="holdem"]').click();
+    check('owner (the starter): the table opens for them and seats them, behind the first-sit disclosure', await acceptDisclosure(P1, true));
     const HOLDEM_ID = P1.cur?.table_id;
+    const seenPoker = await everyoneSeesActivity(others, 'Poker', tPoker);
+    summary.poker_seen_ms = seenPoker;
+    for (const R of others) check(`${R.label}: notice "${ownerName} started Poker", the tile and the playing mark within ${LIVE_MS} ms, no reload`, seenPoker[R.label] !== undefined && seenPoker[R.label] <= LIVE_MS, seenPoker);
+    check('the notice names the starter', /started Poker/.test(await noticeBar(P2).textContent()) && (await noticeBar(P2).textContent()).includes(ownerName));
+    check('S (no Play Games): the notice and the tile offer Watch only', (await noticeBar(S).getByRole('button', { name: 'Join', exact: true }).count()) === 0
+        && (await noticeBar(S).getByRole('button', { name: 'Watch', exact: true }).count()) === 1
+        && (await tile(S).getByRole('button', { name: 'Join', exact: true }).count()) === 0);
+    check('the notice is not a dialog and took no focus', await P2.page.evaluate(() => !document.querySelector('.activity-notice')?.contains(document.activeElement) && !document.querySelector('[role="dialog"]')));
+    check('the channel row says the activity is on (sidebar)', (await P3.page.locator('.voice-channel .voice-activity-chip', { hasText: 'Poker' }).count()) === 1);
+    await shot(P2.page, '02-p2-notice-and-tile');
+    await shot(P4.page, '03-p4-phone-notice-and-tile');
+    await shot(S.page, '04-s-watch-only');
 
-    // S was online, in the call, BEFORE the owner switched games on: its
-    // server row still says games_enabled=false. The open table is the
-    // server's own word that this call plays games.
-    const sEntry = await until(() => entry(S), 8000);
-    check('S (online since before games were on, no reload): the open table is offered as "Watch the table"', /Watch the table/.test(sEntry || ''), sEntry);
-    if (!/Watch the table/.test(sEntry || '')) {
-        note('S reloads to pick up games_enabled (the stale-row finding above)');
-        await reload(S); await openServer(S, srvName);
-        await S.page.locator('.voice-channel-list .voice-channel', { hasText: 'Table' }).first().click();
-        await until(() => entry(S), 10000);
+    // ── 2. They join: P2 and P3 from the tile, P4 (phone) from the notice; S watches.
+    for (const R of [P2, P3]) {
+        await press(R, tile(R).getByRole('button', { name: 'Join', exact: true }));
+        check(`${R.label} joined from the tile (disclosure first)`, await acceptDisclosure(R, true));
     }
-    await openTableView(S);
-    check('S: watching — no Sit button and no Open panel, worded as watching', await until(async () =>
+    await press(P4, noticeBar(P4).getByRole('button', { name: 'Join', exact: true }));
+    check('P4 (phone) joined from the notice (disclosure first)', await acceptDisclosure(P4, true));
+    await shot(P4.page, '05-p4-phone-seated');
+    await press(S, tile(S).getByRole('button', { name: 'Watch', exact: true }));
+    check('S: watching - no Sit, worded as watching', !!await until(async () =>
         (await S.page.locator('.gtable-holdem').count()) > 0
         && (await S.page.locator('.gseat-sit').count()) === 0
-        && (await S.page.locator('.games-open').count()) === 0
         && /You are watching this table/.test(await S.page.locator('.games-footer').textContent()), 8000));
-    await shot(S.page, '02-s-watching-no-sit');
+    check('every seated player has a playing mark in the sidebar (4)', !!await until(async () => (await playingMarks(P1).count()) === 4, 8000), await playingMarks(P1).count());
+    await shot(P1.page, '06-p1-sidebar-marks');
 
-    for (const R of [P2, P3, P4]) {
-        check(`${R.label}: the call offers "Join the table"`, /Join the table/.test(await until(() => entry(R), 10000) || ''));
-        await openTableView(R);
-    }
-    // Sit one by one (seat_taken races are not what this run is about).
-    check('P1 seated', await sit(P1, true));
-    check('P2 seated', await sit(P2, true));
-    check('P3 seated', await sit(P3, true));
-    check('P4 (phone) seated', await sit(P4, true));
-    await shot(P4.page, '03-p4-phone-seated');
-
-    // ── 4. Play. Scenarios by hand number; the driver reads each player's own
+    // ── 3. Play. Scenarios by hand number; the driver reads each player's own
     // view (from its recorded frames) and acts through that player's UI.
     const SCEN = { 1: 'checkdown', 2: 'foldout', 3: 'allin', 4: 'timeout', 5: 'checkdown', 6: 'foldout', 7: 'checkdown', 8: 'allin' };
     const scen = (h) => SCEN[h] || 'checkdown';
@@ -456,10 +494,10 @@ try {
             else if (sc === 'timeout' && !h.waited) {
                 h.waited = R.label;
                 note(`hand ${v.hand_no}: ${R.label} lets the ${v.config.turn_clock_secs}s clock run out`);
-                if (!h.shotClock) { h.shotClock = true; await sleep(1500); await shot(R.page, `04-${R.label}-clock-running`); }
+                if (!h.shotClock) { h.shotClock = true; await sleep(1500); await shot(R.page, `07-${R.label}-clock-running`); }
                 continue;
             }
-            if (v.hand_no === 3 && R.phone && !summary.phoneTurnShot) { summary.phoneTurnShot = true; await shot(R.page, '05-p4-phone-turn'); }
+            if (v.hand_no === 3 && R.phone && !summary.phoneTurnShot) { summary.phoneTurnShot = true; await shot(R.page, '08-p4-phone-turn'); }
             const ok = await holdemAct(R, what);
             if (!ok) R.acted = null; // the bar never showed: try again on the next pass
             actedNow = true;
@@ -492,56 +530,81 @@ try {
     check('Hold\'em: at least one all-in', stats.allins > 0, stats);
     check('Hold\'em: at least one fold-out (hand won without a showdown)', stats.foldouts > 0, stats);
     check('Hold\'em: at least one turn decided by the clock running out', stats.timeouts > 0, stats);
-    await shot(P1.page, '06-p1-desktop-holdem');
-    await shot(P4.page, '07-p4-phone-holdem');
-    await shot(S.page, '08-s-spectator-holdem');
+    await shot(P1.page, '09-p1-desktop-holdem');
+    await shot(P4.page, '10-p4-phone-holdem');
+    await shot(S.page, '11-s-spectator-holdem');
 
-    // ── 5. The moderator closes the table.
-    await P1.page.getByRole('button', { name: 'Close table' }).click();
-    check('closing ends the table for EVERYONE, worded (moderator path)', !!await until(async () => {
-        for (const R of everyone) if (!/A moderator closed the table/.test(await noticeText(R))) return false;
+    // ── 4. "Back to call" and back keeps the seat (desktop and phone).
+    for (const R of [P3, P4]) {
+        const seat = R.cur?.view?.viewer_seat;
+        await press(R, R.page.getByRole('button', { name: 'Back to call' }));
+        const onStage = !!await until(async () => (await R.page.locator('.voice-stage').count()) > 0 && (await tile(R).count()) > 0, 6000);
+        const composerBack = !R.phone || !!await until(async () => (await R.page.locator('form.message-form').count()) > 0, 4000);
+        check(`${R.label}: Back to call shows the call's grid with the tile${R.phone ? ', and the composer returns' : ''}; still in the call`, onStage && composerBack && await inCall(R));
+        if (R.phone) await shot(R.page, '12-p4-phone-back-to-call');
+        check(`${R.label}: the tile says Open (seated)`, (await tile(R).getByRole('button', { name: 'Open', exact: true }).count()) === 1);
+        await press(R, tile(R).getByRole('button', { name: 'Open', exact: true }));
+        check(`${R.label}: back at the table, same seat`, !!await until(async () => (await R.page.locator('.gtable-holdem').count()) > 0, 6000) && R.cur?.view?.viewer_seat === seat, { seat, now: R.cur?.view?.viewer_seat });
+        if (R.phone) check('P4 (phone): at the table the composer steps aside', (await R.page.locator('form.message-form').count()) === 0);
+    }
+
+    // ── 5. The owner switches games OFF: the table ends for everyone at once,
+    // and the launcher, the tile, the marks and the notice go - live.
+    for (const R of others) await toStage(R).catch(() => {});
+    const off = await setGames(P1, false);
+    check('owner: Server Settings saved with games OFF', off.flipped && off.saved);
+    check('games off: every page received GameEnded "disabled"', !!await until(() => everyone.every(R => R.ended.some(e => e.reason === 'disabled')), 10000), everyone.map(R => [R.label, R.ended.map(e => e.reason)]));
+    const endTimes = everyone.map(R => R.ended.find(e => e.reason === 'disabled')?.t).filter(Boolean);
+    check('...at once: every page within 1 s of the others', endTimes.length === everyone.length && Math.max(...endTimes) - Math.min(...endTimes) <= 1000, { spreadMs: Math.max(...endTimes) - Math.min(...endTimes) });
+    check('games off: every page received the switch (GamesEnabled false)', !!await until(() => everyone.every(R => R.switched.some(s => s.on === false)), 8000), everyone.map(R => [R.label, R.switched]));
+    check('games off: the launcher is gone everywhere, no reload', !!await until(async () => { for (const R of everyone) if (await hasLauncher(R)) return false; return true; }, 8000));
+    check('games off: tile, playing marks and notice gone everywhere', !!await until(async () => {
+        for (const R of everyone) if ((await tile(R).count()) || (await playingMarks(R).count()) || (await noticeBar(R).count()) || (await R.page.locator('.voice-activity-chip').count())) return false;
         return true;
-    }, 10000));
-    check('S (no Play Games): with no table there is still no Open panel', (await S.page.locator('.games-open').count()) === 0);
-    check('everyone received GameEnded "closed"', everyone.every(R => R.ended.includes('closed')), everyone.map(R => [R.label, R.ended]));
+    }, 8000));
+    await shot(P4.page, '13-p4-phone-games-off');
 
-    // ── 6. One table per call: two people open at once.
-    for (const R of [P1, P2]) {
-        await R.page.getByRole('radio', { name: /Blackjack/ }).click();
-    }
-    const go1 = P1.page.getByRole('button', { name: /Open a Blackjack table/ });
-    const go2 = P2.page.getByRole('button', { name: /Open a Blackjack table/ });
-    await go1.waitFor({ timeout: 5000 });
-    await go2.waitFor({ timeout: 5000 });
-    // Both presses fired together (a DOM click each, no actionability wait in
-    // between), so both GameCreates are on the wire before either table lands.
-    await Promise.all([go1.evaluate(b => b.click()).catch(() => {}), go2.evaluate(b => b.click()).catch(() => {})]);
-    const refusedInline = async () => {
-        for (const R of [P1, P2]) if (/A Blackjack table is already open in this call; it has to close before another game can start\./.test(await noticeText(R))) return R.label;
-        return null;
-    };
-    let loser = await until(refusedInline, 4000);
-    let path = 'two players opening at once';
-    if (!loser) {
-        path = 'race lost: a raw GameCreate on P2\'s own app socket';
-        await P2.page.evaluate((frame) => {
-            const ws = [...window.__appSockets].reverse().find(w => w.readyState === 1);
-            ws && ws.send(JSON.stringify(frame));
-        }, { type: 'GameCreate', payload: { room_id: ROOM, kind: 'holdem', config: {} } });
-        loser = await until(async () => (/already open in this call/.test(await noticeText(P2)) ? 'P2' : null), 6000);
-    }
-    check(`a second table in the call is refused INLINE in the owner's words (${path})`, !!loser, { loser });
+    // ── 6. ...and ON: the launcher comes back everywhere, no reload.
+    const on = await setGames(P1, true);
+    check('owner: Server Settings saved with games ON', on.flipped && on.saved);
+    check('games on: every page received the switch (GamesEnabled true)', !!await until(() => everyone.every(R => R.switched.some(s => s.on === true)), 8000));
+    for (const R of players) check(`${R.label}: the launcher is back without a reload`, !!await until(() => hasLauncher(R), 8000));
+    check('S: still no launcher (no Play Games)', !(await hasLauncher(S)));
+
+    // ── 7. P1 starts Blackjack from the launcher; everyone sees it, joins.
+    await openLauncher(P1);
+    const tBj = Date.now();
+    await P1.page.locator('.activity-card[data-kind="blackjack"]').click();
+    check('owner: seated at Blackjack (no disclosure the second time)', await acceptDisclosure(P1, false));
+    const BJ_ID = P1.cur?.table_id;
+    const seenBj = await everyoneSeesActivity(others, 'Blackjack', tBj);
+    summary.blackjack_seen_ms = seenBj;
+    for (const R of others) check(`${R.label}: Blackjack notice, tile and mark within ${LIVE_MS} ms`, seenBj[R.label] !== undefined && seenBj[R.label] <= LIVE_MS, seenBj);
+    // The picker of someone else in the call: Join the running one; the other waits.
+    await openLauncher(P2);
+    check('P2: the picker shows Blackjack running and Poker waiting, with the reason', (await P2.page.locator('.activity-card[data-kind="holdem"]').isDisabled())
+        && /Blackjack is running in this call/.test(await P2.page.locator('.activity-picker').textContent()));
+    await shot(P2.page, '14-p2-picker-running');
+    await press(P2, P2.page.locator('.activity-picker').getByRole('button', { name: 'Join', exact: true }));
+    check('P2 joined Blackjack from the picker', await acceptDisclosure(P2, false));
+    await press(P3, tile(P3).getByRole('button', { name: 'Join', exact: true }));
+    check('P3 joined Blackjack from the tile', await acceptDisclosure(P3, false));
+    await press(P4, noticeBar(P4).getByRole('button', { name: 'Join', exact: true }));
+    check('P4 (phone) joined Blackjack from the notice', await acceptDisclosure(P4, false));
+    await press(S, noticeBar(S).getByRole('button', { name: 'Watch', exact: true }));
+    check('S watches Blackjack: no Sit', !!await until(async () => (await S.page.locator('.gtable-blackjack').count()) > 0 && (await S.page.locator('.gseat-sit').count()) === 0, 8000));
+
+    // One activity per call: a raw second GameCreate on P2's own app socket is
+    // refused INLINE (a GameRefused, never an alert).
+    await P2.page.evaluate((frame) => {
+        const ws = [...window.__appSockets].reverse().find(w => w.readyState === 1);
+        ws && ws.send(JSON.stringify(frame));
+    }, { type: 'GameCreate', payload: { room_id: ROOM, kind: 'holdem', config: {} } });
+    check('a second activity in the call is refused INLINE in the owner\'s words', !!await until(async () => /A Blackjack table is already open in this call; it has to close before another game can start\./.test(await tableNotice(P2)), 6000));
     check('no alert() for the refusal', alerts.length === 0, alerts);
-    if (loser) await shot((loser === 'P1' ? P1 : P2).page, '09-refused-inline');
-    const BJ_ID = await until(() => P1.cur && P1.cur.view.game === 'blackjack' && P1.cur.table_id, 8000);
-    check('a Blackjack table is open for everyone', !!BJ_ID && !!await until(async () => {
-        for (const R of everyone) if (!(await R.page.locator('.gtable-blackjack').count())) return false;
-        return true;
-    }, 10000));
-    for (const R of players) check(`${R.label} sat at Blackjack (no disclosure the second time)`, await sit(R, false));
-    check('S: still no Sit at Blackjack', (await S.page.locator('.gseat-sit').count()) === 0);
+    await shot(P2.page, '15-p2-refused-inline');
 
-    // ── 7. Blackjack rounds.
+    // ── 8. Blackjack rounds.
     const bj = { rounds: 0, doubles: 0, splits: 0, hits: 0, stands: 0 };
     const bjSeen = new Set();
     const bjTally = () => {
@@ -578,7 +641,7 @@ try {
                 const name = v.legal.can_split ? 'Split'
                     : (v.legal.can_double && bj.doubles === 0) ? 'Double'
                     : (hand && hand.total < 15 && v.legal.can_hit) ? 'Hit' : 'Stand';
-                if (R.phone && !summary.bjPhoneShot) { summary.bjPhoneShot = true; await shot(R.page, '10-p4-phone-blackjack-turn'); }
+                if (R.phone && !summary.bjPhoneShot) { summary.bjPhoneShot = true; await shot(R.page, '16-p4-phone-blackjack-turn'); }
                 const b = R.page.locator('.games-footer .games-actions button', { hasText: new RegExp(`^${name}$`) });
                 if (!await until(async () => (await b.count()) && await b.isEnabled(), 5000)) { R.acted = null; continue; }
                 await press(R, b);
@@ -591,44 +654,49 @@ try {
     summary.blackjack = bj;
     check(`Blackjack: >= ${MIN_ROUNDS} rounds played to the end`, bj.rounds >= MIN_ROUNDS, bj);
     check('Blackjack: a double or a split was played', bj.doubles + bj.splits > 0, bj);
-    await shot(P1.page, '11-p1-desktop-blackjack');
-    await shot(P4.page, '12-p4-phone-blackjack');
+    // The deal ~1.5 s after the LAST bet (owner-side default, 2026-10-03): the
+    // round_started frame against the frame just before it, when that frame was
+    // a bet that completed the table (every active seat had bet).
+    const pauses = [];
+    const bjFr = gameFrames(P1).filter(f => f.m.payload?.table_id === BJ_ID && f.m.payload.view);
+    for (let i = 1; i < bjFr.length; i++) {
+        const f = bjFr[i], prev = bjFr[i - 1];
+        if (!(f.m.payload.events || []).some(e => e.type === 'round_started')) continue;
+        const pv = prev.m.payload.view;
+        const lastBet = (prev.m.payload.events || []).some(e => e.type === 'bet_placed');
+        const active = pv.seats.filter(s => s && !s.sitting_out);
+        if (lastBet && active.length > 0 && active.every(s => s.pending_bet > 0) && f.m.payload.version === prev.m.payload.version + 1) pauses.push(f.t - prev.t);
+    }
+    summary.bj_last_bet_pause_ms = pauses;
+    check('Blackjack: once everyone has bet, the deal comes ~1.5 s after the last bet (every such round 1.3-3 s)',
+        pauses.length > 0 && pauses.every(ms => ms >= 1300 && ms <= 3000), pauses);
+    await shot(P1.page, '17-p1-desktop-blackjack');
+    await shot(P4.page, '18-p4-phone-blackjack');
 
-    // ── 8. The owner switches games OFF: the table ends for everyone, worded.
-    await P1.page.locator('.server-settings-btn').first().click();
-    await toggle.waitFor({ state: 'attached', timeout: 10000 });
-    if (await toggle.isChecked()) await P1.page.locator('label.toggle-row', { hasText: 'Allow games in voice calls' }).click();
-    check('owner: the switch turns off', !(await toggle.isChecked()));
-    await P1.page.getByRole('button', { name: 'Save Changes' }).click();
-    await until(async () => (await P1.page.locator('body').innerText()).includes('Settings saved'), 8000);
-    await P1.page.locator('.server-settings-content .close-btn').click();
-    check('games off: every page received GameEnded "disabled"', !!await until(() => everyone.every(R => R.ended.includes('disabled')), 10000), everyone.map(R => [R.label, R.ended]));
-    check('games off: the reason is shown at the table for everyone', !!await until(async () => {
-        for (const R of everyone) if (!/The server owner switched games off\./.test(await noticeText(R))) return false;
-        return true;
-    }, 10000));
-    // Their cached server rows still said games were on: the server's
-    // `disabled` ending makes the client refetch them, so nobody is left
-    // looking at an "Open a table" the server would refuse.
-    check('games off: nobody is offered "Open a table" any more (stale server rows refetched)', !!await until(async () => {
-        for (const R of everyone) if (await R.page.locator('.games-open').count()) return false;
+    // ── 9. The moderator closes the table: tile, marks and notice go everywhere.
+    for (const R of others) await toStage(R).catch(() => {});
+    await P1.page.getByRole('button', { name: 'Close table' }).click();
+    check('closing ends the table for EVERYONE (GameEnded "closed" on every page)', !!await until(() => everyone.every(R => R.ended.some(e => e.reason === 'closed')), 10000), everyone.map(R => [R.label, R.ended.map(e => e.reason)]));
+    check('closed: tile, playing marks, channel chip and notice gone everywhere', !!await until(async () => {
+        for (const R of everyone) if ((await tile(R).count()) || (await playingMarks(R).count()) || (await noticeBar(R).count()) || (await R.page.locator('.voice-activity-chip').count())) return false;
         return true;
     }, 8000));
-    await shot(P4.page, '13-p4-phone-games-off');
-    await shot(S.page, '14-s-games-off');
+    check('closed: the launcher is still there for the players (a new activity may start)', (await Promise.all(players.map(hasLauncher))).every(Boolean));
+    await shot(P2.page, '19-p2-after-close');
     check('everyone is still in the call after all of it', (await Promise.all(everyone.map(inCall))).every(Boolean));
+    check('nobody reloaded after sign-in (everything above arrived live)', everyone.every(R => R.loads === R.loadsAtStart), everyone.map(R => [R.label, R.loads - R.loadsAtStart]));
     check('no alert() at any point', alerts.length === 0, alerts);
 
-    // ── 9. PRIVACY, from every recorded frame.
+    // ── 10. PRIVACY, from every recorded frame.
     privacy({ HOLDEM_ID, BJ_ID, players, S });
 } catch (e) {
     check('live run reached the end', false, String(e && e.stack || e).slice(0, 900));
 } finally {
     if (OLD) {
         clearInterval(OLD.ping);
-        const g = OLD.frames.filter(f => typeof f.m.type === 'string' && f.m.type.startsWith('Game'));
+        const g = OLD.frames.filter(f => typeof f.m.type === 'string' && (f.m.type.startsWith('Game') || f.m.type === 'GamesEnabled'));
         const roomTraffic = OLD.frames.filter(f => !['ServerFeatures', 'Pong', 'RoomJoined'].includes(f.m.type)).length;
-        check('OLD (no `games` cap) received ZERO game frames through the whole run', g.length === 0, { game: g.length, total: OLD.frames.length });
+        check('OLD (no `games` cap) received ZERO game or games-switch frames through the whole run', g.length === 0, { game: g.length, total: OLD.frames.length, types: [...new Set(g.map(f => f.m.type))] });
         check('...while it stayed connected and in the room (positive control: it got other room traffic)', OLD.closed === null && roomTraffic > 0, { closed: OLD.closed, roomTraffic });
         fs.writeFileSync(path.join(OUT, 'frames-OLD.jsonl'), OLD.frames.map(f => JSON.stringify(f)).join('\n'));
         try { OLD.ws.close(); } catch { /* gone */ }

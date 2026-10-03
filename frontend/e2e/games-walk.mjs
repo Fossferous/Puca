@@ -1,15 +1,20 @@
-// LIVE: the in-call card table (docs/GAMES.md, "The table on screen") —
-// Poker and Blackjack, on a 1280x800 desktop and a 390x844 coarse-pointer
-// phone, two accounts in one voice call.
+// LIVE: the in-call card table as an ACTIVITY (docs/GAMES.md, "Activities"
+// and "The table on screen") — Poker and Blackjack, on a 1280x800 desktop and
+// a 390x844 coarse-pointer phone, two accounts in one voice call.
 //
 // What it proves, against the REAL web client and a backend that serves games
 // (it confirms `games` in ServerFeatures):
-//   1. the owner's "Allow games in voice calls" switch in Server Settings
-//      saves, and only then does the call offer a table (VoiceStage header on
-//      the desktop, the voice panel's expanded controls on the phone);
-//   2. opening a Poker table, sitting down behind the owner's disclosure
-//      ("Chips are free and worth nothing. This server deals the cards and its
-//      operator could see them.") — shown on the FIRST sit only;
+//   1. games are on by default: the owner's "Allow games in voice calls" switch
+//      in Server Settings is already on, and the call offers the Activities
+//      launcher (the rocket beside camera and screen share; on the phone with
+//      the camera behind the chevron);
+//   2. the launcher's picker (a centred panel on the desktop, a SHEET on the
+//      phone - 44 px targets, no overflow by clientWidth, a 460 px injection
+//      caught) starts Poker; the starter is seated behind the owner's
+//      disclosure ("Chips are free and worth nothing. This server deals the
+//      cards and its operator could see them.") — shown on the FIRST sit only;
+//      the phone gets the "<name> started Poker" notice and the activity tile
+//      in the call grid (both measured the same way) and joins from the tile;
 //   3. privacy: neither player's DOM ever holds the other's hole cards, and a
 //      spectator's holds no card but the board;
 //   4. the phone at 390x844: at most 6 seats, the opponents in a strip that
@@ -26,8 +31,9 @@
 //   6. a typed refusal is shown inline (a second GameCreate in a call that has
 //      a table -> "already open in this call"), never as an alert();
 //   7. the table closes for everyone (MOVE_MEMBERS) with the ending worded, and
-//      a Blackjack table opens in the same call: bet, deal, hit/stand, results;
-//   8. leaving the table view never touches the call;
+//      Blackjack starts from the launcher in the same call; the phone joins it
+//      from the notice: bet, deal (1.5 s after the last bet), hit/stand, results;
+//   8. "Back to call" never touches the call, and the tile brings you back;
 //   9. the felt, the card faces and the buttons keep >= 4.5:1 text contrast in
 //      all eight themes, with and without high contrast.
 // Each check prints PASS/FAIL; the exit code is the number of failures.
@@ -146,10 +152,12 @@ const myCards = (page) => page.evaluate(() => [...document.querySelectorAll('.ga
  * table and its sheet must end inside clientWidth, unless it lives in a
  * container that scrolls sideways on purpose (the opponents' strip).
  */
-async function phoneGeometry(page) {
-    return page.evaluate(() => {
+const TABLE_ROOTS = '.games-view, .games-sheet, .games-disclosure';
+const ACTIVITY_ROOTS = '.activity-picker, .activity-notice, .activity-tile';
+async function phoneGeometry(page, rootSel = TABLE_ROOTS) {
+    return page.evaluate((rootSel) => {
         const vw = document.documentElement.clientWidth;
-        const roots = [...document.querySelectorAll('.games-view, .games-sheet, .games-disclosure')];
+        const roots = [...document.querySelectorAll(rootSel)];
         const scrollsX = (el, root) => {
             for (let p = el.parentElement; p && p !== root.parentElement; p = p.parentElement) {
                 const o = getComputedStyle(p).overflowX;
@@ -174,7 +182,7 @@ async function phoneGeometry(page) {
         }
         const small = [];
         const covered = [];
-        for (const b of document.querySelectorAll('.games-view button, .games-sheet button, .games-disclosure button')) {
+        for (const b of roots.flatMap(r => [...r.querySelectorAll('button')])) {
             const r = b.getBoundingClientRect();
             if (r.width === 0 || getComputedStyle(b).visibility === 'hidden') continue;
             // A button scrolled out of the sideways strip is reachable by scrolling, not covered.
@@ -201,8 +209,9 @@ async function phoneGeometry(page) {
             seats: document.querySelectorAll('.games-opps .gseat').length + (document.querySelector('.games-me .games-me-info') ? 1 : 0),
             stripScrolls: (() => { const s = document.querySelector('.games-opps'); return s ? getComputedStyle(s).overflowX : null; })(),
             barRows: document.querySelectorAll('.games-footer .games-actions > .games-actions-row').length,
+            roots: roots.length,
         };
-    });
+    }, rootSel);
 }
 const geometryOk = (g) => g.overflow.length === 0 && g.scrollWidth <= g.vw && g.small.length === 0 && g.covered.length === 0;
 
@@ -274,10 +283,14 @@ try {
     await dismiss(A);
     await A.locator(`.server-icon[title="${srvName}"]`).click();
     await sleep(800);
-    const offered = async (page) => (await page.locator('.voice-stage-games, .vp-games').count()) > 0;
+    const offered = async (page) => (await page.locator('.vp-activities').count()) > 0;
     await A.locator('.voice-channel-list .voice-channel', { hasText: 'Table' }).first().click();
     check('A joined the call', !!await until(async () => (await A.locator('.voice-panel-compact .voice-connected-label').count()) > 0, 20000));
-    check('before the owner switches games on, the call offers no table', !(await offered(A)));
+    check('games are ON by default: a fresh server\'s call offers the Activities launcher at once', !!await until(() => offered(A), 8000));
+    check('desktop: the launcher sits beside camera and screen share in the call\'s controls', await A.evaluate(() => {
+        const b = document.querySelector('.vp-activities');
+        return !!b && b.previousElementSibling?.classList.contains('vp-camera') && !!b.parentElement?.querySelector('.vp-screenshare');
+    }));
 
     await A.locator('.server-settings-btn').first().click();
     const toggle = A.locator('input[aria-label="Allow games in voice calls"]');
@@ -286,11 +299,8 @@ try {
         const g = document.querySelector('input[aria-label="Allow games in voice calls"]')?.closest('.form-group');
         return !!g && /Allow clips/.test(g.previousElementSibling?.textContent || '');
     }));
-    if (!(await toggle.isChecked())) await A.locator('label.toggle-row', { hasText: 'Allow games in voice calls' }).click();
-    check('the switch turns on', await toggle.isChecked());
+    check('the switch is already ON (games are on by default; the owner may turn them off)', await toggle.isChecked());
     await shot(A, '01-desktop-settings-games-switch');
-    await A.getByRole('button', { name: 'Save Changes' }).click();
-    check('Server Settings saved', !!await until(async () => (await A.locator('body').innerText()).includes('Settings saved'), 8000));
     await A.locator('.server-settings-content .close-btn').click();
     await A.locator('.server-settings-overlay').waitFor({ state: 'detached', timeout: 5000 });
 
@@ -300,43 +310,83 @@ try {
     await sleep(2500);
     await dismiss(B);
 
-    // ── 1. The desktop opens the table from the call's stage.
-    await A.locator('.voice-channel-list .voice-channel', { hasText: 'Table' }).first().click(); // the connected channel: its stage
-    const stageBtn = A.locator('.voice-stage-games');
-    check('desktop: the VoiceStage header offers "Open a table"', !!await until(async () => (await stageBtn.count()) > 0 && /Open a table/.test(await stageBtn.innerText()), 10000));
-    await stageBtn.click();
-    await A.locator('.games-view').waitFor({ timeout: 15000 });
-    await shot(A, '02-desktop-open-a-table');
-    await A.getByRole('button', { name: /Open a Poker table/ }).click();
-    check('desktop: the Poker table opened', !!await until(async () => (await A.locator('.gtable-holdem').count()) > 0, 10000));
-    check('desktop: the call is untouched by opening the table', (await A.locator('.voice-panel-compact .voice-connected-label').count()) > 0);
-
-    // ── 2. The phone joins the call and opens the table from the voice panel.
+    // ── 1. The phone joins the call first, so it is there when the activity starts.
     await B.locator('.mobile-nav-btn').first().tap();
     await sleep(400);
     await B.locator(`.server-icon[title="${srvName}"]`).tap();
     await sleep(800);
     await B.locator('.voice-channel-list .voice-channel', { hasText: 'Table' }).first().tap();
     check('B (phone) joined the call', !!await until(async () => (await B.locator('.voice-panel-compact .voice-connected-label').count()) > 0, 20000));
-    check('phone: the Games control is behind the collapsed bar\'s chevron (hidden until expanded)', await until(async () => {
-        const n = await B.locator('.vp-games').count();
-        return n > 0 && !(await B.locator('.vp-games').isVisible());
+    check('phone: the launcher is behind the collapsed bar\'s chevron with the camera (hidden until expanded)', await until(async () => {
+        const n = await B.locator('.vp-activities').count();
+        return n > 0 && !(await B.locator('.vp-activities').isVisible());
     }, 8000));
+    // The phone's picker: a sheet.
     await B.locator('.vp-expand').tap();
-    await B.locator('.vp-games').tap();
-    await B.locator('.games-view').waitFor({ timeout: 15000 });
-    check('phone: a spectator sees the open table', !!await until(async () => (await B.locator('.gtable-holdem').count()) > 0, 10000));
-    check('phone: a spectator\'s DOM holds no card (nothing dealt, nothing shown)', (await faceUp(B)).length === 0, (await faceUp(B)).join(' '));
+    check('phone: expanded, the launcher shows beside the camera', await B.locator('.vp-activities').isVisible());
+    await B.locator('.vp-activities').tap();
+    await B.locator('.activity-picker.activity-sheet').waitFor({ timeout: 8000 });
+    const gS = await phoneGeometry(B, ACTIVITY_ROOTS);
+    check('phone: the picker is a sheet that fits 390 px, every target >= 44 px and hit at its centre', gS.roots > 0 && geometryOk(gS), gS);
+    await B.evaluate(() => {
+        const d = document.createElement('div');
+        d.id = '__w460s'; d.style.cssText = 'width:460px;height:8px;background:red;flex-shrink:0';
+        document.querySelector('.activity-cards')?.appendChild(d);
+    });
+    const gS460 = await phoneGeometry(B, ACTIVITY_ROOTS);
+    check('POSITIVE CONTROL: a 460 px element injected into the picker sheet is caught', gS460.overflow.length > 0, gS460.overflow);
+    await shot(B, '02-phone-activities-sheet-460');
+    await B.evaluate(() => document.getElementById('__w460s')?.remove());
+    await shot(B, '02-phone-activities-sheet');
+    await B.locator('.activity-picker').getByRole('button', { name: 'Close' }).tap();
+    check('phone: the sheet closes', !!await until(async () => (await B.locator('.activity-picker').count()) === 0, 4000));
+    // The phone looks at the call's grid (where the tile will show).
+    await B.locator('.mobile-nav-btn').nth(1).tap();
+    await sleep(400);
+    await B.locator('.voice-channel-list .voice-channel', { hasText: 'Table' }).first().tap();
+    await B.locator('.voice-stage').waitFor({ timeout: 10000 });
 
-    // ── 3. Both sit; the disclosure comes first, once each.
-    await A.locator('.gseat-sit').first().click();
+    // ── 2. The desktop starts Poker from the launcher's picker.
+    await A.locator('.vp-activities').click();
+    await A.locator('.activity-picker').waitFor({ timeout: 8000 });
+    check('desktop: the picker shows Poker and Blackjack as cards with art', (await A.locator('.activity-card').count()) === 2 && (await A.locator('.activity-card svg').count()) >= 2);
+    await shot(A, '02-desktop-activities-picker');
+    await A.locator('.activity-card[data-kind="holdem"]').click();
+    check('desktop: the Poker table opened for the starter', !!await until(async () => (await A.locator('.gtable-holdem').count()) > 0, 10000));
+    check('desktop: the call is untouched by opening the table', (await A.locator('.voice-panel-compact .voice-connected-label').count()) > 0);
+
+    // ── 3. The phone hears of it live: the notice and the tile, both fitting.
+    check('phone: the notice "<owner> started Poker" with Join and Watch', !!await until(async () =>
+        /started Poker/.test(await B.locator('.activity-notice').textContent().catch(() => '')), 5000));
+    check('phone: the activity tile in the call grid', !!await until(async () => (await B.locator('.activity-tile').count()) > 0, 5000));
+    await B.locator('.activity-tile').scrollIntoViewIfNeeded();
+    const gN = await phoneGeometry(B, ACTIVITY_ROOTS);
+    check('phone: the notice and the tile fit 390 px, every target >= 44 px and hit at its centre', gN.roots >= 2 && geometryOk(gN), gN);
+    // Nothing in the tile sits on top of anything else: the art, the name, the
+    // count and the buttons stack (a 16:9 tile squeezed them over each other).
+    const stack = await B.evaluate(() => ['.activity-art', '.activity-tile-name', '.activity-tile-count', '.activity-tile-actions']
+        .map(s => document.querySelector(`.activity-tile ${s}`)?.getBoundingClientRect()).map(r => r && [Math.round(r.top), Math.round(r.bottom)]));
+    check('phone: in the tile, the art, the name, the count and the buttons stack without overlapping', stack.every(Boolean) && stack.every((r, i) => i === 0 || r[0] >= stack[i - 1][1] - 0.5), stack);
+    await B.evaluate(() => {
+        const d = document.createElement('div');
+        d.id = '__w460n'; d.style.cssText = 'width:460px;height:8px;background:red;flex-shrink:0';
+        document.querySelector('.activity-tile')?.appendChild(d);
+    });
+    check('POSITIVE CONTROL: a 460 px element injected into the tile is caught', (await phoneGeometry(B, ACTIVITY_ROOTS)).overflow.length > 0);
+    await B.evaluate(() => document.getElementById('__w460n')?.remove());
+    await shot(B, '03-phone-notice-and-tile');
+    check('phone: the notice took no focus and is not a dialog', await B.evaluate(() => !document.querySelector('.activity-notice')?.contains(document.activeElement) && !document.querySelector('[role="dialog"]')));
+
+    // ── 3b. The starter was seated behind the disclosure; the phone joins from the tile.
     const disc = A.locator('.games-disclosure');
     check('desktop: the disclosure comes before the first sit, in the owner\'s words', await disc.isVisible().catch(() => false)
         && (await disc.innerText()).includes('Chips are free and worth nothing. This server deals the cards and its operator could see them.'));
     await shot(A, '03-desktop-disclosure');
     await disc.getByRole('button', { name: 'Sit down' }).click();
     check('desktop: seated', !!await until(async () => (await A.locator('.games-me .games-me-info').count()) > 0, 10000));
-    await B.locator('.gseat-sit').first().tap();
+    await B.locator('.activity-tile').getByRole('button', { name: 'Join', exact: true }).tap();
+    await B.locator('.games-view').waitFor({ timeout: 15000 });
+    check('phone: Join opened the table; nothing face up yet (nothing dealt, nothing shown)', (await faceUp(B)).length === 0, (await faceUp(B)).join(' '));
     const bdisc = B.locator('.games-disclosure');
     check('phone: the disclosure too', await until(() => bdisc.isVisible(), 5000));
     const gD = await phoneGeometry(B);
@@ -438,11 +488,19 @@ try {
     check('no alert() was raised for any refusal', alerts.length === 0, alerts);
     await shot(A, '09-desktop-refusal-inline');
 
-    // ── 6. Leaving the view never touches the call.
-    await A.getByRole('button', { name: 'Back to the call' }).click();
-    check('desktop: back on the call\'s stage, still connected', (await A.locator('.voice-stage').count()) > 0 && (await A.locator('.voice-panel-compact .voice-connected-label').count()) > 0);
-    await A.locator('.voice-stage-games').click();
-    check('desktop: the table is still there on return (the store kept it)', !!await until(async () => (await A.locator('.gtable-holdem').count()) > 0, 5000));
+    // ── 6. "Back to call" never touches the call; the tile brings you back.
+    await A.getByRole('button', { name: 'Back to call' }).click();
+    check('desktop: back on the call\'s grid with the activity tile, still connected', (await A.locator('.voice-stage').count()) > 0 && (await A.locator('.activity-tile').count()) > 0 && (await A.locator('.voice-panel-compact .voice-connected-label').count()) > 0);
+    await A.locator('.activity-tile').getByRole('button', { name: 'Open', exact: true }).click();
+    check('desktop: the table is still there on return (the store kept it), same seat', !!await until(async () => (await A.locator('.gtable-holdem').count()) > 0 && (await A.locator('.games-me .games-me-info').count()) > 0, 5000));
+    // The phone: at the table the composer steps aside; Back to call brings it back.
+    check('phone: at the table, no composer', (await B.locator('form.message-form').count()) === 0);
+    await B.getByRole('button', { name: 'Back to call' }).tap();
+    check('phone: Back to call shows the grid and the composer again; still in the call', !!await until(async () =>
+        (await B.locator('.voice-stage').count()) > 0 && (await B.locator('form.message-form').count()) > 0, 5000) && (await B.locator('.voice-panel-compact .voice-connected-label').count()) > 0);
+    await shot(B, '09b-phone-back-to-call');
+    await B.locator('.activity-tile').getByRole('button', { name: 'Open', exact: true }).tap();
+    check('phone: Open returns to the table', !!await until(async () => (await B.locator('.gtable-holdem').count()) > 0, 5000));
 
     // ── 7. Themes: felt, card faces and buttons keep their contrast.
     const themes = ['dark', 'light', 'amoled', 'pink', 'purple', 'green', 'orange', 'yellow'];
@@ -507,14 +565,17 @@ try {
     check('closing ends the table for everyone, worded', !!await until(async () =>
         /moderator closed the table/.test(await A.locator('.games-notice').innerText().catch(() => ''))
         && /moderator closed the table/.test(await B.locator('.games-notice').innerText().catch(() => '')), 10000));
-    await A.getByRole('radio', { name: /Blackjack/ }).click();
-    await A.getByRole('button', { name: /Open a Blackjack table/ }).click();
-    check('a Blackjack table opened in the same call', !!await until(async () => (await A.locator('.gtable-blackjack').count()) > 0 && (await B.locator('.gtable-blackjack').count()) > 0, 10000));
-    await A.locator('.gseat-sit').first().click();
-    check('desktop: no disclosure the second time on this server', !(await A.locator('.games-disclosure').count()));
-    await until(async () => (await B.locator('.gseat-sit').count()) > 0, 5000);
-    await B.locator('.gseat-sit').first().tap();
-    check('phone: no disclosure the second time on this server', !(await B.locator('.games-disclosure').count()));
+    // B goes back to the call's grid; A starts Blackjack from the launcher.
+    await B.getByRole('button', { name: 'Back to call' }).tap();
+    await A.locator('.vp-activities').click();
+    await A.locator('.activity-card[data-kind="blackjack"]').click();
+    check('a Blackjack table opened for the starter', !!await until(async () => (await A.locator('.gtable-blackjack').count()) > 0, 10000));
+    check('desktop: the starter is seated, no disclosure the second time on this server', !!await until(async () => (await A.locator('.games-me .games-me-info').count()) > 0, 8000) && !(await A.locator('.games-disclosure').count()));
+    check('phone: the Blackjack notice', !!await until(async () => /started Blackjack/.test(await B.locator('.activity-notice').textContent().catch(() => '')), 5000));
+    const gN2 = await phoneGeometry(B, ACTIVITY_ROOTS);
+    check('phone: the Blackjack notice and tile fit, 44 px targets', geometryOk(gN2), gN2);
+    await B.locator('.activity-notice').getByRole('button', { name: 'Join', exact: true }).tap();
+    check('phone: Join from the notice seats it, no disclosure the second time', !!await until(async () => (await B.locator('.gtable-blackjack').count()) > 0 && (await B.locator('.games-me .games-me-info').count()) > 0, 8000) && !(await B.locator('.games-disclosure').count()));
     check('both seated at Blackjack with a bet bar', !!await until(async () => (await A.locator('.games-footer .games-actions').count()) > 0 && (await B.locator('.games-footer .games-actions').count()) > 0, 10000));
     await shot(B, '11-phone-blackjack-bet');
     const gb = await phoneGeometry(B);
