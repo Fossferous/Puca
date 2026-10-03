@@ -52,6 +52,7 @@ bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom)); /* nav  */
 | 2100 | `.ua-prompt-backdrop` | unattended passphrase prompt — above the browser above, because connecting to an armed device raises it on top |
 | 2060 | `.clip-composer-backdrop` | clip composer — above Settings/ScreenShare (2000) because the save-clip hotkey fires while Settings can be open; below the 2100 live-connection prompts |
 | 2090 | `.clip-approval-backdrop` | clip approval prompt (Phase 2) — above the composer, below the 2100 prompts, which block a live connection on a 45 s deadline |
+| 1100 | `.games-sheet-scrim` | the card table's amount sheet and first-sit disclosure (docs/GAMES.md) — portaled to `<body>`; above the voice bar and bottom nav, below Settings. The sheet rides the bottom of `window.visualViewport`, so it stays above the soft keyboard |
 
 ### The integration contract for any NEW top-level surface
 
@@ -217,6 +218,7 @@ node e2e/mobile-walk3.mjs <outdir> <user> <pass>      # content surfaces, emoji,
 node e2e/mobile-voice-test.mjs <outdir>               # voice panel + drawer behavior (+ asserts NO clip controls on phones)
 node e2e/clips-mobile-walk.mjs <outdir> [baseURL]     # clip approval prompt / posted clip / owner block at 390x844 (fixture harness, no login)
 node e2e/devices-mobile-walk.mjs <outdir> [baseURL]   # Devices view, both tabs, at 390x844 (fixture harness, no login)
+APP=… API=… OUT=<outdir> node e2e/games-walk.mjs      # the in-call card table: Poker + Blackjack, 1280x800 and 390x844, keyboard-open raise sheet, 460 px overflow control, eight themes (header of the file)
 node e2e/member-popup-scroll.mjs <outdir>             # member profile popup: everything reachable by wheel (1280x720, 1280x460) and touch (390x844, a sheet above the nav); needs API= and APP= (header of the file)
 node e2e/user-context-menu-reach.mjs <outdir> [baseURL]   # right-click user menu: inline Move to / Roles lists reachable by wheel and touch at 1280x720, 1280x400 and 390x844 (fixture harness, no login)
 node e2e/user-menu-move-to-real-browser.mjs           # Move to targets and the server icon's Notification Settings: on screen and hit by real clicks/taps, desktop + 390x844 (bundled component, no server)

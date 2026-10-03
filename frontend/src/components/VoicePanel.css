@@ -1339,6 +1339,7 @@
        touch laptop under 1024px does reach here — hide them the same way. */
     .voice-panel-compact.vp-collapsed .voice-dropdown,
     .voice-panel-compact.vp-collapsed .vp-camera,
+    .voice-panel-compact.vp-collapsed .vp-games,
     .voice-panel-compact.vp-collapsed .vp-screenshare,
     .voice-panel-compact.vp-collapsed .voice-btn.voice-clip-arm,
     .voice-panel-compact.vp-collapsed .voice-btn.voice-clip-save {

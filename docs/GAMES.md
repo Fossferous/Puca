@@ -2,20 +2,23 @@
 
 Hold'em and Blackjack played with the people in your current voice call, for
 free chips that exist only at that table. **The rules engine, the wire
-contract and the server half are built and tested; the client is not.** The
-server plays tables bound to calls (`src/games.rs`), reads the owner's
-`games_enabled` switch and `PLAY_GAMES`, runs the clocks and the disconnect
-grace, and confirms `games` to clients that announce it. There is no Server
-Settings toggle and no table on screen yet — this page is the design for that
-client half, and the contract the engine, the frames and the server keep.
+contract, the server half and the client half are built and tested, and
+were integrated and walked live together.** The server plays tables bound to
+calls (`src/games.rs`), reads the owner's `games_enabled` switch and
+`PLAY_GAMES`, runs the clocks and the disconnect grace, and confirms `games`
+to clients that announce it; the client draws both tables on desktop and on a
+390x844 phone and carries the owner's toggle. This page is the design, the
+contract the engine, the frames, the server and the client keep, and the
+record of what each half decided as built.
 
 | piece | state |
 |---|---|
 | Rules engine: `crates/puca-games` (Hold'em, Blackjack, evaluator, shuffle) | **built**, pure Rust, tested (below) |
 | Wire contract: every frame, view, event, refusal and end reason; the `games` capability; fixtures both sides parse (*Frames*, below) | **built**, tested; the server confirms `games` (`GAMES_SERVED = true`) |
-| `PLAY_GAMES` (1 << 28) and `servers.games_enabled` (migration 073, default off) | **built**; read by the server (the gate, `GET /servers`, the owner-only `PATCH /servers/:id/settings`, the invite join); the toggle UI is client half |
+| `PLAY_GAMES` (1 << 28) and `servers.games_enabled` (migration 073, default off) | **built**; read by the server (the gate, `GET /servers`, the owner-only `PATCH /servers/:id/settings`, the invite join) and written by the owner's toggle in Server Settings |
 | Server tables bound to a voice room, handlers, timers, grace, sweep branch, teardown | **built**: `src/games.rs`, tested in `src/games_tests.rs` (*As built*, below) |
-| Client table view, desktop + 390x844 phone | designed here, not built |
+| Client table view, desktop + 390x844 phone; the owner's toggle; `PLAY_GAMES` in the role and channel editors | **built** (*The table on screen*, below) |
+| Both halves together, live | **walked**: `frontend/e2e/games-live.mjs` (four players and a spectator through the real UI and server, every frame scanned for leaked cards) and `frontend/e2e/games-walk.mjs` against the real server (*Integration*, below) |
 
 ## Owner decisions (fixed)
 
@@ -659,14 +662,14 @@ player has bet, or 15 s after the first bet.
 
 - **`servers.games_enabled BOOLEAN NOT NULL DEFAULT FALSE`** — off by
   default, like `clips_enabled`. **Added by migration `073_games.sql`** (LF
-  bytes, additive: 0.9.832 boots over it). **Server half built:** the
-  server-row SELECTs (`GET /servers`, the invite join, the new-server
+  bytes, additive: 0.9.832 boots over it). **Built on both halves.** Server:
+  the server-row SELECTs (`GET /servers`, the invite join, the new-server
   answer), `ServerResponse.games_enabled`, and the owner-only update handler
   (`PATCH /servers/:id/settings`, `games_enabled`; turning it off ends that
-  server's tables). Still to do (client half): the owner's toggle in Server
-  Settings (next to Clips; owner-only like it) and the client `Server` type.
-  A setting ships with its UI, so the server half must not be released
-  without it.
+  server's tables). Client: the owner's toggle in Server Settings (next to
+  Clips; owner-only like it; disabled with a note, and never sent, when the
+  server did not return the field) and `games_enabled` on the client
+  `Server` type. Both name the field `games_enabled`.
 - **`PLAY_GAMES = 1 << 28`** — **built**: `src/permissions.rs` (the next
   free bit; `1 << 28` is exact with JS `<<`, bit 31 would not be), in
   `DEFAULT_MEMBER` so new servers have it, and migration 073 ORs it onto
@@ -675,9 +678,9 @@ player has bet, or 15 s after the first bet.
   it automatically (pinned by a test). Client: BOTH maps in
   `frontend/src/api/permissionBits.ts` (`PERM` for gating, `PERMISSIONS` for
   the role editor), pinned to the Rust value by
-  `permissions::play_games_bit_tests`. Still to do (client half): the role
-  editor list and `VOICE_CHANNEL_PERMS` in the channel editor — it is a
-  voice-only bit.
+  `permissions::play_games_bit_tests`. **Built (client)**: "Play Games" in
+  the role editor's Voice Permissions and in `VOICE_CHANNEL_PERMS` in the
+  channel editor (voice channels only — it is a voice-only bit).
 - **Capability detection** — **built**, and NOT the `gamesSupported` flag
   the first sketch borrowed from `clipsSupported`: games ride the socket, and
   a reconnect can land on an older rollback host, so the answer must be per
@@ -695,7 +698,7 @@ player has bet, or 15 s after the first bet.
   (`GameEnded { reason: "disabled" }`); deleting a channel ends its tables
   (`channel_deleted`, beside the clip-channel cleanup in `delete_channel`).
 
-## The table on screen (not built)
+## The table on screen
 
 A new `viewMode: 'table'` rendered as content inside `.chat-main`, next to
 VoiceStage, opened from a Games button in the VoiceStage header and the
@@ -727,6 +730,107 @@ Surfaces: desktop, web and the Android app all run the same bundle, so the
 client ships by signed OTA with no new APK; Lite gets it too (nothing depends
 on remote control). Púca Notes has no calls and is unaffected.
 
+### What is built (client)
+
+| piece | where |
+|---|---|
+| The store: one table per call, fed only by the four server frames | `frontend/src/api/games/gamesStore.ts` (+ `useGames.ts`) |
+| Who is offered what | `api/games/gamesGate.ts` |
+| Action bar, raise presets, bet range — read off `view.legal`, never the rules | `api/games/holdemActions.ts`, `blackjackActions.ts` |
+| Every code, reason and event in words | `api/games/gameWords.ts` |
+| The opener's form, checked against the engine's limits | `api/games/openTableConfig.ts` |
+| The disclosure, remembered per account and server | `api/games/gamesDisclosure.ts` |
+| The view (`viewMode: 'table'`), both tables, card faces, the phone sheet | `components/games/*` (lazy-loaded from `Chat.tsx`) |
+| Suits and the Games icon, SVG | `Icons.tsx`: `CardsIcon`, `Suit*Icon` (solid: docs/ICON_LANGUAGE.md §4) |
+| Entry points | VoiceStage header button; VoicePanel control (behind the phone's chevron) |
+| Owner's switch, next to Clips | `ServerSettingsModal.tsx`, `games_enabled` (sent only when the server returned the field) |
+| `PLAY_GAMES` rows | `RoleSettingsModal.tsx` (Voice Permissions), `EditChannelModal.tsx` (`VOICE_CHANNEL_PERMS`) |
+
+**The store's rules** (pinned by `gamesStore.test.ts`, fed the contract
+fixtures): `versionStep` decides; a `GameEvents` at exactly the next version
+is applied AND its events are logged/animated; a gap applies the complete view
+and logs nothing; a frame that does not parse, `RoomJoined` for the call it
+holds a table for, and a turn clock that ran out more than 8 s ago with no
+frame since each send `GameResync` — throttled to one a second (the server's
+own limit) and held until this socket confirms `games`. `GameEnded` drops the
+table and keeps its reason; `GameRefused` becomes a typed notice the table
+shows inline (`stale_turn` silently dropped, a refused resync retried);
+`RoomLeft`, `VoiceMoved` or another call drop the table with no notice; a
+`ServerFeatures` without `games` (an older host after a reconnect) drops it
+too. The store also tracks the voice room THIS SOCKET joined (`RoomJoined` /
+`RoomLeft`), and a seat is offered only when that is the call on screen — the
+SFU-participant-without-a-socket case above.
+
+**Gating** (`gamesGate`): the entry points show with the socket's `games`
+feature, the voice channel's server's `games_enabled`, and this socket in the
+call; opening and sitting additionally need `CONNECT` + `PLAY_GAMES` in that
+channel, with the bits PRESENT (never `hasPerm`'s fail-open on a missing
+set — every server that plays games sends them). Without `PLAY_GAMES` a
+person in the call can still WATCH an open table, as the server allows; the
+button then reads "Watch the table". `MOVE_MEMBERS` shows Close table and a
+Remove on each player.
+
+**Proof:** vitest (`gamesStore`, `gamesLogic`, `gamesView`,
+`serverSettingsGames`, `roleEditorPlayGames`, `editChannelModalVoicePerms`),
+and `frontend/e2e/games-walk.mjs` — two accounts in one call, desktop 1280x800
+and a 390x844 coarse-pointer phone, both games, the keyboard-open sheet, the
+460 px overflow control, eight themes with and without high contrast. Until
+the server half was served the walk ran against a mock in front of a real
+backend that answers `Game*` frames from the contract fixtures; the
+integration step runs it against the real server.
+
+### Client decisions and where they deviate from the sketch
+
+- **A gap does NOT resync.** Every frame carries the complete per-connection
+  view, so a `GameEvents` that skipped versions is applied as is (without
+  animating events as if nothing was missed) — exactly the contract's
+  `versionStep` rule. A resync after a gap would add a frame to a socket that
+  is already dropping frames under backpressure, for nothing the view lacks.
+  What DOES resync is the case where the client cannot trust what it holds: a
+  games frame it could not parse, a reconnect (`RoomJoined` for its call), a
+  clock that ran out long ago.
+- **Your seat lives in the fixed footer** with the action bar (desktop and
+  phone): the opponents, the board and the log scroll above it, so your cards
+  and the buttons never scroll away.
+- **The phone hides the chat composer while the table is up** (it returns with
+  "Call"): with the collapsed voice bar and the bottom nav, the composer's
+  ~75 px is what the two-row bar needs. The desktop keeps it.
+- **The phone takes back `.messages-container`'s side padding** (40 px — a
+  whole 44 px target) so the second row (four presets and the − amount +
+  stepper) fits a 390 px screen.
+- **Tapping the panel's Games control folds the phone's expanded voice
+  controls** away for the same reason.
+- **The raise amount on the phone is a button that opens the sheet**; the
+  sheet has its own presets, stepper and a numeric field (16 px, `inputmode`
+  numeric) and sits on the bottom of `window.visualViewport`. On the desktop
+  the amount is an inline field.
+- **The all-in total is sent as `all_in`**, not `bet_or_raise_to`: a stack
+  short of a full raise has `max_raise_to` below the minimum, which only the
+  all-in action may put in.
+- **Presets are street totals:** min = `min_raise_to`; ½ pot =
+  `current_bet + (pot_total + to_call) / 2` (rounded down); pot =
+  `current_bet + pot_total + to_call` (call, then raise by the pot after the
+  call — `pot_total` already includes this street); all-in = `max_raise_to`;
+  each clamped to `[min_raise_to, max_raise_to]`. The stepper moves by one big
+  blind.
+- **The disclosure is remembered per account AND per server** on this device
+  ("its operator" is a different operator on every server); storage that
+  fails shows it again.
+- **Opponents first in the strip**, open seats after them, so a phone shows
+  the people at the table before any scrolling.
+- **Card faces are a fixed light surface with fixed ink, the felt a fixed
+  green**, in every theme — a card must read the same everywhere; only the
+  face-DOWN back follows the theme's brand colour. Primary buttons use
+  `--brand-active` and Fold a fixed deep red: `--brand-primary` is under 4.5:1
+  against white in the green and yellow themes and `--color-danger` is 3.8:1;
+  the walk measures every button, the felt and the card ink in all eight
+  themes with and without high contrast.
+- **"Watch the table"**: GAMES.md lets anyone in the call watch; the entry
+  point says so for someone without `PLAY_GAMES` instead of hiding the table.
+- **`games_enabled` on the client `Server` type** is read from the voice
+  channel's OWN server (not the viewed one), like the clip policy; absent
+  means a server that predates games (the toggle is disabled and never sent).
+
 ## Not in v1
 
 Persistent chip balances (see the chip-dumping point above); tournaments and
@@ -736,7 +840,9 @@ anything that turns chips into money.
 
 ## Size of the rest
 
-The server half (registry, frames, seat grace, departure drain, sweep branch,
-setting plumbing, teardown, docs) is built. What remains is the client half:
-two tables, desktop and phone, the owner's toggle, the role editor and
-channel-editor rows for `PLAY_GAMES`, and the 390x844 walks.
+Both halves are built: the server (registry, frames, seat grace, departure
+drain, sweep branch, setting plumbing, teardown, docs) and the client (two
+tables, desktop and phone, the owner's toggle, the role-editor and
+channel-editor rows for `PLAY_GAMES`, the 390x844 walk). What v1 still leaves
+out is listed above and under the client's *not built* notes: a "your turn"
+doorbell for a backgrounded phone, dealt-card animations, seat avatars.

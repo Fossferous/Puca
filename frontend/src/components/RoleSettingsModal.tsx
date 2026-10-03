@@ -80,6 +80,7 @@ const PERMISSION_CATEGORIES = [
             { key: 'MUTE_MEMBERS', label: 'Mute Members', desc: 'Silence a member’s custom join/leave sounds' },
             { key: 'MOVE_MEMBERS', label: 'Move Members', desc: 'Drag members between voice channels and disconnect them from voice' },
             { key: 'CREATE_CLIPS', label: 'Create Clips', desc: 'Record a replay clip of a voice call — every participant must approve before it posts' },
+            { key: 'PLAY_GAMES', label: 'Play Games', desc: 'Open a Poker or Blackjack table in a voice call and sit down to play (free chips only; needs games switched on for the server)' },
         ],
     },
     {

@@ -10,7 +10,7 @@ import {
     subscribeToSpeaking,
 } from './voiceState';
 import { SmartAvatar } from './SmartAvatar';
-import { MicOffIcon, HeadphonesOffIcon, SpeakerIcon, UserAddIcon, PlayIcon, CameraIcon, LockOpenIcon, ClipIcon, FullscreenIcon } from './Icons';
+import { MicOffIcon, HeadphonesOffIcon, SpeakerIcon, UserAddIcon, PlayIcon, CameraIcon, LockOpenIcon, ClipIcon, FullscreenIcon, CardsIcon } from './Icons';
 import { mediaE2eeExplanation } from '../api/rtc/e2eeStatus';
 import './VoiceStage.css';
 import { CameraVideo } from './CameraVideo';
@@ -33,6 +33,11 @@ interface VoiceStageProps {
     onInvite?: () => void;
     /** Open the standard user context menu (volume, profile, …). */
     onUserMenu?: (user: { userId: number; username: string }, pos: { x: number; y: number }) => void;
+    /** Open the call's card table (docs/GAMES.md); absent when games are not
+     *  offered here (no server support, switched off, or no permission). */
+    onOpenGames?: () => void;
+    /** "Open a table" / "Join the table" / "Watch the table". */
+    gamesLabel?: string;
 }
 
 /**
@@ -51,6 +56,8 @@ export function VoiceStage({
     onWatchStream,
     onInvite,
     onUserMenu,
+    onOpenGames,
+    gamesLabel,
 }: VoiceStageProps) {
     // Presence/speaking/stream state lives in module-level maps; re-render on
     // their change events. Speaking now emits on every flip (voiceState.ts);
@@ -78,6 +85,11 @@ export function VoiceStage({
                     </span>
                 </div>
                 <div className="voice-stage-controls">
+                    {onOpenGames && (
+                        <button className="voice-stage-btn voice-stage-games" onClick={onOpenGames} title={gamesLabel ?? 'Games'}>
+                            <CardsIcon /> {gamesLabel ?? 'Games'}
+                        </button>
+                    )}
                     {onInvite && (
                         <button className="voice-stage-btn" onClick={onInvite} title="Invite people to this server">
                             <UserAddIcon /> Invite

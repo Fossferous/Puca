@@ -156,13 +156,20 @@ the icon.** Several wrappers set `width`/`height` in px (`.menu-icon` is
 
 ## 4. Solid forms
 
-The set is an outline set. Three things are solid, each for a reason:
+The set is an outline set. Four things are solid, each for a reason:
 
 - **`LiveDotIcon`** — a live indicator is a light, not a diagram.
 - **`StopSharingIcon`** — the filled inner square is the universal "stop"
   mark; an outlined one reads as an empty box.
 - **`TapIcon` / `TapDoubleIcon` / `TapLongIcon`** — the contact point is a
   fingerprint on glass, and an outlined ring there reads as a target instead.
+- **`SuitSpadeIcon` / `SuitHeartIcon` / `SuitDiamondIcon` / `SuitClubIcon`**
+  (the card table, docs/GAMES.md) — a suit pip is a printed glyph: an outlined
+  heart reads as "favourite" and an outlined spade as a garden tool. They are
+  drawn in currentColor with no knockout, so the one objection below does not
+  apply; the card face (`PlayingCard.css`) supplies a fixed light surface and
+  ink, which is why they read the same in every theme. `CardsIcon` (the Games
+  entry point) is an ordinary outline icon.
 
 Note what is *not* on that list: `CheckboxCheckedIcon`. A filled box with a
 knocked-out tick is more legible at 14px, but the knockout has to be painted in

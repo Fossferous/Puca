@@ -23,6 +23,10 @@ export interface Server {
      *  channel — Discord's option set (1|5|15|30|60). Absent ⇒ the backend
      *  predates the setting; clients fall back to the old fixed 15. */
     afk_timeout_minutes?: number;
+    /** Games in voice calls (docs/GAMES.md): the owner's switch, off by
+     *  default (migration 073). Absent ⇒ the server predates games: the
+     *  client offers no table and the toggle renders disabled. */
+    games_enabled?: boolean;
 }
 
 export interface Channel {
@@ -264,7 +268,7 @@ export function listPublicServers(): Promise<PublicServer[]> {
 
 export function updateServerSettings(
     serverId: string,
-    settings: { name?: string; is_public?: boolean; description?: string; icon_file_id?: string; require_media_e2ee?: boolean; clips_enabled?: boolean; clip_max_seconds?: number; clip_channel_id?: number; afk_timeout_minutes?: number }
+    settings: { name?: string; is_public?: boolean; description?: string; icon_file_id?: string; require_media_e2ee?: boolean; clips_enabled?: boolean; clip_max_seconds?: number; clip_channel_id?: number; afk_timeout_minutes?: number; games_enabled?: boolean }
 ): Promise<void> {
     return apiClient.patch(`/servers/${serverId}/settings`, settings);
 }
