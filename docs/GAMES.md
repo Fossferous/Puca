@@ -366,9 +366,11 @@ The 0.9.832 handshake, unchanged in shape:
 #### Shared rules
 
 - Envelope as every frame: `{"type": "<Variant>", "payload": {...}}`.
-- `room_id` is the call, `voice_<channel_id>`, in EVERY frame both ways. The
-  engine's registry is keyed `(room, id)`; a frame naming both is resolved
-  with `get_mut(room, id)`, and membership is checked against that room.
+- `room_id` is the call, `voice_<channel_id>`, in every TABLE frame both
+  ways (every `Game*` frame; `GamesEnabled`, the owner's switch, is about a
+  server, not a call, and has none). The engine's registry is keyed
+  `(room, id)`; a frame naming both is resolved with `get_mut(room, id)`, and
+  membership is checked against that room.
 - `table_id`: an integer in `1..2^53`, from a per-process random seed, never
   reused while the process lives (`registry::RoomTables`). A JavaScript
   number holds it exactly.
@@ -473,8 +475,13 @@ stops sending to a connection the moment it is no longer in the room.
   server already ended (`GameEnded { disabled }`), so nobody sees the launcher
   go while their table is still up. The client writes it into its cached server
   row: the launcher appears or goes at once, no reload, no refetch.
-  `games::push_enabled` (the member list) / `games::announce_enabled` (the
-  send, tested without a database).
+  `games::settle_switch` runs it: it reads the STORED value back (so two quick
+  toggles converge on what is in the row), ends the tables when that is off,
+  then `games::push_enabled` (the member list) / `games::announce_enabled`
+  (the send, tested without a database). The settings handler runs the commit
+  and `settle_switch` as ONE detached task it waits for, so an owner's request
+  dropped after the commit (axum drops the handler when the client goes away)
+  still ends the tables and still reaches everyone.
 
 **Views** (`view.game` tags them). Field by field in
 `frontend/src/api/games/protocol.ts` (`HoldemView`, `BlackjackView`) and in
@@ -672,6 +679,11 @@ first (`src/games_tests.rs`, `ws::room_id_gate_tests`):
   denied while inside the disconnect grace - or off in another channel - came
   back and played on. JoinRoom's own permission resolution now goes to
   `on_join` (`may_play`); a returning seated player who may not play gets up.
+  It is the POST-insert resolution (the second review, 2026-10-03): the first
+  one is older than the insert, and a deny whose sweep ran in between - the
+  player not yet in the call, so the sweep could not stand them up - left them
+  seated and acting (reproduced through the real `handle_message` JoinRoom
+  with a pause after the first resolution: `ws::games_join_db_tests`).
 - **A non-canonical room id was a second call.** `voice_042` parsed to channel
   42, passed JoinRoom's check for it, and keyed a second table that
   `delete_channel` (by `voice_42`) never ended. `parse_voice_room` and
@@ -680,7 +692,12 @@ first (`src/games_tests.rs`, `ws::room_id_gate_tests`):
 - **`GameCreate` re-checks the call after its database gate**: a connection
   that left (or was moved or kicked) while the gate awaited opens nothing; and
   if the call emptied right after the table went into the registry, the
-  call-ended timer is started for it.
+  call-ended timer is started for it. **`GameClose` and `GameRemovePlayer`**
+  re-check it after their `MOVE_MEMBERS` gate too (second review): a
+  moderator moved or kicked out meanwhile closes and removes nothing.
+- **The owner's switch survives a dropped request** (second review): the
+  commit and its tail (end the tables, push `GamesEnabled`) run detached, and
+  the push says what is stored (*Server → client*, `GamesEnabled`).
 
 ### Leaving, disconnects and the grace
 
@@ -723,8 +740,9 @@ On firing it locks the table and calls `timeout(turn)`; a `StaleTurn` means
 the player already acted and is a no-op, so timers never need exact
 cancellation. A destroyed table is marked closed and its timers hold only a
 weak reference, so they die with it. The next hand starts ~3 s after
-`HandEnded` when two players can be dealt; Blackjack deals when every seated
-player has bet, or 15 s after the first bet.
+`HandEnded` when two players can be dealt; Blackjack deals 1.5 s after the
+last bet once every seated player has bet (`LAST_BET_DELAY`), or 15 s after
+the first bet (`BET_WINDOW`), whichever comes first.
 
 ### Gating and permissions
 
@@ -748,6 +766,13 @@ player has bet, or 15 s after the first bet.
   `DEFAULT_MEMBER` so new servers have it, and migration 073 ORs it onto
   every existing @everyone role (the pattern of migrations 051/056). It is
   Discord's "Use Activities": with games on by default it takes effect at once.
+  **A rollback window leaves a gap:** once 073 has run, a server created by a
+  rolled-back 0.9.832 binary gets `games_enabled` TRUE from the column default
+  but an @everyone built from that binary's `DEFAULT_MEMBER`, which has no
+  bit 28, and 073 never runs again - so after rolling forward only the owner
+  (and admins) can start or join a game there; members can only Watch. The
+  owner's fix is one switch: grant Play Games to @everyone (Server Settings ›
+  Roles). Not migrated, because it needs a rollback to happen at all.
   `OVERWRITABLE` derives from `Self::all()`, so per-channel overwrites cover
   it automatically (pinned by a test). Client: BOTH maps in
   `frontend/src/api/permissionBits.ts` (`PERM` for gating, `PERMISSIONS` for
@@ -850,6 +875,15 @@ person in the call can still WATCH an open table, as the server allows: the
 tile and the notice offer Watch only, and there is no launcher
 (`gamesGate().launcher` is `CONNECT` + `PLAY_GAMES` on top of the rest).
 `MOVE_MEMBERS` shows Close table and a Remove on each player.
+
+**A host change is a refetch.** The rows above are cached; a reconnect that
+lands on a host that now confirms `games` (an upgrade or a roll forward) or no
+longer does (a rollback) refetches every server and channel row
+(`onGamesServedChanged` in `gamesStore.ts`; Chat invalidates `keys.servers`,
+the prefix of every server's channel list), so the launcher, and the owner's
+toggle in Server Settings (disabled when the row lacks the field), follow the
+host without a reload. The page's first answer and a reconnect to a host that
+says the same thing refetch nothing.
 
 **Proof:** vitest (`gamesStore`, `gamesLogic`, `gamesView`, `activities`,
 `serverSettingsGames`, `roleEditorPlayGames`, `editChannelModalVoicePerms`),
@@ -976,6 +1010,41 @@ The stale row is now pushed away at the source: since 2026-10-03 the server
 sends `GamesEnabled` to every online member when the owner flips the switch,
 and the client writes it into its cached row. `gamesRowContradicted` stays as
 the fallback for a client the push missed (it was reconnecting through it).
+
+**Fixed after the client review of the activities (2026-10-03),** each red
+first in vitest (`activities.test.tsx`, `gamesView.test.tsx`) or the walk:
+
+- **Chat re-rendered for every game frame**, for everyone in the call, with
+  VoicePanel under it (measured: ~1.3 Chat commits per frame, 14 ms each in a
+  dev build). Chat now subscribes to the call's SLICE (`useCallActivity`,
+  `api/games/callActivity.ts`): who is seated, which game, the announcement,
+  the socket's feature and call - never pots, turns or clocks. The table view
+  alone follows every frame.
+- **The light theme hid the activity surfaces** (dark ink on the root
+  `--bg-floating`, which the light theme does not redefine: 1.05:1). The
+  picker is on `--bg-primary`, the notice on `--bg-secondary`; the tile, which
+  always sits on the stage's dark tile, has fixed light ink. The sidebar's
+  playing mark drops `.voice-status-icon`'s 0.7 opacity (it was under 3:1 in
+  every theme). `games-walk.mjs` now measures the picker, the tile, the chip
+  and the marks on the desktop and the notice on the phone in all eight themes
+  with and without high contrast.
+- **A tap while the socket was down locked that decision** until the clock
+  acted (the bar waited for a new turn, and the resync answers the same one).
+  Only an action that went out holds the bar, and it holds it for the view it
+  answered: any new view (a resync of the same turn included) gives it back -
+  a duplicate is a harmless `stale_turn`.
+- **An amount sheet left open came back by itself** (and grabbed the phone's
+  keyboard) at the next turn or betting window. A sheet now belongs to the
+  decision it was opened for (`turnKey`; Blackjack's round).
+- **The picker came back by itself** after games were switched off and on
+  (its open flag outlived the launcher). It is open only while the launcher
+  is there, and forgotten when it goes (`useOpenWhile`).
+- **The picker said aria-modal but kept focus outside.** Focus moves to the
+  first card it can act on, Tab and Shift+Tab stay inside, and focus returns
+  to the launcher when it closes.
+- **A client that loaded against an older host never offered games after the
+  host was upgraded** (no launcher until a reload): see *A host change is a
+  refetch*, above.
 
 ## Activities
 

@@ -553,7 +553,7 @@ table, and chips are free and per table.
 | `GameEvents {table_id, version, events, view}` | an engine call: its public events (the same for everyone) and the table after them as THIS connection may see it |
 | `GameEnded {table_id, reason}` | the table is gone (`closed`, `call_ended`, `idle`, `disabled`, `channel_deleted`), or the answer to a frame naming a table that is not open in that room (`gone`, which is also what a restart looks like) |
 | `GameRefused {table_id, op, code, ...}` | your frame was refused; to you only, never as an `Error` |
-| `GamesEnabled {server_id, games_enabled}` | the owner switched games on or off for that server: sent right after the change committed (after every table already ended, for off) to EVERY connection of every member of the server that announced `games` - in a call or not - so the launcher appears or goes without a reload. Not a table frame: it names no `room_id` |
+| `GamesEnabled {server_id, games_enabled}` | the owner switched games on or off for that server: sent right after the change committed (after every table already ended, for off), carrying the value then STORED (two quick toggles converge on the row), and sent even if the owner's request was dropped after the commit, to EVERY connection of every member of the server that announced `games` - in a call or not - so the launcher appears or goes without a reload. Not a table frame: it names no `room_id` |
 
 Game frames go to one connection at a time, and only to connections that
 announced `games` AND are in the call; never to a delivery socket, never to a
