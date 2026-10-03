@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
 import type { GameKind } from '../../api/games/protocol';
 import { GAME_NAMES } from '../../api/games/gameWords';
@@ -29,22 +29,49 @@ interface ActivityPickerProps {
  * it for everyone in the call. One activity per call, so while one runs its
  * card offers Join (or Open, or Watch) and the other says why it waits.
  * Portaled to <body> in the modal band (z 1100, DESIGN_PHILOSOPHY §1).
+ *
+ * A real modal for the keyboard too (it says aria-modal): focus moves to the
+ * first card it can act on when it opens, Tab and Shift+Tab stay inside, and
+ * focus goes back to whatever opened it (the launcher) when it closes.
  */
 export function ActivityPicker({ isPhone, channelName, running, canJoin, seated, onStart, onJoin, onWatch, onClose }: ActivityPickerProps) {
+    const dialogRef = useRef<HTMLDivElement>(null);
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
         document.addEventListener('keydown', onKey);
         return () => document.removeEventListener('keydown', onKey);
     }, [onClose]);
+    // Focus in on open, back out on close (mount / unmount only).
+    useEffect(() => {
+        const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        const first = dialogRef.current?.querySelector<HTMLElement>('.activity-card:not(:disabled)')
+            ?? focusablesIn(dialogRef.current)[0];
+        first?.focus();
+        return () => { if (opener && opener.isConnected) opener.focus(); };
+    }, []);
+    const trapTab = (e: ReactKeyboardEvent) => {
+        if (e.key !== 'Tab') return;
+        const els = focusablesIn(dialogRef.current);
+        if (els.length === 0) return;
+        const first = els[0];
+        const last = els[els.length - 1];
+        const at = document.activeElement;
+        if (e.shiftKey ? (at === first || !dialogRef.current?.contains(at)) : (at === last || !dialogRef.current?.contains(at))) {
+            e.preventDefault();
+            (e.shiftKey ? last : first).focus();
+        }
+    };
 
     return createPortal(
         <div className="activity-scrim" onClick={onClose}>
             <div
+                ref={dialogRef}
                 className={`activity-picker${isPhone ? ' activity-sheet' : ''}`}
                 role="dialog"
                 aria-modal="true"
                 aria-label="Activities"
                 onClick={e => e.stopPropagation()}
+                onKeyDown={trapTab}
             >
                 <div className="activity-picker-head">
                     <span className="activity-picker-icon"><RocketIcon /></span>
@@ -110,4 +137,10 @@ export function ActivityPicker({ isPhone, channelName, running, canJoin, seated,
         </div>,
         document.body,
     );
+}
+
+/** The controls Tab can reach inside `root`, in document order. */
+function focusablesIn(root: HTMLElement | null): HTMLElement[] {
+    if (!root) return [];
+    return [...root.querySelectorAll<HTMLElement>('button:not(:disabled), [href], input:not(:disabled), [tabindex]:not([tabindex="-1"])')];
 }

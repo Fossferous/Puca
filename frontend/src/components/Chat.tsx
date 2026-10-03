@@ -171,12 +171,13 @@ import { startActivityReporter } from '../api/activityReporter';
 import { PresenceDot } from './PresenceDot';
 import { PERM, hasPerm } from '../api/permissionBits';
 import {
-    attachGamesSocket, dismissActivityNotice, getGamesState, requestJoin, setGamesRoom, startActivity, subscribeGames,
+    attachGamesSocket, dismissActivityNotice, getGamesState, onGamesServedChanged, requestJoin, setGamesRoom, startActivity, subscribeGames,
 } from '../api/games/gamesStore';
-import { useGames } from '../api/games/useGames';
-import { gamesGate, gamesRowContradicted } from '../api/games/gamesGate';
+import { useCallActivity } from '../api/games/callActivity';
+import { gamesGate, gamesRowContradictedBy } from '../api/games/gamesGate';
 import { parseGamesEnabled } from '../api/games/protocol';
-import { applyGamesEnabled, seatedUserIds } from '../api/games/activities';
+import { applyGamesEnabled } from '../api/games/activities';
+import { useOpenWhile } from './games/useOpenWhile';
 import { GAME_NAMES } from '../api/games/gameWords';
 import { ActivityPicker } from './games/ActivityPicker';
 import { ActivityNotice } from './games/ActivityNotice';
@@ -1357,7 +1358,6 @@ export function Chat({ onLogout }: ChatProps) {
     useEffect(() => {
         setGamesRoom(currentVoiceChannel ? `voice_${currentVoiceChannel.id}` : null);
     }, [currentVoiceChannel]);
-    const games = useGames();
 
     // Increments on genuine ROSTER mutations only (users added/removed from a
     // voice room). The REST snapshot rebuild below only applies when no such
@@ -3810,6 +3810,10 @@ export function Chat({ onLogout }: ChatProps) {
     // server) that server's own list; ChannelPermsChanged refetches either,
     // so a role or overwrite change reaches the launcher live.
     const voiceRoomId = currentVoiceChannel ? `voice_${currentVoiceChannel.id}` : null;
+    // The call's activity - who is seated, which game, the announcement - and
+    // NOT the table's pots and turns: Chat re-renders when this slice
+    // changes, never for a bet (api/games/callActivity.ts).
+    const callActivity = useCallActivity(voiceRoomId);
     const voiceServerId = currentVoiceChannel?.server_id ?? '';
     const { data: voiceServerChannels } = useChannels(voiceServerId && voiceServerId !== currentServer?.id ? voiceServerId : '');
     const voiceChannelRow = currentVoiceChannel
@@ -3825,10 +3829,19 @@ export function Chat({ onLogout }: ChatProps) {
     // reconnected through it, or the host predates it) still holds a stale
     // row; when the server's own frames say otherwise (a table in this call;
     // an ending or a refusal that says `disabled`), refetch the rows.
-    const gamesRowStale = gamesRowContradicted(voiceGamesEnabled, games, voiceRoomId);
+    const gamesRowStale = gamesRowContradictedBy(voiceGamesEnabled, !!callActivity.table, callActivity.saidDisabled);
     useEffect(() => {
         if (gamesRowStale) void queryClient.invalidateQueries({ queryKey: keys.servers });
     }, [gamesRowStale, queryClient]);
+    // A reconnect landed on a host that now plays games (an upgrade, a roll
+    // forward) or no longer does (a rollback): the server rows and channel
+    // rows this client cached from the old host say the wrong thing about
+    // games (games_enabled, PLAY_GAMES), and nothing else would refetch them
+    // before a reload. keys.servers is the prefix of every server's channel
+    // and member lists too.
+    useEffect(() => onGamesServedChanged(() => {
+        void queryClient.invalidateQueries({ queryKey: keys.servers });
+    }), [queryClient]);
     // The owner switched games on or off: every online member's launcher
     // appears or goes at once, no reload (switching off has already ended
     // every table with GameEnded `disabled`).
@@ -3841,16 +3854,16 @@ export function Chat({ onLogout }: ChatProps) {
         return () => wsClient.off('GamesEnabled', onGamesEnabled);
     }, [queryClient]);
     const voiceGamesGate = gamesGate({
-        feature: games.feature,
+        feature: callActivity.feature,
         gamesEnabled: voiceGamesEnabled,
         perms: voiceChannelRow?.my_permissions,
-        inCall: !!voiceRoomId && games.joined === voiceRoomId,
-        hasTable: !!games.table && games.table.room_id === voiceRoomId,
+        inCall: callActivity.inCall,
+        hasTable: !!callActivity.table,
     });
     // The call's running activity, as everyone in the call sees it.
-    const voiceTable = games.table && games.table.room_id === voiceRoomId ? games.table : null;
-    const seatedInCall = useMemo(() => new Set(voiceTable ? seatedUserIds(voiceTable.view) : []), [voiceTable]);
-    const iAmSeated = !!voiceTable && voiceTable.view.viewer_seat !== null;
+    const voiceTable = callActivity.table;
+    const seatedInCall = useMemo(() => new Set(voiceTable ? voiceTable.seated : []), [voiceTable]);
+    const iAmSeated = !!voiceTable && voiceTable.viewerSeated;
     // Open the table view (the tile, the notice, the picker). Steers the phone
     // to the chat slot it renders in (DESIGN_PHILOSOPHY §3). Looking at the
     // table answers "<name> started Poker": it does not come back on the grid.
@@ -3869,7 +3882,11 @@ export function Chat({ onLogout }: ChatProps) {
         requestJoin();
         openGames();
     };
-    const [activityPickerOpen, setActivityPickerOpen] = useState(false);
+    // Open only while the launcher is there, and forgotten when it goes: a
+    // switch-off (or a deny, or leaving the call) must not leave the picker
+    // to reappear by itself when the launcher comes back.
+    const [activityPickerOpen, setActivityPickerOpen] = useOpenWhile(voiceGamesGate.launcher && !!voiceRoomId);
+    const openActivityPicker = useCallback(() => setActivityPickerOpen(true), [setActivityPickerOpen]);
     // The table THIS client started arrived: it opens for the starter (who is
     // then seated by the view). Heard from the store directly, not an effect
     // on a render value, so a re-render never opens it twice.
@@ -4421,7 +4438,7 @@ export function Chat({ onLogout }: ChatProps) {
                 <ActivityPicker
                     isPhone={isMobile}
                     channelName={currentVoiceChannel.name}
-                    running={voiceTable ? { kind: voiceTable.view.game, playing: seatedInCall.size } : null}
+                    running={voiceTable ? { kind: voiceTable.kind, playing: seatedInCall.size } : null}
                     canJoin={voiceGamesGate.canSit}
                     seated={iAmSeated}
                     onStart={(kind) => {
@@ -5097,9 +5114,9 @@ export function Chat({ onLogout }: ChatProps) {
                                         {channel.name}
                                         {/* The call's activity is on (docs/GAMES.md) - known
                                             to the people in this call only. */}
-                                        {voiceTable && voiceTable.room_id === `voice_${channel.id}` && (
-                                            <span className="voice-activity-chip" title={`${GAME_NAMES[voiceTable.view.game]} is on in this call`}>
-                                                <RocketIcon /> {GAME_NAMES[voiceTable.view.game]}
+                                        {voiceTable && voiceRoomId === `voice_${channel.id}` && (
+                                            <span className="voice-activity-chip" title={`${GAME_NAMES[voiceTable.kind]} is on in this call`}>
+                                                <RocketIcon /> {GAME_NAMES[voiceTable.kind]}
                                             </span>
                                         )}
                                     </div>
@@ -5181,8 +5198,8 @@ export function Chat({ onLogout }: ChatProps) {
                                                                 cooperating client asserts it; docs/CLIPS.md). */}
                                                             {user.isBuffering && <span className="voice-status-icon buffering" title="Clip buffer on — the last few minutes of this call are being kept on their PC" aria-label="Clip buffer on"><ClipIcon /></span>}
                                                             {/* Seated at the call's activity (docs/GAMES.md). */}
-                                                            {voiceTable && voiceTable.room_id === `voice_${channel.id}` && seatedInCall.has(user.id) && (
-                                                                <span className="voice-status-icon playing" title={`Playing ${GAME_NAMES[voiceTable.view.game]}`} aria-label={`Playing ${GAME_NAMES[voiceTable.view.game]}`}>
+                                                            {voiceTable && voiceRoomId === `voice_${channel.id}` && seatedInCall.has(user.id) && (
+                                                                <span className="voice-status-icon playing" title={`Playing ${GAME_NAMES[voiceTable.kind]}`} aria-label={`Playing ${GAME_NAMES[voiceTable.kind]}`}>
                                                                     <CardsIcon />
                                                                 </span>
                                                             )}
@@ -5289,7 +5306,7 @@ export function Chat({ onLogout }: ChatProps) {
                             sfuMode={!!currentVoiceChannel.sfu_mode}
                             // Activities (docs/GAMES.md): the rocket beside camera and
                             // screen share, for someone who may play here.
-                            onOpenActivities={voiceGamesGate.launcher ? () => setActivityPickerOpen(true) : undefined}
+                            onOpenActivities={voiceGamesGate.launcher ? openActivityPicker : undefined}
                             // SPEAK / CONNECT hints for this voice channel, read at join
                             // (hasPerm keeps an old server's missing bits "allowed").
                             // The server's VoiceSpeakState is the authority in the call.
@@ -5536,11 +5553,11 @@ export function Chat({ onLogout }: ChatProps) {
                     starts. A status line, not a dialog - no focus taken, no
                     sound; gone when dismissed, acted on, or the table ends.
                     Not over the table itself. */}
-                {games.announce && voiceTable && games.announce.table_id === voiceTable.table_id
+                {callActivity.announce && voiceTable && callActivity.announce.table_id === voiceTable.table_id
                     && voiceGamesGate.available && viewMode !== 'table' && (
                     <ActivityNotice
-                        name={activityStarterName(games.announce.opened_by)}
-                        kind={games.announce.kind}
+                        name={activityStarterName(callActivity.announce.opened_by)}
+                        kind={callActivity.announce.kind}
                         canJoin={voiceGamesGate.canSit}
                         onJoin={joinActivity}
                         onWatch={() => { dismissActivityNotice(); openGames(); }}
@@ -5621,7 +5638,7 @@ export function Chat({ onLogout }: ChatProps) {
                             })}
                             // The running activity as a tile in the grid (Discord's).
                             activity={voiceTable && voiceGamesGate.available ? {
-                                kind: voiceTable.view.game,
+                                kind: voiceTable.kind,
                                 playing: seatedInCall.size,
                                 seated: iAmSeated,
                                 canJoin: voiceGamesGate.canSit,

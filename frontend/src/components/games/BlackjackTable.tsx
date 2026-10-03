@@ -15,7 +15,8 @@ interface BlackjackTableProps {
     nameOf: (userId: number) => string;
     currentUserId: number;
     onSit: (seat: number) => void;
-    send: (frame: GameClientFrame) => void;
+    /** Send a frame; false when it did not go out (the socket is down). */
+    send: (frame: GameClientFrame) => boolean;
     refusedAt: number | null;
 }
 
@@ -66,20 +67,23 @@ export function BlackjackTable({ table, gate, isPhone, nameOf, currentUserId, on
     // `text`: what is being typed into the desktop field, clamped when used
     // (see HoldemTable's raise).
     const [bet, setBet] = useState<{ round: number; amount: number; text?: string } | null>(null);
-    const [sent, setSent] = useState<{ key: string; at: number } | null>(null);
-    const [sheetOpen, setSheetOpen] = useState(false);
+    // Held for the view it answered (see HoldemTable's `sent`).
+    const [sent, setSent] = useState<{ key: string; view: HeldTable; at: number } | null>(null);
+    // The bet sheet, for the betting window it was opened in only (see
+    // HoldemTable's `sheetFor`): a window is named by the round before it.
+    const [sheetFor, setSheetFor] = useState<number | null>(null);
+    const sheetOpen = sheetFor !== null && sheetFor === v.round_no && !v.in_round;
 
     const betAmount = bet && bet.round === v.round_no ? clampBet(bet.amount, range) : clampBet(me?.pending_bet || range.min, range);
-    const busy = !!sent && sent.key === turnKey && !(refusedAt !== null && refusedAt > sent.at);
+    const busy = !!sent && sent.key === turnKey && sent.view === table && !(refusedAt !== null && refusedAt > sent.at);
     const betText = bet && bet.round === v.round_no && bet.text !== undefined ? bet.text : String(betAmount);
 
     const act = (type: 'hit' | 'stand' | 'double' | 'split') => {
         if (!v.turn || busy) return;
-        setSent({ key: turnKey, at: Date.now() });
-        send(gameFrames.act(room, id, v.turn, { type }));
+        if (send(gameFrames.act(room, id, v.turn, { type }))) setSent({ key: turnKey, view: table, at: Date.now() });
     };
     const placeBet = (amount: number) => {
-        setSheetOpen(false);
+        setSheetFor(null);
         send(gameFrames.bet(room, id, clampBet(amount, range)));
     };
 
@@ -261,7 +265,7 @@ export function BlackjackTable({ table, gate, isPhone, nameOf, currentUserId, on
                                 upDisabled={betAmount >= range.max}
                             >
                                 {isPhone ? (
-                                    <button type="button" className="games-btn games-amount-btn" onClick={() => setSheetOpen(true)} aria-label={`Bet amount ${chips(betAmount)}, tap to type it`}>
+                                    <button type="button" className="games-btn games-amount-btn" onClick={() => setSheetFor(v.round_no)} aria-label={`Bet amount ${chips(betAmount)}, tap to type it`}>
                                         {chips(betAmount)}
                                     </button>
                                 ) : (
@@ -295,7 +299,7 @@ export function BlackjackTable({ table, gate, isPhone, nameOf, currentUserId, on
                     presets={presets.map(p => ({ label: chips(p), amount: p }))}
                     confirmLabel={(a) => `Bet ${chips(a)}`}
                     onConfirm={placeBet}
-                    onClose={() => setSheetOpen(false)}
+                    onClose={() => setSheetFor(null)}
                 />
             )}
         </div>

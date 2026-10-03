@@ -482,3 +482,97 @@ describe('the disclosure is remembered per account AND per server', () => {
         expect(disclosureSeen(8, 's1')).toBe(false);
     });
 });
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Json = any;
+/** A deep copy of a fixture frame at `version`, its view edited. */
+function edited<T>(frame: T, version: number, edit: (v: Json) => void): T {
+    const f = JSON.parse(JSON.stringify(frame)) as Json;
+    f.payload.version = version;
+    edit(f.payload.view);
+    return f as T;
+}
+
+describe('a decision is never locked by a send that did not go out (review, 2026-10-03)', () => {
+    it("Hold'em: a tap while the socket is down leaves the bar live; the resync of the same turn keeps it live", async () => {
+        await deliver(seated);
+        await show();
+        ws.open = false;
+        await click(button('Check'));
+        expect(ws.sentOf('GameAct')).toHaveLength(0); // nothing reached the server
+        expect(button('Check')!.disabled).toBe(false);
+        ws.open = true;
+        // The reconnect: RoomJoined -> GameResync -> the server answers the
+        // SAME turn at the same version (it never got the action).
+        await deliver({ type: 'RoomJoined', payload: { room_id: ROOM, members: [] } });
+        await deliver(withVersion(seated, 8));
+        expect(button('Check')!.disabled).toBe(false);
+        await click(button('Check'));
+        expect(ws.sentOf('GameAct')).toHaveLength(1);
+        expect(button('Check')!.disabled).toBe(true); // answered: waits for the next view
+    });
+
+    it("Hold'em: a sent action whose answer was lost is retried after the resync answers the same turn", async () => {
+        await deliver(seated);
+        await show();
+        await click(button('Check'));
+        expect(button('Check')!.disabled).toBe(true);
+        // A half-open socket: the frame was "sent" but never arrived; the
+        // resync shows the very same decision again.
+        await deliver(withVersion(seated, 8));
+        expect(button('Check')!.disabled).toBe(false);
+        await click(button('Check'));
+        expect(ws.sentOf('GameAct')).toHaveLength(2); // a duplicate is a harmless stale_turn
+    });
+
+    it('Blackjack: a tap while the socket is down leaves Hit live', async () => {
+        await deliver(blackjackTable);
+        await show({ currentUserId: 7 });
+        ws.open = false;
+        await click(button('Hit'));
+        expect(button('Hit')!.disabled).toBe(false);
+        ws.open = true;
+        await deliver(withVersion(blackjackTable, 6));
+        await click(button('Hit'));
+        expect(ws.sentOf('GameAct')).toHaveLength(1);
+    });
+});
+
+describe('an amount sheet belongs to the decision it was opened for (review, 2026-10-03)', () => {
+    it("Hold'em: a raise sheet left open when the turn passed does not come back by itself on the next turn", async () => {
+        await deliver(seated);
+        await show({ isPhone: true });
+        await click(document.querySelector('.games-amount-btn'));
+        expect(document.querySelector('.games-sheet')).not.toBeNull();
+        // The clock checks for me: someone else's turn.
+        await deliver(edited(seated, 9, v => { v.legal = null; v.to_act = 0; v.turn = { hand_no: 1, turn_seq: 5 }; }));
+        expect(document.querySelector('.games-sheet')).toBeNull();
+        // My next turn: no sheet, no focus grab (the phone's keyboard stays down).
+        const before = document.activeElement;
+        await deliver(edited(seated, 10, v => { v.turn = { hand_no: 1, turn_seq: 9 }; }));
+        expect(document.querySelector('.games-sheet')).toBeNull();
+        expect(document.activeElement).toBe(before);
+        // Positive control: the button still opens it for THIS turn.
+        await click(document.querySelector('.games-amount-btn'));
+        expect(document.querySelector('.games-sheet')).not.toBeNull();
+    });
+
+    it('Blackjack: a bet sheet left open when the round was dealt does not come back at the next betting window', async () => {
+        const betting = (version: number, round: number) => edited(blackjackTable, version, v => {
+            v.in_round = false; v.round_no = round; v.legal = null; v.to_act = null; v.turn = null;
+            v.seats[0].hands = [];
+        });
+        await deliver(betting(6, 1));
+        await show({ isPhone: true, currentUserId: 7 });
+        await click(document.querySelector('.games-amount-btn'));
+        expect(document.querySelector('.games-sheet')).not.toBeNull();
+        await deliver(edited(blackjackTable, 7, v => { v.round_no = 2; v.legal = null; v.to_act = { seat: 1, hand: 0 }; }));
+        expect(document.querySelector('.games-sheet')).toBeNull();
+        const before = document.activeElement;
+        await deliver(betting(8, 2));
+        expect(document.querySelector('.games-sheet')).toBeNull();
+        expect(document.activeElement).toBe(before);
+        await click(document.querySelector('.games-amount-btn'));
+        expect(document.querySelector('.games-sheet')).not.toBeNull();
+    });
+});

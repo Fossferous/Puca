@@ -162,6 +162,26 @@ let pendingStart: { room: string; kind: GameKind; at: number } | null = null;
 let startTimer: ReturnType<typeof setTimeout> | null = null;
 // Tables already announced (or answered) on this page: one notice per table.
 const announced = new Set<number>();
+// What the last ServerFeatures said about `games` (null: none yet on this
+// page). NOT reset when the socket closes: a reconnect to the same host is no
+// change, a reconnect that lands on a host that now plays games (an upgrade,
+// a roll forward) or no longer does (a rollback) is.
+let lastServed: boolean | null = null;
+const servedListeners = new Set<(served: boolean) => void>();
+
+/**
+ * Hear when the host behind this socket STARTS or STOPS playing games - a
+ * reconnect that landed on an upgraded or a rolled-back server. Everything
+ * the client cached from the old host about games (the server rows'
+ * `games_enabled`, the channel rows' `my_permissions` with or without
+ * PLAY_GAMES) is stale then; Chat refetches them, so the launcher appears or
+ * goes with no reload. Not called for the page's first ServerFeatures, nor
+ * for a reconnect to a host that says the same as before.
+ */
+export function onGamesServedChanged(fn: (served: boolean) => void): () => void {
+    servedListeners.add(fn);
+    return () => { servedListeners.delete(fn); };
+}
 
 function emit() {
     for (const l of [...listeners]) l();
@@ -321,6 +341,9 @@ export function handleGamesMessage(msg: { type: string; payload?: unknown }): st
     switch (msg.type) {
         case 'ServerFeatures': {
             const feature = !!socket && socket.hasServerFeature(GAMES_FEATURE);
+            const before = lastServed;
+            lastServed = feature;
+            if (before !== null && before !== feature) for (const l of [...servedListeners]) l(feature);
             if (!feature) {
                 // This socket's server does not play games (an older rollback
                 // host): what we held came from somewhere else.
@@ -493,6 +516,8 @@ export function resetGamesStoreForTests(clock?: () => number): void {
     socket = null;
     endStart();
     announced.clear();
+    lastServed = null;
+    servedListeners.clear();
     lastResyncAt = -Infinity;
     resyncPending = false;
     now = clock ?? (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));

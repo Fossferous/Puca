@@ -119,7 +119,11 @@
     gap: 12px;
     padding: 16px;
     border-radius: 12px;
-    background: var(--bg-floating, #0d0e10);
+    /* Theme surfaces, never --bg-floating: the light theme does not redefine
+       it, so its dark root value sat under the light theme's dark ink (the
+       title measured 1.05:1). --bg-primary / --text-normal are a pair in
+       every theme (the walk measures them in all eight, both contrasts). */
+    background: var(--bg-primary, #18191c);
     color: var(--text-normal, #dbdee1);
     border: 1px solid var(--border-separator, #2a2b2f);
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
@@ -145,7 +149,7 @@
 
 .activity-picker-titles { display: flex; flex-direction: column; flex: 1; min-width: 0; }
 
-.activity-picker-title { margin: 0; font-size: 1.05rem; font-weight: 700; }
+.activity-picker-title { margin: 0; font-size: 1.05rem; font-weight: 700; color: var(--header-primary, #f2f3f5); }
 
 .activity-picker-sub {
     color: var(--text-muted, #949ba4);
@@ -215,7 +219,9 @@
     margin: 6px 12px 0;
     padding: 6px 8px;
     border-radius: 10px;
-    background: var(--bg-floating, #0d0e10);
+    /* A theme surface (see .activity-picker): --bg-floating is dark in the
+       light theme too. */
+    background: var(--bg-secondary, #0d0e10);
     border: 1px solid var(--brand-primary, #5865f2);
     color: var(--text-normal, #dbdee1);
     min-width: 0;
@@ -264,7 +270,10 @@
     border: none;
     border-radius: 10px;
     background: transparent;
-    color: var(--text-normal, #dbdee1);
+    /* Fixed light ink: the tile sits on the stage's dark tile surface
+       (--bg-nested, dark in every theme, the light one included), like the
+       other stage labels - the theme's --text-normal is dark ink in light. */
+    color: #fff;
     font: inherit;
     cursor: pointer;
 }
@@ -273,7 +282,7 @@
 
 .activity-tile-name { font-weight: 700; font-size: 1.05rem; }
 
-.activity-tile-count { color: var(--text-muted, #949ba4); font-size: 0.85rem; }
+.activity-tile-count { color: rgba(255, 255, 255, 0.78); font-size: 0.85rem; }
 
 .activity-tile-actions { display: flex; gap: 8px; flex-shrink: 0; }
 
@@ -294,7 +303,9 @@
 
 .voice-activity-chip .svrn-icon { width: 12px; height: 12px; }
 
-.voice-status-icon.playing { color: var(--brand-primary, #5865f2); }
+/* Full opacity: .voice-status-icon's 0.7 left this mark under 3:1 against
+   the sidebar in every theme (as .buffering already overrides). */
+.voice-status-icon.playing { color: var(--brand-primary, #5865f2); opacity: 1; }
 
 /* ---- Phone: 390x844, coarse pointer (mirrors mobile.css's gate) ----------- */
 /* Every target at least 44 px; nothing hover-only. */

@@ -13,7 +13,7 @@
  *  - the picker, the notice and the stage tile, rendered.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { act } from 'react';
+import { act, Profiler, useEffect } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import spectator from './fixtures/games/holdem-table-spectator.json';
 import seated from './fixtures/games/holdem-table-seated.json';
@@ -30,7 +30,12 @@ import {
     setGamesRoom,
     startActivity,
     START_ANSWER_MS,
+    onGamesServedChanged,
 } from '../api/games/gamesStore';
+import { useCallActivity } from '../api/games/callActivity';
+import { useGames } from '../api/games/useGames';
+import { gamesRowContradicted, gamesRowContradictedBy } from '../api/games/gamesGate';
+import { useOpenWhile } from '../components/games/useOpenWhile';
 import { parseGameFrame, parseGamesEnabled } from '../api/games/protocol';
 import { applyGamesEnabled, firstOpenSeat, seatedUserIds } from '../api/games/activities';
 import { gamesGate } from '../api/games/gamesGate';
@@ -389,5 +394,165 @@ describe('the tile in the call grid', () => {
         });
         expect(button(/^Join$/)).toBeUndefined();
         expect(button(/^Watch$/)).toBeDefined();
+    });
+});
+
+// ---------------------------------------------------------------------------
+// The 2026-10-03 client review
+
+describe("Chat's subscription: the call's slice, not the whole store", () => {
+    beforeEach(mount);
+    afterEach(unmount);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const edit = (frame: unknown, version: number, f: (v: any) => void) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const c = JSON.parse(JSON.stringify(frame)) as any;
+        c.payload.version = version;
+        f(c.payload.view);
+        return c;
+    };
+
+    it('a bet, a turn or a clock re-renders nothing that only needs the call; a sit, a stand or the table closing does', async () => {
+        // Commits counted by React's Profiler, not by the components.
+        const renders = { slice: 0, whole: 0 };
+        const seen: string[] = [];
+        function Slice() {
+            const a = useCallActivity(ROOM);
+            const label = a.table ? `${a.table.kind}:${a.table.seated.join(',')}:${a.table.viewerSeated}` : 'none';
+            useEffect(() => { seen.push(label); });
+            return null;
+        }
+        function Whole() {
+            useGames();
+            return null;
+        }
+        await act(async () => {
+            root.render(
+                <>
+                    <Profiler id="slice" onRender={() => { renders.slice += 1; }}><Slice /></Profiler>
+                    <Profiler id="whole" onRender={() => { renders.whole += 1; }}><Whole /></Profiler>
+                </>,
+            );
+        });
+        await act(async () => { ws.deliver(seated); });
+        const base = { ...renders };
+        // Four frames that change only the pot, the turn and the clock.
+        for (let v = 9; v <= 12; v++) {
+            await act(async () => {
+                ws.deliver(edit(seated, v, view => {
+                    view.pot_total += 10 * v;
+                    view.turn = { hand_no: 1, turn_seq: v };
+                    view.clock_ms = 30_000 - v;
+                }));
+            });
+        }
+        // Positive control: a whole-store subscriber re-rendered for every one.
+        expect(renders.whole - base.whole).toBeGreaterThanOrEqual(4);
+        expect(renders.slice - base.slice).toBe(0);
+        // A player stands: that the call does need.
+        await act(async () => { ws.deliver(edit(seated, 13, view => { view.seats[4] = null; })); });
+        expect(renders.slice - base.slice).toBe(1);
+        expect(seen.at(-1)).toBe('holdem:7,8:true');
+        await act(async () => { ws.deliver(ended.find(e => e.payload.reason === 'closed')); });
+        expect(seen.at(-1)).toBe('none');
+    });
+
+    it("the slice's contradiction check says what gamesRowContradicted says", () => {
+        // A table in the call with a row that says off; an ending of
+        // `disabled` with a row that says on; neither.
+        expect(gamesRowContradictedBy(false, true, false)).toBe(true);
+        expect(gamesRowContradictedBy(undefined, true, false)).toBe(true);
+        expect(gamesRowContradictedBy(true, false, true)).toBe(true);
+        expect(gamesRowContradictedBy(true, true, false)).toBe(false);
+        expect(gamesRowContradictedBy(false, false, true)).toBe(false);
+        expect(gamesRowContradicted(true, { table: null, notice: { kind: 'ended', room_id: ROOM, table_id: 1, reason: 'disabled', at: 0 } }, ROOM)).toBe(true);
+    });
+});
+
+describe('the host behind the socket starts or stops playing games (review, 2026-10-03)', () => {
+    it('an upgrade or a rollback behind a reconnect is heard; the first answer and a same-host reconnect are not', () => {
+        // beforeEach: this page's first ServerFeatures already said `games`.
+        const heard: boolean[] = [];
+        const off = onGamesServedChanged(s => heard.push(s));
+        ws.deliver({ type: 'ServerFeatures', payload: { features: ['games'] } }); // the same host again
+        expect(heard).toEqual([]);
+        ws.deliver({ type: 'ServerFeatures', payload: { features: ['presence'] } }); // rolled back
+        ws.deliver({ type: 'ServerFeatures', payload: { features: ['presence', 'games'] } }); // rolled forward
+        expect(heard).toEqual([false, true]);
+        off();
+        ws.deliver({ type: 'ServerFeatures', payload: { features: [] } });
+        expect(heard).toEqual([false, true]);
+    });
+
+    it('a page whose first host predated games hears the upgrade', () => {
+        detach();
+        resetGamesStoreForTests();
+        ws = new FakeGamesSocket();
+        detach = attachGamesSocket(ws);
+        const heard: boolean[] = [];
+        onGamesServedChanged(s => heard.push(s));
+        ws.deliver({ type: 'ServerFeatures', payload: { features: ['presence'] } });
+        expect(heard).toEqual([]); // the first answer is no change
+        window.dispatchEvent(new Event('wsClosed'));
+        ws.deliver({ type: 'ServerFeatures', payload: { features: ['presence', 'games'] } });
+        expect(heard).toEqual([true]);
+    });
+});
+
+describe('the picker only opens when asked (review, 2026-10-03)', () => {
+    beforeEach(mount);
+    afterEach(unmount);
+
+    it('closed when the launcher goes, and still closed when it comes back', async () => {
+        const shown: boolean[] = [];
+        function Host({ allowed }: { allowed: boolean }) {
+            const [open, set] = useOpenWhile(allowed);
+            useEffect(() => { shown.push(open); });
+            return <button type="button" className="open-it" onClick={() => set(true)}>open</button>;
+        }
+        await act(async () => { root.render(<Host allowed />); });
+        await click(container.querySelector('.open-it'));
+        expect(shown.at(-1)).toBe(true);
+        await act(async () => { root.render(<Host allowed={false} />); }); // games switched off
+        expect(shown.at(-1)).toBe(false);
+        await act(async () => { root.render(<Host allowed />); }); // ...and on again
+        expect(shown.at(-1)).toBe(false);
+        // Never shown while not allowed, not even for one render.
+        expect(shown.indexOf(true)).toBe(shown.lastIndexOf(true));
+    });
+
+    it('focus moves into it, Tab stays inside, and returns to the launcher when it closes', async () => {
+        const launcher = document.createElement('button');
+        launcher.textContent = 'Activities';
+        document.body.appendChild(launcher);
+        const behind = document.createElement('button');
+        behind.textContent = 'Share your screen';
+        document.body.appendChild(behind);
+        launcher.focus();
+        const picker = (open: boolean) => open ? (
+            <ActivityPicker isPhone={false} channelName="Lounge" running={null} canJoin seated={false}
+                onStart={() => {}} onJoin={() => {}} onWatch={() => {}} onClose={() => {}} />
+        ) : null;
+        await act(async () => { root.render(picker(true)); });
+        const dialog = document.querySelector('[role="dialog"]')!;
+        expect(dialog.contains(document.activeElement)).toBe(true);
+        expect(document.activeElement?.classList.contains('activity-card')).toBe(true);
+        const tab = async (shift = false) => {
+            await act(async () => {
+                document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: shift, bubbles: true, cancelable: true }));
+            });
+        };
+        // From the last control, Tab wraps to the first; Shift+Tab from the first wraps to the last.
+        const focusables = [...dialog.querySelectorAll<HTMLElement>('button:not(:disabled)')];
+        focusables.at(-1)!.focus();
+        await tab();
+        expect(document.activeElement).toBe(focusables[0]);
+        await tab(true);
+        expect(document.activeElement).toBe(focusables.at(-1));
+        await act(async () => { root.render(picker(false)); });
+        expect(document.activeElement).toBe(launcher);
+        launcher.remove();
+        behind.remove();
     });
 });

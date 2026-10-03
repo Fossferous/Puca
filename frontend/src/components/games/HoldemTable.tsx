@@ -17,7 +17,8 @@ interface HoldemTableProps {
     currentUserId: number;
     /** Take a seat (the parent shows the disclosure first, once). */
     onSit: (seat: number) => void;
-    send: (frame: GameClientFrame) => void;
+    /** Send a frame; false when it did not go out (the socket is down). */
+    send: (frame: GameClientFrame) => boolean;
     /** When the last refusal arrived (re-enables the bar after a refused act). */
     refusedAt: number | null;
 }
@@ -65,21 +66,29 @@ export function HoldemTable({ table, gate, isPhone, nameOf, currentUserId, onSit
     const [raise, setRaise] = useState<{ key: string; amount: number; text?: string } | null>(null);
     // The decision we already answered: the bar waits for the next view
     // (or a refusal) rather than letting a second tap send a second action.
-    const [sent, setSent] = useState<{ key: string; at: number } | null>(null);
-    const [sheetOpen, setSheetOpen] = useState(false);
+    // Held for the VIEW it answered, not only the turn: a resync after a
+    // reconnect shows the same turn again (the server never got the action),
+    // and that new view must give the bar back - a duplicate is a harmless
+    // stale_turn, a bar locked until the clock folds you is not.
+    const [sent, setSent] = useState<{ key: string; view: HeldTable; at: number } | null>(null);
+    // The raise sheet, for the decision it was opened for only: left open
+    // when the turn passed, it must not come back (and grab the phone's
+    // keyboard) by itself at the next turn.
+    const [sheetFor, setSheetFor] = useState<string | null>(null);
+    const sheetOpen = sheetFor !== null && sheetFor === turnKey;
     const [shownHand, setShownHand] = useState<number | null>(null);
 
     const raiseTo = bar?.raise
         ? (raise && raise.key === turnKey ? clampRaise(raise.amount, v.legal!) : bar.raise.min)
         : 0;
     const raiseText = raise && raise.key === turnKey && raise.text !== undefined ? raise.text : String(raiseTo);
-    const busy = !!sent && sent.key === turnKey && !(refusedAt !== null && refusedAt > sent.at);
+    const busy = !!sent && sent.key === turnKey && sent.view === table && !(refusedAt !== null && refusedAt > sent.at);
 
     const act = (action: Parameters<typeof gameFrames.act>[3]) => {
         if (!v.turn || busy) return;
-        setSent({ key: turnKey, at: Date.now() });
-        setSheetOpen(false);
-        send(gameFrames.act(room, id, v.turn, action));
+        setSheetFor(null);
+        // Only an action that went out holds the bar.
+        if (send(gameFrames.act(room, id, v.turn, action))) setSent({ key: turnKey, view: table, at: Date.now() });
     };
 
     const nextDeal = useCountdown(v.in_hand ? null : v.next_deal_in_ms, table.receivedAt);
@@ -315,7 +324,7 @@ export function HoldemTable({ table, gate, isPhone, nameOf, currentUserId, onSit
                                             type="button"
                                             className="games-btn games-amount-btn"
                                             disabled={busy}
-                                            onClick={() => setSheetOpen(true)}
+                                            onClick={() => setSheetFor(turnKey)}
                                             aria-label={`Raise amount ${chips(raiseTo)}, tap to type it`}
                                         >
                                             {chips(raiseTo)}
@@ -353,7 +362,7 @@ export function HoldemTable({ table, gate, isPhone, nameOf, currentUserId, onSit
                     presets={presets}
                     confirmLabel={raiseLabel}
                     onConfirm={(amount) => act(raiseAction(amount, v.legal!))}
-                    onClose={() => setSheetOpen(false)}
+                    onClose={() => setSheetFor(null)}
                 />
             )}
         </div>

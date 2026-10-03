@@ -6,9 +6,10 @@
  * A table is offered only when ALL of these hold:
  *   - this socket's server confirmed `games` (ServerFeatures; a reconnect can
  *     reach an older host, so it is per socket);
- *   - the voice channel's server has `games_enabled` (the owner's switch, off
- *     by default; absent on a server that predates games) — or the server
- *     has already sent a table for this call, which outranks a stale row;
+ *   - the voice channel's server has `games_enabled` (the owner's switch, ON
+ *     by default since 2026-10-03; absent on a server that predates games) —
+ *     or the server has already sent a table for this call, which outranks a
+ *     stale row;
  *   - the person is in that call;
  *   - for OPENING and SITTING: `CONNECT` and `PLAY_GAMES` in that channel.
  *
@@ -64,10 +65,11 @@ const has = (perms: number | null | undefined, bit: number) => perms !== null &&
 export function gamesGate(i: GamesGateInput): GamesGate {
     const off = (why: GamesUnavailable): GamesGate => ({ available: false, launcher: false, canOpen: false, canSit: false, canModerate: false, why });
     if (!i.feature) return off('no_feature');
-    // The server row is fetched once and nothing pushes a change to it, so a
-    // person online when the owner switched games on still holds `false`. A
-    // table the server sent for this call is its own word that the call plays
-    // games (switching games off ends every table), so it wins over the row.
+    // The owner's switch is pushed (GamesEnabled) into the cached row, but a
+    // client that missed the push (reconnecting through it) still holds
+    // `false`. A table the server sent for this call is its own word that the
+    // call plays games (switching games off ends every table), so it wins
+    // over the row.
     // With no table the row still decides: there is nothing to open on a
     // server whose owner has games off.
     if (i.gamesEnabled !== true && !i.hasTable) return off('disabled');
@@ -89,11 +91,12 @@ export function gamesGate(i: GamesGateInput): GamesGate {
 
 /**
  * Whether the server's own games frames contradict the cached server row's
- * `games_enabled` for the call on screen. Nothing pushes a changed server row
- * (the owner's save refreshes only the owner's copy), so a member online when
- * games were switched ON holds `false`, and one online when they were switched
- * OFF holds `true` and is still offered "Open a table". The frames are the
- * server's word:
+ * `games_enabled` for the call on screen. The owner's switch is pushed
+ * (GamesEnabled) into every online member's cached row; this is the fallback
+ * for a client that missed the push (it was reconnecting through it): one
+ * that missed a switch ON holds `false`, one that missed a switch OFF holds
+ * `true` and is still offered "Open a table". The frames are the server's
+ * word:
  *   - a table in this call means games are on here;
  *   - an ending or a refusal with `disabled` means they are off.
  * Chat refetches the server rows when this is true. The gate itself already
@@ -106,8 +109,15 @@ export function gamesRowContradicted(
     room: string | null,
 ): boolean {
     if (!room) return false;
-    if (s.table && s.table.room_id === room && gamesEnabled !== true) return true;
     const n = s.notice;
-    if (!n || n.room_id !== room || gamesEnabled !== true) return false;
-    return (n.kind === 'ended' && n.reason === 'disabled') || (n.kind === 'refused' && n.refusal.code === 'disabled');
+    const saidDisabled = !!n && n.room_id === room
+        && ((n.kind === 'ended' && n.reason === 'disabled') || (n.kind === 'refused' && n.refusal.code === 'disabled'));
+    return gamesRowContradictedBy(gamesEnabled, !!s.table && s.table.room_id === room, saidDisabled);
+}
+
+/** `gamesRowContradicted` from the call's slice (callActivity.ts): a table
+ *  in the call, and whether the server's last word there was `disabled`. */
+export function gamesRowContradictedBy(gamesEnabled: boolean | undefined, hasTable: boolean, saidDisabled: boolean): boolean {
+    if (hasTable && gamesEnabled !== true) return true;
+    return saidDisabled && gamesEnabled === true;
 }
