@@ -4,6 +4,27 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Added
+- **Poker and Blackjack in voice calls, like Discord's Activities.** In a
+  call, press the new **Activities** button (the rocket, beside camera and
+  screen share; on a phone, behind the arrow on the voice bar) and pick
+  **Poker** (No-Limit Hold'em, up to 6 players, 1,000 chips, blinds 5/10) or
+  **Blackjack** (6 decks, dealer stands on soft 17, blackjack pays 3:2).
+  Everyone in the call sees "<name> started Poker" with **Join** and
+  **Watch**, a tile in the call grid and a cards mark beside each player;
+  **Back to call** returns to the grid without leaving the call. One game per
+  call at a time; anyone in the call can watch.
+- **Chips are free and worth nothing.** They belong to that table and nothing
+  is kept when it closes. The server deals the cards, so whoever runs it could
+  see them; the table says so the first time you sit.
+- **On for every server by default.** The owner can turn games off under
+  **Server Settings › Overview › Allow games in voice calls**, which ends any
+  table and removes the button for everyone at once, with no reload. A new
+  permission, **Play Games**, is on for everyone by default; deny it on a role
+  or a voice channel. Older apps see none of it.
+
 ## 0.9.832 — 2026-10-03
 
 Idle and away dots, Leave or Move here for a call on your other device, pop-out windows for streams, and fixes for SFU channels saying Channel not found and for Notes live updates.
