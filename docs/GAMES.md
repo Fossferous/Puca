@@ -1,15 +1,18 @@
 # Games — Poker and Blackjack in a voice call
 
 Hold'em and Blackjack played with the people in your current voice call, for
-free chips that exist only at that table. **The rules engine is built and
-tested; nothing else is.** There is no server wiring, no protocol frame, no
-permission bit, no setting and no UI yet — this page is the design for those
-next steps, and the contract the engine already keeps.
+free chips that exist only at that table. **The rules engine and the wire
+contract are built and tested; nothing that plays a game is.** There is no
+server table, handler or timer, no Server Settings toggle and no UI yet —
+this page is the design for those next steps, and the contract the engine
+and the frames already keep.
 
 | piece | state |
 |---|---|
 | Rules engine: `crates/puca-games` (Hold'em, Blackjack, evaluator, shuffle) | **built**, pure Rust, tested (below) |
-| Server tables bound to a voice room, frames, timers, permissions | designed here, not built |
+| Wire contract: every frame, view, event, refusal and end reason; the `games` capability; fixtures both sides parse (*Frames*, below) | **built**, tested; the server does not confirm `games` yet (`GAMES_SERVED = false`) |
+| `PLAY_GAMES` (1 << 28) and `servers.games_enabled` (migration 073, default off) | **built**; nothing reads the column yet and it has no toggle |
+| Server tables bound to a voice room, handlers, timers, the toggle | designed here, not built |
 | Client table view, desktop + 390x844 phone | designed here, not built |
 
 ## Owner decisions (fixed)
@@ -240,9 +243,11 @@ warns that holding DashMap guards across awaits risks shard deadlocks).
 Read what you need from the room, drop the guard, then lock the table.
 
 **Restart ends every table.** That includes every backend deploy. A
-`GameResync` for a table the server does not know is answered with
-`GameEnded { reason: "server_restarted" }`, never an error, and the client
-clears its stale table with that message.
+`GameResync` (or any frame) for a table the server does not know is answered
+with `GameEnded { reason: "gone" }`, never an error, and the client clears its
+stale table with that message. (The first sketch called the reason
+`server_restarted`; the server cannot tell a restart from a table that closed
+while the client was not listening, so the code says only what it knows.)
 
 ### Who is in the room: `conns_of`, never `joined_rooms`
 
@@ -272,20 +277,289 @@ both get that seat's private view; actions are sequenced per seat by
 
 ### Frames
 
-Client: `GameCreate { room_id, kind, config }`, `GameSit { table_id, seat }`,
-`GameAct { table_id, turn, action }` (the `TurnRef` it was shown),
-`GameStand { table_id }`, `GameResync { table_id }`.
-Server: `GameTable { table_id, version, view }` (the per-connection view —
-`view_for(seat)` for a seated player, `view_for(None)` for everyone else),
-`GameEvents { table_id, version, events }`, `GameEnded { table_id, reason }`.
-Every frame carries `version`; a client that sees a gap sends `GameResync`
-(`try_send` drops frames under backpressure). The client also sends
-`GameResync` automatically after `RoomJoined` for a voice room: a reconnect
-gets a NEW `conn_id`, so private cards sent to the old one are gone. Resync
-is throttled per connection (one a second) so it cannot be used to pull full
-snapshots at the general 50/s message rate. Frames carry no free text — no
-chat-injection or amplification lever. All of them go in
-`docs/API_REFERENCE.md`'s WebSocket section when they exist.
+**This is the contract** both halves build against, and it is built and
+tested: `src/games_wire.rs` (the pieces: views, events, refusals, the
+conversions from the engine) and the `Game*` variants of `src/protocol.rs` on
+the server; `frontend/src/api/games/protocol.ts` (types, `gameFrames.*`
+builders, `parseGameFrame`, `versionStep`) on the client. Both are pinned to
+ONE set of files, `frontend/src/tests/fixtures/games/*.json` — the server by
+`protocol::games_frame_tests`, the client by `gamesProtocol.test.ts`:
+
+| fixture | holds |
+|---|---|
+| `client-frames.json` | every client frame (every action once); the client's builders must produce exactly these values, the server must parse each as itself |
+| `holdem-table-seated.json` | `GameTable` for the seat to act on the flop: its own two cards, everyone else `["??","??"]`, `legal`, a clock, one seat `away` |
+| `holdem-table-spectator.json` | the same moment for a spectator: no card but the board |
+| `holdem-events.json` | `GameEvents`: a sit, the deal, the flop, a showdown that shows two hands and mucks one, and the mucked hand shown voluntarily after |
+| `blackjack-table.json` | `GameTable` mid-round: the hole card `"??"`, `legal` for the player to act |
+| `blackjack-events.json` | `GameEvents`: a bet with the deal countdown, the deal (hole card dealt as `"??"`), a hit, the last bust with the reveal and the round's end |
+| `refusals.json` | `GameRefused`: every code once, every op at least once |
+| `ended.json` | `GameEnded`: every reason once |
+
+The table fixtures are not hand-written: they are what real engine tables,
+dealt from a fixed seed, serialise to. After a deliberate contract change,
+`PUCA_WRITE_GAME_FIXTURES=1 cargo test games_frame_tests` rewrites them, and
+the client's tests then say what the change broke.
+
+#### Capability
+
+The 0.9.832 handshake, unchanged in shape:
+
+- The client puts `games` in its ONE caps list — `CLIENT_CAPS` in
+  `frontend/src/api/websocket.ts`, sent as `/ws?caps=own_voice,presence,games`.
+  Never a second `caps=` (it fails the upgrade); `check-docs-consistency.mjs`
+  rule 14 pins every documented `caps=` to that list.
+- The server reads it with the one tokeniser (`presence::ClientCaps`,
+  `CAP_GAMES`), records it per connection (`Session.games`,
+  `AppState::set_conn_games`, never for a delivery socket) and answers
+  `AppState::conn_plays_games(user, conn)`. **Game frames go only to
+  connections for which that is true** — and, of those, only to the ones in
+  the call (`Room.member_conns`), each with `send_to_conn`.
+- The server confirms `games` in `ServerFeatures` only when it plays games:
+  `games_wire::GAMES_SERVED`, **false** in the contract commit and flipped by
+  the commit that adds the handlers. The client sends a game frame only
+  after `wsClient.hasServerFeature('games')` on THIS socket (a reconnect can
+  reach an older host).
+- That says the server build can play. Whether this server's owner turned
+  games on is `games_enabled` (on the `Server` object, server half). The
+  client offers a table only with the feature, `games_enabled`, `CONNECT` +
+  `PLAY_GAMES` in that channel, and the person in the call.
+
+#### Shared rules
+
+- Envelope as every frame: `{"type": "<Variant>", "payload": {...}}`.
+- `room_id` is the call, `voice_<channel_id>`, in EVERY frame both ways. The
+  engine's registry is keyed `(room, id)`; a frame naming both is resolved
+  with `get_mut(room, id)`, and membership is checked against that room.
+- `table_id`: an integer in `1..2^53`, from a per-process random seed, never
+  reused while the process lives (`registry::RoomTables`). A JavaScript
+  number holds it exactly.
+- Cards: always two characters, rank then suit (`Ah`, `Td`, `2c`; ten is `T`,
+  never `10`). `"??"` is a face-down card and appears ONLY as a Hold'em
+  seat's `cards` (`["??","??"]`: in the hand, not yours, not shown), as the
+  Blackjack dealer's hole card in `view.dealer`, and as the card of a
+  `card_dealt` to the dealer. Anywhere else it is junk.
+- Seats are 0-based indexes. `user_id` is the server's user id
+  (`games_wire::player_id` / `user_of` map it to the engine's `PlayerId`).
+- Every number is a non-negative safe integer except `user_id` (the server's
+  `i64`). Counters (`version`, `hand_no`, `round_no`, `turn_seq`) count one
+  per action; stacks are capped at 10^9.
+- No free text anywhere: card codes, enum names and numbers. The client
+  words every code itself; nothing is rendered as HTML.
+- Unknown fields are ignored both ways, so either side can grow.
+
+#### Client → server
+
+Sent only after the server confirmed `games` on this socket.
+
+| frame | payload (besides `room_id`) | who | engine call |
+|---|---|---|---|
+| `GameCreate` | `kind` (`"holdem"`/`"blackjack"`), `config` (optional object) | in the call, `CONNECT` + `PLAY_GAMES` | `RoomTables::open` + `HoldemTable::new` / `BlackjackTable::new` |
+| `GameSit` | `table_id`, `seat` | same | `sit(seat, player)` |
+| `GameStand` | `table_id` | seated | `leave(seat)` — get up from the table (NOT the Blackjack action `stand`) |
+| `GameAct` | `table_id`, `turn` `{hand_no, turn_seq}`, `action` | seated, their turn | `act(seat, turn, action)` |
+| `GameBet` | `table_id`, `amount` | seated, Blackjack, between rounds | `place_bet(seat, amount)` |
+| `GameClearBet` | `table_id` | same | `clear_bet(seat)` |
+| `GameSitOut` | `table_id` | seated | `sit_out(seat)` |
+| `GameSitIn` | `table_id` | seated | `sit_in(seat)` (also after the clock sat you out) |
+| `GameRebuy` | `table_id` | seated, busted | `rebuy(seat)` |
+| `GameShowCards` | `table_id` | seated, Hold'em, after the hand | `show_cards(seat)` |
+| `GameResync` | `table_id` | in the call | none: answers `GameTable` (or `GameEnded gone`) |
+| `GameClose` | `table_id` | in the call, `MOVE_MEMBERS` | `RoomTables::close(room, id)` |
+| `GameRemovePlayer` | `table_id`, `seat` | in the call, `MOVE_MEMBERS` | `leave(seat)` |
+
+`config` — every field optional, defaults are the owner's table
+(`HoldemConfig::default()` / `BlackjackConfig::default()`); only the stack and
+stakes are the opener's: `starting_stack` (both), `small_blind` and
+`big_blind` (Hold'em), `min_bet` and `max_bet` (Blackjack). A field of the
+other game is refused (`invalid_config`), not ignored; the engine's
+`validate()` decides the rest (`GameConfigWire::holdem` / `::blackjack`).
+There is no frame to change the settings after opening (the engine's
+`configure()` is not exposed in v1): close and reopen.
+
+`action` — `{"type":"fold"}`, `check`, `call`,
+`{"type":"bet_or_raise_to","amount":60}` (the street TOTAL, never an
+increment), `all_in` for Hold'em; `hit`, `stand`, `double`, `split` for
+Blackjack. An action of the other game is `wrong_game`.
+
+`turn` is the `view.turn` the client was shown; a delayed or double submit is
+`stale_turn`, which the client drops silently.
+
+The **disclosure** — *"Chips are free and worth nothing. This server deals
+the cards and its operator could see them."* — is the client's to show before
+a person's first `GameSit`; the server does not track it.
+
+#### Server → client
+
+All four go to one connection at a time with `send_to_conn`, only to
+connections that announced `games` (*Capability*). Watching needs nothing but
+being in the call: every such connection there gets the table (a spectator
+view unless it is seated); `PLAY_GAMES` gates opening and sitting, not
+watching. Leaving the call (`LeaveRoom`, a `RoomLeft`, a `VoiceMoved`) sends
+no `GameEnded`: the client drops that call's table itself, because the server
+stops sending to a connection the moment it is no longer in the room.
+
+- **`GameTable { room_id, table_id, version, view }`** — the whole table as
+  THIS connection may see it. Sent: to everyone in the call when a table
+  opens (version 1); to a connection right after its `RoomJoined` for a call
+  that has a table (a newcomer learns of it without knowing its id); in
+  answer to `GameResync`; and to everyone, with `version` + 1, when the table
+  changed without an engine event (a seat's `away` flag, a deal countdown
+  starting).
+- **`GameEvents { room_id, table_id, version, events, view }`** — one engine
+  call that returned events: `events` is that call's public list, identical
+  for everyone, and `view` is the table AFTER it for this connection.
+  `version` is exactly one more than before the call. An engine call that
+  returns no events (a no-op `sit_out`) sends nothing and keeps the version.
+- **`GameEnded { room_id, table_id, reason }`** — the table is gone; drop it
+  and say why. Also the answer to ANY frame naming a table that is not open
+  in that room.
+- **`GameRefused { room_id, table_id, op, code, ... }`** — a frame from this
+  connection was refused, to this connection only. `room_id` and `table_id`
+  echo the refused frame's (`room_id` may then be anything the client sent —
+  `not_a_voice_room` is exactly that case; `table_id` is `null` for a
+  refused `GameCreate`); `op` names the frame (`create`, `sit`, `stand`,
+  `act`, `bet`, `clear_bet`, `sit_out`, `sit_in`, `rebuy`, `show_cards`,
+  `resync`, `close`, `remove_player`); `code` and any numbers it carries are
+  flattened into the payload. Expected refusals are ALWAYS this, never the
+  generic `Error` the client shows as an alert; `Error` remains only for a
+  frame that does not parse (a broken client).
+
+**Views** (`view.game` tags them). Field by field in
+`frontend/src/api/games/protocol.ts` (`HoldemView`, `BlackjackView`) and in
+the fixtures. Hold'em: `viewer_seat` (`null` = spectator), `config`,
+`hand_no`, `in_hand`, `street`, `button`, `small_blind_seat`,
+`big_blind_seat`, `seats` (exactly `config.max_seats` entries, `null` =
+empty; each `seat`, `user_id`, `stack`, `status`, `street_commit`,
+`hand_commit`, `cards`, `sitting_out`, `leaving`, `away`), `board`,
+`pot_total`, `current_bet`, `to_act`, `turn`, `legal` (only in the view of
+the seat to act), `clock_ms`, `next_deal_in_ms`. A seat's `cards`: `null`
+(not in the live hand, folded, or between hands with nothing shown),
+`["??","??"]` (in the hand, face down), or real codes (the viewer's own
+hand, or a shown one). Blackjack: `viewer_seat`, `config` (incl.
+`blackjack_pays: [3,2]`), `round_no`, `in_round`, `seats` (each with
+`pending_bet` and `hands`: `cards`, `bet`, `doubled`, `from_split`, `total`,
+`soft`, `done`, `outcome`, `returned`), `dealer` (hole card `"??"`),
+`dealer_total` (`null` until the reveal), `to_act` `{seat, hand}`, `turn`,
+`shoe_remaining`, `shoe_size`, `reshuffle_due`, `legal` (only for the seat to
+act), `clock_ms`, `next_deal_in_ms`. `clock_ms` / `next_deal_in_ms` are
+RELATIVE milliseconds (like Clips' `*_in_ms`), so clock skew cannot shift
+them; `away` marks a seat inside the disconnect grace.
+
+**Events** (`type`-tagged, the engine's events one for one):
+Hold'em `player_sat`, `player_left`, `sat_out` (`reason`: `requested`,
+`timeouts`, `busted`), `sat_in`, `rebought`, `hand_started`,
+`blind_posted`, `acted` (`kind`: `fold`/`check`/`call`/`bet`/`raise`;
+`reason`: `player`/`timeout`/`left`), `board_dealt`, `uncalled_returned`,
+`showdown` (`shown`: `{seat, cards, category}` in showdown order, `category`
+one of `high_card` … `straight_flush`; `mucked`: seats, never their cards),
+`pot_awarded`, `shown`, `hand_ended`. Blackjack `player_sat`,
+`player_left`, `sat_out`, `sat_in`, `rebought`, `bet_placed`,
+`bet_cleared`, `shoe_shuffled` (`cards_in_shoe`, `mid_round`),
+`round_started`, `card_dealt` (`seat`/`hand` `null` = to the dealer; the
+hole card is `"??"`), `dealer_peeked`, `acted` (`action`:
+`hit`/`stand`/`double`/`split`), `dealer_revealed`, `hand_settled`
+(`outcome`: `blackjack`/`win`/`push`/`lose`; `returned` includes the bet),
+`round_ended`. A client skips an event type it does not know.
+
+#### Versions
+
+`version` is per table: 1 when it opens, + 1 for every change any view shows
+(each engine call that returned events, and each server-side change like
+`away`). Every frame carrying a view carries the version of the state it
+shows, and every connection sees the same number for the same change.
+`versionStep(held, incoming, frame)` in `protocol.ts` is the client's rule:
+`GameEvents` at `held + 1` applies (animate its events); at or below `held`
+is ignored; above `held + 1` (frames dropped under backpressure — `try_send`)
+applies the view, which is complete, without animating events as if nothing
+was missed. A `GameTable` at or above `held` replaces the table. So a dropped
+frame heals at the next one; `GameResync` (throttled to one a second per
+connection — refused `rate_limited` beyond) is for a client that cannot trust
+what it holds: after `RoomJoined` for a call it still holds a table for (a
+reconnect gets a NEW `conn_id`, so private cards sent to the old one are
+gone), after it refused to parse a frame, or when a turn clock ran out long
+ago with no frame since.
+
+#### Refusal codes
+
+| code | carries | meaning |
+|---|---|---|
+| `disabled` | | games are off on this server |
+| `no_permission` | | missing `CONNECT`+`PLAY_GAMES` (open, sit) or `MOVE_MEMBERS` (close, remove) |
+| `not_in_call` | | this connection is not in that call; says nothing about any table |
+| `not_a_voice_room` | | `room_id` is not `voice_<id>` |
+| `room_has_table` | `open_table_id`, `kind` | one table per call: the open one must close first |
+| `too_many_tables` | | the server-wide cap (500) |
+| `rate_limited` | | 5 opens per 5 minutes per user, or one resync a second per connection |
+| `wrong_game` | | an action, bet or request of the other game |
+| `not_seated` | | needs a seat |
+| `invalid_config` | | the settings fail validation or mix the games |
+| `config_locked` | | settings cannot change after the first hand |
+| `seat_out_of_range`, `seat_taken`, `seat_empty`, `already_seated` | | seating |
+| `not_your_turn` | | |
+| `stale_turn` | | that decision passed; drop silently |
+| `no_chips`, `not_busted`, `rebuy_not_allowed` | | stacks and rebuys |
+| `bet_below_minimum` | `min` | Hold'em: the smallest legal `bet_or_raise_to` total; Blackjack: the minimum bet |
+| `hand_in_progress`, `no_hand_in_progress`, `not_enough_players`, `nothing_to_call`, `raise_not_reopened`, `nobody_to_raise`, `not_showable` | | Hold'em engine |
+| `cannot_check` | `to_call` | Hold'em |
+| `bet_above_stack` | `max` | Hold'em: the largest street total the stack reaches |
+| `round_in_progress`, `no_round_in_progress`, `no_bets`, `sitting_out`, `cannot_hit`, `cannot_double`, `cannot_split` | | Blackjack engine |
+| `bet_above_maximum` | `max` | Blackjack |
+| `insufficient_chips` | `stack` | Blackjack |
+
+Every engine error maps to exactly one code (`From<HoldemError>`,
+`From<BjError>`, `From<OpenError>` for `GameRefusal`, exhaustive matches: a
+new engine error does not compile until it has one). A client reads an
+unknown code as `other`.
+
+#### End reasons
+
+| reason | when |
+|---|---|
+| `closed` | someone with `MOVE_MEMBERS` closed it (`GameClose`) |
+| `call_ended` | the call emptied and stayed empty for one rejoin grace |
+| `idle` | nobody sat at it for the idle limit, so it stopped holding the call's one table slot |
+| `disabled` | the owner switched games off |
+| `channel_deleted` | the voice channel was deleted |
+| `gone` | the answer to a frame naming a table that is not open in that room: it closed while this client was not listening, or the server restarted |
+
+A client reads an unknown reason as `other` and still drops the table.
+
+#### Order of checks (server half)
+
+So a refusal never says more than the caller may know: (1) a frame that does
+not parse is the generic `Error`, as for every frame; (2) `room_id` not a
+voice room → `not_a_voice_room`; (3) this connection not in that room
+(`conns_of` under the room guard, never `joined_rooms`) → `not_in_call` —
+before anything about tables, so a non-member learns nothing; (4)
+`games_enabled` off → `disabled`; (5) permissions → `no_permission`; (6)
+rate limits → `rate_limited`; (7) the table, `get_mut(room, id)` — not open
+→ `GameEnded gone`; (8) the op against the game → `wrong_game`, the seat →
+`not_seated`; (9) the engine → its code.
+
+#### Where this deviates from the first sketch, and why
+
+- `room_id` in every frame (the sketch named only `table_id`): the registry
+  is keyed `(room, id)` and membership is per room; the server never has to
+  search for a table, and a frame for one call can never act in another.
+- `GameEvents` carries the per-connection `view`: the client never
+  recomputes pots, legal actions or turns (that would re-implement the
+  engine in TypeScript), and a dropped frame heals at the next one instead of
+  needing a resync.
+- `gone` instead of `server_restarted` (see *Restart ends every table*).
+- The server PUSHES `GameTable` after `RoomJoined` when the call has a
+  table, because a newcomer has no id to resync with; the client still sends
+  `GameResync` after `RoomJoined` when it already holds a table.
+- Frames the sketch left implicit: `GameBet` / `GameClearBet` (Blackjack
+  bets between rounds), `GameSitOut` / `GameSitIn` (the clock sits a player
+  out after two expiries; without `GameSitIn` they could never come back),
+  `GameRebuy`, `GameShowCards`, and the moderation pair `GameClose` /
+  `GameRemovePlayer`; plus the typed `GameRefused`.
+- The `idle` end reason (owner to confirm the limit, suggested 5 minutes):
+  closing is `MOVE_MEMBERS` only, so without it a table nobody sits at would
+  hold the call's one slot until a moderator noticed.
+- Capability: the per-socket `games` handshake instead of a
+  `gamesSupported` flag (*Gating and permissions*).
 
 ### Leaving, disconnects and the grace
 
@@ -332,24 +606,27 @@ player has bet, or 15 s after the first bet.
 ### Gating and permissions
 
 - **`servers.games_enabled BOOLEAN NOT NULL DEFAULT FALSE`** — off by
-  default, like `clips_enabled`. Toggled by the owner in Server Settings
-  (next to Clips; owner-only like it), and plumbed through the server-row
-  SELECTs (server and invite handlers), the `Server` struct, the update
-  handler and the client `Server` type. Migration number: next free at merge
-  time (072 today; other branches ship migrations too, and `dual-ship.sh`
-  byte-matches them on every host).
-- **`PLAY_GAMES = 1 << 28`** in `src/permissions.rs` (the next free bit;
-  `1 << 28` is still safe with JS `<<`, bit 31 would not be), in
-  `DEFAULT_MEMBER` so new servers have it, and a backfill migration ORing it
-  onto every existing @everyone role (the pattern of migrations 051/056).
+  default, like `clips_enabled`. **Added by migration `073_games.sql`** (LF
+  bytes, additive: 0.9.832 boots over it). Still to do (server half + client
+  half, together, since a setting ships with its UI): the owner's toggle in
+  Server Settings (next to Clips; owner-only like it), and the plumbing
+  through the server-row SELECTs (server and invite handlers), the `Server`
+  struct, the update handler and the client `Server` type.
+- **`PLAY_GAMES = 1 << 28`** — **built**: `src/permissions.rs` (the next
+  free bit; `1 << 28` is exact with JS `<<`, bit 31 would not be), in
+  `DEFAULT_MEMBER` so new servers have it, and migration 073 ORs it onto
+  every existing @everyone role (the pattern of migrations 051/056).
   `OVERWRITABLE` derives from `Self::all()`, so per-channel overwrites cover
-  it automatically. Client: BOTH maps in `frontend/src/api/permissionBits.ts`
-  (`PERM` for gating, `PERMISSIONS` for the role editor), the role editor
-  list, and `VOICE_CHANNEL_PERMS` in the channel editor — it is a voice-only
-  bit.
-- **Capability detection**: a `gamesSupported` flag like `clipsSupported`,
-  so a new client on an old server hides the feature instead of sending a
-  frame the old server answers with "Invalid message format".
+  it automatically (pinned by a test). Client: BOTH maps in
+  `frontend/src/api/permissionBits.ts` (`PERM` for gating, `PERMISSIONS` for
+  the role editor), pinned to the Rust value by
+  `permissions::play_games_bit_tests`. Still to do (client half): the role
+  editor list and `VOICE_CHANNEL_PERMS` in the channel editor — it is a
+  voice-only bit.
+- **Capability detection** — **built**, and NOT the `gamesSupported` flag
+  the first sketch borrowed from `clipsSupported`: games ride the socket, and
+  a reconnect can land on an older rollback host, so the answer must be per
+  socket. It is the 0.9.832 capability handshake (*Frames → Capability*).
 - **Who may open a table / sit**: anyone in the call holding `CONNECT` and
   `PLAY_GAMES`. **Moderators with `MOVE_MEMBERS`** may close a table or remove
   a player (the engine's `leave`).
@@ -361,7 +638,7 @@ player has bet, or 15 s after the first bet.
   hand.
 - **Teardown**: switching `games_enabled` off ends every table on that server
   (`GameEnded { reason: "disabled" }`); deleting a channel ends its tables
-  (beside the clip-channel cleanup in `delete_channel`).
+  (`channel_deleted`, beside the clip-channel cleanup in `delete_channel`).
 
 ## The table on screen (not built)
 

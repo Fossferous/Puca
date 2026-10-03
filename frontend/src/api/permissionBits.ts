@@ -35,6 +35,12 @@ export const PERM = {
     // channel's my_permissions is where the client reads it (Server carries
     // no resolved bits of its own). Backend: invite_handlers::create_invite.
     CREATE_INVITE: 1 << 27,
+    // Games in a voice call (docs/GAMES.md): open a table and sit down. A
+    // voice bit, overwritable per channel; needs CONNECT too, and is gated
+    // additionally by the server's games_enabled, so this bit alone grants
+    // nothing. Closing a table or removing a player is MOVE_MEMBERS.
+    // Backend: permissions.rs PLAY_GAMES.
+    PLAY_GAMES: 1 << 28,
 } as const;
 
 /**
@@ -86,4 +92,6 @@ export const PERMISSIONS = {
     CREATE_CLIPS: 1 << 26,
     // Membership (server-scoped: not overwritable per channel)
     CREATE_INVITE: 1 << 27,
+    // Games (voice; overwritable per channel)
+    PLAY_GAMES: 1 << 28,
 } as const;

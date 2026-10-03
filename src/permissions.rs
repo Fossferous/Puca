@@ -58,6 +58,16 @@ bitflags! {
         // non-expiring code for it and there was no setting that said no.
         const CREATE_INVITE      = 1 << 27;
 
+        // Sitting at, and opening, a card table in a voice call (Poker,
+        // Blackjack: docs/GAMES.md). Needs CONNECT too, and is gated
+        // additionally by servers.games_enabled, which defaults FALSE (073),
+        // so this bit alone grants nothing — the CREATE_CLIPS pattern. A
+        // VOICE bit, overwritable per channel. Closing a table or removing a
+        // player is MOVE_MEMBERS, not this. The next free bit; the client's
+        // `1 << 28` is exact (JavaScript's `<<` is 32-bit and only bit 31,
+        // the sign bit, would go wrong).
+        const PLAY_GAMES         = 1 << 28;
+
         // Default member permissions
         const DEFAULT_MEMBER = Self::VIEW_CHANNEL.bits()
                              | Self::SEND_MESSAGES.bits()
@@ -71,7 +81,8 @@ bitflags! {
                              | Self::CREATE_TASKS.bits()
                              | Self::COMPLETE_TASKS.bits()
                              | Self::CREATE_CLIPS.bits()
-                             | Self::CREATE_INVITE.bits();
+                             | Self::CREATE_INVITE.bits()
+                             | Self::PLAY_GAMES.bits();
     }
 }
 
@@ -1291,6 +1302,70 @@ mod create_invite_bit_tests {
 }
 
 #[cfg(test)]
+mod play_games_bit_tests {
+    use super::Permissions;
+
+    /// Bit 28, the next free one, and disjoint from every other flag: a
+    /// mis-typed shift would silently make "may play cards" mean something
+    /// else (CREATE_INVITE is 27, the last one added).
+    #[test]
+    fn play_games_is_bit_28_and_collides_with_nothing() {
+        assert_eq!(Permissions::PLAY_GAMES.bits(), 1 << 28);
+        assert_eq!(Permissions::PLAY_GAMES.bits(), 268_435_456);
+        let others = Permissions::all() & !Permissions::PLAY_GAMES;
+        assert!((others & Permissions::PLAY_GAMES).is_empty());
+        // Not vacuous: `others` really holds the neighbours.
+        assert!(others.contains(Permissions::CREATE_INVITE | Permissions::CREATE_CLIPS));
+    }
+
+    /// New servers have it, and it is a VOICE bit a channel can overwrite
+    /// (deny it on one channel, allow it on another).
+    #[test]
+    fn play_games_is_a_default_member_bit_and_overwritable_per_channel() {
+        assert!(Permissions::DEFAULT_MEMBER.contains(Permissions::PLAY_GAMES));
+        assert!(Permissions::OVERWRITABLE.contains(Permissions::PLAY_GAMES));
+        // Closing a table / removing a player is MOVE_MEMBERS, which members
+        // do NOT have by default.
+        assert!(!Permissions::DEFAULT_MEMBER.contains(Permissions::MOVE_MEMBERS));
+    }
+
+    /// Migration 073 hard-codes the bit's decimal value and the column. Read
+    /// the migration's own SQL (a different file from this one) so moving the
+    /// bit without following through in SQL goes red — the guard 051 and 056
+    /// carry.
+    #[test]
+    fn migration_073_adds_games_enabled_off_and_grants_exactly_this_bit() {
+        let sql = include_str!("../migrations/073_games.sql");
+        let stmt: String = sql.lines().filter(|l| !l.trim_start().starts_with("--")).collect::<Vec<_>>().join("\n");
+        assert!(
+            stmt.contains(&format!("permissions = permissions | {} WHERE is_default = true", Permissions::PLAY_GAMES.bits())),
+            "073 must OR in {} on @everyone only: {stmt}",
+            Permissions::PLAY_GAMES.bits()
+        );
+        assert!(
+            stmt.contains("ADD COLUMN IF NOT EXISTS games_enabled BOOLEAN NOT NULL DEFAULT FALSE"),
+            "073 must add games_enabled, idempotently, OFF by default: {stmt}"
+        );
+        // Additive only: nothing an older binary reads is dropped or renamed.
+        for word in ["DROP", "RENAME", "DELETE"] {
+            assert!(!stmt.to_uppercase().contains(word), "073 must stay additive ({word}): {stmt}");
+        }
+        // LF bytes, like every migration since 014 (migrations/README.md).
+        assert!(!sql.contains('\r'), "073 must be committed with LF line endings");
+    }
+
+    /// The client's two maps (`PERM` for gating, `PERMISSIONS` for the role
+    /// editor) carry the same bit. Read from the TypeScript source, so a
+    /// renumbering on either side goes red here.
+    #[test]
+    fn the_client_maps_carry_the_same_bit() {
+        let ts = include_str!("../frontend/src/api/permissionBits.ts");
+        assert_eq!(Permissions::PLAY_GAMES.bits(), 1 << 28);
+        assert_eq!(ts.matches("PLAY_GAMES: 1 << 28,").count(), 2, "PLAY_GAMES must be in BOTH PERM and PERMISSIONS");
+    }
+}
+
+#[cfg(test)]
 mod invite_expiry_clamp_tests {
     use crate::invite_handlers::{clamp_expiry_hours, MAX_EXPIRY_HOURS, MIN_EXPIRY_HOURS};
 
@@ -1331,9 +1406,23 @@ mod migration_061_constants {
     //! replacement value must be revisited before this test is updated.
     use super::Permissions;
 
+    /// Bits added to DEFAULT_MEMBER AFTER 061, each with its own backfill
+    /// migration that runs after 061 and ORs it onto every @everyone —
+    /// including the rows 061 rewrote. So 061's literals stay correct as the
+    /// value "as of 061", and the end state of a 061-repaired row is today's
+    /// DEFAULT_MEMBER plus 061's grants. Revisited 2026-10-03 for PLAY_GAMES
+    /// (073 runs after 061 on every database, fresh or upgraded).
+    fn added_since_061() -> Permissions {
+        Permissions::PLAY_GAMES
+    }
+
     #[test]
     fn default_member_is_the_value_migration_061_assumes() {
-        assert_eq!(Permissions::DEFAULT_MEMBER.bits(), 226527063);
+        assert_eq!((Permissions::DEFAULT_MEMBER - added_since_061()).bits(), 226527063);
+        // Not vacuous: each bit added since really is in DEFAULT_MEMBER, so
+        // the subtraction above removed something.
+        assert!(Permissions::DEFAULT_MEMBER.contains(added_since_061()));
+        assert_ne!(Permissions::DEFAULT_MEMBER.bits(), 226527063);
     }
 
     #[test]
@@ -1342,7 +1431,8 @@ mod migration_061_constants {
         // the bits migration 046 ORed onto every pre-existing @everyone; 033
         // ORed MANAGE_TASKS onto every role of a then-existing server on purpose.
         let grant_046 = Permissions::from_bits_truncate(35920);
-        assert_eq!((Permissions::DEFAULT_MEMBER | grant_046 | Permissions::MANAGE_TASKS).bits(), 260083543);
+        let as_of_061 = Permissions::DEFAULT_MEMBER - added_since_061();
+        assert_eq!((as_of_061 | grant_046 | Permissions::MANAGE_TASKS).bits(), 260083543);
     }
 
     #[test]

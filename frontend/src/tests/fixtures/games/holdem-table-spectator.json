@@ -1,0 +1,92 @@
+{
+  "payload": {
+    "room_id": "voice_42",
+    "table_id": 4503599627370497,
+    "version": 8,
+    "view": {
+      "big_blind_seat": 4,
+      "board": [
+        "3d",
+        "Ah",
+        "2d"
+      ],
+      "button": 0,
+      "clock_ms": 27500,
+      "config": {
+        "allow_rebuy": true,
+        "big_blind": 10,
+        "max_seats": 6,
+        "small_blind": 5,
+        "starting_stack": 1000,
+        "timeouts_before_sit_out": 2,
+        "turn_clock_secs": 30
+      },
+      "current_bet": 0,
+      "game": "holdem",
+      "hand_no": 1,
+      "in_hand": true,
+      "legal": null,
+      "next_deal_in_ms": null,
+      "pot_total": 30,
+      "seats": [
+        {
+          "away": false,
+          "cards": [
+            "??",
+            "??"
+          ],
+          "hand_commit": 10,
+          "leaving": false,
+          "seat": 0,
+          "sitting_out": false,
+          "stack": 990,
+          "status": "in_hand",
+          "street_commit": 0,
+          "user_id": 7
+        },
+        null,
+        {
+          "away": false,
+          "cards": [
+            "??",
+            "??"
+          ],
+          "hand_commit": 10,
+          "leaving": false,
+          "seat": 2,
+          "sitting_out": false,
+          "stack": 990,
+          "status": "in_hand",
+          "street_commit": 0,
+          "user_id": 8
+        },
+        null,
+        {
+          "away": true,
+          "cards": [
+            "??",
+            "??"
+          ],
+          "hand_commit": 10,
+          "leaving": false,
+          "seat": 4,
+          "sitting_out": false,
+          "stack": 990,
+          "status": "in_hand",
+          "street_commit": 0,
+          "user_id": 9
+        },
+        null
+      ],
+      "small_blind_seat": 2,
+      "street": "flop",
+      "to_act": 2,
+      "turn": {
+        "hand_no": 1,
+        "turn_seq": 4
+      },
+      "viewer_seat": null
+    }
+  },
+  "type": "GameTable"
+}

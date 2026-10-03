@@ -1,0 +1,50 @@
+[
+  {
+    "payload": {
+      "reason": "closed",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameEnded"
+  },
+  {
+    "payload": {
+      "reason": "call_ended",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameEnded"
+  },
+  {
+    "payload": {
+      "reason": "idle",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameEnded"
+  },
+  {
+    "payload": {
+      "reason": "disabled",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameEnded"
+  },
+  {
+    "payload": {
+      "reason": "channel_deleted",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameEnded"
+  },
+  {
+    "payload": {
+      "reason": "gone",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameEnded"
+  }
+]

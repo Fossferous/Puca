@@ -1,0 +1,360 @@
+[
+  {
+    "payload": {
+      "code": "disabled",
+      "op": "create",
+      "room_id": "voice_42",
+      "table_id": null
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "no_permission",
+      "op": "close",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "not_in_call",
+      "op": "sit_out",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "not_a_voice_room",
+      "op": "create",
+      "room_id": "voice_42",
+      "table_id": null
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "room_has_table",
+      "kind": "holdem",
+      "op": "create",
+      "open_table_id": 4503599627370497,
+      "room_id": "voice_42",
+      "table_id": null
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "too_many_tables",
+      "op": "create",
+      "room_id": "voice_42",
+      "table_id": null
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "rate_limited",
+      "op": "resync",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "wrong_game",
+      "op": "bet",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "not_seated",
+      "op": "stand",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "invalid_config",
+      "op": "create",
+      "room_id": "voice_42",
+      "table_id": null
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "config_locked",
+      "op": "create",
+      "room_id": "voice_42",
+      "table_id": null
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "seat_out_of_range",
+      "op": "sit",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "seat_taken",
+      "op": "sit",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "seat_empty",
+      "op": "remove_player",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "already_seated",
+      "op": "sit",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "not_your_turn",
+      "op": "act",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "stale_turn",
+      "op": "act",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "no_chips",
+      "op": "sit_in",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "not_busted",
+      "op": "rebuy",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "rebuy_not_allowed",
+      "op": "rebuy",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "bet_below_minimum",
+      "min": 40,
+      "op": "act",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "hand_in_progress",
+      "op": "show_cards",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "no_hand_in_progress",
+      "op": "act",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "not_enough_players",
+      "op": "act",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "cannot_check",
+      "op": "act",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497,
+      "to_call": 10
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "nothing_to_call",
+      "op": "act",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "bet_above_stack",
+      "max": 990,
+      "op": "act",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "raise_not_reopened",
+      "op": "act",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "nobody_to_raise",
+      "op": "act",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "not_showable",
+      "op": "show_cards",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "round_in_progress",
+      "op": "clear_bet",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "no_round_in_progress",
+      "op": "act",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "no_bets",
+      "op": "act",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "bet_above_maximum",
+      "max": 500,
+      "op": "bet",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "insufficient_chips",
+      "op": "bet",
+      "room_id": "voice_42",
+      "stack": 35,
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "sitting_out",
+      "op": "bet",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "cannot_hit",
+      "op": "act",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "cannot_double",
+      "op": "act",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  },
+  {
+    "payload": {
+      "code": "cannot_split",
+      "op": "act",
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    },
+    "type": "GameRefused"
+  }
+]

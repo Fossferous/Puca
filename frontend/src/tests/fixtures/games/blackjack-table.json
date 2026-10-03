@@ -1,0 +1,113 @@
+{
+  "payload": {
+    "room_id": "voice_42",
+    "table_id": 4503599627370497,
+    "version": 6,
+    "view": {
+      "clock_ms": 30000,
+      "config": {
+        "allow_rebuy": true,
+        "blackjack_pays": [
+          3,
+          2
+        ],
+        "dealer_hits_soft_17": false,
+        "decks": 6,
+        "double_after_split": true,
+        "max_bet": 500,
+        "max_hands": 4,
+        "max_seats": 6,
+        "min_bet": 10,
+        "penetration_percent": 75,
+        "resplit_aces": false,
+        "starting_stack": 1000,
+        "timeouts_before_sit_out": 2,
+        "turn_clock_secs": 30
+      },
+      "dealer": [
+        "8s",
+        "??"
+      ],
+      "dealer_total": null,
+      "game": "blackjack",
+      "in_round": true,
+      "legal": {
+        "can_double": true,
+        "can_hit": true,
+        "can_split": false,
+        "can_stand": true
+      },
+      "next_deal_in_ms": null,
+      "reshuffle_due": false,
+      "round_no": 1,
+      "seats": [
+        {
+          "away": false,
+          "hands": [
+            {
+              "bet": 50,
+              "cards": [
+                "3c",
+                "Th"
+              ],
+              "done": false,
+              "doubled": false,
+              "from_split": false,
+              "outcome": null,
+              "returned": null,
+              "soft": false,
+              "total": 13
+            }
+          ],
+          "leaving": false,
+          "pending_bet": 0,
+          "seat": 0,
+          "sitting_out": false,
+          "stack": 950,
+          "user_id": 7
+        },
+        {
+          "away": false,
+          "hands": [
+            {
+              "bet": 100,
+              "cards": [
+                "4d",
+                "Th"
+              ],
+              "done": false,
+              "doubled": false,
+              "from_split": false,
+              "outcome": null,
+              "returned": null,
+              "soft": false,
+              "total": 14
+            }
+          ],
+          "leaving": false,
+          "pending_bet": 0,
+          "seat": 1,
+          "sitting_out": false,
+          "stack": 900,
+          "user_id": 8
+        },
+        null,
+        null,
+        null,
+        null
+      ],
+      "shoe_remaining": 306,
+      "shoe_size": 312,
+      "to_act": {
+        "hand": 0,
+        "seat": 0
+      },
+      "turn": {
+        "hand_no": 1,
+        "turn_seq": 1
+      },
+      "viewer_seat": 0
+    }
+  },
+  "type": "GameTable"
+}

@@ -282,10 +282,11 @@ subprotocol header `Sec-WebSocket-Protocol: bearer, <JWT>` (the server echoes
 proxy access log.
 
 **Client capabilities and device kind.** The URL also says what the client
-can read and what it is: `/ws?caps=own_voice,presence&kind=<desktop|mobile|browser>`,
+can read and what it is: `/ws?caps=own_voice,presence,games&kind=<desktop|mobile|browser>`,
 both optional. `caps` is ONE comma-separated list carrying every capability
 (`own_voice`: the account's call on another device, below; `presence`: idle
-and away, below); names are trimmed and compared case-insensitively, and an
+and away, below; `games`: the in-call card games, below); names are trimmed
+and compared case-insensitively, and an
 unknown name is ignored, so a client can announce what an older server has
 never heard of. A query parameter rather than a frame because an older server
 ignores a parameter it does not know, whereas an unknown client→server frame
@@ -515,6 +516,15 @@ user's status is broadcast at most once per 10 seconds when it drops (a
 return to online is never held); a held change is delivered by the server's
 sweep. The shapes are pinned by `frontend/src/tests/fixtures/userStatus.json`
 and `serverFeatures.json`, which both sides' tests parse.
+
+**Games (Poker, Blackjack in a voice call) — announced, not yet served.** A
+client that reads the game frames puts `games` in its `caps` list. A server
+confirms it in `ServerFeatures` only when it plays games, and sends game frames
+only to connections that announced it, in the call, never to a delivery
+socket. **No released server confirms `games` yet** (the frames are specified,
+the handlers are not built), so a client never sends a game frame; the frames,
+their reason and error codes and their fixtures are in
+[GAMES.md](GAMES.md#frames) and move here when a server plays them.
 
 ---
 

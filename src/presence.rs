@@ -52,6 +52,13 @@ use std::time::{Duration, Instant};
 /// The capability a client announces in `/ws?caps=` to take part.
 pub const CAP_PRESENCE: &str = "presence";
 
+/// The games capability (docs/GAMES.md): the client reads the Game* frames,
+/// so it may be sent them (`AppState::conn_plays_games`), and the server
+/// confirms it in `ServerFeatures` only when this build plays games
+/// (`crate::games_wire::GAMES_SERVED`). Read by the same tokeniser as every
+/// other name in the one `caps=` list.
+pub const CAP_GAMES: &str = "games";
+
 /// The longest inactivity a client may claim in one report. Anything longer is
 /// "away" anyway; the clamp keeps an absurd value from meaning anything.
 pub const MAX_REPORTED_INACTIVE_SECS: u32 = 24 * 3600;
@@ -225,6 +232,8 @@ impl PresenceStatus {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ClientCaps {
     pub presence: bool,
+    /// Announced `games`: may be sent Game* frames.
+    pub games: bool,
 }
 
 impl ClientCaps {
@@ -241,14 +250,23 @@ impl ClientCaps {
     }
 
     pub fn parse(raw: Option<&str>) -> Self {
-        ClientCaps { presence: Self::announced(raw, CAP_PRESENCE) }
+        ClientCaps { presence: Self::announced(raw, CAP_PRESENCE), games: Self::announced(raw, CAP_GAMES) }
     }
 
     /// The features to confirm back: what was announced AND is supported.
     pub fn features(&self) -> Vec<String> {
+        self.features_given(crate::games_wire::GAMES_SERVED)
+    }
+
+    /// [`Self::features`] for a build that does (or does not) play games, so
+    /// both answers are testable whatever `GAMES_SERVED` says today.
+    pub fn features_given(&self, games_served: bool) -> Vec<String> {
         let mut out = Vec::new();
         if self.presence {
             out.push(CAP_PRESENCE.to_string());
+        }
+        if self.games && games_served {
+            out.push(CAP_GAMES.to_string());
         }
         out
     }
@@ -784,6 +802,25 @@ mod rule_tests {
         assert!(!ClientCaps::parse(None).presence);
         assert_eq!(ClientCaps::parse(Some("x,presence")).features(), vec!["presence".to_string()]);
         assert!(ClientCaps::parse(Some("x")).features().is_empty());
+    }
+
+    /// `games` rides the same list by the same rule, and is confirmed back
+    /// only by a build that plays games — today's does not
+    /// (`games_wire::GAMES_SERVED`), so a client never sends a game frame to
+    /// a server that would ignore it.
+    #[test]
+    fn games_is_read_from_the_one_list_and_confirmed_only_when_served() {
+        let caps = ClientCaps::parse(Some("own_voice,presence,games"));
+        assert!(caps.presence && caps.games);
+        assert!(ClientCaps::parse(Some(" GAMES ")).games);
+        assert!(!ClientCaps::parse(Some("game,gamess,presence")).games, "whole names only");
+        assert!(!ClientCaps::parse(None).games);
+        assert_eq!(caps.features_given(true), vec!["presence".to_string(), "games".to_string()]);
+        assert_eq!(caps.features_given(false), vec!["presence".to_string()]);
+        // Supported but not announced: never confirmed.
+        assert_eq!(ClientCaps::parse(Some("presence")).features_given(true), vec!["presence".to_string()]);
+        // What a connection is told today follows the switch.
+        assert_eq!(caps.features(), caps.features_given(crate::games_wire::GAMES_SERVED));
     }
 
     #[test]

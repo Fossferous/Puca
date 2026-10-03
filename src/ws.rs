@@ -312,6 +312,9 @@ async fn handle_socket(
     // Before anything can be pushed to this connection: whether it may be
     // sent OwnVoiceState (set_conn_caps never marks a delivery socket).
     state.set_conn_caps(user_id, conn_id, caps.0, caps.1);
+    // And whether it may be sent Game* frames (presence_caps is the default,
+    // all false, for a delivery socket; set_conn_games refuses one anyway).
+    state.set_conn_games(user_id, conn_id, presence_caps.games);
 
     tracing::info!(
         "User {} ({}) connected{}",
@@ -3029,6 +3032,26 @@ async fn handle_message(
                 crate::presence::refresh(state, user_id, now).await;
             }
         }
+
+        // Games (docs/GAMES.md): the wire contract exists (crate::games_wire),
+        // the handlers do not yet. This build never confirms `games` in
+        // ServerFeatures (`games_wire::GAMES_SERVED`), so a well-behaved
+        // client never sends these; one that does is ignored — never an
+        // Error, which the client would show as an alert. The server half
+        // replaces this arm.
+        ClientMessage::GameCreate { .. }
+        | ClientMessage::GameSit { .. }
+        | ClientMessage::GameStand { .. }
+        | ClientMessage::GameAct { .. }
+        | ClientMessage::GameBet { .. }
+        | ClientMessage::GameClearBet { .. }
+        | ClientMessage::GameSitOut { .. }
+        | ClientMessage::GameSitIn { .. }
+        | ClientMessage::GameRebuy { .. }
+        | ClientMessage::GameShowCards { .. }
+        | ClientMessage::GameResync { .. }
+        | ClientMessage::GameClose { .. }
+        | ClientMessage::GameRemovePlayer { .. } => {}
 
         ClientMessage::JoinRoom { room_id, take_over, replay } => {
             // Bound room_id length and the number of rooms this connection may
@@ -9398,7 +9421,7 @@ mod presence_ws_tests {
         /// already classified, then the presence half of connect.
         async fn open(state: &Arc<AppState>, uid: i32, caps: bool, headless: bool) -> Sock {
             let (tx, rx) = mpsc::channel::<ServerMessage>(256);
-            let caps = ClientCaps { presence: caps };
+            let caps = ClientCaps { presence: caps, games: false };
             let (conn, is_first, _) = state.register_session_classified(
                 uid as UserId,
                 format!("u{uid}"),

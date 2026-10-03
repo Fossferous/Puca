@@ -329,6 +329,9 @@ pub struct Session {
     /// Announced the `presence` capability: the only connections that are
     /// sent `UserStatus` frames (an older client must never get one).
     pub presence_frames: bool,
+    /// Announced the `games` capability (`crate::presence::CAP_GAMES`): the
+    /// only connections that are sent Game* frames. Never a delivery socket.
+    pub games: bool,
 }
 
 /// One continuous stretch of a user's MEMBERSHIP of a voice room. `left_ms` is
@@ -1823,6 +1826,7 @@ impl AppState {
             client_kind: None,
             activity,
             presence_frames,
+            games: false,
         });
         if !delivery {
             // Under this shard lock: see PresenceRegistry::ensure.
@@ -1843,6 +1847,29 @@ impl AppState {
                 s.client_kind = kind;
             }
         }
+    }
+
+    /// Record whether this connection announced `games` (`?caps=`). Called
+    /// on connect beside `set_conn_caps`, before anything is sent to it. A
+    /// delivery socket is never marked: game frames must not wake a phone.
+    pub fn set_conn_games(&self, user_id: UserId, conn_id: u64, games: bool) {
+        if let Some(mut sessions) = self.sessions.get_mut(&user_id) {
+            if let Some(s) = sessions.iter_mut().find(|s| s.conn_id == conn_id) {
+                s.games = games && !s.delivery;
+            }
+        }
+    }
+
+    /// Whether `conn_id` may be sent Game* frames: live, visible, and it
+    /// announced `games`. The games fan-out filters `Room.member_conns`
+    /// through this; a connection that did not announce it never receives a
+    /// frame it does not know.
+    // Read by the games fan-out (the server half of wave 3) and the tests.
+    #[allow(dead_code)]
+    pub fn conn_plays_games(&self, user_id: UserId, conn_id: u64) -> bool {
+        self.sessions
+            .get(&user_id)
+            .is_some_and(|sessions| sessions.iter().any(|s| s.conn_id == conn_id && s.games && !s.delivery))
     }
 
     /// The device kind `conn_id` reported, if it is live and said one.
@@ -5107,5 +5134,47 @@ mod server_perms_lock_tests {
         tokio::time::timeout(Duration::from_secs(5), second).await.expect("released: the second gets it").expect("task");
         assert!(got_rx.try_recv().is_ok(), "the second taker held it");
         assert!(!state.server_perms_locks.contains_key("s1"), "nobody holds or waits: forgotten");
+    }
+}
+
+/// Game frames go ONLY to connections that announced `games` (docs/GAMES.md,
+/// *Capability*): an older client must never be handed a frame it does not
+/// know, and a delivery socket must never be woken by a busy table.
+#[cfg(test)]
+mod games_cap_tests {
+    use super::*;
+    use crate::protocol::ServerMessage;
+
+    fn test_state() -> Arc<AppState> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/does_not_connect")
+            .expect("lazy pool");
+        AppState::new(pool, "test-secret".into(), None, std::sync::Arc::new(crate::wake::NullWake))
+    }
+
+    #[tokio::test]
+    async fn only_a_visible_connection_that_announced_games_plays() {
+        let state = test_state();
+        let (tx1, _rx1) = mpsc::channel::<ServerMessage>(8);
+        let (tx2, _rx2) = mpsc::channel::<ServerMessage>(8);
+        let (tx3, _rx3) = mpsc::channel::<ServerMessage>(8);
+        let (desk, _, _) = state.register_session(7, "a".into(), tx1, false, None, "s1".into());
+        let (old, _, _) = state.register_session(7, "a".into(), tx2, false, None, "s2".into());
+        let (pocket, _, _) = state.register_session(7, "a".into(), tx3, true, None, "s3".into());
+        // Positive control first: announcing it is what turns it on.
+        assert!(!state.conn_plays_games(7, desk), "nothing announced yet");
+        state.set_conn_games(7, desk, true);
+        assert!(state.conn_plays_games(7, desk));
+        // A connection that did not announce it, a delivery socket that
+        // claims it, a stranger and an unknown connection: never.
+        state.set_conn_games(7, old, false);
+        assert!(!state.conn_plays_games(7, old));
+        state.set_conn_games(7, pocket, true);
+        assert!(!state.conn_plays_games(7, pocket), "a delivery socket is never sent game frames");
+        assert!(!state.conn_plays_games(8, desk), "keyed on the user too");
+        assert!(!state.conn_plays_games(7, 999_999));
+        // Gone with the connection.
+        state.unregister_session(7, desk);
+        assert!(!state.conn_plays_games(7, desk));
     }
 }

@@ -1,0 +1,511 @@
+[
+  {
+    "payload": {
+      "events": [
+        {
+          "amount": 50,
+          "seat": 0,
+          "type": "bet_placed"
+        }
+      ],
+      "room_id": "voice_42",
+      "table_id": 4503599627370497,
+      "version": 4,
+      "view": {
+        "clock_ms": null,
+        "config": {
+          "allow_rebuy": true,
+          "blackjack_pays": [
+            3,
+            2
+          ],
+          "dealer_hits_soft_17": false,
+          "decks": 6,
+          "double_after_split": true,
+          "max_bet": 500,
+          "max_hands": 4,
+          "max_seats": 6,
+          "min_bet": 10,
+          "penetration_percent": 75,
+          "resplit_aces": false,
+          "starting_stack": 1000,
+          "timeouts_before_sit_out": 2,
+          "turn_clock_secs": 30
+        },
+        "dealer": [],
+        "dealer_total": null,
+        "game": "blackjack",
+        "in_round": false,
+        "legal": null,
+        "next_deal_in_ms": 15000,
+        "reshuffle_due": true,
+        "round_no": 0,
+        "seats": [
+          {
+            "away": false,
+            "hands": [],
+            "leaving": false,
+            "pending_bet": 50,
+            "seat": 0,
+            "sitting_out": false,
+            "stack": 950,
+            "user_id": 7
+          },
+          {
+            "away": false,
+            "hands": [],
+            "leaving": false,
+            "pending_bet": 0,
+            "seat": 1,
+            "sitting_out": false,
+            "stack": 1000,
+            "user_id": 8
+          },
+          null,
+          null,
+          null,
+          null
+        ],
+        "shoe_remaining": 312,
+        "shoe_size": 312,
+        "to_act": null,
+        "turn": null,
+        "viewer_seat": 0
+      }
+    },
+    "type": "GameEvents"
+  },
+  {
+    "payload": {
+      "events": [
+        {
+          "cards_in_shoe": 312,
+          "mid_round": false,
+          "type": "shoe_shuffled"
+        },
+        {
+          "round_no": 1,
+          "seats": [
+            0,
+            1
+          ],
+          "type": "round_started"
+        },
+        {
+          "card": "3c",
+          "hand": 0,
+          "seat": 0,
+          "type": "card_dealt"
+        },
+        {
+          "card": "4d",
+          "hand": 0,
+          "seat": 1,
+          "type": "card_dealt"
+        },
+        {
+          "card": "8s",
+          "hand": null,
+          "seat": null,
+          "type": "card_dealt"
+        },
+        {
+          "card": "Th",
+          "hand": 0,
+          "seat": 0,
+          "type": "card_dealt"
+        },
+        {
+          "card": "Th",
+          "hand": 0,
+          "seat": 1,
+          "type": "card_dealt"
+        },
+        {
+          "card": "??",
+          "hand": null,
+          "seat": null,
+          "type": "card_dealt"
+        }
+      ],
+      "room_id": "voice_42",
+      "table_id": 4503599627370497,
+      "version": 6,
+      "view": {
+        "clock_ms": null,
+        "config": {
+          "allow_rebuy": true,
+          "blackjack_pays": [
+            3,
+            2
+          ],
+          "dealer_hits_soft_17": false,
+          "decks": 6,
+          "double_after_split": true,
+          "max_bet": 500,
+          "max_hands": 4,
+          "max_seats": 6,
+          "min_bet": 10,
+          "penetration_percent": 75,
+          "resplit_aces": false,
+          "starting_stack": 1000,
+          "timeouts_before_sit_out": 2,
+          "turn_clock_secs": 30
+        },
+        "dealer": [
+          "8s",
+          "??"
+        ],
+        "dealer_total": null,
+        "game": "blackjack",
+        "in_round": true,
+        "legal": {
+          "can_double": true,
+          "can_hit": true,
+          "can_split": false,
+          "can_stand": true
+        },
+        "next_deal_in_ms": null,
+        "reshuffle_due": false,
+        "round_no": 1,
+        "seats": [
+          {
+            "away": false,
+            "hands": [
+              {
+                "bet": 50,
+                "cards": [
+                  "3c",
+                  "Th"
+                ],
+                "done": false,
+                "doubled": false,
+                "from_split": false,
+                "outcome": null,
+                "returned": null,
+                "soft": false,
+                "total": 13
+              }
+            ],
+            "leaving": false,
+            "pending_bet": 0,
+            "seat": 0,
+            "sitting_out": false,
+            "stack": 950,
+            "user_id": 7
+          },
+          {
+            "away": false,
+            "hands": [
+              {
+                "bet": 100,
+                "cards": [
+                  "4d",
+                  "Th"
+                ],
+                "done": false,
+                "doubled": false,
+                "from_split": false,
+                "outcome": null,
+                "returned": null,
+                "soft": false,
+                "total": 14
+              }
+            ],
+            "leaving": false,
+            "pending_bet": 0,
+            "seat": 1,
+            "sitting_out": false,
+            "stack": 900,
+            "user_id": 8
+          },
+          null,
+          null,
+          null,
+          null
+        ],
+        "shoe_remaining": 306,
+        "shoe_size": 312,
+        "to_act": {
+          "hand": 0,
+          "seat": 0
+        },
+        "turn": {
+          "hand_no": 1,
+          "turn_seq": 1
+        },
+        "viewer_seat": 0
+      }
+    },
+    "type": "GameEvents"
+  },
+  {
+    "payload": {
+      "events": [
+        {
+          "action": "hit",
+          "hand": 0,
+          "reason": "player",
+          "seat": 0,
+          "type": "acted"
+        },
+        {
+          "card": "3s",
+          "hand": 0,
+          "seat": 0,
+          "type": "card_dealt"
+        }
+      ],
+      "room_id": "voice_42",
+      "table_id": 4503599627370497,
+      "version": 7,
+      "view": {
+        "clock_ms": null,
+        "config": {
+          "allow_rebuy": true,
+          "blackjack_pays": [
+            3,
+            2
+          ],
+          "dealer_hits_soft_17": false,
+          "decks": 6,
+          "double_after_split": true,
+          "max_bet": 500,
+          "max_hands": 4,
+          "max_seats": 6,
+          "min_bet": 10,
+          "penetration_percent": 75,
+          "resplit_aces": false,
+          "starting_stack": 1000,
+          "timeouts_before_sit_out": 2,
+          "turn_clock_secs": 30
+        },
+        "dealer": [
+          "8s",
+          "??"
+        ],
+        "dealer_total": null,
+        "game": "blackjack",
+        "in_round": true,
+        "legal": {
+          "can_double": false,
+          "can_hit": true,
+          "can_split": false,
+          "can_stand": true
+        },
+        "next_deal_in_ms": null,
+        "reshuffle_due": false,
+        "round_no": 1,
+        "seats": [
+          {
+            "away": false,
+            "hands": [
+              {
+                "bet": 50,
+                "cards": [
+                  "3c",
+                  "Th",
+                  "3s"
+                ],
+                "done": false,
+                "doubled": false,
+                "from_split": false,
+                "outcome": null,
+                "returned": null,
+                "soft": false,
+                "total": 16
+              }
+            ],
+            "leaving": false,
+            "pending_bet": 0,
+            "seat": 0,
+            "sitting_out": false,
+            "stack": 950,
+            "user_id": 7
+          },
+          {
+            "away": false,
+            "hands": [
+              {
+                "bet": 100,
+                "cards": [
+                  "4d",
+                  "Th"
+                ],
+                "done": false,
+                "doubled": false,
+                "from_split": false,
+                "outcome": null,
+                "returned": null,
+                "soft": false,
+                "total": 14
+              }
+            ],
+            "leaving": false,
+            "pending_bet": 0,
+            "seat": 1,
+            "sitting_out": false,
+            "stack": 900,
+            "user_id": 8
+          },
+          null,
+          null,
+          null,
+          null
+        ],
+        "shoe_remaining": 305,
+        "shoe_size": 312,
+        "to_act": {
+          "hand": 0,
+          "seat": 0
+        },
+        "turn": {
+          "hand_no": 1,
+          "turn_seq": 2
+        },
+        "viewer_seat": 0
+      }
+    },
+    "type": "GameEvents"
+  },
+  {
+    "payload": {
+      "events": [
+        {
+          "action": "hit",
+          "hand": 0,
+          "reason": "player",
+          "seat": 1,
+          "type": "acted"
+        },
+        {
+          "card": "6c",
+          "hand": 0,
+          "seat": 1,
+          "type": "card_dealt"
+        },
+        {
+          "bet": 100,
+          "hand": 0,
+          "outcome": "lose",
+          "returned": 0,
+          "seat": 1,
+          "type": "hand_settled"
+        },
+        {
+          "card": "5c",
+          "type": "dealer_revealed"
+        },
+        {
+          "dealer_bust": false,
+          "dealer_total": 13,
+          "round_no": 1,
+          "type": "round_ended"
+        }
+      ],
+      "room_id": "voice_42",
+      "table_id": 4503599627370497,
+      "version": 11,
+      "view": {
+        "clock_ms": null,
+        "config": {
+          "allow_rebuy": true,
+          "blackjack_pays": [
+            3,
+            2
+          ],
+          "dealer_hits_soft_17": false,
+          "decks": 6,
+          "double_after_split": true,
+          "max_bet": 500,
+          "max_hands": 4,
+          "max_seats": 6,
+          "min_bet": 10,
+          "penetration_percent": 75,
+          "resplit_aces": false,
+          "starting_stack": 1000,
+          "timeouts_before_sit_out": 2,
+          "turn_clock_secs": 30
+        },
+        "dealer": [
+          "8s",
+          "5c"
+        ],
+        "dealer_total": 13,
+        "game": "blackjack",
+        "in_round": false,
+        "legal": null,
+        "next_deal_in_ms": null,
+        "reshuffle_due": false,
+        "round_no": 1,
+        "seats": [
+          {
+            "away": false,
+            "hands": [
+              {
+                "bet": 50,
+                "cards": [
+                  "3c",
+                  "Th",
+                  "3s",
+                  "Jd"
+                ],
+                "done": true,
+                "doubled": false,
+                "from_split": false,
+                "outcome": "lose",
+                "returned": 0,
+                "soft": false,
+                "total": 26
+              }
+            ],
+            "leaving": false,
+            "pending_bet": 0,
+            "seat": 0,
+            "sitting_out": false,
+            "stack": 950,
+            "user_id": 7
+          },
+          {
+            "away": false,
+            "hands": [
+              {
+                "bet": 100,
+                "cards": [
+                  "4d",
+                  "Th",
+                  "Ad",
+                  "Ah",
+                  "6c"
+                ],
+                "done": true,
+                "doubled": false,
+                "from_split": false,
+                "outcome": "lose",
+                "returned": 0,
+                "soft": false,
+                "total": 22
+              }
+            ],
+            "leaving": false,
+            "pending_bet": 0,
+            "seat": 1,
+            "sitting_out": false,
+            "stack": 900,
+            "user_id": 8
+          },
+          null,
+          null,
+          null,
+          null
+        ],
+        "shoe_remaining": 301,
+        "shoe_size": 312,
+        "to_act": null,
+        "turn": null,
+        "viewer_seat": 0
+      }
+    },
+    "type": "GameEvents"
+  }
+]

@@ -321,6 +321,79 @@ pub enum ClientMessage {
         #[serde(default)]
         inactive_secs: Option<u32>,
     },
+
+    // --- Games: Poker and Blackjack in a voice call (docs/GAMES.md, *Frames*;
+    // the pieces are in crate::games_wire). Sent ONLY on a socket whose server
+    // confirmed `games` in ServerFeatures — an older server answers an unknown
+    // variant with an Error, which the client shows as an alert. Every frame
+    // names the call (`room_id`, `voice_<channel_id>`) and, after the first,
+    // the table (`table_id`, from GameTable); a frame naming a table that is
+    // not open in that room is answered with GameEnded { reason: "gone" }.
+    // Refusals are GameRefused, never Error. Shapes pinned by
+    // frontend/src/tests/fixtures/games/client-frames.json.
+    //
+    // The fields are read by the game handlers (the server half of wave 3);
+    // until they land this build never confirms `games`
+    // (`games_wire::GAMES_SERVED`), so no well-behaved client sends these.
+    /// Open a table in this call (`PLAY_GAMES` + `CONNECT`). One table per
+    /// call: refused with `room_has_table` while one is open. `config`
+    /// (optional) sets the opener's stack and stakes; everything else is the
+    /// server's.
+    #[allow(dead_code)]
+    GameCreate {
+        room_id: String,
+        kind: crate::games_wire::GameKindWire,
+        #[serde(default)]
+        config: Option<crate::games_wire::GameConfigWire>,
+    },
+    /// Take seat `seat` (0-based; `PLAY_GAMES` + `CONNECT`). The client shows
+    /// the disclosure before a person's first sit.
+    #[allow(dead_code)]
+    GameSit { room_id: String, table_id: u64, seat: usize },
+    /// Get up from the table (the engine's `leave`): between hands at once;
+    /// mid-hand Hold'em folds now and Blackjack stands every hand, and the
+    /// seat frees when the hand ends. NOT the Blackjack action `stand`.
+    #[allow(dead_code)]
+    GameStand { room_id: String, table_id: u64 },
+    /// Act on the decision `turn` (the `view.turn` the client was shown).
+    #[allow(dead_code)]
+    GameAct {
+        room_id: String,
+        table_id: u64,
+        turn: crate::games_wire::TurnWire,
+        action: crate::games_wire::GameActionWire,
+    },
+    /// Blackjack: bet `amount` on the next round (replaces a bet already
+    /// placed; the chips leave the stack now).
+    #[allow(dead_code)]
+    GameBet { room_id: String, table_id: u64, amount: u64 },
+    /// Blackjack: take back the bet placed for the next round.
+    #[allow(dead_code)]
+    GameClearBet { room_id: String, table_id: u64 },
+    /// Sit out from the next hand / round (keep the seat).
+    #[allow(dead_code)]
+    GameSitOut { room_id: String, table_id: u64 },
+    /// Back in after sitting out (also after the clock sat you out).
+    #[allow(dead_code)]
+    GameSitIn { room_id: String, table_id: u64 },
+    /// A fresh starting stack for a busted player, if the table allows it.
+    #[allow(dead_code)]
+    GameRebuy { room_id: String, table_id: u64 },
+    /// Hold'em, after the hand: table your cards for everyone.
+    #[allow(dead_code)]
+    GameShowCards { room_id: String, table_id: u64 },
+    /// Send me the table again (one a second per connection). Sent after
+    /// RoomJoined for a call the client still holds a table for, and
+    /// whenever the client cannot trust what it holds.
+    #[allow(dead_code)]
+    GameResync { room_id: String, table_id: u64 },
+    /// Moderation (`MOVE_MEMBERS`): close the table for everyone.
+    #[allow(dead_code)]
+    GameClose { room_id: String, table_id: u64 },
+    /// Moderation (`MOVE_MEMBERS`): get the player in `seat` up from the
+    /// table (the engine's `leave`, exactly as if they had stood).
+    #[allow(dead_code)]
+    GameRemovePlayer { room_id: String, table_id: u64, seat: usize },
 }
 
 /// Messages sent from the server to the client
@@ -626,6 +699,59 @@ pub enum ServerMessage {
     /// nothing until this arrives, per socket. Shape pinned by
     /// `frontend/src/tests/fixtures/serverFeatures.json`.
     ServerFeatures { features: Vec<String> },
+
+    // --- Games (docs/GAMES.md, *Frames*; pieces in crate::games_wire). Sent
+    // ONLY to connections that announced `games` in `/ws?caps=` and are in
+    // the call (`Room.member_conns`), each with `send_to_conn` — never
+    // send_to_user / broadcast_to_room, which would wake a phone in a pocket.
+    // Shapes pinned by frontend/src/tests/fixtures/games/*.json. Constructed
+    // by the game handlers (the server half of wave 3) and the tests; the
+    // `allow`s go with the commit that wires them.
+    /// The whole table as THIS connection may see it (its own hole cards and
+    /// nobody else's). Sent when a table opens (to everyone in the call), to
+    /// a connection whose RoomJoined put it in a call that has a table, in
+    /// answer to GameResync, and to everyone when the table changed without
+    /// an engine event (a seat's `away`, a deal countdown). `version` is the
+    /// version of the state `view` shows.
+    #[allow(dead_code)]
+    GameTable {
+        room_id: String,
+        table_id: u64,
+        version: u64,
+        view: crate::games_wire::GameView,
+    },
+    /// One engine call's public events (identical for everyone), and the
+    /// view AFTER them for this connection. `version` is exactly one more
+    /// than the version before the call.
+    #[allow(dead_code)]
+    GameEvents {
+        room_id: String,
+        table_id: u64,
+        version: u64,
+        events: crate::games_wire::GameEventsWire,
+        view: crate::games_wire::GameView,
+    },
+    /// The table is gone; drop it and say why. Also the answer to any frame
+    /// naming a table that is not open in that room (`gone`).
+    #[allow(dead_code)]
+    GameEnded {
+        room_id: String,
+        table_id: u64,
+        reason: crate::games_wire::GameEndReason,
+    },
+    /// A game frame from THIS connection was refused: `op` names which,
+    /// `code` (flattened in, with any numbers it carries) says why.
+    /// `room_id` / `table_id` echo the refused frame's (`table_id` is `null`
+    /// for a refused GameCreate). Never sent to anyone else, and never as an
+    /// Error.
+    #[allow(dead_code)]
+    GameRefused {
+        room_id: String,
+        table_id: Option<u64>,
+        op: crate::games_wire::GameOp,
+        #[serde(flatten)]
+        refusal: crate::games_wire::GameRefusal,
+    },
 
     // --- Remote control (host receives these; see ClientMessage above) ---
     /// A viewer is asking to control this (host) user's shared screen. Username
@@ -1333,5 +1459,608 @@ mod presence_frame_tests {
         // A negative or fractional number is refused, not wrapped.
         assert!(serde_json::from_str::<ClientMessage>(r#"{"type":"SetActivity","payload":{"inactive_secs":-1}}"#).is_err());
         assert!(serde_json::from_str::<ClientMessage>(r#"{"type":"SetActivity","payload":{"inactive_secs":1.5}}"#).is_err());
+    }
+}
+
+/// The games wire contract (docs/GAMES.md, *Frames*), pinned to the files the
+/// client's tests read too (`frontend/src/tests/fixtures/games/*.json`,
+/// `frontend/src/tests/gamesProtocol.test.ts`): one example of every frame.
+///
+/// The table fixtures are NOT hand-written: they are what a real engine table
+/// dealt from a fixed seed serialises to, so they show exactly what the
+/// server half will send, cards included. `PUCA_WRITE_GAME_FIXTURES=1 cargo
+/// test games_frame_tests` rewrites them after a deliberate contract change;
+/// the client's tests then say what that change broke.
+#[cfg(test)]
+mod games_frame_tests {
+    use super::*;
+    use crate::games_wire::*;
+    use puca_games::blackjack::{BlackjackConfig, BlackjackTable};
+    use puca_games::holdem::{Action, Event, HoldemConfig, HoldemTable, Street};
+    use puca_games::rng::seeded;
+    use serde_json::{json, Value};
+    use std::collections::BTreeSet;
+
+    const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/frontend/src/tests/fixtures/games/");
+    const ROOM: &str = "voice_42";
+    /// 2^52 + 1: well above 2^32 (a client storing it in an int32 breaks) and
+    /// still exact in a JavaScript number.
+    const TABLE: u64 = 4_503_599_627_370_497;
+    /// Seeds chosen so the hands exercise what the fixtures must show: a
+    /// Hold'em check-down whose showdown both shows and mucks a hand, and a
+    /// Blackjack round the dealer's peek does not end at once.
+    const HOLDEM_SEED: u64 = 1;
+    const BLACKJACK_SEED: u64 = 3;
+
+    fn pin(name: &str, ours: &Value) {
+        let path = format!("{DIR}{name}");
+        if std::env::var_os("PUCA_WRITE_GAME_FIXTURES").is_some() {
+            std::fs::create_dir_all(DIR).expect("fixture dir");
+            std::fs::write(&path, serde_json::to_string_pretty(ours).expect("JSON") + "\n").expect("write fixture");
+        }
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let fixture: Value = serde_json::from_str(&text).expect("the fixture is JSON");
+        assert_eq!(&fixture, ours, "{name} is not what the server sends");
+    }
+
+    fn fixture(name: &str) -> Value {
+        let path = format!("{DIR}{name}");
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"))).expect("JSON")
+    }
+
+    fn to_value(m: ServerMessage) -> Value {
+        serde_json::to_value(m).expect("serialises")
+    }
+
+    fn table_frame(version: u64, view: GameView) -> Value {
+        to_value(ServerMessage::GameTable { room_id: ROOM.into(), table_id: TABLE, version, view })
+    }
+
+    fn events_frame(version: u64, events: GameEventsWire, view: GameView) -> Value {
+        to_value(ServerMessage::GameEvents { room_id: ROOM.into(), table_id: TABLE, version, events, view })
+    }
+
+    /// Every two-character card code in a JSON value (`"??"` excluded).
+    fn cards_in(v: &Value, out: &mut BTreeSet<String>) {
+        match v {
+            Value::String(s) if puca_games::Card::parse(s).is_some() => {
+                out.insert(s.clone());
+            }
+            Value::Array(a) => a.iter().for_each(|x| cards_in(x, out)),
+            Value::Object(o) => o.values().for_each(|x| cards_in(x, out)),
+            _ => {}
+        }
+    }
+
+    fn card_set(v: &Value) -> BTreeSet<String> {
+        let mut s = BTreeSet::new();
+        cards_in(v, &mut s);
+        s
+    }
+
+    // -- Hold'em: three players check a hand down from a fixed seed.
+
+    struct HoldemRun {
+        /// Engine call by engine call: (version, events frame for seat 0,
+        /// events frame for a spectator).
+        frames: Vec<(u64, Value, Value)>,
+        /// GameTable at the start of the flop for the seat to act, and for a
+        /// spectator, at the same version.
+        flop_seated: Value,
+        flop_spectator: Value,
+        flop_viewer: usize,
+        /// The showdown: who showed, who mucked and what the mucked hands were.
+        shown: Vec<usize>,
+        mucked: Vec<(usize, Vec<String>)>,
+        board: Vec<String>,
+    }
+
+    fn holdem_run(seed: u64) -> HoldemRun {
+        let mut t = HoldemTable::new(HoldemConfig::default()).expect("default config");
+        let mut version = 1; // 1 = the table as it opened
+        let mut frames = Vec::new();
+        let none = ViewExtras::default();
+        let mut push = |t: &HoldemTable, ev: Vec<Event>, extras: &ViewExtras, frames: &mut Vec<(u64, Value, Value)>| {
+            assert!(!ev.is_empty(), "every engine call here changes the table");
+            version += 1;
+            frames.push((
+                version,
+                events_frame(version, holdem_events(&ev), holdem_view(&t.view_for(Some(0)), extras)),
+                events_frame(version, holdem_events(&ev), holdem_view(&t.view_for(None), extras)),
+            ));
+            version
+        };
+        for (seat, user) in [(0, 7), (2, 8), (4, 9)] {
+            let ev = t.sit(seat, player_id(user)).expect("sit");
+            push(&t, ev, &none, &mut frames);
+        }
+        let ev = t.start_hand(&mut seeded(seed)).expect("deal");
+        push(&t, ev, &none, &mut frames);
+        let mut flop = None;
+        let mut showdown = None;
+        while t.hand_in_progress() {
+            let seat = t.to_act().expect("a decision is awaited");
+            let legal = t.legal_actions(seat).expect("legal");
+            let action = if legal.can_check { Action::Check } else { Action::Call };
+            let ev = t.act(seat, t.turn().expect("turn"), action).expect("act");
+            let ends_hand = ev.iter().any(|e| matches!(e, Event::HandEnded { .. }));
+            let extras = if ends_hand { ViewExtras { next_deal_in_ms: Some(3_000), ..Default::default() } } else { none.clone() };
+            if let Some(Event::Showdown { shown, mucked }) = ev.iter().find(|e| matches!(e, Event::Showdown { .. })) {
+                showdown = Some((shown.iter().map(|h| h.seat).collect::<Vec<_>>(), mucked.clone()));
+            }
+            let v = push(&t, ev, &extras, &mut frames);
+            if flop.is_none() && t.view_for(None).street == Some(Street::Flop) {
+                let viewer = t.to_act().expect("someone acts first on the flop");
+                let x = ViewExtras { away: vec![4], clock_ms: Some(27_500), next_deal_in_ms: None };
+                flop = Some((
+                    table_frame(v, holdem_view(&t.view_for(Some(viewer)), &x)),
+                    table_frame(v, holdem_view(&t.view_for(None), &x)),
+                    viewer,
+                ));
+            }
+        }
+        let (shown, mucked_seats) = showdown.expect("the hand was checked down to a showdown");
+        // The mucked hands, as only their owners ever saw them.
+        let mucked = mucked_seats
+            .iter()
+            .map(|&s| (s, t.view_for(Some(s)).my_cards.expect("own cards").iter().map(|c| c.to_string()).collect()))
+            .collect();
+        let board = t.view_for(None).board.iter().map(|c| c.to_string()).collect();
+        let (flop_seated, flop_spectator, flop_viewer) = flop.expect("the hand saw a flop");
+        // After the hand, a player who mucked tables their cards anyway.
+        if let Some(&s) = mucked_seats.first() {
+            let ev = t.show_cards(s).expect("a mucked hand may be shown after the hand");
+            push(&t, ev, &none, &mut frames);
+        }
+        HoldemRun { frames, flop_seated, flop_spectator, flop_viewer, shown, mucked, board }
+    }
+
+    /// The frames the fixture keeps: a sit, the deal, the flop, the showdown
+    /// and a voluntary show â€” every Hold'em event type but the rare ones
+    /// (sat out, rebought, uncalled returned), which the client's tests
+    /// cover from hand-written frames.
+    fn holdem_fixture_frames(run: &HoldemRun) -> Vec<Value> {
+        let has = |f: &Value, ty: &str| f["payload"]["events"].as_array().unwrap().iter().any(|e| e["type"] == ty);
+        let pick = |ty: &str| run.frames.iter().find(|(_, f, _)| has(f, ty)).unwrap_or_else(|| panic!("no {ty}")).1.clone();
+        vec![pick("player_sat"), pick("hand_started"), pick("board_dealt"), pick("showdown"), pick("shown")]
+    }
+
+    #[test]
+    fn holdem_tables_are_the_fixtures_the_client_parses() {
+        let run = holdem_run(HOLDEM_SEED);
+        pin("holdem-table-seated.json", &run.flop_seated);
+        pin("holdem-table-spectator.json", &run.flop_spectator);
+        pin("holdem-events.json", &Value::Array(holdem_fixture_frames(&run)));
+
+        // Not vacuous: the seated view really has the viewer's own two cards,
+        // its turn and what it may do; the spectator's has none of those.
+        let me = &run.flop_seated["payload"]["view"];
+        assert_eq!(me["game"], "holdem");
+        assert_eq!(me["viewer_seat"], run.flop_viewer);
+        let mine = &me["seats"][run.flop_viewer]["cards"];
+        assert_eq!(mine.as_array().map(Vec::len), Some(2));
+        assert!(mine.as_array().unwrap().iter().all(|c| puca_games::Card::parse(c.as_str().unwrap()).is_some()), "{mine}");
+        assert!(me["legal"].is_object() && me["turn"].is_object());
+        assert_eq!(me["board"].as_array().map(Vec::len), Some(3));
+        let spec = &run.flop_spectator["payload"]["view"];
+        assert_eq!(spec["viewer_seat"], Value::Null);
+        assert_eq!(spec["legal"], Value::Null);
+        assert_eq!(spec["seats"][run.flop_viewer]["cards"], json!(["??", "??"]));
+        assert_eq!(spec["seats"][4]["away"], true);
+        assert_eq!(spec["seats"][1], Value::Null, "an empty seat is null");
+        // Everyone else's cards are face down in the seated view too.
+        for s in [0, 2, 4].into_iter().filter(|&s| s != run.flop_viewer) {
+            assert_eq!(me["seats"][s]["cards"], json!(["??", "??"]), "seat {s}");
+        }
+        // The showdown both showed and mucked, so the fixture shows both.
+        assert!(!run.shown.is_empty() && !run.mucked.is_empty(), "seed {HOLDEM_SEED}: shown {:?} mucked {:?}", run.shown, run.mucked);
+    }
+
+    /// The privacy promise, on the wire: a SPECTATOR's frames never hold a
+    /// card but the board and the hands shown at showdown; a seated player's
+    /// add only their own. Checked on every frame of the hand, not just the
+    /// fixtures. (The engine proves its views; this proves the translation
+    /// added nothing to them.)
+    #[test]
+    fn a_spectator_never_sees_a_card_but_the_board_and_shown_hands() {
+        let run = holdem_run(HOLDEM_SEED);
+        let board: BTreeSet<String> = run.board.iter().cloned().collect();
+        let showdown = run
+            .frames
+            .iter()
+            .find_map(|(_, _, spec)| {
+                spec["payload"]["events"].as_array().unwrap().iter().find(|e| e["type"] == "showdown").cloned()
+            })
+            .expect("a showdown");
+        let shown = card_set(&showdown["shown"]);
+        assert_eq!(shown.len(), 2 * run.shown.len());
+        let allowed: BTreeSet<String> = board.union(&shown).cloned().collect();
+        // The flop snapshot: the board, nothing else.
+        assert_eq!(card_set(&run.flop_spectator), card_set(&run.flop_spectator["payload"]["view"]["board"]));
+        assert_eq!(card_set(&run.flop_spectator).len(), 3);
+        // Every spectator frame up to the voluntary show.
+        let mucked_cards: BTreeSet<String> = run.mucked.iter().flat_map(|(_, c)| c.iter().cloned()).collect();
+        assert!(!run.mucked.is_empty(), "seed {HOLDEM_SEED} mucked nothing: this test would prove nothing about mucks");
+        assert_eq!(mucked_cards.len(), 2 * run.mucked.len());
+        let before_show = run.frames.len() - 1;
+        for (v, _, spec) in &run.frames[..before_show] {
+            let seen = card_set(spec);
+            assert!(seen.is_subset(&allowed), "v{v}: {:?} beyond board+shown", seen.difference(&allowed).collect::<Vec<_>>());
+            assert!(seen.is_disjoint(&mucked_cards), "v{v}: a mucked hand leaked");
+        }
+        // Seat 0's frames add exactly seat 0's own cards (once dealt).
+        let own: BTreeSet<String> = card_set(&run.frames[3].1["payload"]["view"]["seats"][0]["cards"]);
+        assert_eq!(own.len(), 2, "seat 0 sees its own hand after the deal");
+        let allowed_0: BTreeSet<String> = allowed.union(&own).cloned().collect();
+        for (v, mine, _) in &run.frames[..before_show] {
+            let seen = card_set(mine);
+            assert!(seen.is_subset(&allowed_0), "v{v}: {:?}", seen.difference(&allowed_0).collect::<Vec<_>>());
+        }
+        // The voluntary show is the ONE place a mucked hand appears.
+        let (_, _, last) = run.frames.last().unwrap();
+        assert!(!card_set(last).is_disjoint(&mucked_cards));
+    }
+
+    /// Versions: 1 when the table opens, then exactly one more per engine
+    /// call, the same number in every connection's frame for that call.
+    #[test]
+    fn versions_count_one_per_change_and_agree_across_viewers() {
+        let run = holdem_run(HOLDEM_SEED);
+        for (i, (v, mine, spec)) in run.frames.iter().enumerate() {
+            assert_eq!(*v, i as u64 + 2);
+            assert_eq!(mine["payload"]["version"], *v);
+            assert_eq!(spec["payload"]["version"], *v);
+            assert_eq!(mine["payload"]["events"], spec["payload"]["events"], "events are public: one list for everyone");
+        }
+    }
+
+    // -- Blackjack: two players, one round, from a fixed seed.
+
+    struct BlackjackRun {
+        frames: Vec<(u64, Value)>,
+        dealt_table: Value,
+        hole: String,
+    }
+
+    fn blackjack_run(seed: u64) -> BlackjackRun {
+        let mut rng = seeded(seed);
+        let mut t = BlackjackTable::new(BlackjackConfig::default()).expect("default config");
+        let mut version = 1;
+        let mut frames = Vec::new();
+        let mut push = |t: &BlackjackTable, ev: Vec<puca_games::blackjack::BjEvent>, x: &ViewExtras, frames: &mut Vec<(u64, Value)>| {
+            assert!(!ev.is_empty());
+            version += 1;
+            frames.push((version, events_frame(version, blackjack_events(&ev), blackjack_view(&t.view(), Some(0), x))));
+            version
+        };
+        let none = ViewExtras::default();
+        for (seat, user) in [(0, 7), (1, 8)] {
+            let ev = t.sit(seat, player_id(user)).expect("sit");
+            push(&t, ev, &none, &mut frames);
+        }
+        let countdown = ViewExtras { next_deal_in_ms: Some(15_000), ..Default::default() };
+        let ev = t.place_bet(0, 50).expect("bet");
+        push(&t, ev, &countdown, &mut frames);
+        let ev = t.place_bet(1, 100).expect("bet");
+        push(&t, ev, &countdown, &mut frames);
+        let ev = t.deal(&mut rng).expect("deal");
+        let v = push(&t, ev, &none, &mut frames);
+        assert!(t.round_in_progress(), "seed {seed}: the peek ended the round; pick another seed");
+        let (to_act, _) = t.to_act().expect("a player acts");
+        let dealt_table = table_frame(
+            v,
+            blackjack_view(&t.view(), Some(to_act), &ViewExtras { clock_ms: Some(30_000), ..Default::default() }),
+        );
+        while t.round_in_progress() {
+            let (seat, hand) = t.to_act().expect("to act");
+            let total = t.view().seats[seat].as_ref().unwrap().hands[hand].total;
+            let action = if total < 17 { GameActionWire::Hit } else { GameActionWire::Stand };
+            let ev = t.act(seat, t.turn().unwrap(), action.blackjack().unwrap(), &mut rng).expect("act");
+            push(&t, ev, &none, &mut frames);
+        }
+        let hole = frames
+            .iter()
+            .find_map(|(_, f)| {
+                f["payload"]["events"].as_array().unwrap().iter().find(|e| e["type"] == "dealer_revealed").map(|e| e["card"].as_str().unwrap().to_string())
+            })
+            .expect("the dealer turned the hole card");
+        BlackjackRun { frames, dealt_table, hole }
+    }
+
+    fn blackjack_fixture_frames(run: &BlackjackRun) -> Vec<Value> {
+        let has = |f: &Value, ty: &str| f["payload"]["events"].as_array().unwrap().iter().any(|e| e["type"] == ty);
+        let pick = |ty: &str| run.frames.iter().find(|(_, f)| has(f, ty)).unwrap_or_else(|| panic!("no {ty}")).1.clone();
+        vec![pick("bet_placed"), pick("round_started"), pick("acted"), pick("round_ended")]
+    }
+
+    #[test]
+    fn blackjack_tables_are_the_fixtures_the_client_parses() {
+        let run = blackjack_run(BLACKJACK_SEED);
+        pin("blackjack-table.json", &run.dealt_table);
+        pin("blackjack-events.json", &Value::Array(blackjack_fixture_frames(&run)));
+
+        let view = &run.dealt_table["payload"]["view"];
+        assert_eq!(view["game"], "blackjack");
+        // The hole card is face down, and the frame does not hold it anywhere.
+        assert_eq!(view["dealer"][1], "??");
+        assert_eq!(view["dealer_total"], Value::Null);
+        assert!(!card_set(&run.dealt_table).contains(&run.hole), "the hole card {} leaked", run.hole);
+        // The player to act sees what they may do; it is their view.
+        assert_eq!(view["viewer_seat"], view["to_act"]["seat"]);
+        assert!(view["legal"].is_object());
+        // Nor is it in any frame before the dealer turns it: the deal sends
+        // it as "??".
+        let deal = &run.frames.iter().find(|(_, f)| f["payload"]["events"].as_array().unwrap().iter().any(|e| e["type"] == "round_started")).unwrap().1;
+        assert!(deal["payload"]["events"].as_array().unwrap().iter().any(|e| e["type"] == "card_dealt" && e["seat"].is_null() && e["card"] == "??"));
+        for (v, f) in &run.frames {
+            let revealed = f["payload"]["events"].as_array().unwrap().iter().any(|e| e["type"] == "dealer_revealed");
+            if revealed {
+                break;
+            }
+            assert!(!card_set(f).contains(&run.hole), "v{v}: the hole card leaked before the reveal");
+        }
+    }
+
+    /// A Blackjack view shows `legal` only to the seat whose turn it is.
+    #[test]
+    fn blackjack_legal_goes_only_to_the_player_to_act() {
+        let run = blackjack_run(BLACKJACK_SEED);
+        let to_act = run.dealt_table["payload"]["view"]["to_act"]["seat"].as_u64().unwrap() as usize;
+        let mut t = BlackjackTable::new(BlackjackConfig::default()).unwrap();
+        let mut rng = seeded(BLACKJACK_SEED);
+        t.sit(0, player_id(7)).unwrap();
+        t.sit(1, player_id(8)).unwrap();
+        t.place_bet(0, 50).unwrap();
+        t.place_bet(1, 100).unwrap();
+        t.deal(&mut rng).unwrap();
+        let x = ViewExtras::default();
+        let get = |viewer| serde_json::to_value(blackjack_view(&t.view(), viewer, &x)).unwrap()["legal"].clone();
+        assert!(get(Some(to_act)).is_object());
+        assert_eq!(get(Some(1 - to_act)), Value::Null);
+        assert_eq!(get(None), Value::Null);
+    }
+
+    // -- Refusals and endings: one of each, every code.
+
+    /// Index of every refusal; a new variant fails to compile here until it
+    /// gets an example below (and so a line in the fixture).
+    fn refusal_index(r: &GameRefusal) -> usize {
+        use GameRefusal::*;
+        match r {
+            Disabled => 0,
+            NoPermission => 1,
+            NotInCall => 2,
+            NotAVoiceRoom => 3,
+            RoomHasTable { .. } => 4,
+            TooManyTables => 5,
+            RateLimited => 6,
+            WrongGame => 7,
+            NotSeated => 8,
+            InvalidConfig => 9,
+            ConfigLocked => 10,
+            SeatOutOfRange => 11,
+            SeatTaken => 12,
+            SeatEmpty => 13,
+            AlreadySeated => 14,
+            NotYourTurn => 15,
+            StaleTurn => 16,
+            NoChips => 17,
+            NotBusted => 18,
+            RebuyNotAllowed => 19,
+            BetBelowMinimum { .. } => 20,
+            HandInProgress => 21,
+            NoHandInProgress => 22,
+            NotEnoughPlayers => 23,
+            CannotCheck { .. } => 24,
+            NothingToCall => 25,
+            BetAboveStack { .. } => 26,
+            RaiseNotReopened => 27,
+            NobodyToRaise => 28,
+            NotShowable => 29,
+            RoundInProgress => 30,
+            NoRoundInProgress => 31,
+            NoBets => 32,
+            BetAboveMaximum { .. } => 33,
+            InsufficientChips { .. } => 34,
+            SittingOut => 35,
+            CannotHit => 36,
+            CannotDouble => 37,
+            CannotSplit => 38,
+        }
+    }
+    const REFUSALS: usize = 39;
+
+    /// (op, table_id, refusal): every code once, each with the frame it
+    /// would plausibly answer.
+    fn every_refusal() -> Vec<(GameOp, Option<u64>, GameRefusal)> {
+        use GameOp as O;
+        use GameRefusal::*;
+        let t = Some(TABLE);
+        vec![
+            (O::Create, None, Disabled),
+            (O::Close, t, NoPermission),
+            (O::SitOut, t, NotInCall),
+            (O::Create, None, NotAVoiceRoom),
+            (O::Create, None, RoomHasTable { open_table_id: TABLE, kind: GameKindWire::Holdem }),
+            (O::Create, None, TooManyTables),
+            (O::Resync, t, RateLimited),
+            (O::Bet, t, WrongGame),
+            (O::Stand, t, NotSeated),
+            (O::Create, None, InvalidConfig),
+            (O::Create, None, ConfigLocked),
+            (O::Sit, t, SeatOutOfRange),
+            (O::Sit, t, SeatTaken),
+            (O::RemovePlayer, t, SeatEmpty),
+            (O::Sit, t, AlreadySeated),
+            (O::Act, t, NotYourTurn),
+            (O::Act, t, StaleTurn),
+            (O::SitIn, t, NoChips),
+            (O::Rebuy, t, NotBusted),
+            (O::Rebuy, t, RebuyNotAllowed),
+            (O::Act, t, BetBelowMinimum { min: 40 }),
+            (O::ShowCards, t, HandInProgress),
+            (O::Act, t, NoHandInProgress),
+            (O::Act, t, NotEnoughPlayers),
+            (O::Act, t, CannotCheck { to_call: 10 }),
+            (O::Act, t, NothingToCall),
+            (O::Act, t, BetAboveStack { max: 990 }),
+            (O::Act, t, RaiseNotReopened),
+            (O::Act, t, NobodyToRaise),
+            (O::ShowCards, t, NotShowable),
+            (O::ClearBet, t, RoundInProgress),
+            (O::Act, t, NoRoundInProgress),
+            (O::Act, t, NoBets),
+            (O::Bet, t, BetAboveMaximum { max: 500 }),
+            (O::Bet, t, InsufficientChips { stack: 35 }),
+            (O::Bet, t, SittingOut),
+            (O::Act, t, CannotHit),
+            (O::Act, t, CannotDouble),
+            (O::Act, t, CannotSplit),
+        ]
+    }
+
+    #[test]
+    fn every_refusal_is_the_fixture_the_client_parses() {
+        let all = every_refusal();
+        let mut seen = vec![false; REFUSALS];
+        for (_, _, r) in &all {
+            assert!(!std::mem::replace(&mut seen[refusal_index(r)], true), "{r:?} twice");
+        }
+        assert!(seen.iter().all(|&s| s), "a refusal code has no example");
+        let frames: Vec<Value> = all
+            .into_iter()
+            .map(|(op, table_id, refusal)| to_value(ServerMessage::GameRefused { room_id: ROOM.into(), table_id, op, refusal }))
+            .collect();
+        pin("refusals.json", &Value::Array(frames.clone()));
+        // The shape the client switches on: flat, `code` beside the numbers,
+        // never a message.
+        assert_eq!(
+            frames[4],
+            json!({"type": "GameRefused", "payload": {"room_id": "voice_42", "table_id": null, "op": "create",
+                   "code": "room_has_table", "open_table_id": TABLE, "kind": "holdem"}})
+        );
+        assert_eq!(frames[20]["payload"]["code"], "bet_below_minimum");
+        assert_eq!(frames[20]["payload"]["min"], 40);
+        for f in &frames {
+            assert!(f["payload"].get("message").is_none(), "no free text: {f}");
+        }
+        // And every op appears, so the client's parser is pinned on each.
+        let ops: BTreeSet<String> = frames.iter().map(|f| f["payload"]["op"].as_str().unwrap().to_string()).collect();
+        assert_eq!(ops.len(), 13, "{ops:?}");
+    }
+
+    fn end_index(r: GameEndReason) -> usize {
+        match r {
+            GameEndReason::Closed => 0,
+            GameEndReason::CallEnded => 1,
+            GameEndReason::Idle => 2,
+            GameEndReason::Disabled => 3,
+            GameEndReason::ChannelDeleted => 4,
+            GameEndReason::Gone => 5,
+        }
+    }
+
+    #[test]
+    fn every_end_reason_is_the_fixture_the_client_parses() {
+        let all = [
+            GameEndReason::Closed,
+            GameEndReason::CallEnded,
+            GameEndReason::Idle,
+            GameEndReason::Disabled,
+            GameEndReason::ChannelDeleted,
+            GameEndReason::Gone,
+        ];
+        assert_eq!(all.iter().map(|&r| end_index(r)).collect::<Vec<_>>(), (0..6).collect::<Vec<_>>());
+        let frames: Vec<Value> = all
+            .iter()
+            .map(|&reason| to_value(ServerMessage::GameEnded { room_id: ROOM.into(), table_id: TABLE, reason }))
+            .collect();
+        pin("ended.json", &Value::Array(frames.clone()));
+        assert_eq!(frames[5], json!({"type": "GameEnded", "payload": {"room_id": "voice_42", "table_id": TABLE, "reason": "gone"}}));
+    }
+
+    // -- Client frames: the client's builders produce client-frames.json
+    // (gamesProtocol.test.ts); here every entry must parse into the frame
+    // it claims to be.
+
+    #[test]
+    fn every_client_frame_in_the_fixture_parses_as_itself() {
+        use crate::games_wire::GameActionWire as A;
+        let fx = fixture("client-frames.json");
+        let frames = fx.as_array().expect("an array");
+        let room = || ROOM.to_string();
+        let turn = TurnWire { hand_no: 3, turn_seq: 7 };
+        let act = |action| ClientMessage::GameAct { room_id: room(), table_id: TABLE, turn, action };
+        let expected = vec![
+            ClientMessage::GameCreate {
+                room_id: room(),
+                kind: GameKindWire::Holdem,
+                config: Some(GameConfigWire { starting_stack: Some(1_000), small_blind: Some(5), big_blind: Some(10), ..Default::default() }),
+            },
+            ClientMessage::GameCreate {
+                room_id: room(),
+                kind: GameKindWire::Blackjack,
+                config: Some(GameConfigWire { starting_stack: Some(1_000), min_bet: Some(10), max_bet: Some(500), ..Default::default() }),
+            },
+            ClientMessage::GameCreate { room_id: room(), kind: GameKindWire::Holdem, config: Some(GameConfigWire::default()) },
+            ClientMessage::GameSit { room_id: room(), table_id: TABLE, seat: 2 },
+            ClientMessage::GameStand { room_id: room(), table_id: TABLE },
+            act(A::Fold),
+            act(A::Check),
+            act(A::Call),
+            act(A::BetOrRaiseTo { amount: 60 }),
+            act(A::AllIn),
+            act(A::Hit),
+            act(A::Stand),
+            act(A::Double),
+            act(A::Split),
+            ClientMessage::GameBet { room_id: room(), table_id: TABLE, amount: 50 },
+            ClientMessage::GameClearBet { room_id: room(), table_id: TABLE },
+            ClientMessage::GameSitOut { room_id: room(), table_id: TABLE },
+            ClientMessage::GameSitIn { room_id: room(), table_id: TABLE },
+            ClientMessage::GameRebuy { room_id: room(), table_id: TABLE },
+            ClientMessage::GameShowCards { room_id: room(), table_id: TABLE },
+            ClientMessage::GameResync { room_id: room(), table_id: TABLE },
+            ClientMessage::GameClose { room_id: room(), table_id: TABLE },
+            ClientMessage::GameRemovePlayer { room_id: room(), table_id: TABLE, seat: 4 },
+        ];
+        assert_eq!(frames.len(), expected.len(), "one fixture entry per expected frame");
+        for (i, (f, want)) in frames.iter().zip(&expected).enumerate() {
+            let got: ClientMessage = serde_json::from_value(f.clone()).unwrap_or_else(|e| panic!("#{i} {f}: {e}"));
+            assert_eq!(format!("{got:?}"), format!("{want:?}"), "#{i}");
+        }
+        // Every Game* client variant is in the fixture.
+        let types: BTreeSet<&str> = frames.iter().map(|f| f["type"].as_str().unwrap()).collect();
+        assert_eq!(types.len(), 13, "{types:?}");
+    }
+
+    #[test]
+    fn client_frames_tolerate_what_they_should_and_refuse_junk() {
+        let parse = |s: &str| serde_json::from_str::<ClientMessage>(s);
+        // `config` may be missing or null: the default table.
+        for s in [
+            r#"{"type":"GameCreate","payload":{"room_id":"voice_1","kind":"blackjack"}}"#,
+            r#"{"type":"GameCreate","payload":{"room_id":"voice_1","kind":"blackjack","config":null}}"#,
+        ] {
+            assert!(matches!(parse(s), Ok(ClientMessage::GameCreate { config: None, .. })), "{s}");
+        }
+        // Unknown fields are ignored (a newer client must not draw an Error).
+        assert!(parse(r#"{"type":"GameStand","payload":{"room_id":"voice_1","table_id":5,"later":true}}"#).is_ok());
+        assert!(parse(r#"{"type":"GameCreate","payload":{"room_id":"voice_1","kind":"holdem","config":{"ante":5}}}"#).is_ok());
+        // Junk is refused.
+        for s in [
+            r#"{"type":"GameCreate","payload":{"room_id":"voice_1","kind":"omaha"}}"#,
+            r#"{"type":"GameSit","payload":{"room_id":"voice_1","table_id":5,"seat":-1}}"#,
+            r#"{"type":"GameSit","payload":{"room_id":"voice_1","table_id":5.5,"seat":1}}"#,
+            r#"{"type":"GameSit","payload":{"room_id":"voice_1","table_id":"5","seat":1}}"#,
+            r#"{"type":"GameAct","payload":{"room_id":"voice_1","table_id":5,"turn":{"hand_no":1,"turn_seq":1},"action":{"type":"raise","amount":60}}}"#,
+            r#"{"type":"GameAct","payload":{"room_id":"voice_1","table_id":5,"turn":{"hand_no":1,"turn_seq":1},"action":{"type":"bet_or_raise_to"}}}"#,
+            r#"{"type":"GameAct","payload":{"room_id":"voice_1","table_id":5,"turn":{"hand_no":1,"turn_seq":1},"action":{"type":"bet_or_raise_to","amount":-60}}}"#,
+            r#"{"type":"GameAct","payload":{"room_id":"voice_1","table_id":5,"action":{"type":"fold"}}}"#,
+            r#"{"type":"GameBet","payload":{"room_id":"voice_1","table_id":5}}"#,
+            r#"{"type":"GameResync","payload":{"room_id":"voice_1"}}"#,
+        ] {
+            assert!(parse(s).is_err(), "accepted junk: {s}");
+        }
     }
 }

@@ -1,0 +1,241 @@
+[
+  {
+    "type": "GameCreate",
+    "payload": {
+      "room_id": "voice_42",
+      "kind": "holdem",
+      "config": {
+        "starting_stack": 1000,
+        "small_blind": 5,
+        "big_blind": 10
+      }
+    }
+  },
+  {
+    "type": "GameCreate",
+    "payload": {
+      "room_id": "voice_42",
+      "kind": "blackjack",
+      "config": {
+        "starting_stack": 1000,
+        "min_bet": 10,
+        "max_bet": 500
+      }
+    }
+  },
+  {
+    "type": "GameCreate",
+    "payload": {
+      "room_id": "voice_42",
+      "kind": "holdem",
+      "config": {}
+    }
+  },
+  {
+    "type": "GameSit",
+    "payload": {
+      "room_id": "voice_42",
+      "table_id": 4503599627370497,
+      "seat": 2
+    }
+  },
+  {
+    "type": "GameStand",
+    "payload": {
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    }
+  },
+  {
+    "type": "GameAct",
+    "payload": {
+      "room_id": "voice_42",
+      "table_id": 4503599627370497,
+      "turn": {
+        "hand_no": 3,
+        "turn_seq": 7
+      },
+      "action": {
+        "type": "fold"
+      }
+    }
+  },
+  {
+    "type": "GameAct",
+    "payload": {
+      "room_id": "voice_42",
+      "table_id": 4503599627370497,
+      "turn": {
+        "hand_no": 3,
+        "turn_seq": 7
+      },
+      "action": {
+        "type": "check"
+      }
+    }
+  },
+  {
+    "type": "GameAct",
+    "payload": {
+      "room_id": "voice_42",
+      "table_id": 4503599627370497,
+      "turn": {
+        "hand_no": 3,
+        "turn_seq": 7
+      },
+      "action": {
+        "type": "call"
+      }
+    }
+  },
+  {
+    "type": "GameAct",
+    "payload": {
+      "room_id": "voice_42",
+      "table_id": 4503599627370497,
+      "turn": {
+        "hand_no": 3,
+        "turn_seq": 7
+      },
+      "action": {
+        "type": "bet_or_raise_to",
+        "amount": 60
+      }
+    }
+  },
+  {
+    "type": "GameAct",
+    "payload": {
+      "room_id": "voice_42",
+      "table_id": 4503599627370497,
+      "turn": {
+        "hand_no": 3,
+        "turn_seq": 7
+      },
+      "action": {
+        "type": "all_in"
+      }
+    }
+  },
+  {
+    "type": "GameAct",
+    "payload": {
+      "room_id": "voice_42",
+      "table_id": 4503599627370497,
+      "turn": {
+        "hand_no": 3,
+        "turn_seq": 7
+      },
+      "action": {
+        "type": "hit"
+      }
+    }
+  },
+  {
+    "type": "GameAct",
+    "payload": {
+      "room_id": "voice_42",
+      "table_id": 4503599627370497,
+      "turn": {
+        "hand_no": 3,
+        "turn_seq": 7
+      },
+      "action": {
+        "type": "stand"
+      }
+    }
+  },
+  {
+    "type": "GameAct",
+    "payload": {
+      "room_id": "voice_42",
+      "table_id": 4503599627370497,
+      "turn": {
+        "hand_no": 3,
+        "turn_seq": 7
+      },
+      "action": {
+        "type": "double"
+      }
+    }
+  },
+  {
+    "type": "GameAct",
+    "payload": {
+      "room_id": "voice_42",
+      "table_id": 4503599627370497,
+      "turn": {
+        "hand_no": 3,
+        "turn_seq": 7
+      },
+      "action": {
+        "type": "split"
+      }
+    }
+  },
+  {
+    "type": "GameBet",
+    "payload": {
+      "room_id": "voice_42",
+      "table_id": 4503599627370497,
+      "amount": 50
+    }
+  },
+  {
+    "type": "GameClearBet",
+    "payload": {
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    }
+  },
+  {
+    "type": "GameSitOut",
+    "payload": {
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    }
+  },
+  {
+    "type": "GameSitIn",
+    "payload": {
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    }
+  },
+  {
+    "type": "GameRebuy",
+    "payload": {
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    }
+  },
+  {
+    "type": "GameShowCards",
+    "payload": {
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    }
+  },
+  {
+    "type": "GameResync",
+    "payload": {
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    }
+  },
+  {
+    "type": "GameClose",
+    "payload": {
+      "room_id": "voice_42",
+      "table_id": 4503599627370497
+    }
+  },
+  {
+    "type": "GameRemovePlayer",
+    "payload": {
+      "room_id": "voice_42",
+      "table_id": 4503599627370497,
+      "seat": 4
+    }
+  }
+]

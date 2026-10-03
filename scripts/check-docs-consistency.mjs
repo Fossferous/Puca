@@ -150,8 +150,10 @@ if (!exists('SECURITY.md')) fail('SECURITY.md', 'missing — the disclosure poli
         }
     };
     walk('src');
-    /** Read only by tests; a server operator never sets it. */
-    const TEST_ONLY = new Set(['TEST_DATABASE_URL']);
+    /** Read only by tests; a server operator never sets them.
+     *  PUCA_WRITE_GAME_FIXTURES: src/protocol.rs games_frame_tests rewrites
+     *  frontend/src/tests/fixtures/games/ from the engine (docs/GAMES.md). */
+    const TEST_ONLY = new Set(['TEST_DATABASE_URL', 'PUCA_WRITE_GAME_FIXTURES']);
     const env = read('.env.example');
     for (const n of [...names].sort()) {
         if (TEST_ONLY.has(n)) continue;

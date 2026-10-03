@@ -10,8 +10,8 @@
  * host, so the answer is latched per socket and forgotten when it closes.
  *
  * The client announces itself in the URL (`presence` in the one
- * `?caps=own_voice,presence` list, CLIENT_CAPS): a query parameter an older
- * server's WsQuery simply ignores, so announcing costs nothing there.
+ * `?caps=own_voice,presence,games` list, CLIENT_CAPS): a query parameter an
+ * older server's WsQuery simply ignores, so announcing costs nothing there.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { wsClient } from '../api/websocket';
@@ -30,6 +30,8 @@ describe('the presence capability is announced and latched per socket', () => {
         const url = new URL(sock().url, 'http://x');
         expect(url.pathname.endsWith('/ws')).toBe(true);
         expect(url.searchParams.get('caps')?.split(',')).toContain('presence');
+        // Games rides the SAME list (a second caps= would fail the upgrade).
+        expect(url.searchParams.get('caps')?.split(',')).toEqual(['own_voice', 'presence', 'games']);
         expect(url.searchParams.getAll('caps')).toHaveLength(1);
         // The token never rides the URL (it is in the subprotocol).
         expect(sock().url).not.toContain('tok');
@@ -40,8 +42,11 @@ describe('the presence capability is announced and latched per socket', () => {
         expect(wsClient.hasServerFeature('presence')).toBe(false);
         deliver({ type: 'ServerFeatures', payload: { features: ['presence', 'something-newer'] } });
         expect(wsClient.hasServerFeature('presence')).toBe(true);
-        // A feature the server did not list is still absent.
+        // A feature the server did not list is still absent - announcing
+        // games is not the server confirming it.
         expect(wsClient.hasServerFeature('games')).toBe(false);
+        deliver({ type: 'ServerFeatures', payload: { features: ['presence', 'games'] } });
+        expect(wsClient.hasServerFeature('games')).toBe(true);
     });
 
     it('a new socket forgets the previous socket\'s features (a reconnect may reach an older host)', async () => {

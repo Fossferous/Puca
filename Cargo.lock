@@ -2199,6 +2199,7 @@ dependencies = [
  "hmac",
  "jsonwebtoken",
  "lettre",
+ "puca-games",
  "rand 0.8.7",
  "reqwest",
  "rsa",
