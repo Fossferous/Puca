@@ -24,6 +24,7 @@ mod email_handlers;
 mod envelope_version;
 mod export_handlers;
 mod friend_handlers;
+mod games;
 mod games_wire;
 mod handlers;
 mod http_err;

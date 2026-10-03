@@ -1518,7 +1518,7 @@ pub async fn evict_user_from_voice_room(
     if let Some(mut room) = state.rooms.get_mut(room_id) {
         room.remove_member(user_id);
     } // guard dropped before any broadcast re-reads rooms
-    state.drop_room_if_empty(room_id);
+    state.settle_room(room_id);
 
     // Roster retraction, presence-scoped to who can see the channel.
     {
@@ -1973,7 +1973,7 @@ pub(crate) async fn displace_own_conns(
     if displaced.is_empty() {
         return 0;
     }
-    state.drop_room_if_empty(room_id);
+    state.settle_room(room_id);
 
     let by = state.conn_kind(user_id, actor_conn);
     for &c in &displaced {
@@ -2084,7 +2084,7 @@ fn parse_channel_room(room_id: &str) -> Option<i64> {
 /// per-server) specifically so joins can be membership-gated the same way text
 /// rooms are. Kept distinct from the `channel_` prefix so send_signal_to_user
 /// (state.rs) still treats voice rooms as signaling-eligible.
-fn parse_voice_room(room_id: &str) -> Option<i64> {
+pub(crate) fn parse_voice_room(room_id: &str) -> Option<i64> {
     room_id
         .strip_prefix("voice_")
         .and_then(|s| s.parse::<i64>().ok())
@@ -2731,7 +2731,7 @@ async fn can_mutate_room(state: &Arc<AppState>, room_id: &str, user_id: UserId) 
 /// once). The client's reconnect backoff starts at one second, so a genuine
 /// blip is back well inside this; a real departure is simply reported eight
 /// seconds late, which nobody notices.
-fn rejoin_grace() -> std::time::Duration {
+pub(crate) fn rejoin_grace() -> std::time::Duration {
     std::time::Duration::from_secs(
         std::env::var("WS_REJOIN_GRACE_SECS")
             .ok()
@@ -3033,13 +3033,11 @@ async fn handle_message(
             }
         }
 
-        // Games (docs/GAMES.md): the wire contract exists (crate::games_wire),
-        // the handlers do not yet. This build never confirms `games` in
-        // ServerFeatures (`games_wire::GAMES_SERVED`), so a well-behaved
-        // client never sends these; one that does is ignored — never an
-        // Error, which the client would show as an alert. The server half
-        // replaces this arm.
-        ClientMessage::GameCreate { .. }
+        // Games (docs/GAMES.md; src/games.rs). Every refusal is a typed
+        // GameRefused to this connection, never an Error (the client would
+        // show it as an alert); a connection that did not announce `games`
+        // is sent nothing at all.
+        game @ (ClientMessage::GameCreate { .. }
         | ClientMessage::GameSit { .. }
         | ClientMessage::GameStand { .. }
         | ClientMessage::GameAct { .. }
@@ -3051,7 +3049,9 @@ async fn handle_message(
         | ClientMessage::GameShowCards { .. }
         | ClientMessage::GameResync { .. }
         | ClientMessage::GameClose { .. }
-        | ClientMessage::GameRemovePlayer { .. } => {}
+        | ClientMessage::GameRemovePlayer { .. }) => {
+            crate::games::handle_frame(state, user_id, conn_id, game).await;
+        }
 
         ClientMessage::JoinRoom { room_id, take_over, replay } => {
             // Bound room_id length and the number of rooms this connection may
@@ -3351,6 +3351,13 @@ async fn handle_message(
             // filtered either.
             if voice_can_speak.is_some() {
                 state.send_speak_snapshot(&room_id, user_id, conn_id);
+            }
+
+            // The call's card table, if it has one (docs/GAMES.md): a
+            // newcomer has no table id to resync with, so it is pushed; and a
+            // seat in its disconnect grace is its player's again.
+            if parse_voice_room(&room_id).is_some() {
+                state.games.on_join(state, &room_id, user_id, conn_id);
             }
 
             // Send existing streams to the joining connection
@@ -5506,8 +5513,10 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
     // for a voice room the member's SPEAK right from the SAME resolution
     // (sweep_speak) — a member who stays has it re-evaluated without a second
     // query — and the permissions the SFU pass hands LiveKit (sweep_grant).
-    let mut allowed_cache: std::collections::HashMap<(i64, UserId, bool), (bool, Option<bool>, Option<Permissions>)> =
-        std::collections::HashMap::new();
+    let mut allowed_cache: std::collections::HashMap<
+        (i64, UserId, bool),
+        (bool, Option<bool>, Option<Permissions>, Option<bool>),
+    > = std::collections::HashMap::new();
     for (room_id, cid, room_members) in snapshot {
         if let Some(set) = &scope {
             if !set.contains(&cid) {
@@ -5520,7 +5529,7 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
         // no time bound.
         let need_connect = parse_voice_room(&room_id).is_some();
         for member_id in room_members {
-            let (allowed, can_speak, _) = match allowed_cache.get(&(cid, member_id, need_connect)) {
+            let (allowed, can_speak, _, can_play) = match allowed_cache.get(&(cid, member_id, need_connect)) {
                 Some(&verdict) => verdict,
                 None => {
                     let access = get_user_channel_permissions(&state.pool, cid, member_id).await;
@@ -5528,12 +5537,27 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
                         sweep_keeps(scope_known, server_id, &access, need_connect),
                         sweep_speak(server_id, &access, need_connect),
                         sweep_grant(server_id, &access),
+                        sweep_play(server_id, &access, need_connect),
                     );
                     allowed_cache.insert((cid, member_id, need_connect), verdict);
                     verdict
                 }
             };
             if allowed {
+                // Staying in the call but no longer allowed to play (PLAY_GAMES
+                // or CONNECT denied here): up from the card table now. Under
+                // this sweep's per-server lock, which a GameSit also holds
+                // from its permission check to its seat, so a sit cannot land
+                // between this answer and the stand-up. A failed lookup is no
+                // answer (None): the worst case is finishing a hand.
+                if can_play == Some(false) && state.games.stand_up(state, &room_id, member_id) {
+                    tracing::info!(
+                        "Perms sweep: user {} stood up from the table in {} (PLAY_GAMES lost, change in server {})",
+                        member_id,
+                        room_id,
+                        server_id
+                    );
+                }
                 // Staying in a voice room: a SPEAK allow/deny may be exactly
                 // what changed. Tell the WHOLE room when the stored right
                 // flipped — the member too, so their own client stops (or
@@ -5566,6 +5590,10 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
             // remaining members also get the media-stopped set (mirrors the
             // voice-exclusivity and unclean-disconnect paths — otherwise an
             // evicted streamer leaves a frozen ghost tile behind).
+            // Out of the call for good (kicked, banned, left the server, VIEW
+            // or CONNECT gone): up from any card table at once - the
+            // disconnect grace is for a dropped connection, not this.
+            state.games.stand_up(state, &room_id, member_id);
             let (was_streamer, was_sharer, was_camera) =
                 if let Some(mut room) = state.rooms.get_mut(&room_id) {
                     let flags = (
@@ -5578,7 +5606,7 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
                 } else {
                     (false, false, false)
                 }; // guard dropped before any broadcast re-reads rooms
-            state.drop_room_if_empty(&room_id);
+            state.settle_room(&room_id);
             if was_streamer {
                 // Viewer-scoped, like every other StreamStopped emitter: the
                 // voice roster is drawn by users who are NOT in the room, so a
@@ -5703,13 +5731,14 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
         // LiveKit takes the server's deny with it, and would publish its mic
         // under the token's old grant. LiveKit's own grant does not leave.
         let (allowed, grant) = match allowed_cache.get(&(cid, uid, true)) {
-            Some(&(ok, _, grant)) => (ok, grant),
+            Some(&(ok, _, grant, _)) => (ok, grant),
             None => {
                 let access = get_user_channel_permissions(&state.pool, cid, uid).await;
                 let verdict = (
                     sweep_keeps(scope_known, server_id, &access, true),
                     sweep_speak(server_id, &access, true),
                     sweep_grant(server_id, &access),
+                    sweep_play(server_id, &access, true),
                 );
                 allowed_cache.insert((cid, uid, true), verdict);
                 (verdict.0, verdict.2)
@@ -5907,6 +5936,22 @@ mod sweep_keeps_tests {
 /// server's members, and their speak flag is no business of a sweep for this
 /// one - it holds only this server's lock, so another server's sweep could be
 /// writing the same flag at the same time.
+/// A member the sweep KEEPS in a voice room: whether they may still play at
+/// its card table (`CONNECT` + `PLAY_GAMES` here, docs/GAMES.md), from the
+/// same resolution. `None` when there is no answer (not voice, a failed
+/// lookup, another server's channel): the table is left alone.
+fn sweep_play(server_id: &str, access: &ChannelPermAccess, voice: bool) -> Option<bool> {
+    if !voice {
+        return None;
+    }
+    match access {
+        ChannelPermAccess::Allowed { server_id: sid, perms } if sid == server_id => {
+            Some(perms.has(Permissions::CONNECT) && perms.has(Permissions::PLAY_GAMES))
+        }
+        ChannelPermAccess::Allowed { .. } | ChannelPermAccess::NotMember | ChannelPermAccess::NotFound => None,
+    }
+}
+
 fn sweep_speak(server_id: &str, access: &ChannelPermAccess, voice: bool) -> Option<bool> {
     if !voice {
         return None;

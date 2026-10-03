@@ -83,7 +83,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _COLS_PROFILE = r'(?:avatar_file_id|display_name|allow_dms_from_server_members|show_online_status|show_idle_status|join_sound_file_id|leave_sound_file_id)'
 _COLS_STATUS = r'(?:status|custom_status|bio)'
 _COLS_ROLE = r'(?:name|color|permissions|position)'
-_COLS_SERVER = (r'(?:clips_enabled|clip_max_seconds|clip_channel_id|name|is_public|require_media_e2ee|'
+_COLS_SERVER = (r'(?:clips_enabled|games_enabled|clip_max_seconds|clip_channel_id|name|is_public|require_media_e2ee|'
                 r'afk_timeout_minutes|description|icon_file_id)')
 
 
@@ -138,7 +138,7 @@ REVIEWED_RUNTIME_SQL = {
         'reason': 'QueryBuilder: UPDATE servers SET <fields present> WHERE id = $N.',
         'builders': [{
             'emits': r'UPDATE servers SET ' + _set_list(_COLS_SERVER) + r' WHERE id = \$\d+',
-            'params': {'clips_enabled': 'bool', 'clip_max_seconds': 'i32', 'clip_channel_id': 'i32',
+            'params': {'clips_enabled': 'bool', 'games_enabled': 'bool', 'clip_max_seconds': 'i32', 'clip_channel_id': 'i32',
                        'name': 'TEXT', 'is_public': 'bool', 'require_media_e2ee': 'bool',
                        'afk_timeout_minutes': 'i32', 'description': 'TEXT', 'icon_file_id': 'TEXT',
                        'id': 'TEXT'},

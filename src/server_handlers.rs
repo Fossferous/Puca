@@ -45,6 +45,10 @@ pub struct ServerResponse {
     /// Minutes of inactivity before a voice member is moved to the AFK channel.
     /// Discord's option set (1|5|15|30|60); 15 was the old hardcoded value.
     pub afk_timeout_minutes: i32,
+    /// Card games in voice calls (docs/GAMES.md): the owner's switch, off by
+    /// default (migration 073). The client offers a table only when this is
+    /// on AND the socket confirmed `games`.
+    pub games_enabled: bool,
 }
 
 // --- ICE Configuration DTOs ---
@@ -224,7 +228,8 @@ pub async fn create_server(
         "require_media_e2ee": false,
         "clips_enabled": false,
         "clip_max_seconds": 120,
-        "clip_channel_id": null
+        "clip_channel_id": null,
+        "games_enabled": false
     }))
     .into_response()
 }
@@ -289,9 +294,9 @@ pub async fn list_servers(
     // owner_id is INTEGER (i32), also include icon_file_id, description, and the E2EE policy.
     // Rail order is per-member (server_members.position, migration 036):
     // dragged-into-place servers first, never-ordered ones after by join age.
-    let servers: Vec<(String, String, i32, String, Option<String>, Option<String>, bool, bool, i32, Option<i32>, bool, i32)> = sqlx::query_as(
+    let servers: Vec<(String, String, i32, String, Option<String>, Option<String>, bool, bool, i32, Option<i32>, bool, i32, bool)> = sqlx::query_as(
         r#"
-        SELECT s.id, s.name, s.owner_id, (replace(s.created_at::text, ' ', 'T') || 'Z') AS created_at, s.icon_file_id, s.description, s.require_media_e2ee, s.clips_enabled, s.clip_max_seconds, s.clip_channel_id, COALESCE(s.is_public, false), s.afk_timeout_minutes
+        SELECT s.id, s.name, s.owner_id, (replace(s.created_at::text, ' ', 'T') || 'Z') AS created_at, s.icon_file_id, s.description, s.require_media_e2ee, s.clips_enabled, s.clip_max_seconds, s.clip_channel_id, COALESCE(s.is_public, false), s.afk_timeout_minutes, s.games_enabled
         FROM servers s
         JOIN server_members sm ON s.id = sm.server_id
         WHERE sm.user_id = $1
@@ -307,7 +312,7 @@ pub async fn list_servers(
     // query); a member's rail is short, and the alternative — the raw column —
     // is the hidden-channel id leak described on visible_clip_channel_id.
     let mut response: Vec<ServerResponse> = Vec::with_capacity(servers.len());
-    for (id, name, owner_id, created_at, icon_file_id, description, require_media_e2ee, clips_enabled, clip_max_seconds, clip_channel_id, is_public, afk_timeout_minutes) in servers {
+    for (id, name, owner_id, created_at, icon_file_id, description, require_media_e2ee, clips_enabled, clip_max_seconds, clip_channel_id, is_public, afk_timeout_minutes, games_enabled) in servers {
         let clip_channel_id = visible_clip_channel_id(&state.pool, claims.sub as i32, &id, clip_channel_id).await;
         response.push(ServerResponse {
             id,
@@ -322,6 +327,7 @@ pub async fn list_servers(
             clip_channel_id: clip_channel_id.map(|c| c as i64),
             is_public,
             afk_timeout_minutes,
+            games_enabled,
         });
     }
 
@@ -657,7 +663,11 @@ pub async fn delete_server(
         .await;
 
     match res {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => {
+            // Its channels went with it, and with them every card table.
+            state.games.close_server(&state, &server_id, crate::games_wire::GameEndReason::ChannelDeleted);
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => {
             tracing::error!("Failed to delete server: {:?}", e);
             (StatusCode::INTERNAL_SERVER_ERROR, "Failed to delete server").into_response()
@@ -690,6 +700,9 @@ pub struct UpdateServerRequest {
     /// afk_timeout_valid; validated for an honest 400, with the DB CHECK
     /// (migration 052) as the backstop.
     pub afk_timeout_minutes: Option<i32>,
+    /// Card games in voice calls (docs/GAMES.md). Switching it off ends every
+    /// open table of this server (`GameEnded { disabled }`).
+    pub games_enabled: Option<bool>,
 }
 
 /// Discord's AFK-timeout options, verbatim: 1, 5, 15, 30 or 60 minutes.
@@ -927,6 +940,11 @@ pub async fn update_server_settings(
         qb.push("clips_enabled = ").push_bind(enabled);
         any = true;
     }
+    if let Some(enabled) = payload.games_enabled {
+        if any { qb.push(", "); }
+        qb.push("games_enabled = ").push_bind(enabled);
+        any = true;
+    }
     if let Some(secs) = payload.clip_max_seconds {
         if any { qb.push(", "); }
         qb.push("clip_max_seconds = ").push_bind(secs);
@@ -1018,6 +1036,15 @@ pub async fn update_server_settings(
                 "update_server_settings: rows_affected={}",
                 updated.rows_affected()
             );
+            // Games switched off: every table of this server ends now
+            // (after the commit, so a GameCreate that re-reads the switch
+            // after opening sees it off and closes its own table too).
+            if payload.games_enabled == Some(false) {
+                let ended = state.games.close_server(&state, &server_id, crate::games_wire::GameEndReason::Disabled);
+                if ended > 0 {
+                    tracing::info!("update_server_settings: games off on {}: {} table(s) ended", server_id, ended);
+                }
+            }
             if let (Some((Some(old),)), Some(new)) = (&old_icon, &payload.icon_file_id) {
                 if old != new {
                     // Reclaim scoped to the CALLER, never the old blob's true

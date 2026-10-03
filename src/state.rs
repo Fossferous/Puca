@@ -547,6 +547,15 @@ pub struct Room {
     /// `presence_log`, so an entry never outlives the membership it describes
     /// and a later re-join starts from the join gate's fresh answer.
     speak_denied: HashSet<UserId>,
+    /// Users who left this VOICE room since the last drain, for the games
+    /// layer (docs/GAMES.md, *Where the departure hook goes*): a seated
+    /// player's seat goes into its disconnect grace. Filled INSIDE
+    /// `remove_member` (which `remove_member_conn` reaches when the last
+    /// connection goes), like `presence_log`, so no mutator can forget it;
+    /// drained by `AppState::settle_room`, which every mutator calls after
+    /// dropping its guard - the games layer locks tables, and a table lock
+    /// must never be taken under a `rooms` guard.
+    game_departures: Vec<UserId>,
 }
 
 /// Which media kinds a departing connection released at the USER level (i.e.
@@ -589,7 +598,25 @@ impl Room {
             share_stream_ids: HashMap::new(),
             presence_log: PresenceLog::new(now_unix_ms()),
             speak_denied: HashSet::new(),
+            game_departures: Vec::new(),
         }
+    }
+
+    /// Every (user, connection) joined to this room - the games fan-out's
+    /// audience, read under the room guard and used after it is dropped.
+    pub fn member_conn_pairs(&self) -> Vec<(UserId, u64)> {
+        self.member_conns.iter().flat_map(|(&u, conns)| conns.iter().map(move |&c| (u, c))).collect()
+    }
+
+    /// The departures recorded since the last drain (see `game_departures`).
+    pub fn take_game_departures(&mut self) -> Vec<UserId> {
+        std::mem::take(&mut self.game_departures)
+    }
+
+    /// Tests: departures recorded and not yet drained.
+    #[cfg(test)]
+    pub fn pending_game_departures(&self) -> usize {
+        self.game_departures.len()
     }
 
     /// Record whether `user_id` may speak in this (voice) room. Returns true
@@ -811,6 +838,7 @@ impl Room {
     }
 
     pub fn remove_member(&mut self, user_id: UserId) {
+        let was_member = self.members.contains(&user_id);
         self.member_conns.remove(&user_id);
         self.streamer_conns.remove(&user_id);
         self.share_conns.remove(&user_id);
@@ -821,6 +849,9 @@ impl Room {
         self.camera_users.retain(|&id| id != user_id);
         self.presence_log.close_at(user_id, now_unix_ms());
         self.speak_denied.remove(&user_id);
+        if was_member && self.id.starts_with("voice_") && !self.game_departures.contains(&user_id) {
+            self.game_departures.push(user_id);
+        }
     }
 
     /// Invariant every Room test asserts: a user is in `members` iff the presence
@@ -1082,6 +1113,10 @@ pub struct AppState {
     pub clip_rate: DashMap<UserId, ClipRateState>,
     /// (proposer, voice_channel_id) → growing cooldown after a decline.
     pub clip_denials: DashMap<(UserId, i64), ClipDenial>,
+
+    /// Card tables in voice calls (src/games.rs, docs/GAMES.md). In memory
+    /// only: a restart ends every table.
+    pub games: crate::games::Games,
 
     /// Monotonic source of unique per-connection ids (see Session::conn_id).
     next_conn_id: AtomicU64,
@@ -1368,7 +1403,11 @@ impl AppState {
         email_service: Option<EmailService>,
         wake: std::sync::Arc<dyn crate::wake::WakeTransport>,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        // Cyclic: the games layer's timers reach the state through a weak
+        // reference to it (they must not keep it alive, and a table's timers
+        // hold only a weak reference to the table).
+        Arc::new_cyclic(|this| Self {
+            games: crate::games::Games::new(this.clone()),
             pool,
             wake,
             wake_recent: DashMap::new(),
@@ -1864,8 +1903,6 @@ impl AppState {
     /// announced `games`. The games fan-out filters `Room.member_conns`
     /// through this; a connection that did not announce it never receives a
     /// frame it does not know.
-    // Read by the games fan-out (the server half of wave 3) and the tests.
-    #[allow(dead_code)]
     pub fn conn_plays_games(&self, user_id: UserId, conn_id: u64) -> bool {
         self.sessions
             .get(&user_id)
@@ -2553,12 +2590,21 @@ impl AppState {
                 emptied.push(room.key().clone());
             }
         }
-        // Drop the now-empty rooms so abandoned-by-disconnect rooms don't
-        // accumulate for the process lifetime (leave_room already does this).
-        // remove_if re-checks emptiness under the shard lock, so a concurrent
-        // join that repopulated the room is not clobbered.
+        // Guards dropped (the loop above ended). Settle every room this
+        // connection's death changed: the games layer hears who left (a seat's
+        // disconnect grace), and the now-empty rooms are dropped so
+        // abandoned-by-disconnect rooms don't accumulate for the process
+        // lifetime (leave_room already does this). remove_if re-checks
+        // emptiness under the shard lock, so a concurrent join that
+        // repopulated the room is not clobbered.
+        let mut settle: Vec<RoomId> = vacated.iter().filter(|v| v.fully_left).map(|v| v.room_id.clone()).collect();
         for room_id in emptied {
-            self.drop_room_if_empty(&room_id);
+            if !settle.contains(&room_id) {
+                settle.push(room_id);
+            }
+        }
+        for room_id in settle {
+            self.settle_room(&room_id);
         }
         // The voice room this socket's death took the session out of (one at
         // most: voice is exclusive per user) - see `voice_drops`.
@@ -2791,12 +2837,41 @@ impl AppState {
             .add_member(user_id, conn_id);
     }
 
-    /// Drop `room_id` if it has no members — the ONE place a room is removed.
-    /// For a voice room whose presence log has not expired, the log moves to
-    /// `orphan_presence_logs` (see join_room). Re-checks emptiness under the
-    /// shard lock so a concurrent join is not clobbered.
-    pub fn drop_room_if_empty(&self, room_id: &str) {
-        if let Some((id, room)) = self.rooms.remove_if(room_id, |_, r| r.members.is_empty()) {
+    /// After ANY change to `room_id`'s membership, once the caller has
+    /// dropped every `rooms` guard: hand the departures the room recorded
+    /// (`Room::remove_member`) to the games layer, then drop the room if it
+    /// emptied. Every room mutator calls this - leave, disconnect, every
+    /// eviction (kick, move, the permission sweep, voice exclusivity, AFK) -
+    /// which is what lets the games layer hear about every departure without
+    /// a hook inside `Room` (which has no `AppState`, and runs under a shard
+    /// write lock where a table lock must never be taken). docs/GAMES.md,
+    /// *Where the departure hook goes*.
+    pub fn settle_room(&self, room_id: &str) {
+        let departed = self.rooms.get_mut(room_id).map(|mut r| r.take_game_departures()).unwrap_or_default();
+        // The guard is gone (end of the statement above).
+        if !departed.is_empty() {
+            self.games.on_departures(self, room_id, &departed);
+        }
+        self.drop_room_if_empty(room_id);
+    }
+
+    /// Drop `room_id` if it has no members — the ONE place a room is removed,
+    /// reached only through `settle_room`. For a voice room whose presence log
+    /// has not expired, the log moves to `orphan_presence_logs` (see
+    /// join_room). Re-checks emptiness under the shard lock so a concurrent
+    /// join is not clobbered. A voice room's table is told the call emptied
+    /// (it ends one rejoin grace later unless somebody is back).
+    fn drop_room_if_empty(&self, room_id: &str) {
+        if let Some((id, mut room)) = self.rooms.remove_if(room_id, |_, r| r.members.is_empty()) {
+            // A departure recorded after settle_room's drain (a concurrent
+            // mutator) leaves with the room: hand it over too.
+            let departed = room.take_game_departures();
+            if !departed.is_empty() {
+                self.games.on_departures(self, &id, &departed);
+            }
+            if id.starts_with("voice_") {
+                self.games.on_room_emptied(&id);
+            }
             let now_ms = now_unix_ms();
             if id.starts_with("voice_") && !room.presence_log.is_expired_at(now_ms) {
                 self.orphan_presence_logs.insert(id, room.presence_log);
@@ -2814,21 +2889,20 @@ impl AppState {
     /// their microphone still on it. Nothing released (or an unknown room)
     /// reads as all-false.
     pub fn leave_room(&self, room_id: &str, user_id: UserId, conn_id: u64) -> ReleasedMedia {
-        let (released, now_empty) = if let Some(mut room) = self.rooms.get_mut(room_id) {
-            let released = room.remove_member_conn(user_id, conn_id);
-            (released, room.members.is_empty())
+        let released = if let Some(mut room) = self.rooms.get_mut(room_id) {
+            room.remove_member_conn(user_id, conn_id)
         } else {
-            (ReleasedMedia::default(), false)
+            ReleasedMedia::default()
         };
 
-        // Guard dropped above. Remove only if STILL empty: remove_if re-checks the
-        // predicate while holding the shard lock, so a concurrent join_room that
-        // repopulated the room between the drop and here is not clobbered (the old
-        // drop-then-unconditional-remove had a TOCTOU that could delete a room a
-        // new member had just joined, silently stranding them).
-        if now_empty {
-            self.drop_room_if_empty(room_id);
-        }
+        // Guard dropped above. settle_room hands any departure to the games
+        // layer, and removes the room only if STILL empty: remove_if
+        // re-checks the predicate while holding the shard lock, so a
+        // concurrent join_room that repopulated the room between the drop and
+        // here is not clobbered (the old drop-then-unconditional-remove had a
+        // TOCTOU that could delete a room a new member had just joined,
+        // silently stranding them).
+        self.settle_room(room_id);
         released
     }
 
@@ -4901,7 +4975,7 @@ mod presence_log_tests {
 
     /// The log survives the last member leaving and is restored on rejoin — the
     /// case a lone clipper's socket blip creates. Red if any of the five
-    /// room-removal sites bypasses drop_room_if_empty.
+    /// room-removal sites bypasses settle_room (and its drop_room_if_empty).
     #[tokio::test]
     async fn an_empty_voice_rooms_log_is_kept_and_restored() {
         let state = test_state();

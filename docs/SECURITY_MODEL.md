@@ -301,6 +301,27 @@ phone calendar** (Púca Notes on Android) hands one event's title, time and
 place to the phone's calendar app, which may sync it to its own provider. The
 app says this once, before the first use.
 
+### Card games: the server deals, so the operator could see the cards
+
+Poker and Blackjack in a voice call ([GAMES.md](GAMES.md)) are the one place
+where the server is not just a relay: **it deals.** It shuffles with the
+operating system's random number generator, holds every hole card and the rest
+of the deck in its own memory, and sends each player only their own cards. That
+protects players from each other - a modified client never receives another
+player's hidden card, cannot act out of turn and cannot invent chips - but it
+does NOT protect them from whoever runs the server. **The operator, anyone with
+root on the box, or a patched backend can read every live hole card and the
+order of the deck.** On a friends' server the owner is often also a player.
+Nothing in this design changes that, and nothing claims to; the table says so
+to each player the first time they sit down: *"Chips are free and worth
+nothing. This server deals the cards and its operator could see them."*
+
+What the server learns that it did not already know: who sat at a table and how
+chips moved between them - in memory only, gone when the table closes (and
+every restart closes every table). Chips are free, per table, never bought,
+sold, kept or turned into anything. Games are off until the server's owner
+switches them on, and the frames go only to connections in that call.
+
 ### Can do
 
 **Mint a valid session token for any user, at any time.** The JWT is a symmetric HMAC; the
