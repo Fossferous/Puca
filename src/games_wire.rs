@@ -27,10 +27,6 @@
 //! engine's `Display` messages stay on the server (logs); the client words
 //! each `code` itself.
 
-// The server half calls the conversions; until it lands only the tests do.
-// Delete this line in the commit that wires the handlers.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use puca_games::blackjack::{
     BjAction, BjActReason, BjError, BjEvent, BjSitOutReason, BjTarget, BlackjackConfig, BlackjackView, Outcome,
 };
@@ -49,11 +45,11 @@ use crate::state::UserId;
 /// Whether this server build plays games: what makes it confirm the `games`
 /// capability in `ServerFeatures` (`crate::presence::ClientCaps::features`).
 ///
-/// FALSE until the commit that adds the game handlers flips it. This commit
-/// is the contract only: a server that confirmed `games` now would let a
-/// client send frames that nothing here acts on, and the client would wait
-/// on a table that never opens.
-pub const GAMES_SERVED: bool = false;
+/// TRUE since the commit that added the game handlers (src/games.rs): a
+/// client that announced `games` may now send the Game* frames, and the
+/// tables they open are played here. (It was false in the contract commit,
+/// when nothing acted on the frames.)
+pub const GAMES_SERVED: bool = true;
 
 // ---------------------------------------------------------------------------
 // Identity

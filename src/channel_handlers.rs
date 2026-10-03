@@ -717,6 +717,13 @@ pub async fn delete_channel(
         .execute(&state.pool)
         .await;
 
+    // A voice channel's card table ends with it (docs/GAMES.md, Teardown).
+    state.games.close_room(
+        &state,
+        &format!("voice_{channel_id}"),
+        crate::games_wire::GameEndReason::ChannelDeleted,
+    );
+
     StatusCode::NO_CONTENT.into_response()
 }
 

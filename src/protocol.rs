@@ -332,14 +332,11 @@ pub enum ClientMessage {
     // Refusals are GameRefused, never Error. Shapes pinned by
     // frontend/src/tests/fixtures/games/client-frames.json.
     //
-    // The fields are read by the game handlers (the server half of wave 3);
-    // until they land this build never confirms `games`
-    // (`games_wire::GAMES_SERVED`), so no well-behaved client sends these.
+    // Read by the game handlers (src/games.rs).
     /// Open a table in this call (`PLAY_GAMES` + `CONNECT`). One table per
     /// call: refused with `room_has_table` while one is open. `config`
     /// (optional) sets the opener's stack and stakes; everything else is the
     /// server's.
-    #[allow(dead_code)]
     GameCreate {
         room_id: String,
         kind: crate::games_wire::GameKindWire,
@@ -348,15 +345,12 @@ pub enum ClientMessage {
     },
     /// Take seat `seat` (0-based; `PLAY_GAMES` + `CONNECT`). The client shows
     /// the disclosure before a person's first sit.
-    #[allow(dead_code)]
     GameSit { room_id: String, table_id: u64, seat: usize },
     /// Get up from the table (the engine's `leave`): between hands at once;
     /// mid-hand Hold'em folds now and Blackjack stands every hand, and the
     /// seat frees when the hand ends. NOT the Blackjack action `stand`.
-    #[allow(dead_code)]
     GameStand { room_id: String, table_id: u64 },
     /// Act on the decision `turn` (the `view.turn` the client was shown).
-    #[allow(dead_code)]
     GameAct {
         room_id: String,
         table_id: u64,
@@ -365,34 +359,25 @@ pub enum ClientMessage {
     },
     /// Blackjack: bet `amount` on the next round (replaces a bet already
     /// placed; the chips leave the stack now).
-    #[allow(dead_code)]
     GameBet { room_id: String, table_id: u64, amount: u64 },
     /// Blackjack: take back the bet placed for the next round.
-    #[allow(dead_code)]
     GameClearBet { room_id: String, table_id: u64 },
     /// Sit out from the next hand / round (keep the seat).
-    #[allow(dead_code)]
     GameSitOut { room_id: String, table_id: u64 },
     /// Back in after sitting out (also after the clock sat you out).
-    #[allow(dead_code)]
     GameSitIn { room_id: String, table_id: u64 },
     /// A fresh starting stack for a busted player, if the table allows it.
-    #[allow(dead_code)]
     GameRebuy { room_id: String, table_id: u64 },
     /// Hold'em, after the hand: table your cards for everyone.
-    #[allow(dead_code)]
     GameShowCards { room_id: String, table_id: u64 },
     /// Send me the table again (one a second per connection). Sent after
     /// RoomJoined for a call the client still holds a table for, and
     /// whenever the client cannot trust what it holds.
-    #[allow(dead_code)]
     GameResync { room_id: String, table_id: u64 },
     /// Moderation (`MOVE_MEMBERS`): close the table for everyone.
-    #[allow(dead_code)]
     GameClose { room_id: String, table_id: u64 },
     /// Moderation (`MOVE_MEMBERS`): get the player in `seat` up from the
     /// table (the engine's `leave`, exactly as if they had stood).
-    #[allow(dead_code)]
     GameRemovePlayer { room_id: String, table_id: u64, seat: usize },
 }
 
@@ -705,15 +690,13 @@ pub enum ServerMessage {
     // the call (`Room.member_conns`), each with `send_to_conn` — never
     // send_to_user / broadcast_to_room, which would wake a phone in a pocket.
     // Shapes pinned by frontend/src/tests/fixtures/games/*.json. Constructed
-    // by the game handlers (the server half of wave 3) and the tests; the
-    // `allow`s go with the commit that wires them.
+    // by the game handlers (src/games.rs).
     /// The whole table as THIS connection may see it (its own hole cards and
     /// nobody else's). Sent when a table opens (to everyone in the call), to
     /// a connection whose RoomJoined put it in a call that has a table, in
     /// answer to GameResync, and to everyone when the table changed without
     /// an engine event (a seat's `away`, a deal countdown). `version` is the
     /// version of the state `view` shows.
-    #[allow(dead_code)]
     GameTable {
         room_id: String,
         table_id: u64,
@@ -723,7 +706,6 @@ pub enum ServerMessage {
     /// One engine call's public events (identical for everyone), and the
     /// view AFTER them for this connection. `version` is exactly one more
     /// than the version before the call.
-    #[allow(dead_code)]
     GameEvents {
         room_id: String,
         table_id: u64,
@@ -733,7 +715,6 @@ pub enum ServerMessage {
     },
     /// The table is gone; drop it and say why. Also the answer to any frame
     /// naming a table that is not open in that room (`gone`).
-    #[allow(dead_code)]
     GameEnded {
         room_id: String,
         table_id: u64,
@@ -744,7 +725,6 @@ pub enum ServerMessage {
     /// `room_id` / `table_id` echo the refused frame's (`table_id` is `null`
     /// for a refused GameCreate). Never sent to anyone else, and never as an
     /// Error.
-    #[allow(dead_code)]
     GameRefused {
         room_id: String,
         table_id: Option<u64>,

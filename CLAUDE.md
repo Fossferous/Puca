@@ -678,10 +678,12 @@ Do not assume a feature exists because a doc says so — one doc claimed push
 notifications were "fully implemented in `pushNotifications.ts`", a file that
 has never existed.
 
-- **Games (Poker, Blackjack)**: only the pure engine exists
-  (`crates/puca-games`, tested). The server tables, WS frames, permission bit,
-  `games_enabled` and every UI are NOT built — the design is `docs/GAMES.md`
-  (one table per call, server deals, free chips per table).
+- **Games (Poker, Blackjack)**: the engine (`crates/puca-games`), the wire
+  contract (`src/games_wire.rs`), `PLAY_GAMES`, `games_enabled` and the server
+  half (`src/games.rs`: tables per call, timers, grace, sweep, teardown) are
+  built and tested. Every UI is NOT: no table on screen and no owner toggle -
+  the design is `docs/GAMES.md` (one table per call, server deals, free chips
+  per table). The server confirms `games` to clients that announce it.
 - **Push/background delivery** (rewritten three times on 2026-08-13 — read
   `src/wake/mod.rs`'s header before touching it): data NEVER rides a relay.
   Android delivery is `NativeDelivery.java`'s OkHttp socket to the user's own

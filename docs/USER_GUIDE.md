@@ -250,6 +250,41 @@ the microphone foreground type for the duration of the call, and releases it
 when you leave. Android 14+ only allows that type to be taken while the app
 is in the foreground, which is why it is set up the moment you join.
 
+### Card games in a call (Poker, Blackjack)
+People in a voice call can play Texas Hold'em or Blackjack together, for
+**free chips that are worth nothing**: everyone sits down with the same stack,
+nothing is kept when the table closes, and chips can never be bought, sold or
+exchanged for anything.
+
+- **For the server owner:** games are **off** until the owner turns them on
+  for the server. Turning them off again ends every table at once. Opening a
+  table and sitting down need the **Play Games** permission (members have it
+  by default; deny it on a role or a single voice channel like any other) and
+  **Connect**. Anyone with **Move Members** can close a table or take a player
+  out of their seat.
+- **One table per call**, of either game. While one is open, another cannot
+  start until it closes.
+- **Watching** needs nothing but being in the call: everyone in it sees the
+  table, and nobody sees another player's face-down cards.
+- **Hold'em:** No-Limit, up to 6 players, 1,000 chips, blinds 5/10 (the
+  person who opens the table may choose the stack and blinds). The next hand
+  is dealt about 3 seconds after the last one ends, when two players can play.
+- **Blackjack:** against the house, 6 decks, the dealer stands on soft 17,
+  blackjack pays 3:2, split up to 4 hands (split aces get one card each), no
+  insurance or surrender; bets 10 to 500. The round is dealt when everyone at
+  the table has bet, or 15 seconds after the first bet.
+- **The clock:** each decision has 30 seconds. When it runs out you check if
+  that is free, otherwise fold (Blackjack: stand); two in a row sit you out
+  until you sit back in. A busted player may take a fresh stack.
+- **Dropping out of the call** (a network blip, a closed laptop) keeps your
+  seat, chips and cards for a few seconds; come back in time and you carry on.
+  Stay away longer and you get up from the table (mid-hand, that folds your
+  hand). Leaving keeps the chips you left with for when you sit down again.
+- **The server deals the cards**, so whoever runs the server could see them.
+  The table says so the first time you sit down; see
+  [the security model](SECURITY_MODEL.md#card-games-the-server-deals-so-the-operator-could-see-the-cards).
+- A server restart ends every table.
+
 ---
 
 ## Screen Sharing

@@ -1,18 +1,20 @@
 # Games — Poker and Blackjack in a voice call
 
 Hold'em and Blackjack played with the people in your current voice call, for
-free chips that exist only at that table. **The rules engine and the wire
-contract are built and tested; nothing that plays a game is.** There is no
-server table, handler or timer, no Server Settings toggle and no UI yet —
-this page is the design for those next steps, and the contract the engine
-and the frames already keep.
+free chips that exist only at that table. **The rules engine, the wire
+contract and the server half are built and tested; the client is not.** The
+server plays tables bound to calls (`src/games.rs`), reads the owner's
+`games_enabled` switch and `PLAY_GAMES`, runs the clocks and the disconnect
+grace, and confirms `games` to clients that announce it. There is no Server
+Settings toggle and no table on screen yet — this page is the design for that
+client half, and the contract the engine, the frames and the server keep.
 
 | piece | state |
 |---|---|
 | Rules engine: `crates/puca-games` (Hold'em, Blackjack, evaluator, shuffle) | **built**, pure Rust, tested (below) |
-| Wire contract: every frame, view, event, refusal and end reason; the `games` capability; fixtures both sides parse (*Frames*, below) | **built**, tested; the server does not confirm `games` yet (`GAMES_SERVED = false`) |
-| `PLAY_GAMES` (1 << 28) and `servers.games_enabled` (migration 073, default off) | **built**; nothing reads the column yet and it has no toggle |
-| Server tables bound to a voice room, handlers, timers, the toggle | designed here, not built |
+| Wire contract: every frame, view, event, refusal and end reason; the `games` capability; fixtures both sides parse (*Frames*, below) | **built**, tested; the server confirms `games` (`GAMES_SERVED = true`) |
+| `PLAY_GAMES` (1 << 28) and `servers.games_enabled` (migration 073, default off) | **built**; read by the server (the gate, `GET /servers`, the owner-only `PATCH /servers/:id/settings`, the invite join); the toggle UI is client half |
+| Server tables bound to a voice room, handlers, timers, grace, sweep branch, teardown | **built**: `src/games.rs`, tested in `src/games_tests.rs` (*As built*, below) |
 | Client table view, desktop + 390x844 phone | designed here, not built |
 
 ## Owner decisions (fixed)
@@ -220,7 +222,7 @@ cards (with a uniform shuffle they change nothing).
   shoe after every operation, including mid-round refills from the discard
   tray.
 
-## Server design (next step, not built)
+## Server design (built: `src/games.rs`)
 
 ### Tables live in the voice room
 
@@ -561,6 +563,54 @@ rate limits → `rate_limited`; (7) the table, `get_mut(room, id)` — not open
 - Capability: the per-socket `games` handshake instead of a
   `gamesSupported` flag (*Gating and permissions*).
 
+### As built: what the server decided beyond this design
+
+Each of these is in `src/games.rs` (tests in `src/games_tests.rs`); the
+reasons are the ones that decided it.
+
+- **The database gate runs only where it decides something.** Steps (4)
+  `disabled` and (5) `no_permission` are read from the database for
+  `GameCreate` / `GameSit` (`CONNECT` + `PLAY_GAMES`) and `GameClose` /
+  `GameRemovePlayer` (`MOVE_MEMBERS`). Every other frame names a table, and
+  switching games off closes every table of the server, so a frame for one
+  is answered `gone` - no database round trip per action.
+- **Sitting is serialized against the permission sweep.** `GameSit` takes the
+  server's permission lock (`AppState::lock_server_perms`, the one the sweep
+  holds for its whole run) and re-checks under it, so a sit cannot land
+  between a sweep's answer and its stand-up. `GameCreate` re-reads
+  `games_enabled` after its table is in the registry and closes it
+  (`disabled`) if the switch went off meanwhile: a switch-off closes only the
+  tables it can see.
+- **The sweep stands a player up in two places.** Kept in the call but
+  without `CONNECT` + `PLAY_GAMES` there (`sweep_play`, from the same
+  resolution as the speak flag): up at once, still in the call. Evicted from
+  the call (kick, ban, leaving the server, VIEW or CONNECT gone): up at once
+  too, with no grace - the grace is for a dropped connection, not for being
+  removed.
+- **Deals.** Hold'em deals `NEXT_HAND_DELAY` (3 s) after a hand ends - and
+  after a second dealable player sits down - whenever two players can be
+  dealt in; the countdown is `next_deal_in_ms`. Blackjack deals at once when
+  every player at the table (not sitting out, not leaving) has bet, otherwise
+  `BET_WINDOW` (15 s) after the first bet. A countdown that ends with nobody
+  to deal to clears itself with a `GameTable`.
+- **Idle** is `IDLE_LIMIT`, 5 minutes with nobody seated (owner to confirm).
+  **Call ended**: the table ends one rejoin grace after the call's room was
+  dropped, unless somebody is back by then (a rejoin clears the stamp).
+- **Rate limit:** a refused open (`room_has_table`, the cap, a bad config)
+  gives back its token - it is 5 tables opened per 5 minutes, not 5 attempts.
+- **No frame at all** to a connection that did not announce `games` - not
+  even a `GameRefused` for its own frame.
+- **Frames leave in version order:** they are sent while the table's lock is
+  held. That touches only `state.sessions` (`conn_plays_games`,
+  `send_to_conn`), which nothing holds while taking a table lock; the
+  recipients (`Room.member_conns`) are read before the lock, never under it.
+- **Moderator removal is the engine's `leave`**, as if the player had stood:
+  they keep the stack they left with and may sit again if their permissions
+  allow. Keeping someone off a table is a role or channel deny of
+  `PLAY_GAMES`.
+- **The `server_restarted` reason** some notes still use is `gone`, as the
+  contract says (*Restart ends every table*).
+
 ### Leaving, disconnects and the grace
 
 **Membership removal on disconnect is immediate.** `unregister_session`
@@ -588,10 +638,12 @@ synchronous with no `AppState`, and it runs under a shard write lock
 (`unregister_session` holds `rooms.iter_mut()` across its whole loop). It
 cannot reach the tables without awaiting under a guard or inverting the lock
 order. Instead `remove_member` records the departing user in a small
-per-room list (a field of `Room`, like `presence_log`), and every caller
-drains it after dropping its guard and hands it to the games layer — the same
-shape as `orphan_presence_logs`. Done that way no mutator can forget the
-hook. A test walks every mutator: `LeaveRoom`, disconnect
+per-room list (`Room::game_departures`, beside `presence_log`), and every
+caller drains it after dropping its guard and hands it to the games layer —
+the same shape as `orphan_presence_logs`. As built, the drain is
+`AppState::settle_room`, which is now the only way to reach
+`drop_room_if_empty` (private): every mutator already had to drop an emptied
+room, so every mutator settles, and no mutator can forget the hook. A test walks every mutator: `LeaveRoom`, disconnect
 (`unregister_session`), `evict_user_from_voice_room` (kick, move, permission
 sweep, exclusivity, AFK) and `drop_room_if_empty`.
 
@@ -607,11 +659,14 @@ player has bet, or 15 s after the first bet.
 
 - **`servers.games_enabled BOOLEAN NOT NULL DEFAULT FALSE`** — off by
   default, like `clips_enabled`. **Added by migration `073_games.sql`** (LF
-  bytes, additive: 0.9.832 boots over it). Still to do (server half + client
-  half, together, since a setting ships with its UI): the owner's toggle in
-  Server Settings (next to Clips; owner-only like it), and the plumbing
-  through the server-row SELECTs (server and invite handlers), the `Server`
-  struct, the update handler and the client `Server` type.
+  bytes, additive: 0.9.832 boots over it). **Server half built:** the
+  server-row SELECTs (`GET /servers`, the invite join, the new-server
+  answer), `ServerResponse.games_enabled`, and the owner-only update handler
+  (`PATCH /servers/:id/settings`, `games_enabled`; turning it off ends that
+  server's tables). Still to do (client half): the owner's toggle in Server
+  Settings (next to Clips; owner-only like it) and the client `Server` type.
+  A setting ships with its UI, so the server half must not be released
+  without it.
 - **`PLAY_GAMES = 1 << 28`** — **built**: `src/permissions.rs` (the next
   free bit; `1 << 28` is exact with JS `<<`, bit 31 would not be), in
   `DEFAULT_MEMBER` so new servers have it, and migration 073 ORs it onto
@@ -681,8 +736,7 @@ anything that turns chips into money.
 
 ## Size of the rest
 
-The skeptic's estimate stands: the server half (registry, frames, seat grace,
-departure drain, sweep branch, setting plumbing, teardown, docs) and the
-client half (two tables, desktop and phone, walks) are about 12–18 working
-days on top of this engine, including the adversarial review rounds this
-repo requires.
+The server half (registry, frames, seat grace, departure drain, sweep branch,
+setting plumbing, teardown, docs) is built. What remains is the client half:
+two tables, desktop and phone, the owner's toggle, the role editor and
+channel-editor rows for `PLAY_GAMES`, and the 390x844 walks.
