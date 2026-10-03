@@ -12,7 +12,7 @@ import { statusOf } from '../api/client';
 import type { Invite, Ban, Report, AuditLogEntry, Channel } from '../api/servers';
 import { RoleSettingsModal } from './RoleSettingsModal';
 import { EmojiSettings } from './EmojiSettings';
-import { CheckIcon, ClipIcon, CloseIcon, GlobeIcon, LockIcon, MoonIcon, ShieldCheckIcon, SparkleIcon, TrashIcon, WarningIcon } from './Icons';
+import { CardsIcon, CheckIcon, ClipIcon, CloseIcon, GlobeIcon, LockIcon, MoonIcon, ShieldCheckIcon, SparkleIcon, TrashIcon, WarningIcon } from './Icons';
 import { AFK_TIMEOUT_CHOICES_MIN } from '../utils/afkIdle';
 import './ServerSettingsModal.css';
 import { parseServerTimestamp } from '../utils/serverTime';
@@ -64,6 +64,9 @@ interface ServerSettingsModalProps {
     /** AFK auto-move window, minutes (Discord's 1|5|15|30|60). undefined =
      *  the backend predates the setting: render disabled, don't send it. */
     initialAfkTimeoutMinutes?: number;
+    /** Games in voice calls (docs/GAMES.md). undefined = the backend
+     *  predates games: render the switch disabled and never send it. */
+    initialGamesEnabled?: boolean;
 }
 
 export function ServerSettingsModal({
@@ -82,6 +85,7 @@ export function ServerSettingsModal({
     initialClipMaxSeconds = 120,
     initialClipChannelId = null,
     initialAfkTimeoutMinutes,
+    initialGamesEnabled,
 }: ServerSettingsModalProps) {
     const [activeTab, setActiveTab] = useState<'overview' | 'roles' | 'emoji' | 'invites' | 'moderation'>('overview');
 
@@ -103,6 +107,12 @@ export function ServerSettingsModal({
     // AFK auto-move window (Discord's option set — utils/afkIdle.ts).
     const afkSupported = typeof initialAfkTimeoutMinutes === 'number';
     const [afkTimeoutMinutes, setAfkTimeoutMinutes] = useState(initialAfkTimeoutMinutes ?? 15);
+
+    // Games in voice calls (docs/GAMES.md) — owner-only, per server, off by
+    // default. Same older-backend rule as AFK: a server that never returned
+    // the field would silently drop the write.
+    const gamesSupported = typeof initialGamesEnabled === 'boolean';
+    const [gamesEnabled, setGamesEnabled] = useState(initialGamesEnabled === true);
 
     // Clips policy (docs/CLIPS.md) — owner-only, per server.
     const [clipsEnabled, setClipsEnabled] = useState(initialClipsEnabled);
@@ -154,6 +164,7 @@ export function ServerSettingsModal({
         setClipMaxSeconds(initialClipMaxSeconds);
         setClipChannelId(initialClipChannelId);
         setAfkTimeoutMinutes(initialAfkTimeoutMinutes ?? 15);
+        setGamesEnabled(initialGamesEnabled === true);
         // Authenticated fetch -> object URL; null until it lands.
         setIconPreview(null);
         if (initialIconFileId) void fetchFileUrl(initialIconFileId).then(setIconPreview);
@@ -302,6 +313,7 @@ export function ServerSettingsModal({
                 // Same older-backend rule as clips: a server that never
                 // returned the field would silently drop the write.
                 ...(afkSupported ? { afk_timeout_minutes: afkTimeoutMinutes } : {}),
+                ...(gamesSupported ? { games_enabled: gamesEnabled } : {}),
             });
             setSavedIconId(iconFileId);   // this pick is now the live icon
             setSuccess('Settings saved!');
@@ -549,6 +561,33 @@ export function ServerSettingsModal({
                                             )}
                                         </div>
                                     </div>
+                                )}
+                            </div>
+
+                            {/* Games (docs/GAMES.md), next to Clips: the owner decides
+                                whether calls on this server may hold a card table at
+                                all. Off by default; switching it off ends every
+                                table on the server. */}
+                            <div className="form-group">
+                                <label className="toggle-row">
+                                    <span><CardsIcon /> Allow games in voice calls</span>
+                                    <input
+                                        type="checkbox"
+                                        checked={gamesEnabled}
+                                        onChange={e => setGamesEnabled(e.target.checked)}
+                                        disabled={!isOwner || !gamesSupported}
+                                        aria-label="Allow games in voice calls"
+                                    />
+                                    <span className="toggle-switch"></span>
+                                </label>
+                                <span className="setting-help">
+                                    People in a call can open one table of Poker or Blackjack and play for free
+                                    chips that are worth nothing and vanish when the table closes. This server
+                                    deals the cards, so whoever runs it could see them. Who may play is the
+                                    Play Games permission; Move Members can close a table.
+                                </span>
+                                {!gamesSupported && (
+                                    <span className="setting-help">This server runs an older version without games.</span>
                                 )}
                             </div>
 

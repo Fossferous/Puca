@@ -948,6 +948,44 @@ export const StarIcon = makeIcon('StarIcon', <>
 </>);
 
 /* ==================================================================== */
+/* Games (docs/GAMES.md)                                                */
+/* ==================================================================== */
+
+/** The in-call card table (Poker, Blackjack): two cards, one behind. */
+export const CardsIcon = makeIcon('CardsIcon', <>
+    <rect x="9" y="3.25" width="11.25" height="16" rx="1.75" />
+    <path d="M9 6.6 5.2 7.5a1.75 1.75 0 0 0-1.3 2.1l2.45 10.3a1.75 1.75 0 0 0 2.1 1.3L12.5 20" />
+    <path d="M14.6 8.5 16.6 11.25 14.6 14l-2-2.75Z" />
+</>);
+
+/*
+ * The four suits are SOLID (docs/ICON_LANGUAGE.md §4): a suit pip is a printed
+ * glyph, and an outlined heart reads as "favourite" and an outlined spade as
+ * a garden tool. They are drawn in currentColor like every icon, so the card
+ * face (PlayingCard.css) decides the ink, and there is no knockout: nothing
+ * here needs to be painted in a background colour.
+ */
+export const SuitSpadeIcon = makeIcon('SuitSpadeIcon', <>
+    <path d="M12 2.75C9.25 5.4 3.75 9.05 3.75 13.15c0 2.4 1.95 4.35 4.35 4.35 1.6 0 3-.85 3.9-2.15.9 1.3 2.3 2.15 3.9 2.15 2.4 0 4.35-1.95 4.35-4.35 0-4.1-5.5-7.75-8.25-10.4Z" fill="currentColor" stroke="none" />
+    <path d="M12 13.75 9.75 21.25h4.5Z" fill="currentColor" stroke="none" />
+</>);
+
+export const SuitHeartIcon = makeIcon('SuitHeartIcon', <>
+    <path d="M12 21C9.1 18.95 3.25 14.6 3.25 9.2c0-2.75 2.15-4.95 4.85-4.95 1.6 0 3.05.8 3.9 2.05.85-1.25 2.3-2.05 3.9-2.05 2.7 0 4.85 2.2 4.85 4.95 0 5.4-5.85 9.75-8.75 11.8Z" fill="currentColor" stroke="none" />
+</>);
+
+export const SuitDiamondIcon = makeIcon('SuitDiamondIcon', <>
+    <path d="M12 2.5 19.25 12 12 21.5 4.75 12Z" fill="currentColor" stroke="none" />
+</>);
+
+export const SuitClubIcon = makeIcon('SuitClubIcon', <>
+    <circle cx="12" cy="7.25" r="3.9" fill="currentColor" stroke="none" />
+    <circle cx="7.35" cy="13.35" r="3.9" fill="currentColor" stroke="none" />
+    <circle cx="16.65" cy="13.35" r="3.9" fill="currentColor" stroke="none" />
+    <path d="M12 9.5 9.75 21.25h4.5Z" fill="currentColor" stroke="none" />
+</>);
+
+/* ==================================================================== */
 /* Controls                                                             */
 /* ==================================================================== */
 
@@ -1313,6 +1351,13 @@ export const ICONS = {
     sparkle: SparkleIcon,
     heart: HeartIcon,
     star: StarIcon,
+
+    // games
+    cards: CardsIcon,
+    'suit-spade': SuitSpadeIcon,
+    'suit-heart': SuitHeartIcon,
+    'suit-diamond': SuitDiamondIcon,
+    'suit-club': SuitClubIcon,
 
     // controls
     plus: PlusIcon,

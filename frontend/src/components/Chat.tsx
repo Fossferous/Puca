@@ -170,6 +170,9 @@ import { presenceOf, usePresence, usePresenceKey, PRESENCE_LABEL } from '../api/
 import { startActivityReporter } from '../api/activityReporter';
 import { PresenceDot } from './PresenceDot';
 import { PERM, hasPerm } from '../api/permissionBits';
+import { attachGamesSocket, setGamesRoom } from '../api/games/gamesStore';
+import { useGames } from '../api/games/useGames';
+import { gamesGate } from '../api/games/gamesGate';
 import { useSwipe } from '../hooks/useSwipe';
 import { isServerMuted, isServerQuiet } from './mutedServersStore';
 import { isChannelMuted, toggleChannelMute, isHideMutedChannels } from './mutedChannelsStore';
@@ -207,6 +210,11 @@ const DevicesView = __RC_ENABLED__
 // Notes' tree or its stylesheet. Carries no remote-control code, so the Lite
 // desktop build has it too.
 const NotesDesktopView = React.lazy(() => import('./NotesDesktopView').then(m => ({ default: m.NotesDesktopView })));
+
+// The in-call card table (docs/GAMES.md). Lazy: most sessions never open it,
+// so its components and stylesheet stay out of the first load. The STORE is
+// imported statically below — it must hear the socket from the start.
+const GamesView = React.lazy(() => import('./games/GamesView').then(m => ({ default: m.GamesView })));
 
 /**
  * The socket was not OPEN at send time. Distinct from SecureSendError so the
@@ -1110,8 +1118,10 @@ export function Chat({ onLogout }: ChatProps) {
     const [showEmojiPicker, setShowEmojiPicker] = useState(false);
 
     // View mode: 'chat' shows messages, 'stream' shows StreamStage,
-    // 'voice' shows the VoiceStage (participant tiles for the connected room)
-    const [viewMode, setViewMode] = useState<'chat' | 'stream' | 'voice'>('chat');
+    // 'voice' shows the VoiceStage (participant tiles for the connected room),
+    // 'table' the call's card table (GamesView, docs/GAMES.md) — like
+    // VoiceStage, presentation only: entering or leaving it never touches the call.
+    const [viewMode, setViewMode] = useState<'chat' | 'stream' | 'voice' | 'table'>('chat');
 
     /** Is the shared `.messages-container` scroller currently showing the
      *  MESSAGE LIST? It's also the scroller for StreamStage, VoiceStage,
@@ -1330,8 +1340,17 @@ export function Chat({ onLogout }: ChatProps) {
     // Leaving voice (hang-up, kicked, moved) while the voice tiles are up —
     // fall back to chat so the main area never shows a stage for a dead room.
     useEffect(() => {
-        if (viewMode === 'voice' && !currentVoiceChannel) setViewMode('chat');
+        if ((viewMode === 'voice' || viewMode === 'table') && !currentVoiceChannel) setViewMode('chat');
     }, [viewMode, currentVoiceChannel]);
+
+    // Games (docs/GAMES.md): the store hears the socket for the whole session
+    // (a newcomer's GameTable arrives right after RoomJoined, before anyone
+    // opens the view), and is told which call this client shows.
+    useEffect(() => attachGamesSocket(wsClient), []);
+    useEffect(() => {
+        setGamesRoom(currentVoiceChannel ? `voice_${currentVoiceChannel.id}` : null);
+    }, [currentVoiceChannel]);
+    const games = useGames();
 
     // Increments on genuine ROSTER mutations only (users added/removed from a
     // voice room). The REST snapshot rebuild below only applies when no such
@@ -3775,6 +3794,38 @@ export function Chat({ onLogout }: ChatProps) {
             && hasPerm(c.my_permissions, PERM.MOVE_MEMBERS));
     }, [currentServer, currentUserId, channels]);
 
+    // Games in the call (docs/GAMES.md): offered only with the socket's
+    // `games` feature, the VOICE channel's server's games_enabled, this
+    // socket in the call, and CONNECT + PLAY_GAMES in that channel (watching
+    // needs only the first three). Permissions from the fresh channel-list
+    // row when the voice channel is on the viewed server, else the row
+    // captured when it was clicked — the same resolution as canSpeak.
+    const voiceRoomId = currentVoiceChannel ? `voice_${currentVoiceChannel.id}` : null;
+    const voiceGamesGate = gamesGate({
+        feature: games.feature,
+        gamesEnabled: currentVoiceChannel
+            ? (servers.find(s => s.id === currentVoiceChannel.server_id) ?? currentServer)?.games_enabled
+            : undefined,
+        perms: currentVoiceChannel
+            ? (channels.find(c => c.id === currentVoiceChannel.id) ?? currentVoiceChannel).my_permissions
+            : undefined,
+        inCall: !!voiceRoomId && games.joined === voiceRoomId,
+        hasTable: !!games.table && games.table.room_id === voiceRoomId,
+    });
+    // "Open a table" while the call has none, else "Join the table" (or
+    // "Watch" for someone in the call without PLAY_GAMES).
+    const gamesEntryLabel = voiceGamesGate.canOpen ? 'Open a table' : voiceGamesGate.canSit ? 'Join the table' : 'Watch the table';
+    // Open the table view (from the VoiceStage header or the voice panel).
+    // Steers the phone to the chat slot it renders in (DESIGN_PHILOSOPHY §3).
+    const openGames = () => {
+        setShowFriendsPanel(false);
+        setShowDevicesView(false);
+        setShowNotesView(false);
+        setShowAllChecklists(false);
+        setViewMode('table');
+        if (isMobile) setMobilePanel('chat');
+    };
+
     const commitVoiceMove = useCallback(async (
         subject: { userId: number; username: string; fromChannelId: number },
         toChannelId: number,
@@ -4373,6 +4424,8 @@ export function Chat({ onLogout }: ChatProps) {
                     // predates the setting, and the modal renders the control
                     // disabled instead of pretending a save would stick.
                     initialAfkTimeoutMinutes={currentServer.afk_timeout_minutes}
+                    // Games (docs/GAMES.md): undefined = a pre-games backend.
+                    initialGamesEnabled={currentServer.games_enabled}
                 />
             )}
 
@@ -5135,6 +5188,10 @@ export function Chat({ onLogout }: ChatProps) {
                                     ?.afk_timeout_minutes ?? 15) * 60_000
                             }
                             sfuMode={!!currentVoiceChannel.sfu_mode}
+                            // Games (docs/GAMES.md): the table is one tap from the
+                            // panel too — behind the phone's "more controls" chevron.
+                            onOpenGames={voiceGamesGate.available ? openGames : undefined}
+                            gamesLabel={gamesEntryLabel}
                             // SPEAK / CONNECT hints for this voice channel, read at join
                             // (hasPerm keeps an old server's missing bits "allowed").
                             // The server's VoiceSpeakState is the authority in the call.
@@ -5447,7 +5504,24 @@ export function Chat({ onLogout }: ChatProps) {
                                 listenerControls: true,
                                 position: pos,
                             })}
+                            onOpenGames={voiceGamesGate.available ? openGames : undefined}
+                            gamesLabel={gamesEntryLabel}
                         />
+                    ) : viewMode === 'table' && currentVoiceChannel ? (
+                        /* The call's card table (docs/GAMES.md) — presentation
+                           only, beside VoiceStage; the call is untouched. */
+                        <React.Suspense fallback={null}>
+                            <GamesView
+                                roomId={`voice_${currentVoiceChannel.id}`}
+                                serverId={currentVoiceChannel.server_id ?? ''}
+                                channelName={currentVoiceChannel.name}
+                                currentUserId={currentUserId}
+                                memberNames={new Map(allMembers.map(m => [m.id, m.display_name || m.server_nickname || m.username]))}
+                                gate={voiceGamesGate}
+                                isPhone={isMobile}
+                                onBack={() => setViewMode('voice')}
+                            />
+                        </React.Suspense>
                     ) : currentChannel?.channel_type === 2 ? (
                         /* Channel Collection Dashboard */
                         <ChannelDashboard channel={currentChannel} />
@@ -5934,7 +6008,11 @@ export function Chat({ onLogout }: ChatProps) {
                     already looking at that exact conversation was never told.
                     One surface, so a transfer can never appear twice. */}
 
-                {composerShown && (
+                {/* On a phone the card table needs every pixel of the chat slot
+                    for its two-row action bar (docs/GAMES.md, *Phone*): the
+                    composer steps aside while the table is up and comes back
+                    with "Call". The desktop keeps it — there is room to chat. */}
+                {composerShown && !(isMobile && viewMode === 'table') && (
                     <>
                     <ComposerAttachments
                         attachments={pendingAttachments}

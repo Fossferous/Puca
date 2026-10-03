@@ -1,0 +1,616 @@
+/* The card table (docs/GAMES.md, *The table on screen*). Content inside
+   .chat-main / .messages-container like VoiceStage, so on a phone it inherits
+   the panel system (DESIGN_PHILOSOPHY §1 option 1). Every rule is scoped to
+   .games-* / .gseat* / .gtable* / .bj-* — nothing here reaches another view.
+
+   Layout: header, an optional notice, then the table — a scrolling column
+   (opponents, board + pot, what happened) over a FIXED footer that holds your
+   seat and the action bar, so your cards and the buttons never scroll away. */
+
+.games-view {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    background: var(--bg-primary, #18191c);
+    color: var(--text-normal, #dbdee1);
+}
+
+.games-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0.75rem;
+    background: var(--bg-secondary, #0d0e10);
+    border-bottom: 1px solid var(--border-separator, #2a2b2f);
+    min-height: 40px;
+    flex-shrink: 0;
+}
+
+.games-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+}
+
+.games-title-icon { display: inline-flex; font-size: 1rem; flex-shrink: 0; }
+
+.games-title-name { font-weight: 600; white-space: nowrap; }
+
+.games-title-meta {
+    color: var(--text-muted, #949ba4);
+    font-size: 0.85rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+}
+
+.games-header-controls { display: flex; gap: 0.4rem; flex-shrink: 0; }
+
+/* ---- Buttons ------------------------------------------------------------- */
+.games-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    min-height: 36px;
+    padding: 0 0.85rem;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: var(--bg-quaternary, #232428);
+    color: var(--text-normal, #dbdee1);
+    font: inherit;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.games-btn:disabled { opacity: 0.45; cursor: default; }
+
+.games-btn:focus-visible { outline: 2px solid var(--brand-primary, #5865f2); outline-offset: 2px; }
+
+/* White on the DEEPEST brand shade: --brand-primary itself is under 4.5:1
+   against white in the green (3.1) and yellow (2.9) themes, and these labels
+   are the ones a player must read in a hurry. --brand-active holds >= 4.8:1
+   in all eight themes (measured by e2e/games-walk.mjs). */
+.games-btn-primary { background: var(--brand-active, #3c45a5); color: #fff; }
+
+/* Fold: a fixed deep red — the theme's danger red (#f23f43) is 3.8:1 under white. */
+.games-btn-danger { background: #b42318; color: #fff; }
+
+.games-btn-ghost {
+    background: transparent;
+    border-color: var(--border-subtle, rgba(79, 84, 92, 0.48));
+    color: var(--text-normal, #dbdee1);
+}
+
+.games-header-btn { min-height: 30px; padding: 0 0.6rem; font-size: 0.82rem; font-weight: 500; }
+
+@media (pointer: fine) {
+    .games-btn:not(:disabled):hover { filter: brightness(1.12); }
+    .games-btn-ghost:not(:disabled):hover { background: rgba(255, 255, 255, 0.06); }
+}
+
+/* ---- Notice (refusals, endings) ------------------------------------------ */
+.games-notice {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.6rem 0.4rem 0.9rem;
+    background: var(--color-warning-bg, rgba(240, 178, 50, 0.1));
+    border-bottom: 1px solid var(--border-separator, #2a2b2f);
+    font-size: 0.9rem;
+    flex-shrink: 0;
+}
+
+.games-notice-ended { background: var(--color-info-bg, rgba(0, 168, 252, 0.1)); }
+
+.games-notice-icon { display: inline-flex; flex-shrink: 0; }
+
+.games-notice-text { flex: 1; min-width: 0; }
+
+.games-notice-close { min-height: 30px; padding: 0 0.4rem; border: none; }
+
+/* ---- Table frame ---------------------------------------------------------- */
+.gtable {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.games-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    padding: 16px;
+}
+
+.games-scroll > * { width: 100%; max-width: 960px; flex-shrink: 0; }
+
+.games-footer {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px 10px;
+    border-top: 1px solid var(--border-separator, #2a2b2f);
+    background: var(--bg-secondary, #0d0e10);
+}
+
+
+.games-footer > * { width: 100%; max-width: 960px; }
+
+.games-actions { display: flex; flex-direction: column; gap: 8px; }
+
+.games-actions-row {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+    gap: 8px;
+}
+
+.games-actions-row > .games-btn { min-width: 96px; }
+
+.games-actions-row2 .gpreset { min-width: 64px; font-weight: 500; }
+
+.gpreset-on { border-color: var(--brand-primary, #5865f2); color: var(--text-normal, #dbdee1); }
+
+.games-seat-row { justify-content: center; }
+
+/* ---- Opponents ------------------------------------------------------------ */
+.games-opps {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 10px;
+}
+
+.gseat {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    /* Five opponents fit one row of the desktop table (5 x 118 + gaps). */
+    width: 118px;
+    min-width: 0;
+    box-sizing: border-box;
+    padding: 8px;
+    border-radius: 10px;
+    background: var(--bg-secondary, #0d0e10);
+    border: 2px solid var(--border-faint, rgba(79, 84, 92, 0.24));
+    font-size: 0.85rem;
+}
+
+.gseat-turn { border-color: var(--brand-primary, #5865f2); }
+
+.gseat-folded { opacity: 0.6; }
+
+.gseat-away .gseat-avatar { opacity: 0.5; }
+
+.gseat-empty {
+    align-items: center;
+    justify-content: center;
+    min-height: 92px;
+    border-style: dashed;
+    background: transparent;
+    color: var(--text-muted, #949ba4);
+}
+
+.gseat-top, .gseat-mid, .gseat-bottom {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+}
+
+.gseat-mid { justify-content: space-between; }
+
+.gseat-avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    background: var(--brand-primary, #5865f2);
+    color: #fff;
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+
+.gseat-name {
+    flex: 1;
+    min-width: 0;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.gseat-empty .gseat-name { flex: 0 0 auto; }
+
+.gseat-stack { font-variant-numeric: tabular-nums; font-weight: 600; }
+
+.gseat-cards { display: inline-flex; gap: 3px; }
+
+.gseat-commit {
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--bg-quaternary, #232428);
+    font-variant-numeric: tabular-nums;
+    font-size: 0.78rem;
+}
+
+.gseat-status, .gseat-meta {
+    color: var(--text-muted, #949ba4);
+    font-size: 0.78rem;
+}
+
+.gseat-remove { min-height: 28px; padding: 0 0.5rem; font-size: 0.75rem; font-weight: 500; }
+
+.gseat-sit { min-height: 32px; }
+
+.gbadge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 3px;
+    box-sizing: border-box;
+    border-radius: 9px;
+    background: var(--bg-quaternary, #232428);
+    color: var(--text-normal, #dbdee1);
+    font-size: 0.65rem;
+    font-weight: 700;
+    flex-shrink: 0;
+}
+
+.gbadge-dealer { background: #fbfbf8; color: #16171a; }
+
+/* ---- Centre: the felt ----------------------------------------------------- */
+/* A fixed felt with fixed ink, like the card faces: the board must read the
+   same in all eight themes. */
+.gcentre, .bj-dealer {
+    --felt: #1f5c3d;
+    --felt-ink: #ffffff;
+    --felt-muted: #cfe6d8;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 14px 12px;
+    border-radius: 16px;
+    background: radial-gradient(ellipse at 50% 30%, rgba(255, 255, 255, 0.08), transparent 70%), var(--felt);
+    color: var(--felt-ink);
+    box-sizing: border-box;
+}
+
+.gboard, .bj-hand-cards { display: flex; gap: 6px; flex-wrap: nowrap; justify-content: center; }
+
+.gboard .pcard-slot { border-color: rgba(255, 255, 255, 0.35); }
+
+.gpot { display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 0.95rem; }
+
+.gpot strong { font-variant-numeric: tabular-nums; }
+
+.gcentre-line { color: var(--felt-muted); font-size: 0.82rem; }
+
+[data-contrast="high"] .gcentre,
+[data-contrast="high"] .bj-dealer {
+    --felt: #0d3a22;
+    --felt-muted: #ffffff;
+    outline: 2px solid var(--border-separator, #6c6f78);
+}
+
+/* ---- You ------------------------------------------------------------------ */
+.games-me {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    border: 2px solid transparent;
+    background: var(--bg-secondary, #0d0e10);
+    box-sizing: border-box;
+}
+
+.games-footer .games-me { background: transparent; padding: 4px 8px; }
+
+.games-me-turn { border-color: var(--brand-primary, #5865f2); }
+
+.games-me-cards { display: inline-flex; gap: 6px; }
+
+.games-me-info { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+
+.games-me-stack { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+.games-me-commit, .games-me-wait { color: var(--text-muted, #949ba4); font-size: 0.85rem; }
+
+.games-me-result { color: var(--text-positive, #23a55a); font-weight: 600; font-size: 0.9rem; }
+
+.games-me-turnline { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
+
+.games-watch { color: var(--text-muted, #949ba4); text-align: center; }
+
+.games-log {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    color: var(--text-muted, #949ba4);
+    font-size: 0.85rem;
+    text-align: center;
+}
+
+.games-phone-note { margin: 0; color: var(--text-faint, #6d6f78); font-size: 0.78rem; text-align: center; }
+
+/* ---- Turn clock ----------------------------------------------------------- */
+.gclock { display: inline-flex; align-items: center; gap: 6px; }
+
+.gclock-bar {
+    display: inline-block;
+    width: 72px;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--bg-quaternary, #232428);
+    overflow: hidden;
+}
+
+.gclock-compact .gclock-bar { width: 100%; }
+
+.gclock-compact { display: flex; width: 100%; }
+
+.gclock-fill { display: block; height: 100%; background: var(--brand-primary, #5865f2); }
+
+.gclock-low .gclock-fill { background: var(--color-danger, #f23f43); }
+
+.gclock-secs { font-variant-numeric: tabular-nums; font-size: 0.85rem; min-width: 2.5ch; }
+
+/* ---- Stepper and amounts -------------------------------------------------- */
+.gstepper { display: inline-flex; align-items: center; gap: 4px; }
+
+.gstep { min-width: 36px; padding: 0; }
+
+.games-amount-input {
+    width: 96px;
+    min-height: 36px;
+    box-sizing: border-box;
+    padding: 0 8px;
+    border-radius: 8px;
+    border: 1px solid var(--border-subtle, rgba(79, 84, 92, 0.48));
+    background: var(--bg-tertiary, #0d0e10);
+    color: var(--text-normal, #dbdee1);
+    font: inherit;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+}
+
+.games-amount-btn { min-width: 76px; font-variant-numeric: tabular-nums; }
+
+/* ---- Blackjack ------------------------------------------------------------ */
+.bj-dealer-label { font-weight: 700; }
+
+.bj-hand { display: inline-flex; flex-direction: column; align-items: center; gap: 4px; padding: 4px; border-radius: 8px; border: 2px solid transparent; }
+
+.bj-hand-active { border-color: var(--brand-primary, #5865f2); }
+
+.bj-hand-meta { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: center; font-size: 0.8rem; }
+
+.bj-hand-total { font-weight: 700; }
+
+.bj-hand-bet { color: var(--text-muted, #949ba4); font-variant-numeric: tabular-nums; }
+
+.bj-hand-outcome { font-weight: 700; }
+
+.bj-hand-win .bj-hand-outcome, .bj-hand-blackjack .bj-hand-outcome { color: var(--text-positive, #23a55a); }
+
+.bj-hand-lose .bj-hand-outcome { color: var(--text-danger, #f23f43); }
+
+.bj-me-hands { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+
+.gseat .bj-hand { padding: 2px; }
+
+/* ---- Open a table --------------------------------------------------------- */
+.games-empty { justify-content: flex-start; }
+
+.games-scroll > .games-open {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-width: 560px;
+}
+
+.games-open-title { margin: 0; font-size: 1.1rem; }
+
+.games-open-kinds { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+.games-kind {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    padding: 12px;
+    border-radius: 10px;
+    border: 2px solid var(--border-subtle, rgba(79, 84, 92, 0.48));
+    background: var(--bg-secondary, #0d0e10);
+    color: var(--text-normal, #dbdee1);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.games-kind span { color: var(--text-muted, #949ba4); font-size: 0.82rem; }
+
+.games-kind-on { border-color: var(--brand-primary, #5865f2); }
+
+.games-open-fields { display: flex; flex-wrap: wrap; gap: 10px; }
+
+.games-field { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--text-muted, #949ba4); }
+
+.games-field .games-amount-input { width: 140px; text-align: left; }
+
+.games-help { margin: 0; color: var(--text-muted, #949ba4); font-size: 0.85rem; }
+
+.games-problem { margin: 0; color: var(--text-danger, #f23f43); font-size: 0.85rem; display: inline-flex; gap: 6px; align-items: center; }
+
+.games-open-go { align-self: flex-start; min-height: 40px; }
+
+/* ---- Sheet and disclosure (portaled to <body>) ---------------------------- */
+/* z 1100: the modal band (DESIGN_PHILOSOPHY §1) — above the voice bar (250)
+   and the bottom nav (300), below Settings (2000). */
+.games-sheet-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 1100;
+    background: rgba(0, 0, 0, 0.5);
+}
+
+.games-sheet {
+    position: absolute;
+    left: 0;
+    right: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px 16px calc(14px + var(--safe-area-bottom, 0px));
+    border-radius: 14px 14px 0 0;
+    background: var(--bg-floating, #0d0e10);
+    color: var(--text-normal, #dbdee1);
+    border-top: 1px solid var(--border-separator, #2a2b2f);
+    box-sizing: border-box;
+}
+
+.games-sheet-title { font-weight: 700; }
+
+.games-sheet-presets { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+
+.games-sheet .gstepper { display: flex; }
+
+.games-sheet .gstepper .games-amount-input { flex: 1; width: auto; min-width: 0; }
+
+.games-sheet-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+.games-sheet-actions > .games-btn { flex: 1; }
+
+.games-disclosure {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: min(420px, calc(100vw - 32px));
+    box-sizing: border-box;
+    padding: 18px;
+    border-radius: 12px;
+    background: var(--bg-floating, #0d0e10);
+    color: var(--text-normal, #dbdee1);
+    border: 1px solid var(--border-separator, #2a2b2f);
+}
+
+.games-disclosure h3 { margin: 0 0 8px; font-size: 1.05rem; }
+
+.games-disclosure p { margin: 0 0 14px; line-height: 1.45; }
+
+/* ---- Phone: 390x844, coarse pointer (mirrors mobile.css's gate) ----------- */
+/* Opponents become a compact strip that scrolls sideways; board and pot in the
+   middle; your cards and the TWO-ROW action bar at the bottom. Every target is
+   at least 44 px, nothing is hover-only, and the amount field is >= 16 px
+   (iOS zooms below that and the fixed panels do not recover). */
+@media (pointer: coarse) and (max-width: 1024px) {
+    /* .messages-container pads every view by 1rem 1.25rem; the table takes
+       that back on a phone — 40 px of width is a whole 44 px target. */
+    .games-view {
+        margin: -1rem -1.25rem;
+        height: calc(100% + 2rem);
+    }
+
+    .games-header { padding: 0.3rem 0.5rem; }
+
+    .games-header-btn { min-height: 44px; min-width: 44px; }
+
+    .games-notice-close { min-height: 44px; min-width: 44px; }
+
+    .games-btn { min-height: 44px; min-width: 44px; font-size: 0.95rem; padding: 0 0.6rem; }
+
+    .games-scroll { padding: 8px; gap: 8px; }
+
+    .games-opps {
+        flex-wrap: nowrap;
+        justify-content: flex-start;
+        overflow-x: auto;
+        overscroll-behavior-x: contain;
+        scroll-snap-type: x proximity;
+        padding-bottom: 2px;
+        gap: 6px;
+    }
+
+    .gseat {
+        width: 112px;
+        flex-shrink: 0;
+        padding: 6px;
+        gap: 3px;
+        font-size: 0.8rem;
+        scroll-snap-align: start;
+    }
+
+    .gseat-empty { min-height: 72px; }
+
+    /* An initial is not worth the name's room in a 112 px tile. */
+    .gseat-avatar { display: none; }
+
+    .gseat-remove { min-height: 44px; }
+
+    .gcentre, .bj-dealer { padding: 10px 8px; gap: 6px; }
+
+    .games-me { padding: 4px 6px; gap: 10px; }
+
+    .games-me .pcard-lg { width: 44px; height: 62px; font-size: 19px; }
+
+    .bj-me-hands { flex-wrap: nowrap; overflow-x: auto; justify-content: flex-start; max-width: 100%; }
+
+    .games-footer { padding: 6px 8px 8px; }
+
+    .games-actions { gap: 6px; }
+
+    .games-actions-row { flex-wrap: nowrap; gap: 6px; }
+
+    .games-actions-row > .games-btn { flex: 1 1 0; min-width: 44px; }
+
+    .games-actions-row2 .gpreset { flex: 1 1 0; min-width: 44px; padding: 0 2px; font-size: 0.85rem; }
+
+    .gstepper { flex-shrink: 0; }
+
+    .gstep { min-width: 44px; }
+
+    .games-amount-btn { min-width: 64px; }
+
+    .games-amount-input { font-size: 16px; min-height: 44px; }
+
+    .games-seat-row { flex-wrap: wrap; }
+
+    .games-open-kinds { grid-template-columns: 1fr; }
+
+    .games-open-fields { flex-direction: column; }
+
+    .games-field .games-amount-input { width: 100%; }
+
+    .games-open-go { align-self: stretch; }
+
+    .games-kind { min-height: 44px; }
+}

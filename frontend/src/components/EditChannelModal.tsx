@@ -37,6 +37,8 @@ const VOICE_CHANNEL_PERMS: { bit: number; label: string; desc: string }[] = [
     { bit: PERM.SPEAK, label: 'Speak', desc: 'Talk in this voice channel' },
     { bit: PERM.VIDEO, label: 'Video', desc: 'Turn on a camera here' },
     { bit: PERM.STREAM, label: 'Stream', desc: 'Screen share here' },
+    // Games (docs/GAMES.md): read only for this voice room's card table.
+    { bit: PERM.PLAY_GAMES, label: 'Play Games', desc: 'Open a Poker or Blackjack table in this call and sit down to play' },
 ];
 
 type TriState = 'inherit' | 'allow' | 'deny';
@@ -214,7 +216,7 @@ export function EditChannelModal({ isOpen, onClose, channel, onChannelUpdated, c
     const selectedRole = permRoles.find(r => r.id === selectedRoleId) || null;
     const isVoice = channel.channel_type === 1;
     // Existing rows first, in their existing order, for every channel type;
-    // a voice channel appends its own four below them.
+    // a voice channel appends its own voice rows below them.
     const permRows: { bit: number; label: string; desc?: string }[] = isVoice
         ? [...CHANNEL_PERMS, ...VOICE_CHANNEL_PERMS]
         : CHANNEL_PERMS;

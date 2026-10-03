@@ -1,6 +1,6 @@
 /**
  * Edit Channel › Permissions — the voice rows (Connect / Speak / Video /
- * Stream).
+ * Stream / Play Games).
  *
  * The backend has always accepted channel overwrites for these four bits, but
  * the editor offered no row for them, so a server owner could not deny Speak
@@ -56,7 +56,7 @@ const MUTED: Role = { id: 9, server_id: 's1', name: 'Muted', color: '#E74C3C', p
 let roles: Role[] = [];
 let existing: ChannelOverwrite[] = [];
 
-const VOICE_ROWS = ['Connect', 'Speak', 'Video', 'Stream'] as const;
+const VOICE_ROWS = ['Connect', 'Speak', 'Video', 'Stream', 'Play Games'] as const;
 
 function chan(over: Partial<Channel> = {}): Channel {
     return {
@@ -131,7 +131,7 @@ function rowLabels(): string[] {
 }
 
 describe('EditChannelModal — voice permission rows', () => {
-    it('a voice channel offers Connect, Speak, Video and Stream below the existing rows', async () => {
+    it('a voice channel offers Connect, Speak, Video, Stream and Play Games below the existing rows', async () => {
         await openPermissions(chan(), 'Member');
         expect(rowLabels()).toEqual([
             'View Channel', 'Send Messages', 'Add Tasks', 'Complete Tasks', 'Manage Tasks',
@@ -167,6 +167,8 @@ describe('EditChannelModal — voice permission rows', () => {
         ['Speak', PERM.SPEAK, 512],
         ['Video', PERM.VIDEO, 1024],
         ['Stream', PERM.STREAM, 2048],
+        // docs/GAMES.md: a voice-only bit, 1 << 28 on the wire.
+        ['Play Games', PERM.PLAY_GAMES, 268435456],
     ] as const)('%s saves its own bit (allow and deny)', async (row, bit, literal) => {
         // The literal pins the wire value independently of PERM, so a PERM
         // typo cannot make the row and the assertion agree on a wrong bit.
@@ -222,7 +224,7 @@ describe('EditChannelModal — voice permission rows', () => {
     it.each([
         ['text', 0],
         ['collection', 2],
-    ])('a %s channel shows no Connect/Speak/Video/Stream rows and no voice hint', async (_kind, channelType) => {
+    ])('a %s channel shows no Connect/Speak/Video/Stream/Play Games rows and no voice hint', async (_kind, channelType) => {
         await openPermissions(chan({ name: 'general', channel_type: channelType }), 'Member');
         // The editor DID render (so absence below is not a tab that failed
         // to load): the existing rows are all there, in their order.

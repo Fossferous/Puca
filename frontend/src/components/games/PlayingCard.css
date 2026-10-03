@@ -1,0 +1,65 @@
+/* A playing card. The FACE is a fixed light surface with fixed ink in every
+   theme: a card must read the same on dark, light, amoled and the tinted
+   themes, and high contrast only thickens the edge and deepens the ink.
+   The suit is an SVG (Icons.tsx) in currentColor, so `color` here is the ink.
+   Red/black is never the only cue: the suit SHAPE always differs too. */
+.pcard {
+    --pcard-face: #fbfbf8;
+    --pcard-ink-black: #16171a;
+    --pcard-ink-red: #c0162c;
+    --pcard-edge: rgba(0, 0, 0, 0.35);
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.05em;
+    box-sizing: border-box;
+    flex-shrink: 0;
+    border-radius: 0.3em;
+    background: var(--pcard-face);
+    border: 1px solid var(--pcard-edge);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+    font-weight: 700;
+    line-height: 1;
+    font-family: var(--font-primary);
+    user-select: none;
+}
+
+.pcard-sm { width: 26px; height: 36px; font-size: 13px; }
+.pcard-md { width: 40px; height: 56px; font-size: 18px; }
+.pcard-lg { width: 52px; height: 72px; font-size: 22px; }
+
+.pcard-black { color: var(--pcard-ink-black); }
+.pcard-red { color: var(--pcard-ink-red); }
+
+.pcard-rank { display: block; letter-spacing: -0.04em; }
+.pcard-suit { display: inline-flex; }
+.pcard-suit .svrn-icon { width: 0.95em; height: 0.95em; }
+
+/* Face down: a back in the theme's brand colour — the one card surface that
+   SHOULD follow the theme, since it carries no information. */
+.pcard-back {
+    background:
+        repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.16) 0 3px, transparent 3px 7px),
+        var(--brand-primary, #5865f2);
+    border: 2px solid var(--pcard-face);
+    box-shadow: 0 0 0 1px var(--pcard-edge), 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+/* An empty board slot. */
+.pcard-slot {
+    background: transparent;
+    border: 1px dashed var(--border-subtle, rgba(255, 255, 255, 0.25));
+    box-shadow: none;
+}
+
+.pcard-muted { opacity: 0.45; }
+
+[data-contrast="high"] .pcard {
+    --pcard-ink-black: #000000;
+    --pcard-ink-red: #a8001a;
+    --pcard-edge: #000000;
+    border-width: 2px;
+}
+
+[data-contrast="high"] .pcard-muted { opacity: 0.6; }
