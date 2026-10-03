@@ -229,7 +229,11 @@ pub async fn create_server(
         "clips_enabled": false,
         "clip_max_seconds": 120,
         "clip_channel_id": null,
-        "games_enabled": false
+        // Migration 073's column default: games are on for every server
+        // (docs/GAMES.md, owner decision 2026-10-03), so the creator's
+        // launcher shows without a refetch. Pinned to the row by
+        // games::tests::db::games_are_on_by_default_for_new_and_existing_servers.
+        "games_enabled": true
     }))
     .into_response()
 }
@@ -1044,6 +1048,13 @@ pub async fn update_server_settings(
                 if ended > 0 {
                     tracing::info!("update_server_settings: games off on {}: {} table(s) ended", server_id, ended);
                 }
+            }
+            // ...and every online member hears the switch at once
+            // (GamesEnabled), so the launcher appears or goes without a
+            // reload - after the tables ended, so nobody sees the launcher go
+            // while their table is still up.
+            if let Some(enabled) = payload.games_enabled {
+                crate::games::push_enabled(&state, &server_id, enabled).await;
             }
             if let (Some((Some(old),)), Some(new)) = (&old_icon, &payload.icon_file_id) {
                 if old != new {

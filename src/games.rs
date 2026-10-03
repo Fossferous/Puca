@@ -66,6 +66,11 @@ pub const NEXT_HAND_DELAY: Duration = Duration::from_secs(3);
 /// Blackjack: the round is dealt when every player at the table has bet, or
 /// this long after the first bet.
 pub const BET_WINDOW: Duration = Duration::from_secs(15);
+/// Blackjack: once every player at the table has bet, the round is dealt this
+/// long after the last bet - not at once - so the last bettor (and everyone
+/// watching) sees the bets before the cards come (owner decision 2026-10-03,
+/// docs/GAMES.md).
+pub const LAST_BET_DELAY: Duration = Duration::from_millis(1_500);
 /// A table nobody sits at stops holding the call's one slot after this
 /// (`GameEnded { idle }`; owner to confirm the value, docs/GAMES.md).
 pub const IDLE_LIMIT: Duration = Duration::from_secs(300);
@@ -79,6 +84,8 @@ const RATE_MAP_PRUNE_AT: usize = 4096;
 pub struct Timings {
     pub next_hand: Duration,
     pub bet_window: Duration,
+    /// Blackjack: the deal after the last bet (`LAST_BET_DELAY`).
+    pub last_bet: Duration,
     pub idle: Duration,
     /// `None`: the rejoin grace the WebSocket layer uses, read when needed.
     pub grace: Option<Duration>,
@@ -86,7 +93,7 @@ pub struct Timings {
 
 impl Timings {
     pub const PRODUCTION: Timings =
-        Timings { next_hand: NEXT_HAND_DELAY, bet_window: BET_WINDOW, idle: IDLE_LIMIT, grace: None };
+        Timings { next_hand: NEXT_HAND_DELAY, bet_window: BET_WINDOW, last_bet: LAST_BET_DELAY, idle: IDLE_LIMIT, grace: None };
 
     fn grace(&self) -> Duration {
         self.grace.unwrap_or_else(crate::ws::rejoin_grace)
@@ -112,6 +119,8 @@ struct Registry {
 /// registry lock, before anyone else can see the cell).
 pub struct TableCell {
     room: RoomId,
+    /// Who opened it (`GameTable.opened_by`: "<name> started Poker").
+    opener: UserId,
     id: OnceLock<u64>,
     inner: Mutex<TableState>,
 }
@@ -166,8 +175,12 @@ impl Engine {
 
     /// How long to wait before dealing, when a deal is wanted now: Hold'em
     /// between hands with two players who can be dealt in; Blackjack between
-    /// rounds once someone has bet.
+    /// rounds once someone has bet - the bet window, or only `last_bet` once
+    /// every player at the table has bet.
     fn deal_wanted(&self, t: &Timings) -> Option<Duration> {
+        if self.everyone_has_bet() {
+            return Some(t.last_bet);
+        }
         match self {
             Engine::Holdem(h) => {
                 let v = h.view_for(None);
@@ -302,6 +315,7 @@ impl Ctx<'_> {
                     table_id: self.cell.id(),
                     version: ts.version,
                     view,
+                    opened_by: Some(self.cell.opener),
                 },
             };
             self.state.send_to_conn(user, conn, msg);
@@ -309,8 +323,8 @@ impl Ctx<'_> {
     }
 
     /// One engine call returned `events`: the version moves on, the clocks
-    /// follow the table, and everyone hears it. Then Blackjack deals at once
-    /// if that was the last bet it was waiting for.
+    /// follow the table (a Blackjack bet that completes the table brings the
+    /// deal forward to `last_bet` from now), and everyone hears it.
     fn apply(&self, ts: &mut TableState, events: GameEventsWire) {
         if events_empty(&events) {
             // A no-op (sit_out twice): nothing changed, nothing is sent.
@@ -319,12 +333,6 @@ impl Ctx<'_> {
         ts.version += 1;
         self.schedule(ts);
         self.send(ts, Some(&events));
-        if ts.engine.everyone_has_bet() {
-            ts.next_deal = None;
-            if let Some(dealt) = ts.engine.deal() {
-                self.apply(ts, dealt);
-            }
-        }
     }
 
     /// A change only the server knows about (a seat's `away`, a countdown
@@ -356,6 +364,15 @@ impl Ctx<'_> {
 
         match (ts.engine.deal_wanted(&timings), ts.next_deal) {
             (Some(after), None) => {
+                ts.gen += 1;
+                ts.next_deal = Some((ts.gen, now + after));
+                self.games.spawn_deal(self.cell, ts.gen, after);
+            }
+            // Wanted SOONER than scheduled: the last Blackjack bet came in
+            // inside the bet window. A new generation, so the window's timer
+            // does nothing when it fires. (Hold'em's delay is constant, so a
+            // deal it scheduled is never sooner than now + the same delay.)
+            (Some(after), Some((_, at))) if now + after < at => {
                 ts.gen += 1;
                 ts.next_deal = Some((ts.gen, now + after));
                 self.games.spawn_deal(self.cell, ts.gen, after);
@@ -397,6 +414,11 @@ pub struct Games {
     /// Tests: every departure handed to this layer, in order.
     #[cfg(test)]
     pub(crate) departures_seen: Mutex<Vec<(RoomId, UserId)>>,
+    /// Tests: runs inside the stand-in gate, while the frame's handler is
+    /// "awaiting the database" - what another task did meanwhile.
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    gate_hook: Mutex<Option<Box<dyn Fn(&AppState) + Send + Sync>>>,
 }
 
 /// Tests only: what the database would have said for (channel, user).
@@ -427,6 +449,8 @@ impl Games {
             test_gate: Mutex::new(None),
             #[cfg(test)]
             departures_seen: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            gate_hook: Mutex::new(None),
         }
     }
 
@@ -708,7 +732,14 @@ impl Games {
     /// A connection joined the call (after its `RoomJoined`). It is sent the
     /// table - a newcomer has no id to resync with - and if its user's seat
     /// was in the disconnect grace, the seat is theirs again.
-    pub fn on_join(&self, state: &AppState, room: &str, user: UserId, conn: u64) {
+    ///
+    /// `may_play` is JoinRoom's OWN permission answer (`CONNECT` +
+    /// `PLAY_GAMES` in this channel). A seated user who may no longer play
+    /// gets up here: a deny that landed while they were away (inside the
+    /// grace, or in another channel) was never seen by the sweep, which walks
+    /// the people IN the call, and every own-seat frame skips the database
+    /// gate - so without this they came back and played on.
+    pub fn on_join(&self, state: &AppState, room: &str, user: UserId, conn: u64, may_play: bool) {
         let Some(cell) = self.lookup(room) else { return };
         let plays = state.conn_plays_games(user, conn);
         let recips = recipients(state, room);
@@ -723,8 +754,20 @@ impl Games {
             Ctx { recips: &one, ..ctx }.send(&ts, None);
         }
         if let Some(seat) = ts.engine.seat_of(user) {
-            if ts.away.get(&seat).is_some_and(|(u, _)| *u == user) {
+            let was_away = ts.away.get(&seat).is_some_and(|(u, _)| *u == user);
+            if was_away {
                 ts.away.remove(&seat);
+            }
+            if !may_play {
+                match ts.engine.leave(seat) {
+                    Ok(events) if !events_empty(&events) => {
+                        tracing::info!("Games: user {} stood up from the table in {} on rejoining (may not play)", user, room);
+                        ctx.apply(&mut ts, events);
+                    }
+                    _ if was_away => ctx.bump(&mut ts),
+                    _ => {}
+                }
+            } else if was_away {
                 ctx.bump(&mut ts);
             }
         }
@@ -805,6 +848,10 @@ impl Games {
     /// NotFound, never a default allow; `games_enabled` reads false).
     async fn gate(&self, state: &AppState, cid: i64, user: UserId, need: Permissions) -> Result<String, GameRefusal> {
         #[cfg(test)]
+        if let Some(hook) = lock(&self.gate_hook).take() {
+            hook(state);
+        }
+        #[cfg(test)]
         if let Some(map) = lock(&self.test_gate).as_ref() {
             let g = map.get(&(cid, user)).ok_or(GameRefusal::NoPermission)?;
             return if !g.enabled {
@@ -833,10 +880,53 @@ impl Games {
         *lock(&self.test_gate) = gate;
     }
 
+    /// Tests: `hook` runs ONCE, inside the next gate (see `gate_hook`).
+    #[cfg(test)]
+    pub(crate) fn set_gate_hook(&self, hook: impl Fn(&AppState) + Send + Sync + 'static) {
+        *lock(&self.gate_hook) = Some(Box::new(hook));
+    }
+
     #[cfg(test)]
     pub(crate) fn set_timings(&self, t: Timings) {
         *lock(&self.timings) = t;
     }
+}
+
+/// The owner switched games on or off for `server_id`: tell every online
+/// member at once (`ServerMessage::GamesEnabled`), so the launcher appears or
+/// goes without a reload. Called after the change committed (and, for off,
+/// after `close_server`). Reads the member list, then [`announce_enabled`].
+pub async fn push_enabled(state: &AppState, server_id: &str, enabled: bool) -> usize {
+    let members: Vec<UserId> = match sqlx::query_as::<_, (i32,)>("SELECT user_id FROM server_members WHERE server_id = $1")
+        .bind(server_id)
+        .fetch_all(&state.pool)
+        .await
+    {
+        Ok(rows) => rows.into_iter().map(|(u,)| UserId::from(u)).collect(),
+        Err(e) => {
+            // The switch itself committed; members who miss the push see it
+            // on their next server-list fetch (a reload, a reconnect).
+            tracing::error!("games: member fetch for the games switch on server {} failed: {}", server_id, e);
+            return 0;
+        }
+    };
+    announce_enabled(state, server_id, enabled, &members)
+}
+
+/// [`push_enabled`] once the members are known: every connection of each
+/// that announced `games` (never a delivery socket, never a connection that
+/// did not announce the capability). Answers how many frames went out.
+pub fn announce_enabled(state: &AppState, server_id: &str, enabled: bool, members: &[UserId]) -> usize {
+    let mut sent = 0;
+    for &user in members {
+        for conn in state.games_conns_of(user) {
+            let msg = ServerMessage::GamesEnabled { server_id: server_id.to_string(), games_enabled: enabled };
+            if state.send_to_conn(user, conn, msg) {
+                sent += 1;
+            }
+        }
+    }
+    sent
 }
 
 /// `servers.games_enabled`, false on any error.
@@ -960,6 +1050,12 @@ pub async fn handle_frame(state: &Arc<AppState>, user: UserId, conn: u64, msg: C
     match msg {
         ClientMessage::GameCreate { kind, config, .. } => {
             let server_id = server_id.unwrap_or_default();
+            // (3) again: the gate awaited the database, and this connection
+            // may have left (or been moved or kicked) meanwhile. A table
+            // opened now would sit in a call with nobody in it.
+            if !conn_in_call(state, &room, user, conn) {
+                return refuse(GameRefusal::NotInCall);
+            }
             // (6)
             if !games.take_create(user) {
                 return refuse(GameRefusal::RateLimited);
@@ -982,6 +1078,7 @@ pub async fn handle_frame(state: &Arc<AppState>, user: UserId, conn: u64, msg: C
             let kind = engine.kind();
             let cell = Arc::new(TableCell {
                 room: room.clone(),
+                opener: user,
                 id: OnceLock::new(),
                 inner: Mutex::new(TableState {
                     engine,
@@ -1017,6 +1114,12 @@ pub async fn handle_frame(state: &Arc<AppState>, user: UserId, conn: u64, msg: C
                 ctx.send(&ts, None);
             }
             tracing::info!("Games: user {} opened {:?} table {} in {}", user, kind, cell.id(), room);
+            // The call emptied between the re-check and the registry insert:
+            // its room is already gone, so nothing else will start the
+            // call-ended timer for this table.
+            if state.rooms.get(&room).is_none() {
+                games.on_room_emptied(&room);
+            }
             // Re-read the switch AFTER the table is in the registry: a switch-
             // off that committed after our check closed every table it could
             // see, which did not include this one yet.

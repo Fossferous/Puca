@@ -2073,10 +2073,13 @@ pub(crate) async fn displace_own_conns(
 /// Parse a `channel_{id}` text-channel room name into its numeric channel id.
 /// Voice rooms use bare channel names and DM rooms use `dm_{...}`, so those
 /// return None (their access is governed elsewhere).
+///
+/// Only the CANONICAL spelling is a room: `channel_042` and `channel_+42`
+/// parse to 42 but are refused, so one channel is one room (see
+/// `parse_voice_room`).
 fn parse_channel_room(room_id: &str) -> Option<i64> {
-    room_id
-        .strip_prefix("channel_")
-        .and_then(|s| s.parse::<i64>().ok())
+    let id = room_id.strip_prefix("channel_")?.parse::<i64>().ok()?;
+    (format!("channel_{id}") == room_id).then_some(id)
 }
 
 /// Parse a `voice_{channelId}` voice/stream-room name into its numeric channel
@@ -2084,10 +2087,17 @@ fn parse_channel_room(room_id: &str) -> Option<i64> {
 /// per-server) specifically so joins can be membership-gated the same way text
 /// rooms are. Kept distinct from the `channel_` prefix so send_signal_to_user
 /// (state.rs) still treats voice rooms as signaling-eligible.
+///
+/// Only the CANONICAL spelling is a room. `voice_042` and `voice_+42` parse to
+/// channel 42, and used to pass JoinRoom's permission check for it - but the
+/// room, and everything keyed by it (the call's one card table, its presence
+/// log, a channel delete's teardown by `format!("voice_{id}")`), is the raw
+/// string, so an alias was a second call for the same channel: a second card
+/// table that outlived the channel's deletion (reproduced by the w3 server
+/// review). No client sends an alias (`voice_${id}` from a number).
 pub(crate) fn parse_voice_room(room_id: &str) -> Option<i64> {
-    room_id
-        .strip_prefix("voice_")
-        .and_then(|s| s.parse::<i64>().ok())
+    let id = room_id.strip_prefix("voice_")?.parse::<i64>().ok()?;
+    (format!("voice_{id}") == room_id).then_some(id)
 }
 
 /// The channel behind a room id, whichever of the two legal shapes it is —
@@ -3355,9 +3365,14 @@ async fn handle_message(
 
             // The call's card table, if it has one (docs/GAMES.md): a
             // newcomer has no table id to resync with, so it is pushed; and a
-            // seat in its disconnect grace is its player's again.
+            // seat in its disconnect grace is its player's again - unless this
+            // join's own resolution says they may no longer play here
+            // (PLAY_GAMES or CONNECT denied while they were away or in another
+            // channel, where no sweep could see them): then they get up.
             if parse_voice_room(&room_id).is_some() {
-                state.games.on_join(state, &room_id, user_id, conn_id);
+                let may_play = matches!(&access, ChannelPermAccess::Allowed { perms, .. }
+                    if perms.has(Permissions::CONNECT) && perms.has(Permissions::PLAY_GAMES));
+                state.games.on_join(state, &room_id, user_id, conn_id, may_play);
             }
 
             // Send existing streams to the joining connection
@@ -6738,6 +6753,30 @@ mod room_id_gate_tests {
         }
         assert_eq!(join_target("channel_1"), Ok(1));
         assert_eq!(join_target("voice_1"), Ok(1));
+    }
+
+    /// ONE room id per channel. `"voice_042"` and `"voice_+42"` parse to
+    /// channel 42, so they passed JoinRoom's permission check for channel 42
+    /// - but the room (and everything keyed by it: the call's one card table,
+    /// its presence log, a delete's teardown by `format!("voice_{id}")`) is
+    /// the raw string. An alias was a second call for the same channel, with
+    /// a second table that outlived the channel's deletion (the w3 server
+    /// review reproduced exactly that). Only the canonical spelling is a room.
+    #[test]
+    fn a_room_id_is_only_its_canonical_spelling() {
+        for alias in ["voice_042", "voice_+42", "voice_00", "voice_ 42", "voice_42 ", "voice_-0"] {
+            assert_eq!(parse_voice_room(alias), None, "{alias:?} is an alias of a voice room");
+            assert_eq!(join_target(alias), Err("unknown room"), "JoinRoom must refuse {alias:?}");
+        }
+        for alias in ["channel_042", "channel_+42", "channel_-0"] {
+            assert_eq!(parse_channel_room(alias), None, "{alias:?} is an alias of a text room");
+            assert_eq!(join_target(alias), Err("unknown room"), "JoinRoom must refuse {alias:?}");
+        }
+        // Positive control: the canonical spellings still are rooms.
+        assert_eq!(parse_voice_room("voice_42"), Some(42));
+        assert_eq!(parse_voice_room("voice_0"), Some(0));
+        assert_eq!(parse_channel_room("channel_42"), Some(42));
+        assert_eq!(join_target("voice_42"), Ok(42));
     }
 
     /// L8-AUTHZ-4. A TEXT room must now resolve a channel, so the mutate gate

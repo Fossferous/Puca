@@ -1909,6 +1909,16 @@ impl AppState {
             .is_some_and(|sessions| sessions.iter().any(|s| s.conn_id == conn_id && s.games && !s.delivery))
     }
 
+    /// Every live connection of `user_id` that may be sent games frames (see
+    /// [`Self::conn_plays_games`]): the audience of the owner's games switch
+    /// (`ServerMessage::GamesEnabled`), which is per member, not per call.
+    pub fn games_conns_of(&self, user_id: UserId) -> Vec<u64> {
+        self.sessions
+            .get(&user_id)
+            .map(|sessions| sessions.iter().filter(|s| s.games && !s.delivery).map(|s| s.conn_id).collect())
+            .unwrap_or_default()
+    }
+
     /// The device kind `conn_id` reported, if it is live and said one.
     pub fn conn_kind(&self, user_id: UserId, conn_id: u64) -> Option<&'static str> {
         self.sessions

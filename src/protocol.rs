@@ -702,6 +702,12 @@ pub enum ServerMessage {
         table_id: u64,
         version: u64,
         view: crate::games_wire::GameView,
+        /// Who opened the table (the user id of the `GameCreate`), so a
+        /// client can say "<name> started Poker" (docs/GAMES.md, *Activities*).
+        /// Absent only where nobody opened it (the contract fixtures); an
+        /// older client ignores it (unknown fields are ignored both ways).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        opened_by: Option<UserId>,
     },
     /// One engine call's public events (identical for everyone), and the
     /// view AFTER them for this connection. `version` is exactly one more
@@ -732,6 +738,16 @@ pub enum ServerMessage {
         #[serde(flatten)]
         refusal: crate::games_wire::GameRefusal,
     },
+
+    /// The owner switched games on or off for `server_id` (docs/GAMES.md,
+    /// *Activities*): every online member's client shows or hides the
+    /// launcher at once, no reload. Sent after the change committed, to every
+    /// connection of every member of that server that announced `games` -
+    /// the same capability as the Game* frames, so an older client is never
+    /// handed a frame it does not know - and never to a delivery socket.
+    /// Switching off has already ended every table of the server
+    /// (`GameEnded { disabled }`) by the time this is sent.
+    GamesEnabled { server_id: String, games_enabled: bool },
 
     // --- Remote control (host receives these; see ClientMessage above) ---
     /// A viewer is asking to control this (host) user's shared screen. Username
@@ -1493,7 +1509,7 @@ mod games_frame_tests {
     }
 
     fn table_frame(version: u64, view: GameView) -> Value {
-        to_value(ServerMessage::GameTable { room_id: ROOM.into(), table_id: TABLE, version, view })
+        to_value(ServerMessage::GameTable { room_id: ROOM.into(), table_id: TABLE, version, view, opened_by: None })
     }
 
     fn events_frame(version: u64, events: GameEventsWire, view: GameView) -> Value {

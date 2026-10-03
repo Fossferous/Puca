@@ -58,6 +58,11 @@ impl Conn {
         })
     }
 
+    /// The owner's games switch, as pushed (`GamesEnabled`).
+    fn game_switch_frames(&self) -> Vec<Value> {
+        self.log.iter().filter(|f| f["type"] == "GamesEnabled").cloned().collect()
+    }
+
     fn refusals(&self) -> Vec<&Value> {
         self.log.iter().filter(|f| f["type"] == "GameRefused").map(|f| &f["payload"]).collect()
     }
@@ -105,10 +110,12 @@ impl Rig {
         self.connect_as(user, true, false)
     }
 
-    /// What JoinRoom does for a voice room, as far as games are concerned.
+    /// What JoinRoom does for a voice room, as far as games are concerned:
+    /// its own permission answer says whether this user may still play here.
     fn join(&self, c: &Conn) {
         self.state.join_room(ROOM, c.user, c.conn);
-        self.state.games.on_join(&self.state, ROOM, c.user, c.conn);
+        let may_play = self.gate.get(&(CID, c.user)).is_some_and(|g| g.perms.contains(P::CONNECT | P::PLAY_GAMES));
+        self.state.games.on_join(&self.state, ROOM, c.user, c.conn, may_play);
     }
 
     async fn send(&self, c: &Conn, msg: ClientMessage) {
@@ -410,11 +417,12 @@ async fn the_dealers_hole_card_stays_face_down_until_the_reveal() {
         }
         let peek = rig.peek().unwrap();
         let Some(seat) = peek.to_act else {
-            // Between rounds: both bet (the deal follows at once), or only
-            // one does and the bet window deals.
+            // Between rounds: both bet (the deal follows LAST_BET_DELAY
+            // later), or only one does and the bet window deals.
             rig.send(&a, ClientMessage::GameBet { room_id: ROOM.into(), table_id: tid, amount: 10 }).await;
             if r.gen_bool(0.7) {
                 rig.send(&b, ClientMessage::GameBet { room_id: ROOM.into(), table_id: tid, amount: 20 }).await;
+                tokio::time::sleep(LAST_BET_DELAY + Duration::from_millis(50)).await;
             } else {
                 tokio::time::sleep(BET_WINDOW + Duration::from_millis(50)).await;
             }
@@ -1094,6 +1102,199 @@ async fn stand_up_takes_a_player_out_of_the_hand_at_once() {
     assert!(!rig.state.games.stand_up(&rig.state, ROOM, 1), "nothing to stand up twice");
 }
 
+/// PLAY_GAMES denied while a seated player was AWAY (inside the disconnect
+/// grace, or off in another channel): the sweep that ran for the deny saw no
+/// such member in the call, and every own-seat frame skips the database gate,
+/// so before this they came back and simply played on (the w3 server review
+/// reproduced it against the real sweep). JoinRoom's own resolution is
+/// handed to `on_join`: a returning player who may no longer play gets up.
+#[tokio::test(start_paused = true)]
+async fn a_player_denied_play_games_while_away_gets_up_on_return() {
+    let mut rig = Rig::new(&[1, 2, 3], &[]);
+    let (mut a, b, c) = (rig.connect(1), rig.connect(2), rig.connect(3));
+    rig.join(&a);
+    rig.join(&b);
+    rig.join(&c);
+    rig.create(&a, GameKindWire::Holdem).await;
+    rig.sit(&a, 0).await;
+    rig.sit(&b, 1).await;
+    rig.sit(&c, 2).await;
+    rig.state.unregister_session(2, b.conn);
+    rig.state.unregister_session(3, c.conn);
+    assert_eq!(rig.peek().unwrap().away, vec![1, 2], "both seats are in their grace");
+    rig.set_perms(2, P::DEFAULT_MEMBER - P::PLAY_GAMES, true);
+    // B returns inside the grace without PLAY_GAMES; C (still allowed) too.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let mut b2 = rig.connect(2);
+    rig.join(&b2);
+    let c2 = rig.connect(3);
+    rig.join(&c2);
+    a.drain();
+    b2.drain();
+    let p = rig.peek().unwrap();
+    assert_eq!(p.occupants, vec![(0, 1), (2, 3)], "B got up; A and C (positive control) keep their seats");
+    assert!(p.away.is_empty(), "nobody is away any more");
+    let left = a.game_frames().iter().any(|f| {
+        f["payload"]["events"].as_array().is_some_and(|e| e.iter().any(|e| e["type"] == "player_left" && e["seat"] == 1))
+    });
+    assert!(left, "everyone is told B left the table");
+    assert!(b2.view().is_some_and(|v| v["viewer_seat"].is_null()), "B watches now: a spectator view");
+    assert!(rig.state.rooms.get(ROOM).unwrap().members.contains(&2), "B is still in the call");
+}
+
+/// A room id is its canonical spelling or nothing: `voice_042` names channel
+/// 42 but is not its call, so it cannot hold a second table for it (and is
+/// refused before anything about tables or membership).
+#[tokio::test(start_paused = true)]
+async fn a_non_canonical_room_id_is_not_a_voice_room() {
+    let rig = Rig::new(&[1], &[]);
+    let mut a = rig.connect(1);
+    rig.join(&a);
+    for alias in ["voice_042", "voice_+42"] {
+        rig.state.join_room(alias, 1, a.conn); // whatever JoinRoom would have said
+        rig.send(&a, ClientMessage::GameCreate { room_id: alias.into(), kind: GameKindWire::Holdem, config: None }).await;
+    }
+    a.drain();
+    let codes: Vec<&str> = a.refusals().iter().map(|r| r["code"].as_str().unwrap()).collect();
+    assert_eq!(codes, ["not_a_voice_room", "not_a_voice_room"]);
+    assert_eq!(rig.state.games.open_tables(), 0, "no table under an alias");
+    // Positive control: the canonical id opens one.
+    rig.create(&a, GameKindWire::Holdem).await;
+    assert_eq!(rig.state.games.open_tables(), 1);
+}
+
+/// `GameCreate` checks membership (3) before its database gate and AGAIN
+/// after it: a connection that left (or was moved or kicked) while the gate
+/// awaited opens nothing - before this the table opened in a call with
+/// nobody in it, and since the room was already dropped no "call ended"
+/// timer ever ran for it (it held the slot until the idle close).
+#[tokio::test(start_paused = true)]
+async fn create_rechecks_the_call_after_the_gate() {
+    let rig = Rig::new(&[1], &[]);
+    let mut a = rig.connect(1);
+    rig.join(&a);
+    let conn = a.conn;
+    rig.state.games.set_gate_hook(move |state: &AppState| {
+        state.leave_room(ROOM, 1, conn);
+    });
+    rig.create(&a, GameKindWire::Holdem).await;
+    a.drain();
+    assert_eq!(rig.state.games.open_tables(), 0, "nothing opened for a connection that left during the gate");
+    let codes: Vec<&str> = a.refusals().iter().map(|r| r["code"].as_str().unwrap()).collect();
+    assert_eq!(codes, ["not_in_call"]);
+    // Positive control: back in the call, the same create opens a table - and
+    // the refused one did not use up one of the 5 opens per window.
+    rig.join(&a);
+    for _ in 0..5 {
+        rig.create(&a, GameKindWire::Holdem).await;
+        assert_eq!(rig.state.games.open_tables(), 1);
+        assert!(rig.state.games.close_room(&rig.state, ROOM, GameEndReason::Closed));
+    }
+    a.drain();
+    let codes: Vec<&str> = a.refusals().iter().map(|r| r["code"].as_str().unwrap()).collect();
+    assert_eq!(codes, ["not_in_call"], "five opens after the refused one, none refused");
+}
+
+/// Blackjack: when every player at the table has bet, the round is dealt
+/// LAST_BET_DELAY (1.5 s) after the last bet, not at once - the last bettor
+/// sees the bets on the table first. The countdown is in the view.
+#[tokio::test(start_paused = true)]
+async fn blackjack_deals_a_moment_after_the_last_bet() {
+    let rig = Rig::new(&[1, 2], &[]);
+    let (mut a, mut b) = (rig.connect(1), rig.connect(2));
+    rig.join(&a);
+    rig.join(&b);
+    rig.create(&a, GameKindWire::Blackjack).await;
+    let tid = rig.table();
+    rig.sit(&a, 0).await;
+    rig.sit(&b, 1).await;
+    rig.send(&a, ClientMessage::GameBet { room_id: ROOM.into(), table_id: tid, amount: 10 }).await;
+    a.drain();
+    let first = a.view().unwrap()["next_deal_in_ms"].as_u64();
+    assert!(first.is_some_and(|ms| ms > 14_000), "one of two has bet: the 15 s window ({first:?})");
+    rig.send(&b, ClientMessage::GameBet { room_id: ROOM.into(), table_id: tid, amount: 20 }).await;
+    b.drain();
+    // "Dealt" is a `round_started` event, not "a round is in progress": a
+    // dealer (or lone player) blackjack settles the round inside the deal.
+    let dealt = |c: &mut Conn| {
+        c.drain();
+        c.game_frames().iter().any(|f| {
+            f["payload"]["events"].as_array().is_some_and(|e| e.iter().any(|e| e["type"] == "round_started"))
+        })
+    };
+    assert!(!dealt(&mut b), "not dealt at the last bet");
+    let v = b.view().unwrap();
+    assert_eq!(v["in_round"], false);
+    assert_eq!(v["seats"][1]["pending_bet"], 20, "the last bet is on the table for everyone to see");
+    let left = v["next_deal_in_ms"].as_u64();
+    assert!(left.is_some_and(|ms| (1_400..=1_500).contains(&ms)), "the countdown says ~1.5 s ({left:?})");
+    tokio::time::sleep(Duration::from_millis(1_400)).await;
+    assert!(!dealt(&mut b), "still waiting at 1.4 s");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(dealt(&mut b), "dealt by 1.6 s");
+    // Alone at the table: the same moment after the only bet.
+    let solo = Rig::new(&[5], &[]);
+    let mut s = solo.connect(5);
+    solo.join(&s);
+    solo.create(&s, GameKindWire::Blackjack).await;
+    let stid = solo.table();
+    solo.sit(&s, 0).await;
+    solo.send(&s, ClientMessage::GameBet { room_id: ROOM.into(), table_id: stid, amount: 10 }).await;
+    assert!(!dealt(&mut s));
+    tokio::time::sleep(LAST_BET_DELAY + Duration::from_millis(50)).await;
+    assert!(dealt(&mut s), "a lone bettor is dealt 1.5 s later too");
+}
+
+/// Who opened the table rides every `GameTable` (the client says "<name>
+/// started Poker"): the frame everyone in the call gets when it opens, and
+/// the one a newcomer gets on joining. `GameEvents` do not carry it.
+#[tokio::test(start_paused = true)]
+async fn every_game_table_names_who_opened_it() {
+    let rig = Rig::new(&[1, 2, 3], &[]);
+    let (mut a, mut b) = (rig.connect(1), rig.connect(2));
+    rig.join(&a);
+    rig.join(&b);
+    rig.create(&b, GameKindWire::Holdem).await;
+    rig.sit(&a, 0).await;
+    let mut c = rig.connect(3);
+    rig.join(&c);
+    for conn in [&mut a, &mut b, &mut c] {
+        conn.drain();
+        let tables: Vec<&Value> = conn.log.iter().filter(|f| f["type"] == "GameTable").collect();
+        assert!(!tables.is_empty(), "user {} got a GameTable", conn.user);
+        assert!(tables.iter().all(|f| f["payload"]["opened_by"] == 2), "user {}: {:?}", conn.user, tables);
+    }
+    assert!(a.log.iter().filter(|f| f["type"] == "GameEvents").all(|f| f["payload"].get("opened_by").is_none()));
+}
+
+/// The owner's switch reaches every ONLINE member at once
+/// (`ServerMessage::GamesEnabled`) - but only connections that announced
+/// `games`: an older client must never be handed a frame it does not know,
+/// and a delivery socket is never woken for it. A non-member hears nothing.
+#[tokio::test(start_paused = true)]
+async fn the_games_switch_reaches_every_member_connection_that_plays_games() {
+    let rig = Rig::new(&[1], &[]);
+    let mut desk = rig.connect_as(1, true, false); // in no call: the launcher's state is server-wide
+    let mut old = rig.connect_as(1, false, false);
+    let mut pocket = rig.connect_as(2, true, true);
+    let mut other = rig.connect_as(3, true, false);
+    let mut stranger = rig.connect_as(9, true, false);
+    let sent = announce_enabled(&rig.state, SERVER, false, &[1, 2, 3, 4]);
+    for c in [&mut desk, &mut old, &mut pocket, &mut other, &mut stranger] {
+        c.drain();
+    }
+    let frame = serde_json::json!({"type": "GamesEnabled", "payload": {"server_id": SERVER, "games_enabled": false}});
+    assert_eq!(desk.game_switch_frames(), vec![frame.clone()]);
+    assert_eq!(other.game_switch_frames(), vec![frame]);
+    assert!(old.game_switch_frames().is_empty(), "a connection without the cap gets nothing");
+    assert!(pocket.game_switch_frames().is_empty(), "a delivery socket gets nothing");
+    assert!(stranger.game_switch_frames().is_empty(), "not a member: nothing");
+    assert_eq!(sent, 2);
+    announce_enabled(&rig.state, SERVER, true, &[1]);
+    desk.drain();
+    assert_eq!(desk.game_switch_frames().last().unwrap()["payload"]["games_enabled"], true);
+}
+
 /// Lock order under load: joins and leaves, disconnects, sweeps' stand-ups,
 /// actions, resyncs, closes and reopens on several threads at once. A
 /// deadlock (a table lock taken under a rooms guard, or the reverse) hangs
@@ -1104,6 +1305,7 @@ async fn lock_order_holds_under_concurrent_churn() {
     rig.state.games.set_timings(Timings {
         next_hand: Duration::from_millis(5),
         bet_window: Duration::from_millis(5),
+        last_bet: Duration::from_millis(2),
         idle: Duration::from_millis(50),
         grace: Some(Duration::from_millis(20)),
     });
@@ -1122,7 +1324,7 @@ async fn lock_order_holds_under_concurrent_churn() {
                 let (conn, _, _) = state.register_session(u, format!("u{u}"), tx, false, None, format!("s{u}"));
                 state.set_conn_games(u, conn, true);
                 state.join_room(ROOM, u, conn);
-                state.games.on_join(&state, ROOM, u, conn);
+                state.games.on_join(&state, ROOM, u, conn, true);
                 for _ in 0..r.gen_range(1..20) {
                     let tid = state.games.peek(ROOM).map(|p| p.id).unwrap_or(0);
                     let msg = match r.gen_range(0..8) {
@@ -1317,6 +1519,48 @@ mod db {
         assert_eq!(after_kick, Some((vec![], vec![])), "A is off the table at once, no grace");
     }
 
+    /// Games are AVAILABLE BY DEFAULT (owner decision 2026-10-03, "work
+    /// similarly to Discord's games"): migration 073's column defaults TRUE, so
+    /// a server row that never mentions it - every existing server, and every
+    /// new one - plays; and `create_server` answers the row's real value, so
+    /// the creator's launcher shows without a refetch. The owner can still
+    /// switch it off (the test below).
+    #[tokio::test]
+    async fn games_are_on_by_default_for_new_and_existing_servers() {
+        use axum::extract::{Json, State};
+        use axum::response::IntoResponse;
+        use axum::Extension;
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let f = fixture(&pool, false).await;
+        let (default,): (Option<String>,) = sqlx::query_as(
+            "SELECT column_default FROM information_schema.columns WHERE table_name = 'servers' AND column_name = 'games_enabled'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("the column exists");
+        // An existing row: inserted without the column, as every pre-073 row was.
+        let old_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, $2, $3)").bind(&old_id).bind("gm-old").bind(f.users[0]).execute(&pool).await.unwrap();
+        let (old_on,): (bool,) = sqlx::query_as("SELECT games_enabled FROM servers WHERE id = $1").bind(&old_id).fetch_one(&pool).await.unwrap();
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let owner = crate::auth::Claims { sub: f.owner, username: "o".into(), exp: 0, tv: 0, sst: 0, sid: String::new(), ls: false };
+        let req: crate::server_handlers::CreateServerRequest = serde_json::from_value(serde_json::json!({"name": "gm-new"})).unwrap();
+        let resp = crate::server_handlers::create_server(State(Arc::clone(&state)), Extension(owner), Json(req)).await.into_response();
+        let body: Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap()).unwrap();
+        let new_id = body["id"].as_str().unwrap_or_default().to_string();
+        let (new_on,): (bool,) = sqlx::query_as("SELECT games_enabled FROM servers WHERE id = $1").bind(&new_id).fetch_one(&pool).await.unwrap();
+        let (bit,): (i64,) = sqlx::query_as("SELECT permissions FROM server_roles WHERE server_id = $1 AND is_default = true")
+            .bind(&new_id).fetch_one(&pool).await.unwrap();
+        let _ = sqlx::query("DELETE FROM servers WHERE id = ANY($1)").bind(vec![old_id, new_id]).execute(&pool).await;
+        drop_fixture(&pool, &f).await;
+
+        assert_eq!(default.as_deref(), Some("true"), "the column defaults ON");
+        assert!(old_on, "a row that never set it plays games");
+        assert!(new_on, "a new server plays games");
+        assert_eq!(body["games_enabled"], true, "the creator is told the row's value: {body}");
+        assert!(P::from_bits_truncate(bit as u64).contains(P::PLAY_GAMES), "and @everyone may play (DEFAULT_MEMBER)");
+    }
+
     /// Switching games off (the owner's settings PATCH) ends every table of
     /// the server; deleting the voice channel ends its table; `games_enabled`
     /// reads back through the server list.
@@ -1330,6 +1574,15 @@ mod db {
         let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
         let room = format!("voice_{}", f.cid);
         let mut a = conn(&state, f.a, &room);
+        // B is a member online in NO call: the launcher's switch reaches them
+        // too. B's second connection did not announce `games`.
+        let (tx, b_rx) = mpsc::channel::<ServerMessage>(64);
+        let (b_conn, _, _) = state.register_session(f.b, "b".into(), tx, false, None, "sb".into());
+        state.set_conn_games(f.b, b_conn, true);
+        let mut b = Conn { user: f.b, conn: b_conn, rx: b_rx, log: Vec::new() };
+        let (tx, old_rx) = mpsc::channel::<ServerMessage>(64);
+        let (old_conn, _, _) = state.register_session(f.b, "b".into(), tx, false, None, "sb-old".into());
+        let mut b_old = Conn { user: f.b, conn: old_conn, rx: old_rx, log: Vec::new() };
         let owner = crate::auth::Claims { sub: f.owner, username: "o".into(), exp: 0, tv: 0, sst: 0, sid: String::new(), ls: false };
         let listed = |claims: crate::auth::Claims| {
             let state = Arc::clone(&state);
@@ -1351,10 +1604,21 @@ mod db {
             .status();
         let after_off = state.games.peek(&room).is_some();
         a.drain();
-        let ended = a.log.last().map(|f| f["payload"]["reason"].clone());
+        let ended = a.log.iter().rev().find(|f| f["type"] == "GameEnded").map(|f| f["payload"]["reason"].clone());
+        // The push comes AFTER the ending, so a client never sees the
+        // launcher go while its table is still up.
+        let order: Vec<String> =
+            a.log.iter().filter_map(|f| f["type"].as_str()).filter(|t| *t == "GameEnded" || *t == "GamesEnabled").map(String::from).collect();
         let after = listed(owner.clone()).await;
+        let on: crate::server_handlers::UpdateServerRequest =
+            serde_json::from_value(serde_json::json!({"games_enabled": true})).unwrap();
+        let _ = crate::server_handlers::update_server_settings(State(Arc::clone(&state)), Path(f.sid.clone()), Extension(owner.clone()), Json(on))
+            .await
+            .into_response();
+        b.drain();
+        b_old.drain();
+        let pushed_b: Vec<Value> = b.game_switch_frames();
 
-        sqlx::query("UPDATE servers SET games_enabled = true WHERE id = $1").bind(&f.sid).execute(&pool).await.unwrap();
         handle_frame(&state, f.a, a.conn, ClientMessage::GameCreate { room_id: room.clone(), kind: GameKindWire::Blackjack, config: None }).await;
         let reopened = state.games.peek(&room).is_some();
         let _ = crate::channel_handlers::delete_channel(State(Arc::clone(&state)), Path(f.cid), Extension(owner.clone())).await;
@@ -1369,6 +1633,10 @@ mod db {
         assert!(status.is_success(), "{status}");
         assert!(!after_off, "switching games off ended the table");
         assert_eq!(ended, Some(Value::from("disabled")));
+        assert_eq!(order, ["GameEnded", "GamesEnabled"], "the ending first, then the switch");
+        let sw = |on: bool| serde_json::json!({"type": "GamesEnabled", "payload": {"server_id": f.sid, "games_enabled": on}});
+        assert_eq!(pushed_b, vec![sw(false), sw(true)], "a member in no call hears both switches, live");
+        assert!(b_old.game_switch_frames().is_empty(), "a connection without `games` never gets the frame");
         assert_eq!(flag(&after), Some(Value::Bool(false)));
         assert!(reopened);
         assert_eq!(deleted, Some(Value::from("channel_deleted")));

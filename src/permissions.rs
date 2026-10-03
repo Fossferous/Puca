@@ -1334,7 +1334,7 @@ mod play_games_bit_tests {
     /// bit without following through in SQL goes red — the guard 051 and 056
     /// carry.
     #[test]
-    fn migration_073_adds_games_enabled_off_and_grants_exactly_this_bit() {
+    fn migration_073_adds_games_enabled_on_and_grants_exactly_this_bit() {
         let sql = include_str!("../migrations/073_games.sql");
         let stmt: String = sql.lines().filter(|l| !l.trim_start().starts_with("--")).collect::<Vec<_>>().join("\n");
         assert!(
@@ -1342,9 +1342,13 @@ mod play_games_bit_tests {
             "073 must OR in {} on @everyone only: {stmt}",
             Permissions::PLAY_GAMES.bits()
         );
+        // ON by default, for every server new and existing (owner decision
+        // 2026-10-03: "work similarly to Discord's games", where Activities
+        // are simply there). ADD COLUMN with a default fills every existing
+        // row with it, so no separate backfill is needed.
         assert!(
-            stmt.contains("ADD COLUMN IF NOT EXISTS games_enabled BOOLEAN NOT NULL DEFAULT FALSE"),
-            "073 must add games_enabled, idempotently, OFF by default: {stmt}"
+            stmt.contains("ADD COLUMN IF NOT EXISTS games_enabled BOOLEAN NOT NULL DEFAULT TRUE"),
+            "073 must add games_enabled, idempotently, ON by default: {stmt}"
         );
         // Additive only: nothing an older binary reads is dropped or renamed.
         for word in ["DROP", "RENAME", "DELETE"] {
