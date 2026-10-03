@@ -257,11 +257,20 @@ nothing is kept when the table closes, and chips can never be bought, sold or
 exchanged for anything.
 
 - **For the server owner:** games are **off** until the owner turns them on
-  for the server. Turning them off again ends every table at once. Opening a
+  for the server: **Server Settings → Overview → Allow games in voice calls**,
+  next to the Clips switch. Turning them off again ends every table at once. Opening a
   table and sitting down need the **Play Games** permission (members have it
   by default; deny it on a role or a single voice channel like any other) and
   **Connect**. Anyone with **Move Members** can close a table or take a player
   out of their seat.
+- **Finding the table:** once you are in the call, the call's view has a
+  button at the top: **Open a table** (nobody has one open yet), **Join the
+  table**, or **Watch the table** (without Play Games). On a phone, tap the
+  arrow on the voice bar to show its controls, then the cards button. Going
+  back to the call (**Back to the call**, or **Call** on a phone) never leaves
+  the call, and the table is still there when you return. The first time you
+  sit down on a server you are told that chips are worth nothing and that the
+  server deals the cards.
 - **One table per call**, of either game. While one is open, another cannot
   start until it closes.
 - **Watching** needs nothing but being in the call: everyone in it sees the

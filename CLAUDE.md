@@ -328,6 +328,8 @@ cd frontend/android && ./gradlew testDebugUnitTest    # the pure-Java logic
 cd frontend/notes-app/android && ./gradlew testDebugUnitTest   # Púca Notes' pure-Java logic (reminder plan/merge, token rule, geofence parity with Púca); needs a cap sync first (npm run notes:android) and ANDROID_HOME
 cd frontend/notes-app/android && ./gradlew :app:connectedDebugAndroidTest   # on a HEADLESS emulator (-no-window -no-audio): the bridge-typing test the JVM cannot reach (PluginArgsBridgeTest)
 node frontend/e2e/feature-flows.mjs          # needs a backend + isolated DB
+cd frontend && node e2e/games-live.mjs          # card games, BOTH halves: four players (one a 390x844 phone) and a spectator through the real UI and server, >=10 Hold'em hands + >=5 Blackjack rounds, grace drops, every received frame scanned for leaked cards; needs APP= / API= against a throwaway backend (header of the file), ~10 min
+cd frontend && node e2e/games-walk.mjs          # the card table's layout: 1280x800 + 390x844 coarse pointer, keyboard-open raise sheet, 44 px targets, 460 px overflow control, all eight themes (one screenshot each); same env
 cd frontend && node e2e/own-voice-2device.mjs   # Leave / Move here: ONE account on a desktop and a 390x844 phone context plus a second account in the call, mesh and (with LK_*) SFU; needs APP= / API= against a throwaway backend (header of the file)
 cd frontend && npm run check:installer-hooks # NSIS hook macros compile and every migrate call names the OLD binary (needs makensis; Tauri caches one under LOCALAPPDATA/tauri/NSIS)
 node scripts/gen-third-party-notices.mjs      # regenerates THIRD_PARTY_NOTICES.md; exits 1 on a dependency with no licence — commit the result before a release
@@ -678,12 +680,16 @@ Do not assume a feature exists because a doc says so — one doc claimed push
 notifications were "fully implemented in `pushNotifications.ts`", a file that
 has never existed.
 
-- **Games (Poker, Blackjack)**: the engine (`crates/puca-games`), the wire
-  contract (`src/games_wire.rs`), `PLAY_GAMES`, `games_enabled` and the server
-  half (`src/games.rs`: tables per call, timers, grace, sweep, teardown) are
-  built and tested. Every UI is NOT: no table on screen and no owner toggle -
-  the design is `docs/GAMES.md` (one table per call, server deals, free chips
-  per table). The server confirms `games` to clients that announce it.
+- **Games (Poker, Blackjack)** are built end to end (`docs/GAMES.md`): the
+  engine (`crates/puca-games`), the wire contract (`src/games_wire.rs`),
+  `PLAY_GAMES`, `games_enabled` (off per server until the owner's switch next
+  to Clips), the server half (`src/games.rs`) and the table on desktop and
+  phone (`frontend/src/components/games/`), walked live together by
+  `e2e/games-live.mjs` and `e2e/games-walk.mjs`. NOT built: a "your turn"
+  doorbell for a backgrounded phone (the clock checks or folds), dealt-card
+  animations, seat avatars, and any push of a changed server row — a member
+  online when the owner switches games on is offered a table only once one
+  is open (or after a reload).
 - **Push/background delivery** (rewritten three times on 2026-08-13 — read
   `src/wake/mod.rs`'s header before touching it): data NEVER rides a relay.
   Android delivery is `NativeDelivery.java`'s OkHttp socket to the user's own

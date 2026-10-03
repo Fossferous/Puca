@@ -831,6 +831,70 @@ integration step runs it against the real server.
   channel's OWN server (not the viewed one), like the clip policy; absent
   means a server that predates games (the toggle is disabled and never sent).
 
+## Integration: both halves together
+
+The two halves were built in parallel against the contract and merged on
+`work/w3-integration`. The only textual conflict was this page. Read side by
+side, they agree on everything the contract pins: the `games` capability in
+the one caps list, `PLAY_GAMES = 1 << 28`, the field name `games_enabled` on
+`GET /servers` and `PATCH /servers/:id/settings` (owner-only on both sides),
+every refusal code and end reason (one set of fixtures), and `gone` instead of
+`server_restarted`.
+
+**Walked live** against a backend built from the merge, a fresh database and
+vite of the merged tree:
+
+- `frontend/e2e/games-walk.mjs` (the layout walk) now runs against the real
+  server: desktop 1280x800 and a 390x844 coarse-pointer phone, the
+  keyboard-open raise sheet, 44 px targets, no horizontal overflow by
+  `clientWidth` with the 460 px injection caught, and one screenshot per theme
+  and contrast (all eight themes, normal and high).
+- `frontend/e2e/games-live.mjs` (new) puts four players (one on the phone) and
+  a spectator without Play Games in one mesh call, plus a raw socket that
+  announces only `own_voice,presence` (a 0.9.832-era client). Through the real
+  UI: ten or more Hold'em hands to the end, with showdowns, mucks, an all-in, a
+  fold-out and a clock that runs out; a socket drop inside the grace (seat,
+  stack and hole cards kept) and one kept away past it (folded, stood, sits
+  again); the moderator's close; two people opening a table at once (one
+  refused inline); five or more Blackjack rounds with a double or a split; and
+  the owner switching games off (ended for everyone, worded). Every frame each
+  page received is recorded and scanned: no player ever received another
+  player's unshown hole card, the spectator never received one, no mucked hand
+  was ever revealed, the Blackjack hole card was `??` until the dealer turned
+  it, and the old client received no game frame at all. The oracle is built
+  from each player's OWN frames, and a hole card planted in a spectator frame
+  must be caught (the positive control).
+
+**What the integration found and fixed** (each red first, in vitest and live):
+
+- **A stale server row hid an open table.** Nothing pushes a changed server
+  row, so someone online when the owner switched games on still held
+  `games_enabled: false` and was offered nothing, not even "Watch the table",
+  while a table was open in their call. `gamesGate` now lets a table the
+  server sent for this call outrank the row: the server ends every table when
+  games go off, so the table is the server's own word that they are on.
+- **...and the reverse.** After the owner switched games OFF, members whose
+  row still said on were offered "Open a table" under the "switched games off"
+  notice. `gamesRowContradicted` (in `gamesGate.ts`) says when the server's
+  frames contradict the row (a table in this call while the row says off; an
+  ending or a refusal of `disabled` while it says on), and Chat refetches the
+  server rows when it does.
+- **The opener's button stuck on "Opening…".** The view waited for an answer
+  to its FIRST `GameCreate` and kept waiting once that table had come and
+  gone, so a moderator who closed their table could not open another without
+  leaving the view. The store now stamps `lastTableAt` when a new table
+  arrives, and "Opening…" ends on it.
+- The live privacy oracle first counted a shown hand as a leak to someone who
+  rejoined the call after the showdown and learned the shown cards from a
+  `GameTable`. That was the oracle's mistake, not the server's: a shown hand is
+  public. It now orders reveals by table version, which is the same on every
+  connection.
+
+Still not done: a push of a changed server row to the other members (a
+`ServerUpdated` frame). Without it, someone online when games are switched on
+can open the FIRST table only after a reload. Once anyone has opened one, the
+rows are refetched.
+
 ## Not in v1
 
 Persistent chip balances (see the chip-dumping point above); tournaments and

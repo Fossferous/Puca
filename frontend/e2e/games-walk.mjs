@@ -39,7 +39,8 @@
 // walk imports /src/api/* modules through vite to set the fixture up).
 // Before the server half landed this ran against a games MOCK in front of a
 // real backend (it proxies everything and answers Game* frames from the
-// contract fixtures); the walk does not care which it gets.
+// contract fixtures); since the integration it runs against the real games
+// server (and e2e/games-live.mjs plays four players and a spectator there).
 //
 // Usage (from frontend/):
 //   APP=http://127.0.0.1:5421 API=http://127.0.0.1:5321 OUT=<dir> node e2e/games-walk.mjs
@@ -494,7 +495,8 @@ try {
                 const r = contrast(pair[0], pair[1]);
                 if (r < 4.5) poor.push(`${theme}/${hc} ${k} ${r.toFixed(2)} ${pair[0]} on ${pair[1]}${pair[2] ? ' (' + pair[2] + ')' : ''}`);
             }
-            if (theme === 'light' || (theme === 'dark' && hc === 'high')) await shot(A, `10-desktop-theme-${theme}-${hc}`);
+            // One screenshot per theme and contrast: the set a person checks by eye.
+            await shot(A, `10-desktop-theme-${theme}-${hc}`);
         }
     }
     check('all eight themes, normal and high contrast: felt, card, button and page text >= 4.5:1', poor.length === 0, poor);
