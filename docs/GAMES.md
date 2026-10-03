@@ -1,21 +1,26 @@
 # Games — Poker and Blackjack in a voice call
 
 Hold'em and Blackjack played with the people in your current voice call, for
-free chips that exist only at that table. **The rules engine, the wire
-contract, the server half and the client half are built and tested, and
-were integrated and walked live together.** The server plays tables bound to
-calls (`src/games.rs`), reads the owner's `games_enabled` switch and
-`PLAY_GAMES`, runs the clocks and the disconnect grace, and confirms `games`
-to clients that announce it; the client draws both tables on desktop and on a
-390x844 phone and carries the owner's toggle. This page is the design, the
-contract the engine, the frames, the server and the client keep, and the
-record of what each half decided as built.
+free chips that exist only at that table - **as Discord-style Activities**
+(*Activities*, below): available on every server by default, started from a
+launcher in the call's controls, and seen live by everyone in the call. **The
+rules engine, the wire contract, the server half and the client half are built
+and tested, and were integrated and walked live together.** The server plays
+tables bound to calls (`src/games.rs`), reads the owner's `games_enabled`
+switch and `PLAY_GAMES`, pushes the switch to every online member, runs the
+clocks and the disconnect grace, and confirms `games` to clients that announce
+it; the client draws both tables on desktop and on a 390x844 phone, the
+launcher, the picker, the notice, the call-grid tile and the sidebar marks, and
+carries the owner's toggle. This page is the design, the contract the engine,
+the frames, the server and the client keep, and the record of what each half
+decided as built.
 
 | piece | state |
 |---|---|
 | Rules engine: `crates/puca-games` (Hold'em, Blackjack, evaluator, shuffle) | **built**, pure Rust, tested (below) |
 | Wire contract: every frame, view, event, refusal and end reason; the `games` capability; fixtures both sides parse (*Frames*, below) | **built**, tested; the server confirms `games` (`GAMES_SERVED = true`) |
-| `PLAY_GAMES` (1 << 28) and `servers.games_enabled` (migration 073, default off) | **built**; read by the server (the gate, `GET /servers`, the owner-only `PATCH /servers/:id/settings`, the invite join) and written by the owner's toggle in Server Settings |
+| `PLAY_GAMES` (1 << 28) and `servers.games_enabled` (migration 073, **default on** since 2026-10-03) | **built**; read by the server (the gate, `GET /servers`, the owner-only `PATCH /servers/:id/settings`, the invite join), written by the owner's toggle in Server Settings and pushed to every online member (`GamesEnabled`) |
+| Activities: the launcher, the picker, the "<name> started Poker" notice, the call-grid tile, the sidebar marks, `opened_by`, the pushed switch | **built** (*Activities*, below), walked live by `e2e/games-live.mjs` and at 390x844 by `e2e/games-walk.mjs` |
 | Server tables bound to a voice room, handlers, timers, grace, sweep branch, teardown | **built**: `src/games.rs`, tested in `src/games_tests.rs` (*As built*, below) |
 | Client table view, desktop + 390x844 phone; the owner's toggle; `PLAY_GAMES` in the role and channel editors | **built** (*The table on screen*, below) |
 | Both halves together, live | **walked**: `frontend/e2e/games-live.mjs` (four players and a spectator through the real UI and server, every frame scanned for leaked cards) and `frontend/e2e/games-walk.mjs` against the real server (*Integration*, below) |
@@ -34,6 +39,27 @@ record of what each half decided as built.
   Blackjack beside Poker — is refused with a clear message ("a Poker table is
   already open in this call; it has to close before another game can start")
   until the first closes.
+
+- **Games work like Discord's Activities** (2026-10-03, the owner: "I want
+  it to work similarly to discord's games"). Available by default on every
+  server, new and existing; the owner can switch them off. Started from an
+  Activities launcher in the call's controls; everyone in the call sees an
+  activity start, live, and can join or watch it; `PLAY_GAMES` is "Use
+  Activities". The whole model is *Activities*, below.
+
+**Defaults the lead chose with that direction (2026-10-03)** - each a
+one-line change if the owner wants otherwise:
+
+- **Blackjack deals 1.5 s after the last bet** (`LAST_BET_DELAY`), not at the
+  instant everyone has bet, so the last bettor - and everyone watching - sees
+  the bets on the table before the cards come.
+- **An empty table still closes after 5 minutes** (`IDLE_LIMIT`, `idle`).
+- **The first-sit disclosure stays once per server per device** (remembered
+  per account on that device, `gamesDisclosure.ts`).
+- **A moderator's "remove player" stands them up** (the engine's `leave`; they
+  may sit again). To keep someone out of a game, deny them `PLAY_GAMES`.
+- **On a phone the table view hides the message composer**, and "Back to
+  call" brings it back.
 
 The second point is also the legal line. Gambling is, almost everywhere,
 consideration + chance + prize; with no money in and nothing of value out it
@@ -71,6 +97,8 @@ in the engine, so changing one is a one-line decision, not a rewrite.
 | Insurance, surrender | none | — |
 | Dealer peek | with an ace or ten-value up card | — |
 | Blackjack bets | min 10, max 500 | `min_bet`, `max_bet` |
+| Blackjack deal | 1.5 s after the last bet when everyone at the table has bet; else 15 s after the first bet | `LAST_BET_DELAY`, `BET_WINDOW` (`src/games.rs`) |
+| Empty table | closes after 5 minutes with nobody seated | `IDLE_LIMIT` (`src/games.rs`) |
 
 ## Trust: what the server can see
 
@@ -239,8 +267,8 @@ engine is synchronous: the registry sits behind a plain mutex held only to
 open, close or look up a table, and each table behind its own plain mutex
 held only for an engine call — never across an `.await`, and never both at
 once (look the table up, drop the registry lock, then lock the table). The
-client offers "Open a table" only while the call has none, and otherwise
-"Join the table".
+client's picker starts an activity only while the call has none, and
+otherwise offers to join the one running (*Activities*).
 
 **Lock order:** never take a `state.rooms` guard while holding a table lock,
 and never lock a table while holding a `rooms` guard (`evict_sweep` already
@@ -325,10 +353,15 @@ The 0.9.832 handshake, unchanged in shape:
   the commit that adds the handlers. The client sends a game frame only
   after `wsClient.hasServerFeature('games')` on THIS socket (a reconnect can
   reach an older host).
-- That says the server build can play. Whether this server's owner turned
-  games on is `games_enabled` (on the `Server` object, server half). The
-  client offers a table only with the feature, `games_enabled`, `CONNECT` +
-  `PLAY_GAMES` in that channel, and the person in the call.
+- That says the server build can play. Whether this server's owner allows
+  games is `games_enabled` (on the `Server` object; ON by default since
+  2026-10-03). The client offers the launcher only with the feature,
+  `games_enabled`, `CONNECT` + `PLAY_GAMES` in that channel, and the person in
+  the call.
+- **The owner's switch is pushed** (`GamesEnabled`, below) on the SAME
+  capability: `games` now means "reads the Game* frames and `GamesEnabled`".
+  Nothing older than this build announces `games` (the cap is unreleased), so
+  no client that predates the frame can be sent it.
 
 #### Shared rules
 
@@ -404,13 +437,16 @@ watching. Leaving the call (`LeaveRoom`, a `RoomLeft`, a `VoiceMoved`) sends
 no `GameEnded`: the client drops that call's table itself, because the server
 stops sending to a connection the moment it is no longer in the room.
 
-- **`GameTable { room_id, table_id, version, view }`** — the whole table as
-  THIS connection may see it. Sent: to everyone in the call when a table
-  opens (version 1); to a connection right after its `RoomJoined` for a call
-  that has a table (a newcomer learns of it without knowing its id); in
+- **`GameTable { room_id, table_id, version, view, opened_by }`** — the whole
+  table as THIS connection may see it. Sent: to everyone in the call when a
+  table opens (version 1); to a connection right after its `RoomJoined` for a
+  call that has a table (a newcomer learns of it without knowing its id); in
   answer to `GameResync`; and to everyone, with `version` + 1, when the table
   changed without an engine event (a seat's `away` flag, a deal countdown
-  starting).
+  starting). `opened_by` (added 2026-10-03) is the user id of the
+  `GameCreate` that opened it, for "<name> started Poker"; it is omitted only
+  where nobody opened the table (the contract fixtures, which are therefore
+  unchanged), and a client reads it absent as `null`.
 - **`GameEvents { room_id, table_id, version, events, view }`** — one engine
   call that returned events: `events` is that call's public list, identical
   for everyone, and `view` is the table AFTER it for this connection.
@@ -429,6 +465,16 @@ stops sending to a connection the moment it is no longer in the room.
   flattened into the payload. Expected refusals are ALWAYS this, never the
   generic `Error` the client shows as an alert; `Error` remains only for a
   frame that does not parse (a broken client).
+- **`GamesEnabled { server_id, games_enabled }`** (added 2026-10-03) — the
+  owner switched games on or off for that server. Not a table frame (no
+  `room_id`): it goes to EVERY connection of every member of the server that
+  announced `games` - in a call or not, never a delivery socket - right after
+  the settings change committed, and for off only after every table of the
+  server already ended (`GameEnded { disabled }`), so nobody sees the launcher
+  go while their table is still up. The client writes it into its cached server
+  row: the launcher appears or goes at once, no reload, no refetch.
+  `games::push_enabled` (the member list) / `games::announce_enabled` (the
+  send, tested without a database).
 
 **Views** (`view.game` tags them). Field by field in
 `frontend/src/api/games/protocol.ts` (`HoldemView`, `BlackjackView`) and in
@@ -534,7 +580,8 @@ A client reads an unknown reason as `other` and still drops the table.
 
 So a refusal never says more than the caller may know: (1) a frame that does
 not parse is the generic `Error`, as for every frame; (2) `room_id` not a
-voice room → `not_a_voice_room`; (3) this connection not in that room
+voice room → `not_a_voice_room` (including a non-canonical spelling of one,
+`voice_042`: only `voice_<id>` exactly is a room, since 2026-10-03); (3) this connection not in that room
 (`conns_of` under the room guard, never `joined_rooms`) → `not_in_call` —
 before anything about tables, so a non-member learns nothing; (4)
 `games_enabled` off → `disabled`; (5) permissions → `no_permission`; (6)
@@ -560,7 +607,7 @@ rate limits → `rate_limited`; (7) the table, `get_mut(room, id)` — not open
   out after two expiries; without `GameSitIn` they could never come back),
   `GameRebuy`, `GameShowCards`, and the moderation pair `GameClose` /
   `GameRemovePlayer`; plus the typed `GameRefused`.
-- The `idle` end reason (owner to confirm the limit, suggested 5 minutes):
+- The `idle` end reason (5 minutes, confirmed by the lead 2026-10-03):
   closing is `MOVE_MEMBERS` only, so without it a table nobody sits at would
   hold the call's one slot until a moderator noticed.
 - Capability: the per-socket `games` handshake instead of a
@@ -592,11 +639,14 @@ reasons are the ones that decided it.
   removed.
 - **Deals.** Hold'em deals `NEXT_HAND_DELAY` (3 s) after a hand ends - and
   after a second dealable player sits down - whenever two players can be
-  dealt in; the countdown is `next_deal_in_ms`. Blackjack deals at once when
-  every player at the table (not sitting out, not leaving) has bet, otherwise
-  `BET_WINDOW` (15 s) after the first bet. A countdown that ends with nobody
-  to deal to clears itself with a `GameTable`.
-- **Idle** is `IDLE_LIMIT`, 5 minutes with nobody seated (owner to confirm).
+  dealt in; the countdown is `next_deal_in_ms`. Blackjack deals
+  `LAST_BET_DELAY` (1.5 s) after the bet that completes the table (every
+  player not sitting out or leaving has bet) - brought forward from the
+  `BET_WINDOW` (15 s) the first bet started; until 2026-10-03 it dealt at that
+  instant, and the last bettor never saw the bets. A countdown that ends with
+  nobody to deal to clears itself with a `GameTable`.
+- **Idle** is `IDLE_LIMIT`, 5 minutes with nobody seated (confirmed by the
+  lead 2026-10-03).
   **Call ended**: the table ends one rejoin grace after the call's room was
   dropped, unless somebody is back by then (a rejoin clears the stamp).
 - **Rate limit:** a refused open (`room_has_table`, the cap, a bad config)
@@ -613,6 +663,24 @@ reasons are the ones that decided it.
   `PLAY_GAMES`.
 - **The `server_restarted` reason** some notes still use is `gone`, as the
   contract says (*Restart ends every table*).
+
+**Fixed after the server review (2026-10-03),** each reproduced by a test
+first (`src/games_tests.rs`, `ws::room_id_gate_tests`):
+
+- **`PLAY_GAMES` lost while away was never enforced.** The sweep stands up
+  people IN the call, and own-seat frames skip the database gate, so a player
+  denied while inside the disconnect grace - or off in another channel - came
+  back and played on. JoinRoom's own permission resolution now goes to
+  `on_join` (`may_play`); a returning seated player who may not play gets up.
+- **A non-canonical room id was a second call.** `voice_042` parsed to channel
+  42, passed JoinRoom's check for it, and keyed a second table that
+  `delete_channel` (by `voice_42`) never ended. `parse_voice_room` and
+  `parse_channel_room` now accept only the canonical spelling, so the alias is
+  refused at JoinRoom for every subsystem, not only games.
+- **`GameCreate` re-checks the call after its database gate**: a connection
+  that left (or was moved or kicked) while the gate awaited opens nothing; and
+  if the call emptied right after the table went into the registry, the
+  call-ended timer is started for it.
 
 ### Leaving, disconnects and the grace
 
@@ -660,20 +728,26 @@ player has bet, or 15 s after the first bet.
 
 ### Gating and permissions
 
-- **`servers.games_enabled BOOLEAN NOT NULL DEFAULT FALSE`** — off by
-  default, like `clips_enabled`. **Added by migration `073_games.sql`** (LF
-  bytes, additive: 0.9.832 boots over it). **Built on both halves.** Server:
+- **`servers.games_enabled BOOLEAN NOT NULL DEFAULT TRUE`** — ON by default
+  for every server, new and existing (the owner's decision of 2026-10-03; the
+  first build defaulted it off like `clips_enabled`). **Added by migration
+  `073_games.sql`** (LF bytes, additive, idempotent: 0.9.832 boots over it;
+  unreleased when the default changed, so it was changed in place). `ADD
+  COLUMN ... DEFAULT TRUE` fills every existing row, and `create_server`
+  answers the row's value. **Built on both halves.** Server:
   the server-row SELECTs (`GET /servers`, the invite join, the new-server
   answer), `ServerResponse.games_enabled`, and the owner-only update handler
   (`PATCH /servers/:id/settings`, `games_enabled`; turning it off ends that
   server's tables). Client: the owner's toggle in Server Settings (next to
   Clips; owner-only like it; disabled with a note, and never sent, when the
   server did not return the field) and `games_enabled` on the client
-  `Server` type. Both name the field `games_enabled`.
+  `Server` type. Both name the field `games_enabled`. A change is pushed to
+  every online member (`GamesEnabled`).
 - **`PLAY_GAMES = 1 << 28`** — **built**: `src/permissions.rs` (the next
   free bit; `1 << 28` is exact with JS `<<`, bit 31 would not be), in
   `DEFAULT_MEMBER` so new servers have it, and migration 073 ORs it onto
-  every existing @everyone role (the pattern of migrations 051/056).
+  every existing @everyone role (the pattern of migrations 051/056). It is
+  Discord's "Use Activities": with games on by default it takes effect at once.
   `OVERWRITABLE` derives from `Self::all()`, so per-channel overwrites cover
   it automatically (pinned by a test). Client: BOTH maps in
   `frontend/src/api/permissionBits.ts` (`PERM` for gating, `PERMISSIONS` for
@@ -695,15 +769,21 @@ player has bet, or 15 s after the first bet.
   game-only revocation can wait for the retry — the worst case is finishing a
   hand.
 - **Teardown**: switching `games_enabled` off ends every table on that server
-  (`GameEnded { reason: "disabled" }`); deleting a channel ends its tables
-  (`channel_deleted`, beside the clip-channel cleanup in `delete_channel`).
+  (`GameEnded { reason: "disabled" }`); deleting a channel ends its table
+  (`channel_deleted`, beside the clip-channel cleanup in `delete_channel`) -
+  the one table, since a room id is only its canonical spelling.
+- **Permission changes reach the launcher live**: a role or overwrite change
+  already sends `ChannelPermsChanged` to every member, and the client refetches
+  the channel list of THAT server - the viewed one, or (in a call on another
+  server) the call's own server, which the client now keeps a query for - so
+  the launcher appears or goes within the refetch, no reload.
 
 ## The table on screen
 
 A new `viewMode: 'table'` rendered as content inside `.chat-main`, next to
-VoiceStage, opened from a Games button in the VoiceStage header and the
-VoicePanel overflow. Like VoiceStage it is presentation only: opening or
-leaving it never touches the call. Cards and suits are SVG from
+VoiceStage, opened from the activity's tile, its notice or the Activities
+picker (*Activities*). Like VoiceStage it is presentation only: opening it or
+"Back to call" never touches the call. Cards and suits are SVG from
 `frontend/src/components/Icons.tsx`; no emoji suits (`npm run lint` fails on
 emoji in chrome). Spectators — people in the call who are not seated — see
 the public table.
@@ -742,7 +822,7 @@ on remote control). Púca Notes has no calls and is unaffected.
 | The disclosure, remembered per account and server | `api/games/gamesDisclosure.ts` |
 | The view (`viewMode: 'table'`), both tables, card faces, the phone sheet | `components/games/*` (lazy-loaded from `Chat.tsx`) |
 | Suits and the Games icon, SVG | `Icons.tsx`: `CardsIcon`, `Suit*Icon` (solid: docs/ICON_LANGUAGE.md §4) |
-| Entry points | VoiceStage header button; VoicePanel control (behind the phone's chevron) |
+| Entry points (since 2026-10-03, *Activities*) | the launcher in the call's controls (`.vp-activities`, behind the phone's chevron) and its picker (`ActivityPicker.tsx`); the call-grid tile (`ActivityTile.tsx`, in VoiceStage); the notice (`ActivityNotice.tsx`) |
 | Owner's switch, next to Clips | `ServerSettingsModal.tsx`, `games_enabled` (sent only when the server returned the field) |
 | `PLAY_GAMES` rows | `RoleSettingsModal.tsx` (Voice Permissions), `EditChannelModal.tsx` (`VOICE_CHANNEL_PERMS`) |
 
@@ -766,11 +846,12 @@ feature, the voice channel's server's `games_enabled`, and this socket in the
 call; opening and sitting additionally need `CONNECT` + `PLAY_GAMES` in that
 channel, with the bits PRESENT (never `hasPerm`'s fail-open on a missing
 set — every server that plays games sends them). Without `PLAY_GAMES` a
-person in the call can still WATCH an open table, as the server allows; the
-button then reads "Watch the table". `MOVE_MEMBERS` shows Close table and a
-Remove on each player.
+person in the call can still WATCH an open table, as the server allows: the
+tile and the notice offer Watch only, and there is no launcher
+(`gamesGate().launcher` is `CONNECT` + `PLAY_GAMES` on top of the rest).
+`MOVE_MEMBERS` shows Close table and a Remove on each player.
 
-**Proof:** vitest (`gamesStore`, `gamesLogic`, `gamesView`,
+**Proof:** vitest (`gamesStore`, `gamesLogic`, `gamesView`, `activities`,
 `serverSettingsGames`, `roleEditorPlayGames`, `editChannelModalVoicePerms`),
 and `frontend/e2e/games-walk.mjs` — two accounts in one call, desktop 1280x800
 and a 390x844 coarse-pointer phone, both games, the keyboard-open sheet, the
@@ -793,8 +874,8 @@ integration step runs it against the real server.
   phone): the opponents, the board and the log scroll above it, so your cards
   and the buttons never scroll away.
 - **The phone hides the chat composer while the table is up** (it returns with
-  "Call"): with the collapsed voice bar and the bottom nav, the composer's
-  ~75 px is what the two-row bar needs. The desktop keeps it.
+  "Back to call"): with the collapsed voice bar and the bottom nav, the
+  composer's ~75 px is what the two-row bar needs. The desktop keeps it.
 - **The phone takes back `.messages-container`'s side padding** (40 px — a
   whole 44 px target) so the second row (four presets and the − amount +
   stepper) fits a 390 px screen.
@@ -825,8 +906,9 @@ integration step runs it against the real server.
   against white in the green and yellow themes and `--color-danger` is 3.8:1;
   the walk measures every button, the felt and the card ink in all eight
   themes with and without high contrast.
-- **"Watch the table"**: GAMES.md lets anyone in the call watch; the entry
-  point says so for someone without `PLAY_GAMES` instead of hiding the table.
+- **Watch**: GAMES.md lets anyone in the call watch; the tile and the notice
+  offer Watch (and only Watch) to someone without `PLAY_GAMES`, instead of
+  hiding the activity. The launcher is for those who may play.
 - **`games_enabled` on the client `Server` type** is read from the voice
   channel's OWN server (not the viewed one), like the clip policy; absent
   means a server that predates games (the toggle is disabled and never sent).
@@ -890,10 +972,46 @@ vite of the merged tree:
   public. It now orders reveals by table version, which is the same on every
   connection.
 
-Still not done: a push of a changed server row to the other members (a
-`ServerUpdated` frame). Without it, someone online when games are switched on
-can open the FIRST table only after a reload. Once anyone has opened one, the
-rows are refetched.
+The stale row is now pushed away at the source: since 2026-10-03 the server
+sends `GamesEnabled` to every online member when the owner flips the switch,
+and the client writes it into its cached row. `gamesRowContradicted` stays as
+the fallback for a client the push missed (it was reconnecting through it).
+
+## Activities
+
+The owner, 2026-10-03: *"I want it to work similarly to discord's games"* -
+read as Discord's Activities. What that means here, and where it lives:
+
+| Discord | Púca | where |
+|---|---|---|
+| Activities are just there | `games_enabled` ON by default for every server, new and existing; the owner can switch it off (Server Settings, next to Clips) and the switch reaches everyone at once (`GamesEnabled`) | migration 073, `server_handlers.rs`, `games::push_enabled`; client `applyGamesEnabled` |
+| "Use Activities" permission | `PLAY_GAMES` (on @everyone by default, overwritable per channel); a change reaches the launcher live through `ChannelPermsChanged` | `permissions.rs`, `Chat.tsx` |
+| The rocket in the call's controls | the Activities launcher (`RocketIcon`, an SVG in `Icons.tsx`) beside camera and screen share; on a phone with the camera behind the chevron (a sixth button in the collapsed bar pushed the mic under the "Encrypted" pill). Shown only with the socket's `games` feature, games on, this socket in the call, and `CONNECT` + `PLAY_GAMES` there (`gamesGate().launcher`) | `VoicePanel.tsx` |
+| The activity shelf | the picker: Poker and Blackjack as cards with SVG art (two fanned `PlayingCard`s, drawn with the suit icons), a centred panel on a desktop and a bottom sheet on a phone; a card starts that game with the owner's table settings; while one runs, its card offers Join / Watch (Open if seated) and the other says "Poker is running in this call. One activity at a time." | `ActivityPicker.tsx`, `ActivityArt.tsx`, `Activities.css` |
+| "X started an activity" | to everyone in the call who announced `games` and did not start it, and is not already seated: "<name> started Poker" with Join (with `PLAY_GAMES`) and Watch, a dismissable status line at the top of the main area - not a dialog, no focus taken, no sound; gone when dismissed, acted on, or when the table ends | `ActivityNotice.tsx`, `gamesStore` (`announce`) |
+| The activity tile in the call grid | a tile in VoiceStage beside the people: the game, how many are playing ("3 playing", or "..., you included"), Join / Watch, or Open when seated; the tile itself opens the table | `ActivityTile.tsx` |
+| Who is in the activity | in the sidebar's voice member list, a cards mark beside each seated player, and the channel row shows the game ("Poker" chip) - to the people in THAT call only (the frames go only there) | `Chat.tsx` |
+| The activity view vs the grid | the table view, with "Back to call" back to the grid; neither touches the call | `GamesView.tsx` |
+
+**The starter's table opens for them and seats them.** `startActivity` sends
+`GameCreate` with the owner's table and remembers the start for
+`START_ANSWER_MS` (15 s); the table that arrives in that time is the
+starter's: no notice, the view opens (`openViewAt`) and seats them
+(`joinRequest`) through the disclosure the first time. Join from the notice,
+the tile or the picker is the same `joinRequest`: the view takes it once and
+sits at the first open seat (a full table says so and the person watches).
+`opened_by` on `GameTable` gives the notice its name; the client looks it up in
+the member list, then in the call's own roster.
+
+**What "live" was proved to mean** (`e2e/games-live.mjs`, no reload after
+sign-in, every frame recorded): an activity started from the launcher showed
+its notice, its tile and the sidebar mark on all four other pages within
+LIVE_MS (2.5 s; measured well under one second); a role granting `PLAY_GAMES`
+to people already in the call brought their launcher within the refetch;
+switching games off ended the table on every page within one second of each
+other and took the launcher, the tile, the marks and the notice away
+everywhere; switching on brought the launcher back; and the old-client socket
+received neither a game frame nor `GamesEnabled`.
 
 ## Not in v1
 

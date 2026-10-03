@@ -250,41 +250,56 @@ the microphone foreground type for the duration of the call, and releases it
 when you leave. Android 14+ only allows that type to be taken while the app
 is in the foreground, which is why it is set up the moment you join.
 
-### Card games in a call (Poker, Blackjack)
-People in a voice call can play Texas Hold'em or Blackjack together, for
-**free chips that are worth nothing**: everyone sits down with the same stack,
-nothing is kept when the table closes, and chips can never be bought, sold or
-exchanged for anything.
+### Activities in a call: Poker and Blackjack
+People in a voice call can play Texas Hold'em or Blackjack together, the way
+Discord's Activities work, for **free chips that are worth nothing**: everyone
+sits down with the same stack, nothing is kept when the table closes, and chips
+can never be bought, sold or exchanged for anything.
 
-- **For the server owner:** games are **off** until the owner turns them on
-  for the server: **Server Settings → Overview → Allow games in voice calls**,
-  next to the Clips switch. Turning them off again ends every table at once. Opening a
-  table and sitting down need the **Play Games** permission (members have it
-  by default; deny it on a role or a single voice channel like any other) and
-  **Connect**. Anyone with **Move Members** can close a table or take a player
-  out of their seat.
-- **Finding the table:** once you are in the call, the call's view has a
-  button at the top: **Open a table** (nobody has one open yet), **Join the
-  table**, or **Watch the table** (without Play Games). On a phone, tap the
-  arrow on the voice bar to show its controls, then the cards button. Going
-  back to the call (**Back to the call**, or **Call** on a phone) never leaves
-  the call, and the table is still there when you return. The first time you
-  sit down on a server you are told that chips are worth nothing and that the
-  server deals the cards.
-- **One table per call**, of either game. While one is open, another cannot
-  start until it closes.
+- **Starting one:** in a call, press the **Activities** button (the rocket)
+  beside the camera and screen-share buttons; on a phone, tap the arrow on the
+  voice bar to show the controls, then the rocket. Pick **Poker** or
+  **Blackjack**. The table opens for you and you sit down; the first time on
+  each server you are told that chips are worth nothing and that the server
+  deals the cards.
+- **Everyone in the call sees it at once**, without reloading: a line at the
+  top, "*name* started Poker", with **Join** and **Watch** (close it with the
+  ×; it never pops up over what you are doing and makes no sound); a tile for
+  the game in the call's grid, with how many are playing; and in the channel
+  list the call shows the game and a small cards mark beside each player.
+- **Joining or watching:** **Join** (on the line at the top, the tile, or the
+  Activities picker) seats you at the first free seat; **Watch** opens the table
+  without a seat. Without the **Play Games** permission you can always watch.
+  **Back to call** returns to the call's grid and never leaves the call; your
+  seat and the table are still there when you open the tile again. On a phone
+  the message box steps aside at the table and comes back with Back to call.
+- **For the server owner:** games are **on** for every server until the owner
+  turns them off: **Server Settings → Overview → Allow games in voice calls**,
+  next to the Clips switch. Turning them off ends every table at once and
+  removes the Activities button from everyone's call straight away; turning
+  them on brings it back the same way. Starting and joining need the **Play
+  Games** permission (everyone has it by default; deny it on a role or a single
+  voice channel like any other - someone who loses it gets up from the table,
+  even if they were away from the call when it changed) and **Connect**. Anyone
+  with **Move Members** can close a table or take a player out of their seat
+  (to keep someone out, deny them Play Games).
+- **One activity per call**, of either game. While one runs, the picker offers
+  to join it, and the other game waits until it closes.
 - **Watching** needs nothing but being in the call: everyone in it sees the
   table, and nobody sees another player's face-down cards.
-- **Hold'em:** No-Limit, up to 6 players, 1,000 chips, blinds 5/10 (the
-  person who opens the table may choose the stack and blinds). The next hand
-  is dealt about 3 seconds after the last one ends, when two players can play.
+- **Hold'em:** No-Limit, up to 6 players, 1,000 chips, blinds 5/10 (opened
+  from the table view itself, a table may have its own stack and blinds). The
+  next hand is dealt about 3 seconds after the last one ends, when two players
+  can play.
 - **Blackjack:** against the house, 6 decks, the dealer stands on soft 17,
   blackjack pays 3:2, split up to 4 hands (split aces get one card each), no
-  insurance or surrender; bets 10 to 500. The round is dealt when everyone at
-  the table has bet, or 15 seconds after the first bet.
+  insurance or surrender; bets 10 to 500. The round is dealt a moment (1.5
+  seconds) after everyone at the table has bet, so the last bet is seen, or 15
+  seconds after the first bet.
 - **The clock:** each decision has 30 seconds. When it runs out you check if
   that is free, otherwise fold (Blackjack: stand); two in a row sit you out
   until you sit back in. A busted player may take a fresh stack.
+- **Nobody at the table** for 5 minutes closes it.
 - **Dropping out of the call** (a network blip, a closed laptop) keeps your
   seat, chips and cards for a few seconds; come back in time and you carry on.
   Stay away longer and you get up from the table (mid-hand, that folds your

@@ -319,8 +319,11 @@ nothing. This server deals the cards and its operator could see them."*
 What the server learns that it did not already know: who sat at a table and how
 chips moved between them - in memory only, gone when the table closes (and
 every restart closes every table). Chips are free, per table, never bought,
-sold, kept or turned into anything. Games are off until the server's owner
-switches them on, and the frames go only to connections in that call.
+sold, kept or turned into anything. Games are available on every server by
+default (Discord-style activities) and the owner can switch them off; the
+table frames go only to connections in that call, and the owner's on/off
+switch (`GamesEnabled`, a server id and a boolean) only to the server's own
+members. Who is playing is shown only to the people in that call.
 
 ### Can do
 

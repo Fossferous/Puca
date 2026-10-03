@@ -40,10 +40,10 @@ in this file is not registered there, so what IS listed is real.
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
-| GET | `/servers` | ✅ | List user's servers. `clip_channel_id` is `null` unless the caller can VIEW the pinned clips channel; the owner's pin itself is unchanged. `games_enabled` is the owner's switch for card games in calls (default `false`; see *Games* under the WebSocket protocol). |
-| POST | `/servers` | ✅ | Create new server |
+| GET | `/servers` | ✅ | List user's servers. `clip_channel_id` is `null` unless the caller can VIEW the pinned clips channel; the owner's pin itself is unchanged. `games_enabled` is the owner's switch for card games in calls (default `true`: games are available on every server until its owner turns them off; see *Games* under the WebSocket protocol). |
+| POST | `/servers` | ✅ | Create new server (the answer is the new row, `games_enabled: true` included) |
 | POST | `/servers/:id/join` | ✅ | Join server by ID |
-| PATCH | `/servers/:id/settings` | ✅ | Update server settings (owner only). `games_enabled: false` ends every open card table of the server at once (`GameEnded`, reason `disabled`). |
+| PATCH | `/servers/:id/settings` | ✅ | Update server settings (owner only). `games_enabled: false` ends every open card table of the server at once (`GameEnded`, reason `disabled`); either value is then pushed to every online member (`GamesEnabled`, WebSocket *Games*). |
 | POST | `/servers/:id/read` | ✅ | Mark the whole server read — every channel the caller can VIEW, that is: a hidden channel gets no read-state row (until 0.9.5 it did, so restoring VIEW later hid what had been posted meanwhile). Bare 200 either way; no channel ids in the answer. |
 
 ---
@@ -522,8 +522,11 @@ and `serverFeatures.json`, which both sides' tests parse.
 A client that reads the game frames puts `games` in its `caps` list; a server
 that plays games confirms it in `ServerFeatures`. Send a game frame only on a
 socket that confirmed it (a reconnect may land on an older host, which answers
-an unknown frame with an `Error`). Whether this server's owner switched games
-on is `games_enabled` on the server object (`GET /servers`, off by default).
+an unknown frame with an `Error`). Whether this server's owner allows games is
+`games_enabled` on the server object (`GET /servers`); it is ON by default for
+every server, new and existing, and the owner can switch it off. Clients show
+games as Discord-style activities: a launcher in the call's controls, a notice
+and a tile for everyone in the call ([GAMES.md](GAMES.md#activities)).
 The full contract - every view field, event, refusal code and end reason, with
 the JSON fixtures both sides' tests parse - is [GAMES.md](GAMES.md#frames);
 this is the summary.
@@ -546,14 +549,17 @@ table, and chips are free and per table.
 
 | Server frame | When |
 |---|---|
-| `GameTable {table_id, version, view}` | the table opened (to everyone in the call); after your `RoomJoined` for a call that has a table; in answer to `GameResync`; when something only the server knows changed (a seat's `away`, a countdown) |
+| `GameTable {table_id, version, view, opened_by}` | the table opened (to everyone in the call); after your `RoomJoined` for a call that has a table; in answer to `GameResync`; when something only the server knows changed (a seat's `away`, a countdown). `opened_by` is the user id of whoever opened it (for "<name> started Poker"); absent only where nobody did |
 | `GameEvents {table_id, version, events, view}` | an engine call: its public events (the same for everyone) and the table after them as THIS connection may see it |
 | `GameEnded {table_id, reason}` | the table is gone (`closed`, `call_ended`, `idle`, `disabled`, `channel_deleted`), or the answer to a frame naming a table that is not open in that room (`gone`, which is also what a restart looks like) |
 | `GameRefused {table_id, op, code, ...}` | your frame was refused; to you only, never as an `Error` |
+| `GamesEnabled {server_id, games_enabled}` | the owner switched games on or off for that server: sent right after the change committed (after every table already ended, for off) to EVERY connection of every member of the server that announced `games` - in a call or not - so the launcher appears or goes without a reload. Not a table frame: it names no `room_id` |
 
 Game frames go to one connection at a time, and only to connections that
 announced `games` AND are in the call; never to a delivery socket, never to a
-connection of yours that is not in the call. A view carries your own hole
+connection of yours that is not in the call. `GamesEnabled` follows the same
+capability rule but goes to every member's `games` connections, in a call or
+not; a client that did not announce `games` never receives either. A view carries your own hole
 cards and nobody else's (a face-down card is `"??"`); `legal` appears only in
 the view of the seat whose turn it is. `version` goes up by exactly one per
 change, so a client that missed a frame (`try_send` drops under backpressure)
@@ -563,8 +569,13 @@ applies the next one's view without animating. `clock_ms` and
 player out. A player who leaves the call keeps their seat, stack and cards for
 the rejoin grace (`WS_REJOIN_GRACE_SECS`, `away` in the view), then gets up
 (mid-hand: folded); a player removed from the call by a moderator, or who
-loses `PLAY_GAMES`, gets up at once.
+loses `PLAY_GAMES`, gets up at once - also when the loss happened while they
+were away from the call: their next `JoinRoom` stands them up. Blackjack deals
+when every player at the table has bet, 1.5 s after the last bet (or 15 s after
+the first bet, whichever comes first). A room id is only its canonical spelling
+(`voice_42`, never `voice_042`): any other spelling is refused at `JoinRoom`
+and answered `not_a_voice_room` by the game frames.
 
 ---
 
-*Last Updated: 2026-10-02*
+*Last Updated: 2026-10-03*

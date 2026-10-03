@@ -168,8 +168,9 @@ The set is an outline set. Four things are solid, each for a reason:
   heart reads as "favourite" and an outlined spade as a garden tool. They are
   drawn in currentColor with no knockout, so the one objection below does not
   apply; the card face (`PlayingCard.css`) supplies a fixed light surface and
-  ink, which is why they read the same in every theme. `CardsIcon` (the Games
-  entry point) is an ordinary outline icon.
+  ink, which is why they read the same in every theme. `CardsIcon` (a seated
+  player's mark in the voice member list) and `RocketIcon` (the Activities
+  launcher, Discord's own mark for activities) are ordinary outline icons.
 
 Note what is *not* on that list: `CheckboxCheckedIcon`. A filled box with a
 knocked-out tick is more legible at 14px, but the knockout has to be painted in
