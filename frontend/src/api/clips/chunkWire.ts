@@ -23,8 +23,10 @@ export interface ChunkFrame {
 }
 
 /** Tauri hands a raw message over as an ArrayBuffer (or, for a small one on
- *  some paths, a byte array); accept both. */
-function asBuffer(msg: unknown): ArrayBuffer | null {
+ *  some paths, a byte array); accept both. Always a buffer of its own
+ *  (offset 0), so a reader may lay typed-array views on it. Shared with the
+ *  audio wire (audioWire.ts). */
+export function asBuffer(msg: unknown): ArrayBuffer | null {
     if (msg instanceof ArrayBuffer) return msg;
     if (ArrayBuffer.isView(msg)) return msg.buffer.slice(msg.byteOffset, msg.byteOffset + msg.byteLength) as ArrayBuffer;
     if (Array.isArray(msg)) return new Uint8Array(msg as number[]).buffer;

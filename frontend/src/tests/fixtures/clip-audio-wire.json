@@ -1,0 +1,29 @@
+{
+  "_comment": "The clip desktop-audio wire (frontend/src-tauri/src/clip_audio_wire.rs audio_frame -> frontend/src/api/clips/audioWire.ts readAudioFrame), message by message: the fields and the exact bytes. clip_audio_wire.rs's tests BUILD each message from its fields and must produce these bytes; src/tests/audioWire.test.ts READS these bytes and must get these fields, so neither side can change the layout without the other. The hex was produced by an independent encoder (Python struct '<BBQIHII', then '<II' per packet, then planar '<f'), not by either implementation. Header: u8 version, u8 flags (bit 0 = silent), u64 generation, u32 sample rate, u16 channels, u32 frames, u32 packets; then per packet u32 frames and u32 age in us (how long before the message was sent that packet was read); then channels x frames f32, planar, absent when silent. All little-endian.",
+  "version": 1,
+  "headerLen": 24,
+  "packetEntryLen": 8,
+  "cases": [
+    {
+      "name": "stereo: the header, the packet table, then all of channel 0's samples, then all of channel 1's",
+      "generation": 7, "sampleRate": 48000, "channels": 2, "frames": 2,
+      "packets": [{ "frames": 1, "ageUs": 250 }, { "frames": 1, "ageUs": 0 }],
+      "planar": [[1.0, -0.5], [0.25, 0.0]],
+      "hex": "01 00 0700000000000000 80BB0000 0200 02000000 02000000 01000000 FA000000 01000000 00000000 0000803F 000000BF 0000803E 00000000"
+    },
+    {
+      "name": "a silent run carries no samples, however many frames its packets count (5.1 at 44.1 kHz)",
+      "generation": 9, "sampleRate": 44100, "channels": 6, "frames": 1764,
+      "packets": [{ "frames": 441, "ageUs": 30000 }, { "frames": 441, "ageUs": 20000 }, { "frames": 441, "ageUs": 10000 }, { "frames": 441, "ageUs": 0 }],
+      "planar": null,
+      "hex": "01 01 0900000000000000 44AC0000 0600 E4060000 04000000 B9010000 30750000 B9010000 204E0000 B9010000 10270000 B9010000 00000000"
+    },
+    {
+      "name": "7.1, a generation past 32 bits and a packet a timeout sent a second after it was read",
+      "generation": 4294967297, "sampleRate": 48000, "channels": 8, "frames": 1,
+      "packets": [{ "frames": 1, "ageUs": 1000000 }],
+      "planar": [[0.5], [-1.0], [0.125], [2.0], [-0.25], [1.5], [0.75], [-2.0]],
+      "hex": "01 00 0100000001000000 80BB0000 0800 01000000 01000000 01000000 40420F00 0000003F 000080BF 0000003E 00000040 000080BE 0000C03F 0000403F 000000C0"
+    }
+  ]
+}

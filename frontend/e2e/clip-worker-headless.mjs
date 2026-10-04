@@ -37,7 +37,10 @@ const srv = http.createServer((req, res) => {
 await new Promise(r => srv.listen(8793, '127.0.0.1', r));
 
 const ctx = await chromium.launchPersistentContext(path.join(process.env.TEMP || '.', 'sovereign-clip-worker-e2e'), {
-    channel: 'msedge', headless: true, args: ['--autoplay-policy=no-user-gesture-required', '--ignore-gpu-blocklist', '--use-angle=d3d11'],
+    // --mute-audio: nothing here is routed to a speaker (the previews are
+    // muted, the oscillators feed MediaStreams), and this makes sure of it:
+    // headless Edge still has a real audio output.
+    channel: 'msedge', headless: true, args: ['--mute-audio', '--autoplay-policy=no-user-gesture-required', '--ignore-gpu-blocklist', '--use-angle=d3d11'],
 });
 const page = await ctx.newPage();
 page.on('console', m => { const t = m.text(); if (!/^\[vite\]/.test(t)) console.log('  C>', t.slice(0, 200)); });

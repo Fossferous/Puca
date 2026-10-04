@@ -9,7 +9,10 @@
 //! in `appAudio.ts` calls `stopGameAudio()` first if one is already running).
 //! Someone sharing a screen WITH game audio while the clip buffer is also
 //! armed is a completely ordinary case, so this owns its own state and its
-//! own event name (`clip-audio-data`, never `audio-data`).
+//! own wire: the PCM goes out on the raw binary channel each start is handed
+//! (`clip_audio_wire.rs` is the format — batched, planar, silence as a
+//! count of frames), never as the per-packet base64 `audio-data`-style event it used
+//! to be.
 //!
 //! WASAPI mechanics mirror `audio_capture.rs`'s proven capture loop, with one
 //! difference: that file opens a per-PROCESS loopback client
@@ -20,16 +23,20 @@
 //! device's `AudioClient`, initialized with `Direction::Capture` (the
 //! `wasapi` crate turns exactly that Render-device/Capture-direction/Shared
 //! combination into `AUDCLNT_STREAMFLAGS_LOOPBACK` internally — see its
-//! `initialize_client`). Same format (32-bit float, 48 kHz, stereo) the clip
-//! ring's AudioEncoder already expects, so the JS side needs no new decode
-//! path — only a new small scheduler mirroring `appAudio.ts`'s (kept
-//! separate for the same singleton-collision reason as the Rust side).
+//! `initialize_client`). It asks for 32-bit float, 48 kHz, stereo with
+//! autoconvert on, so WASAPI converts whatever the device runs; the wire
+//! still carries the rate and channel count of every message and the page
+//! honours them, so nothing downstream depends on that request holding.
 
-use base64::Engine;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
+
+/// Where the PCM goes: a raw binary IPC channel into the page
+/// (`clip_audio_wire.rs` is the format). The capture thread owns it, so it
+/// is dropped — and the page's end of it released — when the capture ends.
+pub type AudioSink = tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>;
 
 pub struct ClipDesktopAudioState {
     pub is_capturing: AtomicBool,
@@ -52,19 +59,6 @@ impl Default for ClipDesktopAudioState {
             generation: AtomicU64::new(0),
         }
     }
-}
-
-#[derive(Serialize, Clone)]
-struct ClipAudioDataEvent {
-    data: String, // base64 f32 LE PCM, interleaved
-    sample_rate: u32,
-    channels: u32,
-    bits_per_sample: u32,
-    silent: bool,
-    /// Which capture produced this. The JS side drops events from a
-    /// generation it does not own — an old thread's tail (it can outlive its
-    /// stop signal by up to one 100ms wait) must not feed the new graph.
-    generation: u64,
 }
 
 /// What `start_clip_desktop_audio` resolves with. The desktop shell and its
@@ -117,9 +111,15 @@ pub fn pick_render_device(names: &[String], wanted: &str) -> Option<usize> {
     })
 }
 
+/// Every message on `sink` carries the generation this start claims. The
+/// channel is this start's own, so another capture's tail cannot arrive on
+/// it; the page still drops a foreign generation, the same belt-and-braces
+/// as the video wire (an old thread can outlive its stop signal by up to one
+/// 100 ms wait).
 #[cfg(windows)]
 pub fn start_capture(
     app: AppHandle,
+    sink: AudioSink,
     state: Arc<ClipDesktopAudioState>,
     device_name: Option<String>,
 ) -> Result<ClipAudioStarted, String> {
@@ -151,9 +151,9 @@ pub fn start_capture(
     // actually opened, so the UI can name what the clip is listening to.
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<String, String>>();
     let state_clone = state.clone();
-    let emit_handle = app.clone();
+    let emit_handle = app;
     std::thread::spawn(move || {
-        let result = capture_loop(app, state_clone.clone(), device_name, generation, ready_tx);
+        let result = capture_loop(sink, state_clone.clone(), device_name, generation, ready_tx);
         state_clone.is_capturing.store(false, Ordering::SeqCst);
         if let Err(e) = result {
             log::error!("Clip desktop audio capture error: {}", e);
@@ -189,7 +189,7 @@ pub fn stop_capture(state: Arc<ClipDesktopAudioState>, generation: Option<u64>) 
 
 #[cfg(windows)]
 fn capture_loop(
-    app: AppHandle,
+    sink: AudioSink,
     state: Arc<ClipDesktopAudioState>,
     device_name: Option<String>,
     generation: u64,
@@ -268,6 +268,19 @@ fn capture_loop(
     init_step!(audio_client
         .initialize_client(&desired_format, &Direction::Capture, &mode)
         .map_err(|e| format!("Failed to initialize desktop loopback: {e:?}")));
+    // What the stream delivers: the format it was initialised with
+    // (autoconvert makes WASAPI convert the device's mix to it). Read back
+    // from that format rather than restated, so the wire can never claim a
+    // format the bytes are not in. Checked before the start is reported, so
+    // a format this loop cannot read is a refused start, not a death.
+    let sample_rate = desired_format.get_samplespersec();
+    let channels = desired_format.get_nchannels();
+    let bytes_per_frame = desired_format.get_blockalign() as usize;
+    if channels == 0 || sample_rate == 0 || bytes_per_frame != channels as usize * 4 {
+        init_step!(Err::<(), String>(format!(
+            "Desktop loopback format is not 32-bit float PCM ({sample_rate} Hz, {channels} ch, {bytes_per_frame} bytes/frame)"
+        )));
+    }
 
     let capture_client = init_step!(audio_client.get_audiocaptureclient().map_err(|e| format!("Failed to get capture client: {e:?}")));
     let event_handle = init_step!(audio_client.set_get_eventhandle().map_err(|e| format!("Failed to get event handle: {e:?}")));
@@ -276,24 +289,38 @@ fn capture_loop(
     let _ = ready.send(Ok(captured_name.clone()));
     log::info!("Clip desktop audio capture started on {captured_name:?}");
 
-    let bytes_per_frame = 2 * 4; // stereo * 32-bit float
-    let mut buffer: Vec<u8> = vec![0u8; 48000 * bytes_per_frame / 10]; // ~100ms starting size
+    let mut buffer: Vec<u8> = vec![0u8; sample_rate as usize * bytes_per_frame / 10]; // ~100ms starting size
+    let mut batcher = crate::clip_audio_wire::AudioBatcher::new(generation);
+    let mut ready_msgs: Vec<Vec<u8>> = Vec::new();
 
     let mut silent_streak: u32 = 0;
     let mut warned_silent_streak = false;
     let mut discontinuities: u64 = 0;
 
     'capture: while !state.stop_signal.load(Ordering::SeqCst) {
-        if event_handle.wait_for_event(100).is_err() {
-            continue; // timeout — nothing new, loop back and re-check stop_signal
+        // A part-filled batch waits at most ~two packets for the rest: past
+        // that the sound has stopped (loopback delivers nothing while
+        // nothing plays), and the page should have its tail now, not 100 ms
+        // from now. The message says how long each packet waited (age_us),
+        // so the lead stays exact either way.
+        let wait_ms = if batcher.has_pending() { 20 } else { 100 };
+        if event_handle.wait_for_event(wait_ms).is_err() {
+            // Timeout: nothing new. Send what is pending, then loop back and
+            // re-check stop_signal.
+            if let Some(m) = batcher.flush(std::time::Instant::now()) {
+                if sink.send(tauri::ipc::InvokeResponseBody::Raw(m)).is_err() {
+                    break 'capture; // window gone
+                }
+            }
+            continue;
         }
         // DRAIN every packet waiting, not one per wake-up. The event is
-        // auto-reset: two periods landing while this thread was busy (the
-        // base64 and the emit below, or a game holding the CPU) signal it
-        // ONCE, so reading one packet per wake-up leaves one behind for
-        // good, each time that happens, until the 200 ms buffer is full and
-        // WASAPI throws captured audio away. Chromium's own WASAPI capture
-        // loop drains the same way.
+        // auto-reset: two periods landing while this thread was busy (a
+        // send below, or a game holding the CPU) signal it ONCE, so reading
+        // one packet per wake-up leaves one behind for good, each time that
+        // happens, until the 200 ms buffer is full and WASAPI throws
+        // captured audio away. Chromium's own WASAPI capture loop drains the
+        // same way.
         loop {
             let packet_size = match capture_client.get_next_packet_size() {
                 Ok(Some(n)) if n > 0 => n,
@@ -308,12 +335,13 @@ fn capture_loop(
                 .read_from_device(&mut buffer[..bytes_needed])
                 .map_err(|e| format!("Failed to read desktop audio: {e:?}"))?;
             let actual_bytes = frames_read as usize * bytes_per_frame;
-            if buffer_info.flags.silent {
-                // "Treat all of the data in the packet as silence and ignore
-                // the actual data values" (AUDCLNT_BUFFERFLAGS_SILENT): the
-                // bytes are not promised to be zero, and the JS side plays
-                // whatever it is sent.
-                buffer[..actual_bytes].fill(0);
+            // "Treat all of the data in the packet as silence and ignore the
+            // actual data values" (AUDCLNT_BUFFERFLAGS_SILENT): the bytes are
+            // not promised to be zero, so they are never sent. A run of these
+            // goes out as messages with no samples that count the frames,
+            // which the page turns into exactly that much silence.
+            let silent = buffer_info.flags.silent;
+            if silent {
                 silent_streak += 1;
                 if !warned_silent_streak && silent_streak >= 50 {
                     warned_silent_streak = true;
@@ -338,19 +366,19 @@ fn capture_loop(
                     );
                 }
             }
-            let encoded = base64::engine::general_purpose::STANDARD.encode(&buffer[..actual_bytes]);
-            if app
-                .emit("clip-audio-data", ClipAudioDataEvent {
-                    data: encoded,
-                    sample_rate: 48000,
-                    channels: 2,
-                    bits_per_sample: 32,
-                    silent: buffer_info.flags.silent,
-                    generation,
-                })
-                .is_err()
-            {
-                break 'capture; // window gone
+            batcher.push(
+                sample_rate,
+                channels,
+                frames_read,
+                &buffer[..actual_bytes],
+                silent,
+                std::time::Instant::now(),
+                &mut ready_msgs,
+            );
+            for m in ready_msgs.drain(..) {
+                if sink.send(tauri::ipc::InvokeResponseBody::Raw(m)).is_err() {
+                    break 'capture; // window gone
+                }
             }
         }
     }
@@ -364,6 +392,7 @@ fn capture_loop(
 #[cfg(not(windows))]
 pub fn start_capture(
     _app: AppHandle,
+    _sink: AudioSink,
     _state: Arc<ClipDesktopAudioState>,
     _device_name: Option<String>,
 ) -> Result<ClipAudioStarted, String> {

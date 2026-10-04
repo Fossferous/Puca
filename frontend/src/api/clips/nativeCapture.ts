@@ -19,14 +19,15 @@
  *    the worker's `Ring.ingestNativeVideoChunk` constructs a real
  *    `EncodedVideoChunk` from the bytes and hands it to the SAME
  *    GOP-closing code the WebCodecs path uses.
- *  - AUDIO arrives as raw PCM and is turned into a real `MediaStreamTrack`
+ *  - AUDIO arrives as raw PCM (planar f32, ~100 ms a message, on its own
+ *    binary channel — audioWire.ts) and is turned into a real `MediaStreamTrack`
  *    (via a `MediaStreamAudioDestinationNode`, the exact trick
  *    `api/appAudio.ts` already uses for per-app "game audio" in a screen
  *    share) — so `replayBuffer.ts`'s existing `sysGain`→`dest` mixing graph
  *    needs no changes at all; a native system-audio track plugs into the
  *    same `sysTrack` slot getDisplayMedia's audio track fills today.
  *
- * A SEPARATE Rust module and a separate event name from `audio_capture.rs`'s
+ * A SEPARATE Rust module and a separate wire from `audio_capture.rs`'s
  * per-app capture on purpose: that module's capture state is a process-wide
  * singleton a live screen share may already be using for its own "include
  * this app's audio" feature, and starting a second capture through it would
@@ -35,6 +36,7 @@
  */
 import { isTauri } from '../platform';
 import { readChunkFrame } from './chunkWire';
+import { readAudioFrame } from './audioWire';
 
 export interface NativeCaptureTarget {
     outputIndex: number;
@@ -61,13 +63,6 @@ interface RustTarget {
 
 export function isNativeCaptureSupported(): boolean {
     return isTauri();
-}
-
-function base64ToBytes(b64: string): Uint8Array {
-    const binary = atob(b64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return bytes;
 }
 
 export interface NativeVideoChunk {
@@ -164,20 +159,7 @@ export async function startNativeVideo(
     };
 }
 
-// ---- system audio: same wire shape as api/appAudio.ts, standalone state ----
-
-interface ClipAudioDataEvent {
-    data: string; // base64 f32 LE PCM, interleaved
-    sample_rate: number;
-    channels: number;
-    bits_per_sample: number;
-    silent: boolean;
-    /** Which capture produced this (clip_desktop_audio.rs). Events from a
-     *  generation this handle does not own are dropped — an old capture
-     *  thread can outlive its stop signal by up to one 100ms wait, and its
-     *  tail must not feed (or error) the replacement. */
-    generation?: number;
-}
+// ---- system audio: the raw binary audio wire (audioWire.ts), standalone state ----
 
 const JITTER_S = 0.05;
 const MAX_BACKLOG_S = 0.5;
@@ -237,7 +219,7 @@ export async function startNativeSystemAudioTrack(
     onLead?: (renderAtMs: number, leadMs: number, newSegment: boolean) => void,
 ): Promise<NativeAudioHandle> {
     if (!isTauri()) throw new Error('native capture is desktop only');
-    const { invoke } = await import('@tauri-apps/api/core');
+    const { invoke, Channel } = await import('@tauri-apps/api/core');
     const { listen } = await import('@tauri-apps/api/event');
 
     const ctx = new AudioContext({ sampleRate: 48000 });
@@ -263,35 +245,35 @@ export async function startNativeSystemAudioTrack(
     // correction stays exact on both sides of it.
     const pending = new Set<AudioBufferSourceNode>();
 
-    // Set once the start resolves. Events carrying a DIFFERENT generation are
-    // another capture's (a predecessor's tail, or a successor after this one
-    // lost an ownership race) and are dropped. Events arriving before the
-    // start resolves are accepted — the worst pre-resolve mistake is <100ms
-    // of the old device's PCM into a graph nobody is recording from yet.
+    // Set once the start resolves. Messages carrying a DIFFERENT generation
+    // are another capture's (a predecessor's tail, or a successor after this
+    // one lost an ownership race) and are dropped. Messages arriving before
+    // the start resolves are accepted — the worst pre-resolve mistake is
+    // <100ms of the old device's PCM into a graph nobody is recording from
+    // yet. Each start has its own channel, so another capture's tail cannot
+    // normally arrive here at all; the generation check is the same
+    // belt-and-braces as the video wire.
     let myGeneration: number | null = null;
     const foreign = (g: number | undefined): boolean =>
         typeof g === 'number' && myGeneration !== null && g !== myGeneration;
 
-    const unlistenData = await listen<ClipAudioDataEvent>('clip-audio-data', (event) => {
+    // One raw binary message per ~100 ms of loopback audio (audioWire.ts): no
+    // base64, no JSON, no script eval carrying the samples; the planar f32
+    // goes straight into an AudioBuffer with one copyToChannel per channel. A
+    // run of packets WASAPI flagged silent carries no samples and only
+    // advances the playhead — the destination already outputs silence wherever
+    // nothing is scheduled, so nothing needs building for it.
+    const audio = new Channel<ArrayBuffer>();
+    let audioOpen = true;
+    audio.onmessage = (msg) => {
+        if (!audioOpen) return;
         try {
-            if (foreign(event.payload.generation)) return;
-            const { data, sample_rate, channels } = event.payload;
-            const bytes = base64ToBytes(data);
-            const interleaved = new Float32Array(bytes.buffer, 0, Math.floor(bytes.byteLength / 4));
-            const frames = Math.floor(interleaved.length / channels);
-            if (frames === 0) return;
-            const buf = ctx.createBuffer(channels, frames, sample_rate);
-            for (let ch = 0; ch < channels; ch++) {
-                const chan = buf.getChannelData(ch);
-                for (let i = 0; i < frames; i++) chan[i] = interleaved[i * channels + ch];
-            }
-            const src = ctx.createBufferSource();
-            src.buffer = buf;
-            src.connect(dest);
+            const f = readAudioFrame(msg);
+            if (!f || foreign(f.generation)) return;
             const now = ctx.currentTime;
-            // Context time a NEW segment's lead governs from, when this packet
-            // starts one: where the old content ended (an underrun's silence
-            // began there), or now (a reset stops the backlog now).
+            // Context time a NEW segment's lead governs from, when this
+            // message starts one: where the old content ended (an underrun's
+            // silence began there), or now (a reset stops the backlog now).
             let segmentFrom: number | null = null;
             if (playhead < now + 0.01) { // prime / recover from underrun
                 segmentFrom = playhead > 0 ? playhead : now;
@@ -302,10 +284,17 @@ export async function startNativeSystemAudioTrack(
                 segmentFrom = now;
                 playhead = now + JITTER_S;
             }
-            pending.add(src);
-            src.onended = () => { pending.delete(src); };
-            src.start(playhead);
-            // THE SCHEDULING LEAD is A/V error. This packet was captured up to
+            if (f.planar) {
+                const buf = ctx.createBuffer(f.channels, f.frames, f.sampleRate);
+                for (let ch = 0; ch < f.channels; ch++) buf.copyToChannel(f.planar[ch], ch);
+                const src = ctx.createBufferSource();
+                src.buffer = buf;
+                src.connect(dest);
+                pending.add(src);
+                src.onended = () => { pending.delete(src); };
+                src.start(playhead);
+            }
+            // THE SCHEDULING LEAD is A/V error. This audio was captured up to
             // now, and renders `playhead - now` later: JITTER_S at a prime,
             // then whatever the gap between the capture device's clock and
             // this context's clock has accumulated, up to MAX_BACKLOG_S. The
@@ -313,6 +302,19 @@ export async function startNativeSystemAudioTrack(
             // this figure a clip's system audio lands late by the lead — 100
             // to 200 ms, and drifting within one session, measured 2026-09-21
             // by e2e/clip-av-emulation.mjs.
+            //
+            // MEASURED PER WASAPI PACKET, AS IT ALWAYS WAS. The shell used to
+            // send every 10 ms packet the moment it read it, so each packet was
+            // one sample of this lead. It now holds a batch's packets until the
+            // last is read (clip_audio_wire.rs) and lists them: each one's
+            // frames, and how long before the send it was read (`ageUs`). A
+            // packet renders as many frames after the playhead as precede it
+            // in the message, and would have arrived `ageUs` sooner, so the
+            // loop below takes exactly the samples the one-packet wire gave,
+            // in the same order, under the same rule — the measure, and the
+            // bias NATIVE_AUDIO_OFFSET_US was calibrated with, unchanged. A
+            // silent run is measured the same way: its silence occupies the
+            // render timeline exactly as sound would.
             //
             // ONE LEAD PER SEGMENT, NOT PER PACKET. Between two primes the
             // playhead advances by exactly each packet's duration, so render
@@ -328,20 +330,29 @@ export async function startNativeSystemAudioTrack(
             // arrived late show less, never more), so after its start only
             // growth is reported, which is also how a slowly drifting clock
             // is followed.
-            const leadMs = (playhead - now) * 1000;
             const epochNow = performance.timeOrigin + performance.now();
-            if (segmentFrom !== null) {
-                segLeadMs = leadMs;
-                onLead?.(epochNow + (segmentFrom - now) * 1000, leadMs, true);
-            } else if (leadMs >= segLeadMs + LEAD_STEP_MS) {
-                segLeadMs = leadMs;
-                onLead?.(epochNow + leadMs, leadMs, false);
+            let into = 0;
+            for (let k = 0; k < f.packets.length; k++) {
+                const p = f.packets[k];
+                const renderInMs = (playhead + into / f.sampleRate - now) * 1000;
+                const leadMs = renderInMs + p.ageUs / 1000;
+                if (k === 0 && segmentFrom !== null) {
+                    segLeadMs = leadMs;
+                    onLead?.(epochNow + (segmentFrom - now) * 1000, leadMs, true);
+                } else if (leadMs >= segLeadMs + LEAD_STEP_MS) {
+                    segLeadMs = leadMs;
+                    onLead?.(epochNow + renderInMs, leadMs, false);
+                }
+                into += p.frames;
             }
-            playhead += buf.duration;
+            playhead += f.frames / f.sampleRate;
         } catch (err) {
-            console.warn('[nativeCapture] Dropped malformed desktop-audio chunk:', err);
+            console.warn('[nativeCapture] Dropped malformed desktop-audio message:', err);
         }
-    });
+    };
+    // The page's end of the channel is released when the shell drops its end
+    // — when the capture's thread ends, or at once for a refused start.
+    const unlistenData = () => { audioOpen = false; };
     const unlistenError = onError
         ? await listen<{ message?: string; generation?: number }>(
             'clip-audio-capture-error',
@@ -386,7 +397,7 @@ export async function startNativeSystemAudioTrack(
         // reply, not skew.
         const reply = await invoke<{ device_name?: unknown; generation?: unknown }>(
             'start_clip_desktop_audio',
-            { deviceName: deviceName ?? null },
+            { deviceName: deviceName ?? null, onAudio: audio },
         );
         started = true;
         capturedName = typeof reply?.device_name === 'string' && reply.device_name

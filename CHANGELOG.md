@@ -4,6 +4,20 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Improved
+- **Clips cost the app less while they listen to your PC's sound.** With the
+  clip buffer armed, the sound your PC plays reached the app about a hundred
+  times a second, each time as text: converted to base64, wrapped in a
+  script, run on the app's main thread and converted back, even while
+  Windows was reporting silence. It now arrives as raw bytes ten times a
+  second, and silence arrives as a few bytes that only say how long it
+  lasted. In a test page that replays both, the app's main thread spent
+  about 12 ms a second on it instead of 20 while sound played, and 1.5 ms
+  instead of 16 while it was silent. Clips sound the same and stay in sync
+  with the picture.
+
 ## 0.9.833 — 2026-10-03
 
 Poker and Blackjack in voice calls, like Discord's Activities: start one from the rocket button, everyone in the call sees it and can join or watch.

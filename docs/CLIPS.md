@@ -317,8 +317,8 @@ H.264 encoder directly (`frontend/src-tauri/src/clip_capture.rs`) — the exact
 same no-gesture, no-picker primitive the unattended remote-desktop agent
 uses, not a variant of `getDisplayMedia` (which can never be made
 picker-free — Chromium always draws the source dialog). System audio is
-classic WASAPI loopback (`clip_desktop_audio.rs`, a separate module/event
-name from the per-app "game audio" capture so a live screen share using that
+classic WASAPI loopback (`clip_desktop_audio.rs`, a separate module and wire
+from the per-app "game audio" capture so a live screen share using that
 feature is unaffected). Mic capture is unchanged (`getUserMedia` already
 needs no picker).
 
@@ -431,7 +431,7 @@ needs no picker).
   the page as one raw binary message on the Channel `start_clip_video_capture`
   was given (`clip_capture.rs` `chunk_frame`, read by `chunkWire.ts`; it used
   to be a base64 JSON event, ~1.3 MB/s of decoding on the main thread). The
-  frame carries the capture generation (as `clip-audio-data` does) and
+  frame carries the capture generation (as every audio message does) and
   `startNativeVideo` drops any
   other capture's chunks, so the old capture's tail after "Restart
   buffer" never reaches the new ring; as a backstop, a video timestamp
@@ -440,6 +440,81 @@ needs no picker).
   5 s of samples, puca.log gets `[stream-diag] clip-av video-origin=..
   shift=.. legacy-late=..` (again if the shift moves 10 ms), where
   `legacy-late` is how much later the old code placed the audio.
+- **The desktop-audio wire (2026-10-04).** The loopback PCM reaches the
+  page on its own raw binary Channel, handed over by
+  `start_clip_desktop_audio` (`onAudio`) — the same move 0.9.820 made for
+  video. It used to be a Tauri event per WASAPI packet: ~100 a second, each
+  10 ms of interleaved f32 base64-encoded inside a JSON payload inside an
+  evaluated script, which the page's main thread then ran through `atob`, a
+  byte loop and a de-interleave loop before building an AudioBuffer and a
+  source; packets Windows flagged silent were sent as zeros and played.
+  Now (`clip_audio_wire.rs` `AudioBatcher` / `audio_frame`, read by
+  `audioWire.ts`):
+  - **~100 ms a message** (`BATCH_MS`: a message goes once it holds 100 ms,
+    so ten 10 ms packets; a part-filled one after 20 ms with no packet).
+    Batching is the point, not just the missing base64: tauri sends a raw
+    message of 1 KiB or more as an eval plus a fetch round trip
+    (`ipc/channel.rs`), and the page pays for the round trip, not the bytes —
+    about 1 ms of its main thread each in headless Edge, measured 2026-10-04
+    (`fetch` alone, with nothing done with the bytes, was 95% of the cost). At
+    40 ms a message, the size first planned, the binary wire cost the page MORE
+    than the base64 event it replaced whenever sound played; at 100 ms it
+    costs less. The batch is held up to 90 ms longer in the shell, and the
+    lead (below) puts every ms of that back.
+  - **Planar f32** after a little-endian header (version, flags,
+    generation, rate, channels, frames, packet count) and a table of the
+    WASAPI packets the message holds (each one's frames, and how long before
+    the send it was read), so each channel goes into the AudioBuffer with one
+    `copyToChannel` from a view of the message itself. Rate and channel count
+    are per message and honoured: WASAPI's autoconvert gives this capture
+    48 kHz stereo, but nothing downstream relies on it (44.1 kHz, 5.1 and 7.1
+    are tested on both sides).
+  - **A run of WASAPI-silent packets carries no samples** (flag bit 0), only
+    the header and its packet table. The page schedules nothing for it and
+    moves the playhead on by exactly that much, so silence costs ~nothing and
+    the sound after it lands where it would have; a message never mixes sound
+    and silence or two formats (a change sends what is pending first).
+  - **The lead is measured as before, packet by packet.** On the one-packet
+    wire every packet was one sample of the lead, and the page reported a
+    segment's lead whenever a sample beat the last report by 5 ms. A batch
+    holds its packets until its last is read, so it lists them with their
+    ages; nativeCapture walks that list, adds each age back, and takes exactly
+    the samples the old wire gave, in the same order, under the same rule —
+    the measure `NATIVE_AUDIO_OFFSET_US` was calibrated on. The real latency a
+    batch adds (up to 90 ms) is therefore in the lead, and the clip worker and
+    the mic delay correct for it. (Sending one packet's age per message —
+    the last packet's, or the one that would have shown the most lead — was
+    tried first: it takes the same maximum but reports it at different
+    points than the per-packet rule, so the table is what makes the measure
+    the same one, not just a similar one.)
+    Under `clip-av-emulation.mjs` (2026-10-04, four sessions each, interleaved
+    with the old wire): 0 audio-timeline misfits on both, the sound after a
+    1.6 s silent run exactly that much later, and the clip's system audio
+    23.3 ms late on average (1.6 to 33.7) where the old wire gave 21.8 (13.7
+    to 25.5). The average is the same within a couple of ms; the spread is
+    wider, and stays within about half an AAC frame (±10.7 ms: replayWorker.ts
+    keeps an entry at its predecessor's offset until its target moves that
+    far) of where the old wire's runs landed. Why batching widens it was not pinned down: it
+    persisted with all three ways of sending the lead, and disappeared with
+    one packet per message. A flash and a click through the real app is
+    still the only measure of the real total.
+  - **Lifecycle.** Each start has its own Channel; the capture thread owns
+    the shell's end and drops it when it ends (a refused start drops it at
+    once), which unregisters the page's end. A stopped handle ignores what
+    is still in flight. A page reload is the same as for video: the new
+    page's `reset_capture_state` ends the capture. There is no back-pressure
+    beyond what the event had: a stalled page leaves messages queued in the
+    shell (~0.4 MB/s of PCM, where the event queued ~0.5 MB/s of script), and
+    the page's drift reset drops any backlog over MAX_BACKLOG_S when it
+    resumes.
+  Proved by `clip_audio_wire.rs`'s tests and `src/tests/audioWire.test.ts`
+  (one byte fixture, `src/tests/fixtures/clip-audio-wire.json`, built by
+  the Rust side and read by the page's), `nativeCaptureAudioWire.test.ts`
+  (the lead of a batch, silence, any format), `nativeCaptureAudioChannel.test.ts`
+  (tauri's real `Channel`: no callback outlives its capture across restarts,
+  and a silent run that overtakes the batch before it still plays in
+  order), and `e2e/clip-av-emulation.mjs`, whose emulated shell now batches
+  the same way and whose fourth run sends 1.6 s of silence with no samples.
 - **Indicator**: `armNative()` fires the roster "buffering" badge, the
   local status pill AND the tray tooltip ("Púca — clip buffer armed
   (recording your fullscreen app / primary monitor)",

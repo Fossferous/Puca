@@ -9,8 +9,13 @@
 //    (READBACK_LAG_MS), and delivering it over IPC with jitter (VIDEO_IPC_MS).
 //    The frames are a real H.264 Annex-B stream (a flash at a known frame).
 //  - `start_clip_desktop_audio`: WASAPI loopback packets of 10 ms of f32
-//    stereo PCM, delivered a WASAPI period plus IPC after their last sample
-//    (AUDIO_DELIVERY_MS), silence except a 1 kHz burst at a known instant.
+//    stereo PCM, each read a WASAPI period plus IPC after its last sample
+//    (AUDIO_DELIVERY_MS), a quiet tone except a 1 kHz burst at a known
+//    instant, batched the way the shell batches them (clip_audio_wire.rs
+//    AudioBatcher: ~100 ms a message, planar, a run of WASAPI-silent packets
+//    as a message with no samples, every packet listed with how long before
+//    the send it was read) and delivered as raw binary messages on the Channel the
+//    start was handed — each when the packet that completes it is read.
 //  - the generation on every event, `stop_*` with a generation, the tray and
 //    stream-diag commands (the `clip-av` line is captured for the report).
 //
@@ -40,6 +45,12 @@
         // The MIC leg (main.ts builds it): a burst at this flash's present.
         micBurstFrame: 330,
         burstMs: 30,
+        // Stretches of desktop audio WASAPI flags SILENT, in ms relative to the
+        // first burst ([[from, to]]): the shell sends them as messages with
+        // no samples that only advance the page's playhead. [] = none.
+        silentAroundBurst0: [],
+        // The shell's batch target (clip_audio_wire.rs BATCH_MS).
+        batchMs: 100,
         // A continuous tone UNDER everything (below the 0.1 onset threshold
         // the harness uses for the bursts). Silence cannot show a broken
         // timeline — a gap in silence is silence — so without this the
@@ -68,6 +79,10 @@
     // (when - currentTime, ms) it was scheduled with. nativeCapture's loopback
     // context is the only caller, so this is its scheduling lead over time.
     const leads = [];
+    // Silence delivered as messages with no samples so far, s: a start that
+    // follows one is chained to the previous source by it (main.ts primes).
+    const silence = { s: 0, messages: 0, bytes: 0, packets: 0 };
+    const wire = { messages: 0, bytes: 0, packets: 0 };
     // PROBE: every ramp scheduled on a DelayNode's delayTime (replayBuffer's
     // mic-leg delay is the only DelayNode in the page). Each ramp is a
     // stretch where the mic is read faster or slower than real time — an
@@ -92,20 +107,11 @@
     AudioBufferSourceNode.prototype.start = function (when) {
         // The harness's own mic context (main.ts installMic tags it) schedules
         // its burst seconds ahead; that is not a loopback lead.
-        if (typeof when === 'number' && !this.context.__avMic) leads.push({ at: performance.now(), leadMs: (when - this.context.currentTime) * 1000, state: this.context.state, when, dur: this.buffer ? this.buffer.duration : 0 });
+        if (typeof when === 'number' && !this.context.__avMic) leads.push({ at: performance.now(), leadMs: (when - this.context.currentTime) * 1000, state: this.context.state, when, dur: this.buffer ? this.buffer.duration : 0, silentS: silence.s });
         return origStart.apply(this, arguments);
     };
 
-    function emit(event, payload) {
-        const ls = listeners.get(event);
-        if (!ls) return;
-        for (const cbId of ls.values()) {
-            const fn = callbacks.get(cbId);
-            if (fn) fn({ event, id: cbId, payload });
-        }
-    }
     const jitter = ([lo, hi]) => lo + Math.random() * (hi - lo);
-    const b64 = (u8) => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
 
     // ---- video: the pre-encoded access units, on the emulated agent's clock.
     // Delivered as the shell delivers them: one raw binary message per access
@@ -145,34 +151,79 @@
         return st;
     }
 
-    // ---- audio: 10 ms WASAPI packets on the same clock
-    function startAudio(generation, burstsAtMs) {
+    // ---- audio: 10 ms WASAPI packets on the same clock, batched as the shell
+    // batches them and sent on the Channel the start was handed. One message
+    // (clip_audio_wire.rs audio_frame): a 24-byte header, the packet table
+    // (each packet's frames and how long before the send it was read), then
+    // planar f32, or nothing for a silent run.
+    function audioFrame(generation, silent, packets, planes) {
+        const { sampleRate, channels } = cfg;
+        const frames = packets.reduce((n, p) => n + p.frames, 0);
+        const at = 24 + 8 * packets.length;
+        const b = new ArrayBuffer(at + (silent ? 0 : channels * frames * 4));
+        const v = new DataView(b);
+        v.setUint8(0, 1); v.setUint8(1, silent ? 1 : 0);
+        v.setBigUint64(2, BigInt(generation), true);
+        v.setUint32(10, sampleRate, true); v.setUint16(14, channels, true);
+        v.setUint32(16, frames, true); v.setUint32(20, packets.length, true);
+        packets.forEach((p, k) => { v.setUint32(24 + 8 * k, p.frames, true); v.setUint32(28 + 8 * k, p.ageUs, true); });
+        if (!silent) for (let c = 0; c < channels; c++) new Float32Array(b, at + c * frames * 4, frames).set(planes[c].subarray(0, frames));
+        return b;
+    }
+    function startAudio(generation, burstsAtMs, channelId) {
         const st = { stopped: false, timer: null, a0: performance.now() + 5, n: 0 };
         const { sampleRate, channels, packetFrames } = cfg;
+        const batchFrames = Math.floor(sampleRate * cfg.batchMs / 1000);
+        let index = 0;
+        const send = (buf) => { const fn = callbacks.get(channelId); if (fn) fn({ index: index++, message: buf }); };
+        // The batch being filled (AudioBatcher's Pending).
+        let pend = null;
+        const planes = Array.from({ length: channels }, () => new Float32Array(batchFrames + packetFrames));
+        const flush = (now) => {
+            if (!pend) return;
+            const packets = pend.reads.map(r => ({ frames: r.frames, ageUs: Math.max(0, Math.round((now - r.at) * 1000)) }));
+            const buf = audioFrame(generation, pend.silent, packets, planes);
+            wire.messages++; wire.bytes += buf.byteLength;
+            if (pend.silent) { silence.s += pend.frames / sampleRate; silence.messages++; silence.bytes += buf.byteLength; silence.packets += packets.length; }
+            pend = null;
+            send(buf);
+        };
         const inBurst = (t) => { for (const b of burstsAtMs) if (t >= b && t < b + cfg.burstMs) return t - b; return -1; };
+        const b0 = burstsAtMs[0];
+        const isSilent = (t) => cfg.silentAroundBurst0.some(([from, to]) => t >= b0 + from && t < b0 + to);
         const tick = () => {
             if (st.stopped) return;
             const now = performance.now();
-            // Every packet whose last sample is at least AUDIO_DELIVERY behind now.
+            // Every packet whose last sample is at least AUDIO_DELIVERY behind
+            // now is read now.
             for (;;) {
                 const firstAt = st.a0 + (st.n * packetFrames * 1000) / sampleRate;
                 const lastAt = firstAt + (packetFrames * 1000) / sampleRate;
                 if (lastAt + st.nextDelay > now) break;
-                const pcm = new Float32Array(packetFrames * channels);
-                for (let i = 0; i < packetFrames; i++) {
-                    const t = firstAt + (i * 1000) / sampleRate;
-                    const dt = inBurst(t);
-                    const tone = cfg.toneAmp * Math.sin(2 * Math.PI * cfg.toneHz * (st.n * packetFrames + i) / sampleRate);
-                    const v = dt >= 0 ? 0.5 * Math.sin(2 * Math.PI * 1000 * dt / 1000) : tone;
-                    for (let c = 0; c < channels; c++) pcm[i * channels + c] = v;
+                const silent = isSilent(firstAt);
+                // A change of silent/sound sends what is pending first, as the
+                // shell does (it waited for this packet to see the change).
+                if (pend && pend.silent !== silent) flush(now);
+                if (!pend) pend = { silent, frames: 0, reads: [] };
+                // Each packet's frames and read time (AudioBatcher::push).
+                pend.reads.push({ frames: packetFrames, at: now });
+                if (!silent) {
+                    for (let i = 0; i < packetFrames; i++) {
+                        const t = firstAt + (i * 1000) / sampleRate;
+                        const dt = inBurst(t);
+                        const tone = cfg.toneAmp * Math.sin(2 * Math.PI * cfg.toneHz * (st.n * packetFrames + i) / sampleRate);
+                        const v = dt >= 0 ? 0.5 * Math.sin(2 * Math.PI * 1000 * dt / 1000) : tone;
+                        for (let c = 0; c < channels; c++) planes[c][pend.frames + i] = v;
+                    }
                 }
-                emit('clip-audio-data', {
-                    data: b64(new Uint8Array(pcm.buffer)), sample_rate: sampleRate, channels, bits_per_sample: 32,
-                    silent: false, generation,
-                });
+                pend.frames += packetFrames;
+                wire.packets++;
+                if (pend.frames >= batchFrames) flush(now);
                 st.n++;
                 st.nextDelay = jitter(cfg.audioDeliveryMs);
             }
+            // The shell sends a part-filled batch after a 20 ms wait with no
+            // packet; here packets never stop, so that only matters at stop.
             st.timer = setTimeout(tick, 2);
         };
         st.nextDelay = jitter(cfg.audioDeliveryMs);
@@ -223,7 +274,8 @@
                     const generation = ++audioGen;
                     const t = window.__AV_TRUTH__;
                     if (!t) throw new Error('video must start before audio in this emulation');
-                    audio = startAudio(generation, t.bursts.map(b => b.burstAt));
+                    if (!args.onAudio || typeof args.onAudio.id !== 'number') throw new Error('start_clip_desktop_audio needs an onAudio Channel');
+                    audio = startAudio(generation, t.bursts.map(b => b.burstAt), args.onAudio.id);
                     return { device_name: 'Emulated loopback', generation };
                 }
                 case 'stop_clip_desktop_audio': {
@@ -236,5 +288,5 @@
             }
         },
     };
-    window.__AV_EMU__ = { log, diag, params: cfg, leads, delayRamps, presented: () => (video ? video.presented : []) };
+    window.__AV_EMU__ = { log, diag, params: cfg, leads, delayRamps, silence, wire, presented: () => (video ? video.presented : []) };
 })();
