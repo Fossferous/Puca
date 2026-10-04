@@ -22,10 +22,17 @@
  * budget, a 2-minute clip at the default preset made a phone download ~24 MB
  * before its first frame (6–26 s on the measured links, 2026-10-04). The seal
  * therefore cuts media part 1 after ONE fragment (one 2 s keyframe interval),
- * part 2 after two, then four, then eight, and only then packs to the budget:
- * playback starts after a few MB, and each next part arrives while the
- * previous one plays. `fitPartCount` undoes the ramp for the rare clip it
- * would push past the 64-part reference limit.
+ * part 2 after two, then four, then eight, and only then packs to the budget,
+ * so playback CAN start after a few MB. Each part is twice as long as the one
+ * before, so it only arrives while the previous one plays on a link of at
+ * least TWICE the clip's bitrate; on a slower one, starting on part 1 alone
+ * froze the clip at 0:02, 0:06, 0:14 and 0:30 (12 Mbit/s for an 8.9 Mbit/s
+ * clip, measured 2026-10-04). The player therefore holds the start until the
+ * throughput it measures says the first ~40 s will not stall
+ * (clipPlayback.ts `startBytesNeeded`): ~8 s there, against ~17 s for the
+ * same footage cut flat, and nothing extra on a link of twice the bitrate.
+ * `fitPartCount` undoes the ramp for the rare clip it would push past the
+ * 64-part reference limit.
  */
 
 /** Fragments in media parts 1, 2, 3, 4 (then the byte budget alone). The

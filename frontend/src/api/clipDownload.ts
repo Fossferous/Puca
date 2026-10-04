@@ -5,14 +5,16 @@
  * like any attachment (saveAttachment) — the native `attachment_save` command
  * in the desktop shell, a transient anchor in a browser.
  *
- * The Android app STREAMS instead: each part is fetched, decrypted and written
- * to Documents/Puca in bounded slices before the next part is fetched
- * (forEachClipPart + saveStreamToDevice). Building the whole clip and handing
- * it to the filesystem plugin in one piece is what closed the app on Download:
- * a 2-minute 1080p clip is ~92 MB, one 128 MB string over the Capacitor
- * bridge, OutOfMemoryError on the UI thread. Now the phone holds about one
- * part (≤ 24 MiB) and each bridge message is ≤ 4 MiB, whatever the clip's
- * length.
+ * The Android app STREAMS instead: parts are fetched, decrypted and written
+ * to Documents/Puca in order, in bounded slices, the NEXT part downloading
+ * while this one is written and the one after not requested until that write
+ * returned (forEachClipPart + saveStreamToDevice). Building the whole clip
+ * and handing it to the filesystem plugin in one piece is what closed the
+ * app on Download: a 2-minute 1080p clip is ~92 MB, one 128 MB string over
+ * the Capacitor bridge, OutOfMemoryError on the UI thread. Now the phone
+ * holds at most two parts (≤ 48 MiB of plaintext; see forEachClipPart for
+ * the transient peak while the next one is decrypted) and each bridge
+ * message is ≤ 4 MiB, whatever the clip's length.
  *
  * Lives OUTSIDE api/clips on purpose: that directory may not reach any
  * file-writing API (clipNoDiskWrite.test.ts), and this is the module that

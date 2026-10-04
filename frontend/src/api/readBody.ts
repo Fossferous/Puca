@@ -10,6 +10,17 @@
  * /files streams chunked today and sends none, so callers that want a
  * fraction must supply their own estimate; the number of bytes received is
  * always exact.
+ *
+ * Memory: the chunks and the one buffer they are joined into exist together
+ * for a moment, so a body costs about twice its size at its peak (the same
+ * as decrypting it, which holds the sealed and the opened copy at once).
+ *
+ * DevTools — and CDP, so Playwright's `requestfailed` — may list a request
+ * read this way as FAILED, `net::ERR_ABORTED`, although every byte arrived.
+ * It is not an abort: a probe (2026-10-04) saw it come and go with response
+ * headers alone (never with arrayBuffer()), every body complete, and the next
+ * request reuse the same keep-alive connection; and a clip part that lost a
+ * byte would fail its AES-GCM check, not play. Do not chase it.
  */
 export type BytesProgress = (received: number, total: number | null) => void;
 

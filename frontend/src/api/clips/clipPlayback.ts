@@ -6,7 +6,10 @@
  *                evicting what is more than ~12 s BEHIND it (KEEP_BEHIND_S)
  *                and retrying a QuotaExceededError after freeing behind.
  *                `attach()` resolves as soon as the first media part is in
- *                (playable), not after the whole clip. Why: a SourceBuffer
+ *                (playable) — or, on a link under about twice the clip's
+ *                bitrate, once enough more is in that the first ~40 s will
+ *                not stall (the start-up gate, `startBytesNeeded`) — never
+ *                after the whole clip. Why: a SourceBuffer
  *                has a browser quota (~150 MB video on desktop Chromium,
  *                less on phones) and the first version appended EVERYTHING
  *                up front — a 257 MB 1440p clip failed for every viewer with
@@ -29,8 +32,8 @@
 import { API_BASE_URL } from '../config';
 import { getToken } from '../auth';
 import { readBodyBytes, type BytesProgress } from '../readBody';
-import { openPart, type ClipSecrets, uuidToBytes } from './clipCrypto';
-import { partIndexForTime, type ClipManifest } from './clipRef';
+import { openPart, PART_HEADER_BYTES, PART_MAX_PLAINTEXT, PART_TAG_BYTES, type ClipSecrets, uuidToBytes } from './clipCrypto';
+import { partIndexForTime, partStartMs, type ClipManifest } from './clipRef';
 
 export type ClipPlaybackMode = 'mse' | 'blob' | 'unsupported';
 
@@ -49,6 +52,8 @@ export interface PlaybackEnv {
     hasMediaSource: boolean;
     isTypeSupported: (type: string) => boolean;
     blobCapBytes?: number;
+    /** Milliseconds, for the start-up gate's throughput (default performance.now). */
+    now?: () => number;
 }
 
 export function mseType(m: ClipManifest, videoCodec: string): string {
@@ -107,6 +112,58 @@ export function estimatePartBytes(m: ClipManifest, index: number): number {
     return Math.round(media * share);
 }
 
+/**
+ * THE START-UP GATE: how many sealed bytes, counted from the first byte of
+ * the part the playhead starts in, must be in hand before playback starts, so
+ * that no part within `horizonMs` of the start arrives after the playhead
+ * needs it.
+ *
+ * Parts download one after another (the pump fetches the next only once the
+ * previous is in), so with `inHand` bytes received and the link carrying
+ * `bytesPerMs`, part k is complete after (cum_k - inHand) / bytesPerMs, and
+ * the playhead reaches it after the media before it has played. Playback can
+ * start once inHand >= cum_k - bytesPerMs * before_k for every k in the
+ * horizon; the k = 0 term is the whole first part, which is all the old
+ * player ever waited for.
+ *
+ * Why it exists: new clips are sealed with a RAMP of small first parts
+ * (fmp4Split PART_RAMP_FRAGMENTS, each twice as long as the last), and part
+ * k+1 must then download within part k's play time — a link of at least
+ * TWICE the clip's bitrate. Between one and two times, starting on the first
+ * part alone froze a 1440p clip (8.9 Mbit/s) on a 12 Mbit/s link at 0:02,
+ * 0:06, 0:14 and 0:30 (measured 2026-10-04). The gate turns those stalls into
+ * one shorter wait up front (~8 s there, against ~17 s for the same footage
+ * cut flat), and costs nothing on a link of twice the bitrate or more, nor
+ * for a clip cut flat on a link at least as fast as its bitrate.
+ *
+ * `capBytes` bounds it: on a link SLOWER than the clip's bitrate no start
+ * avoids stalls, and the gate never waits for more than a flat cut's first
+ * part would have made the viewer wait for. `bytesPerMs` null (nothing
+ * measured yet) asks for the first part only. `offsetMs` is how far into the
+ * first part the playhead starts (a scrub before the first play).
+ */
+export function startBytesNeeded(
+    sizes: readonly number[],
+    durMs: readonly number[],
+    bytesPerMs: number | null,
+    horizonMs: number,
+    capBytes: number,
+    offsetMs = 0,
+): number {
+    const first = sizes[0] ?? 0;
+    // Nothing measured yet, or a link too fast to time: the first part only.
+    if (bytesPerMs === null || !Number.isFinite(bytesPerMs) || bytesPerMs <= 0) return first;
+    let cum = 0;
+    let before = 0; // media (ms) the playhead plays before reaching part k
+    let need = first;
+    for (let k = 0; k < sizes.length && before < horizonMs; k++) {
+        cum += sizes[k];
+        need = Math.max(need, cum - bytesPerMs * before);
+        before = Math.max(0, before + (durMs[k] ?? 0) - (k === 0 ? offsetMs : 0));
+    }
+    return Math.max(first, Math.min(need, capBytes));
+}
+
 function secretsOf(m: ClipManifest): ClipSecrets {
     return { key: m.key, noncePrefix: m.noncePrefix, clipId: uuidToBytes(m.clipId) };
 }
@@ -147,6 +204,15 @@ export async function downloadClipBytes(
  * plaintext), never the whole clip — the phone's Download uses this
  * (api/clipDownload.ts), where building a whole clip and pushing it through
  * the Capacitor bridge in one piece killed the app.
+ *
+ * The transient peak is higher than the plaintext: while part i is written,
+ * part i+1 briefly exists twice — its chunks and their joined copy
+ * (readBodyBytes), then its sealed and opened copies (openPart) — so about
+ * three parts, ~72 MiB plus the ≤ 4 MiB bridge slice, against ~48 MiB when
+ * the next part waited for the write (estimated from the code, not
+ * measured). Still bounded whatever the clip's length, and it is renderer
+ * memory: the 0.9.831 crash was the bridge's whole-clip string on the Java
+ * side, and each bridge message stays ≤ 4 MiB.
  *
  * Why one part ahead and not zero: on a phone `onPart` is the bridge write
  * (base64 + JSON + a file append, ~10 MB/s on the measured emulator), and
@@ -192,14 +258,16 @@ export async function forEachClipPart(
 }
 
 /** Bytes received toward the first playable moment, and about how many that
- *  takes (`needed` is an estimate until each part's real size is known; it
- *  never falls below `loaded`). */
+ *  takes (`needed` is an estimate until each part's real size is known, and
+ *  includes what the start-up gate asks for at the throughput measured so
+ *  far, so it moves as that does; it never falls below `loaded`). */
 export interface ClipLoadProgress { loaded: number; needed: number }
 
 export interface ClipPlayerHandle {
     mode: ClipPlaybackMode;
-    /** Resolves once the clip is PLAYABLE (init + first media part appended),
-     *  not once it is fully loaded; later parts stream in behind the playhead. */
+    /** Resolves once the clip is PLAYABLE (init + first media part appended,
+     *  and the start-up gate met: startBytesNeeded), not once it is fully
+     *  loaded; later parts stream in behind the playhead. */
     attach(el: HTMLVideoElement): Promise<void>;
     destroy(): void;
     /** A failure AFTER attach() resolved (a later part 404s, an unrecoverable
@@ -231,22 +299,66 @@ export function createClipPlayer(m: ClipManifest, env: PlaybackEnv = defaultEnv(
     const decrypted = new Map<number, Promise<Uint8Array>>();
     const handle: ClipPlayerHandle = { mode, attach, destroy };
 
-    // ---- load progress, until the clip is playable ---------------------------
-    // MSE plays once the init part and the part the playhead is waiting for
-    // are in (the first media part, unless the viewer already scrubbed); the
-    // blob fallback needs every part.
-    const allParts = m.parts.map((_, i) => i);
-    const startParts = () => (mode === 'blob' ? allParts : nextIdx < m.parts.length ? [0, nextIdx] : [0]);
+    // ---- load progress and the start-up gate, until the clip is playable -----
+    // MSE plays once the init part and enough of the run that starts at the
+    // part the playhead is waiting for are in (startBytesNeeded: the first
+    // media part, or more on a link under twice the clip's bitrate); the blob
+    // fallback needs every part.
+    const now = env.now ?? (() => performance.now());
     const received = new Map<number, number>();
     const knownSize = new Map<number, number>();
+    const sizeOf = (i: number) => Math.max(received.get(i) ?? 0, knownSize.get(i) ?? estimatePartBytes(m, i));
     let playable = false;
+    /** When the first media part was requested: the throughput the gate
+     *  predicts with is every media byte received since, over the time since
+     *  (so it includes each part's request round trip and decryption). */
+    let mediaT0: number | null = null;
+    /** Until the run's first part is in, a rate over less than this is mostly
+     *  the request's round trip, and the readout asked for the 24 MiB cap
+     *  ("0.1 / 24 MB") before settling (measured 2026-10-04). */
+    const RATE_SAMPLE_MS = 1000;
+    const mediaBytesPerMs = (firstPartIn: boolean): number | null => {
+        if (mediaT0 === null) return null;
+        let got = 0;
+        for (const [i, n] of received) if (i > 0) got += n;
+        if (got <= 0) return null;
+        const ms = now() - mediaT0;
+        if (ms < RATE_SAMPLE_MS && !firstPartIn) return null;
+        return ms > 0 ? got / ms : Infinity;
+    };
+    /** The run the playhead will play from: its first part, and how far into
+     *  that part the playhead stands (a scrub before the first play). */
+    let runStart = 1;
+    let runOffsetMs = 0;
+    /** runStart's part is appended: the clip COULD play now. */
+    let runReady = false;
+    const runGate = (): { inHand: number; needed: number } => {
+        const sizes: number[] = [];
+        const durs: number[] = [];
+        let inHand = 0;
+        let contiguous = true; // every part before this one is entirely in
+        let firstPartIn = false;
+        for (let i = runStart; i < m.parts.length; i++) {
+            sizes.push(sizeOf(i));
+            durs.push(m.partDurMs[i] ?? 0);
+            const got = received.get(i) ?? 0;
+            if (contiguous) inHand += got;
+            const known = knownSize.get(i);
+            contiguous = contiguous && known !== undefined && got >= known;
+            if (i === runStart) firstPartIn = contiguous;
+        }
+        const needed = startBytesNeeded(sizes, durs, mediaBytesPerMs(firstPartIn), PLAY_AHEAD_S * 1000, PART_MAX_PLAINTEXT + PART_HEADER_BYTES + PART_TAG_BYTES, runOffsetMs);
+        return { inHand, needed: Math.max(needed, inHand) };
+    };
     const reportLoad = () => {
         if (playable || !handle.onLoadProgress) return;
         let loaded = 0, needed = 0;
-        for (const i of startParts()) {
-            const got = received.get(i) ?? 0;
-            loaded += got;
-            needed += Math.max(got, knownSize.get(i) ?? estimatePartBytes(m, i));
+        if (mode === 'blob') {
+            for (let i = 0; i < m.parts.length; i++) { loaded += received.get(i) ?? 0; needed += sizeOf(i); }
+        } else {
+            const gate = runGate();
+            loaded = (received.get(0) ?? 0) + gate.inHand;
+            needed = sizeOf(0) + gate.needed;
         }
         handle.onLoadProgress({ loaded, needed });
     };
@@ -254,10 +366,12 @@ export function createClipPlayer(m: ClipManifest, env: PlaybackEnv = defaultEnv(
     const getPart = (i: number): Promise<Uint8Array> => {
         let p = decrypted.get(i);
         if (!p) {
+            if (i > 0 && mediaT0 === null) mediaT0 = now();
             p = fetchPart(m.parts[i], abort.signal, (n, total) => {
                 received.set(i, n);
                 if (total !== null) knownSize.set(i, total);
                 reportLoad();
+                maybePlayable();
             }).then(wire => {
                 received.set(i, wire.byteLength);
                 knownSize.set(i, wire.byteLength);
@@ -340,15 +454,30 @@ export function createClipPlayer(m: ClipManifest, env: PlaybackEnv = defaultEnv(
         firstRej?.(err); firstRej = null; firstRes = null;
         handle.onError?.(err);
     };
+    const becomePlayable = () => {
+        if (!firstRes) return;
+        playable = true; firstRes(); firstRes = null; firstRej = null;
+    };
+    /** Resolve attach() once the start-up gate (startBytesNeeded) is met —
+     *  or at once if the viewer already pressed the video's own play. */
+    const maybePlayable = () => {
+        if (!firstRes || !runReady || destroyed) return;
+        if (el?.paused === false) { becomePlayable(); return; }
+        const gate = runGate();
+        if (gate.inHand >= gate.needed) becomePlayable();
+    };
 
     const pump = async (): Promise<void> => {
         while (!destroyed) {
-            if (!sb || !el || nextIdx >= m.parts.length) { await waitForWake(); continue; }
+            // Whenever the pump stops fetching, the gate opens: everything it
+            // would wait for is already in (it never asks for media more than
+            // PLAY_AHEAD_S ahead, which is also the gate's horizon).
+            if (!sb || !el || nextIdx >= m.parts.length) { if (runReady) becomePlayable(); await waitForWake(); continue; }
             const cur = el.currentTime;
             const end = bufferedEndAt(cur);
             // Enough runway, and the first part is already in: wait for the
             // playhead to move (timeupdate / seeking wake us).
-            if (end >= 0 && end - cur >= PLAY_AHEAD_S && nextIdx > 1 && !needInit) { await waitForWake(); continue; }
+            if (end >= 0 && end - cur >= PLAY_AHEAD_S && nextIdx > 1 && !needInit) { if (runReady) becomePlayable(); await waitForWake(); continue; }
             const gen = loadGen;
             const idx = nextIdx;
             let bytes: Uint8Array;
@@ -374,7 +503,8 @@ export function createClipPlayer(m: ClipManifest, env: PlaybackEnv = defaultEnv(
             }
             if (gen !== loadGen) continue;
             nextIdx = idx + 1;
-            if (firstRes) { playable = true; firstRes(); firstRes = null; firstRej = null; }
+            if (idx === runStart) runReady = true;
+            maybePlayable();
             if (nextIdx >= m.parts.length && ms && ms.readyState === 'open') { try { ms.endOfStream(); } catch { /* ignore */ } }
         }
     };
@@ -405,6 +535,8 @@ export function createClipPlayer(m: ClipManifest, env: PlaybackEnv = defaultEnv(
         // restarts the contiguous run from the part that contains the target
         // (GET /files has no Range support, so a part is the seek granularity).
         video.addEventListener('timeupdate', wake);
+        // The viewer pressed the video's own play while the gate held: theirs.
+        video.addEventListener('play', maybePlayable);
         video.addEventListener('seeking', () => {
             if (!sb || destroyed) return;
             const t = video.currentTime * 1000;
@@ -415,6 +547,9 @@ export function createClipPlayer(m: ClipManifest, env: PlaybackEnv = defaultEnv(
             try { if (sb.updating) sb.abort(); } catch { /* ignore */ }
             nextIdx = partIndexForTime(m, t);
             needInit = true;
+            // A scrub before the first play: the gate measures from here.
+            runStart = nextIdx; runReady = false;
+            runOffsetMs = Math.max(0, t - partStartMs(m, nextIdx));
             wake();
         });
         void pump();

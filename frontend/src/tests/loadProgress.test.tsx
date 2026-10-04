@@ -123,6 +123,33 @@ describe('the clip plate while a Play loads', () => {
         await settle();
         expect(container.querySelector('.clip-attachment-overlay')).toBeNull(); // playing: the readout is gone
     });
+
+    it('tells a screen reader once that the clip is loading, not every MB', async () => {
+        // The old overlay was a polite live region ("Decrypting…"); the MB
+        // readout is not one (it would speak every network chunk), and a
+        // progressbar is only read when focused.
+        const s = newClipSecrets('0000abcd-0000-4000-8000-0000000000ab');
+        const href = encodeClipRef({
+            key: s.key, noncePrefix: s.noncePrefix, clipId: '0000abcd-0000-4000-8000-0000000000ab', videoCodec: 'avc1.640029', audioCodec: 'mp4a.40.2',
+            durationMs: 120_000, width: 2560, height: 1440, totalCipherBytes: 129 * MIB,
+            parts: ['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000002'], partDurMs: [0, 120_000],
+        });
+        await act(async () => { root.render(<ClipAttachment href={href} />); });
+        const live = () => [...container.querySelectorAll('[aria-live="polite"]')];
+        // Already in the page before Play, empty, so the change is what is announced.
+        expect(live().map(e => e.textContent)).toEqual(['']);
+        const region = live()[0];
+        await act(async () => { (container.querySelector('.clip-attachment-play') as HTMLButtonElement).click(); });
+        await settle();
+        expect(live()).toEqual([region]);
+        expect(region.textContent).toBe('Loading the clip');
+        await act(async () => { player.onLoadProgress!({ loaded: 6 * MIB, needed: 24 * MIB }); });
+        expect(region.textContent).toBe('Loading the clip'); // the MB readout is not in it
+        expect(region.closest('.clip-attachment-overlay')).toBeNull();
+        await act(async () => { player.release!(); });
+        await settle();
+        expect(region.textContent).toBe('');
+    });
 });
 
 // ---- an ordinary encrypted attachment, end to end through decryptToBlobUrl ----

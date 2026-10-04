@@ -200,9 +200,15 @@ export async function trimSealedParts(
     partBudget: number,
     retireOriginal: boolean,
     /** The seal's graduated first parts (fmp4Split.PART_RAMP_FRAGMENTS), so a
-     *  trimmed clip starts playing as fast as an untrimmed one. Never pushes a
-     *  trim past `maxParts`: a trim is at most TRIM_MAX_CIPHER_BYTES (32 full
-     *  parts), and the ramp adds at most four. */
+     *  trimmed clip starts playing as fast as an untrimmed one. There is no
+     *  flat fallback here (fitPartCount): parts are sealed as they are cut.
+     *  None is needed: the ramp adds parts only where a full part holds more
+     *  fragments than a ramp step — none at one fragment per part, one at
+     *  two, at most three ever — and a part that holds two or more fragments
+     *  is about 2/3 full or more, so a trim of at most TRIM_MAX_CIPHER_BYTES
+     *  (768 MiB) stays near 50 parts with them. (At one 12+ MiB fragment per
+     *  part a 768 MiB trim can need 64 parts with or without the ramp — the
+     *  limit `maxParts` enforces either way.) */
     rampFragments: readonly number[] = [],
 ): Promise<TrimSealedResult | null> {
     const lo = Math.max(0, Math.min(startMs, endMs));

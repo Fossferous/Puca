@@ -80,7 +80,15 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
   24 MiB budget): a part is one AES-GCM unit, so a viewer can play nothing
   until all of the first one has arrived, and a full 24 MiB first part made
   a phone wait 6-26 s for a 2-minute clip's first frame (measured
-  2026-10-04; ~1 s with the ramp at 50 Mbit/s). A clip the ramp would push
+  2026-10-04; ~1 s with the ramp at 50 Mbit/s). Each ramp part is twice as
+  long as the one before, so it only arrives in time on a link of at least
+  twice the clip's bitrate; on a slower one the player holds the start until
+  the throughput it measures says the first ~40 s will not stall (the
+  start-up gate, `startBytesNeeded` in `clipPlayback.ts`), never longer than
+  one flat 24 MiB part would have taken. Measured on a 12 Mbit/s link with a
+  1440p clip (8.9 Mbit/s): starting on part 1 alone froze at 0:02, 0:06,
+  0:14 and 0:30; gated, it starts after ~8.4 s and plays straight through
+  (the same footage cut flat: 16.7 s). A clip the ramp would push
   past 64 parts is re-cut flat (`fitPartCount`), so the ramp never stops a
   clip from posting; a trim keeps the ramp too. The sealed bytes never leave the Worker before
   approval — the composer shows only metadata (duration, resolution, size)
@@ -210,7 +218,9 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
   the web it is a transient anchor. In the Android app it is STREAMED into
   `Documents/Puca/puca-clip-<id>-<timestamp>.mp4`: parts fetched, decrypted
   and written in order with the NEXT part downloading while this one is
-  written, never more than two in hand (`forEachClipPart` →
+  written, never more than two in hand (≤ 48 MiB of plaintext; ~72 MiB of
+  renderer memory at the moment the next part is decrypted;
+  `forEachClipPart` →
   `api/clipDownload.ts` → `saveStreamToDevice`; fetching only after each
   write made the link idle 4-5 s per part, 51.5 s for a 129 MB clip on the
   measured emulator), each bridge call at most
@@ -579,8 +589,8 @@ is disabled and the clip must be discarded; the upload uses
 the proposal id as its `clip_id`; the post carries `clip_id` and renders the
 server's `clip_consent`. `ClipAttachment` plays a posted clip in place (MSE,
 decrypted in the viewer's browser; the part the playhead waits for is fetched
-alone, the next one only once it is in, and the plate counts the MB it is
-waiting for) and offers Download (the original bytes, any viewer — see
+alone, the next one only once it is in, playback starts once the start-up
+gate is met, and the plate counts the MB it is waiting for) and offers Download (the original bytes, any viewer — see
 "guaranteed"; the button counts the percent received, then says Saving),
 and shows the badge only when the manifest's
 parts are a SUBSET of the stamped ids — mismatch refuses playback AND

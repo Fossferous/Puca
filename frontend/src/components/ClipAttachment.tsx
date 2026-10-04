@@ -161,6 +161,11 @@ export function ClipAttachment({ href, consent }: ClipAttachmentProps) {
                         </button>
                     </>
                 )}
+                {/* One polite announcement that Play started loading: the MB
+                    readout changes every network chunk, and a progressbar is
+                    only read when focused. Always present, so a screen reader
+                    hears the text appear. */}
+                <span className="sr-only" aria-live="polite">{state === 'loading' ? 'Loading the clip' : ''}</span>
                 {state === 'loading' && (
                     <span className="clip-attachment-overlay">
                         <span className="clip-attachment-overlay-text">{loadText}</span>
