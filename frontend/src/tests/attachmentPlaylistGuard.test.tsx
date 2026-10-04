@@ -56,8 +56,8 @@ describe('looksLikeHlsPlaylist', () => {
         expect(looksLikeHlsPlaylist(enc.encode('﻿' + PLAYLIST)), 'a UTF-8 BOM').toBe(true);
         expect(looksLikeHlsPlaylist(enc.encode(' \r\n\t' + PLAYLIST)), 'leading whitespace').toBe(true);
         expect(looksLikeHlsPlaylist(enc.encode('#extm3u\n#EXT-X-TARGETDURATION:2\n')), 'any case').toBe(true);
-        // FFmpeg's probe and GStreamer's id3demux both look past an ID3v2
-        // tag before they decide what a stream is.
+        // Media probes (FFmpeg's, for one) skip an ID3v2 tag before they
+        // decide what a stream is; refusing the playlist behind one is free.
         expect(looksLikeHlsPlaylist(cat(id3(20), enc.encode(PLAYLIST))), 'behind an ID3 tag').toBe(true);
         expect(looksLikeHlsPlaylist(cat(id3(5, true), new Uint8Array(10), enc.encode(PLAYLIST))), 'behind an ID3 tag with a footer').toBe(true);
         expect(looksLikeHlsPlaylist(cat(id3(3), id3(4), enc.encode(PLAYLIST))), 'behind two ID3 tags').toBe(true);

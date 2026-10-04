@@ -388,12 +388,13 @@ export function safeBlobType(mime: string): string {
  * Engines decide that from the BYTES, not the blob's type (see safeBlobType),
  * so the only place to stop it is here, while the plaintext is in hand.
  *
- * Chromium's own check is `#EXTM3U` at byte 0 (plus an `#EXT-X-` tag later);
- * this one is deliberately looser, since a false positive only costs a
- * player on a file that was never audio or video: any case, after a UTF-8
- * BOM, whitespace, or ID3v2 tags (FFmpeg's probe and GStreamer's id3demux both
- * look past an ID3 tag before deciding what a stream is), and with or without
- * the `#EXT-X-` tags (a plain m3u is not media either).
+ * Measured in Edge: `#EXTM3U` at byte 0 plus an `#EXT-X-` tag fetched; a
+ * plain m3u (no `#EXT-X-` tag) did not. This check is deliberately looser,
+ * since a false positive only costs a player on a file that was never audio
+ * or video: any case, after a UTF-8 BOM, whitespace, or ID3v2 tags (media
+ * probes such as FFmpeg's skip an ID3 tag before deciding what a stream is;
+ * not measured for HLS on any engine), and with or without the `#EXT-X-`
+ * tags (a plain m3u is not media either).
  */
 export function looksLikeHlsPlaylist(bytes: Uint8Array): boolean {
     let i = 0;
