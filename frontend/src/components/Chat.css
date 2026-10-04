@@ -1154,12 +1154,6 @@ button.message-attachment.error { color: #ffb4b4; }
     min-width: 0;
 }
 
-/* The page sets color-scheme: dark at the root; the light theme's native
-   controls must be the light ones or they sit as a dark slab on white. */
-[data-theme="light"] .message-audio audio {
-    color-scheme: light;
-}
-
 .message-audio .message-attachment {
     margin-top: 4px;
 }
