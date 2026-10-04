@@ -354,11 +354,15 @@ const blobCache = new Map<string, string>();
  * them costs nothing. The subtype must be a plain token; anything else — an
  * empty subtype, a space, a quote — is opaque bytes.
  *
- * Audio playlists (`audio/mpegurl`, `audio/x-mpegurl`, `audio/x-scpls`) are
- * excluded too: they are lists of OTHER URLs, and a player handed one goes and
- * fetches what it names — the sender's tracker, with the reader's IP. No
- * player in this app is ever given one (audioMimeFor never returns it), and
- * the blob type keeps it that way if some future consumer forgets to ask.
+ * Audio playlist TYPES (`audio/mpegurl`, `audio/x-mpegurl`, `audio/x-scpls`)
+ * are opaque bytes too, but that is hygiene, not the defence: the type does
+ * NOT decide whether a player treats a file as a playlist. Measured in
+ * headless Edge: HLS playlist bytes in a blob typed audio/mpeg, video/mp4,
+ * audio/x-mpegurl or application/vnd.apple.mpegurl ALL made a preload=metadata
+ * player fetch the segment URL inside, with no click — Chromium recognises
+ * the playlist from its first bytes. What keeps a playlist away from every
+ * player is `isPlaylistBlobUrl` below, which the renderers ask before they
+ * mount a <video> or <audio>.
  */
 const MEDIA_TYPE_RE = /^(image|video|audio)\/[a-z0-9][a-z0-9!#$&^_.-]*$/;
 const AUDIO_PLAYLIST_RE = /^audio\/(x-)?(mpegurl|scpls)$/;
@@ -367,6 +371,60 @@ export function safeBlobType(mime: string): string {
     if (m === 'image/svg+xml') return 'application/octet-stream';
     if (!MEDIA_TYPE_RE.test(m) || AUDIO_PLAYLIST_RE.test(m)) return 'application/octet-stream';
     return m;
+}
+
+/**
+ * Does this plaintext open as an HLS playlist (`#EXTM3U`)?
+ *
+ * A playlist is a list of OTHER URLs, and a media element handed one goes
+ * and fetches them: the sender's server learns the reader's IP and the moment
+ * they opened the channel, with no click, past "Load remote images", and the
+ * player then fails to the download chip so nothing on screen shows it.
+ * Engines decide that from the BYTES, not the blob's type (see safeBlobType),
+ * so the only place to stop it is here, while the plaintext is in hand.
+ *
+ * Chromium's own check is `#EXTM3U` at byte 0 (plus an `#EXT-X-` tag later);
+ * this one is deliberately looser, since a false positive only costs a
+ * player on a file that was never audio or video: any case, after a UTF-8
+ * BOM, whitespace, or ID3v2 tags (FFmpeg's probe and GStreamer's id3demux both
+ * look past an ID3 tag before deciding what a stream is), and with or without
+ * the `#EXT-X-` tags (a plain m3u is not media either).
+ */
+export function looksLikeHlsPlaylist(bytes: Uint8Array): boolean {
+    let i = 0;
+    for (let guard = 0; guard < 8; guard++) {
+        if (bytes[i] === 0xef && bytes[i + 1] === 0xbb && bytes[i + 2] === 0xbf) i += 3;
+        while (i < bytes.length && (bytes[i] === 0x20 || bytes[i] === 0x09 || bytes[i] === 0x0a || bytes[i] === 0x0d)) i++;
+        // ID3v2: "ID3", version (2), flags (1), size (4 bytes, 7 bits each);
+        // flag 0x10 means a 10-byte footer follows the tag.
+        if (i + 10 <= bytes.length && bytes[i] === 0x49 && bytes[i + 1] === 0x44 && bytes[i + 2] === 0x33) {
+            const size = ((bytes[i + 6] & 0x7f) << 21) | ((bytes[i + 7] & 0x7f) << 14) | ((bytes[i + 8] & 0x7f) << 7) | (bytes[i + 9] & 0x7f);
+            i += 10 + size + ((bytes[i + 5] & 0x10) ? 10 : 0);
+            continue;
+        }
+        break;
+    }
+    const sig = '#extm3u';
+    if (i + sig.length > bytes.length) return false;
+    for (let j = 0; j < sig.length; j++) {
+        const b = bytes[i + j];
+        const lower = b >= 0x41 && b <= 0x5a ? b + 0x20 : b;
+        if (lower !== sig.charCodeAt(j)) return false;
+    }
+    return true;
+}
+
+/** Blob URLs (from decryptToBlobUrl) whose plaintext is a playlist. */
+const playlistUrls = new Set<string>();
+
+/**
+ * Is `url` a decrypted attachment that must never be handed to a media
+ * element? Every renderer that would mount a <video> or <audio> for an
+ * attachment asks this first and shows the download button instead
+ * (MessageContent's EncryptedAttachment, TaskAttachments, NoteImages).
+ */
+export function isPlaylistBlobUrl(url: string | null | undefined): boolean {
+    return !!url && playlistUrls.has(url);
 }
 
 /** Concurrent mounts of the same attachment share one fetch+decrypt — a row
@@ -399,7 +457,11 @@ export async function decryptToBlobUrl(id: string, keyB64url: string, mime: stri
         const ct = buf.slice(12);
         const key = await crypto.subtle.importKey('raw', fromB64url(keyB64url) as BufferSource, 'AES-GCM', false, ['decrypt']);
         const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce as BufferSource }, key, ct as BufferSource);
-        const url = URL.createObjectURL(new Blob([pt], { type: safeBlobType(mime) }));
+        // A playlist is not media, whatever the ref says: opaque bytes, and
+        // flagged so no renderer gives it a player (looksLikeHlsPlaylist).
+        const playlist = looksLikeHlsPlaylist(new Uint8Array(pt));
+        const url = URL.createObjectURL(new Blob([pt], { type: playlist ? 'application/octet-stream' : safeBlobType(mime) }));
+        if (playlist) playlistUrls.add(url);
         blobCache.set(cacheKey, url);
         return url;
     })();
@@ -419,4 +481,5 @@ export function clearBlobCache(): void {
         URL.revokeObjectURL(url);
     }
     blobCache.clear();
+    playlistUrls.clear();
 }

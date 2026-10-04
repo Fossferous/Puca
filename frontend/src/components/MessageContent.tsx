@@ -8,7 +8,7 @@
 import React, { useState, useEffect } from 'react';
 import { parseMessage, isSafeUrl, type Node } from '../utils/messageParser';
 import { isImageUrl } from '../api/linkPreview';
-import { isEncAttachment, parseEncAttachment, decryptToBlobUrl, videoMimeFor, audioMimeFor } from '../api/attachments';
+import { isEncAttachment, parseEncAttachment, decryptToBlobUrl, videoMimeFor, audioMimeFor, isPlaylistBlobUrl } from '../api/attachments';
 import { isClipRef, isScrubbedClipRef } from '../api/clips/clipRef';
 import { ClipAttachment } from './ClipAttachment';
 import type { ClipConsent } from '../api/servers';
@@ -151,6 +151,10 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
             </span>
         );
     }
+    // A playlist (its BYTES open with #EXTM3U, whatever the ref says) never
+    // reaches a player: a <video>/<audio> handed one fetches the URLs inside
+    // on its own. It is the download chip (api/attachments.ts).
+    if (isPlaylistBlobUrl(url)) return <AttachmentDownload url={url} name={name || 'attachment'} />;
     if (videoMime && !embedFailed && !audioOnly) {
         // Inline player, same pattern TaskAttachments already uses: the
         // decrypted blob URL feeds a native <video> directly (safeBlobType

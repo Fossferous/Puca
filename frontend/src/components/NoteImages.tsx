@@ -33,7 +33,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { type TaskAttachmentRef, isAttachmentsLocked } from '../api/tasks';
-import { audioMimeFor, decryptToBlobUrl, parseEncAttachment } from '../api/attachments';
+import { audioMimeFor, decryptToBlobUrl, isPlaylistBlobUrl, parseEncAttachment } from '../api/attachments';
 import { type GalleryItem, galleryItemNoun, galleryItems } from '../api/noteMedia';
 import { isParkedRef, parseParkedRef } from '../api/parkedMedia';
 import { parkedObjectUrl } from '../api/parkedPreview';
@@ -139,7 +139,9 @@ function AudioClip({ refItem, folder }: { refItem: TaskAttachmentRef; folder?: s
     if (!parseEncAttachment(href) || failed) {
         return <span className="ni-broken" title={refItem.name}><WarningIcon /> {refItem.name}</span>;
     }
-    if (embedFailed) return <FileDownload refItem={refItem} folder={folder} />;
+    // A playlist (its bytes open with #EXTM3U) never reaches the player: an
+    // <audio> handed one fetches the URLs inside on its own (api/attachments.ts).
+    if (embedFailed || isPlaylistBlobUrl(url)) return <FileDownload refItem={refItem} folder={folder} />;
     if (!url) return <span className="ni-pending" aria-label={`Loading ${refItem.name}`} />;
     return (
         <span className="ni-audio">

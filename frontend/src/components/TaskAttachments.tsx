@@ -11,7 +11,7 @@
  */
 import { useEffect, useState } from 'react';
 import { type TaskAttachmentRef } from '../api/tasks';
-import { parseEncAttachment, decryptToBlobUrl, videoMimeFor, audioMimeFor } from '../api/attachments';
+import { parseEncAttachment, decryptToBlobUrl, videoMimeFor, audioMimeFor, isPlaylistBlobUrl } from '../api/attachments';
 import { ImageLightbox } from './ImageLightbox';
 import { CheckCircleIcon, CloseIcon, PaperclipIcon, WarningIcon } from './Icons';
 import { saveAttachment } from '../api/saveAttachment';
@@ -78,6 +78,9 @@ function AttachmentItem({ refItem }: { refItem: TaskAttachmentRef }) {
             </>
         );
     }
+    // A playlist never reaches a player, whatever its ref says: a <video> or
+    // <audio> handed one fetches the URLs inside on its own (api/attachments.ts).
+    if (isPlaylistBlobUrl(url)) return <TaskFileDownload url={url} name={refItem.name} />;
     // Both players sit on the Output Device chosen in Settings, not the OS default.
     if (videoMimeFor(refItem.name, parsed.mime)) {
         return <video ref={followOutputDeviceRef} className="ta-video" src={url} controls preload="metadata" title={refItem.name} />;

@@ -71,7 +71,9 @@ describe('safeBlobType', () => {
         }
     });
 
-    it('neutralises audio playlists, which make a player fetch other URLs', () => {
+    // Hygiene only: the TYPE does not stop a player fetching a playlist's URLs
+    // (Chromium reads the bytes) — attachmentPlaylistGuard.test.tsx is the defence.
+    it('neutralises audio playlist types', () => {
         for (const m of ['audio/mpegurl', 'audio/x-mpegurl', 'audio/x-scpls', 'Audio/X-MpegURL']) {
             expect(safeBlobType(m), m).toBe('application/octet-stream');
         }

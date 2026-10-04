@@ -1535,8 +1535,12 @@ Migration 065 gives a personal list three nullable columns, and
   and takes its type from the ref, so an in-origin document could read the stored token and
   the E2EE key material; `safeBlobType` reduces anything that is not an
   image, video or audio file to opaque bytes (and, within those, any
-  `+xml`-style structured-suffix type and any audio playlist), and that must
-  not be relaxed to make a PDF preview. Each upload is capped at 25 MB, and a note holds 12
+  `+xml`-style structured-suffix type), and that must not be relaxed to make
+  a PDF preview. A blob's type does NOT keep a playlist out of a player —
+  Chromium recognises HLS from the bytes, and a `<video>`/`<audio>` handed
+  one fetches the URLs inside with no click — so a file whose plaintext opens
+  with `#EXTM3U` is flagged when it is decrypted (`isPlaylistBlobUrl`) and
+  shown as the download button, never a player. Each upload is capped at 25 MB, and a note holds 12
   sidecar slots (a drawing takes two). A drawing is uploaded twice: a PNG
   that every card and Púca's gallery show, and its strokes, so it can be
   edited again (`frontend/src/api/drawing.ts`; the editor is
