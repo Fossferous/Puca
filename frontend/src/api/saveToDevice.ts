@@ -255,9 +255,16 @@ export async function saveTextToDevice(folder: string, name: string, text: strin
     });
 }
 
-/** Bytes as base64 (what Filesystem.writeFile takes for binary). Chunked:
+/** Bytes as base64 (what Filesystem.writeFile takes for binary).
+ *
+ *  The engine's own `Uint8Array.prototype.toBase64` when it has one (Android
+ *  WebView 151 does): 5.5 ms per 3 MiB slice against 135 ms for the loop
+ *  below, identical output — about 40% of what every phone save spent per
+ *  byte (measured on the emulator, 2026-10-04). Otherwise the loop, chunked:
  *  String.fromCharCode over a whole large file would overflow the stack. */
 export function bytesToBase64(bytes: Uint8Array): string {
+    const native = (bytes as Uint8Array & { toBase64?: () => string }).toBase64;
+    if (typeof native === 'function') return native.call(bytes);
     let bin = '';
     const CHUNK = 0x8000;
     for (let i = 0; i < bytes.length; i += CHUNK) {
@@ -284,11 +291,61 @@ export async function saveStreamToDevice(
     }));
 }
 
-/** Documents/<folder>/<name>, from a blob URL (a decrypted attachment). */
+/** Documents/<folder>/<name>, from a blob URL (a decrypted attachment).
+ *
+ *  READ AS A STREAM, one slice ahead of the writes: the next slice comes off
+ *  the blob while the bridge is still writing this one. Reading the whole
+ *  file first (as this did) held a second full copy of it in JS and left the
+ *  bridge idle until the last byte was read — 2 of the 4.5 s a 22.5 MB video
+ *  took to save on the measured emulator (2026-10-04). */
 export async function saveBytesToDevice(folder: string, name: string, blobUrl: string): Promise<SaveResult> {
     return saveStreamToDevice(folder, name, async (write) => {
-        await write(new Uint8Array(await (await fetch(blobUrl)).arrayBuffer()));
+        const resp = await fetch(blobUrl);
+        if (!resp.body) { await write(new Uint8Array(await resp.arrayBuffer())); return; }
+        const reader = resp.body.getReader();
+        const next = sliceReader(reader, DEVICE_WRITE_CHUNK_BYTES);
+        try {
+            let pending = next();
+            for (;;) {
+                const slice = await pending;
+                if (!slice) break;
+                pending = next();
+                pending.catch(() => { /* surfaces when it is awaited */ });
+                await write(slice);
+            }
+        } finally {
+            // A write that failed stops the read-ahead too.
+            reader.cancel().catch(() => { /* already done */ });
+        }
     });
+}
+
+/** A stream re-cut into slices of exactly `size` bytes (the last one
+ *  shorter); `null` once it is exhausted. Never call it again before the
+ *  previous call settled. */
+export function sliceReader(reader: ReadableStreamDefaultReader<Uint8Array>, size: number): () => Promise<Uint8Array | null> {
+    let carry: Uint8Array | null = null;
+    let ended = false;
+    return async () => {
+        if (ended && !carry) return null;
+        const out = new Uint8Array(size);
+        let n = 0;
+        while (n < size) {
+            if (!carry) {
+                if (ended) break;
+                const { done, value } = await reader.read();
+                if (done) { ended = true; break; }
+                if (!value || value.byteLength === 0) continue;
+                carry = value;
+            }
+            const take = Math.min(size - n, carry.byteLength);
+            out.set(carry.subarray(0, take), n);
+            n += take;
+            carry = take < carry.byteLength ? carry.subarray(take) : null;
+        }
+        if (n === 0) return null;
+        return n === size ? out : out.slice(0, n);
+    };
 }
 
 /** What to tell someone when the write failed. Names the Android 10

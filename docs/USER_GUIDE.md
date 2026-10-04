@@ -138,7 +138,7 @@ name, except a spoilered one.
 3. Press **Enter** to send
 
 ### Save a File on Android
-- In the Android app, saving an attachment or a clip (its **Download** button) puts the file in `Documents/Puca`, under a new name each time; the app shows the name when it is done
+- In the Android app, saving an attachment or a clip (its **Download** button) puts the file in `Documents/Puca`, under a new name each time; the app shows the name when it is done. While a clip downloads, its button shows how much has arrived (`Downloading 45%`, then `Saving…`); a clip you press Play on, or a large attachment, shows the MB arriving until it can play
 - A large file is written as `<name>.part` and gets its real name only once it is complete. If the app is closed before then, the `.part` file is what is left: delete it and save again
 
 ---

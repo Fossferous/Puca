@@ -21,6 +21,7 @@
 import { uploadFile, assertUploadable, ENCRYPTED_OVERHEAD_BYTES } from './uploads';
 import { API_BASE_URL } from './config';
 import { getToken } from './auth';
+import { readAttachmentBody } from './attachmentProgress';
 
 const PREFIX = 'sovereign-enc:';
 
@@ -302,7 +303,7 @@ export async function decryptToBlobUrl(id: string, keyB64url: string, mime: stri
             },
         });
         if (!resp.ok) throw new Error(`fetch ${id} failed: ${resp.status}`);
-        const buf = new Uint8Array(await resp.arrayBuffer());
+        const buf = await readAttachmentBody(id, resp); // its progress shows while it downloads (AttachmentLoading)
         const nonce = buf.slice(0, 12);
         const ct = buf.slice(12);
         const key = await crypto.subtle.importKey('raw', fromB64url(keyB64url) as BufferSource, 'AES-GCM', false, ['decrypt']);

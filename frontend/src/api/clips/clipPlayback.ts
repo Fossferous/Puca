@@ -28,6 +28,7 @@
  */
 import { API_BASE_URL } from '../config';
 import { getToken } from '../auth';
+import { readBodyBytes, type BytesProgress } from '../readBody';
 import { openPart, type ClipSecrets, uuidToBytes } from './clipCrypto';
 import { partIndexForTime, type ClipManifest } from './clipRef';
 
@@ -77,18 +78,49 @@ function defaultEnv(): PlaybackEnv {
     return { hasMediaSource: has, isTypeSupported: (t) => has && MediaSource.isTypeSupported(t) };
 }
 
-async function fetchPartBytes(fileId: string, signal?: AbortSignal): Promise<Uint8Array> {
+/** Fetches one part's sealed bytes; `onBytes` hears them arrive. */
+export type PartFetcher = (id: string, signal?: AbortSignal, onBytes?: BytesProgress) => Promise<Uint8Array>;
+
+const fetchPartBytes: PartFetcher = async (fileId, signal, onBytes) => {
     const token = getToken();
     const resp = await fetch(`${API_BASE_URL}/files/${fileId}`, { headers: token ? { Authorization: `Bearer ${token}` } : undefined, signal });
     if (!resp.ok) throw Object.assign(new Error(`part ${fileId}: HTTP ${resp.status}`), { status: resp.status });
-    return new Uint8Array(await resp.arrayBuffer());
+    return readBodyBytes(resp, onBytes);
+};
+
+/** What the init part is assumed to weigh before it arrives (it is ~1 KB). */
+const INIT_PART_ESTIMATE_BYTES = 4096;
+
+/**
+ * About how many sealed bytes part `index` is. The manifest carries only the
+ * clip's total (GET /files sends no Content-Length), so a media part gets the
+ * share of it that its duration is of the clip's — the encoder runs at a
+ * roughly constant rate. Only ever used for a progress readout.
+ */
+export function estimatePartBytes(m: ClipManifest, index: number): number {
+    if (index === 0) return Math.min(INIT_PART_ESTIMATE_BYTES, m.totalCipherBytes);
+    const media = Math.max(0, m.totalCipherBytes - INIT_PART_ESTIMATE_BYTES);
+    const mediaParts = m.parts.length - 1;
+    if (mediaParts <= 0) return 0;
+    const totalDur = m.partDurMs.slice(1).reduce((a, d) => a + d, 0);
+    const share = totalDur > 0 ? (m.partDurMs[index] ?? 0) / totalDur : 1 / mediaParts;
+    return Math.round(media * share);
 }
 
 function secretsOf(m: ClipManifest): ClipSecrets {
     return { key: m.key, noncePrefix: m.noncePrefix, clipId: uuidToBytes(m.clipId) };
 }
 
-export interface ClipDownloadProgress { done: number; total: number; bytesDone: number; totalBytes: number }
+export interface ClipDownloadProgress {
+    /** Parts handed over in full (written to the device, on a phone). */
+    done: number;
+    total: number;
+    /** Sealed bytes RECEIVED so far, across every part — moves while a part
+     *  is still downloading, not once per part. */
+    bytesDone: number;
+    /** The manifest's totalCipherBytes. */
+    totalBytes: number;
+}
 
 /**
  * Fetch + decrypt every part IN ORDER and concatenate them. Parts are exactly
@@ -100,7 +132,7 @@ export interface ClipDownloadProgress { done: number; total: number; bytesDone: 
 export async function downloadClipBytes(
     m: ClipManifest,
     onProgress?: (p: ClipDownloadProgress) => void,
-    fetchPart: (id: string, signal?: AbortSignal) => Promise<Uint8Array> = fetchPartBytes,
+    fetchPart: PartFetcher = fetchPartBytes,
 ): Promise<Blob> {
     const chunks: Uint8Array[] = [];
     await forEachClipPart(m, async (plain) => { chunks.push(plain); }, onProgress, fetchPart);
@@ -109,28 +141,60 @@ export async function downloadClipBytes(
 
 /**
  * The same bytes as downloadClipBytes, handed over ONE PART AT A TIME, in
- * order: `onPart` is awaited before the next part is even fetched, so the
- * caller holds about one part (≤ 24 MiB plaintext), never the whole clip.
- * The phone's Download uses this (api/clipDownload.ts): building a whole clip
- * there and pushing it through the Capacitor bridge in one piece killed the
- * app. Hands bytes to a callback only — it writes nothing itself.
+ * order, never more than TWO parts in hand: while `onPart` handles part i,
+ * part i+1 is fetched and decrypted, and part i+2 is not requested until
+ * `onPart(i)` has returned. So the caller holds at most two parts (≤ 48 MiB
+ * plaintext), never the whole clip — the phone's Download uses this
+ * (api/clipDownload.ts), where building a whole clip and pushing it through
+ * the Capacitor bridge in one piece killed the app.
+ *
+ * Why one part ahead and not zero: on a phone `onPart` is the bridge write
+ * (base64 + JSON + a file append, ~10 MB/s on the measured emulator), and
+ * fetching only after it returned made the total network time PLUS write
+ * time — the link idle for 4-5 s after every 24 MiB part (2026-10-04: 51.5 s
+ * for a 129 MB clip). With the next part on its way, the two overlap.
+ *
+ * A failure anywhere stops the run and cancels the part in flight. Hands
+ * bytes to a callback only — it writes nothing itself.
  */
 export async function forEachClipPart(
     m: ClipManifest,
     onPart: (plain: Uint8Array, index: number) => Promise<void>,
     onProgress?: (p: ClipDownloadProgress) => void,
-    fetchPart: (id: string, signal?: AbortSignal) => Promise<Uint8Array> = fetchPartBytes,
+    fetchPart: PartFetcher = fetchPartBytes,
 ): Promise<void> {
     if (m.totalCipherBytes > CLIP_DOWNLOAD_MAX_BYTES) throw new Error(`this clip is ${Math.round(m.totalCipherBytes / (1024 * 1024))} MB — too large to download in the app`);
     const secrets = secretsOf(m);
+    const abort = new AbortController();
+    const got = new Array<number>(m.parts.length).fill(0);
     let bytesDone = 0;
-    for (let i = 0; i < m.parts.length; i++) {
-        const plain = await openPart(secrets, i, await fetchPart(m.parts[i]));
-        await onPart(plain, i);
-        bytesDone += plain.byteLength;
-        onProgress?.({ done: i + 1, total: m.parts.length, bytesDone, totalBytes: m.totalCipherBytes });
+    let done = 0;
+    const report = () => onProgress?.({ done, total: m.parts.length, bytesDone, totalBytes: m.totalCipherBytes });
+    const heard = (i: number, n: number) => { bytesDone += n - got[i]; got[i] = n; };
+    const load = (i: number): Promise<Uint8Array> =>
+        fetchPart(m.parts[i], abort.signal, (n) => { heard(i, n); report(); })
+            .then((wire) => { heard(i, wire.byteLength); report(); return openPart(secrets, i, wire); });
+    try {
+        let next = load(0);
+        for (let i = 0; i < m.parts.length; i++) {
+            const plain = await next;
+            if (i + 1 < m.parts.length) {
+                next = load(i + 1);
+                next.catch(() => { /* surfaces when awaited — or was cancelled by the failure that ended the run */ });
+            }
+            await onPart(plain, i);
+            done = i + 1;
+            report();
+        }
+    } finally {
+        abort.abort();
     }
 }
+
+/** Bytes received toward the first playable moment, and about how many that
+ *  takes (`needed` is an estimate until each part's real size is known; it
+ *  never falls below `loaded`). */
+export interface ClipLoadProgress { loaded: number; needed: number }
 
 export interface ClipPlayerHandle {
     mode: ClipPlaybackMode;
@@ -141,6 +205,9 @@ export interface ClipPlayerHandle {
     /** A failure AFTER attach() resolved (a later part 404s, an unrecoverable
      *  quota error). Set before calling attach(). */
     onError?: (e: Error) => void;
+    /** Download progress until attach() resolves — what a viewer waits for is
+     *  bytes on the wire, not decryption. Set before calling attach(). */
+    onLoadProgress?: (p: ClipLoadProgress) => void;
 }
 
 /** Keep at most this much media buffered past the playhead before pausing
@@ -151,7 +218,7 @@ export const PLAY_AHEAD_S = 40;
 /** Evict media older than this behind the playhead. */
 export const KEEP_BEHIND_S = 12;
 
-export function createClipPlayer(m: ClipManifest, env: PlaybackEnv = defaultEnv(), fetchPart: (id: string, signal?: AbortSignal) => Promise<Uint8Array> = fetchPartBytes): ClipPlayerHandle {
+export function createClipPlayer(m: ClipManifest, env: PlaybackEnv = defaultEnv(), fetchPart: PartFetcher = fetchPartBytes): ClipPlayerHandle {
     const mode = clipPlaybackMode(m, env);
     const secrets = secretsOf(m);
     const abort = new AbortController();
@@ -164,10 +231,39 @@ export function createClipPlayer(m: ClipManifest, env: PlaybackEnv = defaultEnv(
     const decrypted = new Map<number, Promise<Uint8Array>>();
     const handle: ClipPlayerHandle = { mode, attach, destroy };
 
+    // ---- load progress, until the clip is playable ---------------------------
+    // MSE plays once the init part and the part the playhead is waiting for
+    // are in (the first media part, unless the viewer already scrubbed); the
+    // blob fallback needs every part.
+    const allParts = m.parts.map((_, i) => i);
+    const startParts = () => (mode === 'blob' ? allParts : nextIdx < m.parts.length ? [0, nextIdx] : [0]);
+    const received = new Map<number, number>();
+    const knownSize = new Map<number, number>();
+    let playable = false;
+    const reportLoad = () => {
+        if (playable || !handle.onLoadProgress) return;
+        let loaded = 0, needed = 0;
+        for (const i of startParts()) {
+            const got = received.get(i) ?? 0;
+            loaded += got;
+            needed += Math.max(got, knownSize.get(i) ?? estimatePartBytes(m, i));
+        }
+        handle.onLoadProgress({ loaded, needed });
+    };
+
     const getPart = (i: number): Promise<Uint8Array> => {
         let p = decrypted.get(i);
         if (!p) {
-            p = fetchPart(m.parts[i], abort.signal).then(wire => openPart(secrets, i, wire));
+            p = fetchPart(m.parts[i], abort.signal, (n, total) => {
+                received.set(i, n);
+                if (total !== null) knownSize.set(i, total);
+                reportLoad();
+            }).then(wire => {
+                received.set(i, wire.byteLength);
+                knownSize.set(i, wire.byteLength);
+                reportLoad();
+                return openPart(secrets, i, wire);
+            });
             decrypted.set(i, p);
             p.catch(() => decrypted.delete(i));
         }
@@ -255,11 +351,15 @@ export function createClipPlayer(m: ClipManifest, env: PlaybackEnv = defaultEnv(
             if (end >= 0 && end - cur >= PLAY_AHEAD_S && nextIdx > 1 && !needInit) { await waitForWake(); continue; }
             const gen = loadGen;
             const idx = nextIdx;
-            void getPart(idx + 1).catch(() => { /* prefetch failure surfaces on its own turn */ });
             let bytes: Uint8Array;
             try { bytes = await getPart(idx); } catch (e) { if (destroyed) return; fail(e); return; }
             if (destroyed) return;
             if (gen !== loadGen) continue; // a seek moved nextIdx while we fetched — re-evaluate
+            // Only NOW start on the next part. Requesting it alongside the one
+            // the playhead is waiting for split the link between the two: the
+            // first frame waited for ~48 MB instead of ~24 MB (8.2 s instead
+            // of 4.3 s at 50 Mbit/s, measured 2026-10-04).
+            if (idx + 1 < m.parts.length) void getPart(idx + 1).catch(() => { /* prefetch failure surfaces on its own turn */ });
             try {
                 if (needInit) { needInit = false; await append(initBytes!); }
                 const cut = cur - KEEP_BEHIND_S;
@@ -274,7 +374,7 @@ export function createClipPlayer(m: ClipManifest, env: PlaybackEnv = defaultEnv(
             }
             if (gen !== loadGen) continue;
             nextIdx = idx + 1;
-            if (firstRes) { firstRes(); firstRes = null; firstRej = null; }
+            if (firstRes) { playable = true; firstRes(); firstRes = null; firstRej = null; }
             if (nextIdx >= m.parts.length && ms && ms.readyState === 'open') { try { ms.endOfStream(); } catch { /* ignore */ } }
         }
     };
@@ -285,6 +385,7 @@ export function createClipPlayer(m: ClipManifest, env: PlaybackEnv = defaultEnv(
         if (mode === 'blob') {
             const chunks: Uint8Array[] = [];
             for (let i = 0; i < m.parts.length; i++) chunks.push(await getPart(i));
+            playable = true;
             objectUrl = URL.createObjectURL(new Blob(chunks as BlobPart[], { type: 'video/mp4' }));
             video.src = objectUrl;
             return;

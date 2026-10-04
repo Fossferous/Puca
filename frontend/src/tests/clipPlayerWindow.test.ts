@@ -15,7 +15,7 @@
  * these, so they are built here.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { createClipPlayer, PLAY_AHEAD_S, KEEP_BEHIND_S } from '../api/clips/clipPlayback';
+import { createClipPlayer, estimatePartBytes, PLAY_AHEAD_S, KEEP_BEHIND_S, type ClipLoadProgress } from '../api/clips/clipPlayback';
 import { encodeClipRef, decodeClipRef, type ClipManifest } from '../api/clips/clipRef';
 import { newClipSecrets, sealPart } from '../api/clips/clipCrypto';
 
@@ -279,5 +279,105 @@ describe('windowed MSE clip player (the 257 MB "SourceBuffer is full" fix)', () 
             await expect(player.attach(video as unknown as HTMLVideoElement)).rejects.toThrow();
             player.destroy();
         } finally { restore(); }
+    });
+});
+
+// ---- time to first frame: what the player asks the network for, and when ----
+// Owner report 2026-10-04: clips on the phone "took very long" to start. The
+// pump used to request part idx+1 (prefetch) BEFORE part idx, in the same
+// tick, so the part the playhead waits for shared the link with the next one
+// and the first frame waited for ~48 MB instead of ~24 MB (8.2 s instead of
+// 4.3 s at 50 Mbit/s, measured).
+describe('clip player — the part the playhead waits for is fetched ALONE', () => {
+    /** A fetchPart whose answers the test releases one by one. */
+    function gatedFetch(serve: (id: string) => Promise<Uint8Array>) {
+        const requested: string[] = [];
+        const gates = new Map<string, () => void>();
+        const fetchPart = async (id: string, _signal?: AbortSignal, onBytes?: (n: number, total: number | null) => void) => {
+            requested.push(id);
+            const wire = await serve(id);
+            await new Promise<void>(r => gates.set(id, r));
+            onBytes?.(wire.byteLength, null);
+            return wire;
+        };
+        const release = (id: string) => { const g = gates.get(id); if (!g) throw new Error(`${id} was not requested`); gates.delete(id); g(); };
+        return { requested, fetchPart, release, waiting: (id: string) => gates.has(id) };
+    }
+
+    it('part 2 is not requested until part 1 has arrived, and is requested right after', async () => {
+        install();
+        try {
+            const { manifest, fetchPart: serve } = await makeManifest();
+            const g = gatedFetch(serve);
+            const video = new FakeVideo(); videoRef = video;
+            const player = createClipPlayer(manifest, env, g.fetchPart);
+            const attached = player.attach(video as unknown as HTMLVideoElement);
+            await settleUntil(() => g.waiting(manifest.parts[0]));
+            g.release(manifest.parts[0]); // init
+            await settleUntil(() => g.waiting(manifest.parts[1]));
+            await settleUntil(() => g.requested.length > 2, 50); // give a stray prefetch every chance to show
+            expect(g.requested).toEqual([manifest.parts[0], manifest.parts[1]]);
+            g.release(manifest.parts[1]);
+            await attached; // playable on part 1 alone
+            await settleUntil(() => g.requested.length > 2);
+            expect(g.requested).toEqual([manifest.parts[0], manifest.parts[1], manifest.parts[2]]);
+            player.destroy();
+        } finally { restore(); }
+    });
+
+    it('never asks for a part past the last one (the old prefetch fetched /files/undefined)', async () => {
+        install();
+        try {
+            const { manifest, fetchPart } = await makeManifest();
+            const asked: Array<string | undefined> = [];
+            const video = new FakeVideo(); videoRef = video;
+            const player = createClipPlayer(manifest, env, async (id: string) => { asked.push(id); return fetchPart(id); });
+            await player.attach(video as unknown as HTMLVideoElement);
+            const sb = video._ms!.sb!;
+            for (let t = 0; t < (N * PART_MS) / 1000; t += 2) { video.advance(t); await settle(); }
+            await settleUntil(() => new Set(sb.appends).size === N);
+            expect(new Set(sb.appends).size).toBe(N); // it did reach the last part
+            expect(asked.every(id => typeof id === 'string' && manifest.parts.includes(id))).toBe(true);
+            player.destroy();
+        } finally { restore(); }
+    });
+
+    it('reports the bytes it is waiting for until the clip is playable, then stops', async () => {
+        install();
+        try {
+            const { manifest, fetchPart: serve } = await makeManifest();
+            const g = gatedFetch(serve);
+            const video = new FakeVideo(); videoRef = video;
+            const player = createClipPlayer(manifest, env, g.fetchPart);
+            const seen: ClipLoadProgress[] = [];
+            player.onLoadProgress = (p) => seen.push(p);
+            const attached = player.attach(video as unknown as HTMLVideoElement);
+            await settleUntil(() => g.waiting(manifest.parts[0]));
+            g.release(manifest.parts[0]);
+            await settleUntil(() => g.waiting(manifest.parts[1]));
+            const init = (await serve(manifest.parts[0])).byteLength;
+            const part1 = (await serve(manifest.parts[1])).byteLength;
+            // Init in; part 1 still on its way: the estimate for it stands in.
+            expect(seen.at(-1)).toEqual({ loaded: init, needed: init + estimatePartBytes(manifest, 1) });
+            g.release(manifest.parts[1]);
+            await attached;
+            expect(seen.at(-1)).toEqual({ loaded: init + part1, needed: init + part1 });
+            const count = seen.length;
+            await settleUntil(() => g.requested.length > 2);
+            g.release(manifest.parts[2]);
+            await settleUntil(() => !g.waiting(manifest.parts[2]));
+            expect(seen.length).toBe(count); // playing: later parts report nothing
+            player.destroy();
+        } finally { restore(); }
+    });
+
+    it('estimatePartBytes shares the total out by duration (no Content-Length to go on)', async () => {
+        const { manifest } = await makeManifest();
+        const media = manifest.totalCipherBytes - 4096;
+        expect(estimatePartBytes(manifest, 0)).toBe(4096);
+        expect(estimatePartBytes(manifest, 1)).toBe(Math.round(media / N)); // equal durations, equal shares
+        const graduated = { ...manifest, partDurMs: [0, 2000, 4000, ...manifest.partDurMs.slice(3)] };
+        const total = graduated.partDurMs.reduce((a, d) => a + d, 0);
+        expect(estimatePartBytes(graduated, 1)).toBe(Math.round(media * 2000 / total));
     });
 });
