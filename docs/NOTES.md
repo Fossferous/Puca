@@ -1557,7 +1557,10 @@ Migration 065 gives a personal list three nullable columns, and
   name when the type says nothing) gets the same player, by the same rule a
   chat message uses (`audioMimeFor`, `api/attachments.ts`); audio it cannot
   play (AMR, MIDI), and a file whose player fails to open it, is the download
-  button. A recording is never a card's hero
+  button. Where a note is summed up instead of shown (the All-tasks board's
+  snippet, a card's chip, a trashed note's line), a recording or any other
+  audio file counts as a FILE (`galleryCounts`), never as a picture or as
+  nothing. A recording is never a card's hero
   picture. On a phone, *Photo* offers the camera (`<input accept="image/*"
   capture>`); on Android that needs the `IMAGE_CAPTURE` entry under `<queries>`
   in each app's manifest, so the camera arrives with a new APK of each app, not

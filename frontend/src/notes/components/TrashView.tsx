@@ -19,7 +19,7 @@
 import { useSyncExternalStore } from 'react';
 import { type TaskList } from '../../api/tasks';
 import { purgeCountdown, serverNowFrom, trashPurgeAt } from '../../api/listContent';
-import { galleryItems } from '../../api/noteMedia';
+import { galleryCounts } from '../../api/noteMedia';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { parseServerTimestamp } from '../../utils/serverTime';
 import { TrashIcon } from '../../components/Icons';
@@ -54,11 +54,11 @@ interface RowProps {
 function TrashRow({ list, content, now, restoreNote, queued }: RowProps) {
     const title = list.title.trim() ? list.title : 'Untitled note';
     const body = list.body && !isUndecryptable(list.body) ? list.body : '';
-    const gallery = galleryItems(list.attachments);
-    const pictures = gallery.filter(i => i.kind !== 'file').length;
     // Files were counted as nothing, so the trash under-stated what Delete
-    // forever destroys for a note holding a PDF.
-    const files = gallery.filter(i => i.kind === 'file').length;
+    // forever destroys for a note holding a PDF; and a voice note or song,
+    // counted as "not a file", was called a picture. galleryCounts names
+    // pictures positively and counts everything else as a file.
+    const { pictures, files } = galleryCounts(list.attachments);
     const purge = trashPurgeAt(list.trashed_at, content.features.trashRetentionDays);
     const trashed = list.trashed_at ? parseServerTimestamp(list.trashed_at) : NaN;
     const parts: string[] = [];

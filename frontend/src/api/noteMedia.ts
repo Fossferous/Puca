@@ -409,3 +409,20 @@ function nextBase(refs: TaskAttachmentRef[], prefix: string): string {
 export function heroItems(opened: string | null | undefined, max = 3): GalleryItem[] {
     return galleryItems(opened).filter(i => i.kind === 'image' || i.kind === 'drawing').slice(0, max);
 }
+
+/** How many pictures and how many other files a note holds, for every line
+ *  that sums a note up instead of showing it: the All-tasks board's snippet,
+ *  a Notes card's chip, a trashed note's line. Pictures are named positively,
+ *  as in heroItems; EVERYTHING else is a file — a voice note or song too, as
+ *  in mediaCountLabel. Each of those three used to count `kind === 'file'`
+ *  (or `!== 'file'`) on its own, so audio said nothing on the board, made
+ *  its card read "Empty note" and was "1 picture" in the trash. */
+export function galleryCounts(opened: string | null | undefined): { pictures: number; files: number } {
+    let pictures = 0;
+    let files = 0;
+    for (const i of galleryItems(opened)) {
+        if (i.kind === 'image' || i.kind === 'drawing') pictures++;
+        else files++;
+    }
+    return { pictures, files };
+}
