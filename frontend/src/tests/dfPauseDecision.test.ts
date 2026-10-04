@@ -56,6 +56,14 @@ const ROWS: Row[] = [
     ['socket down, everyone deafened', w({ socketUp: false, roster: [me, deaf(2)] }), []],
     ['transport unknown, everyone deafened', w({ roster: [me, deaf(2)], transportPeers: null }), []],
     ['mic closed survives an unknown roster', w({ micOpen: false, roster: null, socketUp: false, transportPeers: null }), ['mic-closed']],
+    // A deafen stated before the member's current media session (Move here to
+    // another device, a reload, a rejoin) describes the OLD session: unknown.
+    ['the only deafened member is on a session whose deafen is unknown', w({ roster: [me, deaf(2)], deafenUnknown: [2] }), []],
+    ['one of two deafened members is on a new session', w({ roster: [me, deaf(2), deaf(3)], transportPeers: [2, 3], deafenUnknown: [3] }), []],
+    ['positive control: an unknown deafen for someone NOT in the call changes nothing', w({ roster: [me, deaf(2)], deafenUnknown: [9] }), ['all-deafened']],
+    ['positive control: an empty unknown list changes nothing', w({ roster: [me, deaf(2)], deafenUnknown: [] }), ['all-deafened']],
+    ['an unknown deafen does not stop "alone"', w({ roster: [me], transportPeers: [], deafenUnknown: [2] }), ['alone']],
+    ['an unknown deafen does not stop "mic closed"', w({ micOpen: false, roster: [me, deaf(2)], deafenUnknown: [2] }), ['mic-closed']],
 
     // --- two conditions at once ---------------------------------------------
     ['mic closed AND alone', w({ micOpen: false, roster: [me], transportPeers: [] }), ['mic-closed', 'alone']],
@@ -84,6 +92,7 @@ describe('decideDfPause: every condition flips both ways', () => {
         ['all-deafened', w({ roster: [me, deaf(2)] }), base, 'the deafened peer undeafens'],
         ['all-deafened', w({ roster: [me, deaf(2)] }), w({ roster: [me, deaf(2), hearing(3)], transportPeers: [2] }), 'a hearing peer joins'],
         ['all-deafened', w({ roster: [me, deaf(2)] }), w({ roster: [me, deaf(2)], transportPeers: [2, 3] }), 'an unknown media peer appears'],
+        ['all-deafened', w({ roster: [me, deaf(2)] }), w({ roster: [me, deaf(2)], deafenUnknown: [2] }), 'the deafened peer starts a new media session (Move here, a reload)'],
     ];
     for (const [cond, on, off, offEvent] of flips) {
         it(`${cond}: on, then off (${offEvent}), then on again`, () => {

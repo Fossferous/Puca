@@ -16,14 +16,24 @@ one-line summary; this file is the full story. Versions follow
   your speaking ring keeps working. It pauses only after 1.5 s of that, and
   comes back the moment it stops being true (someone joins or undeafens, you
   unmute or press your push-to-talk key), with RNNoise covering the first
-  ~50 ms while it catches up. Whenever Púca cannot be sure (reconnecting,
-  someone whose status has not arrived yet, an SFU call still connecting),
-  it keeps running. The minute health line in puca.log now says how much of
-  each minute it was paused, and why (`paused42s/alone`).
+  ~50 ms while it catches up. For about a second after that it filters a
+  little less cleanly than if it had never paused (about as well as at the
+  start of a call), then it is back to normal. Whenever Púca cannot be sure
+  (reconnecting, someone whose status has not arrived yet, someone who has
+  just moved the call to another device or rejoined, an SFU call still
+  connecting), it keeps running. The minute health line in puca.log now says
+  how much of each minute it was paused, and why (`paused42s/alone`).
 - **One trade-off, on purpose:** a clip saved while you were alone in a call
   (or everyone else was deafened) has your mic through RNNoise instead of
   DeepFilter for that stretch. Muted stretches are unaffected: the clip
   never records a muted mic.
+
+### Fixed
+- **Moving a call to another device no longer leaves your old mute or deafen
+  showing.** After **Move here**, or a quick reload that drops you back into
+  the call, everyone else kept seeing the mute and deafen icons from before
+  until you toggled one, because a device joining a call never said what its
+  own state was. It now does, a moment after it joins.
 
 ## 0.9.833 — 2026-10-03
 

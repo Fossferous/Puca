@@ -252,8 +252,9 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
   published track. Decided on 2026-10-04 and accepted: keeping DeepFilter
   running whenever a clip is armed would have cancelled the saving entirely
   for the person it was built for (in the call logs it was measured from,
-  Clips were armed in every call minute, and the caller alone in 12% of
-  them), and RNNoise is the same suppressor that already covers every CPU
+  about 2,100 call-minutes between 30 Sep and 4 Oct 2026, Clips were armed
+  in 86% of them, and the caller was alone in about 8%), and RNNoise is the
+  same suppressor that already covers every CPU
   spike in a clip. Muted, push-to-talk and the other
   mic-closed pauses change nothing here: the clip's mic leg is silent then
   anyway (it respects mute).

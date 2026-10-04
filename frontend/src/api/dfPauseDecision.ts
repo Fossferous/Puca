@@ -31,7 +31,13 @@
  *    side, mesh and SFU alike (VoicePanel attachVoice / toggleDeafen). A media
  *    peer with no roster row, our own other device (the roster has one row
  *    per USER), and anyone whose status we never received (the roster seeds
- *    isDeafened=false) all count as hearing.
+ *    isDeafened=false) all count as hearing. So does anyone whose deafen was
+ *    stated by an EARLIER media session than the one they have now: the row
+ *    keeps its flags across every replay, and "Move here" to another device,
+ *    a reload or a rejoin never re-sent them before 2026-10-04 (an older
+ *    client still does not), so a deafened row could describe a device that
+ *    has left while the new one hears us. dfPause.ts works out who that is
+ *    (deafenUnknown below).
  *
  * NOT conditions: listeners exist (they hear); other people's private
  * per-user mute or volume (not knowable, and private); silence (DeepFilter
@@ -60,6 +66,10 @@ export interface DfPauseInputs {
      *  it is our other device). null = unknown: an SFU call that is not
      *  connected, or is reconnecting. */
     transportPeers: ReadonlyArray<number> | null;
+    /** Members whose deafen status does not describe the media session they
+     *  have now (a new session since their last status, or two at once):
+     *  they count as hearing whatever their row says. Absent = none. */
+    deafenUnknown?: ReadonlyArray<number>;
 }
 
 export interface DfPauseDecision {
@@ -78,12 +88,13 @@ export function decideDfPause(i: DfPauseInputs): DfPauseDecision {
     const rosterKnown = i.roster !== null && i.roster.some(u => u.id === i.selfId);
     if (rosterKnown && i.socketUp && i.transportPeers !== null) {
         const roster = new Map(i.roster!.map(u => [u.id, u]));
+        const unknown = new Set(i.deafenUnknown ?? []);
         const listeners = new Set<number>();
         for (const u of i.roster!) if (u.id !== i.selfId) listeners.add(u.id);
         for (const id of i.transportPeers) listeners.add(id);
         if (listeners.size === 0) {
             reasons.push('alone');
-        } else if ([...listeners].every(id => id !== i.selfId && roster.get(id)?.isDeafened === true)) {
+        } else if ([...listeners].every(id => id !== i.selfId && !unknown.has(id) && roster.get(id)?.isDeafened === true)) {
             reasons.push('all-deafened');
         }
     }

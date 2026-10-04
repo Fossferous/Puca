@@ -345,9 +345,13 @@ function fromMesh(peers: Array<Record<string, unknown>>): { video: VideoIn[]; se
 }
 
 /** The graph's cumulative paused time at the last sample, so a line can say
- *  how much of ITS minute was paused. A new graph (a mic rebuild) restarts
- *  the count from 0, which reads as "all of it is this minute's". */
+ *  how much of ITS minute was paused, and which graph that was. A new graph
+ *  (a mic rebuild) restarts the count from 0, so all of a new graph's count
+ *  is this minute's. Told by its number: a count that merely went DOWN missed
+ *  a new graph that had already paused past the old one's total. (What the
+ *  old graph paused after the last line is not counted: it is gone.) */
 let lastDfPausedMs: number | null = null;
+let lastDfGraph: unknown = null;
 
 function noiseFrom(diag: Record<string, unknown> | null): HealthInput['noise'] {
     const nz = diag?.noise as Record<string, unknown> | undefined;
@@ -357,12 +361,15 @@ function noiseFrom(diag: Record<string, unknown> | null): HealthInput['noise'] {
     const k = df?.worklet ?? {};
     const round1 = (x: unknown) => { const n = num(x); return n === null ? null : Math.round(n * 10) / 10; };
     const pausedTotal = num(df?.pause?.pausedMs);
+    const graph = df?.pause?.graph;
     let pausedS: number | null = null;
     if (pausedTotal !== null) {
-        const since = lastDfPausedMs !== null && pausedTotal >= lastDfPausedMs ? pausedTotal - lastDfPausedMs : pausedTotal;
+        const sameGraph = lastDfPausedMs !== null && graph === lastDfGraph && pausedTotal >= lastDfPausedMs;
+        const since = sameGraph ? pausedTotal - lastDfPausedMs! : pausedTotal;
         pausedS = Math.round(since / 1000);
     }
     lastDfPausedMs = pausedTotal;
+    lastDfGraph = graph;
     return {
         mode: String(nz.mode ?? '?'), context: String(nz.contextState ?? '?'),
         dfAvgMs: round1(w.avgMs), dfMaxMs: round1(w.maxMs), overBudget: num(w.overBudgetHops),
@@ -471,6 +478,7 @@ export function stopHealthLog(): void {
     observer?.disconnect();
     observer = null;
     lastDfPausedMs = null; // the next call's first line counts from its own start
+    lastDfGraph = null;
     send('health stopped');
     micLevels('end');
 }

@@ -375,6 +375,20 @@ describe('DeepFilter paused', () => {
         expect(await sampleHealth()).toContain('paused7s/mic-closed');
     });
 
+    it('a graph rebuilt BETWEEN two lines counts from its own 0, even once it passes the old total', async () => {
+        // Review finding 2026-10-04: 5 s paused on the old graph at the last
+        // line, then a device switch rebuilt it and the new one paused 50 s
+        // before the next. Only a count going DOWN used to reveal a rebuild,
+        // so this read 50 - 5 = 45 s.
+        withPause({ paused: false, reason: null, pausedMs: 5_000, graph: 1 });
+        await sampleHealth();
+        withPause({ paused: true, reason: 'alone', pausedMs: 50_000, graph: 2 });
+        expect(await sampleHealth()).toContain('paused50s/alone');
+        // positive control: the SAME graph a minute on counts only that minute
+        withPause({ paused: true, reason: 'alone', pausedMs: 110_000, graph: 2 });
+        expect(await sampleHealth()).toContain('paused60s/alone');
+    });
+
     it('formats from the input alone', () => {
         const noise = { mode: 'deepfilter', context: 'running', dfAvgMs: 2.3, dfMaxMs: 2.9, overBudget: 0, dry: 0, flips: 0, overloaded: false };
         expect(formatHealthLine({ ...base, noise: { ...noise, pausedS: 0, pauseReason: 'mic-closed' } })).toContain('paused0s/mic-closed');

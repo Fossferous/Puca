@@ -56,11 +56,12 @@ function newConnId(): string {
 }
 
 /**
- * The mesh peers map, announcing every change of MEMBERSHIP (a peer added or
- * removed; replacing one under the same id is not a change). dfPause.ts must
- * hear the moment a media connection to someone appears - they can hear us
- * from then on - or goes. A subclass rather than a call at each set/delete,
- * so a future one cannot forget it.
+ * The mesh peers map, announcing every change: a peer added or removed, or a
+ * connection replaced by a different one under the same id (a new SESSION:
+ * their deafen status may belong to the old one - dfPause.ts). dfPause.ts
+ * must hear the moment a media connection to someone appears - they can hear
+ * us from then on - or goes. A subclass rather than a call at each
+ * set/delete, so a future one cannot forget it.
  */
 class PeerMap extends Map<UserId, PeerConnection> {
     private readonly changed: () => void;
@@ -69,9 +70,9 @@ class PeerMap extends Map<UserId, PeerConnection> {
         this.changed = changed;
     }
     override set(userId: UserId, peer: PeerConnection): this {
-        const added = !this.has(userId);
+        const changed = this.get(userId) !== peer;
         super.set(userId, peer);
-        if (added) this.changed();
+        if (changed) this.changed();
         return this;
     }
     override delete(userId: UserId): boolean {
@@ -522,6 +523,13 @@ export class WebRTCManager {
      *  one is someone our mic reaches, or is about to. */
     peerUserIds(): UserId[] {
         return [...this.peers.keys()];
+    }
+
+    /** Each mesh peer connection as [user id, its connId]: a connId is new
+     *  for every connection, so a different one for the same user is a new
+     *  session of theirs (dfPause.ts). */
+    peerSessions(): Array<[UserId, string]> {
+        return [...this.peers].map(([userId, peer]) => [userId, `mesh:${peer.connId}`]);
     }
 
     /** Hear a mesh peer connection appear or go. Returns the unsubscribe. */

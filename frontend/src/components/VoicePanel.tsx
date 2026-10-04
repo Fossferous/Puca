@@ -95,7 +95,7 @@ import { useDfSettledOffer, keepRnnoiseForSession, KEEP_RNNOISE_NOTICE } from '.
 import './VoicePanel.css';
 
 
-import { globalVoiceUsers, globalScreenSharers, globalCameraUsers, globalCameraStreams, setUserSpeaking, clearSpeaking, notifyVoiceUsersChange, registerStopScreenShareCallback, stopOwnScreenShare, setCurrentStreamingUser, setSelfInVoice, upsertVoiceUser, globalSelectedStreams, globalStreamData, notifyStreamStateChange, clearAllStreams, selectStream, deselectStream, subscribeToStreamState } from './voiceState';
+import { globalVoiceUsers, globalScreenSharers, globalCameraUsers, globalCameraStreams, setUserSpeaking, clearSpeaking, notifyVoiceUsersChange, registerStopScreenShareCallback, stopOwnScreenShare, setCurrentStreamingUser, setSelfInVoice, upsertVoiceUser, applyVoiceStatus, globalSelectedStreams, globalStreamData, notifyStreamStateChange, clearAllStreams, selectStream, deselectStream, subscribeToStreamState } from './voiceState';
 
 interface VoicePanelProps {
     roomId: string;
@@ -695,6 +695,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     return () => { offMesh(); offSfu(); };
                 },
             },
+            // Which session each of those connections is: a member who moved
+            // the call to another device, or rejoined, is on a new one, and
+            // their deafen status may still be the old device's.
+            sessions: () => [...webrtcManager.peerSessions(), ...sfuManager.participantSessions()],
         });
     }, [isInVoice, roomId, currentUserId, sfuMode]);
 
@@ -1181,14 +1185,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             if (payload.room_id !== roomId) return;
             const status = parseVoiceStatus(payload.content);
             if (!status) return;
-            const roomUsers = globalVoiceUsers.get(roomId);
-            if (roomUsers && roomUsers.has(payload.sender.id)) {
-                const user = roomUsers.get(payload.sender.id)!;
-                user.isMuted = status.muted;
-                user.isDeafened = status.deafened;
-                user.isBuffering = status.buffering;
-                refreshVoiceUsersList();
-            }
+            // Stamped with when it arrived: dfPause.ts trusts a deafen only if
+            // it was stated after the member's current media session began.
+            if (applyVoiceStatus(roomId, payload.sender.id, status)) refreshVoiceUsersList();
         };
 
         // When a new user joins the room, add them to voice users and re-broadcast our presence
@@ -1454,6 +1453,19 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // adding broadcastStatus to those effects' deps would tear down and
     // re-register every WS handler on each identity change.
     useEffect(() => { broadcastStatusRef.current = broadcastStatus; }, [broadcastStatus]);
+
+    // Re-state our mute/deafen shortly, from the refs as they are THEN: after
+    // our own reconnect, and after every join. The short delay lets peers
+    // apply the StreamStarted that goes out first, and lets a mute decided
+    // during the join itself (an AFK channel, listen-only) reach the refs.
+    const restateStatusSoon = useCallback(() => {
+        const statusTimer = setTimeout(() => {
+            rebroadcastTimersRef.current.delete(statusTimer);
+            if (!isInVoiceRef.current) return;
+            broadcastStatusRef.current(isMutedRef.current, isDeafenedRef.current);
+        }, 600);
+        rebroadcastTimersRef.current.add(statusTimer);
+    }, []);
 
     // Stop PLAYING a member whose SPEAK was withdrawn. The stream stays in the
     // gate so a later grant can play it again (the SFU never re-delivers a
@@ -2068,6 +2080,15 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
 
             // Broadcast that we joined
             wsClient.startStream(roomId);
+            // ...and our mute/deafen right behind it. A status ping is one-shot
+            // and the room keeps a member's row (and its flags) across every
+            // replay, so after "Move here" to this device, a reload or a
+            // rejoin, everyone still held the OLD session's status: a member
+            // who had deafened on their PC showed deafened - and DeepFilter
+            // stayed paused for them (dfPause.ts) - while this device, not
+            // deafened, heard everything. The server tells the room nothing
+            // on a take-over, so only we can.
+            restateStatusSoon();
             playJoinSound(); // Play join sound
 
             // CRITICAL: The JOINER initiates to everyone already in the room,
@@ -2139,7 +2160,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 }
             }
         }
-    }, [roomId, currentUserId, currentUsername, refreshVoiceUsersList, isAfkChannel, resetInactivity, sfuMode, applyMicGate]);
+    }, [roomId, currentUserId, currentUsername, refreshVoiceUsersList, isAfkChannel, resetInactivity, sfuMode, applyMicGate, restateStatusSoon]);
 
     // Handle leaving voice
     // Apply the CURRENT noise mode to a live call: fresh mic through the new
@@ -2253,16 +2274,11 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             // wipe our own flags in everyone's roster (ours included), and a
             // toggle sent while the socket was down was dropped outright.
             // Short delay so it lands after peers have applied that echo.
-            const statusTimer = setTimeout(() => {
-                rebroadcastTimersRef.current.delete(statusTimer);
-                if (!isInVoiceRef.current) return;
-                broadcastStatusRef.current(isMutedRef.current, isDeafenedRef.current);
-            }, 600);
-            rebroadcastTimersRef.current.add(statusTimer);
+            restateStatusSoon();
         };
         window.addEventListener('wsConnected', onReconnected);
         return () => window.removeEventListener('wsConnected', onReconnected);
-    }, [roomId]);
+    }, [roomId, restateStatusSoon]);
 
     // A noise-suppression graph died (worklet wasm crash, or the liveness
     // watchdog caught it emitting pure silence against live speech): fall back

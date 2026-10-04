@@ -17,7 +17,7 @@ vi.mock('../api/noiseFilter', () => ({
 }));
 
 import { attachDfPause, dfPauseDiagnostics, PAUSE_HOLD_MS, type Probe } from '../api/dfPause';
-import { globalVoiceUsers, notifyVoiceUsersChange, type VoiceUserStatus } from '../components/voiceState';
+import { globalVoiceUsers, notifyVoiceUsersChange, applyVoiceStatus, type VoiceUserStatus } from '../components/voiceState';
 import type { DfPauseReason } from '../api/dfPauseDecision';
 
 const ROOM = 'voice_7';
@@ -44,6 +44,13 @@ function roster(...users: VoiceUserStatus[]) {
 let mic: FakeProbe<boolean | null>;
 let socket: FakeProbe<boolean>;
 let transport: FakeProbe<ReadonlyArray<number> | null>;
+/** Each media connection's session key, per user, as the wiring reports
+ *  them: by default one stable key per transport peer (`s<id>`); a test
+ *  gives someone a NEW session by changing `sessionKey`, or lists sessions
+ *  outright in `sessionsOverride` (two at once). Announced through the
+ *  transport probe, as the real sources do. */
+let sessionKey: Map<number, string>;
+let sessionsOverride: Array<readonly [number, string]> | null;
 let applied: Array<[boolean, DfPauseReason | null]>;
 let detach: () => void;
 const paused = () => applied.length > 0 && applied[applied.length - 1][0];
@@ -54,10 +61,13 @@ function startCall() {
     mic = new FakeProbe<boolean | null>(true);
     socket = new FakeProbe(true);
     transport = new FakeProbe<ReadonlyArray<number> | null>([2]);
+    sessionKey = new Map();
+    sessionsOverride = null;
+    const sessions = () => sessionsOverride ?? (transport.value ?? []).map(id => [id, sessionKey.get(id) ?? `s${id}`] as const);
     globalVoiceUsers.set(ROOM, new Map([[SELF, row(SELF)], [2, row(2)]]));
     const sink: Array<[boolean, DfPauseReason | null]> = [];
     applied = sink;
-    detach = attachDfPause({ roomId: ROOM, selfId: SELF, mic, socket, transport, apply: (p, r) => sink.push([p, r]) });
+    detach = attachDfPause({ roomId: ROOM, selfId: SELF, mic, socket, transport, sessions, apply: (p, r) => sink.push([p, r]) });
 }
 
 beforeEach(() => {
@@ -189,6 +199,120 @@ describe('dfPause: two conditions at once', () => {
         expect(paused()).toBe(false);
         transport.set([]);
         holdUntilPaused('alone');
+    });
+});
+
+/**
+ * A deafen status describes the media SESSION it was sent from. The roster
+ * has one row per user and keeps their flags across every replay, so when
+ * someone deafened moves the call to another device ("Move here"), reloads,
+ * or rejoins, their row still says deafened while the new session hears us
+ * (review finding 2026-10-04, reproduced live: A stayed paused while B's
+ * second device received A's audio, and no event ever ended it). A NEW media
+ * session for someone (a key not seen for them before) makes their deafen
+ * unknown - they hear - until a status arrives after it.
+ */
+describe('dfPause: a new media session makes an old deafen status unknown', () => {
+    /** Their status ping, applied as VoicePanel applies it, and announced. */
+    function status(id: number, deafened: boolean) {
+        expect(applyVoiceStatus(ROOM, id, { muted: deafened, deafened, buffering: false })).toBe(true);
+        notifyVoiceUsersChange();
+    }
+    function deafenedPeer() {
+        status(2, true);
+        holdUntilPaused('all-deafened');
+    }
+
+    it('Move here, mesh shape: the peer connection is replaced under the same user -> resumed at once, and stays running', () => {
+        deafenedPeer();
+        sessionKey.set(2, 's2-phone');
+        transport.set([2]);
+        expect(paused()).toBe(false);
+        vi.advanceTimersByTime(PAUSE_HOLD_MS * 20);
+        expect(paused()).toBe(false);
+    });
+
+    it('Move here, SFU shape: the old session leaves, then the new one connects -> resumed when it connects', () => {
+        deafenedPeer();
+        transport.set([]); // the old device's participant goes; their row stays
+        expect(paused()).toBe(true);
+        expect(reason()).toBe('all-deafened');
+        sessionKey.set(2, 'u2#phone');
+        transport.set([2]);
+        expect(paused()).toBe(false);
+        vi.advanceTimersByTime(PAUSE_HOLD_MS * 20);
+        expect(paused()).toBe(false);
+    });
+
+    it('a status from the new session ends the doubt: deafened pauses again after the hold, undeafened keeps it running', () => {
+        deafenedPeer();
+        sessionKey.set(2, 's2-new');
+        transport.set([2]);
+        expect(paused()).toBe(false);
+        status(2, false); // the new device states itself: not deafened
+        vi.advanceTimersByTime(PAUSE_HOLD_MS * 4);
+        expect(paused()).toBe(false);
+        status(2, true); // ...and later deafens there
+        holdUntilPaused('all-deafened');
+    });
+
+    it('a status that arrived BEFORE the new session appeared does not vouch for it', () => {
+        deafenedPeer();
+        status(2, true); // a late repeat from the OLD session
+        sessionKey.set(2, 's2-new');
+        transport.set([2]);
+        vi.advanceTimersByTime(PAUSE_HOLD_MS * 4);
+        expect(paused()).toBe(false);
+    });
+
+    it('a roster row rebuilt without its stamp is not a fresh status', () => {
+        deafenedPeer();
+        sessionKey.set(2, 's2-new');
+        transport.set([2]);
+        roster(row(SELF), row(2, true)); // a writer that dropped statusSeq
+        vi.advanceTimersByTime(PAUSE_HOLD_MS * 4);
+        expect(paused()).toBe(false);
+    });
+
+    it('two sessions of the same person at once: one row cannot say which is deafened -> runs', () => {
+        deafenedPeer();
+        sessionsOverride = [[2, 's2'], [2, 's2-phone']];
+        transport.set([2]);
+        expect(paused()).toBe(false);
+        status(2, true); // even a fresh status cannot say which device sent it
+        vi.advanceTimersByTime(PAUSE_HOLD_MS * 4);
+        expect(paused()).toBe(false);
+        sessionsOverride = [[2, 's2-phone']]; // the old one goes
+        transport.set([2]);
+        status(2, true);
+        holdUntilPaused('all-deafened');
+    });
+
+    it('the first session seen for someone is trusted: joining a call where everyone is deafened still pauses', () => {
+        // Their status can arrive before their media connects (our own join).
+        transport.set([]);
+        roster(row(SELF), row(2));
+        status(2, true);
+        transport.set([2]);
+        holdUntilPaused('all-deafened');
+    });
+
+    it('our own other device starting a session is not a deafen question (it already counts as hearing)', () => {
+        deafenedPeer();
+        sessionsOverride = [[2, 's2'], [SELF, 'me-phone']];
+        transport.set([2, SELF]);
+        expect(paused()).toBe(false); // hearing: our other device
+        sessionsOverride = [[2, 's2']];
+        transport.set([2]);
+        holdUntilPaused('all-deafened'); // no doubt left over about member 2
+    });
+
+    it('positive control: the same session announced again changes nothing', () => {
+        deafenedPeer();
+        transport.set([2]);
+        transport.set([2]);
+        expect(paused()).toBe(true);
+        expect(applied.filter(([p]) => !p)).toEqual([]);
     });
 });
 

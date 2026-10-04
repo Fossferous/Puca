@@ -201,6 +201,17 @@ describe('applyDeepFilter: pause wiring', () => {
         expect(diag().lastResumeCoverMs).toBe(null);
     });
 
+    it('each call graph carries its own number, so a reader can tell a rebuild from the same graph later on', async () => {
+        const first = await applyDeepFilter(fakeCtx(), {} as MediaStream);
+        const g1 = diag().graph;
+        expect(diag().graph).toBe(g1); // the same graph reads the same number
+        await applyDeepFilter(fakeCtx(), {} as MediaStream, 1, { local: { onDead: vi.fn() } });
+        expect(diag().graph).toBe(g1); // the mic test is not a call graph
+        first.worklet.destroy!();
+        await applyDeepFilter(fakeCtx(), {} as MediaStream); // a rebuild
+        expect(diag().graph).not.toBe(g1);
+    });
+
     it('a torn-down graph sends nothing more, and leaves no pause diagnostics behind', async () => {
         const { worklet } = await applyDeepFilter(fakeCtx(), {} as MediaStream);
         report();

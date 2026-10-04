@@ -8,7 +8,10 @@
  *  - the mesh peers map announces every peer added or removed, whichever
  *    path adds or removes it (callUser, closePeer, closeAll);
  *  - SfuManager announces participants connecting and leaving, and the room
- *    connecting, reconnecting and dropping.
+ *    connecting, reconnecting and dropping;
+ *  - both name each connection's SESSION, so a member who moved the call to
+ *    another device (or reloaded) is told apart from the session their old
+ *    deafen status came from.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
@@ -86,6 +89,35 @@ describe('WebRTCManager: mesh peers', () => {
         expect(n).toBe(3);
     });
 
+    it('names each connection: a rebuilt connection to the same user is a different session', async () => {
+        const mgr = new WebRTCManager();
+        mgr.setLocalUserId(1);
+        await mgr.callUser(2);
+        const first = mgr.peerSessions();
+        expect(first).toEqual([[2, expect.stringMatching(/^mesh:/)]]);
+        expect(mgr.peerSessions()).toEqual(first); // stable while it lives
+        mgr.closePeer(2);
+        expect(mgr.peerSessions()).toEqual([]);
+        await mgr.callUser(2);
+        const second = mgr.peerSessions();
+        expect(second.map(([id]) => id)).toEqual([2]);
+        expect(second[0][1]).not.toBe(first[0][1]);
+    });
+
+    it('announces a connection REPLACED under the same user (a new session), not only one added or removed', async () => {
+        const mgr = new WebRTCManager();
+        mgr.setLocalUserId(1);
+        const create = (mgr as unknown as { createPeerConnection(id: number): Promise<unknown> }).createPeerConnection.bind(mgr);
+        let n = 0;
+        mgr.onPeersChanged(() => n++);
+        await create(2);
+        expect(n).toBe(1);
+        const before = mgr.peerSessions()[0][1];
+        await create(2); // a second connection written over the first
+        expect(mgr.peerSessions()[0][1]).not.toBe(before);
+        expect(n).toBe(2);
+    });
+
     it('announces closeAll once, and not at all when there was nobody', async () => {
         const mgr = new WebRTCManager();
         mgr.setLocalUserId(1);
@@ -137,6 +169,17 @@ describe('SfuManager: participants', () => {
         expect(n).toBe(2);
         fire(RoomEvent.ConnectionStateChanged, ConnectionState.Reconnecting);
         expect(n).toBe(3);
+    });
+
+    it('names each participant by identity: a second device of the same user is a second session', () => {
+        const { m, room } = managerWithRoom();
+        expect(m.participantSessions()).toEqual([]);
+        room.remoteParticipants.set('u2#a', { identity: 'u2#a', trackPublications: new Map() });
+        expect(m.participantSessions()).toEqual([[2, 'sfu:u2#a']]);
+        room.remoteParticipants.set('u2#b', { identity: 'u2#b', trackPublications: new Map() });
+        room.remoteParticipants.set('agent', { identity: 'agent', trackPublications: new Map() });
+        expect(m.participantSessions()).toEqual([[2, 'sfu:u2#a'], [2, 'sfu:u2#b']]);
+        expect(m.participantUserIds()).toEqual([2]);
     });
 
     it('announces the room going away on disconnect', async () => {

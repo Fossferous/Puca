@@ -963,6 +963,20 @@ export class SfuManager {
         return [...out];
     }
 
+    /** Each remote participant as [user id, identity]. The identity
+     *  (`u<id>#<nonce>`) is minted per token request - once per join - so a
+     *  new one for the same user is a new device or a rejoin (dfPause.ts);
+     *  LiveKit's own reconnects reuse the token, and keep it. */
+    participantSessions(): Array<[number, string]> {
+        if (!this.room) return [];
+        const out: Array<[number, string]> = [];
+        for (const p of this.room.remoteParticipants.values()) {
+            const uid = userIdFromIdentity(p.identity);
+            if (uid !== null) out.push([uid, `sfu:${p.identity}`]);
+        }
+        return out;
+    }
+
     /** Whether the user still has a live CAMERA publication in the LiveKit
      *  room. Used to ignore a CameraStopped that was really just the sender's
      *  WS blipping (server releases media claims on disconnect) — tearing the

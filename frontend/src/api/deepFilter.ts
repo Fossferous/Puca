@@ -87,8 +87,14 @@ let overloadLog: { episode: number; start: string; ms: number | null }[] = [];
 let lastSettle: { reason: SettleReason; at: string; episodes: number } | null = null;
 /** The call graph's pause state (dfPause.ts), read live. */
 let pauseDiag: (() => DeepFilterPauseDiag) | null = null;
+/** Numbers each call graph, so a reader of `pausedMs` can tell a rebuilt
+ *  graph (whose count restarts at 0) from the same one later on. */
+let callGraphSeq = 0;
 
 export type DeepFilterPauseDiag = {
+    /** Which call graph this is (a new number on every rebuild: a device or
+     *  mode change, a mic restart). `pausedMs` belongs to it. */
+    graph: number;
     /** The worklet is paused right now (the Worker is idle). */
     paused: boolean;
     reason: DfPauseReason | null;
@@ -453,7 +459,9 @@ export async function applyDeepFilter(
         const now = Date.now();
         if (want) { pause.pauses++; pause.since = now; } else { pause.resumes++; pause.pausedMs += now - pause.since; }
     };
+    const graphId = opts?.local ? 0 : ++callGraphSeq;
     const readPause = (): DeepFilterPauseDiag => ({
+        graph: graphId,
         paused: pausedOnGraph, reason: pause.reason, refused: pause.refused,
         pauses: pause.pauses, resumes: pause.resumes,
         pausedMs: pause.pausedMs + (pausedOnGraph ? Date.now() - pause.since : 0),
