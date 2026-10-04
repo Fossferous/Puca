@@ -20,6 +20,8 @@ vi.mock('../api/attachments', async () => ({
         : null),
     decryptToBlobUrl: async (id: string) => `blob:decrypted-${id}`,
     videoMimeFor: () => null,
+    // The real predicate: the stand-in decrypt above never flags a playlist.
+    isPlaylistBlobUrl: (await vi.importActual<typeof import('../api/attachments')>('../api/attachments')).isPlaylistBlobUrl,
 }));
 
 const { NoteImages } = await import('../components/NoteImages');
