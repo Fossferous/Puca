@@ -33,7 +33,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { type TaskAttachmentRef, isAttachmentsLocked } from '../api/tasks';
-import { decryptToBlobUrl, parseEncAttachment } from '../api/attachments';
+import { audioMimeFor, decryptToBlobUrl, isPlaylistBlobUrl, parseEncAttachment } from '../api/attachments';
 import { type GalleryItem, galleryItemNoun, galleryItems } from '../api/noteMedia';
 import { isParkedRef, parseParkedRef } from '../api/parkedMedia';
 import { parkedObjectUrl } from '../api/parkedPreview';
@@ -116,23 +116,32 @@ function Picture({ refItem, onOpen }: { refItem: TaskAttachmentRef; onOpen: (url
 
 /** A voice note: decrypted here, played only on purpose. `preload="metadata"`
  *  fetches the duration from the blob URL and nothing else; `autoplay` is
- *  never set, and there is no code path that calls play(). */
-function AudioClip({ refItem }: { refItem: TaskAttachmentRef }) {
+ *  never set, and there is no code path that calls play(). A file the
+ *  player cannot decode after all (it lied about its type, or this engine
+ *  lacks the codec) becomes the download button, not a dead player. */
+function AudioClip({ refItem, folder }: { refItem: TaskAttachmentRef; folder?: string }) {
     const [url, setUrl] = useState<string | null>(null);
     const [failed, setFailed] = useState(false);
+    const [embedFailed, setEmbedFailed] = useState(false);
     const href = refItem.href;
+    const name = refItem.name;
     useEffect(() => {
         const p = parseEncAttachment(href);
         if (!p) return;
         let cancelled = false;
-        decryptToBlobUrl(p.id, p.key, p.mime, p.cap)
+        // Typed with the resolved audio MIME: an unlabelled `.mp3` gets a
+        // media-typed blob, as in chat (galleryItems put it here by name).
+        decryptToBlobUrl(p.id, p.key, audioMimeFor(name, p.mime) ?? p.mime, p.cap)
             .then(u => { if (!cancelled) setUrl(u); })
             .catch(() => { if (!cancelled) setFailed(true); });
         return () => { cancelled = true; };
-    }, [href]);
+    }, [href, name]);
     if (!parseEncAttachment(href) || failed) {
         return <span className="ni-broken" title={refItem.name}><WarningIcon /> {refItem.name}</span>;
     }
+    // A playlist (its bytes open with #EXTM3U) never reaches the player: an
+    // <audio> handed one fetches the URLs inside on its own (api/attachments.ts).
+    if (embedFailed || isPlaylistBlobUrl(url)) return <FileDownload refItem={refItem} folder={folder} />;
     if (!url) return <span className="ni-pending" aria-label={`Loading ${refItem.name}`} />;
     return (
         <span className="ni-audio">
@@ -140,7 +149,7 @@ function AudioClip({ refItem }: { refItem: TaskAttachmentRef }) {
             {/* On the Output Device chosen in Settings: shared with Púca on the
                 web. The Android Notes app has no such setting, so it stays on
                 the default. */}
-            <audio ref={followOutputDeviceRef} src={url} controls preload="metadata" aria-label={refItem.name} />
+            <audio ref={followOutputDeviceRef} src={url} controls preload="metadata" aria-label={refItem.name} onError={() => setEmbedFailed(true)} />
         </span>
     );
 }
@@ -197,10 +206,13 @@ export function NoteImages({ opened, editable, busy = false, onAddPhotos, onRemo
                     {items.map(item => (
                         <figure key={item.ref.href} className={`ni-item ${item.kind}`} data-parked={isParkedRef(item.ref) ? 'true' : undefined}>
                             {isParkedRef(item.ref) && <span className="ni-unsent" title="Waiting for a connection">Not sent yet</span>}
-                            {item.kind === 'file'
+                            {/* A parked recording or audio file is not on the server yet,
+                                so there is nothing for the player to open: it is the
+                                on-this-device download until it uploads. */}
+                            {item.kind === 'file' || (item.kind === 'audio' && isParkedRef(item.ref))
                                 ? <FileDownload refItem={item.ref} folder={saveFolder} />
                                 : item.kind === 'audio'
-                                    ? <AudioClip refItem={item.ref} />
+                                    ? <AudioClip refItem={item.ref} folder={saveFolder} />
                                     : <Picture refItem={item.ref} onOpen={url => setZoom({ url, name: item.ref.name })} />}
                             {canEdit && (
                                 <div className="ni-tools">

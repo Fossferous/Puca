@@ -9,7 +9,7 @@ import { useQuery } from '@tanstack/react-query';
 import { type TaskList } from '../api/tasks';
 import { type ListFeatures, NO_LIST_FEATURES, fetchListFeatures, listTrashedTaskLists } from '../api/listContent';
 import { isUndecryptable } from '../api/decryptMarkers';
-import { galleryItems, heroItems } from '../api/noteMedia';
+import { galleryCounts } from '../api/noteMedia';
 
 export const listContentQueryKeys = {
     features: ['listContent', 'features'] as const,
@@ -35,12 +35,12 @@ export function useListContentSupport(): {
 
 /** A short line for the All-tasks board card: the note's text, or — for a
  *  note that is only attachments — how many pictures and files it holds (the
- *  board is a glance; the list's own view shows them). */
+ *  board is a glance; the list's own view shows them). A voice note or song
+ *  is a file here (galleryCounts). */
 export function listBodySnippet(list: TaskList | undefined): string {
     const b = list?.body;
     if (b && !isUndecryptable(b)) return b.length > 240 ? `${b.slice(0, 239)}…` : b;
-    const pictures = heroItems(list?.attachments, Number.MAX_SAFE_INTEGER).length;
-    const files = galleryItems(list?.attachments).filter(i => i.kind === 'file').length;
+    const { pictures, files } = galleryCounts(list?.attachments);
     const parts: string[] = [];
     if (pictures > 0) parts.push(`${pictures} picture${pictures === 1 ? '' : 's'}`);
     if (files > 0) parts.push(`${files} file${files === 1 ? '' : 's'}`);

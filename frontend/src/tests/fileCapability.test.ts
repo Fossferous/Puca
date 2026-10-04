@@ -86,3 +86,24 @@ describe('presenting a capability', () => {
         fetchSpy.mockRestore();
     });
 });
+
+/**
+ * The MIME a ref records is what decides, for every reader, whether the file
+ * gets a player. The browser's File.type wins; when it is empty (Matroska
+ * famously, and a picker on some phones for .opus or .flac) the extension
+ * fills it in, so a new ref never needs the render-time name fallback.
+ */
+describe('the MIME the ref records', () => {
+    it('keeps the browser type, and infers video, then audio, from the name when there is none', async () => {
+        const mimeOf = async (name: string, type?: string) =>
+            parseEncAttachment((await encryptAndUploadRef(fileOf([1], name, type))).href)?.mime;
+        expect(await mimeOf('song.mp3', 'audio/mpeg')).toBe('audio/mpeg');
+        expect(await mimeOf('song.m4a', 'audio/x-m4a')).toBe('audio/x-m4a');
+        expect(await mimeOf('song.mp3')).toBe('audio/mpeg');
+        expect(await mimeOf('take.opus')).toBe('audio/ogg');
+        expect(await mimeOf('take.flac')).toBe('audio/flac');
+        expect(await mimeOf('clip.mkv')).toBe('video/x-matroska');
+        expect(await mimeOf('track.webm')).toBe('video/webm');   // video or audio: the video player decides once it has looked
+        expect(await mimeOf('archive.bin')).toBe('application/octet-stream');
+    });
+});

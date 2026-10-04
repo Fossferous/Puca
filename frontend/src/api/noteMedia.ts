@@ -19,11 +19,11 @@
  * fail with a 400 the user cannot explain.
  */
 import { type TaskAttachmentRef, MAX_TASK_ATTACHMENTS, isAttachmentsLocked, parseTaskAttachments } from './tasks';
-import { type SealedFile, decryptToBlobUrl, encryptAndUploadRef, parseEncAttachment, sealFileForUpload, uploadSealedRef } from './attachments';
+import { type SealedFile, audioMimeFor, decryptToBlobUrl, encryptAndUploadRef, parseEncAttachment, sealFileForUpload, uploadSealedRef } from './attachments';
 import { prepareImageForUpload } from './imagePrep';
 import { bytesFromB64, bytesToB64, parkedHref, parseParkedRef } from './parkedMedia';
 import { addTaskListAttachments, deleteFiles, removeTaskListAttachments } from './listContent';
-import { assertClipUploadable, isAudioMime } from '../notes/model/audioNote';
+import { assertClipUploadable } from '../notes/model/audioNote';
 
 /** The mime a drawing's editable strokes are uploaded under (next to its PNG). */
 export const DRAWING_STROKES_MIME = 'application/x-puca-drawing';
@@ -277,7 +277,8 @@ export function mediaCountLabel(photos: File[], drawings: number): string {
 
 /** One entry of a note's gallery. A drawing is its PNG plus the strokes file
  *  that makes it editable again; the strokes file is never shown on its own.
- *  An `audio` item is a voice note and gets a player, not a paperclip. */
+ *  An `audio` item is a voice note (or any audio file this engine can play)
+ *  and gets a player, not a paperclip. */
 export interface GalleryItem {
     ref: TaskAttachmentRef;
     kind: 'image' | 'drawing' | 'file' | 'audio';
@@ -327,7 +328,10 @@ export function galleryItems(opened: string | null | undefined): GalleryItem[] {
             } else {
                 out.push({ ref: r, kind: 'image' });
             }
-        } else if (isAudioMime(mime)) {
+        } else if (audioMimeFor(r.name, mime)) {
+            // The chat player's rule (api/attachments.ts): a playable audio
+            // type, or an unlabelled file whose NAME says it is one. An .amr
+            // is audio this engine cannot play, so it stays a download.
             out.push({ ref: r, kind: 'audio' });
         } else {
             out.push({ ref: r, kind: 'file' });
@@ -404,4 +408,21 @@ function nextBase(refs: TaskAttachmentRef[], prefix: string): string {
  *  picture by falling through a `!== 'file'` filter. At most `max`. */
 export function heroItems(opened: string | null | undefined, max = 3): GalleryItem[] {
     return galleryItems(opened).filter(i => i.kind === 'image' || i.kind === 'drawing').slice(0, max);
+}
+
+/** How many pictures and how many other files a note holds, for every line
+ *  that sums a note up instead of showing it: the All-tasks board's snippet,
+ *  a Notes card's chip, a trashed note's line. Pictures are named positively,
+ *  as in heroItems; EVERYTHING else is a file — a voice note or song too, as
+ *  in mediaCountLabel. Each of those three used to count `kind === 'file'`
+ *  (or `!== 'file'`) on its own, so audio said nothing on the board, made
+ *  its card read "Empty note" and was "1 picture" in the trash. */
+export function galleryCounts(opened: string | null | undefined): { pictures: number; files: number } {
+    let pictures = 0;
+    let files = 0;
+    for (const i of galleryItems(opened)) {
+        if (i.kind === 'image' || i.kind === 'drawing') pictures++;
+        else files++;
+    }
+    return { pictures, files };
 }

@@ -27,7 +27,7 @@ import { scheduleSearchText } from '../model/notesTiming';
 import { Highlight } from './Highlight';
 import { type NoteActions } from '../model/notesQueries';
 import { NoteBodyPreview, NoteHero } from './NoteCardContent';
-import { galleryItems, heroItems } from '../../api/noteMedia';
+import { galleryCounts, heroItems } from '../../api/noteMedia';
 import { ScheduleChip } from '../../components/schedule/ScheduleChip';
 import { NoteDueChip } from '../../components/schedule/NoteReminderControl';
 import { useNoteUnsynced } from '../model/notesOutbox';
@@ -186,8 +186,9 @@ function NoteCardImpl({
     // The note's OWN files (a PDF, a ticket) as well as its items'. `hero`
     // above shows only pictures, so without this a note whose one attachment
     // is a file renders as an empty card — the card would be lying about
-    // what the note holds.
-    let fileCount = galleryItems(card.noteAttachments).filter(i => i.kind === 'file').length;
+    // what the note holds. A voice note or song counts as a file too
+    // (galleryCounts), as an item's audio already does in the loop below.
+    let fileCount = galleryCounts(card.noteAttachments).files;
     for (const t of tasks ?? []) {
         if (!t.attachments) continue;
         if (isAttachmentsLocked(t.attachments)) { anyLocked = true; continue; }

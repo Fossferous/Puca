@@ -778,7 +778,9 @@ back the copy it holds (migration 069, `expect_rev` on
   kept, in the same sealed database as the rest of the queue (store `m` of
   `pucaNotesCache:<user>`, each record sealed with `sealLocal`), and it is
   uploaded when the queue replays. The picture shows on the card and in the
-  editor from those local bytes meanwhile, marked *Not sent yet*, and the
+  editor from those local bytes meanwhile, marked *Not sent yet* (a
+  recording or other audio file waiting there is its download button, saved
+  from those same bytes, and gets its player once it has uploaded), and the
   banner counts what is waiting separately from the other changes — as
   "pictures or files", because the queue counts records, not their kind, and
   a waiting PDF is not a picture. A note made offline
@@ -1534,8 +1536,13 @@ Migration 065 gives a personal list three nullable columns, and
   a link to a `blob:` URL. A `blob:` document inherits the app's own origin
   and takes its type from the ref, so an in-origin document could read the stored token and
   the E2EE key material; `safeBlobType` reduces anything that is not an
-  image, video or audio file to opaque bytes, and that must not be relaxed
-  to make a PDF preview. Each upload is capped at 25 MB, and a note holds 12
+  image, video or audio file to opaque bytes (and, within those, any
+  `+xml`-style structured-suffix type), and that must not be relaxed to make
+  a PDF preview. A blob's type does NOT keep a playlist out of a player —
+  Chromium recognises HLS from the bytes, and a `<video>`/`<audio>` handed
+  one fetches the URLs inside with no click — so a file whose plaintext opens
+  with `#EXTM3U` is flagged when it is decrypted (`isPlaylistBlobUrl`) and
+  shown as the download button, never a player. Each upload is capped at 25 MB, and a note holds 12
   sidecar slots (a drawing takes two). A drawing is uploaded twice: a PNG
   that every card and Púca's gallery show, and its strokes, so it can be
   edited again (`frontend/src/api/drawing.ts`; the editor is
@@ -1545,7 +1552,15 @@ Migration 065 gives a personal list three nullable columns, and
   helper, so the server holds an encrypted blob and its size and cannot tell a
   recording from a picture. It plays back in Púca Notes and in Púca's Tasks
   view, with controls and never by itself, and takes one sidecar slot of the
-  twelve (25 MB a clip, five minutes). A recording is never a card's hero
+  twelve (25 MB a clip, five minutes). Any other audio file this device can
+  play (mp3, m4a, aac, ogg, opus, wav, flac, weba — by its type, or by its
+  name when the type says nothing) gets the same player, by the same rule a
+  chat message uses (`audioMimeFor`, `api/attachments.ts`); audio it cannot
+  play (AMR, MIDI), and a file whose player fails to open it, is the download
+  button. Where a note is summed up instead of shown (the All-tasks board's
+  snippet, a card's chip, a trashed note's line), a recording or any other
+  audio file counts as a FILE (`galleryCounts`), never as a picture or as
+  nothing. A recording is never a card's hero
   picture. On a phone, *Photo* offers the camera (`<input accept="image/*"
   capture>`); on Android that needs the `IMAGE_CAPTURE` entry under `<queries>`
   in each app's manifest, so the camera arrives with a new APK of each app, not

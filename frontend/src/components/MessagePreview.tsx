@@ -6,19 +6,22 @@
  * snapshot, "Replying to" bar, pinned list, search results, collection feed),
  * so that span's ellipsis and colour still apply.
  *
- * Icons match the message list: a picture for an image, the paperclip the
- * message's own file chip uses for any other file, the clip frame for a clip,
+ * Icons match the message list: a picture for an image, the note its audio
+ * player's card carries for audio, the paperclip the message's own file chip
+ * uses for any other file, the clip frame for a clip,
  * and the eye-off of the composer's spoiler toggle for a spoiler (whose name
  * stays hidden — the name can be the spoiler).
  */
 import { messagePreviewSegments, segmentDisplayName, segmentLabel, type PreviewSegment } from '../api/messagePreview';
-import { ClipIcon, EyeOffIcon, ImageIcon, PaperclipIcon } from './Icons';
+import { ClipIcon, EyeOffIcon, ImageIcon, MusicIcon, PaperclipIcon } from './Icons';
 import './MessagePreview.css';
 
 function SegmentIcon({ seg }: { seg: Exclude<PreviewSegment, { type: 'text' }> }) {
     if (seg.type === 'clip') return <ClipIcon />;
     if (seg.spoiler) return <EyeOffIcon />;
-    return seg.kind === 'image' ? <ImageIcon /> : <PaperclipIcon />;
+    if (seg.kind === 'image') return <ImageIcon />;
+    if (seg.kind === 'audio') return <MusicIcon />;
+    return <PaperclipIcon />;
 }
 
 export function MessagePreview({ content, max }: { content: string; max?: number }) {

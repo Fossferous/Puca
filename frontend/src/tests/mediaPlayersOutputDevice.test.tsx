@@ -212,6 +212,13 @@ describe('every hand-started player follows the chosen Output Device', () => {
         await expectFollows(container.querySelector('.message-video video'));
     });
 
+    it('an audio attachment in chat', async () => {
+        const href = 'sovereign-enc:aud1?k=KEY&m=audio%2Fmpeg';
+        await act(async () => { root.render(<MessageContent content={`[m83-midnight-city.mp3](${href})`} members={[]} />); });
+        await settle();
+        await expectFollows(container.querySelector('.message-audio audio'));
+    });
+
     it("a Task's video attachment", async () => {
         await act(async () => {
             root.render(<TaskAttachments refs={[{ href: 'sovereign-enc:v1?k=KEY&m=video%2Fmp4', name: 'walkthrough.mp4' }]} canEdit={false} onRemove={() => {}} />);

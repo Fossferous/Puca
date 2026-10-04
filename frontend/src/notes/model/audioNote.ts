@@ -106,11 +106,6 @@ export function extForMime(mime: string): string {
     return 'bin';
 }
 
-/** Is this mime a recording? (Used for the gallery's `audio` kind.) */
-export function isAudioMime(mime: string | null | undefined): boolean {
-    return !!mime && mime.toLowerCase().startsWith('audio/');
-}
-
 /** mm:ss for the recorder's elapsed time and a clip's length. */
 export function formatClipTime(ms: number): string {
     const total = Math.max(0, Math.floor(ms / 1000));
