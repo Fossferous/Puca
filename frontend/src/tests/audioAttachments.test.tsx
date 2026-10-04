@@ -23,6 +23,8 @@ vi.mock('../api/attachments', async (orig) => ({
         return `blob:decrypted-${id}`;
     },
 }));
+const { saveAttachment } = vi.hoisted(() => ({ saveAttachment: vi.fn(async () => ({ where: 'Documents/Puca Notes', onDisk: true })) }));
+vi.mock('../api/saveAttachment', () => ({ saveAttachment }));
 
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MessageContent } from '../components/MessageContent';
@@ -50,6 +52,7 @@ async function renderMessage(content: string) {
 
 beforeEach(() => {
     decrypts.length = 0;
+    saveAttachment.mockClear();
     play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(() => Promise.resolve());
     container = document.createElement('div');
     document.body.appendChild(container);
@@ -192,6 +195,21 @@ describe('a chat message with an audio attachment', () => {
         expect(card.querySelector('.message-audio-name > svg')!.outerHTML).toBe(renderToStaticMarkup(<MusicIcon />));
     });
 
+    it('the same attachment handed a new file forgets that the old one had no picture', async () => {
+        // An edited message keeps its EncryptedAttachment (same place, same
+        // key) and gives it a new href: the fetch for the new file must start
+        // from "a video", not from the old file's sound-only card.
+        await renderMessage(`[track.webm](${ref('f11', 'video/webm')})`);
+        await act(async () => { container.querySelector('.message-video video')!.dispatchEvent(new Event('loadedmetadata')); });
+        expect(container.querySelector('.message-audio-note'), 'control: the first file went sound-only').not.toBeNull();
+        await renderMessage(`[clip.webm](${ref('f12', 'video/webm')})`);
+        expect(decrypts.map(d => d.id), 'control: the same instance fetched the new file').toEqual(['f11', 'f12']);
+        const video = container.querySelector<HTMLVideoElement>('.message-video video');
+        expect(video, 'the new video was left on the old sound-only card').not.toBeNull();
+        expect(video!.getAttribute('src')).toBe('blob:decrypted-f12');
+        expect(container.querySelector('.message-audio')).toBeNull();
+    });
+
     it('control: a real video (it has a frame size) stays a video', async () => {
         await renderMessage(`[clip.webm](${ref('f8', 'video/webm')})`);
         const video = container.querySelector<HTMLVideoElement>('.message-video video')!;
@@ -236,6 +254,7 @@ describe("the composer's pending chip", () => {
         const chips = [
             pendingAttachment({ name: 'song.mp3', type: 'audio/mpeg' }, null),
             pendingAttachment({ name: 'take.opus', type: '' }, null),   // a picker that reports no type
+            pendingAttachment({ name: 'Voice message', type: 'audio/mpeg' }, null),   // no extension: the TYPE says audio
             pendingAttachment({ name: 'report.pdf', type: 'application/pdf' }, null),
         ];
         await act(async () => {
@@ -245,7 +264,7 @@ describe("the composer's pending chip", () => {
         const music = renderToStaticMarkup(<MusicIcon />);
         const file = renderToStaticMarkup(<FileIcon />);
         expect(music).not.toBe(file); // control: the two icons are distinguishable
-        expect(drawn).toEqual([music, music, file]);
+        expect(drawn).toEqual([music, music, music, file]);
     });
 });
 
@@ -271,6 +290,21 @@ describe("a note's gallery", () => {
         await act(async () => { audio!.dispatchEvent(new Event('error')); });
         expect(container.querySelector('audio')).toBeNull();
         expect(container.querySelector('button.ni-file')?.textContent).toContain('song.mp3');
+    });
+
+    it("a player that errors becomes a download into the note app's OWN folder", async () => {
+        // Púca Notes passes its folder (NOTES_FOLDER) so a note's file does not
+        // land in the chat app's Documents/Puca on a phone.
+        const opened = sidecar([{ href: ref('n6', 'audio/mpeg'), name: 'song.mp3' }]);
+        await act(async () => { root.render(<NoteImages opened={opened} editable={false} saveFolder="Puca Notes" />); });
+        await settle();
+        await act(async () => { container.querySelector('.ni-audio audio')!.dispatchEvent(new Event('error')); });
+        const btn = container.querySelector<HTMLButtonElement>('button.ni-file');
+        expect(btn?.textContent, 'control: it fell back to the download button').toContain('song.mp3');
+        await act(async () => { btn!.click(); });
+        await settle();
+        expect(saveAttachment).toHaveBeenCalledTimes(1);
+        expect(saveAttachment).toHaveBeenCalledWith('blob:decrypted-n6', 'song.mp3', 'Puca Notes');
     });
 
     // Added offline, not uploaded yet: the ref is `puca-parked:` and its bytes

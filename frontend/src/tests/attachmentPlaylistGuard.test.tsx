@@ -53,7 +53,11 @@ const MP3_FRAME = new Uint8Array([0xff, 0xfb, 0x90, 0x64, ...new Array(60).fill(
 describe('looksLikeHlsPlaylist', () => {
     it('an HLS playlist, however it opens', () => {
         expect(looksLikeHlsPlaylist(enc.encode(PLAYLIST))).toBe(true);
-        expect(looksLikeHlsPlaylist(enc.encode('﻿' + PLAYLIST)), 'a UTF-8 BOM').toBe(true);
+        // Written as an escape, not the invisible character itself: a tool that
+        // strips a literal BOM would quietly turn this into the plain case above.
+        const withBom = enc.encode('\uFEFF' + PLAYLIST);
+        expect([...withBom.subarray(0, 3)], 'control: the bytes really open with a BOM').toEqual([0xef, 0xbb, 0xbf]);
+        expect(looksLikeHlsPlaylist(withBom), 'a UTF-8 BOM').toBe(true);
         expect(looksLikeHlsPlaylist(enc.encode(' \r\n\t' + PLAYLIST)), 'leading whitespace').toBe(true);
         expect(looksLikeHlsPlaylist(enc.encode('#extm3u\n#EXT-X-TARGETDURATION:2\n')), 'any case').toBe(true);
         // Media probes (FFmpeg's, for one) skip an ID3v2 tag before they
