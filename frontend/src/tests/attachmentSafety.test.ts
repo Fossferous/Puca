@@ -146,7 +146,7 @@ describe('audioMimeFor', () => {
     it('what the upload side records, per format (Edge on Windows, measured)', () => {
         // File.type as the composer saw it in a real browser, 2026-10-04.
         expect(audioMimeFor('test-tone.mp3', 'audio/mpeg')).toBe('audio/mpeg');
-        expect(audioMimeFor('test-tone.m4a', 'audio/x-m4a')).toBe('audio/x-m4a');
+        expect(audioMimeFor('test-tone.m4a', 'audio/x-m4a')).toBe('audio/mp4'); // Windows' alias, canonicalised
         expect(audioMimeFor('test-tone.ogg', 'audio/ogg')).toBe('audio/ogg');
         expect(audioMimeFor('test-tone.opus', 'audio/ogg')).toBe('audio/ogg');
         expect(audioMimeFor('test-tone.wav', 'audio/wav')).toBe('audio/wav');
@@ -155,6 +155,29 @@ describe('audioMimeFor', () => {
         // Windows' registry type for .aac — not a name any player is handed;
         // the extension turns it into the real one.
         expect(audioMimeFor('test-tone.aac', 'audio/vnd.dlna.adts')).toBe('audio/aac');
+    });
+
+    // An engine that picks its decoder from the DECLARED type (Firefox, the
+    // WebKitGTK desktop shell) may not list a platform's alias, and would then
+    // fall back to the chip for a file it can play under the standard name.
+    // Chromium sniffs the bytes and does not care, so this costs nothing there.
+    it('hands the player ONE canonical type per format, never the platform alias', () => {
+        const cases: Array<[string, string]> = [
+            ['audio/x-m4a', 'audio/mp4'], ['audio/m4a', 'audio/mp4'],
+            ['audio/mp3', 'audio/mpeg'], ['audio/mpeg3', 'audio/mpeg'], ['audio/x-mpeg', 'audio/mpeg'], ['audio/x-mp3', 'audio/mpeg'],
+            ['audio/x-aac', 'audio/aac'], ['audio/aacp', 'audio/aac'],
+            ['audio/opus', 'audio/ogg'],
+            ['audio/x-wav', 'audio/wav'], ['audio/wave', 'audio/wav'], ['audio/vnd.wave', 'audio/wav'],
+            ['audio/x-flac', 'audio/flac'],
+        ];
+        for (const [alias, canonical] of cases) {
+            expect(audioMimeFor('x', alias), alias).toBe(canonical);
+            expect(audioMimeFor('x', `${alias.toUpperCase()}; q=1`), alias).toBe(canonical);
+        }
+        // Control: the standard names are their own canonical type.
+        for (const m of ['audio/mpeg', 'audio/mp4', 'audio/aac', 'audio/ogg', 'audio/wav', 'audio/flac', 'audio/webm']) {
+            expect(audioMimeFor('x', m), m).toBe(m);
+        }
     });
 
     it('drops parameters (a Púca Notes recording is audio/webm;codecs=opus)', () => {
@@ -223,8 +246,9 @@ describe('audioMimeFor', () => {
             expect(safeBlobType(m!), n).toBe(m);
         }
         for (const mime of mimes) {
-            expect(audioMimeFor('x', mime), mime).toBe(mime);
-            expect(safeBlobType(mime), mime).toBe(mime);
+            const m = audioMimeFor('x', mime);
+            expect(m, mime).not.toBeNull();
+            expect(safeBlobType(m!), mime).toBe(m);
         }
     });
 });

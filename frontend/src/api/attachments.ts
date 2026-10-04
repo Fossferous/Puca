@@ -117,22 +117,26 @@ const AUDIO_EXT_MIME: Record<string, string> = {
 };
 
 /**
- * Real audio MIMEs worth a player: the canonical names plus the aliases
- * platforms actually report (Windows says `audio/x-m4a` for .m4a and some
- * registries `audio/mp3`; Android has said `audio/x-wav`). An `audio/*` type
- * NOT listed — a playlist (`audio/x-mpegurl`, which would have the player go
- * and fetch whatever URLs it lists), AMR, MIDI — gets no player from its
- * MIME alone; the extension may still vouch for it (below), and the onError
- * fallback catches a file that lied.
+ * Real audio MIMEs worth a player, each mapped to the ONE standard name the
+ * player is handed: the canonical names plus the aliases platforms actually
+ * report (Windows says `audio/x-m4a` for .m4a and some registries
+ * `audio/mp3`; Android has said `audio/x-wav`). The blob carries the
+ * canonical name, not the alias: Chromium sniffs the bytes either way, but an
+ * engine that picks its decoder from the declared type (Firefox, the
+ * WebKitGTK desktop shell) may not list an alias, and would fall back to the
+ * chip for a file it can play. `.opus` files are Ogg Opus, hence audio/ogg.
+ * An `audio/*` type NOT listed — a playlist (`audio/x-mpegurl`), AMR, MIDI —
+ * gets no player from its MIME alone; the extension may still vouch for it
+ * (below), and the onError fallback catches a file that lied.
  */
-const PLAYABLE_AUDIO_MIME = new Set([
-    'audio/mpeg', 'audio/mp3', 'audio/mpeg3', 'audio/x-mpeg', 'audio/x-mp3',
-    'audio/mp4', 'audio/x-m4a', 'audio/m4a',
-    'audio/aac', 'audio/x-aac', 'audio/aacp',
-    'audio/ogg', 'audio/opus',
-    'audio/wav', 'audio/x-wav', 'audio/wave', 'audio/vnd.wave',
-    'audio/flac', 'audio/x-flac',
-    'audio/webm',
+const PLAYABLE_AUDIO_MIME = new Map<string, string>([
+    ['audio/mpeg', 'audio/mpeg'], ['audio/mp3', 'audio/mpeg'], ['audio/mpeg3', 'audio/mpeg'], ['audio/x-mpeg', 'audio/mpeg'], ['audio/x-mp3', 'audio/mpeg'],
+    ['audio/mp4', 'audio/mp4'], ['audio/x-m4a', 'audio/mp4'], ['audio/m4a', 'audio/mp4'],
+    ['audio/aac', 'audio/aac'], ['audio/x-aac', 'audio/aac'], ['audio/aacp', 'audio/aac'],
+    ['audio/ogg', 'audio/ogg'], ['audio/opus', 'audio/ogg'],
+    ['audio/wav', 'audio/wav'], ['audio/x-wav', 'audio/wav'], ['audio/wave', 'audio/wav'], ['audio/vnd.wave', 'audio/wav'],
+    ['audio/flac', 'audio/flac'], ['audio/x-flac', 'audio/flac'],
+    ['audio/webm', 'audio/webm'],
 ]);
 
 /** MIMEs that say nothing about what a file holds: the name decides. */
@@ -143,8 +147,8 @@ const GENERIC_MIME = new Set(['', 'application/octet-stream', 'application/ogg']
  *
  * Same shape as videoMimeFor, and the caller asks videoMimeFor FIRST (a real
  * video/* MIME, or an unlabelled video extension, is a video). Then:
- *  - a playable audio MIME wins (parameters dropped: Púca Notes records
- *    `audio/webm;codecs=opus`);
+ *  - a playable audio MIME wins, as its canonical name (parameters dropped:
+ *    Púca Notes records `audio/webm;codecs=opus`; `audio/x-m4a` is audio/mp4);
  *  - any other audio/* falls back to the extension — an `.mp3` labelled
  *    `audio/x-mpeg-3` is still an mp3; an `.amr` is still not playable;
  *  - a MISSING or generic MIME falls back to the extension, which is how refs
@@ -154,13 +158,14 @@ const GENERIC_MIME = new Set(['', 'application/octet-stream', 'application/ogg']
  *    type registries report for an `.ogg` or `.opus`;
  *  - a concrete NON-audio type (application/pdf, text/html) is respected:
  *    that file is not audio wearing a bad label, it is not audio.
- * Everything returned is a member of PLAYABLE_AUDIO_MIME or AUDIO_EXT_MIME —
- * never a sender-chosen string — so the blob it types is always one
- * safeBlobType keeps as plain audio.
+ * Everything returned is a canonical value of PLAYABLE_AUDIO_MIME or
+ * AUDIO_EXT_MIME — never a sender-chosen string — so the blob it types is
+ * always one safeBlobType keeps as plain audio.
  */
 export function audioMimeFor(name: string, mime: string): string | null {
     const m = (mime || '').toLowerCase().split(';')[0].trim();
-    if (PLAYABLE_AUDIO_MIME.has(m)) return m;
+    const canonical = PLAYABLE_AUDIO_MIME.get(m);
+    if (canonical) return canonical;
     if (!GENERIC_MIME.has(m) && !m.startsWith('audio/')) return null;
     const ext = (name || '').toLowerCase().split('.').pop() ?? '';
     return AUDIO_EXT_MIME[ext] ?? null;
