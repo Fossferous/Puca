@@ -20,9 +20,9 @@
  * whose parts are not a subset of what was actually approved (clipBadge
  * 'mismatch').
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { decodeClipRef, type ClipManifest } from '../api/clips/clipRef';
-import { CLIP_DOWNLOAD_MAX_BYTES, createClipPlayer, type ClipDownloadProgress, type ClipPlayerHandle } from '../api/clips/clipPlayback';
+import { CLIP_DOWNLOAD_MAX_BYTES, createClipPlayer, type ClipPlayerHandle } from '../api/clips/clipPlayback';
 import { clipBadge, clipBadgeText } from '../api/clips/clipConsentBadge';
 import { formatClock, formatMB } from '../api/clips/clipPresets';
 import type { ClipConsent } from '../api/servers';
@@ -30,6 +30,7 @@ import { saveClip } from '../api/clipDownload';
 import { applyOutputDevice } from './settingsStore';
 import { useOutputDeviceRef } from '../hooks/useOutputDeviceRef';
 import { ClipIcon, DownloadIcon, LockIcon, PlayIcon, ShieldCheckIcon, WarningIcon } from './Icons';
+import { downloadPercent, downloadSaving, playLoadPercent, playLoadText } from '../api/loadProgressText';
 import './ClipAttachment.css';
 
 export interface ClipAttachmentProps {
@@ -54,8 +55,13 @@ export function ClipAttachment({ href, consent }: ClipAttachmentProps) {
     // The player follows Settings > Output Device while it is mounted.
     const videoSinkRef = useOutputDeviceRef(videoRef);
     const playerRef = useRef<ClipPlayerHandle | null>(null);
+    // Strings and numbers, so a byte that does not change the readout
+    // re-renders nothing (progress arrives once per network chunk).
+    const [loadText, setLoadText] = useState('Loading…');
+    const [loadPct, setLoadPct] = useState(0);
     const [dlState, setDlState] = useState<DownloadState>('idle');
-    const [dlProgress, setDlProgress] = useState<ClipDownloadProgress | null>(null);
+    const [dlPct, setDlPct] = useState(0);
+    const [dlSaving, setDlSaving] = useState(false);
     const [dlError, setDlError] = useState<string | null>(null);
     const [savedWhere, setSavedWhere] = useState<string | null>(null);
 
@@ -74,10 +80,15 @@ export function ClipAttachment({ href, consent }: ClipAttachmentProps) {
 
     const play = async () => {
         if (refused || state === 'loading' || state === 'playing') return;
-        setState('loading'); setError(null);
+        setState('loading'); setError(null); setLoadText(playLoadText(null)); setLoadPct(0);
         const player = createClipPlayer(manifest);
         playerRef.current = player;
         if (player.mode === 'unsupported') { setState('unsupported'); return; }
+        player.onLoadProgress = (p) => {
+            if (playerRef.current !== player) return;
+            setLoadText(playLoadText(p));
+            setLoadPct(playLoadPercent(p));
+        };
         const onFail = (e: unknown) => {
             if (playerRef.current !== player) return; // a newer play() superseded this one
             const status = (e as { status?: number })?.status;
@@ -114,9 +125,9 @@ export function ClipAttachment({ href, consent }: ClipAttachmentProps) {
     // the filesystem plugin in one piece closed the app.
     const download = async () => {
         if (refused || tooLargeToDownload || dlState === 'downloading') return;
-        setDlState('downloading'); setDlProgress(null); setDlError(null); setSavedWhere(null);
+        setDlState('downloading'); setDlPct(0); setDlSaving(false); setDlError(null); setSavedWhere(null);
         try {
-            const res = await saveClip(manifest, setDlProgress);
+            const res = await saveClip(manifest, (p) => { setDlPct(downloadPercent(p)); setDlSaving(downloadSaving(p)); });
             if (res.cancelled) { setDlState('idle'); return; } // the Save As dialog was dismissed
             setSavedWhere(res.onDisk ? res.where : null);
             setDlState('saved');
@@ -150,7 +161,26 @@ export function ClipAttachment({ href, consent }: ClipAttachmentProps) {
                         </button>
                     </>
                 )}
-                {state === 'loading' && <span className="clip-attachment-overlay" aria-live="polite">Decrypting…</span>}
+                {/* One polite announcement that Play started loading: the MB
+                    readout changes every network chunk, and a progressbar is
+                    only read when focused. Always present, so a screen reader
+                    hears the text appear. */}
+                <span className="sr-only" aria-live="polite">{state === 'loading' ? 'Loading the clip' : ''}</span>
+                {state === 'loading' && (
+                    <span className="clip-attachment-overlay">
+                        <span className="clip-attachment-overlay-text">{loadText}</span>
+                        <span
+                            className="clip-attachment-progress"
+                            role="progressbar"
+                            aria-label="Loading the clip"
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                            aria-valuenow={loadPct}
+                        >
+                            <span className="clip-attachment-progress-fill" style={{ width: `${loadPct}%` }} />
+                        </span>
+                    </span>
+                )}
             </div>
             <div className="clip-attachment-meta">
                 <span className="clip-attachment-chips">
@@ -170,14 +200,17 @@ export function ClipAttachment({ href, consent }: ClipAttachmentProps) {
                 <div className="clip-attachment-actions">
                     <button
                         type="button"
-                        className="clip-attachment-download"
+                        className={`clip-attachment-download${dlState === 'downloading' ? ' busy' : ''}`}
                         onClick={() => void download()}
                         disabled={refused || tooLargeToDownload || dlState === 'downloading'}
-                        aria-label={dlState === 'downloading' && dlProgress ? `Downloading, part ${dlProgress.done} of ${dlProgress.total}` : 'Download the original recording'}
+                        aria-busy={dlState === 'downloading' || undefined}
+                        aria-label={dlState === 'downloading' ? (dlSaving ? 'Saving the clip' : `Downloading, ${dlPct} percent`) : 'Download the original recording'}
                         title={refused ? 'This clip points at footage nobody approved.' : tooLargeToDownload ? 'This clip is too large to download in the app — play it here instead.' : 'Decrypted in your browser, then saved like any other file'}
+                        // The fill behind the label is the share received (ClipAttachment.css).
+                        style={dlState === 'downloading' ? ({ '--clip-dl-pct': `${dlSaving ? 100 : dlPct}%` } as CSSProperties) : undefined}
                     >
                         <DownloadIcon size={14} />
-                        {dlState === 'downloading' ? `Downloading${dlProgress ? ` ${dlProgress.done}/${dlProgress.total}` : '…'}` : dlState === 'saved' ? (savedWhere ? 'Saved' : 'Download started') : 'Download'}
+                        {dlState === 'downloading' ? (dlSaving ? 'Saving…' : `Downloading ${dlPct}%`) : dlState === 'saved' ? (savedWhere ? 'Saved' : 'Download started') : 'Download'}
                     </button>
                     {dlState === 'saved' && savedWhere && <span className="clip-attachment-saved">Saved to {savedWhere}</span>}
                 </div>

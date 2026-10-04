@@ -29,7 +29,7 @@
  */
 import { evictionPlan, selectWindow, trimLeadingAudio, type ChunkIndexEntry, type GopUnit, type WindowUnit } from './clipRing';
 import { newRingKey, sealGop, openGop, newClipSecrets, sealPart, openPart, PART_MAX_PLAINTEXT, type ClipSecrets } from './clipCrypto';
-import { Fmp4Splitter, type SplitPart } from './fmp4Split';
+import { Fmp4Splitter, PART_RAMP_FRAGMENTS, fitPartCount, type SplitPart } from './fmp4Split';
 import { encodeClipRef, MAX_CLIP_PARTS, type ClipAudioCodec, type ClipManifest } from './clipRef';
 import { trimSealedParts, TRIM_MAX_CIPHER_BYTES } from './clipTrim';
 import { uploadParts, discardParts, ClipUploadError } from './clipUpload';
@@ -699,8 +699,10 @@ export class Ring {
         const hasAudio = !!audioCodec && !!this.aDecoderConfig && chosen.some(u => u.audio.length > 0);
 
         // Mux with mediabunny (statically imported above; worker-only bundle).
-        const parts: SplitPart[] = [];
-        const splitter = new Fmp4Splitter(PART_MAX_PLAINTEXT, p => parts.push(p));
+        // Graduated first parts (fmp4Split.ts): a viewer plays after a few MB
+        // instead of after the first whole 24 MiB part.
+        let parts: SplitPart[] = [];
+        const splitter = new Fmp4Splitter(PART_MAX_PLAINTEXT, p => parts.push(p), PART_RAMP_FRAGMENTS);
         const writable = new WritableStream<Uint8Array | { data: Uint8Array }>({
             write(c) { splitter.push(c instanceof Uint8Array ? c : c.data); },
         });
@@ -751,6 +753,9 @@ export class Ring {
         }
         await output.finalize();
         splitter.end();
+        // The ramp costs a few parts; a clip it would push past the reference
+        // limit is re-cut flat, exactly as it was cut before the ramp existed.
+        parts = fitPartCount(parts, PART_MAX_PLAINTEXT, MAX_CLIP_PARTS);
         if (parts.length < 2) throw new Error('mux produced no fragments');
         if (parts.length > MAX_CLIP_PARTS) throw new Error(`clip needs ${parts.length} parts; the maximum is ${MAX_CLIP_PARTS} — shorten it`);
         // A part can only exceed the budget when ONE moof/mdat fragment does —
@@ -966,7 +971,7 @@ async function preview(seq: number): Promise<void> {
  */
 async function trimSealed(s: SealedClip, startMs: number, endMs: number): Promise<SealedClip> {
     if (s.info.totalCipherBytes > TRIM_MAX_CIPHER_BYTES) throw new Error('this clip is too large to trim in memory — post it as-is');
-    const r = await trimSealedParts(s.secrets, s.clipId, s.parts, s.info.durationMs, startMs, endMs, MAX_CLIP_PARTS, PART_MAX_PLAINTEXT, false);
+    const r = await trimSealedParts(s.secrets, s.clipId, s.parts, s.info.durationMs, startMs, endMs, MAX_CLIP_PARTS, PART_MAX_PLAINTEXT, false, PART_RAMP_FRAGMENTS);
     if (!r) return s; // nothing to trim
     releaseMediaSource(s.ms);
     const info: SealedInfo = {

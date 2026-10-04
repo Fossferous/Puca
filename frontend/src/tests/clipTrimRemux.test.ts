@@ -227,6 +227,27 @@ async function sealMulti(budget: number): Promise<{ secrets: ClipSecrets; parts:
 const nonceOf = (wire: Uint8Array) => Array.from(wire.subarray(7, 19)).map(b => b.toString(16).padStart(2, '0')).join('');
 const isZero = (u: Uint8Array) => u.every(b => b === 0);
 
+describe('trimSealedParts keeps the seal\'s graduated first parts (a trimmed clip starts as fast)', () => {
+    it('with the ramp passed, media part 1 is ONE keyframe interval and part 2 is two; without it, one part holds everything', async () => {
+        const durationMs = Math.round(base.videoDuration * 1000);
+        const from = Math.round(base.keyTimes[1] * 1000) + 100; // keeps GOPs 1..5
+        const gop = (base.keyTimes[2] - base.keyTimes[1]) * 1000;
+        const flatSeal = await sealMulti(100 * 1024 * 1024);
+        const flat = await trimSealedParts(flatSeal.secrets, flatSeal.clipId, flatSeal.parts, durationMs, from, durationMs, 64, 100 * 1024 * 1024, true);
+        expect(flat!.parts.length).toBe(2); // positive control: the budget alone packs it into one media part
+        const { secrets, parts, clipId } = await sealMulti(100 * 1024 * 1024);
+        const r = await trimSealedParts(secrets, clipId, parts, durationMs, from, durationMs, 64, 100 * 1024 * 1024, true, [1, 2]);
+        expect(r!.parts.length).toBe(4); // init, 1 GOP, 2 GOPs, the remaining 2
+        expect(near(r!.parts[1].durMs, gop, 120)).toBe(true);
+        expect(near(r!.parts[2].durMs, 2 * gop, 120)).toBe(true);
+        const plain = [];
+        for (const p of r!.parts) plain.push(await openPart(r!.secrets, p.index, p.wire));
+        const out = await probe(concatParts(plain));
+        expect(near(out.firstVideoTs, 0, 0.001)).toBe(true);
+        expect(near(r!.durationMs / 1000, out.videoDuration, 0.06)).toBe(true);
+    }, 60_000);
+});
+
 describe('trimSealedParts (decrypt → re-mux → re-seal under FRESH secrets)', () => {
     it('seals the trimmed clip under NEW secrets: every new nonce differs from every old one, new parts open under the new key and reject under the old', async () => {
         const { secrets, parts, clipId } = await sealMulti(200 * 1024);

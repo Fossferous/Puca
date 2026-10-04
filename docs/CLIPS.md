@@ -75,7 +75,22 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
 - **Clip** seals the last D seconds: units are decrypted, muxed by mediabunny
   into fragmented MP4, split into an **init part + moof-aligned ≤24 MiB
   parts**, each sealed under a fresh clip key bound to the clip id and part
-  index (`clipCrypto.ts`). The sealed bytes never leave the Worker before
+  index (`clipCrypto.ts`). The first four media parts are SMALL on purpose
+  (`PART_RAMP_FRAGMENTS`: 1, 2, 4 and 8 two-second fragments, then the
+  24 MiB budget): a part is one AES-GCM unit, so a viewer can play nothing
+  until all of the first one has arrived, and a full 24 MiB first part made
+  a phone wait 6-26 s for a 2-minute clip's first frame (measured
+  2026-10-04; ~1 s with the ramp at 50 Mbit/s). Each ramp part is twice as
+  long as the one before, so it only arrives in time on a link of at least
+  twice the clip's bitrate; on a slower one the player holds the start until
+  the throughput it measures says the first ~40 s will not stall (the
+  start-up gate, `startBytesNeeded` in `clipPlayback.ts`), never longer than
+  one flat 24 MiB part would have taken. Measured on a 12 Mbit/s link with a
+  1440p clip (8.9 Mbit/s): starting on part 1 alone froze at 0:02, 0:06,
+  0:14 and 0:30; gated, it starts after ~8.4 s and plays straight through
+  (the same footage cut flat: 16.7 s). A clip the ramp would push
+  past 64 parts is re-cut flat (`fitPartCount`), so the ramp never stops a
+  clip from posting; a trim keeps the ramp too. The sealed bytes never leave the Worker before
   approval — the composer shows only metadata (duration, resolution, size)
   until the server says everyone approved; then a worker-side MSE preview and
   a trim (a RE-MUX of the kept range into a fresh fMP4 whose timeline starts
@@ -201,10 +216,16 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
   (`forEachClipPart`), although nothing there would need it. On desktop it is written through the native `attachment_save`
   command (a bare `<a download>` is not honoured in the Tauri webview); on
   the web it is a transient anchor. In the Android app it is STREAMED into
-  `Documents/Puca/puca-clip-<id>-<timestamp>.mp4`: one part fetched,
-  decrypted and written at a time (`forEachClipPart` →
-  `api/clipDownload.ts` → `saveStreamToDevice`), each bridge call at most
-  4 MiB of base64 (3 MiB of the file), into `<name>.part`, renamed to the
+  `Documents/Puca/puca-clip-<id>-<timestamp>.mp4`: parts fetched, decrypted
+  and written in order with the NEXT part downloading while this one is
+  written, never more than two in hand (≤ 48 MiB of plaintext; ~72 MiB of
+  renderer memory at the moment the next part is decrypted;
+  `forEachClipPart` →
+  `api/clipDownload.ts` → `saveStreamToDevice`; fetching only after each
+  write made the link idle 4-5 s per part, 51.5 s for a 129 MB clip on the
+  measured emulator), each bridge call at most
+  4 MiB of base64 (3 MiB of the file, encoded by the engine's
+  `Uint8Array.toBase64` where it exists), into `<name>.part`, renamed to the
   real name only once complete — the plugin media-scans after every call,
   and a half-written mp4 under the real name, left by an app killed
   mid-download, would look like the clip. Building the whole clip and handing it to the filesystem
@@ -289,8 +310,9 @@ says how big a saved clip of the longest allowed length is and how many fit
 in the member's clip storage (`GET /clips/usage`), and warns when that clip
 would exceed the in-app download (1 GiB) or trim (768 MiB) limit, or the
 64-part limit (`clipPartCount` counts parts the way `Fmp4Splitter` cuts them:
-an init-only part 0, then whole 2 s fragments under 24 MiB each — a test runs
-the real splitter to keep the two in step). The Quality line says what **automatic arming** really records
+an init-only part 0, the ramp's 1, 2, 4 and 8 fragments, then whole 2 s
+fragments under 24 MiB each, or flat when the ramp would pass 64 — a test
+runs the real splitter to keep the two in step). The Quality line says what **automatic arming** really records
 on a monitor like the current one — `nativeEncodeEstimate`, a TS port of
 `clip_capture.rs::effective_encode_settings`, pinned to the Rust by a shared
 table (`frontend/src/tests/fixtures/clip-native-encode-table.json`, asserted
@@ -566,8 +588,11 @@ nothing was cut); the final approval resets the server's deadline to the
 is disabled and the clip must be discarded; the upload uses
 the proposal id as its `clip_id`; the post carries `clip_id` and renders the
 server's `clip_consent`. `ClipAttachment` plays a posted clip in place (MSE,
-decrypted in the viewer's browser) and offers Download (the original bytes,
-any viewer — see "guaranteed"), and shows the badge only when the manifest's
+decrypted in the viewer's browser; the part the playhead waits for is fetched
+alone, the next one only once it is in, playback starts once the start-up
+gate is met, and the plate counts the MB it is waiting for) and offers Download (the original bytes, any viewer — see
+"guaranteed"; the button counts the percent received, then says Saving),
+and shows the badge only when the manifest's
 parts are a SUBSET of the stamped ids — mismatch refuses playback AND
 download, no stamp = no badge. Copy Text / Quote scrub
 the whole clip payload (the key is inside it). Owner switch: Server Settings ›

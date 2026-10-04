@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { Fmp4Splitter, parseFragmentStart, parseTimescales, type SplitPart } from '../api/clips/fmp4Split';
+import { Fmp4Splitter, PART_RAMP_FRAGMENTS, fitPartCount, parseFragmentStart, parseTimescales, type SplitPart } from '../api/clips/fmp4Split';
 
 // ---- tiny ISO-BMFF builders -------------------------------------------------
 const enc = new TextEncoder();
@@ -121,6 +121,73 @@ describe('fmp4Split — cutting rules', () => {
         const s = new Fmp4Splitter(1000, () => {});
         s.push(new Uint8Array([0, 0, 0, 20, 0x66, 0x74]));
         expect(() => s.end()).toThrow(/trailing/);
+    });
+});
+
+// ---- the ramp: small first parts so a viewer starts playing after a few MB ----
+// A part is one AES-GCM unit: nothing in it can play before ALL of it has
+// arrived. With every part cut at the 24 MiB budget a 2-minute clip made a
+// phone fetch ~24 MB before the first frame (6-26 s measured, 2026-10-04).
+describe('fmp4Split — the graduated first parts (PART_RAMP_FRAGMENTS)', () => {
+    const ftyp = box('ftyp', enc.encode('isom'));
+    const frag = (i: number) => cat(moof(i * 2), mdat(1000)); // ~1.15 KB, one 2 s fragment
+    const streamOf = (n: number) => cat(ftyp, moov(), ...Array.from({ length: n }, (_, i) => frag(i)));
+    const F = frag(0).byteLength; // every fragment here is the same size
+    const fits = (n: number) => n * F + 10; // a budget that holds exactly n fragments
+    function runRamp(stream: Uint8Array, budget: number, ramp: readonly number[], chunk = 97): SplitPart[] {
+        const parts: SplitPart[] = [];
+        const s = new Fmp4Splitter(budget, p => parts.push(p), ramp);
+        for (let o = 0; o < stream.byteLength; o += chunk) s.push(stream.subarray(o, Math.min(stream.byteLength, o + chunk)));
+        s.end();
+        return parts;
+    }
+
+    it('the seal ramps 1, 2, 4, 8 fragments before packing to the budget', () => {
+        expect(PART_RAMP_FRAGMENTS).toEqual([1, 2, 4, 8]);
+    });
+
+    it('media parts 1-4 hold 1, 2, 4 and 8 fragments, then the budget alone decides; concat stays byte-identical', () => {
+        const stream = streamOf(40);
+        const parts = runRamp(stream, fits(20), PART_RAMP_FRAGMENTS);
+        expect(parts[0].isInit).toBe(true);
+        const counts = parts.slice(1).map(p => p.fragments);
+        expect(counts.slice(0, 4)).toEqual([1, 2, 4, 8]);
+        // 40 - 15 = 25 fragments left: one full-budget part and the rest.
+        expect(counts.slice(4)).toEqual([20, 5]);
+        expect(cat(...parts.map(p => p.bytes))).toEqual(stream);
+        // Every part still starts on a fragment, with its start time.
+        expect(parts.slice(1).map(p => p.startS)).toEqual([0, 2, 6, 14, 30, 70]);
+        for (const p of parts.slice(1)) expect(new TextDecoder('latin1').decode(p.bytes.subarray(4, 8))).toBe('moof');
+    });
+
+    it('the byte budget still wins over a ramp step that does not fit', () => {
+        const parts = runRamp(streamOf(20), fits(3), PART_RAMP_FRAGMENTS);
+        expect(parts.slice(1).map(p => p.fragments)).toEqual([1, 2, 3, 3, 3, 3, 3, 2]);
+    });
+
+    it('no ramp passed = the flat cut every caller had before (positive control)', () => {
+        const parts = runRamp(streamOf(40), fits(20), []);
+        expect(parts.slice(1).map(p => p.fragments)).toEqual([20, 20]);
+    });
+
+    it('fitPartCount keeps a ramped split that fits, and re-cuts one that does not FLAT, byte-identical', () => {
+        const stream = streamOf(40);
+        const ramped = runRamp(stream, fits(20), PART_RAMP_FRAGMENTS); // 7 parts
+        expect(ramped.length).toBe(7);
+        expect(fitPartCount(ramped, fits(20), 7)).toBe(ramped);
+        const flat = runRamp(stream, fits(20), []);
+        const refit = fitPartCount(ramped, fits(20), 6);
+        expect(refit.map(p => p.fragments)).toEqual(flat.map(p => p.fragments));
+        expect(refit.map(p => p.startS)).toEqual(flat.map(p => p.startS));
+        expect(refit.map(p => p.index)).toEqual([0, 1, 2]);
+        expect(cat(...refit.map(p => p.bytes))).toEqual(stream);
+        // The ramped input was consumed and its plaintext zero-filled.
+        expect(ramped.length).toBe(0);
+    });
+
+    it('rejects a ramp entry that is not a positive whole number', () => {
+        expect(() => new Fmp4Splitter(1000, () => {}, [1, 0])).toThrow(/positive integers/);
+        expect(() => new Fmp4Splitter(1000, () => {}, [1.5])).toThrow(/positive integers/);
     });
 });
 
