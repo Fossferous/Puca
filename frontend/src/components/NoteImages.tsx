@@ -206,7 +206,10 @@ export function NoteImages({ opened, editable, busy = false, onAddPhotos, onRemo
                     {items.map(item => (
                         <figure key={item.ref.href} className={`ni-item ${item.kind}`} data-parked={isParkedRef(item.ref) ? 'true' : undefined}>
                             {isParkedRef(item.ref) && <span className="ni-unsent" title="Waiting for a connection">Not sent yet</span>}
-                            {item.kind === 'file'
+                            {/* A parked recording or audio file is not on the server yet,
+                                so there is nothing for the player to open: it is the
+                                on-this-device download until it uploads. */}
+                            {item.kind === 'file' || (item.kind === 'audio' && isParkedRef(item.ref))
                                 ? <FileDownload refItem={item.ref} folder={saveFolder} />
                                 : item.kind === 'audio'
                                     ? <AudioClip refItem={item.ref} folder={saveFolder} />

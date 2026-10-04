@@ -32,6 +32,7 @@ import { ComposerAttachments } from '../components/ComposerAttachments';
 import { FileIcon, MusicIcon } from '../components/Icons';
 import { galleryItems } from '../api/noteMedia';
 import { pendingAttachment } from '../api/composerAttachments';
+import { parkedHref } from '../api/parkedMedia';
 
 let container: HTMLDivElement;
 let root: Root;
@@ -238,5 +239,28 @@ describe("a note's gallery", () => {
         await act(async () => { audio!.dispatchEvent(new Event('error')); });
         expect(container.querySelector('audio')).toBeNull();
         expect(container.querySelector('button.ni-file')?.textContent).toContain('song.mp3');
+    });
+
+    // Added offline, not uploaded yet: the ref is `puca-parked:` and its bytes
+    // are only on this device, so there is no server file to decrypt into a
+    // player. Before the audio rule it was the on-this-device download when
+    // the type said nothing; the name rule sent it to the player, which can
+    // only open a server file and drew a broken-file warning instead.
+    it.each([
+        ['take.opus', 'application/octet-stream'],   // a parked record from before, or a picker with no type
+        ['song.mp3', 'application/octet-stream'],
+        ['take.opus', 'audio/ogg'],                  // what the upload side records now
+        ['voice-1.webm', 'audio/webm;codecs=opus'],  // a voice note recorded offline (broken before this change too)
+    ])('a parked %s (%s) is the on-this-device download, not a broken player', async (name, mime) => {
+        const opened = sidecar([{ href: parkedHref('pk1', mime), name }]);
+        expect(galleryItems(opened).map(i => i.kind), 'control: it is classified as audio').toEqual(['audio']);
+        await act(async () => { root.render(<NoteImages opened={opened} editable={false} />); });
+        await settle();
+        expect(container.querySelector('.ni-broken'), 'a broken-file warning').toBeNull();
+        expect(container.querySelector('audio')).toBeNull();
+        const btn = container.querySelector('button.ni-file');
+        expect(btn?.textContent).toContain(name);
+        expect(btn?.textContent).toContain('on this device');
+        expect(decrypts).toEqual([]);
     });
 });
