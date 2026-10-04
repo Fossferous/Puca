@@ -11,11 +11,10 @@
  */
 import { useEffect, useState } from 'react';
 import { type TaskAttachmentRef } from '../api/tasks';
-import { parseEncAttachment, decryptToBlobUrl, videoMimeFor } from '../api/attachments';
+import { parseEncAttachment, decryptToBlobUrl, videoMimeFor, audioMimeFor } from '../api/attachments';
 import { ImageLightbox } from './ImageLightbox';
 import { CheckCircleIcon, CloseIcon, PaperclipIcon, WarningIcon } from './Icons';
 import { saveAttachment } from '../api/saveAttachment';
-import { isAudioMime } from '../notes/model/audioNote';
 import { followOutputDeviceRef } from './settingsStore';
 import './TaskAttachments.css';
 
@@ -31,6 +30,9 @@ function AttachmentItem({ refItem }: { refItem: TaskAttachmentRef }) {
     const [url, setUrl] = useState<string | null>(null);
     const [failed, setFailed] = useState(false);
     const [zoomed, setZoomed] = useState(false);
+    // The player could not decode it (a file that lied about its type, or a
+    // codec this engine lacks): the download button instead of a dead player.
+    const [embedFailed, setEmbedFailed] = useState(false);
 
     const href = refItem.href;
     const name = refItem.name;
@@ -43,8 +45,9 @@ function AttachmentItem({ refItem }: { refItem: TaskAttachmentRef }) {
         let cancelled = false;
         // Same extension fallback as chat messages: a ref recorded with
         // application/octet-stream but named *.mkv is a video (File.type is
-        // routinely empty for mkv), and the blob should be media-typed.
-        decryptToBlobUrl(p.id, p.key, videoMimeFor(name, p.mime) ?? p.mime, p.cap)
+        // routinely empty for mkv), one named *.mp3 is audio, and the blob
+        // should be media-typed.
+        decryptToBlobUrl(p.id, p.key, videoMimeFor(name, p.mime) ?? audioMimeFor(name, p.mime) ?? p.mime, p.cap)
             .then(u => { if (!cancelled) setUrl(u); })
             .catch(err => {
                 console.error('Failed to decrypt task attachment:', err);
@@ -79,8 +82,10 @@ function AttachmentItem({ refItem }: { refItem: TaskAttachmentRef }) {
     if (videoMimeFor(refItem.name, parsed.mime)) {
         return <video ref={followOutputDeviceRef} className="ta-video" src={url} controls preload="metadata" title={refItem.name} />;
     }
-    if (isAudioMime(parsed.mime)) {
-        return <audio ref={followOutputDeviceRef} className="ta-audio" src={url} controls preload="metadata" title={refItem.name} aria-label={refItem.name} />;
+    // audioMimeFor, not any audio/*: the same name fallback and the same
+    // playable-only list as a chat message (an .amr stays a download).
+    if (audioMimeFor(refItem.name, parsed.mime) && !embedFailed) {
+        return <audio ref={followOutputDeviceRef} className="ta-audio" src={url} controls preload="metadata" title={refItem.name} aria-label={refItem.name} onError={() => setEmbedFailed(true)} />;
     }
     // A BUTTON, never a link: `download` is ignored by middle-click and
     // "Open link in new tab", and a blob: document inherits this app's origin

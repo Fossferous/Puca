@@ -96,6 +96,16 @@ describe('messagePreviewText / messagePreviewSegments: attachments become a labe
         expect(text.startsWith('two files')).toBe(true);
     });
 
+    it('an old octet-stream ref named .mp3 is audio, as the message list plays it', () => {
+        const content = `[old-song.mp3](sovereign-enc:5?k=K5SECRETK5&m=application%2Foctet-stream)`
+            + ` [notes.txt](sovereign-enc:6?k=K6SECRETK6&m=application%2Foctet-stream)`;
+        expect(messagePreviewSegments(content).filter(s => s.type === 'attachment')).toEqual([
+            { type: 'attachment', kind: 'audio', name: 'old-song.mp3', spoiler: false },
+            { type: 'attachment', kind: 'file', name: 'notes.txt', spoiler: false },
+        ]);
+        expect(messagePreviewText(content)).toBe('Audio: old-song.mp3 File: notes.txt');
+    });
+
     it('a spoiler attachment hides its name and leaves no || behind', () => {
         const content = buildOutgoingContent('caption', [
             chip('secret-plot.png', 'image/png', `sovereign-enc:1?k=${KEY}&m=image%2Fpng`, true),

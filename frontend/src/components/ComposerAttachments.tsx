@@ -2,13 +2,15 @@
  * The pending-attachment chip strip above the message composer.
  *
  * Renders the PendingAttachment list (api/composerAttachments): a thumbnail
- * for images, a file icon otherwise, a spinner while uploading, a warning +
+ * for images, a note for audio (it will arrive as a player, see
+ * MessageContent), a file icon otherwise, a spinner while uploading, a warning +
  * retry on failure, a spoiler toggle, and a remove button. Pure view: every
  * mutation goes through the callbacks, and object-URL lifecycle stays with
  * Chat (which created them).
  */
 import type { PendingAttachment } from '../api/composerAttachments';
-import { CloseIcon, EyeIcon, EyeOffIcon, FileIcon, PendingIcon, RefreshIcon, WarningIcon } from './Icons';
+import { audioMimeFor } from '../api/attachments';
+import { CloseIcon, EyeIcon, EyeOffIcon, FileIcon, MusicIcon, PendingIcon, RefreshIcon, WarningIcon } from './Icons';
 import './ComposerAttachments.css';
 
 interface ComposerAttachmentsProps {
@@ -32,7 +34,7 @@ export function ComposerAttachments({ attachments, onRemove, onToggleSpoiler, on
                     <span className="composer-chip-thumb" aria-hidden="true">
                         {a.previewUrl
                             ? <img src={a.previewUrl} alt="" />
-                            : <FileIcon />}
+                            : audioMimeFor(a.name, a.mime) ? <MusicIcon /> : <FileIcon />}
                         {a.status === 'uploading' && (
                             <span className="composer-chip-busy"><PendingIcon /></span>
                         )}

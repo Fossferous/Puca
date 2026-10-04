@@ -93,6 +93,80 @@ export function videoMimeFor(name: string, mime: string): string | null {
 }
 
 /**
+ * Audio files the same engines can play, keyed by extension — the fallback
+ * for a ref whose MIME says nothing (or names an audio type this list does
+ * not know). `.opus` is Ogg Opus, which is what every encoder writes under
+ * that name. `.weba` is WebM audio. `.webm` is deliberately NOT here: the
+ * container holds video as often as audio, so an unlabelled `.webm` goes to
+ * the video player (videoMimeFor), which hands an audio-only file over to
+ * the audio player once its metadata shows no picture (MessageContent).
+ * Deliberately absent: amr/3gp (Android's old voice recorder — Chromium
+ * cannot decode AMR), wma, aiff, mid — a guaranteed-broken player is worse
+ * than a chip.
+ */
+const AUDIO_EXT_MIME: Record<string, string> = {
+    mp3: 'audio/mpeg',
+    m4a: 'audio/mp4',
+    aac: 'audio/aac',
+    ogg: 'audio/ogg',
+    oga: 'audio/ogg',
+    opus: 'audio/ogg',
+    wav: 'audio/wav',
+    flac: 'audio/flac',
+    weba: 'audio/webm',
+};
+
+/**
+ * Real audio MIMEs worth a player: the canonical names plus the aliases
+ * platforms actually report (Windows says `audio/x-m4a` for .m4a and some
+ * registries `audio/mp3`; Android has said `audio/x-wav`). An `audio/*` type
+ * NOT listed — a playlist (`audio/x-mpegurl`, which would have the player go
+ * and fetch whatever URLs it lists), AMR, MIDI — gets no player from its
+ * MIME alone; the extension may still vouch for it (below), and the onError
+ * fallback catches a file that lied.
+ */
+const PLAYABLE_AUDIO_MIME = new Set([
+    'audio/mpeg', 'audio/mp3', 'audio/mpeg3', 'audio/x-mpeg', 'audio/x-mp3',
+    'audio/mp4', 'audio/x-m4a', 'audio/m4a',
+    'audio/aac', 'audio/x-aac', 'audio/aacp',
+    'audio/ogg', 'audio/opus',
+    'audio/wav', 'audio/x-wav', 'audio/wave', 'audio/vnd.wave',
+    'audio/flac', 'audio/x-flac',
+    'audio/webm',
+]);
+
+/** MIMEs that say nothing about what a file holds: the name decides. */
+const GENERIC_MIME = new Set(['', 'application/octet-stream', 'application/ogg']);
+
+/**
+ * The audio MIME to render `name` under, or null when it gets no player.
+ *
+ * Same shape as videoMimeFor, and the caller asks videoMimeFor FIRST (a real
+ * video/* MIME, or an unlabelled video extension, is a video). Then:
+ *  - a playable audio MIME wins (parameters dropped: Púca Notes records
+ *    `audio/webm;codecs=opus`);
+ *  - any other audio/* falls back to the extension — an `.mp3` labelled
+ *    `audio/x-mpeg-3` is still an mp3; an `.amr` is still not playable;
+ *  - a MISSING or generic MIME falls back to the extension, which is how refs
+ *    recorded before the upload side inferred audio types, and any browser
+ *    that reports "" for a file, get their player. `application/ogg` counts
+ *    as generic: it is RFC 5334's name for "some Ogg stream", which some
+ *    type registries report for an `.ogg` or `.opus`;
+ *  - a concrete NON-audio type (application/pdf, text/html) is respected:
+ *    that file is not audio wearing a bad label, it is not audio.
+ * Everything returned is a member of PLAYABLE_AUDIO_MIME or AUDIO_EXT_MIME —
+ * never a sender-chosen string — so the blob it types is always one
+ * safeBlobType keeps as plain audio.
+ */
+export function audioMimeFor(name: string, mime: string): string | null {
+    const m = (mime || '').toLowerCase().split(';')[0].trim();
+    if (PLAYABLE_AUDIO_MIME.has(m)) return m;
+    if (!GENERIC_MIME.has(m) && !m.startsWith('audio/')) return null;
+    const ext = (name || '').toLowerCase().split('.').pop() ?? '';
+    return AUDIO_EXT_MIME[ext] ?? null;
+}
+
+/**
  * `decodeURIComponent` that cannot throw. `URLSearchParams` has ALREADY
  * percent-decoded the value, so the second pass below only ever mattered for a
  * hypothetical double-encoded legacy ref — but it THREW on a lone '%', which
@@ -176,11 +250,12 @@ export async function sealFileForUpload(file: File): Promise<SealedFile> {
     const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce as BufferSource }, key, raw as BufferSource));
     const blob = new Blob([nonce, ct], { type: 'application/octet-stream' });
     // The browser's guess first; when it has none (mkv famously reports ""),
-    // infer video types from the extension so the ref records something the
-    // renderer can embed — old refs without this still get the same fallback
-    // at render time (videoMimeFor).
+    // infer video and audio types from the extension so the ref records
+    // something the renderer can embed — old refs without this still get the
+    // same fallback at render time (videoMimeFor / audioMimeFor).
     const mime = file.type
         || videoMimeFor(file.name || '', '')
+        || audioMimeFor(file.name || '', '')
         || 'application/octet-stream';
     // Strip markdown-breaking chars from the display name (href has the real ref).
     const name = (file.name || 'attachment').replace(/[[\]()\n]/g, '_');
@@ -269,12 +344,29 @@ const blobCache = new Map<string, string>();
  * SVG is excluded deliberately even though it is an image: inside `<img>` it
  * cannot run script, but as a top-level document it can, and the same blob URL
  * is used for both.
+ *
+ * The same reasoning covers every STRUCTURED-SUFFIX type, so a subtype with a
+ * `+` never keeps its type in any family. `image/svg+xml` is the one we know
+ * by name, but whether an engine renders some other `x/y+xml` as an XML
+ * document (where an XHTML-namespace <script> runs) varies by engine, and the
+ * desktop shell is not Chromium everywhere (WebKitGTK on Linux). No image,
+ * video or audio format we play is spelled with a `+`, so refusing all of
+ * them costs nothing. The subtype must be a plain token; anything else — an
+ * empty subtype, a space, a quote — is opaque bytes.
+ *
+ * Audio playlists (`audio/mpegurl`, `audio/x-mpegurl`, `audio/x-scpls`) are
+ * excluded too: they are lists of OTHER URLs, and a player handed one goes and
+ * fetches what it names — the sender's tracker, with the reader's IP. No
+ * player in this app is ever given one (audioMimeFor never returns it), and
+ * the blob type keeps it that way if some future consumer forgets to ask.
  */
+const MEDIA_TYPE_RE = /^(image|video|audio)\/[a-z0-9][a-z0-9!#$&^_.-]*$/;
+const AUDIO_PLAYLIST_RE = /^audio\/(x-)?(mpegurl|scpls)$/;
 export function safeBlobType(mime: string): string {
     const m = (mime || '').toLowerCase().split(';')[0].trim();
     if (m === 'image/svg+xml') return 'application/octet-stream';
-    const renderable = m.startsWith('image/') || m.startsWith('video/') || m.startsWith('audio/');
-    return renderable ? m : 'application/octet-stream';
+    if (!MEDIA_TYPE_RE.test(m) || AUDIO_PLAYLIST_RE.test(m)) return 'application/octet-stream';
+    return m;
 }
 
 /** Concurrent mounts of the same attachment share one fetch+decrypt — a row

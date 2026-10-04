@@ -125,11 +125,15 @@ DM.
 2. Select one or more files. Each appears as a chip above the box while it uploads; a chip has **Mark as spoiler** and **Remove** buttons
 3. Press **Enter** to send. The send button waits until every upload has finished
 
+A picture shows in the message. A video, and an audio file (mp3, m4a, aac, ogg, opus, wav, flac, weba), gets a player
+right there instead — audio under its file name — and nothing plays until you press play. Every file keeps its
+download button underneath. A file the player cannot open, or a type it does not know, is just the download button.
+
 You can also drag files from your computer onto the messages, in the desktop
 app as in the browser, wherever you could send a message. Wherever a message is shown in short — the
 **Replying to** bar, the line above a reply, **Pinned messages**, search
 results — an attachment appears as a small icon and its file name; a spoiler
-shows only **Spoiler image** (or file). Search finds an attachment by its file
+shows only **Spoiler image** (or video, audio, file). Search finds an attachment by its file
 name, except a spoilered one.
 
 ### Paste Images

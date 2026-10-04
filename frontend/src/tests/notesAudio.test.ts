@@ -18,7 +18,6 @@ import {
     assertClipUploadable,
     extForMime,
     formatClipTime,
-    isAudioMime,
     pickAudioMime,
     toPcm16Mono16k,
 } from '../notes/model/audioNote';
@@ -71,12 +70,6 @@ describe('the container probe', () => {
         ['application/pdf', 'bin'],
     ])('%s is stored as .%s', (mime, ext) => {
         expect(extForMime(mime)).toBe(ext);
-    });
-    it('classifies audio mimes and nothing else', () => {
-        expect(isAudioMime('audio/webm;codecs=opus')).toBe(true);
-        expect(isAudioMime('image/png')).toBe(false);
-        expect(isAudioMime(DRAWING_STROKES_MIME)).toBe(false);
-        expect(isAudioMime(null)).toBe(false);
     });
     it('the caps are the ones the UI promises', () => {
         expect(MAX_CLIP_MS).toBe(5 * 60_000);

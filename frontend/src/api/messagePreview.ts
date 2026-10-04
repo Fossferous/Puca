@@ -24,7 +24,7 @@
  * Pure and React-free; components/MessagePreview.tsx renders the segments
  * with icons. Tests: tests/messagePreview.test.ts.
  */
-import { videoMimeFor } from './attachments';
+import { audioMimeFor, videoMimeFor } from './attachments';
 import { decodeClipRef } from './clips/clipRef';
 import { formatClock } from './clips/clipPresets';
 
@@ -69,6 +69,9 @@ function kindOf(href: string, bang: boolean, name: string): AttachmentKind {
     if (mime.startsWith('image/')) return 'image';
     if (mime.startsWith('audio/')) return 'audio';
     if (videoMimeFor(name, mime)) return 'video';
+    // The message list's own name fallback: an `.mp3` whose ref says
+    // octet-stream plays there as audio, so it is audio here too.
+    if (audioMimeFor(name, mime)) return 'audio';
     if (bang && (!mime || mime === 'application/octet-stream')) return 'image';
     return 'file';
 }

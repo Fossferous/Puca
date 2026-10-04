@@ -8,13 +8,13 @@
 import React, { useState, useEffect } from 'react';
 import { parseMessage, isSafeUrl, type Node } from '../utils/messageParser';
 import { isImageUrl } from '../api/linkPreview';
-import { isEncAttachment, parseEncAttachment, decryptToBlobUrl, videoMimeFor } from '../api/attachments';
+import { isEncAttachment, parseEncAttachment, decryptToBlobUrl, videoMimeFor, audioMimeFor } from '../api/attachments';
 import { isClipRef, isScrubbedClipRef } from '../api/clips/clipRef';
 import { ClipAttachment } from './ClipAttachment';
 import type { ClipConsent } from '../api/servers';
 import { openExternalUrl } from '../api/openExternal';
 import { ImageLightbox } from './ImageLightbox';
-import { LockIcon, CheckCircleIcon, WarningIcon, PaperclipIcon } from './Icons';
+import { LockIcon, CheckCircleIcon, WarningIcon, PaperclipIcon, MusicIcon } from './Icons';
 import { saveAttachment } from '../api/saveAttachment';
 import { remoteImagesAllowed, followOutputDeviceRef } from './settingsStore';
 import type { MemberWithRoles, Channel } from '../api/servers';
@@ -70,8 +70,9 @@ function RemoteImage({ href, alt }: { href: string; alt?: string }) {
     );
 }
 
-/** Fetch + decrypt an E2EE attachment and render it (image and video inline,
- *  else a download link). The plaintext bytes only ever exist in this browser. */
+/** Fetch + decrypt an E2EE attachment and render it (image, video and audio
+ *  inline, else a download link). The plaintext bytes only ever exist in this
+ *  browser. */
 function EncryptedAttachment({ href, name }: { href: string; name: string }) {
     const [url, setUrl] = useState<string | null>(null);
     const [failed, setFailed] = useState(false);
@@ -85,20 +86,29 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
     // The player couldn't decode the container (an extension-guessed video
     // that turned out unplayable) — drop back to the download chip.
     const [embedFailed, setEmbedFailed] = useState(false);
+    // The video player loaded a file with no picture (an audio-only .webm or
+    // .mp4 — what most "download the audio" tools write, and which the OS
+    // labels video/*): show it as the audio player instead of a black box.
+    const [audioOnly, setAudioOnly] = useState(false);
     const info = parseEncAttachment(href);
     // Not just `mime.startsWith('video/')`: refs recorded before the upload
     // side inferred types (and any browser that reports "" for .mkv) carry
     // application/octet-stream for real videos — the NAME is the signal then.
     const videoMime = info ? videoMimeFor(name, info.mime) : null;
+    // Asked only when it is not a video, so `.webm`/`.mp4` stay with the
+    // video player. Same name fallback (an old `.mp3` ref says octet-stream),
+    // and only types the engines can play — an .amr keeps its chip.
+    const audioMime = info && !videoMime ? audioMimeFor(name, info.mime) : null;
     useEffect(() => {
         setFailed(false);
         setEmbedFailed(false);
+        setAudioOnly(false);
         if (!info) { setFailed(true); return; }
         let alive = true;
         let retryTimer: ReturnType<typeof setTimeout> | undefined;
-        // Type the blob with the resolved video MIME so <video> gets a
+        // Type the blob with the resolved media MIME so the player gets a
         // media-typed source even when the ref said octet-stream.
-        decryptToBlobUrl(info.id, info.key, videoMime ?? info.mime, info.cap)
+        decryptToBlobUrl(info.id, info.key, videoMime ?? audioMime ?? info.mime, info.cap)
             .then((u) => { if (alive) setUrl(u); })
             .catch(() => {
                 if (!alive) return;
@@ -141,7 +151,7 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
             </span>
         );
     }
-    if (videoMime && !embedFailed) {
+    if (videoMime && !embedFailed && !audioOnly) {
         // Inline player, same pattern TaskAttachments already uses: the
         // decrypted blob URL feeds a native <video> directly (safeBlobType
         // keeps the real MIME on video/* blobs for exactly this).
@@ -169,7 +179,46 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
                     playsInline
                     title={name}
                     onError={() => setEmbedFailed(true)}
+                    // Metadata is in: a file with no video track has no
+                    // dimensions (the spec makes videoWidth 0 until there is
+                    // a frame size to report, and one is known by now for a
+                    // real video), so it is sound only.
+                    onLoadedMetadata={(e) => {
+                        if (e.currentTarget.videoWidth === 0 && e.currentTarget.videoHeight === 0) setAudioOnly(true);
+                    }}
                 />
+                <AttachmentDownload url={url} name={name || 'attachment'} />
+            </span>
+        );
+    }
+    if ((audioMime || (videoMime && audioOnly)) && !embedFailed) {
+        // Inline audio player — the video branch above, minus the picture.
+        // With nothing to look at, the NAME is what says which file this is,
+        // so it heads the card. Same rules otherwise: the decrypted blob URL
+        // feeds a native <audio> (safeBlobType keeps plain audio/* types);
+        // preload="metadata" fetches the duration and nothing else; no
+        // autoplay, ever, and nothing here calls play(); on the Output
+        // Device chosen in Settings; onError (a file that lied about being
+        // audio, or a codec this engine lacks) falls back to the plain chip;
+        // and the download chip stays underneath.
+        return (
+            // stopPropagation: the same spoiler-toggle reason as the video.
+            <span className="message-audio" onClick={(e) => e.stopPropagation()}>
+                <span className="message-audio-card">
+                    <span className="message-audio-name">
+                        <MusicIcon />
+                        <span className="message-audio-title">{name || 'audio'}</span>
+                    </span>
+                    <audio
+                        ref={followOutputDeviceRef}
+                        src={url}
+                        controls
+                        preload="metadata"
+                        title={name}
+                        aria-label={name || 'audio'}
+                        onError={() => setEmbedFailed(true)}
+                    />
+                </span>
                 <AttachmentDownload url={url} name={name || 'attachment'} />
             </span>
         );

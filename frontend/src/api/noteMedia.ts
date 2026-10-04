@@ -19,11 +19,11 @@
  * fail with a 400 the user cannot explain.
  */
 import { type TaskAttachmentRef, MAX_TASK_ATTACHMENTS, isAttachmentsLocked, parseTaskAttachments } from './tasks';
-import { type SealedFile, decryptToBlobUrl, encryptAndUploadRef, parseEncAttachment, sealFileForUpload, uploadSealedRef } from './attachments';
+import { type SealedFile, audioMimeFor, decryptToBlobUrl, encryptAndUploadRef, parseEncAttachment, sealFileForUpload, uploadSealedRef } from './attachments';
 import { prepareImageForUpload } from './imagePrep';
 import { bytesFromB64, bytesToB64, parkedHref, parseParkedRef } from './parkedMedia';
 import { addTaskListAttachments, deleteFiles, removeTaskListAttachments } from './listContent';
-import { assertClipUploadable, isAudioMime } from '../notes/model/audioNote';
+import { assertClipUploadable } from '../notes/model/audioNote';
 
 /** The mime a drawing's editable strokes are uploaded under (next to its PNG). */
 export const DRAWING_STROKES_MIME = 'application/x-puca-drawing';
@@ -277,7 +277,8 @@ export function mediaCountLabel(photos: File[], drawings: number): string {
 
 /** One entry of a note's gallery. A drawing is its PNG plus the strokes file
  *  that makes it editable again; the strokes file is never shown on its own.
- *  An `audio` item is a voice note and gets a player, not a paperclip. */
+ *  An `audio` item is a voice note (or any audio file this engine can play)
+ *  and gets a player, not a paperclip. */
 export interface GalleryItem {
     ref: TaskAttachmentRef;
     kind: 'image' | 'drawing' | 'file' | 'audio';
@@ -327,7 +328,10 @@ export function galleryItems(opened: string | null | undefined): GalleryItem[] {
             } else {
                 out.push({ ref: r, kind: 'image' });
             }
-        } else if (isAudioMime(mime)) {
+        } else if (audioMimeFor(r.name, mime)) {
+            // The chat player's rule (api/attachments.ts): a playable audio
+            // type, or an unlabelled file whose NAME says it is one. An .amr
+            // is audio this engine cannot play, so it stays a download.
             out.push({ ref: r, kind: 'audio' });
         } else {
             out.push({ ref: r, kind: 'file' });

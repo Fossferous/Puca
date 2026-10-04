@@ -12,7 +12,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
-vi.mock('../api/attachments', () => ({
+vi.mock('../api/attachments', async () => ({
+    // The real rule: the gallery asks it which refs get a player.
+    audioMimeFor: (await vi.importActual<typeof import('../api/attachments')>('../api/attachments')).audioMimeFor,
     parseEncAttachment: (href: string) => (href.startsWith('enc:')
         ? { id: href.slice(4), key: new Uint8Array(32), mime: href.includes('webm') ? 'audio/webm;codecs=opus' : 'image/png', cap: null }
         : null),

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { safeBlobType, videoMimeFor } from '../api/attachments';
+import { safeBlobType, videoMimeFor, audioMimeFor } from '../api/attachments';
 
 /**
  * THE ATTACK THIS CLOSES.
@@ -58,6 +58,38 @@ describe('safeBlobType', () => {
         // renderable families pass, and svg is excluded by name above.
         expect(safeBlobType('image/svg+xml; charset=utf-8')).toBe('application/octet-stream');
     });
+
+    /**
+     * Audio refs now get an inline player, so the audio family is a type a
+     * sender can steer a blob into on purpose. A structured suffix (`+xml`,
+     * `+json`) is how a document type wears a media prefix, in every family;
+     * no format we play is spelled with one.
+     */
+    it('neutralises every structured-suffix type, in every media family', () => {
+        for (const m of ['audio/x+xml', 'audio/mpeg+xml', 'video/mp4+xml', 'image/png+xml', 'audio/ld+json', 'AUDIO/X+XML; charset=utf-8']) {
+            expect(safeBlobType(m), m).toBe('application/octet-stream');
+        }
+    });
+
+    it('neutralises audio playlists, which make a player fetch other URLs', () => {
+        for (const m of ['audio/mpegurl', 'audio/x-mpegurl', 'audio/x-scpls', 'Audio/X-MpegURL']) {
+            expect(safeBlobType(m), m).toBe('application/octet-stream');
+        }
+    });
+
+    it('needs a plain token after the slash', () => {
+        for (const m of ['audio/', 'audio/ mpeg', 'audio/"mpeg"', 'audio/mp<eg', 'audio', 'audiox/mpeg']) {
+            expect(safeBlobType(m), m).toBe('application/octet-stream');
+        }
+    });
+
+    it('positive control: the audio types the players are handed keep their type', () => {
+        for (const m of ['audio/mpeg', 'audio/mp4', 'audio/x-m4a', 'audio/aac', 'audio/ogg', 'audio/wav', 'audio/x-wav', 'audio/vnd.wave', 'audio/flac', 'audio/webm']) {
+            expect(safeBlobType(m), m).toBe(m);
+        }
+        expect(safeBlobType('audio/webm;codecs=opus')).toBe('audio/webm');
+        expect(safeBlobType('video/x-matroska')).toBe('video/x-matroska');
+    });
 });
 
 /**
@@ -98,6 +130,99 @@ describe('videoMimeFor', () => {
             const m = videoMimeFor(name, '');
             expect(m).not.toBeNull();
             expect(safeBlobType(m!)).toBe(m);
+        }
+    });
+});
+
+/**
+ * The owner's report (2026-10-04): ".mp3 files dont have a player" — an
+ * encrypted m83-midnight-city.mp3 rendered only as the download chip. The
+ * renderer now asks audioMimeFor, after videoMimeFor, which audio refs get an
+ * <audio> and what type their blob carries.
+ */
+describe('audioMimeFor', () => {
+    it('what the upload side records, per format (Edge on Windows, measured)', () => {
+        // File.type as the composer saw it in a real browser, 2026-10-04.
+        expect(audioMimeFor('test-tone.mp3', 'audio/mpeg')).toBe('audio/mpeg');
+        expect(audioMimeFor('test-tone.m4a', 'audio/x-m4a')).toBe('audio/x-m4a');
+        expect(audioMimeFor('test-tone.ogg', 'audio/ogg')).toBe('audio/ogg');
+        expect(audioMimeFor('test-tone.opus', 'audio/ogg')).toBe('audio/ogg');
+        expect(audioMimeFor('test-tone.wav', 'audio/wav')).toBe('audio/wav');
+        expect(audioMimeFor('test-tone.flac', 'audio/flac')).toBe('audio/flac');
+        expect(audioMimeFor('test-tone.weba', 'audio/webm')).toBe('audio/webm');
+        // Windows' registry type for .aac — not a name any player is handed;
+        // the extension turns it into the real one.
+        expect(audioMimeFor('test-tone.aac', 'audio/vnd.dlna.adts')).toBe('audio/aac');
+    });
+
+    it('drops parameters (a Púca Notes recording is audio/webm;codecs=opus)', () => {
+        expect(audioMimeFor('voice-1.webm', 'audio/webm;codecs=opus')).toBe('audio/webm');
+        expect(audioMimeFor('x.mp3', ' AUDIO/MPEG ; q=1')).toBe('audio/mpeg');
+    });
+
+    it('falls back to the extension when the MIME says nothing (old refs, empty File.type)', () => {
+        expect(audioMimeFor('m83-midnight-city.mp3', 'application/octet-stream')).toBe('audio/mpeg');
+        expect(audioMimeFor('a.M4A', '')).toBe('audio/mp4');
+        expect(audioMimeFor('a.aac', '')).toBe('audio/aac');
+        expect(audioMimeFor('a.oga', '')).toBe('audio/ogg');
+        expect(audioMimeFor('a.opus', '')).toBe('audio/ogg');
+        expect(audioMimeFor('a.flac', 'application/octet-stream')).toBe('audio/flac');
+        expect(audioMimeFor('a.weba', '')).toBe('audio/webm');
+        expect(audioMimeFor('a.b.c.wav', '')).toBe('audio/wav');
+    });
+
+    it('an audio type it does not know falls back to the extension, never passes through', () => {
+        expect(audioMimeFor('song.mp3', 'audio/x-mpeg-3')).toBe('audio/mpeg');
+        // A playlist MIME wearing an mp3 name gets the mp3 type, not its own.
+        expect(audioMimeFor('song.mp3', 'audio/x-mpegurl')).toBe('audio/mpeg');
+        expect(audioMimeFor('list.m3u', 'audio/x-mpegurl')).toBeNull();
+        expect(audioMimeFor('memo.amr', 'audio/amr')).toBeNull();
+        expect(audioMimeFor('tune.mid', 'audio/midi')).toBeNull();
+    });
+
+    it('respects a concrete non-audio type — that file is not audio', () => {
+        expect(audioMimeFor('song.mp3', 'application/pdf')).toBeNull();
+        expect(audioMimeFor('song.mp3', 'text/html')).toBeNull();
+        expect(audioMimeFor('song.mp3', 'image/png')).toBeNull();
+    });
+
+    it("treats application/ogg (RFC 5334's generic Ogg) as unlabelled: the extension decides", () => {
+        expect(audioMimeFor('take.ogg', 'application/ogg')).toBe('audio/ogg');
+        expect(audioMimeFor('take.opus', 'APPLICATION/OGG')).toBe('audio/ogg');
+        // ...and only the extension: an Ogg-labelled file with no audio name gets no player.
+        expect(audioMimeFor('stream.bin', 'application/ogg')).toBeNull();
+    });
+
+    it('leaves .webm and video to the video player (videoMimeFor is asked first)', () => {
+        expect(audioMimeFor('clip.webm', '')).toBeNull();
+        expect(videoMimeFor('clip.webm', '')).toBe('video/webm');
+        // ...but an explicit audio/webm is audio, and the video side agrees.
+        expect(videoMimeFor('voice.webm', 'audio/webm')).toBeNull();
+        expect(audioMimeFor('voice.webm', 'audio/webm')).toBe('audio/webm');
+        expect(audioMimeFor('clip.mp4', 'video/mp4')).toBeNull();
+    });
+
+    it('is null for non-audio names with no MIME, and for unplayable containers', () => {
+        expect(audioMimeFor('notes.txt', '')).toBeNull();
+        expect(audioMimeFor('noextension', 'application/octet-stream')).toBeNull();
+        expect(audioMimeFor('voice.amr', '')).toBeNull();
+        expect(audioMimeFor('voice.3gp', '')).toBeNull();
+        expect(audioMimeFor('song.wma', '')).toBeNull();
+    });
+
+    it('never returns a type safeBlobType would change (the blob is plain audio)', () => {
+        const names = ['a.mp3', 'a.m4a', 'a.aac', 'a.ogg', 'a.oga', 'a.opus', 'a.wav', 'a.flac', 'a.weba'];
+        const mimes = ['audio/mpeg', 'audio/mp3', 'audio/mpeg3', 'audio/x-mpeg', 'audio/x-mp3', 'audio/mp4', 'audio/x-m4a', 'audio/m4a',
+            'audio/aac', 'audio/x-aac', 'audio/aacp', 'audio/ogg', 'audio/opus', 'audio/wav', 'audio/x-wav', 'audio/wave',
+            'audio/vnd.wave', 'audio/flac', 'audio/x-flac', 'audio/webm'];
+        for (const n of names) {
+            const m = audioMimeFor(n, '');
+            expect(m, n).not.toBeNull();
+            expect(safeBlobType(m!), n).toBe(m);
+        }
+        for (const mime of mimes) {
+            expect(audioMimeFor('x', mime), mime).toBe(mime);
+            expect(safeBlobType(mime), mime).toBe(mime);
         }
     });
 });

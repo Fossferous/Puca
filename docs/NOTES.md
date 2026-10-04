@@ -1534,8 +1534,9 @@ Migration 065 gives a personal list three nullable columns, and
   a link to a `blob:` URL. A `blob:` document inherits the app's own origin
   and takes its type from the ref, so an in-origin document could read the stored token and
   the E2EE key material; `safeBlobType` reduces anything that is not an
-  image, video or audio file to opaque bytes, and that must not be relaxed
-  to make a PDF preview. Each upload is capped at 25 MB, and a note holds 12
+  image, video or audio file to opaque bytes (and, within those, any
+  `+xml`-style structured-suffix type and any audio playlist), and that must
+  not be relaxed to make a PDF preview. Each upload is capped at 25 MB, and a note holds 12
   sidecar slots (a drawing takes two). A drawing is uploaded twice: a PNG
   that every card and Púca's gallery show, and its strokes, so it can be
   edited again (`frontend/src/api/drawing.ts`; the editor is
@@ -1545,7 +1546,12 @@ Migration 065 gives a personal list three nullable columns, and
   helper, so the server holds an encrypted blob and its size and cannot tell a
   recording from a picture. It plays back in Púca Notes and in Púca's Tasks
   view, with controls and never by itself, and takes one sidecar slot of the
-  twelve (25 MB a clip, five minutes). A recording is never a card's hero
+  twelve (25 MB a clip, five minutes). Any other audio file this device can
+  play (mp3, m4a, aac, ogg, opus, wav, flac, weba — by its type, or by its
+  name when the type says nothing) gets the same player, by the same rule a
+  chat message uses (`audioMimeFor`, `api/attachments.ts`); audio it cannot
+  play (AMR, MIDI), and a file whose player fails to open it, is the download
+  button. A recording is never a card's hero
   picture. On a phone, *Photo* offers the camera (`<input accept="image/*"
   capture>`); on Android that needs the `IMAGE_CAPTURE` entry under `<queries>`
   in each app's manifest, so the camera arrives with a new APK of each app, not
