@@ -56,13 +56,14 @@
     background: #000;
 }
 
-/* The loading readout sits in the middle of the plate, clear of the native
-   controls along the bottom edge, and never takes a tap meant for them. */
+/* The loading readout sits along the TOP of the plate: the native controls
+   take the bottom edge (and, in the Android WebView, a large play button the
+   middle), and the readout never takes a tap meant for them. */
 .clip-attachment-overlay {
     position: absolute;
     left: 50%;
-    top: 50%;
-    transform: translate(-50%, -50%);
+    top: 10px;
+    transform: translateX(-50%);
     pointer-events: none;
     display: flex;
     flex-direction: column;
