@@ -1139,6 +1139,13 @@ button.message-attachment.error { color: #ffb4b4; }
     overflow-wrap: anywhere;
 }
 
+/* Under a VIDEO file's name when it plays as sound only (no picture this
+   device can show): says so, in the muted ink every theme defines. */
+.message-audio-note {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
 /* The native controls keep their own height (54px in Chromium and Android
    WebView — a comfortable touch target); only the width is ours. */
 .message-audio audio {

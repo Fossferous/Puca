@@ -128,6 +128,8 @@ DM.
 A picture shows in the message. A video, and an audio file (mp3, m4a, aac, ogg, opus, wav, flac, weba), gets a player
 right there instead — audio under its file name — and nothing plays until you press play. Every file keeps its
 download button underneath. A file the player cannot open, or a type it does not know, is just the download button.
+A video with no picture your device can show — a sound-only .webm, or a video in a format your device cannot
+decode — gets the audio player, marked **Sound only: no picture to show**; download it to watch it elsewhere.
 
 You can also drag files from your computer onto the messages, in the desktop
 app as in the browser, wherever you could send a message. Wherever a message is shown in short — the

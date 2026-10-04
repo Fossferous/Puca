@@ -29,7 +29,7 @@ import { MessageContent } from '../components/MessageContent';
 import { TaskAttachments } from '../components/TaskAttachments';
 import { NoteImages } from '../components/NoteImages';
 import { ComposerAttachments } from '../components/ComposerAttachments';
-import { FileIcon, MusicIcon } from '../components/Icons';
+import { FileIcon, MusicIcon, SpeakerIcon } from '../components/Icons';
 import { galleryItems } from '../api/noteMedia';
 import { pendingAttachment } from '../api/composerAttachments';
 import { parkedHref } from '../api/parkedMedia';
@@ -158,6 +158,38 @@ describe('a chat message with an audio attachment', () => {
         expect(audio).not.toBeNull();
         expect(audio!.getAttribute('src')).toBe('blob:decrypted-f7');
         expect(container.querySelector('.message-audio-name')?.textContent).toContain('track.webm');
+    });
+
+    // A video whose picture this engine cannot decode (MPEG-4 Part 2 always,
+    // HEVC on a machine without it) also reports no frame size, so it too
+    // arrives here — and it is a VIDEO the sender posted, not a song. The card
+    // must not dress it as one: no music note, and a line that says what the
+    // reader is getting. Measured: an MPEG-4 Part 2 + AAC .mp4 in headless
+    // Edge reached readyState 4 with videoWidth/videoHeight 0.
+    it.each([
+        ['clip.mp4', 'video/mp4'],
+        ['track.webm', 'video/webm'],
+        ['old-clip.mkv', 'application/octet-stream'],
+    ])('a video file (%s, %s) with no picture to show says it is sound only, not a song', async (name, mime) => {
+        await renderMessage(`[${name}](${ref('f9', mime)})`);
+        const video = container.querySelector('.message-video video')!;
+        expect(video, 'it starts in the video player').not.toBeNull();
+        await act(async () => { video.dispatchEvent(new Event('loadedmetadata')); });
+        const card = container.querySelector('.message-audio')!;
+        expect(card.querySelector('audio'), 'it plays as sound').not.toBeNull();
+        expect(card.querySelector('.message-audio-title')?.textContent).toBe(name);
+        expect(card.querySelector('.message-audio-note')?.textContent).toBe('Sound only: no picture to show');
+        const icon = card.querySelector('.message-audio-name > svg')!.outerHTML;
+        expect(icon, 'it wears the music note of a song').not.toBe(renderToStaticMarkup(<MusicIcon />));
+        expect(icon).toBe(renderToStaticMarkup(<SpeakerIcon />));
+    });
+
+    it('control: a real audio file has no sound-only line, and keeps its music note', async () => {
+        await renderMessage(`[song.mp3](${ref('f10', 'audio/mpeg')})`);
+        const card = container.querySelector('.message-audio')!;
+        expect(card.querySelector('audio')).not.toBeNull();
+        expect(card.querySelector('.message-audio-note')).toBeNull();
+        expect(card.querySelector('.message-audio-name > svg')!.outerHTML).toBe(renderToStaticMarkup(<MusicIcon />));
     });
 
     it('control: a real video (it has a frame size) stays a video', async () => {

@@ -14,7 +14,7 @@ import { ClipAttachment } from './ClipAttachment';
 import type { ClipConsent } from '../api/servers';
 import { openExternalUrl } from '../api/openExternal';
 import { ImageLightbox } from './ImageLightbox';
-import { LockIcon, CheckCircleIcon, WarningIcon, PaperclipIcon, MusicIcon } from './Icons';
+import { LockIcon, CheckCircleIcon, WarningIcon, PaperclipIcon, MusicIcon, SpeakerIcon } from './Icons';
 import { saveAttachment } from '../api/saveAttachment';
 import { remoteImagesAllowed, followOutputDeviceRef } from './settingsStore';
 import type { MemberWithRoles, Channel } from '../api/servers';
@@ -196,6 +196,14 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
         );
     }
     if ((audioMime || (videoMime && audioOnly)) && !embedFailed) {
+        // A VIDEO file handed over because it showed no picture: an audio-only
+        // .webm/.mp4, or a real video whose picture this engine cannot decode
+        // (MPEG-4 Part 2; HEVC without a decoder), which reports the same
+        // zero frame size. Either way it is not a song the sender posted, so
+        // it does not wear the music note, and a line says what the reader is
+        // getting. No codec sniffing: onError still covers a file that will
+        // not open at all.
+        const soundOnly = !!videoMime && audioOnly;
         // Inline audio player — the video branch above, minus the picture.
         // With nothing to look at, the NAME is what says which file this is,
         // so it heads the card. Same rules otherwise: the decrypted blob URL
@@ -210,9 +218,10 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
             <span className="message-audio" onClick={(e) => e.stopPropagation()}>
                 <span className="message-audio-card">
                     <span className="message-audio-name">
-                        <MusicIcon />
+                        {soundOnly ? <SpeakerIcon /> : <MusicIcon />}
                         <span className="message-audio-title">{name || 'audio'}</span>
                     </span>
+                    {soundOnly && <span className="message-audio-note">Sound only: no picture to show</span>}
                     <audio
                         ref={followOutputDeviceRef}
                         src={url}
