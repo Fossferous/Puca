@@ -778,7 +778,9 @@ back the copy it holds (migration 069, `expect_rev` on
   kept, in the same sealed database as the rest of the queue (store `m` of
   `pucaNotesCache:<user>`, each record sealed with `sealLocal`), and it is
   uploaded when the queue replays. The picture shows on the card and in the
-  editor from those local bytes meanwhile, marked *Not sent yet*, and the
+  editor from those local bytes meanwhile, marked *Not sent yet* (a
+  recording or other audio file waiting there is its download button, saved
+  from those same bytes, and gets its player once it has uploaded), and the
   banner counts what is waiting separately from the other changes — as
   "pictures or files", because the queue counts records, not their kind, and
   a waiting PDF is not a picture. A note made offline
