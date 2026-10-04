@@ -15,22 +15,32 @@
 //      (uploaded through the composer, with a reaction under it), a line, a
 //      grouped encrypted VIDEO (the inline player; nothing is played), a line,
 //      a grouped Puca CLIP plate, a line, a blocked third-party image chip, a
-//      line, then a REPLY made with the hover toolbar (a new header row) and a
-//      line under it - posted at a person's pace and read back from the
-//      server; and on the desktop the same run plus an image in a DM (your
-//      conversation with yourself), which Chat.tsx renders from its own branch;
+//      line, a grouped SPOILERED image (marked in the composer; its blur cover
+//      is scaled past its box and cropped by the spoiler), a line, then a
+//      REPLY made with the hover toolbar (a new header row) and a line under
+//      it, then a line from a second member whom the poster then BLOCKS (the
+//      "Blocked message" stub row) and a line after it - posted at a person's
+//      pace and read back from the server; and on the desktop the same run
+//      plus an image in a DM (your conversation with yourself), which Chat.tsx
+//      renders from its own branch;
 //   2. no CONTENT of one message (each text line's glyph box from a Range,
 //      every img / video / clip plate / attachment chip / reaction / reply
-//      reference / avatar) intersects the content of any other message;
+//      reference / avatar) intersects the content of any other message. Each
+//      rect is first cut down to every ancestor inside its row that clips
+//      overflow (what is PAINTED, not the layout box: the spoiler cover's
+//      scaled <img> reaches ~10 px past each edge of what shows);
 //   3. no message ROW overlaps its neighbour: the row is what the hover and
 //      @mention backgrounds paint, so an overlapping row tints the next
 //      message's first line;
 //   4. desktop only (fine pointer): hovering any row moves no other row
-//      (hover may change only the horizontal padding) and the hovered row
-//      still overlaps nothing;
+//      (hover may change only the horizontal padding), moves none of the
+//      hovered row's own content (the blocked stub's text used to jump 16 px
+//      left), and the hovered row still overlaps nothing;
 //   5. POSITIVE CONTROL, every configuration: the same detector, handed the
 //      old failure mode (a grouped row pulled up 12 px), MUST report it - so
 //      a detector that measured nothing, or the wrong elements, cannot pass;
+//      and on the desktop the hover check, handed a hover that shifts the
+//      row's content, MUST report that;
 //   6. an engine without :has() (simulated) still gets no overlap;
 //   7. the grouped-text line pitch is printed (MEASURE) and must not be
 //      smaller than a line box (two single-line grouped rows sharing pixels
@@ -106,13 +116,13 @@ async function dismiss(page) {
     }
 }
 
-async function signIn(ctx, tag, register) {
+async function signIn(ctx, tag, register, user = USER) {
     const page = await ctx.newPage();
     watch(page, tag);
     await page.goto(APP + '/login', { waitUntil: 'domcontentloaded', timeout: 120000 });
     await page.getByPlaceholder('Enter username').waitFor({ timeout: 60000 });
     if (register) await page.locator('.toggle-mode').click();
-    await page.getByPlaceholder('Enter username').fill(USER);
+    await page.getByPlaceholder('Enter username').fill(user);
     await page.getByPlaceholder(register ? 'Choose a password (min 8 characters)' : 'Enter password').fill(PASS);
     await page.locator('button.login-button[type="submit"]').click();
     await page.waitForURL('**/chat', { timeout: 60000 });
@@ -149,12 +159,17 @@ async function say(page, text) {
     check(`posted "${text.slice(0, 40)}"`, !!await until(async () => (await rowCount(page)) > before && await acked(page), 15000));
 }
 
-/** Attach a file through the composer's own file input, then send it. */
-async function attach(page, file) {
+/** Attach a file through the composer's own file input, then send it -
+ *  marked as a spoiler with the chip's own toggle when asked. */
+async function attach(page, file, { spoiler = false } = {}) {
     const before = await rowCount(page);
     await page.locator('label.file-upload-btn input[type="file"]').setInputFiles(file);
     const ready = await until(async () => (await page.locator('.composer-chip-ready').count()) > 0, 30000);
     check(`${file.name}: the upload finished in the composer`, !!ready);
+    if (spoiler) {
+        await page.getByRole('button', { name: `Mark ${file.name} as spoiler`, exact: true }).click();
+        check(`${file.name}: marked as a spoiler in the composer`, (await page.locator('.composer-chip-spoiler').count()) === 1);
+    }
     await page.locator(COMPOSER).press('Enter');
     check(`${file.name}: posted`, !!await until(async () => (await rowCount(page)) > before && await acked(page), 15000));
 }
@@ -166,12 +181,31 @@ async function attach(page, file) {
  * block's box spans its whole width, so it would "overlap" things the text
  * never touches. The hover toolbar is excluded - it floats over the row above
  * on purpose.
+ *
+ * Every content rect is what is PAINTED: cut down to each ancestor inside the
+ * row that clips its overflow. An unrevealed spoiler's <img> is scaled 1.08
+ * past its box for the blur cover and cropped by the spoiler's
+ * overflow:hidden - its layout rect reaches ~10 px past each edge of what is
+ * on screen, and measured raw it "overlapped" the lines above and below by
+ * 3-10 px. An inline box is skipped: overflow does not apply to it, whatever
+ * its computed value says.
  */
 const MEASURE = () => {
     const list = document.querySelector('.messages-container');
     const rows = [...(list?.children || [])].filter(e => e.classList.contains('message'));
     const R = (q) => ({ top: q.top, bottom: q.bottom, left: q.left, right: q.right });
     const out = rows.map((row, index) => {
+        const painted = (el, q) => {
+            const r = R(q);
+            for (let a = el.parentElement; a && a !== row; a = a.parentElement) {
+                const cs = getComputedStyle(a);
+                if (cs.display === 'inline' || (cs.overflowX === 'visible' && cs.overflowY === 'visible')) continue;
+                const b = a.getBoundingClientRect();
+                if (cs.overflowX !== 'visible') { r.left = Math.max(r.left, b.left); r.right = Math.min(r.right, b.right); }
+                if (cs.overflowY !== 'visible') { r.top = Math.max(r.top, b.top); r.bottom = Math.min(r.bottom, b.bottom); }
+            }
+            return r;
+        };
         const content = [];
         const body = row.querySelector('.message-body') || row;
         const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
@@ -184,23 +218,35 @@ const MEASURE = () => {
             const rg = document.createRange();
             rg.selectNodeContents(n);
             for (const q of rg.getClientRects()) {
-                if (q.width > 0 && q.height > 0) content.push({ what: 'text:' + n.textContent.trim().slice(0, 24), ...R(q) });
+                const r = painted(p, q);
+                if (r.right - r.left > 0 && r.bottom - r.top > 0) content.push({ what: 'text:' + n.textContent.trim().slice(0, 24), ...r });
             }
         }
         const SEL = 'img, video, .clip-attachment, .message-attachment, .message-image-blocked, .reaction-badge, .message-reply-ref, .code-block, .message-quote, .task-checkbox';
         for (const el of body.querySelectorAll(SEL)) {
             if (el.closest('.message-actions, .add-reaction-wrapper')) continue;
-            const q = el.getBoundingClientRect();
-            if (q.width > 0 && q.height > 0) content.push({ what: el.tagName.toLowerCase() + (el.className && typeof el.className === 'string' ? '.' + el.className.split(' ')[0] : ''), ...R(q) });
+            const r = painted(el, el.getBoundingClientRect());
+            if (r.right - r.left > 0 && r.bottom - r.top > 0) content.push({ what: el.tagName.toLowerCase() + (el.className && typeof el.className === 'string' ? '.' + el.className.split(' ')[0] : ''), ...r });
         }
         const av = row.querySelector(':scope > .message-avatar');
         if (av) { const q = av.getBoundingClientRect(); if (q.height) content.push({ what: 'avatar', ...R(q) }); }
-        const label = (row.querySelector('.message-content')?.textContent || '').trim().slice(0, 24)
+        const stub = row.classList.contains('blocked-message-stub');
+        const spoiler = !!row.querySelector('.spoiler:not(.revealed) .message-image img');
+        const label = stub ? '[blocked]' : spoiler ? '[spoiler image]'
+            : (row.querySelector('.message-content')?.textContent || '').trim().slice(0, 24)
             || (row.querySelector('img') ? '[image]' : row.querySelector('video') ? '[video]' : row.querySelector('.clip-attachment') ? '[clip]' : '[?]');
         // `y` is the row's top in the LIST's coordinates (scroll-independent),
         // so a scroll between two measurements is not mistaken for a shift.
         const y = row.getBoundingClientRect().top - list.getBoundingClientRect().top + list.scrollTop;
-        return { index, label, grouped: row.classList.contains('grouped'), y, box: R(row.getBoundingClientRect()), content };
+        // The list's origin in viewport coordinates: content rect minus this
+        // is its place in the list, whatever the list scrolled in between.
+        const origin = { x: list.getBoundingClientRect().left - list.scrollLeft, y: list.getBoundingClientRect().top - list.scrollTop };
+        const pad = getComputedStyle(row);
+        return {
+            index, label, grouped: row.classList.contains('grouped'), stub, spoiler, y, origin,
+            padding: `${pad.paddingTop} ${pad.paddingRight} ${pad.paddingBottom} ${pad.paddingLeft}`,
+            box: R(row.getBoundingClientRect()), content,
+        };
     });
     return out;
 };
@@ -226,6 +272,39 @@ function findings(rows) {
         }
     }
     return { contentHits, boxHits };
+}
+
+/** How the hovered row's OWN content moved, in the list's coordinates (a
+ *  scroll of the list in between is not a move): each item matched to itself
+ *  before the hover by kind and order (the hover toolbar is not content). */
+function ownShift(before, after) {
+    const keyed = (list) => { const n = {}; return list.map(c => [`${c.what}#${n[c.what] = (n[c.what] || 0) + 1}`, c]); };
+    const was = new Map(keyed(before.content));
+    const shifts = [];
+    let compared = 0;
+    for (const [k, c] of keyed(after.content)) {
+        const p = was.get(k);
+        if (!p) continue;
+        compared++;
+        const dx = (c.left - after.origin.x) - (p.left - before.origin.x);
+        const dy = (c.top - after.origin.y) - (p.top - before.origin.y);
+        if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+            shifts.push({ what: k, dx: +dx.toFixed(1), dy: +dy.toFixed(1), scrolled: +(before.origin.y - after.origin.y).toFixed(1), was: [+p.left.toFixed(1), +p.top.toFixed(1)], now: [+c.left.toFixed(1), +c.top.toFixed(1)] });
+        }
+    }
+    return { compared, shifts };
+}
+
+/** Measure, put the pointer on row `i`, measure again. */
+async function hoverRow(page, i) {
+    const row = page.locator('.messages-container > .message').nth(i);
+    await row.scrollIntoViewIfNeeded();
+    const before = await page.evaluate(MEASURE);
+    const bb = await row.boundingBox();
+    await page.mouse.move(bb.x + 8, bb.y + bb.height / 2);
+    await sleep(60);
+    const now = await page.evaluate(MEASURE);
+    return { before, now };
 }
 
 /** Top of the first text line of the row whose content is exactly `text`. */
@@ -272,7 +351,7 @@ async function setCompact(page, on) {
 }
 
 /** What each fixture must have rendered before its measurements mean anything. */
-const CHANNEL_FIXTURE = { rows: 15, grouped: 13, media: ['image', 'video', 'clip', 'reaction', 'reply'] };
+const CHANNEL_FIXTURE = { rows: 19, grouped: 15, media: ['image', 'video', 'clip', 'reaction', 'reply', 'spoiler', 'stub'] };
 const DM_FIXTURE = { rows: 6, grouped: 5, media: ['image'] };
 
 /** The space between two lines of one same-author run, by density: what
@@ -292,6 +371,9 @@ async function runConfig(page, name, { hover, fx, runGap }) {
         clip: rows.some(r => r.content.some(c => c.what.startsWith('div.clip-attachment'))),
         reaction: rows.some(r => r.content.some(c => c.what.includes('reaction-badge'))),
         reply: rows.some(r => r.content.some(c => c.what.includes('message-reply-ref'))),
+        // Painted, i.e. still a real picture after the spoiler's clip.
+        spoiler: rows.some(r => r.spoiler && r.content.some(c => c.what.startsWith('img') && c.bottom - c.top > 20)),
+        stub: rows.some(r => r.stub && r.content.some(c => c.what === 'text:Blocked message')),
     };
     const media = Object.fromEntries(fx.media.map(k => [k, seen[k]]));
     check(`${name}: rendered ${fx.media.join(', ')}`, Object.values(media).every(Boolean), media);
@@ -323,6 +405,8 @@ async function runConfig(page, name, { hover, fx, runGap }) {
         return a && b ? +(b.top - a.top).toFixed(2) : null;
     })();
     console.log(`  MEASURE ${name}: grouped-text pitch ${JSON.stringify(pitch)} px (header->first grouped ${firstPitch} px), line box ${lineH} px, tunnels->image gap ${gapToImage} px`);
+    const stubRow = rows.find(r => r.stub);
+    if (stubRow) console.log(`  MEASURE ${name}: blocked stub padding ${stubRow.padding}, height ${+(stubRow.box.bottom - stubRow.box.top).toFixed(2)} px`);
     check(`${name}: two single-line grouped rows are at least one line box apart`, !!pitch && pitch.every(p => p >= lineH - 0.5), { pitch, lineH });
     // ...and no further: a run must still read as one message. Every grouped
     // line sits exactly where the first one under the header does.
@@ -333,28 +417,47 @@ async function runConfig(page, name, { hover, fx, runGap }) {
     await page.locator('.messages-container .message', { hasText: 'Stream the rat.' }).first().scrollIntoViewIfNeeded();
     await sleep(200);
     await shot(page, name);
+    // ...and the end of the list (the spoiler and the blocked stub).
+    await page.evaluate(() => { const c = document.querySelector('.messages-container'); c.scrollTop = c.scrollHeight; });
+    await sleep(200);
+    await shot(page, `${name}-end`);
 
     if (hover) {
         const moved = [];
+        const shifted = [];
+        const uncompared = [];
         const hoverHits = [];
         for (let i = 0; i < rows.length; i++) {
-            const row = page.locator('.messages-container > .message').nth(i);
-            await row.scrollIntoViewIfNeeded();
-            const unhovered = (await page.evaluate(MEASURE)).map(r => r.y);
-            const bb = await row.boundingBox();
-            await page.mouse.move(bb.x + 8, bb.y + bb.height / 2);
-            await sleep(60);
-            const now = await page.evaluate(MEASURE);
+            const { before, now } = await hoverRow(page, i);
             for (let k = 0; k < now.length; k++) {
-                const d = now[k].y - unhovered[k];
+                const d = now[k].y - before[k].y;
                 if (Math.abs(d) > 0.5) moved.push({ hovered: rows[i].label, moved: now[k].label, px: +d.toFixed(1) });
             }
+            const own = ownShift(before[i], now[i]);
+            if (!own.compared) uncompared.push(rows[i].label);
+            if (own.shifts.length) shifted.push({ hovered: rows[i].label, ...own.shifts[0] });
             const hf = findings(now);
             if (hf.contentHits.length || hf.boxHits.length) hoverHits.push({ hovered: rows[i].label, ...hf });
         }
         await page.mouse.move(2, 2);
         check(`${name}: hovering any row moves no row`, moved.length === 0, moved.slice(0, 4));
+        check(`${name}: hovering a row moves none of its own content (no sideways jump either)`,
+            shifted.length === 0 && uncompared.length === 0, { shifted: shifted.slice(0, 4), uncompared });
         check(`${name}: a hovered row overlaps nothing`, hoverHits.length === 0, JSON.stringify(hoverHits.slice(0, 2)).slice(0, 400));
+
+        // CONTROL for the own-content check: a hover that shifts the content.
+        await page.evaluate(() => {
+            const s = document.createElement('style');
+            s.id = '__shift_control';
+            s.textContent = '.messages-container > .message:hover { padding-left: 3rem !important; }';
+            document.head.appendChild(s);
+        });
+        const c = await hoverRow(page, 0);
+        await page.evaluate(() => document.getElementById('__shift_control')?.remove());
+        await page.mouse.move(2, 2);
+        const ctlShift = ownShift(c.before[0], c.now[0]);
+        check(`${name}: CONTROL - the own-content check reports a hover that pushes the content sideways`,
+            ctlShift.shifts.length > 0, ctlShift.shifts.slice(0, 2));
     }
 
     // POSITIVE CONTROL: the old failure mode, re-created. The detector must
@@ -498,6 +601,11 @@ try {
     await say(D, 'a line after the clip');
     await say(D, 'https://example.invalid/rat.png');
     await say(D, 'a line after the blocked image');
+    // Spoilered in the composer, as a person does it: the image is covered
+    // (blurred, scaled 1.08 inside the spoiler's clip) until clicked, and
+    // nothing here clicks it.
+    await attach(D, { name: 'spoiler.png', mimeType: 'image/png', buffer: Buffer.from(png, 'base64') }, { spoiler: true });
+    await say(D, 'a line after the spoiler');
 
     // A reply starts a new header row (replies never group): through the
     // hover toolbar's Reply, as a person does it. One more line groups under it.
@@ -508,6 +616,25 @@ try {
     await D.locator('.reply-preview-banner').waitFor({ timeout: 5000 });
     await say(D, 'replying to the first one');
     await say(D, 'and a line under the reply');
+
+    // A second member posts one line, which the poster then blocks: it reads
+    // back as the "Blocked message" stub row. One more line from the poster
+    // follows it (a new header row - the stub's author is someone else).
+    const bCtx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    const B = await signIn(bCtx, 'member', true, 'ovlb_' + stamp);
+    const inv = await call(D, '/src/api/servers.ts', 'createInvite', [srv.id, {}]);
+    await call(B, '/src/api/servers.ts', 'joinViaInvite', [inv.code]);
+    await B.reload({ waitUntil: 'domcontentloaded' });
+    await sleep(2500);
+    await dismiss(B);
+    await openChannel(B, srvName, text.name, false);
+    await say(B, 'a line from someone you will block');
+    const subOf = (page) => page.evaluate(() => Number(JSON.parse(atob(localStorage.getItem('auth_token').split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).sub));
+    const bId = await subOf(B);
+    await bCtx.close();
+    await until(async () => (await rowCount(D)) >= CHANNEL_FIXTURE.rows - 1, 15000);
+    await say(D, 'a line after the blocked one');
+    await call(D, '/src/api/blocking.ts', 'blockUser', [bId]);
     await sleep(1000);
 
     // Read it back the way every other reader does: from the server.
@@ -515,7 +642,7 @@ try {
     await sleep(2500);
     await dismiss(D);
     await openChannel(D, srvName, text.name, false);
-    await until(async () => (await rowCount(D)) >= 15, 15000);
+    await until(async () => (await rowCount(D)) >= CHANNEL_FIXTURE.rows, 15000);
 
     // ── Desktop 1280x800, normal then compact.
     check('desktop: normal density', (await setCompact(D, false)) === 'false');
@@ -526,8 +653,7 @@ try {
 
     // ── A DM renders the same rows from its own branch of Chat.tsx: your
     // conversation with yourself, the same run, through the same composer.
-    const me = await D.evaluate(() => JSON.parse(atob(localStorage.getItem('auth_token').split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).sub);
-    const conv = await call(D, '/src/api/dms.ts', 'startDMConversation', [Number(me)]);
+    const conv = await call(D, '/src/api/dms.ts', 'startDMConversation', [await subOf(D)]);
     check('setup: a conversation with yourself', !!conv?.id);
     await D.reload({ waitUntil: 'domcontentloaded' });
     await sleep(2500);

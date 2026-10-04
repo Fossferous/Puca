@@ -2867,14 +2867,34 @@ body.voice-drag-active {
     }
 }
 
-/* Collapsed stand-in for a run of messages from a blocked user. */
+/* Collapsed stand-in for a run of messages from a blocked user. It is a
+   `.message` row (Chat.tsx), so it takes the row's hover — the background
+   stretched to the list's edges by -1.25rem of margin, given back as padding
+   — and the row's density:
+   - normal: 4px above and below, the text indented 16px (--stub-indent);
+   - compact: the row's --message-pad above and below and no indent, which is
+     what compact mode has always shown (its `.message` padding rule used to
+     outrank this one).
+   Hover adds the indent to the row's 1.25rem, so the text stays where it is:
+   it used to jump 16px left on hover, and in normal mode the stub also grew
+   8px taller and pushed every row below it down. */
 .blocked-message-stub {
-    padding: 4px 16px;
+    --stub-indent: 16px;
+    padding: 4px var(--stub-indent);
     font-size: 12px;
     font-style: italic;
     color: var(--text-faint);
     opacity: 0.7;
     user-select: none;
+}
+.blocked-message-stub:hover {
+    padding-left: calc(1.25rem + var(--stub-indent));
+    padding-right: calc(1.25rem + var(--stub-indent));
+}
+[data-compact="true"] .blocked-message-stub {
+    --stub-indent: 0px;
+    padding-top: var(--message-pad);
+    padding-bottom: var(--message-pad);
 }
 
 /* Search footer: the real numbers. "No results" means something different
