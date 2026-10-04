@@ -67,10 +67,11 @@ function kindOf(href: string, bang: boolean, name: string): AttachmentKind {
     const m = /[?&]m=([^&]*)/i.exec(href);
     const mime = m ? safeDecode(m[1]).toLowerCase() : '';
     if (mime.startsWith('image/')) return 'image';
-    if (mime.startsWith('audio/')) return 'audio';
     if (videoMimeFor(name, mime)) return 'video';
-    // The message list's own name fallback: an `.mp3` whose ref says
-    // octet-stream plays there as audio, so it is audio here too.
+    // The message list's own rule, in its order (MessageContent asks
+    // videoMimeFor, then audioMimeFor): an `.mp3` whose ref says octet-stream
+    // plays there as audio, so it is audio here too; a playlist type or an
+    // .amr gets the download chip there, so it is a file here.
     if (audioMimeFor(name, mime)) return 'audio';
     if (bang && (!mime || mime === 'application/octet-stream')) return 'image';
     return 'file';

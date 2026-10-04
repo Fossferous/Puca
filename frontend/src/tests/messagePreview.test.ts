@@ -106,6 +106,23 @@ describe('messagePreviewText / messagePreviewSegments: attachments become a labe
         expect(messagePreviewText(content)).toBe('Audio: old-song.mp3 File: notes.txt');
     });
 
+    it('follows the player rule exactly: audio the message list will not play previews as a file', () => {
+        // The message list asks audioMimeFor (after videoMimeFor); a playlist
+        // type and AMR get the download chip there, so a music note here
+        // would promise a player the message does not have.
+        const content = `[list.m3u](sovereign-enc:7?k=K7SECRETK7&m=audio%2Fx-mpegurl)`
+            + ` [memo.amr](sovereign-enc:8?k=K8SECRETK8&m=audio%2Famr)`
+            + ` [voice-1.webm](sovereign-enc:9?k=K9SECRETK9&m=audio%2Fwebm%3Bcodecs%3Dopus)`
+            + ` [take.m4a](sovereign-enc:10?k=K10SECRETK10&m=audio%2Fx-m4a)`;
+        expect(messagePreviewSegments(content).filter(s => s.type === 'attachment')).toEqual([
+            { type: 'attachment', kind: 'file', name: 'list.m3u', spoiler: false },
+            { type: 'attachment', kind: 'file', name: 'memo.amr', spoiler: false },
+            // Controls: a Púca Notes recording and Windows' .m4a type still play.
+            { type: 'attachment', kind: 'audio', name: 'voice-1.webm', spoiler: false },
+            { type: 'attachment', kind: 'audio', name: 'take.m4a', spoiler: false },
+        ]);
+    });
+
     it('a spoiler attachment hides its name and leaves no || behind', () => {
         const content = buildOutgoingContent('caption', [
             chip('secret-plot.png', 'image/png', `sovereign-enc:1?k=${KEY}&m=image%2Fpng`, true),
