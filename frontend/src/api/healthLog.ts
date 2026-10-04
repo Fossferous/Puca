@@ -122,7 +122,14 @@ export interface HealthInput {
     audioEls: number;
     videoEls: number;
     renders: Array<[string, number]>;
-    noise: { mode: string; context: string; dfAvgMs: number | null; dfMaxMs: number | null; overBudget: number | null; dry: number | null; flips: number | null; overloaded: boolean | null } | null;
+    noise: {
+        mode: string; context: string; dfAvgMs: number | null; dfMaxMs: number | null; overBudget: number | null; dry: number | null; flips: number | null; overloaded: boolean | null;
+        /** Seconds of this minute DeepFilter spent PAUSED because nobody
+         *  could hear the mic (dfPause.ts), and why it is paused right now
+         *  (null: running). The df ms figures are from its last running
+         *  stretch: a paused Worker reports nothing. */
+        pausedS?: number | null; pauseReason?: string | null;
+    } | null;
     clip: { phase: string; fps: number; kbps: number; ringMB: number; dropped: number };
 }
 
@@ -173,8 +180,13 @@ export function formatHealthLine(h: HealthInput): string {
     ).join(',');
     const renderText = h.renders.length === 0 ? 'none' : h.renders.map(([n, c]) => `${n}${c}`).join(',');
     const n = h.noise;
+    // Only when it paused this minute (or is paused now): a call where it
+    // never pauses reads exactly as it did before pausing existed.
+    const paused = n && ((n.pausedS ?? 0) > 0 || n.pauseReason)
+        ? ` paused${v(n.pausedS, 's')}${n.pauseReason ? '/' + n.pauseReason : ''}`
+        : '';
     const noise = n
-        ? `nz=${n.mode}/${n.context} df${v(n.dfAvgMs, 'ms')}/${v(n.dfMaxMs, 'ms')} over${v(n.overBudget)} dry${v(n.dry)} flips${v(n.flips)}${n.overloaded ? ' OVERLOADED' : ''}`
+        ? `nz=${n.mode}/${n.context} df${v(n.dfAvgMs, 'ms')}/${v(n.dfMaxMs, 'ms')} over${v(n.overBudget)} dry${v(n.dry)} flips${v(n.flips)}${paused}${n.overloaded ? ' OVERLOADED' : ''}`
         : 'nz=?';
     const c = h.clip;
     return [
@@ -332,17 +344,31 @@ function fromMesh(peers: Array<Record<string, unknown>>): { video: VideoIn[]; se
     return { video, sending };
 }
 
+/** The graph's cumulative paused time at the last sample, so a line can say
+ *  how much of ITS minute was paused. A new graph (a mic rebuild) restarts
+ *  the count from 0, which reads as "all of it is this minute's". */
+let lastDfPausedMs: number | null = null;
+
 function noiseFrom(diag: Record<string, unknown> | null): HealthInput['noise'] {
     const nz = diag?.noise as Record<string, unknown> | undefined;
     if (!nz) return null;
-    const df = nz.deepFilter as { worker?: Record<string, unknown>; worklet?: Record<string, unknown> } | undefined;
+    const df = nz.deepFilter as { worker?: Record<string, unknown>; worklet?: Record<string, unknown>; pause?: Record<string, unknown> | null } | undefined;
     const w = df?.worker ?? {};
     const k = df?.worklet ?? {};
     const round1 = (x: unknown) => { const n = num(x); return n === null ? null : Math.round(n * 10) / 10; };
+    const pausedTotal = num(df?.pause?.pausedMs);
+    let pausedS: number | null = null;
+    if (pausedTotal !== null) {
+        const since = lastDfPausedMs !== null && pausedTotal >= lastDfPausedMs ? pausedTotal - lastDfPausedMs : pausedTotal;
+        pausedS = Math.round(since / 1000);
+    }
+    lastDfPausedMs = pausedTotal;
     return {
         mode: String(nz.mode ?? '?'), context: String(nz.contextState ?? '?'),
         dfAvgMs: round1(w.avgMs), dfMaxMs: round1(w.maxMs), overBudget: num(w.overBudgetHops),
         dry: num(k.dryDelta), flips: num(k.flipsDelta), overloaded: typeof k.overloaded === 'boolean' ? k.overloaded : null,
+        pausedS,
+        pauseReason: df?.pause?.paused === true ? String(df.pause.reason ?? '?') : null,
     };
 }
 
@@ -444,6 +470,7 @@ export function stopHealthLog(): void {
     probeTimer = null;
     observer?.disconnect();
     observer = null;
+    lastDfPausedMs = null; // the next call's first line counts from its own start
     send('health stopped');
     micLevels('end');
 }

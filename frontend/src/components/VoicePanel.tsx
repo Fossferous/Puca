@@ -24,6 +24,7 @@ import { copyDiagnostics } from '../api/diagnosticsReport';
 import { goLiveBegin, goLiveMark, goLiveEnd } from '../api/goLiveTiming';
 import { useShareStarting } from './useShareStarting';
 import { noteRender, startHealthLog, stopHealthLog } from '../api/healthLog';
+import { attachDfPause } from '../api/dfPause';
 import { keepDetail, keepSummary } from './stableState';
 import { type NoiseSuppressionMode, type NoiseModeChange, NOISE_MODE_EVENT, getNoiseSuppressionMode, setNoiseSuppressionMode, changeNoiseModeLive, modeUsesWebAudio, rawInputHasHadSignal, hasLiveGainStage, isDeepFilterGateOpen, selectedInputDeviceId } from '../api/noiseFilter';
 import { registerHold, unregisterHold, registerPress, unregisterPress, startNativeFeed, stopNativeFeed, setNativeFeedHost } from '../api/hotkeys';
@@ -657,6 +658,45 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         if (isInVoice) startHealthLog(); else stopHealthLog();
         return () => { setSelfInVoice(false); setVoiceKeepAlive(false); stopHealthLog(); };
     }, [isInVoice]);
+
+    // DeepFilter pauses while nobody can hear this mic, and resumes the moment
+    // someone might (dfPause.ts, dfPauseDecision.ts). Everything it needs is
+    // read live from here and re-read on each change - no polling.
+    useEffect(() => {
+        if (!isInVoice) return;
+        return attachDfPause({
+            roomId,
+            selfId: currentUserId,
+            mic: {
+                read: () => webrtcManager.media.getLocalStreamSync()?.getAudioTracks()[0]?.enabled ?? null,
+                subscribe: (cb) => webrtcManager.onMicGateChange(() => cb()),
+            },
+            socket: {
+                read: () => wsClient.isConnected,
+                subscribe: (cb) => {
+                    window.addEventListener('wsConnected', cb);
+                    window.addEventListener('wsClosed', cb);
+                    return () => {
+                        window.removeEventListener('wsConnected', cb);
+                        window.removeEventListener('wsClosed', cb);
+                    };
+                },
+            },
+            transport: {
+                // Mesh peer connections and SFU participants alike: each is
+                // someone our mic reaches. An SFU call that is not connected
+                // (still joining, reconnecting) is unknown, never "nobody".
+                read: () => (sfuMode && !sfuManager.connected
+                    ? null
+                    : [...webrtcManager.peerUserIds(), ...sfuManager.participantUserIds()]),
+                subscribe: (cb) => {
+                    const offMesh = webrtcManager.onPeersChanged(cb);
+                    const offSfu = sfuManager.onParticipantsChanged(cb);
+                    return () => { offMesh(); offSfu(); };
+                },
+            },
+        });
+    }, [isInVoice, roomId, currentUserId, sfuMode]);
 
     // Properly sync self-preview video srcObject when screen sharing
     useEffect(() => {

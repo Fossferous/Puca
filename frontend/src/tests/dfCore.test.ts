@@ -60,6 +60,8 @@ class Rig {
     paused = false;
     respond = true;
     dryFlag = false;
+    /** The `fresh` flag of every hop sent, in order. */
+    fresh: boolean[] = [];
     /** What input 1 (the RNNoise bridge) carries at timeline index i; null =
      *  nothing connected. Set it to model a bridge that is live, not loaded
      *  yet, or dies. */
@@ -74,17 +76,19 @@ class Rig {
         coreModelDelay = modelDelayHops * HOP,
         latency = LATENCY + coreModelDelay,
         bridgeDelay: number | null = null,
+        prerollHops?: number,
     ) {
         this.transform = transform;
         this.delayQuanta = delayQuanta;
         for (let i = 0; i < modelDelayHops; i++) this.modelQueue.push(new Float32Array(HOP));
-        this.core = new DfCore(HOP, latency, (hopView: Float32Array) => {
+        this.core = new DfCore(HOP, latency, (hopView: Float32Array, fresh: boolean) => {
+            this.fresh.push(fresh);
             if (!this.respond) return;
             // Contract: the view is scratch, valid only during the call.
             this.modelQueue.push(new Float32Array(hopView));
             const answers = this.modelQueue.shift()!;
             this.pending.push({ deliverAt: this.quantum + this.delayQuanta, data: answers });
-        }, coreModelDelay, bridgeDelay);
+        }, coreModelDelay, bridgeDelay, prerollHops);
     }
 
     private deliverDue() {
@@ -616,5 +620,304 @@ describe('crackle detector positive control', () => {
         const at = 30000;
         for (let p = at; p < at + HOP; p++) glitched[p] = 0;
         expect(maxStep(glitched, LATENCY + FADE)).toBeGreaterThan(0.2);
+    });
+});
+
+/**
+ * PAUSE / RESUME (2026-10-04): while nobody can hear the mic, dfPause.ts
+ * pauses DeepFilter. These run the DFN3-shaped rig (3-hop model delay, emit
+ * latency 6 hops, live RNNoise bridge) and pin what the room hears across a
+ * pause: the bridge from the first sample, never raw, never silence; on
+ * resume, the bridge until DeepFilter has answers for the instant on air,
+ * then the declicked switch back; and never one sample of the model's stale
+ * state (its lookahead still holds the hops sent before the pause).
+ */
+describe('DfCore pause / resume', () => {
+    const MODEL = 3; // DFN3's delay in hops
+    const L = LATENCY + MODEL * HOP; // 2880: deepFilter.ts's emit latency for DFN3
+    const dfnRig = (delayQuanta = 0, prerollHops?: number) => {
+        const rig = new Rig((x) => x * 0.5, delayQuanta, MODEL, MODEL * HOP, L, BRIDGE_DELAY, prerollHops);
+        rig.bridgeFn = liveBridge(rig);
+        return rig;
+    };
+    const processedAt = (rig: Rig, p: number) => 0.5 * rig.input[p - L];
+    const bridgeAt = (rig: Rig, p: number) => 0.25 * rig.input[p - L];
+    /** Every output sample from `from` on, classified against the two
+     *  renderings of the SAME instant. Anything else is either a declick ramp
+     *  (at most FADE samples after a flip) or a defect: stale audio. */
+    const classify = (rig: Rig, from: number) => {
+        let processed = 0; let bridge = 0; const other: number[] = [];
+        for (let p = from; p < rig.output.length; p++) {
+            if (rig.output[p] === processedAt(rig, p)) processed++;
+            else if (rig.output[p] === bridgeAt(rig, p)) bridge++;
+            else other.push(p);
+        }
+        return { processed, bridge, other };
+    };
+    /** The ramps: every unclassified sample sits within FADE after the start
+     *  of a run of unclassified samples, and there are at most `flips` runs. */
+    const onlyRamps = (other: number[], flips: number) => {
+        const runs: number[][] = [];
+        for (const p of other) {
+            const run = runs[runs.length - 1];
+            if (run && p === run[run.length - 1] + 1) run.push(p); else runs.push([p]);
+        }
+        return runs.length <= flips && runs.every(r => r.length <= FADE);
+    };
+    /** The resume a naive design would do: carry on from NOW (skip the paused
+     *  stretch), keep every answer. The model's lookahead still holds the
+     *  last pre-pause hops, so its first answers are stale audio, placed on
+     *  the instants just after the resume. */
+    const naiveResume = (core: InstanceType<typeof DfCore>) => {
+        core.paused = false;
+        core.sentPos += Math.floor((core.inPos - core.sentPos) / HOP) * HOP;
+        core.enhHigh = core.sentPos - MODEL * HOP;
+    };
+
+    it('paused: not one hop goes to the Worker, and the bridge carries every sample (no raw, no silence)', () => {
+        const rig = dfnRig();
+        rig.pump(400, sineSig);
+        const before = rig.core.stats();
+        expect(rig.core.pause()).toBe(true);
+        rig.pump(400, sineSig);
+        const s = rig.core.stats();
+        expect(s.hopsSent).toBe(before.hopsSent);
+        expect(s.paused).toBe(true);
+        expect(s.pausedSamples).toBe(400 * QUANTUM);
+        expect(s.drySamples).toBe(0);
+        expect(s.silentSamples).toBe(before.silentSamples);
+        for (let p = rig.output.length - 200 * QUANTUM; p < rig.output.length; p++) {
+            expect(rig.output[p]).toBe(bridgeAt(rig, p));
+        }
+        expect(maxStep(rig.output, L + FADE)).toBeLessThan(0.06);
+    });
+
+    it('a long pause resumes on fresh audio only: every sample is DeepFilter or the bridge of the SAME instant, never stale', () => {
+        const rig = dfnRig();
+        rig.pump(400, noiseSig);
+        rig.core.pause();
+        rig.pump(400, noiseSig); // ~1 s: far past the pre-roll
+        const flips0 = rig.core.stats().flips;
+        const resumeP = rig.output.length;
+        expect(rig.core.resume()).toBe(true);
+        rig.pump(400, noiseSig);
+        const s = rig.core.stats();
+        const c = classify(rig, resumeP);
+        // One flip back to DeepFilter, its ramp the only unclassified stretch.
+        expect(s.flips - flips0).toBe(1);
+        expect(onlyRamps(c.other, 1)).toBe(true);
+        expect(c.bridge).toBeGreaterThan(0); // the bridge covered the resume
+        expect(s.drySamples).toBe(0);
+        // ...and DeepFilter is back, exactly.
+        for (let p = rig.output.length - 200 * QUANTUM; p < rig.output.length; p++) {
+            expect(rig.output[p]).toBe(processedAt(rig, p));
+        }
+    });
+
+    it('positive control: a naive resume puts the model\'s stale lookahead on air, and the oracle sees it', () => {
+        const rig = dfnRig();
+        rig.pump(400, noiseSig);
+        rig.core.pause();
+        rig.pump(400, noiseSig);
+        const flips0 = rig.core.stats().flips;
+        const resumeP = rig.output.length;
+        naiveResume(rig.core);
+        rig.pump(400, noiseSig);
+        const c = classify(rig, resumeP);
+        expect(onlyRamps(c.other, rig.core.stats().flips - flips0)).toBe(false);
+        expect(c.other.length).toBeGreaterThanOrEqual(MODEL * HOP - FADE);
+    });
+
+    it('the guard alone keeps the stale lookahead off air: with a 4-hop pre-roll it would land after the emit point', () => {
+        // At 16 hops the stale answers land in the past anyway; at 4 they land
+        // ~20 ms AHEAD of what is on air, so only enhLow keeps them off.
+        const rig = dfnRig(0, 4);
+        rig.pump(400, noiseSig);
+        rig.core.pause();
+        rig.pump(400, noiseSig);
+        const resumeP = rig.output.length;
+        rig.core.resume();
+        rig.pump(400, noiseSig);
+        const c = classify(rig, resumeP);
+        expect(onlyRamps(c.other, 1)).toBe(true);
+        for (let p = rig.output.length - 200 * QUANTUM; p < rig.output.length; p++) {
+            expect(rig.output[p]).toBe(processedAt(rig, p));
+        }
+    });
+
+    it('positive control: the same 4-hop resume without the guard puts stale audio on air', () => {
+        const rig = dfnRig(0, 4);
+        rig.pump(400, noiseSig);
+        rig.core.pause();
+        rig.pump(400, noiseSig);
+        const flips0 = rig.core.stats().flips;
+        const resumeP = rig.output.length;
+        rig.core.resume();
+        rig.core.enhLow = -Infinity; // no guard
+        rig.pump(400, noiseSig);
+        const c = classify(rig, resumeP);
+        expect(onlyRamps(c.other, rig.core.stats().flips - flips0)).toBe(false);
+    });
+
+    it('answers still in flight from before a long pause are dropped, not placed on the new stretch', () => {
+        const rig = dfnRig();
+        rig.pump(400, noiseSig);
+        rig.paused = true; // the Worker stalls: answers pile up undelivered
+        rig.pump(20, noiseSig);
+        const owed = rig.core.stats().outstanding;
+        expect(owed).toBeGreaterThan(0);
+        rig.core.pause();
+        rig.pump(300, noiseSig);
+        const resumeP = rig.output.length;
+        rig.core.resume();
+        rig.pump(1, noiseSig);
+        rig.paused = false; // the backlog lands, oldest first
+        rig.pump(400, noiseSig);
+        const c = classify(rig, resumeP);
+        expect(onlyRamps(c.other, 1)).toBe(true);
+        for (let p = rig.output.length - 200 * QUANTUM; p < rig.output.length; p++) {
+            expect(rig.output[p]).toBe(processedAt(rig, p));
+        }
+    });
+
+    it('positive control: placing those stale answers instead is visible to the same oracle', () => {
+        const rig = dfnRig();
+        rig.pump(400, noiseSig);
+        rig.paused = true;
+        rig.pump(20, noiseSig);
+        rig.core.pause();
+        rig.pump(300, noiseSig);
+        const flips0 = rig.core.stats().flips;
+        const resumeP = rig.output.length;
+        rig.core.resume();
+        rig.core.staleReturns = 0; // as if the resume kept them
+        rig.pump(1, noiseSig);
+        rig.paused = false;
+        rig.pump(400, noiseSig);
+        const c = classify(rig, resumeP);
+        expect(onlyRamps(c.other, rig.core.stats().flips - flips0)).toBe(false);
+    });
+
+    it('a short pause (under the pre-roll) just continues: the missed hops go out at once, contiguous, no fresh start', () => {
+        const rig = dfnRig();
+        rig.pump(400, noiseSig);
+        rig.core.pause();
+        const sentAtPause = rig.core.sentPos;
+        rig.pump(10, noiseSig); // 1280 samples: well under 16 hops
+        const n0 = rig.fresh.length;
+        rig.core.resume();
+        rig.pump(1, noiseSig);
+        expect(rig.core.sentPos).toBe(sentAtPause + Math.floor((rig.core.inPos - sentAtPause) / HOP) * HOP);
+        expect(rig.core.staleReturns).toBe(0);
+        expect(rig.fresh.slice(n0).every(f => f === false)).toBe(true);
+        rig.pump(400, noiseSig);
+        expect(rig.core.stats().drySamples).toBe(0);
+        for (let p = rig.output.length - 200 * QUANTUM; p < rig.output.length; p++) {
+            expect(rig.output[p]).toBe(processedAt(rig, p));
+        }
+    });
+
+    it('a long resume marks exactly its first hop fresh (the Worker\'s seam detector skips that jump)', () => {
+        const rig = dfnRig();
+        rig.pump(400, noiseSig);
+        rig.core.pause();
+        rig.pump(400, noiseSig);
+        const n0 = rig.fresh.length;
+        rig.core.resume();
+        rig.pump(50, noiseSig);
+        const after = rig.fresh.slice(n0);
+        expect(after[0]).toBe(true);
+        expect(after.slice(1).every(f => f === false)).toBe(true);
+        expect(after.length).toBeGreaterThanOrEqual(16); // the whole pre-roll went out
+    });
+
+    it('no click either way: sine continuity holds through pause and resume, two flips, all bridged', () => {
+        const rig = dfnRig();
+        rig.pump(400, sineSig);
+        const f0 = rig.core.stats().flips;
+        rig.core.pause();
+        rig.pump(300, sineSig);
+        rig.core.resume();
+        rig.pump(300, sineSig);
+        const s = rig.core.stats();
+        expect(s.flips - f0).toBe(2); // processed -> bridge -> processed
+        expect(s.drySamples).toBe(0);
+        expect(maxStep(rig.output, L + FADE)).toBeLessThan(0.06);
+    });
+
+    it('reports how long the bridge carried a resume: exactly until the first DeepFilter sample', () => {
+        const rig = dfnRig(4); // a Worker answering 4 quanta (~11 ms) late
+        rig.pump(400, noiseSig);
+        rig.core.pause();
+        rig.pump(400, noiseSig);
+        const resumeP = rig.output.length;
+        rig.core.resume();
+        rig.pump(200, noiseSig);
+        let firstNotBridge = resumeP;
+        while (rig.output[firstNotBridge] === bridgeAt(rig, firstNotBridge)) firstNotBridge++;
+        const cover = rig.core.stats().lastResumeCover;
+        expect(cover).toBe(firstNotBridge - resumeP);
+        // A pre-roll answered ~11 ms late is on air within a few tens of ms.
+        expect(cover).toBeGreaterThan(0);
+        expect(cover).toBeLessThan(48 * 30); // 30 ms at 48 kHz
+    });
+
+    it('push-to-talk chatter (50 short presses) stays exact, click-free and never trips an overload episode', () => {
+        const rig = dfnRig(2);
+        rig.pump(400, sineSig);
+        for (let k = 0; k < 50; k++) {
+            rig.core.pause();
+            rig.pump(20 + (k % 7) * 30, sineSig); // 50 ms .. 500 ms released
+            rig.core.resume();
+            rig.pump(40 + (k % 5) * 20, sineSig); // 100 ms .. 300 ms held
+        }
+        rig.pump(400, sineSig);
+        const s = rig.core.stats();
+        expect(s.overloadEpisodes).toBe(0);
+        expect(s.drySamples).toBe(0);
+        expect(s.pauses).toBe(50);
+        expect(s.resumes).toBe(50);
+        expect(maxStep(rig.output, L + FADE)).toBeLessThan(0.06);
+        for (let p = rig.output.length - 200 * QUANTUM; p < rig.output.length; p++) {
+            expect(rig.output[p]).toBe(processedAt(rig, p));
+        }
+    });
+
+    it('pause and resume are idempotent, and no-ops once in standby', () => {
+        const rig = dfnRig();
+        rig.pump(100, sineSig);
+        expect(rig.core.resume()).toBe(false); // not paused
+        expect(rig.core.pause()).toBe(true);
+        expect(rig.core.pause()).toBe(false);
+        expect(rig.core.resume()).toBe(true);
+        expect(rig.core.resume()).toBe(false);
+        rig.core.enterStandby();
+        expect(rig.core.pause()).toBe(false);
+        expect(rig.core.resume()).toBe(false);
+        const sent = rig.core.stats().hopsSent;
+        rig.pump(100, sineSig);
+        expect(rig.core.stats().hopsSent).toBe(sent);
+    });
+
+    it('a bridge that dies while paused is reported once the raw mic has been on air for 100 ms', () => {
+        const rig = dfnRig();
+        const dies = 400 * QUANTUM + 20_000;
+        rig.bridgeFn = liveBridge(rig, 0, dies);
+        rig.pump(400, sineSig);
+        rig.core.pause();
+        rig.pump(150, sineSig);
+        // ~40 ms of raw so far (it died 20 000 samples in): not yet.
+        expect(rig.core.bridgeFailed()).toBe(false);
+        rig.pump(150, sineSig);
+        expect(rig.core.bridgeFailed()).toBe(true);
+    });
+
+    it('positive control: a live bridge through a long pause never reports', () => {
+        const rig = dfnRig();
+        rig.pump(400, sineSig);
+        rig.core.pause();
+        rig.pump(800, sineSig);
+        expect(rig.core.bridgeFailed()).toBe(false);
+        expect(rig.core.stats().rawUncovered).toBe(0);
     });
 });

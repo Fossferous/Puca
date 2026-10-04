@@ -131,8 +131,10 @@ function exactLag(dry, out, coarse, halfWindow = 600) {
 
 // ---------- browser side ----------
 
+// Headless and MUTED: the graph is connected to ctx.destination, and nothing
+// this rig does may ever be audible on the machine running it.
 const browser = await chromium.launch({
-    args: ['--autoplay-policy=no-user-gesture-required'],
+    args: ['--autoplay-policy=no-user-gesture-required', '--mute-audio'],
 });
 const page = await browser.newPage();
 const consoleErrors = [];

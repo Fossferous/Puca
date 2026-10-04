@@ -188,8 +188,13 @@ function regimeOf(lsnr: number): 0 | 1 | 2 | 3 {
     return 3; // mask + deep filtering
 }
 
-function onHop(port: MessagePort, msg: { seq: number; buf: ArrayBuffer }): void {
+function onHop(port: MessagePort, msg: { seq: number; buf: ArrayBuffer; fresh?: boolean }): void {
     const samples = new Float32Array(msg.buf);
+    // The first hop after a long pause (dfWorklet.js resume) does not continue
+    // the last one this Worker saw: its first sample is not a neighbour of
+    // lastOutSample, so the seam detector below must not judge that step.
+    // NaN makes the boundary ratio NaN, which compares false to every bound.
+    if (msg.fresh) lastOutSample = NaN;
     let dry = false;
     const t0 = performance.now();
     try {
@@ -360,7 +365,7 @@ self.onmessage = async (e: MessageEvent) => {
     const port = data.port;
     if (data.bypassInference) {
         bypass = true;
-        port.onmessage = (ev: MessageEvent) => onHop(port, ev.data as { seq: number; buf: ArrayBuffer });
+        port.onmessage = (ev: MessageEvent) => onHop(port, ev.data as { seq: number; buf: ArrayBuffer; fresh?: boolean });
         // Echoing hops has no delay: the worklet must not offset the timeline.
         self.postMessage({ type: 'ready', hop: 480, delayHops: 0 });
         return;
@@ -408,7 +413,7 @@ self.onmessage = async (e: MessageEvent) => {
             }
             df.process(warm);
         }
-        port.onmessage = (ev: MessageEvent) => onHop(port, ev.data as { seq: number; buf: ArrayBuffer });
+        port.onmessage = (ev: MessageEvent) => onHop(port, ev.data as { seq: number; buf: ArrayBuffer; fresh?: boolean });
         self.postMessage({ type: 'ready', hop: df.hop_size, delayHops: df.delay_hops });
     } catch (err) {
         self.postMessage({ type: 'error', message: String(err) });

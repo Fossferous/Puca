@@ -39,10 +39,17 @@ import { createRnnoiseNode, RNNOISE_WORKLET_LATENCY, type RnnoiseNode } from './
 import {
     DfOverloadPolicy, REPEAT_EPISODES, REPEAT_WINDOW_MS, SUSTAINED_MS, type SettleReason,
 } from './dfOverloadPolicy';
+import type { DfPauseReason } from './dfPauseDecision';
 
 export type DeepFilterNodes = {
     source: MediaStreamAudioSourceNode;
-    worklet: AudioNode & { destroy?: () => void };
+    worklet: AudioNode & {
+        destroy?: () => void;
+        /** Pause the model while nobody can hear the mic (dfPause.ts); the
+         *  RNNoise bridge carries the output meanwhile. Refused (it keeps
+         *  running) when there is no working bridge or the graph settled. */
+        setPaused?: (paused: boolean, reason: DfPauseReason | null) => void;
+    };
     /** Mic gain stage (Input Volume × Manual Gain), post-suppressor. */
     gain: GainNode;
     destination: MediaStreamAudioDestinationNode;
@@ -78,11 +85,30 @@ let lastWorkerStats: Record<string, unknown> | null = null;
  *  thresholds, which used to vanish with the fallback that followed it. */
 let overloadLog: { episode: number; start: string; ms: number | null }[] = [];
 let lastSettle: { reason: SettleReason; at: string; episodes: number } | null = null;
+/** The call graph's pause state (dfPause.ts), read live. */
+let pauseDiag: (() => DeepFilterPauseDiag) | null = null;
+
+export type DeepFilterPauseDiag = {
+    /** The worklet is paused right now (the Worker is idle). */
+    paused: boolean;
+    reason: DfPauseReason | null;
+    /** A pause was asked for and refused, and why ('no working bridge',
+     *  'settled'); null when nothing is refused. */
+    refused: string | null;
+    pauses: number;
+    resumes: number;
+    /** Total time paused on this graph, ms (the current pause included). */
+    pausedMs: number;
+    /** How long the RNNoise bridge carried the mic after the last resume
+     *  before DeepFilter was on air again, ms; null before any. */
+    lastResumeCoverMs: number | null;
+};
 
 export function deepFilterDiagnostics(): Record<string, unknown> {
     return {
         worklet: lastWorkletStats, worker: lastWorkerStats, captureAvailable: liveWorker !== null,
         overloadEpisodes: overloadLog, settled: lastSettle,
+        pause: pauseDiag?.() ?? null,
     };
 }
 
@@ -256,6 +282,7 @@ export async function applyDeepFilter(
             lastWorkerStats = null;
             overloadLog = [];
             lastSettle = null;
+            pauseDiag = null;
         }
 
         // THE BRIDGE: RNNoise on the same source, into the worklet's second
@@ -397,9 +424,46 @@ export async function applyDeepFilter(
         console.warn('[DeepFilter] inference ' + why + ' — RNNoise carries the call from here');
         window.dispatchEvent(new CustomEvent('sovereign:df-settled', { detail: { reason } }));
     };
+
+    // PAUSE (dfPause.ts decides; dfWorklet.js does it). While nobody can hear
+    // the mic, the worklet stops feeding the Worker and the RNNoise bridge
+    // carries the output, exactly as through a CPU spike; on resume the
+    // bridge covers until DeepFilter has caught up. Only ever onto a bridge
+    // that WORKS: without one the RAW mic would be what a clip or the
+    // speaking ring reads while paused, and what the room hears for the
+    // first ~50 ms after every resume - so a graph without a working bridge
+    // simply keeps running, as before this existed. A settled graph has no
+    // Worker left to pause.
+    let pauseWanted = false;
+    let pauseReason: DfPauseReason | null = null;
+    let pausedOnGraph = false;
+    const pause = {
+        reason: null as DfPauseReason | null, refused: null as string | null,
+        pauses: 0, resumes: 0, pausedMs: 0, since: 0, lastResumeCoverMs: null as number | null,
+    };
+    const syncPause = () => {
+        if (!alive) return;
+        const can = !policy.settled && bridgeWorks();
+        const want = pauseWanted && can;
+        pause.refused = pauseWanted && !can ? (policy.settled ? 'settled' : 'no working bridge') : null;
+        pause.reason = want ? pauseReason : null;
+        if (want === pausedOnGraph) return;
+        pausedOnGraph = want;
+        try { node.port.postMessage({ type: want ? 'pause' : 'resume' }); } catch { /* context closed */ }
+        const now = Date.now();
+        if (want) { pause.pauses++; pause.since = now; } else { pause.resumes++; pause.pausedMs += now - pause.since; }
+    };
+    const readPause = (): DeepFilterPauseDiag => ({
+        paused: pausedOnGraph, reason: pause.reason, refused: pause.refused,
+        pauses: pause.pauses, resumes: pause.resumes,
+        pausedMs: pause.pausedMs + (pausedOnGraph ? Date.now() - pause.since : 0),
+        lastResumeCoverMs: pause.lastResumeCoverMs,
+    });
+    if (!opts?.local) pauseDiag = readPause;
     if (bridge) {
         bridge.onprocessorerror = () => {
             bridgeDead = true;
+            syncPause(); // a paused graph resumes: nothing would carry it
             if (policy.settled) {
                 reportDead('the RNNoise bridge DeepFilter settled on crashed', 'crash');
             } else if (policy.episodeOpen) {
@@ -413,11 +477,23 @@ export async function applyDeepFilter(
             }
         };
     }
+    type WorkletReport = { type?: string; episode?: number; stats?: Record<string, unknown>; coverSamples?: number };
     node.port.onmessage = (e: MessageEvent) => {
-        const d = e.data as { type?: string; episode?: number; stats?: Record<string, unknown> };
+        const d = e.data as WorkletReport;
         if (d?.stats && typeof d.stats.bridgeLive === 'boolean') bridgeLive = d.stats.bridgeLive;
         if (d?.stats && typeof d.stats.inputLive === 'boolean') inputLive = d.stats.inputLive;
-        if (d?.type === 'stats' && d.stats) { if (ownsDiagnostics()) lastWorkletStats = d.stats; }
+        onWorkletReport(d);
+        // Whatever this report said about the bridge decides whether a pause
+        // may start (the first report proves it live) or must end.
+        syncPause();
+    };
+    const onWorkletReport = (d: WorkletReport) => {
+        if (d?.type === 'resumed') {
+            // A resume has ended: DeepFilter is on air again after the bridge
+            // carried it this long (-1: paused again before it got there).
+            const cover = typeof d.coverSamples === 'number' && d.coverSamples >= 0 ? d.coverSamples : null;
+            pause.lastResumeCoverMs = cover === null ? null : Math.round((cover / ctx.sampleRate) * 10000) / 10;
+        } else if (d?.type === 'stats' && d.stats) { if (ownsDiagnostics()) lastWorkletStats = d.stats; }
         else if (d?.type === 'overloaded') {
             if (ownsDiagnostics()) {
                 lastWorkletStats = d.stats ?? lastWorkletStats;
@@ -445,7 +521,11 @@ export async function applyDeepFilter(
             // loaded or has died since. Nothing here can recover it.
             bridgeDead = true;
             if (policy.settled) reportDead('the RNNoise bridge DeepFilter settled on is not producing audio', 'crash');
-            else noBridge('fell ~500 ms behind, and its RNNoise bridge is not producing audio');
+            else if (d.stats?.paused === true && d.stats?.overloaded !== true) {
+                // Paused and keeping up: DeepFilter itself is fine. It resumes
+                // (syncPause, after this: no working bridge) and stays on.
+                console.warn('[DeepFilter] RNNoise bridge is not producing audio — DeepFilter resumes and will not pause again');
+            } else noBridge('fell ~500 ms behind, and its RNNoise bridge is not producing audio');
         }
     };
     worker.onmessage = (e: MessageEvent) => {
@@ -519,12 +599,18 @@ export async function applyDeepFilter(
     // private mic-test graph must not displace it.
     if (!opts?.local) liveWorker = worker;
 
-    const worklet = node as AudioNode & { destroy?: () => void };
+    const worklet = node as DeepFilterNodes['worklet'];
+    worklet.setPaused = (paused, reason) => {
+        pauseWanted = paused;
+        pauseReason = reason;
+        syncPause();
+    };
     // cleanupNoiseFilter() calls destroy() before disconnecting.
     worklet.destroy = () => {
         alive = false; // a torn-down graph must not request a mode fallback
         // ...nor settle, from a timer armed while it was live.
         clearSustainTimer();
+        if (pauseDiag === readPause) pauseDiag = null;
         node.port.onmessage = null;
         if (liveWorker === worker) liveWorker = null;
         try { node.port.postMessage({ type: 'stop' }); } catch { /* context closed */ }

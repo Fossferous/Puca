@@ -51,6 +51,23 @@
  * the mic on RNNoise for the rest of the session, which made one spike
  * permanent.
  *
+ * PAUSE, WHEN NOBODY CAN HEAR (2026-10-04). DFN3 inference is a core-fifth of
+ * a desktop CPU on every 10 ms hop, and it used to run while the user was
+ * muted, waiting on push-to-talk, or alone in the call. The main thread
+ * (dfPause.ts) now pauses this core then: no hops are sent, so the Worker
+ * sleeps, and the output is the bridge - the same fallback a CPU spike gets,
+ * so whatever still reads the track (the speaking ring, a clip) keeps working.
+ * Resuming re-feeds the model RESUME_PREROLL_HOPS of real audio from the raw
+ * ring and never emits its first answers on that stretch: a model stopped
+ * mid-stream still holds the last pre-pause hops in its lookahead (its first
+ * answers after a resume are pre-pause audio) and its recurrent state
+ * describes the room as it was. The bridge carries the call until DeepFilter
+ * has answers for the instant on air, then the usual declicked switch hands
+ * it back. Unlike standby this is reversible, and the Worker stays alive.
+ * What a resumed model sounds like is measured in e2e/df-resume-offline.mjs:
+ * no transient, the talker's level within ~1 dB, no extra noise or warble,
+ * and converged on the never-paused model within 1-2 s.
+ *
  * This file is loaded raw via `?url` + `audioWorklet.addModule`, so it must
  * stay dependency-free. The state machine is exported (and `registerProcessor`
  * guarded) so vitest can drive it deterministically off the audio thread.
@@ -73,6 +90,18 @@ const RECOVER_HOLD_SAMPLES = 48000;
 // The RNNoise worklet's own 1920-sample ring: for its first ~40 ms after
 // loading, its output still mixes in the zeros it started with.
 const BRIDGE_WARMUP = 1920;
+// Hops of REAL audio re-fed to the model when it resumes after a pause, taken
+// from the raw ring (the instants just before the resume). Everything they
+// produce lands before the emit position (the emit latency is 6 hops,
+// deepFilter.ts), so this is how long the model re-adapts before anything it
+// says is heard: 16 gives it 10 hops (100 ms) of the room as it is now. A
+// pause no longer than this needs nothing: the model just continues. Longer
+// buys little (e2e/df-resume-offline.mjs, 2026-10-04: 64 hops is 1-3 dB
+// closer to the clean speech for the first ~600 ms, the talker's level the
+// same within 0.2 dB) and costs a longer RNNoise stretch after every resume
+// (the whole pre-roll is inferred before the model reaches "now") - and must
+// stay well under OVERLOAD_OUTSTANDING, since it is all sent at once.
+const RESUME_PREROLL_HOPS = 16;
 
 // Emit sources, for flip detection.
 const SRC_SILENT = 0;
@@ -87,8 +116,12 @@ export class DfCore {
      *                          delay plus the hop framing plus the Worker
      *                          round trip, or indices fall back to the raw
      *                          delay line (deepFilter.ts sizes it)
-     * @param {(hop: Float32Array) => void} sendHop  called with a SCRATCH view
-     *                          valid only during the call — copy it out
+     * @param {(hop: Float32Array, fresh: boolean) => void} sendHop  called with
+     *                          a SCRATCH view valid only during the call — copy
+     *                          it out. `fresh` marks the first hop of a stretch
+     *                          that does not continue the previous one (the
+     *                          pre-roll after a long pause): the Worker's seam
+     *                          detector must not read that jump as a seam.
      * @param {number} modelDelay  samples by which each returned hop TRAILS
      *                          the hop it answers (DFN3: 3 hops = 1440; the
      *                          bypass-inference test path: 0). Reported by the
@@ -98,9 +131,12 @@ export class DfCore {
      *                          source) TRAILS the raw input: 992 for the
      *                          RNNoise worklet deepFilter.ts builds. null = no
      *                          bridge, and the fallback is raw, as it was.
+     * @param {number} prerollHops  hops re-fed on a resume after a long pause
+     *                          (RESUME_PREROLL_HOPS; tests vary it).
      */
-    constructor(hop, latency, sendHop, modelDelay = 0, bridgeDelay = null) {
+    constructor(hop, latency, sendHop, modelDelay = 0, bridgeDelay = null, prerollHops = RESUME_PREROLL_HOPS) {
         this.hop = hop;
+        this.prerollHops = prerollHops;
         this.latency = latency;
         this.sendHop = sendHop;
         this.modelDelay = modelDelay;
@@ -122,9 +158,15 @@ export class DfCore {
 
         this.inPos = 0; // input samples consumed == output samples emitted
         this.sentPos = 0; // start index of the next hop to send
-        // Enhanced timeline covers [0, enhHigh). Starts NEGATIVE by the model
-        // delay: the first returned hops answer pre-stream (zero-state) input.
+        // Enhanced timeline covers [enhLow, enhHigh). enhHigh starts NEGATIVE
+        // by the model delay: the first returned hops answer pre-stream
+        // (zero-state) input. enhLow moves only at a resume (see resume()).
         this.enhHigh = -modelDelay;
+        this.enhLow = 0;
+        // Answers still owed for hops sent before the last resume: they
+        // belong to a timeline the resume abandoned, and are dropped on
+        // arrival (the port is FIFO, so they are exactly the next ones).
+        this.staleReturns = 0;
 
         this.source = SRC_SILENT;
         this.carry = 0; // last emitted sample (ramp anchor)
@@ -147,10 +189,23 @@ export class DfCore {
         // terminated the Worker. No more hops are sent, and everything from
         // here is fallback (the bridge, where it is live).
         this.standby = false;
+        // Paused: nobody can hear this mic right now (dfPause.ts), so no hops
+        // are sent and the Worker sleeps; the bridge carries the output.
+        // Reversible, unlike standby: resume() hands back to DeepFilter.
+        this.paused = false;
+        this.pauses = 0;
+        this.resumes = 0;
+        this.pausedSamples = 0; // emitted while paused
+        // Timeline position of the last resume until the first processed
+        // sample after it is emitted (-1 otherwise), and how many samples the
+        // bridge covered in between: the resume's cost, in time.
+        this.resumeAt = -1;
+        this.lastResumeCover = -1;
+        this.freshNext = false; // the next hop sent starts a new stretch
         // Raw samples carrying sound emitted while the bridge was supposed to
-        // be carrying the call: during an overload episode, or after
-        // standby. Live RNNoise never emits exact zeros for a non-silent mic,
-        // so a run of these means it has died or never loaded. (Digital
+        // be carrying the call: during an overload episode, after standby, or
+        // while paused. Live RNNoise never emits exact zeros for a non-silent
+        // mic, so a run of these means it has died or never loaded. (Digital
         // silence in gives zeros out of both, and is not counted: s === 0
         // there. Its warm-up can leak at most BRIDGE_WARMUP of them.)
         this.rawUncovered = 0;
@@ -158,6 +213,55 @@ export class DfCore {
 
     enterStandby() {
         this.standby = true;
+    }
+
+    /** Stop feeding the Worker: nobody can hear this mic. Hops already in
+     *  flight still land (they are the true continuation); after them the
+     *  bridge carries the output. A no-op in standby or when already paused.
+     *  Returns whether anything changed. */
+    pause() {
+        if (this.standby || this.paused) return false;
+        this.paused = true;
+        this.pauses++;
+        // Paused again before DeepFilter came back: that resume never ended.
+        if (this.resumeAt >= 0) this.lastResumeCover = -1;
+        this.resumeAt = -1;
+        return true;
+    }
+
+    /**
+     * Feed the Worker again. A pause shorter than the pre-roll is simply
+     * continued: the hops the model missed are still in the raw ring and go
+     * out on the next quantum, contiguous with what it last saw. A longer one
+     * starts a fresh stretch of the timeline the pre-roll back from now, drops
+     * every answer still in flight from before, and refuses the model's first
+     * answers on the new stretch: they are its pre-pause LOOKAHEAD (the last
+     * hops it saw before the pause, placed on the instants just after the
+     * jump) and the frame that overlap-adds onto one (a seam). With the
+     * pre-roll at its length all of that lands before the emit position
+     * anyway; the guard keeps it so at any length. Until a fresh answer
+     * arrives the bridge keeps carrying the call, exactly as through a CPU
+     * spike. Returns whether anything changed.
+     */
+    resume() {
+        if (this.standby || !this.paused) return false;
+        this.paused = false;
+        this.resumes++;
+        const preroll = this.prerollHops * this.hop;
+        if (this.inPos - this.sentPos > preroll) {
+            // Everything in flight answers the abandoned stretch.
+            this.staleReturns = this.hopsSent - this.hopsReceived;
+            this.sentPos = this.inPos - preroll;
+            this.enhHigh = this.sentPos - this.modelDelay;
+            // Answers landing below sentPos are the lookahead the model held
+            // at the pause (pre-pause audio on post-pause instants); the hop
+            // at sentPos overlap-adds onto a pre-pause frame. Neither may ever
+            // be emitted, nor the model's own delay's worth of warm-up after.
+            this.enhLow = this.sentPos + this.hop + this.modelDelay;
+            this.freshNext = true;
+        }
+        this.resumeAt = this.inPos;
+        return true;
     }
 
     /** The bridge was meant to be covering, and the raw mic has been on air
@@ -182,14 +286,20 @@ export class DfCore {
     /**
      * Enhanced hop back from the Worker (FIFO ⇒ contiguous timeline). Lands
      * `modelDelay` samples behind the hop it answers; the model's warm-up
-     * output (negative indices) is dropped.
+     * output (before enhLow: negative indices at the start, the resume
+     * warm-up after a pause) is dropped, and so is an answer to a hop sent
+     * before the last resume.
      */
     onEnhanced(samples, workerDry) {
         this.hopsReceived++;
+        if (this.staleReturns > 0) {
+            this.staleReturns--;
+            return;
+        }
         if (workerDry) this.workerDryHops++;
         for (let j = 0; j < samples.length; j++) {
             const idx = this.enhHigh + j;
-            if (idx >= 0) this.enh[idx & RMASK] = samples[j];
+            if (idx >= this.enhLow) this.enh[idx & RMASK] = samples[j];
         }
         this.enhHigh += samples.length;
     }
@@ -219,16 +329,20 @@ export class DfCore {
         this.inPos += n;
 
         // 2) Ship every completed hop (at 128-sample quanta and hop 480, at
-        // most one completes per call, but stay general). None in standby:
-        // nobody is listening, and a queue nobody drains only grows.
-        while (!this.standby && this.inPos - this.sentPos >= this.hop) {
+        // most one completes per call, but stay general; the first quantum
+        // after a resume sends the whole pre-roll). None in standby: nobody
+        // is listening, and a queue nobody drains only grows. None while
+        // paused: that is the point of pausing.
+        while (!this.standby && !this.paused && this.inPos - this.sentPos >= this.hop) {
             const start = this.sentPos;
             for (let j = 0; j < this.hop; j++) {
                 this.hopScratch[j] = this.raw[(start + j) & RMASK];
             }
             this.sentPos += this.hop;
             this.hopsSent++;
-            this.sendHop(this.hopScratch);
+            const fresh = this.freshNext;
+            this.freshNext = false;
+            this.sendHop(this.hopScratch, fresh);
         }
         const outstanding = this.hopsSent - this.hopsReceived;
         if (!this.overloaded) {
@@ -258,9 +372,14 @@ export class DfCore {
             if (e < 0) {
                 src = SRC_SILENT;
                 s = 0;
-            } else if (e < this.enhHigh) {
+            } else if (e >= this.enhLow && e < this.enhHigh) {
                 src = SRC_PROCESSED;
                 s = this.enh[e & RMASK];
+                if (this.resumeAt >= 0) {
+                    // First DeepFilter sample since the resume.
+                    this.lastResumeCover = this.inPos - n + i - this.resumeAt;
+                    this.resumeAt = -1;
+                }
             } else if (
                 this.bridge !== null
                 && this.bridgeFirst >= 0
@@ -284,8 +403,9 @@ export class DfCore {
             else if (src === SRC_BRIDGE) this.bridgeSamples++;
             else {
                 this.drySamples++;
-                if ((this.overloaded || this.standby) && s !== 0) this.rawUncovered++;
+                if ((this.overloaded || this.standby || this.paused) && s !== 0) this.rawUncovered++;
             }
+            if (this.paused) this.pausedSamples++;
             if (this.fadePos < FADE) {
                 const t = ++this.fadePos / FADE;
                 s = this.fadeFrom * (1 - t) + s * t;
@@ -311,6 +431,13 @@ export class DfCore {
             overloaded: this.overloaded,
             overloadEpisodes: this.overloadEpisodes,
             standby: this.standby,
+            paused: this.paused,
+            pauses: this.pauses,
+            resumes: this.resumes,
+            pausedSamples: this.pausedSamples,
+            // Samples the bridge carried between the last resume and the first
+            // DeepFilter sample after it (-1: none yet).
+            lastResumeCover: this.lastResumeCover,
             rawUncovered: this.rawUncovered,
             // null = no bridge built; otherwise whether RNNoise produced
             // anything in the last 100 ms (48 kHz).
@@ -337,6 +464,7 @@ if (typeof registerProcessor === 'function') {
             this.seq = 0;
             this.wasOverloaded = false; // edge detector for episode reports
             this.bridgeFailSent = false;
+            this.resumesReported = 0; // resumes whose outcome was posted
             this.sinceStats = 0;
             // Crackle diag: the cumulative counters answer "how bad has it
             // ever been"; catching it IN THE ACT needs per-window rates.
@@ -360,11 +488,17 @@ if (typeof registerProcessor === 'function') {
                         if (this.pool.length < 8) this.pool.push(d.buf);
                     }
                 };
-                this.core = new DfCore(msg.hop, msg.latency, (hopView) => {
+                this.core = new DfCore(msg.hop, msg.latency, (hopView, fresh) => {
                     const buf = this.pool.pop() ?? new ArrayBuffer(hopView.length * 4);
                     new Float32Array(buf).set(hopView);
-                    this.workerPort.postMessage({ seq: this.seq++, buf }, [buf]);
+                    this.workerPort.postMessage({ seq: this.seq++, buf, fresh }, [buf]);
                 }, msg.modelDelay ?? 0, msg.bridgeDelay ?? null);
+            } else if (msg?.type === 'pause') {
+                // Nobody can hear this mic (dfPause.ts): stop feeding the
+                // Worker; the bridge carries the output until 'resume'.
+                this.core?.pause();
+            } else if (msg?.type === 'resume') {
+                this.core?.resume();
             } else if (msg?.type === 'standby') {
                 // The Worker is being terminated: stop feeding it, keep
                 // emitting (the bridge carries the call from here).
@@ -406,6 +540,12 @@ if (typeof registerProcessor === 'function') {
             if (!this.bridgeFailSent && this.core.bridgeFailed()) {
                 this.bridgeFailSent = true;
                 this.port.postMessage({ type: 'bridge-failed', stats: this.core.stats() });
+            }
+            // A resume has ended (DeepFilter is on air again, or it was paused
+            // again first: cover -1): say how long the bridge carried it.
+            if (this.core.resumes > this.resumesReported && this.core.resumeAt < 0) {
+                this.resumesReported = this.core.resumes;
+                this.port.postMessage({ type: 'resumed', coverSamples: this.core.lastResumeCover });
             }
             this.sinceStats += output.length;
             if (this.sinceStats >= STATS_INTERVAL_SAMPLES) {
