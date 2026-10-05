@@ -50,7 +50,7 @@ const SNAPSHOT_MAX = 128;
 
 export function SmartAvatar({ userId, fileId, alt = '', className, fallback }: {
     userId: number;
-    /** Uploaded-file id. Resolved to an authenticated object URL internally —
+    /** Uploaded-file id. Resolved to an authenticated data: URL internally —
      *  `/files/:id` needs a bearer token now and `<img>` cannot send one. */
     fileId: string | null | undefined;
     alt?: string;

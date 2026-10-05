@@ -2,7 +2,7 @@
  * An `<img>` for an uploaded file, fetched with credentials.
  *
  * `/files/:id` is authenticated, and `<img src>` cannot send an Authorization
- * header, so the bytes are fetched and handed over as an object URL (see
+ * header, so the bytes are fetched and handed over as a data: URL (see
  * api/authedMedia). Renders nothing until they arrive, and nothing if the
  * fetch fails — a missing emoji or icon is better than a broken-image glyph.
  *

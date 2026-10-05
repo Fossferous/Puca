@@ -166,7 +166,7 @@ export function ServerSettingsModal({
         setClipChannelId(initialClipChannelId);
         setAfkTimeoutMinutes(initialAfkTimeoutMinutes ?? 15);
         setGamesEnabled(initialGamesEnabled === true);
-        // Authenticated fetch -> object URL; null until it lands.
+        // Authenticated fetch -> data: URL; null until it lands.
         setIconPreview(null);
         if (initialIconFileId) void fetchFileUrl(initialIconFileId).then(setIconPreview);
         setError(null);
