@@ -206,17 +206,19 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
 - **A posted clip can be downloaded by anyone who can see the message.**
   Once posted, every required approver already agreed to release it; the
   Download button (`ClipAttachment`) fetches + decrypts every part and
-  concatenates them — the same bytes that were sealed (the muxer's output for
+  concatenates them — the same media bytes that were sealed (the muxer's output for
   an untrimmed clip, the re-mux's output for a trimmed one), not a re-encode
-  (`downloadClipBytes`, tested round-trip). It is refused for the same
+  (`downloadClipBytes`, tested round-trip), with the container fix below
+  added (everywhere but an older APK's fallback path). It is refused for the same
   reason Play is: a manifest whose parts are not a subset of what was
   actually approved — and above 1 GiB (`CLIP_DOWNLOAD_MAX_BYTES`), because
   on desktop and the web the download is built whole in the renderer's
   memory. The cap also applies to the streamed Android download
   (`forEachClipPart`), although nothing there would need it. On desktop it is written through the native `attachment_save`
   command (a bare `<a download>` is not honoured in the Tauri webview); on
-  the web it is a transient anchor. Desktop and web save the sealed bytes
-  exactly as they are (no container changes there; see *Not done* below).
+  the web it is a transient anchor. Desktop and web save the clip with the
+  same duration and seek index the Android save adds, as the same bytes
+  (`api/clips/fmp4SaveFix.ts`; *On desktop and the web* below).
 
 - **In the Android app the download is NATIVE** (an APK from 0.9.835 on;
   `api/nativeDownloads.ts` → `SovereignDownloadsPlugin.java` →
@@ -288,6 +290,43 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
     seal streams parts out as it cuts them), and the init is what every
     viewer's MSE player appends first — a change there reaches every client
     version for no gain on the phone, which fixes old and new clips alike.
+  - **On desktop and the web** the same fix runs in the page
+    (`api/clips/fmp4SaveFix.ts`, a line-for-line port of `Fmp4SaveFix.java`
+    and `ClipAssembler.java`, driven by `downloadClipBytes(…, fixContainer)`
+    from `api/clipDownload.ts`): the same decisions (only an MP4 by
+    `SaveTarget`'s brand rules; an init it does not recognise is saved as
+    sealed), the same limits, and Java's 64-bit `long` arithmetic and signed
+    track ids reproduced with BigInt, so a crafted clip too gives the same
+    bytes on both. **The phone and the PC save a clip as the same file**:
+    `download-vectors.json` carries 28 `saveFix` cases (the real clip cut
+    every way, edited inits, every `Fmp4SaveFixHostileTest` shape, 64-bit
+    sizes, a track id past 2^31, a duration x timescale past 2^64) with the
+    file the JAVA save wrote for each, and `downloadVectors.test.ts` (TS) and
+    `DownloadVectorsTest` (JUnit) must both write exactly that; 13 TS mutants
+    and 4 Java mutants of the fix each fail it. The decrypted parts the page
+    already holds ARE the output — the patches are written into them and only
+    the init is a new (KB) array — so the fix costs no second copy of the
+    clip. Measured 2026-10-05 against a throwaway server, headless Edge, the
+    desktop path under a stubbed shell: the 129 MB 2:00 1440p clip's
+    `attachment_save` bytes and its web download are SHA-identical to the
+    file the emulator's native save wrote for the same clip; the assembler
+    adds ~1 ms (download 2.6–3.0 s with the fix, 2.8–3.3 s without);
+    `ffprobe -show_packets` data hashes are identical before and after; the
+    fix undone gives back the sealed SHA-256. What changes on Windows:
+    Explorer's Length (`System.Media.Duration`) was blank for a downloaded
+    clip and now reads 2:00; Media Foundation (Media Player, Movies & TV)
+    already found a length (119.957 s, from the fragments) and seeked, and
+    now reports 120.000 s; ffmpeg seeked before (through the `mfra`) and
+    lands on the same keyframes after (VLC was not re-measured). One thing
+    ffprobe reports differently: with a `sidx` it takes the format duration
+    from the video track's index, 119.998 s instead of the audio's 120.000 s
+    (20.000 s instead of 20.011 s for a 20 s clip) — the same packets, every
+    one, are still listed. A crafted clip is bounded as on the
+    phone: one posted with a 24 MiB part of 8-byte boxes, 3.1 M empty moofs,
+    a 64 x 2^32-sample `trun` bomb and five 30,000-entry `mfra`s downloaded
+    in 1.8 s (web) / 3.0 s (desktop), byte-identical to the Java save, with
+    one ~245 ms main-thread task — the 8-byte boxes, the most header work per
+    byte; a real clip's scan is ~1 ms.
   - **Liveness**: `DownloadService` (a dataSync foreground service with a
     wake lock and its own notification with a **Cancel** action) keeps it
     going with the screen locked
@@ -365,12 +404,12 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
   string; Android's bridge handler ran out of memory on the UI thread). The
   writer lives outside `api/clips/`, which `clipNoDiskWrite.test.ts` keeps
   free of every file API, the Capacitor filesystem included.
-- **Not done: the same container fix on desktop and the web.** Their
-  Download still saves the sealed bytes, so a clip saved on the PC has no
-  `mehd`/`sidx` (players that read the `mfra`, such as VLC and ffmpeg, seek
-  anyway). The desktop download already holds the whole clip in memory, so a
-  JS port of `Fmp4SaveFix` there would be simple; it was left out of this
-  change on purpose.
+- **Not done: the container fix on that older-APK path.** It writes
+  `Documents/Puca` through the filesystem plugin, which can only append, and
+  the fix's last step is positional writes into what was already written
+  (the durations, the `sidx`, the moved `tfra` offsets), so a clip saved
+  there is still the sealed bytes. Every other Download — the native one,
+  desktop, the web — gets the fix; the cure for this one is the new APK.
 
 ## What is NOT guaranteed — read this
 

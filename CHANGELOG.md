@@ -21,6 +21,13 @@ one-line summary; this file is the full story. Versions follow
   index to the file as it saves it (the video and sound themselves are not
   touched). This also works for clips posted before this update. A damaged
   clip is still saved, though it may not get them.
+- **Clips downloaded on the Windows app or in a browser carry their length
+  too.** **Download** on a clip now adds the same length and seek index there,
+  and the file is exactly the one the Android app saves for that clip. File
+  Explorer and a file's Properties showed no length for a downloaded clip;
+  they now do, and players that read the length from the start of the file
+  get it. Nothing is re-encoded, the download is no slower, and it works for
+  clips posted before this update.
 - **Downloads keep going with the screen off or the app in the background,
   and can be cancelled.** A long download shows a notification with its
   progress and a **Cancel** button; if it finishes while you are elsewhere, a

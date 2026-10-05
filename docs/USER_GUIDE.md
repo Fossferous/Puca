@@ -151,7 +151,10 @@ name, except a spoilered one.
 - Downloads keep going with the screen off or the app in the background. A long one shows a notification with its progress and a **Cancel** button (a quick one can flash it for a moment too, for example in the first two minutes after you open the app); if it finishes while you are not in the app, a notification says it was saved (tap it to open the file) or that it failed. A clip's **Cancel** button next to **Download** stops it too, and leaves nothing half-written behind
 - While a clip downloads, its button shows how much has arrived (`Downloading 45%`, then `Saving…`); a clip you press Play on, or a large attachment, shows the MB arriving until it can play
 - An attachment you already see in the chat is downloaded once more when you save it (at most 25 MB), so the phone can write it straight into the right folder
-- On an older Android app, or Android 9 and older, saving still puts the file in `Documents/Puca` under a new name each time, as before. A large file is written there as `<name>.part` and gets its real name only once it is complete; if the app is closed before then, the `.part` file is what is left: delete it and save again
+- On an older Android app, or Android 9 and older, saving still puts the file in `Documents/Puca` under a new name each time, as before. A large file is written there as `<name>.part` and gets its real name only once it is complete; if the app is closed before then, the `.part` file is what is left: delete it and save again. A clip saved that way has no length in its file; the new app adds it
+
+### Save a Clip on Windows or in a Browser
+- **Download** on a clip saves it with its length and a seek index, the same file the Android app saves for that clip: File Explorer shows how long it is, and players can skip around in it. The picture and sound are exactly what was recorded
 
 ---
 
