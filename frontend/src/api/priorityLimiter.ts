@@ -16,9 +16,13 @@
  * worth having — it lands in the cache).
  *
  * A `background` job (a file far from the screen, loaded ahead of the reader)
- * never takes the last free slot: one is always left for a file the reader
- * scrolls to, which would otherwise wait out a whole download it does not
- * need — 1.8 s for a 22.5 MB video at 100 Mbit, 12 s at 15.
+ * never takes the last free slot: it starts only while at least two are free
+ * (with `max` 2: only when nothing else runs), so one is always left for a
+ * file the reader scrolls to, which would otherwise wait out a whole download
+ * it does not need — 1.8 s for a 22.5 MB video at 100 Mbit, 12 s at 15. (It
+ * used to count only the background jobs running, which let one start beside
+ * a near file and fill both slots: review finding 2026-10-05.) With `max` 1
+ * there is no slot to spare, and a background job runs when it is idle.
  */
 
 export interface LimiterJob<T> {
@@ -57,8 +61,8 @@ export function isAbortError(e: unknown): boolean {
 
 export function createPriorityLimiter(max: number): PriorityLimiter {
     let active = 0;
-    let activeBackground = 0;
-    const maxBackground = Math.max(1, max - 1);
+    // A background job may start while fewer than this run (of any kind).
+    const backgroundBelow = Math.max(1, max - 1);
     const queue: Waiting[] = [];
     // A free slot is filled a microtask AFTER the job that found it, not
     // during schedule(): a channel's attachments all ask in the same tick
@@ -86,7 +90,7 @@ export function createPriorityLimiter(max: number): PriorityLimiter {
 
     const pump = () => {
         while (active < max && queue.length > 0) {
-            const backgroundFull = activeBackground >= maxBackground;
+            const backgroundFull = active >= backgroundBelow;
             let best = -1;
             let bestU = 0;
             for (let i = 0; i < queue.length; i++) {
@@ -97,9 +101,7 @@ export function createPriorityLimiter(max: number): PriorityLimiter {
             if (best < 0) return; // only background jobs wait, and they may not take this slot
             const [w] = queue.splice(best, 1);
             detach(w);
-            const background = !!w.job.background;
             active++;
-            if (background) activeBackground++;
             let p: Promise<unknown>;
             try {
                 p = w.job.run();
@@ -108,7 +110,6 @@ export function createPriorityLimiter(max: number): PriorityLimiter {
             }
             p.then(w.resolve, w.reject).finally(() => {
                 active--;
-                if (background) activeBackground--;
                 pump();
             });
         }

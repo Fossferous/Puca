@@ -21,11 +21,14 @@
  * instant). Measured the same way after: the two on screen ready in 5.6-6.0 s
  * at 100 Mbit (2.7-2.9 s unthrottled), the renderer at 320-380 MB, and every
  * video ready as a reader scrolled up to it 10 s later, as before. In the
- * Android WebView (emulator): 17.4 s before, 5.2 s after.
+ * Android WebView (emulator): 17-29 s before, 5-7 s after (two runs each).
  *
- * At most MAX_LIVE_PLAYERS video or audio players, the closest to the screen,
- * are mounted at once; every one ON the screen always is, and one in use
- * always keeps its player. Measured at 100 Mbit after a reader scrolled up
+ * At most MAX_LIVE_PLAYERS video or audio players, the closest to the screen
+ * (off screen, the ones the reader is scrolling toward first), are mounted at
+ * once; every one ON the screen always is, and one in use always keeps its
+ * player. One waiting for a player is its player's card already, with a
+ * stand-in of the same box (MessageContent), so getting a player, or giving
+ * it up, moves nothing. Measured at 100 Mbit after a reader scrolled up
  * through the 12: with a player for every video near the screen, the whole
  * browser held 1.3-1.5 GB, and 1.2-1.5 GB ten seconds later (two runs); with
  * the closest four, 0.9-1.0 GB (three runs), as with all 12 mounted from the
@@ -57,15 +60,16 @@ export function scrollRootOf(el: Element): Element | null {
     return null;
 }
 
-/** Pixels between `el` and the visible part of `root` (0 when they overlap). */
-function distanceToScreen(el: Element | null, root: Element | null): number {
-    if (!el || !el.isConnected) return Number.MAX_SAFE_INTEGER;
+/** Pixels between `el` and the visible part of `root` (0 when they overlap),
+ *  and which side of it `el` is on: -1 above, 1 below, 0 on it. */
+function placeOf(el: Element | null, root: Element | null): { d: number; side: -1 | 0 | 1 } {
+    if (!el || !el.isConnected) return { d: Number.MAX_SAFE_INTEGER, side: 0 };
     const r = el.getBoundingClientRect();
     const top = root ? root.getBoundingClientRect().top : 0;
     const bottom = root ? root.getBoundingClientRect().bottom : window.innerHeight;
-    if (r.bottom < top) return top - r.bottom;
-    if (r.top > bottom) return r.top - bottom;
-    return 0;
+    if (r.bottom < top) return { d: top - r.bottom, side: -1 };
+    if (r.top > bottom) return { d: r.top - bottom, side: 1 };
+    return { d: 0, side: 0 };
 }
 
 /** Within this of its end, the message list counts as sitting at the newest
@@ -118,7 +122,14 @@ class RootWatch {
     private slots = new Map<Element, (near: boolean) => void>();
     private players = new Set<PlayerCandidate>();
     private frame = 0;
+    /** Which way the reader last scrolled: -1 up (toward older messages),
+     *  1 down, 0 not yet. */
+    private toward: -1 | 0 | 1 = 0;
+    private lastTop: number | null = null;
     private readonly onScroll = () => {
+        const top = this.root ? this.root.scrollTop : window.scrollY;
+        if (this.lastTop !== null && top !== this.lastTop) this.toward = top < this.lastTop ? -1 : 1;
+        this.lastTop = top;
         if (this.frame) return;
         this.frame = requestAnimationFrame(() => { this.frame = 0; this.rank(); });
     };
@@ -163,11 +174,17 @@ class RootWatch {
     }
 
     /** The closest MAX_LIVE_PLAYERS keep (or get) a player; every one on
-     *  screen and every busy one does regardless. */
+     *  screen and every busy one does regardless. Off screen, the ones the
+     *  reader is scrolling toward come first, then the nearest: the next
+     *  video to come into view has its player before it does, not the one
+     *  just scrolled past (review finding 2026-10-05: scrolling up at
+     *  1000 px/s in the Android WebView, 4 of 12 videos showed their
+     *  placeholder for 1-7 frames before their player came). */
     rank(): void {
+        const ahead = (side: number) => (side !== 0 && side === this.toward ? 0 : 1);
         const order = [...this.players]
-            .map((c) => ({ c, d: distanceToScreen(c.el(), this.root) }))
-            .sort((a, b) => a.d - b.d);
+            .map((c) => ({ c, ...placeOf(c.el(), this.root) }))
+            .sort((a, b) => (a.d === 0 ? 0 : 1) - (b.d === 0 ? 0 : 1) || ahead(a.side) - ahead(b.side) || a.d - b.d);
         let live = 0;
         for (const { c, d } of order) {
             const grant = c.busy() || d === 0 || live < MAX_LIVE_PLAYERS;
@@ -256,13 +273,29 @@ export function usePlayerGrant(el: Element | null, wants: boolean, busy: boolean
         elRef.current = el;
         busyRef.current = busy;
         measureRef.current = measure;
-        candRef.current?.w.rank();
+        const cand = candRef.current;
+        if (!cand) return;
+        // Registered through an element that left the page in that same
+        // commit — a chip swapped for its card as the file arrived; `el` is
+        // state and lags the DOM by a render — so it was filed under no
+        // scroller (the window), whose scrolling never comes. File it under
+        // the scroller the element standing for it now is in.
+        if (el?.isConnected) {
+            const root = scrollRootOf(el);
+            if (root !== cand.w.root) {
+                cand.w.removePlayer(cand.c);
+                dropIfEmpty(cand.w);
+                cand.w = watchFor(root);
+                cand.w.addPlayer(cand.c); // ranks
+                return;
+            }
+        }
+        cand.w.rank();
     }, [el, busy, measure]);
     const haveEl = !!el;
     useLayoutEffect(() => {
         const first = elRef.current;
         if (!wants || !first || !io) return;
-        const w = watchFor(scrollRootOf(first));
         const c: PlayerCandidate = {
             el: () => elRef.current,
             busy: () => busyRef.current,
@@ -272,12 +305,13 @@ export function usePlayerGrant(el: Element | null, wants: boolean, busy: boolean
                 setState({ granted, size: granted || !cur ? null : (measureRef.current?.(cur) ?? null) });
             },
         };
-        candRef.current = { w, c };
-        w.addPlayer(c);
+        const cand = { w: watchFor(scrollRootOf(first)), c };
+        candRef.current = cand;
+        cand.w.addPlayer(c);
         return () => {
             candRef.current = null;
-            w.removePlayer(c);
-            dropIfEmpty(w);
+            cand.w.removePlayer(c);
+            dropIfEmpty(cand.w);
             // The next wish is ranked again before it shows anything.
             setState((s) => (s.granted ? { granted: false, size: null } : s));
         };

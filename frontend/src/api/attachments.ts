@@ -23,6 +23,7 @@ import { API_BASE_URL } from './config';
 import { getToken } from './auth';
 import { readAttachmentBody } from './attachmentProgress';
 import { createPriorityLimiter, abortError, isAbortError } from './priorityLimiter';
+import { readVideoDims, type VideoDims } from './videoDims';
 
 const PREFIX = 'sovereign-enc:';
 
@@ -556,7 +557,14 @@ async function loadEntry(cacheKey: string, id: string, keyB64url: string, mime: 
     if (generation !== cacheGeneration) throw abortError();
     // A playlist is not media, whatever the ref says: opaque bytes, and
     // flagged so no renderer gives it a player (looksLikeHlsPlaylist).
-    const playlist = looksLikeHlsPlaylist(new Uint8Array(pt));
+    const plain = new Uint8Array(pt);
+    const playlist = looksLikeHlsPlaylist(plain);
+    // A video's picture size, from its header, for the box it takes before
+    // (or without) a player: attachmentPictureSize.
+    if (!playlist && safeBlobType(mime).startsWith('video/') && !pictureSizes.has(id)) {
+        const dims = readVideoDims(plain);
+        if (dims) pictureSizes.set(id, dims);
+    }
     const url = URL.createObjectURL(new Blob([pt], { type: playlist ? 'application/octet-stream' : safeBlobType(mime) }));
     if (playlist) playlistUrls.add(url);
     const entry: CacheEntry = { url, bytes: pt.byteLength, refs: 0, pinned: false, seen: false, seq: ++useSeq, burst: 0 };
@@ -827,6 +835,26 @@ export function attachmentCacheStats(): { entries: number; heldBytes: number; pi
     return { entries: blobCache.size, heldBytes, pinnedBytes, retainedBytes, aheadBytes };
 }
 
+/**
+ * Picture sizes of message videos, by file id: read from each file's header
+ * as it is decrypted (api/videoDims.ts), replaced by what a player reports
+ * (noteAttachmentPictureSize). MessageContent gives a video that has no
+ * player (only the few closest to the screen have one) its player's box, so
+ * giving it a player moves nothing. A few numbers per file, kept until
+ * sign-out; they outlive an evicted copy, so one loaded again keeps its
+ * space while it downloads.
+ */
+const pictureSizes = new Map<string, VideoDims>();
+
+export function attachmentPictureSize(id: string): VideoDims | null {
+    return pictureSizes.get(id) ?? null;
+}
+
+/** What a player showed for this file (its videoWidth x videoHeight). */
+export function noteAttachmentPictureSize(id: string, dims: VideoDims): void {
+    if (dims.width > 0 && dims.height > 0) pictureSizes.set(id, { width: dims.width, height: dims.height });
+}
+
 /** Revoke every cached decrypted-attachment object URL and clear the cache.
  *  Called on logout so one user's decrypted files don't linger in memory (or
  *  remain openable via their blob: URLs) for the next user on a shared session.
@@ -840,6 +868,7 @@ export function clearBlobCache(): void {
     blobCache.clear();
     inflight.clear();
     playlistUrls.clear();
+    pictureSizes.clear();
     heavyLimiter.clear();
     lightLimiter.clear();
 }

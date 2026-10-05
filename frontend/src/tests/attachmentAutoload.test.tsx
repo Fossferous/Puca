@@ -5,16 +5,20 @@
  * The owner, 2026-10-04: "big video attachments should still load
  * automatically if theres no downside". Measured 2026-10-05 with a channel of
  * 12 x 22.5 MB videos, loading every one the moment the channel rendered:
- * the videos on screen finished LAST (24 s in Edge at 100 Mbit; 53-95 s on
+ * the videos on screen finished LAST (24 s in Edge at 100 Mbit; 17-29 s in
  * the Android emulator), the renderer grew by up to 770 MB, and nothing was
  * ever given back before sign-out (+257 MB per such channel). So, still with
  * no click: the ones that stay on screen first, then the closest, two big
- * files at a time; the far ones after that, one at a time and only into
- * their own budget (shown once they come near); and a decrypted copy given
- * back when it scrolls far off or its channel is left (kept within a budget,
- * the newest of each channel first, so coming back is instant); and at most
- * four live players, the closest (a player for every video near the screen
- * left the browser 0.4-0.6 GB heavier after a reader scrolled through them).
+ * files at a time; the far ones after that, one at a time, only while nothing
+ * near is loading, and only into their own budget (shown once they come
+ * near); and a decrypted copy given back when it scrolls far off or its
+ * channel is left (kept within a budget, the newest of each channel first, so
+ * coming back is instant); and at most four live players, the closest (a
+ * player for every video near the screen left the browser 0.4-0.6 GB heavier
+ * after a reader scrolled through them). A video waiting for a player already
+ * takes the player's box, so getting one moves nothing; one that was paused
+ * comes back where it was; one in use (playing, open in the lightbox, being
+ * saved) keeps its copy.
  *
  * Everything below runs through the REAL attachments module (fetch, AES-GCM,
  * the cache); only the network, the layout (each message has a fake y) and
@@ -25,12 +29,18 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
 vi.mock('../api/auth', async (orig) => ({ ...(await orig<typeof import('../api/auth')>()), getToken: () => 'tok' }));
+// A save in progress, finished when the test says (saves.finish).
+const saves = vi.hoisted(() => ({ finish: [] as Array<() => void> }));
+vi.mock('../api/saveAttachment', () => ({
+    saveAttachment: () => new Promise<{ cancelled: false; where: string }>((res) => { saves.finish.push(() => res({ cancelled: false, where: 'Downloads' })); }),
+}));
 
 import { MessageContent } from '../components/MessageContent';
 import { clearBlobCache, decryptToBlobUrl, acquireAttachmentUrl, attachmentCacheStats, __setRetainedAttachmentBudget, __setAheadAttachmentBudget } from '../api/attachments';
 import { isAbortError } from '../api/priorityLimiter';
 import { MAX_UPLOAD_BYTES } from '../api/uploads';
 import { MAX_LIVE_PLAYERS, __attachmentZoneWatchCount } from '../components/attachmentZone';
+import { mp4Header } from './fixtures/videoHeaders';
 
 const VH = 900; // the message list's visible height
 const VIDEO_H = 320; // a loaded video's card (player + download chip)
@@ -85,15 +95,19 @@ const origCreate = URL.createObjectURL;
 const origRevoke = URL.revokeObjectURL;
 
 const cat = (a: Uint8Array, b: Uint8Array) => { const o = new Uint8Array(a.length + b.length); o.set(a); o.set(b, a.length); return o; };
-async function seal(id: string, size = 1000): Promise<string> {
+/** Serve `id` encrypted: `size` opaque bytes, or `plain` (a real header). */
+async function seal(id: string, size = 1000, plain?: Uint8Array): Promise<string> {
     const raw = crypto.getRandomValues(new Uint8Array(32));
     const nonce = crypto.getRandomValues(new Uint8Array(12));
     const k = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt']);
-    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, k, new Uint8Array(size).fill(7)));
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, k, (plain ?? new Uint8Array(size).fill(7)) as BufferSource));
     served.set(id, cat(nonce, ct));
     return Buffer.from(raw).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 const videoRef = (id: string, key: string) => `[${id}.mp4](sovereign-enc:${id}?k=${key}&m=video%2Fmp4)`;
+const imageRef = (id: string, key: string) => `[${id}.png](sovereign-enc:${id}?k=${key}&m=image%2Fpng)`;
+const audioRef = (id: string, key: string) => `[${id}.mp3](sovereign-enc:${id}?k=${key}&m=audio%2Fmpeg)`;
+const refFor = { video: videoRef, image: imageRef, audio: audioRef };
 
 let container: HTMLDivElement;
 let root: Root;
@@ -131,12 +145,12 @@ function Channel({ msgs, up = false }: { msgs: Msg[]; up?: boolean }) {
         </div>
     );
 }
-async function renderChannel(spec: Array<[string, number]>, opts: { up?: boolean } = {}) {
+async function renderChannel(spec: Array<[string, number] | [string, number, keyof typeof refFor]>, opts: { up?: boolean } = {}) {
     const msgs: Msg[] = [];
     // The same file keeps its key (and so its cache entry) if it is rendered again.
-    for (const [id, y] of spec) {
+    for (const [id, y, kind = 'video'] of spec) {
         if (!keys.has(id)) keys.set(id, await seal(id));
-        msgs.push({ id, y, content: videoRef(id, keys.get(id)!) });
+        msgs.push({ id, y, content: refFor[kind](id, keys.get(id)!) });
     }
     await act(async () => { root.render(<Channel msgs={msgs} up={opts.up} />); });
     await settle();
@@ -144,10 +158,20 @@ async function renderChannel(spec: Array<[string, number]>, opts: { up?: boolean
         // Scroll: the same messages at new positions (less any `gone`).
         const next = msgs.filter((m) => !gone.includes(m.id)).map((m) => ({ ...m, y: moved.find(([id]) => id === m.id)?.[1] ?? m.y }));
         await act(async () => { root.render(<Channel msgs={next} up={opts.up} />); });
-        reportAll();
-        container.querySelector('[data-scroller]')!.dispatchEvent(new Event('scroll'));
+        // Inside act, as a browser delivers them: an observer report handled
+        // outside it was sometimes flushed so late that two scrolls' releases
+        // shared one burst (attachments.ts currentBurst), which no real pair
+        // of scroll events can (review finding 2026-10-05: 8 of 26 runs red).
+        await act(async () => {
+            reportAll();
+            container.querySelector('[data-scroller]')!.dispatchEvent(new Event('scroll'));
+        });
         await settle();
     };
+}
+/** Let every requested download finish, including those started on the way. */
+async function deliverAll() {
+    for (let k = 0; k < requested.length; k++) await deliver(requested[k]);
 }
 const videoSrcs = () => [...container.querySelectorAll('video')].map((v) => v.getAttribute('src'));
 const videoOf = (id: string) => container.querySelector<HTMLElement>(`[data-y] video[title="${id}.mp4"]`);
@@ -173,8 +197,9 @@ beforeEach(() => {
     });
     URL.createObjectURL = (() => { const u = `blob:test-${++seq}`; created.push(u); return u; }) as typeof URL.createObjectURL;
     URL.revokeObjectURL = ((u: string) => {
-        // Never while anything on the page still uses it.
-        expect(container.querySelector(`[src="${u}"]`), `${u} was revoked while still in the DOM`).toBeNull();
+        // Never while anything on the page still uses it (the lightbox is a
+        // portal: the whole document, not just the channel).
+        expect(document.querySelector(`[src="${u}"]`), `${u} was revoked while still in the DOM`).toBeNull();
         revoked.push(u);
     }) as typeof URL.revokeObjectURL;
     container = document.createElement('div');
@@ -184,6 +209,7 @@ beforeEach(() => {
 
 afterEach(async () => {
     expect(play).not.toHaveBeenCalled();
+    for (const finish of saves.finish.splice(0)) finish();
     await act(async () => { root.unmount(); });
     container.remove();
     for (const g of gates.values()) g();
@@ -208,11 +234,12 @@ describe('a channel full of big videos', { timeout: 30000 }, () => {
         expect(requested).toEqual(['shown2', 'shown1', 'up1']);
         await deliver('shown2');
         await deliver('up1');
-        // Everything near is here or on its way: the nearer far one starts...
-        expect(requested).toEqual(['shown2', 'shown1', 'up1', 'up2', 'far2']);
+        // A near one still loads: the far ones wait, so the other slot stays
+        // free for whatever the reader scrolls to.
+        expect(requested).toEqual(['shown2', 'shown1', 'up1', 'up2']);
         await deliver('up2');
-        // ...and only one far one at a time: a slot stays free for whatever
-        // the reader scrolls to.
+        // Everything near is here: the nearer far one starts, and only one
+        // far one at a time.
         expect(requested).toEqual(['shown2', 'shown1', 'up1', 'up2', 'far2']);
         await deliver('far2');
         expect(requested).toEqual(['shown2', 'shown1', 'up1', 'up2', 'far2', 'far1']);
@@ -265,9 +292,9 @@ describe('a channel full of big videos', { timeout: 30000 }, () => {
         expect(requested).toEqual(['b', 'a']);
         await scroll([['x', -5000], ['a', 100], ['b', 500]]);
         await deliver('a');
+        await deliver('b');
         expect(requested).toEqual(['b', 'a', 'x']);
         await deliver('x');
-        await deliver('b');
         expect(attachmentCacheStats()).toMatchObject({ heldBytes: 2000, aheadBytes: 1000 });
     });
 
@@ -399,6 +426,31 @@ describe('a channel full of big videos', { timeout: 30000 }, () => {
         expect(requested.filter((id) => id === 'e')).toHaveLength(1);
     });
 
+    it('scrolling up, the spare player goes to the next video above, not the one just passed below', async () => {
+        // Review finding 2026-10-05: scrolling up at 1000 px/s in the Android
+        // WebView, 4 of 12 videos showed their placeholder for 1-7 frames
+        // before their player came. The players beyond the ones on screen
+        // now go first to the ones the reader is scrolling toward.
+        const scroll = await renderChannel([['up', -700], ['a', 100], ['b', 400], ['c', 600], ['down', 1000]]);
+        await deliverAll();
+        const scroller = container.querySelector<HTMLElement>('[data-scroller]')!;
+        let top = 2000;
+        Object.defineProperty(scroller, 'scrollTop', { configurable: true, get: () => top, set: (v: number) => { top = v; } });
+        const live = () => ['up', 'a', 'b', 'c', 'down'].filter((id) => videoOf(id));
+        // Not scrolled yet: the spare goes to the nearest, just below.
+        await scroll([]);
+        expect(live()).toEqual(['a', 'b', 'c', 'down']);
+        // The reader scrolls up 50 px: the one above comes next, and it is
+        // the one given the spare, though the one below is still nearer.
+        top = 1950;
+        await scroll([['up', -650], ['a', 150], ['b', 450], ['c', 650], ['down', 1050]]);
+        expect(live()).toEqual(['up', 'a', 'b', 'c']);
+        // And back down: the one below again.
+        top = 2000;
+        await scroll([['up', -700], ['a', 100], ['b', 400], ['c', 600], ['down', 1000]]);
+        expect(live()).toEqual(['a', 'b', 'c', 'down']);
+    });
+
     it('a playing video keeps its player with four others closer to the screen', async () => {
         const ids = ['p', 'b', 'c', 'd', 'e'];
         const scroll = await renderChannel(ids.map((id, i) => [id, 100 + i * 150] as [string, number]));
@@ -473,6 +525,123 @@ describe('a channel full of big videos', { timeout: 30000 }, () => {
         await scroll([['kept', 200]], ['gone']);
         expect(requested).toEqual(['gone', 'kept']);
         expect(videoOf('kept')?.getAttribute('src')).toBe(keptUrl);
+    });
+
+    it('a loaded video waiting for a player already takes its box: getting one moves nothing', async () => {
+        // Review finding 2026-10-05: videos posted back to back, scrolled up
+        // through. One loaded but not among the closest four was a 30 px
+        // "Loading attachment…" chip that became a ~260 px player when it
+        // reached the screen; at the top edge that pushed what the reader was
+        // looking at 100-380 px down (Edge: 1 step in 5, 2 in 5 in the phone
+        // layout). Its picture size is read from the file (a phone video: a
+        // 1920x1080 track turned a quarter), so it is its player's card
+        // already, a stand-in of the same box where the <video> goes.
+        const upright = mp4Header({ tracks: [{ handler: 'vide', width: 1920, height: 1080, rotate: 90 }] });
+        for (const id of ['a', 'b', 'c', 'd', 'e']) keys.set(id, await seal(id, 0, upright));
+        const scroll = await renderChannel([['a', -400], ['b', 100], ['c', 300], ['d', 500], ['e', 700]]);
+        await deliverAll();
+        // b-e are on screen and have the four players; a, loaded, waits.
+        expect(['a', 'b', 'c', 'd', 'e'].filter((id) => videoOf(id))).toEqual(['b', 'c', 'd', 'e']);
+        const card = container.querySelector<HTMLElement>('[data-y="-400"] .message-video');
+        expect(card, 'a loaded video with no player is its card, not a chip').not.toBeNull();
+        expect(card!.querySelector('.message-attachment.loading')).toBeNull();
+        const standIn = card!.querySelector<HTMLElement>('.video-box');
+        expect(standIn?.tagName).toBe('SPAN');
+        expect([standIn!.style.getPropertyValue('--vw'), standIn!.style.getPropertyValue('--vh')]).toEqual(['1080', '1920']);
+        // The same download chip under it as under a player.
+        expect(card!.querySelector('button.message-attachment')?.textContent).toContain('a.mp4');
+        // a reaches the top edge: it gets its player in the SAME card, the
+        // stand-in swapped for a <video> sized by the same numbers. (This
+        // also needs its player ranking to hear the list's scrolling: it was
+        // registered through the chip that left the page as the file came,
+        // and usePlayerGrant re-files it under the list.)
+        await scroll([['a', -100], ['b', 400], ['c', 600], ['d', 800], ['e', 1000]]);
+        const video = videoOf('a');
+        expect(video?.closest('.message-video')).toBe(card);
+        expect(video!.classList.contains('video-box')).toBe(true);
+        expect([video!.style.getPropertyValue('--vw'), video!.style.getPropertyValue('--vh')]).toEqual(['1080', '1920']);
+        expect(card!.querySelector('span.video-box')).toBeNull();
+        // e, pushed below the screen and out of the four, gives its player up
+        // the same way: the card stays, the box becomes the stand-in.
+        expect(videoOf('e')).toBeNull();
+        expect(container.querySelector('[data-y="1000"] .message-video span.video-box')).not.toBeNull();
+    });
+
+    it('an audio file waiting for a player keeps its card, with a stand-in as tall as a player', async () => {
+        const ids = ['s1', 's2', 's3', 's4', 's5'];
+        await renderChannel(ids.map((id, i) => [id, -300 + i * 200, 'audio'] as [string, number, 'audio']));
+        await deliverAll();
+        // s2-s5 on screen have the players; s1, loaded, waits.
+        const players = [...container.querySelectorAll('audio')];
+        expect(players).toHaveLength(MAX_LIVE_PLAYERS);
+        const card = container.querySelector<HTMLElement>('[data-y="-300"] .message-audio');
+        expect(card, 'a loaded audio file with no player is its card, not a chip').not.toBeNull();
+        expect(card!.querySelector('.message-audio-name')?.textContent).toContain('s1.mp3');
+        expect(card!.querySelector<HTMLElement>('.message-audio-standin')?.style.height).toBe(`${players[0].getBoundingClientRect().height}px`);
+        expect(card!.querySelector('button.message-attachment')).not.toBeNull();
+        expect(card!.querySelector('.message-attachment.loading')).toBeNull();
+    });
+
+    it('a paused video comes back where it was when its player is given back', async () => {
+        // Review finding 2026-10-05: paused at 0:12, scrolled two screens up
+        // and back, it started again from 0:00 (its player had been taken
+        // away); the old always-mounted player kept its place.
+        const scroll = await renderChannel([['v', 100]]);
+        await deliver('v');
+        const first = videoOf('v') as HTMLVideoElement;
+        await act(async () => { first.currentTime = 12; first.dispatchEvent(new Event('timeupdate')); });
+        await scroll([['v', -5000]]);
+        expect(videoOf('v')).toBeNull();
+        const metadata = async (v: HTMLVideoElement) => {
+            Object.defineProperty(v, 'videoWidth', { configurable: true, value: 1920 });
+            Object.defineProperty(v, 'videoHeight', { configurable: true, value: 1080 });
+            await act(async () => { v.dispatchEvent(new Event('loadedmetadata')); });
+        };
+        await scroll([['v', 200]]);
+        const again = videoOf('v') as HTMLVideoElement;
+        expect(again).not.toBe(first);
+        await metadata(again);
+        expect(again.currentTime).toBe(12);
+        // Watched to the end: the next player starts at the beginning.
+        await act(async () => { again.dispatchEvent(new Event('ended')); });
+        await scroll([['v', -5000]]);
+        await scroll([['v', 200]]);
+        const third = videoOf('v') as HTMLVideoElement;
+        expect(third).not.toBe(again);
+        await metadata(third);
+        expect(third.currentTime).toBe(0);
+    });
+
+    it('a picture open in the lightbox keeps its copy however far it scrolls; closed, it lets go', async () => {
+        __setRetainedAttachmentBudget(0); // so a release is seen as a revoke
+        const scroll = await renderChannel([['pic', 100, 'image']]);
+        await deliver('pic');
+        const img = container.querySelector<HTMLImageElement>('.message-image img')!;
+        const url = img.getAttribute('src')!;
+        await act(async () => { img.click(); });
+        const inLightbox = () => [...document.querySelectorAll(`img[src="${url}"]`)].some((el) => !container.contains(el));
+        expect(inLightbox()).toBe(true);
+        await scroll([['pic', -5000]]);
+        expect(revoked).not.toContain(url);
+        expect(inLightbox()).toBe(true);
+        await act(async () => { document.querySelector<HTMLButtonElement>('.image-lightbox-close')!.click(); });
+        await settle();
+        expect(inLightbox()).toBe(false);
+        expect(revoked).toEqual([url]);
+    });
+
+    it('a file being saved keeps its copy however far it scrolls; saved, it lets go', async () => {
+        __setRetainedAttachmentBudget(0);
+        const scroll = await renderChannel([['v', 100]]);
+        await deliver('v');
+        const url = videoOf('v')!.getAttribute('src')!;
+        await act(async () => { container.querySelector<HTMLButtonElement>('.message-video button.message-attachment')!.click(); });
+        expect(saves.finish).toHaveLength(1);
+        await scroll([['v', -5000]]);
+        expect(revoked).not.toContain(url);
+        await act(async () => { saves.finish.shift()!(); });
+        await settle();
+        expect(revoked).toEqual([url]);
     });
 
     it("a Task's or a note's copy (decryptToBlobUrl) is never revoked to make room", async () => {

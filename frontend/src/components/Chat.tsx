@@ -196,6 +196,7 @@ import {
 } from '../api/mobileApp';
 import { setUnreadBadge } from '../api/unreadBadge';
 import { SmartAvatar } from './SmartAvatar';
+import { repinOnGrowth } from './repinOnGrowth';
 import { isBlocked, loadBlockedUsers, useBlockedUsers } from './blockStore';
 import { searchChannel, searchDM, type SearchOutcome } from '../api/searchMessages';
 
@@ -3032,11 +3033,13 @@ export function Chat({ onLogout }: ChatProps) {
     // decrypted-attachment swaps) is covered by a ResizeObserver over the
     // container's children. Depends on isLoading because the component
     // early-returns before the container exists, so a [] dep would bind to a
-    // null ref forever.
+    // null ref forever. Only a change that GROWS the list re-pins it
+    // (repinOnGrowth): one that moves nothing must not pull back a reader who
+    // has just scrolled up less than AT_BOTTOM_SLOP.
     useEffect(() => {
         const el = messagesContainerRef.current;
         if (!el || !showingMessageList) return;
-        const repin = () => { if (atBottomRef.current) el.scrollTop = el.scrollHeight; };
+        const repin = repinOnGrowth(el, () => atBottomRef.current);
         el.addEventListener('load', repin, true);
         el.addEventListener('error', repin, true);
         const ro = new ResizeObserver(repin);

@@ -108,28 +108,36 @@ describe('createPriorityLimiter', () => {
         expect(ran).toEqual([1]);
     });
 
-    it('a background job never takes the last free slot: one is left for a file the reader scrolls to', async () => {
-        const lim = createPriorityLimiter(2);
+    const jobs = (lim: ReturnType<typeof createPriorityLimiter>) => {
         const started: string[] = [];
         const gates: Record<string, { promise: Promise<void>; resolve: () => void }> = {};
+        const all: Promise<void>[] = [];
         const job = (name: string, background: boolean) => {
             gates[name] = deferred();
-            return lim.schedule({ run: async () => { started.push(name); await gates[name].promise; }, urgency: () => 0, background });
+            all.push(lim.schedule({ run: async () => { started.push(name); await gates[name].promise; }, urgency: () => 0, background }));
         };
-        const all = [job('far-1', true), job('far-2', true), job('far-3', true)];
+        return { started, gates, all, job };
+    };
+
+    it('a background job never takes the last free slot: one is left for a file the reader scrolls to', async () => {
+        const lim = createPriorityLimiter(2);
+        const { started, gates, all, job } = jobs(lim);
+        job('far-1', true); job('far-2', true); job('far-3', true);
         await tick();
         // Three far files wait to be loaded ahead: only one runs.
         expect(started).toEqual(['far-1']);
         // The reader scrolls to another: it starts at once, in the slot kept free.
-        all.push(job('near', false));
+        job('near', false);
         await tick();
         expect(started).toEqual(['far-1', 'near']);
-        // A background slot frees: the next far file takes it, never two at once.
+        // far-1 ends while the near one still loads: the next far one waits,
+        // so the slot stays free for whatever the reader scrolls to next.
         gates['far-1'].resolve();
         await tick();
-        expect(started).toEqual(['far-1', 'near', 'far-2']);
+        expect(started).toEqual(['far-1', 'near']);
         gates['near'].resolve();
         await tick();
+        // Nothing near loading: the far ones go on, one at a time.
         expect(started).toEqual(['far-1', 'near', 'far-2']);
         gates['far-2'].resolve();
         await tick();
@@ -137,6 +145,54 @@ describe('createPriorityLimiter', () => {
         gates['far-3'].resolve();
         await Promise.all(all);
         expect(lim.active).toBe(0);
+    });
+
+    it('while one near file loads, a far one waits: the file scrolled to next starts at once', async () => {
+        // Review finding 2026-10-05: `activeBackground < max - 1` let a far
+        // load start beside a near one, so both slots were busy and the next
+        // file the reader scrolled to waited out a whole download (up to
+        // 1.8 s for 22.5 MB at 100 Mbit, 12 s at 15).
+        const lim = createPriorityLimiter(2);
+        const { started, gates, all, job } = jobs(lim);
+        job('near-1', false);
+        await tick();
+        job('far-1', true);
+        await tick();
+        expect(started).toEqual(['near-1']);
+        job('scrolled-to', false);
+        await tick();
+        expect(started).toEqual(['near-1', 'scrolled-to']);
+        gates['near-1'].resolve();
+        gates['scrolled-to'].resolve();
+        await tick();
+        expect(started).toEqual(['near-1', 'scrolled-to', 'far-1']);
+        gates['far-1'].resolve();
+        await Promise.all(all);
+    });
+
+    it('with four slots, background jobs leave the fourth free; with one, they run only when it is idle', async () => {
+        const four = jobs(createPriorityLimiter(4));
+        for (let i = 1; i <= 5; i++) four.job(`far-${i}`, true);
+        await tick();
+        expect(four.started).toEqual(['far-1', 'far-2', 'far-3']);
+        four.job('near', false);
+        await tick();
+        expect(four.started).toEqual(['far-1', 'far-2', 'far-3', 'near']);
+        for (const g of Object.values(four.gates)) g.resolve();
+        await tick();
+        for (const g of Object.values(four.gates)) g.resolve();
+        await Promise.all(four.all);
+
+        const one = jobs(createPriorityLimiter(1));
+        one.job('near', false);
+        one.job('far', true);
+        await tick();
+        expect(one.started).toEqual(['near']);
+        one.gates['near'].resolve();
+        await tick();
+        expect(one.started).toEqual(['near', 'far']);
+        one.gates['far'].resolve();
+        await Promise.all(one.all);
     });
 
     it('a job that throws frees its slot', async () => {
