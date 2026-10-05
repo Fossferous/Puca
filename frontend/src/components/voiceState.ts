@@ -212,6 +212,20 @@ export function subscribeSelfInVoice(callback: SelfInVoiceCallback): () => void 
     return () => selfInVoiceListeners.delete(callback);
 }
 
+// Whether THIS user is deafened (VoicePanel owns the state and mirrors it
+// here). Read by sounds that are not call audio but must still respect it -
+// the card table's game sounds (api/games/gameSounds.ts): deafened means
+// nothing plays.
+let selfDeafened = false;
+
+export function setSelfDeafened(deafened: boolean) {
+    selfDeafened = deafened;
+}
+
+export function isSelfDeafened(): boolean {
+    return selfDeafened;
+}
+
 // Voice user state change callbacks - for Chat.tsx sidebar to subscribe
 type VoiceUserCallback = () => void;
 const voiceUserListeners: Set<VoiceUserCallback> = new Set();

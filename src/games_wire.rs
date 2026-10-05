@@ -541,6 +541,14 @@ pub struct LegalWire {
     pub max_raise_to: u64,
 }
 
+/// A live pot (`HoldemViewWire::pots`): pot 0 is the main pot, every one after
+/// it a side pot. `eligible`: the seats that can still win it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PotWire {
+    pub amount: u64,
+    pub eligible: Vec<usize>,
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct HoldemViewWire {
     /// The viewer's seat, or `null` for a spectator.
@@ -556,7 +564,14 @@ pub struct HoldemViewWire {
     /// `max_seats` entries; `null` is an empty seat.
     pub seats: Vec<Option<HoldemSeatWire>>,
     pub board: Vec<String>,
+    /// Everything put in this hand, this street's bets included.
     pub pot_total: u64,
+    /// The main pot and the side pots from the streets that have closed
+    /// (this street's bets are each seat's `street_commit` until it closes);
+    /// empty between hands. ADDED after 0.9.833: an older client ignores it
+    /// (unknown fields are), and a newer client facing an older server reads
+    /// its absence as "no breakdown" and shows `pot_total` alone.
+    pub pots: Vec<PotWire>,
     pub current_bet: u64,
     pub to_act: Option<usize>,
     pub turn: Option<TurnWire>,
@@ -620,6 +635,7 @@ pub fn holdem_view(view: &HoldemView, extras: &ViewExtras) -> GameView {
         seats,
         board: view.board.iter().map(|&c| code(c)).collect(),
         pot_total: view.pot_total,
+        pots: view.pots.iter().map(|p| PotWire { amount: p.amount, eligible: p.eligible.clone() }).collect(),
         current_bet: view.current_bet,
         to_act: view.to_act,
         turn: view.turn.map(Into::into),
@@ -1200,6 +1216,28 @@ mod tests {
             assert!(!printed.contains(c.as_str()), "{c} in {printed}");
         }
         assert!(printed.contains("HoldemView") && printed.contains("events"), "{printed}");
+    }
+
+    /// The live pots the engine reports reach the wire as they are, main pot
+    /// first, each with the seats that can win it.
+    #[test]
+    fn side_pots_reach_the_wire_with_who_can_win_them() {
+        use puca_games::holdem::{HoldemTable, PotView};
+        let mut t = HoldemTable::new(HoldemConfig::default()).unwrap();
+        t.sit(0, player_id(7)).unwrap();
+        t.sit(1, player_id(8)).unwrap();
+        t.start_hand(&mut puca_games::rng::seeded(5)).unwrap();
+        let mut view = t.view_for(None);
+        view.pots = vec![PotView { amount: 300, eligible: vec![0, 1, 2] }, PotView { amount: 450, eligible: vec![1, 2] }];
+        let wire = serde_json::to_value(holdem_view(&view, &ViewExtras::default())).unwrap();
+        assert_eq!(
+            wire["pots"],
+            serde_json::json!([{"amount": 300, "eligible": [0, 1, 2]}, {"amount": 450, "eligible": [1, 2]}])
+        );
+        // And an engine table's own (empty, preflop) pots are an empty list,
+        // never a missing field.
+        let fresh = serde_json::to_value(holdem_view(&t.view_for(None), &ViewExtras::default())).unwrap();
+        assert_eq!(fresh["pots"], serde_json::json!([]));
     }
 
     #[test]

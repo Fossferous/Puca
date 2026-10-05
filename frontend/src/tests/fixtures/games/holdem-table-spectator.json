@@ -28,6 +28,16 @@
       "legal": null,
       "next_deal_in_ms": null,
       "pot_total": 30,
+      "pots": [
+        {
+          "amount": 30,
+          "eligible": [
+            0,
+            2,
+            4
+          ]
+        }
+      ],
       "seats": [
         {
           "away": false,

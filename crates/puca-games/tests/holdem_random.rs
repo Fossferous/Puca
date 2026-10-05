@@ -14,6 +14,11 @@
 //!    something to decide: if nobody else can still act, the player must be
 //!    facing more than they have put in (else the clock could fold chips that
 //!    already cover every all-in), and may then only call or fold.
+//! 5. LIVE POTS ADD UP. While a hand is live, the main pot and side pots the
+//!    view shows plus every bet still in front of a player is the pot total;
+//!    no pot is empty or names a folded seat; and each side pot's contenders
+//!    are a subset of the pot before it (a short stack is never offered a
+//!    side pot it did not cover). Between hands there are no live pots.
 //!
 //! Plus: a refused action (`Err`) leaves every view — each seat's and the
 //! spectator's — unchanged. That is what clients can observe; the engine's
@@ -65,6 +70,8 @@ struct Coverage {
     /// Turns given to the only player who can still act (facing a bigger
     /// all-in): the call-or-fold branch of invariant 4.
     lone_decisions: u64,
+    /// Views that showed a side pot while the hand was still being played.
+    live_side_pots: u64,
 }
 
 struct Sim {
@@ -154,6 +161,28 @@ impl Sim {
         assert_eq!(unique.len(), dealt.len(), "a card was dealt twice: {dealt:?}");
         // The table's own Debug never shows a card at all.
         assert!(card_tokens(&format!("{:?}", self.table)).is_empty(), "table Debug is not redacted");
+        // 5. Live pots add up.
+        if public.in_hand {
+            let bets: u64 = public.seats.iter().flatten().map(|s| s.street_commit).sum();
+            let pots: u64 = public.pots.iter().map(|p| p.amount).sum();
+            assert_eq!(pots + bets, public.pot_total, "live pots and bets do not make the total: {public:?}");
+            for (k, pot) in public.pots.iter().enumerate() {
+                assert!(pot.amount > 0 && !pot.eligible.is_empty(), "an empty pot: {public:?}");
+                for &e in &pot.eligible {
+                    let st = public.seats[e].as_ref().map(|s| s.status);
+                    assert!(matches!(st, Some(SeatStatus::InHand | SeatStatus::AllIn)), "pot {k} offered to seat {e} ({st:?}): {public:?}");
+                }
+                if k > 0 {
+                    let prev = &public.pots[k - 1].eligible;
+                    assert!(pot.eligible.iter().all(|e| prev.contains(e)), "side pot {k} names a seat the pot before it does not: {public:?}");
+                }
+            }
+            if public.pots.len() > 1 {
+                self.cov.live_side_pots += 1;
+            }
+        } else {
+            assert!(public.pots.is_empty(), "pots between hands: {public:?}");
+        }
         // 4. No pointless decision.
         if let Some(s) = public.to_act {
             let me = public.seats[s].as_ref().expect("the seat to act is occupied");
@@ -396,6 +425,7 @@ fn chips_are_conserved_and_no_view_leaks_over_thousands_of_random_hands() {
         total.voluntary_shows += c.voluntary_shows;
         total.rebuys += c.rebuys;
         total.lone_decisions += c.lone_decisions;
+        total.live_side_pots += c.live_side_pots;
     }
     eprintln!("coverage: {total:?}");
     assert!(total.hands >= 3_000, "{total:?}");
@@ -411,6 +441,7 @@ fn chips_are_conserved_and_no_view_leaks_over_thousands_of_random_hands() {
         ("voluntary shows", total.voluntary_shows),
         ("rebuys", total.rebuys),
         ("call-or-fold turns facing a bigger all-in", total.lone_decisions),
+        ("side pots shown while the hand was live", total.live_side_pots),
     ] {
         assert!(n > 0, "the random run never exercised {name}: {total:?}");
     }

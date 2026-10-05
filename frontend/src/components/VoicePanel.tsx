@@ -95,7 +95,7 @@ import { useDfSettledOffer, keepRnnoiseForSession, KEEP_RNNOISE_NOTICE } from '.
 import './VoicePanel.css';
 
 
-import { globalVoiceUsers, globalScreenSharers, globalCameraUsers, globalCameraStreams, setUserSpeaking, clearSpeaking, notifyVoiceUsersChange, registerStopScreenShareCallback, stopOwnScreenShare, setCurrentStreamingUser, setSelfInVoice, upsertVoiceUser, applyVoiceStatus, globalSelectedStreams, globalStreamData, notifyStreamStateChange, clearAllStreams, selectStream, deselectStream, subscribeToStreamState } from './voiceState';
+import { globalVoiceUsers, globalScreenSharers, globalCameraUsers, globalCameraStreams, setUserSpeaking, clearSpeaking, notifyVoiceUsersChange, registerStopScreenShareCallback, stopOwnScreenShare, setCurrentStreamingUser, setSelfInVoice, setSelfDeafened, upsertVoiceUser, applyVoiceStatus, globalSelectedStreams, globalStreamData, notifyStreamStateChange, clearAllStreams, selectStream, deselectStream, subscribeToStreamState } from './voiceState';
 
 interface VoicePanelProps {
     roomId: string;
@@ -492,7 +492,12 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     useEffect(() => { isScreenSharingRef.current = isScreenSharing; }, [isScreenSharing]);
     useEffect(() => { listenOnlyRef.current = listenOnly; }, [listenOnly]);
     useEffect(() => { isCameraOnRef.current = isCameraOn; }, [isCameraOn]);
-    useEffect(() => { isDeafenedRef.current = isDeafened; }, [isDeafened]);
+    useEffect(() => {
+        isDeafenedRef.current = isDeafened;
+        setSelfDeafened(isDeafened);
+    }, [isDeafened]);
+    // Gone with the panel (the call ended): nothing is deafened any more.
+    useEffect(() => () => setSelfDeafened(false), []);
     useEffect(() => { onInactiveRef.current = onInactive; }, [onInactive]);
     useEffect(() => { isAfkChannelRef.current = isAfkChannel; }, [isAfkChannel]);
     useEffect(() => { isMutedRef.current = isMuted; }, [isMuted]);

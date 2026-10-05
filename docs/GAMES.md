@@ -209,6 +209,17 @@ all-in, every live hand is tabled. After a hand, anyone dealt in may show
 voluntarily. Odd chips go one at a time from the left of the button. No burn
 cards (with a uniform shuffle they change nothing).
 
+**Side pots while the hand is live.** Every view of a live hand carries
+`pots`: the main pot and the side pots built, by the same level rule the
+settlement uses, from what each seat put in on the streets that have CLOSED.
+This street's bets are not in a pot yet (each seat's `street_commit`, drawn in
+front of the player); the pots are rebuilt when the street closes, as a dealer
+gathers the bets. A short all-in therefore shows its side pot from the next
+street on, and `pots` plus every `street_commit` is always `pot_total`. A pot's
+`eligible` never names a folded seat, and each side pot's contenders are a
+subset of the pot before it. Between hands `pots` is empty; who won what is in
+the `pot_awarded` events (pot 0 the main pot).
+
 ### What the tests prove
 
 `cargo test -p puca-games` (about 10 s; the crate is built with `opt-level =
@@ -229,7 +240,11 @@ cards (with a uniform shuffle they change nothing).
 - **Hold'em on stacked decks**: heads-up and 3+ handed blind order and
   rotation, min-raise, incomplete all-ins that do and do not reopen, three
   all-ins of different sizes (main pot + two side pots + uncalled return),
-  odd chips, short big blind, a player who covers every all-in getting no
+  the live `pots` a short all-in builds (a bet on the next street staying
+  out of them until it closes, a fold taking the folder out of every pot it
+  reached), two short all-ins whose settlement pays exactly the pots the
+  table showed, tied hands splitting a main and a side pot with the odd chip
+  left of the button, odd chips, short big blind, a player who covers every all-in getting no
   turn (heads-up, after folds, and after a departure), call-or-fold only
   against a bigger all-in, showdown order and mucking, timeouts and stale
   timers, leaving mid-hand, rebuys, config lock.
@@ -239,7 +254,11 @@ cards (with a uniform shuffle they change nothing).
   the viewer's own, the board and shown hands; no card dealt twice; a turn
   is only ever given when there is something to decide (never to a player
   who covers every all-in, never with a raise nobody could answer); a refused
-  action changed no view (the engine validates before it mutates). The run fails if it never exercised side pots,
+  action changed no view (the engine validates before it mutates); while a
+  hand is live, its `pots` plus the bets in front of the players make
+  `pot_total`, no pot is empty or offered to a folded seat, and each side pot's
+  contenders are a subset of the pot before it. The run fails if it never
+  exercised side pots (settled, and shown while the hand was live),
   split pots, incomplete raises, timeouts, departures or a call-or-fold
   turn against a bigger all-in.
 - **One table per call**: a second table of either game is refused and the
@@ -490,8 +509,12 @@ the fixtures. Hold'em: `viewer_seat` (`null` = spectator), `config`,
 `big_blind_seat`, `seats` (exactly `config.max_seats` entries, `null` =
 empty; each `seat`, `user_id`, `stack`, `status`, `street_commit`,
 `hand_commit`, `cards`, `sitting_out`, `leaving`, `away`), `board`,
-`pot_total`, `current_bet`, `to_act`, `turn`, `legal` (only in the view of
-the seat to act), `clock_ms`, `next_deal_in_ms`. A seat's `cards`: `null`
+`pot_total`, `pots` (the live main and side pots, each `amount` and
+`eligible` seats; see *Side pots while the hand is live* - ADDED after 0.9.833:
+an older client ignores the field, and a newer client reads its absence from
+an older server as no breakdown and shows `pot_total`), `current_bet`,
+`to_act`, `turn`, `legal` (only in the view of the seat to act), `clock_ms`,
+`next_deal_in_ms`. A seat's `cards`: `null`
 (not in the live hand, folded, or between hands with nothing shown),
 `["??","??"]` (in the hand, face down), or real codes (the viewer's own
 hand, or a shown one). Blackjack: `viewer_seat`, `config` (incl.
@@ -813,11 +836,49 @@ picker (*Activities*). Like VoiceStage it is presentation only: opening it or
 emoji in chrome). Spectators — people in the call who are not seated — see
 the public table.
 
+**The Poker table is a table** (since the owner's request of 2026-10-05): an
+oval of green felt inside a wooden rail, the pots, the board and the street in
+the middle, and the seats AROUND it - your own at the bottom, the others
+clockwise in seat order (the player who acts after you sits on your left, as
+at a real table; `api/games/tableLayout.ts`). Each seat tile shows the
+avatar (or initial), name, chips, the dealer / SB / BB marks, the hole cards
+(face down, or shown), folded and all-in states, the turn highlight with its
+clock, and its bet as a chip on the felt side. The board always has five
+slots: face-down backs for the cards not dealt yet - plain pictures of a
+back with NO card in them - and each card the server deals turns face up in
+place, one after another (`FlipCard`; prefers-reduced-motion and Settings >
+Enable Animations just show it). A board already on the table when you open
+it does not flip again. With two or more live pots the middle shows **Main
+pot** and **Side pot** (numbered past one) with their amounts, a pot you did
+not cover marked with a dashed edge, and the total when bets are still in
+front of the players; between hands it says who won which pot. Blackjack
+keeps its layout.
+
+**Sounds** (`api/games/gameSynth.ts`, `gameTimeline.ts`, `gameSounds.ts`,
+`components/games/useGameSounds.ts`): a card dealt, a card turned, chips (a
+bet, call, raise, blind; a Blackjack bet, double or split), a check (and a
+Blackjack stand) as two knocks, a fold, a win (only the winner hears it;
+everyone else hears the chips move) and a chime when a NEW decision is yours.
+All synthesized with Web Audio - no recordings, nothing to license. They play
+only while the table is on screen, only for frames that arrive while it is
+(opening the table replays nothing), on the Output Device chosen in Settings
+(routed before anything is scheduled, as every app sound is), at a game level
+of 0.16 peak times the master Output Volume (the join chime peaks at 0.3),
+and never while you are deafened. **Settings > Notifications > Card Game
+Sounds** switches them, and so does the speaker button in the table's header;
+Enable Sounds off silences them too. A flip's sound and its animation read the
+same timeline, so a card is heard as it turns. Proof: `gamesTableAndSounds`
+(vitest, a fake AudioContext that records instead of sounding: the gates,
+deafen, volume, device-first routing) and
+`e2e/game-sounds-offline-real-browser.mjs` (every sound rendered in a real
+browser's OfflineAudioContext - a buffer, never a speaker - for its peak and
+length).
+
 **Phone, 390x844** (`docs/DESIGN_PHILOSOPHY.md` is the contract): content in
 `.chat-main` inherits the panel transforms, but the voice panel's reserved
-space leaves roughly 500–560 px. So: at most 6 seats; opponents as a compact
-strip (avatar, stack, status) that scrolls sideways; board and pot in the
-middle; your cards and a **two-row action bar** at the bottom — Fold /
+space leaves roughly 500–560 px. So: at most 6 seats around a taller-than-wide
+oval with narrower seat tiles, each clamped inside the table; board and pots
+in the middle; your cards and a **two-row action bar** at the bottom — Fold /
 Check-or-Call / Raise on one row, raise presets (min, ½ pot, pot, all-in)
 and a stepper on the other. Every target at least 44 px, nothing hover-only.
 The numeric raise field (≥16 px font, DESIGN_PHILOSOPHY §5) opens the
@@ -874,7 +935,8 @@ set — every server that plays games sends them). Without `PLAY_GAMES` a
 person in the call can still WATCH an open table, as the server allows: the
 tile and the notice offer Watch only, and there is no launcher
 (`gamesGate().launcher` is `CONNECT` + `PLAY_GAMES` on top of the rest).
-`MOVE_MEMBERS` shows Close table and a Remove on each player.
+`MOVE_MEMBERS` shows Close table and a Remove for each player (a row under
+the table).
 
 **A host change is a refetch.** The rows above are cached; a reconnect that
 lands on a host that now confirms `games` (an upgrade or a roll forward) or no
@@ -931,8 +993,10 @@ integration step runs it against the real server.
 - **The disclosure is remembered per account AND per server** on this device
   ("its operator" is a different operator on every server); storage that
   fails shows it again.
-- **Opponents first in the strip**, open seats after them, so a phone shows
-  the people at the table before any scrolling.
+- **Opponents first in reading order**, open seats after them (the seat
+  list's DOM order; where each seat is drawn is the oval's). A moderator's
+  Remove buttons are a row under the table, not inside the seat tiles, so the
+  tiles stay small enough to sit around a phone's oval.
 - **Card faces are a fixed light surface with fixed ink, the felt a fixed
   green**, in every theme — a card must read the same everywhere; only the
   face-DOWN back follows the theme's brand colour. Primary buttons use
@@ -1096,4 +1160,5 @@ drain, sweep branch, setting plumbing, teardown, docs) and the client (two
 tables, desktop and phone, the owner's toggle, the role-editor and
 channel-editor rows for `PLAY_GAMES`, the 390x844 walk). What v1 still leaves
 out is listed above and under the client's *not built* notes: a "your turn"
-doorbell for a backgrounded phone, dealt-card animations, seat avatars.
+doorbell for a backgrounded phone (the turn chime plays only while the table
+is on screen), and a Blackjack table drawn as a table.

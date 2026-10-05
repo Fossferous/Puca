@@ -340,6 +340,8 @@ cd frontend && node e2e/share-quality-live-real-browser.mjs   # a LIVE share re-
 cd frontend && node e2e/notes-dialog-escape-real-browser.mjs   # one REAL Escape closes only the top of two stacked NotesDialogs (jsdom cannot show the microtask checkpoint between listeners); no server needed
 cd frontend && node e2e/user-menu-move-to-real-browser.mjs   # right-click a member > Move to, and the server icon's Notification Settings: every listed item is ON SCREEN and is what document.elementFromPoint hits, real mouse at desktop and real taps at 390x844 (never locator.click(), which scrolls a clipped menu and false-passed the invisible flyout); no server needed
 cd frontend && node e2e/paste-html-real-browser.mjs     # a pasted checklist's clipboard HTML is READ in real Chromium and nothing in it loads, runs or stalls the parser (jsdom fetches nothing and is not Chromium's parser); no server needed
+cd frontend && node e2e/game-sounds-offline-real-browser.mjs   # every card-table sound rendered in a real browser's OfflineAudioContext (a buffer, never a speaker; --mute-audio): it renders, peaks near the game level and under the join chime, and is over in time; no server needed
+cd frontend && node e2e/poker-table-real-browser.mjs <outdir> [baseURL]   # the Poker table as a table (e2e/poker-table-harness.html, fixture-fed): five face-down board slots naming no card, the flop turning card by card (no animation with reduced motion), main + side pots with felt contrast, seats around the oval with nothing on anything, 1280x800 and 390x844; needs a vite dev server
 cd frontend && node e2e/notes-walk.mjs                  # Púca Notes end to end; needs a dist built against a throwaway backend + serve-dist (header of the file)
 cd frontend && node e2e/notes-desktop-embed.mjs         # Púca Notes INSIDE the desktop app, under a fake Tauri shell; needs the main bundle built against a throwaway backend into its own --outDir + serve-dist (header of the file)
 cd frontend && node e2e/member-popup-scroll.mjs <outdir>   # member profile popup: last role reachable by wheel (1280x720, 1280x460) and touch (390x844 sheet); needs API= and APP= against a throwaway backend (header of the file)
@@ -688,10 +690,14 @@ has never existed.
   half (`src/games.rs`), the launcher / picker / notice / call-grid tile /
   sidebar marks and the table on desktop and phone
   (`frontend/src/components/games/`), walked live together by
-  `e2e/games-live.mjs` and `e2e/games-walk.mjs`. NOT built: a "your turn"
-  doorbell for a backgrounded phone (the clock checks or folds), dealt-card
-  animations, seat avatars, and a "playing" mark for people OUTSIDE the call
-  (the frames go only to the call; Discord shows it server-wide).
+  `e2e/games-live.mjs` and `e2e/games-walk.mjs`. Since 2026-10-05 the Poker
+  table is an oval with the seats around it, the board flips as it is dealt,
+  live side pots are on the wire (`pots`) and there are synthesized game
+  sounds (docs/GAMES.md, *The table on screen*). NOT built: a "your turn"
+  doorbell for a backgrounded phone (the clock checks or folds; the turn
+  chime plays only while the table is on screen), and a "playing" mark for
+  people OUTSIDE the call (the frames go only to the call; Discord shows it
+  server-wide).
 - **A room id is only its canonical spelling** (`voice_42`, `channel_42`):
   since 2026-10-03 `parse_voice_room` / `parse_channel_room` refuse `voice_042`
   and `voice_+42`, which used to pass JoinRoom's check for channel 42 and key a

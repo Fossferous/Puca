@@ -7,6 +7,23 @@ one-line summary; this file is the full story. Versions follow
 ## Unreleased
 
 ### Added
+- **Poker is played at a real table.** The table is now a green felt oval
+  with a rail, and everyone sits in their own place around it - you at the
+  bottom, the player after you on your left - with their picture, chips, bet,
+  the dealer button and whose turn it is. The five board cards lie face down
+  from the start of a hand and turn over as they are dealt (just appear, if
+  you have animations off). When someone is all-in for less than the bet, the
+  middle of the table shows the **main pot** and each **side pot** - and which
+  ones you can still win - and after the hand, who won which pot. (Side pots
+  were always paid out correctly; the table now shows them while you play.
+  Seeing them needs the server updated too; until then the table shows the
+  total as before.)
+- **Card game sounds.** Cards dealt and turned, chips, check, fold, a win and
+  a chime when it is your turn, at Poker and Blackjack tables. They play on
+  your chosen output device at your output volume, never while you are
+  deafened, and only while the table is on screen. Switch them off with the
+  speaker button on the table or in Settings > Notifications > **Card Game
+  Sounds**.
 - **Downloads on Android go where your phone looks — this needs the NEW
   Android app (0.9.834), installed once from the download page.** The update
   that arrives inside the app is not enough: with it alone, saving keeps

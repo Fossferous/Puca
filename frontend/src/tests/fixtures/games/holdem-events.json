@@ -33,6 +33,7 @@
         "legal": null,
         "next_deal_in_ms": null,
         "pot_total": 0,
+        "pots": [],
         "seats": [
           {
             "away": false,
@@ -120,6 +121,7 @@
         },
         "next_deal_in_ms": null,
         "pot_total": 15,
+        "pots": [],
         "seats": [
           {
             "away": false,
@@ -232,6 +234,16 @@
         "legal": null,
         "next_deal_in_ms": null,
         "pot_total": 30,
+        "pots": [
+          {
+            "amount": 30,
+            "eligible": [
+              0,
+              2,
+              4
+            ]
+          }
+        ],
         "seats": [
           {
             "away": false,
@@ -385,6 +397,7 @@
         "legal": null,
         "next_deal_in_ms": 3000,
         "pot_total": 0,
+        "pots": [],
         "seats": [
           {
             "away": false,
@@ -483,6 +496,7 @@
         "legal": null,
         "next_deal_in_ms": null,
         "pot_total": 0,
+        "pots": [],
         "seats": [
           {
             "away": false,

@@ -1,12 +1,14 @@
-import { useState } from 'react';
-import { gameFrames, type GameClientFrame, type HoldemSeat, type HoldemView } from '../../api/games/protocol';
+import { useState, type CSSProperties } from 'react';
+import { gameFrames, type GameClientFrame, type HoldemEvent, type HoldemSeat, type HoldemView } from '../../api/games/protocol';
 import type { HeldTable } from '../../api/games/gamesStore';
 import type { GamesGate } from '../../api/games/gamesGate';
 import { clampRaise, holdemBar, holdemBusted, raiseAction, raisePresets, raiseStep } from '../../api/games/holdemActions';
-import { CATEGORY_NAMES, chips, eventLine } from '../../api/games/gameWords';
-import { CardSlot, PlayingCard } from './PlayingCard';
+import { CATEGORY_NAMES, chips, eventLine, potLabel } from '../../api/games/gameWords';
+import { seatSpots } from '../../api/games/tableLayout';
+import { CardSlot, FlipCard, PlayingCard } from './PlayingCard';
 import { AmountSheet, SeatAvatar, Stepper, TurnClock } from './GameBits';
 import { useCountdown } from './useCountdown';
+import { timelineOf, useGameSounds } from './useGameSounds';
 
 interface HoldemTableProps {
     table: HeldTable & { view: HoldemView };
@@ -14,6 +16,8 @@ interface HoldemTableProps {
     /** Phone layout (the JS half of the coarse-pointer gate). */
     isPhone: boolean;
     nameOf: (userId: number) => string;
+    /** userId -> avatar file id (absent: initials). */
+    avatarOf?: (userId: number) => string | null | undefined;
     currentUserId: number;
     /** Take a seat (the parent shows the disclosure first, once). */
     onSit: (seat: number) => void;
@@ -25,9 +29,29 @@ interface HoldemTableProps {
 
 const STREET_LABEL: Record<string, string> = { preflop: 'Pre-flop', flop: 'Flop', turn: 'Turn', river: 'River', showdown: 'Showdown' };
 
-/** The seats to draw in the opponents' strip: the players after the viewer,
- *  clockwise (a spectator: from seat 0), then the open seats — so on a phone
- *  the people at the table are what the strip shows before any scrolling. */
+/** The pots awarded in hand `handNo` (the pot_awarded events just before its
+ *  hand_ended), for the result shown on the felt between hands. Empty when
+ *  this client did not see that hand end - after a gap the log may hold an
+ *  OLDER hand's awards, which must not be shown as this one's. */
+function lastAwards(log: readonly { type: string }[], handNo: number): Extract<HoldemEvent, { type: 'pot_awarded' }>[] {
+    const out: Extract<HoldemEvent, { type: 'pot_awarded' }>[] = [];
+    let i = log.length - 1;
+    for (; i >= 0; i--) {
+        const e = log[i] as HoldemEvent;
+        if (e.type === 'hand_ended') break;
+    }
+    if (i < 0 || (log[i] as Extract<HoldemEvent, { type: 'hand_ended' }>).hand_no !== handNo) return out;
+    for (i--; i >= 0; i--) {
+        const e = log[i] as HoldemEvent;
+        if (e.type === 'hand_started' || e.type === 'hand_ended') break;
+        if (e.type === 'pot_awarded') out.unshift(e);
+    }
+    return out;
+}
+
+/** The order the other seats are READ in (the list's DOM order; where each is
+ *  DRAWN is tableLayout's): the players after the viewer, clockwise (a
+ *  spectator: from seat 0), then the open seats. */
 function stripOrder(view: HoldemView): number[] {
     const n = view.seats.length;
     const me = view.viewer_seat;
@@ -50,7 +74,7 @@ function seatStatus(s: HoldemSeat): string | null {
  * until shown, `legal` exists only when it is the viewer's turn, and the
  * action bar is read straight off it (api/games/holdemActions.ts).
  */
-export function HoldemTable({ table, gate, isPhone, nameOf, currentUserId, onSit, send, refusedAt }: HoldemTableProps) {
+export function HoldemTable({ table, gate, isPhone, nameOf, avatarOf, currentUserId, onSit, send, refusedAt }: HoldemTableProps) {
     const v = table.view;
     const room = table.room_id;
     const id = table.table_id;
@@ -77,6 +101,11 @@ export function HoldemTable({ table, gate, isPhone, nameOf, currentUserId, onSit
     const [sheetFor, setSheetFor] = useState<string | null>(null);
     const sheetOpen = sheetFor !== null && sheetFor === turnKey;
     const [shownHand, setShownHand] = useState<number | null>(null);
+    // What was on the board when the table opened: those cards are already
+    // face up, not news, and do not flip again.
+    const [opened] = useState(() => ({ hand: v.hand_no, board: v.board.length }));
+    useGameSounds(table);
+    const reveals = timelineOf(table).reveals;
 
     const raiseTo = bar?.raise
         ? (raise && raise.key === turnKey ? clampRaise(raise.amount, v.legal!) : bar.raise.min)
@@ -120,87 +149,144 @@ export function HoldemTable({ table, gate, isPhone, nameOf, currentUserId, onSit
         && shownHand !== v.hand_no && !myCategory;
     const busted = holdemBusted(v);
 
+    const spots = seatSpots(v.seats.length, v.viewer_seat);
+    // The middle of the felt: the live main pot and side pots (a server that
+    // predates them sends only the total), or, between hands, who won what.
+    const seatLabel = (seat: number) => (seat === v.viewer_seat ? 'You' : v.seats[seat] ? nameOf(v.seats[seat]!.user_id) : `Seat ${seat + 1}`);
+    const awards = !v.in_hand && v.hand_no > 0 ? lastAwards(table.log, v.hand_no) : [];
+    const potCount = awards.reduce((n, a) => Math.max(n, a.pot + 1), 0);
+    const meIn = (eligible: number[]) => v.viewer_seat === null || eligible.includes(v.viewer_seat);
+    const potsAdded = v.pots.reduce((a, p) => a + p.amount, 0);
+    const pots = v.in_hand && v.pots.length > 1 ? (
+        <>
+            {v.pots.map((p, k) => (
+                <span key={k} className={`gpot-pill${meIn(p.eligible) ? '' : ' gpot-out'}`}>
+                    {potLabel(k, v.pots.length)} <strong>{chips(p.amount)}</strong>
+                    {!meIn(p.eligible) && <span className="sr-only"> (you are not in this pot)</span>}
+                </span>
+            ))}
+            {v.pot_total > potsAdded && <span className="gpot-total">Total {chips(v.pot_total)}</span>}
+        </>
+    ) : v.in_hand || awards.length === 0 ? (
+        <span>Pot <strong>{chips(v.pot_total)}</strong></span>
+    ) : (
+        awards.map((a, k) => (
+            <span key={k} className="gpot-pill gpot-won">
+                {potLabel(a.pot, potCount)} <strong>{chips(a.amount)}</strong>
+                {' '}{a.shares.map(sh => seatLabel(sh.seat)).join(', ')}
+            </span>
+        ))
+    );
+
     const raiseLabel = (amount: number) => (bar?.raise && amount >= bar.raise.max ? `All-in ${chips(amount)}` : `${bar?.raise?.verb ?? 'Raise'} to ${chips(amount)}`);
 
     return (
         <div className="gtable gtable-holdem">
             <div className="games-scroll">
-                <div className="games-opps" role="list" aria-label="Players">
-                    {stripOrder(v).map(i => {
-                        const s = v.seats[i];
-                        if (!s) {
+                <div className={`gtable-oval${v.viewer_seat !== null ? ' gtable-oval-seated' : ''}`}>
+                    <div className="gtable-rail">
+                        <div className="gcentre">
+                            <div className="gpot">
+                                {pots}
+                            </div>
+                            <div className="gboard" role="group" aria-label="Board">
+                                {[0, 1, 2, 3, 4].map(k => {
+                                    const code = v.board[k];
+                                    if (code) {
+                                        const old = v.hand_no === opened.hand && k < opened.board;
+                                        return <FlipCard key={`${v.hand_no}-${k}-${code}`} code={code} delay={reveals[code] ?? 0} animate={!old} />;
+                                    }
+                                    // Not dealt yet: a plain back with no card in it.
+                                    return v.in_hand
+                                        ? <PlayingCard key={`${v.hand_no}-${k}-down`} code="??" size="md" />
+                                        : <CardSlot key={`${v.hand_no}-${k}-slot`} size="md" />;
+                                })}
+                            </div>
+                            <span className="gcentre-line">{centreLine}</span>
+                        </div>
+                    </div>
+                    <ul className="games-opps" aria-label="Players">
+                        {[...(v.viewer_seat !== null ? [v.viewer_seat] : []), ...stripOrder(v)].map(i => {
+                            const spot = spots[i];
+                            const style = { '--gx': `${spot.x}%`, '--gy': `${spot.y}%` } as CSSProperties;
+                            const s = v.seats[i];
+                            if (!s) {
+                                return (
+                                    <li key={i} className={`gseat gseat-empty gseat-side-${spot.side}`} style={style}>
+                                        <span className="gseat-name">Seat {i + 1}</span>
+                                        {gate.canSit && v.viewer_seat === null ? (
+                                            <button type="button" className="games-btn games-btn-primary gseat-sit" onClick={() => onSit(i)}>
+                                                Sit here
+                                            </button>
+                                        ) : (
+                                            <span className="gseat-meta">Open</span>
+                                        )}
+                                    </li>
+                                );
+                            }
+                            const status = seatStatus(s);
+                            const toAct = v.to_act === i && v.in_hand;
+                            const mine = i === v.viewer_seat;
+                            const realName = nameOf(s.user_id);
+                            const name = mine ? 'You' : realName;
                             return (
-                                <div key={i} role="listitem" className="gseat gseat-empty">
-                                    <span className="gseat-name">Seat {i + 1}</span>
-                                    {gate.canSit && v.viewer_seat === null ? (
-                                        <button type="button" className="games-btn games-btn-primary gseat-sit" onClick={() => onSit(i)}>
-                                            Sit here
-                                        </button>
-                                    ) : (
-                                        <span className="gseat-meta">Open</span>
-                                    )}
-                                </div>
-                            );
-                        }
-                        const status = seatStatus(s);
-                        const toAct = v.to_act === i && v.in_hand;
-                        const name = nameOf(s.user_id);
-                        return (
-                            <div
-                                key={i}
-                                role="listitem"
-                                className={`gseat${toAct ? ' gseat-turn' : ''}${s.status === 'folded' ? ' gseat-folded' : ''}${s.away ? ' gseat-away' : ''}`}
-                                aria-label={`${name}, ${chips(s.stack)} chips${status ? `, ${status}` : ''}${toAct ? ', to act' : ''}`}
-                            >
-                                <span className="gseat-top">
-                                    <SeatAvatar name={name} />
-                                    <span className="gseat-name">{name}</span>
-                                    {v.button === i && <span className="gbadge gbadge-dealer" title="Dealer button">D</span>}
-                                    {v.in_hand && v.small_blind_seat === i && <span className="gbadge" title="Small blind">SB</span>}
-                                    {v.in_hand && v.big_blind_seat === i && <span className="gbadge" title="Big blind">BB</span>}
-                                </span>
-                                <span className="gseat-mid">
-                                    <span className="gseat-stack">{chips(s.stack)}</span>
-                                    {s.cards && (
-                                        <span className="gseat-cards">
-                                            {s.cards.map((c, k) => <PlayingCard key={k} code={c} size="sm" muted={s.status === 'folded'} />)}
+                                <li
+                                    key={i}
+                                    className={`gseat gseat-side-${spot.side}${mine ? ' gseat-me' : ''}${toAct ? ' gseat-turn' : ''}${s.status === 'folded' ? ' gseat-folded' : ''}${s.status === 'all_in' ? ' gseat-allin' : ''}${s.away ? ' gseat-away' : ''}`}
+                                    style={style}
+                                    aria-label={`${name}, ${chips(s.stack)} chips${s.street_commit > 0 ? `, ${chips(s.street_commit)} bet` : ''}${v.button === i ? ', dealer' : ''}${status ? `, ${status}` : ''}${toAct ? ', to act' : ''}`}
+                                >
+                                    <span className="gseat-top">
+                                        <SeatAvatar name={realName} userId={s.user_id} fileId={avatarOf?.(s.user_id)} />
+                                        <span className="gseat-name">{name}</span>
+                                        {v.button === i && <span className="gbadge gbadge-dealer" title="Dealer button">D</span>}
+                                        {v.in_hand && v.small_blind_seat === i && <span className="gbadge" title="Small blind">SB</span>}
+                                        {v.in_hand && v.big_blind_seat === i && <span className="gbadge" title="Big blind">BB</span>}
+                                    </span>
+                                    <span className="gseat-mid">
+                                        <span className="gseat-stack">{chips(s.stack)}</span>
+                                        {s.cards && !mine && (
+                                            <span className="gseat-cards">
+                                                {s.cards.map((c, k) => <PlayingCard key={k} code={c} size="sm" muted={s.status === 'folded'} />)}
+                                            </span>
+                                        )}
+                                    </span>
+                                    {status && <span className={`gseat-status${s.status === 'all_in' ? ' gseat-status-allin' : ''}`}>{status}</span>}
+                                    {toAct && <TurnClock ms={v.clock_ms} receivedAt={table.receivedAt} totalSecs={v.config.turn_clock_secs} compact />}
+                                    {s.street_commit > 0 && (
+                                        <span className="gseat-bet" aria-hidden="true">
+                                            <span className="gchip" />
+                                            {chips(s.street_commit)}
                                         </span>
                                     )}
-                                </span>
-                                <span className="gseat-bottom">
-                                    {s.street_commit > 0 && <span className="gseat-commit">{chips(s.street_commit)}</span>}
-                                    {status && <span className="gseat-status">{status}</span>}
-                                </span>
-                                {toAct && <TurnClock ms={v.clock_ms} receivedAt={table.receivedAt} totalSecs={v.config.turn_clock_secs} compact />}
-                                {gate.canModerate && (
-                                    <button
-                                        type="button"
-                                        className="games-btn games-btn-ghost gseat-remove"
-                                        onClick={() => {
-                                            if (confirm(`Remove ${name} from the table? Their hand folds and they get up.`)) {
-                                                send(gameFrames.removePlayer(room, id, i));
-                                            }
-                                        }}
-                                    >
-                                        Remove
-                                    </button>
-                                )}
-                            </div>
-                        );
-                    })}
+                                </li>
+                            );
+                        })}
+                    </ul>
                 </div>
 
-                <div className="gcentre">
-                    <div className="gboard" aria-label="Board">
-                        {[0, 1, 2, 3, 4].map(k => (v.board[k]
-                            ? <PlayingCard key={k} code={v.board[k]} size="md" />
-                            : <CardSlot key={k} size="md" />))}
+                {gate.canModerate && v.seats.some((s, i) => s && i !== v.viewer_seat) && (
+                    <div className="games-actions-row games-mod-row" role="group" aria-label="Moderate the table">
+                        {v.seats.map((s, i) => {
+                            if (!s || i === v.viewer_seat) return null;
+                            const name = nameOf(s.user_id);
+                            return (
+                                <button
+                                    key={i}
+                                    type="button"
+                                    className="games-btn games-btn-ghost gseat-remove"
+                                    onClick={() => {
+                                        if (confirm(`Remove ${name} from the table? Their hand folds and they get up.`)) {
+                                            send(gameFrames.removePlayer(room, id, i));
+                                        }
+                                    }}
+                                >
+                                    Remove {name}
+                                </button>
+                            );
+                        })}
                     </div>
-                    <div className="gpot">
-                        <span>Pot <strong>{chips(v.pot_total)}</strong></span>
-                        <span className="gcentre-line">{centreLine}</span>
-                    </div>
-                </div>
+                )}
 
                 {me && !bar && (
                     <div className="games-actions-row games-seat-row">

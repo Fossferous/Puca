@@ -1,0 +1,131 @@
+<!doctype html>
+<!--
+  Real-browser harness for the Poker table (components/games/HoldemTable.tsx),
+  driven by e2e/poker-table-real-browser.mjs.
+
+  It mounts the real GamesView with the app's real global stylesheets and a
+  stand-in socket that delivers the contract's own fixture (a seated view on
+  the flop, src/tests/fixtures/games/holdem-table-seated.json), reshaped into
+  a four-handed hand with a short all-in: first the hand before the flop, then
+  - one version later, as a GameEvents with the board_dealt that names them -
+  the flop with a main pot and a side pot. jsdom cannot see any of what the
+  rig checks (the flip animation, reduced motion, where the seats land, the
+  felt's contrast), so this is a layout check only - nothing here talks to a
+  server.
+
+  SILENT: game sounds are switched OFF in this page's settings before anything
+  mounts, and the rig runs the browser with --mute-audio.
+
+  Serve with the dev server (`npx vite --port 5402 --strictPort --host
+  127.0.0.1` in frontend/) and open /e2e/poker-table-harness.html; call
+  window.__pokerFlop() to deal the flop.
+-->
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Poker table harness</title>
+    <style>
+        html, body { margin: 0; height: 100%; }
+        /* The app's .messages-container pads every view by 1rem 1.25rem (the
+           phone table takes that back with a negative margin). */
+        #root { height: 100vh; display: flex; flex-direction: column; box-sizing: border-box; padding: 1rem 1.25rem; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="module">
+        // Sounds off before any module reads the settings.
+        localStorage.setItem('sovereign_settings', JSON.stringify({ gameSounds: false, soundsEnabled: false }));
+        await import('/src/index.css');
+        await import('/src/App.css');
+        const [{ createRoot }, React, store, { GamesView }, { gamesGate }, { PERM }, seatedMod, settings] = await Promise.all([
+            import('react-dom/client'),
+            import('react'),
+            import('/src/api/games/gamesStore.ts'),
+            import('/src/components/games/GamesView.tsx'),
+            import('/src/api/games/gamesGate.ts'),
+            import('/src/api/permissionBits.ts'),
+            import('/src/tests/fixtures/games/holdem-table-seated.json'),
+            import('/src/components/settingsStore.ts'),
+        ]);
+        await import('/src/mobile.css');
+        settings.saveSettings({ ...settings.loadSettings(), gameSounds: false, soundsEnabled: false });
+
+        const handlers = new Map();
+        const ws = {
+            on: (t, h) => handlers.set(t, [...(handlers.get(t) ?? []), h]),
+            off: (t, h) => handlers.set(t, (handlers.get(t) ?? []).filter(x => x !== h)),
+            send: () => true,
+            hasServerFeature: (n) => n === 'games',
+        };
+        const deliver = (m) => { for (const h of handlers.get(m.type) ?? []) h(JSON.parse(JSON.stringify(m))); };
+        store.attachGamesSocket(ws);
+        deliver({ type: 'ServerFeatures', payload: { features: ['games'] } });
+        store.setGamesRoom('voice_42');
+        deliver({ type: 'RoomJoined', payload: { room_id: 'voice_42', members: [] } });
+
+        // Four players: seat 0 Ann (button), 1 Dee, 2 Ben (you: all-in, short), 4 Cat.
+        const base = JSON.parse(JSON.stringify(seatedMod.default));
+        const v = base.payload.view;
+        const seat = (s, user_id, stack, status, street, hand, cards) => ({
+            away: false, cards, hand_commit: hand, leaving: false, seat: s, sitting_out: false,
+            stack, status, street_commit: street, user_id,
+        });
+        const preflop = JSON.parse(JSON.stringify(base));
+        Object.assign(preflop.payload.view, {
+            board: [], street: 'preflop', pot_total: 360, pots: [], current_bet: 100, legal: null, to_act: 4,
+            small_blind_seat: 1, big_blind_seat: 2,
+            turn: { hand_no: 1, turn_seq: 3 }, clock_ms: 24000,
+        });
+        preflop.payload.view.seats = [
+            seat(0, 7, 900, 'in_hand', 100, 100, ['??', '??']),
+            seat(1, 10, 900, 'in_hand', 100, 100, ['??', '??']),
+            seat(2, 8, 0, 'all_in', 60, 60, v.seats[2].cards),
+            null,
+            seat(4, 9, 1000, 'in_hand', 0, 0, ['??', '??']),
+            null,
+        ];
+        preflop.payload.version = 7;
+        deliver(preflop);
+
+        const flop = JSON.parse(JSON.stringify(base));
+        flop.type = 'GameEvents';
+        flop.payload.version = 8;
+        Object.assign(flop.payload.view, {
+            pot_total: 420, current_bet: 60, to_act: 0, legal: null, turn: { hand_no: 1, turn_seq: 5 },
+            small_blind_seat: 1, big_blind_seat: 2,
+            pots: [{ amount: 240, eligible: [0, 1, 2, 4] }, { amount: 120, eligible: [0, 1, 4] }],
+        });
+        flop.payload.view.seats = [
+            seat(0, 7, 900, 'in_hand', 0, 100, ['??', '??']),
+            seat(1, 10, 900, 'in_hand', 0, 100, ['??', '??']),
+            seat(2, 8, 0, 'all_in', 0, 60, v.seats[2].cards),
+            null,
+            seat(4, 9, 840, 'in_hand', 60, 160, ['??', '??']),
+            null,
+        ];
+        flop.payload.events = [
+            { type: 'acted', seat: 4, kind: 'call', added: 100, street_commit: 100, all_in: false, reason: 'player' },
+            { type: 'board_dealt', street: 'flop', cards: v.board },
+            { type: 'acted', seat: 1, kind: 'check', added: 0, street_commit: 0, all_in: false, reason: 'player' },
+            { type: 'acted', seat: 4, kind: 'bet', added: 60, street_commit: 60, all_in: false, reason: 'player' },
+        ];
+        window.__pokerFlop = () => deliver(flop);
+
+        const isPhone = matchMedia('(pointer: coarse)').matches;
+        const gate = gamesGate({ feature: true, gamesEnabled: true, perms: PERM.CONNECT | PERM.PLAY_GAMES, inCall: true, hasTable: true });
+        createRoot(document.getElementById('root')).render(React.createElement(GamesView, {
+            roomId: 'voice_42',
+            serverId: 's1',
+            channelName: 'Table',
+            currentUserId: 8,
+            memberNames: new Map([[7, 'Ann'], [8, 'Ben'], [9, 'Cat'], [10, 'Dee']]),
+            gate,
+            isPhone,
+            onBack: () => {},
+        }));
+        window.__pokerReady = true;
+    </script>
+</body>
+</html>

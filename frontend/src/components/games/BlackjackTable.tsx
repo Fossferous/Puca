@@ -7,12 +7,15 @@ import { chips, eventLine } from '../../api/games/gameWords';
 import { PlayingCard } from './PlayingCard';
 import { AmountSheet, SeatAvatar, Stepper, TurnClock } from './GameBits';
 import { useCountdown } from './useCountdown';
+import { useGameSounds } from './useGameSounds';
 
 interface BlackjackTableProps {
     table: HeldTable & { view: BlackjackView };
     gate: GamesGate;
     isPhone: boolean;
     nameOf: (userId: number) => string;
+    /** userId -> avatar file id (absent: initials). */
+    avatarOf?: (userId: number) => string | null | undefined;
     currentUserId: number;
     onSit: (seat: number) => void;
     /** Send a frame; false when it did not go out (the socket is down). */
@@ -53,7 +56,7 @@ function HandView({ hand, size, active }: { hand: BlackjackHand; size: 'sm' | 'l
  * the first bet — the server's timer). The dealer's hole card is '??' until
  * the server turns it.
  */
-export function BlackjackTable({ table, gate, isPhone, nameOf, currentUserId, onSit, send, refusedAt }: BlackjackTableProps) {
+export function BlackjackTable({ table, gate, isPhone, nameOf, avatarOf, currentUserId, onSit, send, refusedAt }: BlackjackTableProps) {
     const v = table.view;
     const room = table.room_id;
     const id = table.table_id;
@@ -73,6 +76,7 @@ export function BlackjackTable({ table, gate, isPhone, nameOf, currentUserId, on
     // HoldemTable's `sheetFor`): a window is named by the round before it.
     const [sheetFor, setSheetFor] = useState<number | null>(null);
     const sheetOpen = sheetFor !== null && sheetFor === v.round_no && !v.in_round;
+    useGameSounds(table);
 
     const betAmount = bet && bet.round === v.round_no ? clampBet(bet.amount, range) : clampBet(me?.pending_bet || range.min, range);
     const busy = !!sent && sent.key === turnKey && sent.view === table && !(refusedAt !== null && refusedAt > sent.at);
@@ -137,7 +141,7 @@ export function BlackjackTable({ table, gate, isPhone, nameOf, currentUserId, on
                         return (
                             <div key={i} role="listitem" className={`gseat${toAct ? ' gseat-turn' : ''}${s.away ? ' gseat-away' : ''}`}>
                                 <span className="gseat-top">
-                                    <SeatAvatar name={name} />
+                                    <SeatAvatar name={name} userId={s.user_id} fileId={avatarOf?.(s.user_id)} />
                                     <span className="gseat-name">{name}</span>
                                 </span>
                                 <span className="gseat-mid">

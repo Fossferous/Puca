@@ -80,6 +80,14 @@ export function chips(n: number): string {
     return n.toLocaleString('en-US');
 }
 
+/** "Pot" when there is one; otherwise "Main pot", then "Side pot" - numbered
+ *  once there is more than one side pot. */
+export function potLabel(index: number, count: number): string {
+    if (count <= 1) return 'Pot';
+    if (index === 0) return 'Main pot';
+    return count === 2 ? 'Side pot' : `Side pot ${index}`;
+}
+
 const RANKS: Record<string, string> = {
     A: 'Ace', K: 'King', Q: 'Queen', J: 'Jack', T: '10', '9': '9', '8': '8', '7': '7', '6': '6', '5': '5', '4': '4', '3': '3', '2': '2',
 };

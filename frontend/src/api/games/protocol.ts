@@ -168,6 +168,13 @@ export interface HoldemLegal {
     max_raise_to: number;
 }
 
+/** A live pot: pot 0 is the main pot, every one after it a side pot. */
+export interface HoldemPot {
+    amount: number;
+    /** The seats that can still win it, in seat order. */
+    eligible: number[];
+}
+
 export interface HoldemView {
     game: 'holdem';
     viewer_seat: number | null;
@@ -181,7 +188,12 @@ export interface HoldemView {
     /** `config.max_seats` entries; null is an empty seat. */
     seats: (HoldemSeat | null)[];
     board: CardCode[];
+    /** Everything put in this hand, this street's bets included. */
     pot_total: number;
+    /** The main pot and the side pots from the streets that have closed
+     *  (this street's bets are each seat's `street_commit`); empty between
+     *  hands. An older server sends none: read as `[]` (show the total). */
+    pots: HoldemPot[];
     current_bet: number;
     to_act: number | null;
     turn: TurnRef | null;
@@ -555,6 +567,13 @@ function holdemView(v: Obj): HoldemView {
         })),
         board: cardList(v.board),
         pot_total: nat(v.pot_total),
+        // Absent from a server older than side-pot display: no breakdown.
+        pots: v.pots === undefined ? [] : arr(v.pots).map((p0) => {
+            const p = obj(p0);
+            const eligible = seatList(p.eligible);
+            if (eligible.some((s) => s >= config.max_seats)) throw new Junk('a pot names a seat out of range');
+            return { amount: nat(p.amount), eligible };
+        }),
         current_bet: nat(v.current_bet),
         to_act: optNat(v.to_act),
         turn: turn(v.turn),

@@ -336,6 +336,26 @@ describe('junk is refused, and what a newer server may add is tolerated', () => 
         expect(parse({ type: 'Error', payload: { message: 'x' } })).toBeNull();
     });
 
+    it('the live pots parse; an older server that sends none reads as no breakdown; a bad pot drops the frame', () => {
+        const f = parse(seated) as Extract<GameServerFrame, { type: 'GameTable' }>;
+        expect(f.view.game === 'holdem' && f.view.pots).toEqual([{ amount: 30, eligible: [0, 2, 4] }]);
+        const old = holdem();
+        delete (old.payload.view as Record<string, unknown>).pots;
+        const parsed = parse(old) as Extract<GameServerFrame, { type: 'GameTable' }>;
+        expect(parsed).not.toBeNull();
+        expect(parsed.view.game === 'holdem' && parsed.view.pots).toEqual([]);
+        for (const bad of [
+            [{ amount: -1, eligible: [0] }],
+            [{ amount: 10, eligible: [6] }], // max_seats is 6
+            [{ amount: 10 }],
+            { amount: 10, eligible: [0] },
+        ]) {
+            const b = holdem();
+            (b.payload.view as Record<string, unknown>).pots = bad;
+            expect(parse(b), JSON.stringify(bad)).toBeNull();
+        }
+    });
+
     it('unknown fields are ignored', () => {
         const f = holdem();
         (f.payload as Record<string, unknown>).later = true;

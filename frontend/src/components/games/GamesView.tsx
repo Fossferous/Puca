@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import { loadSettings, saveSettings } from '../settingsStore';
+import { gameSoundsSetting } from '../../api/games/gameSounds';
 import { createPortal } from 'react-dom';
 import { useGames } from '../../api/games/useGames';
 import { clearGamesNotice, consumeJoinRequest, sendGame } from '../../api/games/gamesStore';
@@ -9,7 +11,7 @@ import { disclosureSeen, markDisclosureSeen } from '../../api/games/gamesDisclos
 import { configFor, defaultForm, formProblem, type OpenTableForm } from '../../api/games/openTableConfig';
 import { gameFrames, type BlackjackView, type GameClientFrame, type GameKind, type HoldemView } from '../../api/games/protocol';
 import type { HeldTable } from '../../api/games/gamesStore';
-import { ArrowLeftIcon, CardsIcon, CloseIcon, InfoIcon, WarningIcon } from '../Icons';
+import { ArrowLeftIcon, CardsIcon, CloseIcon, InfoIcon, SpeakerIcon, SpeakerOffIcon, WarningIcon } from '../Icons';
 import { HoldemTable } from './HoldemTable';
 import { BlackjackTable } from './BlackjackTable';
 import './PlayingCard.css';
@@ -24,6 +26,8 @@ interface GamesViewProps {
     currentUserId: number;
     /** userId -> the name to show (server nickname / display name). */
     memberNames: Map<number, string>;
+    /** userId -> avatar file id, for the seats (absent or null: initials). */
+    memberAvatars?: Map<number, string | null>;
     gate: GamesGate;
     /** The JS half of the coarse-pointer gate (DESIGN_PHILOSOPHY §2). */
     isPhone: boolean;
@@ -106,12 +110,43 @@ function OpenTablePanel({ busy, onOpen }: { busy: boolean; onOpen: (kind: GameKi
 }
 
 /**
+ * The table's speaker button: Settings > Notifications > Card game sounds,
+ * from where the sounds are heard. With every sound switched off in Settings
+ * (Enable Sounds) it says so and cannot be turned on from here.
+ */
+function GameSoundsButton() {
+    const read = () => ({ on: gameSoundsSetting(), master: loadSettings().soundsEnabled !== false });
+    const [s, setS] = useState(read);
+    useEffect(() => {
+        const sync = () => setS(read());
+        window.addEventListener('settingsChanged', sync);
+        return () => window.removeEventListener('settingsChanged', sync);
+    }, []);
+    // A toggle: one fixed name, its state in aria-pressed; the tooltip says
+    // what a click will do.
+    const title = !s.master ? 'Game sounds are off: every sound is switched off in Settings' : s.on ? 'Mute game sounds' : 'Turn game sounds on';
+    return (
+        <button
+            type="button"
+            className="games-btn games-btn-ghost games-header-btn games-sound-btn"
+            aria-pressed={s.on}
+            aria-label="Game sounds"
+            title={title}
+            disabled={!s.master}
+            onClick={() => saveSettings({ ...loadSettings(), gameSounds: !s.on })}
+        >
+            {s.on ? <SpeakerIcon /> : <SpeakerOffIcon />}
+        </button>
+    );
+}
+
+/**
  * The card table in the main area (`viewMode: 'table'`), next to VoiceStage
  * inside .chat-main. Like VoiceStage it is presentation only: mounting or
  * leaving it never touches the call. The table itself lives in the games
  * store (api/games/gamesStore.ts), so closing this view loses nothing.
  */
-export function GamesView({ roomId, serverId, channelName, currentUserId, memberNames, gate, isPhone, onBack }: GamesViewProps) {
+export function GamesView({ roomId, serverId, channelName, currentUserId, memberNames, memberAvatars, gate, isPhone, onBack }: GamesViewProps) {
     const g = useGames();
     const table = g.table && g.table.room_id === roomId ? g.table : null;
     const notice = g.notice && g.notice.room_id === roomId ? g.notice : null;
@@ -127,6 +162,7 @@ export function GamesView({ roomId, serverId, channelName, currentUserId, member
         return ok;
     };
     const nameOf = (uid: number) => memberNames.get(uid) ?? `Player ${uid}`;
+    const avatarOf = (uid: number) => memberAvatars?.get(uid) ?? null;
     const sit = (seat: number) => {
         if (!table) return;
         if (!disclosureSeen(currentUserId, serverId)) { setPendingSit(seat); return; }
@@ -170,6 +206,7 @@ export function GamesView({ roomId, serverId, channelName, currentUserId, member
                     <span className="games-title-meta">{stakes ? `${stakes} · ` : ''}{channelName}</span>
                 </div>
                 <div className="games-header-controls">
+                    {table && <GameSoundsButton />}
                     {table && gate.canModerate && (
                         <button
                             type="button"
@@ -226,6 +263,7 @@ export function GamesView({ roomId, serverId, channelName, currentUserId, member
                     gate={gate}
                     isPhone={isPhone}
                     nameOf={nameOf}
+                    avatarOf={avatarOf}
                     currentUserId={currentUserId}
                     onSit={sit}
                     send={send}
@@ -237,6 +275,7 @@ export function GamesView({ roomId, serverId, channelName, currentUserId, member
                     gate={gate}
                     isPhone={isPhone}
                     nameOf={nameOf}
+                    avatarOf={avatarOf}
                     currentUserId={currentUserId}
                     onSit={sit}
                     send={send}
