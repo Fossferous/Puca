@@ -254,6 +254,27 @@ describe('an open note: the transcript goes through the text field, not behind i
         await act(async () => { remove!.click(); });
         expect(confirm.mock.calls[0][0]).toMatch(/Remove this voice note\?/);
     });
+
+    it('removing an attached song asks about an audio file, not a voice note', async () => {
+        const f = editorActions();
+        const withSong = {
+            ...card,
+            noteAttachments: JSON.stringify([{
+                href: `sovereign-enc:file-2?k=${'A'.repeat(43)}&m=${encodeURIComponent('audio/mpeg')}`,
+                name: 'm83-midnight-city.mp3',
+            }]),
+        } as unknown as NoteCard;
+        await act(async () => { root.render(<NoteContentSection card={withSong} actions={f.actions} tasks={[]} tasksLoaded />); });
+        await settle();
+        const confirm = vi.mocked(window.confirm);
+        confirm.mockClear();
+        confirm.mockReturnValue(false);
+        expect(byLabel('Remove voice note')).toBeFalsy();
+        const remove = byLabel('Remove audio file');
+        expect(remove, 'the song did not render as a removable gallery item').toBeTruthy();
+        await act(async () => { remove!.click(); });
+        expect(confirm.mock.calls[0][0]).toMatch(/Remove this audio file\?/);
+    });
 });
 
 // --- the composer --------------------------------------------------------------------

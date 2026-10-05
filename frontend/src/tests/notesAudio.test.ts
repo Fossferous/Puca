@@ -180,12 +180,36 @@ describe('what a gallery entry is CALLED', () => {
     // The Remove button's label and the confirm it opens come from here, so
     // "Remove voice note" can never open "Remove this picture?".
     it.each([
-        ['audio', 'voice note'],
         ['drawing', 'drawing'],
         ['image', 'picture'],
         ['file', 'picture'],
     ])('a %s is a "%s"', (kind, noun) => {
         expect(galleryItemNoun({ ref: ref('x', 'audio/webm'), kind: kind as 'audio' })).toBe(noun);
+    });
+
+    // The owner, 2026-10-05: an attached SONG's Remove button said "Remove
+    // voice note". Only what the Notes recorder made is a voice note: it
+    // hands over `voice.<ext>` in one of its own containers and every save
+    // names it `voice-<n>.<ext>` (nameAudioFiles). Name AND type must both
+    // say so; anything else that plays as audio is an "audio file".
+    it.each([
+        ['voice-1.webm', 'audio/webm;codecs=opus', 'voice note'],
+        ['voice-3.webm', 'audio/webm', 'voice note'],
+        ['voice-12.m4a', 'audio/mp4', 'voice note'],
+        ['m83-midnight-city.mp3', 'audio/mpeg', 'audio file'],
+        ['song.webm', 'audio/webm', 'audio file'],
+        ['voice-1.mp3', 'audio/mpeg', 'audio file'],
+        ['voice-1.m4a', 'audio/webm', 'audio file'],
+        ['voice.webm', 'audio/webm', 'audio file'],
+        ['take.opus', 'application/octet-stream', 'audio file'],
+    ])('an audio item %s (%s) is a "%s"', (name, mime, noun) => {
+        expect(galleryItemNoun({ ref: ref(name, mime), kind: 'audio' })).toBe(noun);
+    });
+
+    it('a recording parked offline is still a voice note, a parked song an audio file', () => {
+        const parked = (name: string, mime: string) => ({ href: `puca-parked:p-${name}?m=${encodeURIComponent(mime)}`, name });
+        expect(galleryItemNoun({ ref: parked('voice-2.webm', 'audio/webm'), kind: 'audio' })).toBe('voice note');
+        expect(galleryItemNoun({ ref: parked('song.mp3', 'audio/mpeg'), kind: 'audio' })).toBe('audio file');
     });
 });
 

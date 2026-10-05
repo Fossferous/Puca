@@ -23,7 +23,7 @@ import { type SealedFile, audioMimeFor, decryptToBlobUrl, encryptAndUploadRef, p
 import { prepareImageForUpload } from './imagePrep';
 import { bytesFromB64, bytesToB64, parkedHref, parseParkedRef } from './parkedMedia';
 import { addTaskListAttachments, deleteFiles, removeTaskListAttachments } from './listContent';
-import { assertClipUploadable } from '../notes/model/audioNote';
+import { AUDIO_CANDIDATE_MIMES, assertClipUploadable, extForMime } from '../notes/model/audioNote';
 
 /** The mime a drawing's editable strokes are uploaded under (next to its PNG). */
 export const DRAWING_STROKES_MIME = 'application/x-puca-drawing';
@@ -277,8 +277,9 @@ export function mediaCountLabel(photos: File[], drawings: number): string {
 
 /** One entry of a note's gallery. A drawing is its PNG plus the strokes file
  *  that makes it editable again; the strokes file is never shown on its own.
- *  An `audio` item is a voice note (or any audio file this engine can play)
- *  and gets a player, not a paperclip. */
+ *  An `audio` item is a voice note or any other audio file this engine can
+ *  play (isRecordedVoiceNote tells them apart), and gets a player, not a
+ *  paperclip. */
 export interface GalleryItem {
     ref: TaskAttachmentRef;
     kind: 'image' | 'drawing' | 'file' | 'audio';
@@ -292,8 +293,27 @@ export interface GalleryItem {
  *  attachment being deleted. One helper so the two cannot drift. */
 export function galleryItemNoun(item: GalleryItem): string {
     if (item.kind === 'drawing') return 'drawing';
-    if (item.kind === 'audio') return 'voice note';
+    // An attached song is not a voice note: its Remove button said "Remove
+    // voice note" (the owner, 2026-10-05).
+    if (item.kind === 'audio') return isRecordedVoiceNote(item.ref) ? 'voice note' : 'audio file';
     return 'picture';
+}
+
+/**
+ * Whether an audio ref is a recording the Notes recorder made. The recorder
+ * hands over `voice.<ext>` in one of its own containers (AUDIO_CANDIDATE_MIMES,
+ * extension from extForMime) and every save names it `voice-<n>.<ext>`
+ * (nameAudioFiles); a file the user attaches keeps its own name and type.
+ * Name AND type must both say so — neither alone proves it (a `voice-1.mp3`
+ * someone attached, a `song.webm`) — and anything that does not is an
+ * audio file. The server cannot tell them apart and is never asked.
+ */
+export function isRecordedVoiceNote(ref: TaskAttachmentRef): boolean {
+    const mime = mimeOf(ref);
+    const type = mime.split(';')[0].trim().toLowerCase();
+    if (!AUDIO_CANDIDATE_MIMES.some(c => c.split(';')[0] === type)) return false;
+    const m = /^voice-[1-9][0-9]*\.([a-z0-9]+)$/.exec(ref.name);
+    return !!m && m[1] === extForMime(mime);
 }
 
 function baseName(name: string): string {

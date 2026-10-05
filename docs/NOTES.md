@@ -1560,8 +1560,14 @@ Migration 065 gives a personal list three nullable columns, and
   button. Where a note is summed up instead of shown (the All-tasks board's
   snippet, a card's chip, a trashed note's line), a recording or any other
   audio file counts as a FILE (`galleryCounts`), never as a picture or as
-  nothing. A recording is never a card's hero
-  picture. On a phone, *Photo* offers the camera (`<input accept="image/*"
+  nothing. Only a recording is CALLED a voice note: its Remove button and the
+  confirm it opens say *Remove voice note*, any other audio file's say
+  *Remove audio file* (`galleryItemNoun`). A recording is told apart by what
+  the recorder gives it — the name `voice-<n>.<ext>` AND one of the
+  recorder's own containers (`audio/webm`, `audio/mp4`) with the matching
+  extension (`isRecordedVoiceNote`); a song attached as `song.webm`, or a
+  `voice-1.mp3` someone attached, is an audio file. A recording is never a
+  card's hero picture. On a phone, *Photo* offers the camera (`<input accept="image/*"
   capture>`); on Android that needs the `IMAGE_CAPTURE` entry under `<queries>`
   in each app's manifest, so the camera arrives with a new APK of each app, not
   with an OTA.

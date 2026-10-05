@@ -135,6 +135,17 @@ describe('NoteImages: a recording is a player, not a paperclip', () => {
         await settle();
         expect(container.querySelector('button[aria-label="Remove voice note"]')).not.toBeNull();
     });
+
+    it('removing an attached audio file does not call it a voice note', async () => {
+        // Same container as a recording (the mock types any .webm as the
+        // recorder's audio/webm), but the user's own name: not the recorder's.
+        const SONG = { href: 'enc:song.webm', name: 'concert.webm' };
+        await act(async () => { root.render(<NoteImages opened={sidecar([SONG, CLIP])} editable onRemove={() => {}} />); });
+        await settle();
+        expect(container.querySelectorAll('audio')).toHaveLength(2);
+        expect(container.querySelectorAll('button[aria-label="Remove audio file"]')).toHaveLength(1);
+        expect(container.querySelectorAll('button[aria-label="Remove voice note"]')).toHaveLength(1);
+    });
 });
 
 /** The recorder portals into document.body, so its DOM is queried there. */
