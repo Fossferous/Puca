@@ -4,6 +4,45 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Added
+- **Downloads on Android go where your phone looks — this needs the NEW
+  Android app (0.9.835), installed once; an update inside the app is not
+  enough.** **Download** on a clip or an attachment now saves videos to
+  **Movies/Puca**, pictures to **Pictures/Puca**, music to **Music/Puca**
+  and anything else to **Download/Puca**, so Google Photos and your gallery
+  show them. The phone fetches and decrypts the file itself and writes it
+  straight to storage instead of passing it through the app's web page, so a
+  large clip no longer has to squeeze through it piece by piece.
+- **Saved clips show their length and you can skip around in them.** Google
+  Photos and the phone's own player used to show no length for a saved Púca
+  Clip and could not seek; the phone now adds the missing length and seek
+  index to the file as it saves it (the video and sound themselves are not
+  touched). This also works for clips posted before this update.
+- **Downloads keep going with the screen off or the app in the background,
+  and can be cancelled.** A long download shows a notification with its
+  progress and a **Cancel** button; if it finishes while you are elsewhere, a
+  notification says it was saved (tap to open) or that it failed. Clips also
+  get a **Cancel** button next to **Download**, on every device. A cancelled
+  or failed download leaves nothing half-written behind.
+- **Download in a picture's full-screen view works in the Android app.** It
+  used to save nothing there; it now saves the picture to **Pictures/Puca**
+  (to Documents/Puca on an older Android app).
+
+### Improved
+- **Where a file goes is decided by what it really is, not by its name.** A
+  file called `.mp4` that is not really a video goes to Download/Puca with
+  `.bin` added to its name (`cat.mp4.bin`), so neither your gallery nor the
+  phone's media scanner treats it as one; rename it if you trust it. File
+  names from other people are cleaned up before they are saved.
+- **Saving an attachment on Android shows how much has arrived**
+  (`— 12.3 MB`), and when it fails it says why: no longer on the server,
+  the connection dropped, or it could not be decrypted.
+- **On an older Android app nothing changes**: saving keeps using
+  Documents/Puca until the new app is installed, and Android 9 and older keep
+  that folder for good.
+
 ## 0.9.833 — 2026-10-03
 
 Poker and Blackjack in voice calls, like Discord's Activities: start one from the rocket button, everyone in the call sees it and can join or watch.

@@ -64,6 +64,9 @@ export function ClipAttachment({ href, consent }: ClipAttachmentProps) {
     const [dlSaving, setDlSaving] = useState(false);
     const [dlError, setDlError] = useState<string | null>(null);
     const [savedWhere, setSavedWhere] = useState<string | null>(null);
+    // The running download's Cancel. Leaving the channel does NOT cancel it:
+    // only the viewer's own Cancel (here, or the phone's notification) does.
+    const dlAbortRef = useRef<AbortController | null>(null);
 
     // Every hook above the early return (React #310 class). The caller keys
     // this element by href, so a different clip in the same slot remounts —
@@ -120,22 +123,28 @@ export function ClipAttachment({ href, consent }: ClipAttachmentProps) {
     // first. api/clipDownload.ts saves the exact original bytes: on the
     // desktop shell through the native command every attachment uses (a bare
     // `<a download>` is NOT honoured in the Tauri webview), in a browser
-    // through a transient anchor, and in the Android app STREAMED part by
-    // part into Documents/Puca — building the whole clip and handing it to
-    // the filesystem plugin in one piece closed the app.
+    // through a transient anchor, and in the Android app natively — the phone
+    // fetches and decrypts the parts itself and writes Movies/Puca with the
+    // clip's duration and a seek index added (api/nativeDownloads.ts) — or,
+    // on an older APK, STREAMED part by part into Documents/Puca.
     const download = async () => {
         if (refused || tooLargeToDownload || dlState === 'downloading') return;
+        const ac = new AbortController();
+        dlAbortRef.current = ac;
         setDlState('downloading'); setDlPct(0); setDlSaving(false); setDlError(null); setSavedWhere(null);
         try {
-            const res = await saveClip(manifest, (p) => { setDlPct(downloadPercent(p)); setDlSaving(downloadSaving(p)); });
+            const res = await saveClip(manifest, (p) => { setDlPct(downloadPercent(p)); setDlSaving(downloadSaving(p)); }, ac.signal);
             if (res.cancelled) { setDlState('idle'); return; } // the Save As dialog was dismissed
             setSavedWhere(res.onDisk ? res.where : null);
             setDlState('saved');
         } catch (e) {
+            if ((e as { name?: string })?.name === 'AbortError') { setDlState('idle'); return; } // the viewer's Cancel
             const status = (e as { status?: number })?.status;
             if (status === 404 || status === 410) { setDlState('gone'); return; }
             setDlError(e instanceof Error ? e.message : String(e));
             setDlState('failed');
+        } finally {
+            if (dlAbortRef.current === ac) dlAbortRef.current = null;
         }
     };
 
@@ -212,6 +221,11 @@ export function ClipAttachment({ href, consent }: ClipAttachmentProps) {
                         <DownloadIcon size={14} />
                         {dlState === 'downloading' ? (dlSaving ? 'Saving…' : `Downloading ${dlPct}%`) : dlState === 'saved' ? (savedWhere ? 'Saved' : 'Download started') : 'Download'}
                     </button>
+                    {dlState === 'downloading' && (
+                        <button type="button" className="clip-attachment-cancel" onClick={() => dlAbortRef.current?.abort()}>
+                            Cancel
+                        </button>
+                    )}
                     {dlState === 'saved' && savedWhere && <span className="clip-attachment-saved">Saved to {savedWhere}</span>}
                 </div>
                 {dlState === 'gone' && <span className="clip-attachment-note"><WarningIcon size={13} /> This clip is no longer on the server.</span>}

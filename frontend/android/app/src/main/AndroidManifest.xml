@@ -125,6 +125,15 @@
             android:name=".TransferService"
             android:foregroundServiceType="dataSync"
             android:exported="false" />
+        <!-- Native downloads (Download on a clip or an attachment): keeps the
+             download running with the screen off or the app in the background,
+             and shows its progress with a Cancel action. Its own service, not
+             TransferService, which the page's P2P transfers start and stop from
+             JavaScript (DownloadService.java says why). Not exported. -->
+        <service
+            android:name=".DownloadService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
 
         <!-- Keeps the process (and the WebView's WebSocket/WebRTC) alive while
              a remote-control session is active, a voice call is live, or the

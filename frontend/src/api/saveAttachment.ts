@@ -27,6 +27,7 @@ import { isMobile, isTauri } from './platform';
 import { loadSettings } from '../components/settingsStore';
 import { chooseSavePath } from './savePath';
 import { PUCA_FOLDER, deviceWriteFailedMessage, saveBytesToDevice, timestampedName } from './saveToDevice';
+import { nativeDownloadsAvailable, saveAttachmentNatively, type EncRef } from './nativeDownloads';
 
 /** Where a saved file ended up, for the "Saved to …" line. */
 export interface SaveResult {
@@ -100,4 +101,47 @@ export async function saveAttachment(blobUrl: string, name: string, folder: stri
     a.click();
     a.remove();
     return { where: safeName, onDisk: false };
+}
+
+/**
+ * Save an encrypted attachment the viewer clicked Download on.
+ *
+ * In the Android app with the native download plugin (api/nativeDownloads.ts)
+ * the PHONE fetches the ciphertext again by its ref, decrypts it in Java and
+ * writes it into the shared folder it belongs in — Movies/Puca for a video,
+ * Pictures/Puca, Music/Puca, otherwise Download/Puca — so the bytes never
+ * cross the WebView bridge and the gallery sees the file with its duration
+ * and size. The copy this page already decrypted (for the inline player) is
+ * not used for that: handing it to Java would mean the bridge again. Costs
+ * one more download of at most 25 MB; buys the right folder and a file the
+ * phone's own apps understand.
+ *
+ * Everywhere else, and on an older APK, the decrypted copy is saved exactly
+ * as saveAttachment always did. `folder` (Púca Notes' own) keeps that path.
+ */
+export async function saveEncryptedAttachment(
+    blobUrl: string,
+    ref: EncRef | null,
+    name: string,
+    folder: string = PUCA_FOLDER,
+    onBytes?: (received: number, total: number | null) => void,
+): Promise<SaveResult> {
+    if (ref && folder === PUCA_FOLDER && !isTauri() && isMobile() && await nativeDownloadsAvailable()) {
+        return saveAttachmentNatively(ref, name || 'attachment', undefined, onBytes);
+    }
+    return saveAttachment(blobUrl, name, folder);
+}
+
+/**
+ * Why a Download failed, in a few words for the button. The native path
+ * rejects with a short `code` (api/nativeDownloads.ts); a fetch carries its
+ * HTTP `status`. Anything else is the device's own failure.
+ */
+export function saveFailureNote(err: unknown): string {
+    const e = err as { status?: unknown; code?: unknown } | null;
+    if (e?.status === 404 || e?.status === 410 || e?.code === 'gone') return 'no longer on the server';
+    if (e?.code === 'network') return 'the connection dropped, try again';
+    if (e?.code === 'decrypt') return 'could not be decrypted';
+    if (e?.code === 'denied') return 'the server refused it';
+    return 'could not save';
 }

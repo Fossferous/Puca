@@ -14,7 +14,8 @@ import { type TaskAttachmentRef } from '../api/tasks';
 import { parseEncAttachment, decryptToBlobUrl, videoMimeFor, audioMimeFor, isPlaylistBlobUrl } from '../api/attachments';
 import { ImageLightbox } from './ImageLightbox';
 import { CheckCircleIcon, CloseIcon, PaperclipIcon, WarningIcon } from './Icons';
-import { saveAttachment } from '../api/saveAttachment';
+import { saveEncryptedAttachment, saveFailureNote } from '../api/saveAttachment';
+import type { EncRef } from '../api/nativeDownloads';
 import { followOutputDeviceRef } from './settingsStore';
 import './TaskAttachments.css';
 
@@ -73,14 +74,14 @@ function AttachmentItem({ refItem }: { refItem: TaskAttachmentRef }) {
                     onClick={() => setZoomed(true)}
                 />
                 {zoomed && (
-                    <ImageLightbox url={url} name={refItem.name} onClose={() => setZoomed(false)} />
+                    <ImageLightbox url={url} name={refItem.name} encRef={parsed} onClose={() => setZoomed(false)} />
                 )}
             </>
         );
     }
     // A playlist never reaches a player, whatever its ref says: a <video> or
     // <audio> handed one fetches the URLs inside on its own (api/attachments.ts).
-    if (isPlaylistBlobUrl(url)) return <TaskFileDownload url={url} name={refItem.name} />;
+    if (isPlaylistBlobUrl(url)) return <TaskFileDownload url={url} name={refItem.name} encRef={parsed} />;
     // Both players sit on the Output Device chosen in Settings, not the OS default.
     if (videoMimeFor(refItem.name, parsed.mime)) {
         return <video ref={followOutputDeviceRef} className="ta-video" src={url} controls preload="metadata" title={refItem.name} />;
@@ -93,27 +94,30 @@ function AttachmentItem({ refItem }: { refItem: TaskAttachmentRef }) {
     // A BUTTON, never a link: `download` is ignored by middle-click and
     // "Open link in new tab", and a blob: document inherits this app's origin
     // while its MIME comes from whoever sent the file. See api/saveAttachment.
-    return <TaskFileDownload url={url} name={refItem.name} />;
+    return <TaskFileDownload url={url} name={refItem.name} encRef={parsed} />;
 }
 
-function TaskFileDownload({ url, name }: { url: string; name: string }) {
+function TaskFileDownload({ url, name, encRef }: { url: string; name: string; encRef: EncRef | null }) {
     const [state, setState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
     const [where, setWhere] = useState('');
+    const [failure, setFailure] = useState('');
     return (
         <button
             type="button"
             className={`ta-file ${state}`}
-            title={state === 'saved' ? `Saved to ${where}` : name}
+            title={state === 'saved' ? `Saved to ${where}` : state === 'error' ? `${name}: ${failure}` : name}
             disabled={state === 'saving'}
             onClick={async () => {
                 setState('saving');
                 try {
-                    const res = await saveAttachment(url, name);
+                    // The Android app saves natively from the ref (api/saveAttachment.ts).
+                    const res = await saveEncryptedAttachment(url, encRef, name);
                     if (res.cancelled) { setState('idle'); return; } // the Save As dialog was dismissed
                     setWhere(res.where);
                     setState('saved');
                 } catch (err) {
                     console.error('[task attachment] save failed:', err);
+                    setFailure(saveFailureNote(err));
                     setState('error');
                 }
             }}
