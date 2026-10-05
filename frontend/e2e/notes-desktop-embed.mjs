@@ -200,6 +200,10 @@ const FAKE_SHELL = `(() => {
         // No puca:// link parked by a launch: this walk's links arrive as
         // the running app's event (shell.emit below).
         deep_link_take: () => null,
+        // Stream pop-out windows (0.9.832, components/streamOsWindows.ts):
+        // asked once at boot. Not under test here; answered as a shell that
+        // has none, so the page keeps its in-page pop-outs.
+        popout_supported: () => false,
         // The clip orphan reaper asks once a minute (replayBuffer.ts); a walk
         // that runs past a minute used to meet it unanswered. Nothing native
         // is capturing in this shell.
