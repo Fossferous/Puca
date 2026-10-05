@@ -11,7 +11,9 @@
  *    start dropping it at once) the page's callback is gone: restarting the
  *    buffer all evening registers nothing that outlives its capture;
  *  - the shell's messages are played in the order it SENT them. A silent
- *    run is 56 bytes (no samples), which tauri evaluates in the page directly,
+ *    run is only its header and packet table (24 + 8 bytes a packet: 56 for
+ *    this file's four packets, 104 for the shell's usual ten), which tauri
+ *    evaluates in the page directly,
  *    while a batch of sound is >= 1 KiB and goes eval -> fetch -> callback,
  *    so a silent run can overtake the batch before it; the Channel's index puts
  *    them back in order.

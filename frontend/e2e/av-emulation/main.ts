@@ -206,6 +206,15 @@ const api = {
             }
         }
         const timeline = { packets: packets.length, misfit, misfitMs: misfitS * 1000, worstMs, where };
+        // THE END OF THE CLIP: where its picture ends (the last frame's
+        // timestamp plus its duration) against where its sound does. The
+        // seal waits for the sound still on its way at the press (the
+        // loopback's lead), so the two should end together, the sound at most
+        // the one AAC frame it keeps across the press past the picture.
+        let videoEnd = -Infinity;
+        for await (const p of new EncodedPacketSink(vt).packets()) videoEnd = Math.max(videoEnd, p.timestamp + p.duration);
+        const audioEnd = packets.reduce((e, p) => Math.max(e, p.t + p.d), -Infinity);
+        const soundShortMs = (videoEnd - audioEnd) * 1000;
         chunks.sort((a, b) => a.t - b.t);
         // Burst onsets: a loud sample after at least 200 ms of quiet.
         const onsets: number[] = [];
@@ -225,7 +234,7 @@ const api = {
         for (const f of flash) if (!flashes.length || f.t - flashes[flashes.length - 1] > 0.5) flashes.push(f.t);
         return {
             errors, durationMs: m.durationMs, videoFrames: lumas.length, yMin, yMax, hasMic: getReplayState().hasMic,
-            videoDecodable, timeline,
+            videoDecodable, timeline, soundShortMs,
             mp4B64: videoDecodable ? null : btoa(Array.from(all, b => String.fromCharCode(b)).join('')),
             flashes, brightFrames: flash.length, audioChunks: chunks.length, audioPeak: peak, onsets,
             // Per burst: audio onset minus its flash frame, ms (+ = audio late).

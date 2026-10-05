@@ -34,7 +34,16 @@
 // before the first burst as WASAPI-silent, which the shell sends as
 // messages with no samples the page schedules nothing for. The sound after that
 // silence must land exactly that much silence after the sound before it —
-// no re-prime — and the burst after it in sync like the others.
+// no re-prime — and the burst after it in sync like the others. What it does
+// NOT model: the shell's IPC per MESSAGE, after the send. The emulated
+// delivery delay (AUDIO_DELIVERY_MS) is paid per packet BEFORE it is read, so
+// its jitter lands in the packets' ages, which the real shell's IPC never
+// does; the emulated A/V spread of the batched wire is not a model of the
+// real one's (docs/CLIPS.md).
+//
+// THE CLIP'S END: the seal waits for the sound still on its way at the press
+// (replayWorker.ts seal()), so every run's clip must have sound right up to
+// its last frame — it used to stop a lead (~0.15 s) short.
 //
 //   cd frontend && node e2e/clip-av-emulation.mjs
 //   AV_BROWSER=chromium node e2e/clip-av-emulation.mjs   # no Edge: Playwright's
@@ -224,9 +233,18 @@ try {
         console.log(`  run ${r.runIndex}${tag}: the wire: ${w.packets} WASAPI packets in ${w.messages} messages (${(w.packets / Math.max(1, w.messages)).toFixed(1)} a message, ${(w.bytes / 1024).toFixed(0)} KiB); silent runs: ${sil.messages} messages with no samples, ${(sil.s * 1000).toFixed(0)} ms of silence in ${sil.bytes} bytes; the sound after each silence sat ${JSON.stringify(r.truth.lead.afterSilence)} ms off its chain`);
         ck(w.messages > 0 && w.packets >= 8 * w.messages, `run ${r.runIndex}${tag}: the audio arrived batched (~100 ms a message, not one per 10 ms packet)`, `${w.packets} packets / ${w.messages} messages`);
         if (r.extra) {
-            ck(sil.messages >= 14 && sil.bytes === 24 * sil.messages + 8 * sil.packets && Math.abs(sil.s - 1.6) < 0.05, `run ${r.runIndex}${tag}: the silence crossed the wire with no samples (a header and its packet table)`, `${sil.messages} messages, ${sil.bytes} bytes, ${(sil.s * 1000).toFixed(0)} ms`);
+            // A PRECONDITION, not a check of the shell: it counts what the
+            // EMULATOR sent against the formula the emulator was written
+            // from, so it proves this run exercised the silent path. The
+            // shell's own bytes are pinned by clip_audio_wire.rs's tests and
+            // the byte fixture both sides read (src/tests/audioWire.test.ts).
+            ck(sil.messages >= 14 && sil.bytes === 24 * sil.messages + 8 * sil.packets && Math.abs(sil.s - 1.6) < 0.05, `run ${r.runIndex}${tag}: precondition: the emulated shell sent the 1.6 s of silence as messages with no samples`, `${sil.messages} messages, ${sil.bytes} bytes, ${(sil.s * 1000).toFixed(0)} ms`);
             ck(r.truth.lead.afterSilence.length === 1 && Math.abs(r.truth.lead.afterSilence[0]) < 0.001, `run ${r.runIndex}${tag}: the sound after the silence landed exactly that much silence later (no re-prime: the playhead advanced through it)`, JSON.stringify(r.truth.lead.afterSilence));
         }
+        // The clip's end: the sound reaches its last frame, and runs past it
+        // by at most the one AAC (or 20 ms Opus) frame kept across the press.
+        console.log(`  run ${r.runIndex}${tag}: the clip's sound ends ${m.soundShortMs.toFixed(1)} ms before its picture (- = after)`);
+        ck(m.soundShortMs <= 2 && m.soundShortMs >= -23.4, `run ${r.runIndex}${tag}: the clip's sound runs to the end of its picture`, `${m.soundShortMs.toFixed(1)} ms short`);
         ck(r.truth.micDelayRamps.n < r.truth.lead.n / 20, `run ${r.runIndex}${tag}: the mic delay moves only with the lead, not per packet (each ramp is pitch-shifted mic)`, `${r.truth.micDelayRamps.n} ramps over ${r.truth.lead.n} packets`);
         if (!m.videoDecodable) {
             skip(`run ${r.runIndex}: A/V sync`, 'neither this browser nor ffmpeg decoded the video' + (m.errors.length ? ': ' + m.errors.join('; ') : ''));

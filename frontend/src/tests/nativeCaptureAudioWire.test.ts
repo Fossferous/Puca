@@ -15,17 +15,21 @@
  *    the stale death that lands after a successful retry.
  *
  * And the AUDIO WIRE itself (clip_audio_wire.rs -> audioWire.ts): the PCM
- * arrives on the Channel the start hands over, ~40 ms a message, planar, a
- * silent run as a header. The lead is still measured per WASAPI packet: a
- * batch names the packet whose sample would have been the largest on the
- * one-packet wire, and reports exactly that; silence advances the timeline
- * exactly and builds nothing.
+ * arrives on the Channel the start hands over, ~100 ms a message, planar, a
+ * silent run as a header and its packet table. The lead is still measured
+ * per WASAPI packet: every message lists its packets (frames, and how long
+ * before the send each was read), and the page takes each one's lead as the
+ * one-packet wire would have, under the same reporting rule; silence
+ * advances the timeline exactly, builds nothing, and opens a segment exactly
+ * as sound would. (The tests below use 40 ms messages: the size does not
+ * matter to the page, only the table.) Render times are checked to the ms
+ * against a frozen performance.now.
  *
  * jsdom has no AudioContext; a minimal stub stands in — this file tests the
  * WIRE, not the audio graph.
  */
 // @vitest-environment jsdom
-import { describe, test, expect, vi, beforeEach } from 'vitest';
+import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const invokeMock = vi.fn();
 type Listener = (e: { payload: unknown }) => void;
@@ -82,6 +86,15 @@ beforeEach(() => {
     listeners.clear();
     (window as unknown as Record<string, unknown>).AudioContext = StubAudioContext;
 });
+afterEach(() => { vi.restoreAllMocks(); });
+
+/** Freeze performance.now at `ms` (and move it with `set`), so a render time
+ *  the page reports (epoch ms) can be checked to the millisecond. */
+function freezeClock(ms: number) {
+    let t = ms;
+    vi.spyOn(performance, 'now').mockImplementation(() => t);
+    return { epoch: () => performance.timeOrigin + t, set: (v: number) => { t = v; } };
+}
 
 async function subject() {
     return await import('../api/clips/nativeCapture');
@@ -176,21 +189,20 @@ describe('the clip-audio invoke wire', () => {
         const { startNativeSystemAudioTrack } = await subject();
         const h = await startNativeSystemAudioTrack(undefined, null, (renderAt, leadMs, newSegment) => leads.push({ renderAt, leadMs, newSegment }));
         const ctx = StubAudioContext.last!;
-        const now = () => performance.timeOrigin + performance.now();
+        const now = freezeClock(10_000).epoch;
         ctx.currentTime = 0;
         deliver(packet(9)); // primes at now + 50 ms: a segment from now
         deliver(packet(9)); // appended: 60 ms ahead of a clock that did not move: growth
         expect(leads.map(l => [Math.round(l.leadMs), l.newSegment])).toEqual([[50, true], [60, false]]);
-        expect(Math.abs(leads[0].renderAt - now())).toBeLessThan(500);         // the first segment starts now
-        expect(Math.abs(leads[1].renderAt - 60 - now())).toBeLessThan(500);    // growth: the packet's render time
+        expect(Math.abs(leads[0].renderAt - now())).toBeLessThan(1);         // the first segment starts now
+        expect(Math.abs(leads[1].renderAt - 60 - now())).toBeLessThan(1);    // growth: the packet's render time
         ctx.currentTime = 1;               // the clock jumped past the playhead (0.07 s): an underrun
         deliver(packet(9)); // re-primed at now + 50 ms
         expect(leads[2].newSegment).toBe(true);
         expect(Math.round(leads[2].leadMs)).toBe(50);
         // The new segment governs from where the old content ENDED (0.07 s,
         // 930 ms before this clock), which is where the underrun's silence began.
-        expect(Math.abs(leads[2].renderAt - (now() - 930))).toBeLessThan(500);
-        expect(leads[2].renderAt).toBeLessThan(now() - 400);
+        expect(Math.abs(leads[2].renderAt - (now() - 930))).toBeLessThan(1);
         expect(StubAudioContext.stopped, 'an underrun re-prime stops nothing (nothing is pending)').toBe(0);
         // The drift reset: 60 more packets on a still clock push the playhead
         // 600 ms ahead; past MAX_BACKLOG_S (500) it re-primes at 50.
@@ -201,7 +213,7 @@ describe('the clip-audio invoke wire', () => {
         expect(Math.max(...grown)).toBeGreaterThanOrEqual(490); // it really climbed to the cap before resetting
         const reset = drift.find(l => l.newSegment)!;
         expect(Math.round(reset.leadMs)).toBe(50);
-        expect(Math.abs(reset.renderAt - now()), 'a reset cuts the backlog off NOW').toBeLessThan(500);
+        expect(Math.abs(reset.renderAt - now()), 'a reset cuts the backlog off NOW').toBeLessThan(1);
         // The reset DROPPED the backlog: every source still scheduled ahead was
         // stopped, not left to play over the re-primed packets.
         expect(StubAudioContext.stopped).toBeGreaterThanOrEqual(40);
@@ -254,7 +266,7 @@ describe('the clip-audio invoke wire', () => {
         const { startNativeSystemAudioTrack } = await subject();
         const h = await startNativeSystemAudioTrack(undefined, null, (renderAt, leadMs, newSegment) => leads.push({ renderAt, leadMs, newSegment }));
         const ctx = StubAudioContext.last!;
-        const now = () => performance.timeOrigin + performance.now();
+        const now = freezeClock(20_000).epoch;
         ctx.currentTime = 0;
         deliver(batch(4));
         expect(leads.map(l => [Math.round(l.leadMs), l.newSegment])).toEqual([[80, true]]);
@@ -266,12 +278,13 @@ describe('the clip-audio invoke wire', () => {
         expect(leads).toHaveLength(1);
         // One arriving 10 ms EARLY shows 10 ms more lead in every packet:
         // growth, reported once, at the render time of the first packet that
-        // showed it — as the one-packet wire would have.
+        // showed it — as the one-packet wire would have. That render time is
+        // the packet's own (60 ms ahead), not its lead (90).
         ctx.currentTime = 0.07;
         deliver(batch(4));
         expect(leads.map(l => Math.round(l.leadMs))).toEqual([80, 90]);
         expect(leads[1].newSegment).toBe(false);
-        expect(Math.abs(leads[1].renderAt - (now() + (0.13 - 0.07) * 1000))).toBeLessThan(500);
+        expect(Math.abs(leads[1].renderAt - (now() + (0.13 - 0.07) * 1000))).toBeLessThan(1);
         expect(ctx.starts.map(t => +t.toFixed(3))).toEqual([0.05, 0.09, 0.13]);
         await h.stop();
 
@@ -316,8 +329,9 @@ describe('the clip-audio invoke wire', () => {
     /** Packets are not read evenly. On the one-packet wire the one read
      *  soonest after its capture showed the most lead, and the segment kept
      *  that. Here the second of four arrives 2 ms after the first instead of
-     *  10 and shows 58 ms where the others show 50; the shell names it
-     *  (clip_audio_wire.rs: reads at 10/12/30/40 ms -> ages 30/28/10/0 ms),
+     *  10 and shows 58 ms where the others show 50; the message's table
+     *  carries every packet's age (clip_audio_wire.rs: reads at
+     *  10/12/30/40 ms -> ages 30/28/10/0 ms),
      *  and the batch reports the same growth the packets did. Had the batch
      *  been measured on its LAST packet it would have said 50 and the growth
      *  — 8 ms of A/V error in the clip — would never have been reported. */
@@ -361,6 +375,67 @@ describe('the clip-audio invoke wire', () => {
         expect(ctx.buffers).toHaveLength(2);
         expect(ctx.starts.map(t => +t.toFixed(4))).toEqual([0.05, 0.15]);
         expect(leads.filter(l => l.newSegment), 'one segment: the silence kept the playhead ahead').toHaveLength(1);
+        await h.stop();
+    });
+
+    /** The usual start: the buffer arms while nothing plays, so the first
+     *  messages are silent runs (WASAPI flags them). The silence primes the
+     *  segment exactly as sound would — it occupies the render timeline — and
+     *  the sound after it is chained on, with no second segment: a segment
+     *  start is what the worker reads every later lead against
+     *  (replayBuffer.ts leadReporter), so a missing or extra one misplaces
+     *  the clip's audio. */
+    test('arming during silence: the silent run opens the segment and the sound is chained after it', async () => {
+        invokeMock.mockResolvedValue({ device_name: 'Speakers', generation: 13 });
+        const leads: { renderAt: number; leadMs: number; newSegment: boolean }[] = [];
+        const { startNativeSystemAudioTrack } = await subject();
+        const h = await startNativeSystemAudioTrack(undefined, null, (renderAt, leadMs, newSegment) => leads.push({ renderAt, leadMs, newSegment }));
+        const ctx = StubAudioContext.last!;
+        const clock = freezeClock(30_000);
+        const at = (t: number) => { ctx.currentTime = t; clock.set(30_000 + t * 1000); };
+        at(0);
+        const primedAt = clock.epoch();
+        deliver(message({ generation: 13, packets: even(480), silent: true }));       // primes: 0.05 .. 0.09, nothing built
+        at(0.04);
+        deliver(message({ generation: 13, packets: even(480), silent: true }));       // 0.09 .. 0.13
+        at(0.08);
+        deliver(batch(13));                                                           // 0.13 .. 0.17
+        expect(ctx.buffers).toHaveLength(1);
+        expect(ctx.starts.map(t => +t.toFixed(4))).toEqual([0.13]);
+        // One report: the segment the silence opened, from the moment it
+        // primed, with its first packet's lead (JITTER_S + 30 ms held).
+        expect(leads.map(l => [Math.round(l.leadMs), l.newSegment])).toEqual([[80, true]]);
+        expect(Math.abs(leads[0].renderAt - primedAt)).toBeLessThan(1);
+        await h.stop();
+    });
+
+    /** An underrun whose first message is a silent run (the sound stopped,
+     *  then Windows started flagging silence): the silence re-primes and
+     *  opens the new segment where the old content ENDED (the underrun's
+     *  silence began there), and the sound after it is chained on. */
+    test('an underrun that resumes with silence re-primes on the silence', async () => {
+        invokeMock.mockResolvedValue({ device_name: 'Speakers', generation: 14 });
+        const leads: { renderAt: number; leadMs: number; newSegment: boolean }[] = [];
+        const { startNativeSystemAudioTrack } = await subject();
+        const h = await startNativeSystemAudioTrack(undefined, null, (renderAt, leadMs, newSegment) => leads.push({ renderAt, leadMs, newSegment }));
+        const ctx = StubAudioContext.last!;
+        const clock = freezeClock(40_000);
+        const at = (t: number) => { ctx.currentTime = t; clock.set(40_000 + t * 1000); };
+        at(0);
+        deliver(batch(14));                                                           // 0.05 .. 0.09
+        at(0.5);                                                                      // nothing for 410 ms: an underrun
+        const underrunAt = clock.epoch();
+        deliver(message({ generation: 14, packets: even(480), silent: true }));       // re-primes: 0.55 .. 0.59
+        at(0.52);
+        const soundAt = clock.epoch();
+        deliver(batch(14));                                                           // 0.59 .. 0.63, 70 ms ahead
+        expect(ctx.buffers).toHaveLength(2);
+        expect(ctx.starts.map(t => +t.toFixed(4))).toEqual([0.05, 0.59]);
+        expect(leads.map(l => [Math.round(l.leadMs), l.newSegment])).toEqual([[80, true], [80, true], [100, false]]);
+        // The new segment governs from 0.09, 410 ms before the clock it was seen at...
+        expect(Math.abs(leads[1].renderAt - (underrunAt - 410))).toBeLessThan(1);
+        // ...and the sound that came early shows growth at its own render time.
+        expect(Math.abs(leads[2].renderAt - (soundAt + 70))).toBeLessThan(1);
         await h.stop();
     });
 

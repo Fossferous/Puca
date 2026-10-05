@@ -318,7 +318,8 @@ fn capture_loop(
         // auto-reset: two periods landing while this thread was busy (a
         // send below, or a game holding the CPU) signal it ONCE, so reading
         // one packet per wake-up leaves one behind for good, each time that
-        // happens, until the 200 ms buffer is full and WASAPI throws
+        // happens, until the stream's buffer (20 ms asked for above:
+        // buffer_duration_hns 200_000 x 100 ns) is full and WASAPI throws
         // captured audio away. Chromium's own WASAPI capture loop drains the
         // same way.
         loop {

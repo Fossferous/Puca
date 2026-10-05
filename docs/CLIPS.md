@@ -88,6 +88,33 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
   The seal reads a list of units snapshotted at the press, and eviction
   waits while any seal runs, so GOPs closing mid-mux can neither enter
   the clip nor pull (and zero-fill) a unit out from under it.
+  **A native seal waits for the sound under the press (2026-10-05).**
+  Native audio reaches the worker a lead after it happened: the loopback
+  context renders every sample that long after its capture, and the mic
+  leg is delayed to match. So at the press the worker holds the picture up
+  to its last frame and the sound only up to about a lead before it, and a
+  clip sealed at once ended about a lead short of sound — ~0.15 s since
+  the batched desktop-audio wire below raised the lead from ~60 ms. Under
+  `e2e/clip-av-emulation.mjs` (2026-10-05) a seal that did not wait ended
+  the sound 174-214 ms before the picture; with the wait, 0.2-19.8 ms after
+  it (two sessions of four runs). The real app's figure is not measured.
+  `seal()` now notes where the picture ends at the press, waits until the
+  sound handed to the encoder reaches that point (with half a frame to
+  spare), or at most the current lead plus 100 ms (never over 1.2 s) if it
+  never does, flushes the audio encoder, and only then takes the snapshot,
+  capped at the press: frames that arrived meanwhile and sound placed past
+  the press stay out, and a unit opened meanwhile (a keyframe arrived)
+  gives the clip only its sound, which is filed by arrival. Eviction waits
+  from the press. The picker path does not wait. The half frame of spare
+  is placeAudio's: it keeps an entry at its predecessor's offset until its
+  target moves half a frame, so after a re-prime with a slightly smaller
+  lead the placed sound sits up to that much earlier than the lead says.
+  If another capture's clock arrives during the wait (restartNativeClock,
+  which drops the open unit), the seal fails with "the capture restarted
+  while the clip was being made" rather than muxing the new capture's first
+  frames as the clip. Pinned by `clipRingNative.test.ts` ("a clip's sound
+  runs right up to the press", six cases, each shown red without its part
+  of the fix) and by `e2e/clip-av-emulation.mjs`'s per-run end check.
 - **Discard / disarm / leave / channel switch / suspend / lock / quit** zero
   the buffers and drop the key (table below).
 
@@ -460,7 +487,10 @@ needs no picker).
     40 ms a message, the size first planned, the binary wire cost the page MORE
     than the base64 event it replaced whenever sound played; at 100 ms it
     costs less. The batch is held up to 90 ms longer in the shell, and the
-    lead (below) puts every ms of that back.
+    lead (below) puts every ms of that back. That hold is real latency all
+    the same: the loopback's lead went from about 60 ms to about 150, so
+    the sound reaches the clip worker that much later than the picture, and
+    the seal now waits for it (above, under **Clip**).
   - **Planar f32** after a little-endian header (version, flags,
     generation, rate, channels, frames, packet count) and a table of the
     WASAPI packets the message holds (each one's frames, and how long before
@@ -487,17 +517,23 @@ needs no picker).
     tried first: it takes the same maximum but reports it at different
     points than the per-packet rule, so the table is what makes the measure
     the same one, not just a similar one.)
-    Under `clip-av-emulation.mjs` (2026-10-04, four sessions each, interleaved
-    with the old wire): 0 audio-timeline misfits on both, the sound after a
-    1.6 s silent run exactly that much later, and the clip's system audio
-    23.3 ms late on average (1.6 to 33.7) where the old wire gave 21.8 (13.7
-    to 25.5). The average is the same within a couple of ms; the spread is
-    wider, and stays within about half an AAC frame (±10.7 ms: replayWorker.ts
-    keeps an entry at its predecessor's offset until its target moves that
-    far) of where the old wire's runs landed. Why batching widens it was not pinned down: it
-    persisted with all three ways of sending the lead, and disappeared with
-    one packet per message. A flash and a click through the real app is
-    still the only measure of the real total.
+    Under `clip-av-emulation.mjs` (2026-10-04, four sessions of four runs
+    each, interleaved with the old wire): 0 audio-timeline misfits on both,
+    the sound after a 1.6 s silent run exactly that much later, and the
+    clip's system audio 23.3 ms late on average (1.6 to 33.7) where the old
+    wire gave 21.8 (13.7 to 25.5). The average is the same within a couple
+    of ms; the spread is wider. The old wire's 16 runs fell in two groups
+    10 ms apart (about 14-15 and 24-25 ms: the step AudioContext.currentTime
+    moves in); the new wire's mostly near 20 and 30 ms, with two lower (1.6
+    and 9.5). Every run is within about one AAC frame (21.3 ms) of the old
+    wire's range — not the half frame an earlier version of this note
+    claimed (1.6 is 12.1 below 13.7). Why batching widens it was not pinned
+    down: it persisted with all three ways of sending the lead, and
+    disappeared with one packet per message. Nor is the emulation a model of
+    the real spread: its delivery delay is paid per packet BEFORE the read,
+    so that jitter lands in the packets' ages, where the real shell pays its
+    IPC once per message after the send, unseen by any age. A flash and a
+    click through the real app is still the only measure of the real total.
   - **Lifecycle.** Each start has its own Channel; the capture thread owns
     the shell's end and drops it when it ends (a refused start drops it at
     once), which unregisters the page's end. A stopped handle ignores what
@@ -510,7 +546,7 @@ needs no picker).
   Proved by `clip_audio_wire.rs`'s tests and `src/tests/audioWire.test.ts`
   (one byte fixture, `src/tests/fixtures/clip-audio-wire.json`, built by
   the Rust side and read by the page's), `nativeCaptureAudioWire.test.ts`
-  (the lead of a batch, silence, any format), `nativeCaptureAudioChannel.test.ts`
+  (the lead of a batch, silence and a segment that silence opens, any format), `nativeCaptureAudioChannel.test.ts`
   (tauri's real `Channel`: no callback outlives its capture across restarts,
   and a silent run that overtakes the batch before it still plays in
   order), and `e2e/clip-av-emulation.mjs`, whose emulated shell now batches

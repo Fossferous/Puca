@@ -35,7 +35,10 @@
         readbackLagMs: 2,
         // IPC (pipe -> Puca.exe -> base64 -> Tauri event) per chunk: min + jitter.
         videoIpcMs: [3, 12],
-        // WASAPI period (10 ms packets) + the same IPC, per packet.
+        // WASAPI period (10 ms packets) + the same IPC, per packet, paid
+        // BEFORE the packet is read: so in a batch its jitter shows up in the
+        // packets' ages. The real shell pays IPC once per MESSAGE, after the
+        // send, where no age sees it; this is not a model of that.
         audioDeliveryMs: [12, 25],
         sampleRate: 48000, channels: 2, packetFrames: 480,
         // Bursts, each tied to a flash frame: {frame, offsetMs}. Offset 0 is
