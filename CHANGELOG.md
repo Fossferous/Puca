@@ -19,7 +19,8 @@ one-line summary; this file is the full story. Versions follow
   Photos and the phone's own player used to show no length for a saved Púca
   Clip and could not seek; the phone now adds the missing length and seek
   index to the file as it saves it (the video and sound themselves are not
-  touched). This also works for clips posted before this update.
+  touched). This also works for clips posted before this update. A damaged
+  clip is still saved, though it may not get them.
 - **Downloads keep going with the screen off or the app in the background,
   and can be cancelled.** A long download shows a notification with its
   progress and a **Cancel** button; if it finishes while you are elsewhere, a
@@ -34,7 +35,9 @@ one-line summary; this file is the full story. Versions follow
 - **Where a file goes is decided by what it really is, not by its name.** A
   file called `.mp4` that is not really a video goes to Download/Puca with
   `.bin` added to its name (`cat.mp4.bin`), so neither your gallery nor the
-  phone's media scanner treats it as one; rename it if you trust it. File
+  phone's media scanner treats it as one; rename it if you trust it. Some
+  text files get `.bin` too, because phones use their extension for media as
+  well: a TypeScript file `notes.ts` is saved as `notes.ts.bin`. File
   names from other people are cleaned up before they are saved.
 - **Saving an attachment on Android shows how much has arrived**
   (`— 12.3 MB`), and when it fails it says why: no longer on the server,

@@ -265,6 +265,23 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
     samples or chunk offsets in the moov) is saved exactly as sealed; an
     `mfra` entry that points at no `moof` turns the `mfra` into a `free` box
     rather than leave a wrong index.
+  - **A clip is the poster's file, so reading it is bounded.** Every count
+    in it is theirs, and before these limits a crafted clip could hold the
+    one download thread for minutes or run the app out of memory (JVM, 192 MiB
+    heap, 2026-10-05: one `trun` claiming 2^32 samples took 1.3 s and 64 of
+    them over 30 s, with Cancel unable to stop it; a 24 MB part of empty
+    `moof`s, 72 MB of base-offset fragments, five 8 MB `mfra`s, or ONE 20 MB
+    init of 8-byte boxes each ran out of memory — and every later download
+    queued behind it). Now: a container of more than 1,024 boxes is not an
+    MP4 this touches; a run with no per-sample fields is `count x default`
+    with no loop, and more than 2^20 samples in one run is not understood;
+    the scan keeps at most 65,536 `moof` starts and 65,536 patches, then
+    stops reading boxes and retires the last `mfra` found through the
+    trailing `mfro`; an `mfra` that would not fit the budget is retired
+    whole. The same shapes now take under 0.2 s on that JVM and a few MB, and
+    giving up costs the fix (the manifest's duration, no seek index), never the save.
+    Cancel reaches inside a part: `ClipAssembler` and the scan poll it once
+    per box (`Fmp4SaveFixHostileTest`).
   - **Why not at the seal.** The desktop seal could write the `mehd` (it
     knows the length when it seals), but every clip ALREADY posted would
     still need this on download, the `sidx` needs every fragment's size (the
@@ -272,12 +289,23 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
     viewer's MSE player appends first — a change there reaches every client
     version for no gain on the phone, which fixes old and new clips alike.
   - **Liveness**: `DownloadService` (a dataSync foreground service with a
-    wake lock, its own notification with a **Cancel** action, deferred so a
-    short download never flashes one) keeps it going with the screen locked
+    wake lock and its own notification with a **Cancel** action) keeps it
+    going with the screen locked
     or the app in the background; a download finished while the app is not
     on screen leaves a "Saved …" (tap to open) or "Download failed"
     notification. The plate has a **Cancel** button too (every platform),
-    which aborts the fetch in flight and leaves nothing behind.
+    which aborts the fetch in flight and leaves nothing behind. The progress
+    notification asks to be deferred, and Android 12+ then keeps it out of
+    the shade for ~10 s, so a short download usually shows none (an explicit
+    `FOREGROUND_SERVICE_DEFERRED` outranks the "action buttons show at once"
+    rule, so the Cancel action does not matter). But Android grants an app
+    one deferral per two minutes (`deferred_fgs_notification_exclusion_time`
+    120000): within two minutes of the app's own keep-alive service starting
+    — so just after the app opens — or of an earlier download, it shows at
+    once and a short download flashes it. Measured 2026-10-05 on the
+    emulator saving a 22 MB attachment: id 4714 at +0.5 s inside that window,
+    never outside it, both with and without the Cancel action. Before
+    Android 12 there is no deferral at all.
   - **Errors** come back as codes the plate already speaks: `gone` (404/410)
     is "This clip is no longer on the server", `decrypt` names the part,
     `network` is a connection that dropped four times in a row (a dropped
@@ -296,7 +324,11 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
     `.bin` appended, because MediaStore's scanner types a published item by
     its extension, not by the MIME it was created with (measured: an HTML
     file saved as `fake-video.mp4` with `application/octet-stream` came back
-    as `video/mp4`, media_type VIDEO, in the video collection). The progress
+    as `video/mp4`, media_type VIDEO, in the video collection). That also
+    catches text whose extension Android maps to media: a TypeScript
+    `notes.ts` (`.ts` is MPEG-TS to `MimeTypeMap`) is saved as
+    `notes.ts.bin` (seen on the emulator), and `logo.svg` as
+    `logo.svg.bin`. The progress
     notification has its own id (4714): sharing KeepAliveService's 4712 made
     a download replace the keep-alive notification and leave it stuck on
     "Downloading …" (`NotificationIdsTest`).

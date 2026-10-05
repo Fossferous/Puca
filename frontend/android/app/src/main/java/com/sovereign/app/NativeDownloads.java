@@ -305,8 +305,10 @@ final class NativeDownloads {
                 SaveTarget target = target(outBuf, job.name, "video/mp4");
                 r.file = MediaStoreFile.create(app, target);
                 // Only an MP4 gets the container fix; anything else is saved as sealed.
+                // A Cancel reaches inside a part too (a CancellationException, which
+                // run() reports as "cancelled"), not only between parts.
                 boolean mp4 = target.mime.equals("video/mp4") || target.mime.equals("audio/mp4");
-                asm = new ClipAssembler(r.file, job.durationMs, mp4);
+                asm = new ClipAssembler(r.file, job.durationMs, mp4, () -> job.cancelled);
             }
             asm.part(i, outBuf);
             r.writeMs += SystemClock.elapsedRealtime() - t;

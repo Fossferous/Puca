@@ -32,10 +32,17 @@ import androidx.core.app.NotificationCompat;
  * does NOT stop when the task is swiped away: the download is native work
  * that needs no WebView, so it finishes and the notification says so.
  *
- * <p>The progress notification is DEFERRED (Android 12+ shows it only after
- * ~10 s): a 2-second attachment download should not flash a notification. It
- * carries a Cancel action. When a download ends while the app is not on screen,
- * a plain notification says it was saved (tap to open) or that it failed.
+ * <p>The progress notification asks to be DEFERRED: Android 12+ then holds
+ * it back ~10 s, so a 2-second attachment download shows nothing — even with
+ * its Cancel action, since an explicit FOREGROUND_SERVICE_DEFERRED outranks the
+ * "action buttons show at once" rule. But Android grants an app ONE deferral
+ * per two minutes (deferred_fgs_notification_exclusion_time = 120000 on the
+ * emulator): within two minutes of the app's own KeepAliveService starting, or
+ * of an earlier download, the system shows it at once and a short download
+ * flashes it (measured 2026-10-05: id 4714 at +0.5 s inside that window, never
+ * outside it, with and without the Cancel action). Before Android 12 there is
+ * no deferral. When a download ends while the app is not on screen, a plain
+ * notification says it was saved (tap to open) or that it failed.
  */
 public class DownloadService extends Service {
 

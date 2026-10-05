@@ -3,6 +3,8 @@ package com.sovereign.app;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.List;
+import java.util.concurrent.CancellationException;
+import java.util.function.BooleanSupplier;
 
 /**
  * Writes a clip's decrypted parts, in order, into one file — with the
@@ -27,6 +29,7 @@ final class ClipAssembler {
     private final Sink sink;
     private final long durationHintMs;
     private final boolean fix;
+    private final BooleanSupplier cancelled;
     private Fmp4SaveFix.Plan plan;
     private Fmp4SaveFix.Scanner scanner;
     private int nextIndex;
@@ -38,14 +41,25 @@ final class ClipAssembler {
      *             MP4 at all is still saved, just not touched)
      */
     ClipAssembler(Sink sink, long durationHintMs, boolean fix) {
+        this(sink, durationHintMs, fix, null);
+    }
+
+    /**
+     * @param cancelled polled before every part and once per box while a part
+     *                  is read; true throws {@link CancellationException}, so
+     *                  a Cancel stops a long or hostile part where it is
+     */
+    ClipAssembler(Sink sink, long durationHintMs, boolean fix, BooleanSupplier cancelled) {
         this.sink = sink;
         this.durationHintMs = durationHintMs;
         this.fix = fix;
+        this.cancelled = cancelled;
     }
 
     /** Part {@code index}'s plaintext, position to limit; parts arrive in order. */
     void part(int index, ByteBuffer plain) throws IOException {
         if (index != nextIndex) throw new IllegalStateException("part " + index + " out of order (expected " + nextIndex + ")");
+        if (cancelled != null && cancelled.getAsBoolean()) throw new CancellationException("download cancelled");
         nextIndex++;
         if (index == 0) {
             int len = plain.remaining();
@@ -58,7 +72,7 @@ final class ClipAssembler {
                 return;
             }
             put(ByteBuffer.wrap(plan.init));
-            scanner = new Fmp4SaveFix.Scanner(plan, plan.init.length);
+            scanner = new Fmp4SaveFix.Scanner(plan, plan.init.length, cancelled);
             if (plan.consumed < len) {
                 ByteBuffer rest = plain.duplicate();
                 rest.position(rest.position() + plan.consumed);

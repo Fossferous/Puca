@@ -25,6 +25,13 @@ public class DownloadInputsTest {
         assertFalse(DownloadInputs.isUuid("5f243cae0b1d4c2e9a7f30e62651d0f5"));
         assertFalse(DownloadInputs.isUuid(" 5f243cae-0b1d-4c2e-9a7f-30e62651d0f5"));
         assertFalse(DownloadInputs.isUuid(null));
+        // 36 characters, like a UUID, and still not one: a check that only
+        // counted characters (or dropped the character classes) passes these
+        assertFalse(DownloadInputs.isUuid("../../../../../../../../../../../../"));
+        assertFalse(DownloadInputs.isUuid("5f243cae-0b1d-4c2e-9a7f-30e62651d0g5"));
+        assertFalse(DownloadInputs.isUuid("5f243cae-0b1d-4c2e-9a7f/30e62651d0f5"));
+        assertFalse(DownloadInputs.isUuid("5f243cae0-b1d-4c2e-9a7f-30e62651d0f5"));
+        assertFalse(DownloadInputs.isUuid("@evil.example/aaaaaaaaaaaaaaaaaaaaaa"));
         assertArrayEquals(new byte[] { 0x00, (byte) 0xff, 0x10, (byte) 0xee, 0x22, 0x33, 0x44, 0x55, (byte) 0x88, (byte) 0x99, (byte) 0xaa, (byte) 0xbb, (byte) 0xcc, (byte) 0xdd, (byte) 0xee, (byte) 0xff },
                 DownloadInputs.uuidBytes("00ff10ee-2233-4455-8899-aabbccddeeff"));
     }
