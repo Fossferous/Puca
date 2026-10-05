@@ -98,9 +98,10 @@ one-line summary; this file is the full story. Versions follow
   going back to a channel is still instant, and past it the oldest are
   dropped. In a channel of thirty 22 MB videos, a minute after opening it,
   the app kept about 520 MB of decrypted files instead of 900 MB.
-- **At most four video or audio players are live at once**: every one on
-  screen, then the next ones in the direction you are scrolling, and one that
-  is playing keeps playing. A video waiting for its player already takes the
+- **Only the video and audio players nearest the screen are live**: every
+  one on screen, and off screen the next ones in the direction you are
+  scrolling, four in all unless more than that are on screen; one that is
+  playing keeps playing. A video waiting for its player already takes the
   player's space (for MP4, MOV, WebM and MKV files, nearly all of them), so
   nothing on the page moves as you scroll past videos posted one after
   another, and a video you paused carries on from where you left it when you
