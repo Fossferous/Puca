@@ -16,8 +16,10 @@ import type { ClipConsent } from '../api/servers';
 import { openExternalUrl } from '../api/openExternal';
 import { ImageLightbox } from './ImageLightbox';
 import { LockIcon, CheckCircleIcon, WarningIcon, PaperclipIcon, MusicIcon, SpeakerIcon } from './Icons';
-import { saveAttachment } from '../api/saveAttachment';
+import { saveEncryptedAttachment, saveFailureNote } from '../api/saveAttachment';
+import type { EncRef } from '../api/nativeDownloads';
 import { remoteImagesAllowed, followOutputDeviceRef } from './settingsStore';
+import { bytesOfText } from '../api/loadProgressText';
 import type { MemberWithRoles, Channel } from '../api/servers';
 
 /**
@@ -148,14 +150,14 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
                 {/* Enlarge in-app. openAttachmentBlob's window.open of a blob:
                     URL is a no-op in the Tauri and Capacitor shells. */}
                 <img src={url} alt={name} loading="lazy" onClick={() => setZoomed(true)} />
-                {zoomed && <ImageLightbox url={url} name={name} onClose={() => setZoomed(false)} />}
+                {zoomed && <ImageLightbox url={url} name={name} encRef={info} onClose={() => setZoomed(false)} />}
             </span>
         );
     }
     // A playlist (its BYTES open with #EXTM3U, whatever the ref says) never
     // reaches a player: a <video>/<audio> handed one fetches the URLs inside
     // on its own. It is the download chip (api/attachments.ts).
-    if (isPlaylistBlobUrl(url)) return <AttachmentDownload url={url} name={name || 'attachment'} />;
+    if (isPlaylistBlobUrl(url)) return <AttachmentDownload url={url} name={name || 'attachment'} encRef={info} />;
     if (videoMime && !embedFailed && !audioOnly) {
         // Inline player, same pattern TaskAttachments already uses: the
         // decrypted blob URL feeds a native <video> directly (safeBlobType
@@ -192,7 +194,7 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
                         if (e.currentTarget.videoWidth === 0 && e.currentTarget.videoHeight === 0) setAudioOnly(true);
                     }}
                 />
-                <AttachmentDownload url={url} name={name || 'attachment'} />
+                <AttachmentDownload url={url} name={name || 'attachment'} encRef={info} />
             </span>
         );
     }
@@ -233,11 +235,11 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
                         onError={() => setEmbedFailed(true)}
                     />
                 </span>
-                <AttachmentDownload url={url} name={name || 'attachment'} />
+                <AttachmentDownload url={url} name={name || 'attachment'} encRef={info} />
             </span>
         );
     }
-    return <AttachmentDownload url={url} name={name || 'attachment'} />;
+    return <AttachmentDownload url={url} name={name || 'attachment'} encRef={info} />;
 }
 
 /**
@@ -246,9 +248,12 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
  * to the blob, which inherits this app's origin while its MIME comes from
  * whoever sent the attachment. No blob URL is exposed as a link anywhere.
  */
-function AttachmentDownload({ url, name }: { url: string; name: string }) {
+function AttachmentDownload({ url, name, encRef }: { url: string; name: string; encRef: EncRef | null }) {
     const [state, setState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
     const [where, setWhere] = useState('');
+    // The Android app's native save reports how much has arrived; null elsewhere.
+    const [arrived, setArrived] = useState<string | null>(null);
+    const [failure, setFailure] = useState('could not save');
 
     return (
         <button
@@ -258,20 +263,24 @@ function AttachmentDownload({ url, name }: { url: string; name: string }) {
             disabled={state === 'saving'}
             onClick={async () => {
                 setState('saving');
+                setArrived(null);
                 try {
-                    const res = await saveAttachment(url, name);
+                    // The Android app saves natively from the ref (api/saveAttachment.ts).
+                    const res = await saveEncryptedAttachment(url, encRef, name, undefined, (got, total) => setArrived(got > 0 ? bytesOfText(got, total) : null));
                     if (res.cancelled) { setState('idle'); return; } // the Save As dialog was dismissed
                     setWhere(res.where);
                     setState('saved');
                 } catch (err) {
                     console.error('[attachment] save failed:', err);
+                    setFailure(saveFailureNote(err));
                     setState('error');
                 }
             }}
         >
             {state === 'saved' ? <CheckCircleIcon /> : state === 'error' ? <WarningIcon /> : <PaperclipIcon />} {name}
+            {state === 'saving' && arrived !== null && <span className="attachment-saved"> — {arrived}</span>}
             {state === 'saved' && <span className="attachment-saved"> — saved</span>}
-            {state === 'error' && <span className="attachment-saved"> — could not save</span>}
+            {state === 'error' && <span className="attachment-saved"> — {failure}</span>}
         </button>
     );
 }

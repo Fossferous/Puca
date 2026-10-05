@@ -29,6 +29,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(SovereignTransfersPlugin.class);
         registerPlugin(SovereignAppPlugin.class);
         registerPlugin(SovereignLocationPlugin.class);
+        registerPlugin(SovereignDownloadsPlugin.class);
         super.onCreate(savedInstanceState);
     }
 

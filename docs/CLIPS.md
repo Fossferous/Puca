@@ -218,7 +218,139 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
   memory. The cap also applies to the streamed Android download
   (`forEachClipPart`), although nothing there would need it. On desktop it is written through the native `attachment_save`
   command (a bare `<a download>` is not honoured in the Tauri webview); on
-  the web it is a transient anchor. In the Android app it is STREAMED into
+  the web it is a transient anchor. Desktop and web save the sealed bytes
+  exactly as they are (no container changes there; see *Not done* below).
+
+- **In the Android app the download is NATIVE** (an APK from 0.9.835 on;
+  `api/nativeDownloads.ts` → `SovereignDownloadsPlugin.java` →
+  `NativeDownloads.java`). The page hands Java the part ids, the clip key,
+  nonce prefix and clip id, its bearer and the API base it talks to; the
+  phone fetches every part itself from `<API base>/files/<id>`, opens it
+  (`DownloadCrypto.java`, byte-exact with `openPart`: the same header,
+  nonce and AAD checks, proved against vectors the real `sealPart` wrote —
+  `android/app/src/test/resources/download-vectors.json`, checked from both
+  sides by `downloadVectors.test.ts` and `DownloadVectorsTest.java`) and
+  streams it into **`Movies/Puca/puca-clip-<id>.mp4`** through MediaStore
+  (`IS_PENDING` while it is written; a second save of the same clip becomes
+  `puca-clip-<id> (1).mp4`). No byte of the clip crosses the WebView bridge.
+  Memory is two reused buffers of one part each (~25 MiB + ~25 MiB, GCM
+  verifies a whole part before releasing a byte), whatever the clip's
+  length; they are dropped when the last download ends.
+  - **Measured** on the emulator (2026-10-05, the same 129 MB 2:00 1440p
+    clip and 22 MB video attachment over the same loopback link, old and new
+    APK interleaved, 4 runs each): the clip took 22.3–23.9 s the old way and
+    16.7–17.0 s natively, of which all but ~0.2 s is the network (decrypt
+    ~30 ms, writes ~150 ms). Peak memory during it (dumpsys meminfo, PSS):
+    app 196 MB + WebView renderer 401 MB the old way, 220 + 165 MB natively.
+    The attachment is the one thing that got SLOWER: 1.9 s the old way
+    (the page already held it decrypted, so only the bridge write was left)
+    against 2.9–3.0 s natively, because the phone downloads it again.
+  - **The saved clip gets its duration and a seek index**, without a
+    re-encode or a moved media byte (`Fmp4SaveFix.java`). A sealed clip is
+    fragmented MP4 whose init was written before its length was known:
+    mvhd/tkhd/mdhd say 0, there is no `mehd`, and the only index is the
+    `mfra` at the end — Android's MediaExtractor reports no duration and
+    cannot seek, MediaStore stores no duration, Google Photos shows no length
+    or working seek bar. The save inserts an `mehd` into `mvex`, reserves a
+    region before the first `moof` that becomes `free` + a `sidx` (one
+    reference per video fragment, ending exactly at the first `moof`), writes
+    the real durations (read from the fragments' own `tfdt` + `trun`) into
+    mvhd, every tkhd and mdhd and the `mehd`, and moves every `tfra`
+    moof_offset by the bytes it inserted. Undoing exactly those changes gives
+    back the sealed file byte for byte — `DownloadVectorsTest` checks that on
+    a real mediabunny clip, and it held for a 129 MB 2:00 1440p clip saved on
+    the emulator (2026-10-05: same SHA-256 after the undo; ffprobe lists the
+    same 8,504 packets, every one with the same data hash). That clip then
+    had duration 120000 and 2560x1440 in MediaStore, MediaExtractor reported
+    120 s and sought to 28.6 s for a 30 s seek (before: no duration, every
+    seek landed on 0), and Google Photos showed `2:00` and seeked to 1:29.
+    An init it does not recognise (no `mvex`, an `mehd` already there,
+    samples or chunk offsets in the moov) is saved exactly as sealed; an
+    `mfra` entry that points at no `moof` turns the `mfra` into a `free` box
+    rather than leave a wrong index.
+  - **A clip is the poster's file, so reading it is bounded.** Every count
+    in it is theirs, and before these limits a crafted clip could hold the
+    one download thread for minutes or run the app out of memory (JVM, 192 MiB
+    heap, 2026-10-05: one `trun` claiming 2^32 samples took 1.3 s and 64 of
+    them over 30 s, with Cancel unable to stop it; a 24 MB part of empty
+    `moof`s, 72 MB of base-offset fragments, five 8 MB `mfra`s, or ONE 20 MB
+    init of 8-byte boxes each ran out of memory — and every later download
+    queued behind it). Now: a container of more than 1,024 boxes is not an
+    MP4 this touches; a run with no per-sample fields is `count x default`
+    with no loop, and more than 2^20 samples in one run is not understood;
+    the scan keeps at most 65,536 `moof` starts and 65,536 patches, then
+    stops reading boxes and retires the last `mfra` found through the
+    trailing `mfro`; an `mfra` that would not fit the budget is retired
+    whole. The same shapes now take under 0.2 s on that JVM and a few MB, and
+    giving up costs the fix (the manifest's duration, no seek index), never the save.
+    Cancel reaches inside a part: `ClipAssembler` and the scan poll it once
+    per box (`Fmp4SaveFixHostileTest`).
+  - **Why not at the seal.** The desktop seal could write the `mehd` (it
+    knows the length when it seals), but every clip ALREADY posted would
+    still need this on download, the `sidx` needs every fragment's size (the
+    seal streams parts out as it cuts them), and the init is what every
+    viewer's MSE player appends first — a change there reaches every client
+    version for no gain on the phone, which fixes old and new clips alike.
+  - **Liveness**: `DownloadService` (a dataSync foreground service with a
+    wake lock and its own notification with a **Cancel** action) keeps it
+    going with the screen locked
+    or the app in the background; a download finished while the app is not
+    on screen leaves a "Saved …" (tap to open) or "Download failed"
+    notification. The plate has a **Cancel** button too (every platform),
+    which aborts the fetch in flight and leaves nothing behind. The progress
+    notification asks to be deferred, and Android 12+ then keeps it out of
+    the shade for ~10 s, so a short download usually shows none (an explicit
+    `FOREGROUND_SERVICE_DEFERRED` outranks the "action buttons show at once"
+    rule, so the Cancel action does not matter). But Android grants an app
+    one deferral per two minutes (`deferred_fgs_notification_exclusion_time`
+    120000): within two minutes of the app's own keep-alive service starting
+    — so just after the app opens — or of an earlier download, it shows at
+    once and a short download flashes it. Measured 2026-10-05 on the
+    emulator saving a 22 MB attachment: id 4714 at +0.5 s inside that window,
+    never outside it, both with and without the Cancel action. Before
+    Android 12 there is no deferral at all.
+  - **Errors** come back as codes the plate already speaks: `gone` (404/410)
+    is "This clip is no longer on the server", `decrypt` names the part,
+    `network` is a connection that dropped four times in a row (a dropped
+    part is fetched again from its first byte after 1, 3 and 10 s, which
+    rides out a move between Wi-Fi and mobile data; a Cancel cuts a wait
+    short), `write` is the phone's storage. An ordinary
+    attachment saved the same way says the same reasons in a few words on
+    its button (`saveFailureNote`), and shows the MB arriving while it saves
+    (out of a total only when the response carries a Content-Length, which
+    GET /files, a stream, does not).
+  - **Where an attachment lands** is decided by its first 512 plaintext
+    bytes (`SaveTarget.java`), never by the sender's MIME or name: a
+    recognised picture, video or sound format goes to Pictures/Movies/Music
+    (`Puca` under each) with that format's MIME and extension; anything else
+    goes to Download/Puca. A name that CLAIMS media the bytes are not gets
+    `.bin` appended, because MediaStore's scanner types a published item by
+    its extension, not by the MIME it was created with (measured: an HTML
+    file saved as `fake-video.mp4` with `application/octet-stream` came back
+    as `video/mp4`, media_type VIDEO, in the video collection). That also
+    catches text whose extension Android maps to media: a TypeScript
+    `notes.ts` (`.ts` is MPEG-TS to `MimeTypeMap`) is saved as
+    `notes.ts.bin` (seen on the emulator), and `logo.svg` as
+    `logo.svg.bin`. The progress
+    notification has its own id (4714): sharing KeepAliveService's 4712 made
+    a download replace the keep-alive notification and leave it stuck on
+    "Downloading …" (`NotificationIdsTest`).
+  - **Security**: credentials go to ONE origin — the API base the APK was
+    BUILT for (`plugins.SovereignDownloads.apiBase` in the APK's
+    `capacitor.config.json`, written at `cap sync` from the same
+    `VITE_API_URL` the bundle is built against). The page's own base must
+    equal it or the plugin refuses; the URL is always `<base>/files/<uuid>`
+    with the id checked as a UUID; redirects are not followed (they would
+    carry the bearer); https only outside a debug build. Keys, tokens, ids
+    and names are never logged. The consent check stays where it was: a
+    clip whose manifest points at unapproved parts never gets a Download
+    button, so nothing is sent to the plugin.
+  - **Older APKs and Android 9 and older** (an over-the-air bundle arrives
+    before the new APK) keep the previous path, unchanged: the plugin name is
+    new, so `Capacitor.isPluginAvailable('SovereignDownloads')` is false
+    there; Android 9 and older (no MediaStore pending items) and an APK built
+    for another server than the page talks to say so through `status()`.
+    That path STREAMS the clip into
   `Documents/Puca/puca-clip-<id>-<timestamp>.mp4`: parts fetched, decrypted
   and written in order with the NEXT part downloading while this one is
   written, never more than two in hand (≤ 48 MiB of plaintext; ~72 MiB of
@@ -236,6 +368,12 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
   string; Android's bridge handler ran out of memory on the UI thread). The
   writer lives outside `api/clips/`, which `clipNoDiskWrite.test.ts` keeps
   free of every file API, the Capacitor filesystem included.
+- **Not done: the same container fix on desktop and the web.** Their
+  Download still saves the sealed bytes, so a clip saved on the PC has no
+  `mehd`/`sidx` (players that read the `mfra`, such as VLC and ffmpeg, seek
+  anyway). The desktop download already holds the whole clip in memory, so a
+  JS port of `Fmp4SaveFix` there would be simple; it was left out of this
+  change on purpose.
 
 ## What is NOT guaranteed — read this
 

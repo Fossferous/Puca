@@ -187,6 +187,24 @@
         linear-gradient(90deg, color-mix(in srgb, currentColor 30%, transparent) var(--clip-dl-pct, 0%), transparent var(--clip-dl-pct, 0%));
 }
 
+/* Stops a running download (it rejects with an AbortError; nothing is left
+   on the phone). Quieter than Download: no fill, transparent background. */
+.clip-attachment-cancel {
+    margin-left: 8px;
+    min-height: 28px;
+    padding: 4px 10px;
+    border: 1px solid rgba(127, 127, 127, 0.3);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-normal, #dcddde);
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+}
+.clip-attachment-cancel:hover { background: rgba(127, 127, 127, 0.15); }
+.clip-attachment-cancel:focus-visible { outline: 2px solid var(--brand-experiment, #5865f2); outline-offset: 2px; }
+[data-contrast="high"] .clip-attachment-cancel { border-color: currentColor; }
+
 .clip-attachment-broken {
     display: inline-flex;
     align-items: center;
@@ -201,5 +219,6 @@
     .clip-attachment-play { width: 64px; height: 64px; }
     .clip-attachment-meta { font-size: 13px; }
     .clip-attachment-download { min-height: 44px; padding: 0 14px; font-size: 13px; }
+    .clip-attachment-cancel { min-height: 44px; padding: 0 14px; font-size: 13px; }
 }
 .clip-attachment-saved { align-self: center; margin-left: 8px; font-size: 12px; color: var(--text-muted, #949ba4); }

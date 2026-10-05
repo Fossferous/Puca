@@ -198,9 +198,10 @@ export async function downloadClipBytes(
     m: ClipManifest,
     onProgress?: (p: ClipDownloadProgress) => void,
     fetchPart: PartFetcher = fetchPartBytes,
+    signal?: AbortSignal,
 ): Promise<Blob> {
     const chunks: Uint8Array[] = [];
-    await forEachClipPart(m, async (plain) => { chunks.push(plain); }, onProgress, fetchPart);
+    await forEachClipPart(m, async (plain) => { chunks.push(plain); }, onProgress, fetchPart, signal);
     return new Blob(chunks as BlobPart[], { type: 'video/mp4' });
 }
 
@@ -229,17 +230,24 @@ export async function downloadClipBytes(
  * for a 129 MB clip). With the next part on its way, the two overlap.
  *
  * A failure anywhere stops the run and cancels the part in flight. Hands
- * bytes to a callback only — it writes nothing itself.
+ * bytes to a callback only — it writes nothing itself. `signal` is the
+ * viewer's Cancel: it aborts the fetch in flight and the run rejects with an
+ * AbortError before another part is handed over.
  */
 export async function forEachClipPart(
     m: ClipManifest,
     onPart: (plain: Uint8Array, index: number) => Promise<void>,
     onProgress?: (p: ClipDownloadProgress) => void,
     fetchPart: PartFetcher = fetchPartBytes,
+    signal?: AbortSignal,
 ): Promise<void> {
     if (m.totalCipherBytes > CLIP_DOWNLOAD_MAX_BYTES) throw new Error(`this clip is ${Math.round(m.totalCipherBytes / (1024 * 1024))} MB — too large to download in the app`);
+    const cancelled = () => new DOMException('Download cancelled.', 'AbortError');
+    if (signal?.aborted) throw cancelled();
     const secrets = secretsOf(m);
     const abort = new AbortController();
+    const onAbort = () => abort.abort();
+    signal?.addEventListener('abort', onAbort, { once: true });
     const got = new Array<number>(m.parts.length).fill(0);
     let bytesDone = 0;
     let done = 0;
@@ -251,7 +259,8 @@ export async function forEachClipPart(
     try {
         let next = load(0);
         for (let i = 0; i < m.parts.length; i++) {
-            const plain = await next;
+            const plain = await next.catch((e) => { throw signal?.aborted ? cancelled() : e; });
+            if (signal?.aborted) throw cancelled();
             if (i + 1 < m.parts.length) {
                 next = load(i + 1);
                 next.catch(() => { /* surfaces when awaited — or was cancelled by the failure that ended the run */ });
@@ -261,6 +270,7 @@ export async function forEachClipPart(
             report();
         }
     } finally {
+        signal?.removeEventListener('abort', onAbort);
         abort.abort();
     }
 }

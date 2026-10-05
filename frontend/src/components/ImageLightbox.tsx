@@ -39,6 +39,9 @@ import { createPortal } from 'react-dom';
 import { useLayerOnScreen, usePortalTarget } from './portalTarget';
 import { canCopyImages, copyImageToClipboard, describeCopyFailure } from '../api/copyImage';
 import { CheckIcon, CloseIcon } from './Icons';
+import { isMobile, isTauri } from '../api/platform';
+import { saveEncryptedAttachment, saveFailureNote } from '../api/saveAttachment';
+import type { EncRef } from '../api/nativeDownloads';
 import { clampPanTo } from './deviceZoomFollow';
 import {
     zoomAt, isDoubleTap,
@@ -51,6 +54,16 @@ interface ImageLightboxProps {
     url: string;
     name?: string;
     onClose: () => void;
+    /**
+     * The encrypted attachment this picture was opened from. In the Android
+     * app a transient `<a download>` of a blob saves NOTHING (the WebView has
+     * no download handler), so with a ref Download goes through
+     * saveEncryptedAttachment like every other attachment: natively into
+     * Pictures/Puca on an APK with the download plugin, Documents/Puca on an
+     * older one. Without a ref (Notes' own pictures), and on desktop and the
+     * web, it is the anchor it always was.
+     */
+    encRef?: EncRef | null;
 }
 
 /**
@@ -81,11 +94,13 @@ const WHEEL_ZOOM_RATE = 0.002;
 /** The first contact of the current gesture — what a tap is judged from. */
 interface DownInfo { x: number; y: number; onPicture: boolean; moved: boolean }
 
-export function ImageLightbox({ url, name, onClose }: ImageLightboxProps) {
+export function ImageLightbox({ url, name, onClose, encRef }: ImageLightboxProps) {
     const portalTarget = usePortalTarget();
     const onScreen = useLayerOnScreen();
     const [copyState, setCopyState] = useState<'idle' | 'copying' | 'copied' | 'error'>('idle');
     const [copyError, setCopyError] = useState('');
+    const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+    const [saveNote, setSaveNote] = useState('');
     const [t, setT] = useState<Transform>(FIT);
     // The gesture handlers read the committed transform through this ref
     // (they run between renders); kept in sync by effect, not during render.
@@ -333,8 +348,28 @@ export function ImageLightbox({ url, name, onClose }: ImageLightboxProps) {
                                     : 'Copy'}
                     </button>
                 )}
-                <button className="image-lightbox-dl" onClick={() => downloadBlob(url, name)}>
-                    Download
+                <button
+                    className="image-lightbox-dl"
+                    disabled={saveState === 'saving'}
+                    title={saveState === 'saved' ? `Saved to ${saveNote}` : saveState === 'error' ? saveNote : undefined}
+                    onClick={async () => {
+                        if (encRef === undefined || isTauri() || !isMobile()) { downloadBlob(url, name); return; }
+                        setSaveState('saving');
+                        try {
+                            const r = await saveEncryptedAttachment(url, encRef, name || 'image');
+                            setSaveNote(r.where);
+                            setSaveState('saved');
+                        } catch (err) {
+                            console.error('[image] save failed:', err);
+                            setSaveNote(saveFailureNote(err));
+                            setSaveState('error');
+                        }
+                    }}
+                >
+                    {saveState === 'saving' ? 'Saving…'
+                        : saveState === 'saved' ? <>Saved <CheckIcon /></>
+                            : saveState === 'error' ? 'Could not save'
+                                : 'Download'}
                 </button>
             </div>
             {copyState === 'error' && copyError && (

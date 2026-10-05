@@ -1,4 +1,6 @@
 import type { CapacitorConfig } from '@capacitor/cli';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 // LITE VARIANT. `npm run cap:build:android:lite` sets PUCA_LITE=1.
 //
@@ -11,6 +13,35 @@ import type { CapacitorConfig } from '@capacitor/cli';
 // Only the LABEL differs, so an installed app says which variant it is.
 const LITE = process.env.PUCA_LITE === '1';
 
+/**
+ * The API origin the native download path may send credentials to
+ * (SovereignDownloadsPlugin.java). The SAME build-time value the web bundle
+ * is built against — VITE_API_URL from the environment, else .env.production,
+ * the order Vite and scripts/check-api-url.mjs use — written into the APK's
+ * capacitor.config.json at `cap sync`, i.e. in the same build step as the
+ * bundle it ships with. Pinned in the APK rather than taken from the page, so
+ * nothing a page passes can point the bearer at another host. Absent (no
+ * value), the plugin reports no API base and the page keeps its old save path.
+ */
+function buildApiBase(): string | undefined {
+    let v = process.env.VITE_API_URL;
+    if (!v) {
+        try {
+            const text = readFileSync(join(__dirname, '.env.production'), 'utf8');
+            for (const raw of text.split(/\r?\n/)) {
+                const line = raw.trim();
+                if (line.startsWith('#') || !line.startsWith('VITE_API_URL=')) continue;
+                v = line.slice('VITE_API_URL='.length).trim().replace(/^(["'])(.*)\1$/, '$2');
+            }
+        } catch {
+            v = undefined;
+        }
+    }
+    const base = (v ?? '').trim().replace(/\/+$/, '');
+    return base || undefined;
+}
+const API_BASE = buildApiBase();
+
 const config: CapacitorConfig = {
     appId: 'com.sovereign.app',
     appName: LITE ? 'Púca Lite' : 'Púca',
@@ -22,6 +53,8 @@ const config: CapacitorConfig = {
         androidScheme: 'https',
     },
     plugins: {
+        // The native download path's ONE permitted API origin (see buildApiBase).
+        SovereignDownloads: API_BASE ? { apiBase: API_BASE } : {},
         // Self-hosted OTA: UpdateGate drives the manual download/set flow
         // against /api/mobile-updates/check — autoUpdate must stay false or
         // the plugin also polls Capgo's cloud (unconfigured) and conflicts.
