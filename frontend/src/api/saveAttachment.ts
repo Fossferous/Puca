@@ -118,6 +118,11 @@ export async function saveAttachment(blobUrl: string, name: string, folder: stri
  *
  * Everywhere else, and on an older APK, the decrypted copy is saved exactly
  * as saveAttachment always did. `folder` (Púca Notes' own) keeps that path.
+ *
+ * `onUrlUnneeded` is called once the save is known NOT to read `blobUrl` —
+ * the native path, before it starts — so a caller that holds its copy for
+ * the save can let it go for what may be a long re-download. Never called on
+ * a path that reads the URL.
  */
 export async function saveEncryptedAttachment(
     blobUrl: string,
@@ -125,8 +130,10 @@ export async function saveEncryptedAttachment(
     name: string,
     folder: string = PUCA_FOLDER,
     onBytes?: (received: number, total: number | null) => void,
+    onUrlUnneeded?: () => void,
 ): Promise<SaveResult> {
     if (ref && folder === PUCA_FOLDER && !isTauri() && isMobile() && await nativeDownloadsAvailable()) {
+        onUrlUnneeded?.();
         return saveAttachmentNatively(ref, name || 'attachment', undefined, onBytes);
     }
     return saveAttachment(blobUrl, name, folder);

@@ -114,7 +114,8 @@ function audioPlayerRef(el: HTMLAudioElement | null): (() => void) | undefined {
  *  for a player is its player's card already, with a stand-in of the same
  *  size where the player goes, so getting one moves nothing; a paused one
  *  that gets a player again starts where it was. One that is playing, open
- *  in the lightbox or being saved is never let go. */
+ *  in the lightbox or being saved from this copy is never let go; only one
+ *  that is playing keeps its player beyond the closest few. */
 function EncryptedAttachment({ href, name }: { href: string; name: string }) {
     const [url, setUrl] = useState<string | null>(null);
     const [failed, setFailed] = useState(false);
@@ -138,7 +139,10 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
     const slotRef = useRef<HTMLElement | null>(null);
     const bindSlot = useCallback((el: HTMLElement | null) => { slotRef.current = el; setSlot(el); }, []);
     const [playing, setPlaying] = useState(false);
-    const [saving, setSaving] = useState(false);
+    // The Download chip's save, kept here rather than in the chip: the chip
+    // is unmounted whenever its card shows a placeholder (far off screen, or
+    // its player handed to a closer one), and a save outlives that.
+    const save = useAttachmentSave();
     // A player reported its picture size (noteAttachmentPictureSize): render
     // again with it.
     const [, pictureReported] = useReducer((n: number) => n + 1, 0);
@@ -148,8 +152,10 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
     // Back to the start once it has played to the end.
     const resumeAt = useRef(0);
     const zone = useAttachmentZone(slot, measureShown);
-    // In use: never taken away, however far it scrolls.
-    const busy = playing || zoomed || saving;
+    // In use: its copy is never let go, however far it scrolls. A save holds
+    // it only while the save reads it — not for the Android app's native
+    // save, which downloads the file again (api/saveAttachment.ts).
+    const busy = playing || zoomed || save.reading;
     const want = zone.near || busy;
     const info = parseEncAttachment(href);
     // Not just `mime.startsWith('video/')`: refs recorded before the upload
@@ -178,7 +184,10 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
     const shown = want ? url : null;
     const playlist = isPlaylistBlobUrl(shown);
     const wantsPlayer = !!shown && !playlist && !embedFailed && !!(videoMime || audioMime);
-    const player = usePlayerGrant(slot, wantsPlayer, busy, measureShown);
+    // Only one that is playing keeps its player beyond the closest few: a
+    // save reads the file, not the player (review finding 2026-10-05: tapping
+    // Download and scrolling on left a fifth player live for the whole save).
+    const player = usePlayerGrant(slot, wantsPlayer, playing, measureShown);
     useEffect(() => {
         setFailed(false);
         setEmbedFailed(false);
@@ -284,7 +293,7 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
         // never sees the revealing tap.
         <span className="message-video" ref={bindSlot} onClick={(e) => e.stopPropagation()}>
             {box}
-            {shown ? <AttachmentDownload url={shown} name={name || 'attachment'} encRef={info} onBusy={setSaving} /> : <AttachmentLoading fileId={info.id} />}
+            {shown ? <AttachmentDownload url={shown} name={name || 'attachment'} encRef={info} save={save} /> : <AttachmentLoading fileId={info.id} />}
         </span>
     );
     // An audio file's card: its name over the player (or the stand-in), the
@@ -302,7 +311,7 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
                 {soundOnly && <span className="message-audio-note">Sound only: no picture to show</span>}
                 {box}
             </span>
-            <AttachmentDownload url={url} name={name || 'attachment'} encRef={info} onBusy={setSaving} />
+            <AttachmentDownload url={url} name={name || 'attachment'} encRef={info} save={save} />
         </span>
     );
     // Nothing to show (not loaded yet, out of range, or a player that is not
@@ -355,7 +364,7 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
     // A playlist (its BYTES open with #EXTM3U, whatever the ref says) never
     // reaches a player: a <video>/<audio> handed one fetches the URLs inside
     // on its own. It is the download chip (api/attachments.ts).
-    if (playlist) return <AttachmentDownload url={shown} name={name || 'attachment'} encRef={info} ref={bindSlot} onBusy={setSaving} />;
+    if (playlist) return <AttachmentDownload url={shown} name={name || 'attachment'} encRef={info} ref={bindSlot} save={save} />;
     if (asVideo) {
         // Inline player, same pattern TaskAttachments already uses: the
         // decrypted blob URL feeds a native <video> directly (safeBlobType
@@ -436,7 +445,58 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
             />,
         );
     }
-    return <AttachmentDownload url={shown} name={name || 'attachment'} encRef={info} ref={bindSlot} onBusy={setSaving} />;
+    return <AttachmentDownload url={shown} name={name || 'attachment'} encRef={info} ref={bindSlot} save={save} />;
+}
+
+/** What a Download chip shows about its save (useAttachmentSave). */
+interface ChipSave {
+    phase: 'idle' | 'saving' | 'saved' | 'error';
+    /** Where the file went, for "Saved to …". */
+    where: string;
+    /** The Android app's native save reports how much has arrived; null elsewhere. */
+    arrived: string | null;
+    failure: string;
+}
+const IDLE_SAVE: ChipSave = { phase: 'idle', where: '', arrived: null, failure: 'could not save' };
+
+interface AttachmentSave {
+    state: ChipSave;
+    /** The save is reading the page's copy: its URL must stay valid until
+     *  then. False for the Android app's native save as soon as it starts. */
+    reading: boolean;
+    start: (url: string, encRef: EncRef | null, name: string) => Promise<void>;
+}
+
+/**
+ * An attachment's save, owned by the attachment rather than by its chip, so
+ * a chip unmounted mid-save (its card turned into a placeholder) comes back
+ * saying how far the save got — not as a fresh button that starts a second
+ * one.
+ */
+function useAttachmentSave(): AttachmentSave {
+    const [state, setState] = useState<ChipSave>(IDLE_SAVE);
+    const [reading, setReading] = useState(false);
+    const start = useCallback(async (url: string, encRef: EncRef | null, name: string) => {
+        setState({ ...IDLE_SAVE, phase: 'saving' });
+        setReading(true);
+        try {
+            // The Android app saves natively from the ref (api/saveAttachment.ts)
+            // and never reads `url`: it says so, and the copy may go.
+            const res = await saveEncryptedAttachment(
+                url, encRef, name, undefined,
+                (got, total) => setState((s) => ({ ...s, arrived: got > 0 ? bytesOfText(got, total) : null })),
+                () => setReading(false),
+            );
+            if (res.cancelled) { setState(IDLE_SAVE); return; } // the Save As dialog was dismissed
+            setState({ ...IDLE_SAVE, phase: 'saved', where: res.where });
+        } catch (err) {
+            console.error('[attachment] save failed:', err);
+            setState({ ...IDLE_SAVE, phase: 'error', failure: saveFailureNote(err) });
+        } finally {
+            setReading(false);
+        }
+    }, []);
+    return { state, reading, start };
 }
 
 /**
@@ -444,45 +504,24 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
  * left click — middle-click and "Open link in new tab" ignore it and navigate
  * to the blob, which inherits this app's origin while its MIME comes from
  * whoever sent the attachment. No blob URL is exposed as a link anywhere.
- * `onBusy` hears while a save runs: the URL must stay valid until it is done.
+ * `save` is the attachment's (useAttachmentSave), which keeps the URL valid
+ * while a save reads it.
  */
-function AttachmentDownload({ url, name, encRef, ref, onBusy }: { url: string; name: string; encRef: EncRef | null; ref?: Ref<HTMLButtonElement>; onBusy?: (busy: boolean) => void }) {
-    const [state, setState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
-    const [where, setWhere] = useState('');
-    // The Android app's native save reports how much has arrived; null elsewhere.
-    const [arrived, setArrived] = useState<string | null>(null);
-    const [failure, setFailure] = useState('could not save');
-
+function AttachmentDownload({ url, name, encRef, ref, save }: { url: string; name: string; encRef: EncRef | null; ref?: Ref<HTMLButtonElement>; save: AttachmentSave }) {
+    const { phase, where, arrived, failure } = save.state;
     return (
         <button
             type="button"
             ref={ref}
-            className={`message-attachment ${state}`}
-            title={state === 'saved' ? `Saved to ${where}` : `Download ${name}`}
-            disabled={state === 'saving'}
-            onClick={async () => {
-                setState('saving');
-                setArrived(null);
-                onBusy?.(true);
-                try {
-                    // The Android app saves natively from the ref (api/saveAttachment.ts).
-                    const res = await saveEncryptedAttachment(url, encRef, name, undefined, (got, total) => setArrived(got > 0 ? bytesOfText(got, total) : null));
-                    if (res.cancelled) { setState('idle'); return; } // the Save As dialog was dismissed
-                    setWhere(res.where);
-                    setState('saved');
-                } catch (err) {
-                    console.error('[attachment] save failed:', err);
-                    setFailure(saveFailureNote(err));
-                    setState('error');
-                } finally {
-                    onBusy?.(false);
-                }
-            }}
+            className={`message-attachment ${phase}`}
+            title={phase === 'saved' ? `Saved to ${where}` : `Download ${name}`}
+            disabled={phase === 'saving'}
+            onClick={() => { void save.start(url, encRef, name); }}
         >
-            {state === 'saved' ? <CheckCircleIcon /> : state === 'error' ? <WarningIcon /> : <PaperclipIcon />} {name}
-            {state === 'saving' && arrived !== null && <span className="attachment-saved"> — {arrived}</span>}
-            {state === 'saved' && <span className="attachment-saved"> — saved</span>}
-            {state === 'error' && <span className="attachment-saved"> — {failure}</span>}
+            {phase === 'saved' ? <CheckCircleIcon /> : phase === 'error' ? <WarningIcon /> : <PaperclipIcon />} {name}
+            {phase === 'saving' && arrived !== null && <span className="attachment-saved"> — {arrived}</span>}
+            {phase === 'saved' && <span className="attachment-saved"> — saved</span>}
+            {phase === 'error' && <span className="attachment-saved"> — {failure}</span>}
         </button>
     );
 }

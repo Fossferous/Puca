@@ -18,7 +18,7 @@
  * after a reader scrolled through them). A video waiting for a player already
  * takes the player's box, so getting one moves nothing; one that was paused
  * comes back where it was; one in use (playing, open in the lightbox, being
- * saved) keeps its copy.
+ * saved from its copy) keeps its copy, and only a playing one its player.
  *
  * Everything below runs through the REAL attachments module (fetch, AES-GCM,
  * the cache); only the network, the layout (each message has a fake y) and
@@ -31,11 +31,25 @@ import { createRoot, type Root } from 'react-dom/client';
 vi.mock('../api/auth', async (orig) => ({ ...(await orig<typeof import('../api/auth')>()), getToken: () => 'tok' }));
 // A save in progress, finished when the test says (saves.finish). The chip
 // saves through saveEncryptedAttachment (native on the Android app, else
-// saveAttachment), so both are the same held-open save here.
-const saves = vi.hoisted(() => ({ finish: [] as Array<() => void> }));
+// saveAttachment), so both are the same held-open save here. With
+// `saves.native` it is the Android app's native save: it says at once that
+// the page's copy is not needed (the phone downloads the file again), and
+// `saves.bytes` reports what has arrived.
+const saves = vi.hoisted(() => ({
+    finish: [] as Array<() => void>,
+    native: false,
+    bytes: [] as Array<(received: number, total: number | null) => void>,
+}));
 vi.mock('../api/saveAttachment', () => {
     const save = () => new Promise<{ cancelled: false; where: string }>((res) => { saves.finish.push(() => res({ cancelled: false, where: 'Downloads' })); });
-    return { saveAttachment: save, saveEncryptedAttachment: save, saveFailureNote: () => 'could not save' };
+    const saveEncrypted = (_url: string, _ref: unknown, _name: string, _folder?: string, onBytes?: (received: number, total: number | null) => void, onUrlUnneeded?: () => void) => {
+        if (saves.native) {
+            onUrlUnneeded?.();
+            if (onBytes) saves.bytes.push(onBytes);
+        }
+        return save();
+    };
+    return { saveAttachment: save, saveEncryptedAttachment: saveEncrypted, saveFailureNote: () => 'could not save' };
 });
 
 import { MessageContent } from '../components/MessageContent';
@@ -182,6 +196,7 @@ const videoOf = (id: string) => container.querySelector<HTMLElement>(`[data-y] v
 beforeEach(() => {
     served = new Map(); keys = new Map(); gates = new Map(); requested = []; created = []; revoked = [];
     inFlight = 0; mostInFlight = 0;
+    saves.native = false; saves.bytes.length = 0;
     FakeIO.all.clear();
     vi.stubGlobal('IntersectionObserver', FakeIO);
     // The players are re-ranked on the next frame after a scroll.
@@ -645,6 +660,57 @@ describe('a channel full of big videos', { timeout: 30000 }, () => {
         await act(async () => { saves.finish.shift()!(); });
         await settle();
         expect(revoked).toEqual([url]);
+    });
+
+    it('a video being saved keeps its copy but not a player past the four: the save reads the file, not the player', async () => {
+        // Review finding 2026-10-05: being saved counted as in use for the
+        // player too, so tapping Download and scrolling on left five live.
+        const wide = mp4Header({ tracks: [{ handler: 'vide', width: 1920, height: 1080 }] });
+        for (const id of ['s', 'a', 'b', 'c', 'd']) keys.set(id, await seal(id, 0, wide));
+        const scroll = await renderChannel([['s', 100], ['a', 1000], ['b', 1200], ['c', 1400], ['d', 1600]]);
+        await deliverAll();
+        const url = videoOf('s')!.getAttribute('src')!;
+        await act(async () => { container.querySelector<HTMLButtonElement>('[data-y="100"] .message-video button.message-attachment')!.click(); });
+        expect(saves.finish).toHaveLength(1);
+        await scroll([['s', -1000], ['a', 100], ['b', 300], ['c', 500], ['d', 700]]);
+        expect(container.querySelectorAll('video')).toHaveLength(MAX_LIVE_PLAYERS);
+        expect(videoOf('s')).toBeNull();
+        // Its card, with a stand-in for the player, and the chip still saving.
+        const card = container.querySelector('[data-y="-1000"] .message-video');
+        expect(card?.querySelector('span.video-box')).not.toBeNull();
+        expect(card?.querySelector<HTMLButtonElement>('button.message-attachment')?.disabled).toBe(true);
+        expect(revoked).not.toContain(url);
+        await act(async () => { saves.finish.shift()!(); });
+        await settle();
+        expect(card?.querySelector('button.message-attachment')?.className).toMatch(/\bsaved\b/);
+    });
+
+    it('saved natively (the Android app downloads it again), its copy is let go; back on screen the chip says how far the save got', async () => {
+        // Review finding 2026-10-05: the native save never reads the page's
+        // copy, yet the copy stayed held for the whole re-download.
+        __setRetainedAttachmentBudget(0);
+        saves.native = true;
+        const scroll = await renderChannel([['v', 100]]);
+        await deliver('v');
+        const url = videoOf('v')!.getAttribute('src')!;
+        const chip = () => container.querySelector<HTMLButtonElement>('.message-video button.message-attachment');
+        await act(async () => { chip()!.click(); });
+        expect(saves.finish).toHaveLength(1);
+        await act(async () => { saves.bytes[0](3 * 1024 * 1024, null); });
+        expect(chip()!.textContent).toMatch(/3(\.0)? MB/);
+        await scroll([['v', -5000]]);
+        expect(revoked).toEqual([url]);
+        expect(chip()).toBeNull();
+        // Back near: the file loads again, and the chip is not a fresh one
+        // that would start a second save.
+        await scroll([['v', 100]]);
+        await deliver('v');
+        expect(chip()!.disabled).toBe(true);
+        expect(chip()!.textContent).toMatch(/3(\.0)? MB/);
+        await act(async () => { saves.finish.shift()!(); });
+        await settle();
+        expect(chip()!.className).toMatch(/\bsaved\b/);
+        expect(chip()!.title).toBe('Saved to Downloads');
     });
 
     it("a Task's or a note's copy (decryptToBlobUrl) is never revoked to make room", async () => {

@@ -294,6 +294,33 @@ describe('Android with the native download plugin', () => {
         expect(h.listeners.length, 'the progress listener was removed').toBe(0);
     });
 
+    it('an attachment saved natively says at once that the page\'s copy is not needed: the phone downloads it again', async () => {
+        // Review finding 2026-10-05: the message's Download held its decrypted
+        // copy (and its player) for the whole native re-download, which never
+        // reads it.
+        let unneeded = 0;
+        const p = saveEncryptedAttachment('blob:unused', { id: '5f243cae-0b1d-4c2e-9a7f-30e62651d0f5', key: 'k', mime: 'video/mp4' }, 'clip.mp4', undefined, undefined, () => { unneeded++; });
+        await waitFor(() => h.saves.length === 1, 'the plugin was asked to save it');
+        expect(unneeded, 'told before the plugin settles').toBe(1);
+        h.saves[0].resolve({ where: 'Movies/Puca/clip.mp4', uri: 'content://media/y', bytes: 1, container: 'video' });
+        await p;
+        expect(unneeded).toBe(1);
+    });
+
+    it('a save that reads the page\'s copy never says it is not needed', async () => {
+        // Notes' own folder and an older APK both save the copy this page holds.
+        let unneeded = 0;
+        const blob = new Blob([patternBytes(10, 1)]);
+        vi.stubGlobal('fetch', vi.fn(async () => new Response(await new Response(blob).arrayBuffer())));
+        await saveEncryptedAttachment('blob:x', { id: '5f243cae-0b1d-4c2e-9a7f-30e62651d0f5', key: 'k', mime: 'text/plain' }, 'note.txt', NOTES_FOLDER, undefined, () => { unneeded++; });
+        h.nativePlugin = false;
+        resetNativeDownloadsForTests();
+        await saveEncryptedAttachment('blob:x', { id: '5f243cae-0b1d-4c2e-9a7f-30e62651d0f5', key: 'k', mime: 'text/plain' }, 'a.txt', undefined, undefined, () => { unneeded++; });
+        expect(disk.files.size, 'both were written from the copy').toBe(2);
+        expect(h.saves).toEqual([]);
+        expect(unneeded).toBe(0);
+    });
+
     it('a failed save says why in a few words', () => {
         expect(saveFailureNote(Object.assign(new Error('x'), { status: 410, code: 'gone' }))).toBe('no longer on the server');
         expect(saveFailureNote({ status: 404 })).toBe('no longer on the server');
