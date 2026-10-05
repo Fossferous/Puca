@@ -88,10 +88,10 @@ final class ClipAssembler {
     /** Applies the patches; returns the file's final length. */
     long finish() throws IOException {
         if (scanner != null) {
-            boolean sidx = scanner.sidxReady();
+            String noIndex = scanner.noIndexReason();
             List<Fmp4SaveFix.Patch> patches = scanner.finish(durationHintMs);
             for (Fmp4SaveFix.Patch p : patches) sink.writeAt(p.offset, ByteBuffer.wrap(p.bytes));
-            outcome = sidx ? "duration and seek index added" : "duration added (no seek index: " + (scanner.analysisOk() ? "too many fragments" : "fragments not understood") + ")";
+            outcome = noIndex == null ? "duration and seek index added" : "duration added (no seek index: " + noIndex + ")";
         }
         return written;
     }

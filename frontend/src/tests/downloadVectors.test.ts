@@ -21,6 +21,22 @@
  *
  * Regenerate (only when the FORMAT changes, which it must not silently):
  *   PUCA_UPDATE_DOWNLOAD_VECTORS=1 npx vitest run src/tests/downloadVectors.test.ts
+ *
+ * The same file carries `saveFix`: the container fix a saved clip gets
+ * (Fmp4SaveFix.java + ClipAssembler.java on the phone, api/clips/fmp4SaveFix.ts
+ * on desktop and the web). Each case is a list of parts — built from the real
+ * clip's parts, edited, or crafted to hurt the fix — a manifest duration, and
+ * the file that comes out: its length, SHA-256 and outcome, the whole file for
+ * the first case. BOTH suites must produce exactly that file from those parts,
+ * so the phone and the PC save the same clip as the same bytes. The expected
+ * outputs were first written from the JAVA side's results (its test prints
+ * them when they are missing) and the TS port then had to match them; the
+ * 17 shapes a review added later were written from the TS port, the Java
+ * side went red on 8 of them (and on 3 old cases whose log label changed),
+ * and the fixed Java then had to match;
+ *   PUCA_UPDATE_SAVEFIX_VECTORS=1 npx vitest run src/tests/downloadVectors.test.ts
+ * rewrites only `saveFix`, outputs from the TS port (=inputs: parts only, for
+ * the Java side to fill) — and then DownloadVectorsTest must still pass.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -32,6 +48,7 @@ import { Blob as NodeBlob, File as NodeFile } from 'node:buffer';
 import { sealPart, openPart, uuidToBytes, type ClipSecrets } from '../api/clips/clipCrypto';
 import { Fmp4Splitter, PART_RAMP_FRAGMENTS, type SplitPart } from '../api/clips/fmp4Split';
 import { sealFileForUpload } from '../api/attachments';
+import { ClipAssembler, MAX_MOOFS } from '../api/clips/fmp4SaveFix';
 
 for (const k of ['ReadableStream', 'WritableStream', 'TransformStream', 'ByteLengthQueuingStrategy', 'CountQueuingStrategy'] as const) {
     if (!(k in globalThis)) (globalThis as unknown as Record<string, unknown>)[k] = (webStreams as unknown as Record<string, unknown>)[k];
@@ -40,6 +57,16 @@ for (const k of ['ReadableStream', 'WritableStream', 'TransformStream', 'ByteLen
 const VECTORS = join(__dirname, '..', '..', 'android', 'app', 'src', 'test', 'resources', 'download-vectors.json');
 const FIXTURE = join(__dirname, 'fixtures', 'clip-avc-1s.mp4');
 const UPDATE = process.env.PUCA_UPDATE_DOWNLOAD_VECTORS === '1';
+const UPDATE_SAVEFIX = process.env.PUCA_UPDATE_SAVEFIX_VECTORS;
+
+/** A piece of a part: literal bytes, a real clip part (optionally edited at
+ *  offsets within it), or a unit repeated. DownloadVectorsTest.build reads
+ *  the same shapes. */
+type Seg = { hex: string } | { clip: number; edits?: [number, string][] } | { repeat: string | Seg[]; times: number };
+interface SaveFixCase {
+    name: string; durationMs: number; parts: Seg[][];
+    outBytes?: number; outSha256?: string; outcome?: string; out?: string;
+}
 
 interface ClipVectors {
     key: string; noncePrefix: string; clipId: string; durationMs: number;
@@ -53,6 +80,7 @@ interface Vectors {
     clip: ClipVectors;
     extraParts: { key: string; noncePrefix: string; clipId: string; parts: PartVector[] };
     attachments: AttachmentVector[];
+    saveFix?: { note: string; cases: SaveFixCase[] };
 }
 
 const hex = (u: Uint8Array) => Buffer.from(u).toString('hex');
@@ -187,6 +215,8 @@ describe('shared download vectors (JS seal -> Java native download)', () => {
 
     it.runIf(UPDATE)('regenerates the vectors from the real JS sealing', async () => {
         const v = await generate();
+        // saveFix is built from the clip: run PUCA_UPDATE_SAVEFIX_VECTORS=1 after this
+        v.saveFix = readVectors().saveFix;
         writeFileSync(VECTORS, JSON.stringify(v, null, 1) + '\n');
     }, 60_000);
 
@@ -249,5 +279,371 @@ describe('shared download vectors (JS seal -> Java native download)', () => {
             expect(again.key).toBe(a.key);
             expect(b64(again.wire)).toBe(a.wire);
         }
+    });
+});
+
+// ---- the container fix a saved clip gets: shared cases ---------------------------
+
+async function clipPlainsOf(v: Vectors): Promise<Uint8Array[]> {
+    const s = secretsOf(v.clip);
+    const out: Uint8Array[] = [];
+    for (let i = 0; i < v.clip.parts.length; i++) out.push(await openPart(s, i, unb64(v.clip.parts[i].wire)));
+    return out;
+}
+
+/** A part from its segments (DownloadVectorsTest.build is the Java twin). */
+function buildPart(segs: Seg[], clip: Uint8Array[]): Uint8Array {
+    const pieces: Uint8Array[] = [];
+    for (const s of segs) {
+        if ('hex' in s) {
+            pieces.push(unhex(s.hex));
+        } else if ('clip' in s) {
+            const b = clip[s.clip].slice();
+            for (const [at, hx] of s.edits ?? []) b.set(unhex(hx), at);
+            pieces.push(b);
+        } else {
+            const unit = typeof s.repeat === 'string' ? unhex(s.repeat) : buildPart(s.repeat, clip);
+            const r = new Uint8Array(unit.byteLength * s.times);
+            for (let i = 0; i < s.times; i++) r.set(unit, i * unit.byteLength);
+            pieces.push(r);
+        }
+    }
+    return concat(pieces);
+}
+
+/** What the desktop and web Download write for these decrypted parts. */
+function saveFixed(parts: Uint8Array[], durationMs: number): { bytes: Uint8Array; outcome: string } {
+    const a = new ClipAssembler(durationMs, true);
+    parts.forEach((p, i) => a.part(i, p));
+    const r = a.finish();
+    const bytes = concat(r.chunks);
+    expect(bytes.byteLength).toBe(r.bytes);
+    return { bytes, outcome: r.outcome };
+}
+
+// Box builders and a walker of their own (not the module's), as the Java
+// hostile test has.
+const be32 = (n: number) => { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, n >>> 0); return b; };
+const latin = (t: string) => Uint8Array.from(t, (c) => c.charCodeAt(0));
+function mkBox(type: string, ...kids: Uint8Array[]): Uint8Array {
+    const body = concat(kids);
+    return concat([be32(8 + body.byteLength), latin(type), body]);
+}
+/** A full box: version 0, the flags, then 32-bit fields. */
+function mkFull(type: string, flags: number, ...fields: number[]): Uint8Array {
+    const b = new Uint8Array(12 + 4 * fields.length);
+    const dv = new DataView(b.buffer);
+    dv.setUint32(0, b.byteLength); b.set(latin(type), 4); dv.setUint32(8, flags & 0xffffff);
+    fields.forEach((f, i) => dv.setUint32(12 + 4 * i, f >>> 0));
+    return b;
+}
+/** traf for `track`: tfhd (default-base-is-moof | flags), tfdt v0 = 0, then the truns. */
+function mkTraf(track: number, tfhdFlags: number, tfhdFields: number[], ...truns: Uint8Array[]): Uint8Array {
+    return mkBox('traf', mkFull('tfhd', 0x020000 | tfhdFlags, track, ...tfhdFields), mkFull('tfdt', 0, 0), ...truns);
+}
+const EMPTY_MOOF = mkBox('moof');
+const EMPTY_MDAT = mkBox('mdat');
+const be64 = (n: bigint) => { const b = new Uint8Array(8); new DataView(b.buffer).setBigUint64(0, n); return b; };
+/** A box header and nothing else: 8 bytes, no version byte. */
+const header8 = (type: string) => concat([be32(8), latin(type)]);
+/** An mfra holding one tfra (version 0, 1-byte numbers) of `n` entries, all pointing at `moofAt`. */
+function mfraSegs(track: number, moofAt: number, n: number, withMfro = false): Seg[] {
+    const entry = new Uint8Array(11); // time (4), moof_offset (4), traf/trun/sample numbers (1 each)
+    new DataView(entry.buffer).setUint32(4, moofAt);
+    const tfra = mkFull('tfra', 0, track, 0, n);
+    new DataView(tfra.buffer).setUint32(0, 24 + 11 * n);
+    const total = 8 + 24 + 11 * n + (withMfro ? 16 : 0);
+    const segs: Seg[] = [{ hex: hex(concat([be32(total), latin('mfra'), tfra])) }, { repeat: hex(entry), times: n }];
+    if (withMfro) segs.push({ hex: hex(mkFull('mfro', 0, total)) });
+    return segs;
+}
+interface WBox { start: number; size: number; type: string }
+function boxesIn(u8: Uint8Array, from: number, to: number): WBox[] {
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    const out: WBox[] = [];
+    for (let o = from; o < to;) {
+        const size = dv.getUint32(o);
+        if (size < 8 || o + size > to) throw new Error(`walker: bad box at ${o}`);
+        out.push({ start: o, size, type: String.fromCharCode(...u8.subarray(o + 4, o + 8)) });
+        o += size;
+    }
+    return out;
+}
+const kidsOf = (u8: Uint8Array, b: WBox) => boxesIn(u8, b.start + 8, b.start + b.size);
+const kidOf = (u8: Uint8Array, b: WBox, type: string) => {
+    const k = kidsOf(u8, b).find((x) => x.type === type);
+    if (!k) throw new Error(`walker: no ${type} in ${b.type}`);
+    return k;
+};
+const u32At = (u8: Uint8Array, o: number) => new DataView(u8.buffer, u8.byteOffset, u8.byteLength).getUint32(o);
+
+/**
+ * The cases: the real clip cut and labelled every way the phone can meet it,
+ * and every shape Fmp4SaveFixHostileTest builds to hurt the fix, plus the
+ * places the two languages' numbers differ (64-bit sizes, a track id past
+ * 2^31, a duration x timescale past 2^64).
+ */
+function saveFixCases(clip: Uint8Array[]): SaveFixCase[] {
+    const c0 = clip[0];
+    const each = (i: number) => [{ clip: i }] as Seg[];
+    const all = clip.map((_, i) => each(i));
+    const withInit = (edits: [number, string][]) => [[{ clip: 0, edits }] as Seg[], ...all.slice(1)];
+    const top = boxesIn(c0, 0, c0.length);
+    const moov = top.find((b) => b.type === 'moov')!;
+    expect(moov.start + moov.size, 'the init ends with its moov').toBe(c0.length);
+    const mvhd = kidOf(c0, moov, 'mvhd');
+    const mvex = kidOf(c0, moov, 'mvex');
+    const traks = kidsOf(c0, moov).filter((b) => b.type === 'trak').map((t) => {
+        const tkhd = kidOf(c0, t, 'tkhd'); const mdia = kidOf(c0, t, 'mdia');
+        const mdhd = kidOf(c0, mdia, 'mdhd'); const hdlr = kidOf(c0, mdia, 'hdlr');
+        expect(c0[tkhd.start + 8], 'tkhd version 0').toBe(0);
+        expect(c0[mdhd.start + 8], 'mdhd version 0').toBe(0);
+        return { tkhd, mdhd, id: u32At(c0, tkhd.start + 20), video: String.fromCharCode(...c0.subarray(hdlr.start + 16, hdlr.start + 20)) === 'vide' };
+    });
+    expect(c0[mvhd.start + 8], 'mvhd version 0').toBe(0);
+    const video = traks.find((t) => t.video)!;
+    const ref = video.id;
+    const trex = kidsOf(c0, mvex).find((b) => b.type === 'trex' && u32At(c0, b.start + 12) === ref)!;
+    // Part 1 starts with the first moof, so in the sealed file it sits right after the init.
+    const moofAt = c0.byteLength;
+    const lastIdx = clip.length - 1;
+    const last = clip[lastIdx];
+    const mfraAt = last.byteLength - u32At(last, last.byteLength - 4);
+    expect(String.fromCharCode(...last.subarray(mfraAt + 4, mfraAt + 8))).toBe('mfra');
+    const firstMoofOffsetAt = mfraAt + 8 + 24 + 8; // first tfra (v1), first entry's moof_offset
+    const wrong = new DataView(last.buffer, last.byteOffset).getBigUint64(firstMoofOffsetAt) + 1n;
+    const wrongHex = wrong.toString(16).padStart(16, '0');
+    const junk = Uint8Array.from({ length: 300 }, (_, i) => (i * 7) & 0xff);
+    const media = hex(concat([EMPTY_MOOF, EMPTY_MDAT]));
+    const one = (moof: Uint8Array): Seg[][] => [[{ clip: 0 }], [{ hex: hex(concat([moof, EMPTY_MDAT])) }]];
+
+    // a moof of 1000 trafs whose tfhd each carries a base_data_offset
+    const baseTraf = mkTraf(ref, 0x1, [0, 0]);
+    const baseMoofHead = concat([be32(8 + 1000 * baseTraf.byteLength), latin('moof')]);
+    // reading stops at a box too short to be one, after an mfra that was rewritten
+    const broken = concat([be32(4), latin('junk')]);
+    // a tfdt near 2^63, then one sample
+    const tfdtV1 = mkFull('tfdt', 0, 0x7fffffff, 0xffffff00);
+    tfdtV1[8] = 1;
+    // a moof too large to read: 9 MiB of a free box
+    const bigMoofBody = 4096 * 2304;
+    // the init stuffed with 5000 8-byte boxes inside its moov
+    const stuffedMoov: [number, string][] = [[moov.start, hex(be32(moov.size + 5000 * 8))]];
+    const free8 = hex(mkBox('free'));
+
+    // ---- the shapes the review of this port found (2026-10-05) ----
+    const bytesOf = (b: WBox) => c0.subarray(b.start, b.start + b.size);
+    const moovKids = kidsOf(c0, moov);
+    const initWith = (kids: Uint8Array[]) => hex(concat([c0.subarray(0, moov.start), mkBox('moov', ...kids)]));
+    const videoTs = u32At(c0, video.mdhd.start + 20);
+    // Another muxer's index in front of the media: a v0 sidx with one
+    // reference over every fragment (as ffmpeg's +global_sidx writes one), or
+    // an ssix. Its offsets count from its own end, so the region the fix
+    // reserves would land inside what it points at.
+    const mediaBytes = clip.slice(1).reduce((n, p) => n + p.byteLength, 0) - (last.byteLength - mfraAt);
+    const leadingSidx = mkFull('sidx', 0, ref, videoTs, 0, 0, 1, mediaBytes, 4 * videoTs, 0x90000000);
+    // An 8-byte mvhd, tkhd or mdhd as the very last bytes of part 0 (Java read
+    // its version byte past the array). The audio trak is moved last for the
+    // two inside a trak.
+    const audioTrak = moovKids.find((b) => b.type === 'trak' && u32At(c0, kidOf(c0, b, 'tkhd').start + 20) !== ref)!;
+    const audioMdia = kidOf(c0, audioTrak, 'mdia');
+    const lastTrak = (...kids: Uint8Array[]) => initWith([...moovKids.filter((b) => b.start !== audioTrak.start).map(bytesOf), mkBox('trak', ...kids)]);
+    const mvhdAtEnd = initWith([...moovKids.filter((b) => b.type !== 'mvhd').map(bytesOf), header8('mvhd')]);
+    const tkhdAtEnd = lastTrak(bytesOf(audioMdia), header8('tkhd'));
+    const mdhdAtEnd = lastTrak(bytesOf(kidOf(c0, audioTrak, 'tkhd')), mkBox('mdia', ...kidsOf(c0, audioMdia).filter((b) => b.type !== 'mdhd').map(bytesOf), header8('mdhd')));
+    // A moof child with a 64-bit size of 2^63 - 8: Java's off + size wrapped
+    // negative and (int) size stepped BACK 8 bytes, onto the mfhd's tail
+    // written to read as a 40-byte box, so Java kept parsing what TS refuses.
+    const tenFrames = mkTraf(ref, 0x8, [1500], mkFull('trun', 0, 10));
+    const overflowMoof = concat([be32(8 + 16 + 16 + 16 + tenFrames.byteLength), latin('moof'),
+        be32(16), latin('mfhd'), be32(40), latin('free'),
+        be32(1), latin('skip'), be64(0x7ffffffffffffff8n),
+        new Uint8Array(16), tenFrames]);
+    // The same at the top of part 0, after the moov: a free box whose last 8
+    // bytes read as a 32-byte box running to the end of part 0, then the 2^63 - 8
+    // box. Java stepped back onto those 8 bytes and took the init as fine.
+    const overflowTop = concat([be32(16), latin('free'), be32(32), latin('skip'),
+        be32(1), latin('wide'), be64(0x7ffffffffffffff8n), new Uint8Array(8)]);
+    // An mvhd of version 1 (64-bit times): the mehd must be version 1 too.
+    const mvhdV1 = concat([be32(120), latin('mvhd'), Uint8Array.of(1, 0, 0, 0),
+        be64(BigInt(u32At(c0, mvhd.start + 12))), be64(BigInt(u32At(c0, mvhd.start + 16))), c0.subarray(mvhd.start + 20, mvhd.start + 24), be64(0n),
+        c0.subarray(mvhd.start + 28, mvhd.start + mvhd.size)]);
+    const initV1 = initWith(moovKids.map((b) => (b.type === 'mvhd' ? mvhdV1 : bytesOf(b))));
+    // the mfro arriving in a final part shorter than 16 bytes, once reading has stopped
+    const lastMfra = mfraSegs(ref, moofAt, 1, true);
+    const mfroHex = (lastMfra.pop() as { hex: string }).hex;
+    const splitMfro = (tailBytes: number): Seg[][] => [[{ clip: 0 }], [{ hex: media }], mfraSegs(ref, moofAt, 1), [{ hex: hex(broken) }],
+        [...lastMfra, { hex: mfroHex.slice(0, 32 - 2 * tailBytes) }], [{ hex: mfroHex.slice(32 - 2 * tailBytes) }]];
+    // a tfra moof_offset cut across two parts: its patch spans both
+    const cut = firstMoofOffsetAt + 4;
+    // a trex for track 2^31 + ref: an UNSIGNED id no track has (Java's Long key never matches it)
+    const audioTrex = kidsOf(c0, mvex).find((b) => b.type === 'trex' && b.start !== trex.start)!;
+    const trexDefaults = mkBox('moof', mkTraf(ref, 0, [], mkFull('trun', 0, 10)));
+    // a fragment of one frame starting at `tfdt`
+    const frameAt = (tfdt: number) => mkBox('moof', mkBox('traf', mkFull('tfhd', 0x020008, ref, 1500), mkFull('tfdt', 0, tfdt), mkFull('trun', 0, 1)));
+
+    return [
+        { name: 'the real clip', durationMs: 4000, parts: all },
+        { name: 'the real clip, a manifest saying 0 ms', durationMs: 0, parts: all },
+        { name: 'the real clip, the longest manifest (2^32 - 1 ms: 65,535 references reserved)', durationMs: 0xffffffff, parts: all },
+        { name: 'the real clip, its init and first media part in one part', durationMs: 4000, parts: [[{ clip: 0 }, { clip: 1 }], ...all.slice(2)] },
+        { name: 'the real clip as one part', durationMs: 4000, parts: [clip.map((_, i) => ({ clip: i }))] },
+        { name: 'an mfra entry that points at no moof: the mfra is retired, the rest stands', durationMs: 4000, parts: [...all.slice(0, lastIdx), [{ clip: lastIdx, edits: [[firstMoofOffsetAt, wrongHex]] }]] },
+        { name: 'an mehd already there: saved as sealed', durationMs: 4000, parts: withInit([[kidsOf(c0, mvex)[0].start + 4, hex(latin('mehd'))]]) },
+        { name: 'no mvex: saved as sealed', durationMs: 4000, parts: withInit([[mvex.start + 4, hex(latin('free'))]]) },
+        { name: 'a QuickTime brand: the phone saves it as a .mov, untouched', durationMs: 4000, parts: withInit([[8, hex(latin('qt  '))]]) },
+        { name: 'an M4A brand: still an MP4, fixed', durationMs: 4000, parts: withInit([[8, hex(latin('M4A '))]]) },
+        { name: 'not an MP4 at all', durationMs: 4000, parts: [[{ hex: hex(junk) }], each(1)] },
+        { name: 'part 0 ending in half a box: init not recognised', durationMs: 4000, parts: [[{ clip: 0 }, { hex: hex(concat([be32(32), latin('free')])) }], ...all.slice(1)] },
+        { name: 'an init stuffed with 5,000 tiny boxes: saved as sealed', durationMs: 4000, parts: [[{ clip: 0, edits: stuffedMoov }, { repeat: free8, times: 5000 }], [{ hex: media }]] },
+        { name: 'a run declaring 2^32 - 1 samples, 64 times over', durationMs: 4000, parts: one(mkBox('moof', mkTraf(ref, 0, [], ...Array.from({ length: 64 }, () => mkFull('trun', 0, 0xffffffff))))) },
+        { name: 'runs with no per-sample fields: count x the default', durationMs: 4000, parts: one(mkBox('moof', mkTraf(ref, 0x8, [1500], mkFull('trun', 0, 40), mkFull('trun', 0, 2)))) },
+        { name: 'a run of 2^20 + 1 samples: not understood', durationMs: 4000, parts: one(mkBox('moof', mkTraf(ref, 0x8, [1500], mkFull('trun', 0, 0x100001)))) },
+        { name: 'a tfdt near 2^63 plus one sample: no wrapped duration', durationMs: 4000, parts: one(mkBox('moof', mkBox('traf', mkFull('tfhd', 0x020000, ref), tfdtV1, mkFull('trun', 0x100, 1, 0x1000)))) },
+        { name: 'a tfhd base_data_offset: an absolute offset that moves', durationMs: 4000, parts: one(mkBox('moof', mkTraf(ref, 0x1, [0, 1234], mkFull('trun', 0x100, 1, 3000)))) },
+        { name: 'a flood of empty moofs, past MAX_MOOFS', durationMs: 4000, parts: [[{ clip: 0 }], [{ repeat: hex(EMPTY_MOOF), times: MAX_MOOFS + 20_000 }]] },
+        { name: 'a flood of base-offset fragments, past MAX_PATCHES', durationMs: 4000, parts: [[{ clip: 0 }], [{ repeat: [{ hex: hex(baseMoofHead) }, { repeat: hex(baseTraf), times: 1000 }], times: 80 }]] },
+        { name: 'a flood of index entries: two mfras fit the budget, three are retired whole', durationMs: 4000, parts: [[{ clip: 0 }], [{ hex: media }], [{ repeat: mfraSegs(ref, moofAt, 30_000), times: 5 }]] },
+        { name: 'an mfra too large to read: retired unread', durationMs: 4000, parts: [[{ clip: 0 }], [{ hex: media }], mfraSegs(ref, moofAt, 800_000)] },
+        { name: 'a moof too large to read: no index', durationMs: 4000, parts: [[{ clip: 0 }], [{ hex: hex(concat([be32(16 + bigMoofBody), latin('moof'), be32(8 + bigMoofBody), latin('free')])) }, { repeat: '00'.repeat(4096), times: 2304 }, { hex: hex(EMPTY_MDAT) }]] },
+        { name: 'reading stops; the last mfra is found through its mfro and retired', durationMs: 4000, parts: [[{ clip: 0 }], [{ hex: media }], mfraSegs(ref, moofAt, 1), [{ hex: hex(broken) }], mfraSegs(ref, moofAt, 1, true)] },
+        { name: 'a 64-bit box size past the end of the clip', durationMs: 4000, parts: [...all.slice(0, lastIdx), [{ clip: lastIdx }, { hex: '00000001' + hex(latin('free')) + '4000000000000000' }]] },
+        { name: 'a 64-bit box size with its top bit set', durationMs: 4000, parts: [...all.slice(0, lastIdx), [{ clip: lastIdx }, { hex: '00000001' + hex(latin('free')) + '8000000000000010' }]] },
+        { name: 'a track id past 2^31 (an int in Java, negative)', durationMs: 4000, parts: [[{ clip: 0, edits: [[video.tkhd.start + 20, '80000001'], [trex.start + 12, '80000001']] }], [{ hex: hex(concat([mkBox('moof', mkTraf(0x80000001, 0, [], mkFull('trun', 0x100, 1, 1500))), EMPTY_MDAT])) }]] },
+        { name: 'timescales of 2^32 - 1 and the longest manifest: a duration x timescale past 2^64', durationMs: 0xffffffff, parts: [[{ clip: 0, edits: [[mvhd.start + 20, 'ffffffff'], ...traks.map((t) => [t.mdhd.start + 20, 'ffffffff'] as [number, string])] }], [{ hex: hex(concat([mkBox('moof', mkBox('traf', mkFull('tfhd', 0x020000, ref))), EMPTY_MDAT])) }]] },
+        // ---- found by the review of this port (2026-10-05) ----
+        { name: 'another muxer\'s sidx in front of the media: saved as sealed', durationMs: 4000, parts: [[{ clip: 0 }, { hex: hex(leadingSidx) }], ...all.slice(1)] },
+        { name: 'an ssix in front of the media: saved as sealed', durationMs: 4000, parts: [[{ clip: 0 }, { hex: hex(mkFull('ssix', 0, 0)) }], ...all.slice(1)] },
+        { name: 'an 8-byte mvhd as the last bytes of part 0: init not recognised (Java threw)', durationMs: 4000, parts: [[{ hex: mvhdAtEnd }], ...all.slice(1)] },
+        { name: 'an 8-byte tkhd as the last bytes of part 0: init not recognised (Java threw)', durationMs: 4000, parts: [[{ hex: tkhdAtEnd }], ...all.slice(1)] },
+        { name: 'an 8-byte mdhd as the last bytes of part 0: init not recognised (Java threw)', durationMs: 4000, parts: [[{ hex: mdhdAtEnd }], ...all.slice(1)] },
+        { name: 'a moof child with a 64-bit size of 2^63 - 8: not understood (Java\'s bound wrapped)', durationMs: 4000, parts: one(overflowMoof) },
+        { name: 'a box after the moov with a 64-bit size of 2^63 - 8: init not recognised (Java\'s bound wrapped)', durationMs: 4000, parts: [[{ clip: 0 }, { hex: hex(overflowTop) }], ...all.slice(1)] },
+        { name: 'the real clip, a manifest of 6,001 ms (room for 7 s of references)', durationMs: 6001, parts: all },
+        { name: 'fragments not understood, a manifest of 119,998 ms: the manifest\'s durations, rounded', durationMs: 119998, parts: one(mkBox('moof', mkTraf(ref, 0x8, [1500], mkFull('trun', 0, 0x100001)))) },
+        { name: 'an mvhd of version 1: the mehd is version 1 too', durationMs: 4000, parts: [[{ hex: initV1 }], ...all.slice(1)] },
+        { name: 'reading stops; the mfro arrives in a last part of 10 bytes', durationMs: 4000, parts: splitMfro(10) },
+        { name: 'reading stops; the mfro arrives in a last part of 1 byte', durationMs: 4000, parts: splitMfro(1) },
+        { name: 'a moof after the last mdat: the last reference runs to its end', durationMs: 4000, parts: [[{ clip: 0 }], [{ hex: hex(concat([mkBox('moof', tenFrames), EMPTY_MDAT, EMPTY_MOOF])) }]] },
+        { name: 'the real clip with a tfra moof_offset cut across two parts', durationMs: 4000, parts: [...all.slice(0, lastIdx), [{ hex: hex(last.subarray(0, cut)) }], [{ hex: hex(last.subarray(cut)) }]] },
+        { name: 'a trex for track 2^31 + the video\'s id: no track has that unsigned id', durationMs: 4000, parts: [[{ clip: 0, edits: [[audioTrex.start + 12, hex(be32(0x80000000 + ref))], [audioTrex.start + 20, hex(be32(1234))]] }], [{ hex: hex(concat([trexDefaults, EMPTY_MDAT])) }]] },
+        { name: 'more video fragments than a 0 ms manifest has room for: too many fragments', durationMs: 0, parts: [[{ clip: 0 }], [{ repeat: hex(concat([frameAt(0), EMPTY_MDAT])), times: 17 }]] },
+        { name: 'fragment times that run backwards: out of range', durationMs: 4000, parts: [[{ clip: 0 }], [{ hex: hex(concat([frameAt(3000), EMPTY_MDAT, frameAt(0), EMPTY_MDAT])) }]] },
+    ];
+}
+
+/** Test-side inverse of the fix (independent code, DownloadVectorsTest.unfix's twin). */
+function unfix(f: Uint8Array): Uint8Array {
+    const g = f.slice();
+    const dv = new DataView(g.buffer);
+    const top = boxesIn(g, 0, g.length);
+    const moov = top[1];
+    for (const x of kidsOf(g, moov)) {
+        if (x.type === 'mvhd') dv.setUint32(x.start + 24, 0);
+        if (x.type === 'trak') {
+            dv.setUint32(kidOf(g, x, 'tkhd').start + 28, 0);
+            dv.setUint32(kidOf(g, kidOf(g, x, 'mdia'), 'mdhd').start + 24, 0);
+        }
+    }
+    const mvex = kidOf(g, moov, 'mvex');
+    const mehd = kidsOf(g, mvex)[0];
+    expect(mehd.type).toBe('mehd');
+    dv.setUint32(moov.start, moov.size - mehd.size);
+    dv.setUint32(mvex.start, mvex.size - mehd.size);
+    const regionStart = top[2].start, regionEnd = top[4].start;
+    const shift = BigInt(mehd.size + (regionEnd - regionStart));
+    for (const tfra of kidsOf(g, top[top.length - 1]).filter((b) => b.type === 'tfra')) {
+        const n = dv.getUint32(tfra.start + 20);
+        for (let i = 0; i < n; i++) {
+            const at = tfra.start + 24 + 28 * i + 8;
+            dv.setBigUint64(at, dv.getBigUint64(at) - shift);
+        }
+    }
+    return concat([g.subarray(0, mehd.start), g.subarray(mehd.start + mehd.size, regionStart), g.subarray(regionEnd)]);
+}
+
+describe('shared container-fix vectors (Fmp4SaveFix.java and fmp4SaveFix.ts write the same file)', () => {
+    it.runIf(UPDATE_SAVEFIX)('rewrites saveFix (parts only with =inputs; else with this port\'s outputs)', async () => {
+        const v = readVectors();
+        const clip = await clipPlainsOf(v);
+        const cases = saveFixCases(clip);
+        if (UPDATE_SAVEFIX !== 'inputs') {
+            for (const c of cases) {
+                const r = saveFixed(c.parts.map((segs) => buildPart(segs, clip)), c.durationMs);
+                Object.assign(c, { outBytes: r.bytes.byteLength, outSha256: sha(r.bytes), outcome: r.outcome });
+                if (c === cases[0]) c.out = b64(r.bytes);
+            }
+        }
+        v.saveFix = {
+            note: 'The container fix a saved clip gets: each case is parts (segments: hex, a real clip part with edits, or a unit repeated) and a manifest duration; the file out is what BOTH Fmp4SaveFix.java (DownloadVectorsTest) and api/clips/fmp4SaveFix.ts (downloadVectors.test.ts) must write. Do not edit by hand.',
+            cases,
+        };
+        writeFileSync(VECTORS, JSON.stringify(v, null, 1) + '\n');
+    }, 120_000);
+
+    it('every case: the desktop and web save writes exactly the file the phone writes', async () => {
+        const v = readVectors();
+        const clip = await clipPlainsOf(v);
+        const cases = v.saveFix?.cases ?? [];
+        expect(cases.length).toBeGreaterThanOrEqual(45);
+        const bad: string[] = [];
+        for (const c of cases) {
+            const r = saveFixed(c.parts.map((segs) => buildPart(segs, clip)), c.durationMs);
+            const got = { outBytes: r.bytes.byteLength, outSha256: sha(r.bytes), outcome: r.outcome };
+            if (got.outBytes !== c.outBytes || got.outSha256 !== c.outSha256 || got.outcome !== c.outcome) {
+                bad.push(`${c.name}: expected ${c.outBytes} ${c.outSha256} "${c.outcome}", got ${got.outBytes} ${got.outSha256} "${got.outcome}"`);
+            }
+            if (c.out !== undefined) expect(b64(r.bytes), c.name).toBe(c.out);
+        }
+        expect(bad).toEqual([]);
+    }, 60_000);
+
+    it('the cases reach every outcome, and every one still saves a file', () => {
+        const cases = readVectors().saveFix?.cases ?? [];
+        const outcomes = new Set(cases.map((c) => c.outcome));
+        for (const o of ['duration and seek index added', 'duration added (no seek index: fragments not understood)',
+            'duration added (no seek index: fragments incomplete)', 'duration added (no seek index: no fragments to index)',
+            'duration added (no seek index: too many fragments)', 'duration added (no seek index: fragments out of range)',
+            'saved as sealed (init not recognised)', 'saved as sealed']) {
+            expect(outcomes, o).toContain(o);
+        }
+        for (const c of cases) expect(c.outBytes, c.name).toBeGreaterThan(0);
+    });
+
+    it('the real clip, however it is cut into parts, is the same file', () => {
+        const cases = readVectors().saveFix?.cases ?? [];
+        const named = (name: string) => {
+            const c = cases.find((x) => x.name === name);
+            if (!c) throw new Error(`no case "${name}"`);
+            return c;
+        };
+        const whole = named('the real clip');
+        expect(whole.outcome).toBe('duration and seek index added');
+        expect(named('the real clip, its init and first media part in one part').outSha256).toBe(whole.outSha256);
+        expect(named('the real clip as one part').outSha256).toBe(whole.outSha256);
+        expect(named('the real clip with a tfra moof_offset cut across two parts').outSha256).toBe(whole.outSha256);
+        // the manifest only sizes the reserved region: the file differs, the media does not
+        expect(named('the real clip, a manifest saying 0 ms').outSha256).not.toBe(whole.outSha256);
+    });
+
+    it('undoing exactly the documented changes gives back the sealed clip, byte for byte', async () => {
+        const v = readVectors();
+        const clip = await clipPlainsOf(v);
+        for (const durationMs of [4000, 0, 0xffffffff, 117]) {
+            const { bytes, outcome } = saveFixed(clip.map((p) => p.slice()), durationMs);
+            expect(outcome).toBe('duration and seek index added');
+            expect(sha(bytes), 'the fix changed something').not.toBe(v.clip.plainSha256);
+            expect(sha(unfix(bytes)), `undone, manifest ${durationMs} ms`).toBe(v.clip.plainSha256);
+        }
+    });
+
+    it('without the fix the download is the plain concatenation (the control for the undo)', async () => {
+        const v = readVectors();
+        const clip = await clipPlainsOf(v);
+        const a = new ClipAssembler(4000, false);
+        clip.forEach((p, i) => a.part(i, p));
+        const r = a.finish();
+        expect(r.outcome).toBe('saved as sealed');
+        expect(sha(concat(r.chunks))).toBe(v.clip.plainSha256);
     });
 });

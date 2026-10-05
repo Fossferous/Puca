@@ -481,6 +481,98 @@ public class DownloadVectorsTest {
         assertNull(Fmp4SaveFix.prepareInit(noMvex, noMvex.length, 4000));
     }
 
+    // ---- the same file on the phone and on the PC -----------------------------------
+
+    /**
+     * A part from its segments (downloadVectors.test.ts buildPart is the
+     * TypeScript twin): {"hex"}, {"clip": i, "edits": [[offset, hex], ...]}
+     * or {"repeat": hex | [segments], "times": n}.
+     */
+    static byte[] build(JSONArray segs, List<byte[]> clip) throws org.json.JSONException {
+        ByteArrayOutputStream bo = new ByteArrayOutputStream();
+        for (int i = 0; i < segs.length(); i++) {
+            JSONObject s = segs.getJSONObject(i);
+            byte[] b;
+            if (s.has("hex")) {
+                b = hex(s.getString("hex"));
+            } else if (s.has("clip")) {
+                b = clip.get(s.getInt("clip")).clone();
+                JSONArray edits = s.optJSONArray("edits");
+                for (int k = 0; edits != null && k < edits.length(); k++) {
+                    byte[] e = hex(edits.getJSONArray(k).getString(1));
+                    System.arraycopy(e, 0, b, edits.getJSONArray(k).getInt(0), e.length);
+                }
+            } else {
+                Object r = s.get("repeat");
+                byte[] unit = r instanceof String ? hex((String) r) : build((JSONArray) r, clip);
+                int times = s.getInt("times");
+                b = new byte[unit.length * times];
+                for (int k = 0; k < times; k++) System.arraycopy(unit, 0, b, k * unit.length, unit.length);
+            }
+            bo.write(b, 0, b.length);
+        }
+        return bo.toByteArray();
+    }
+
+    /**
+     * Saves these decrypted parts as NativeDownloads.runClip does: the
+     * SaveTarget of part 0 decides whether the container fix applies, then
+     * ClipAssembler writes the file.
+     */
+    static Object[] saveLikeThePhone(List<byte[]> parts, long durationMs) throws Exception {
+        byte[] p0 = parts.get(0);
+        int n = Math.min(SaveTarget.SNIFF_BYTES, p0.length);
+        SaveTarget t = SaveTarget.decide(java.util.Arrays.copyOf(p0, n), n, "puca-clip-0123abcd.mp4", "video/mp4",
+                ext -> "mp4".equals(ext) ? "video/mp4" : null);
+        boolean mp4 = t.mime.equals("video/mp4") || t.mime.equals("audio/mp4");
+        MemSink sink = new MemSink();
+        ClipAssembler a = new ClipAssembler(sink, durationMs, mp4);
+        for (int i = 0; i < parts.size(); i++) a.part(i, direct(parts.get(i)));
+        a.finish();
+        return new Object[] { sink.bytes(), a.outcome() };
+    }
+
+    /**
+     * THE parity check: every saveFix case — the real clip cut and labelled
+     * every way, and every shape built to hurt the fix — must come out as the
+     * file recorded in the vectors, which api/clips/fmp4SaveFix.ts (the
+     * desktop and web Download) must also write (downloadVectors.test.ts). So
+     * a clip saved on the phone and on the PC is the same file. On a mismatch
+     * this prints what Java wrote, for every case.
+     */
+    @Test
+    public void theContainerFixWritesTheFileTheDesktopAndWebSaveWrite() throws Exception {
+        JSONArray cases = v.getJSONObject("saveFix").getJSONArray("cases");
+        assertTrue("cases: " + cases.length(), cases.length() >= 45);
+        List<byte[]> clip = clipPlains();
+        StringBuilder bad = new StringBuilder();
+        for (int i = 0; i < cases.length(); i++) {
+            JSONObject c = cases.getJSONObject(i);
+            JSONArray ps = c.getJSONArray("parts");
+            List<byte[]> parts = new ArrayList<>();
+            for (int k = 0; k < ps.length(); k++) parts.add(build(ps.getJSONArray(k), clip));
+            byte[] f;
+            String outcome;
+            try {
+                Object[] saved = saveLikeThePhone(parts, c.getLong("durationMs"));
+                f = (byte[]) saved[0];
+                outcome = (String) saved[1];
+            } catch (RuntimeException e) {
+                // a save that throws fails the download on the phone: report it with the rest
+                f = new byte[0];
+                outcome = "THREW " + e;
+            }
+            String sha = sha(f);
+            boolean same = sha.equals(c.optString("outSha256")) && f.length == c.optLong("outBytes", -1) && outcome.equals(c.optString("outcome"));
+            if (c.has("out") && !java.util.Arrays.equals(b64(c.getString("out")), f)) same = false;
+            if (!same) {
+                bad.append("\nCASE ").append(i).append(" | ").append(c.getString("name"))
+                        .append(" | outBytes=").append(f.length).append(" | outSha256=").append(sha).append(" | outcome=").append(outcome);
+            }
+        }
+        assertEquals("cases where Java wrote something else:", "", bad.toString());
+    }
+
     @Test
     public void aManifestWithNoDurationStillGetsTheFix() throws Exception {
         List<byte[]> plains = clipPlains();

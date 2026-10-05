@@ -37,6 +37,7 @@ import { getToken } from '../auth';
 import { readBodyBytes, type BytesProgress } from '../readBody';
 import { openPart, PART_HEADER_BYTES, PART_MAX_PLAINTEXT, PART_TAG_BYTES, type ClipSecrets, uuidToBytes } from './clipCrypto';
 import { partIndexForTime, partStartMs, type ClipManifest } from './clipRef';
+import { ClipAssembler } from './fmp4SaveFix';
 
 export type ClipPlaybackMode = 'mse' | 'blob' | 'unsupported';
 
@@ -193,15 +194,25 @@ export interface ClipDownloadProgress {
  * so this reconstructs the recorded file byte-for-byte — not a re-encode, the
  * same bytes that were sealed. Used only from ClipAttachment, after a clip has
  * been posted (every required approver already agreed to release it).
+ *
+ * `fixContainer` (the Download button on desktop and the web): the file also
+ * gets the clip's duration and a seek index (fmp4SaveFix.ts — byte for byte
+ * what the Android app saves for the same clip), still without a re-encode or
+ * a moved media byte. The fix is written INTO the decrypted parts this already
+ * holds, so it costs no second copy of the clip; only the init is new (~6 KB
+ * for a 2:00 clip). Without it: the sealed bytes, exactly.
  */
 export async function downloadClipBytes(
     m: ClipManifest,
     onProgress?: (p: ClipDownloadProgress) => void,
     fetchPart: PartFetcher = fetchPartBytes,
     signal?: AbortSignal,
+    fixContainer = false,
 ): Promise<Blob> {
-    const chunks: Uint8Array[] = [];
-    await forEachClipPart(m, async (plain) => { chunks.push(plain); }, onProgress, fetchPart, signal);
+    const file = new ClipAssembler(m.durationMs, fixContainer, () => signal?.aborted === true);
+    await forEachClipPart(m, async (plain, i) => { file.part(i, plain); }, onProgress, fetchPart, signal);
+    const { chunks, outcome } = file.finish();
+    if (fixContainer) console.info(`[clip] download: ${outcome}`);
     return new Blob(chunks as BlobPart[], { type: 'video/mp4' });
 }
 

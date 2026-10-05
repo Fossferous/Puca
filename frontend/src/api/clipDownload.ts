@@ -1,9 +1,13 @@
 /**
  * Saving a posted clip (the Download button on ClipAttachment).
  *
- * Desktop and web: build the original file (downloadClipBytes) and save it
- * like any attachment (saveAttachment) — the native `attachment_save` command
- * in the desktop shell, a transient anchor in a browser.
+ * Desktop and web: build the file (downloadClipBytes) and save it like any
+ * attachment (saveAttachment) — the native `attachment_save` command in the
+ * desktop shell, a transient anchor in a browser. The file is the sealed clip
+ * with its duration and a seek index added (api/clips/fmp4SaveFix.ts), byte
+ * for byte what the Android app saves for the same clip: a sealed clip says
+ * duration 0 in its moov, so Explorer, a file's Properties and players that
+ * read only the moov showed no length for it.
  *
  * The Android app, when its APK carries the native download plugin
  * (api/nativeDownloads.ts), hands the whole job to Java: the phone fetches
@@ -67,7 +71,7 @@ export async function saveClip(m: ClipManifest, onProgress?: (p: ClipDownloadPro
         }
     }
 
-    const blob = await downloadClipBytes(m, onProgress, undefined, signal);
+    const blob = await downloadClipBytes(m, onProgress, undefined, signal, true);
     const url = URL.createObjectURL(blob);
     try {
         return await saveAttachment(url, name);
