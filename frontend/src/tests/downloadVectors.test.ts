@@ -30,7 +30,10 @@
  * the first case. BOTH suites must produce exactly that file from those parts,
  * so the phone and the PC save the same clip as the same bytes. The expected
  * outputs were first written from the JAVA side's results (its test prints
- * them when they are missing) and the TS port then had to match them;
+ * them when they are missing) and the TS port then had to match them; the
+ * 17 shapes a review added later were written from the TS port, the Java
+ * side went red on 8 of them (and on 3 old cases whose log label changed),
+ * and the fixed Java then had to match;
  *   PUCA_UPDATE_SAVEFIX_VECTORS=1 npx vitest run src/tests/downloadVectors.test.ts
  * rewrites only `saveFix`, outputs from the TS port (=inputs: parts only, for
  * the Java side to fill) — and then DownloadVectorsTest must still pass.
@@ -340,6 +343,9 @@ function mkTraf(track: number, tfhdFlags: number, tfhdFields: number[], ...truns
 }
 const EMPTY_MOOF = mkBox('moof');
 const EMPTY_MDAT = mkBox('mdat');
+const be64 = (n: bigint) => { const b = new Uint8Array(8); new DataView(b.buffer).setBigUint64(0, n); return b; };
+/** A box header and nothing else: 8 bytes, no version byte. */
+const header8 = (type: string) => concat([be32(8), latin(type)]);
 /** An mfra holding one tfra (version 0, 1-byte numbers) of `n` entries, all pointing at `moofAt`. */
 function mfraSegs(track: number, moofAt: number, n: number, withMfro = false): Seg[] {
     const entry = new Uint8Array(11); // time (4), moof_offset (4), traf/trun/sample numbers (1 each)
@@ -425,6 +431,57 @@ function saveFixCases(clip: Uint8Array[]): SaveFixCase[] {
     const stuffedMoov: [number, string][] = [[moov.start, hex(be32(moov.size + 5000 * 8))]];
     const free8 = hex(mkBox('free'));
 
+    // ---- the shapes the review of this port found (2026-10-05) ----
+    const bytesOf = (b: WBox) => c0.subarray(b.start, b.start + b.size);
+    const moovKids = kidsOf(c0, moov);
+    const initWith = (kids: Uint8Array[]) => hex(concat([c0.subarray(0, moov.start), mkBox('moov', ...kids)]));
+    const videoTs = u32At(c0, video.mdhd.start + 20);
+    // Another muxer's index in front of the media: a v0 sidx with one
+    // reference over every fragment (as ffmpeg's +global_sidx writes one), or
+    // an ssix. Its offsets count from its own end, so the region the fix
+    // reserves would land inside what it points at.
+    const mediaBytes = clip.slice(1).reduce((n, p) => n + p.byteLength, 0) - (last.byteLength - mfraAt);
+    const leadingSidx = mkFull('sidx', 0, ref, videoTs, 0, 0, 1, mediaBytes, 4 * videoTs, 0x90000000);
+    // An 8-byte mvhd, tkhd or mdhd as the very last bytes of part 0 (Java read
+    // its version byte past the array). The audio trak is moved last for the
+    // two inside a trak.
+    const audioTrak = moovKids.find((b) => b.type === 'trak' && u32At(c0, kidOf(c0, b, 'tkhd').start + 20) !== ref)!;
+    const audioMdia = kidOf(c0, audioTrak, 'mdia');
+    const lastTrak = (...kids: Uint8Array[]) => initWith([...moovKids.filter((b) => b.start !== audioTrak.start).map(bytesOf), mkBox('trak', ...kids)]);
+    const mvhdAtEnd = initWith([...moovKids.filter((b) => b.type !== 'mvhd').map(bytesOf), header8('mvhd')]);
+    const tkhdAtEnd = lastTrak(bytesOf(audioMdia), header8('tkhd'));
+    const mdhdAtEnd = lastTrak(bytesOf(kidOf(c0, audioTrak, 'tkhd')), mkBox('mdia', ...kidsOf(c0, audioMdia).filter((b) => b.type !== 'mdhd').map(bytesOf), header8('mdhd')));
+    // A moof child with a 64-bit size of 2^63 - 8: Java's off + size wrapped
+    // negative and (int) size stepped BACK 8 bytes, onto the mfhd's tail
+    // written to read as a 40-byte box, so Java kept parsing what TS refuses.
+    const tenFrames = mkTraf(ref, 0x8, [1500], mkFull('trun', 0, 10));
+    const overflowMoof = concat([be32(8 + 16 + 16 + 16 + tenFrames.byteLength), latin('moof'),
+        be32(16), latin('mfhd'), be32(40), latin('free'),
+        be32(1), latin('skip'), be64(0x7ffffffffffffff8n),
+        new Uint8Array(16), tenFrames]);
+    // The same at the top of part 0, after the moov: a free box whose last 8
+    // bytes read as a 32-byte box running to the end of part 0, then the 2^63 - 8
+    // box. Java stepped back onto those 8 bytes and took the init as fine.
+    const overflowTop = concat([be32(16), latin('free'), be32(32), latin('skip'),
+        be32(1), latin('wide'), be64(0x7ffffffffffffff8n), new Uint8Array(8)]);
+    // An mvhd of version 1 (64-bit times): the mehd must be version 1 too.
+    const mvhdV1 = concat([be32(120), latin('mvhd'), Uint8Array.of(1, 0, 0, 0),
+        be64(BigInt(u32At(c0, mvhd.start + 12))), be64(BigInt(u32At(c0, mvhd.start + 16))), c0.subarray(mvhd.start + 20, mvhd.start + 24), be64(0n),
+        c0.subarray(mvhd.start + 28, mvhd.start + mvhd.size)]);
+    const initV1 = initWith(moovKids.map((b) => (b.type === 'mvhd' ? mvhdV1 : bytesOf(b))));
+    // the mfro arriving in a final part shorter than 16 bytes, once reading has stopped
+    const lastMfra = mfraSegs(ref, moofAt, 1, true);
+    const mfroHex = (lastMfra.pop() as { hex: string }).hex;
+    const splitMfro = (tailBytes: number): Seg[][] => [[{ clip: 0 }], [{ hex: media }], mfraSegs(ref, moofAt, 1), [{ hex: hex(broken) }],
+        [...lastMfra, { hex: mfroHex.slice(0, 32 - 2 * tailBytes) }], [{ hex: mfroHex.slice(32 - 2 * tailBytes) }]];
+    // a tfra moof_offset cut across two parts: its patch spans both
+    const cut = firstMoofOffsetAt + 4;
+    // a trex for track 2^31 + ref: an UNSIGNED id no track has (Java's Long key never matches it)
+    const audioTrex = kidsOf(c0, mvex).find((b) => b.type === 'trex' && b.start !== trex.start)!;
+    const trexDefaults = mkBox('moof', mkTraf(ref, 0, [], mkFull('trun', 0, 10)));
+    // a fragment of one frame starting at `tfdt`
+    const frameAt = (tfdt: number) => mkBox('moof', mkBox('traf', mkFull('tfhd', 0x020008, ref, 1500), mkFull('tfdt', 0, tfdt), mkFull('trun', 0, 1)));
+
     return [
         { name: 'the real clip', durationMs: 4000, parts: all },
         { name: 'the real clip, a manifest saying 0 ms', durationMs: 0, parts: all },
@@ -454,6 +511,24 @@ function saveFixCases(clip: Uint8Array[]): SaveFixCase[] {
         { name: 'a 64-bit box size with its top bit set', durationMs: 4000, parts: [...all.slice(0, lastIdx), [{ clip: lastIdx }, { hex: '00000001' + hex(latin('free')) + '8000000000000010' }]] },
         { name: 'a track id past 2^31 (an int in Java, negative)', durationMs: 4000, parts: [[{ clip: 0, edits: [[video.tkhd.start + 20, '80000001'], [trex.start + 12, '80000001']] }], [{ hex: hex(concat([mkBox('moof', mkTraf(0x80000001, 0, [], mkFull('trun', 0x100, 1, 1500))), EMPTY_MDAT])) }]] },
         { name: 'timescales of 2^32 - 1 and the longest manifest: a duration x timescale past 2^64', durationMs: 0xffffffff, parts: [[{ clip: 0, edits: [[mvhd.start + 20, 'ffffffff'], ...traks.map((t) => [t.mdhd.start + 20, 'ffffffff'] as [number, string])] }], [{ hex: hex(concat([mkBox('moof', mkBox('traf', mkFull('tfhd', 0x020000, ref))), EMPTY_MDAT])) }]] },
+        // ---- found by the review of this port (2026-10-05) ----
+        { name: 'another muxer\'s sidx in front of the media: saved as sealed', durationMs: 4000, parts: [[{ clip: 0 }, { hex: hex(leadingSidx) }], ...all.slice(1)] },
+        { name: 'an ssix in front of the media: saved as sealed', durationMs: 4000, parts: [[{ clip: 0 }, { hex: hex(mkFull('ssix', 0, 0)) }], ...all.slice(1)] },
+        { name: 'an 8-byte mvhd as the last bytes of part 0: init not recognised (Java threw)', durationMs: 4000, parts: [[{ hex: mvhdAtEnd }], ...all.slice(1)] },
+        { name: 'an 8-byte tkhd as the last bytes of part 0: init not recognised (Java threw)', durationMs: 4000, parts: [[{ hex: tkhdAtEnd }], ...all.slice(1)] },
+        { name: 'an 8-byte mdhd as the last bytes of part 0: init not recognised (Java threw)', durationMs: 4000, parts: [[{ hex: mdhdAtEnd }], ...all.slice(1)] },
+        { name: 'a moof child with a 64-bit size of 2^63 - 8: not understood (Java\'s bound wrapped)', durationMs: 4000, parts: one(overflowMoof) },
+        { name: 'a box after the moov with a 64-bit size of 2^63 - 8: init not recognised (Java\'s bound wrapped)', durationMs: 4000, parts: [[{ clip: 0 }, { hex: hex(overflowTop) }], ...all.slice(1)] },
+        { name: 'the real clip, a manifest of 6,001 ms (room for 7 s of references)', durationMs: 6001, parts: all },
+        { name: 'fragments not understood, a manifest of 119,998 ms: the manifest\'s durations, rounded', durationMs: 119998, parts: one(mkBox('moof', mkTraf(ref, 0x8, [1500], mkFull('trun', 0, 0x100001)))) },
+        { name: 'an mvhd of version 1: the mehd is version 1 too', durationMs: 4000, parts: [[{ hex: initV1 }], ...all.slice(1)] },
+        { name: 'reading stops; the mfro arrives in a last part of 10 bytes', durationMs: 4000, parts: splitMfro(10) },
+        { name: 'reading stops; the mfro arrives in a last part of 1 byte', durationMs: 4000, parts: splitMfro(1) },
+        { name: 'a moof after the last mdat: the last reference runs to its end', durationMs: 4000, parts: [[{ clip: 0 }], [{ hex: hex(concat([mkBox('moof', tenFrames), EMPTY_MDAT, EMPTY_MOOF])) }]] },
+        { name: 'the real clip with a tfra moof_offset cut across two parts', durationMs: 4000, parts: [...all.slice(0, lastIdx), [{ hex: hex(last.subarray(0, cut)) }], [{ hex: hex(last.subarray(cut)) }]] },
+        { name: 'a trex for track 2^31 + the video\'s id: no track has that unsigned id', durationMs: 4000, parts: [[{ clip: 0, edits: [[audioTrex.start + 12, hex(be32(0x80000000 + ref))], [audioTrex.start + 20, hex(be32(1234))]] }], [{ hex: hex(concat([trexDefaults, EMPTY_MDAT])) }]] },
+        { name: 'more video fragments than a 0 ms manifest has room for: too many fragments', durationMs: 0, parts: [[{ clip: 0 }], [{ repeat: hex(concat([frameAt(0), EMPTY_MDAT])), times: 17 }]] },
+        { name: 'fragment times that run backwards: out of range', durationMs: 4000, parts: [[{ clip: 0 }], [{ hex: hex(concat([frameAt(3000), EMPTY_MDAT, frameAt(0), EMPTY_MDAT])) }]] },
     ];
 }
 
@@ -510,7 +585,7 @@ describe('shared container-fix vectors (Fmp4SaveFix.java and fmp4SaveFix.ts writ
         const v = readVectors();
         const clip = await clipPlainsOf(v);
         const cases = v.saveFix?.cases ?? [];
-        expect(cases.length).toBeGreaterThanOrEqual(28);
+        expect(cases.length).toBeGreaterThanOrEqual(45);
         const bad: string[] = [];
         for (const c of cases) {
             const r = saveFixed(c.parts.map((segs) => buildPart(segs, clip)), c.durationMs);
@@ -527,7 +602,9 @@ describe('shared container-fix vectors (Fmp4SaveFix.java and fmp4SaveFix.ts writ
         const cases = readVectors().saveFix?.cases ?? [];
         const outcomes = new Set(cases.map((c) => c.outcome));
         for (const o of ['duration and seek index added', 'duration added (no seek index: fragments not understood)',
-            'duration added (no seek index: too many fragments)', 'saved as sealed (init not recognised)', 'saved as sealed']) {
+            'duration added (no seek index: fragments incomplete)', 'duration added (no seek index: no fragments to index)',
+            'duration added (no seek index: too many fragments)', 'duration added (no seek index: fragments out of range)',
+            'saved as sealed (init not recognised)', 'saved as sealed']) {
             expect(outcomes, o).toContain(o);
         }
         for (const c of cases) expect(c.outBytes, c.name).toBeGreaterThan(0);
@@ -544,6 +621,7 @@ describe('shared container-fix vectors (Fmp4SaveFix.java and fmp4SaveFix.ts writ
         expect(whole.outcome).toBe('duration and seek index added');
         expect(named('the real clip, its init and first media part in one part').outSha256).toBe(whole.outSha256);
         expect(named('the real clip as one part').outSha256).toBe(whole.outSha256);
+        expect(named('the real clip with a tfra moof_offset cut across two parts').outSha256).toBe(whole.outSha256);
         // the manifest only sizes the reserved region: the file differs, the media does not
         expect(named('the real clip, a manifest saying 0 ms').outSha256).not.toBe(whole.outSha256);
     });

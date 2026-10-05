@@ -264,9 +264,19 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
     120 s and sought to 28.6 s for a 30 s seek (before: no duration, every
     seek landed on 0), and Google Photos showed `2:00` and seeked to 1:29.
     An init it does not recognise (no `mvex`, an `mehd` already there,
-    samples or chunk offsets in the moov) is saved exactly as sealed; an
-    `mfra` entry that points at no `moof` turns the `mfra` into a `free` box
-    rather than leave a wrong index.
+    samples or chunk offsets in the moov, a box too short for its version
+    byte, or another muxer's `sidx`/`ssix` in front of the media) is saved
+    exactly as sealed; an `mfra` entry that points at no `moof` turns the
+    `mfra` into a `free` box rather than leave a wrong index. A leading
+    `sidx` counts its offsets from its own end, so the reserved region would
+    land inside what it points at — measured 2026-10-05: ffmpeg's `+dash`
+    output, once fixed, sought to 1 s for a 4 s seek (4 s as posted), and its
+    `+global_sidx` output started its audio at 0.07 s with AAC decode errors;
+    both are now saved byte for byte as posted. Púca's mediabunny clips never
+    carry one. The save's log line says why a file
+    got no index: `fragments not understood`, `fragments incomplete` (the
+    clip ends inside a box), `no fragments to index`, `too many fragments`
+    (more than the manifest reserved room for) or `fragments out of range`.
   - **A clip is the poster's file, so reading it is bounded.** Every count
     in it is theirs, and before these limits a crafted clip could hold the
     one download thread for minutes or run the app out of memory (JVM, 192 MiB
@@ -296,14 +306,29 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
     from `api/clipDownload.ts`): the same decisions (only an MP4 by
     `SaveTarget`'s brand rules; an init it does not recognise is saved as
     sealed), the same limits, and Java's 64-bit `long` arithmetic and signed
-    track ids reproduced with BigInt, so a crafted clip too gives the same
-    bytes on both. **The phone and the PC save a clip as the same file**:
-    `download-vectors.json` carries 28 `saveFix` cases (the real clip cut
-    every way, edited inits, every `Fmp4SaveFixHostileTest` shape, 64-bit
-    sizes, a track id past 2^31, a duration x timescale past 2^64) with the
-    file the JAVA save wrote for each, and `downloadVectors.test.ts` (TS) and
-    `DownloadVectorsTest` (JUnit) must both write exactly that; 13 TS mutants
-    and 4 Java mutants of the fix each fail it. The decrypted parts the page
+    track ids reproduced with BigInt. **The phone and the PC save a clip as
+    the same file — for every shared vector**, crafted ones included; that
+    is what is checked, not a proof for every possible file. A review found
+    two crafted shapes on which they did differ, both fixed on the Java side
+    and now vectors: an 8-byte `mvhd`, `tkhd` or `mdhd` as the very last
+    bytes of the init made Java read its version byte past the array and
+    fail the download ("Could not save the file on this phone"), where TS
+    saved the clip as sealed; and a 64-bit box size near 2^63 wrapped Java's
+    `off + size` bound, so Java parsed boxes TS refused. Both sides now
+    check a size against the room left, and every size before a version
+    byte. `download-vectors.json` carries 45 `saveFix` cases (the real clip
+    cut every way, edited inits, every `Fmp4SaveFixHostileTest` shape, 64-bit
+    sizes, a track id past 2^31, a duration x timescale past 2^64, a leading
+    `sidx`/`ssix`, an mvhd of version 1, the manifest's fallback durations
+    and their rounding, an `mfro` arriving in a last part under 16 bytes, a
+    `tfra` offset cut across two parts, a `moof` after the last `mdat`, every
+    no-index reason) with the file both sides write for each, and
+    `downloadVectors.test.ts` (TS) and `DownloadVectorsTest` (JUnit) must
+    both write exactly that. 26 TS mutants and 13 Java mutants of the fix
+    each fail it; one TS mutant cannot (looking up a `trex` by the signed
+    instead of the unsigned id only differs for a track id of 2^31 or more,
+    and such a track's `trex` defaults are never read: no `tfhd` id matches
+    it on either side). The decrypted parts the page
     already holds ARE the output — the patches are written into them and only
     the init is a new (KB) array — so the fix costs no second copy of the
     clip. Measured 2026-10-05 against a throwaway server, headless Edge, the
@@ -316,12 +341,22 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
     Explorer's Length (`System.Media.Duration`) was blank for a downloaded
     clip and now reads 2:00; Media Foundation (Media Player, Movies & TV)
     already found a length (119.957 s, from the fragments) and seeked, and
-    now reports 120.000 s; ffmpeg seeked before (through the `mfra`) and
-    lands on the same keyframes after (VLC was not re-measured). One thing
-    ffprobe reports differently: with a `sidx` it takes the format duration
-    from the video track's index, 119.998 s instead of the audio's 120.000 s
-    (20.000 s instead of 20.011 s for a 20 s clip) — the same packets, every
-    one, are still listed. A crafted clip is bounded as on the
+    now reports 120.000 s; ffmpeg seeked before and lands on the same
+    keyframes after (VLC was not re-measured) — before by reading every
+    fragment's header up to the target (60 for a 60 s seek: by default it
+    ignores the `mfra`), now by jumping with the `sidx` (2). That last
+    point holds because a recorded clip's audio fragment never starts after
+    its video keyframe (every one of 89 fragments in two recorded clips): in
+    an MP4 whose audio does (ffmpeg's own fragmented output), ffmpeg's demuxer
+    jumps by a one-track `sidx` and then finds no earlier audio than the
+    first fragment's, so `ffmpeg -ss 2` and `-ss 4` both landed on 1 s
+    (ffmpeg's own `+global_sidx` files seek short too: 2 s to 1 s, 4 s to
+    2 s). Only a non-Púca or crafted clip has that shape today. ffprobe reports durations
+    differently: with a `sidx` it takes the format duration AND the duration
+    of every track without one (the audio) from the video track's index —
+    119.998 s instead of 120.000 s for both on the 2:00 clip (20.000 s
+    instead of 20.011 s for a 20 s clip), though the audio's `mdhd` says
+    exactly 120.000 s. The same packets, every one, are still listed. A crafted clip is bounded as on the
     phone: one posted with a 24 MiB part of 8-byte boxes, 3.1 M empty moofs,
     a 64 x 2^32-sample `trun` bomb and five 30,000-entry `mfra`s downloaded
     in 1.8 s (web) / 3.0 s (desktop), byte-identical to the Java save, with

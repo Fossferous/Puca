@@ -543,7 +543,7 @@ public class DownloadVectorsTest {
     @Test
     public void theContainerFixWritesTheFileTheDesktopAndWebSaveWrite() throws Exception {
         JSONArray cases = v.getJSONObject("saveFix").getJSONArray("cases");
-        assertTrue("cases: " + cases.length(), cases.length() >= 28);
+        assertTrue("cases: " + cases.length(), cases.length() >= 45);
         List<byte[]> clip = clipPlains();
         StringBuilder bad = new StringBuilder();
         for (int i = 0; i < cases.length(); i++) {
@@ -551,9 +551,17 @@ public class DownloadVectorsTest {
             JSONArray ps = c.getJSONArray("parts");
             List<byte[]> parts = new ArrayList<>();
             for (int k = 0; k < ps.length(); k++) parts.add(build(ps.getJSONArray(k), clip));
-            Object[] saved = saveLikeThePhone(parts, c.getLong("durationMs"));
-            byte[] f = (byte[]) saved[0];
-            String outcome = (String) saved[1];
+            byte[] f;
+            String outcome;
+            try {
+                Object[] saved = saveLikeThePhone(parts, c.getLong("durationMs"));
+                f = (byte[]) saved[0];
+                outcome = (String) saved[1];
+            } catch (RuntimeException e) {
+                // a save that throws fails the download on the phone: report it with the rest
+                f = new byte[0];
+                outcome = "THREW " + e;
+            }
             String sha = sha(f);
             boolean same = sha.equals(c.optString("outSha256")) && f.length == c.optLong("outBytes", -1) && outcome.equals(c.optString("outcome"));
             if (c.has("out") && !java.util.Arrays.equals(b64(c.getString("out")), f)) same = false;

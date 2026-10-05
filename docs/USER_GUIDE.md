@@ -154,7 +154,7 @@ name, except a spoilered one.
 - On an older Android app, or Android 9 and older, saving still puts the file in `Documents/Puca` under a new name each time, as before. A large file is written there as `<name>.part` and gets its real name only once it is complete; if the app is closed before then, the `.part` file is what is left: delete it and save again. A clip saved that way has no length in its file; the new app adds it
 
 ### Save a Clip on Windows or in a Browser
-- **Download** on a clip saves it with its length and a seek index, the same file the Android app saves for that clip: File Explorer shows how long it is, and players can skip around in it. The picture and sound are exactly what was recorded
+- **Download** on a clip saves it with its length and a seek index, the same file the Android app saves for that clip: File Explorer and the file's Properties now show how long it is (Media Player could already skip around in a downloaded clip, and still can). The picture and sound are exactly what was recorded
 
 ---
 

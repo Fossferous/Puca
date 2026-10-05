@@ -53,9 +53,9 @@ import java.util.function.BooleanSupplier;
  * read-write). Memory is one moof/mfra at a time (KB), never a part.
  *
  * <p>Anything unexpected in the INIT (no mvex, an mehd already there, samples
- * or chunk offsets in the moov, a 64-bit box we cannot grow) means no fix at
- * all: {@link #prepareInit} returns null and the file is saved exactly as
- * sealed.
+ * or chunk offsets in the moov, a 64-bit box we cannot grow, another muxer's
+ * {@code sidx} or {@code ssix} in front of the media) means no fix at all:
+ * {@link #prepareInit} returns null and the file is saved exactly as sealed.
  *
  * <p>HOSTILE INPUT. A clip is written by whoever posted it, so every count in
  * it is the sender's. Nothing here may cost more than a pass over the bytes,
@@ -187,7 +187,8 @@ final class Fmp4SaveFix {
             } else if (size == 0) {
                 return null; // "to the end of the file": not inside an init or a moof
             }
-            if (size < hdr || off + size > to) return null;
+            // size against the room left: off + size wraps for a 64-bit size near 2^63
+            if (size < hdr || size > to - off) return null;
             out.add(new Box(off, hdr, size, type(b, off + 4)));
             off += (int) size;
         }
@@ -214,6 +215,12 @@ final class Fmp4SaveFix {
     static Plan prepareInit(byte[] part0, int len, long durationHintMs) {
         List<Box> top = topLevelBeforeMoof(part0, len);
         if (top == null) return null;
+        // An index already in front of the media (another muxer's sidx, or the
+        // ssix that goes with one) counts its offsets from where it ends: the
+        // region reserved below would land inside what it points at, and ffmpeg
+        // follows a leading sidx. No index is better than a wrong one: leave
+        // such a file alone.
+        if (find(top, "sidx") != null || find(top, "ssix") != null) return null;
         int initEnd = top.isEmpty() ? 0 : top.get(top.size() - 1).end();
         Box moov = find(top, "moov");
         if (moov == null || moov.hdr != 8) return null;
@@ -221,7 +228,9 @@ final class Fmp4SaveFix {
         if (mk == null) return null;
         Box mvhd = find(mk, "mvhd");
         Box mvex = find(mk, "mvex");
-        if (mvhd == null || mvex == null || mvex.hdr != 8) return null;
+        // Every size check comes before a version byte is read: an 8-byte box
+        // at the very end of part 0 has none, and reading it threw.
+        if (mvhd == null || mvex == null || mvex.hdr != 8 || mvhd.size < 28) return null;
         List<Box> xk = children(part0, mvex.body(), mvex.end());
         if (xk == null || find(xk, "mehd") != null) return null;
 
@@ -309,7 +318,7 @@ final class Fmp4SaveFix {
                 size = u64(b, off + 8);
                 hdr = 16;
             }
-            if (size < hdr || off + size > len) return null;
+            if (size < hdr || size > len - off) return null; // never off + size: it wraps near 2^63
             out.add(new Box(off, hdr, size, t));
             off += (int) size;
         }
@@ -321,7 +330,7 @@ final class Fmp4SaveFix {
         if (tk == null) return null;
         Box tkhd = find(tk, "tkhd");
         Box mdia = find(tk, "mdia");
-        if (tkhd == null || mdia == null) return null;
+        if (tkhd == null || mdia == null || tkhd.size < 32) return null;
         Track tr = new Track();
         int tv = b[tkhd.start + 8] & 0xff;
         if (tv > 1 || tkhd.size < (tv == 1 ? 44 : 32)) return null;
@@ -333,7 +342,7 @@ final class Fmp4SaveFix {
         Box mdhd = find(md, "mdhd");
         Box hdlr = find(md, "hdlr");
         Box minf = find(md, "minf");
-        if (mdhd == null || hdlr == null || hdlr.size < 20) return null;
+        if (mdhd == null || hdlr == null || hdlr.size < 20 || mdhd.size < 32) return null;
         int mv = b[mdhd.start + 8] & 0xff;
         if (mv > 1 || mdhd.size < (mv == 1 ? 44 : 32)) return null;
         tr.timescale = u32(b, mdhd.start + (mv == 1 ? 28 : 20));
@@ -701,9 +710,14 @@ final class Fmp4SaveFix {
             return out;
         }
 
-        /** Did {@link #finish} write a sidx? (For the save's log line.) */
-        boolean sidxReady() {
-            return analysisOk() && !inBody && hdrHave == 0 && sidx() != null;
+        /** Why {@link #finish} writes no sidx, or null when it writes one. For
+         *  the save's log line only. */
+        String noIndexReason() {
+            if (!analysisOk()) return "fragments not understood";
+            if (inBody || hdrHave != 0) return "fragments incomplete"; // the stream ended inside a box
+            if (refFrags.isEmpty()) return "no fragments to index";
+            if (refFrags.size() > plan.maxRefs) return "too many fragments";
+            return sidx() == null ? "fragments out of range" : null;
         }
 
         private static boolean fits(long v, int size) {

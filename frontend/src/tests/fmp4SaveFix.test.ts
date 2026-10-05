@@ -139,7 +139,7 @@ describe('a crafted clip costs no more than a pass over its bytes', () => {
         const t0 = performance.now();
         const { outcome } = save([init, part]);
         const ms = performance.now() - t0;
-        expect(outcome).toBe('duration added (no seek index: too many fragments)');
+        expect(outcome).toBe('duration added (no seek index: no fragments to index)');
         // ~0.25 s on a desktop (also in Edge, as one long task, for such a
         // part in a posted clip); the bound is for a slow CI box
         expect(ms).toBeLessThan(5000);

@@ -55,9 +55,11 @@
  *
  * NUMBERS. Java's `long` wraps at 64 bits and `Math.addExact` throws there;
  * this file does the same with BigInt wherever a sender's value can get that
- * far (64-bit box sizes, tfdt, durations x timescales), so a crafted clip
- * gives the same bytes here as on the phone. Track ids are kept as a signed
- * 32-bit `int`, as Java keeps them, for the same reason.
+ * far (tfdt, durations x timescales), and both sides check a 64-bit box size
+ * against the room left rather than adding it to an offset, so every shared
+ * vector, the crafted ones included, gives the same bytes here as on the
+ * phone. Track ids are kept as a signed 32-bit `int`, as Java keeps them, for
+ * the same reason.
  *
  * Pure: no I/O, no Blob, nothing written (api/clips may not reach a file API —
  * clipNoDiskWrite.test.ts). api/clips/clipPlayback.ts's downloadClipBytes
@@ -85,7 +87,7 @@ const MOOV = fourcc('moov'), MVHD = fourcc('mvhd'), MVEX = fourcc('mvex'), MEHD 
 const TRAK = fourcc('trak'), TKHD = fourcc('tkhd'), MDIA = fourcc('mdia'), MDHD = fourcc('mdhd'), HDLR = fourcc('hdlr');
 const MINF = fourcc('minf'), STBL = fourcc('stbl'), STCO = fourcc('stco'), CO64 = fourcc('co64'), STSZ = fourcc('stsz');
 const TRAF = fourcc('traf'), TFHD = fourcc('tfhd'), TFDT = fourcc('tfdt'), TRUN = fourcc('trun'), TFRA = fourcc('tfra');
-const VIDE = fourcc('vide'), FTYP = fourcc('ftyp');
+const VIDE = fourcc('vide'), FTYP = fourcc('ftyp'), SIDX = fourcc('sidx'), SSIX = fourcc('ssix');
 const FREE_BYTES = Uint8Array.of(0x66, 0x72, 0x65, 0x65); // "free"
 
 /** Bytes to write at an absolute output offset once every part is out. */
@@ -242,13 +244,15 @@ function parseTrak(b: Uint8Array, trak: Box, insertAt: number, mehdLen: number):
     const tk = children(b, body(trak), end(trak));
     if (!tk) return null;
     const tkhd = find(tk, TKHD), mdia = find(tk, MDIA);
-    if (!tkhd || !mdia) return null;
+    // Every size check comes before the version byte is read: an 8-byte box at
+    // the very end of part 0 has no version byte (Java would read past the array).
+    if (!tkhd || !mdia || tkhd.size < 32) return null;
     const tv = b[tkhd.start + 8];
     if (tv > 1 || tkhd.size < (tv === 1 ? 44 : 32)) return null;
     const md = children(b, body(mdia), end(mdia));
     if (!md) return null;
     const mdhd = find(md, MDHD), hdlr = find(md, HDLR), minf = find(md, MINF);
-    if (!mdhd || !hdlr || hdlr.size < 20) return null;
+    if (!mdhd || !hdlr || hdlr.size < 20 || mdhd.size < 32) return null;
     const mv = b[mdhd.start + 8];
     if (mv > 1 || mdhd.size < (mv === 1 ? 44 : 32)) return null;
     const timescale = u32(b, mdhd.start + (mv === 1 ? 28 : 20));
@@ -298,13 +302,19 @@ function hintOf(durationHintMs: number): number {
 export function prepareInit(part0: Uint8Array, durationHintMs: number): Plan | null {
     const top = topLevelBeforeMoof(part0);
     if (!top) return null;
+    // An index already in front of the media (another muxer's sidx, or the
+    // ssix that goes with one) counts its offsets from where it ends: the
+    // region reserved below would land inside what it points at, and ffmpeg
+    // follows a leading sidx. No index is better than a wrong one: leave such
+    // a file alone.
+    if (find(top, SIDX) || find(top, SSIX)) return null;
     const initEnd = top.length === 0 ? 0 : end(top[top.length - 1]);
     const moov = find(top, MOOV);
     if (!moov || moov.hdr !== 8) return null;
     const mk = children(part0, body(moov), end(moov));
     if (!mk) return null;
     const mvhd = find(mk, MVHD), mvex = find(mk, MVEX);
-    if (!mvhd || !mvex || mvex.hdr !== 8) return null;
+    if (!mvhd || !mvex || mvex.hdr !== 8 || mvhd.size < 28) return null;
     const xk = children(part0, body(mvex), end(mvex));
     if (!xk || find(xk, MEHD)) return null;
 
@@ -730,9 +740,13 @@ export class Scanner {
         return result;
     }
 
-    /** Did finish write a sidx? (For the outcome line.) */
-    sidxReady(): boolean {
-        return this.analysisOk() && !this.inBody && this.hdrHave === 0 && this.sidx() !== null;
+    /** Why finish writes no sidx, or null when it writes one. For the outcome line only. */
+    noIndexReason(): string | null {
+        if (!this.analysisOk()) return 'fragments not understood';
+        if (this.inBody || this.hdrHave !== 0) return 'fragments incomplete'; // the stream ended inside a box
+        if (this.refFrags.length === 0) return 'no fragments to index';
+        if (this.refFrags.length > this.plan.maxRefs) return 'too many fragments';
+        return this.sidx() === null ? 'fragments out of range' : null;
     }
 
     /** v1 sidx over the reference track's fragments, or null when it does not fit. */
@@ -849,9 +863,9 @@ export class ClipAssembler {
     /** Writes the patches into the parts; returns the file. */
     finish(): AssembledClip {
         if (this.scanner) {
-            const sidx = this.scanner.sidxReady();
+            const noIndex = this.scanner.noIndexReason();
             for (const p of this.scanner.finish(this.durationHintMs)) this.writeAt(p.offset, p.bytes);
-            this.outcome = sidx ? 'duration and seek index added' : `duration added (no seek index: ${this.scanner.analysisOk() ? 'too many fragments' : 'fragments not understood'})`;
+            this.outcome = noIndex === null ? 'duration and seek index added' : `duration added (no seek index: ${noIndex})`;
             this.scanner = null;
         }
         return { chunks: this.chunks, bytes: this.written, outcome: this.outcome };
