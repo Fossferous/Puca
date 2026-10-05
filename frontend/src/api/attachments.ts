@@ -18,10 +18,11 @@
  * The display name (which may contain spaces) lives in the markdown alt/label.
  * Stored blob = nonce(12) || AES-256-GCM ciphertext.
  */
-import { uploadFile, assertUploadable, ENCRYPTED_OVERHEAD_BYTES } from './uploads';
+import { uploadFile, assertUploadable, ENCRYPTED_OVERHEAD_BYTES, MAX_UPLOAD_BYTES } from './uploads';
 import { API_BASE_URL } from './config';
 import { getToken } from './auth';
 import { readAttachmentBody } from './attachmentProgress';
+import { createPriorityLimiter, abortError, isAbortError } from './priorityLimiter';
 
 const PREFIX = 'sovereign-enc:';
 
@@ -322,20 +323,101 @@ export async function encryptAndUpload(file: File, opts?: { channelId?: number }
 // different `m=` got a URL whose type contradicted how the renderer treated it.
 // Everything that determines the bytes and their type is in the key.
 //
-// STILL UNBOUNDED, deliberately, and this is the second thing to know about it.
-// An LRU here is not a local change: evicting an entry is only worth anything
-// if the object URL is revoked with it (an un-revoked blob: URL pins its bytes
-// for the life of the document whether or not a Map still names it), and
-// revoking breaks a URL that is already live. `EncryptedAttachment`
-// (components/MessageContent.tsx) puts the URL in component state and only
-// re-derives it when `href` or its retry counter changes — so a revoked URL is
-// a permanently broken image in a row the user can still see, with no path back
-// short of a remount. Bounding this needs a consumer that can notice a dead URL
-// and ask again; until then the cache is cleared on logout (clearBlobCache) and
-// on reload, which is what it has always relied on.
-const blobCache = new Map<string, string>();
+// BOUNDED for the attachments in messages, and only for them. An entry is
+// evicted (and its object URL revoked) only when nobody can be showing it:
+//  - `acquireAttachmentUrl` (MessageContent's EncryptedAttachment) HOLDS an
+//    entry while it is on or near the screen and releases it, after its
+//    <img>/<video> has left the DOM, when it scrolls far away or the channel
+//    is left. Released entries (copies the reader has SEEN) stay cached up to
+//    RETAINED_ATTACHMENT_BYTES, so coming back to a channel is still instant;
+//    past that, revoked: the oldest messages of each channel left first
+//    (releaseBurst), then the ones nothing on the page shows any more
+//    (noteAttachmentInterest), then the least recently given back. Revoking
+//    a URL that is still on screen would be a permanently broken image (and
+//    an un-revoked blob: URL pins its bytes for the life of the document
+//    whether or not a Map still names it), which is why nothing else may
+//    evict.
+//  - `prefetchAttachmentUrl` loads a message attachment that is still far
+//    from the screen, after everything nearer, so one the reader scrolls to
+//    later is already here, as it was when everything loaded at once. Those
+//    copies (loaded AHEAD, not yet seen) have their own budget,
+//    AHEAD_ATTACHMENT_BYTES, which it never goes past and in which it never
+//    pushes out another of the page's own; a copy the reader has seen is
+//    never pushed out to load ahead (measured: when one budget was shared,
+//    loading ahead in one channel pushed out the copies of the channel just
+//    left, and going back to it downloaded again what had been on screen).
+//  - `decryptToBlobUrl` (Tasks, Notes, capture-to-note) PINS its entry until
+//    sign-out, as every entry was before: those callers keep the URL in their
+//    own state and have no way to be told it went away.
+// Measured before the bound (2026-10-05, headless Edge, a channel of 12 x
+// 22.5 MB videos): the browser process kept +257 MB per such channel opened
+// and never gave it back while the app ran (515 MB after two). The Android
+// WebView pages the same plaintext to app_webview/Default/blob_storage on
+// disk instead. Sign-out still clears everything (clearBlobCache), as does a
+// reload.
+interface CacheEntry {
+    url: string;
+    bytes: number;
+    /** Holders showing it now (acquireAttachmentUrl). Never evicted while > 0. */
+    refs: number;
+    /** A decryptToBlobUrl caller has it: kept until sign-out. */
+    pinned: boolean;
+    /** Has been held (shown) at least once; else it was loaded ahead. */
+    seen: boolean;
+    /** When it was loaded, last taken or last given back (useSeq): the
+     *  lowest goes first. A counter, not a clock: a channel left gives all
+     *  its copies back in one millisecond, top row first, and the newest
+     *  (what is on screen when you come back) must be the ones kept. */
+    seq: number;
+    /** The burst it was last given back in (releaseBurst): every copy a
+     *  channel gives back as it is left shares one. 0 if never given back. */
+    burst: number;
+}
+const blobCache = new Map<string, CacheEntry>();
+let useSeq = 0;
 
-/** Fetch + decrypt an encrypted attachment, returning an object URL for the plaintext. */
+/** Copies given back in one task (a channel being left: every row unmounts
+ *  in one commit) share a burst. Eviction goes by how deep a copy sits in its
+ *  burst — the oldest message of each channel first — before it goes by age,
+ *  so the newest few of EVERY channel left are kept, not all of the last one:
+ *  measured 2026-10-05 with two channels of 12 x 22.5 MB videos, plain
+ *  least-recently-used dropped every copy of the first channel when the
+ *  second was left, and going back to it downloaded the two on screen again
+ *  (4.2 s at 100 Mbit; 0.3 s when everything was kept). */
+let releaseBurst = 0;
+let burstOpen = false;
+function currentBurst(): number {
+    if (!burstOpen) {
+        burstOpen = true;
+        releaseBurst++;
+        setTimeout(() => { burstOpen = false; }, 0);
+    }
+    return releaseBurst;
+}
+
+/** Decrypted bytes kept for message attachments the reader has seen and
+ *  nobody is showing now (see above): a little over seven 25 MB videos (the
+ *  upload cap). */
+export const RETAINED_ATTACHMENT_BYTES = 192 * 1024 * 1024;
+/** Decrypted bytes loaded ahead of the reader (prefetchAttachmentUrl). */
+export const AHEAD_ATTACHMENT_BYTES = 192 * 1024 * 1024;
+let retainedBudget = RETAINED_ATTACHMENT_BYTES;
+let aheadBudget = AHEAD_ATTACHMENT_BYTES;
+/** Tests only: other budgets (null restores the real one), so eviction can
+ *  be seen without 192 MB of files. */
+export function __setRetainedAttachmentBudget(bytes: number | null): void {
+    retainedBudget = bytes ?? RETAINED_ATTACHMENT_BYTES;
+}
+export function __setAheadAttachmentBudget(bytes: number | null): void {
+    aheadBudget = bytes ?? AHEAD_ATTACHMENT_BYTES;
+}
+
+/** Message attachments on the page now, per cache key
+ *  (noteAttachmentInterest): an unheld copy one of them may scroll back to
+ *  is kept before one nothing shows any more, and only those count against
+ *  what may still be loaded ahead. */
+const interest = new Map<string, number>();
+
 
 /**
  * The MIME on an attachment ref is chosen by the SENDER (`m=` in the href), and
@@ -438,55 +520,326 @@ export function isPlaylistBlobUrl(url: string | null | undefined): boolean {
  *  remount (e.g. the optimistic→server id swap) otherwise pulls the multi-MB
  *  ciphertext twice, which on a phone right after its own upload is exactly
  *  when the link has no headroom. Same shape as authedMedia's inflight map. */
-const inflight = new Map<string, Promise<string>>();
+const inflight = new Map<string, Promise<CacheEntry>>();
+/** Callers between asking for an entry and taking it: never evicted then. */
+const claiming = new Map<string, number>();
+/** Bumped by clearBlobCache (sign-out). A load that began before it is not
+ *  cached after it, and nobody retries across it. */
+let cacheGeneration = 0;
 
-export async function decryptToBlobUrl(id: string, keyB64url: string, mime: string, cap?: string): Promise<string> {
-    const cacheKey = `${id}:${keyB64url}:${safeBlobType(mime)}`;
+const cacheKeyOf = (id: string, keyB64url: string, mime: string) => `${id}:${keyB64url}:${safeBlobType(mime)}`;
+
+/** The fetch + decrypt itself; the result is cached before it is returned. */
+async function loadEntry(cacheKey: string, id: string, keyB64url: string, mime: string, cap?: string): Promise<CacheEntry> {
+    const generation = cacheGeneration;
+    // /files is authenticated now — a bare fetch here 401s and every
+    // attachment in the app fails to open.
+    const token = getToken();
+    // The capability rides in a header, never the URL: URLs land in server
+    // and proxy logs, headers on this authenticated route do not.
+    const resp = await fetch(`${API_BASE_URL}/files/${id}`, {
+        headers: {
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            ...(cap ? { 'X-Puca-File-Cap': cap } : {}),
+        },
+    });
+    if (!resp.ok) throw new Error(`fetch ${id} failed: ${resp.status}`);
+    const buf = await readAttachmentBody(id, resp); // its progress shows while it downloads (AttachmentLoading)
+    // Views, not copies: WebCrypto copies its input anyway, and a .slice()
+    // here held one more full copy of a 25 MB file for the length of the call.
+    const nonce = buf.subarray(0, 12);
+    const ct = buf.subarray(12);
+    const key = await crypto.subtle.importKey('raw', fromB64url(keyB64url) as BufferSource, 'AES-GCM', false, ['decrypt']);
+    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce as BufferSource }, key, ct as BufferSource);
+    // Signed out while it downloaded: the plaintext is not the next user's
+    // to find in the cache (or by its blob: URL).
+    if (generation !== cacheGeneration) throw abortError();
+    // A playlist is not media, whatever the ref says: opaque bytes, and
+    // flagged so no renderer gives it a player (looksLikeHlsPlaylist).
+    const playlist = looksLikeHlsPlaylist(new Uint8Array(pt));
+    const url = URL.createObjectURL(new Blob([pt], { type: playlist ? 'application/octet-stream' : safeBlobType(mime) }));
+    if (playlist) playlistUrls.add(url);
+    const entry: CacheEntry = { url, bytes: pt.byteLength, refs: 0, pinned: false, seen: false, seq: ++useSeq, burst: 0 };
+    blobCache.set(cacheKey, entry);
+    return entry;
+}
+
+/** The cached entry, the load already under way, or a new one from `start`. */
+function getOrLoad(cacheKey: string, start: () => Promise<CacheEntry>): Promise<CacheEntry> {
     const cached = blobCache.get(cacheKey);
-    if (cached) return cached;
+    if (cached) return Promise.resolve(cached);
     const pending = inflight.get(cacheKey);
     if (pending) return pending;
-    const p = (async () => {
-        // /files is authenticated now — a bare fetch here 401s and every
-        // attachment in the app fails to open.
-        const token = getToken();
-        // The capability rides in a header, never the URL: URLs land in server
-        // and proxy logs, headers on this authenticated route do not.
-        const resp = await fetch(`${API_BASE_URL}/files/${id}`, {
-            headers: {
-                ...(token ? { Authorization: `Bearer ${token}` } : {}),
-                ...(cap ? { 'X-Puca-File-Cap': cap } : {}),
-            },
-        });
-        if (!resp.ok) throw new Error(`fetch ${id} failed: ${resp.status}`);
-        const buf = await readAttachmentBody(id, resp); // its progress shows while it downloads (AttachmentLoading)
-        const nonce = buf.slice(0, 12);
-        const ct = buf.slice(12);
-        const key = await crypto.subtle.importKey('raw', fromB64url(keyB64url) as BufferSource, 'AES-GCM', false, ['decrypt']);
-        const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce as BufferSource }, key, ct as BufferSource);
-        // A playlist is not media, whatever the ref says: opaque bytes, and
-        // flagged so no renderer gives it a player (looksLikeHlsPlaylist).
-        const playlist = looksLikeHlsPlaylist(new Uint8Array(pt));
-        const url = URL.createObjectURL(new Blob([pt], { type: playlist ? 'application/octet-stream' : safeBlobType(mime) }));
-        if (playlist) playlistUrls.add(url);
-        blobCache.set(cacheKey, url);
-        return url;
-    })();
+    // Forget the load in ITS settle, which runs before anyone awaiting `p`
+    // resumes: a waiter that retries after an abort must not find it again.
+    // (Only its own entry: sign-out empties the map, and a later load of the
+    // same file may be in it by the time this one settles.)
+    const forget = () => { if (inflight.get(cacheKey) === p) inflight.delete(cacheKey); };
+    const p: Promise<CacheEntry> = start().then(
+        (e) => { forget(); return e; },
+        (err) => { forget(); throw err; },
+    );
     inflight.set(cacheKey, p);
+    return p;
+}
+
+/** getOrLoad, then `take` the entry in the same tick it arrives, before
+ *  anything else (a release elsewhere) could evict it. */
+async function claim(cacheKey: string, start: () => Promise<CacheEntry>, take: (e: CacheEntry) => void): Promise<CacheEntry> {
+    claiming.set(cacheKey, (claiming.get(cacheKey) ?? 0) + 1);
     try {
-        return await p;
+        const e = await getOrLoad(cacheKey, start);
+        take(e);
+        return e;
     } finally {
-        inflight.delete(cacheKey);
+        const n = (claiming.get(cacheKey) ?? 1) - 1;
+        if (n > 0) claiming.set(cacheKey, n); else claiming.delete(cacheKey);
     }
+}
+
+/**
+ * claim, again when the load it joined was dropped for someone else: a
+ * message attachment that was still waiting for a fetch slot when its row
+ * scrolled away (acquireAttachmentUrl's `signal`) takes its waiting load with
+ * it, and whoever else was riding on that load still wants the file. Never
+ * when `own` (this caller's signal) aborted, and never across a sign-out.
+ */
+async function claimForCaller(cacheKey: string, start: () => Promise<CacheEntry>, take: (e: CacheEntry) => void, own?: AbortSignal): Promise<CacheEntry> {
+    const generation = cacheGeneration;
+    for (let tries = 0; ; tries++) {
+        try {
+            return await claim(cacheKey, start, take);
+        } catch (err) {
+            if ((isAbortError(err) || isSkipped(err)) && !own?.aborted && generation === cacheGeneration && tries < 4) continue;
+            throw err;
+        }
+    }
+}
+
+/** A load ahead that found no room when its turn came (prefetchAttachmentUrl):
+ *  nobody else's business, so anyone riding on it queues its own. */
+function skippedError(): Error {
+    const e = new Error('No room to load this attachment ahead.');
+    e.name = 'AttachmentPrefetchSkipped';
+    return e;
+}
+function isSkipped(e: unknown): boolean {
+    return !!e && typeof e === 'object' && (e as { name?: unknown }).name === 'AttachmentPrefetchSkipped';
+}
+
+/** Revoke unheld entries until the copies seen fit RETAINED_ATTACHMENT_BYTES
+ *  and the copies loaded ahead fit AHEAD_ATTACHMENT_BYTES, each on its own:
+ *  the deepest in their burst first, then those no attachment on the page
+ *  shows, then the lowest `seq`. Held, pinned and being-claimed entries stay. */
+function enforceRetainedBudget(): void {
+    const seen: Array<[string, CacheEntry]> = [];
+    const ahead: Array<[string, CacheEntry]> = [];
+    for (const [k, e] of blobCache) {
+        if (e.refs > 0 || e.pinned || claiming.has(k)) continue;
+        (e.seen ? seen : ahead).push([k, e]);
+    }
+    trimTo(seen, retainedBudget);
+    trimTo(ahead, aheadBudget);
+}
+
+function trimTo(pool: Array<[string, CacheEntry]>, budget: number): void {
+    let kept = pool.reduce((n, [, e]) => n + e.bytes, 0);
+    if (kept <= budget) return;
+    // How many in the same burst were given back after it (0: the newest).
+    const depth = new Map<CacheEntry, number>();
+    for (const [, e] of pool) {
+        if (!e.burst) { depth.set(e, 0); continue; }
+        let d = 0;
+        for (const [, o] of pool) if (o.burst === e.burst && o.seq > e.seq) d++;
+        depth.set(e, d);
+    }
+    const onPage = (k: string) => (interest.has(k) ? 1 : 0);
+    pool.sort((a, b) => depth.get(b[1])! - depth.get(a[1])! || onPage(a[0]) - onPage(b[0]) || a[1].seq - b[1].seq);
+    for (const [k, e] of pool) {
+        if (kept <= budget) break;
+        blobCache.delete(k);
+        playlistUrls.delete(e.url);
+        URL.revokeObjectURL(e.url);
+        kept -= e.bytes;
+    }
+}
+
+/**
+ * Fetch + decrypt an encrypted attachment, returning an object URL for the
+ * plaintext that stays valid until sign-out (the entry is pinned: see the
+ * cache notes above). A message's attachments use acquireAttachmentUrl.
+ */
+export async function decryptToBlobUrl(id: string, keyB64url: string, mime: string, cap?: string): Promise<string> {
+    const cacheKey = cacheKeyOf(id, keyB64url, mime);
+    const e = await claimForCaller(cacheKey, () => loadEntry(cacheKey, id, keyB64url, mime, cap), (entry) => {
+        entry.pinned = true;
+    });
+    return e.url;
+}
+
+/** A held attachment URL: valid until `release()`, which the holder calls only
+ *  once nothing it renders uses the URL any more. A second call does nothing. */
+export interface AttachmentHold {
+    url: string;
+    release: () => void;
+}
+
+/**
+ * How many fetch+decrypts run at once. A video (or any other file) can be the
+ * full 25 MB, so two: the one on screen gets the link instead of sharing it
+ * with the whole channel, and the renderer never holds more than two files'
+ * sealed and opened copies at once. Pictures are usually small and many to a
+ * screen, so they get their own four.
+ */
+const heavyLimiter = createPriorityLimiter(2);
+const lightLimiter = createPriorityLimiter(4);
+const limiterFor = (mime: string) => (safeBlobType(mime).startsWith('image/') ? lightLimiter : heavyLimiter);
+
+/**
+ * Hold a message attachment's decrypted URL (MessageContent's
+ * EncryptedAttachment). The same cache and keying as decryptToBlobUrl, but:
+ *  - the fetch waits for one of a few slots, and the most urgent waiting
+ *    attachment (`urgency`: lowest first, asked when a slot frees; the
+ *    distance from the screen) goes first;
+ *  - aborting `signal` while it still waits drops it (rejects AbortError);
+ *  - the entry is held, not pinned: `release()` it once it is no longer
+ *    shown, and it joins the RETAINED_ATTACHMENT_BYTES budget.
+ */
+export async function acquireAttachmentUrl(
+    id: string,
+    keyB64url: string,
+    mime: string,
+    cap?: string,
+    opts: { urgency?: () => number; signal?: AbortSignal } = {},
+): Promise<AttachmentHold> {
+    const { urgency = () => 0, signal } = opts;
+    if (signal?.aborted) throw abortError();
+    const cacheKey = cacheKeyOf(id, keyB64url, mime);
+    const limiter = limiterFor(mime);
+    const start = () => limiter.schedule({ run: () => loadEntry(cacheKey, id, keyB64url, mime, cap), urgency, signal });
+    const take = (e: CacheEntry) => {
+        if (signal?.aborted) return;
+        e.refs++;
+        e.seen = true;
+        e.seq = ++useSeq;
+    };
+    const entry = await claimForCaller(cacheKey, start, take, signal);
+    if (signal?.aborted) {
+        // It arrived just as we stopped wanting it: cached, unheld.
+        enforceRetainedBudget();
+        throw abortError();
+    }
+    let held = true;
+    return {
+        url: entry.url,
+        release: () => {
+            if (!held) return;
+            held = false;
+            entry.refs = Math.max(0, entry.refs - 1);
+            entry.seq = ++useSeq;
+            entry.burst = currentBurst();
+            if (entry.refs === 0) enforceRetainedBudget();
+        },
+    };
+}
+
+/**
+ * A message attachment for this file is on the page, until the returned
+ * function is called (MessageContent's EncryptedAttachment, for as long as it
+ * is mounted). Its unheld copy is then kept before one nothing on the page
+ * shows any more, and prefetchAttachmentUrl counts it as the page's own.
+ */
+export function noteAttachmentInterest(id: string, keyB64url: string, mime: string): () => void {
+    const k = cacheKeyOf(id, keyB64url, mime);
+    interest.set(k, (interest.get(k) ?? 0) + 1);
+    let noted = true;
+    return () => {
+        if (!noted) return;
+        noted = false;
+        const n = (interest.get(k) ?? 1) - 1;
+        if (n > 0) interest.set(k, n); else interest.delete(k);
+    };
+}
+
+/** Is there room for one more file loaded ahead for the page, in
+ *  AHEAD_ATTACHMENT_BYTES? Copies loaded ahead for rows no longer on the page
+ *  do not count (they go first), and copies seen are not in this budget. */
+function roomToPrefetch(): boolean {
+    let onPage = 0;
+    for (const [k, e] of blobCache) {
+        if (e.refs === 0 && !e.pinned && !e.seen && interest.has(k)) onPage += e.bytes;
+    }
+    return onPage + MAX_UPLOAD_BYTES <= aheadBudget;
+}
+
+/**
+ * Load a message attachment that is still far from the screen into the cache,
+ * unheld, so it is already here when the reader scrolls to it — as every
+ * attachment was when they all loaded at once. It goes after everything
+ * nearer (`urgency`, as for acquireAttachmentUrl), never in the last free
+ * fetch slot (a `background` job: one is always left for a file the reader
+ * scrolls to), and only while the page's copies loaded ahead leave room for
+ * one more file in AHEAD_ATTACHMENT_BYTES, judged when its turn comes: it
+ * may push out a copy loaded ahead for a row no longer on the page, never a
+ * copy the reader has seen. Resolves when it is here, skipped, failed or
+ * aborted (`signal`: the row came near and holds it, or left the page); a
+ * skipped one loads when it comes near, as one that failed does.
+ */
+export async function prefetchAttachmentUrl(
+    id: string,
+    keyB64url: string,
+    mime: string,
+    cap?: string,
+    opts: { urgency?: () => number; signal?: AbortSignal } = {},
+): Promise<void> {
+    const { urgency = () => 0, signal } = opts;
+    const cacheKey = cacheKeyOf(id, keyB64url, mime);
+    const generation = cacheGeneration;
+    const run = () => (roomToPrefetch() ? loadEntry(cacheKey, id, keyB64url, mime, cap) : Promise.reject(skippedError()));
+    for (let tries = 0; ; tries++) {
+        if (signal?.aborted || blobCache.has(cacheKey)) return;
+        try {
+            await getOrLoad(cacheKey, () => limiterFor(mime).schedule({ run, urgency, signal, background: true }));
+            break;
+        } catch (err) {
+            // The load it joined was dropped for someone else — typically this
+            // very row's own wait for a slot, dropped as the row scrolled out
+            // of range, a moment before this load ahead replaced it (measured:
+            // giving up then left two of twelve videos never loaded). Queue
+            // its own. Skipped (no room), failed or aborted itself: done.
+            if (isAbortError(err) && !signal?.aborted && generation === cacheGeneration && tries < 4) continue;
+            return;
+        }
+    }
+    enforceRetainedBudget();
+}
+
+/** What the cache holds now, in bytes of plaintext (tests, diagnostics):
+ *  shown now, pinned, seen and given back, loaded ahead and not yet seen. */
+export function attachmentCacheStats(): { entries: number; heldBytes: number; pinnedBytes: number; retainedBytes: number; aheadBytes: number } {
+    let heldBytes = 0, pinnedBytes = 0, retainedBytes = 0, aheadBytes = 0;
+    for (const e of blobCache.values()) {
+        if (e.pinned) pinnedBytes += e.bytes;
+        else if (e.refs > 0) heldBytes += e.bytes;
+        else if (e.seen) retainedBytes += e.bytes;
+        else aheadBytes += e.bytes;
+    }
+    return { entries: blobCache.size, heldBytes, pinnedBytes, retainedBytes, aheadBytes };
 }
 
 /** Revoke every cached decrypted-attachment object URL and clear the cache.
  *  Called on logout so one user's decrypted files don't linger in memory (or
- *  remain openable via their blob: URLs) for the next user on a shared session. */
+ *  remain openable via their blob: URLs) for the next user on a shared session.
+ *  Attachments still waiting for a fetch slot are dropped too, and one still
+ *  downloading is not cached when it lands (cacheGeneration). */
 export function clearBlobCache(): void {
-    for (const url of blobCache.values()) {
-        URL.revokeObjectURL(url);
+    cacheGeneration++;
+    for (const e of blobCache.values()) {
+        URL.revokeObjectURL(e.url);
     }
     blobCache.clear();
+    inflight.clear();
     playlistUrls.clear();
+    heavyLimiter.clear();
+    lightLimiter.clear();
 }

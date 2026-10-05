@@ -131,6 +131,13 @@ download button underneath. A file the player cannot open, or a type it does not
 A video with no picture your device can show — a sound-only .webm, or a video in a format your device cannot
 decode — gets the audio player, marked **Sound only: no picture to show**; download it to watch it elsewhere.
 
+Attachments load by themselves, with nothing to click: the ones on screen first, then the ones nearest to it, a
+couple of big files at a time, and then, up to a limit, the rest of the channel, so one you scroll to is normally ready
+when it appears. Each is downloaded and decrypted on your device. Only the few players nearest the screen are
+live at once (every one on screen is); the others show **Loading attachment…** until you scroll near them. Files
+far off screen, or in a channel you left, are kept for a while so going back is instant, up to a limit; past
+that the oldest are dropped from memory and load again when you come back.
+
 You can also drag files from your computer onto the messages, in the desktop
 app as in the browser, wherever you could send a message. Wherever a message is shown in short — the
 **Replying to** bar, the line above a reply, **Pinned messages**, search

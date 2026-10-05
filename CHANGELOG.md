@@ -4,6 +4,28 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Changed
+- **Big video attachments still load by themselves, the ones on screen
+  first.** Opening a channel used to download and decrypt every attachment in
+  it at once, oldest first, so the video you were looking at arrived last:
+  with twelve 22 MB videos it took 23 seconds at 100 Mbit (and 17 seconds on
+  an Android phone emulator) before the newest one played. Now the ones on
+  screen come first, two big files at a time, then the ones nearest the
+  screen, then the rest of the channel in the background: the newest video
+  was ready in about 6 seconds (5 on the emulator), and every one was ready
+  when scrolled to, as before. Nothing to click and nothing to set.
+- **Less memory while a channel full of videos opens, and it is given back.**
+  Decrypting everything at once took the app's page from about 65 MB to
+  600-800 MB on a PC; it now stays near 300-400 MB. Decrypted files used to
+  stay in memory (on Android, on disk) until you signed out, about 260 MB
+  more for every such channel you opened; now files you have scrolled far
+  away from or left behind are kept up to a limit, the newest of each channel
+  first, so going back to a channel is still instant, and the oldest are
+  dropped past it. At most four video or audio players are live at once
+  (every one on screen always is, and one that is playing keeps playing).
+
 ## 0.9.833 — 2026-10-03
 
 Poker and Blackjack in voice calls, like Discord's Activities: start one from the rocket button, everyone in the call sees it and can join or watch.
