@@ -19,7 +19,8 @@
  * fail with a 400 the user cannot explain.
  */
 import { type TaskAttachmentRef, MAX_TASK_ATTACHMENTS, isAttachmentsLocked, parseTaskAttachments } from './tasks';
-import { type SealedFile, audioMimeFor, decryptAttachmentBytes, encryptAndUploadRef, parseEncAttachment, sealFileForUpload, uploadSealedRef } from './attachments';
+import { type PlainBytes, type SealedFile, audioMimeFor, decryptAttachmentBytes, encryptAndUploadRef, parseEncAttachment, sealFileForUpload, uploadSealedRef } from './attachments';
+import { freeNow } from './plaintextHost';
 import { prepareImageForUpload } from './imagePrep';
 import { bytesFromB64, bytesToB64, parkedHref, parseParkedRef } from './parkedMedia';
 import { addTaskListAttachments, deleteFiles, removeTaskListAttachments } from './listContent';
@@ -61,15 +62,28 @@ export function clampAttachmentName(name: string): string {
     return `${name.slice(0, MAX_ATTACHMENT_NAME_LEN - ext.length - 1)}…${ext}`;
 }
 
+/** A file to upload as it is: a File, or plaintext the app decrypted itself,
+ *  made only when its turn comes (`() => PlainBytes`, never a File: see
+ *  api/attachments.ts) and freed as soon as it is sealed, so one file's
+ *  plaintext is in memory at a time. */
+export type PreparedFile = File | (() => Promise<PlainBytes>);
+
 /** Encrypt and upload files that are ALREADY the bytes to store (no shrink),
- *  all or nothing: a failure deletes whatever already landed. Exported for
- *  api/captureToNote.ts, which re-uploads a chat attachment the sender had
- *  already prepared — it reuses this rollback rather than copying it. */
-export async function uploadPreparedFiles(files: File[]): Promise<TaskAttachmentRef[]> {
+ *  one at a time, all or nothing: a failure deletes whatever already landed.
+ *  Exported for api/captureToNote.ts, which re-uploads a chat attachment the
+ *  sender had already prepared — it reuses this rollback rather than copying
+ *  it. */
+export async function uploadPreparedFiles(files: PreparedFile[]): Promise<TaskAttachmentRef[]> {
     const done: TaskAttachmentRef[] = [];
     try {
         for (const f of files) {
-            const r = await encryptAndUploadRef(f);
+            const plain = typeof f === 'function' ? await f() : null;
+            let r: { href: string; name: string };
+            try {
+                r = await encryptAndUploadRef(plain ?? (f as File));
+            } finally {
+                if (plain) freeNow(plain.bytes.buffer as ArrayBuffer);
+            }
             done.push({ href: r.href, name: clampAttachmentName(r.name) });
         }
         return done;
@@ -210,8 +224,15 @@ export async function resealRefs(refs: TaskAttachmentRef[]): Promise<TaskAttachm
         for (const r of refs) {
             const p = parseEncAttachment(r.href);
             if (!p) throw new Error('Not an attachment ref');
+            // Sealed straight from the bytes, never a File made of them
+            // (api/attachments.ts PlainBytes), and freed once sealed.
             const bytes = await decryptAttachmentBytes(p.id, p.key, p.mime, p.cap);
-            const made = await encryptAndUploadRef(new File([bytes as BlobPart], r.name, { type: p.mime }));
+            let made: { href: string };
+            try {
+                made = await encryptAndUploadRef({ bytes, name: r.name, type: p.mime });
+            } finally {
+                freeNow(bytes.buffer as ArrayBuffer);
+            }
             done.push({ href: made.href, name: r.name });
         }
         return done;

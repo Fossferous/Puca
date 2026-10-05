@@ -19,7 +19,7 @@
  * No React, no components/ imports, and nothing from notes/** — Notes is a
  * separate Vite entry, and a cross-entry import renames the index chunk.
  */
-import { decryptAttachmentBytes, isEncAttachment, parseEncAttachment } from './attachments';
+import { type PlainBytes, decryptAttachmentBytes, isEncAttachment, parseEncAttachment } from './attachments';
 import { deleteFiles } from './listContent';
 import { uploadPreparedFiles } from './noteMedia';
 import { type TaskAttachmentRef, MAX_TASK_ATTACHMENTS } from './tasks';
@@ -78,12 +78,14 @@ export function captureTitle(text: string, fallback = 'Saved message'): string {
     return (first ? first.replace(/\s+/g, ' ').slice(0, CAPTURE_TITLE_MAX) : fallback) || fallback;
 }
 
-/** Decrypt one attachment ref back to a plain File. */
-async function decryptRefToFile(ref: TaskAttachmentRef): Promise<File> {
+/** Decrypt one attachment ref back to its bytes. Never a File made of them:
+ *  that is a page Blob, which the engine may write to its blob storage as it
+ *  is (api/attachments.ts PlainBytes). */
+async function decryptRef(ref: TaskAttachmentRef): Promise<PlainBytes> {
     const p = parseEncAttachment(ref.href);
     if (!p) throw new Error('That attachment can’t be read.');
     const bytes = await decryptAttachmentBytes(p.id, p.key, p.mime, p.cap);
-    return new File([bytes as BlobPart], ref.name || 'attachment', { type: p.mime });
+    return { bytes, name: ref.name || 'attachment', type: p.mime };
 }
 
 /**
@@ -94,7 +96,9 @@ async function decryptRefToFile(ref: TaskAttachmentRef): Promise<File> {
  *
  * All or nothing: one failure deletes the copies that already landed, so a
  * refused capture never leaves files counting against the quota that no note
- * names (api/noteMedia.ts's rule, reused rather than re-written).
+ * names (api/noteMedia.ts's rule, reused rather than re-written). One at a
+ * time: each is decrypted only when its turn comes and its plaintext freed
+ * once it is sealed, so one attachment's plaintext is in memory at a time.
  *
  * No `channelId` is passed: the copy belongs to the note, not to the
  * conversation the message was in. No re-shrink either — the sender already
@@ -104,9 +108,7 @@ export async function copyRefsIntoMyNote(refs: TaskAttachmentRef[], existing = 0
     if (existing + refs.length > MAX_TASK_ATTACHMENTS) {
         throw new Error(`A note holds at most ${MAX_TASK_ATTACHMENTS} pictures and files.`);
     }
-    const files: File[] = [];
-    for (const ref of refs) files.push(await decryptRefToFile(ref));
-    return uploadPreparedFiles(files);
+    return uploadPreparedFiles(refs.map(ref => () => decryptRef(ref)));
 }
 
 /** Best-effort cleanup of copies whose note then failed to save. */

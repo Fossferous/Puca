@@ -36,6 +36,7 @@ vi.mock('../api/uploads', () => ({
 }));
 vi.mock('../api/authedMedia', () => ({
     fetchFileUrl: async () => null,
+    fetchFileObjectUrl: async () => null,
     cachedFileUrl: () => null,
     clearFileCache: () => {},
 }));

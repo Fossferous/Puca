@@ -247,13 +247,34 @@ export interface SealedFile {
     name: string;
 }
 
+/**
+ * A file's plaintext as bytes, with its name and type: what an attachment
+ * decrypted only to be sealed again under a fresh key (a message captured
+ * into a note, a note copied) is handed over as. Never wrapped in a File: a
+ * File made from bytes is a page Blob, and the engine writes a page's blobs
+ * beyond its in-memory limit (1% of the RAM in the Android WebView) to
+ * `blob_storage` as they are, where the plaintext stays until the page next
+ * collects garbage (docs/SECURITY_MODEL.md, *Decrypted attachments on your
+ * own storage*). The caller owns `bytes`, and may free them (freeNow) once
+ * the seal is done.
+ */
+export interface PlainBytes {
+    bytes: Uint8Array;
+    name: string;
+    type: string;
+}
+
+// Not `'bytes' in f`: a File has a bytes() method of its own in newer engines.
+const isPlainBytes = (f: File | PlainBytes): f is PlainBytes => ArrayBuffer.isView((f as PlainBytes).bytes);
+
 /** Encrypt a file for upload, without uploading it. See `SealedFile`. */
-export async function sealFileForUpload(file: File): Promise<SealedFile> {
+export async function sealFileForUpload(file: File | PlainBytes): Promise<SealedFile> {
+    const given = isPlainBytes(file) ? file.bytes : null;
     // Check BEFORE reading and encrypting: uploadFile checks too, but by then we
     // have already pulled the whole file into memory and encrypted it. Account
     // for what encryption adds, or a file of exactly the cap fails at the server.
-    assertUploadable(file, ENCRYPTED_OVERHEAD_BYTES);
-    const raw = new Uint8Array(await file.arrayBuffer());
+    assertUploadable({ name: file.name, size: given ? given.byteLength : (file as File).size }, ENCRYPTED_OVERHEAD_BYTES);
+    const raw = given ?? new Uint8Array(await (file as File).arrayBuffer());
     const keyBytes = crypto.getRandomValues(new Uint8Array(32));
     const nonce = crypto.getRandomValues(new Uint8Array(12));
     const key = await crypto.subtle.importKey('raw', keyBytes as BufferSource, 'AES-GCM', false, ['encrypt']);
@@ -284,9 +305,10 @@ export async function uploadSealedRef(sealed: SealedFile, opts?: { channelId?: n
  * Encrypt a file, upload the ciphertext, and return the parts of the ref:
  * the sovereign-enc href (carrying id + key + mime), the sanitized display
  * name, and the real mime. Building block for both the chat markdown form
- * (encryptAndUpload) and task attachment refs.
+ * (encryptAndUpload) and task attachment refs. Plaintext the app decrypted
+ * itself comes as bytes (PlainBytes), never as a File made from them.
  */
-export async function encryptAndUploadRef(file: File, opts?: { channelId?: number }): Promise<{ href: string; name: string; mime: string }> {
+export async function encryptAndUploadRef(file: File | PlainBytes, opts?: { channelId?: number }): Promise<{ href: string; name: string; mime: string }> {
     return uploadSealedRef(await sealFileForUpload(file), opts);
 }
 
@@ -790,9 +812,11 @@ function trimTo(pool: Array<[string, CacheEntry]>, budget: number): void {
 /**
  * An attachment's plaintext as bytes, for code that reads a file rather than
  * showing it (a message captured into a note, a note copied, a drawing's
- * strokes): no URL is made and nothing stays decrypted here, so nothing is
- * left in the engine's blob storage either (what these used, decryptToBlobUrl,
- * kept a URL for each until sign-out). The cache keeps the ciphertext as for
+ * strokes): no URL is made and nothing stays decrypted here (what these used,
+ * decryptToBlobUrl, kept a URL for each until sign-out). The bytes are the
+ * caller's: keep them bytes (seal them as PlainBytes, decode them as text),
+ * never a File or Blob, or they are in the engine's blob storage after all,
+ * and free them (freeNow) when done. The cache keeps the ciphertext as for
  * any load.
  */
 export async function decryptAttachmentBytes(id: string, keyB64url: string, mime: string, cap?: string): Promise<Uint8Array> {

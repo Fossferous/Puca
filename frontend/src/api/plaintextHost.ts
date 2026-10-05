@@ -30,6 +30,11 @@
  * (nudgeCollection): files gone within 2 s, measured in headless Edge and in
  * the Android WebView; without it, still there.
  *
+ * Chromium writes the blobs it pages out several to a file and deletes the
+ * file only once every blob in it is gone, so this works only if nothing the
+ * page keeps for long is a blob: avatars, icons and emoji are data: URLs
+ * (api/authedMedia.ts); an avatar's blob kept two released pictures on disk.
+ *
  * A file of BIG_LEASE_BYTES or more gets a worker of its own; smaller ones
  * share one, a few at a time, so a channel of pictures does not start a
  * worker per picture (an idle worker is about 0.75 MB in the WebView;

@@ -13,61 +13,19 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { keepCipher, dropAllCiphertext, __setCipherStoreDisabled, __setCipherWriterFactory } from '../api/cipherStore';
+import { type FakeDir, type FakeFileHandle, fakeOpfsNavigator, sessionDirsOf, filesInOf } from './fixtures/fakeOpfs';
 
-// ---- an in-memory OPFS ------------------------------------------------------
-class FakeFileHandle {
-    readonly kind = 'file';
-    data = new Uint8Array(0);
-    readonly name: string;
-    constructor(name: string) { this.name = name; }
-    async createWritable() {
-        const parts: Uint8Array[] = [];
-        return {
-            write: async (d: Uint8Array) => { parts.push(new Uint8Array(d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength))); },
-            close: async () => {
-                const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
-                let o = 0;
-                for (const p of parts) { out.set(p, o); o += p.length; }
-                this.data = out;
-            },
-        };
-    }
-    async getFile() {
-        const d = this.data;
-        return { size: d.length, arrayBuffer: async () => d.slice().buffer } as unknown as File;
-    }
-}
-class FakeDir {
-    readonly kind = 'directory';
-    entries = new Map<string, FakeDir | FakeFileHandle>();
-    readonly name: string;
-    constructor(name: string) { this.name = name; }
-    async getDirectoryHandle(n: string, o?: { create?: boolean }) {
-        let d = this.entries.get(n);
-        if (!d) { if (!o?.create) throw new DOMException('no such directory', 'NotFoundError'); d = new FakeDir(n); this.entries.set(n, d); }
-        return d as FakeDir;
-    }
-    async getFileHandle(n: string, o?: { create?: boolean }) {
-        let f = this.entries.get(n);
-        if (!f) { if (!o?.create) throw new DOMException('no such file', 'NotFoundError'); f = new FakeFileHandle(n); this.entries.set(n, f); }
-        return f as FakeFileHandle;
-    }
-    async removeEntry(n: string) {
-        if (!this.entries.delete(n)) throw new DOMException('no such entry', 'NotFoundError');
-    }
-    async *keys() { for (const k of [...this.entries.keys()]) yield k; }
-}
+// ---- an in-memory OPFS (fixtures/fakeOpfs.ts) ------------------------------
 let root: FakeDir;
-const held = new Set<string>();
-const cacheDir = () => root.entries.get('puca-attachment-cache') as FakeDir | undefined;
-const sessionDirs = () => [...(cacheDir()?.entries.keys() ?? [])];
-const filesIn = (name: string) => [...((cacheDir()?.entries.get(name) as FakeDir | undefined)?.entries.values() ?? [])] as FakeFileHandle[];
+let held: Set<string>;
+const sessionDirs = () => sessionDirsOf(root);
+const filesIn = (name: string) => filesInOf(root, name);
 
 // ---- the writer worker, doing what cipherWriter.worker.ts does --------------
 type Listener = (e: Event) => void;
 class FakeWriter {
     static all: FakeWriter[] = [];
-    static mode: 'ok' | 'fail-start' | 'fail-write' = 'ok';
+    static mode: 'ok' | 'fail-start' | 'fail-write' | 'cannot-clone' = 'ok';
     static hold: Promise<void> | null = null;
     terminated = false;
     private ls: Record<string, Listener[]> = { message: [], error: [] };
@@ -83,6 +41,9 @@ class FakeWriter {
     private emit(t: string, e: Event) { for (const l of this.ls[t]) l(e); }
     private reply(data: unknown) { this.emit('message', Object.assign(new Event('message'), { data })); }
     postMessage(m: { handle: FakeFileHandle; buf: ArrayBuffer; offset: number; length: number }, transfer: ArrayBuffer[]) {
+        // An engine that cannot hand a file handle to a worker throws here,
+        // before anything is transferred (the buffer stays the page's).
+        if (FakeWriter.mode === 'cannot-clone') throw new DOMException('FileSystemFileHandle could not be cloned.', 'DataCloneError');
         // Transferred: the page's buffer is detached from here on.
         const buf = structuredClone(m.buf, { transfer });
         void (async () => {
@@ -99,18 +60,13 @@ const settle = async (n = 20) => { for (let i = 0; i < n; i++) await new Promise
 const bytes = (...xs: number[]) => new Uint8Array(xs);
 
 beforeEach(() => {
-    root = new FakeDir('');
-    held.clear();
+    const opfs = fakeOpfsNavigator();
+    root = opfs.root;
+    held = opfs.held;
     FakeWriter.all = [];
     FakeWriter.mode = 'ok';
     FakeWriter.hold = null;
-    vi.stubGlobal('navigator', {
-        storage: { getDirectory: async () => root },
-        locks: {
-            request: (name: string, cb: () => Promise<void>) => { held.add(name); return cb().then(() => { held.delete(name); }); },
-            query: async () => ({ held: [...held].map((name) => ({ name })) }),
-        },
-    });
+    vi.stubGlobal('navigator', opfs.navigator);
     __setCipherStoreDisabled(null); // a new session directory per test
     __setCipherWriterFactory(() => new FakeWriter() as unknown as Worker);
 });
@@ -190,6 +146,23 @@ describe('the ciphertext cache', () => {
         keepCipher(bytes(1));
         await settle();
         expect(FakeWriter.all).toHaveLength(1); // no second try
+        expect(filesIn(sessionDirs()[0])).toHaveLength(2);
+    });
+
+    it('a writer that cannot be handed the file loses nothing: the page writes it, and every later one', async () => {
+        // postMessage throws (a DataCloneError) before it transfers anything:
+        // the bytes are still the page's, so this copy must not count as lost,
+        // and no later copy may be lost the same way (review finding, 2026-10-05).
+        FakeWriter.mode = 'cannot-clone';
+        const copy = keepCipher(bytes(6, 1));
+        await settle();
+        expect(Array.from(await copy.read())).toEqual([6, 1]);
+        expect(filesIn(sessionDirs()[0]).map((f) => Array.from(f.data))).toEqual([[6, 1]]);
+        expect(FakeWriter.all[0].terminated).toBe(true);
+        const later = keepCipher(bytes(2));
+        await settle();
+        expect(FakeWriter.all).toHaveLength(1); // the page writes from now on
+        expect(Array.from(await later.read())).toEqual([2]);
         expect(filesIn(sessionDirs()[0])).toHaveLength(2);
     });
 

@@ -112,10 +112,10 @@ function sessionDir(): Promise<Session | null> {
 
 /**
  * Write `data` into `fh` from a writer worker of its own, and terminate it.
- * Resolves true once the file holds it; false when no worker could start
- * (`data` is untouched then, for the page to write). Rejects when the worker
- * took the bytes and failed (`data` is gone then: it was transferred).
- * `handingOver` runs just before `data` is transferred.
+ * Resolves true once the file holds it; false when no worker could start or
+ * take it (`data` is untouched then, for the page to write). Rejects when the
+ * worker took the bytes and failed (`data` is gone then: it was transferred).
+ * `handingOver` runs as soon as `data` has been transferred.
  */
 async function writeInWorker(fh: FileSystemFileHandle, data: Uint8Array, handingOver: () => void): Promise<boolean> {
     if (writersBroken) return false;
@@ -134,8 +134,17 @@ async function writeInWorker(fh: FileSystemFileHandle, data: Uint8Array, handing
             worker.addEventListener('error', () => resolve({ ok: false, error: 'writer stopped' }));
         });
         const buf = data.buffer as ArrayBuffer;
+        try {
+            worker.postMessage({ handle: fh, buf, offset: data.byteOffset, length: data.byteLength }, [buf]);
+        } catch {
+            // Refused before anything was transferred (a DataCloneError: an
+            // engine that cannot hand a file handle to a worker): the bytes
+            // are still the page's, which writes this copy and every later one.
+            writersBroken = true;
+            return false;
+        }
+        // Transferred now (postMessage returned): no longer the page's.
         handingOver();
-        worker.postMessage({ handle: fh, buf, offset: data.byteOffset, length: data.byteLength }, [buf]);
         const r = await done;
         if (!r.ok) {
             // No sync access handles here, as it turns out: the page writes

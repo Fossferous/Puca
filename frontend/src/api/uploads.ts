@@ -39,9 +39,10 @@ export const ENCRYPTED_OVERHEAD_BYTES = 28;
 
 /** Thrown before any bytes move. Message is safe to show to the user verbatim. */
 export class FileTooLargeError extends Error {
-    readonly file: File;
+    /** What was refused: a File, or bytes with a name (api/attachments.ts PlainBytes). */
+    readonly file: Pick<File, 'name' | 'size'>;
 
-    constructor(file: File, budget: number) {
+    constructor(file: Pick<File, 'name' | 'size'>, budget: number) {
         super(
             `"${file.name}" is ${formatFileSize(file.size)} — the limit is `
             + `${formatFileSize(budget)}.`
@@ -55,7 +56,7 @@ export class FileTooLargeError extends Error {
  * Reject an oversized file before spending time encrypting and sending it.
  * `overhead` is what the caller will add to these bytes before upload.
  */
-export function assertUploadable(file: File, overhead = 0): void {
+export function assertUploadable(file: Pick<File, 'name' | 'size'>, overhead = 0): void {
     const budget = MAX_UPLOAD_BYTES - overhead;
     if (file.size > budget) throw new FileTooLargeError(file, budget);
 }

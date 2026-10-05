@@ -102,7 +102,7 @@ beforeEach(() => {
     }));
     vi.mocked(decryptAttachmentBytes).mockResolvedValue(new TextEncoder().encode('bytes'));
     let copy = 0;
-    vi.mocked(encryptAndUploadRef).mockImplementation(async (f: File) => {
+    vi.mocked(encryptAndUploadRef).mockImplementation(async (f: { name: string }) => {
         const id = `new${++copy}`;
         return { href: href(id), name: f.name, mime: 'image/png' };
     });

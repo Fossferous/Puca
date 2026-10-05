@@ -18,9 +18,11 @@
  */
 import { useSyncExternalStore } from 'react';
 
-/** Hidden this long, the app lets go of what it is not using. Short enough
- *  that a phone killing it right after it went to the background finds
- *  nothing; long enough that a glance at another app costs nothing. */
+/** Hidden this long, the app lets go of what it is not using: long enough
+ *  that a glance at another app costs nothing, and short, because a phone
+ *  that kills the app before it has let go leaves what was on screen on
+ *  disk until the app's next start (the Android app removes it then:
+ *  PucaApplication.java). */
 export const SUSPEND_AFTER_HIDDEN_MS = 2000;
 
 let suspendAfterMs = SUSPEND_AFTER_HIDDEN_MS;

@@ -141,8 +141,9 @@ it when you come back to it. The files within about two screens of what you are 
 away, or in a channel you left, are kept up to a limit so going back needs no download, and past it the oldest are
 dropped and load again when you come back. The ones kept are kept **encrypted**: a file is decrypted only while it
 is on or near the screen, and a couple of seconds after you switch to another app Púca lets go of everything it is
-not playing or showing full screen, so no readable copy waits on the phone. Coming back shows them again at once
-from the encrypted copy (docs/SECURITY_MODEL.md, *Decrypted attachments on your own storage*).
+not playing, showing in the picture viewer or saving, so no readable copy waits on the phone. Coming back shows them
+again a moment later (about a second and a half for a channel's few pictures and videos on a test phone) from the
+encrypted copy, with nothing downloaded again (docs/SECURITY_MODEL.md, *Decrypted attachments on your own storage*).
 
 You can also drag files from your computer onto the messages, in the desktop
 app as in the browser, wherever you could send a message. Wherever a message is shown in short — the

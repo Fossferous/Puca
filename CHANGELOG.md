@@ -48,17 +48,26 @@ one-line summary; this file is the full story. Versions follow
   Now a file is decrypted only while it is on or near the screen, the copies
   kept so that coming back needs no download stay encrypted, and a couple of
   seconds after you switch to another app Púca lets go of everything it is
-  not playing or showing full screen, and those files are gone from the
-  phone within seconds. Coming back to Púca shows them again from the
+  not playing, showing in the picture viewer or saving, and those files are
+  gone from the phone within seconds (on a test phone, with an avatar on
+  screen: none left 5 and 20 seconds after switching away, in three tries
+  out of three). If the phone closes Púca within those two seconds, what
+  was on screen is left until Púca next starts (see the next point).
+  Coming back to Púca shows them again from the
   encrypted copies, with nothing downloaded again, though it takes a moment
   longer than before: on a test phone a channel's three videos, three
   pictures and a song were all back about 1.5 seconds after returning,
-  where they used to be back in under one. Pictures and voice notes in Tasks
-  and Notes are let go the same way; they used to stay decrypted until you
-  signed out. On a PC the same files were written to disk when Windows ran
+  where they used to be back in under one, and going back to a channel of
+  big videos briefly takes more memory while they are decrypted again
+  (about 270 to 400 MB for two or three seconds on a 2 GB test phone,
+  against 150 to 170 MB before; it then settles where it was). Pictures and
+  voice notes in Tasks and Notes are let go the same way; they used to stay
+  decrypted until you signed out. Saving a message to a note and copying a
+  note no longer leave a readable copy of its pictures or videos behind
+  either. On a PC the same files were written to disk when Windows ran
   short of memory, and stayed there for as long as Púca kept them in its
-  cache; now they go as soon as nothing shows them. This arrives with the
-  update inside the app.
+  cache; now they go within seconds of nothing showing them. This arrives
+  with the update inside the app.
 - **What a crash left behind is removed when the app next starts — this
   part needs the NEW Android app (0.9.834).** If Púca is closed by a crash
   or killed while a picture or video is on screen, that file is still on the
