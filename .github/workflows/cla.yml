@@ -5,21 +5,23 @@
 # hosted bot, which stopped accepting new projects. It works entirely inside
 # GitHub Actions: no external service, no OAuth app to install.
 #
-# WHAT STILL NEEDS DOING BY HAND (this file alone is not enough):
-#   1. Create a GitHub Personal Access Token with `repo` scope, belonging to
-#      an account that can comment on and label PRs in this repo (the
-#      maintainer's own account is simplest).
-#   2. Add it as a repository secret named PERSONAL_ACCESS_TOKEN:
-#      Settings -> Secrets and variables -> Actions -> New repository secret.
-#   3. That's it — this workflow reads CLA.md at the repo root and posts a
-#      comment on any PR from a contributor who hasn't signed, asking them to
-#      reply with the sentence configured below. Signatures are recorded in
-#      .github/cla-signatures.json on the branch configured below, which the
-#      action creates and commits to automatically.
+# NOTHING NEEDS DOING BY HAND, and no Personal Access Token is needed. The
+# workflow reads CLA.md and posts a comment on any PR from a contributor who
+# hasn't signed, asking them to reply with the sentence configured below.
+# Signatures are recorded in .github/cla-signatures.json on the
+# `cla-signatures` branch of THIS repository, which the action creates and
+# commits to by itself.
 #
-# Nobody's GitHub OAuth needs to be granted to a third party for this to
-# work — the PAT above IS the only credential involved, and it stays inside
-# this repository's own secrets.
+# The only credential is the built-in GITHUB_TOKEN, with the write
+# permissions this job grants it (below). The action asks for a PAT only to
+# store signatures in a DIFFERENT repository or organisation (its
+# `remote-repository-name` / `remote-organization-name` inputs: at the pinned
+# commit, src/octokit.ts getPATOctokit is used for nothing else); ours live
+# here, so it never reads one. If signatures ever move to another repository,
+# that move is when a PAT with access to it becomes necessary — add it then
+# as the PERSONAL_ACCESS_TOKEN secret and pass it in `env`.
+#
+# Nobody's GitHub OAuth is granted to a third party for this to work.
 
 name: "CLA Assistant Lite"
 on:
@@ -46,7 +48,6 @@ jobs:
         uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
         with:
           path-to-signatures: '.github/cla-signatures.json'
           path-to-document: 'https://raw.githubusercontent.com/Fossferous/Puca/main/CLA.md'
