@@ -109,9 +109,11 @@ Everything else arrives with the update inside the app.
   screens of what you are reading stay ready; those further away, or in a
   channel you left, are kept up to a limit (about 190 MB of files you have
   seen, and as much again loaded ahead), the newest of each channel first, so
-  going back to a channel is still instant, and past it the oldest are
-  dropped. In a channel of thirty 22 MB videos, a minute after opening it,
-  the app kept about 520 MB of decrypted files instead of 900 MB.
+  going back to a channel needs no download, and past it the oldest are
+  dropped. The ones kept are kept encrypted and decrypted again when you
+  come back, a moment later (see *Fixed* below). In a channel of thirty
+  22 MB videos, a minute after opening it, the app kept about 520 MB of
+  files instead of 900 MB (measured before that change).
 - **Only the video and audio players nearest the screen are live**: every
   one on screen, and off screen the next ones in the direction you are
   scrolling, four in all unless more than that are on screen; one that is
