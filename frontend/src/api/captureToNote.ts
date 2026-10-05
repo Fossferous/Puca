@@ -19,7 +19,7 @@
  * No React, no components/ imports, and nothing from notes/** — Notes is a
  * separate Vite entry, and a cross-entry import renames the index chunk.
  */
-import { decryptToBlobUrl, isEncAttachment, parseEncAttachment } from './attachments';
+import { decryptAttachmentBytes, isEncAttachment, parseEncAttachment } from './attachments';
 import { deleteFiles } from './listContent';
 import { uploadPreparedFiles } from './noteMedia';
 import { type TaskAttachmentRef, MAX_TASK_ATTACHMENTS } from './tasks';
@@ -82,9 +82,8 @@ export function captureTitle(text: string, fallback = 'Saved message'): string {
 async function decryptRefToFile(ref: TaskAttachmentRef): Promise<File> {
     const p = parseEncAttachment(ref.href);
     if (!p) throw new Error('That attachment can’t be read.');
-    const url = await decryptToBlobUrl(p.id, p.key, p.mime, p.cap);
-    const blob = await (await fetch(url)).blob();
-    return new File([blob], ref.name || 'attachment', { type: p.mime });
+    const bytes = await decryptAttachmentBytes(p.id, p.key, p.mime, p.cap);
+    return new File([bytes as BlobPart], ref.name || 'attachment', { type: p.mime });
 }
 
 /**

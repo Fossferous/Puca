@@ -15,8 +15,9 @@
  * is the exception that proves the rule: audio is a type the blob URL may
  * keep, so it gets a real player — and one that never plays by itself.
  *
- * Every picture and every recording is decrypted on this device
- * (decryptToBlobUrl); the server only ever holds ciphertext. A voice note
+ * Every picture and every recording is decrypted on this device, and only
+ * while it is shown (useHeldAttachmentUrl); the server only ever holds
+ * ciphertext. A voice note
  * gets a real player with controls and NEVER autoplays: sound on this device
  * happens only because someone pressed play. A LOCKED sidecar (the identity is locked, the
  * value is not an envelope) renders a lock line and offers no edits: writing
@@ -33,7 +34,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { type TaskAttachmentRef, isAttachmentsLocked } from '../api/tasks';
-import { audioMimeFor, decryptToBlobUrl, isPlaylistBlobUrl, parseEncAttachment } from '../api/attachments';
+import { acquireAttachmentUrl, audioMimeFor, isPlaylistBlobUrl, parseEncAttachment } from '../api/attachments';
 import { type GalleryItem, galleryItemNoun, galleryItems } from '../api/noteMedia';
 import { isParkedRef, parseParkedRef } from '../api/parkedMedia';
 import { parkedObjectUrl } from '../api/parkedPreview';
@@ -41,6 +42,7 @@ import { saveAttachment } from '../api/saveAttachment';
 import { ImageLightbox } from './ImageLightbox';
 import { CameraIcon, CheckCircleIcon, CloseIcon, ImageIcon, LockIcon, MicIcon, PaperclipIcon, PencilIcon, WarningIcon } from './Icons';
 import { followOutputDeviceRef } from './settingsStore';
+import { useHeldAttachmentUrl } from './useHeldAttachmentUrl';
 import './NoteImages.css';
 
 /**
@@ -61,11 +63,18 @@ function FileDownload({ refItem, folder }: { refItem: TaskAttachmentRef; folder?
             disabled={state === 'saving'}
             onClick={async () => {
                 setState('saving');
+                // Decrypted for the save only, and let go after it.
+                let release = () => { /* nothing held */ };
                 try {
                     const p = parseEncAttachment(refItem.href);
-                    const url = p
-                        ? await decryptToBlobUrl(p.id, p.key, p.mime, p.cap)
-                        : await parkedObjectUrl(refItem.href);
+                    let url: string | null;
+                    if (p) {
+                        const hold = await acquireAttachmentUrl(p.id, p.key, p.mime, p.cap);
+                        release = hold.release;
+                        url = hold.url;
+                    } else {
+                        url = await parkedObjectUrl(refItem.href);
+                    }
                     if (!url) throw new Error('nothing to save');
                     const res = await saveAttachment(url, refItem.name, folder);
                     if (res.cancelled) { setState('idle'); return; }
@@ -74,6 +83,8 @@ function FileDownload({ refItem, folder }: { refItem: TaskAttachmentRef; folder?
                 } catch (err) {
                     console.error('[note attachment] save failed:', err);
                     setState('error');
+                } finally {
+                    release();
                 }
             }}
         >
@@ -84,25 +95,26 @@ function FileDownload({ refItem, folder }: { refItem: TaskAttachmentRef; folder?
     );
 }
 
-function Picture({ refItem, onOpen }: { refItem: TaskAttachmentRef; onOpen: (url: string) => void }) {
-    const [url, setUrl] = useState<string | null>(null);
-    const [failed, setFailed] = useState(false);
+function Picture({ refItem, onOpen, zoomed }: { refItem: TaskAttachmentRef; onOpen: (url: string) => void; zoomed: boolean }) {
+    const [parkedUrl, setParkedUrl] = useState<string | null>(null);
+    const [parkedFailed, setParkedFailed] = useState(false);
     const href = refItem.href;
     const parked = isParkedRef(refItem);
+    const p = parseEncAttachment(href);
+    // Kept while it is open in the lightbox, whatever else happens.
+    const held = useHeldAttachmentUrl(p ? { id: p.id, key: p.key, mime: p.mime, cap: p.cap } : null, { keep: zoomed });
     useEffect(() => {
-        const p = parseEncAttachment(href);
         // A parked ref has no server file: its plaintext comes from this
         // device's own sealed copy, and null there means the bytes are gone.
-        if (!p && !parseParkedRef(href)) return;
+        if (parseEncAttachment(href) || !parseParkedRef(href)) return;
         let cancelled = false;
-        const load = p
-            ? decryptToBlobUrl(p.id, p.key, p.mime, p.cap)
-            : parkedObjectUrl(href).then(u => { if (u === null) throw new Error('those bytes are no longer on this device'); return u; });
-        load
-            .then(u => { if (!cancelled) setUrl(u); })
-            .catch(() => { if (!cancelled) setFailed(true); });
+        parkedObjectUrl(href)
+            .then(u => { if (u === null) throw new Error('those bytes are no longer on this device'); if (!cancelled) setParkedUrl(u); })
+            .catch(() => { if (!cancelled) setParkedFailed(true); });
         return () => { cancelled = true; };
     }, [href]);
+    const url = p ? held.url : parkedUrl;
+    const failed = p ? held.failed : parkedFailed;
     if ((!parseEncAttachment(href) && !parked) || failed) {
         return <span className="ni-broken" title={refItem.name}><WarningIcon /> {refItem.name}</span>;
     }
@@ -120,22 +132,15 @@ function Picture({ refItem, onOpen }: { refItem: TaskAttachmentRef; onOpen: (url
  *  player cannot decode after all (it lied about its type, or this engine
  *  lacks the codec) becomes the download button, not a dead player. */
 function AudioClip({ refItem, folder }: { refItem: TaskAttachmentRef; folder?: string }) {
-    const [url, setUrl] = useState<string | null>(null);
-    const [failed, setFailed] = useState(false);
     const [embedFailed, setEmbedFailed] = useState(false);
+    const [playing, setPlaying] = useState(false);
     const href = refItem.href;
     const name = refItem.name;
-    useEffect(() => {
-        const p = parseEncAttachment(href);
-        if (!p) return;
-        let cancelled = false;
-        // Typed with the resolved audio MIME: an unlabelled `.mp3` gets a
-        // media-typed blob, as in chat (galleryItems put it here by name).
-        decryptToBlobUrl(p.id, p.key, audioMimeFor(name, p.mime) ?? p.mime, p.cap)
-            .then(u => { if (!cancelled) setUrl(u); })
-            .catch(() => { if (!cancelled) setFailed(true); });
-        return () => { cancelled = true; };
-    }, [href, name]);
+    const p = parseEncAttachment(href);
+    // Typed with the resolved audio MIME: an unlabelled `.mp3` gets a
+    // media-typed blob, as in chat (galleryItems put it here by name). Kept
+    // while it plays, whatever else happens.
+    const { url, failed } = useHeldAttachmentUrl(p ? { id: p.id, key: p.key, mime: audioMimeFor(name, p.mime) ?? p.mime, cap: p.cap } : null, { keep: playing });
     if (!parseEncAttachment(href) || failed) {
         return <span className="ni-broken" title={refItem.name}><WarningIcon /> {refItem.name}</span>;
     }
@@ -149,7 +154,8 @@ function AudioClip({ refItem, folder }: { refItem: TaskAttachmentRef; folder?: s
             {/* On the Output Device chosen in Settings: shared with Púca on the
                 web. The Android Notes app has no such setting, so it stays on
                 the default. */}
-            <audio ref={followOutputDeviceRef} src={url} controls preload="metadata" aria-label={refItem.name} onError={() => setEmbedFailed(true)} />
+            <audio ref={followOutputDeviceRef} src={url} controls preload="metadata" aria-label={refItem.name} onError={() => setEmbedFailed(true)}
+                onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={() => setPlaying(false)} />
         </span>
     );
 }
@@ -178,7 +184,7 @@ export interface NoteImagesProps {
 }
 
 export function NoteImages({ opened, editable, busy = false, onAddPhotos, onRemove, onDraw, showCamera = false, onRecord, saveFolder }: NoteImagesProps) {
-    const [zoom, setZoom] = useState<{ url: string; name: string } | null>(null);
+    const [zoom, setZoom] = useState<{ url: string; name: string; href: string } | null>(null);
     const pickRef = useRef<HTMLInputElement>(null);
     const fileRef = useRef<HTMLInputElement>(null);
     const cameraRef = useRef<HTMLInputElement>(null);
@@ -213,7 +219,7 @@ export function NoteImages({ opened, editable, busy = false, onAddPhotos, onRemo
                                 ? <FileDownload refItem={item.ref} folder={saveFolder} />
                                 : item.kind === 'audio'
                                     ? <AudioClip refItem={item.ref} folder={saveFolder} />
-                                    : <Picture refItem={item.ref} onOpen={url => setZoom({ url, name: item.ref.name })} />}
+                                    : <Picture refItem={item.ref} zoomed={zoom?.href === item.ref.href} onOpen={url => setZoom({ url, name: item.ref.name, href: item.ref.href })} />}
                             {canEdit && (
                                 <div className="ni-tools">
                                     {item.kind === 'drawing' && onDraw && (

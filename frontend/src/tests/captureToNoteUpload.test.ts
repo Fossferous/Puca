@@ -19,7 +19,8 @@ vi.mock('../api/attachments', async (orig) => {
     const real = await orig<typeof import('../api/attachments')>();
     return {
         ...real,
-        decryptToBlobUrl: vi.fn(async (id: string) => `blob:decrypted-${id}`),
+        // The decrypted bytes are whatever this returns, which is all this test cares about.
+        decryptAttachmentBytes: vi.fn(async (id: string) => new TextEncoder().encode(`decrypted-${id}`)),
         encryptAndUploadRef: vi.fn(async (file: File) => {
             uploaded.push(file);
             if (failOnUpload !== null && uploaded.length === failOnUpload) throw new Error('upload refused');
@@ -32,15 +33,6 @@ vi.mock('../api/listContent', async (orig) => {
     const real = await orig<typeof import('../api/listContent')>();
     return { ...real, deleteFiles: vi.fn(async (ids: string[]) => { deletedIds.push(ids); }) };
 });
-
-// jsdom has no fetch for blob: URLs — the decrypted bytes are whatever this
-// returns, which is all this test cares about.
-const realFetch = globalThis.fetch;
-globalThis.fetch = (async (input: RequestInfo | URL) => {
-    const url = String(input);
-    if (url.startsWith('blob:')) return new Response(new Blob([url]), { status: 200 });
-    return realFetch(input as RequestInfo);
-}) as typeof fetch;
 
 import { copyRefsIntoMyNote, discardCopies } from '../api/captureToNote';
 import { parseEncAttachment } from '../api/attachments';

@@ -18,10 +18,14 @@ import { createRoot, type Root } from 'react-dom/client';
 
 const { saveAttachment } = vi.hoisted(() => ({ saveAttachment: vi.fn(async () => ({ where: 'Documents/Puca Notes', onDisk: true })) }));
 vi.mock('../api/saveAttachment', () => ({ saveAttachment }));
-const { decryptToBlobUrl } = vi.hoisted(() => ({ decryptToBlobUrl: vi.fn(async () => 'blob:decrypted') }));
+// The file is decrypted for the save and let go after it (a held URL, released).
+const { acquireAttachmentUrl, released } = vi.hoisted(() => {
+    const released: string[] = [];
+    return { released, acquireAttachmentUrl: vi.fn(async () => ({ url: 'blob:decrypted', release: () => { released.push('blob:decrypted'); } })) };
+});
 vi.mock('../api/attachments', async () => {
     const real = await vi.importActual<typeof import('../api/attachments')>('../api/attachments');
-    return { ...real, decryptToBlobUrl };
+    return { ...real, acquireAttachmentUrl };
 });
 const { prepareImageForUpload } = vi.hoisted(() => ({ prepareImageForUpload: vi.fn(async (f: File) => f) }));
 vi.mock('../api/imagePrep', async () => {
@@ -59,6 +63,7 @@ let root: Root;
 let container: HTMLDivElement;
 beforeEach(() => {
     saveAttachment.mockClear();
+    released.length = 0;
     prepareImageForUpload.mockClear();
     container = document.createElement('div');
     document.body.appendChild(container);
@@ -99,6 +104,8 @@ describe('a file in a note’s own gallery', () => {
         await act(async () => { btn!.click(); });
         await settle();
         expect(saveAttachment).toHaveBeenCalledWith('blob:decrypted', 'tickets.pdf', 'Puca Notes');
+        // Saved: its plaintext is let go, not kept until sign-out.
+        expect(released).toEqual(['blob:decrypted']);
     });
 
     it('never puts a blob: URL in the document', async () => {

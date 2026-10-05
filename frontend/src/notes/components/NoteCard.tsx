@@ -14,7 +14,8 @@
  */
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { type Task, isAttachmentsLocked, parseTaskAttachments, isTaskOverdue, formatDueShort, type TaskAttachmentRef } from '../../api/tasks';
-import { parseEncAttachment, decryptToBlobUrl } from '../../api/attachments';
+import { parseEncAttachment } from '../../api/attachments';
+import { useHeldAttachmentUrl } from '../../components/useHeldAttachmentUrl';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { PERM, hasPerm } from '../../api/permissionBits';
 import {
@@ -71,19 +72,12 @@ interface NoteCardProps {
 }
 
 function ImageThumb({ refItem, visible }: { refItem: TaskAttachmentRef; visible: boolean }) {
-    const [url, setUrl] = useState<string | null>(null);
-    const [failed, setFailed] = useState(false);
     const parsed = parseEncAttachment(refItem.href);
-    useEffect(() => {
-        if (!visible || !parsed || url) return;
-        let cancelled = false;
-        decryptToBlobUrl(parsed.id, parsed.key, parsed.mime, parsed.cap)
-            .then(u => { if (!cancelled) setUrl(u); })
-            .catch(() => { if (!cancelled) setFailed(true); });
-        return () => { cancelled = true; };
-        // parseEncAttachment is pure over href.
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [visible, refItem.href]);
+    // Decrypted once the card is on screen, then shown for as long as the
+    // card is mounted (and the app on screen: useHeldAttachmentUrl).
+    const [reached, setReached] = useState(visible);
+    if (visible && !reached) setReached(true);
+    const { url, failed } = useHeldAttachmentUrl(parsed ? { id: parsed.id, key: parsed.key, mime: parsed.mime, cap: parsed.cap } : null, { enabled: reached });
     if (!parsed || failed) return <span className="notes-thumb file" title={refItem.name}><WarningIcon /></span>;
     if (!url) return <span className="notes-thumb pending" title={refItem.name} />;
     return <img className="notes-thumb" src={url} alt={refItem.name} title={refItem.name} loading="lazy" />;

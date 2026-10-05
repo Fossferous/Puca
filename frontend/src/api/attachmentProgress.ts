@@ -21,7 +21,7 @@ function notify(id: string, b: AttachmentBytes): void {
     for (const l of listeners.get(id) ?? []) l(b);
 }
 
-/** `resp`'s body (decryptToBlobUrl's fetch of file `id`), publishing its
+/** `resp`'s body (the attachment cache's fetch of file `id`), publishing its
  *  progress while it arrives. The last figure stands until the attachment
  *  shows (decryption takes tens of ms) or fails; a retry counts again from 0. */
 export async function readAttachmentBody(id: string, resp: Response): Promise<Uint8Array> {

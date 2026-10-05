@@ -13,7 +13,7 @@
  *   - the clip plate: "Loading 1.0 / 24 MB" and a progress bar, from the
  *     player's onLoadProgress (the player's side is clipPlayerWindow.test.ts);
  *   - an encrypted attachment: "Loading attachment… 1.0 MB" while its body
- *     streams in, through the real decryptToBlobUrl, then the player.
+ *     streams in, through the real attachment cache, then the player.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
@@ -152,7 +152,7 @@ describe('the clip plate while a Play loads', () => {
     });
 });
 
-// ---- an ordinary encrypted attachment, end to end through decryptToBlobUrl ----
+// ---- an ordinary encrypted attachment, end to end through the attachment cache ----
 function b64url(bytes: Uint8Array): string {
     return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }

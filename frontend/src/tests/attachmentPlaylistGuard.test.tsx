@@ -12,11 +12,11 @@
  * their IP and when they opened the channel, ignoring "Load remote images",
  * and the player then failed to the chip so nothing on screen showed it.
  *
- * So `decryptToBlobUrl` looks at the plaintext while it has it, and every
+ * So the attachment cache looks at the plaintext while it has it, and every
  * renderer that would hand the URL to a player asks `isPlaylistBlobUrl`
  * first: a playlist is the download chip, never a player.
  *
- * Nothing in this file mocks the code under test: the REAL decryptToBlobUrl
+ * Nothing in this file mocks the code under test: the REAL attachment cache
  * opens real AES-GCM ciphertext (only fetch and URL.createObjectURL, which
  * jsdom lacks, are stand-ins), and the real components decide. Each case
  * has a positive control (the same ref with real audio bytes gets its
@@ -28,7 +28,7 @@ import { createRoot, type Root } from 'react-dom/client';
 
 vi.mock('../api/auth', async (orig) => ({ ...(await orig<typeof import('../api/auth')>()), getToken: () => 'tok' }));
 
-import { decryptToBlobUrl, isPlaylistBlobUrl, looksLikeHlsPlaylist, clearBlobCache } from '../api/attachments';
+import { acquireAttachmentUrl, isPlaylistBlobUrl, looksLikeHlsPlaylist, clearBlobCache } from '../api/attachments';
 import { MessageContent } from '../components/MessageContent';
 import { TaskAttachments } from '../components/TaskAttachments';
 import { NoteImages } from '../components/NoteImages';
@@ -131,24 +131,40 @@ afterEach(async () => {
     vi.restoreAllMocks();
 });
 
-describe('decryptToBlobUrl', () => {
+/** The URL an attachment is shown under (a held one; never released here:
+ *  clearBlobCache after each test takes them all back). */
+const urlOf = async (id: string, key: string, mime: string, cap?: string) => (await acquireAttachmentUrl(id, key, mime, cap)).url;
+
+describe('the attachment cache', () => {
     it('flags a playlist plaintext, and types its blob as opaque bytes', async () => {
         const key = await seal('d-pl', enc.encode(PLAYLIST));
-        const url = await decryptToBlobUrl('d-pl', key, 'audio/mpeg');
+        const url = await urlOf('d-pl', key, 'audio/mpeg');
         expect(isPlaylistBlobUrl(url)).toBe(true);
         expect(blobTypes.get(url)).toBe('application/octet-stream');
     });
 
     it('positive control: real audio keeps its type and is not flagged', async () => {
         const key = await seal('d-mp3', cat(id3(30), MP3_FRAME));
-        const url = await decryptToBlobUrl('d-mp3', key, 'audio/mpeg');
+        const url = await urlOf('d-mp3', key, 'audio/mpeg');
         expect(isPlaylistBlobUrl(url)).toBe(false);
         expect(blobTypes.get(url)).toBe('audio/mpeg');
     });
 
+    it('the flag goes with its URL when the last holder lets go', async () => {
+        const key = await seal('d-pl3', enc.encode(PLAYLIST));
+        const hold = await acquireAttachmentUrl('d-pl3', key, 'audio/mpeg');
+        expect(isPlaylistBlobUrl(hold.url)).toBe(true);
+        hold.release();
+        expect(isPlaylistBlobUrl(hold.url)).toBe(false);
+        // Held again: decrypted again, flagged again.
+        const again = await urlOf('d-pl3', key, 'audio/mpeg');
+        expect(again).not.toBe(hold.url);
+        expect(isPlaylistBlobUrl(again)).toBe(true);
+    });
+
     it('a sign-out forgets the flags with the URLs', async () => {
         const key = await seal('d-pl2', enc.encode(PLAYLIST));
-        const url = await decryptToBlobUrl('d-pl2', key, 'video/mp4');
+        const url = await urlOf('d-pl2', key, 'video/mp4');
         expect(isPlaylistBlobUrl(url)).toBe(true);
         clearBlobCache();
         expect(isPlaylistBlobUrl(url)).toBe(false);

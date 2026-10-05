@@ -18,7 +18,8 @@ vi.mock('../api/attachments', async () => ({
     parseEncAttachment: (href: string) => (href.startsWith('enc:')
         ? { id: href.slice(4), key: new Uint8Array(32), mime: href.includes('webm') ? 'audio/webm;codecs=opus' : 'image/png', cap: null }
         : null),
-    decryptToBlobUrl: async (id: string) => `blob:decrypted-${id}`,
+    // Held, as the gallery takes it (components/useHeldAttachmentUrl.ts).
+    acquireAttachmentUrl: async (id: string) => ({ url: `blob:decrypted-${id}`, release: () => {} }),
     videoMimeFor: () => null,
     // The real predicate: the stand-in decrypt above never flags a playlist.
     isPlaylistBlobUrl: (await vi.importActual<typeof import('../api/attachments')>('../api/attachments')).isPlaylistBlobUrl,

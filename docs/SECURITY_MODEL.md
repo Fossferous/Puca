@@ -72,6 +72,13 @@ whether the tool fits your threat model.
 - **No outside human has audited this.** It has been reviewed hard, repeatedly and
   adversarially, by machines, and its findings fixed (§8); an independent cryptographer
   has not read it. The DM v4 design shipped in 0.9.3 is days old.
+- **A decrypted attachment is a readable file on your device while it is on screen** —
+  in the Android app always, on a PC when it runs short of memory. The browser engine
+  writes the files a page has decrypted to its own storage as they are, and a page
+  cannot tell it not to. Púca keeps that to what you are looking at, lets go
+  of it when you scroll away or switch apps, and the Android app removes what a crash
+  left the next time it starts; a crash or a kill of the app with media on screen
+  leaves those files until then (§3, *Decrypted attachments on your own storage*).
 - **The Windows build is not code-signed** until the operator buys a certificate; the
   pipeline is in place and idle (`docs/CODE_SIGNING.md`).
 - **Personal notes' sealed fields are not bound to where they are stored.** The operator
@@ -372,13 +379,62 @@ Yes, and the send path fails closed rather than falling back to plaintext.
   server stores only wrapped blobs and never holds an unwrapped channel key
   (`migrations/014_e2ee_channel_keys.sql`, `src/key_handlers.rs`).
 - **Attachments:** separately AES-256-GCM encrypted under a per-file key carried inside the
-  already-encrypted message.
+  already-encrypted message, and decrypted on your device only while they are shown (below).
 - **Fail-closed:** if the key isn't available the client throws rather than sending
   ([`servers.ts:420`](../frontend/src/api/servers.ts#L420),
   [`dms.ts:150`](../frontend/src/api/dms.ts#L150)). Edits go through the same path.
 
 Cryptographic primitives come from `@noble/curves`, `@noble/hashes`, `@scure/bip39` and the
 browser's WebCrypto — not home-made.
+
+### Decrypted attachments on your own storage
+
+A picture, video or song has to be decrypted to be shown, and the browser engine underneath
+every Púca app (Chromium: the Android WebView, WebView2 on Windows, Chrome or Edge) decides
+where the result lives. It keeps a page's files in memory only up to a limit — **1% of the
+phone's RAM in the Android WebView**, 2 GB on a 64-bit PC — and writes the rest to its own
+folder (`app_webview/Default/blob_storage` in the Android app's private storage,
+`EBWebView/Default/blob_storage` in the desktop app's) **exactly as they are, unencrypted**.
+On a PC that also happens to everything at once when Windows reports memory pressure.
+Measured 2026-10-05 on a 2 GB Android emulator: 79 of the 85 MB of a channel's three
+videos, three pictures and a song were on disk; before 0.9.834 they stayed there while the
+app sat in the background, and after the phone killed it, until Púca was next opened.
+
+What Púca does about it, since 0.9.834:
+
+- **Only what you are looking at is decrypted.** A file is decrypted when it comes near
+  the screen and let go when it scrolls away, when you open another channel or
+  conversation, and about two seconds after the app goes to the background, unless it is
+  playing, open full screen or being saved. (The friends list on the home screen covers
+  the channel you were in rather than leaving it: what was on screen stays decrypted
+  under it until one of those happens.) The copies kept so that coming back needs no
+  download stay **encrypted**, in the browser's private file system (OPFS), never as one
+  of those blobs: Chromium writes several blobs into one file and keeps the file while
+  any of them lives, so an encrypted copy kept that way had kept a picture's plaintext on
+  disk after the picture was gone. Tasks and Notes work the same way; they used to keep
+  every picture and voice note they had shown decrypted until sign-out.
+- **Let go means gone from the disk, within seconds.** A decrypted file is registered by a
+  small worker that is stopped when the file is let go, and the app then makes the page
+  collect its garbage, so the engine deletes the file within about two seconds instead of
+  minutes later (`frontend/src/api/plaintextHost.ts`; checked on a real disk by
+  `frontend/e2e/plaintext-disk-real-browser.mjs`).
+- **What a crash left behind goes at the next start** (the Android app,
+  `PucaApplication.java`): before any web view exists, so also when the phone starts the
+  app for a push wake and not for you. The web view itself clears it only when it next
+  opens, and the desktop app relies on that: WebView2 removed a killed run's files within
+  seconds of the next start (measured in Edge, the same engine). Púca Notes' own Android
+  app gets the rest of this with its update, but not the removal at start.
+
+What remains: the files of what is **on screen** can be on the Android app's storage while
+they are shown (inside the app's private, encrypted-by-the-phone storage, which other apps
+cannot read), and a **crash or kill with media on screen** leaves them until the app's
+process next starts. A small picture let go while another one written into the same file
+by Chromium is still on screen stays until that one goes too. Clips play through
+MediaSource and are never written there. Files you save with **Download** are yours, in
+your Downloads, Documents or Pictures folder, and are not affected by any of this. Not
+covered yet: a Púca Notes picture or recording still waiting to upload (its preview stays
+decrypted until it uploads or you sign out), and, on a PC short of memory, the copy a
+clip's **Download** is written from, which can sit there for a few minutes after the save.
 
 ### The honest limit
 

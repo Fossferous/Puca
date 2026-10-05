@@ -8,29 +8,36 @@
  * taken on a plane looks like a photo note.
  */
 import { useEffect, useState } from 'react';
-import { decryptToBlobUrl, parseEncAttachment } from '../../api/attachments';
+import { parseEncAttachment } from '../../api/attachments';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { type GalleryItem } from '../../api/noteMedia';
 import { parseParkedRef } from '../../api/parkedMedia';
 import { parkedObjectUrl } from '../../api/parkedPreview';
+import { useHeldAttachmentUrl } from '../../components/useHeldAttachmentUrl';
 import { NoteLinkText } from '../../components/NoteLinkText';
 import { findRanges, snippetAround } from '../model/noteSearch';
 import { Highlight } from './Highlight';
 import '../noteContent.css';
 
 function HeroImage({ item, visible }: { item: GalleryItem; visible: boolean }) {
-    const [url, setUrl] = useState<string | null>(null);
+    const [parkedUrl, setParkedUrl] = useState<string | null>(null);
     const href = item.ref.href;
+    const p = parseEncAttachment(href);
+    // Decrypted once the card is on screen, then shown for as long as the
+    // card is mounted (and the app on screen: useHeldAttachmentUrl); a
+    // failure shows in the editor's gallery.
+    const [reached, setReached] = useState(visible);
+    if (visible && !reached) setReached(true);
+    const held = useHeldAttachmentUrl(p ? { id: p.id, key: p.key, mime: p.mime, cap: p.cap } : null, { enabled: reached });
     useEffect(() => {
-        const p = parseEncAttachment(href);
-        if (!visible || url || (!p && !parseParkedRef(href))) return;
+        if (!visible || parkedUrl || parseEncAttachment(href) || !parseParkedRef(href)) return;
         let cancelled = false;
-        const load = p ? decryptToBlobUrl(p.id, p.key, p.mime, p.cap) : parkedObjectUrl(href);
-        load
-            .then(u => { if (!cancelled && u) setUrl(u); })
+        parkedObjectUrl(href)
+            .then(u => { if (!cancelled && u) setParkedUrl(u); })
             .catch(() => { /* the gallery in the editor shows the failure */ });
         return () => { cancelled = true; };
-    }, [visible, href, url]);
+    }, [visible, href, parkedUrl]);
+    const url = p ? held.url : parkedUrl;
     if (!url) return <span className="notes-hero-pending" />;
     return <img src={url} alt={item.ref.name} className={item.kind === 'drawing' ? 'drawing' : ''} loading="lazy" />;
 }

@@ -138,8 +138,11 @@ few players nearest the screen are live at once: every one on screen, then the n
 scrolling. A video waiting for its player already takes the player's space (for MP4, MOV, WebM and MKV files,
 which is nearly all of them), so nothing moves as you scroll, and a video you paused carries on from where you left
 it when you come back to it. The files within about two screens of what you are reading stay ready; those further
-away, or in a channel you left, are kept up to a limit so going back is instant, and past it the oldest are dropped
-from memory and load again when you come back.
+away, or in a channel you left, are kept up to a limit so going back needs no download, and past it the oldest are
+dropped and load again when you come back. The ones kept are kept **encrypted**: a file is decrypted only while it
+is on or near the screen, and a couple of seconds after you switch to another app Púca lets go of everything it is
+not playing or showing full screen, so no readable copy waits on the phone. Coming back shows them again at once
+from the encrypted copy (docs/SECURITY_MODEL.md, *Decrypted attachments on your own storage*).
 
 You can also drag files from your computer onto the messages, in the desktop
 app as in the browser, wherever you could send a message. Wherever a message is shown in short — the

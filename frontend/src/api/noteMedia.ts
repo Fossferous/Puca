@@ -19,7 +19,7 @@
  * fail with a 400 the user cannot explain.
  */
 import { type TaskAttachmentRef, MAX_TASK_ATTACHMENTS, isAttachmentsLocked, parseTaskAttachments } from './tasks';
-import { type SealedFile, audioMimeFor, decryptToBlobUrl, encryptAndUploadRef, parseEncAttachment, sealFileForUpload, uploadSealedRef } from './attachments';
+import { type SealedFile, audioMimeFor, decryptAttachmentBytes, encryptAndUploadRef, parseEncAttachment, sealFileForUpload, uploadSealedRef } from './attachments';
 import { prepareImageForUpload } from './imagePrep';
 import { bytesFromB64, bytesToB64, parkedHref, parseParkedRef } from './parkedMedia';
 import { addTaskListAttachments, deleteFiles, removeTaskListAttachments } from './listContent';
@@ -210,9 +210,8 @@ export async function resealRefs(refs: TaskAttachmentRef[]): Promise<TaskAttachm
         for (const r of refs) {
             const p = parseEncAttachment(r.href);
             if (!p) throw new Error('Not an attachment ref');
-            const url = await decryptToBlobUrl(p.id, p.key, p.mime, p.cap);
-            const blob = await (await fetch(url)).blob();
-            const made = await encryptAndUploadRef(new File([blob], r.name, { type: p.mime }));
+            const bytes = await decryptAttachmentBytes(p.id, p.key, p.mime, p.cap);
+            const made = await encryptAndUploadRef(new File([bytes as BlobPart], r.name, { type: p.mime }));
             done.push({ href: made.href, name: r.name });
         }
         return done;
@@ -226,9 +225,7 @@ export async function resealRefs(refs: TaskAttachmentRef[]): Promise<TaskAttachm
 export async function readStrokes(ref: TaskAttachmentRef): Promise<string> {
     const p = parseEncAttachment(ref.href);
     if (!p) throw new Error('Not an attachment ref');
-    const url = await decryptToBlobUrl(p.id, p.key, p.mime, p.cap);
-    const resp = await fetch(url);
-    return resp.text();
+    return new TextDecoder().decode(await decryptAttachmentBytes(p.id, p.key, p.mime, p.cap));
 }
 
 /** The uploaded file ids behind refs (for best-effort deletion). */

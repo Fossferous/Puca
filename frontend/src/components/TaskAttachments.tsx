@@ -5,13 +5,15 @@
  * itself: `controls`, no `autoplay`, no call to play().
  *
  * Each ref's sovereign-enc: href carries the per-file AES key, so decryption
- * happens entirely client-side (decryptToBlobUrl caches by file id). A ref
- * that fails to parse or decrypt degrades to a broken-file placeholder —
- * a corrupt sidecar must never take down the checklist.
+ * happens entirely client-side, and only while it is shown
+ * (useHeldAttachmentUrl: the cache keeps the ciphertext). A ref that fails to
+ * parse or decrypt degrades to a broken-file placeholder — a corrupt sidecar
+ * must never take down the checklist.
  */
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { type TaskAttachmentRef } from '../api/tasks';
-import { parseEncAttachment, decryptToBlobUrl, videoMimeFor, audioMimeFor, isPlaylistBlobUrl } from '../api/attachments';
+import { parseEncAttachment, videoMimeFor, audioMimeFor, isPlaylistBlobUrl } from '../api/attachments';
+import { useHeldAttachmentUrl } from './useHeldAttachmentUrl';
 import { ImageLightbox } from './ImageLightbox';
 import { CheckCircleIcon, CloseIcon, PaperclipIcon, WarningIcon } from './Icons';
 import { saveAttachment } from '../api/saveAttachment';
@@ -27,34 +29,24 @@ interface TaskAttachmentsProps {
 /** One decrypted attachment: image thumb / small video / plain download link. */
 function AttachmentItem({ refItem }: { refItem: TaskAttachmentRef }) {
     const parsed = parseEncAttachment(refItem.href);
-    const [url, setUrl] = useState<string | null>(null);
-    const [failed, setFailed] = useState(false);
     const [zoomed, setZoomed] = useState(false);
+    const [playing, setPlaying] = useState(false);
+    const [saving, setSaving] = useState(false);
     // The player could not decode it (a file that lied about its type, or a
     // codec this engine lacks): the download button instead of a dead player.
     const [embedFailed, setEmbedFailed] = useState(false);
 
-    const href = refItem.href;
     const name = refItem.name;
-    useEffect(() => {
-        // parseEncAttachment is pure, so keying the effect off the href alone
-        // covers everything it derives (name rides along for the video-MIME
-        // fallback below).
-        const p = parseEncAttachment(href);
-        if (!p) return;
-        let cancelled = false;
-        // Same extension fallback as chat messages: a ref recorded with
-        // application/octet-stream but named *.mkv is a video (File.type is
-        // routinely empty for mkv), one named *.mp3 is audio, and the blob
-        // should be media-typed.
-        decryptToBlobUrl(p.id, p.key, videoMimeFor(name, p.mime) ?? audioMimeFor(name, p.mime) ?? p.mime, p.cap)
-            .then(u => { if (!cancelled) setUrl(u); })
-            .catch(err => {
-                console.error('Failed to decrypt task attachment:', err);
-                if (!cancelled) setFailed(true);
-            });
-        return () => { cancelled = true; };
-    }, [href, name]);
+    // Same extension fallback as chat messages: a ref recorded with
+    // application/octet-stream but named *.mkv is a video (File.type is
+    // routinely empty for mkv), one named *.mp3 is audio, and the blob
+    // should be media-typed.
+    const { url, failed } = useHeldAttachmentUrl(
+        parsed ? { id: parsed.id, key: parsed.key, mime: videoMimeFor(name, parsed.mime) ?? audioMimeFor(name, parsed.mime) ?? parsed.mime, cap: parsed.cap } : null,
+        // In use: kept while the app is in the background.
+        { keep: zoomed || playing || saving },
+    );
+    const playingHandlers = { onPlay: () => setPlaying(true), onPause: () => setPlaying(false), onEnded: () => setPlaying(false) };
 
     if (!parsed || failed) {
         return <span className="ta-broken" title={refItem.name}><WarningIcon /> {refItem.name}</span>;
@@ -80,23 +72,23 @@ function AttachmentItem({ refItem }: { refItem: TaskAttachmentRef }) {
     }
     // A playlist never reaches a player, whatever its ref says: a <video> or
     // <audio> handed one fetches the URLs inside on its own (api/attachments.ts).
-    if (isPlaylistBlobUrl(url)) return <TaskFileDownload url={url} name={refItem.name} />;
+    if (isPlaylistBlobUrl(url)) return <TaskFileDownload url={url} name={refItem.name} onBusy={setSaving} />;
     // Both players sit on the Output Device chosen in Settings, not the OS default.
     if (videoMimeFor(refItem.name, parsed.mime)) {
-        return <video ref={followOutputDeviceRef} className="ta-video" src={url} controls preload="metadata" title={refItem.name} />;
+        return <video ref={followOutputDeviceRef} className="ta-video" src={url} controls preload="metadata" title={refItem.name} {...playingHandlers} />;
     }
     // audioMimeFor, not any audio/*: the same name fallback and the same
     // playable-only list as a chat message (an .amr stays a download).
     if (audioMimeFor(refItem.name, parsed.mime) && !embedFailed) {
-        return <audio ref={followOutputDeviceRef} className="ta-audio" src={url} controls preload="metadata" title={refItem.name} aria-label={refItem.name} onError={() => setEmbedFailed(true)} />;
+        return <audio ref={followOutputDeviceRef} className="ta-audio" src={url} controls preload="metadata" title={refItem.name} aria-label={refItem.name} onError={() => setEmbedFailed(true)} {...playingHandlers} />;
     }
     // A BUTTON, never a link: `download` is ignored by middle-click and
     // "Open link in new tab", and a blob: document inherits this app's origin
     // while its MIME comes from whoever sent the file. See api/saveAttachment.
-    return <TaskFileDownload url={url} name={refItem.name} />;
+    return <TaskFileDownload url={url} name={refItem.name} onBusy={setSaving} />;
 }
 
-function TaskFileDownload({ url, name }: { url: string; name: string }) {
+function TaskFileDownload({ url, name, onBusy }: { url: string; name: string; onBusy?: (busy: boolean) => void }) {
     const [state, setState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
     const [where, setWhere] = useState('');
     return (
@@ -107,6 +99,7 @@ function TaskFileDownload({ url, name }: { url: string; name: string }) {
             disabled={state === 'saving'}
             onClick={async () => {
                 setState('saving');
+                onBusy?.(true);
                 try {
                     const res = await saveAttachment(url, name);
                     if (res.cancelled) { setState('idle'); return; } // the Save As dialog was dismissed
@@ -115,6 +108,8 @@ function TaskFileDownload({ url, name }: { url: string; name: string }) {
                 } catch (err) {
                     console.error('[task attachment] save failed:', err);
                     setState('error');
+                } finally {
+                    onBusy?.(false);
                 }
             }}
         >

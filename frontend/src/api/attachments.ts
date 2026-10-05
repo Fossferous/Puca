@@ -24,6 +24,8 @@ import { getToken } from './auth';
 import { readAttachmentBody } from './attachmentProgress';
 import { createPriorityLimiter, abortError, isAbortError } from './priorityLimiter';
 import { readVideoDims, type VideoDims } from './videoDims';
+import { hostPlaintext, dropAllPlaintext, freeNow, type PlainLease } from './plaintextHost';
+import { keepCipher, dropAllCiphertext, type CipherCopy } from './cipherStore';
 
 const PREFIX = 'sovereign-enc:';
 
@@ -310,8 +312,24 @@ export async function encryptAndUpload(file: File, opts?: { channelId?: number }
     return `${mime.startsWith('image/') ? '!' : ''}[${name}](${href})`;
 }
 
-// Decrypted blob URLs are cached so an attachment shown in multiple places
-// decrypts once.
+// Fetched attachments are cached so one shown in several places, or shown
+// again, downloads once.
+//
+// WHAT the cache keeps is the CIPHERTEXT, exactly as fetched. The plaintext
+// exists only while something shows it: a blob: URL made in a plaintext host
+// worker (api/plaintextHost.ts) when the first holder takes the entry, and
+// taken back — the worker terminated, its blobs and any file Chromium paged
+// them to gone at once — when the last holder lets go. A copy kept for coming
+// back is decrypted again then (from the ciphertext in the cache: no second
+// download). Measured 2026-10-05, before this: the Android WebView wrote 79 of
+// 85 MB of a small channel's decrypted pictures and videos to
+// app_webview/Default/blob_storage as they were, kept them there while the
+// app sat in the background, and left them after a crash until the next
+// start; on desktop the same happens under memory pressure. The ciphertext is
+// kept in the origin-private file system (api/cipherStore.ts), never as a
+// Blob: Chromium writes several blobs into one page file and keeps the file
+// while any of them lives, so a cached ciphertext Blob kept a picture's
+// plaintext on disk after the picture had gone (measured).
 //
 // The key is `id:key:type`, NOT the bare file id, and that matters for
 // correctness as well as freshness. Keyed on the id alone, a cache hit skipped
@@ -324,20 +342,20 @@ export async function encryptAndUpload(file: File, opts?: { channelId?: number }
 // different `m=` got a URL whose type contradicted how the renderer treated it.
 // Everything that determines the bytes and their type is in the key.
 //
-// BOUNDED for the attachments in messages, and only for them. An entry is
-// evicted (and its object URL revoked) only when nobody can be showing it:
+// BOUNDED for the attachments in messages, and only for them. An entry (its
+// ciphertext) is evicted only when nobody can be showing it:
 //  - `acquireAttachmentUrl` (MessageContent's EncryptedAttachment) HOLDS an
 //    entry while it is on or near the screen and releases it, after its
-//    <img>/<video> has left the DOM, when it scrolls far away or the channel
-//    is left. Released entries (copies the reader has SEEN) stay cached up to
-//    RETAINED_ATTACHMENT_BYTES, so coming back to a channel is still instant;
-//    past that, revoked: the oldest messages of each channel left first
-//    (releaseBurst), then the ones nothing on the page shows any more
-//    (noteAttachmentInterest), then the least recently given back. Revoking
-//    a URL that is still on screen would be a permanently broken image (and
-//    an un-revoked blob: URL pins its bytes for the life of the document
-//    whether or not a Map still names it), which is why nothing else may
-//    evict.
+//    <img>/<video> has left the DOM, when it scrolls far away, the channel is
+//    left, or the app has been in the background a moment (attachmentAwake).
+//    The first holder gets the plaintext URL, the last one to let go takes it
+//    back. Released entries (copies the reader has SEEN) stay cached, as
+//    ciphertext, up to RETAINED_ATTACHMENT_BYTES, so coming back to a channel
+//    downloads nothing; past that, dropped: the oldest messages of each
+//    channel left first (releaseBurst), then the ones nothing on the page
+//    shows any more (noteAttachmentInterest), then the least recently given
+//    back. Taking back a URL that is still on screen would be a permanently
+//    broken image, which is why only the last holder's release does it.
 //  - `prefetchAttachmentUrl` loads a message attachment that is still far
 //    from the screen, after everything nearer, so one the reader scrolls to
 //    later is already here, as it was when everything loaded at once. Those
@@ -347,22 +365,39 @@ export async function encryptAndUpload(file: File, opts?: { channelId?: number }
 //    never pushed out to load ahead (measured: when one budget was shared,
 //    loading ahead in one channel pushed out the copies of the channel just
 //    left, and going back to it downloaded again what had been on screen).
-//  - `decryptToBlobUrl` (Tasks, Notes, capture-to-note) PINS its entry until
-//    sign-out, as every entry was before: those callers keep the URL in their
-//    own state and have no way to be told it went away.
+//    It decrypts the file once, to check the key and read what the page
+//    needs before it is shown (a video's picture size, whether it is a
+//    playlist), and keeps only the ciphertext.
+//  - Tasks and Notes hold their pictures and voice notes the same way, while
+//    they are shown (components/useHeldAttachmentUrl.ts); they used to pin
+//    them, plaintext URL included, until sign-out (decryptToBlobUrl, gone).
+//    `decryptAttachmentBytes` holds an entry only while it reads it.
 // Measured before the bound (2026-10-05, headless Edge, a channel of 12 x
 // 22.5 MB videos): the browser process kept +257 MB per such channel opened
-// and never gave it back while the app ran (515 MB after two). The Android
-// WebView pages the same plaintext to app_webview/Default/blob_storage on
-// disk instead. Sign-out still clears everything (clearBlobCache), as does a
-// reload.
+// and never gave it back while the app ran (515 MB after two). Sign-out
+// still clears everything (clearBlobCache), as does a reload.
 interface CacheEntry {
-    url: string;
+    /** The file as fetched, nonce(12) || AES-GCM ciphertext: in OPFS once it
+     *  is written there, never as a Blob (api/cipherStore.ts says why). */
+    cipher: CipherCopy;
+    keyB64url: string;
+    /** The type the plaintext is hosted under (safeBlobType, or opaque bytes
+     *  for a playlist). */
+    type: string;
+    /** The plaintext opens as a playlist (looksLikeHlsPlaylist). */
+    playlist: boolean;
+    /** Plaintext size: what the budgets count. */
     bytes: number;
+    /** The plaintext URL, while anyone holds or pins the entry. */
+    plain: PlainLease | null;
+    /** The plaintext on its way to a host (openPlain). */
+    opening: Promise<PlainLease> | null;
+    /** The plaintext the load just decrypted, for a holder that took the
+     *  entry in the same task (so a file shown as it arrives is decrypted
+     *  once); dropped at the end of that task. */
+    fresh: ArrayBuffer | null;
     /** Holders showing it now (acquireAttachmentUrl). Never evicted while > 0. */
     refs: number;
-    /** A decryptToBlobUrl caller has it: kept until sign-out. */
-    pinned: boolean;
     /** Has been held (shown) at least once; else it was loaded ahead. */
     seen: boolean;
     /** When it was loaded, last taken or last given back (useSeq): the
@@ -396,11 +431,11 @@ function currentBurst(): number {
     return releaseBurst;
 }
 
-/** Decrypted bytes kept for message attachments the reader has seen and
- *  nobody is showing now (see above): a little over seven 25 MB videos (the
- *  upload cap). */
+/** Bytes kept (as ciphertext) for message attachments the reader has seen
+ *  and nobody is showing now (see above): a little over seven 25 MB videos
+ *  (the upload cap). */
 export const RETAINED_ATTACHMENT_BYTES = 192 * 1024 * 1024;
-/** Decrypted bytes loaded ahead of the reader (prefetchAttachmentUrl). */
+/** Bytes loaded ahead of the reader, as ciphertext (prefetchAttachmentUrl). */
 export const AHEAD_ATTACHMENT_BYTES = 192 * 1024 * 1024;
 let retainedBudget = RETAINED_ATTACHMENT_BYTES;
 let aheadBudget = AHEAD_ATTACHMENT_BYTES;
@@ -504,7 +539,7 @@ export function looksLikeHlsPlaylist(bytes: Uint8Array): boolean {
     return true;
 }
 
-/** Blob URLs (from decryptToBlobUrl) whose plaintext is a playlist. */
+/** Plaintext URLs handed out now whose bytes are a playlist. */
 const playlistUrls = new Set<string>();
 
 /**
@@ -530,7 +565,19 @@ let cacheGeneration = 0;
 
 const cacheKeyOf = (id: string, keyB64url: string, mime: string) => `${id}:${keyB64url}:${safeBlobType(mime)}`;
 
-/** The fetch + decrypt itself; the result is cached before it is returned. */
+async function importKey(keyB64url: string): Promise<CryptoKey> {
+    return crypto.subtle.importKey('raw', fromB64url(keyB64url) as BufferSource, 'AES-GCM', false, ['decrypt']);
+}
+
+/** nonce(12) || ciphertext -> plaintext. Views, not copies: WebCrypto copies
+ *  its input anyway, and a .slice() here held one more full copy of a 25 MB
+ *  file for the length of the call. */
+async function openSealed(sealed: Uint8Array, keyB64url: string): Promise<ArrayBuffer> {
+    return crypto.subtle.decrypt({ name: 'AES-GCM', iv: sealed.subarray(0, 12) as BufferSource }, await importKey(keyB64url), sealed.subarray(12) as BufferSource);
+}
+
+/** The fetch + first decrypt; the entry (ciphertext) is cached before it is
+ *  returned, with the plaintext as `fresh` for a holder in the same task. */
 async function loadEntry(cacheKey: string, id: string, keyB64url: string, mime: string, cap?: string): Promise<CacheEntry> {
     const generation = cacheGeneration;
     // /files is authenticated now — a bare fetch here 401s and every
@@ -546,12 +593,9 @@ async function loadEntry(cacheKey: string, id: string, keyB64url: string, mime: 
     });
     if (!resp.ok) throw new Error(`fetch ${id} failed: ${resp.status}`);
     const buf = await readAttachmentBody(id, resp); // its progress shows while it downloads (AttachmentLoading)
-    // Views, not copies: WebCrypto copies its input anyway, and a .slice()
-    // here held one more full copy of a 25 MB file for the length of the call.
-    const nonce = buf.subarray(0, 12);
-    const ct = buf.subarray(12);
-    const key = await crypto.subtle.importKey('raw', fromB64url(keyB64url) as BufferSource, 'AES-GCM', false, ['decrypt']);
-    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce as BufferSource }, key, ct as BufferSource);
+    // Decrypted once here whatever happens next: a wrong key fails now, not
+    // when the reader scrolls to it.
+    const pt = await openSealed(buf, keyB64url);
     // Signed out while it downloaded: the plaintext is not the next user's
     // to find in the cache (or by its blob: URL).
     if (generation !== cacheGeneration) throw abortError();
@@ -565,11 +609,80 @@ async function loadEntry(cacheKey: string, id: string, keyB64url: string, mime: 
         const dims = readVideoDims(plain);
         if (dims) pictureSizes.set(id, dims);
     }
-    const url = URL.createObjectURL(new Blob([pt], { type: playlist ? 'application/octet-stream' : safeBlobType(mime) }));
-    if (playlist) playlistUrls.add(url);
-    const entry: CacheEntry = { url, bytes: pt.byteLength, refs: 0, pinned: false, seen: false, seq: ++useSeq, burst: 0 };
+    const entry: CacheEntry = {
+        cipher: keepCipher(buf),
+        keyB64url,
+        type: playlist ? 'application/octet-stream' : safeBlobType(mime),
+        playlist,
+        bytes: pt.byteLength,
+        plain: null,
+        opening: null,
+        fresh: pt,
+        refs: 0, seen: false, seq: ++useSeq, burst: 0,
+    };
+    // Nobody took it in this task (a load ahead, or a holder that went away):
+    // only the ciphertext stays, and the plaintext's memory goes now rather
+    // than at the next garbage collection.
+    setTimeout(() => {
+        const left = entry.fresh;
+        entry.fresh = null;
+        freeNow(left);
+    }, 0);
     blobCache.set(cacheKey, entry);
     return entry;
+}
+
+/**
+ * The entry's plaintext URL, decrypting and hosting it if nobody has it now.
+ * Only for an entry that is held (the caller took it first), so
+ * nothing evicts it meanwhile; one call at a time per entry (`opening`).
+ */
+function openPlain(e: CacheEntry): Promise<PlainLease> {
+    if (e.plain) return Promise.resolve(e.plain);
+    if (e.opening) return e.opening;
+    const generation = cacheGeneration;
+    const p = (async () => {
+        let pt = e.fresh;
+        e.fresh = null;
+        if (!pt) {
+            const sealed = await e.cipher.read();
+            pt = await openSealed(sealed, e.keyB64url);
+            freeNow(sealed.buffer as ArrayBuffer);
+        }
+        // Signed out meanwhile: no URL for the next user to find.
+        if (generation !== cacheGeneration) throw abortError();
+        // Copied into the hosted Blob and emptied (freeNow).
+        const lease = await hostPlaintext(pt, e.type);
+        if (generation !== cacheGeneration) { lease.release(); throw abortError(); }
+        return lease;
+    })();
+    e.opening = p.then(
+        (lease) => {
+            e.opening = null;
+            e.plain = lease;
+            if (e.playlist) playlistUrls.add(lease.url);
+            return lease;
+        },
+        (err) => {
+            e.opening = null;
+            // Its cached ciphertext could not be read back (its file went):
+            // forget the entry, so the next try downloads it again.
+            if (!isAbortError(err)) {
+                for (const [k, v] of blobCache) if (v === e) { blobCache.delete(k); e.cipher.drop(); }
+            }
+            throw err;
+        },
+    );
+    return e.opening;
+}
+
+/** Nobody holds it: take its plaintext URL back (its host worker goes, and
+ *  the page is nudged to collect: api/plaintextHost.ts). */
+function dropPlainIfIdle(e: CacheEntry): void {
+    if (e.refs > 0 || !e.plain) return;
+    playlistUrls.delete(e.plain.url);
+    e.plain.release();
+    e.plain = null;
 }
 
 /** The cached entry, the load already under way, or a new one from `start`. */
@@ -635,15 +748,15 @@ function isSkipped(e: unknown): boolean {
     return !!e && typeof e === 'object' && (e as { name?: unknown }).name === 'AttachmentPrefetchSkipped';
 }
 
-/** Revoke unheld entries until the copies seen fit RETAINED_ATTACHMENT_BYTES
+/** Drop unheld entries until the copies seen fit RETAINED_ATTACHMENT_BYTES
  *  and the copies loaded ahead fit AHEAD_ATTACHMENT_BYTES, each on its own:
  *  the deepest in their burst first, then those no attachment on the page
- *  shows, then the lowest `seq`. Held, pinned and being-claimed entries stay. */
+ *  shows, then the lowest `seq`. Held and being-claimed entries stay. */
 function enforceRetainedBudget(): void {
     const seen: Array<[string, CacheEntry]> = [];
     const ahead: Array<[string, CacheEntry]> = [];
     for (const [k, e] of blobCache) {
-        if (e.refs > 0 || e.pinned || claiming.has(k)) continue;
+        if (e.refs > 0 || claiming.has(k)) continue;
         (e.seen ? seen : ahead).push([k, e]);
     }
     trimTo(seen, retainedBudget);
@@ -666,23 +779,42 @@ function trimTo(pool: Array<[string, CacheEntry]>, budget: number): void {
     for (const [k, e] of pool) {
         if (kept <= budget) break;
         blobCache.delete(k);
-        playlistUrls.delete(e.url);
-        URL.revokeObjectURL(e.url);
+        // Unheld, so its plaintext went with its last holder; this is the
+        // ciphertext.
+        dropPlainIfIdle(e);
+        e.cipher.drop();
         kept -= e.bytes;
     }
 }
 
 /**
- * Fetch + decrypt an encrypted attachment, returning an object URL for the
- * plaintext that stays valid until sign-out (the entry is pinned: see the
- * cache notes above). A message's attachments use acquireAttachmentUrl.
+ * An attachment's plaintext as bytes, for code that reads a file rather than
+ * showing it (a message captured into a note, a note copied, a drawing's
+ * strokes): no URL is made and nothing stays decrypted here, so nothing is
+ * left in the engine's blob storage either (what these used, decryptToBlobUrl,
+ * kept a URL for each until sign-out). The cache keeps the ciphertext as for
+ * any load.
  */
-export async function decryptToBlobUrl(id: string, keyB64url: string, mime: string, cap?: string): Promise<string> {
+export async function decryptAttachmentBytes(id: string, keyB64url: string, mime: string, cap?: string): Promise<Uint8Array> {
     const cacheKey = cacheKeyOf(id, keyB64url, mime);
+    let fresh: ArrayBuffer | null = null;
+    // Held while it is read, so nothing evicts it meanwhile.
     const e = await claimForCaller(cacheKey, () => loadEntry(cacheKey, id, keyB64url, mime, cap), (entry) => {
-        entry.pinned = true;
+        entry.refs++;
+        fresh = entry.fresh;
+        entry.fresh = null;
     });
-    return e.url;
+    try {
+        if (fresh) return new Uint8Array(fresh);
+        const sealed = await e.cipher.read();
+        const pt = await openSealed(sealed, e.keyB64url);
+        freeNow(sealed.buffer as ArrayBuffer);
+        return new Uint8Array(pt);
+    } finally {
+        e.refs = Math.max(0, e.refs - 1);
+        dropPlainIfIdle(e);
+        enforceRetainedBudget();
+    }
 }
 
 /** A held attachment URL: valid until `release()`, which the holder calls only
@@ -702,16 +834,31 @@ export interface AttachmentHold {
 const heavyLimiter = createPriorityLimiter(2);
 const lightLimiter = createPriorityLimiter(4);
 const limiterFor = (mime: string) => (safeBlobType(mime).startsWith('image/') ? lightLimiter : heavyLimiter);
+/**
+ * Decrypting a cached copy again (reading its ciphertext back and opening
+ * it) is CPU work, so it takes its turn too, the closest first, apart from
+ * the downloads (which wait on the network). Measured on the 2 GB emulator,
+ * going back to a channel of 12 x 22 MB videos: six copies opened at once
+ * took 600-700 ms each and the first on screen showed after 4.9 s, where
+ * the same six one or two at a time take 70-140 ms each; with this, the
+ * ones on screen showed after 2.3 s (2.1 s when the cache still kept them
+ * decrypted).
+ */
+const heavyOpenLimiter = createPriorityLimiter(2);
+const lightOpenLimiter = createPriorityLimiter(4);
+const openLimiterFor = (mime: string) => (safeBlobType(mime).startsWith('image/') ? lightOpenLimiter : heavyOpenLimiter);
 
 /**
- * Hold a message attachment's decrypted URL (MessageContent's
- * EncryptedAttachment). The same cache and keying as decryptToBlobUrl, but:
+ * Hold an attachment's decrypted URL while it is shown (MessageContent's
+ * EncryptedAttachment; Tasks and Notes through useHeldAttachmentUrl):
  *  - the fetch waits for one of a few slots, and the most urgent waiting
  *    attachment (`urgency`: lowest first, asked when a slot frees; the
  *    distance from the screen) goes first;
  *  - aborting `signal` while it still waits drops it (rejects AbortError);
- *  - the entry is held, not pinned: `release()` it once it is no longer
- *    shown, and it joins the RETAINED_ATTACHMENT_BYTES budget.
+ *  - `release()` it once it is no longer shown. The last holder's release
+ *    takes the plaintext URL back at once (every holder of one file shares
+ *    one URL), and the ciphertext joins the RETAINED_ATTACHMENT_BYTES
+ *    budget; taken again, it is decrypted again, into a NEW URL.
  */
 export async function acquireAttachmentUrl(
     id: string,
@@ -737,16 +884,43 @@ export async function acquireAttachmentUrl(
         enforceRetainedBudget();
         throw abortError();
     }
+    // Held from here: give it back if the plaintext does not come, or comes
+    // after we stopped wanting it.
+    const letGo = () => {
+        entry.refs = Math.max(0, entry.refs - 1);
+        dropPlainIfIdle(entry);
+        enforceRetainedBudget();
+    };
+    let lease: PlainLease;
+    try {
+        // Shown already, or just decrypted by its download: at once. A copy
+        // from the cache is decrypted again, in its turn (openLimiterFor).
+        lease = entry.plain || entry.fresh || entry.opening
+            ? await openPlain(entry)
+            : await openLimiterFor(mime).schedule({ run: () => openPlain(entry), urgency, signal });
+    } catch (err) {
+        letGo();
+        throw err;
+    }
+    if (signal?.aborted) {
+        letGo();
+        throw abortError();
+    }
     let held = true;
     return {
-        url: entry.url,
+        url: lease.url,
         release: () => {
             if (!held) return;
             held = false;
             entry.refs = Math.max(0, entry.refs - 1);
             entry.seq = ++useSeq;
             entry.burst = currentBurst();
-            if (entry.refs === 0) enforceRetainedBudget();
+            if (entry.refs === 0) {
+                // The last one showing it: the plaintext goes now, the
+                // ciphertext stays within the budget.
+                dropPlainIfIdle(entry);
+                enforceRetainedBudget();
+            }
         },
     };
 }
@@ -775,7 +949,7 @@ export function noteAttachmentInterest(id: string, keyB64url: string, mime: stri
 function roomToPrefetch(): boolean {
     let onPage = 0;
     for (const [k, e] of blobCache) {
-        if (e.refs === 0 && !e.pinned && !e.seen && interest.has(k)) onPage += e.bytes;
+        if (e.refs === 0 && !e.seen && interest.has(k)) onPage += e.bytes;
     }
     return onPage + MAX_UPLOAD_BYTES <= aheadBudget;
 }
@@ -823,16 +997,18 @@ export async function prefetchAttachmentUrl(
 }
 
 /** What the cache holds now, in bytes of plaintext (tests, diagnostics):
- *  shown now, pinned, seen and given back, loaded ahead and not yet seen. */
-export function attachmentCacheStats(): { entries: number; heldBytes: number; pinnedBytes: number; retainedBytes: number; aheadBytes: number } {
-    let heldBytes = 0, pinnedBytes = 0, retainedBytes = 0, aheadBytes = 0;
+ *  shown now, seen and given back, loaded ahead and not yet seen — and how
+ *  much of it is decrypted right now (`plainBytes`: only what is held
+ *  should be). */
+export function attachmentCacheStats(): { entries: number; heldBytes: number; retainedBytes: number; aheadBytes: number; plainBytes: number } {
+    let heldBytes = 0, retainedBytes = 0, aheadBytes = 0, plainBytes = 0;
     for (const e of blobCache.values()) {
-        if (e.pinned) pinnedBytes += e.bytes;
-        else if (e.refs > 0) heldBytes += e.bytes;
+        if (e.refs > 0) heldBytes += e.bytes;
         else if (e.seen) retainedBytes += e.bytes;
         else aheadBytes += e.bytes;
+        if (e.plain) plainBytes += e.bytes;
     }
-    return { entries: blobCache.size, heldBytes, pinnedBytes, retainedBytes, aheadBytes };
+    return { entries: blobCache.size, heldBytes, retainedBytes, aheadBytes, plainBytes };
 }
 
 /**
@@ -855,20 +1031,28 @@ export function noteAttachmentPictureSize(id: string, dims: VideoDims): void {
     if (dims.width > 0 && dims.height > 0) pictureSizes.set(id, { width: dims.width, height: dims.height });
 }
 
-/** Revoke every cached decrypted-attachment object URL and clear the cache.
- *  Called on logout so one user's decrypted files don't linger in memory (or
- *  remain openable via their blob: URLs) for the next user on a shared session.
- *  Attachments still waiting for a fetch slot are dropped too, and one still
- *  downloading is not cached when it lands (cacheGeneration). */
+/** Take back every decrypted-attachment URL (every plaintext host worker
+ *  goes) and clear the cache. Called on logout so one user's decrypted files
+ *  don't linger in memory (or remain openable via their blob: URLs) for the
+ *  next user on a shared session. Attachments still waiting for a fetch slot
+ *  are dropped too, and one still downloading is not cached when it lands
+ *  (cacheGeneration). */
 export function clearBlobCache(): void {
     cacheGeneration++;
     for (const e of blobCache.values()) {
-        URL.revokeObjectURL(e.url);
+        e.plain?.release();
+        e.plain = null;
+        e.fresh = null;
+        e.cipher.drop();
     }
+    dropAllPlaintext();
+    dropAllCiphertext();
     blobCache.clear();
     inflight.clear();
     playlistUrls.clear();
     pictureSizes.clear();
     heavyLimiter.clear();
     lightLimiter.clear();
+    heavyOpenLimiter.clear();
+    lightOpenLimiter.clear();
 }

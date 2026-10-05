@@ -38,6 +38,33 @@ one-line summary; this file is the full story. Versions follow
   another, and a video you paused carries on from where you left it when you
   come back to it.
 
+### Fixed
+- **Pictures, videos and songs you open no longer stay on your phone as
+  readable files.** The engine inside the Android app keeps only about 1% of
+  the phone's memory for files the app decrypts and writes the rest to the
+  app's storage as they are, unencrypted; they stayed there while Púca sat in
+  the background and, after the phone closed it, until you opened Púca again
+  (a channel of three videos, three pictures and a song left 79 MB of them).
+  Now a file is decrypted only while it is on or near the screen, the copies
+  kept so that coming back needs no download stay encrypted, and a couple of
+  seconds after you switch to another app Púca lets go of everything it is
+  not playing or showing full screen, and those files are gone from the
+  phone within seconds. Coming back to Púca shows them again from the
+  encrypted copies, with nothing downloaded again, though it takes a moment
+  longer than before: on a test phone a channel's three videos, three
+  pictures and a song were all back about 1.5 seconds after returning,
+  where they used to be back in under one. Pictures and voice notes in Tasks
+  and Notes are let go the same way; they used to stay decrypted until you
+  signed out. On a PC the same files were written to disk when Windows ran
+  short of memory, and stayed there for as long as Púca kept them in its
+  cache; now they go as soon as nothing shows them. This arrives with the
+  update inside the app.
+- **What a crash left behind is removed when the app next starts — this
+  part needs the NEW Android app (0.9.834).** If Púca is closed by a crash
+  or killed while a picture or video is on screen, that file is still on the
+  phone; the new app removes it as soon as it starts again, before anything
+  else, even when it only starts to receive a notification.
+
 ## 0.9.833 — 2026-10-03
 
 Poker and Blackjack in voice calls, like Discord's Activities: start one from the rocket button, everyone in the call sees it and can join or watch.

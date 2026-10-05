@@ -41,7 +41,7 @@ vi.mock('../components/messageToastBus', async () => {
 // nothing and every assertion below would pass for the wrong reason.
 vi.mock('../api/attachments', async () => {
     const real = await vi.importActual<typeof import('../api/attachments')>('../api/attachments');
-    return { ...real, decryptToBlobUrl: vi.fn(async () => 'blob:x'), encryptAndUploadRef: vi.fn() };
+    return { ...real, acquireAttachmentUrl: vi.fn(async () => ({ url: 'blob:x', release: () => {} })), encryptAndUploadRef: vi.fn() };
 });
 // The real canvas cannot draw in jsdom (it disables its own Save there), so
 // the SAVE is driven through a stand-in that hands ListContentBlock a finished
