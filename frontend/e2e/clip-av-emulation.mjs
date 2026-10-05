@@ -28,6 +28,23 @@
 // packets up in the field. The mic leg's delay is probed too: every ramp of
 // it is a stretch of pitch-shifted mic.
 //
+// THE AUDIO WIRE (since the binary channel replaced the per-packet base64
+// event): the emulator batches its 10 ms packets the way the shell does
+// (clip_audio_wire.rs, ~100 ms a message, planar) and a FOURTH run flags 1.6 s
+// before the first burst as WASAPI-silent, which the shell sends as
+// messages with no samples the page schedules nothing for. The sound after that
+// silence must land exactly that much silence after the sound before it —
+// no re-prime — and the burst after it in sync like the others. What it does
+// NOT model: the shell's IPC per MESSAGE, after the send. The emulated
+// delivery delay (AUDIO_DELIVERY_MS) is paid per packet BEFORE it is read, so
+// its jitter lands in the packets' ages, which the real shell's IPC never
+// does; the emulated A/V spread of the batched wire is not a model of the
+// real one's (docs/CLIPS.md).
+//
+// THE CLIP'S END: the seal waits for the sound still on its way at the press
+// (replayWorker.ts seal()), so every run's clip must have sound right up to
+// its last frame — it used to stop a lead (~0.15 s) short.
+//
 //   cd frontend && node e2e/clip-av-emulation.mjs
 //   AV_BROWSER=chromium node e2e/clip-av-emulation.mjs   # no Edge: Playwright's
 //     Chromium, which cannot decode H.264 (the harness decodes the clip's
@@ -117,7 +134,7 @@ const origin = `http://127.0.0.1:${srv.address().port}`;
 
 // 4. Drive it.
 const browser = await chromium.launch({ channel: process.env.AV_BROWSER === 'chromium' ? undefined : 'msedge', headless: true, args: ['--mute-audio', '--autoplay-policy=no-user-gesture-required', '--use-fake-ui-for-media-stream'] });
-async function run(runIndex, stall = null) {
+async function run(runIndex, stall = null, extra = null) {
     const ctx = await browser.newContext();
     const page = await ctx.newPage();
     const errors = [];
@@ -144,7 +161,7 @@ async function run(runIndex, stall = null) {
     // is the JS pipeline's own constant (what NATIVE_AUDIO_OFFSET_US can
     // correct); the default keeps the shell's measured-shape latencies.
     const rust = process.env.AV_RUST_MODEL === 'zero' ? { readbackLagMs: 0, videoIpcMs: [0, 0], audioDeliveryMs: [0, 0] } : {};
-    await page.addInitScript((p) => { window.__AV_PARAMS__ = p; }, { bursts: [{ frame: FLASHES[0], offsetMs: 0 }, { frame: FLASHES[1], offsetMs: CONTROL_MS }], ...rust, ...(stall ?? {}) });
+    await page.addInitScript((p) => { window.__AV_PARAMS__ = p; }, { bursts: [{ frame: FLASHES[0], offsetMs: 0 }, { frame: FLASHES[1], offsetMs: CONTROL_MS }], ...rust, ...(stall ?? {}), ...(extra ?? {}) });
     await page.goto(origin + '/');
     await page.waitForFunction(() => !!window.__av, null, { timeout: 15000 });
     const loaded = await page.evaluate((f) => window.__av.load('/flash.h264', f), FLASHES[0]);
@@ -159,7 +176,7 @@ async function run(runIndex, stall = null) {
     await page.evaluate(() => window.__av.disarm()).catch(() => { });
     await ctx.close();
     parts.clear();
-    return { runIndex, stall, loaded, armed, buffered, sealed, m, truth, errors, offHost, requests, micState };
+    return { runIndex, stall, extra, loaded, armed, buffered, sealed, m, truth, errors, offHost, requests, micState };
 }
 
 /** The browser could not decode the clip's H.264: find the flash frames with
@@ -191,13 +208,16 @@ try {
     for (let i = 0; i < 2; i++) results.push(await run(i));
     // A busy main thread: a 30 ms long task every 200 ms.
     results.push(await run(2, { stallEveryMs: 200, stallMs: 30 }));
+    // Desktop audio WASAPI flags silent for 1.6 s, ending 400 ms before the
+    // first burst: messages with no samples on the wire.
+    results.push(await run(3, null, { silentAroundBurst0: [[-2000, -400]] }));
     const r0 = results[0];
     ck(r0.loaded.keyframes >= 6 && r0.loaded.accessUnits === FPS * SECONDS, "the stream has the agent's shape", `${r0.loaded.accessUnits} AUs, ${r0.loaded.keyframes} keys, ${r0.loaded.codec}`);
     ck(r0.armed.state.phase === 'armed' && r0.armed.state.hasSystemAudio === true && r0.armed.state.hasMic === true, 'the real pipeline armed with system audio AND a mic', JSON.stringify({ phase: r0.armed.state.phase, sys: r0.armed.state.hasSystemAudio, mic: r0.armed.state.hasMic, micCtx: r0.micState, notices: r0.armed.notices }));
     const skip = (label, why) => console.log('SKIP  ' + label + '  — ' + why);
     for (const r of results) {
         const m = r.m;
-        const tag = r.stall ? ` (main thread stalled ${r.stall.stallMs} ms every ${r.stall.stallEveryMs} ms)` : '';
+        const tag = r.stall ? ` (main thread stalled ${r.stall.stallMs} ms every ${r.stall.stallEveryMs} ms)` : r.extra ? ' (1.6 s of WASAPI-silent desktop audio before the first burst)' : '';
         // THE AUDIO TIMELINE. A misfit is allowed only where the loopback
         // genuinely re-primed (an underrun, or a drift reset): there the
         // render timeline itself has a hole. Anywhere else it is the
@@ -209,6 +229,22 @@ try {
         // Per-packet reporting ramped the mic delay on about half of all
         // packets (671 ramps over ~1300 packets); it should move only where
         // the lead does — a segment start and the few 5 ms steps it is learnt in.
+        const w = r.truth.wire, sil = r.truth.silence;
+        console.log(`  run ${r.runIndex}${tag}: the wire: ${w.packets} WASAPI packets in ${w.messages} messages (${(w.packets / Math.max(1, w.messages)).toFixed(1)} a message, ${(w.bytes / 1024).toFixed(0)} KiB); silent runs: ${sil.messages} messages with no samples, ${(sil.s * 1000).toFixed(0)} ms of silence in ${sil.bytes} bytes; the sound after each silence sat ${JSON.stringify(r.truth.lead.afterSilence)} ms off its chain`);
+        ck(w.messages > 0 && w.packets >= 8 * w.messages, `run ${r.runIndex}${tag}: the audio arrived batched (~100 ms a message, not one per 10 ms packet)`, `${w.packets} packets / ${w.messages} messages`);
+        if (r.extra) {
+            // A PRECONDITION, not a check of the shell: it counts what the
+            // EMULATOR sent against the formula the emulator was written
+            // from, so it proves this run exercised the silent path. The
+            // shell's own bytes are pinned by clip_audio_wire.rs's tests and
+            // the byte fixture both sides read (src/tests/audioWire.test.ts).
+            ck(sil.messages >= 14 && sil.bytes === 24 * sil.messages + 8 * sil.packets && Math.abs(sil.s - 1.6) < 0.05, `run ${r.runIndex}${tag}: precondition: the emulated shell sent the 1.6 s of silence as messages with no samples`, `${sil.messages} messages, ${sil.bytes} bytes, ${(sil.s * 1000).toFixed(0)} ms`);
+            ck(r.truth.lead.afterSilence.length === 1 && Math.abs(r.truth.lead.afterSilence[0]) < 0.001, `run ${r.runIndex}${tag}: the sound after the silence landed exactly that much silence later (no re-prime: the playhead advanced through it)`, JSON.stringify(r.truth.lead.afterSilence));
+        }
+        // The clip's end: the sound reaches its last frame, and runs past it
+        // by at most the one AAC (or 20 ms Opus) frame kept across the press.
+        console.log(`  run ${r.runIndex}${tag}: the clip's sound ends ${m.soundShortMs.toFixed(1)} ms before its picture (- = after)`);
+        ck(m.soundShortMs <= 2 && m.soundShortMs >= -23.4, `run ${r.runIndex}${tag}: the clip's sound runs to the end of its picture`, `${m.soundShortMs.toFixed(1)} ms short`);
         ck(r.truth.micDelayRamps.n < r.truth.lead.n / 20, `run ${r.runIndex}${tag}: the mic delay moves only with the lead, not per packet (each ramp is pitch-shifted mic)`, `${r.truth.micDelayRamps.n} ramps over ${r.truth.lead.n} packets`);
         if (!m.videoDecodable) {
             skip(`run ${r.runIndex}: A/V sync`, 'neither this browser nor ffmpeg decoded the video' + (m.errors.length ? ': ' + m.errors.join('; ') : ''));

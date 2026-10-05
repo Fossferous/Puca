@@ -21,7 +21,7 @@ declare global {
         __AV_CODEC__: string;
         __AV_FLASH_FRAME__: number;
         __AV_TRUTH__: { bursts: { frame: number; flashAt: number; burstAt: number; offsetMs: number }[]; micBurstAt: number; v0: number; agentStart: number } | undefined;
-        __AV_EMU__: { log: string[]; diag: string[]; params: Record<string, unknown>; leads: { at: number; leadMs: number; state: string; when: number; dur: number }[]; delayRamps: { at: number; value: number; endTime: number }[]; presented: () => { k: number; presentAt: number; tsUs: number }[] };
+        __AV_EMU__: { log: string[]; diag: string[]; params: Record<string, unknown>; leads: { at: number; leadMs: number; state: string; when: number; dur: number; silentS: number }[]; delayRamps: { at: number; value: number; endTime: number }[]; silence: { s: number; messages: number; bytes: number; packets: number }; wire: { messages: number; bytes: number; packets: number }; presented: () => { k: number; presentAt: number; tsUs: number }[] };
         __av: typeof api;
     }
 }
@@ -206,6 +206,15 @@ const api = {
             }
         }
         const timeline = { packets: packets.length, misfit, misfitMs: misfitS * 1000, worstMs, where };
+        // THE END OF THE CLIP: where its picture ends (the last frame's
+        // timestamp plus its duration) against where its sound does. The
+        // seal waits for the sound still on its way at the press (the
+        // loopback's lead), so the two should end together, the sound at most
+        // the one AAC frame it keeps across the press past the picture.
+        let videoEnd = -Infinity;
+        for await (const p of new EncodedPacketSink(vt).packets()) videoEnd = Math.max(videoEnd, p.timestamp + p.duration);
+        const audioEnd = packets.reduce((e, p) => Math.max(e, p.t + p.d), -Infinity);
+        const soundShortMs = (videoEnd - audioEnd) * 1000;
         chunks.sort((a, b) => a.t - b.t);
         // Burst onsets: a loud sample after at least 200 ms of quiet.
         const onsets: number[] = [];
@@ -225,7 +234,7 @@ const api = {
         for (const f of flash) if (!flashes.length || f.t - flashes[flashes.length - 1] > 0.5) flashes.push(f.t);
         return {
             errors, durationMs: m.durationMs, videoFrames: lumas.length, yMin, yMax, hasMic: getReplayState().hasMic,
-            videoDecodable, timeline,
+            videoDecodable, timeline, soundShortMs,
             mp4B64: videoDecodable ? null : btoa(Array.from(all, b => String.fromCharCode(b)).join('')),
             flashes, brightFrames: flash.length, audioChunks: chunks.length, audioPeak: peak, onsets,
             // Per burst: audio onset minus its flash frame, ms (+ = audio late).
@@ -244,12 +253,20 @@ const api = {
         const ramps = window.__AV_EMU__.delayRamps;
         const spanS = ramps.length > 1 ? (ramps[ramps.length - 1].at - ramps[0].at) / 1000 : 0;
         return { truth: window.__AV_TRUTH__, presented: window.__AV_EMU__.presented().length, invoked: window.__AV_EMU__.log, diag: window.__AV_EMU__.diag, params: window.__AV_EMU__.params,
-            // Between primes each packet is scheduled exactly where the one
-            // before it ends (nativeCapture.ts); a break in that chain is a
-            // re-prime — an underrun or a drift reset, a genuine hole in the
-            // loopback's render timeline.
+            // Between primes each message is scheduled exactly where the one
+            // before it ends (nativeCapture.ts) — or, after a silent run (a
+            // message with no samples the page schedules nothing for), exactly that much
+            // silence later; a break in that chain is a re-prime — an
+            // underrun or a drift reset, a genuine hole in the loopback's
+            // render timeline.
             lead: { n: leads.length, min: q(0), p50: q(0.5), max: q(0.999), first: leads[0] ?? null, aroundBursts: around, suspendedStarts, firstAtMs: (window.__AV_EMU__.leads[0]?.at ?? 0) - t0,
-                primes: window.__AV_EMU__.leads.filter((l, i, all) => i > 0 && Math.abs(l.when - (all[i - 1].when + all[i - 1].dur)) > 1e-6).length },
+                primes: window.__AV_EMU__.leads.filter((l, i, all) => i > 0 && Math.abs(l.when - (all[i - 1].when + all[i - 1].dur + (l.silentS - all[i - 1].silentS))) > 1e-6).length,
+                // The first sound after each silent run: was it chained to the
+                // sound before the silence by exactly the silence between?
+                // ms off that chain, one entry per silent run.
+                afterSilence: window.__AV_EMU__.leads.flatMap((l, i, all) => i > 0 && l.silentS > all[i - 1].silentS
+                    ? [+((l.when - (all[i - 1].when + all[i - 1].dur + (l.silentS - all[i - 1].silentS))) * 1000).toFixed(3)] : []) },
+            silence: window.__AV_EMU__.silence, wire: window.__AV_EMU__.wire,
             micDelayRamps: { n: ramps.length, perS: spanS > 0 ? ramps.length / spanS : 0 } };
     },
 };

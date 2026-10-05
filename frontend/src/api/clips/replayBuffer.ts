@@ -105,8 +105,10 @@ function notifyArmed(armed: boolean): void {
     }
 }
 
-/** The mic-leg DelayNode's ceiling: past nativeCapture's MAX_BACKLOG_S the
- *  loopback resets its lead, so no larger delay is ever asked for. */
+/** The mic-leg DelayNode's ceiling. A lead is the loopback's scheduling
+ *  backlog, which nativeCapture resets past MAX_BACKLOG_S (0.5 s), plus how
+ *  long the shell held the packet in its batch (up to ~0.1 s): about 0.6 s
+ *  at most, under this. applyLead clamps to it all the same. */
 const MIC_DELAY_MAX_S = 1;
 
 /** Spike-measured: audio arrived ~40 ms EARLY relative to video; delay it.

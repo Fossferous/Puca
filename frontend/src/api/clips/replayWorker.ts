@@ -56,6 +56,18 @@ const STATUS_INTERVAL_MS = 1000;
  *  an underrun (tens to a few hundred ms), short enough that a lead
  *  following a slowly drifting clock is applied at most this early. */
 const LEAD_LOOKAHEAD_MS = 1000;
+/** How long a native seal waits for the sound its press already covers
+ *  (seal(), THE SOUND UNDER THE PRESS): the current lead plus this margin
+ *  for the hop from the mix to this worker's pump, never more than the
+ *  cap whatever the lead says. Usually it ends sooner, the moment that
+ *  sound is read. */
+const TAIL_WAIT_MARGIN_MS = 100;
+const TAIL_WAIT_MAX_MS = 1_200;
+/** ...and "reaches" means by this much more: placeAudio keeps an entry at
+ *  its predecessor's offset until its own target moves half a frame (an
+ *  AAC frame is 21.3 ms, Opus 20), so placed sound can sit up to that much
+ *  earlier than the estimate says. */
+const TAIL_COVER_SLACK_US = 11_000;
 
 interface OpenGop {
     startUs: number;
@@ -162,6 +174,15 @@ export class Ring {
     sealsInFlight = 0;
     /** In-flight seals' copies of the open unit, so wipe() can zero them. */
     sealTails = new Set<Uint8Array>();
+    /** Native: where the last AudioData the pump handed the encoder ENDS,
+     *  on the audio clock, and the seals waiting for the sound to reach
+     *  their press (seal()). */
+    audioReadEndUs: number | null = null;
+    tailWaiters = new Set<{ untilUs: number; done: () => void }>();
+    /** seal()'s time limit on that wait (TAIL_WAIT_*): fields, so a test
+     *  can take the limit out of a race it is not testing. */
+    tailWaitMarginMs = TAIL_WAIT_MARGIN_MS;
+    tailWaitMaxMs = TAIL_WAIT_MAX_MS;
     lastKeyUs = -Infinity;
     forceKeyNext = true;
     // pumps
@@ -378,6 +399,10 @@ export class Ring {
                 if (this.fatal || !this.aenc || this.aenc.state !== 'configured') continue;
                 if (this.firstAudioTs === null) { this.firstAudioTs = data.timestamp; this.wallA = nowMs(); }
                 this.aenc.encode(data);
+                if (this.cfg.nativeVideo) {
+                    this.audioReadEndUs = data.timestamp + (data.duration || 0);
+                    for (const w of this.tailWaiters) if (this.soundReaches(w.untilUs)) w.done();
+                }
             } catch (e) {
                 this.fail('audio', e instanceof Error ? e.message : String(e));
             } finally {
@@ -651,25 +676,84 @@ export class Ring {
         void this.wipe();
     }
 
+    /** Native: whether the sound handed to the encoder reaches `untilUs` on
+     *  the video timeline, placed as seal() places it (the clip's one shift,
+     *  less its segment's lead), with TAIL_COVER_SLACK_US to spare. */
+    private soundReaches(untilUs: number): boolean {
+        const raw = this.audioReadEndUs;
+        return raw !== null && raw + this.audioShiftUs() - this.leadUsAt(raw) >= untilUs + TAIL_COVER_SLACK_US;
+    }
+
+    /** Resolves once the sound reaches `untilUs` (the pump checks after every
+     *  read), after `ms`, or at wipe(), whichever is first. */
+    private waitForSound(untilUs: number, ms: number): Promise<void> {
+        return new Promise<void>(resolve => {
+            const w = { untilUs, done: () => { clearTimeout(timer); this.tailWaiters.delete(w); resolve(); } };
+            const timer = setTimeout(w.done, ms);
+            this.tailWaiters.add(w);
+            if (this.soundReaches(untilUs)) w.done();
+        });
+    }
+
+    /** Where the newest unit's picture ends: what selectWindow would call
+     *  the clip's end if the ring were snapshotted now. */
+    private newestVideoEndUs(): number | null {
+        const op = this.open;
+        if (op && op.videoIdx.length > 0) return op.endUs;
+        return this.gops.length ? this.gops[this.gops.length - 1].endUs : null;
+    }
+
     // ---- seal ------------------------------------------------------------------
     async seal(clipId: string, requestedMs: number, maxMs?: number): Promise<SealedClip> {
+        // Native audio is waited for below; the picker path's comes out of
+        // its encoder with the video's, as it always has.
+        const tailWait = !!this.cfg?.nativeVideo && this.audioReader !== null;
         // Bring every pending frame out of the encoders (the picker path) and
         // let every GOP already closed finish sealing into the ring.
         try { await this.venc?.flush(); } catch { /* ignore */ }
-        try { await this.aenc?.flush(); } catch { /* ignore */ }
+        if (!tailWait) { try { await this.aenc?.flush(); } catch { /* ignore */ } }
         while (this.pendingCloses > 0 && !this.fatal) await this.closing;
         if (this.fatal || !this.running) throw new Error('the buffer stopped before the clip could be made');
-        // THE PRESS: nothing awaits between here and `chosen`, so the clip is
-        // exactly the ring as it stands now plus a COPY of the open unit. The
-        // open unit is not closed: it keeps growing and closes on its own
-        // next keyframe, so nothing is lost after the press (the native
-        // path cannot force that keyframe). The mux reads `chosen` by
-        // reference, and eviction waits (sealsInFlight), so frames arriving
-        // while it runs can neither enter this clip nor pull a unit from it.
+        // THE PRESS. The clip is the ring as it stands at the press plus a
+        // COPY of the open unit. The open unit is not closed: it keeps
+        // growing and closes on its own next keyframe, so nothing is lost
+        // after the press (the native path cannot force that keyframe). The
+        // mux reads `chosen` by reference, and eviction waits from here
+        // (sealsInFlight), so frames arriving while it runs can neither
+        // enter this clip nor pull a unit from it.
         this.sealsInFlight++;
         const held: { tail: TailUnit | null } = { tail: null };
         try {
-            return await this.sealSnapshot(clipId, requestedMs, maxMs, held);
+            const pressEndUs = this.newestVideoEndUs();
+            const pressConfigId = this.configId;
+            if (tailWait) {
+                // THE SOUND UNDER THE PRESS. Native audio reaches this worker
+                // a LEAD after it happened: the loopback context renders every
+                // sample that long after its capture (nativeCapture.ts: about
+                // 50 ms of scheduling, plus up to 90 ms the shell holds a
+                // batch, ~150 ms in all), and the mic leg is delayed to match.
+                // So at the press the picture is here up to its last frame
+                // and the sound only up to about a lead before it: sealed now,
+                // every clip's last ~0.15 s would be silent, mic and all. Wait
+                // until the sound handed to the encoder reaches the press (or
+                // about a lead, if it never does), then take the snapshot —
+                // capped at the press, so the picture that arrived meanwhile,
+                // and any sound past it, stay out of this clip.
+                if (pressEndUs !== null) {
+                    const leadMs = Math.max(0, (this.audioLeads[this.audioLeads.length - 1]?.leadUs ?? 0) / 1000);
+                    await this.waitForSound(pressEndUs, Math.min(this.tailWaitMaxMs, leadMs + this.tailWaitMarginMs));
+                }
+                try { await this.aenc?.flush(); } catch { /* ignore */ }
+                while (this.pendingCloses > 0 && !this.fatal) await this.closing;
+                if (this.fatal || !this.running) throw new Error('the buffer stopped before the clip could be made');
+                // Another capture's clock arrived meanwhile (restartNativeClock,
+                // the only native configId change): the open unit under the
+                // press is gone and what follows is on a new clock, so the
+                // window would be the new capture's first frames. Say so.
+                if (this.configId !== pressConfigId) throw new Error('the capture restarted while the clip was being made');
+            }
+            // Nothing awaits between here and `chosen` (sealSnapshot).
+            return await this.sealSnapshot(clipId, requestedMs, maxMs, held, tailWait ? pressEndUs : null);
         } finally {
             const t = held.tail;
             if (t) { t.plain.fill(0); this.sealTails.delete(t.plain); }
@@ -677,8 +761,11 @@ export class Ring {
         }
     }
 
-    /** The body of seal() from the press on. Synchronous up to `chosen`. */
-    private async sealSnapshot(clipId: string, requestedMs: number, maxMs: number | undefined, held: { tail: TailUnit | null }): Promise<SealedClip> {
+    /** The body of seal() from the snapshot on. Synchronous up to `chosen`.
+     *  `pressEndUs`: where the picture ended at the press, when seal() waited
+     *  for the sound after it (null: it did not, and the clip ends with the
+     *  newest frame, as the snapshot finds it). */
+    private async sealSnapshot(clipId: string, requestedMs: number, maxMs: number | undefined, held: { tail: TailUnit | null }, pressEndUs: number | null): Promise<SealedClip> {
         if (!this.vDecoderConfig || !this.videoCodec) throw new Error('no video decoder configuration yet');
         // Part of the snapshot: a picker reconfigure mid-mux replaces these.
         const vcfg = this.vDecoderConfig, width = this.width, height = this.height;
@@ -690,9 +777,17 @@ export class Ring {
             held.tail = tail;
             units.push(tail);
         }
-        const win = selectWindow(units, requestedMs * 1000, maxMs !== undefined ? maxMs * 1000 : undefined);
+        // The clip ends at the press. Frames that arrived while seal() waited
+        // for the sound are left out, and a unit that OPENED meanwhile (a
+        // keyframe arrived) gives the clip only its sound: audio is filed
+        // under the unit open when it ARRIVES, so the sound from just before
+        // the press is there.
+        const capUs = pressEndUs ?? Infinity;
+        const pressed = units.filter(u => u.startUs < capUs);
+        const late = new Set(units.filter(u => u.startUs >= capUs));
+        const win = selectWindow(pressed.map(u => ({ configId: u.configId, startUs: u.startUs, endUs: Math.min(u.endUs, capUs) })), requestedMs * 1000, maxMs !== undefined ? maxMs * 1000 : undefined);
         if (!win) throw new Error('the buffer is empty');
-        const chosen = units.slice(win.from, win.to + 1);
+        const chosen = [...pressed.slice(win.from, win.to + 1), ...late];
         const shiftUs = this.audioShiftUs();
         const secrets = newClipSecrets(clipId);
         const audioCodec = this.audioCodec;
@@ -725,15 +820,18 @@ export class Ring {
             try {
                 let off = 0;
                 for (const v of g.video) {
-                    const bytes = plain.slice(off, off + v.len); off += v.len;
+                    const at = off; off += v.len;
+                    if (late.has(g) || v.tsUs >= capUs) continue; // after the press
+                    const bytes = plain.slice(at, off);
                     const pkt = new mb.EncodedPacket(bytes, v.key ? 'key' : 'delta', (v.tsUs - win.startUs) / 1e6, v.durUs / 1e6);
                     await vsrc.add(pkt, firstV ? { decoderConfig: vcfg } : undefined);
                     firstV = false;
                 }
                 // Native entries are on the audio clock until here: one shift
-                // per clip, minus each one's segment lead (placeAudio).
+                // per clip, minus each one's segment lead (placeAudio). Sound
+                // placed past the press goes with the picture past it.
                 const placed = this.placeAudio(g.audio, shiftUs, lastAudio);
-                const kept = placed.filter((a): a is ChunkIndexEntry => a !== null);
+                const kept = placed.filter((a): a is ChunkIndexEntry => a !== null && a.tsUs < capUs);
                 const audioEntries = g === chosen[0] ? trimLeadingAudio(kept, win.startUs) : kept;
                 // audio bytes follow the video bytes; walk the FULL index to keep offsets right
                 let aoff = off;
@@ -792,6 +890,8 @@ export class Ring {
 
     async wipe(): Promise<void> {
         this.running = false;
+        // A seal waiting for the sound stops waiting (and then finds the ring gone).
+        for (const w of this.tailWaiters) w.done();
         if (this.statusTimer) { clearInterval(this.statusTimer); this.statusTimer = null; }
         const vr = this.videoReader, ar = this.audioReader;
         this.videoReader = null; this.audioReader = null;

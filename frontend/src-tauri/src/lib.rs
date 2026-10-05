@@ -7,6 +7,7 @@
 mod agent_ipc;
 mod audio_capture;
 mod capture_bar;
+mod clip_audio_wire;
 mod clip_capture;
 mod clip_desktop_audio;
 #[cfg(feature = "remote-control")]
@@ -199,16 +200,20 @@ fn clip_capture_status() -> ClipCaptureStatus {
 /// captured plus the capture GENERATION the caller now owns (see
 /// clip_desktop_audio.rs — the state is a process singleton and ownership is
 /// what stops a failed start's cleanup killing someone else's capture).
+/// `on_audio` (JS: `onAudio`): the raw binary channel the PCM arrives on
+/// (clip_audio_wire.rs); a start that is refused drops it at once, which
+/// releases the page's end.
 #[cfg(windows)]
 #[tauri::command]
 async fn start_clip_desktop_audio(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, Arc<ClipDesktopAudioState>>,
     device_name: Option<String>,
+    on_audio: clip_desktop_audio::AudioSink,
 ) -> Result<clip_desktop_audio::ClipAudioStarted, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        clip_desktop_audio::start_capture(app_handle, state, device_name)
+        clip_desktop_audio::start_capture(app_handle, on_audio, state, device_name)
     })
     .await
     .map_err(|e| e.to_string())?

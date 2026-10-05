@@ -107,6 +107,25 @@ one-line summary; this file is the full story. Versions follow
   until you toggled one, because a device joining a call never said what its
   own state was. It now does, a moment after it joins.
 
+### Improved
+- **Clips cost the app less while they listen to your PC's sound.** With the
+  clip buffer armed, the sound your PC plays reached the app about a hundred
+  times a second, each time as text: converted to base64, wrapped in a
+  script, run on the app's main thread and converted back, even while
+  Windows was reporting silence. It now arrives as raw bytes ten times a
+  second, and silence arrives as a few bytes that only say how long it
+  lasted. In a test page that replays both, the app's main thread spent
+  about 12 ms a second on it instead of 20 while sound played, and 1.5 ms
+  instead of 16 while it was silent. Clips stay in sync with the picture.
+
+### Fixed
+- **A clip's sound now runs right up to the moment you press Clip.** Your
+  PC's sound and your mic reach the clip buffer a moment after the picture
+  does (about 0.15 to 0.2 s since the change above, less before it), so a
+  clip ended with that moment of silence. Making a clip now waits that
+  moment for the sound, then ends the clip exactly where you pressed,
+  picture and sound together. The clip appears that moment later.
+
 ## 0.9.833 — 2026-10-03
 
 Poker and Blackjack in voice calls, like Discord's Activities: start one from the rocket button, everyone in the call sees it and can join or watch.

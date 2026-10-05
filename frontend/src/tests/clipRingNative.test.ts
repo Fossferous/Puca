@@ -507,6 +507,188 @@ describe('native ring: audio lands where it happened, on one continuous timeline
     }, 60_000);
 });
 
+describe("native ring: a clip's sound runs right up to the press", () => {
+    /** The loopback renders each sample LEAD ms after it was captured
+     *  (nativeCapture.ts: JITTER_S, plus up to ~90 ms the shell holds a batch
+     *  since the binary wire, ~150 ms in all), and the mic leg is delayed to
+     *  match, so at the press the worker holds the picture up to its last
+     *  frame but the sound only up to about LEAD ms before it. The rest is
+     *  already on its way: it must be in the clip, and the picture that
+     *  arrives while it comes must not be — the clip ends at the press. */
+    const V0 = 612.345, A0 = 1_500, RAW0 = 108_000_000_000, AUDIO_US = 21_333, LEAD = 150;
+    const AAC_FRAME_MS = AUDIO_US / 1000;
+
+    /** `soundStopsAtPress`: no audio arrives after the press. `pictureStalledMs`:
+     *  the picture stalled just before the press while the sound kept coming,
+     *  so the sound under the press (and this much after it) is already here.
+     *  `leadDrop`: from audio frame `from` on, a new segment whose lead is
+     *  `ms` SMALLER (a re-prime). `restartAfterPress`: a chunk from another
+     *  capture's clock (restartNativeClock) arrives while the seal waits.
+     *  The seal's real-time limit on its wait is taken out (30 s) unless
+     *  `realTimeLimit`: the feed below runs on a mocked clock, and a loaded
+     *  machine must not turn a slow feed into a different result. */
+    async function pressDuringSound(pressFrame: number, opts: { soundStopsAtPress?: boolean; pictureStalledMs?: number; realTimeLimit?: boolean; leadDrop?: { from: number; ms: number }; restartAfterPress?: boolean } = {}) {
+        let clock = 0;
+        vi.spyOn(performance, 'now').mockImplementation(() => clock);
+        let ctrl!: ReadableStreamDefaultController<AudioData>;
+        const audio = new ReadableStream<AudioData>({ start(c) { ctrl = c; } }, { highWaterMark: 0 });
+        const ring = await armNative({ audio });
+        if (!opts.realTimeLimit) Object.assign(ring, { tailWaitMarginMs: 30_000, tailWaitMaxMs: 30_000 });
+        /** Audio frame f renders at R(f) (worker ms); its content was captured leadOf(f) ms before. */
+        const R = (f: number) => A0 + (f * AUDIO_US) / 1000;
+        const leadOf = (f: number) => (opts.leadDrop && f >= opts.leadDrop.from ? LEAD - opts.leadDrop.ms : LEAD);
+        type Ev = { at: number; video?: number; audio?: number };
+        const evs: Ev[] = [];
+        let prev = 0;
+        for (let k = 0; k < pressFrame + 40; k++) {
+            prev = Math.max(prev, V0 + 450, V0 + tsOf(k) / 1000 + 3 + ((k * 7) % 15));
+            evs.push({ at: prev, video: k });
+        }
+        // Sound captured until well after the last frame above.
+        const frames = Math.ceil(((V0 + tsOf(pressFrame + 40) / 1000 + LEAD - A0) * 1000) / AUDIO_US);
+        for (let f = 0; f < frames; f++) evs.push({ at: R(f) + 2 + ((f * 5) % 10), audio: f });
+        evs.sort((a, b) => a.at - b.at);
+        ring.noteAudioLead({ renderAtMs: performance.timeOrigin + R(0), leadMs: LEAD, newSegment: true });
+        if (opts.leadDrop) ring.noteAudioLead({ renderAtMs: performance.timeOrigin + R(opts.leadDrop.from), leadMs: leadOf(opts.leadDrop.from), newSegment: true });
+        const fed = new Set<Ev>();
+        const feed = async (e: Ev) => {
+            fed.add(e);
+            clock = e.at;
+            if (e.video !== undefined) { ingestOne(ring, e.video); return; }
+            ctrl.enqueue({ timestamp: RAW0 + e.audio! * AUDIO_US, duration: AUDIO_US, index: e.audio!, close() { } } as unknown as AudioData);
+            await new Promise(r => setTimeout(r, 0)); // the pump reads it at THIS clock
+        };
+        // THE PRESS: the moment frame `pressFrame` arrives.
+        const pressAt = evs.find(e => e.video === pressFrame)!.at;
+        for (const e of evs) if (e.at <= pressAt) await feed(e);
+        const capUs = tsOf(pressFrame) + FRAME_US;
+        const reachAt = evs.find(e => e.audio !== undefined && (R(e.audio) - leadOf(e.audio) - V0) * 1000 + AUDIO_US >= capUs)!.at;
+        if (opts.pictureStalledMs !== undefined) {
+            for (const e of evs) if (e.audio !== undefined && !fed.has(e) && e.at <= reachAt + opts.pictureStalledMs) await feed(e);
+        }
+        await drain(ring);
+        // When the seal took its snapshot (it copies the open unit then), on
+        // the feed's clock, and when the first sound reaching the press
+        // arrived: the seal should wait for that sound, and no longer.
+        let snapAt: number | null = null;
+        const tails = (ring as unknown as { sealTails: Set<Uint8Array> }).sealTails;
+        const add = tails.add.bind(tails);
+        tails.add = (p: Uint8Array) => { snapAt ??= clock; return add(p); };
+        const sealAt = clock;
+        const t0 = Date.now();
+        let sealMs: number | null = null;
+        const sealing = seal(ring).finally(() => { sealMs = Date.now() - t0; });
+        sealing.catch(() => { }); // a refusal is awaited (and rethrown) below, after the feed
+        // What arrives after the press arrives while the seal runs — never in
+        // the press's own task (each message is a task of its own).
+        await new Promise(r => setTimeout(r, 0));
+        // Another capture's first keyframe: its timestamps start again.
+        if (opts.restartAfterPress) ingestOne(ring, 0);
+        for (const e of evs) {
+            if (fed.has(e)) continue;
+            if (sealMs !== null) break;
+            if (opts.soundStopsAtPress && e.audio !== undefined) continue;
+            if (opts.restartAfterPress && e.video !== undefined) continue;
+            await feed(e);
+        }
+        const sealed = await sealing.catch(async (e: unknown) => { await ring.wipe(); throw e; });
+        const { video, audio: packets } = await demux(sealed, 0);
+        await ring.wipe();
+        // Content captured at C ms (worker clock) belongs (C - V0) ms after
+        // video ts 0; the clip starts at frame 0.
+        const errs = packets.map(p => (p.t * 1e6 - ((R(p.index) - leadOf(p.index) - V0) * 1000 - tsOf(0))) / 1000);
+        const steps = packets.slice(1).map((p, i) => Math.round((p.t - packets[i].t) * 1e6) - AUDIO_US).filter(d => Math.abs(d) > 100);
+        const pictureEndMs = ((pressFrame + 1) * FRAME_US) / 1000;
+        const soundEndMs = (packets[packets.length - 1].t * 1e6 + AUDIO_US) / 1000;
+        return { video, errs, steps, soundShortMs: pictureEndMs - soundEndMs, sealMs: sealMs!, waitedPastSoundMs: snapAt! - reachAt, snapshotAfterSealMs: snapAt! - sealAt, durationMs: sealed.info.durationMs };
+    }
+
+    it('the sound still on its way at the press is in the clip, and the picture after it is not', async () => {
+        // Pressed as frame 299 arrives: frame 300, a keyframe, arrives while
+        // the sound catches up, so the unit the press landed in closes and a
+        // new one opens holding sound from BEFORE the press.
+        const { video, errs, steps, soundShortMs, waitedPastSoundMs, durationMs } = await pressDuringSound(299);
+        expect(video).toEqual(range(0, 299));
+        expect(durationMs, 'the clip says it ends at the press too').toBe(Math.round((300 * FRAME_US) / 1000));
+        expect(errs.length).toBeGreaterThan(400);
+        for (const e of errs) expect(Math.abs(e)).toBeLessThanOrEqual(2);
+        expect(steps).toEqual([]);
+        // The last AAC frame kept is the one under the press: the sound ends
+        // within one frame AFTER the picture's last frame, never before it.
+        // (Sealed at once, it ended ~155-170 ms early: LEAD plus the read hop.)
+        expect(soundShortMs).toBeLessThanOrEqual(2);
+        expect(soundShortMs).toBeGreaterThanOrEqual(-AAC_FRAME_MS - 2);
+        // ...and the seal went on once that sound was read, not at its time
+        // limit (taken out here: waiting for it, the feed ran on for over a
+        // second). A few reads of slack on the feed's clock: a GOP closing
+        // under the wait finishes its crypto first, and the feed runs on
+        // while it does.
+        expect(waitedPastSoundMs).toBeGreaterThanOrEqual(0);
+        expect(waitedPastSoundMs).toBeLessThanOrEqual(300);
+    }, 60_000);
+
+    it('pressed mid-GOP: the same, with the press unit still open', async () => {
+        const { video, errs, steps, soundShortMs, waitedPastSoundMs, durationMs } = await pressDuringSound(279);
+        expect(video).toEqual(range(0, 279));
+        expect(durationMs).toBe(Math.round((280 * FRAME_US) / 1000));
+        for (const e of errs) expect(Math.abs(e)).toBeLessThanOrEqual(2);
+        expect(steps).toEqual([]);
+        expect(soundShortMs).toBeLessThanOrEqual(2);
+        expect(soundShortMs).toBeGreaterThanOrEqual(-AAC_FRAME_MS - 2);
+        expect(waitedPastSoundMs).toBeGreaterThanOrEqual(0);
+        expect(waitedPastSoundMs).toBeLessThanOrEqual(300);
+    }, 60_000);
+
+    it('sound already there at the press (the picture stalled): no wait, and none of the sound after the press', async () => {
+        const { video, errs, steps, soundShortMs, snapshotAfterSealMs } = await pressDuringSound(279, { pictureStalledMs: 300 });
+        expect(snapshotAfterSealMs, 'the snapshot came before anything else arrived').toBe(0);
+        expect(video).toEqual(range(0, 279));
+        for (const e of errs) expect(Math.abs(e)).toBeLessThanOrEqual(2);
+        expect(steps).toEqual([]);
+        // 300 ms of sound past the press were here: the clip stops at the press.
+        expect(soundShortMs).toBeLessThanOrEqual(2);
+        expect(soundShortMs).toBeGreaterThanOrEqual(-AAC_FRAME_MS - 2);
+    }, 60_000);
+
+    it('sound that stops at the press does not hold the clip up', async () => {
+        // Nothing more arrives (the mix stalled, the track ended): the seal
+        // gives up after about the lead and makes the clip from what it has.
+        const { video, errs, soundShortMs, sealMs } = await pressDuringSound(279, { soundStopsAtPress: true, realTimeLimit: true });
+        expect(video).toEqual(range(0, 279));
+        for (const e of errs) expect(Math.abs(e)).toBeLessThanOrEqual(2);
+        expect(soundShortMs).toBeGreaterThan(LEAD);
+        expect(sealMs).toBeLessThan(3_000);
+    }, 60_000);
+
+    it('a re-prime with a slightly smaller lead: the wait covers the half frame placement keeps', async () => {
+        // From frame 200 on the lead is 140, not 150. That moves each entry's
+        // target 10 ms LATER, under half an AAC frame, so placeAudio keeps the
+        // offset it had (continuity first) and the placed sound sits 10 ms
+        // EARLIER than the lead says. The seal's "sound reaches the press"
+        // must allow for that, or the clip stops short by up to that much.
+        // (Pressed at frame 278, where the first read the lead says reaches
+        // the press lands 0.2 ms past it: without the allowance the sound
+        // ends ~10 ms before the picture.)
+        const { video, errs, steps, soundShortMs } = await pressDuringSound(278, { leadDrop: { from: 200, ms: 10 } });
+        expect(video).toEqual(range(0, 278));
+        // Placed against the kept offset: the later entries 10 ms early, by
+        // design, inside the half frame.
+        for (const e of errs) expect(Math.abs(e)).toBeLessThanOrEqual(AAC_FRAME_MS / 2 + 1);
+        expect(errs.filter(e => e < -9).length, 'positive control: the drop really shifted the placement').toBeGreaterThan(150);
+        expect(steps).toEqual([]);
+        expect(soundShortMs).toBeLessThanOrEqual(2);
+        expect(soundShortMs).toBeGreaterThanOrEqual(-AAC_FRAME_MS - 2);
+    }, 60_000);
+
+    it('a capture restart while it waits fails the clip, rather than making one from the new capture', async () => {
+        // restartNativeClock drops the open unit and starts the video clock
+        // again: the footage under the press is gone and every later frame
+        // is on another clock. The seal says so instead of muxing the new
+        // capture's first frame as "the clip".
+        await expect(pressDuringSound(279, { restartAfterPress: true, realTimeLimit: true })).rejects.toThrow('the capture restarted while the clip was being made');
+    }, 60_000);
+});
+
 describe("the worker wires the main thread's lead reports to the ring", () => {
     it('an audioLead message reaches the armed ring', async () => {
         // The ring tests above call noteAudioLead directly; this pins the one
