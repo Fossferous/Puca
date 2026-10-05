@@ -47,7 +47,15 @@
 //      is the bug) - nor larger than the line box plus the density's run gap
 //      (2 px normal, 0 compact), the same pitch as the first line under the
 //      header, so a run still reads as one message. Its control: the looser
-//      no-:has() spacing of check 6 must fail it.
+//      no-:has() spacing of check 6 must fail it;
+//   8. nothing in the list is wider than the list: it cannot be dragged
+//      sideways, and no picture, player or chip reaches past its right edge
+//      (review finding 2026-10-05: on a 411 px phone a 1200 px picture was
+//      drawn 400 px wide from x=68 - cut off, and every message could be
+//      swiped 57 px left). Measured on the LIST, not the document: the list
+//      scrolls on both axes, so the page's own width never changes. Its
+//      CONTROL: an element 70 px wider than the list, put in a row, must fail
+//      it.
 // Each check prints PASS/FAIL; the exit code is the number of failures.
 // Screenshots go to OUT (SHOT <file>) - look at them.
 //
@@ -251,6 +259,22 @@ const MEASURE = () => {
     return out;
 };
 
+/** The list's own width and how far it scrolls sideways (in the page). */
+const LIST_WIDTH = () => {
+    const list = document.querySelector('.messages-container');
+    const left = list.getBoundingClientRect().left;
+    return { scrollWidth: list.scrollWidth, clientWidth: list.clientWidth, left, right: left + list.clientWidth };
+};
+
+/** Check 8 over one MEASURE() and LIST_WIDTH(): the list does not scroll
+ *  sideways, and no painted content reaches past either edge of it. */
+function tooWide(rows, w) {
+    const past = rows.flatMap(r => r.content
+        .filter(c => c.right > w.right + 0.5 || c.left < w.left - 0.5)
+        .map(c => `${r.label} ${c.what} ${c.left.toFixed(0)}..${c.right.toFixed(0)}`));
+    return { ok: w.scrollWidth <= w.clientWidth && past.length === 0, scrollWidth: w.scrollWidth, clientWidth: w.clientWidth, past: past.slice(0, 4) };
+}
+
 /** Overlap findings over one MEASURE() result. */
 function findings(rows) {
     const contentHits = [];
@@ -386,6 +410,8 @@ async function runConfig(page, name, { hover, fx, runGap }) {
     const f = findings(rows);
     check(`${name}: no message's CONTENT overlaps another message's`, f.contentHits.length === 0, f.contentHits.slice(0, 4));
     check(`${name}: no message ROW overlaps its neighbour (hover/mention backgrounds stay on their own row)`, f.boxHits.length === 0, f.boxHits.slice(0, 4));
+    const wide = tooWide(rows, await page.evaluate(LIST_WIDTH));
+    check(`${name}: nothing in the list is wider than the list (no sideways drag, nothing cut off at its right edge)`, wide.ok, wide);
 
     // The owner's exact pair: the last text line above the grouped image.
     const tunnels = lineTop(rows, 'can he go in tunnels?');
@@ -474,6 +500,21 @@ async function runConfig(page, name, { hover, fx, runGap }) {
     await sleep(100);
     check(`${name}: CONTROL - the detector reports a grouped row pulled 12px into the line above`,
         ctl.contentHits.length > 0 && ctl.boxHits.length > 0, `${ctl.contentHits.length} content / ${ctl.boxHits.length} row overlaps`);
+
+    // CONTROL for check 8: something 70 px wider than the list, in a row.
+    await page.evaluate(() => {
+        const list = document.querySelector('.messages-container');
+        const d = document.createElement('div');
+        d.id = '__wide_control';
+        d.style.cssText = `width: ${list.clientWidth + 70}px; height: 4px;`;
+        list.querySelector(':scope > .message .message-content')?.appendChild(d);
+    });
+    await sleep(100);
+    const wideCtl = tooWide(await page.evaluate(MEASURE), await page.evaluate(LIST_WIDTH));
+    await page.evaluate(() => document.getElementById('__wide_control')?.remove());
+    await page.evaluate(() => { document.querySelector('.messages-container').scrollLeft = 0; });
+    await sleep(100);
+    check(`${name}: CONTROL - the width check reports an element 70px wider than the list`, !wideCtl.ok, wideCtl);
 
     // An engine without :has() (Chromium < 105; nothing gates the Android
     // WebView version) drops the rule that trims the bottom of the row above

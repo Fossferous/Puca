@@ -1041,8 +1041,13 @@ button.message-attachment.error { color: #ffb4b4; }
 }
 .attachment-retry:hover { background: rgba(255, 255, 255, 0.1); }
 
+/* Never wider than the column, like the video and audio players: a fixed
+   400px cap drew a wide picture past the right edge of a phone's list (cut
+   off, and the whole list could be dragged sideways; review finding
+   2026-10-05). The 100% is the message's own width — the span around the
+   picture is inline, so the <img>'s containing block is the message body. */
 .message-image img {
-    max-width: 400px;
+    max-width: min(400px, 100%);
     max-height: 300px;
     border-radius: 8px;
     cursor: pointer;
@@ -1243,6 +1248,15 @@ button.message-attachment.error { color: #ffb4b4; }
     min-height: 44px;
     max-width: 100%;
     vertical-align: bottom;
+}
+
+/* A picture's spoiler is no wider than the picture may be. The picture's own
+   cap, `min(400px, 100%)`, holds a percentage, which the browser drops when
+   it sizes this shrink-to-fit box from its content: measured 2026-10-05 at
+   1280x800, a 640x420 picture drew 400px wide in a 457px box (an empty strip
+   beside it once revealed, the cover short of the right edge before). */
+.spoiler:has(.message-image) {
+    max-width: min(400px, 100%);
 }
 
 /* An audio card has no picture to give the shrink-to-fit box above a size

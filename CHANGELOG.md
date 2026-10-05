@@ -160,6 +160,10 @@ one-line summary; this file is the full story. Versions follow
   after a single message. Hovering a message in compact mode no longer
   nudges the messages below it, and a "Blocked message" line keeps its
   compact look and no longer jumps when hovered.
+- **A wide picture fits on a phone.** A posted picture could be wider than
+  the chat on a phone screen: its right side was cut off, and the whole list
+  of messages could be dragged sideways. Pictures now shrink to fit, as
+  videos and audio players already did.
 - **A clip no longer stops for good after a seek just past what had
   loaded.** Seeking about 10 to 12 seconds past the loaded part could end in
   "Could not play this clip: this clip's parts are too large for the
