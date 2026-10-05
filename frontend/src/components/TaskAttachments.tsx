@@ -10,7 +10,7 @@
  * parse or decrypt degrades to a broken-file placeholder — a corrupt sidecar
  * must never take down the checklist.
  */
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { type TaskAttachmentRef } from '../api/tasks';
 import { parseEncAttachment, videoMimeFor, audioMimeFor, isPlaylistBlobUrl } from '../api/attachments';
 import { useHeldAttachmentUrl } from './useHeldAttachmentUrl';
@@ -32,7 +32,7 @@ function AttachmentItem({ refItem }: { refItem: TaskAttachmentRef }) {
     const parsed = parseEncAttachment(refItem.href);
     const [zoomed, setZoomed] = useState(false);
     const [playing, setPlaying] = useState(false);
-    const [saving, setSaving] = useState(false);
+    const save = useTaskFileSave();
     // The player could not decode it (a file that lied about its type, or a
     // codec this engine lacks): the download button instead of a dead player.
     const [embedFailed, setEmbedFailed] = useState(false);
@@ -44,8 +44,10 @@ function AttachmentItem({ refItem }: { refItem: TaskAttachmentRef }) {
     // should be media-typed.
     const { url, failed } = useHeldAttachmentUrl(
         parsed ? { id: parsed.id, key: parsed.key, mime: videoMimeFor(name, parsed.mime) ?? audioMimeFor(name, parsed.mime) ?? parsed.mime, cap: parsed.cap } : null,
-        // In use: kept while the app is in the background.
-        { keep: zoomed || playing || saving },
+        // In use: kept while the app is in the background. A save keeps it
+        // only while the save reads it, not for the Android app's native
+        // save, which downloads the file again (api/saveAttachment.ts).
+        { keep: zoomed || playing || save.reading },
     );
     const playingHandlers = { onPlay: () => setPlaying(true), onPause: () => setPlaying(false), onEnded: () => setPlaying(false) };
 
@@ -73,7 +75,7 @@ function AttachmentItem({ refItem }: { refItem: TaskAttachmentRef }) {
     }
     // A playlist never reaches a player, whatever its ref says: a <video> or
     // <audio> handed one fetches the URLs inside on its own (api/attachments.ts).
-    if (isPlaylistBlobUrl(url)) return <TaskFileDownload url={url} name={refItem.name} encRef={parsed} onBusy={setSaving} />;
+    if (isPlaylistBlobUrl(url)) return <TaskFileDownload url={url} name={refItem.name} encRef={parsed} save={save} />;
     // Both players sit on the Output Device chosen in Settings, not the OS default.
     if (videoMimeFor(refItem.name, parsed.mime)) {
         return <video ref={followOutputDeviceRef} className="ta-video" src={url} controls preload="metadata" title={refItem.name} {...playingHandlers} />;
@@ -86,38 +88,59 @@ function AttachmentItem({ refItem }: { refItem: TaskAttachmentRef }) {
     // A BUTTON, never a link: `download` is ignored by middle-click and
     // "Open link in new tab", and a blob: document inherits this app's origin
     // while its MIME comes from whoever sent the file. See api/saveAttachment.
-    return <TaskFileDownload url={url} name={refItem.name} encRef={parsed} onBusy={setSaving} />;
+    return <TaskFileDownload url={url} name={refItem.name} encRef={parsed} save={save} />;
 }
 
-function TaskFileDownload({ url, name, encRef, onBusy }: { url: string; name: string; encRef: EncRef | null; onBusy?: (busy: boolean) => void }) {
-    const [state, setState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
-    const [where, setWhere] = useState('');
-    const [failure, setFailure] = useState('');
+interface TaskFileSave {
+    state: { phase: 'idle' | 'saving' | 'saved' | 'error'; where: string; failure: string };
+    /** The save is reading the page's copy: it must stay held (in the
+     *  background too) until then. False for the Android app's native save
+     *  as soon as it starts. */
+    reading: boolean;
+    start: (url: string, encRef: EncRef | null, name: string) => Promise<void>;
+}
+const IDLE_TASK_SAVE: TaskFileSave['state'] = { phase: 'idle', where: '', failure: '' };
+
+/**
+ * A file's save, owned by its attachment rather than by its button: the
+ * button goes while the copy is let go in the background (a native save
+ * does not hold it), and comes back saying the save is still running — not
+ * as a fresh button that starts a second one. The same shape as a chat
+ * message's (MessageContent's useAttachmentSave).
+ */
+function useTaskFileSave(): TaskFileSave {
+    const [state, setState] = useState(IDLE_TASK_SAVE);
+    const [reading, setReading] = useState(false);
+    const start = useCallback(async (url: string, encRef: EncRef | null, name: string) => {
+        setState({ ...IDLE_TASK_SAVE, phase: 'saving' });
+        setReading(true);
+        try {
+            // The Android app saves natively from the ref (api/saveAttachment.ts)
+            // and never reads `url`: it says so, and the copy may go.
+            const res = await saveEncryptedAttachment(url, encRef, name, undefined, undefined, () => setReading(false));
+            if (res.cancelled) { setState(IDLE_TASK_SAVE); return; } // the Save As dialog was dismissed
+            setState({ ...IDLE_TASK_SAVE, phase: 'saved', where: res.where });
+        } catch (err) {
+            console.error('[task attachment] save failed:', err);
+            setState({ ...IDLE_TASK_SAVE, phase: 'error', failure: saveFailureNote(err) });
+        } finally {
+            setReading(false);
+        }
+    }, []);
+    return { state, reading, start };
+}
+
+function TaskFileDownload({ url, name, encRef, save }: { url: string; name: string; encRef: EncRef | null; save: TaskFileSave }) {
+    const { phase, where, failure } = save.state;
     return (
         <button
             type="button"
-            className={`ta-file ${state}`}
-            title={state === 'saved' ? `Saved to ${where}` : state === 'error' ? `${name}: ${failure}` : name}
-            disabled={state === 'saving'}
-            onClick={async () => {
-                setState('saving');
-                onBusy?.(true);
-                try {
-                    // The Android app saves natively from the ref (api/saveAttachment.ts).
-                    const res = await saveEncryptedAttachment(url, encRef, name);
-                    if (res.cancelled) { setState('idle'); return; } // the Save As dialog was dismissed
-                    setWhere(res.where);
-                    setState('saved');
-                } catch (err) {
-                    console.error('[task attachment] save failed:', err);
-                    setFailure(saveFailureNote(err));
-                    setState('error');
-                } finally {
-                    onBusy?.(false);
-                }
-            }}
+            className={`ta-file ${phase}`}
+            title={phase === 'saved' ? `Saved to ${where}` : phase === 'error' ? `${name}: ${failure}` : name}
+            disabled={phase === 'saving'}
+            onClick={() => { void save.start(url, encRef, name); }}
         >
-            {state === 'saved' ? <CheckCircleIcon /> : state === 'error' ? <WarningIcon /> : <PaperclipIcon />} {name}
+            {phase === 'saved' ? <CheckCircleIcon /> : phase === 'error' ? <WarningIcon /> : <PaperclipIcon />} {name}
         </button>
     );
 }

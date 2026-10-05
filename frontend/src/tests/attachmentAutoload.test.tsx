@@ -962,6 +962,53 @@ describe("a Task's attachments", { timeout: 30000 }, () => {
         await until(() => container.querySelector('img.ta-thumb')?.getAttribute('src'), 'the picture again');
         expect(requested.sort()).toEqual(['tp', 'ts']);
     });
+
+    // The two halves of one rule, merged from two branches (2026-10-05): a
+    // file being saved FROM this copy keeps it, in the background too
+    // (work/x-blobdisk); a save that does not read it, the Android app's
+    // native one, does not hold it (a76bfce2) — it downloads the file again.
+    const fileButton = () => container.querySelector<HTMLButtonElement>('button.ta-file');
+
+    it('a file being saved from its copy keeps it in the background; saved, it lets go', async () => {
+        await renderTask([taskRef('tf', await seal('tf'), 'doc.pdf', 'application/pdf')]);
+        await deliver('tf');
+        await until(() => fileButton(), 'the file button');
+        const url = [...created].pop()!;
+        await act(async () => { fileButton()!.click(); });
+        expect(saves.finish).toHaveLength(1);
+        await setVisibility('hidden');
+        expect(revoked).not.toContain(url);
+        expect(fileButton()?.disabled).toBe(true);
+        await act(async () => { saves.finish.shift()!(); });
+        await settle();
+        expect(revoked).toEqual([url]);
+    });
+
+    it('saved natively (the Android app downloads it again), its copy goes in the background; back, the button says it is still saving, then saved', async () => {
+        saves.native = true;
+        await renderTask([taskRef('tf', await seal('tf'), 'doc.pdf', 'application/pdf')]);
+        await deliver('tf');
+        await until(() => fileButton(), 'the file button');
+        const url = [...created].pop()!;
+        await act(async () => { fileButton()!.click(); });
+        expect(saves.finish).toHaveLength(1);
+        await setVisibility('hidden');
+        expect(revoked).toEqual([url]);
+        expect(attachmentCacheStats().plainBytes).toBe(0);
+        // The button went with the copy, so what it says on the way back is
+        // the attachment's, not the button's.
+        expect(fileButton()).toBeNull();
+        // Back on screen: shown again from the cached ciphertext, and the
+        // button is not a fresh one that would start a second save.
+        await setVisibility('visible');
+        await until(() => fileButton(), 'the file button again');
+        expect(fileButton()!.disabled).toBe(true);
+        await act(async () => { saves.finish.shift()!(); });
+        await settle();
+        expect(fileButton()!.className).toMatch(/\bsaved\b/);
+        expect(fileButton()!.title).toBe('Saved to Downloads');
+        expect(requested).toEqual(['tf']);
+    });
 });
 
 describe('decryptAttachmentBytes (a note copied, a message captured, a drawing read)', { timeout: 30000 }, () => {
