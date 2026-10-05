@@ -11,6 +11,7 @@ import { isImageUrl } from '../api/linkPreview';
 import { isEncAttachment, parseEncAttachment, decryptToBlobUrl, videoMimeFor, audioMimeFor, isPlaylistBlobUrl } from '../api/attachments';
 import { isClipRef, isScrubbedClipRef } from '../api/clips/clipRef';
 import { ClipAttachment } from './ClipAttachment';
+import { AttachmentLoading } from './AttachmentLoading';
 import type { ClipConsent } from '../api/servers';
 import { openExternalUrl } from '../api/openExternal';
 import { ImageLightbox } from './ImageLightbox';
@@ -135,7 +136,7 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
             </span>
         );
     }
-    if (!url) return <span className="message-attachment loading"><LockIcon /> Decrypting attachment…</span>;
+    if (!url) return <AttachmentLoading fileId={info.id} />;
     if (info.mime.startsWith('image/')) {
         return (
             // stopPropagation for the same reason as the video branch below:

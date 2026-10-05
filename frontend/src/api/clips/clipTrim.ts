@@ -60,6 +60,8 @@ export async function remuxRange(
     toS: number,
     partBudget: number,
     onPart: (p: SplitPart) => void | Promise<void>,
+    /** fmp4Split.PART_RAMP_FRAGMENTS for a clip that will be posted; empty = flat. */
+    rampFragments: readonly number[] = [],
 ): Promise<RemuxResult> {
     if (!(toS > fromS)) throw new Error('trim range is empty');
     const input = new mb.Input({ formats: mb.ALL_FORMATS, source: new mb.BufferSource(bytes) });
@@ -110,7 +112,7 @@ export async function remuxRange(
     // Pass 2: re-mux [startS, endS) with timestamps rebased to 0.
     let partCount = 0;
     let pending: Promise<void> = Promise.resolve();
-    const splitter = new Fmp4Splitter(partBudget, p => { partCount++; pending = pending.then(() => onPart(p)); });
+    const splitter = new Fmp4Splitter(partBudget, p => { partCount++; pending = pending.then(() => onPart(p)); }, rampFragments);
     const writable = new WritableStream<Uint8Array | { data: Uint8Array }>({
         write(c) { splitter.push(c instanceof Uint8Array ? c : c.data); },
     });
@@ -197,6 +199,17 @@ export async function trimSealedParts(
     maxParts: number,
     partBudget: number,
     retireOriginal: boolean,
+    /** The seal's graduated first parts (fmp4Split.PART_RAMP_FRAGMENTS), so a
+     *  trimmed clip starts playing as fast as an untrimmed one. There is no
+     *  flat fallback here (fitPartCount): parts are sealed as they are cut.
+     *  None is needed: the ramp adds parts only where a full part holds more
+     *  fragments than a ramp step — none at one fragment per part, one at
+     *  two, at most three ever — and a part that holds two or more fragments
+     *  is about 2/3 full or more, so a trim of at most TRIM_MAX_CIPHER_BYTES
+     *  (768 MiB) stays near 50 parts with them. (At one 12+ MiB fragment per
+     *  part a 768 MiB trim can need 64 parts with or without the ramp — the
+     *  limit `maxParts` enforces either way.) */
+    rampFragments: readonly number[] = [],
 ): Promise<TrimSealedResult | null> {
     const lo = Math.max(0, Math.min(startMs, endMs));
     const hi = Math.min(durationMs, Math.max(startMs, endMs));
@@ -225,7 +238,7 @@ export async function trimSealedParts(
             } finally {
                 p.bytes.fill(0);
             }
-        });
+        }, rampFragments);
         // Durations per part from fragment starts; the last part runs to the end.
         for (let i = 0; i < kept.length; i++) {
             const next = kept[i + 1];

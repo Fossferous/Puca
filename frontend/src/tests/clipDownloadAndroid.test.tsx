@@ -9,9 +9,10 @@
  *   1. No bridge message is larger than BRIDGE_MAX_CHARS. Before the fix the
  *      whole clip was one base64 writeFile (a 92 MB clip = a 128 MB string,
  *      OutOfMemoryError on the UI thread, process killed).
- *   2. It STREAMS: when each part is fetched, everything before it is
- *      already on disk (bar at most one held slice), so JS holds about one
- *      part, not the whole clip.
+ *   2. It STREAMS: when each part is fetched, everything but the part
+ *      before it is already on disk (bar at most one held slice) — that one
+ *      is being written while this one downloads — so JS holds at most two
+ *      parts, never the whole clip.
  *   3. The file on disk is the plaintext, byte for byte — written as
  *      `<name>.part` and renamed only once complete, so a dead app never
  *      leaves half a clip under the real name — and a failure part-way shows
@@ -110,12 +111,25 @@ const settle = async (rounds = 8) => {
 };
 const downloadButton = () => container.querySelector('button.clip-attachment-download') as HTMLButtonElement;
 
-/** Click Download and wait until the button leaves "Downloading". */
+/** Every label the button showed while the download ran. */
+const labels: string[] = [];
+
+/** Click Download and wait until the button leaves "Downloading" / "Saving". */
 async function clickDownloadAndWait(): Promise<void> {
-    await act(async () => { downloadButton().click(); });
-    for (let i = 0; i < 2000 && /Downloading/.test(downloadButton().textContent ?? ''); i++) {
-        await settle(2);
-        await act(async () => { await new Promise(r => setTimeout(r, 5)); });
+    labels.length = 0;
+    // Every label React commits, not a sample of them.
+    const note = () => { const t = downloadButton()?.textContent ?? ''; if (labels.at(-1) !== t) labels.push(t); };
+    const mo = new MutationObserver(note);
+    mo.observe(container, { subtree: true, childList: true, characterData: true });
+    try {
+        await act(async () => { downloadButton().click(); });
+        note();
+        for (let i = 0; i < 2000 && /Downloading|Saving/.test(downloadButton().textContent ?? ''); i++) {
+            await settle(2);
+            await act(async () => { await new Promise(r => setTimeout(r, 5)); });
+        }
+    } finally {
+        mo.disconnect();
     }
 }
 
@@ -178,14 +192,26 @@ describe('Android: Download on a clip', () => {
 
         // Streaming, not "build the whole clip, then write" — and not "write
         // part 0, then prefetch the rest" either: when part k is fetched,
-        // parts 0..k-1 are on disk, bar at most the one slice a save holds
-        // back until it knows whether the file takes more than one call.
+        // parts 0..k-2 are on disk (part k-1 is being written while part k
+        // downloads), bar at most the one slice a save holds back until it
+        // knows whether the file takes more than one call. So the phone holds
+        // two parts at most, whatever the clip's length.
         expect(h.diskAtFetch.length).toBe(5);
-        let before = 0;
-        for (let k = 1; k < sizes.length; k++) {
-            before += sizes[k - 1];
-            expect(h.diskAtFetch[k], `bytes on disk when part ${k} is fetched (parts before it: ${before})`).toBeGreaterThanOrEqual(before - HELD_MAX_BYTES);
+        let twoBack = 0;
+        for (let k = 2; k < sizes.length; k++) {
+            twoBack += sizes[k - 2];
+            expect(h.diskAtFetch[k], `bytes on disk when part ${k} is fetched (parts 0..${k - 2}: ${twoBack})`).toBeGreaterThanOrEqual(twoBack - HELD_MAX_BYTES);
         }
+        // ...and the overlap is real: part k is requested BEFORE part k-1 is
+        // all on disk (the link no longer idles while the bridge writes).
+        let upTo = 0;
+        const overlapped = sizes.slice(1).some((_, j) => { upTo += sizes[j]; return h.diskAtFetch[j + 1] < upTo; });
+        expect(overlapped, 'some part was fetched while the one before it was still being written').toBe(true);
+
+        // The button counted up in percent of the clip, then said it was saving.
+        expect(labels.some(l => /^Downloading \d{1,2}%$/.test(l)), labels.join(' | ')).toBe(true);
+        expect(labels.some(l => /Downloading [1-9]\d?%/.test(l)), 'a percentage above 0 was shown').toBe(true);
+        expect(labels).not.toContain('Downloading 100%');
     }, 120_000);
 
     it('a write failing part-way shows the error inline and leaves no partial clip', async () => {

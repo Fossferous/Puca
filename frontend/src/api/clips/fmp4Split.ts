@@ -15,7 +15,30 @@
  * The splitter also reads each fragment's start time out of `moof>traf>tfdt`
  * (with the timescales from `moov>trak>mdia>mdhd`) so the manifest can carry
  * per-part durations for seek-by-part — `GET /files/:id` has no Range support.
+ *
+ * THE FIRST MEDIA PARTS ARE SMALL ON PURPOSE (`PART_RAMP_FRAGMENTS`). A part
+ * is one AES-GCM unit, so a viewer can play nothing until the WHOLE first
+ * media part has arrived and verified. With every part cut at the 24 MiB
+ * budget, a 2-minute clip at the default preset made a phone download ~24 MB
+ * before its first frame (6–26 s on the measured links, 2026-10-04). The seal
+ * therefore cuts media part 1 after ONE fragment (one 2 s keyframe interval),
+ * part 2 after two, then four, then eight, and only then packs to the budget,
+ * so playback CAN start after a few MB. Each part is twice as long as the one
+ * before, so it only arrives while the previous one plays on a link of at
+ * least TWICE the clip's bitrate; on a slower one, starting on part 1 alone
+ * froze the clip at 0:02, 0:06, 0:14 and 0:30 (12 Mbit/s for an 8.9 Mbit/s
+ * clip, measured 2026-10-04). The player therefore holds the start until the
+ * throughput it measures says the first ~40 s will not stall
+ * (clipPlayback.ts `startBytesNeeded`): ~8 s there, against ~17 s for the
+ * same footage cut flat, and nothing extra on a link of twice the bitrate.
+ * `fitPartCount` undoes the ramp for the rare clip it would push past the
+ * 64-part reference limit.
  */
+
+/** Fragments in media parts 1, 2, 3, 4 (then the byte budget alone). The
+ *  growth runs through 8: stopping at 4 left a 20 Mbit/s link ~1 s short when
+ *  the first full-budget part fell due (measured, 2026-10-04). */
+export const PART_RAMP_FRAGMENTS: readonly number[] = [1, 2, 4, 8];
 
 export interface SplitPart {
     index: number;
@@ -144,11 +167,24 @@ export class Fmp4Splitter {
     private ended = false;
     private readonly budgetBytes: number;
     private readonly onPart: (p: SplitPart) => void;
+    private readonly rampFragments: readonly number[];
 
-    constructor(budgetBytes: number, onPart: (p: SplitPart) => void) {
+    /** `rampFragments[k]` caps media part k+1 at that many fragments (the
+     *  budget still applies); parts past the list are cut by the budget alone.
+     *  Empty = every part packed to the budget. */
+    constructor(budgetBytes: number, onPart: (p: SplitPart) => void, rampFragments: readonly number[] = []) {
         if (!(budgetBytes > 0)) throw new Error('budget must be positive');
+        if (!rampFragments.every(n => Number.isInteger(n) && n > 0)) throw new Error('ramp entries must be positive integers');
         this.budgetBytes = budgetBytes;
         this.onPart = onPart;
+        this.rampFragments = rampFragments;
+    }
+
+    /** The current media part already holds as many fragments as the ramp
+     *  allows it (media part k is `nextIndex`, the init part being 0). */
+    private partFull(): boolean {
+        const cap = this.rampFragments[this.nextIndex - 1];
+        return cap !== undefined && this.partFragments >= cap;
     }
 
     push(bytes: Uint8Array): void {
@@ -194,8 +230,9 @@ export class Fmp4Splitter {
             this.groupHasMoof = true;
             this.groupStartS = parseFragmentStart(box, this.timescales);
         } else if (type === 'mdat' && this.groupHasMoof) {
-            // A complete fragment. Would it overflow the current part?
-            if (this.partBytes > 0 && this.partBytes + this.groupBytes > this.budgetBytes) this.flushPart();
+            // A complete fragment. Would it overflow the current part, or is
+            // the part already as long as the ramp lets it be?
+            if (this.partBytes > 0 && (this.partBytes + this.groupBytes > this.budgetBytes || this.partFull())) this.flushPart();
             this.appendGroupToPart();
         }
     }
@@ -223,4 +260,30 @@ export class Fmp4Splitter {
         this.onPart({ index: this.nextIndex++, bytes, isInit: false, startS: this.partStartS, fragments: this.partFragments, overBudget: this.partOver });
         this.part = []; this.partBytes = 0; this.partStartS = null; this.partFragments = 0; this.partOver = false;
     }
+}
+
+/**
+ * The seal's guard for the 64-part reference limit. The ramp spends a few
+ * extra parts on the first ~30 s (about two at 4K), so a clip that fits
+ * MAX_CLIP_PARTS when packed flat can overflow it ramped. When `parts` (a
+ * whole split, init first) is over `maxParts`, the SAME bytes are re-cut with
+ * no ramp — exactly the flat split, since the parts concatenate to the muxer's
+ * output — and that is returned instead; otherwise `parts` comes back as is.
+ * Only very long, high-bitrate clips (4K near the 10-minute server maximum)
+ * ever take this path; they keep today's flat cut.
+ *
+ * CONSUMES `parts` when it re-cuts: each one is zero-filled and dropped as
+ * soon as the new splitter has copied it, so the clip is never resident twice.
+ */
+export function fitPartCount(parts: SplitPart[], budgetBytes: number, maxParts: number): SplitPart[] {
+    if (parts.length <= maxParts) return parts;
+    const out: SplitPart[] = [];
+    const flat = new Fmp4Splitter(budgetBytes, p => out.push(p));
+    while (parts.length) {
+        const p = parts.shift()!;
+        flat.push(p.bytes);
+        p.bytes.fill(0);
+    }
+    flat.end();
+    return out;
 }

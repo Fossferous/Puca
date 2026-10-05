@@ -140,6 +140,8 @@ export const CLIP_PART_PLAIN_BYTES = 24 * MIB;
 export const CLIP_PART_OVERHEAD_BYTES = 19 + 16;
 /** clipRef.MAX_CLIP_PARTS — the most parts a clip reference can carry. */
 export const CLIP_MAX_PARTS = 64;
+/** fmp4Split.PART_RAMP_FRAGMENTS — fragments in the seal's first media parts. */
+export const CLIP_PART_RAMP_FRAGMENTS: readonly number[] = [1, 2, 4, 8];
 /** clipPlayback.CLIP_DOWNLOAD_MAX_BYTES — larger clips cannot be downloaded in the app. */
 export const CLIP_DOWNLOAD_LIMIT_BYTES = GIB;
 /** clipTrim.TRIM_MAX_CIPHER_BYTES — larger clips cannot be trimmed in the app. */
@@ -155,10 +157,14 @@ const clipMediaBytes = (p: ClipRate, seconds: number) => Math.round(Math.max(0, 
  * then media parts are cut only IN FRONT of a moof, so each holds whole
  * fragments — one keyframe interval (CLIP_RING_GOP_SECONDS) each, since the
  * mux fragments at every keyframe — and stays under `partBytes` by up to one
- * fragment. replayWorker's seal refuses a clip whose part count (init part
- * included) exceeds CLIP_MAX_PARTS. Nominal bitrate: a VBR encoder can need
- * more. `partBytes` is a parameter only so a test can cross-check this against
- * the real splitter at a small scale.
+ * fragment. The first media parts are capped at CLIP_PART_RAMP_FRAGMENTS
+ * fragments (so a viewer starts playing after a few MB), unless that ramp
+ * would need more than CLIP_MAX_PARTS parts: then the seal re-cuts the clip
+ * flat (fmp4Split.fitPartCount), and so does this count. replayWorker's seal
+ * refuses a clip whose part count (init part included) still exceeds
+ * CLIP_MAX_PARTS. Nominal bitrate: a VBR encoder can need more. `partBytes`
+ * is a parameter only so a test can cross-check this against the real
+ * splitter at a small scale.
  */
 export function clipPartCount(p: ClipRate, seconds: number, partBytes: number = CLIP_PART_PLAIN_BYTES): number {
     const s = Math.max(0, seconds);
@@ -166,7 +172,16 @@ export function clipPartCount(p: ClipRate, seconds: number, partBytes: number = 
     const fragments = Math.max(1, Math.ceil(s / CLIP_RING_GOP_SECONDS));
     const fragBytes = (p.videoBitrate + p.audioBitrate) / 8 * CLIP_RING_GOP_SECONDS;
     const perPart = Math.max(1, Math.floor(partBytes / fragBytes));
-    return 1 + Math.ceil(fragments / perPart);
+    const flat = 1 + Math.ceil(fragments / perPart);
+    let left = fragments;
+    let ramped = 1;
+    for (const step of CLIP_PART_RAMP_FRAGMENTS) {
+        if (left <= 0) break;
+        left -= Math.min(step, perPart, left);
+        ramped++;
+    }
+    ramped += Math.ceil(left / perPart);
+    return ramped <= CLIP_MAX_PARTS ? ramped : flat;
 }
 
 /**
