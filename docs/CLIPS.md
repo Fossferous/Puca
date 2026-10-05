@@ -248,7 +248,7 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
   the web it is a transient anchor. Desktop and web save the sealed bytes
   exactly as they are (no container changes there; see *Not done* below).
 
-- **In the Android app the download is NATIVE** (an APK from 0.9.835 on;
+- **In the Android app the download is NATIVE** (an APK from 0.9.834 on;
   `api/nativeDownloads.ts` → `SovereignDownloadsPlugin.java` →
   `NativeDownloads.java`). The page hands Java the part ids, the clip key,
   nonce prefix and clip id, its bearer and the API base it talks to; the

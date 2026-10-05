@@ -8,61 +8,89 @@ one-line summary; this file is the full story. Versions follow
 
 ### Added
 - **Downloads on Android go where your phone looks — this needs the NEW
-  Android app (0.9.835), installed once; an update inside the app is not
-  enough.** **Download** on a clip or an attachment now saves videos to
-  **Movies/Puca**, pictures to **Pictures/Puca**, music to **Music/Puca**
-  and anything else to **Download/Puca**, so Google Photos and your gallery
-  show them. The phone fetches and decrypts the file itself and writes it
-  straight to storage instead of passing it through the app's web page, so a
-  large clip no longer has to squeeze through it piece by piece.
-- **Saved clips show their length and you can skip around in them.** Google
-  Photos and the phone's own player used to show no length for a saved Púca
-  Clip and could not seek; the phone now adds the missing length and seek
-  index to the file as it saves it (the video and sound themselves are not
-  touched). This also works for clips posted before this update. A damaged
-  clip is still saved, though it may not get them.
+  Android app (0.9.834), installed once from the download page.** The update
+  that arrives inside the app is not enough: with it alone, saving keeps
+  going to Documents/Puca exactly as before (as it always will on Android 9
+  and older). With the new app, **Download** on a clip or an attachment saves
+  videos to **Movies/Puca**, pictures to **Pictures/Puca**, music to
+  **Music/Puca** and anything else to **Download/Puca**, so Google Photos and
+  your gallery show them. The phone fetches and decrypts the file itself and
+  writes it straight to storage instead of passing it through the app's web
+  page, so a large clip no longer has to squeeze through it piece by piece.
+  An attachment you can already see in the chat is downloaded once more when
+  you save it (at most 25 MB), so the phone can write it into the right
+  folder.
+- **Saved clips show their length and you can skip around in them** (the
+  new Android app). Google Photos and the phone's own player used to show no
+  length for a saved Púca Clip and could not seek; the phone now adds the
+  missing length and seek index to the file as it saves it (the video and
+  sound themselves are not touched). This also works for clips posted before
+  this update. A damaged clip is still saved, though it may not get them.
 - **Downloads keep going with the screen off or the app in the background,
-  and can be cancelled.** A long download shows a notification with its
-  progress and a **Cancel** button; if it finishes while you are elsewhere, a
-  notification says it was saved (tap to open) or that it failed. Clips also
-  get a **Cancel** button next to **Download**, on every device. A cancelled
-  or failed download leaves nothing half-written behind.
+  and can be cancelled** (the new Android app). A long download shows a
+  notification with its progress and a **Cancel** button; if it finishes
+  while you are elsewhere, a notification says it was saved (tap to open) or
+  that it failed. Clips also get a **Cancel** button next to **Download**, on
+  every device. A cancelled or failed download leaves nothing half-written
+  behind.
 - **Download in a picture's full-screen view works in the Android app.** It
   used to save nothing there; it now saves the picture to **Pictures/Puca**
   (to Documents/Puca on an older Android app).
+- **Audio files play in the chat.** An .mp3, .m4a, .aac, .ogg, .opus, .wav,
+  .flac or .weba attachment in a channel or a DM now gets a player under its
+  name, on the Output Device you chose in Settings, with its download button
+  still underneath; nothing plays until you press play. Tasks and a note's
+  gallery, which already played most audio, now recognise the same files (by
+  their type, or by their name when the type says nothing). Replies, pinned
+  messages and search show an audio file with a music note. A video with no picture your device can show (a sound-only .webm, or
+  a video in a format your device cannot decode) gets the same player, marked
+  **Sound only: no picture to show**. A file whose contents are a playlist
+  never gets a player, whatever it is called: a player would fetch the links
+  inside it by itself, telling whoever posted it your IP address and when you
+  opened the channel. It stays a download button.
 
 ### Improved
-- **Where a file goes is decided by what it really is, not by its name.** A
-  file called `.mp4` that is not really a video goes to Download/Puca with
-  `.bin` added to its name (`cat.mp4.bin`), so neither your gallery nor the
-  phone's media scanner treats it as one; rename it if you trust it. Some
-  text files get `.bin` too, because phones use their extension for media as
-  well: a TypeScript file `notes.ts` is saved as `notes.ts.bin`. File
-  names from other people are cleaned up before they are saved.
-- **Saving an attachment on Android shows how much has arrived**
-  (`— 12.3 MB`), and when it fails it says why: no longer on the server,
-  the connection dropped, or it could not be decrypted.
-- **On an older Android app nothing changes**: saving keeps using
-  Documents/Puca until the new app is installed, and Android 9 and older keep
-  that folder for good.
-
-### Changed
-- **Big video attachments still load by themselves, the ones on screen
-  first.** Opening a channel used to download and decrypt every attachment in
-  it at once, oldest first, so the video you were looking at arrived last:
-  with twelve 22 MB videos it took 23 seconds at 100 Mbit (and 17 to 29
-  seconds on an Android phone emulator) before the newest one played. Now the
-  ones on screen come first, two big files at a time, then the ones nearest
-  the screen, then the rest of the channel in the background, one at a time
-  and only while nothing nearer is loading, so a slot is always free for a
-  video you scroll to: the newest video was ready in about 5 to 6 seconds
-  (5 to 7 on the emulator), and scrolling back up through the channel every
-  video was ready the moment it came into view, on a PC and on the emulator.
-  Nothing to click and nothing to set.
-- **Less memory while a channel full of videos opens, and it is given back.**
-  Decrypting everything at once took the app's page from about 65 MB to
-  600-800 MB on a PC; it now stays near 300-400 MB. Decrypted files used to
-  stay in memory (on Android, on disk) until you signed out, about 260 MB
+- **Clips start playing much sooner.** New clips are cut so that a viewer
+  can start after about 2 MB instead of about 24 MB: in a test at 50 Mbit/s a
+  2-minute 1440p clip started in about half a second instead of 8. On a link
+  slower than about twice the clip's bitrate it waits just long enough to
+  play its start without stalling. Clips posted before this start sooner too
+  (4.3 s instead of 8.1 s in the same test), because the player now fetches
+  the part it needs before the next one instead of sharing the link with it.
+  Older apps play the new clips unchanged. While a clip loads, the top of the
+  picture says how much has arrived and how much it is waiting for
+  (`Loading 1.4 / 13 MB`), clear of the player's controls (on a phone it sat
+  over the volume button and the seek bar), and a screen reader hears
+  "Loading the clip" once.
+- **A playing clip holds far less memory.** The player used to keep every
+  part of the clip it had decrypted until you left it; it now keeps the start
+  and about 40 seconds around where you are watching (75-90 MB instead of
+  144 MB for a 123 MB clip in a test; a long 4K clip could have grown toward
+  1 GB on a phone). Going back to a part it let go of downloads that part
+  again.
+- **Clip downloads in the Android app are faster.** The next part now
+  downloads while the previous one is saved (a 2-minute clip took 34 s
+  instead of 48 s in one test), and with the new Android app the phone does
+  the whole job itself (23 s down to 17 s for the same clip in another, with
+  about 200 MB less memory in use). The button counts the percent received,
+  then says "Saving…".
+- **Attachments still load by themselves, the ones on screen first.**
+  Opening a channel used to download and decrypt every attachment in it at
+  once, oldest first, so the video you were looking at arrived last: with
+  twelve 22 MB videos it took 23 seconds at 100 Mbit (and 17 to 29 seconds on
+  an Android phone emulator) before the newest one played. Now the ones on
+  screen come first, two big files at a time, then the ones nearest the
+  screen, then the rest of the channel in the background, one at a time and
+  only while nothing nearer is loading, so a slot is always free for a video
+  you scroll to: the newest video was ready in about 5 to 6 seconds (5 to 7
+  on the emulator), and scrolling back up through the channel every video was
+  ready the moment it came into view. Nothing to click and nothing to set.
+  While one loads, its placeholder counts the MB arriving (`Loading
+  attachment… 3.2 MB`) instead of saying "Decrypting attachment…".
+- **Less memory while a channel full of videos is open, and it is given
+  back.** Decrypting everything at once took the app's page from about 65 MB
+  to 600-800 MB on a PC; it now stays near 300-400 MB. Decrypted files used
+  to stay in memory (on Android, on disk) until you signed out, about 260 MB
   more for every such channel you opened. Now the files within about two
   screens of what you are reading stay ready; those further away, or in a
   channel you left, are kept up to a limit (about 190 MB of files you have
@@ -77,8 +105,21 @@ one-line summary; this file is the full story. Versions follow
   nothing on the page moves as you scroll past videos posted one after
   another, and a video you paused carries on from where you left it when you
   come back to it.
-
-### Improved
+- **Where a saved file goes is decided by what it really is, not by its
+  name** (the new Android app). A file called `.mp4` that is not really a
+  video goes to Download/Puca with `.bin` added to its name (`cat.mp4.bin`),
+  so neither your gallery nor the phone's media scanner treats it as one;
+  rename it if you trust it. Some text files get `.bin` too, because phones
+  use their extension for media as well: a TypeScript file `notes.ts` is
+  saved as `notes.ts.bin`. File names from other people are cleaned up before
+  they are saved.
+- **Saving an attachment on Android shows how much has arrived**
+  (`— 12.3 MB`), and when it fails it says why: no longer on the server, the
+  connection dropped, or it could not be decrypted (the new Android app). On
+  an older Android app it no longer reads the whole file into memory a second
+  time first.
+- **The download button is readable in the light theme.** It was light grey
+  on white; it now uses dark ink there, under every player and on its own.
 - **DeepFilter gives its CPU back while nobody can hear you.** It costs
   about a fifth of a CPU core for every second of a call, and it used to run
   the whole call. It now pauses while you are muted, deafened, holding
@@ -95,19 +136,10 @@ one-line summary; this file is the full story. Versions follow
   just moved the call to another device or rejoined, an SFU call still
   connecting), it keeps running. The minute health line in puca.log now says
   how much of each minute it was paused, and why (`paused42s/alone`).
-- **One trade-off, on purpose:** a clip saved while you were alone in a call
+  **One trade-off, on purpose:** a clip saved while you were alone in a call
   (or everyone else was deafened) has your mic through RNNoise instead of
   DeepFilter for that stretch. Muted stretches are unaffected: the clip
   never records a muted mic.
-
-### Fixed
-- **Moving a call to another device no longer leaves your old mute or deafen
-  showing.** After **Move here**, or a quick reload that drops you back into
-  the call, everyone else kept seeing the mute and deafen icons from before
-  until you toggled one, because a device joining a call never said what its
-  own state was. It now does, a moment after it joins.
-
-### Improved
 - **Clips cost the app less while they listen to your PC's sound.** With the
   clip buffer armed, the sound your PC plays reached the app about a hundred
   times a second, each time as text: converted to base64, wrapped in a
@@ -119,12 +151,39 @@ one-line summary; this file is the full story. Versions follow
   instead of 16 while it was silent. Clips stay in sync with the picture.
 
 ### Fixed
+- **A picture or video in a run of quick messages no longer covers the line
+  above it.** From the third message in a row by the same person, each line
+  sat about 5 px into the one above, so a picture, video or clip covered the
+  end of the line before it. Lines in a run are now evenly spaced (2 px apart,
+  just touching in compact mode), and the gap after a run is the same as
+  after a single message. Hovering a message in compact mode no longer
+  nudges the messages below it, and a "Blocked message" line keeps its
+  compact look and no longer jumps when hovered.
+- **A clip no longer stops for good after a seek just past what had
+  loaded.** Seeking about 10 to 12 seconds past the loaded part could end in
+  "Could not play this clip: this clip's parts are too large for the
+  browser's playback buffer — use Download". It now plays on.
 - **A clip's sound now runs right up to the moment you press Clip.** Your
   PC's sound and your mic reach the clip buffer a moment after the picture
   does (about 0.15 to 0.2 s since the change above, less before it), so a
   clip ended with that moment of silence. Making a clip now waits that
   moment for the sound, then ends the clip exactly where you pressed,
   picture and sound together. The clip appears that moment later.
+- **Moving a call to another device no longer leaves your old mute or deafen
+  showing.** After **Move here**, or a quick reload that drops you back into
+  the call, everyone else kept seeing the mute and deafen icons from before
+  until you toggled one, because a device joining a call never said what its
+  own state was. It now does, a moment after it joins.
+- **Notes: a note holding only a song or a voice note counts it as a file.**
+  It said nothing on the All-tasks board, read "Empty note" on its card, and
+  was "1 picture" in the trash, the line that says what Delete forever
+  destroys.
+- **Notes: an attached song's Remove button says "Remove audio file".** Only
+  a recording made with **Voice note** is called a voice note, on the button
+  and in the question it asks.
+- **Notes: a voice note or audio file added with no connection** is a
+  download button, saved from this device's own copy, until it has uploaded
+  and gets its player. It showed a broken-file warning meanwhile.
 
 ## 0.9.833 — 2026-10-03
 
