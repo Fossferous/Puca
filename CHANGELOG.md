@@ -150,6 +150,17 @@ one-line summary; this file is the full story. Versions follow
   lasted. In a test page that replays both, the app's main thread spent
   about 12 ms a second on it instead of 20 while sound played, and 1.5 ms
   instead of 16 while it was silent. Clips stay in sync with the picture.
+- **The diagnostics log says more clearly what happened to a screen share.**
+  A share nobody is watching is switched off by the server to save your
+  upload; the 5-second `stream-diag` lines now say `out paused` for it
+  instead of `out fps=0 size=?`, which looked like a broken share. Each
+  outgoing stream also shows the bandwidth the sender is aiming for
+  (`target=`) and the round trip and loss the server reports for it
+  (`rrtt=`, `rloss=`), which is what tells a slow connection apart from
+  other causes. In the minute `health` line, each stream you watch through
+  the server is now labelled with who is sending it (`screen_share<7`), so
+  two people sharing one after the other no longer read as one stream that
+  dropped to a tiny picture and recovered.
 
 ### Fixed
 - **A picture or video in a run of quick messages no longer covers the line

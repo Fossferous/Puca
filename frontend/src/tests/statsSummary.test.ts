@@ -168,4 +168,39 @@ describe('receiverHints and the log line', () => {
         expect(line).toContain('in fps=30 size=1920x1080 jb=20ms(target 15) proc=25ms dec=2.5ms drop=3 freeze=2 lost=7 decoder=libvpx');
         expect(line).toContain('pair=tcp relay/udp/tcp->host/udp rtt=183ms out=2400kbps');
     });
+
+    // 2026-10-05: a streamer's share sat at 310x180 for minutes, and the only
+    // place that said WHY — the encoder's bandwidth target (118 kbps) and the
+    // far end's RTCP view (519 ms round trip, 1.6% lost, against 28 ms on the
+    // ICE pair) — was a diagnostics report someone had to send by hand. The
+    // 5 s line had the pair's estimate and nothing the congestion controller
+    // was acting on.
+    it('an outgoing stream carries its bandwidth target and the far end\'s RTCP round trip and loss', () => {
+        const s = summariseRtcStats(report([outboundRow({ targetBitrate: 118_000 }), ...transportRows.slice(0, 4),
+            { id: 'RI', type: 'remote-inbound-rtp', kind: 'video', ssrc: 222, roundTripTime: 0.519, fractionLost: 0.015625, jitter: 0.098 }]));
+        const line = formatLatencyLine(s);
+        expect(line).toContain('limit=bandwidth encoder=OpenH264 target=118kbps rrtt=519ms rloss=1.6%');
+    });
+
+    it('the RTCP figures are matched to their own stream by ssrc, never borrowed from another', () => {
+        const s = summariseRtcStats(report([outboundRow(), ...transportRows.slice(0, 4),
+            { id: 'RX', type: 'remote-inbound-rtp', kind: 'video', ssrc: 999, roundTripTime: 0.9, fractionLost: 0.5 }]));
+        const line = formatLatencyLine(s);
+        expect(line).toContain('target=4500kbps');
+        expect(line).not.toContain('rrtt=');
+        expect(line).not.toContain('rloss=');
+    });
+
+    // The owner's own share read `out fps=0 size=? enc=?ms` for ten minutes on
+    // 2026-10-05 and looked broken. Nobody was watching it: the SFU had
+    // switched the encoding off (dynacast), which the minute line already
+    // printed as `paused` and this one printed as a stall.
+    it('an encoding the SFU switched off reads as paused, not as a zero-fps stall', () => {
+        const s = summariseRtcStats(report([outboundRow({ active: false, framesPerSecond: undefined, frameWidth: undefined, frameHeight: undefined }), ...transportRows]));
+        const line = formatLatencyLine(s);
+        expect(line).toContain('out paused encoder=OpenH264');
+        expect(line).not.toContain('out fps=');
+        const live = formatLatencyLine(summariseRtcStats(report([outboundRow({ active: true }), ...transportRows])));
+        expect(live, 'an active one is unchanged').toContain('out fps=30 size=1280x720');
+    });
 });

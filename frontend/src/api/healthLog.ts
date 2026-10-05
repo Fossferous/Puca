@@ -243,7 +243,11 @@ function videoFrom(diag: Record<string, unknown>): VideoIn[] {
         const lat = row.latency as { inbound?: Array<Record<string, unknown>> } | undefined;
         const i = lat?.inbound?.[0];
         if (!i) continue;
-        out.push(videoInOf(String(row.source ?? 'video'), i));
+        // `<user`: received FROM that user, as the mesh rows are labelled. Two
+        // streamers watched one after the other otherwise print as ONE stream
+        // that fell to 310x180 and recovered (2026-10-05).
+        const from = typeof row.userId === 'number' || (typeof row.userId === 'string' && row.userId !== '') ? `<${row.userId}` : '';
+        out.push(videoInOf(`${String(row.source ?? 'video')}${from}`, i));
     }
     return out;
 }

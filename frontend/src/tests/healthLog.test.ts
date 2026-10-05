@@ -262,6 +262,26 @@ describe('the sending side', () => {
         expect(line, 'unknown source stays generic').toContain(';video<7:15fps/640x360');
     });
 
+    // 2026-10-05: one viewer's minute line read `screen_share:12fps/310x180`
+    // then `screen_share:18fps/1920x1032`, which reads as one stream dropping
+    // to its lowest quality and recovering. It was TWO streamers: one whose
+    // share collapsed and ended, then someone else's at full size. Only the
+    // 5 s lines (`sfu peer=10` then `sfu peer=7`) said so; the mesh rows were
+    // already labelled `<peer`, the SFU rows were not.
+    it('labels each incoming SFU stream with who sent it, the way the mesh rows are', async () => {
+        newCall();
+        const inbound = (fps: number, size: string) => ({ inbound: [{ fps, size, framesDropped: 0, freezeCount: 0, freezeMs: 0, jitterBufferMs: 60, decodeMs: 0.5, packetsLost: 0 }], outbound: [], pair: null, remoteInbound: [] });
+        voiceDiagnostics.mockResolvedValueOnce({ connected: true, localRtp: [], remoteRtp: [
+            { userId: 10, identity: 'u10#a', source: 'screen_share', latency: inbound(12, '310x180') },
+            { userId: 7, identity: 'u7#b', source: 'screen_share', latency: inbound(21, '1920x1080') },
+            { userId: null, identity: 'odd', source: 'camera', latency: inbound(15, '640x360') },
+        ] });
+        const line = await sampleHealth();
+        expect(line).toContain('v=[screen_share<10:12fps/310x180');
+        expect(line).toContain(';screen_share<7:21fps/1920x1080');
+        expect(line, 'no id: the bare source, never "<null"').toContain(';camera:15fps/640x360');
+    });
+
     it('prints a dead incoming copy (a peer\'s camera switched off) as off, not as a frozen camera', async () => {
         voiceDiagnostics.mockResolvedValueOnce({ connected: false, localRtp: [], remoteRtp: [] });
         meshDiagnostics.mockResolvedValueOnce([{
