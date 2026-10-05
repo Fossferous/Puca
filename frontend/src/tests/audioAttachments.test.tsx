@@ -18,11 +18,7 @@ import { createRoot, type Root } from 'react-dom/client';
 const { decrypts } = vi.hoisted(() => ({ decrypts: [] as Array<{ id: string; mime: string }> }));
 vi.mock('../api/attachments', async (orig) => ({
     ...(await orig<typeof import('../api/attachments')>()),
-    decryptToBlobUrl: async (id: string, _key: string, mime: string) => {
-        decrypts.push({ id, mime });
-        return `blob:decrypted-${id}`;
-    },
-    // A message's attachments hold their URL (MessageContent): same record.
+    // Messages, Tasks and Notes all hold their URL: one record.
     acquireAttachmentUrl: async (id: string, _key: string, mime: string) => {
         decrypts.push({ id, mime });
         return { url: `blob:decrypted-${id}`, release: () => {} };

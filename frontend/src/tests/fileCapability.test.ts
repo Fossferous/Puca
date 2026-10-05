@@ -20,7 +20,7 @@ vi.mock('../api/client', () => ({
 vi.mock('../api/auth', async (orig) => ({ ...(await orig<typeof import('../api/auth')>()), getToken: () => 'tok' }));
 
 import { uploadFile } from '../api/uploads';
-import { encryptAndUploadRef, parseEncAttachment, decryptToBlobUrl } from '../api/attachments';
+import { encryptAndUploadRef, parseEncAttachment, acquireAttachmentUrl } from '../api/attachments';
 
 /** jsdom's File has no arrayBuffer(); the encrypt path reads the file through it. */
 function fileOf(bytes: number[], name: string, type?: string): File {
@@ -74,13 +74,13 @@ describe('presenting a capability', () => {
         const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(bytes)); // a fresh body per call
         globalThis.URL.createObjectURL = vi.fn(() => 'blob:x') as never;
 
-        await decryptToBlobUrl('id-with-cap', key, 'image/png', 'CAP1');
+        await acquireAttachmentUrl('id-with-cap', key, 'image/png', 'CAP1');
         const first = fetchSpy.mock.calls[0][1] as { headers: Record<string, string> };
         expect(first.headers['X-Puca-File-Cap']).toBe('CAP1');
         expect(first.headers.Authorization).toBe('Bearer tok');
         expect(String(fetchSpy.mock.calls[0][0])).not.toContain('CAP1'); // never in the URL
 
-        await decryptToBlobUrl('id-without-cap', key, 'image/png');
+        await acquireAttachmentUrl('id-without-cap', key, 'image/png');
         const second = fetchSpy.mock.calls[1][1] as { headers: Record<string, string> };
         expect(second.headers['X-Puca-File-Cap']).toBeUndefined();
         fetchSpy.mockRestore();

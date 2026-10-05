@@ -20,7 +20,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('../api/auth', async (orig) => ({ ...(await orig<typeof import('../api/auth')>()), getToken: () => 'tok' }));
 
-import { isEncAttachment, parseEncAttachment, decryptToBlobUrl, clearBlobCache } from '../api/attachments';
+import { isEncAttachment, parseEncAttachment, acquireAttachmentUrl, clearBlobCache } from '../api/attachments';
 import { isClipRef, isScrubbedClipRef, hasClipRef } from '../api/clips/clipRef';
 import { stripAttachmentKeys, scrubClipRefs } from '../components/contextMenuUtils';
 import { messagePreviewText } from '../api/messagePreview';
@@ -86,7 +86,11 @@ describe('the clipboard scrub is case-insensitive', () => {
  * already opened that file, the REAL plaintext rendered inside the attacker's
  * message under their chosen display name and MIME.
  */
-describe('decryptToBlobUrl keys its cache on everything that determines the bytes', () => {
+/** The URL an attachment is shown under (a held one; never released here:
+ *  clearBlobCache after each test takes them all back). */
+const urlOf = async (id: string, key: string, mime: string, cap?: string) => (await acquireAttachmentUrl(id, key, mime, cap)).url;
+
+describe('the attachment cache is keyed on everything that determines the bytes', () => {
     let created = 0;
     let fetchSpy: ReturnType<typeof vi.spyOn>;
 
@@ -120,14 +124,14 @@ describe('decryptToBlobUrl keys its cache on everything that determines the byte
         const { key, bytes } = await sealed('the real plaintext');
         fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(bytes));
 
-        const first = await decryptToBlobUrl('same-id', key, 'image/png');
+        const first = await urlOf('same-id', key, 'image/png');
         expect(first).toBe('blob:1');
         expect(fetchSpy).toHaveBeenCalledTimes(1);
 
         // A different key for the SAME id: must not be served the cached URL.
         const wrong = Buffer.from(new Uint8Array(32).fill(7)).toString('base64')
             .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-        await expect(decryptToBlobUrl('same-id', wrong, 'image/png')).rejects.toThrow();
+        await expect(urlOf('same-id', wrong, 'image/png')).rejects.toThrow();
         expect(fetchSpy).toHaveBeenCalledTimes(2);   // it really went back to the server
         expect(created).toBe(1);                     // and produced no second blob
     });
@@ -136,8 +140,8 @@ describe('decryptToBlobUrl keys its cache on everything that determines the byte
         const { key, bytes } = await sealed('cached');
         fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(bytes));
 
-        const a = await decryptToBlobUrl('cache-me', key, 'image/png');
-        const b = await decryptToBlobUrl('cache-me', key, 'image/png');
+        const a = await urlOf('cache-me', key, 'image/png');
+        const b = await urlOf('cache-me', key, 'image/png');
         expect(b).toBe(a);
         expect(fetchSpy).toHaveBeenCalledTimes(1);
     });
@@ -146,8 +150,8 @@ describe('decryptToBlobUrl keys its cache on everything that determines the byte
         const { key, bytes } = await sealed('typed');
         fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(bytes));
 
-        const png = await decryptToBlobUrl('typed-id', key, 'image/png');
-        const webm = await decryptToBlobUrl('typed-id', key, 'video/webm');
+        const png = await urlOf('typed-id', key, 'image/png');
+        const webm = await urlOf('typed-id', key, 'video/webm');
         expect(webm).not.toBe(png);
         expect(fetchSpy).toHaveBeenCalledTimes(2);
     });
@@ -158,8 +162,8 @@ describe('decryptToBlobUrl keys its cache on everything that determines the byte
 
         // Both become application/octet-stream (safeBlobType), so the bytes and
         // the type are identical and one blob is correct.
-        const html = await decryptToBlobUrl('norm-id', key, 'text/html');
-        const pdf = await decryptToBlobUrl('norm-id', key, 'application/pdf');
+        const html = await urlOf('norm-id', key, 'text/html');
+        const pdf = await urlOf('norm-id', key, 'application/pdf');
         expect(pdf).toBe(html);
         expect(fetchSpy).toHaveBeenCalledTimes(1);
     });

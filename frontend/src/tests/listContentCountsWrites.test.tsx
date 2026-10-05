@@ -29,7 +29,7 @@ vi.mock('../api/listContent', async () => {
 // The pictures are decrypted elsewhere; these tests are about the saves.
 vi.mock('../api/attachments', async () => {
     const real = await vi.importActual<typeof import('../api/attachments')>('../api/attachments');
-    return { ...real, decryptToBlobUrl: vi.fn(async () => 'blob:x') };
+    return { ...real, acquireAttachmentUrl: vi.fn(async () => ({ url: 'blob:x', release: () => {} })) };
 });
 
 import { ListContentBlock, TasksTrash } from '../components/ListContentBlock';

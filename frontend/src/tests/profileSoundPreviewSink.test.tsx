@@ -27,8 +27,11 @@ vi.mock('../api/uploads', () => ({
     MAX_SOUND_BYTES: 1024 * 1024,
     formatFileSize: (n: number) => `${n} B`,
 }));
+/** The clip's blob: URL, and when it was let go. */
+const clipUrls = vi.hoisted(() => ({ released: 0 }));
 vi.mock('../api/authedMedia', () => ({
-    fetchFileUrl: async () => 'blob:clip-1',
+    fetchFileUrl: async () => null,
+    fetchFileObjectUrl: async () => ({ url: 'blob:clip-1', release: () => { clipUrls.released++; } }),
     cachedFileUrl: () => null,
     clearFileCache: () => {},
 }));
@@ -96,5 +99,16 @@ describe('profile clip preview', () => {
     it('on the default device it plays at once', async () => {
         await openAndClickPlay();
         expect(playedOn).toEqual(['default']);
+    });
+
+    // A blob kept for the session kept decrypted attachments' plaintext on
+    // disk beside it (api/authedMedia.ts): the clip's goes once it has played.
+    it('lets the clip\'s blob: URL go once it has played, not before', async () => {
+        clipUrls.released = 0;
+        await openAndClickPlay();
+        expect(built[0].src).toBe('blob:clip-1');
+        expect(clipUrls.released).toBe(0);
+        await act(async () => { built[0].dispatchEvent(new Event('ended')); });
+        expect(clipUrls.released).toBe(1);
     });
 });

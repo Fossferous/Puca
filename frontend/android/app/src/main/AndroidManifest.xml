@@ -23,7 +23,11 @@
          Nothing here needs backing up: a device re-derives its state by logging
          in. The rule files are kept and are now include-only, so re-enabling
          backup later cannot silently restore the old behaviour. -->
+    <!-- PucaApplication: at every process start, before any WebView exists,
+         removes what an earlier run's WebView blob storage left on disk
+         (decrypted attachments a crash or a kill left behind). -->
     <application
+        android:name=".PucaApplication"
         android:allowBackup="false"
         android:fullBackupContent="@xml/backup_rules"
         android:dataExtractionRules="@xml/data_extraction_rules"

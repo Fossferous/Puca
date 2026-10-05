@@ -2,7 +2,7 @@
  * React view of an authenticated file (see api/authedMedia).
  *
  * `GET /files/:id` requires the Authorization header now, and `<img src>`
- * cannot send one — so components ask for an object URL instead of a
+ * cannot send one — so components ask for a data: URL instead of a
  * `/files/...` URL. Returns null until the bytes arrive, and stays null if the
  * fetch fails, so callers keep rendering their existing fallback (initials, a
  * placeholder icon) rather than a broken image.
@@ -15,7 +15,7 @@ import { cachedFileUrl, fetchFileUrl } from '../api/authedMedia';
 export function useAuthedFileUrl(fileId: string | null | undefined): string | null {
     // Seed from the cache so an already-fetched avatar paints on the FIRST
     // render. Without this every re-mount in a scrolling message list would
-    // flash its fallback for a frame even though the blob is already in hand.
+    // flash its fallback for a frame even though the URL is already in hand.
     const [url, setUrl] = useState<string | null>(() => (fileId ? cachedFileUrl(fileId) : null));
 
     useEffect(() => {

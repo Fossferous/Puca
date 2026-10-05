@@ -8,9 +8,10 @@
 import React, { useState, useEffect, useCallback, useReducer, useRef, type Ref } from 'react';
 import { parseMessage, isSafeUrl, type Node } from '../utils/messageParser';
 import { isImageUrl } from '../api/linkPreview';
+import { attachmentsAwake, subscribeAttachmentsAwake, useAttachmentsAwake } from '../api/attachmentAwake';
 import { isEncAttachment, parseEncAttachment, acquireAttachmentUrl, prefetchAttachmentUrl, noteAttachmentInterest, attachmentPictureSize, noteAttachmentPictureSize, videoMimeFor, audioMimeFor, isPlaylistBlobUrl, type AttachmentHold } from '../api/attachments';
 import { isAbortError } from '../api/priorityLimiter';
-import { useAttachmentZone, usePlayerGrant, loadUrgency, scrollRootOf } from './attachmentZone';
+import { useAttachmentZone, usePlayerGrant, loadUrgency, scrollRootOf, type ShownSize } from './attachmentZone';
 import { isClipRef, isScrubbedClipRef } from '../api/clips/clipRef';
 import { ClipAttachment } from './ClipAttachment';
 import { AttachmentLoading } from './AttachmentLoading';
@@ -115,7 +116,10 @@ function audioPlayerRef(el: HTMLAudioElement | null): (() => void) | undefined {
  *  size where the player goes, so getting one moves nothing; a paused one
  *  that gets a player again starts where it was. One that is playing, open
  *  in the lightbox or being saved from this copy is never let go; only one
- *  that is playing keeps its player beyond the closest few. */
+ *  that is playing keeps its player beyond the closest few. The plaintext
+ *  exists only while it is held (api/attachments.ts): one given back is kept
+ *  as ciphertext, and the app in the background gives back all it is not
+ *  using (api/attachmentAwake.ts). */
 function EncryptedAttachment({ href, name }: { href: string; name: string }) {
     const [url, setUrl] = useState<string | null>(null);
     const [failed, setFailed] = useState(false);
@@ -152,11 +156,27 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
     // Back to the start once it has played to the end.
     const resumeAt = useRef(0);
     const zone = useAttachmentZone(slot, measureShown);
-    // In use: its copy is never let go, however far it scrolls. A save holds
-    // it only while the save reads it — not for the Android app's native
-    // save, which downloads the file again (api/saveAttachment.ts).
+    // The app has been in the background a moment: what is not in use is
+    // let go, so no decrypted copy waits on disk while a phone may kill the
+    // app (api/attachmentAwake.ts). Back on screen it is decrypted again
+    // from the cached ciphertext.
+    const awake = useAttachmentsAwake();
+    // The box it took when the app went to the background, measured before
+    // it lets go (this listener runs as the app is suspended, ahead of the
+    // render that takes it away), so it keeps its space while it is away
+    // and on the way back: nothing jumps when the app comes back.
+    const [suspendedSize, setSuspendedSize] = useState<ShownSize | null>(null);
+    useEffect(() => subscribeAttachmentsAwake(() => {
+        if (attachmentsAwake() || !slotRef.current) return;
+        const size = measureShown(slotRef.current);
+        if (size) setSuspendedSize(size);
+    }), []);
+    // In use: its copy is never let go, however far it scrolls, or while the
+    // app is in the background. A save holds it only while the save reads it
+    // — not for the Android app's native save, which downloads the file
+    // again (api/saveAttachment.ts).
     const busy = playing || zoomed || save.reading;
-    const want = zone.near || busy;
+    const want = (zone.near && awake) || busy;
     const info = parseEncAttachment(href);
     // Not just `mime.startsWith('video/')`: refs recorded before the upload
     // side inferred types (and any browser that reports "" for .mkv) carry
@@ -317,7 +337,7 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
     // Nothing to show (not loaded yet, out of range, or a player that is not
     // among the closest few).
     if (!shown || waiting) {
-        const reserve = (shown ? player.size : null) ?? zone.size;
+        const reserve = (shown ? player.size : null) ?? (zone.near ? suspendedSize : null) ?? zone.size;
         // Its player's card with a stand-in for the player: loaded and
         // waiting for one, or — its picture size known from an earlier load
         // and no space measured — still on its way.

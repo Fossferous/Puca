@@ -42,12 +42,12 @@ vi.mock('../api/listContent', async (orig) => {
 });
 vi.mock('../api/attachments', async (orig) => {
     const real = await orig<typeof import('../api/attachments')>();
-    return { ...real, encryptAndUploadRef: vi.fn(), decryptToBlobUrl: vi.fn() };
+    return { ...real, encryptAndUploadRef: vi.fn(), decryptAttachmentBytes: vi.fn() };
 });
 vi.mock('../api/taskReminders', () => ({ pokeTaskReminders: vi.fn() }));
 
 import { apiClient, ApiError } from '../api/client';
-import { decryptToBlobUrl, encryptAndUploadRef } from '../api/attachments';
+import { decryptAttachmentBytes, encryptAndUploadRef } from '../api/attachments';
 import { createTaskListWithContent, deleteFiles } from '../api/listContent';
 import { createListTask, patchTaskTiming, updateListTaskAttachments, type Task, type TaskAttachmentRef, type TaskList } from '../api/tasks';
 import { pushMessageToast } from '../components/messageToastBus';
@@ -100,13 +100,12 @@ beforeEach(() => {
     vi.mocked(createListTask).mockImplementation(async (_l: number, text: string, parentId?: number) => ({
         ...task(n++, text), parent_id: parentId ?? null,
     }));
-    vi.mocked(decryptToBlobUrl).mockResolvedValue('blob:fake');
+    vi.mocked(decryptAttachmentBytes).mockResolvedValue(new TextEncoder().encode('bytes'));
     let copy = 0;
-    vi.mocked(encryptAndUploadRef).mockImplementation(async (f: File) => {
+    vi.mocked(encryptAndUploadRef).mockImplementation(async (f: { name: string }) => {
         const id = `new${++copy}`;
         return { href: href(id), name: f.name, mime: 'image/png' };
     });
-    vi.stubGlobal('fetch', vi.fn(async () => ({ blob: async () => new Blob(['bytes']) })));
 });
 afterEach(() => {
     act(() => { root?.unmount(); });
@@ -192,7 +191,7 @@ describe('copyNote', () => {
         await act(async () => { out = await actions().copyNote(plan({ body: 'Before Friday', items: [item('Milk')] })); });
         expect(out).toEqual({ kind: 'list', id: 77 });
         expect(encryptAndUploadRef).not.toHaveBeenCalled();
-        expect(decryptToBlobUrl).not.toHaveBeenCalled();
+        expect(decryptAttachmentBytes).not.toHaveBeenCalled();
         expect(updateListTaskAttachments).not.toHaveBeenCalled();
         const [title, content, key] = vi.mocked(createTaskListWithContent).mock.calls[0];
         expect([title, content]).toEqual(['Groceries (copy)', { body: 'Before Friday', refs: [] }]);

@@ -24,8 +24,7 @@ import {
 
 vi.mock('../api/attachments', async (orig) => ({
     ...(await orig<typeof import('../api/attachments')>()),
-    decryptToBlobUrl: async (id: string) => `blob:decrypted-${id}`,
-    // A message's attachments hold their URL (MessageContent).
+    // Messages, Tasks and Notes all hold their URL.
     acquireAttachmentUrl: async (id: string) => ({ url: `blob:decrypted-${id}`, release: () => {} }),
 }));
 vi.mock('../notes/model/transcribe', () => ({

@@ -53,8 +53,10 @@ vi.mock('../api/saveAttachment', () => {
 });
 
 import { MessageContent } from '../components/MessageContent';
-import { clearBlobCache, decryptToBlobUrl, acquireAttachmentUrl, attachmentCacheStats, __setRetainedAttachmentBudget, __setAheadAttachmentBudget } from '../api/attachments';
+import { clearBlobCache, acquireAttachmentUrl, decryptAttachmentBytes, attachmentCacheStats, __setRetainedAttachmentBudget, __setAheadAttachmentBudget } from '../api/attachments';
+import { TaskAttachments } from '../components/TaskAttachments';
 import { isAbortError } from '../api/priorityLimiter';
+import { __resetAttachmentsAwake, __setSuspendAfterHiddenMs } from '../api/attachmentAwake';
 import { MAX_UPLOAD_BYTES } from '../api/uploads';
 import { MAX_LIVE_PLAYERS, __attachmentZoneWatchCount } from '../components/attachmentZone';
 import { mp4Header } from './fixtures/videoHeaders';
@@ -131,8 +133,29 @@ let root: Root;
 let play: ReturnType<typeof vi.spyOn>;
 
 const settle = async () => {
-    await act(async () => { for (let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 0)); });
+    // Zero-delay turns for React and the limiter, then a few real
+    // milliseconds: a copy shown again is decrypted again (WebCrypto runs off
+    // the event loop) before it is shown.
+    await act(async () => {
+        for (let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 0));
+        for (let j = 0; j < 3; j++) {
+            await new Promise(r => setTimeout(r, 5));
+            for (let i = 0; i < 5; i++) await new Promise(r => setTimeout(r, 0));
+        }
+    });
 };
+/** Settle until `cond` holds: a copy shown again is decrypted again from the
+ *  cached ciphertext first (FileReader, then WebCrypto off the event loop),
+ *  which a busy machine may not finish within one settle. */
+async function until<T>(cond: () => T, what = 'the condition'): Promise<T> {
+    for (let i = 0; i < 60; i++) {
+        const v = cond();
+        if (v) return v;
+        await settle();
+    }
+    throw new Error(`${what} never held`);
+}
+
 /** Let `id`'s download finish. */
 async function deliver(id: string) {
     const g = gates.get(id);
@@ -223,7 +246,18 @@ beforeEach(() => {
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
+    visibility = 'visible';
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility });
+    __setSuspendAfterHiddenMs(0);
 });
+
+/** The app goes to the background (or comes back): what the WebView reports. */
+let visibility: DocumentVisibilityState = 'visible';
+async function setVisibility(v: DocumentVisibilityState) {
+    visibility = v;
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+    await settle();
+}
 
 afterEach(async () => {
     expect(play).not.toHaveBeenCalled();
@@ -234,6 +268,9 @@ afterEach(async () => {
     clearBlobCache();
     __setRetainedAttachmentBudget(null);
     __setAheadAttachmentBudget(null);
+    delete (document as { visibilityState?: unknown }).visibilityState;
+    __resetAttachmentsAwake();
+    __setSuspendAfterHiddenMs(null);
     URL.createObjectURL = origCreate;
     URL.revokeObjectURL = origRevoke;
     vi.unstubAllGlobals();
@@ -290,13 +327,18 @@ describe('a channel full of big videos', { timeout: 30000 }, () => {
         expect(requested).toEqual(['m1', 'm2', 'm3']);
     });
 
-    it('a far one that was loaded ahead is shown the moment the reader scrolls to it, with no second fetch', async () => {
+    it('a far one that was loaded ahead is shown as the reader scrolls to it, with no second fetch, and was never decrypted into a URL before', async () => {
         const scroll = await renderChannel([['old', -4000], ['new', 100]]);
         await deliver('new');
         expect(requested).toEqual(['new', 'old']);
+        const urlsBefore = created.length;
         await deliver('old');
         expect(videoOf('old')).toBeNull();
+        // Loaded ahead as ciphertext: no plaintext URL for it yet.
+        expect(created).toHaveLength(urlsBefore);
+        expect(attachmentCacheStats()).toMatchObject({ aheadBytes: 1000, plainBytes: 1000 });
         await scroll([['old', 200], ['new', 3300]]);
+        await until(() => videoOf('old'), 'the player for old');
         expect(requested).toEqual(['new', 'old']);
         expect(videoOf('old')?.getAttribute('src')).toMatch(/^blob:test-/);
     });
@@ -361,8 +403,10 @@ describe('a channel full of big videos', { timeout: 30000 }, () => {
         await deliver('f1');
         await deliver('f2');
         expect(attachmentCacheStats()).toMatchObject({ aheadBytes: 2000, retainedBytes: 1000 });
-        // The copy seen in the first channel is still there for coming back.
-        expect(revoked).not.toContain(seenUrl);
+        // Its plaintext went with the channel (the retained 1000 bytes are
+        // its ciphertext, still here for coming back).
+        expect(revoked).toContain(seenUrl);
+        expect(attachmentCacheStats().plainBytes).toBe(1000); // only 'new', on screen
     });
 
     it('with no room to load ahead, a far one loads as the reader scrolls toward it, with no click', async () => {
@@ -399,17 +443,23 @@ describe('a channel full of big videos', { timeout: 30000 }, () => {
         expect(videoOf('v')?.getAttribute('src')).toMatch(/^blob:test-/);
     });
 
-    it('within the budget, coming back costs nothing: no second fetch', async () => {
+    it('within the budget, coming back downloads nothing; the plaintext is taken back as it goes and decrypted again', async () => {
         const scroll = await renderChannel([['v', 100]]);
         await deliver('v');
         const url = videoOf('v')!.getAttribute('src');
         await scroll([['v', -5000]]);
         expect(videoOf('v')).toBeNull();
-        expect(revoked).toEqual([]);
-        expect(attachmentCacheStats().retainedBytes).toBe(1000);
+        // Nobody shows it: its plaintext URL is taken back at once, budget
+        // or not; the cache keeps the ciphertext.
+        expect(revoked).toEqual([url]);
+        expect(attachmentCacheStats()).toMatchObject({ retainedBytes: 1000, plainBytes: 0 });
         await scroll([['v', 200]]);
+        await until(() => videoOf('v'), 'the player for v');
         expect(requested).toEqual(['v']);
-        expect(videoOf('v')?.getAttribute('src')).toBe(url);
+        const again = videoOf('v')?.getAttribute('src');
+        expect(again).toMatch(/^blob:test-/);
+        expect(again).not.toBe(url);
+        expect(attachmentCacheStats()).toMatchObject({ heldBytes: 1000, plainBytes: 1000 });
     });
 
     it('a video that is playing keeps its player and its copy, however far it scrolls', async () => {
@@ -497,10 +547,17 @@ describe('a channel full of big videos', { timeout: 30000 }, () => {
         const s = attachmentCacheStats();
         expect(s.heldBytes).toBe(0);
         expect(s.retainedBytes).toBe(2000);
-        // All three were given back in the same millisecond; the one revoked
-        // is the oldest message's, not whichever the clock happened to pick.
-        expect(revoked).toEqual([oldest]);
+        // Every plaintext URL went with the channel...
+        expect(revoked).toHaveLength(3);
+        expect(revoked).toContain(oldest);
+        expect(s.plainBytes).toBe(0);
         expect(__attachmentZoneWatchCount()).toBe(0);
+        // ...and of the ciphertext, the one dropped is the oldest message's,
+        // not whichever the clock happened to pick (all three were given
+        // back in the same millisecond): only it is downloaded again.
+        await renderChannel([['a', -800], ['b', -400], ['c', 100]]);
+        await deliverAll();
+        expect(requested.filter((id) => ['a', 'b', 'c'].includes(id))).toEqual(['c', 'b', 'a', 'a']);
     });
 
     it('leaving one channel and then another keeps the newest of EACH, not just the last one left', async () => {
@@ -516,12 +573,22 @@ describe('a channel full of big videos', { timeout: 30000 }, () => {
         await leave();
         const b = await open('b');
         await leave();
-        // Eight copies, room for four: each channel's two oldest messages go.
-        expect([...revoked].sort()).toEqual([a.a1, a.a2, b.b1, b.b2].sort());
-        // Back to the first: what is on screen there (the newest) is instant.
+        // Every plaintext URL went with its channel.
+        expect([...revoked].sort()).toEqual([...Object.values(a), ...Object.values(b)].sort());
+        // Eight copies, room for four: each channel's two oldest messages go
+        // (the newest two of each are still here, as ciphertext).
+        expect(attachmentCacheStats()).toMatchObject({ retainedBytes: 4000, plainBytes: 0 });
+        // Back to the first: what is on screen there (the newest) is shown
+        // again with no download.
         await renderChannel([['a3', -500], ['a4', 100]]);
+        await until(() => videoOf('a4'), 'the player for a4');
         expect(requested.filter((id) => id.startsWith('a'))).toEqual(['a4', 'a3', 'a2', 'a1']);
-        expect(videoOf('a4')?.getAttribute('src')).toBe(a.a4);
+        expect(videoOf('a4')?.getAttribute('src')).toMatch(/^blob:test-/);
+        await leave();
+        // The other channel's newest two are still here too; its oldest two are not.
+        await renderChannel(ids('b').map((id, i) => [id, -1500 + i * 500] as [string, number]));
+        await deliverAll();
+        expect(requested.filter((id) => id.startsWith('b')).slice(4).sort()).toEqual(['b1', 'b2']);
     });
 
     it('a copy nothing on the page shows any more goes before one the reader may scroll back to', async () => {
@@ -532,17 +599,20 @@ describe('a channel full of big videos', { timeout: 30000 }, () => {
         await deliver('kept');
         const keptUrl = videoOf('kept')!.getAttribute('src');
         const goneUrl = videoOf('gone')!.getAttribute('src');
-        // 'kept' scrolls far up: given back, and it fits.
+        // 'kept' scrolls far up: given back (its plaintext with it), and its
+        // ciphertext fits.
         await scroll([['kept', -5000], ['gone', 500]]);
-        expect(revoked).toEqual([]);
+        expect(revoked).toEqual([keptUrl]);
         // 'gone' leaves the page (its message went), given back LATER than
         // 'kept'. Room for one: the one nothing on the page shows goes.
         await scroll([['kept', -5000]], ['gone']);
-        expect(revoked).toEqual([goneUrl]);
-        // The reader scrolls back up to 'kept': there at once, not refetched.
+        expect(revoked).toEqual([keptUrl, goneUrl]);
+        expect(attachmentCacheStats()).toMatchObject({ retainedBytes: 1000, plainBytes: 0 });
+        // The reader scrolls back up to 'kept': there again, not refetched.
         await scroll([['kept', 200]], ['gone']);
+        await until(() => videoOf('kept'), 'the player for kept');
         expect(requested).toEqual(['gone', 'kept']);
-        expect(videoOf('kept')?.getAttribute('src')).toBe(keptUrl);
+        expect(videoOf('kept')?.getAttribute('src')).toMatch(/^blob:test-/);
     });
 
     it('a loaded video waiting for a player already takes its box: getting one moves nothing', async () => {
@@ -616,7 +686,7 @@ describe('a channel full of big videos', { timeout: 30000 }, () => {
             await act(async () => { v.dispatchEvent(new Event('loadedmetadata')); });
         };
         await scroll([['v', 200]]);
-        const again = videoOf('v') as HTMLVideoElement;
+        const again = await until(() => videoOf('v'), 'the second player') as HTMLVideoElement;
         expect(again).not.toBe(first);
         await metadata(again);
         expect(again.currentTime).toBe(12);
@@ -624,7 +694,7 @@ describe('a channel full of big videos', { timeout: 30000 }, () => {
         await act(async () => { again.dispatchEvent(new Event('ended')); });
         await scroll([['v', -5000]]);
         await scroll([['v', 200]]);
-        const third = videoOf('v') as HTMLVideoElement;
+        const third = await until(() => videoOf('v'), 'the third player') as HTMLVideoElement;
         expect(third).not.toBe(again);
         await metadata(third);
         expect(third.currentTime).toBe(0);
@@ -713,19 +783,200 @@ describe('a channel full of big videos', { timeout: 30000 }, () => {
         expect(chip()!.title).toBe('Saved to Downloads');
     });
 
-    it("a Task's or a note's copy (decryptToBlobUrl) is never revoked to make room", async () => {
+    it("a Task's or a note's copy, shown (held), is never taken back to make room", async () => {
         __setRetainedAttachmentBudget(0);
-        const key = await seal('pinned');
-        const p = decryptToBlobUrl('pinned', key, 'video/mp4');
+        const key = await seal('task');
+        const p = acquireAttachmentUrl('task', key, 'video/mp4');
         await settle();
-        await deliver('pinned');
-        const pinnedUrl = await p;
+        await deliver('task');
+        const taskUrl = (await p).url;
         const scroll = await renderChannel([['v', 100]]);
         await deliver('v');
         await scroll([['v', -5000]]);
         expect(revoked).toHaveLength(1);
-        expect(revoked).not.toContain(pinnedUrl);
-        expect(attachmentCacheStats().pinnedBytes).toBe(1000);
+        expect(revoked).not.toContain(taskUrl);
+        expect(attachmentCacheStats()).toMatchObject({ heldBytes: 1000, plainBytes: 1000 });
+    });
+});
+
+// The plaintext of an attachment exists only while something shows it
+// (api/attachments.ts, api/plaintextHost.ts): in the Android WebView every
+// decrypted blob beyond ~1% of the phone's RAM is a plaintext FILE in
+// app_webview/Default/blob_storage (79 of 85 MB of a small channel, measured
+// 2026-10-05), kept there while the app sat in the background and after a
+// crash until the next start. Under jsdom there is no Worker, so the page
+// makes the blobs itself; created/revoked are the URLs it made and took back.
+describe('decrypted copies', { timeout: 30000 }, () => {
+    it('two holders of one file share one plaintext URL, taken back only when the last lets go; the ciphertext stays', async () => {
+        const k = await seal('f');
+        const one = acquireAttachmentUrl('f', k, 'video/mp4');
+        await settle();
+        await deliver('f');
+        const a = await one;
+        const b = await acquireAttachmentUrl('f', k, 'video/mp4');
+        expect(b.url).toBe(a.url);
+        expect(created).toEqual([a.url]);
+        a.release();
+        expect(revoked).toEqual([]);
+        expect(attachmentCacheStats()).toMatchObject({ heldBytes: 1000, plainBytes: 1000 });
+        b.release();
+        expect(revoked).toEqual([a.url]);
+        expect(attachmentCacheStats()).toMatchObject({ entries: 1, retainedBytes: 1000, plainBytes: 0 });
+        // Taken again: decrypted again from the cache, into a new URL, with
+        // no second download.
+        const c = await acquireAttachmentUrl('f', k, 'video/mp4');
+        expect(requested).toEqual(['f']);
+        expect(c.url).not.toBe(a.url);
+        expect(created).toEqual([a.url, c.url]);
+        c.release();
+    });
+
+    it('in the background a moment, the app gives back every copy it is not using; back on screen, shown again with no download', async () => {
+        await renderChannel([['pic', -300, 'image'], ['v', 100], ['song', 500, 'audio']]);
+        await deliverAll();
+        const before = [...container.querySelectorAll('img, video, audio')].map((el) => el.getAttribute('src'));
+        expect(before).toHaveLength(3);
+        expect(attachmentCacheStats()).toMatchObject({ heldBytes: 3000, plainBytes: 3000 });
+        await setVisibility('hidden');
+        // Nothing decrypted is left: every URL went, after it left the page
+        // (revokeObjectURL itself asserts that), and the cache holds only
+        // ciphertext.
+        expect([...revoked].sort()).toEqual([...before].sort());
+        expect(attachmentCacheStats()).toMatchObject({ heldBytes: 0, plainBytes: 0, retainedBytes: 3000 });
+        expect(container.querySelectorAll('img[src], video[src], audio[src]')).toHaveLength(0);
+        // Each keeps the space it took (nothing jumps on the way back).
+        expect(container.querySelector<HTMLElement>('.message-image .attachment-reserve')?.style.height).toBe('200px');
+        expect(container.querySelector<HTMLElement>('.message-video.attachment-reserve')?.style.height).toBe(`${VIDEO_H}px`);
+        expect(container.querySelector<HTMLElement>('.message-audio.attachment-reserve')).not.toBeNull();
+        await setVisibility('visible');
+        await until(() => container.querySelectorAll('img[src^="blob:"], video[src^="blob:"], audio[src^="blob:"]').length === 3, 'all three shown again');
+        expect(requested.sort()).toEqual(['pic', 'song', 'v']);
+        const after = [...container.querySelectorAll('img, video, audio')].map((el) => el.getAttribute('src'));
+        expect(after.some((u) => before.includes(u))).toBe(false);
+    });
+
+    it('copies decrypted again from the cache go two big files at a time, the closest first', async () => {
+        // Measured on the emulator, going back to a channel of 12 x 22 MB
+        // videos: six cached copies decrypted at once took 600-700 ms each
+        // and the first on screen showed after 4.9 s.
+        const ids = ['c1', 'c2', 'c3', 'c4', 'c5'];
+        const k: Record<string, string> = {};
+        for (const id of ids) k[id] = await seal(id);
+        const first = ids.map((id) => acquireAttachmentUrl(id, k[id], 'video/mp4'));
+        await settle();
+        await deliverAll();
+        for (const h of await Promise.all(first)) h.release();
+        expect(attachmentCacheStats()).toMatchObject({ plainBytes: 0, retainedBytes: 5000 });
+        // Count the decryptions running at once, and the order they start in.
+        const realDecrypt = crypto.subtle.decrypt.bind(crypto.subtle);
+        let running = 0, most = 0;
+        const order: string[] = [];
+        const nonceOf = new Map(ids.map((id) => [Buffer.from(served.get(id)!.subarray(0, 12)).toString('hex'), id]));
+        const spy = vi.spyOn(crypto.subtle, 'decrypt').mockImplementation(async (...args: Parameters<SubtleCrypto['decrypt']>) => {
+            running++; most = Math.max(most, running);
+            order.push(nonceOf.get(Buffer.from((args[0] as AesGcmParams).iv as Uint8Array).toString('hex')) ?? '?');
+            await new Promise((r) => setTimeout(r, 5));
+            try { return await realDecrypt(...args); } finally { running--; }
+        });
+        // Urgency: c5 is on screen (0), c1 furthest away.
+        const urgencyOf: Record<string, number> = { c1: 5, c2: 4, c3: 3, c4: 2, c5: 0 };
+        const holds = await Promise.all(ids.map((id) => acquireAttachmentUrl(id, k[id], 'video/mp4', undefined, { urgency: () => urgencyOf[id] })));
+        spy.mockRestore();
+        expect(requested.filter((id) => id.startsWith('c'))).toEqual(ids); // nothing downloaded again
+        expect(most).toBe(2);
+        // All five asked in one tick: the limiter takes them in order of
+        // distance, the one on screen first.
+        expect(order).toEqual(['c5', 'c4', 'c3', 'c2', 'c1']);
+        expect(holds.every((h) => /^blob:test-/.test(h.url))).toBe(true);
+        for (const h of holds) h.release();
+    });
+
+    it('a glance at another app shorter than the delay gives nothing back', async () => {
+        __setSuspendAfterHiddenMs(60_000);
+        await renderChannel([['v', 100]]);
+        await deliver('v');
+        const url = videoOf('v')!.getAttribute('src');
+        await setVisibility('hidden');
+        await setVisibility('visible');
+        expect(revoked).toEqual([]);
+        expect(videoOf('v')?.getAttribute('src')).toBe(url);
+    });
+
+    it('in the background, a video that is playing and a picture open in the lightbox keep their copies', async () => {
+        await renderChannel([['pic', -300, 'image'], ['v', 100], ['other', 500]]);
+        await deliverAll();
+        await act(async () => { videoOf('v')!.dispatchEvent(new Event('play')); });
+        const img = container.querySelector<HTMLImageElement>('.message-image img')!;
+        const picUrl = img.getAttribute('src')!;
+        await act(async () => { img.click(); });
+        const vUrl = videoOf('v')!.getAttribute('src');
+        const otherUrl = videoOf('other')!.getAttribute('src');
+        await setVisibility('hidden');
+        expect(revoked).toEqual([otherUrl]);
+        expect(videoOf('v')?.getAttribute('src')).toBe(vUrl);
+        expect(document.querySelector(`img[src="${picUrl}"]`)).not.toBeNull();
+        // Paused, and the lightbox closed: now they go too.
+        await act(async () => { videoOf('v')!.dispatchEvent(new Event('pause')); });
+        await act(async () => { document.querySelector<HTMLButtonElement>('.image-lightbox-close')!.click(); });
+        await settle();
+        expect([...revoked].sort()).toEqual([otherUrl, vUrl, picUrl].sort());
+        expect(attachmentCacheStats().plainBytes).toBe(0);
+    });
+});
+
+// Tasks and Notes used to PIN every picture and voice note they had shown,
+// decrypted, until sign-out (decryptToBlobUrl): on a phone, a plaintext file
+// each for the whole session, in the background and after a kill. They hold
+// them now, like a message's (components/useHeldAttachmentUrl.ts).
+describe("a Task's attachments", { timeout: 30000 }, () => {
+    const taskRef = (id: string, key: string, name: string, mime: string) => ({ href: `sovereign-enc:${id}?k=${key}&m=${encodeURIComponent(mime)}`, name });
+    async function renderTask(refs: Array<{ href: string; name: string }>) {
+        await act(async () => { root.render(<TaskAttachments refs={refs} canEdit={false} onRemove={() => {}} />); });
+        await settle();
+    }
+
+    it('let go of their copy when the task leaves the page', async () => {
+        await renderTask([taskRef('tp', await seal('tp'), 'pic.png', 'image/png')]);
+        await deliver('tp');
+        const url = await until(() => container.querySelector('img.ta-thumb')?.getAttribute('src'), 'the picture');
+        await act(async () => { root.render(<div />); });
+        await settle();
+        expect(revoked).toEqual([url]);
+        expect(attachmentCacheStats()).toMatchObject({ heldBytes: 0, plainBytes: 0, retainedBytes: 1000 });
+    });
+
+    it('in the background let go of all but what is playing; back on screen, shown again with no download', async () => {
+        await renderTask([
+            taskRef('tp', await seal('tp'), 'pic.png', 'image/png'),
+            taskRef('ts', await seal('ts'), 'song.mp3', 'audio/mpeg'),
+        ]);
+        await deliverAll();
+        const pic = await until(() => container.querySelector('img.ta-thumb')?.getAttribute('src'), 'the picture');
+        const song = container.querySelector<HTMLAudioElement>('audio.ta-audio')!;
+        const songUrl = song.getAttribute('src');
+        await act(async () => { song.dispatchEvent(new Event('play')); });
+        await setVisibility('hidden');
+        expect(revoked).toEqual([pic]);
+        expect(container.querySelector('audio.ta-audio')?.getAttribute('src')).toBe(songUrl);
+        await setVisibility('visible');
+        await until(() => container.querySelector('img.ta-thumb')?.getAttribute('src'), 'the picture again');
+        expect(requested.sort()).toEqual(['tp', 'ts']);
+    });
+});
+
+describe('decryptAttachmentBytes (a note copied, a message captured, a drawing read)', { timeout: 30000 }, () => {
+    it('hands back the plaintext and keeps no URL and nothing decrypted', async () => {
+        const plain = new Uint8Array([1, 2, 3, 4, 5]);
+        const k = await seal('nb', 0, plain);
+        const p = decryptAttachmentBytes('nb', k, 'image/png');
+        await settle();
+        await deliver('nb');
+        expect(Array.from(await p)).toEqual([1, 2, 3, 4, 5]);
+        // Read again from the cached ciphertext: no second download.
+        expect(Array.from(await decryptAttachmentBytes('nb', k, 'image/png'))).toEqual([1, 2, 3, 4, 5]);
+        expect(requested).toEqual(['nb']);
+        expect(created).toEqual([]);
+        expect(attachmentCacheStats()).toMatchObject({ heldBytes: 0, plainBytes: 0, entries: 1 });
     });
 });
 
@@ -740,8 +991,8 @@ describe('the cache under them', { timeout: 30000 }, () => {
         const rowDone = Promise.allSettled([x]);
         await settle();
         expect(requested).toEqual(['a', 'b']);
-        // A Task shows the same file (decryptToBlobUrl): it rides on x's wait.
-        const task = decryptToBlobUrl('x', kx, 'video/mp4');
+        // A Task shows the same file (held, with no signal): it rides on x's wait.
+        const task = acquireAttachmentUrl('x', kx, 'video/mp4');
         const taskDone = Promise.allSettled([task]);
         await settle();
         // The row scrolls away while x still waits: its wait is dropped...
@@ -749,13 +1000,15 @@ describe('the cache under them', { timeout: 30000 }, () => {
         const [rowResult] = await rowDone;
         expect(rowResult.status === 'rejected' && isAbortError(rowResult.reason)).toBe(true);
         await settle();
-        // ...but the Task still wants the file, and gets it.
+        // ...but the Task still wants the file: it waits for a slot of its
+        // own (a hold takes its turn like any other), and gets it.
+        expect(requested).toEqual(['a', 'b']);
+        await deliver('a');
         expect(requested).toEqual(['a', 'b', 'x']);
         await deliver('x');
         const [taskResult] = await taskDone;
         expect(taskResult.status).toBe('fulfilled');
-        expect(attachmentCacheStats().pinnedBytes).toBe(1000);
-        await deliver('a');
+        expect(attachmentCacheStats().heldBytes).toBe(2000); // a and the Task's x
         await deliver('b');
         (await a).release();
         (await b).release();

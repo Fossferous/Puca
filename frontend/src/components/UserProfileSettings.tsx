@@ -4,7 +4,7 @@ import type { Profile } from '../api/profile';
 import { uploadFile, discardUpload, isAudioType, MAX_SOUND_BYTES, formatFileSize } from '../api/uploads';
 import './UserProfileSettings.css';
 import { CloseIcon, PlayIcon } from './Icons';
-import { fetchFileUrl } from '../api/authedMedia';
+import { fetchFileObjectUrl } from '../api/authedMedia';
 import { useAuthedFileUrl } from '../hooks/useAuthedFileUrl';
 import { applyOutputDevice } from './settingsStore';
 
@@ -250,15 +250,20 @@ export function UserProfileSettings({ isOpen, onClose }: UserProfileSettingsProp
      *  be able to hear what you just uploaded regardless of notification
      *  settings. */
     const previewSound = async (fileId: string) => {
-        // /files needs credentials now, and <audio src> cannot send them.
-        const url = await fetchFileUrl(fileId);
-        if (!url) { setError('Could not load that clip'); return; }
-        const a = new Audio(url);
+        // /files needs credentials now, and <audio src> cannot send them. A
+        // blob: URL that is let go once the clip has played: one kept for the
+        // session would keep decrypted attachments on disk (api/authedMedia.ts).
+        const clip = await fetchFileObjectUrl(fileId);
+        if (!clip) { setError('Could not load that clip'); return; }
+        const a = new Audio(clip.url);
+        a.addEventListener('ended', clip.release, { once: true });
+        a.addEventListener('error', clip.release, { once: true });
         a.volume = 0.6;
         // On the Output Device chosen in Settings, routed BEFORE play() so no
         // part of the clip lands on the OS default.
         await applyOutputDevice(a);
-        void a.play().catch(() => { /* autoplay refusal — a click precedes this, so rare */ });
+        // An autoplay refusal (a click precedes this, so rare): nothing plays.
+        void a.play().catch(clip.release);
     };
 
     const handleSaveDisplayName = async () => {
