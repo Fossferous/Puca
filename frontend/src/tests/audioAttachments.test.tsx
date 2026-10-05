@@ -22,6 +22,11 @@ vi.mock('../api/attachments', async (orig) => ({
         decrypts.push({ id, mime });
         return `blob:decrypted-${id}`;
     },
+    // A message's attachments hold their URL (MessageContent): same record.
+    acquireAttachmentUrl: async (id: string, _key: string, mime: string) => {
+        decrypts.push({ id, mime });
+        return { url: `blob:decrypted-${id}`, release: () => {} };
+    },
 }));
 const { saveAttachment } = vi.hoisted(() => ({ saveAttachment: vi.fn(async () => ({ where: 'Documents/Puca Notes', onDisk: true })) }));
 vi.mock('../api/saveAttachment', () => ({ saveAttachment }));

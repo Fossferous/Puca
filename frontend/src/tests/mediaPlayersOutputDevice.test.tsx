@@ -25,6 +25,8 @@ import {
 vi.mock('../api/attachments', async (orig) => ({
     ...(await orig<typeof import('../api/attachments')>()),
     decryptToBlobUrl: async (id: string) => `blob:decrypted-${id}`,
+    // A message's attachments hold their URL (MessageContent).
+    acquireAttachmentUrl: async (id: string) => ({ url: `blob:decrypted-${id}`, release: () => {} }),
 }));
 vi.mock('../notes/model/transcribe', () => ({
     transcribeClip: async () => ({ text: null, reason: null }),

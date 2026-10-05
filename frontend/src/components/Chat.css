@@ -1091,14 +1091,33 @@ button.message-attachment.error { color: #ffb4b4; }
 .message-video {
     display: block;
     margin-top: 8px;
+    /* The player's caps, shared with .video-box below. */
+    --video-max-w: 400px;
+    --video-max-h: 300px;
 }
 
-.message-video video {
+.message-video video,
+.message-video-standin {
     display: block;
-    max-width: min(400px, 100%);
-    max-height: 300px;
+    max-width: min(var(--video-max-w), 100%);
+    max-height: var(--video-max-h);
     border-radius: 8px;
     background: #000;
+}
+
+/* A video whose picture size is known before its player has the metadata
+   (api/videoDims.ts reads it from the file; MessageContent sets --vw/--vh),
+   and the stand-in that holds its place while it has no player (only the few
+   closest to the screen have one): the box the browser gives that picture
+   under the caps above — the smallest of its own width, the column, the width
+   cap and the width at which it meets the height cap. Player and stand-in get
+   the same box, so swapping one for the other moves nothing below it; before
+   this, a 30 px chip grew into a player at the top edge as the reader scrolled
+   up and pushed their place 100-380 px down (review finding 2026-10-05). */
+.message-video .video-box {
+    width: min(calc(var(--vw) * 1px), var(--video-max-w), 100%, calc(var(--video-max-h) * var(--vw) / var(--vh)));
+    height: auto;
+    aspect-ratio: var(--vw) / var(--vh);
 }
 
 /* The save-to-disk chip stays available under the player. */
@@ -1164,6 +1183,12 @@ button.message-attachment.error { color: #ffb4b4; }
     display: block;
     width: 100%;
     min-width: 0;
+}
+
+/* Where the player goes while an audio file waits for one (MessageContent
+   sets the height a mounted player measured). */
+.message-audio-standin {
+    display: block;
 }
 
 .message-audio .message-attachment {

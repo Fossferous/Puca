@@ -46,6 +46,38 @@ one-line summary; this file is the full story. Versions follow
   Documents/Puca until the new app is installed, and Android 9 and older keep
   that folder for good.
 
+### Changed
+- **Big video attachments still load by themselves, the ones on screen
+  first.** Opening a channel used to download and decrypt every attachment in
+  it at once, oldest first, so the video you were looking at arrived last:
+  with twelve 22 MB videos it took 23 seconds at 100 Mbit (and 17 to 29
+  seconds on an Android phone emulator) before the newest one played. Now the
+  ones on screen come first, two big files at a time, then the ones nearest
+  the screen, then the rest of the channel in the background, one at a time
+  and only while nothing nearer is loading, so a slot is always free for a
+  video you scroll to: the newest video was ready in about 5 to 6 seconds
+  (5 to 7 on the emulator), and scrolling back up through the channel every
+  video was ready the moment it came into view, on a PC and on the emulator.
+  Nothing to click and nothing to set.
+- **Less memory while a channel full of videos opens, and it is given back.**
+  Decrypting everything at once took the app's page from about 65 MB to
+  600-800 MB on a PC; it now stays near 300-400 MB. Decrypted files used to
+  stay in memory (on Android, on disk) until you signed out, about 260 MB
+  more for every such channel you opened. Now the files within about two
+  screens of what you are reading stay ready; those further away, or in a
+  channel you left, are kept up to a limit (about 190 MB of files you have
+  seen, and as much again loaded ahead), the newest of each channel first, so
+  going back to a channel is still instant, and past it the oldest are
+  dropped. In a channel of thirty 22 MB videos, a minute after opening it,
+  the app kept about 520 MB of decrypted files instead of 900 MB.
+- **At most four video or audio players are live at once**: every one on
+  screen, then the next ones in the direction you are scrolling, and one that
+  is playing keeps playing. A video waiting for its player already takes the
+  player's space (for MP4, MOV, WebM and MKV files, nearly all of them), so
+  nothing on the page moves as you scroll past videos posted one after
+  another, and a video you paused carries on from where you left it when you
+  come back to it.
+
 ## 0.9.833 — 2026-10-03
 
 Poker and Blackjack in voice calls, like Discord's Activities: start one from the rocket button, everyone in the call sees it and can join or watch.
