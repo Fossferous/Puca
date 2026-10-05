@@ -93,6 +93,85 @@ export function videoMimeFor(name: string, mime: string): string | null {
 }
 
 /**
+ * Audio files the same engines can play, keyed by extension — the fallback
+ * for a ref whose MIME says nothing (or names an audio type this list does
+ * not know). `.opus` is Ogg Opus, which is what every encoder writes under
+ * that name. `.weba` is WebM audio. `.webm` is deliberately NOT here: the
+ * container holds video as often as audio, so an unlabelled `.webm` goes to
+ * the video player (videoMimeFor), which hands an audio-only file over to
+ * the audio player once its metadata shows no picture (MessageContent).
+ * Deliberately absent: amr/3gp (Android's old voice recorder — Chromium
+ * cannot decode AMR), wma, aiff, mid — a guaranteed-broken player is worse
+ * than a chip.
+ */
+const AUDIO_EXT_MIME: Record<string, string> = {
+    mp3: 'audio/mpeg',
+    m4a: 'audio/mp4',
+    aac: 'audio/aac',
+    ogg: 'audio/ogg',
+    oga: 'audio/ogg',
+    opus: 'audio/ogg',
+    wav: 'audio/wav',
+    flac: 'audio/flac',
+    weba: 'audio/webm',
+};
+
+/**
+ * Real audio MIMEs worth a player, each mapped to the ONE standard name the
+ * player is handed: the canonical names plus the aliases platforms actually
+ * report (Windows says `audio/x-m4a` for .m4a and some registries
+ * `audio/mp3`; Android has said `audio/x-wav`). The blob carries the
+ * canonical name, not the alias: Chromium sniffs the bytes either way, but an
+ * engine that picks its decoder from the declared type (Firefox, the
+ * WebKitGTK desktop shell) may not list an alias, and would fall back to the
+ * chip for a file it can play. `.opus` files are Ogg Opus, hence audio/ogg.
+ * An `audio/*` type NOT listed — a playlist (`audio/x-mpegurl`), AMR, MIDI —
+ * gets no player from its MIME alone; the extension may still vouch for it
+ * (below), and the onError fallback catches a file that lied.
+ */
+const PLAYABLE_AUDIO_MIME = new Map<string, string>([
+    ['audio/mpeg', 'audio/mpeg'], ['audio/mp3', 'audio/mpeg'], ['audio/mpeg3', 'audio/mpeg'], ['audio/x-mpeg', 'audio/mpeg'], ['audio/x-mp3', 'audio/mpeg'],
+    ['audio/mp4', 'audio/mp4'], ['audio/x-m4a', 'audio/mp4'], ['audio/m4a', 'audio/mp4'],
+    ['audio/aac', 'audio/aac'], ['audio/x-aac', 'audio/aac'], ['audio/aacp', 'audio/aac'],
+    ['audio/ogg', 'audio/ogg'], ['audio/opus', 'audio/ogg'],
+    ['audio/wav', 'audio/wav'], ['audio/x-wav', 'audio/wav'], ['audio/wave', 'audio/wav'], ['audio/vnd.wave', 'audio/wav'],
+    ['audio/flac', 'audio/flac'], ['audio/x-flac', 'audio/flac'],
+    ['audio/webm', 'audio/webm'],
+]);
+
+/** MIMEs that say nothing about what a file holds: the name decides. */
+const GENERIC_MIME = new Set(['', 'application/octet-stream', 'application/ogg']);
+
+/**
+ * The audio MIME to render `name` under, or null when it gets no player.
+ *
+ * Same shape as videoMimeFor, and the caller asks videoMimeFor FIRST (a real
+ * video/* MIME, or an unlabelled video extension, is a video). Then:
+ *  - a playable audio MIME wins, as its canonical name (parameters dropped:
+ *    Púca Notes records `audio/webm;codecs=opus`; `audio/x-m4a` is audio/mp4);
+ *  - any other audio/* falls back to the extension — an `.mp3` labelled
+ *    `audio/x-mpeg-3` is still an mp3; an `.amr` is still not playable;
+ *  - a MISSING or generic MIME falls back to the extension, which is how refs
+ *    recorded before the upload side inferred audio types, and any browser
+ *    that reports "" for a file, get their player. `application/ogg` counts
+ *    as generic: it is RFC 5334's name for "some Ogg stream", which some
+ *    type registries report for an `.ogg` or `.opus`;
+ *  - a concrete NON-audio type (application/pdf, text/html) is respected:
+ *    that file is not audio wearing a bad label, it is not audio.
+ * Everything returned is a canonical value of PLAYABLE_AUDIO_MIME or
+ * AUDIO_EXT_MIME — never a sender-chosen string — so the blob it types is
+ * always one safeBlobType keeps as plain audio.
+ */
+export function audioMimeFor(name: string, mime: string): string | null {
+    const m = (mime || '').toLowerCase().split(';')[0].trim();
+    const canonical = PLAYABLE_AUDIO_MIME.get(m);
+    if (canonical) return canonical;
+    if (!GENERIC_MIME.has(m) && !m.startsWith('audio/')) return null;
+    const ext = (name || '').toLowerCase().split('.').pop() ?? '';
+    return AUDIO_EXT_MIME[ext] ?? null;
+}
+
+/**
  * `decodeURIComponent` that cannot throw. `URLSearchParams` has ALREADY
  * percent-decoded the value, so the second pass below only ever mattered for a
  * hypothetical double-encoded legacy ref — but it THREW on a lone '%', which
@@ -176,11 +255,12 @@ export async function sealFileForUpload(file: File): Promise<SealedFile> {
     const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce as BufferSource }, key, raw as BufferSource));
     const blob = new Blob([nonce, ct], { type: 'application/octet-stream' });
     // The browser's guess first; when it has none (mkv famously reports ""),
-    // infer video types from the extension so the ref records something the
-    // renderer can embed — old refs without this still get the same fallback
-    // at render time (videoMimeFor).
+    // infer video and audio types from the extension so the ref records
+    // something the renderer can embed — old refs without this still get the
+    // same fallback at render time (videoMimeFor / audioMimeFor).
     const mime = file.type
         || videoMimeFor(file.name || '', '')
+        || audioMimeFor(file.name || '', '')
         || 'application/octet-stream';
     // Strip markdown-breaking chars from the display name (href has the real ref).
     const name = (file.name || 'attachment').replace(/[[\]()\n]/g, '_');
@@ -269,12 +349,88 @@ const blobCache = new Map<string, string>();
  * SVG is excluded deliberately even though it is an image: inside `<img>` it
  * cannot run script, but as a top-level document it can, and the same blob URL
  * is used for both.
+ *
+ * The same reasoning covers every STRUCTURED-SUFFIX type, so a subtype with a
+ * `+` never keeps its type in any family. `image/svg+xml` is the one we know
+ * by name, but whether an engine renders some other `x/y+xml` as an XML
+ * document (where an XHTML-namespace <script> runs) varies by engine, and the
+ * desktop shell is not Chromium everywhere (WebKitGTK on Linux). No image,
+ * video or audio format we play is spelled with a `+`, so refusing all of
+ * them costs nothing. The subtype must be a plain token; anything else — an
+ * empty subtype, a space, a quote — is opaque bytes.
+ *
+ * Audio playlist TYPES (`audio/mpegurl`, `audio/x-mpegurl`, `audio/x-scpls`)
+ * are opaque bytes too, but that is hygiene, not the defence: the type does
+ * NOT decide whether a player treats a file as a playlist. Measured in
+ * headless Edge: HLS playlist bytes in a blob typed audio/mpeg, video/mp4,
+ * audio/x-mpegurl or application/vnd.apple.mpegurl ALL made a preload=metadata
+ * player fetch the segment URL inside, with no click — Chromium recognises
+ * the playlist from its first bytes. What keeps a playlist away from every
+ * player is `isPlaylistBlobUrl` below, which the renderers ask before they
+ * mount a <video> or <audio>.
  */
+const MEDIA_TYPE_RE = /^(image|video|audio)\/[a-z0-9][a-z0-9!#$&^_.-]*$/;
+const AUDIO_PLAYLIST_RE = /^audio\/(x-)?(mpegurl|scpls)$/;
 export function safeBlobType(mime: string): string {
     const m = (mime || '').toLowerCase().split(';')[0].trim();
     if (m === 'image/svg+xml') return 'application/octet-stream';
-    const renderable = m.startsWith('image/') || m.startsWith('video/') || m.startsWith('audio/');
-    return renderable ? m : 'application/octet-stream';
+    if (!MEDIA_TYPE_RE.test(m) || AUDIO_PLAYLIST_RE.test(m)) return 'application/octet-stream';
+    return m;
+}
+
+/**
+ * Does this plaintext open as an HLS playlist (`#EXTM3U`)?
+ *
+ * A playlist is a list of OTHER URLs, and a media element handed one goes
+ * and fetches them: the sender's server learns the reader's IP and the moment
+ * they opened the channel, with no click, past "Load remote images", and the
+ * player then fails to the download chip so nothing on screen shows it.
+ * Engines decide that from the BYTES, not the blob's type (see safeBlobType),
+ * so the only place to stop it is here, while the plaintext is in hand.
+ *
+ * Measured in Edge: `#EXTM3U` at byte 0 plus an `#EXT-X-` tag fetched; a
+ * plain m3u (no `#EXT-X-` tag) did not. This check is deliberately looser,
+ * since a false positive only costs a player on a file that was never audio
+ * or video: any case, after a UTF-8 BOM, whitespace, or ID3v2 tags (media
+ * probes such as FFmpeg's skip an ID3 tag before deciding what a stream is;
+ * not measured for HLS on any engine), and with or without the `#EXT-X-`
+ * tags (a plain m3u is not media either).
+ */
+export function looksLikeHlsPlaylist(bytes: Uint8Array): boolean {
+    let i = 0;
+    for (let guard = 0; guard < 8; guard++) {
+        if (bytes[i] === 0xef && bytes[i + 1] === 0xbb && bytes[i + 2] === 0xbf) i += 3;
+        while (i < bytes.length && (bytes[i] === 0x20 || bytes[i] === 0x09 || bytes[i] === 0x0a || bytes[i] === 0x0d)) i++;
+        // ID3v2: "ID3", version (2), flags (1), size (4 bytes, 7 bits each);
+        // flag 0x10 means a 10-byte footer follows the tag.
+        if (i + 10 <= bytes.length && bytes[i] === 0x49 && bytes[i + 1] === 0x44 && bytes[i + 2] === 0x33) {
+            const size = ((bytes[i + 6] & 0x7f) << 21) | ((bytes[i + 7] & 0x7f) << 14) | ((bytes[i + 8] & 0x7f) << 7) | (bytes[i + 9] & 0x7f);
+            i += 10 + size + ((bytes[i + 5] & 0x10) ? 10 : 0);
+            continue;
+        }
+        break;
+    }
+    const sig = '#extm3u';
+    if (i + sig.length > bytes.length) return false;
+    for (let j = 0; j < sig.length; j++) {
+        const b = bytes[i + j];
+        const lower = b >= 0x41 && b <= 0x5a ? b + 0x20 : b;
+        if (lower !== sig.charCodeAt(j)) return false;
+    }
+    return true;
+}
+
+/** Blob URLs (from decryptToBlobUrl) whose plaintext is a playlist. */
+const playlistUrls = new Set<string>();
+
+/**
+ * Is `url` a decrypted attachment that must never be handed to a media
+ * element? Every renderer that would mount a <video> or <audio> for an
+ * attachment asks this first and shows the download button instead
+ * (MessageContent's EncryptedAttachment, TaskAttachments, NoteImages).
+ */
+export function isPlaylistBlobUrl(url: string | null | undefined): boolean {
+    return !!url && playlistUrls.has(url);
 }
 
 /** Concurrent mounts of the same attachment share one fetch+decrypt — a row
@@ -307,7 +463,11 @@ export async function decryptToBlobUrl(id: string, keyB64url: string, mime: stri
         const ct = buf.slice(12);
         const key = await crypto.subtle.importKey('raw', fromB64url(keyB64url) as BufferSource, 'AES-GCM', false, ['decrypt']);
         const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce as BufferSource }, key, ct as BufferSource);
-        const url = URL.createObjectURL(new Blob([pt], { type: safeBlobType(mime) }));
+        // A playlist is not media, whatever the ref says: opaque bytes, and
+        // flagged so no renderer gives it a player (looksLikeHlsPlaylist).
+        const playlist = looksLikeHlsPlaylist(new Uint8Array(pt));
+        const url = URL.createObjectURL(new Blob([pt], { type: playlist ? 'application/octet-stream' : safeBlobType(mime) }));
+        if (playlist) playlistUrls.add(url);
         blobCache.set(cacheKey, url);
         return url;
     })();
@@ -327,4 +487,5 @@ export function clearBlobCache(): void {
         URL.revokeObjectURL(url);
     }
     blobCache.clear();
+    playlistUrls.clear();
 }

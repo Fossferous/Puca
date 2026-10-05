@@ -6,7 +6,9 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { MessagePreview } from '../components/MessagePreview';
+import { MusicIcon, PaperclipIcon } from '../components/Icons';
 
 const KEY = 'y8PY2ErUIKyijmVzroOm6CWv9rqH0iHqDybKo1r3Gi8';
 let root: Root | null = null;
@@ -49,6 +51,16 @@ describe('<MessagePreview>', () => {
             expect(icon?.querySelector('svg')).not.toBeNull();
         }
         expect(el.textContent?.startsWith('hi ')).toBe(true);
+    });
+
+    it('an audio file shows the music note (the icon on its player card); another file the paperclip', () => {
+        const el = render(`[song.mp3](sovereign-enc:4?k=${KEY}&m=audio%2Fmpeg) [report.pdf](sovereign-enc:2?k=${KEY}&m=application%2Fpdf)`);
+        const chips = Array.from(el.querySelectorAll('.msg-preview-att'));
+        expect(chips.map(c => c.className)).toEqual(['msg-preview-att msg-preview-att-audio', 'msg-preview-att msg-preview-att-file']);
+        const drawn = (c: Element) => c.querySelector('.msg-preview-att-icon svg')!.outerHTML;
+        expect(drawn(chips[0])).toBe(renderToStaticMarkup(<MusicIcon />));
+        expect(drawn(chips[1])).toBe(renderToStaticMarkup(<PaperclipIcon />));
+        expect(chips[0].getAttribute('title')).toBe('Audio: song.mp3');
     });
 
     it('plain text renders as just that text (negative control)', () => {

@@ -1012,6 +1012,23 @@ button.message-attachment.error { color: #ffb4b4; }
 .attachment-saved { opacity: 0.75; font-size: 12px; }
 .message-attachment.loading { opacity: 0.7; }
 .message-attachment.failed { color: #ffb4b4; }
+/* The chip above is drawn for dark backgrounds (light text on a white wash),
+   which on the light theme is light-grey text on white — the file's name
+   all but disappears, under every player and on its own. The light theme
+   gets the same chip in dark ink. */
+[data-theme="light"] .message-attachment {
+    background: rgba(0, 0, 0, 0.06);
+    color: var(--text-normal);
+}
+[data-theme="light"] a.message-attachment:hover,
+[data-theme="light"] button.message-attachment:hover { background: rgba(0, 0, 0, 0.1); }
+[data-theme="light"] button.message-attachment.saved { color: #1e7a34; }
+[data-theme="light"] button.message-attachment.error,
+[data-theme="light"] .message-attachment.failed { color: #b42318; }
+[data-theme="light"] .attachment-retry {
+    border-color: rgba(0, 0, 0, 0.2);
+    color: var(--text-normal);
+}
 .attachment-retry {
     margin-left: 6px;
     padding: 1px 8px;
@@ -1089,6 +1106,70 @@ button.message-attachment.error { color: #ffb4b4; }
     margin-top: 4px;
 }
 
+/* Inline audio attachments: a card with the file's name over the native
+   player (there is no picture to say which file it is), the save chip under
+   it like the video's. Same 400px cap, and never wider than the column, so it
+   fits a 390px phone. Theme tokens only, so all eight themes and high
+   contrast restyle it. */
+.message-audio {
+    display: block;
+    margin-top: 8px;
+    width: 100%;
+    max-width: min(400px, 100%);
+}
+
+.message-audio-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 10px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    min-width: 0;
+}
+
+.message-audio-name {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    font-size: 13px;
+    color: var(--text-normal);
+}
+
+.message-audio-name svg {
+    flex: 0 0 auto;
+    width: 16px;
+    height: 16px;
+    color: var(--text-muted);
+}
+
+/* A long file name wraps rather than widening the card past the column. */
+.message-audio-title {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+/* Under a VIDEO file's name when it plays as sound only (no picture this
+   device can show): says so, in the muted ink every theme defines. */
+.message-audio-note {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+/* The native controls keep their own height (54px in Chromium and Android
+   WebView — a comfortable touch target); only the width is ours. */
+.message-audio audio {
+    display: block;
+    width: 100%;
+    min-width: 0;
+}
+
+.message-audio .message-attachment {
+    margin-top: 4px;
+}
+
 /* ==== Spoilered media ====
    Text spoilers hide by painting the glyphs out (color: transparent below);
    an embedded image or video needs a REAL cover — before this, media inside
@@ -1098,18 +1179,21 @@ button.message-attachment.error { color: #ffb4b4; }
 /* An unrevealed spoiler must reveal on first click, not zoom the image or
    scrub the video — media must not see the tap at all. */
 .spoiler:not(.revealed) .message-image,
-.spoiler:not(.revealed) .message-video {
+.spoiler:not(.revealed) .message-video,
+.spoiler:not(.revealed) .message-audio {
     pointer-events: none;
 }
 
-/* The cover: blur + dim. For video the whole block (the download chip's
-   filename can be a spoiler too); for images the IMG itself — the
+/* The cover: blur + dim. For video and audio the whole block (the
+   download chip's filename can be a spoiler too, and an audio card's title
+   is that filename); for images the IMG itself — the
    .message-image span is a non-replaced inline, which CSS Transforms
    silently refuses to transform, so the anti-fringe scale must sit on the
    replaced element. The slight scale hides the transparent fringe a blur
    leaves at its own edges; the spoiler's overflow:hidden (below) crops it. */
 .spoiler:not(.revealed) .message-image img,
-.spoiler:not(.revealed) .message-video {
+.spoiler:not(.revealed) .message-video,
+.spoiler:not(.revealed) .message-audio {
     filter: blur(32px) brightness(0.6);
     transform: scale(1.08);
 }
@@ -1124,7 +1208,7 @@ button.message-attachment.error { color: #ffb4b4; }
      (same as the block treatment everywhere else); vertical-align keeps
      the overflow:hidden inline-block from adopting its odd bottom-edge
      baseline against surrounding text. */
-.spoiler:has(.message-image, .message-video) {
+.spoiler:has(.message-image, .message-video, .message-audio) {
     display: inline-block;
     position: relative;
     overflow: hidden;
@@ -1136,9 +1220,18 @@ button.message-attachment.error { color: #ffb4b4; }
     vertical-align: bottom;
 }
 
+/* An audio card has no picture to give the shrink-to-fit box above a size
+   (its player is width:100% of whatever it is given), so inside an
+   inline-block spoiler it collapsed to the pill's 112px and the player lost
+   its time and timeline. A spoiler holding one takes the card's own width. */
+.spoiler:has(.message-audio) {
+    display: block;
+    width: min(400px, 100%);
+}
+
 /* The always-visible label (design §5: no hover-gated affordance). Plain
    text, not a glyph — the icon gate stays clean. */
-.spoiler:has(.message-image, .message-video):not(.revealed)::after {
+.spoiler:has(.message-image, .message-video, .message-audio):not(.revealed)::after {
     content: 'SPOILER';
     position: absolute;
     top: 50%;
