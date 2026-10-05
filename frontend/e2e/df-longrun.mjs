@@ -27,7 +27,9 @@ const LONG_S = Number(process.env.DF_LONG_S || 150);
 const WINDOW_S = 10;
 const SPEECH_WAV = fileURLToPath(new URL('./assets/df-test-speech.wav', import.meta.url));
 
-const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
+// Headless and MUTED: the meter is connected to ctx.destination, and nothing
+// this rig does may ever be audible on the machine running it.
+const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required', '--mute-audio'] });
 const page = await browser.newPage();
 page.on('pageerror', (e) => console.log('  [page exception]', String(e).slice(0, 160)));
 page.on('console', (m) => { if (m.type() === 'error') console.log('  [page err]', m.text().slice(0, 160)); });

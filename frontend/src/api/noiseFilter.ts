@@ -33,6 +33,7 @@ import { DEFAULT_TUNING, POST_FILTER_BETA, type DfTuning } from './dfTuning';
 import { inputGain, loadSettings, isDeveloperMode } from '../components/settingsStore';
 import { saveAttachment } from './saveAttachment';
 import { createRnnoiseNode } from './rnnoiseNode';
+import type { DfPauseReason } from './dfPauseDecision';
 
 export type NoiseSuppressionMode = 'off' | 'standard' | 'rnnoise' | 'deepfilter';
 
@@ -42,8 +43,13 @@ let currentMode: NoiseSuppressionMode = 'standard';
 let audioContext: AudioContext | null = null;
 let sourceNode: MediaStreamAudioSourceNode | null = null;
 // AudioWorkletNode for RNNoise, ScriptProcessorNode for DeepFilter — both are
-// AudioNodes; the optional destroy() releases mode-specific resources.
-let workletNode: (AudioNode & { destroy?: () => void }) | null = null;
+// AudioNodes; the optional destroy() releases mode-specific resources, and a
+// DeepFilter graph's setPaused() pauses its model (deepFilter.ts).
+type SuppressorNode = AudioNode & {
+    destroy?: () => void;
+    setPaused?: (paused: boolean, reason: DfPauseReason | null) => void;
+};
+let workletNode: SuppressorNode | null = null;
 let destinationNode: MediaStreamAudioDestinationNode | null = null;
 // The mic gain stage (Input Volume × Manual Gain). Kept at module level so a
 // slider change in Settings can adjust a live call without rebuilding the
@@ -57,6 +63,27 @@ let rawInputStream: MediaStream | null = null;
 // the wasm loaded) detects staleness and releases itself instead of
 // resurrecting module state — which left a hot mic running after the call.
 let graphGeneration = 0;
+
+/**
+ * What dfPause.ts last asked of the call's DeepFilter: paused while nobody can
+ * hear the mic (dfPauseDecision.ts). Kept here, not only on the graph, because
+ * the call's graph is rebuilt under it (a device change, a mode switch, the
+ * audio watchdog) and each new DeepFilter graph must start in the state the
+ * call is in. The Settings mic test builds a private graph and is never paused.
+ */
+let dfPauseWanted: { paused: boolean; reason: DfPauseReason | null } = { paused: false, reason: null };
+
+export function setDeepFilterPaused(paused: boolean, reason: DfPauseReason | null): void {
+    dfPauseWanted = { paused, reason };
+    workletNode?.setPaused?.(paused, reason);
+}
+
+/** dfPause.ts's own diagnostics (what the conditions say, and what deciding
+ *  costs), registered by it so this module need not import it. */
+let dfPauseDiagSource: (() => Record<string, unknown>) | null = null;
+export function setDfPauseDiagnosticsSource(fn: () => Record<string, unknown>): void {
+    dfPauseDiagSource = fn;
+}
 
 /** Whether the Advanced → Experimental DeepFilterNet gate is on. */
 export function isDeepFilterGateOpen(): boolean {
@@ -207,7 +234,7 @@ function buildOutput(dest: MediaStreamAudioDestinationNode, input: MediaStream):
 /** The nodes of a suppressor graph: source → worklet → gain → destination. */
 type SuppressorNodes = {
     source: MediaStreamAudioSourceNode;
-    worklet: AudioNode & { destroy?: () => void };
+    worklet: SuppressorNode;
     gain: GainNode;
     destination: MediaStreamAudioDestinationNode;
 };
@@ -460,7 +487,7 @@ function watchGraphLiveness(ctx: AudioContext, input: AudioNode, output: AudioNo
 
 /** Detached snapshot of a live graph (see processAudioStream's swap order). */
 type GraphSnapshot = {
-    worklet: (AudioNode & { destroy?: () => void }) | null;
+    worklet: SuppressorNode | null;
     source: MediaStreamAudioSourceNode | null;
     context: AudioContext | null;
     rawInput: MediaStream | null;
@@ -552,6 +579,8 @@ export async function processAudioStream(inputStream: MediaStream): Promise<Medi
                 workletNode = result.worklet;
                 micGainNode = result.gain;
                 destinationNode = result.destination;
+                // A rebuild mid-call starts in the call's pause state.
+                result.worklet.setPaused?.(dfPauseWanted.paused, dfPauseWanted.reason);
                 // Same watchdogs as RNNoise: prove the graph PROCESSES (the
                 // worklet emits its raw delay line while broken, which is
                 // audible-but-unsuppressed rather than silent — the dedicated
@@ -749,7 +778,7 @@ export function noiseDiagnostics(): Record<string, unknown> {
         deepFilterGateOpen: isDeepFilterGateOpen(),
         // Pipeline telemetry (hop counts, dry ratio, inference timings) — only
         // meaningful while a DeepFilter graph is (or recently was) live.
-        ...(currentMode === 'deepfilter' ? { deepFilter: deepFilterDiagnostics() } : {}),
+        ...(currentMode === 'deepfilter' ? { deepFilter: deepFilterDiagnostics(), dfPause: dfPauseDiagSource?.() ?? null } : {}),
     };
 }
 

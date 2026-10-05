@@ -435,6 +435,22 @@ export class SfuManager {
         return this.room?.state === ConnectionState.Connected;
     }
 
+    /** Listeners told whenever who is in the room, or whether we are
+     *  connected to it, may have changed (dfPause.ts: a participant can hear
+     *  us from the moment they connect; a reconnecting room is unknown). */
+    private participantsListeners = new Set<() => void>();
+
+    /** Hear participants connect and leave, and the room connect, reconnect
+     *  or drop. Returns the unsubscribe. */
+    onParticipantsChanged(fn: () => void): () => void {
+        this.participantsListeners.add(fn);
+        return () => { this.participantsListeners.delete(fn); };
+    }
+
+    private participantsChanged(): void {
+        this.participantsListeners.forEach(fn => { try { fn(); } catch (e) { console.warn('[sfu] participants listener failed:', e); } });
+    }
+
     /**
      * Join the channel's SFU room. `micTrack` is the mesh-acquired mic track
      * (same noise-suppression pipeline); publishing the SAME track means the
@@ -654,6 +670,9 @@ export class SfuManager {
         this.cryptorEnabled.clear();
         this.encryptionErrorAt.clear();
         this.keyProvider = null;
+        // The room is gone (its listeners are removed below, so its own
+        // ConnectionStateChanged never reaches us).
+        if (room) this.participantsChanged();
         if (room) {
             room.removeAllListeners();
             await room.disconnect();
@@ -942,6 +961,20 @@ export class SfuManager {
             if (uid !== null) out.add(uid);
         }
         return [...out];
+    }
+
+    /** Each remote participant as [user id, identity]. The identity
+     *  (`u<id>#<nonce>`) is minted per token request - once per join - so a
+     *  new one for the same user is a new device or a rejoin (dfPause.ts);
+     *  LiveKit's own reconnects reuse the token, and keep it. */
+    participantSessions(): Array<[number, string]> {
+        if (!this.room) return [];
+        const out: Array<[number, string]> = [];
+        for (const p of this.room.remoteParticipants.values()) {
+            const uid = userIdFromIdentity(p.identity);
+            if (uid !== null) out.push([uid, `sfu:${p.identity}`]);
+        }
+        return out;
     }
 
     /** Whether the user still has a live CAMERA publication in the LiveKit
@@ -1458,7 +1491,12 @@ export class SfuManager {
             // (or rebuilds the session) must re-reconcile subscriptions.
             .on(RoomEvent.TrackPublished, () => this.syncSubscriptions())
             .on(RoomEvent.ParticipantConnected, () => this.syncSubscriptions())
-            .on(RoomEvent.Reconnected, () => this.syncSubscriptions());
+            .on(RoomEvent.Reconnected, () => this.syncSubscriptions())
+            // Who can hear us (dfPause.ts). ConnectionStateChanged covers the
+            // connect, every reconnect and the drop.
+            .on(RoomEvent.ParticipantConnected, () => this.participantsChanged())
+            .on(RoomEvent.ParticipantDisconnected, () => this.participantsChanged())
+            .on(RoomEvent.ConnectionStateChanged, () => this.participantsChanged());
     }
 
     private handleTrackSubscribed(

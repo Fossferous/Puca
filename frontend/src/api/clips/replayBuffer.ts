@@ -218,7 +218,12 @@ function buildMicSource(s: Session): void {
     const track = webrtcManager.getLocalStreamSync()?.getAudioTracks()[0];
     if (!track || track.readyState !== 'live') { emit({ hasMic: false }); return; }
     // A source over the SAME track (not a clone): a muted mic (track.enabled=false)
-    // yields silence here too, so the clip respects mute automatically.
+    // yields silence here too, so the clip respects mute automatically. It is
+    // also whatever the noise graph emits: while DeepFilter is paused because
+    // nobody else can hear the mic (alone, or everyone else deafened:
+    // api/dfPause.ts), that is its RNNoise bridge, so the clip's mic is
+    // RNNoise-quality for those stretches. Accepted on purpose (docs/CLIPS.md,
+    // "What is NOT guaranteed").
     s.micSrc = s.ctx.createMediaStreamSource(new MediaStream([track]));
     if (!s.micGain) { s.micGain = s.ctx.createGain(); s.micGain.connect(s.dest); }
     s.micGain.gain.value = Math.max(0, Math.min(2, (loadSettings().clipMicGain ?? 100) / 100));

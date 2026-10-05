@@ -35,8 +35,37 @@ export interface VoiceUserStatus {
      *  only by the in-call VoicePanel; observers outside the call have no
      *  transport state to judge this by, so they never set it. */
     connecting?: boolean;
+    /** When their last __VOICE_STATUS__ ping was applied, as a sequence number
+     *  (applyVoiceStatus; higher = later, across every member and room).
+     *  undefined = none heard on this row. dfPause.ts reads it: a deafen that
+     *  was stated BEFORE their current media session began (Move here to
+     *  another device, a reload) describes the old session, not this one. */
+    statusSeq?: number;
 }
 export const globalVoiceUsers = new Map<string, Map<number, VoiceUserStatus>>(); // roomId -> Map of userId -> status
+
+let lastStatusSeq = 0;
+
+/**
+ * Apply a member's __VOICE_STATUS__ ping (mute / deafen / clip buffer armed)
+ * to their roster row, stamping when it arrived (`statusSeq`). The ONE writer
+ * of a status that came from the member themself. Returns false, changing
+ * nothing, when they have no row in this room. Does NOT notify: the caller
+ * refreshes, as every roster writer here does.
+ */
+export function applyVoiceStatus(
+    roomId: string,
+    userId: number,
+    status: { muted: boolean; deafened: boolean; buffering: boolean },
+): boolean {
+    const user = globalVoiceUsers.get(roomId)?.get(userId);
+    if (!user) return false;
+    user.isMuted = status.muted;
+    user.isDeafened = status.deafened;
+    user.isBuffering = status.buffering;
+    user.statusSeq = ++lastStatusSeq;
+    return true;
+}
 
 /**
  * Add-or-refresh a roster entry WITHOUT losing what we already know about it.
@@ -74,6 +103,7 @@ export function upsertVoiceUser(
         isBuffering: prev?.isBuffering ?? fallback?.isBuffering ?? false,
         avatarFileId: user.avatarFileId ?? prev?.avatarFileId,
         connecting: prev?.connecting,
+        statusSeq: prev?.statusSeq,
     };
     roomUsers.set(user.id, next);
     return next;

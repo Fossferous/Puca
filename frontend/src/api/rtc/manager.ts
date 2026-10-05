@@ -55,9 +55,45 @@ function newConnId(): string {
         : `${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
 }
 
+/**
+ * The mesh peers map, announcing every change: a peer added or removed, or a
+ * connection replaced by a different one under the same id (a new SESSION:
+ * their deafen status may belong to the old one - dfPause.ts). dfPause.ts
+ * must hear the moment a media connection to someone appears - they can hear
+ * us from then on - or goes. A subclass rather than a call at each
+ * set/delete, so a future one cannot forget it.
+ */
+class PeerMap extends Map<UserId, PeerConnection> {
+    private readonly changed: () => void;
+    constructor(changed: () => void) {
+        super();
+        this.changed = changed;
+    }
+    override set(userId: UserId, peer: PeerConnection): this {
+        const changed = this.get(userId) !== peer;
+        super.set(userId, peer);
+        if (changed) this.changed();
+        return this;
+    }
+    override delete(userId: UserId): boolean {
+        const removed = super.delete(userId);
+        if (removed) this.changed();
+        return removed;
+    }
+    override clear(): void {
+        const had = this.size > 0;
+        super.clear();
+        if (had) this.changed();
+    }
+}
+
 export class WebRTCManager {
     public media: MediaManager;
-    private peers: Map<UserId, PeerConnection> = new Map();
+    private peersListeners = new Set<() => void>();
+    private micGateListeners = new Set<(open: boolean) => void>();
+    private peers: PeerMap = new PeerMap(() => {
+        this.peersListeners.forEach(fn => { try { fn(); } catch (e) { console.warn('[WebRTC] peers listener failed:', e); } });
+    });
     // In-flight peer builds, keyed by userId. getOrCreatePeer awaits the ICE
     // config (a real async gap) BEFORE it inserts into `peers`, so two callers
     // for the same user (a callUser racing an incoming offer, or doubled
@@ -472,6 +508,34 @@ export class WebRTCManager {
         this.media.getLocalStreamSync()?.getAudioTracks().forEach(track => {
             track.enabled = enabled;
         });
+        // Every path that gates the mic (mute, push-to-talk, push-to-mute,
+        // deafen, an AFK channel) comes through here: dfPause.ts listens.
+        this.micGateListeners.forEach(fn => { try { fn(enabled); } catch (e) { console.warn('[WebRTC] mic-gate listener failed:', e); } });
+    }
+
+    /** Hear every mic-gate change (setAudioEnabled). Returns the unsubscribe. */
+    onMicGateChange(fn: (open: boolean) => void): () => void {
+        this.micGateListeners.add(fn);
+        return () => { this.micGateListeners.delete(fn); };
+    }
+
+    /** User ids with a mesh peer connection right now, in any state: each
+     *  one is someone our mic reaches, or is about to. */
+    peerUserIds(): UserId[] {
+        return [...this.peers.keys()];
+    }
+
+    /** Each mesh peer connection as [user id, its connId]: a connId is new
+     *  for every connection, so a different one for the same user is a new
+     *  session of theirs (dfPause.ts). */
+    peerSessions(): Array<[UserId, string]> {
+        return [...this.peers].map(([userId, peer]) => [userId, `mesh:${peer.connId}`]);
+    }
+
+    /** Hear a mesh peer connection appear or go. Returns the unsubscribe. */
+    onPeersChanged(fn: () => void): () => void {
+        this.peersListeners.add(fn);
+        return () => { this.peersListeners.delete(fn); };
     }
 
     setVideoEnabled(enabled: boolean) {

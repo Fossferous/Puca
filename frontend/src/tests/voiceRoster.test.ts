@@ -11,7 +11,7 @@
  * those handlers now goes through this helper.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { globalVoiceUsers, upsertVoiceUser } from '../components/voiceState';
+import { globalVoiceUsers, upsertVoiceUser, applyVoiceStatus } from '../components/voiceState';
 
 const ROOM = 'voice_1';
 
@@ -107,5 +107,59 @@ describe('upsertVoiceUser', () => {
 
         expect(globalVoiceUsers.get(ROOM)!.get(1)).toMatchObject({ isMuted: true, isDeafened: true });
         expect(globalVoiceUsers.get(ROOM)!.size).toBe(2);
+    });
+});
+
+/**
+ * applyVoiceStatus - a member's own __VOICE_STATUS__ ping onto their row,
+ * stamped with when it arrived. dfPause.ts trusts a deafen only when that
+ * stamp is newer than the member's current media session, so the stamp must
+ * move on every ping, survive a StreamStarted replay, and never appear on a
+ * row nobody stated anything for.
+ */
+describe('applyVoiceStatus', () => {
+    beforeEach(() => {
+        globalVoiceUsers.clear();
+    });
+
+    it('writes the three flags and stamps a later sequence number on every ping', () => {
+        globalVoiceUsers.set(ROOM, new Map([[7, { id: 7, username: 'bob', isMuted: false, isDeafened: false }]]));
+        expect(globalVoiceUsers.get(ROOM)!.get(7)!.statusSeq).toBeUndefined();
+        expect(applyVoiceStatus(ROOM, 7, { muted: true, deafened: true, buffering: true })).toBe(true);
+        const first = globalVoiceUsers.get(ROOM)!.get(7)!;
+        expect(first).toMatchObject({ isMuted: true, isDeafened: true, isBuffering: true });
+        const seq1 = first.statusSeq!;
+        expect(typeof seq1).toBe('number');
+        applyVoiceStatus(ROOM, 7, { muted: true, deafened: true, buffering: true }); // the same flags again
+        expect(globalVoiceUsers.get(ROOM)!.get(7)!.statusSeq!).toBeGreaterThan(seq1);
+    });
+
+    it('the stamp is ordered across members: a later ping for anyone is a larger number', () => {
+        globalVoiceUsers.set(ROOM, new Map([
+            [7, { id: 7, username: 'bob', isMuted: false, isDeafened: false }],
+            [8, { id: 8, username: 'cai', isMuted: false, isDeafened: false }],
+        ]));
+        applyVoiceStatus(ROOM, 7, { muted: false, deafened: true, buffering: false });
+        applyVoiceStatus(ROOM, 8, { muted: false, deafened: true, buffering: false });
+        const room = globalVoiceUsers.get(ROOM)!;
+        expect(room.get(8)!.statusSeq!).toBeGreaterThan(room.get(7)!.statusSeq!);
+    });
+
+    it('no row: nothing is created and it says so', () => {
+        expect(applyVoiceStatus(ROOM, 7, { muted: true, deafened: true, buffering: false })).toBe(false);
+        expect(globalVoiceUsers.has(ROOM)).toBe(false);
+        globalVoiceUsers.set(ROOM, new Map());
+        expect(applyVoiceStatus(ROOM, 7, { muted: true, deafened: true, buffering: false })).toBe(false);
+        expect(globalVoiceUsers.get(ROOM)!.size).toBe(0);
+    });
+
+    it('a StreamStarted replay keeps the stamp with the status it belongs to', () => {
+        globalVoiceUsers.set(ROOM, new Map([[7, { id: 7, username: 'bob', isMuted: false, isDeafened: false }]]));
+        applyVoiceStatus(ROOM, 7, { muted: false, deafened: true, buffering: false });
+        const seq = globalVoiceUsers.get(ROOM)!.get(7)!.statusSeq;
+        upsertVoiceUser(ROOM, { id: 7, username: 'bob' });
+        expect(globalVoiceUsers.get(ROOM)!.get(7)).toMatchObject({ isDeafened: true, statusSeq: seq });
+        // positive control: a brand-new row has no stamp
+        expect(upsertVoiceUser(ROOM, { id: 9, username: 'dee' }).statusSeq).toBeUndefined();
     });
 });

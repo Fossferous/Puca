@@ -335,6 +335,67 @@ describe('sampling', () => {
     });
 });
 
+/**
+ * DeepFilter PAUSED while nobody could hear the mic (dfPause.ts, 2026-10-04).
+ * The df ms figures stop moving while it is paused (a sleeping Worker reports
+ * nothing), so the line must say how much of the minute was paused and why,
+ * or a quiet minute reads like a frozen pipeline.
+ */
+describe('DeepFilter paused', () => {
+    const withPause = (pause: Record<string, unknown> | null) => voiceDiagnostics.mockResolvedValue({
+        remoteRtp: [],
+        noise: { mode: 'deepfilter', contextState: 'running', deepFilter: { worker: { avgMs: 2.3, maxMs: 2.9, overBudgetHops: 0 }, worklet: { dryDelta: 0, flipsDelta: 0, overloaded: false }, pause } },
+    });
+
+    it('says how many seconds of THIS minute were paused, and the reason while it still is', async () => {
+        withPause({ paused: true, reason: 'alone', pausedMs: 42_000 });
+        expect(await sampleHealth()).toContain('flips0 paused42s/alone');
+        withPause({ paused: true, reason: 'alone', pausedMs: 102_000 });
+        expect(await sampleHealth()).toContain('paused60s/alone'); // not 102
+        withPause({ paused: false, reason: null, pausedMs: 110_400 });
+        const line = await sampleHealth();
+        expect(line).toContain('paused8s');
+        expect(line).not.toContain('paused8s/');
+    });
+
+    it('a minute without a pause reads exactly as before pausing existed', async () => {
+        withPause({ paused: false, reason: null, pausedMs: 0 });
+        const line = await sampleHealth();
+        expect(line).toContain('nz=deepfilter/running df2.3ms/2.9ms over0 dry0 flips0 ');
+        expect(line).not.toContain('paused');
+        // ...and a graph that never reports pause state at all (RNNoise, old shapes).
+        withPause(null);
+        expect(await sampleHealth()).not.toContain('paused');
+    });
+
+    it('a rebuilt graph (its count restarts at 0) is not a negative minute', async () => {
+        withPause({ paused: false, reason: null, pausedMs: 50_000 });
+        await sampleHealth();
+        withPause({ paused: true, reason: 'mic-closed', pausedMs: 7_000 });
+        expect(await sampleHealth()).toContain('paused7s/mic-closed');
+    });
+
+    it('a graph rebuilt BETWEEN two lines counts from its own 0, even once it passes the old total', async () => {
+        // Review finding 2026-10-04: 5 s paused on the old graph at the last
+        // line, then a device switch rebuilt it and the new one paused 50 s
+        // before the next. Only a count going DOWN used to reveal a rebuild,
+        // so this read 50 - 5 = 45 s.
+        withPause({ paused: false, reason: null, pausedMs: 5_000, graph: 1 });
+        await sampleHealth();
+        withPause({ paused: true, reason: 'alone', pausedMs: 50_000, graph: 2 });
+        expect(await sampleHealth()).toContain('paused50s/alone');
+        // positive control: the SAME graph a minute on counts only that minute
+        withPause({ paused: true, reason: 'alone', pausedMs: 110_000, graph: 2 });
+        expect(await sampleHealth()).toContain('paused60s/alone');
+    });
+
+    it('formats from the input alone', () => {
+        const noise = { mode: 'deepfilter', context: 'running', dfAvgMs: 2.3, dfMaxMs: 2.9, overBudget: 0, dry: 0, flips: 0, overloaded: false };
+        expect(formatHealthLine({ ...base, noise: { ...noise, pausedS: 0, pauseReason: 'mic-closed' } })).toContain('paused0s/mic-closed');
+        expect(formatHealthLine({ ...base, noise: { ...noise, pausedS: 0, pauseReason: null } })).not.toContain('paused');
+    });
+});
+
 describe('lifecycle', () => {
     const lines = () => invoke.mock.calls.filter(c => c[0] === 'log_stream_diag').map(c => String((c[1] as { line: string }).line));
 
