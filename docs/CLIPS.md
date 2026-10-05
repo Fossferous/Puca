@@ -85,7 +85,10 @@ its infinite GOP; the clip path does not). See "Arm automatically" below.
   twice the clip's bitrate; on a slower one the player holds the start until
   the throughput it measures says the first ~40 s will not stall (the
   start-up gate, `startBytesNeeded` in `clipPlayback.ts`), never longer than
-  one flat 24 MiB part would have taken. Measured on a 12 Mbit/s link with a
+  one full 24 MiB part takes (a clip that IS cut flat has a first part up to
+  one 2 s fragment under that, so on such a link it can also wait for up to
+  one fragment of its second part — ~0.8 MB at 1440p — and the stall that
+  follows anyway is that much shorter). Measured on a 12 Mbit/s link with a
   1440p clip (8.9 Mbit/s): starting on part 1 alone froze at 0:02, 0:06,
   0:14 and 0:30; gated, it starts after ~8.4 s and plays straight through
   (the same footage cut flat: 16.7 s). A clip the ramp would push
@@ -590,7 +593,15 @@ the proposal id as its `clip_id`; the post carries `clip_id` and renders the
 server's `clip_consent`. `ClipAttachment` plays a posted clip in place (MSE,
 decrypted in the viewer's browser; the part the playhead waits for is fetched
 alone, the next one only once it is in, playback starts once the start-up
-gate is met, and the plate counts the MB it is waiting for) and offers Download (the original bytes, any viewer — see
+gate is met, and the plate counts the MB it is waiting for — with no total
+until the player has measured the link, about a second in, and a bar that
+only moves forwards unless a scrub before the first play starts the load
+over; the player keeps the decrypted parts of its window and the clip's
+first part, not every part it has played or scrubbed past; and an eviction
+never leaves an audio-only remnant in the SourceBuffer — Chromium charged
+the whole next part to that remnant's audio track and refused it, so a seek
+~11 s past the buffered end used to stop the clip for good; a quota error
+with nothing playable buffered clears any remnant once and retries) and offers Download (the original bytes, any viewer — see
 "guaranteed"; the button counts the percent received, then says Saving),
 and shows the badge only when the manifest's
 parts are a SUBSET of the stamped ids — mismatch refuses playback AND

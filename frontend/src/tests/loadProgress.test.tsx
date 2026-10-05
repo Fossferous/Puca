@@ -65,6 +65,14 @@ describe('the readouts', () => {
         expect(playLoadPercent({ loaded: 6 * MIB, needed: 24 * MIB })).toBe(25);
         expect(playLoadPercent({ loaded: 30, needed: 20 })).toBe(100);
     });
+    it('claims no total, and no percent, until the player knows what it is waiting for', () => {
+        // The player reports needed: null until it has measured the link
+        // (clipPlayback.ts): a total guessed before that was the first ramp
+        // part alone, and the real one replaced it 6x larger.
+        expect(playLoadText({ loaded: 1.4 * MIB, needed: null })).toBe('Loading 1.4 MB');
+        expect(playLoadPercent({ loaded: 1.4 * MIB, needed: null })).toBeNull();
+        expect(playLoadPercent(null)).toBeNull();
+    });
     it('the download counts percent of the clip, never 100 before it is saved, then "saving"', () => {
         const p = (bytesDone: number, done = 0) => ({ done, total: 7, bytesDone, totalBytes: 1000 });
         expect(downloadPercent(null)).toBe(0);
@@ -122,6 +130,78 @@ describe('the clip plate while a Play loads', () => {
         await act(async () => { player.release!(); });
         await settle();
         expect(container.querySelector('.clip-attachment-overlay')).toBeNull(); // playing: the readout is gone
+    });
+
+    it('the bar never moves backwards: indeterminate until there is a total, then only forwards', async () => {
+        const s = newClipSecrets('0000abcd-0000-4000-8000-0000000000ac');
+        const href = encodeClipRef({
+            key: s.key, noncePrefix: s.noncePrefix, clipId: '0000abcd-0000-4000-8000-0000000000ac', videoCodec: 'avc1.640029', audioCodec: 'mp4a.40.2',
+            durationMs: 120_000, width: 2560, height: 1440, totalCipherBytes: 129 * MIB,
+            parts: ['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000002'], partDurMs: [0, 120_000],
+        });
+        await act(async () => { root.render(<ClipAttachment href={href} />); });
+        await act(async () => { (container.querySelector('.clip-attachment-play') as HTMLButtonElement).click(); });
+        await settle();
+        const overlay = () => container.querySelector('.clip-attachment-overlay')?.textContent ?? '';
+        const bar = () => container.querySelector('.clip-attachment-progress[role="progressbar"]')!;
+        const fill = () => (container.querySelector('.clip-attachment-progress-fill') as HTMLElement).style.width;
+        // Nothing measured yet: the MB move, the bar claims no value.
+        expect(bar().hasAttribute('aria-valuenow')).toBe(false);
+        await act(async () => { player.onLoadProgress!({ loaded: 1.4 * MIB, needed: null }); });
+        expect(overlay()).toBe('Loading 1.4 MB');
+        expect(bar().hasAttribute('aria-valuenow')).toBe(false);
+        expect(fill()).toBe('0%');
+        await act(async () => { player.onLoadProgress!({ loaded: 6 * MIB, needed: 24 * MIB }); });
+        expect(bar().getAttribute('aria-valuenow')).toBe('25');
+        // The link slowed and the wait grew: the words say so, the bar holds.
+        await act(async () => { player.onLoadProgress!({ loaded: 7 * MIB, needed: 40 * MIB }); });
+        expect(overlay()).toBe('Loading 7.0 / 40 MB');
+        expect(bar().getAttribute('aria-valuenow')).toBe('25');
+        expect(fill()).toBe('25%');
+        await act(async () => { player.onLoadProgress!({ loaded: 20 * MIB, needed: 40 * MIB }); });
+        expect(bar().getAttribute('aria-valuenow')).toBe('50');
+        // A scrub before the first play restarts the run (the player counts
+        // from the part the playhead now waits in): that is a real restart,
+        // and the bar shows it rather than holding 50% over "0.5 / 24 MB".
+        await act(async () => { player.onLoadProgress!({ loaded: 0.5 * MIB, needed: 24 * MIB }); });
+        expect(overlay()).toBe('Loading 0.5 / 24 MB');
+        expect(bar().getAttribute('aria-valuenow')).toBe('2');
+        await act(async () => { player.onLoadProgress!({ loaded: 6 * MIB, needed: 24 * MIB }); });
+        expect(bar().getAttribute('aria-valuenow')).toBe('25');
+        await act(async () => { player.release!(); });
+        await settle();
+    });
+
+    it('a restart the player has no total for yet empties the bar, and it counts up from there', async () => {
+        // The player measures the link over its first second unless the run's
+        // first part is in sooner. A part that fast, then a scrub before the
+        // first play, and the NEW run has no total yet: the bar must not
+        // keep the old run's 50% over "Loading 0.5 MB", nor hold it once the
+        // new total arrives.
+        const s = newClipSecrets('0000abcd-0000-4000-8000-0000000000ad');
+        const href = encodeClipRef({
+            key: s.key, noncePrefix: s.noncePrefix, clipId: '0000abcd-0000-4000-8000-0000000000ad', videoCodec: 'avc1.640029', audioCodec: 'mp4a.40.2',
+            durationMs: 120_000, width: 2560, height: 1440, totalCipherBytes: 129 * MIB,
+            parts: ['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000002'], partDurMs: [0, 120_000],
+        });
+        await act(async () => { root.render(<ClipAttachment href={href} />); });
+        await act(async () => { (container.querySelector('.clip-attachment-play') as HTMLButtonElement).click(); });
+        await settle();
+        const overlay = () => container.querySelector('.clip-attachment-overlay')?.textContent ?? '';
+        const bar = () => container.querySelector('.clip-attachment-progress[role="progressbar"]')!;
+        const fill = () => (container.querySelector('.clip-attachment-progress-fill') as HTMLElement).style.width;
+        await act(async () => { player.onLoadProgress!({ loaded: 6 * MIB, needed: 12 * MIB }); });
+        expect(bar().getAttribute('aria-valuenow')).toBe('50');
+        await act(async () => { player.onLoadProgress!({ loaded: 0.5 * MIB, needed: null }); });
+        expect(overlay()).toBe('Loading 0.5 MB');
+        expect(bar().hasAttribute('aria-valuenow')).toBe(false);
+        expect(fill()).toBe('0%');
+        await act(async () => { player.onLoadProgress!({ loaded: 0.6 * MIB, needed: 24 * MIB }); });
+        expect(overlay()).toBe('Loading 0.6 / 24 MB');
+        expect(bar().getAttribute('aria-valuenow')).toBe('2');
+        expect(fill()).toBe('2%');
+        await act(async () => { player.release!(); });
+        await settle();
     });
 
     it('tells a screen reader once that the clip is loading, not every MB', async () => {

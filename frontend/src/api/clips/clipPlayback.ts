@@ -4,7 +4,10 @@
  *  'mse'         MediaSource, WINDOWED: append the init part, then parts in
  *                order but only ~40 s AHEAD of the playhead (PLAY_AHEAD_S),
  *                evicting what is more than ~12 s BEHIND it (KEEP_BEHIND_S)
- *                and retrying a QuotaExceededError after freeing behind.
+ *                without ever leaving an unplayable single-track remnant
+ *                (evictBefore), holding decrypted copies only of the parts
+ *                in that window (forgetOutsideWindow), and retrying a
+ *                QuotaExceededError after freeing behind.
  *                `attach()` resolves as soon as the first media part is in
  *                (playable) — or, on a link under about twice the clip's
  *                bitrate, once enough more is in that the first ~40 s will
@@ -137,10 +140,15 @@ export function estimatePartBytes(m: ClipManifest, index: number): number {
  * for a clip cut flat on a link at least as fast as its bitrate.
  *
  * `capBytes` bounds it: on a link SLOWER than the clip's bitrate no start
- * avoids stalls, and the gate never waits for more than a flat cut's first
- * part would have made the viewer wait for. `bytesPerMs` null (nothing
- * measured yet) asks for the first part only. `offsetMs` is how far into the
- * first part the playhead starts (a scrub before the first play).
+ * avoids stalls, and the gate never waits for more than one FULL part (the
+ * cap the player passes: 24 MiB plus the seal) — about what a flat cut's
+ * first part made the viewer wait for, not exactly: a clip that IS cut flat
+ * has a first part up to one fragment under the cap, so on such a link it can
+ * wait for that much of its second part too (~0.8 MB of a 1440p clip,
+ * measured 2026-10-04), and the stall that follows anyway is that much
+ * shorter. `bytesPerMs` null (nothing measured yet) asks for the first part
+ * only. `offsetMs` is how far into the first part the playhead starts (a
+ * scrub before the first play).
  */
 export function startBytesNeeded(
     sizes: readonly number[],
@@ -260,8 +268,12 @@ export async function forEachClipPart(
 /** Bytes received toward the first playable moment, and about how many that
  *  takes (`needed` is an estimate until each part's real size is known, and
  *  includes what the start-up gate asks for at the throughput measured so
- *  far, so it moves as that does; it never falls below `loaded`). */
-export interface ClipLoadProgress { loaded: number; needed: number }
+ *  far, so it moves as that does; it never falls below `loaded`). `needed` is
+ *  null until there IS a throughput: a figure before that would be the first
+ *  part alone — on a ramped clip ~2 MB — and the gate's real one, a second
+ *  later, up to six times larger ("1.4 / 2.1 MB", then "1.4 / 13 MB": the
+ *  readout looked restarted, review 2026-10-04). */
+export interface ClipLoadProgress { loaded: number; needed: number | null }
 
 export interface ClipPlayerHandle {
     mode: ClipPlaybackMode;
@@ -332,7 +344,7 @@ export function createClipPlayer(m: ClipManifest, env: PlaybackEnv = defaultEnv(
     let runOffsetMs = 0;
     /** runStart's part is appended: the clip COULD play now. */
     let runReady = false;
-    const runGate = (): { inHand: number; needed: number } => {
+    const runGate = (): { inHand: number; needed: number; measured: boolean } => {
         const sizes: number[] = [];
         const durs: number[] = [];
         let inHand = 0;
@@ -347,18 +359,20 @@ export function createClipPlayer(m: ClipManifest, env: PlaybackEnv = defaultEnv(
             contiguous = contiguous && known !== undefined && got >= known;
             if (i === runStart) firstPartIn = contiguous;
         }
-        const needed = startBytesNeeded(sizes, durs, mediaBytesPerMs(firstPartIn), PLAY_AHEAD_S * 1000, PART_MAX_PLAINTEXT + PART_HEADER_BYTES + PART_TAG_BYTES, runOffsetMs);
-        return { inHand, needed: Math.max(needed, inHand) };
+        const rate = mediaBytesPerMs(firstPartIn);
+        const needed = startBytesNeeded(sizes, durs, rate, PLAY_AHEAD_S * 1000, PART_MAX_PLAINTEXT + PART_HEADER_BYTES + PART_TAG_BYTES, runOffsetMs);
+        return { inHand, needed: Math.max(needed, inHand), measured: rate !== null };
     };
     const reportLoad = () => {
         if (playable || !handle.onLoadProgress) return;
-        let loaded = 0, needed = 0;
+        let loaded = 0;
+        let needed: number | null = 0;
         if (mode === 'blob') {
             for (let i = 0; i < m.parts.length; i++) { loaded += received.get(i) ?? 0; needed += sizeOf(i); }
         } else {
             const gate = runGate();
             loaded = (received.get(0) ?? 0) + gate.inHand;
-            needed = sizeOf(0) + gate.needed;
+            needed = gate.measured ? sizeOf(0) + gate.needed : null;
         }
         handle.onLoadProgress({ loaded, needed });
     };
@@ -379,11 +393,11 @@ export function createClipPlayer(m: ClipManifest, env: PlaybackEnv = defaultEnv(
                 return openPart(secrets, i, wire);
             });
             decrypted.set(i, p);
-            p.catch(() => decrypted.delete(i));
+            const mine = p;
+            mine.catch(() => { if (decrypted.get(i) === mine) decrypted.delete(i); });
         }
         return p;
     };
-
     const sbOp = (run: () => void): Promise<void> => new Promise((resolve, reject) => {
         if (!sb || destroyed) return reject(new Error('player destroyed'));
         const buf = sb;
@@ -395,6 +409,23 @@ export function createClipPlayer(m: ClipManifest, env: PlaybackEnv = defaultEnv(
     });
     const append = (bytes: Uint8Array) => sbOp(() => sb!.appendBuffer(bytes as BufferSource));
     const remove = (a: number, b: number) => sbOp(() => sb!.remove(a, b));
+
+    /** Evict everything before `t` — and then, if no moment is left where
+     *  BOTH tracks are buffered, whatever remains. A cut inside a video GOP
+     *  removes the rest of that GOP's video too (frames cannot decode without
+     *  their keyframe — MSE's coded frame removal) while the audio beside it,
+     *  every frame of it a keyframe, stays. So a cut in the LAST GOP of the
+     *  buffered range leaves an audio-only sliver: `buffered`, the tracks'
+     *  intersection, reads empty, and Chromium charges the next append to the
+     *  tracks in proportion to what each holds — a whole 17-24 MB part
+     *  against audio's ~12 MB limit — and refuses it with QuotaExceededError.
+     *  A seek ~10-12 s past the buffered end did exactly that and killed the
+     *  clip ("this clip's parts are too large...", reproduced in Edge
+     *  2026-10-04). Nothing in such a remnant can play: clearing it is free. */
+    const evictBefore = async (t: number): Promise<void> => {
+        await remove(0, t);
+        if (sb && !destroyed && sb.buffered.length === 0) await remove(0, Infinity);
+    };
 
     /** End of the buffered range that contains `t` (±0.5 s slack), or -1. */
     const bufferedEndAt = (t: number): number => {
@@ -410,6 +441,7 @@ export function createClipPlayer(m: ClipManifest, env: PlaybackEnv = defaultEnv(
      *  retry. Only gives up when nothing can be freed — i.e. a single part
      *  does not fit at all. */
     const appendWithQuota = async (bytes: Uint8Array): Promise<void> => {
+        let clearedRemnant = false;
         for (let attempt = 0; attempt < 8; attempt++) {
             try { await append(bytes); return; }
             catch (e) {
@@ -424,11 +456,17 @@ export function createClipPlayer(m: ClipManifest, env: PlaybackEnv = defaultEnv(
                 // genuinely larger than the buffer quota.
                 let freed = false;
                 const behindCut = Math.max(0, cur - 1);
-                if (sb.buffered.length && sb.buffered.start(0) < behindCut - 0.01) { await remove(0, behindCut); freed = true; }
+                if (sb.buffered.length && sb.buffered.start(0) < behindCut - 0.01) { await evictBefore(behindCut); freed = true; }
                 const last = sb.buffered.length - 1;
                 if (!freed && last >= 0 && sb.buffered.end(last) > cur + Math.max(4, PLAY_AHEAD_S - attempt * 8) + 0.01) {
                     await remove(cur + Math.max(4, PLAY_AHEAD_S - attempt * 8), sb.buffered.end(last)); freed = true;
                 }
+                // Nothing playable is buffered and there is still no room: a
+                // single-track remnant (evictBefore's case, left by anything
+                // else) can be all that holds the quota. Clearing it costs
+                // nothing; once, so a part that does not fit even an empty
+                // buffer still ends here.
+                if (!freed && sb.buffered.length === 0 && !clearedRemnant) { clearedRemnant = true; await remove(0, Infinity); freed = true; }
                 if (!freed) throw new Error("this clip's parts are too large for the browser's playback buffer — use Download");
             }
         }
@@ -445,6 +483,31 @@ export function createClipPlayer(m: ClipManifest, env: PlaybackEnv = defaultEnv(
     const waitForWake = (): Promise<void> => {
         if (wakePending) { wakePending = false; return Promise.resolve(); }
         return new Promise<void>(r => { wakeFn = r; });
+    };
+    /** Stop holding the plaintext of every part outside the window around
+     *  the playhead at `cur` (s): ending KEEP_BEHIND_S or more behind it
+     *  (what the pump has evicted from the SourceBuffer), or starting
+     *  PLAY_AHEAD_S or more ahead of it (left there by a seek back) unless it
+     *  is the part the pump fetches next or the one after (its prefetch).
+     *  Holding every part kept the whole clip in the renderer next to the
+     *  SourceBuffer's own copy: the page's ArrayBuffers went from 21 MB to
+     *  144 MB over a 123 MB clip played through (Edge, 2026-10-04; 75 MB
+     *  with this), and a long 4K clip would hold ~1 GB, on a phone; a
+     *  scrub backwards through it held every part it passed (144 MB again
+     *  when dropping only the parts behind; 90 MB with the window, both
+     *  ends, 2026-10-05). What stays is about one window — ~40 s of parts
+     *  plus the first — however long the clip. The cost: a seek
+     *  back to a part, or playing on into one dropped ahead, fetches it again.
+     *  The first part stays — "watch it again" is the seek back people make,
+     *  and on a ramped clip it is ~2 MB. */
+    const forgetOutsideWindow = (cur: number) => {
+        const behindMs = (cur - KEEP_BEHIND_S) * 1000;
+        const aheadMs = (cur + PLAY_AHEAD_S) * 1000;
+        for (const i of decrypted.keys()) {
+            if (i <= 1 || i === nextIdx || i === nextIdx + 1) continue;
+            const start = partStartMs(m, i);
+            if (start + (m.partDurMs[i] ?? 0) <= behindMs || start >= aheadMs) decrypted.delete(i);
+        }
     };
     let firstRes: (() => void) | null = null;
     let firstRej: ((e: Error) => void) | null = null;
@@ -469,6 +532,9 @@ export function createClipPlayer(m: ClipManifest, env: PlaybackEnv = defaultEnv(
 
     const pump = async (): Promise<void> => {
         while (!destroyed) {
+            // Every wake (the playhead moving included): let go of the parts
+            // outside the window.
+            if (el) forgetOutsideWindow(el.currentTime);
             // Whenever the pump stops fetching, the gate opens: everything it
             // would wait for is already in (it never asks for media more than
             // PLAY_AHEAD_S ahead, which is also the gate's horizon).
@@ -492,7 +558,7 @@ export function createClipPlayer(m: ClipManifest, env: PlaybackEnv = defaultEnv(
             try {
                 if (needInit) { needInit = false; await append(initBytes!); }
                 const cut = cur - KEEP_BEHIND_S;
-                if (cut > 0 && sb.buffered.length && sb.buffered.start(0) < cut) await remove(0, cut).catch(() => { /* eviction is best effort */ });
+                if (cut > 0 && sb.buffered.length && sb.buffered.start(0) < cut) await evictBefore(cut).catch(() => { /* eviction is best effort */ });
                 if (destroyed || gen !== loadGen) continue;
                 await appendWithQuota(bytes);
             } catch (e) {

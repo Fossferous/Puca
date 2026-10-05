@@ -16,6 +16,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { createClipPlayer, estimatePartBytes, startBytesNeeded, PLAY_AHEAD_S, KEEP_BEHIND_S, type ClipLoadProgress } from '../api/clips/clipPlayback';
+import { playLoadPercent } from '../api/loadProgressText';
 import { encodeClipRef, decodeClipRef, type ClipManifest } from '../api/clips/clipRef';
 import { newClipSecrets, sealPart, PART_HEADER_BYTES, PART_MAX_PLAINTEXT, PART_TAG_BYTES } from '../api/clips/clipCrypto';
 
@@ -94,12 +95,16 @@ class FakeSourceBuffer extends EventTarget {
     abort() { this.updating = false; }
 }
 
+/** Which SourceBuffer the fake MediaSource hands out (TrackedSourceBuffer
+ *  for the tests that need separate audio and video tracks). */
+let makeSourceBuffer = (ms: FakeMediaSource): FakeSourceBuffer => new FakeSourceBuffer(ms);
+
 class FakeMediaSource extends EventTarget {
     readyState = 'closed';
     duration = 0;
     sb: FakeSourceBuffer | null = null;
     endOfStream = vi.fn(() => { this.readyState = 'ended'; });
-    addSourceBuffer() { this.sb = new FakeSourceBuffer(this); return this.sb as unknown as SourceBuffer; }
+    addSourceBuffer() { this.sb = makeSourceBuffer(this); return this.sb as unknown as SourceBuffer; }
     _open() { this.readyState = 'open'; this.dispatchEvent(new Event('sourceopen')); }
 }
 
@@ -288,6 +293,272 @@ describe('windowed MSE clip player (the 257 MB "SourceBuffer is full" fix)', () 
     });
 });
 
+// ---- a seek just past the buffered end killed the clip ----------------------
+// Review 2026-10-04, reproduced in headless Edge: a 2-minute flat clip with
+// 0-44.93 s buffered, seeked to 55.93 s, showed "Could not play this clip:
+// this clip's parts are too large for the browser's playback buffer — use
+// Download" for good; at 49.93 s it played on. The pump's eviction cut
+// (55.93 - KEEP_BEHIND_S = 43.93) fell inside the buffered range's LAST GOP.
+// Removing video frames removes everything that depends on them, up to the
+// next keyframe (MSE "coded frame removal"), so ALL that video went while
+// the audio beside it, every frame of which is a keyframe, stayed: an
+// audio-only sliver, `buffered` (the tracks' intersection) empty. Chromium
+// then charges a whole append to the tracks in proportion to what each
+// already holds (ChunkDemuxer::EvictCodedFrames) — all 24 MB of the next
+// part against audio's ~12 MB limit — and throws QuotaExceededError.
+// The plain FakeSourceBuffer above has one track and cannot show this.
+
+/** The keyframe interval the app records at (CLIP_RING_GOP_SECONDS). */
+const GOP_S = 2;
+const MIB = 1024 * 1024;
+const AUDIO_BPS = 16_000; // 128 kbit/s AAC, bytes per second
+const VIDEO_BPS = PART_BYTES / (PART_MS / 1000) - AUDIO_BPS;
+/** Chromium's per-track SourceBuffer limits (desktop defaults). */
+let trackLimits = { video: 150 * MIB, audio: 12 * MIB };
+
+function intersect(a: Array<[number, number]>, b: Array<[number, number]>): Array<[number, number]> {
+    const out: Array<[number, number]> = [];
+    for (const [s1, e1] of a) for (const [s2, e2] of b) {
+        const s = Math.max(s1, s2), e = Math.min(e1, e2);
+        if (e > s) out.push([s, e]);
+    }
+    return out.sort((x, y) => x[0] - y[0]);
+}
+
+/** A SourceBuffer with separate VIDEO and AUDIO track buffers, as far as the
+ *  failure needs: `buffered` is their intersection; remove() also removes
+ *  the video up to the next keyframe (GOP_S apart), audio exactly; an
+ *  append is charged to the tracks in proportion to what each holds, each
+ *  against its own limit, and nothing at all is checked when both are empty. */
+class TrackedSourceBuffer extends FakeSourceBuffer {
+    video = new FakeBufferedRanges();
+    audio = new FakeBufferedRanges();
+    quotaErrors = 0;
+    private held(r: FakeBufferedRanges, bps: number) { return r.ranges.reduce((n, [s, e]) => n + (e - s) * bps, 0); }
+    private sync() { this.buffered.ranges = intersect(this.video.ranges, this.audio.ranges); }
+    /** The video goes and the audio stays, by some route other than the
+     *  player's own remove() (an append aborted part-way, say). */
+    loseVideo() { this.video.ranges = []; this.sync(); }
+    private done() {
+        this.updating = true;
+        queueMicrotask(() => { this.updating = false; this.dispatchEvent(new Event('updateend')); });
+    }
+    appendBuffer(data: Uint8Array) {
+        if (data.byteLength >= 1024) {
+            const v = this.held(this.video, VIDEO_BPS), a = this.held(this.audio, AUDIO_BPS), total = v + a, n = data.byteLength;
+            if (total > 0 && ((v > 0 && v + (n * v) / total > trackLimits.video) || (a > 0 && a + (n * a) / total > trackLimits.audio))) {
+                this.quotaErrors++;
+                const err = new Error('The SourceBuffer is full, and cannot free space to append additional buffers.');
+                err.name = 'QuotaExceededError';
+                throw err;
+            }
+            const idx = data[0];
+            const s = ((idx - 1) * PART_MS) / 1000;
+            this.video.add(s, s + PART_MS / 1000);
+            this.audio.add(s, s + PART_MS / 1000);
+            this.appends.push(idx);
+            this.sync();
+        }
+        this.done();
+    }
+    remove(a: number, b: number) {
+        this.audio.removeRange(a, b);
+        let vb = b;
+        for (const [s, e] of this.video.ranges) if (s < b && b < e) vb = Math.min(e, Math.ceil(b / GOP_S) * GOP_S);
+        this.video.removeRange(a, vb);
+        this.sync();
+        this.done();
+    }
+}
+
+describe('clip player — a seek just past the buffered end (the audio-only sliver)', () => {
+    /** Buffer 0-40 s at the start, then seek `offsetS` past that end. */
+    async function seekPastEnd(offsetS: number) {
+        install();
+        makeSourceBuffer = (ms) => new TrackedSourceBuffer(ms);
+        try {
+            const { manifest, fetchPart } = await makeManifest();
+            const video = new FakeVideo(); videoRef = video;
+            const player = createClipPlayer(manifest, env, fetchPart);
+            const onError = vi.fn();
+            player.onError = onError;
+            await player.attach(video as unknown as HTMLVideoElement);
+            const sb = video._ms!.sb as TrackedSourceBuffer;
+            await settleUntil(() => sb.appends.length >= PLAY_AHEAD_S / (PART_MS / 1000));
+            expect(sb.buffered.ranges).toEqual([[0, PLAY_AHEAD_S]]); // the pump filled its window and waits
+            const target = PLAY_AHEAD_S + offsetS;
+            const covered = () => sb.buffered.ranges.some(([s, e]) => s <= target && target <= e);
+            video.seekTo(target);
+            await settleUntil(() => covered() || onError.mock.calls.length > 0);
+            const out = { covered: covered(), error: (onError.mock.calls[0]?.[0] as Error | undefined)?.message ?? null, quotaErrors: sb.quotaErrors };
+            player.destroy();
+            return out;
+        } finally { makeSourceBuffer = (ms) => new FakeSourceBuffer(ms); restore(); }
+    }
+
+    it('5 s past the end (the control): the cut leaves video behind, and it plays on', async () => {
+        expect(await seekPastEnd(5)).toEqual({ covered: true, error: null, quotaErrors: 0 });
+    });
+
+    it('11 s past the end: the cut falls in the last GOP, and the audio-only remnant is cleared before the next part goes in', async () => {
+        // Before the fix: { covered: false, error: "this clip's parts are too
+        // large for the browser's playback buffer — use Download", quotaErrors: 1 }.
+        expect(await seekPastEnd(11)).toEqual({ covered: true, error: null, quotaErrors: 0 });
+    });
+
+    it("a quota error's own eviction does not leave the remnant either", async () => {
+        // The other cut the player makes: on QuotaExceededError it frees what
+        // is behind the playhead. With the playhead in the last second of the
+        // only buffered range, that cut too takes all the video and leaves
+        // the audio — and the retry was then charged to audio and refused.
+        install();
+        makeSourceBuffer = (ms) => new TrackedSourceBuffer(ms);
+        trackLimits = { video: 60 * MIB, audio: 12 * MIB }; // two parts fit, a third does not
+        try {
+            const { manifest, fetchPart: serve } = await makeManifest();
+            const gates = new Map<string, () => void>();
+            const fetchPart = async (id: string) => {
+                const wire = await serve(id);
+                if (id === manifest.parts[3]) await new Promise<void>(r => gates.set(id, r));
+                return wire;
+            };
+            const video = new FakeVideo(); videoRef = video;
+            const player = createClipPlayer(manifest, env, fetchPart);
+            const onError = vi.fn();
+            player.onError = onError;
+            await player.attach(video as unknown as HTMLVideoElement);
+            const sb = video._ms!.sb as TrackedSourceBuffer;
+            await settleUntil(() => sb.appends.length >= 2 && gates.has(manifest.parts[3]));
+            expect(sb.buffered.ranges).toEqual([[0, 20]]);
+            video.advance(19.5); // part 3 is late: the playhead nears the end of what is buffered
+            gates.get(manifest.parts[3])!();
+            await settleUntil(() => sb.appends.includes(3) || onError.mock.calls.length > 0);
+            expect(sb.quotaErrors).toBe(1); // the real quota error, which the player must get past
+            expect(onError).not.toHaveBeenCalled();
+            expect(sb.appends).toContain(3);
+            player.destroy();
+        } finally {
+            trackLimits = { video: 150 * MIB, audio: 12 * MIB };
+            makeSourceBuffer = (ms) => new FakeSourceBuffer(ms);
+            restore();
+        }
+    });
+
+    it('a remnant from anything else: a quota error with nothing playable buffered clears it once, and the part goes in', async () => {
+        // evictBefore keeps the player's own cuts from leaving one. This is
+        // the net under any other route to the same dead end.
+        install();
+        makeSourceBuffer = (ms) => new TrackedSourceBuffer(ms);
+        try {
+            const { manifest, fetchPart } = await makeManifest();
+            const video = new FakeVideo(); videoRef = video;
+            const player = createClipPlayer(manifest, env, fetchPart);
+            const onError = vi.fn();
+            player.onError = onError;
+            await player.attach(video as unknown as HTMLVideoElement);
+            const sb = video._ms!.sb as TrackedSourceBuffer;
+            await settleUntil(() => sb.appends.length >= PLAY_AHEAD_S / (PART_MS / 1000));
+            expect(sb.buffered.ranges).toEqual([[0, PLAY_AHEAD_S]]);
+            sb.loseVideo();
+            expect(sb.buffered.ranges).toEqual([]); // 40 s of audio, nothing that plays
+            const target = 60;
+            const covered = () => sb.buffered.ranges.some(([s, e]) => s <= target && target <= e);
+            video.seekTo(target);
+            await settleUntil(() => covered() || onError.mock.calls.length > 0);
+            expect(sb.quotaErrors).toBe(1); // it met the remnant: the next part was charged to audio
+            expect(onError).not.toHaveBeenCalled();
+            expect(covered()).toBe(true);
+            player.destroy();
+        } finally { makeSourceBuffer = (ms) => new FakeSourceBuffer(ms); restore(); }
+    });
+});
+
+// ---- the player holds only the window's plaintext ---------------------------
+// Review 2026-10-04: every part the player had ever decrypted stayed in a map
+// until destroy(), so a clip played to the end held all of itself in the
+// renderer next to the SourceBuffer's copy (the page's ArrayBuffers went from
+// 21 MB to 144 MB over a 123 MB clip, measured in Edge) — up to ~1 GB for a
+// long 4K clip, on a phone. What the SourceBuffer has evicted behind the playhead, the player
+// now drops too; the clip's first part stays, so "watch it again" starts at once.
+describe('clip player — memory: the decrypted parts it keeps', () => {
+    it('a part behind the window is fetched again on a seek back to it; the first part, and anything during forward play, are fetched once', async () => {
+        install();
+        try {
+            const { manifest, fetchPart: serve } = await makeManifest();
+            const fetched = new Map<string, number>();
+            const video = new FakeVideo(); videoRef = video;
+            const player = createClipPlayer(manifest, env, async (id: string) => { fetched.set(id, (fetched.get(id) ?? 0) + 1); return serve(id); });
+            const onError = vi.fn();
+            player.onError = onError;
+            await player.attach(video as unknown as HTMLVideoElement);
+            const sb = video._ms!.sb!;
+            // Play forward as a real playhead does: never past what is buffered.
+            for (let t = 0; t < (N * PART_MS) / 1000; t += 2) {
+                await settleUntil(() => sb.buffered.ranges.some(([s, e]) => s <= t && t <= e));
+                video.advance(t);
+                await settle();
+            }
+            await settleUntil(() => new Set(sb.appends).size === N);
+            expect(new Set(sb.appends).size).toBe(N);
+            // Forward play fetches every part exactly once: nothing it still
+            // needed was dropped early.
+            expect(manifest.parts.map(id => fetched.get(id) ?? 0)).toEqual(manifest.parts.map(() => 1));
+            // Back to 20 s (part 3, long evicted from the SourceBuffer).
+            const appended = sb.appends.length;
+            video.seekTo(20);
+            await settleUntil(() => sb.appends.length > appended && (fetched.get(manifest.parts[3]) ?? 0) > 1, 100);
+            expect(fetched.get(manifest.parts[3])).toBe(2); // it was no longer held
+            // Back to the start: the first part was kept.
+            const appended2 = sb.appends.length;
+            video.seekTo(0);
+            await settleUntil(() => sb.appends.length > appended2);
+            expect(sb.appends.slice(appended2)[0]).toBe(1);
+            expect(fetched.get(manifest.parts[1])).toBe(1);
+            expect(onError).not.toHaveBeenCalled();
+            player.destroy();
+        } finally { restore(); }
+    });
+
+    it('a seek BACK lets go of the parts it leaves ahead of the window too, so a backwards scrub cannot pile the clip up', async () => {
+        install();
+        try {
+            const { manifest, fetchPart: serve } = await makeManifest();
+            const fetched = new Map<string, number>();
+            const video = new FakeVideo(); videoRef = video;
+            const player = createClipPlayer(manifest, env, async (id: string) => { fetched.set(id, (fetched.get(id) ?? 0) + 1); return serve(id); });
+            const onError = vi.fn();
+            player.onError = onError;
+            await player.attach(video as unknown as HTMLVideoElement);
+            const sb = video._ms!.sb!;
+            // Near the end first: the last three parts come in.
+            video.seekTo(((N - 3) * PART_MS) / 1000);
+            await settleUntil(() => sb.appends.includes(N));
+            expect(sb.appends.slice(-3)).toEqual([N - 2, N - 1, N]);
+            // They leave the SourceBuffer (its quota retry trims a seek's far
+            // tail, remove(cur + …, end), and a browser may evict on its own),
+            // and the viewer goes back to the start and watches it through.
+            sb.remove(0, (N * PART_MS) / 1000);
+            await settle();
+            expect(sb.buffered.ranges).toEqual([]);
+            video.seekTo(0);
+            for (let t = 0; t < (N * PART_MS) / 1000; t += 2) {
+                await settleUntil(() => sb.buffered.ranges.some(([s, e]) => s <= t && t <= e));
+                video.advance(t);
+                await settle();
+            }
+            await settleUntil(() => sb.appends.filter(i => i === N).length === 2);
+            expect(sb.appends.filter(i => i === N).length).toBe(2); // it did play the end again
+            // Held from the first visit, they would have been appended from
+            // memory, fetched once. Dropped while the playhead was ~90 s away,
+            // they are fetched again.
+            expect([N - 2, N - 1, N].map(i => fetched.get(manifest.parts[i]))).toEqual([2, 2, 2]);
+            expect(fetched.get(manifest.parts[1])).toBe(1); // the first part stays
+            expect(onError).not.toHaveBeenCalled();
+            player.destroy();
+        } finally { restore(); }
+    });
+});
+
 // ---- time to first frame: what the player asks the network for, and when ----
 // Owner report 2026-10-04: clips on the phone "took very long" to start. The
 // pump used to request part idx+1 (prefetch) BEFORE part idx, in the same
@@ -363,8 +634,9 @@ describe('clip player — the part the playhead waits for is fetched ALONE', () 
             await settleUntil(() => g.waiting(manifest.parts[1]));
             const init = (await serve(manifest.parts[0])).byteLength;
             const part1 = (await serve(manifest.parts[1])).byteLength;
-            // Init in; part 1 still on its way: the estimate for it stands in.
-            expect(seen.at(-1)).toEqual({ loaded: init, needed: init + estimatePartBytes(manifest, 1) });
+            // Init in; part 1 requested, none of it here: no throughput yet,
+            // so no total — the bytes alone.
+            expect(seen.at(-1)).toEqual({ loaded: init, needed: null });
             g.release(manifest.parts[1]);
             await attached;
             expect(seen.at(-1)).toEqual({ loaded: init + part1, needed: init + part1 });
@@ -534,11 +806,42 @@ describe('clip player — the start-up gate (startBytesNeeded)', () => {
         expect(ramped.startedAt!).toBeLessThan(0.65 * flat.startedAt!);
         // The readout counted toward what the gate waited for, not part 1 alone.
         const last = ramped.seen.at(-1)!;
-        expect(last.loaded).toBeGreaterThanOrEqual(last.needed);
-        expect(last.needed).toBeGreaterThan(4 * RAMPED[0] * BYTES_PER_MS);
+        expect(last.needed).not.toBeNull();
+        expect(last.loaded).toBeGreaterThanOrEqual(last.needed!);
+        expect(last.needed!).toBeGreaterThan(4 * RAMPED[0] * BYTES_PER_MS);
         // ...and never asked for much more than that on the way: a rate timed
         // over the first request's round trip alone said "0.1 / 24 MB".
-        expect(Math.max(...ramped.seen.map(p => p.needed))).toBeLessThanOrEqual(1.25 * last.needed);
+        const known = ramped.seen.map(p => p.needed).filter((n): n is number => n !== null);
+        expect(Math.max(...known)).toBeLessThanOrEqual(1.25 * last.needed!);
+        expectReadoutSteady(ramped.seen);
+    }, 120_000);
+
+    /** The plate's readout. Review 2026-10-04: for the first second (no
+     *  throughput measured yet) the player counted toward the first ramp part
+     *  alone, "1.4 / 2.1 MB" with the bar at 66%, then the gate's real figure
+     *  replaced it, "1.4 / 13 MB" at 11% (55% -> 8% here) — it looked
+     *  restarted. Now there is no total until the link is measured. After
+     *  that the total follows the measured throughput, which dips at each
+     *  part boundary while the next request makes its round trip, so the raw
+     *  percent can fall back a few points (5 at most here, with a 300 ms
+     *  round trip); the plate's bar holds its best (ClipAttachment,
+     *  loadProgress.test.tsx), so on screen that is a pause, never a slide. */
+    function expectReadoutSteady(seen: ClipLoadProgress[]) {
+        const pct = seen.map(p => playLoadPercent(p));
+        expect(pct[0]).toBeNull(); // the first reports, before a rate exists, claim no total
+        let best = -1;
+        for (const p of pct) {
+            if (p === null) { expect(best).toBe(-1); continue; } // indeterminate only BEFORE any figure
+            expect(best - p).toBeLessThanOrEqual(5);
+            best = Math.max(best, p);
+        }
+        expect(best).toBe(100);
+    }
+
+    it('with a 300 ms round trip the readout still never slides back', async () => {
+        const r = await play(RAMPED, 1.35, 1, { latencyMs: 300 });
+        expect(r.startedAt).not.toBeNull();
+        expectReadoutSteady(r.seen);
     }, 120_000);
 
     it('on a link twice the bitrate or faster the gate holds nothing: playback starts on the first 2 s part', async () => {
@@ -552,13 +855,21 @@ describe('clip player — the start-up gate (startBytesNeeded)', () => {
         expect(r.startedAt!).toBeLessThanOrEqual(Math.ceil(FLAT[0] / 1.05 / STEP_MS) * STEP_MS + 2 * STEP_MS);
     }, 120_000);
 
-    it("on a link SLOWER than the bitrate it never waits longer than a flat cut's first part would have", async () => {
+    it('on a link SLOWER than the bitrate it never waits for more than one full 24 MiB part (the cap)', async () => {
         const r = await play(RAMPED, 0.8, 5);
         const rate = 0.8 * BYTES_PER_MS;
         // (+ up to a step and a round trip per part boundary, where the link
         // idles while the next request goes out)
         expect(r.startedAt!).toBeLessThanOrEqual((CAP + 4096) / rate + 10 * STEP_MS);
         expect(r.startedAt!).toBeGreaterThan((CAP - 2 * 1024 * 1024) / rate); // it did hold, up to the cap
+        // A clip cut FLAT has a first part a little under the cap (here 22.5 s
+        // = 24.2 MB), so it may wait for the rest of the cap out of its second
+        // part too — "about one flat part", not exactly its own first part
+        // (review 2026-10-04: 788 KB more on a real 1440p clip).
+        const flat = await play(FLAT, 0.8, 5);
+        const firstPart = FLAT[0] * BYTES_PER_MS + PART_HEADER_BYTES + PART_TAG_BYTES;
+        expect(flat.startedAt!).toBeGreaterThan(firstPart / rate);
+        expect(flat.startedAt!).toBeLessThanOrEqual((CAP + 4096) / rate + 10 * STEP_MS);
     }, 120_000);
 
     it("the viewer pressing the video's own play while the gate holds starts it at once", async () => {

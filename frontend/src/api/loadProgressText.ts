@@ -22,15 +22,19 @@ export function bytesOfText(received: number, total: number | null): string {
     return `${formatLoadedMB(received).replace(/ MB$/, '')} / ${formatLoadedMB(Math.max(total, received))}`;
 }
 
-/** What the clip plate says while a Play loads. */
+/** What the clip plate says while a Play loads: "Loading 1.4 MB" until the
+ *  player knows what it is waiting for (needed null), "Loading 1.4 / 13 MB"
+ *  after. */
 export function playLoadText(p: ClipLoadProgress | null): string {
     if (!p || p.loaded <= 0) return 'Loading…';
     return `Loading ${bytesOfText(p.loaded, p.needed)}`;
 }
 
-/** Whole percent of what a Play waits for that has arrived. */
-export function playLoadPercent(p: ClipLoadProgress | null): number {
-    if (!p || p.loaded <= 0) return 0;
+/** Whole percent of what a Play waits for that has arrived, or null while
+ *  there is no total to be a percent of (an indeterminate bar). */
+export function playLoadPercent(p: ClipLoadProgress | null): number | null {
+    if (!p || p.needed === null) return null;
+    if (p.loaded <= 0) return 0;
     return Math.min(100, Math.floor((100 * p.loaded) / Math.max(1, p.needed, p.loaded)));
 }
 

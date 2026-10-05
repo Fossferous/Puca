@@ -58,7 +58,10 @@ export function ClipAttachment({ href, consent }: ClipAttachmentProps) {
     // Strings and numbers, so a byte that does not change the readout
     // re-renders nothing (progress arrives once per network chunk).
     const [loadText, setLoadText] = useState('Loading…');
-    const [loadPct, setLoadPct] = useState(0);
+    // null = no total yet (indeterminate). Only ever moves forwards within a
+    // Play: the total can grow when the link slows, and a bar that slid back
+    // looked like the load had restarted (the words still say the new total).
+    const [loadPct, setLoadPct] = useState<number | null>(null);
     const [dlState, setDlState] = useState<DownloadState>('idle');
     const [dlPct, setDlPct] = useState(0);
     const [dlSaving, setDlSaving] = useState(false);
@@ -80,14 +83,22 @@ export function ClipAttachment({ href, consent }: ClipAttachmentProps) {
 
     const play = async () => {
         if (refused || state === 'loading' || state === 'playing') return;
-        setState('loading'); setError(null); setLoadText(playLoadText(null)); setLoadPct(0);
+        setState('loading'); setError(null); setLoadText(playLoadText(null)); setLoadPct(null);
         const player = createClipPlayer(manifest);
         playerRef.current = player;
         if (player.mode === 'unsupported') { setState('unsupported'); return; }
+        // What was counted only falls when a scrub before the first play
+        // restarts the run: then the bar starts over with it — valueless
+        // again if the player has no total for the new run yet. Otherwise a
+        // report with no total leaves the bar where it is.
+        let lastLoaded = 0;
         player.onLoadProgress = (p) => {
             if (playerRef.current !== player) return;
             setLoadText(playLoadText(p));
-            setLoadPct(playLoadPercent(p));
+            const pct = playLoadPercent(p);
+            const restarted = p.loaded < lastLoaded;
+            lastLoaded = p.loaded;
+            setLoadPct((prev) => (restarted ? pct : pct === null ? prev : Math.max(prev ?? 0, pct)));
         };
         const onFail = (e: unknown) => {
             if (playerRef.current !== player) return; // a newer play() superseded this one
@@ -175,9 +186,9 @@ export function ClipAttachment({ href, consent }: ClipAttachmentProps) {
                             aria-label="Loading the clip"
                             aria-valuemin={0}
                             aria-valuemax={100}
-                            aria-valuenow={loadPct}
+                            aria-valuenow={loadPct ?? undefined}
                         >
-                            <span className="clip-attachment-progress-fill" style={{ width: `${loadPct}%` }} />
+                            <span className="clip-attachment-progress-fill" style={{ width: `${loadPct ?? 0}%` }} />
                         </span>
                     </span>
                 )}
