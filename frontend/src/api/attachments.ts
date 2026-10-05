@@ -866,7 +866,10 @@ const limiterFor = (mime: string) => (safeBlobType(mime).startsWith('image/') ? 
  * took 600-700 ms each and the first on screen showed after 4.9 s, where
  * the same six one or two at a time take 70-140 ms each; with this, the
  * ones on screen showed after 2.3 s (2.1 s when the cache still kept them
- * decrypted).
+ * decrypted). Not one at a time: going back to that channel took the
+ * renderer to 291-328 MB with one, 291-346 MB with two (6 rounds each,
+ * 2026-10-05; 152-204 MB in the other channel just before), with the first
+ * on screen ready at 1.46-1.65 s either way.
  */
 const heavyOpenLimiter = createPriorityLimiter(2);
 const lightOpenLimiter = createPriorityLimiter(4);

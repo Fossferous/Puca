@@ -60,7 +60,8 @@ one-line summary; this file is the full story. Versions follow
   where they used to be back in under one, and going back to a channel of
   big videos briefly takes more memory while they are decrypted again
   (about 270 to 400 MB for two or three seconds on a 2 GB test phone,
-  against 150 to 170 MB before; it then settles where it was). Pictures and
+  against 150 to 170 MB before; decrypting one at a time instead of two
+  made no difference to it). Pictures and
   voice notes in Tasks and Notes are let go the same way; they used to stay
   decrypted until you signed out. Saving a message to a note and copying a
   note no longer leave a readable copy of its pictures or videos behind
