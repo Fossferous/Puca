@@ -826,16 +826,33 @@
     color: var(--brand-primary);
 }
 
+/* Vertical rhythm of the message list. Rows are separated by their own
+   vertical PADDING and nothing else — no row has a negative margin, so no row
+   can paint over its neighbour. Two values per density:
+     --message-pad      above and below a row that stands alone;
+     --message-run-pad  each side of the seam between two rows of one
+                        same-author run (see .message.grouped below).
+   A grouped row pulled up by a fixed negative margin used to cancel the row
+   above's padding — right only when that row was NOT grouped itself, so from
+   the third line of a run on, each row sat ~5px inside the line above, and
+   an image, player or clip plate covered the end of that line. */
 .message {
     display: flex;
     gap: 0.75rem;
-    padding: 0.5rem 0;
+    --message-pad: 0.5rem;
+    --message-run-pad: 1px;
+    padding: var(--message-pad) 0;
 }
 
+/* Hover stretches the row's background to the list's edges: HORIZONTAL only.
+   A hover that also set vertical padding overrode the grouped rows' (compact
+   mode did, moving every row below the pointer by ~3px on each hover). */
 .message:hover {
     background: rgba(49, 50, 68, 0.3);
-    margin: 0 -1.25rem;
-    padding: 0.5rem 1.25rem;
+    margin-left: -1.25rem;
+    margin-right: -1.25rem;
+    padding-left: 1.25rem;
+    padding-right: 1.25rem;
 }
 
 /* Edit Server Profile (per-server nickname) modal */
@@ -876,18 +893,12 @@
     gap: 8px;
 }
 
-/* Appearance → Compact Mode: tighter vertical rhythm, same layout. */
+/* Appearance → Compact Mode: tighter vertical rhythm, same layout. Inside a
+   same-author run the rows touch (no gap, never an overlap). */
 [data-compact="true"] .message {
     gap: 0.6rem;
-    padding: 0.15rem 0;
-}
-
-[data-compact="true"] .message:hover {
-    padding: 0.15rem 1.25rem;
-}
-
-[data-compact="true"] .message.grouped {
-    margin-top: -3px;
+    --message-pad: 0.15rem;
+    --message-run-pad: 0px;
 }
 
 .message-avatar {
@@ -964,10 +975,11 @@
     color: var(--color-warning);
 }
 
-/* Message Images */
-.message-image {
-    margin-top: 8px;
-}
+/* Message Images. `.message-image` is an inline <span> around the <img>, so
+   it takes no vertical margin — the `margin-top: 8px` that used to sit here
+   never applied (measured: 0, 8 and 40px all leave the image in one place).
+   The space above an image is the row's, like any other content's (see
+   --message-pad / --message-run-pad on .message). */
 
 /* E2EE attachment states (decrypting / failed / non-image download link) */
 .message-attachment {
@@ -2526,12 +2538,21 @@ body.voice-drag-active {
     background: rgba(255, 255, 255, 0.03);
     border-radius: 4px;
 }
+/* Same-author runs sit tight: the seam between two rows of a run is
+   2 x --message-run-pad (2px; 0 in compact mode), and is made by shrinking the
+   padding on BOTH sides of it — the top of the grouped row, and the bottom of
+   the row above it. The last row of a run keeps its full bottom padding, so a
+   run ends with the same space below it as a single message does.
+   The row above is selected with :has() — WebView2, Chromium / Android
+   System WebView 105+, Safari 15.4+, Firefox 121+. Nothing gates the Android
+   WebView version (Capacitor's default floor is 60), so on an older engine the
+   second rule is simply dropped: the seam is then --message-pad +
+   --message-run-pad — looser, never an overlap. */
 .message.grouped {
-    padding-top: 1px;
-    padding-bottom: 1px;
-    /* Pull same-author runs tight: cancels most of the previous message's
-       0.5rem bottom padding, leaving ~2px between lines (compact grouping). */
-    margin-top: -7px;
+    padding-top: var(--message-run-pad);
+}
+.message:has(+ .message.grouped) {
+    padding-bottom: var(--message-run-pad);
 }
 
 /* No header row on grouped messages — drop the content's top margin too,
@@ -2846,14 +2867,34 @@ body.voice-drag-active {
     }
 }
 
-/* Collapsed stand-in for a run of messages from a blocked user. */
+/* Collapsed stand-in for a run of messages from a blocked user. It is a
+   `.message` row (Chat.tsx), so it takes the row's hover — the background
+   stretched to the list's edges by -1.25rem of margin, given back as padding
+   — and the row's density:
+   - normal: 4px above and below, the text indented 16px (--stub-indent);
+   - compact: the row's --message-pad above and below and no indent, which is
+     what compact mode has always shown (its `.message` padding rule used to
+     outrank this one).
+   Hover adds the indent to the row's 1.25rem, so the text stays where it is:
+   it used to jump 16px left on hover, and in normal mode the stub also grew
+   8px taller and pushed every row below it down. */
 .blocked-message-stub {
-    padding: 4px 16px;
+    --stub-indent: 16px;
+    padding: 4px var(--stub-indent);
     font-size: 12px;
     font-style: italic;
     color: var(--text-faint);
     opacity: 0.7;
     user-select: none;
+}
+.blocked-message-stub:hover {
+    padding-left: calc(1.25rem + var(--stub-indent));
+    padding-right: calc(1.25rem + var(--stub-indent));
+}
+[data-compact="true"] .blocked-message-stub {
+    --stub-indent: 0px;
+    padding-top: var(--message-pad);
+    padding-bottom: var(--message-pad);
 }
 
 /* Search footer: the real numbers. "No results" means something different
