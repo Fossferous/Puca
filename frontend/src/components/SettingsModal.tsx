@@ -2393,6 +2393,19 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                     </div>
                                     <div className="settings-option">
                                         <div className="option-info">
+                                            <label>Card Game Sounds</label>
+                                            <span className="option-hint">Cards dealt and turned, chips, check, fold, a win and your turn at a Poker or Blackjack table. Never while you are deafened. Also on the table's speaker button.</span>
+                                        </div>
+                                        <input
+                                            type="checkbox"
+                                            aria-label="Card Game Sounds"
+                                            checked={settings.gameSounds}
+                                            onChange={(e) => updateSetting('gameSounds', e.target.checked)}
+                                            disabled={!settings.soundsEnabled}
+                                        />
+                                    </div>
+                                    <div className="settings-option">
+                                        <div className="option-info">
                                             <label>Speak Join/Leave (TTS)</label>
                                             <span className="option-hint">Announce “X joined/left the channel” aloud using your device's voice</span>
                                         </div>

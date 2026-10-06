@@ -32,6 +32,15 @@ import { gamesGate, type GamesGate } from '../api/games/gamesGate';
 import { GamesView } from '../components/games/GamesView';
 import { PERM } from '../api/permissionBits';
 import { FakeGamesSocket, withVersion } from './gamesTestSocket';
+import { playGameCues } from '../api/games/gameSounds';
+import { loadSettings } from '../components/settingsStore';
+
+// The table's sounds: recorded, never played (jsdom has no Web Audio, and
+// nothing in a test may be audible anyway).
+vi.mock('../api/games/gameSounds', async importOriginal => ({
+    ...(await importOriginal<typeof import('../api/games/gameSounds')>()),
+    playGameCues: vi.fn(() => true),
+}));
 
 const ROOM = 'voice_42';
 const TABLE = 4503599627370497;
@@ -109,7 +118,16 @@ describe('privacy: what each viewer is shown', () => {
         await show({ gate: gate(), currentUserId: 99 });
         expect(faceUp()).toEqual(['2d', '3d', 'Ah']);
         // Everyone in the hand shows two backs.
-        expect(document.querySelectorAll('.pcard-back').length).toBe(6);
+        expect(document.querySelectorAll('.gseat .pcard-back').length).toBe(6);
+        // The two board cards not dealt yet are backs too - with NO card in
+        // them: no code, no data, no name but "face-down card".
+        const down = [...document.querySelectorAll('.gboard > .pcard-back')];
+        expect(down).toHaveLength(2);
+        for (const d of down) {
+            expect(d.getAttribute('data-card')).toBeNull();
+            expect(d.getAttribute('aria-label')).toBe('face-down card');
+            expect(d.outerHTML).not.toMatch(/[2-9TJQKA][cdhs]/);
+        }
         expect(document.querySelector('.games-actions')).toBeNull();
         expect(container.textContent).toContain('You are watching');
     });
@@ -335,6 +353,154 @@ describe('notices and the disclosure', () => {
         await show({ gate: gate({ perms: PERM.CONNECT | PERM.PLAY_GAMES | PERM.MOVE_MEMBERS }) });
         expect(button('Close table')).toBeTruthy();
         expect(document.querySelectorAll('.gseat-remove').length).toBe(2);
+    });
+});
+
+
+describe('the table: an oval with the seats around it', () => {
+    it('the viewer sits at the bottom; every other seat has its own place; the dealer button is on its seat', async () => {
+        await deliver(seated); // viewer seat 2 (Ben); seats 0, 2, 4 taken; button 0
+        await show();
+        const me = document.querySelector('.gseat-me');
+        expect(me?.classList.contains('gseat-side-bottom')).toBe(true);
+        expect(me?.querySelector('.gseat-name')?.textContent).toBe('You');
+        // Your own cards are in the footer, not repeated on the table.
+        expect(me?.querySelector('.pcard')).toBeNull();
+        const places = [...document.querySelectorAll<HTMLElement>('.gtable-oval .gseat')].map(e => `${e.style.getPropertyValue('--gx')},${e.style.getPropertyValue('--gy')}`);
+        expect(places).toHaveLength(6);
+        expect(new Set(places).size).toBe(6);
+        const dealer = [...document.querySelectorAll('.gseat')].find(e => e.querySelector('.gbadge-dealer'));
+        expect(dealer?.querySelector('.gseat-name')?.textContent).toBe('Ann');
+    });
+
+    it('a seat with chips in front of it shows the bet on the felt side', async () => {
+        await deliver(withVersion(holdemEvents[1], 7)); // the deal: blinds posted
+        await show({ currentUserId: 7 });
+        const bets = [...document.querySelectorAll('.gseat-bet')].map(b => b.textContent);
+        expect(bets.sort()).toEqual(['10', '5']);
+    });
+});
+
+describe('the board: five cards face down, turned as they are dealt', () => {
+    it('the flop arriving turns its three cards one after another; the rest stay face down', async () => {
+        await deliver(withVersion(holdemEvents[1], 7));
+        await show({ currentUserId: 7 });
+        expect(document.querySelectorAll('.gboard > .pcard-back')).toHaveLength(5);
+        expect(document.querySelectorAll('.gboard [data-card]')).toHaveLength(0);
+        await deliver(withVersion(holdemEvents[2], 8)); // a check and the flop
+        const flips = [...document.querySelectorAll<HTMLElement>('.gboard .pflip')];
+        expect(flips.map(f => f.querySelector('[data-card]')?.getAttribute('data-card'))).toEqual(['3d', 'Ah', '2d']);
+        expect(flips.every(f => f.classList.contains('pflip-anim'))).toBe(true);
+        const delays = flips.map(f => parseFloat(f.style.getPropertyValue('--pflip-delay')));
+        expect(delays[0]).toBeGreaterThan(0);
+        expect(delays[1]).toBeGreaterThan(delays[0]);
+        expect(delays[2]).toBeGreaterThan(delays[1]);
+        expect(document.querySelectorAll('.gboard > .pcard-back')).toHaveLength(2);
+    });
+
+    it('a board already on the table when it opens does not flip again', async () => {
+        await deliver(seated);
+        await show();
+        expect(document.querySelectorAll('.gboard .pflip')).toHaveLength(3);
+        expect(document.querySelectorAll('.gboard .pflip-anim')).toHaveLength(0);
+    });
+
+    it('between hands the slots are empty, not face down', async () => {
+        await deliver(withVersion(holdemEvents[2], 8));
+        await deliver(withVersion(holdemEvents[3], 9)); // the showdown ends the hand
+        await show({ currentUserId: 7 });
+        expect(document.querySelectorAll('.gboard > .pcard-back')).toHaveLength(0);
+    });
+});
+
+describe('the pots: main pot and side pots, and who won them', () => {
+    const withPots = (pots: { amount: number; eligible: number[] }[], total: number) => {
+        const f = JSON.parse(JSON.stringify(seated));
+        f.payload.view.pots = pots;
+        f.payload.view.pot_total = total;
+        return f;
+    };
+
+    it('two pots show as Main pot and Side pot; one the viewer did not cover is marked', async () => {
+        await deliver(withPots([{ amount: 300, eligible: [0, 2, 4] }, { amount: 400, eligible: [0, 4] }], 750));
+        await show(); // viewer seat 2 is only in the main pot
+        const pills = [...document.querySelectorAll('.gpot-pill')];
+        expect(pills.map(p => p.textContent)).toEqual(['Main pot 300', 'Side pot 400 (you are not in this pot)']);
+        expect(pills[0].classList.contains('gpot-out')).toBe(false);
+        expect(pills[1].classList.contains('gpot-out')).toBe(true);
+        // 50 is still in front of the players this street.
+        expect(document.querySelector('.gpot-total')?.textContent).toBe('Total 750');
+    });
+
+    it('three pots are numbered; one pot (or an older server that sends none) is just the pot', async () => {
+        await deliver(withPots([{ amount: 300, eligible: [0, 2, 4] }, { amount: 200, eligible: [0, 2] }, { amount: 100, eligible: [2] }], 600));
+        await show();
+        expect([...document.querySelectorAll('.gpot-pill')].map(p => p.textContent)).toEqual(['Main pot 300', 'Side pot 1 200', 'Side pot 2 100']);
+        await deliver(withVersion(withPots([], 30), 9));
+        expect(document.querySelectorAll('.gpot-pill')).toHaveLength(0);
+        expect(document.querySelector('.gpot')?.textContent).toBe('Pot 30');
+    });
+
+    it('after the hand, the felt says who won what', async () => {
+        await deliver(withVersion(holdemEvents[2], 8));
+        await deliver(withVersion(holdemEvents[3], 9));
+        await show({ currentUserId: 7 }); // Ann, seat 0, split the pot with Ben
+        expect(document.querySelector('.gpot')?.textContent).toBe('Pot 30 Ben, You');
+        // A later hand that ended while frames were lost (a gap): its result
+        // was never seen, and the older hand's must not stand in for it.
+        const later = JSON.parse(JSON.stringify(holdemEvents[3]));
+        later.type = 'GameTable';
+        later.payload.version = 20;
+        later.payload.view.hand_no = 2;
+        delete later.payload.events;
+        await deliver(later);
+        expect(document.querySelector('.gpot')?.textContent).toBe('Pot 0');
+    });
+});
+
+describe('sounds and the speaker button', () => {
+    beforeEach(() => vi.mocked(playGameCues).mockClear());
+
+    it('opening the table plays nothing; each new frame plays its own sounds', async () => {
+        await deliver(withVersion(holdemEvents[1], 7));
+        await show({ currentUserId: 7 });
+        expect(playGameCues).not.toHaveBeenCalled();
+        await deliver(withVersion(holdemEvents[2], 8));
+        expect(playGameCues).toHaveBeenCalledTimes(1);
+        const cues = vi.mocked(playGameCues).mock.calls[0][0].map(c => c.cue);
+        expect(cues.slice(0, 4)).toEqual(['check', 'flip', 'flip', 'flip']);
+        // The same frame again (a resync) is not news.
+        await deliver(withVersion(holdemEvents[2], 8));
+        expect(playGameCues).toHaveBeenCalledTimes(1);
+    });
+
+    it('a new decision of yours chimes once; someone else\'s turn does not', async () => {
+        const waiting = JSON.parse(JSON.stringify(seated));
+        waiting.payload.view.legal = null;
+        waiting.payload.view.to_act = 0;
+        waiting.payload.view.turn = { hand_no: 1, turn_seq: 3 };
+        await deliver(withVersion(waiting, 7));
+        await show(); // Ben, seat 2: Ann is to act
+        await deliver(withVersion(waiting, 8));
+        expect(playGameCues).not.toHaveBeenCalled();
+        await deliver(withVersion(seated, 9)); // now it is Ben's turn
+        expect(vi.mocked(playGameCues).mock.calls.map(c => c[0].map(q => q.cue))).toEqual([['turn']]);
+        await deliver(withVersion(seated, 10)); // the same decision again (a resync)
+        expect(playGameCues).toHaveBeenCalledTimes(1);
+    });
+
+    it('the speaker button turns the game sounds off and on (the setting Settings shows)', async () => {
+        await deliver(seated);
+        await show();
+        const speaker = () => document.querySelector('.games-sound-btn') as HTMLButtonElement;
+        expect(speaker().getAttribute('aria-pressed')).toBe('true');
+        await click(speaker());
+        expect(loadSettings().gameSounds).toBe(false);
+        expect(speaker().getAttribute('aria-pressed')).toBe('false');
+        expect(speaker().getAttribute('aria-label')).toBe('Game sounds');
+        expect(speaker().getAttribute('title')).toBe('Turn game sounds on');
+        await click(speaker());
+        expect(loadSettings().gameSounds).toBe(true);
     });
 });
 

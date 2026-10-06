@@ -1,3 +1,4 @@
+import { useState, type CSSProperties } from 'react';
 import { SuitClubIcon, SuitDiamondIcon, SuitHeartIcon, SuitSpadeIcon } from '../Icons';
 import { cardName, rankLabel } from '../../api/games/gameWords';
 import { HIDDEN_CARD, type CardCode } from '../../api/games/protocol';
@@ -43,6 +44,29 @@ export function PlayingCard({ code, size = 'md', muted = false, decorative = fal
         >
             <span className="pcard-rank" aria-hidden="true">{rankLabel(code)}</span>
             <span className="pcard-suit" aria-hidden="true">{Suit ? <Suit /> : null}</span>
+        </span>
+    );
+}
+
+/**
+ * A board card the server has dealt, turning face up. It is drawn only once
+ * its code has arrived - before that the board shows plain face-down backs
+ * that carry no card at all - so the flip cannot give anything away early.
+ *
+ * `delay` (seconds) and `animate` are taken at MOUNT and kept: later views
+ * re-render the card without restarting or shifting a flip in progress. The
+ * resting state is face up, so with the animation off (prefers-reduced-motion,
+ * or Settings > Enable Animations) the card is simply there.
+ */
+export function FlipCard({ code, delay, animate, size = 'md' }: { code: CardCode; delay: number; animate: boolean; size?: 'sm' | 'md' | 'lg' }) {
+    const [d] = useState(delay);
+    const [anim] = useState(animate);
+    return (
+        <span className={`pflip${anim ? ' pflip-anim' : ''}`} style={{ '--pflip-delay': `${Math.max(0, d)}s` } as CSSProperties}>
+            <span className="pflip-inner">
+                <PlayingCard code={code} size={size} />
+                <span className={`pcard pcard-${size} pcard-back pflip-back`} aria-hidden="true" />
+            </span>
         </span>
     );
 }

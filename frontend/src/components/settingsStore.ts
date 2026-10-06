@@ -91,6 +91,11 @@ export const defaultSettings = {
     customJoinLeaveSounds: true,
     mentionSound: true,
     streamSound: true,          // sounds when someone starts/stops streaming
+    // The card table's sounds (deal, card turned, chips, check, fold, win,
+    // your turn): synthesized, on the Output Device, at the master volume,
+    // never while deafened (api/games/gameSounds.ts). Also switched from the
+    // table's own speaker button. Subordinate to soundsEnabled.
+    gameSounds: true,
     // SPOKEN "X joined/left the channel" via the browser's local TTS. Opt-in
     // (off) — it gets chatty in a busy channel; the join/leave chime stays on.
     voiceTTS: false,

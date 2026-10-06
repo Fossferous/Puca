@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 're
 import { createPortal } from 'react-dom';
 import { useCountdown } from './useCountdown';
 import { MinusIcon, PlusIcon } from '../Icons';
+import { SmartAvatar } from '../SmartAvatar';
 
 /** The 30 s turn clock: a bar and the seconds left. */
 export function TurnClock({ ms, receivedAt, totalSecs, compact = false }: {
@@ -26,10 +27,17 @@ export function TurnClock({ ms, receivedAt, totalSecs, compact = false }: {
     );
 }
 
-/** Initials avatar for a seat (the call's avatars live in the VoiceStage). */
-export function SeatAvatar({ name }: { name: string }) {
-    const initial = (name.trim()[0] ?? '?').toUpperCase();
-    return <span className="gseat-avatar" aria-hidden="true">{initial}</span>;
+/** A seat's avatar: the member's picture (SmartAvatar: authenticated, frozen
+ *  unless they speak, hidden if the viewer hid it), else their initial. */
+export function SeatAvatar({ name, userId, fileId }: { name: string; userId?: number; fileId?: string | null }) {
+    const letter = (name.trim()[0] ?? '?').toUpperCase();
+    return (
+        <span className="gseat-avatar" aria-hidden="true">
+            {userId !== undefined && fileId
+                ? <SmartAvatar userId={userId} fileId={fileId} className="gseat-avatar-img" fallback={letter} />
+                : letter}
+        </span>
+    );
 }
 
 /** A − amount + stepper. The amount itself is a control the caller supplies

@@ -255,6 +255,19 @@ pub struct SeatView {
     pub leaving: bool,
 }
 
+/// A pot as it stands in a live hand: the chips gathered from the streets
+/// that have closed, and the seats that can still win it. Pot 0 is the main
+/// pot; each one after it is a side pot that only the players who put in more
+/// can win. This street's bets are NOT in any pot yet (they sit in front of
+/// the players, `SeatView::street_commit`) - the pots are rebuilt when the
+/// street closes, the way a dealer gathers the bets. `eligible` is in seat
+/// order and never names a folded seat.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PotView {
+    pub amount: u64,
+    pub eligible: Vec<usize>,
+}
+
 /// The table as one viewer may see it. Build it per connection with
 /// [`HoldemTable::view_for`]; `viewer: None` is a spectator.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -270,7 +283,11 @@ pub struct HoldemView {
     pub big_blind_seat: Option<usize>,
     pub seats: Vec<Option<SeatView>>,
     pub board: Vec<Card>,
+    /// Everything put in this hand, this street's bets included.
     pub pot_total: u64,
+    /// The main pot and the side pots (see [`PotView`]); empty between hands
+    /// and before the first street closes.
+    pub pots: Vec<PotView>,
     pub current_bet: u64,
     pub to_act: Option<usize>,
     pub turn: Option<TurnRef>,
@@ -446,6 +463,22 @@ impl Hand {
             matches!(&self.players[i], Some(h)
                 if h.status == PStatus::Active && (!h.acted || h.street_commit < self.current_bet))
         })
+    }
+
+    /// The pots as the dealer would have them now: built from what each seat
+    /// put in on the streets that have CLOSED (this street's bets are still
+    /// in front of the players), by the same `build_pots` rule the settlement
+    /// uses. The settlement rebuilds them from the whole contribution once
+    /// uncalled chips have gone back, so the last street's bets join the
+    /// pots they reach, exactly as they do on the table when it closes.
+    fn gathered_pots(&self) -> Vec<PotView> {
+        let contrib: Vec<(usize, u64, bool)> = (0..self.players.len())
+            .filter_map(|s| {
+                let h = self.players[s].as_ref()?;
+                Some((s, h.hand_commit - h.street_commit, h.status == PStatus::Folded))
+            })
+            .collect();
+        build_pots(&contrib).into_iter().map(|p| PotView { amount: p.amount, eligible: p.eligible }).collect()
     }
 
     /// Seats in clockwise order starting at `from` (inclusive).
@@ -1149,6 +1182,7 @@ impl HoldemTable {
             seats,
             board: hand.map_or_else(Vec::new, |h| h.board.clone()),
             pot_total: if live { hand.unwrap().players.iter().flatten().map(|h| h.hand_commit).sum() } else { 0 },
+            pots: hand.filter(|_| live).map_or_else(Vec::new, Hand::gathered_pots),
             current_bet: if live { hand.unwrap().current_bet } else { 0 },
             to_act: self.to_act(),
             turn: self.turn(),

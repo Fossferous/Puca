@@ -355,6 +355,107 @@ fn a_short_big_blind_all_in_still_makes_everyone_call_the_full_blind() {
     assert_eq!(stacks(&t)[..3], [1_002, 990, 12]);
 }
 
+/// The live pots in a view: `(amount, eligible)` per pot, main pot first.
+fn live_pots(t: &HoldemTable) -> Vec<(u64, Vec<usize>)> {
+    t.view_for(None).pots.iter().map(|p| (p.amount, p.eligible.clone())).collect()
+}
+
+#[test]
+fn the_view_shows_a_main_pot_and_a_side_pot_once_a_short_all_in_street_closes() {
+    // Button 0, SB 1, BB 2, UTG 3; seat 0 can only put in 100.
+    let mut t = table_with(&[0, 1, 2, 3]);
+    t.set_stack(0, 100);
+    t.start_hand_stacked(&[], "").unwrap();
+    assert_eq!(live_pots(&t), vec![], "the blinds are bets in front of the players, not a pot yet");
+    act(&mut t, 3, Action::BetOrRaiseTo(300));
+    act(&mut t, 0, Action::AllIn); // 100: less than the 300 to call
+    act(&mut t, 1, Action::Call);
+    act(&mut t, 2, Action::Call);
+    let v = t.view_for(None);
+    assert_eq!(v.street, Some(Street::Flop));
+    // 4 x 100 everyone matched; the 3 x 200 above it is for the three who
+    // put it in, never for the short stack.
+    assert_eq!(live_pots(&t), vec![(400, vec![0, 1, 2, 3]), (600, vec![1, 2, 3])]);
+    assert_eq!(v.pot_total, 1_000);
+    // A bet this street sits in front of the bettor until the street closes:
+    // the pots do not move, the total does.
+    act(&mut t, 1, Action::BetOrRaiseTo(50));
+    assert_eq!(live_pots(&t), vec![(400, vec![0, 1, 2, 3]), (600, vec![1, 2, 3])]);
+    assert_eq!(t.view_for(None).pot_total, 1_050);
+    // A fold leaves its chips in the pots it reached but no longer contests
+    // them; the call goes into the side pot only.
+    act(&mut t, 2, Action::Fold);
+    act(&mut t, 3, Action::Call);
+    assert_eq!(t.view_for(None).street, Some(Street::Turn));
+    assert_eq!(live_pots(&t), vec![(400, vec![0, 1, 3]), (700, vec![1, 3])]);
+    // Every seat's view shows the same pots (they are public).
+    for seat in 0..4 {
+        assert_eq!(t.view_for(Some(seat)).pots, t.view_for(None).pots);
+    }
+    // Settled: the hand is over, no live pots remain.
+    check_down(&mut t);
+    assert!(!t.hand_in_progress());
+    assert_eq!(live_pots(&t), vec![]);
+}
+
+#[test]
+fn two_short_all_ins_make_two_side_pots_and_the_settlement_pays_exactly_them() {
+    // Seats 0 (60) and 1 (150) are short; 2 and 3 cover. Seat 0 has the best
+    // hand, seat 1 the second best: each wins only the pots it is in.
+    let mut t = table_with(&[0, 1, 2, 3]);
+    t.set_stack(0, 60);
+    t.set_stack(1, 150);
+    t.start_hand_stacked(&[(0, "Ah Ad"), (1, "Kh Kd"), (2, "Qh Qd"), (3, "7c 2d")], "2c 8d 9h Jc 3s").unwrap();
+    act(&mut t, 3, Action::BetOrRaiseTo(400));
+    act(&mut t, 0, Action::AllIn);
+    act(&mut t, 1, Action::AllIn);
+    act(&mut t, 2, Action::Call);
+    // Flop: 3 and 2 still have chips; the street opens with the pots built.
+    assert_eq!(
+        live_pots(&t),
+        vec![(240, vec![0, 1, 2, 3]), (270, vec![1, 2, 3]), (500, vec![2, 3])],
+        "main 4 x 60, first side 3 x 90, second side 2 x 250"
+    );
+    let ev = check_down(&mut t);
+    let pots = awarded(&ev);
+    assert_eq!(
+        pots.iter().map(|p| (p.1, p.2.clone())).collect::<Vec<_>>(),
+        vec![(240, vec![0, 1, 2, 3]), (270, vec![1, 2, 3]), (500, vec![2, 3])],
+        "the settlement pays the pots the table showed"
+    );
+    assert_eq!(pots[0].3, vec![PotShare { seat: 0, amount: 240 }]);
+    assert_eq!(pots[1].3, vec![PotShare { seat: 1, amount: 270 }]);
+    assert_eq!(pots[2].3, vec![PotShare { seat: 2, amount: 500 }]);
+    assert_eq!(stacks(&t)[..4], [240, 270, 1_000 - 400 + 500, 1_000 - 400]);
+}
+
+#[test]
+fn tied_hands_split_the_main_and_the_side_pot_with_the_odd_chip_left_of_the_button() {
+    // The board is a straight; seats 2 and 3 both make the king-high one and
+    // split everything they are in. Seat 1 (55 chips) plays the board and
+    // loses. Button 0, SB 1, BB 2, UTG 3.
+    let mut t = table_with(&[0, 1, 2, 3]);
+    t.set_stack(1, 55);
+    t.start_hand_stacked(&[(0, "2c 3d"), (1, "4c 4d"), (2, "Kh 2h"), (3, "Kd 3h")], "9s Ts Jd Qc 8h").unwrap();
+    act(&mut t, 3, Action::BetOrRaiseTo(101));
+    act(&mut t, 0, Action::Fold); // the button: no blind, nothing in
+    act(&mut t, 1, Action::AllIn); // 55
+    act(&mut t, 2, Action::Call);
+    // Main 3 x 55 = 165 (odd), side 2 x 46 = 92.
+    assert_eq!(live_pots(&t), vec![(165, vec![1, 2, 3]), (92, vec![2, 3])]);
+    act(&mut t, 2, Action::BetOrRaiseTo(11));
+    act(&mut t, 3, Action::Call);
+    assert_eq!(live_pots(&t), vec![(165, vec![1, 2, 3]), (114, vec![2, 3])]);
+    let ev = check_down(&mut t);
+    let pots = awarded(&ev);
+    assert_eq!(pots.len(), 2, "{pots:?}");
+    // The odd chip of the main pot goes to the first winner left of the
+    // button: seat 1 lost, so seat 2.
+    assert_eq!(pots[0].3, vec![PotShare { seat: 2, amount: 83 }, PotShare { seat: 3, amount: 82 }]);
+    assert_eq!(pots[1].3, vec![PotShare { seat: 2, amount: 57 }, PotShare { seat: 3, amount: 57 }]);
+    assert_eq!(stacks(&t)[..4], [1_000, 0, 1_000 - 112 + 83 + 57, 1_000 - 112 + 82 + 57]);
+}
+
 // A player who already covers every all-in opponent has nothing to decide:
 // nobody can call a raise, and the excess comes back uncalled. Giving such a
 // player a turn would let the clock FOLD chips that already cover the pot.

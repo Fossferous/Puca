@@ -5660,6 +5660,7 @@ export function Chat({ onLogout }: ChatProps) {
                                 channelName={currentVoiceChannel.name}
                                 currentUserId={currentUserId}
                                 memberNames={new Map(allMembers.map(m => [m.id, m.display_name || m.server_nickname || m.username]))}
+                                memberAvatars={new Map(allMembers.map(m => [m.id, m.avatar_file_id || null]))}
                                 gate={voiceGamesGate}
                                 isPhone={isMobile}
                                 onBack={() => setViewMode('voice')}

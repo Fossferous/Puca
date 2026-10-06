@@ -17,8 +17,10 @@
 //      in the call grid (both measured the same way) and joins from the tile;
 //   3. privacy: neither player's DOM ever holds the other's hole cards, and a
 //      spectator's holds no card but the board;
-//   4. the phone at 390x844: at most 6 seats, the opponents in a strip that
-//      scrolls sideways, the TWO-ROW action bar above the voice bar and the
+//   4. the phone at 390x844: at most 6 seats, each in its own place around the
+//      oval table (the viewer at the bottom), no seat on another seat or on
+//      the board and pots, the board's five slots face down until dealt, the
+//      TWO-ROW action bar above the voice bar and the
 //      bottom nav, every visible target >= 44 px and hit by a tap at its
 //      centre, no horizontal overflow measured with clientWidth (never
 //      innerWidth) — and a 460 px element injected into the table MUST be
@@ -161,7 +163,7 @@ const myCards = (page) => page.evaluate(() => [...document.querySelectorAll('.ga
 const TABLE_ROOTS = '.games-view, .games-sheet, .games-disclosure';
 const ACTIVITY_ROOTS = '.activity-picker, .activity-notice, .activity-tile';
 async function phoneGeometry(page, rootSel = TABLE_ROOTS) {
-    return page.evaluate((rootSel) => {
+    const g = await page.evaluate((rootSel) => {
         const vw = document.documentElement.clientWidth;
         const roots = [...document.querySelectorAll(rootSel)];
         const scrollsX = (el, root) => {
@@ -212,13 +214,40 @@ async function phoneGeometry(page, rootSel = TABLE_ROOTS) {
             covered: covered.slice(0, 6),
             footerBottom: footer ? Math.round(footer.bottom) : null,
             floor: Math.round(floor),
-            seats: document.querySelectorAll('.games-opps .gseat').length + (document.querySelector('.games-me .games-me-info') ? 1 : 0),
-            stripScrolls: (() => { const s = document.querySelector('.games-opps'); return s ? getComputedStyle(s).overflowX : null; })(),
+            seats: document.querySelectorAll('.games-opps .gseat').length,
             barRows: document.querySelectorAll('.games-footer .games-actions > .games-actions-row').length,
             roots: roots.length,
         };
     }, rootSel);
+    g.table = await page.evaluate(tableGeometry);
+    return g;
 }
+/** In the page: the Poker table's oval - seat tiles must not sit on each
+ *  other, on the board or on the pots, and must stay inside the table's box;
+ *  the board always has five slots and a face-down one names no card. */
+function tableGeometry() {
+    const oval = document.querySelector('.gtable-oval');
+    if (!oval) return null;
+    const box = oval.getBoundingClientRect();
+    const rect = (e) => e.getBoundingClientRect();
+    const meets = (a, b) => a.left < b.right - 0.5 && b.left < a.right - 0.5 && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5;
+    const seats = [...oval.querySelectorAll('.gseat')].map(rect);
+    const middle = ['.gboard', '.gpot'].map(q => oval.querySelector(q)).filter(Boolean).map(rect);
+    const clashes = [];
+    seats.forEach((a, i) => {
+        seats.forEach((b, j) => { if (j > i && meets(a, b)) clashes.push(`seat ${i} on seat ${j}`); });
+        middle.forEach((m, k) => { if (meets(a, m)) clashes.push(`seat ${i} on ${k ? 'the pots' : 'the board'}`); });
+        if (a.left < box.left - 0.5 || a.right > box.right + 0.5 || a.top < box.top - 0.5 || a.bottom > box.bottom + 0.5) clashes.push(`seat ${i} outside the table`);
+    });
+    const me = oval.querySelector('.gseat-me');
+    return {
+        clashes,
+        meAtBottom: me ? me.classList.contains('gseat-side-bottom') && rect(me).top > box.top + box.height / 2 : null,
+        slots: oval.querySelectorAll('.gboard > .pcard, .gboard > .pflip').length,
+        downWithData: [...oval.querySelectorAll('.gboard > .pcard-back')].filter(b => b.hasAttribute('data-card') || /[2-9TJQKA][cdhs]/.test(b.outerHTML)).length,
+    };
+}
+
 const geometryOk = (g) => g.overflow.length === 0 && g.scrollWidth <= g.vw && g.small.length === 0 && g.covered.length === 0;
 
 /** Emulate the soft keyboard: shrink window.visualViewport by `kb` px. */
@@ -473,7 +502,12 @@ try {
         }, 40000);
         if (who === 'B') { phoneTurn = true; break; }
         if (who !== 'A') break;
-        if (i === 0) await shot(A, '05-desktop-holdem-your-turn');
+        if (i === 0) {
+            const t = await A.evaluate(tableGeometry);
+            check('desktop: six seats around the oval, you at the bottom, no seat on another or on the board/pots, all inside the table', t && t.clashes.length === 0 && t.meAtBottom === true, t);
+            check('desktop: the board has five slots, and a face-down one carries no card', t && t.slots === 5 && t.downWithData === 0, t);
+            await shot(A, '05-desktop-holdem-your-turn');
+        }
         const btn = A.locator('.games-footer .games-actions-row').first().locator('button').nth(1); // Check / Call
         await btn.click();
         await sleep(800);
@@ -486,7 +520,8 @@ try {
         check('phone 390x844: no horizontal overflow, every target >= 44 px and hit at its centre', geometryOk(g), g);
         check('phone: the action bar is TWO rows', g.barRows === 2, g);
         check('phone: the action bar ends above the voice bar and the bottom nav', g.footerBottom !== null && g.footerBottom <= g.floor + 0.5, g);
-        check('phone: at most 6 seats; the opponents\' strip scrolls sideways', g.seats <= 6 && g.stripScrolls === 'auto', g);
+        check('phone: at most 6 seats around the oval, you at the bottom, no seat on another or on the board/pots, all inside the table', g.seats <= 6 && g.table && g.table.clashes.length === 0 && g.table.meAtBottom === true, g.table);
+        check('phone: the board has five slots, and a face-down one carries no card', g.table && g.table.slots === 5 && g.table.downWithData === 0, g.table);
         await shot(B, '06-phone-holdem-your-turn');
 
         // Positive control: a 460 px element in the table MUST be caught.

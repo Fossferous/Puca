@@ -433,6 +433,26 @@ try {
     const hs = {};
     const handsEnded = new Set();
     const stats = { showdowns: 0, mucks: 0, allins: 0, foldouts: 0, timeouts: 0 };
+    // The live pots on the wire: every Hold'em view of a live hand carries
+    // them, and they plus the bets still in front of the players are the
+    // total (counted from EVERY recorded frame, every viewer).
+    const pots = { views: 0, bad: [], sidePotViews: 0 };
+    const checkPots = () => {
+        pots.views = 0; pots.bad = []; pots.sidePotViews = 0;
+        for (const R of [P1, P2, P3, P4, S]) {
+            for (const f of gameFrames(R)) {
+                const v = f.m.payload?.view;
+                if (!v || v.game !== 'holdem' || f.m.payload.table_id !== HOLDEM_ID) continue;
+                pots.views++;
+                if (!Array.isArray(v.pots)) { pots.bad.push(`v${f.m.payload.version}: no pots`); continue; }
+                const bets = v.seats.reduce((a, x) => a + (x ? x.street_commit : 0), 0);
+                const sum = v.pots.reduce((a, x) => a + x.amount, 0);
+                if (v.in_hand && sum + bets !== v.pot_total) pots.bad.push(`v${f.m.payload.version}: pots ${sum} + bets ${bets} != ${v.pot_total}`);
+                if (!v.in_hand && v.pots.length) pots.bad.push(`v${f.m.payload.version}: pots between hands`);
+                if (v.pots.length > 1) pots.sidePotViews++;
+            }
+        }
+    };
     const seenEvents = new Set();
     const tally = () => {
         // From P1's frames (a seated player sees every public event).
@@ -530,6 +550,9 @@ try {
     check('Hold\'em: at least one all-in', stats.allins > 0, stats);
     check('Hold\'em: at least one fold-out (hand won without a showdown)', stats.foldouts > 0, stats);
     check('Hold\'em: at least one turn decided by the clock running out', stats.timeouts > 0, stats);
+    checkPots();
+    summary.holdem.pots = { views: pots.views, side_pot_views: pots.sidePotViews };
+    check('Hold\'em: every view carries the live pots, and pots + bets = the pot total (every viewer, every frame)', pots.views > 0 && pots.bad.length === 0, { views: pots.views, side_pot_views: pots.sidePotViews, bad: pots.bad.slice(0, 5) });
     await shot(P1.page, '09-p1-desktop-holdem');
     await shot(P4.page, '10-p4-phone-holdem');
     await shot(S.page, '11-s-spectator-holdem');

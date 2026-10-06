@@ -63,3 +63,23 @@
 }
 
 [data-contrast="high"] .pcard-muted { opacity: 0.6; }
+
+/* A board card turning face up (FlipCard). The resting state is FACE UP: the
+   animation only starts it face down (fill: backwards holds the back up
+   through the delay) and lets go when it ends, so with animations off the
+   card is just there. Its back is a picture of a back, with no card in it. */
+.pflip { display: inline-flex; perspective: 600px; flex-shrink: 0; }
+.pflip-inner { position: relative; display: inline-flex; transform-style: preserve-3d; }
+.pflip-inner > .pcard { backface-visibility: hidden; -webkit-backface-visibility: hidden; }
+.pflip-back { position: absolute; inset: 0; transform: rotateY(180deg); }
+.pflip-anim .pflip-inner {
+    animation: pflip-turn 0.42s cubic-bezier(0.3, 0.7, 0.4, 1) backwards;
+    animation-delay: var(--pflip-delay, 0s);
+}
+@keyframes pflip-turn {
+    from { transform: rotateY(-180deg); }
+    to { transform: rotateY(0deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+    .pflip-anim .pflip-inner { animation: none; }
+}
