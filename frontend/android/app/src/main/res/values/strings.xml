@@ -4,10 +4,9 @@
          the Lite build must show a different launcher label and Capacitor's
          appName never reaches the APK. Defining it here too is a duplicate
          resource and fails the build. -->
-    <string name="title_activity_main">Puca</string>
     <string name="package_name">com.sovereign.app</string>
     <string name="custom_url_scheme">com.sovereign.app</string>
-    <string name="widget_label">Puca shortcuts</string>
+    <string name="widget_label">Púca shortcuts</string>
     <string name="widget_description">One-tap shortcuts to Friends, Tasks, Devices and Settings.</string>
     <string name="widget_friends">Friends</string>
     <string name="widget_tasks">Tasks</string>

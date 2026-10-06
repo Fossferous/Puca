@@ -4,6 +4,12 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+
+- **The Android app's name on your home screen has its fada again.** The phone showed "Puca" under the icon (and "Puca" for the Lite app too) because the app's main screen carried its own plain-ASCII label; it now uses the app's real name, "Púca" or "Púca Lite", and the home-screen widget is "Púca shortcuts". This arrives with the next Android app install, not with an in-app update.
+
 ## 0.9.834 — 2026-10-06
 
 Poker table with side pots and sounds, a proper phone download path, faster clips, an MP3 player, CPU savings in calls, steadier streams on weak connections
