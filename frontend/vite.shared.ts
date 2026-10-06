@@ -77,7 +77,7 @@ export const RC_MODULE_PATTERNS: RegExp[] = [
   // it the moment anything preserved imported it. RcGlobals.lite.tsx is
   // excluded from this by the `s` in the alternation never matching it.
   /[\\/]src[\\/]components[\\/]DeviceStage\w*\.tsx$/,
-  /[\\/]src[\\/]components[\\/]Device(sView|FileBrowser|FileManager|Downloads|ShareModal)\.tsx$/,
+  /[\\/]src[\\/]components[\\/]Device(sView|FileBrowser|FileManager|Downloads|ShareModal|AudioHubPanel)\.tsx$/,
   /[\\/]src[\\/]components[\\/](RemoteControlOverlay|HostConsentPrompt|HostFilesIndicator|FileAccessPrompt|UnattendedPassphrasePrompt|ServiceUpdateBanner)\.tsx$/,
   /[\\/]src[\\/]components[\\/]device(AutoKeyboard|StageStall)\.ts$/,
 ]

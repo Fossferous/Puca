@@ -41,6 +41,12 @@ interface SovereignAppPlugin {
      *  (APKs from 0.9.2). The only way back once a runtime permission has
      *  been refused with "Don't allow", after which Android never asks again. */
     openAppSettings(): Promise<void>;
+    /** Android's Bluetooth settings page (APKs after 0.9.834). A fixed
+     *  intent action — the caller passes nothing. Used after Audio Hub hands a
+     *  headset to the phone, because Android does not let an ordinary app
+     *  connect a Bluetooth headset itself: the person taps it there. Older
+     *  APKs reject, and the caller says where to go instead. */
+    openBluetoothSettings(): Promise<void>;
     /** Native delivery (APKs from 0.8.66): hand the background socket its
      *  connection credentials — OUR server's WS URL + the session JWT. Null
      *  token clears them. No third party in this path, by design. `deviceId`
@@ -357,6 +363,29 @@ export async function openMobileAppSettings(): Promise<boolean> {
         return true;
     } catch {
         appSettingsSupported = false;
+        return false;
+    }
+}
+
+/** Whether openBluetoothSettings exists natively (APKs after 0.9.834). Its
+ *  own latch, like the others. */
+let bluetoothSettingsSupported: boolean | null = null;
+
+/**
+ * Open Android's Bluetooth settings, so the person can tap the headset a PC
+ * just let go of (Audio Hub, My Devices). false = not Android, or an APK
+ * without the method — the caller then says where to go instead of offering
+ * a button that does nothing.
+ */
+export async function openBluetoothSettings(): Promise<boolean> {
+    if (!android() || usable === false || bluetoothSettingsSupported === false) return false;
+    try {
+        await App.openBluetoothSettings();
+        usable = true;
+        bluetoothSettingsSupported = true;
+        return true;
+    } catch {
+        bluetoothSettingsSupported = false;
         return false;
     }
 }

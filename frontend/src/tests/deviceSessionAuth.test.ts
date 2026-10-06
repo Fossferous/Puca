@@ -38,7 +38,9 @@ const displayTopologyChanged = vi.fn(async () => {});
  *  synthetic 1px mouse moves). Mocked so a test can observe whether a connect
  *  physically touched the host at all; every other call site in session.ts is
  *  best-effort and indifferent to whether it resolves. */
-const tauriInvoke = vi.fn(async (..._a: unknown[]) => undefined);
+// `unknown`, not `undefined`: the Audio Hub tests answer `audio_hub_request`
+// with a reply object.
+const tauriInvoke = vi.fn(async (..._a: unknown[]): Promise<unknown> => undefined);
 vi.mock('@tauri-apps/api/core', () => ({
     invoke: (...a: unknown[]) => tauriInvoke(...a),
 }));
@@ -1865,5 +1867,195 @@ describe('a share is told the screen layout only for a screen session', () => {
         const { key } = await activeHostSession();
         await settle();
         expect(await sentKinds(key, 0)).toContain('monitors');
+    });
+});
+
+/**
+ * AUDIO HUB (audioHub.ts): the owner's phone asks THIS host to make one of
+ * five calls against Audio Hub's local API, through the Tauri command
+ * `audio_hub_request`. The host is the gate; what reaches the OS here is that
+ * command, so every test asserts on whether — and with what — it was invoked.
+ */
+describe('Audio Hub requests', () => {
+    /** Every frame the host sealed after index `from`, opened. */
+    async function sentFrames(key: Uint8Array, from: number): Promise<Record<string, unknown>[]> {
+        const { openControl } = await import('../api/e2ee');
+        const out: Record<string, unknown>[] = [];
+        for (const m of sent.slice(from)) {
+            const blob = m.payload?.payload;
+            if (!blob) continue;
+            const plain = await openControl(key, blob);
+            if (plain) out.push(JSON.parse(plain) as Record<string, unknown>);
+        }
+        return out;
+    }
+    const hubCalls = () => tauriInvoke.mock.calls.filter(c => c[0] === 'audio_hub_request');
+    const RID = 'rid-0123456789';
+    /** What the shell answers: the mock Audio Hub, one level up. */
+    let shellReply: unknown = { running: true, status: 200, body: { ok: true, message: 'let go' } };
+    let shellGate: Promise<void> | null = null;
+
+    beforeEach(() => {
+        shellReply = { running: true, status: 200, body: { ok: true, message: 'let go' } };
+        shellGate = null;
+        tauriInvoke.mockImplementation(async (...a: unknown[]) => {
+            if (a[0] === 'audio_hub_request') {
+                if (shellGate) await shellGate;
+                return shellReply;
+            }
+            return undefined;
+        });
+    });
+
+    it('POSITIVE CONTROL: the owner\'s own device on an unarmed host reaches Audio Hub and gets the answer back', async () => {
+        armed = false;
+        const { key } = await activeHostSession();
+        const before = sent.length;
+        await signal(key, { kind: 'audio-hub', op: 'airpods-phone', rid: RID });
+        expect(hubCalls()).toEqual([['audio_hub_request', { op: 'airpods-phone' }]]);
+        const frames = await sentFrames(key, before);
+        expect(frames.map(f => f.kind)).toEqual(['audio-hub-ack', 'audio-hub-result']);
+        expect(frames[0]).toMatchObject({ rid: RID });
+        expect(frames[1]).toMatchObject({
+            rid: RID, op: 'airpods-phone', running: true, status: 200, body: { ok: true, message: 'let go' },
+        });
+    });
+
+    it('a FRIEND\'s share never reaches Audio Hub, whatever it may otherwise do', async () => {
+        armed = false;
+        shareCaps = ['control', 'view_only', 'files'];
+        const { key } = await activeHostSession();
+        const before = sent.length;
+        await signal(key, { kind: 'audio-hub', op: 'status', rid: RID });
+        await signal(key, { kind: 'audio-hub', op: 'airpods-phone', rid: RID + 'x' });
+        expect(hubCalls(), 'Audio Hub is the owner\'s alone').toEqual([]);
+        expect(await sentFrames(key, before), 'silence, not an error to probe with').toEqual([]);
+    });
+
+    it('an ARMED host holds the request until the passphrase is proved, then serves it once', async () => {
+        armed = true;
+        const { key } = await activeHostSession();
+        await signal(key, { kind: 'audio-hub', op: 'status', rid: RID });
+        expect(hubCalls(), 'nothing before the proof').toEqual([]);
+
+        verifyUaResponse.mockImplementation(async () => true);
+        await signal(key, { kind: 'ua-response', nonce: btoa('nonce-abc'), sig: btoa('sig') });
+        expect(hubCalls(), 'served once the proof arrived').toEqual([['audio_hub_request', { op: 'status' }]]);
+    });
+
+    it('an ARMED host whose passphrase is REJECTED never serves the held request', async () => {
+        armed = true;
+        const { key } = await activeHostSession();
+        await signal(key, { kind: 'audio-hub', op: 'airpods-phone', rid: RID });
+        verifyUaResponse.mockImplementation(async () => false);
+        await signal(key, { kind: 'ua-response', nonce: btoa('nonce-abc'), sig: btoa('sig') });
+        expect(hubCalls()).toEqual([]);
+    });
+
+    it('only the five allow-listed ops reach the shell, and only the op does', async () => {
+        armed = false;
+        const { key } = await activeHostSession();
+        let i = 0;
+        for (const op of ['pair', '/api/pair', 'airpods/phone', 'STATUS', 'hello', '', 7, null]) {
+            await signal(key, { kind: 'audio-hub', op, rid: `${RID}${i++}` });
+        }
+        expect(hubCalls(), 'nothing off the allow-list').toEqual([]);
+
+        // Extra fields a hostile peer might hope are forwarded: none is.
+        await signal(key, {
+            kind: 'audio-hub', op: 'status', rid: RID,
+            path: '/api/pair', method: 'POST', host: 'evil.example', port: 22, headers: { Origin: 'x' },
+        });
+        expect(hubCalls()).toEqual([['audio_hub_request', { op: 'status' }]]);
+    });
+
+    it('a malformed request id is refused', async () => {
+        armed = false;
+        const { key } = await activeHostSession();
+        for (const rid of [undefined, '', 'short', 'x'.repeat(65), 'has spaces in it']) {
+            await signal(key, { kind: 'audio-hub', op: 'status', rid });
+        }
+        expect(hubCalls()).toEqual([]);
+    });
+
+    it('a REPLAYED request is not served twice', async () => {
+        armed = false;
+        const { key } = await activeHostSession();
+        const sealed = await sealControl(key, JSON.stringify({
+            sid: 'ds-test', n: peerSigSeq++, kind: 'audio-hub', op: 'xm6-phone', rid: RID,
+        }));
+        handlers.get('DeviceSignalled')!({ payload: { session_id: 'ds-test', payload: sealed } });
+        await settle();
+        handlers.get('DeviceSignalled')!({ payload: { session_id: 'ds-test', payload: sealed } });
+        await settle();
+        expect(hubCalls()).toEqual([['audio_hub_request', { op: 'xm6-phone' }]]);
+    });
+
+    it('a request the SERVER forged (wrong key) or sent in the clear is ignored', async () => {
+        armed = false;
+        await activeHostSession();
+        const forgedKey = new Uint8Array(32).fill(0x42);
+        const forged = await sealControl(forgedKey, JSON.stringify({
+            sid: 'ds-test', n: 1000, kind: 'audio-hub', op: 'airpods-phone', rid: RID,
+        }));
+        handlers.get('DeviceSignalled')!({ payload: { session_id: 'ds-test', payload: forged } });
+        handlers.get('DeviceSignalled')!({
+            payload: {
+                session_id: 'ds-test',
+                payload: JSON.stringify({ sid: 'ds-test', n: 1001, kind: 'audio-hub', op: 'airpods-phone', rid: RID }),
+            },
+        });
+        await settle();
+        expect(hubCalls()).toEqual([]);
+    });
+
+    it('a request spliced in from ANOTHER session is ignored', async () => {
+        armed = false;
+        const { key } = await activeHostSession();
+        const spliced = await sealControl(key, JSON.stringify({
+            sid: 'ds-other', n: peerSigSeq++, kind: 'audio-hub', op: 'airpods-phone', rid: RID,
+        }));
+        handlers.get('DeviceSignalled')!({ payload: { session_id: 'ds-test', payload: spliced } });
+        await settle();
+        expect(hubCalls()).toEqual([]);
+    });
+
+    it('a second request while one is in flight is answered busy, not stacked', async () => {
+        armed = false;
+        const { key } = await activeHostSession();
+        let release!: () => void;
+        shellGate = new Promise<void>(r => { release = r; });
+        const before = sent.length;
+        await signal(key, { kind: 'audio-hub', op: 'airpods-phone', rid: RID });
+        await signal(key, { kind: 'audio-hub', op: 'airpods-pc', rid: RID + 'b' });
+        release();
+        await settle();
+        expect(hubCalls()).toEqual([['audio_hub_request', { op: 'airpods-phone' }]]);
+        const busy = (await sentFrames(key, before)).find(f => f.rid === RID + 'b');
+        expect(busy).toMatchObject({ kind: 'audio-hub-result', running: true });
+        expect(String(busy?.error)).toMatch(/still running/);
+    });
+
+    it('a host with no Audio Hub command says it cannot, instead of going silent', async () => {
+        armed = false;
+        const { key } = await activeHostSession();
+        tauriInvoke.mockImplementation(async (...a: unknown[]) => {
+            if (a[0] === 'audio_hub_request') throw new Error('command audio_hub_request not found');
+            return undefined;
+        });
+        const before = sent.length;
+        await signal(key, { kind: 'audio-hub', op: 'status', rid: RID });
+        const result = (await sentFrames(key, before)).find(f => f.kind === 'audio-hub-result');
+        expect(result).toMatchObject({ rid: RID, running: false, unsupported: true });
+    });
+
+    it('a reflected answer sent TO a host does nothing', async () => {
+        armed = false;
+        const { key } = await activeHostSession();
+        const before = sent.length;
+        await signal(key, { kind: 'audio-hub-result', rid: RID, op: 'status', running: true });
+        await signal(key, { kind: 'audio-hub-ack', rid: RID });
+        expect(hubCalls()).toEqual([]);
+        expect(await sentFrames(key, before)).toEqual([]);
     });
 });

@@ -50,6 +50,7 @@ const DETECTORS = [
     { s: 'shareable_folders', why: 'remote file browser roots' },
     { s: 'list_anticheat_processes', why: 'control-session anti-cheat gate' },
     { s: 'set_control_monitor', why: 'which monitor injected input maps onto' },
+    { s: 'audio_hub_request', why: 'Audio Hub control through a device session' },
     // Wire protocol
     { s: 'DeviceConnectRequested', why: 'incoming device-control session' },
     { s: 'ControlInput', why: 'input frames over the device channel' },

@@ -6,6 +6,10 @@ one-line summary; this file is the full story. Versions follow
 
 ## Unreleased
 
+### Added
+
+- **Hand your headphones between your PC and your phone from anywhere.** If you run Audio Hub on your Windows PC, that PC's card in My Devices now has an **Audio Hub** button. It shows your AirPods and XM6 status and four buttons — AirPods to phone, AirPods to PC, XM6 to phone, XM6 to PC — with Audio Hub's own answer underneath. After "to phone", the Android app opens Bluetooth settings so you can tap the headset. It goes through the same sealed link as the rest of My Devices, only your own devices can use it (never a friend you shared a device with), and on a PC armed for unattended access it needs your passphrase first. Both the PC and the phone need this version; the Bluetooth settings shortcut comes with the next Android app install (until then the panel tells you to open Bluetooth settings yourself).
+
 ### Fixed
 
 - **The Android app's name on your home screen has its fada again.** The phone showed "Puca" under the icon (and "Puca" for the Lite app too) because the app's main screen carried its own plain-ASCII label; it now uses the app's real name, "Púca" or "Púca Lite", and the home-screen widget is "Púca shortcuts". This arrives with the next Android app install, not with an in-app update.

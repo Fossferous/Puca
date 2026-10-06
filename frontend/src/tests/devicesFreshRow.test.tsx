@@ -52,6 +52,12 @@ let sessionListener: SessionListener | null = null;
 vi.mock('../api/devices/session', () => ({
     connectToDevice: (...a: unknown[]) => connectToDevice(...a),
     subscribeSessions: (l: SessionListener) => { sessionListener = l; l([]); return () => { sessionListener = null; }; },
+    // The Audio Hub panel's half (DeviceAudioHubPanel); its own behaviour is
+    // tested in deviceAudioHubPanel.test.tsx — here only the card's button.
+    audioHubSessionFor: () => null,
+    activeSessions: () => [],
+    endSession: () => {},
+    sendAudioHubRequest: async () => ({ kind: 'not-running', message: "Audio Hub isn't running on that PC." }),
 }));
 
 const wsHandlers = new Map<string, Array<(m: unknown) => void>>();
@@ -203,5 +209,36 @@ describe('the list re-reads itself', () => {
         await act(async () => { sessionListener!([]); });
         await settle();
         expect(listDevices.mock.calls.length).toBe(before);
+    });
+});
+
+describe('the Audio Hub button', () => {
+    const audioHub = () => buttonNamed('Audio Hub');
+
+    it('is offered on an online Windows PC whose Púca APP is up', async () => {
+        listDevices.mockResolvedValue([appRow(true), signInRow(false)]);
+        await mount();
+        expect(audioHub()).toBeTruthy();
+        await click(audioHub());
+        // The panel opens against the APP row, never the sign-in row.
+        expect(connectToDevice).toHaveBeenCalledWith('pc', { audioHub: true });
+        expect(host!.querySelector('section.audio-hub-panel')).not.toBeNull();
+    });
+
+    it('is not offered when only the sign-in screen answers (no user, no Audio Hub)', async () => {
+        listDevices.mockResolvedValue([appRow(false), signInRow(true)]);
+        await mount();
+        expect(buttonNamed('Control'), 'positive control: the card is reachable').toBeTruthy();
+        expect(audioHub()).toBeUndefined();
+    });
+
+    it('is not offered for a phone, or for this device itself', async () => {
+        listDevices.mockResolvedValue([
+            dev({ id: 'tablet', platform: 'android' }),
+            dev({ id: 'phone', name: 'This phone', platform: 'windows', isThisDevice: true }),
+        ]);
+        await mount();
+        expect(buttonNamed('Control'), 'positive control: the tablet is reachable').toBeTruthy();
+        expect(audioHub()).toBeUndefined();
     });
 });

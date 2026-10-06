@@ -5,6 +5,10 @@
 // dependencies (puca-ua, puca-service, the device-identity keypair crates).
 #[cfg(feature = "remote-control")]
 mod agent_ipc;
+// Audio Hub control for My Devices (the owner's phone asks this PC to hand a
+// headset over). Rides the device session, so it is remote-control only.
+#[cfg(feature = "remote-control")]
+mod audio_hub;
 mod audio_capture;
 mod capture_bar;
 mod clip_audio_wire;
@@ -1706,6 +1710,8 @@ pub fn run() {
             power::power_action,
             #[cfg(feature = "remote-control")]
             power::display_power_session_end,
+            #[cfg(feature = "remote-control")]
+            audio_hub::audio_hub_request,
             stream_boost::set_stream_boost,
             log_stream_diag,
             popout::popout_supported,

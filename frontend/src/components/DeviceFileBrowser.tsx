@@ -31,8 +31,11 @@ export function DeviceFileBrowser() {
 
     // Only the controller side, only file-only sessions, and only while live.
     // A host session shows its own indicator; the stage owns everything else.
+    // An Audio Hub session is files-only on the wire but browses nothing: its
+    // panel lives on the device card, and claiming it here would cover the
+    // very card it is shown on.
     const session = sessions.find(
-        s => s.role === 'controller' && s.filesOnly && s.phase !== 'ended',
+        s => s.role === 'controller' && s.filesOnly && !s.audioHub && s.phase !== 'ended',
     ) ?? null;
 
     if (!session) return null;

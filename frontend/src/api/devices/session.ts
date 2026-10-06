@@ -73,6 +73,19 @@ import {
 } from './controlGuard';
 import { appIsBackgrounded } from '../pagePainting';
 import { linkRefusalPersistent } from './linkHealth';
+import {
+    AUDIO_HUB_ACK_TIMEOUT_MS,
+    AUDIO_HUB_RESULT_TIMEOUT_MS,
+    buildAudioHubResult,
+    callAudioHubShell,
+    isAudioHubOp,
+    isAudioHubRid,
+    newAudioHubRid,
+    parseAudioHubResult,
+    NEEDS_UPDATE_MESSAGE,
+    type AudioHubOp,
+    type AudioHubOutcome,
+} from './audioHub';
 
 /** How long a controller has to answer the unattended challenge before the
  *  session is torn down. Generous, because a human is typing a passphrase on a
@@ -307,6 +320,13 @@ export interface DeviceControlSession {
      *  file browser claims them. It also suppresses the media deadline, whose
      *  whole job is to complain that no video arrived — here that is the point. */
     filesOnly: boolean;
+    /** CONTROLLER: this session was opened only to reach Audio Hub on the
+     *  owner's own PC (audioHub.ts). It is a files-only session on the wire —
+     *  the host answers it without capturing, exactly like Files — but this
+     *  side asks for no file access and no surface claims it: the Audio Hub
+     *  panel on the device card is its only UI. Always false on a host, which
+     *  neither knows nor needs to know why the controller connected. */
+    audioHub: boolean;
     /** CONTROLLER: whether the host reports its screen blanked. Driven by the
      *  host's ack, never set optimistically — a toggle that lies about this is
      *  worse than one that is slow. */
@@ -383,6 +403,17 @@ export interface DeviceControlSession {
 }
 
 interface Internal extends DeviceControlSession {
+    /** CONTROLLER: Audio Hub requests sent on this session and not yet
+     *  answered, by request id. Resolved by the host's `audio-hub-result`, by
+     *  a deadline, or by teardown — never left hanging. */
+    audioHubWaiters?: Map<string, AudioHubWaiter>;
+    /** HOST: an Audio Hub call is in flight for this session. One at a time:
+     *  a second request is answered "busy", never queued. */
+    audioHubBusy?: boolean;
+    /** HOST: an Audio Hub request that arrived before the unattended
+     *  passphrase was proved, held (only the latest) and served once it is —
+     *  the same reasoning as `pendingFileRequest`. */
+    pendingAudioHub?: { op: AudioHubOp; rid: string } | null;
     /** HOST: the controller's stage in its device pixels, as last reported
      *  by a `view-size` signal. Carried into a media restart (answerOffer)
      *  so the fit survives it the way fps and bitrate do. */
@@ -797,6 +828,7 @@ function emit(): void {
         monitors: s.monitors, activeMonitor: s.activeMonitor,
         filesChannel: s.filesChannel,
         fileRoot: s.fileRoot, fileScopeKind: s.fileScopeKind, filesOnly: s.filesOnly,
+        audioHub: s.audioHub,
         privacyActive: s.privacyActive,
         cursorOwned: s.cursorOwned,
         reconnecting: s.reconnecting,
@@ -1458,6 +1490,10 @@ function teardown(s: Internal, reason: string, tellPeer: boolean, deliberate = f
     s.key = null;
     // Drop anything held for a passphrase that will now never arrive.
     s.pendingOffer = null;
+    s.pendingAudioHub = null;
+    // And answer every Audio Hub request still waiting, so a panel is never
+    // left spinning on a session that no longer exists.
+    settleAudioHubWaiters(s, reason);
     // And anything held for a key that will now never be agreed. A dead session
     // must carry nothing replayable: teardown nulls the key, but if one were
     // ever agreed afterwards this buffer would be drained into a session that
@@ -3198,6 +3234,11 @@ export async function connectToDevice(
     hostDevice: string,
     opts?: {
         filesOnly?: boolean;
+        /** Open the session only to reach Audio Hub on that PC (see
+         *  `DeviceControlSession.audioHub`). Implies filesOnly. Never combined
+         *  with `share`: Audio Hub is the owner's alone, and the host refuses
+         *  it on a share session whatever this side sends. */
+        audioHub?: boolean;
         /** Present when connecting to a FRIEND's device under an accepted
          *  share. The host verifies everything independently; this side uses
          *  it to resolve and verify the host's key (a foreign device is not
@@ -3217,7 +3258,10 @@ export async function connectToDevice(
 
     const id = newId();
     const s: Internal = {
-        filesOnly: opts?.filesOnly === true,
+        // An Audio Hub session IS a files-only session on the wire: no
+        // capture on the host, no media deadline here.
+        filesOnly: opts?.filesOnly === true || opts?.audioHub === true,
+        audioHub: opts?.audioHub === true,
         share: opts?.share
             ? {
                 inviteId: opts.share.inviteId,
@@ -3279,8 +3323,13 @@ export async function connectToDevice(
     // the server refuses the new connect with a reason the stage shows,
     // which is the long-standing, explained behaviour.
     for (const old of [...sessions.values()]) {
+        // An Audio Hub session is the lightest kind and only ever a means to
+        // an end: opening Files or Control replaces it (the panel then rides
+        // the new session — audioHubSessionFor), rather than being refused
+        // as "already handling a session" by a host it is merely holding.
         if (old.role === 'controller' && old.peerDevice === hostDevice && old.phase !== 'ended'
-            && old.id !== id && old.filesOnly === s.filesOnly) {
+            && old.id !== id
+            && (old.audioHub || (old.filesOnly === s.filesOnly && !s.audioHub))) {
             teardown(old, 'replaced by a new connection to that device', true, true);
         }
     }
@@ -3827,6 +3876,7 @@ export function installDeviceSessions(): void {
                 // Learned from the offer, not guessed here: the controller is
                 // the side that knows what it opened the session for.
                 filesOnly: false,
+                audioHub: false,
                 hostCaptureless: !caps.capture,
                 // Set below only after the share verification chain passes;
                 // the public shareUser/viewOnly are derived from it in emit().
@@ -4301,7 +4351,7 @@ export function installDeviceSessions(): void {
                 // forever. Unconditional: armMediaDeadline itself declines for a
                 // file-only session, so both callers get that for free.
                 armMediaDeadline(s);
-                if (s.filesOnly) {
+                if (s.filesOnly && !s.audioHub) {
                     // Ask for file access straight away. On an armed host this is
                     // answered without a prompt, so the round trip is the only
                     // thing between opening this and seeing a listing; making the
@@ -4966,6 +5016,130 @@ async function serveFileAccessRequest(s: Internal): Promise<void> {
     }
 }
 
+/** CONTROLLER: one Audio Hub request awaiting the host. */
+interface AudioHubWaiter {
+    op: AudioHubOp;
+    resolve: (o: AudioHubOutcome) => void;
+    timer: ReturnType<typeof setTimeout> | null;
+    /** The host said it is working on it (`audio-hub-ack`). Before that, the
+     *  short deadline decides "this PC's Púca does not know Audio Hub". */
+    acked: boolean;
+}
+
+function finishAudioHubWaiter(s: Internal, rid: string, outcome: AudioHubOutcome): void {
+    const w = s.audioHubWaiters?.get(rid);
+    if (!w) return;
+    if (w.timer) clearTimeout(w.timer);
+    s.audioHubWaiters!.delete(rid);
+    w.resolve(outcome);
+}
+
+/** Every waiting request ends with the session, answered rather than dropped. */
+function settleAudioHubWaiters(s: Internal, reason: string): void {
+    if (!s.audioHubWaiters) return;
+    for (const rid of [...s.audioHubWaiters.keys()]) {
+        finishAudioHubWaiter(s, rid, {
+            kind: 'error',
+            message: `The connection to that PC ended (${reason.slice(0, MAX_REASON_LEN)}).`,
+        });
+    }
+}
+
+/**
+ * (Re)arm a request's deadline. Paused, not counted, while the person here is
+ * typing the unattended passphrase: an armed host holds the request until the
+ * proof arrives, and typing takes as long as it takes.
+ */
+function armAudioHubDeadline(s: Internal, rid: string, ms: number): void {
+    const w = s.audioHubWaiters?.get(rid);
+    if (!w) return;
+    if (w.timer) clearTimeout(w.timer);
+    w.timer = setTimeout(() => {
+        if (sessions.get(s.id) !== s || s.phase === 'ended') return;
+        if (s.awaitingUaPassphrase) {
+            armAudioHubDeadline(s, rid, ms);
+            return;
+        }
+        // Never acknowledged: the host dropped a kind it does not know, which
+        // is what every Púca from before this feature does. Acknowledged but
+        // never answered: the host's own calls are bounded well inside this,
+        // so the session itself is what failed.
+        finishAudioHubWaiter(s, rid, w.acked
+            ? { kind: 'error', message: 'That PC stopped answering before Audio Hub did.' }
+            : { kind: 'unsupported', message: NEEDS_UPDATE_MESSAGE });
+    }, ms);
+}
+
+/**
+ * The live session the Audio Hub panel may use for `hostDevice`, if any: one
+ * of this account's OWN controller sessions to it, whatever kind — a Control
+ * or Files session already open serves as well as a dedicated one, and the
+ * host allows only one session at a time, so opening another would be
+ * refused.
+ */
+export function audioHubSessionFor(hostDevice: string): string | null {
+    for (const s of sessions.values()) {
+        if (s.role === 'controller' && s.peerDevice === hostDevice && s.phase === 'active' && !s.share) {
+            return s.id;
+        }
+    }
+    return null;
+}
+
+/**
+ * Ask the owner's own PC to make one Audio Hub call. Always resolves — with
+ * the outcome, or with why there is none. Never on a share session: the host
+ * refuses those anyway, and this side does not ask.
+ */
+export function sendAudioHubRequest(sessionId: string, op: AudioHubOp): Promise<AudioHubOutcome> {
+    const s = sessions.get(sessionId);
+    if (!s || s.role !== 'controller' || s.phase !== 'active' || s.share) {
+        return Promise.resolve({ kind: 'error', message: 'Not connected to that PC.' });
+    }
+    if (!isAudioHubOp(op)) {
+        return Promise.resolve({ kind: 'error', message: 'Not an Audio Hub request.' });
+    }
+    if (s.transportDown) {
+        return Promise.resolve({ kind: 'error', message: 'Reconnecting to that PC — try again in a moment.' });
+    }
+    const rid = newAudioHubRid();
+    return new Promise<AudioHubOutcome>(resolve => {
+        if (!s.audioHubWaiters) s.audioHubWaiters = new Map();
+        s.audioHubWaiters.set(rid, { op, resolve, timer: null, acked: false });
+        armAudioHubDeadline(s, rid, AUDIO_HUB_ACK_TIMEOUT_MS);
+        void sendSignal(s, { kind: 'audio-hub', op, rid }).catch(() => {
+            finishAudioHubWaiter(s, rid, { kind: 'error', message: 'Could not reach that PC.' });
+        });
+    });
+}
+
+/**
+ * HOST: make the call and answer. Every gate has already passed (the
+ * `audio-hub` arm of handleSignalFrame, or the passphrase replay) and is
+ * checked again here, because the replay path reaches this directly.
+ */
+async function serveAudioHub(s: Internal, op: AudioHubOp, rid: string): Promise<void> {
+    if (s.role !== 'host' || s.share || (s.uaRequired && !s.uaVerified)) return;
+    if (s.audioHubBusy) {
+        await sendSignal(s, {
+            kind: 'audio-hub-result', rid, op, running: true,
+            error: 'Another Audio Hub request is still running on that PC.',
+        }).catch(() => undefined);
+        return;
+    }
+    s.audioHubBusy = true;
+    try {
+        await sendSignal(s, { kind: 'audio-hub-ack', rid });
+        const reply = await callAudioHubShell(op);
+        if (sessions.get(s.id) !== s || s.phase === 'ended') return;
+        await sendSignal(s, buildAudioHubResult(rid, op, reply));
+    } catch (e) {
+        console.warn('[device-session] audio hub request failed', e);
+    } finally {
+        s.audioHubBusy = false;
+    }
+}
+
 /** The host sent something only a VERIFIED controller receives (its monitor
  *  list, an answer, a file grant), so the seed that signed this session's
  *  challenge is known-good: mark it and slide its expiry. A no-op for the
@@ -5187,6 +5361,12 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                 if (s.pendingFileRequest && s.phase === 'active' && sessions.get(s.id) === s) {
                     s.pendingFileRequest = false;
                     void serveFileAccessRequest(s);
+                }
+                // An Audio Hub request held for the same reason.
+                const heldHub = s.pendingAudioHub;
+                s.pendingAudioHub = null;
+                if (heldHub && s.phase === 'active' && sessions.get(s.id) === s) {
+                    void serveAudioHub(s, heldHub.op, heldHub.rid);
                 }
             })();
             return;
@@ -5430,6 +5610,52 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
         //    the picture MOVES to the sign-in-screen row; LOCK_HANDOVER_REASON
         //    tells the controller to follow it there (mirror of the unlock
         //    handover the service sends).
+        // AUDIO HUB (audioHub.ts). The host is the gate, as for power:
+        //  - only the HOST serves it, so a reflected frame does nothing;
+        //  - NEVER on a share session. Audio Hub is the owner's: a friend's
+        //    grant, whatever its capabilities, does not reach it. Silence, not
+        //    an error, like every other refusal a peer could probe with;
+        //  - an armed host serves it only after the passphrase is proved
+        //    (held until then, like a file request);
+        //  - only an op on the allow-list, and only with a well-formed id.
+        // Sealing, session binding and the replay counter were already
+        // enforced by openSignal before this point.
+        if (data.kind === 'audio-hub') {
+            if (s.role !== 'host') return;
+            if (s.share) return;
+            const raw = data as Record<string, unknown>;
+            if (!isAudioHubOp(raw.op) || !isAudioHubRid(raw.rid)) return;
+            if (s.uaRequired && !s.uaVerified) {
+                s.pendingAudioHub = { op: raw.op, rid: raw.rid };
+                return;
+            }
+            void serveAudioHub(s, raw.op, raw.rid);
+            return;
+        }
+        if (data.kind === 'audio-hub-ack' || data.kind === 'audio-hub-result') {
+            if (s.role !== 'controller') return;
+            const raw = data as Record<string, unknown>;
+            const rid = raw.rid;
+            if (!isAudioHubRid(rid)) return;
+            const waiter = s.audioHubWaiters?.get(rid);
+            // An answer to nothing this side asked (a stale or duplicated id)
+            // is dropped: it cannot resolve someone else's request.
+            if (!waiter) return;
+            // The host answers only a controller it has verified, so this is
+            // as good a proof as `monitors` that a remembered seed was right.
+            uaProofAccepted(s);
+            if (data.kind === 'audio-hub-ack') {
+                if (!waiter.acked) {
+                    waiter.acked = true;
+                    armAudioHubDeadline(s, rid, AUDIO_HUB_RESULT_TIMEOUT_MS);
+                }
+                return;
+            }
+            // The op it answers is the one THIS side asked for; whatever the
+            // frame says about its op is not trusted for parsing.
+            finishAudioHubWaiter(s, rid, parseAudioHubResult(waiter.op, raw));
+            return;
+        }
         if (data.kind === 'power') {
             if (s.role !== 'host') return;
             if (s.uaRequired && !s.uaVerified) return;

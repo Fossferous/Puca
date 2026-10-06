@@ -684,6 +684,19 @@ It starts when you open the Devices tab, or when a connect request arrives from 
   your screen: every signal frame is AES-GCM sealed under a key derived from that verified
   device key, with no unsealed fallback.
 
+### Audio Hub hand-over is yours alone
+
+If you run Audio Hub on a PC, My Devices can ask that PC to hand your
+headphones to your phone or take them back (`docs/REMOTE_CONTROL.md`, *Audio
+Hub from My Devices*). It rides the same sealed device session as everything
+above, so the server cannot read, forge or replay a request. The PC's own app
+is the gate: it serves only your own enrolled devices — never a friend's
+device share, whatever it grants — only after the unattended passphrase on an
+armed machine, and only five fixed calls to Audio Hub on `127.0.0.1:47392`
+(`frontend/src-tauri/src/audio_hub.rs`). The request names one of those five
+and nothing else; no address, path, method or header in it can be chosen by
+the sender. It opens no port and talks to no third party.
+
 ### Screen-share control needs your click, every time
 
 Separate, older feature: someone watching your screen share in a voice channel can request

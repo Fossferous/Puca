@@ -909,6 +909,24 @@ public class SovereignAppPlugin extends Plugin {
         }
     }
 
+    /**
+     * Open Android's Bluetooth settings page. Audio Hub (My Devices) calls
+     * this after the owner's PC lets go of a headset: Android gives ordinary
+     * apps no way to connect a Bluetooth headset, so the person taps it
+     * there. A FIXED action — nothing from the caller reaches the intent.
+     */
+    @PluginMethod
+    public void openBluetoothSettings(PluginCall call) {
+        try {
+            Intent i = new Intent(Settings.ACTION_BLUETOOTH_SETTINGS)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            getContext().startActivity(i);
+            call.resolve();
+        } catch (Exception e) {
+            call.reject("could not open Bluetooth settings: " + e.getMessage());
+        }
+    }
+
     private void createMessagesChannel() {
         if (Build.VERSION.SDK_INT < 26) return;
         NotificationManager nm =

@@ -1,0 +1,144 @@
+/* Audio Hub panel on a My Devices card (DeviceAudioHubPanel.tsx).
+   Theme tokens only, so all eight themes and [data-contrast="high"] carry it;
+   the buttons reuse .device-btn from DevicesView.css, which already sizes
+   them to 44 px on a coarse pointer. */
+
+.audio-hub-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--bg-tertiary);
+    background: var(--bg-primary);
+    min-width: 0;
+}
+
+.audio-hub-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.audio-hub-title {
+    flex: 1 1 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text-normal);
+    min-width: 0;
+}
+
+.audio-hub-title-icon {
+    display: inline-flex;
+    width: 18px;
+    height: 18px;
+    flex: 0 0 auto;
+}
+
+.audio-hub-note,
+.audio-hub-devices {
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
+}
+
+.audio-hub-devices {
+    font-size: 12px;
+}
+
+.audio-hub-headset {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+}
+
+/* Audio Hub's own line ("AirPods: L 64% · R 66% · Case —"). Read, not
+   tapped; wraps rather than pushing the card wider than its column. */
+.audio-hub-line {
+    font-size: 13px;
+    line-height: 1.4;
+    color: var(--text-normal);
+    overflow-wrap: anywhere;
+}
+
+/* Where the headset is now ("On the PC", "Handed to the phone"). */
+.audio-hub-where {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+
+/* The standing reminder under the XM6 buttons. */
+.audio-hub-hint {
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-muted);
+}
+
+/* The button for where the headset already is: still pressable, played down
+   with an outline instead of a fill so it reads in every theme. */
+.audio-hub-actions .device-btn.audio-hub-btn-here {
+    background: transparent;
+    color: var(--text-muted);
+    box-shadow: inset 0 0 0 1px var(--bg-tertiary);
+}
+
+[data-contrast="high"] .audio-hub-actions .device-btn.audio-hub-btn-here {
+    box-shadow: inset 0 0 0 1px currentColor;
+}
+
+.audio-hub-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.audio-hub-actions .device-btn {
+    flex: 1 1 0;
+    min-width: 0;
+}
+
+.audio-hub-notice {
+    font-size: 13px;
+    line-height: 1.45;
+    padding: 6px 8px;
+    border-radius: 4px;
+    color: var(--text-normal);
+    background: var(--bg-secondary);
+    border: 1px solid var(--bg-tertiary);
+    overflow-wrap: anywhere;
+}
+
+.audio-hub-notice-error {
+    color: var(--text-danger);
+    border-color: var(--text-danger);
+}
+
+/* High contrast: the panel and its notice get a real edge, not a tint. */
+[data-contrast="high"] .audio-hub-panel,
+[data-contrast="high"] .audio-hub-notice {
+    border-color: currentColor;
+}
+
+@media (pointer: coarse) {
+    .audio-hub-icon-btn {
+        min-height: 44px;
+        min-width: 44px;
+    }
+
+    .audio-hub-actions .device-btn {
+        min-height: 44px;
+    }
+
+    .audio-hub-line,
+    .audio-hub-note,
+    .audio-hub-hint,
+    .audio-hub-notice {
+        font-size: 14px;
+    }
+}

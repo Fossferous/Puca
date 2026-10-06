@@ -108,6 +108,7 @@ import {
 } from '../api/devices/shares';
 import { wsClient } from '../api/websocket';
 import { DeviceShareModal } from './DeviceShareModal';
+import { DeviceAudioHubPanel } from './DeviceAudioHubPanel';
 import { BanIcon, CloseIcon, Icon, MonitorIcon, SettingsIcon, ShieldCheckIcon, TrashIcon, WarningIcon, type IconName } from './Icons';
 import './DevicesView.css';
 
@@ -362,6 +363,8 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
     const [editingId, setEditingId] = useState<string | null>(null);
     const [draftName, setDraftName] = useState('');
     const [confirmId, setConfirmId] = useState<string | null>(null);
+    /** The machine card whose Audio Hub panel is open (by primary row id). */
+    const [audioHubId, setAudioHubId] = useState<string | null>(null);
     const [autostart, setAutostartState] = useState<boolean | null>(null);
     const [forwarding, setForwardingState] = useState<boolean | null>(null);
     const [unattended, setUnattendedState] = useState<boolean | null>(null);
@@ -1181,6 +1184,20 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                     && device.verified
                                     && !machine.online
                                     && machine.mac !== null;
+                                // AUDIO HUB talks to the Púca desktop APP on
+                                // that PC (it runs as the signed-in user, as
+                                // Audio Hub does), so it needs the app's own
+                                // row online — never the sign-in-screen row,
+                                // whose service has no user profile to read.
+                                // Windows only, like Audio Hub. Offered on the
+                                // same terms as Files: whether Audio Hub is
+                                // actually running is asked when the panel
+                                // opens, never published.
+                                const audioHubRow = isThis ? null : machine.rows.find(
+                                    r => r.id !== machine.signInRow?.id
+                                        && r.verified && r.online && r.platform === 'windows',
+                                ) ?? null;
+                                const audioHubOpen = audioHubId === device.id && audioHubRow !== null;
                                 return (
                                     <div
                                         key={device.id}
@@ -1312,6 +1329,17 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                                     Files
                                                 </button>
                                             )}
+                                            {audioHubRow && editingId !== device.id && (
+                                                <button
+                                                    className="device-btn"
+                                                    disabled={busyId === device.id}
+                                                    aria-expanded={audioHubOpen}
+                                                    onClick={() => setAudioHubId(audioHubOpen ? null : device.id)}
+                                                    title="Hand your headphones between this PC and your phone"
+                                                >
+                                                    Audio Hub
+                                                </button>
+                                            )}
                                             {editingId !== device.id && (
                                                 <button
                                                     className="device-btn"
@@ -1366,6 +1394,15 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                                 </button>
                                             )}
                                         </div>
+
+                                        {audioHubOpen && audioHubRow && (
+                                            <DeviceAudioHubPanel
+                                                key={audioHubRow.id}
+                                                hostDevice={audioHubRow.id}
+                                                machineName={device.name}
+                                                onClose={() => setAudioHubId(null)}
+                                            />
+                                        )}
 
                                         {/* Wake progress and, more importantly, wake
                                             FAILURE. A magic packet is unacknowledged, so

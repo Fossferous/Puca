@@ -161,6 +161,61 @@ actions in that session stall until the agent is updated. If a current host
 ever produces a reply too large to send, it answers that request with an error
 instead, so later file requests in the session are not stuck behind it.
 
+## Audio Hub from My Devices
+
+Audio Hub is a separate tray app some owners run on their Windows PC (AirPods
+and Sony XM6 hand-over). When it runs, the card for that PC in My Devices
+offers **Audio Hub**: the panel shows the AirPods and XM6 status lines and four
+buttons — AirPods to phone / to PC, XM6 to phone / to PC — with Audio Hub's own
+message or error underneath. After a successful "to phone" the Android app
+opens Bluetooth settings, because Android lets no ordinary app connect a
+headset itself; the owner taps it there. (An Android app older than this
+feature has no shortcut to that page, and the panel says where to go instead.)
+
+Each headset's line says where it is now. When FlooCast is not running the XM6
+buttons are replaced by a line saying so (Audio Hub could only refuse them). A
+200 from Audio Hub means the hand-over was QUEUED, not finished, so the panel
+re-reads the status about 2.5, 6 and 12 seconds later, stopping as soon as the
+headset is where it was sent; nothing polls after that.
+
+How it travels:
+
+- **Same session, same seal.** The panel rides a session already open to that
+  PC (Control or Files), or opens a files-only session of its own — no screen
+  captured — and ends it when the panel closes. The request
+  `{kind: 'audio-hub', op, rid}` and the answer `audio-hub-ack` /
+  `audio-hub-result` are ordinary device-session signals: sealed under the
+  session key, bound to the session and strictly ordered, so the server
+  relays them without being able to read, forge, splice or replay one. The
+  server needed no change.
+- **The PC's Púca app makes the call**, not the agent or the lock-screen
+  service: it runs as the signed-in user, which is whose `%APPDATA%` holds
+  Audio Hub's token (`frontend/src-tauri/src/audio_hub.rs`). So the button is
+  offered only while that PC's app is online — never at its sign-in screen.
+- **Five calls, nothing else.** `status` (`GET /api/hello`, then
+  `GET /api/status`), and `POST /api/airpods/phone`, `/api/airpods/pc`,
+  `/api/xm6/phone`, `/api/xm6/pc` with an empty body. The request carries only
+  the op's name and an id; the address (`127.0.0.1:47392`), method, path and
+  headers are fixed in the app, so there is no way to reach any other port,
+  path or host. The token is read fresh from the user's
+  `%APPDATA%\airpods-app\phone-token.txt` on every call, sent only after
+  `/api/hello` has answered as Audio Hub, never logged, and never sent with an
+  `Origin` header (Audio Hub refuses those). Audio Hub's JSON comes back as it
+  was, including its 409 / 503 refusals; a 401 is shown in Púca's own words
+  (Audio Hub's "not paired" is written for its own phone app — here it means
+  the token Púca read was stale or belongs to another Windows user).
+- **Who may ask.** Only the owner's own enrolled devices: a friend's device
+  share, whatever it allows, never reaches Audio Hub, and on a machine armed
+  for unattended access the request waits until the passphrase is proved. On
+  an unarmed machine opening the panel asks the person at the PC first, the
+  same as Files.
+- **Asked, not advertised.** Whether Audio Hub runs is asked when the panel
+  opens (and on Refresh), never published through presence: the server has no
+  reason to know, and nothing on the PC polls for it in the background.
+- **Older versions.** A PC whose Púca predates this drops the request it does
+  not know, and the panel says to update Púca there after a few seconds. A
+  phone whose Púca predates it never sends one, so nothing changes for it.
+
 ## Latency — what to read when it feels behind
 
 The loop a viewer feels is: pointer → sealed frame → lane → host coalescer →
