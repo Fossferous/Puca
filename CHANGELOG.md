@@ -4,14 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.834 — 2026-10-06
 
-Two things in this release need the **new Android app (0.9.834)**, installed
-once from the download page: downloads that go where your phone looks (and
-what comes with them below), and removing at start what a crash left behind.
-The server is updated too, so the Poker table can show side pots while you
-play. Everything else arrives with the update inside the app.
-
+Poker table with side pots and sounds, a proper phone download path, faster clips, an MP3 player, CPU savings in calls, steadier streams on weak connections
 ### Added
 - **Poker is played at a real table.** The table is now a green felt oval
   with a rail, and everyone sits in their own place around it - you at the
