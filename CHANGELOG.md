@@ -184,6 +184,31 @@ play. Everything else arrives with the update inside the app.
   lasted. In a test page that replays both, the app's main thread spent
   about 12 ms a second on it instead of 20 while sound played, and 1.5 ms
   instead of 16 while it was silent. Clips stay in sync with the picture.
+- **A screen share on a slow upload stays watchable, and recovers much
+  sooner.** When the person sharing has a weak connection, Púca now picks the
+  picture size itself, from what the connection can carry, and never goes
+  below 360p. Before, the share could shrink to a 310x180 smear and stay
+  there for minutes. In tests on a throttled connection with a fast-moving
+  picture, a 1 Mbit/s upload now gives viewers 540p at 30 fps instead of
+  270-360p, and 1.5 Mbit/s gives 720p at 30 fps instead of 540p. At
+  0.45 Mbit/s the picture is 360p at about 13 fps, where it used to be 180p.
+  On a good connection nothing changes: the share is full quality within
+  about 6 seconds of going live. When a connection that collapsed comes back,
+  the share returns to full quality about twice as fast as before, and a
+  second share on the same call no longer starts stuck at the first one's low
+  speed. This applies to calls that go through the server. It does not apply
+  if you turned on extra quality layers for your shares in Settings.
+- **The diagnostics log says more clearly what happened to a screen share.**
+  A share nobody is watching is switched off by the server to save your
+  upload; the 5-second `stream-diag` lines now say `out paused` for it
+  instead of `out fps=0 size=?`, which looked like a broken share. Each
+  outgoing stream also shows the bandwidth the sender is aiming for
+  (`target=`) and the round trip and loss the server reports for it
+  (`rrtt=`, `rloss=`), which is what tells a slow connection apart from
+  other causes. In the minute `health` line, each stream you watch through
+  the server is now labelled with who is sending it (`screen_share<7`), so
+  two people sharing one after the other no longer read as one stream that
+  dropped to a tiny picture and recovered.
 
 ### Fixed
 - **A picture or video in a run of quick messages no longer covers the line

@@ -123,9 +123,23 @@ describe('turning the ladder off', () => {
         const on = screenSharePublishOptions(true);
         const off = screenSharePublishOptions(false);
         expect(off.videoCodec).toBe(on.videoCodec);
-        expect(off.degradationPreference).toBe(on.degradationPreference);
         expect(off.videoEncoding).toEqual(on.videoEncoding);
         expect(off.source).toBe(on.source);
+    });
+});
+
+describe('who decides the resolution of a single-layer share', () => {
+    // 2026-10-05: a streamer's estimate collapsed and libwebrtc's own
+    // 'maintain-framerate' adaptation took the share to 310x180 and left it
+    // there. Without a ladder Púca picks the resolution itself (shareAdapt.ts),
+    // so libwebrtc must be told to hold it: under 'maintain-framerate' it would
+    // shrink the picture again underneath every rung Púca chose.
+    it('holds the resolution and lets Púca choose it', () => {
+        expect(screenSharePublishOptions(false).degradationPreference).toBe('maintain-resolution');
+    });
+
+    it('leaves a laddered share to libwebrtc: its rungs are fixed ratios Púca must not rescale', () => {
+        expect(screenSharePublishOptions(true).degradationPreference).toBe('maintain-framerate');
     });
 });
 

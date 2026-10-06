@@ -193,8 +193,8 @@ export function shareDimensions(resolution: string): { width: number; height: nu
  *
  * Within the ladder: a step of RESOLUTION saves 32–41%, a step of FRAME RATE
  * saves 44–51%. Frame rate is the bigger lever and is deliberately not the
- * first one pulled, for the same reason the publish sets
- * `degradationPreference: 'maintain-framerate'`: a choppy game stream is worse
+ * first one pulled, for the same reason the share's resolution picker
+ * (shareAdapt.ts) gives up pixels before frames: a choppy game stream is worse
  * than a blurry one, and this is the same judgement applied to the same trade.
  * Somebody who wants the larger saving can take a second step, or set it
  * directly in the dialog.

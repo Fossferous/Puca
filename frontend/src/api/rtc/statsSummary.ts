@@ -59,6 +59,9 @@ export interface InboundVideoSummary {
 export interface OutboundVideoSummary {
     ssrc: number | null;
     rid: string | null;
+    /** false when the encoding is switched off — on the SFU, dynacast pauses
+     *  a rung nobody is subscribed to. Null when the browser does not say. */
+    active: boolean | null;
     framesSent: number | null;
     framesEncoded: number | null;
     /** framesEncoded − framesSent. The media-E2EE frame transform sits
@@ -168,6 +171,7 @@ function outboundOf(r: Row): OutboundVideoSummary {
     return {
         ssrc: num(r.ssrc),
         rid: str(r.rid),
+        active: typeof r.active === 'boolean' ? r.active : null,
         framesSent: sent,
         framesEncoded: encoded,
         encodeSentGap: encoded !== null && sent !== null ? encoded - sent : null,
@@ -318,7 +322,22 @@ export function receiverHints(receivers: RTCRtpReceiver[]): ReceiverHints[] {
 export function formatLatencyLine(s: RtcLatencySummary): string {
     const parts: string[] = [];
     for (const o of s.outbound) {
-        parts.push(`out fps=${o.fps ?? '?'} size=${o.size ?? '?'} enc=${o.encodeMs ?? '?'}ms send=${o.sendDelayMs ?? '?'}ms gap=${o.encodeSentGap ?? '?'} limit=${o.limit ?? '?'} encoder=${o.encoder ?? '?'}${o.rid ? ` rid=${o.rid}` : ''}`);
+        const rid = o.rid ? ` rid=${o.rid}` : '';
+        // Switched off (nobody subscribed: the SFU's dynacast pause). Its
+        // missing fps and size are a pause, not a stall — printed as numbers
+        // they read as a broken share (2026-10-05).
+        if (o.active === false) { parts.push(`out paused encoder=${o.encoder ?? '?'}${rid}`); continue; }
+        // What the congestion controller is acting on, beside what it sent:
+        // `target` is the encoder's bandwidth target, and `rrtt`/`rloss` the
+        // FAR END's RTCP view of this stream (remote-inbound-rtp, matched by
+        // ssrc). A round trip far above the pair's `rtt` is queueing on the
+        // media path; a target pinned low with no loss and no queue is the
+        // estimator, not the network. Before this a share collapsing to
+        // 310x180 (2026-10-05) left none of it in the log.
+        const ri = o.ssrc === null ? undefined : s.remoteInbound.find(x => x.ssrc === o.ssrc);
+        const rtcp = (ri?.rttMs != null ? ` rrtt=${ri.rttMs}ms` : '')
+            + (ri?.fractionLost != null ? ` rloss=${Math.round(ri.fractionLost * 1000) / 10}%` : '');
+        parts.push(`out fps=${o.fps ?? '?'} size=${o.size ?? '?'} enc=${o.encodeMs ?? '?'}ms send=${o.sendDelayMs ?? '?'}ms gap=${o.encodeSentGap ?? '?'} limit=${o.limit ?? '?'} encoder=${o.encoder ?? '?'}${rid} target=${o.targetKbps ?? '?'}kbps${rtcp}`);
     }
     for (const i of s.inbound) {
         parts.push(`in fps=${i.fps ?? '?'} size=${i.size ?? '?'} jb=${i.jitterBufferMs ?? '?'}ms(target ${i.jitterBufferTargetMs ?? '?'}) proc=${i.processingMs ?? '?'}ms dec=${i.decodeMs ?? '?'}ms drop=${i.framesDropped ?? '?'} freeze=${i.freezeCount ?? '?'} lost=${i.packetsLost ?? '?'} decoder=${i.decoder ?? '?'}`);
@@ -353,8 +372,9 @@ export interface SendEncoding { rid?: string; maxFramerate?: number; active?: bo
  * send (encoder busy, congestion or rate control; WebRTC's stats do not say
  * which). `limit` (qualityLimitationReason) is a SEPARATE signal: WebRTC's
  * ADAPTATION state — for a maintain-framerate share, 'cpu' means the
- * RESOLUTION was lowered to spare the encoder — and it does not explain dropped
- * frames. A viewer saw 22 fps on 2026-09-25 and nothing on either side could
+ * RESOLUTION was lowered to spare the encoder; for a maintain-resolution one
+ * (a single-layer SFU share, shareAdapt.ts) it means frames were — and it does
+ * not explain dropped frames on its own. A viewer saw 22 fps on 2026-09-25 and nothing on either side could
  * say which of these it was. Empty for audio.
  */
 export function videoSendExtras(
