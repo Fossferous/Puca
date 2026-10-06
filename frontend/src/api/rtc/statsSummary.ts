@@ -372,8 +372,9 @@ export interface SendEncoding { rid?: string; maxFramerate?: number; active?: bo
  * send (encoder busy, congestion or rate control; WebRTC's stats do not say
  * which). `limit` (qualityLimitationReason) is a SEPARATE signal: WebRTC's
  * ADAPTATION state — for a maintain-framerate share, 'cpu' means the
- * RESOLUTION was lowered to spare the encoder — and it does not explain dropped
- * frames. A viewer saw 22 fps on 2026-09-25 and nothing on either side could
+ * RESOLUTION was lowered to spare the encoder; for a maintain-resolution one
+ * (a single-layer SFU share, shareAdapt.ts) it means frames were — and it does
+ * not explain dropped frames on its own. A viewer saw 22 fps on 2026-09-25 and nothing on either side could
  * say which of these it was. Empty for audio.
  */
 export function videoSendExtras(

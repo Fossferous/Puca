@@ -31,6 +31,7 @@ import { noiseDiagnostics } from '../noiseFilter';
 import { ensureChannelKey } from '../channelKeys';
 import { CTL_SFU_TOPIC, deliverSfuControlFrame } from './controlDc';
 import type { EncodeSample } from './shareHealth';
+import { ShareAdapter, SHARE_ADAPT_INTERVAL_MS } from './shareAdapt';
 import type { RtpEndpoint } from './streamStats';
 import { deriveSfuMediaKey } from '../e2ee';
 import { registerScreenReceiver } from './receiverLatency';
@@ -186,7 +187,7 @@ export function screenSharePublishOptions(
         screenShareSimulcastLayers?: VideoPreset[];
         videoCodec: 'h264';
         videoEncoding: { maxBitrate: number; maxFramerate: number };
-        degradationPreference: 'maintain-framerate';
+        degradationPreference: 'maintain-framerate' | 'maintain-resolution';
     } = {
         source: Track.Source.ScreenShare,
         // Three rungs, so the server has something to give a viewer who cannot
@@ -219,13 +220,34 @@ export function screenSharePublishOptions(
         // holds full 1080p. Raising SHARE_BITRATE would change that, and would
         // also change the backend's per-subscriber admission arithmetic
         // (SHARE_KBPS, src/sfu.rs) — not a one-sided knob.
-        degradationPreference: 'maintain-framerate' as const,
+        degradationPreference: 'maintain-framerate',
     };
+    // WITHOUT A LADDER PÚCA PICKS THE RESOLUTION (shareAdapt.ts), so libwebrtc
+    // must hold whatever it was given and spend a shortage on frames instead.
+    // Left on 'maintain-framerate' it shrank a collapsed share to 310x180 and
+    // kept it there (2026-10-05), and it would shrink the picture again under
+    // every rung Púca chose. A laddered share keeps it: LiveKit fixes those
+    // rungs as ratios of the source, which Púca must not rescale.
+    if (!simulcast) opts.degradationPreference = 'maintain-resolution';
     // Omitted rather than sent alongside `simulcast: false`: the rungs would
     // be ignored, and a publish that carries layers it is not using is the
     // shape someone later reads as "simulcast is on".
     if (simulcast) opts.screenShareSimulcastLayers = [SHARE_LOW, SHARE_MID];
     return opts;
+}
+
+/**
+ * Encode the share at `height` lines out of a `sourceHeight`-line capture,
+ * holding that resolution (shareAdapt.ts). The capture itself is untouched:
+ * the person's own preview, a clip and a later live quality change all still
+ * see the full picture.
+ */
+export async function applyShareHeight(sender: RTCRtpSender, sourceHeight: number, height: number): Promise<void> {
+    const params = sender.getParameters() as RTCRtpSendParameters & { degradationPreference?: string };
+    if (!params.encodings || params.encodings.length === 0) return;
+    params.encodings[0].scaleResolutionDownBy = Math.max(1, sourceHeight / height);
+    params.degradationPreference = 'maintain-resolution';
+    await sender.setParameters(params);
 }
 
 /// LiveKit's frame-crypto keyring is 16 slots; epochs map onto it mod-16, so
@@ -651,6 +673,7 @@ export class SfuManager {
     }
 
     async disconnect(): Promise<void> {
+        this.stopShareAdapt();
         if (this.epochTimer) {
             clearInterval(this.epochTimer);
             this.epochTimer = null;
@@ -785,12 +808,11 @@ export class SfuManager {
         }
         const video = stream.getVideoTracks()[0];
         if (video) {
-            await this.room.localParticipant.publishTrack(
-                video,
-                // Read at publish time, so changing it takes effect on the
-                // next share rather than the next launch.
-                screenSharePublishOptions(),
-            );
+            // Read at publish time, so changing it takes effect on the
+            // next share rather than the next launch.
+            const opts = screenSharePublishOptions();
+            await this.room.localParticipant.publishTrack(video, opts);
+            if (!opts.simulcast) this.startShareAdapt();
         }
         const audio = stream.getAudioTracks()[0];
         if (audio) {
@@ -837,6 +859,91 @@ export class SfuManager {
         return sample;
     }
 
+    /** The running single-layer share's resolution picker (shareAdapt.ts). */
+    private shareAdapt: {
+        timer: ReturnType<typeof setInterval>;
+        adapter: ShareAdapter | null;
+        sender: RTCRtpSender | null;
+        busy: boolean;
+    } | null = null;
+
+    private startShareAdapt(): void {
+        this.stopShareAdapt();
+        const st = { timer: setInterval(() => { void this.shareAdaptTick(st); }, SHARE_ADAPT_INTERVAL_MS), adapter: null, sender: null, busy: false };
+        this.shareAdapt = st;
+        // At once, not in 2 s: the start rung must be in place before the first
+        // keyframe has gone far (shareAdapt.ts, WHY IT STARTS AT 540p).
+        void this.shareAdaptTick(st);
+    }
+
+    private stopShareAdapt(): void {
+        if (this.shareAdapt) clearInterval(this.shareAdapt.timer);
+        this.shareAdapt = null;
+    }
+
+    /**
+     * One reading of the share's sender, and whatever the adapter asks for.
+     *
+     * The publication is looked up live on every tick rather than held: a
+     * reconnect republishes every local track (see `localPubs`), and a held
+     * sender would go on adapting an object nobody sends from. A NEW sender
+     * starts a new adapter, at the start rung, because its estimate and its
+     * counters start over too.
+     */
+    private async shareAdaptTick(st: NonNullable<SfuManager['shareAdapt']>): Promise<void> {
+        if (st.busy || this.shareAdapt !== st) return;
+        st.busy = true;
+        try {
+            const pub = this.localSharePubs().find(p => p.kind === Track.Kind.Video);
+            const sender = pub?.track?.sender;
+            const mst = pub?.track?.mediaStreamTrack;
+            if (!pub || !sender || !mst || publicationsHaveLadder([pub])) return;
+            const set = mst.getSettings();
+            const sourceHeight = typeof set.height === 'number' && set.height > 0 ? set.height : 1080;
+            const fps = typeof set.frameRate === 'number' && set.frameRate > 0 ? set.frameRate : 30;
+            if (st.sender !== sender || !st.adapter) {
+                const adapter = new ShareAdapter({ sourceHeight, fps, maxKbps: SHARE_BITRATE / 1000 });
+                await applyShareHeight(sender, sourceHeight, adapter.currentHeight);
+                // A probe left running on the previous sender (a reconnect
+                // republished the track) must not outlive it: the new adapter
+                // starts out of probe mode.
+                if (mst.contentHint === 'detail') { try { mst.contentHint = 'motion'; } catch { /* not supported */ } }
+                // Only once the rung is really in place, so a refused
+                // setParameters is retried rather than believed.
+                st.adapter = adapter;
+                st.sender = sender;
+                return;
+            }
+            const adapter = st.adapter;
+            const resized = adapter.resize(sourceHeight, fps);
+            if (resized.height !== undefined) await applyShareHeight(sender, sourceHeight, resized.height);
+            let out: Record<string, unknown> | null = null;
+            (await sender.getStats()).forEach((r) => {
+                const row = r as Record<string, unknown>;
+                if (row.type === 'outbound-rtp' && row.kind === 'video') out = row;
+            });
+            const o = out as Record<string, unknown> | null;
+            if (!o || typeof o.targetBitrate !== 'number' || typeof o.bytesSent !== 'number' || typeof o.framesEncoded !== 'number') return;
+            const act = adapter.step({
+                atMs: performance.now(),
+                targetKbps: o.targetBitrate / 1000,
+                bytesSent: o.bytesSent,
+                framesEncoded: o.framesEncoded,
+                limit: typeof o.qualityLimitationReason === 'string' ? o.qualityLimitationReason : 'none',
+            });
+            if (act.contentHint) { try { mst.contentHint = act.contentHint; } catch { /* not supported */ } }
+            if (act.height !== undefined) await applyShareHeight(sender, sourceHeight, act.height);
+        } catch {
+            // Sender detached mid-tick, or setParameters refused: the adapter
+            // may now believe in a rung that is not on the wire. Start over at
+            // the start rung on the next tick rather than drift.
+            st.adapter = null;
+            st.sender = null;
+        } finally {
+            st.busy = false;
+        }
+    }
+
     /**
      * Does the RUNNING share actually have a simulcast ladder?
      *
@@ -855,6 +962,7 @@ export class SfuManager {
     }
 
     async stopScreenShare(): Promise<void> {
+        this.stopShareAdapt();
         if (!this.room) return;
         for (const pub of this.localSharePubs()) {
             if (pub.track) {

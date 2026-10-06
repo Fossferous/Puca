@@ -193,6 +193,21 @@ The SFU is necessary but not sufficient. The project succeeds or fails on this l
 4. **Screen-share is special**: high-res/high-motion screen share is the most
    expensive stream. Cap concurrent screen-shares (e.g. ≤2), and treat a screen-share
    as consuming a "high-layer slot" in the admission budget.
+   **The SHARER's own upload is the other half** (built 2026-10-06,
+   `frontend/src/api/rtc/shareAdapt.ts`). A single-layer share is published
+   `maintain-resolution` and Púca picks its resolution from the encoder's
+   bandwidth target: a ladder from the source height down to a 360-line floor
+   (Chromium's hardware-encode line), starting at 540p so the first keyframe
+   cannot flood a slow link, with hysteresis against the estimator's sawtooth.
+   When the share is stuck — on its lowest rung with nothing queueing on the
+   path, or with the encoder sending far under its target — the track's
+   `contentHint` is switched to `'detail'` until the estimate carries the next
+   rung: libwebrtc only probes for bandwidth on screen content, and a `'motion'`
+   track's estimate otherwise stays flat for a minute or more after the link
+   recovers. Measurements are in the module header; re-run them with
+   `frontend/e2e/share-adapt-shaped.mjs` (a loopback LiveKit plus a userspace
+   upload bottleneck, `MODE=shipped|adapt`; setup in its header). A laddered share (the `shareSimulcast` setting) is left to
+   libwebrtc's `maintain-framerate`, because its rungs are fixed ratios.
 5. **Audio-first**: audio is ~50 kbps and always fine; never let video pressure
    starve audio. Prioritize audio in the congestion controller.
 

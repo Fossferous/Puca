@@ -99,8 +99,10 @@ export interface VideoOut {
     frames: number | null;
     size: string | null;
     /** WebRTC's adaptation state over the minute ('none', 'cpu', 'bandwidth',
-     *  'other') and for what share of it. For a share (maintain-framerate) 'cpu'
-     *  means the RESOLUTION was lowered; it does not explain dropped frames. */
+     *  'other') and for what share of it. For a laddered share
+     *  (maintain-framerate) 'cpu' means the RESOLUTION was lowered; for a
+     *  single-layer SFU share (maintain-resolution, shareAdapt.ts) it means
+     *  FRAMES were held back, and Púca then steps the resolution down itself. */
     limit: string | null;
     limitPct: number | null;
     hw: boolean | null;
