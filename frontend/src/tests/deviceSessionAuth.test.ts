@@ -1220,6 +1220,25 @@ describe('cursor ownership on an armed host (the "no mouse after the passphrase"
         expect(setDrawCursor.mock.calls).toEqual([['ds-test', true]]);
     });
 
+    it('a NEWER request served while the held offer is answered is not overwritten by the held one', async () => {
+        armed = true;
+        const { key } = await activeHostSession();
+        await signal(key, { kind: 'offer', sdp: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n' });
+        await signal(key, { kind: 'set-cursor-owner', owned: true });         // held
+        // The held offer takes a while to answer (the agent starting a
+        // capture); the proof is in, so a request arriving meanwhile is
+        // served at once.
+        let release: () => void = () => {};
+        agentAnswerOffer.mockImplementationOnce(() => new Promise(r => { release = () => r('v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\n'); }));
+        verifyUaResponse.mockImplementation(async () => true);
+        await signal(key, { kind: 'ua-response', nonce: btoa('nonce-abc'), sig: btoa('ok') });
+        expect(agentAnswerOffer, 'precondition: the held offer is being answered').toHaveBeenCalled();
+        await signal(key, { kind: 'set-cursor-owner', owned: false });        // newer: served
+        release();
+        await settle();
+        expect(setDrawCursor.mock.calls, 'the latest request wins, not the held one').toEqual([['ds-test', true]]);
+    });
+
     it('never applies a held request for a peer that failed the proof', async () => {
         armed = true;
         const { key } = await activeHostSession();

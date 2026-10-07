@@ -5827,6 +5827,10 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                 s.heldCursorOwner = owned;
                 return;
             }
+            // Served now, so anything still held is OLDER than this and must
+            // not be applied after it (the proof's replay reads the held value
+            // only once the held offer is answered, which takes a while).
+            s.heldCursorOwner = null;
             void serveCursorOwner(s, owned);
             return;
         }
