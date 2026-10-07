@@ -1099,6 +1099,11 @@ button.message-attachment.error { color: #ffb4b4; }
     /* The player's caps, shared with .video-box below. */
     --video-max-w: 400px;
     --video-max-h: 300px;
+    /* Never narrower than this (unless the column is): room for the
+       player's volume, speed and fullscreen buttons at 44 px each on a touch
+       screen, beside the time (VideoPlayer.css). A taller picture than that
+       is letterboxed inside it. */
+    --video-min-w: 176px;
 }
 
 .message-video video,
@@ -1123,6 +1128,22 @@ button.message-attachment.error { color: #ffb4b4; }
     width: min(calc(var(--vw) * 1px), var(--video-max-w), 100%, calc(var(--video-max-h) * var(--vw) / var(--vh)));
     height: auto;
     aspect-ratio: var(--vw) / var(--vh);
+    /* A very tall picture (a phone's screen recording is ~9:20) would be
+       ~135 px wide under the height cap: the box keeps --video-min-w and the
+       height cap, and the picture is letterboxed in it. Player and stand-in
+       alike, so the swap still moves nothing. */
+    min-width: min(var(--video-min-w), 100%);
+    max-height: var(--video-max-h);
+}
+
+/* The player (VideoPlayer) is the box when the picture size is known; until
+   then it wraps its <video>, under the same caps. */
+.message-video .vpl.video-box {
+    display: block;
+}
+
+.message-video .vpl:not(.video-box) {
+    max-width: min(var(--video-max-w), 100%);
 }
 
 /* The save-to-disk chip stays available under the player. */

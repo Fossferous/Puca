@@ -30,6 +30,7 @@ import { saveClip } from '../api/clipDownload';
 import { applyOutputDevice } from './settingsStore';
 import { useOutputDeviceRef } from '../hooks/useOutputDeviceRef';
 import { ClipIcon, DownloadIcon, LockIcon, PlayIcon, ShieldCheckIcon, WarningIcon } from './Icons';
+import { VideoPlayer } from './VideoPlayer';
 import { downloadPercent, downloadSaving, playLoadPercent, playLoadText } from '../api/loadProgressText';
 import './ClipAttachment.css';
 
@@ -165,7 +166,18 @@ export function ClipAttachment({ href, consent }: ClipAttachmentProps) {
         <div className={`clip-attachment ${refused ? 'refused' : ''}`} data-clip-state={state}>
             <div className="clip-attachment-plate">
                 {showVideo ? (
-                    <video ref={videoSinkRef} className="clip-attachment-video" controls playsInline preload="none" />
+                    // Púca's own controls (volume, speed, fullscreen), on the
+                    // MediaSource the clip player attaches to this element.
+                    // The manifest knows the length before MSE reports it.
+                    <VideoPlayer
+                        videoRef={videoSinkRef}
+                        videoClassName="clip-attachment-video"
+                        frameClassName="clip-attachment-player vpl-fill"
+                        preload="none"
+                        title={`Clip, ${formatClock(manifest.durationMs / 1000)}`}
+                        durationHint={manifest.durationMs / 1000}
+                        memoryKey={href}
+                    />
                 ) : (
                     <>
                         <span className="clip-attachment-glyph" aria-hidden="true"><ClipIcon size={28} /></span>

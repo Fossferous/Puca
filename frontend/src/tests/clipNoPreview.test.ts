@@ -29,9 +29,10 @@ const composerPath = join(__dirname, '..', 'components', 'ClipComposerModal.tsx'
 /** Comments may DESCRIBE the <video> (the file header does); only JSX counts. */
 const stripComments = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
 const src = () => stripComments(readFileSync(composerPath, 'utf8'));
-/** A real JSX <video ...> element (any attribute order), not the word in prose —
- *  comments are stripped first, and the composer has no `<video` in copy. */
-const VIDEO_EL = /<video\b/g;
+/** A real JSX player — a bare <video ...> or Púca's <VideoPlayer ...> (which
+ *  renders one) — in any attribute order, not the word in prose: comments are
+ *  stripped first, and the composer has no `<video` in copy. */
+const VIDEO_EL = /<(?:video|VideoPlayer)\b/g;
 
 /** Concatenate EVERY `{phase === 'X' && (` render branch for that phase, each
  *  sliced up to the next branch of any phase. The `&&` distinguishes a branch
@@ -117,6 +118,8 @@ describe('clip preview is gated on approval (docs/CLIPS.md)', () => {
         expect((code.match(/\{phase === 'approved' &&/g) ?? []).length).toBe(2);
         // VIDEO_EL matches a real element regardless of attribute order
         expect('<video className="x" ref={r} />').toMatch(VIDEO_EL);
+        expect('<VideoPlayer videoRef={r} title="t" />').toMatch(VIDEO_EL);
+        expect('<VideoPlayerish />').not.toMatch(VIDEO_EL);
         expect('a <video> in prose').toMatch(VIDEO_EL); // which is why comments are stripped first
     });
 

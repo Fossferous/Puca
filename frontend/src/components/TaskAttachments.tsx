@@ -2,7 +2,8 @@
  * TaskAttachments — compact strip of E2EE picture/video/audio attachments
  * under a task row (works for subtasks too; they render through the same
  * TaskTree). A recording made in Púca Notes plays here too, and never by
- * itself: `controls`, no `autoplay`, no call to play().
+ * itself: `controls`, no `autoplay`, no call to play(). A video gets Púca's
+ * own player (VideoPlayer: volume, speed and fullscreen in a 240x160 tile).
  *
  * Each ref's sovereign-enc: href carries the per-file AES key, so decryption
  * happens entirely client-side, and only while it is shown
@@ -19,6 +20,7 @@ import { CheckCircleIcon, CloseIcon, PaperclipIcon, WarningIcon } from './Icons'
 import { saveEncryptedAttachment, saveFailureNote } from '../api/saveAttachment';
 import type { EncRef } from '../api/nativeDownloads';
 import { followOutputDeviceRef } from './settingsStore';
+import { VideoPlayer } from './VideoPlayer';
 import './TaskAttachments.css';
 
 interface TaskAttachmentsProps {
@@ -32,6 +34,8 @@ function AttachmentItem({ refItem }: { refItem: TaskAttachmentRef }) {
     const parsed = parseEncAttachment(refItem.href);
     const [zoomed, setZoomed] = useState(false);
     const [playing, setPlaying] = useState(false);
+    // Fullscreen is in use too: its copy stays while the app is away.
+    const [fullscreen, setFullscreen] = useState(false);
     const save = useTaskFileSave();
     // The player could not decode it (a file that lied about its type, or a
     // codec this engine lacks): the download button instead of a dead player.
@@ -47,7 +51,7 @@ function AttachmentItem({ refItem }: { refItem: TaskAttachmentRef }) {
         // In use: kept while the app is in the background. A save keeps it
         // only while the save reads it, not for the Android app's native
         // save, which downloads the file again (api/saveAttachment.ts).
-        { keep: zoomed || playing || save.reading },
+        { keep: zoomed || playing || fullscreen || save.reading },
     );
     const playingHandlers = { onPlay: () => setPlaying(true), onPause: () => setPlaying(false), onEnded: () => setPlaying(false) };
 
@@ -77,8 +81,23 @@ function AttachmentItem({ refItem }: { refItem: TaskAttachmentRef }) {
     // <audio> handed one fetches the URLs inside on its own (api/attachments.ts).
     if (isPlaylistBlobUrl(url)) return <TaskFileDownload url={url} name={refItem.name} encRef={parsed} save={save} />;
     // Both players sit on the Output Device chosen in Settings, not the OS default.
-    if (videoMimeFor(refItem.name, parsed.mime)) {
-        return <video ref={followOutputDeviceRef} className="ta-video" src={url} controls preload="metadata" title={refItem.name} {...playingHandlers} />;
+    // A video the engine cannot open becomes the download button, as in chat,
+    // rather than a player with nothing in it.
+    if (videoMimeFor(refItem.name, parsed.mime) && !embedFailed) {
+        return (
+            <VideoPlayer
+                videoRef={followOutputDeviceRef}
+                videoClassName="ta-video"
+                frameClassName="ta-video-frame vpl-fill"
+                src={url}
+                preload="metadata"
+                title={refItem.name}
+                memoryKey={parsed.id}
+                onFullscreenChange={setFullscreen}
+                onError={() => { setPlaying(false); setEmbedFailed(true); }}
+                {...playingHandlers}
+            />
+        );
     }
     // audioMimeFor, not any audio/*: the same name fallback and the same
     // playable-only list as a chat message (an .amr stays a download).

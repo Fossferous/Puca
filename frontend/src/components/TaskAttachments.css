@@ -32,6 +32,20 @@
     background: #000;
 }
 
+/* Púca's own player (VideoPlayer) takes one tile size whatever the picture's
+   shape, letterboxed: a portrait video under the old 160 px cap was 90 px
+   wide, too narrow for any controls. 240 px holds volume, speed and
+   fullscreen at 44 px each on a touch screen, beside the time. */
+.vpl.ta-video-frame {
+    display: block;
+    /* A length, not min(240px, 100%): the strip's items are sized by their
+       content, and a percentage of that came back as the old 90 px. */
+    width: 240px;
+    max-width: 100%;
+    height: 160px;
+    border-radius: 6px;
+}
+
 .ta-file,
 .ta-broken {
     display: inline-flex;

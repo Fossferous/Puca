@@ -16,6 +16,7 @@ import android.service.notification.StatusBarNotification;
 import android.util.Base64;
 import android.view.View;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.core.app.NotificationCompat;
 import androidx.core.content.pm.ShortcutInfoCompat;
 import androidx.core.content.pm.ShortcutManagerCompat;
@@ -925,6 +926,45 @@ public class SovereignAppPlugin extends Plugin {
         } catch (Exception e) {
             call.reject("could not open Bluetooth settings: " + e.getMessage());
         }
+    }
+
+    /**
+     * The BACK gesture, while the web app shows something back should close
+     * first: today a video in the player's in-app fullscreen
+     * (VideoPlayer.tsx). Back then reaches the page as a "backButton" event
+     * instead of sending the app away, and the page turns this off again as
+     * soon as that thing closes. Off by default and between uses, so back
+     * everywhere else is exactly what it was.
+     *
+     * A page that reloaded with it on (an in-app update applying) has no
+     * listener any more — Capacitor drops them all as a page starts — so the
+     * next back turns it off and goes on to the system's own back: it can
+     * never be stranded on. APKs after 0.9.836; older ones reject, and back
+     * there leaves the app from a fullscreen video, as from anything else.
+     */
+    private OnBackPressedCallback backCallback;
+
+    @PluginMethod
+    public void setBackIntercept(PluginCall call) {
+        final boolean on = Boolean.TRUE.equals(call.getBoolean("enabled", false));
+        getActivity().runOnUiThread(() -> {
+            if (backCallback == null) {
+                backCallback = new OnBackPressedCallback(false) {
+                    @Override
+                    public void handleOnBackPressed() {
+                        if (!hasListeners("backButton")) {
+                            setEnabled(false);
+                            getActivity().getOnBackPressedDispatcher().onBackPressed();
+                            return;
+                        }
+                        notifyListeners("backButton", new JSObject());
+                    }
+                };
+                getActivity().getOnBackPressedDispatcher().addCallback(getActivity(), backCallback);
+            }
+            backCallback.setEnabled(on);
+            call.resolve();
+        });
     }
 
     private void createMessagesChannel() {

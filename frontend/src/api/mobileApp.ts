@@ -115,6 +115,14 @@ interface SovereignAppPlugin {
         eventName: 'pipModeChanged',
         listener: (data: { active: boolean }) => void,
     ): Promise<PluginListenerHandle>;
+    /** While enabled, the BACK gesture arrives as a 'backButton' event
+     *  instead of sending the app away (APKs after 0.9.836; older reject).
+     *  interceptBack below is the only caller. */
+    setBackIntercept(opts: { enabled: boolean }): Promise<void>;
+    addListener(
+        eventName: 'backButton',
+        listener: () => void,
+    ): Promise<PluginListenerHandle>;
 }
 
 const App = registerPlugin<SovereignAppPlugin>('SovereignApp');
@@ -710,6 +718,46 @@ export async function onMobileKeyboard(
     } catch {
         return null;
     }
+}
+
+// --- the BACK gesture (APKs after 0.9.836) --------------------------------
+
+let backOwner: symbol | null = null;
+
+/**
+ * Until the returned release is called, Android's BACK gesture calls
+ * `onBack` instead of sending the app away: for something back should close
+ * first, today a video in the player's in-app fullscreen (VideoPlayer.tsx).
+ * One taker at a time, the newest winning; an older taker letting go late
+ * does not switch it off under the newer one.
+ *
+ * Nothing at all elsewhere (the web, the desktop app), and nothing visible on
+ * an APK without the method: setBackIntercept rejects there (swallowed), the
+ * listener never fires, and back leaves the app as it always did. A page that
+ * reloads while it is on cannot strand back either — SovereignAppPlugin
+ * hands back to the system when no page listens.
+ */
+export function interceptBack(onBack: () => void): () => void {
+    if (!android()) return () => {};
+    const me = Symbol('back');
+    backOwner = me;
+    let released = false;
+    let handle: PluginListenerHandle | null = null;
+    App.addListener('backButton', () => {
+        if (!released && backOwner === me) onBack();
+    }).then(
+        (h) => { if (released) void h.remove(); else handle = h; },
+        () => { /* no plugin: back stays the system's */ },
+    );
+    App.setBackIntercept({ enabled: true }).catch(() => { /* an APK without it */ });
+    return () => {
+        if (released) return;
+        released = true;
+        void handle?.remove();
+        if (backOwner !== me) return;
+        backOwner = null;
+        App.setBackIntercept({ enabled: false }).catch(() => { /* an APK without it */ });
+    };
 }
 
 // --- launcher shortcuts ---------------------------------------------------

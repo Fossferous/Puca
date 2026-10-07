@@ -215,6 +215,10 @@ async function deliverAll() {
 }
 const videoSrcs = () => [...container.querySelectorAll('video')].map((v) => v.getAttribute('src'));
 const videoOf = (id: string) => container.querySelector<HTMLElement>(`[data-y] video[title="${id}.mp4"]`);
+/** The player's own fullscreen button (VideoPlayer). jsdom has no Fullscreen
+ *  API, so pressing it shows the in-app fullscreen; either kind is "in use". */
+const fullscreenButton = (video: Element | null, label = 'Full screen') =>
+    video!.closest('.vpl')!.querySelector<HTMLButtonElement>(`.vpl-bar button[aria-label="${label}"]`)!;
 
 beforeEach(() => {
     served = new Map(); keys = new Map(); gates = new Map(); requested = []; created = []; revoked = [];
@@ -477,6 +481,23 @@ describe('a channel full of big videos', { timeout: 30000 }, () => {
         expect(revoked).toHaveLength(1);
     });
 
+    it('a video shown full screen keeps its player and its copy, however far it scrolls, paused or not', async () => {
+        // Full screen is in use, like playing: a player taken away would
+        // throw the reader out of it, and its copy must not go meanwhile.
+        __setRetainedAttachmentBudget(0);
+        const scroll = await renderChannel([['v', 100]]);
+        await deliver('v');
+        await act(async () => { fullscreenButton(videoOf('v')).click(); });
+        await scroll([['v', -5000]]);
+        expect(videoOf('v')).not.toBeNull();
+        expect(revoked).toEqual([]);
+        // Out of full screen, out there: now it goes.
+        await act(async () => { fullscreenButton(videoOf('v'), 'Exit full screen').click(); });
+        await settle();
+        expect(videoOf('v')).toBeNull();
+        expect(revoked).toHaveLength(1);
+    });
+
     it(`mounts at most ${MAX_LIVE_PLAYERS} players, the closest to the screen, and every one on screen`, async () => {
         const spec: Array<[string, number]> = [['a', -1700], ['b', -1300], ['c', -900], ['d', -500], ['e', 100], ['f', 500]];
         const scroll = await renderChannel(spec);
@@ -527,6 +548,22 @@ describe('a channel full of big videos', { timeout: 30000 }, () => {
         // p scrolls up out of view, still near; the other four are on screen.
         await scroll([['p', -1700], ['b', 100], ['c', 300], ['d', 500], ['e', 700]]);
         expect(ids.filter((id) => videoOf(id))).toEqual(ids);
+    });
+
+    it('a video shown full screen keeps its player with four others closer to the screen, paused', async () => {
+        // The cap must not take the player of the video someone is watching
+        // full screen: its frame IS the fullscreen element, and taking it
+        // away would throw them out (and lose the picture).
+        const ids = ['p', 'b', 'c', 'd', 'e'];
+        const scroll = await renderChannel(ids.map((id, i) => [id, 100 + i * 150] as [string, number]));
+        for (const id of [...ids].reverse()) await deliver(id);
+        await act(async () => { fullscreenButton(videoOf('p')).click(); });
+        await scroll([['p', -1700], ['b', 100], ['c', 300], ['d', 500], ['e', 700]]);
+        expect(ids.filter((id) => videoOf(id))).toEqual(ids);
+        // Positive control: out of full screen, the cap takes it as usual.
+        await act(async () => { fullscreenButton(videoOf('p'), 'Exit full screen').click(); });
+        await scroll([['p', -1750], ['b', 100], ['c', 300], ['d', 500], ['e', 700]]);
+        expect(ids.filter((id) => videoOf(id))).toEqual(['b', 'c', 'd', 'e']);
     });
 
     it('more on screen than the cap: every one on screen still plays', async () => {
@@ -646,13 +683,17 @@ describe('a channel full of big videos', { timeout: 30000 }, () => {
         await scroll([['a', -100], ['b', 400], ['c', 600], ['d', 800], ['e', 1000]]);
         const video = videoOf('a');
         expect(video?.closest('.message-video')).toBe(card);
-        expect(video!.classList.contains('video-box')).toBe(true);
-        expect([video!.style.getPropertyValue('--vw'), video!.style.getPropertyValue('--vh')]).toEqual(['1080', '1920']);
-        expect(card!.querySelector('span.video-box')).toBeNull();
+        // The box is the player's frame (VideoPlayer: the picture and its
+        // controls share it), with the stand-in's class and numbers.
+        const box = video!.closest<HTMLElement>('.video-box');
+        expect(box?.classList.contains('vpl')).toBe(true);
+        expect(box!.closest('.message-video')).toBe(card);
+        expect([box!.style.getPropertyValue('--vw'), box!.style.getPropertyValue('--vh')]).toEqual(['1080', '1920']);
+        expect(card!.querySelector('.message-video-standin')).toBeNull();
         // e, pushed below the screen and out of the four, gives its player up
         // the same way: the card stays, the box becomes the stand-in.
         expect(videoOf('e')).toBeNull();
-        expect(container.querySelector('[data-y="1000"] .message-video span.video-box')).not.toBeNull();
+        expect(container.querySelector('[data-y="1000"] .message-video span.message-video-standin.video-box')).not.toBeNull();
     });
 
     it('an audio file waiting for a player keeps its card, with a stand-in as tall as a player', async () => {
@@ -922,6 +963,21 @@ describe('decrypted copies', { timeout: 30000 }, () => {
         expect([...revoked].sort()).toEqual([otherUrl, vUrl, picUrl].sort());
         expect(attachmentCacheStats().plainBytes).toBe(0);
     });
+
+    it('in the background, a video shown full screen keeps its copy, paused', async () => {
+        await renderChannel([['v', 100], ['other', 500]]);
+        await deliverAll();
+        const vUrl = videoOf('v')!.getAttribute('src');
+        const otherUrl = videoOf('other')!.getAttribute('src');
+        await act(async () => { fullscreenButton(videoOf('v')).click(); });
+        await setVisibility('hidden');
+        expect(revoked).toEqual([otherUrl]);
+        expect(videoOf('v')?.getAttribute('src')).toBe(vUrl);
+        // Out of full screen: it goes too.
+        await act(async () => { fullscreenButton(videoOf('v'), 'Exit full screen').click(); });
+        await settle();
+        expect([...revoked].sort()).toEqual([otherUrl, vUrl].sort());
+    });
 });
 
 // Tasks and Notes used to PIN every picture and voice note they had shown,
@@ -961,6 +1017,21 @@ describe("a Task's attachments", { timeout: 30000 }, () => {
         await setVisibility('visible');
         await until(() => container.querySelector('img.ta-thumb')?.getAttribute('src'), 'the picture again');
         expect(requested.sort()).toEqual(['tp', 'ts']);
+    });
+
+    it('in the background a video shown full screen keeps its copy, paused', async () => {
+        await renderTask([
+            taskRef('tp', await seal('tp'), 'pic.png', 'image/png'),
+            taskRef('tv', await seal('tv'), 'walkthrough.mp4', 'video/mp4'),
+        ]);
+        await deliverAll();
+        const pic = await until(() => container.querySelector('img.ta-thumb')?.getAttribute('src'), 'the picture');
+        const video = (await until(() => container.querySelector<HTMLVideoElement>('video.ta-video'), 'the video'))!;
+        const url = video.getAttribute('src');
+        await act(async () => { fullscreenButton(video).click(); });
+        await setVisibility('hidden');
+        expect(revoked).toEqual([pic]);
+        expect(container.querySelector('video.ta-video')?.getAttribute('src')).toBe(url);
     });
 
     // The two halves of one rule, merged from two branches (2026-10-05): a

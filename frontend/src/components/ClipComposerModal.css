@@ -173,3 +173,11 @@
 .clip-approver-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted, #b9bbbe); opacity: 0.5; flex: 0 0 auto; }
 .clip-approver-dot.online { background: var(--text-positive, #23a559); opacity: 1; }
 .clip-approver-name { font-weight: 600; }
+
+/* The preview's player (VideoPlayer): as wide as the section; the picture
+   under it sets the height (.clip-preview-video above). */
+.vpl.clip-preview-player {
+    display: block;
+    width: 100%;
+    border-radius: 6px;
+}

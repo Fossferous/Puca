@@ -5,7 +5,7 @@
  * only maps the resulting node tree to React elements and resolves mention /
  * channel names against the current server context.
  */
-import React, { useState, useEffect, useCallback, useReducer, useRef, type Ref } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useReducer, useRef, type Ref } from 'react';
 import { parseMessage, isSafeUrl, type Node } from '../utils/messageParser';
 import { isImageUrl } from '../api/linkPreview';
 import { attachmentsAwake, subscribeAttachmentsAwake, useAttachmentsAwake } from '../api/attachmentAwake';
@@ -14,6 +14,7 @@ import { isAbortError } from '../api/priorityLimiter';
 import { useAttachmentZone, usePlayerGrant, loadUrgency, scrollRootOf, type ShownSize } from './attachmentZone';
 import { isClipRef, isScrubbedClipRef } from '../api/clips/clipRef';
 import { ClipAttachment } from './ClipAttachment';
+import { VideoPlayer } from './VideoPlayer';
 import { AttachmentLoading } from './AttachmentLoading';
 import type { ClipConsent } from '../api/servers';
 import { openExternalUrl } from '../api/openExternal';
@@ -100,6 +101,12 @@ function audioPlayerRef(el: HTMLAudioElement | null): (() => void) | undefined {
     return followOutputDeviceRef(el);
 }
 
+/** True inside a spoiler that is not revealed yet: a player there is
+ *  covered, and nothing in it may be focused or pressed (VideoPlayer's
+ *  `covered`). The cover itself is CSS (Chat.css, Spoilered media), which
+ *  already keeps the pointer out; this keeps the keyboard out too. */
+const SpoilerCover = createContext(false);
+
 /** Fetch + decrypt an E2EE attachment and render it (image, video and audio
  *  inline, else a download link). The plaintext bytes only ever exist in this
  *  browser.
@@ -143,6 +150,11 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
     const slotRef = useRef<HTMLElement | null>(null);
     const bindSlot = useCallback((el: HTMLElement | null) => { slotRef.current = el; setSlot(el); }, []);
     const [playing, setPlaying] = useState(false);
+    // Fullscreen counts as in use, like playing: its copy is held and its
+    // player kept, paused or not (a player taken away mid-fullscreen would
+    // throw the reader out of it).
+    const [fullscreen, setFullscreen] = useState(false);
+    const covered = useContext(SpoilerCover);
     // The Download chip's save, kept here rather than in the chip: the chip
     // is unmounted whenever its card shows a placeholder (far off screen, or
     // its player handed to a closer one), and a save outlives that.
@@ -175,7 +187,7 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
     // app is in the background. A save holds it only while the save reads it
     // — not for the Android app's native save, which downloads the file
     // again (api/saveAttachment.ts).
-    const busy = playing || zoomed || save.reading;
+    const busy = playing || fullscreen || zoomed || save.reading;
     const want = (zone.near && awake) || busy;
     const info = parseEncAttachment(href);
     // Not just `mime.startsWith('video/')`: refs recorded before the upload
@@ -204,10 +216,11 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
     const shown = want ? url : null;
     const playlist = isPlaylistBlobUrl(shown);
     const wantsPlayer = !!shown && !playlist && !embedFailed && !!(videoMime || audioMime);
-    // Only one that is playing keeps its player beyond the closest few: a
-    // save reads the file, not the player (review finding 2026-10-05: tapping
-    // Download and scrolling on left a fifth player live for the whole save).
-    const player = usePlayerGrant(slot, wantsPlayer, playing, measureShown);
+    // Only one that is playing (or fullscreen) keeps its player beyond the
+    // closest few: a save reads the file, not the player (review finding
+    // 2026-10-05: tapping Download and scrolling on left a fifth player live
+    // for the whole save).
+    const player = usePlayerGrant(slot, wantsPlayer, playing || fullscreen, measureShown);
     useEffect(() => {
         setFailed(false);
         setEmbedFailed(false);
@@ -304,13 +317,13 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
     // A video's card: its player, or the stand-in, over the download chip.
     // The same element either way, so getting a player swaps only the box.
     const videoCard = (box: React.ReactNode) => (
-        // stopPropagation: native <video> control clicks (play/seek/
-        // volume) COMPOSE out of the UA shadow root and would bubble to a
-        // wrapping Spoiler's toggle — pressing Play re-hid the spoiler,
-        // which re-applied pointer-events:none over the controls while
-        // the clip kept playing (review finding, 0811). Unrevealed
-        // spoilers are unaffected: pointer-events:none means this span
-        // never sees the revealing tap.
+        // stopPropagation: a click on the player (play/seek/volume) or on
+        // the download chip would bubble to a wrapping Spoiler's toggle —
+        // pressing Play re-hid the spoiler, which re-applied
+        // pointer-events:none over the controls while the clip kept playing
+        // (review finding, 0811; the player stops its own clicks too).
+        // Unrevealed spoilers are unaffected: pointer-events:none means this
+        // span never sees the revealing tap.
         <span className="message-video" ref={bindSlot} onClick={(e) => e.stopPropagation()}>
             {box}
             {shown ? <AttachmentDownload url={shown} name={name || 'attachment'} encRef={info} save={save} /> : <AttachmentLoading fileId={info.id} />}
@@ -386,26 +399,30 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
     // on its own. It is the download chip (api/attachments.ts).
     if (playlist) return <AttachmentDownload url={shown} name={name || 'attachment'} encRef={info} ref={bindSlot} save={save} />;
     if (asVideo) {
-        // Inline player, same pattern TaskAttachments already uses: the
-        // decrypted blob URL feeds a native <video> directly (safeBlobType
-        // keeps the real MIME on video/* blobs for exactly this).
-        // preload="metadata" so a channel of clips doesn't buffer them all;
-        // playsInline so Capacitor/iOS doesn't hijack into fullscreen; no
-        // autoplay ever. The download chip stays underneath — the embed
-        // replaces the NEED to download, not the ability. onError: an
-        // extension-guessed container the engine can't demux falls back to
+        // Inline player (VideoPlayer: Púca's own controls — volume, speed and
+        // fullscreen at every width, which the engine's controls dropped on a
+        // narrow portrait video): the decrypted blob URL feeds its <video>
+        // directly (safeBlobType keeps the real MIME on video/* blobs for
+        // exactly this). preload="metadata" so a channel of clips doesn't
+        // buffer them all; playsInline so Capacitor/iOS doesn't hijack into
+        // fullscreen; no autoplay ever. The download chip stays underneath —
+        // the embed replaces the NEED to download, not the ability. onError:
+        // an extension-guessed container the engine can't demux falls back to
         // the plain chip instead of a dead player.
         return videoCard(
-            <video
+            <VideoPlayer
                 // On the Output Device chosen in Settings, not the OS default.
-                ref={followOutputDeviceRef}
-                className={pictureBox ? 'video-box' : undefined}
-                style={pictureBox}
+                videoRef={followOutputDeviceRef}
+                // The player's frame takes the picture's box (and so does the
+                // stand-in it replaces), so getting a player moves nothing.
+                frameClassName={pictureBox ? 'video-box vpl-fill' : undefined}
+                frameStyle={pictureBox}
                 src={shown}
-                controls
                 preload="metadata"
-                playsInline
                 title={name}
+                memoryKey={info.id}
+                covered={covered}
+                onFullscreenChange={setFullscreen}
                 onError={() => { setPlaying(false); setEmbedFailed(true); }}
                 onPlay={() => setPlaying(true)}
                 onPause={() => setPlaying(false)}
@@ -566,7 +583,7 @@ function Spoiler({ children }: { children: React.ReactNode }) {
             className={`spoiler ${revealed ? 'revealed' : ''}`}
             onClick={() => setRevealed(!revealed)}
         >
-            {children}
+            <SpoilerCover.Provider value={!revealed}>{children}</SpoilerCover.Provider>
         </span>
     );
 }

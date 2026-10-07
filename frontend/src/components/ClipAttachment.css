@@ -56,9 +56,19 @@
     background: #000;
 }
 
-/* The loading readout sits along the TOP of the plate: the native controls
-   take the bottom edge (and, in the Android WebView, a large play button the
-   middle), and the readout never takes a tap meant for them. */
+/* The player (VideoPlayer) fills the plate, which rounds and clips it. */
+.vpl.clip-attachment-player {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    border-radius: 0;
+}
+
+/* The loading readout sits along the TOP of the plate: the player's controls
+   take the bottom edge and its play button the middle, and the readout never
+   takes a tap meant for them. */
 .clip-attachment-overlay {
     position: absolute;
     left: 50%;

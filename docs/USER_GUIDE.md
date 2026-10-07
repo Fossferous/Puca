@@ -131,6 +131,32 @@ download button underneath. A file the player cannot open, or a type it does not
 A video with no picture your device can show — a sound-only .webm, or a video in a format your device cannot
 decode — gets the audio player, marked **Sound only: no picture to show**; download it to watch it elsewhere.
 
+### Watch a Video
+Videos in messages and DMs, posted clips, a clip's preview before you post it and videos attached to tasks all
+have the same player, with every control on it at every size — a narrow portrait video included:
+
+- **Play / pause**: the round button in the middle of the picture, or the one at the left of the bar on a wider video.
+  With a mouse, clicking the picture plays and pauses too
+- **Timeline**: shows the time so far (and the length, where there is room); click or drag along it to skip
+- **Volume**: the speaker button. On a wide video it mutes and the slider sits beside it; on a narrow one it opens a
+  small panel with **Mute** and the slider. A video's volume is its share of **Settings → Voice & Video → Output
+  Volume**: at 50 % Output Volume, a video at 100 % plays at half, and moving Output Volume changes a video that is
+  already playing. The level you set is where the next video starts until you close the app
+- **Speed**: the `1×` button — 0.5×, 0.75×, 1×, 1.25×, 1.5× or 2×, without changing the pitch. A speed stays with that
+  video until you close the app
+- **Full screen**: the corners button. It fills the screen in a browser and the whole window in the desktop app; in the
+  Android app it fills the app, and turning the phone sideways gives a landscape picture. Leave it with the same
+  button, **Esc**, or (with an Android app installed after 0.9.836) **Back**
+
+With the player focused (click it, or **Tab** to it): **Space** or **K** play/pause, **←** / **→** skip 5 seconds,
+**↑** / **↓** volume, **M** mute, **F** full screen. These keys do nothing anywhere else, so typing in the message
+box never controls a video.
+
+On a phone, tap the picture to show or hide the controls — a tap on the picture never starts the video — and they
+hide by themselves a moment after it starts playing. Scrolling the chat with a finger that starts on a video's
+timeline scrolls the chat; it does not skip the video. A video under a spoiler cannot be played or focused until
+the spoiler is revealed. Nothing ever plays by itself.
+
 Attachments load by themselves, with nothing to click: the ones on screen first, then the ones nearest to it, a
 couple of big files at a time, and then, while nothing nearer is loading and up to a limit, the rest of the channel,
 so one you scroll to is normally ready when it appears. Each is downloaded and decrypted on your device. Only the

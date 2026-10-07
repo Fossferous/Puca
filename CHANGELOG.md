@@ -4,6 +4,19 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+Videos get volume, speed and full-screen buttons at every size
+### Added
+
+- **Every video has its own volume, speed and full-screen buttons, however narrow it is.** A portrait video in a message used to get only Play, a three-dot menu and the timeline, because the built-in player hid the rest when there was no room. Videos now have Púca's own controls: play/pause, the timeline with the time, **volume** (a slider and Mute — beside the speaker on a wide video, in a small panel on a narrow one), **speed** (0.5× to 2×, without changing the pitch) and **full screen**. The same player is used for videos in messages and DMs, posted clips, a clip's preview before you post it, and videos attached to tasks. A very tall video (a phone's screen recording) gets a slightly wider box with black bars at the sides, so all of its buttons fit.
+  - A video's volume works with **Settings → Voice & Video → Output Volume**: the video's slider sets its share of what Output Volume allows (at 50 % Output Volume, a video at 100 % plays at half), and moving Output Volume reaches a video that is already playing. Videos used to ignore Output Volume.
+  - The level you set is where the next video starts, until you close the app; a speed you choose stays with that video. Nothing is saved.
+  - With the player focused: **Space** or **K** play/pause, **← →** skip 5 seconds, **↑ ↓** volume, **M** mute, **F** full screen, **Esc** leaves full screen.
+  - On a phone, tap the picture to show or hide the controls (a tap on the picture never starts the video; the round button in the middle does), they hide by themselves while it plays, and scrolling the chat over a video no longer moves its timeline.
+  - Full screen fills the screen in a browser and the whole window in the desktop app. In the Android app it fills the app (turn the phone sideways for a landscape picture); **Back** leaves full screen with the next Android app install — with only the in-app update, Back leaves the app as before, so use the full-screen button to come back out.
+  - Comes with the in-app update on Android and the web app, and with the next desktop update.
+
 ## 0.9.836 — 2026-10-07
 
 Phone remote control: typing works again, pointer after the passphrase, steady zoom when switching monitors, no black screen over the keyboard

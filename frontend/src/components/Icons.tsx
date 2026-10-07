@@ -81,7 +81,7 @@ const LEGACY_GLYPHS: Record<string, string> = {
     CameraIcon: '📹', ScreenShareIcon: '🖥️', MonitorIcon: '🖥️', ScreenIcon: '📺',
     LaptopIcon: '💻', PhoneIcon: '📱', TerminalIcon: '🐧', GlobeIcon: '🌐',
     GridIcon: '🪟', FullscreenIcon: '⛶', StopIcon: '🛑', StopSharingIcon: '⬛',
-    LiveDotIcon: '🔴', CrosshairIcon: '🎯', PlayIcon: '▶',
+    LiveDotIcon: '🔴', CrosshairIcon: '🎯', PlayIcon: '▶', PauseIcon: '⏸',
 
     // input / gestures
     GamepadIcon: '🎮', MouseIcon: '🖱️', KeyboardIcon: '⌨️', TouchIcon: '👆',
@@ -533,6 +533,15 @@ export const FullscreenIcon = makeIcon('FullscreenIcon', <>
     <path d="M3.25 15.25v3.25a2.25 2.25 0 0 0 2.25 2.25h3.25" />
 </>);
 
+/** Leave fullscreen: the four corners turned inward. No LEGACY_GLYPHS entry:
+ *  the classic set never had one (FullscreenIcon's glyph stood for both). */
+export const FullscreenExitIcon = makeIcon('FullscreenExitIcon', <>
+    <path d="M8.75 3.25v3.25a2.25 2.25 0 0 1-2.25 2.25H3.25" />
+    <path d="M20.75 8.75H17.5a2.25 2.25 0 0 1-2.25-2.25V3.25" />
+    <path d="M15.25 20.75V17.5a2.25 2.25 0 0 1 2.25-2.25h3.25" />
+    <path d="M3.25 15.25H6.5a2.25 2.25 0 0 1 2.25 2.25v3.25" />
+</>);
+
 export const DisconnectIcon = makeIcon('DisconnectIcon', <>
     <path d="M10.7 13.3a15.5 15.5 0 0 0 3.4 2.6l1.25-1.25a1.9 1.9 0 0 1 2-.43 12.4 12.4 0 0 0 2.7.68 1.9 1.9 0 0 1 1.65 1.9v2.9a1.9 1.9 0 0 1-2.07 1.9 19.2 19.2 0 0 1-8.35-2.97 18.8 18.8 0 0 1-3.2-2.58" />
     <path d="M5.65 12.9a19.2 19.2 0 0 1-2.9-8.3A1.9 1.9 0 0 1 4.65 2.5h2.9a1.9 1.9 0 0 1 1.9 1.65 12.4 12.4 0 0 0 .68 2.7 1.9 1.9 0 0 1-.43 2L8.4 10.1" />
@@ -591,6 +600,13 @@ export const CrosshairIcon = makeIcon('CrosshairIcon', <>
 
 export const PlayIcon = makeIcon('PlayIcon', <>
     <path d="M7.5 4.75 19.25 12 7.5 19.25Z" />
+</>);
+
+/** Two outlined bars, the same weight as PlayIcon's outlined triangle, so
+ *  a play/pause button does not change weight when it flips. */
+export const PauseIcon = makeIcon('PauseIcon', <>
+    <rect x="6.25" y="4.75" width="4" height="14.5" rx="1" />
+    <rect x="13.75" y="4.75" width="4" height="14.5" rx="1" />
 </>);
 
 /* ==================================================================== */
@@ -1288,6 +1304,7 @@ export const ICONS = {
     grid: GridIcon,
     'flip-camera': FlipCameraIcon,
     fullscreen: FullscreenIcon,
+    'fullscreen-exit': FullscreenExitIcon,
     disconnect: DisconnectIcon,
     stop: StopIcon,
     record: RecordIcon,
@@ -1297,6 +1314,7 @@ export const ICONS = {
     'live-dot': LiveDotIcon,
     crosshair: CrosshairIcon,
     play: PlayIcon,
+    pause: PauseIcon,
 
     // input / gestures
     gamepad: GamepadIcon,

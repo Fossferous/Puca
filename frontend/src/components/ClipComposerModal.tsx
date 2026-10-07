@@ -52,6 +52,7 @@ import { API_BASE_URL } from '../api/config';
 import { getToken } from '../api/auth';
 import { useOutputDeviceRef } from '../hooks/useOutputDeviceRef';
 import { CloseIcon, ClipIcon, ShieldCheckIcon, WarningIcon } from './Icons';
+import { VideoPlayer } from './VideoPlayer';
 import './ClipComposerModal.css';
 
 type ComposerPhase = 'choose' | 'sealing' | 'sealed' | 'proposing' | 'pending' | 'approved' | 'uploading' | 'posting' | 'done' | 'failed';
@@ -572,7 +573,13 @@ export function ClipComposerModal({ isOpen, onClose, bufferedSeconds, maxSeconds
                     return (
                         <>
                             <div className="clip-composer-section">
-                                <video ref={videoSinkRef} className="clip-preview-video" controls playsInline muted={false} />
+                                <VideoPlayer
+                                    videoRef={videoSinkRef}
+                                    videoClassName="clip-preview-video"
+                                    frameClassName="clip-preview-player"
+                                    title="Clip preview"
+                                    durationHint={durMs / 1000}
+                                />
                                 {previewState === 'loading' && <p className="clip-composer-hint">Loading preview…</p>}
                                 {previewState === 'failed' && <p className="clip-composer-hint"><WarningIcon size={13} /> Preview could not play here — the clip itself is intact and will still post.</p>}
                                 <p className="clip-composer-hint clip-composer-sealed-summary">
