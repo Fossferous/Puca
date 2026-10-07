@@ -448,6 +448,15 @@ pub(crate) fn caret_fractions(
     if b <= t || r < l {
         return None;
     }
+    // An EMPTY intersection is not a caret on this surface. A rect with width
+    // that only touches the surface (the screen beside it ends exactly where
+    // this one begins) shares no column with it, and a zero-width caret is on
+    // the surface only at a column inside it — not one past its right edge.
+    // Both used to come out as a caret zero pixels wide on the edge: the
+    // neighbouring screen's taskbar, reported on this one at x=0.
+    if r == l && (cw > 0 || l >= sl + sw) {
+        return None;
+    }
     Some(crate::caret_wire::CaretFractions {
         x: (l - sl) as f64 / sw as f64,
         y: (t - st) as f64 / sh as f64,
@@ -2541,6 +2550,27 @@ mod tests {
         assert_eq!(caret_fractions((100, 100, -4, 20), primary), None);
         // A zero-WIDTH caret is real: some applications measure one pixel as 0.
         assert_eq!(frac((100, 100, 0, 20), primary).w, 0.0);
+    }
+
+    /// THE SEAM. A rect that ends exactly where the captured screen begins
+    /// shares no pixel with it, and used to be reported anyway — as a caret
+    /// zero pixels wide on the captured screen's edge. Field evidence
+    /// (agent.log, 2026-10-07): the primary's taskbar, (0,1392) 2560x48,
+    /// reported on the portrait screen to its right as `x: 0.0, w: 0.0,
+    /// y: 0.817` — a caret on a screen it is not on, for the viewer's camera
+    /// and keyboard to act on.
+    #[test]
+    fn a_rect_that_only_touches_the_surface_is_not_on_it() {
+        let right = CaptureSurface::Single { left: 2560, top: -700, width: 1440, height: 2560 };
+        assert_eq!(caret_fractions((0, 1392, 2560, 48), right), None, "ends at the left seam");
+        // And the mirror image: a rect starting one past the right edge.
+        let primary = CaptureSurface::Single { left: 0, top: 0, width: 2560, height: 1440 };
+        assert_eq!(caret_fractions((2560, 100, 0, 20), primary), None, "a zero-width caret one past the right edge");
+        // POSITIVE CONTROLS: one shared column is on it, and so is a
+        // zero-width caret ON the left edge.
+        let f = frac((0, 1392, 2561, 48), right);
+        assert_eq!((f.x, f.w), (0.0, 1.0 / 1440.0));
+        assert_eq!(frac((2560, 100, 0, 20), right).x, 0.0);
     }
 
     #[test]
