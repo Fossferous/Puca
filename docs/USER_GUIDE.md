@@ -155,8 +155,8 @@ box never controls a video.
 
 On a phone, tap the picture to show or hide the controls — a tap on the picture never starts the video — and they
 hide by themselves a moment after it starts playing. Scrolling the chat with a finger that starts on a video's
-timeline scrolls the chat; it does not skip the video. A video under a spoiler cannot be played or focused until
-the spoiler is revealed. Nothing ever plays by itself.
+timeline scrolls the chat; it does not skip the video. A video attachment under a spoiler cannot be played or focused
+until the spoiler is revealed (Púca Clips are not hidden by spoilers). Nothing ever plays by itself.
 
 Attachments load by themselves, with nothing to click: the ones on screen first, then the ones nearest to it, a
 couple of big files at a time, and then, while nothing nearer is loading and up to a limit, the rest of the channel,
