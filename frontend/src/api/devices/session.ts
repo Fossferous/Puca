@@ -414,6 +414,18 @@ interface Internal extends DeviceControlSession {
      *  passphrase was proved, held (only the latest) and served once it is —
      *  the same reasoning as `pendingFileRequest`. */
     pendingAudioHub?: { op: AudioHubOp; rid: string } | null;
+    /** HOST: a cursor-ownership request (set-cursor-owner) that arrived
+     *  before the unattended passphrase was proved — only the latest, applied
+     *  once it is, after the held offer (setDrawCursor is an IPC against the
+     *  stream answering it creates). Undefined/null = nothing held. */
+    heldCursorOwner?: boolean | null;
+    /** CONTROLLER: the cursor ownership the stage last asked for (true =
+     *  this end draws), whether or not it has been sent or acked. What the
+     *  re-assert after an armed host's proof (the `answer` arm) sends. */
+    cursorIntent?: boolean | null;
+    /** CONTROLLER: the post-proof re-assert has been sent for this session,
+     *  so a media restart's later answer does not send it again. */
+    cursorReasserted?: boolean;
     /** HOST: the controller's stage in its device pixels, as last reported
      *  by a `view-size` signal. Carried into a media restart (answerOffer)
      *  so the fit survives it the way fps and bitrate do. */
@@ -1491,6 +1503,7 @@ function teardown(s: Internal, reason: string, tellPeer: boolean, deliberate = f
     // Drop anything held for a passphrase that will now never arrive.
     s.pendingOffer = null;
     s.pendingAudioHub = null;
+    s.heldCursorOwner = null;
     // And answer every Audio Hub request still waiting, so a panel is never
     // left spinning on a session that no longer exists.
     settleAudioHubWaiters(s, reason);
@@ -2430,6 +2443,9 @@ export function sendPowerAction(sessionId: string, action: PowerAction): boolean
 export function setCursorOwned(sessionId: string, owned: boolean): void {
     const s = sessions.get(sessionId);
     if (!s || s.role !== 'controller') return;
+    // The intent, whatever happens to this send: an armed host drops it until
+    // the passphrase is proved, and the `answer` arm re-asserts it from here.
+    s.cursorIntent = owned;
     if (s.phase !== 'active') {
         // NOT dropped: the stage mounts and asks for the cursor as soon as it
         // has a session id, which is normally BEFORE the handshake finishes —
@@ -5016,6 +5032,31 @@ async function serveFileAccessRequest(s: Internal): Promise<void> {
     }
 }
 
+/**
+ * HOST: stop (owned) or resume drawing this machine's pointer for the
+ * session, and tell the controller which — the ack is the only thing that
+ * makes it draw one. Every gate has already passed (the `set-cursor-owner`
+ * arm, or the passphrase replay) and the replay path is re-checked here.
+ */
+async function serveCursorOwner(s: Internal, owned: boolean): Promise<void> {
+    if (s.role !== 'host' || (s.uaRequired && !s.uaVerified)) return;
+    try {
+        const backend = await getHostBackend();
+        if (!backend.setDrawCursor) {
+            throw new Error('this host cannot hide its pointer');
+        }
+        // enabled = "keep drawing it", the inverse of who owns it.
+        await backend.setDrawCursor(s.id, !owned);
+        await sendSignal(s, { kind: 'cursor-owner-active', owned });
+    } catch (e) {
+        console.warn('[device-session] cursor ownership failed', e);
+        await sendSignal(s, {
+            kind: 'cursor-owner-failed',
+            reason: e instanceof Error ? e.message : 'could not change cursor ownership',
+        }).catch(() => undefined);
+    }
+}
+
 /** CONTROLLER: one Audio Hub request awaiting the host. */
 interface AudioHubWaiter {
     op: AudioHubOp;
@@ -5367,6 +5408,14 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
                 s.pendingAudioHub = null;
                 if (heldHub && s.phase === 'active' && sessions.get(s.id) === s) {
                     void serveAudioHub(s, heldHub.op, heldHub.rid);
+                }
+                // And the pointer, AFTER the held offer for the same reason as
+                // the file request: setDrawCursor is an IPC against the stream
+                // answerOffer just started.
+                const heldCursor = s.heldCursorOwner;
+                s.heldCursorOwner = null;
+                if (typeof heldCursor === 'boolean' && s.phase === 'active' && sessions.get(s.id) === s) {
+                    void serveCursorOwner(s, heldCursor);
                 }
             })();
             return;
@@ -5766,25 +5815,19 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
         // included: it changes what a watching stranger can see.
         if (data.kind === 'set-cursor-owner') {
             if (s.role !== 'host') return;
-            if (s.uaRequired && !s.uaVerified) return;
-            void (async () => {
-                const owned = data.owned === true;
-                try {
-                    const backend = await getHostBackend();
-                    if (!backend.setDrawCursor) {
-                        throw new Error('this host cannot hide its pointer');
-                    }
-                    // enabled = "keep drawing it", the inverse of who owns it.
-                    await backend.setDrawCursor(s.id, !owned);
-                    await sendSignal(s, { kind: 'cursor-owner-active', owned });
-                } catch (e) {
-                    console.warn('[device-session] cursor ownership failed', e);
-                    await sendSignal(s, {
-                        kind: 'cursor-owner-failed',
-                        reason: e instanceof Error ? e.message : 'could not change cursor ownership',
-                    }).catch(() => undefined);
-                }
-            })();
+            const owned = data.owned === true;
+            if (s.uaRequired && !s.uaVerified) {
+                // HELD, not dropped — the same reasoning as pendingOffer and
+                // pendingFileRequest. The stage asks for the pointer the moment
+                // the session goes active, which on an armed host is while a
+                // person is still typing the passphrase; dropped here, nothing
+                // ever asked again, so this host went on drawing a pointer a few
+                // pixels tall on a phone and the phone drew none. Only the latest
+                // is kept, and it is applied only once the proof is in.
+                s.heldCursorOwner = owned;
+                return;
+            }
+            void serveCursorOwner(s, owned);
             return;
         }
         if (data.kind === 'cursor-owner-active') {
@@ -6232,6 +6275,21 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
             // reasoning as the offer branch.
             if (s.role !== 'controller') return;
             uaProofAccepted(s);
+
+            // ASK FOR THE POINTER AGAIN, ONCE, ON AN ARMED HOST. The stage
+            // asked the moment this session went active, which on an armed
+            // host is before the passphrase is proved — and hosts up to 0.9.835
+            // DROPPED that request at the gate (a newer host holds it). Nothing
+            // ever asked again, so the host kept drawing a pointer a few pixels
+            // tall on a phone and this end drew none: "the mouse wasn't drawn
+            // after entering the unattended password". An armed host answers
+            // only after the proof, so this answer says it is listening now.
+            // Only while no ack has granted it; a duplicate on a host that held
+            // the first is harmless (it applies the same state twice).
+            if (s.unattended && !s.cursorReasserted && s.cursorIntent === true && !s.cursorOwned) {
+                s.cursorReasserted = true;
+                void sendSignal(s, { kind: 'set-cursor-owner', owned: true }).catch(() => undefined);
+            }
 
             // REQUIRE the host to say it honoured data-only, rather than assuming
             // it did because we asked.

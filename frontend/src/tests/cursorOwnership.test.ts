@@ -44,7 +44,9 @@ vi.mock('../api/devices/tunnel', () => ({ attachTunnelChannel: () => {}, closeTu
 vi.mock('../api/thisDevice', () => ({
     thisDeviceId: () => 'dev-me',
 }));
-vi.mock('../api/devices/unattendedPrompt', () => ({ requestUnattendedPassphrase: async () => null }));
+/** What the person types at the unattended prompt; null = they cancel. */
+let passphraseAnswer: string | null = null;
+vi.mock('../api/devices/unattendedPrompt', () => ({ requestUnattendedPassphrase: async () => passphraseAnswer }));
 vi.mock('../api/devices/unattended', () => ({
     deriveUaSeed: () => new Uint8Array(32),
     signUaChallengeSeed: () => new Uint8Array(64),
@@ -344,6 +346,92 @@ describe('cursor ownership is granted only by the host', () => {
         expect(activeSessions().find(s => s.id === id)?.cursorOwned).toBe(false);
         await hostSignal(id, key, { kind: 'cursor-owner-active', owned: true });
         expect(activeSessions().find(s => s.id === id)?.cursorOwned).toBe(true);
+    });
+});
+
+/** The kinds of every signal this end sealed after index `from`. */
+async function sentKinds(key: Uint8Array, from: number): Promise<string[]> {
+    const kinds: string[] = [];
+    for (const m of sent.slice(from).filter(x => x.type === 'DeviceSignal')) {
+        const blob = (m.payload as { payload?: string } | undefined)?.payload;
+        if (!blob) continue;
+        const opened = await openControl(key, blob);
+        if (opened) kinds.push(String(JSON.parse(opened).kind));
+    }
+    return kinds;
+}
+
+describe('an ARMED host drops a cursor request made before the passphrase (the "no mouse" report)', () => {
+    // An armed host ignores everything but the passphrase from a peer that
+    // has not proved it, and the request goes out the moment the session is
+    // active — while the person is still typing. Hosts up to 0.9.835 dropped
+    // it and nothing asked again; this end must re-assert it once the host's
+    // ANSWER proves the passphrase was accepted, or a newer phone against an
+    // older PC still shows no pointer.
+    it('re-asserts the request once the host answers, when nothing acked it yet', async () => {
+        passphraseAnswer = 'correct horse';
+        try {
+            const { id, key } = await activeController();
+            const { activeSessions, setCursorOwned } = await import('../api/devices/session');
+            setCursorOwned(id, true);
+            await settle();
+            await hostSignal(id, key, { kind: 'ua-challenge', nonce: btoa('nonce'), salt: btoa('salt') });
+            const proved = await sentKinds(key, 0);
+            expect(proved, 'the premise: the proof went out').toContain('ua-response');
+
+            const before = sent.length;
+            await hostSignal(id, key, { kind: 'answer', sdp: 'v=0\r\n' });
+            expect(
+                await sentKinds(key, before),
+                'the host has proved it is listening now: ask again',
+            ).toEqual(['set-cursor-owner']);
+
+            // Still only the ACK grants it.
+            expect(sessionById(activeSessions(), id)?.cursorOwned).toBe(false);
+            await hostSignal(id, key, { kind: 'cursor-owner-active', owned: true });
+            expect(sessionById(activeSessions(), id)?.cursorOwned).toBe(true);
+        } finally {
+            passphraseAnswer = null;
+        }
+    });
+
+    it('re-asserts it ONCE: a media restart\'s later answer does not repeat it', async () => {
+        passphraseAnswer = 'correct horse';
+        try {
+            const { id, key } = await activeController();
+            const { setCursorOwned } = await import('../api/devices/session');
+            setCursorOwned(id, true);
+            await hostSignal(id, key, { kind: 'ua-challenge', nonce: btoa('nonce'), salt: btoa('salt') });
+            await hostSignal(id, key, { kind: 'answer', sdp: 'v=0\r\n' });
+            const before = sent.length;
+            await hostSignal(id, key, { kind: 'answer', sdp: 'v=0\r\n' });
+            expect(await sentKinds(key, before)).not.toContain('set-cursor-owner');
+        } finally {
+            passphraseAnswer = null;
+        }
+    });
+
+    it('NEGATIVE CONTROL: an unarmed host is not asked twice', async () => {
+        const { id, key } = await activeController();
+        const { setCursorOwned } = await import('../api/devices/session');
+        setCursorOwned(id, true);
+        await settle();
+        const before = sent.length;
+        await hostSignal(id, key, { kind: 'answer', sdp: 'v=0\r\n' });
+        expect(await sentKinds(key, before)).not.toContain('set-cursor-owner');
+    });
+
+    it('nothing is re-asserted when the stage never asked for the pointer', async () => {
+        passphraseAnswer = 'correct horse';
+        try {
+            const { id, key } = await activeController();
+            await hostSignal(id, key, { kind: 'ua-challenge', nonce: btoa('nonce'), salt: btoa('salt') });
+            const before = sent.length;
+            await hostSignal(id, key, { kind: 'answer', sdp: 'v=0\r\n' });
+            expect(await sentKinds(key, before)).not.toContain('set-cursor-owner');
+        } finally {
+            passphraseAnswer = null;
+        }
     });
 });
 

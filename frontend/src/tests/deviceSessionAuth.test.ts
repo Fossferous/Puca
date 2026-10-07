@@ -33,6 +33,11 @@ const powerAction = vi.fn(async (_action: PowerAction): Promise<string | void> =
  *  person at the host sees black while the peer keeps the real picture. What
  *  the set-privacy arm reaches; mocked so the tests can see WHO may reach it. */
 const setPrivacyMode = vi.fn(async (..._a: unknown[]) => {});
+/** Whether the host draws its own pointer (set-cursor-owner). Mocked so the
+ *  tests can see when an ARMED host applies a request made before the
+ *  passphrase was proved — and that it never applies one for a peer that did
+ *  not prove it. */
+const setDrawCursor = vi.fn(async (..._a: unknown[]) => {});
 const displayTopologyChanged = vi.fn(async () => {});
 /** Tauri's `invoke`, which the connect handler uses for the display wake (two
  *  synthetic 1px mouse moves). Mocked so a test can observe whether a connect
@@ -91,6 +96,7 @@ vi.mock('../api/devices/hostBackend', () => ({
         getStreamQuality: (...a: unknown[]) => getStreamQuality(...a),
         displayTopologyChanged: () => displayTopologyChanged(),
         setPrivacyMode: (...a: unknown[]) => setPrivacyMode(...a),
+        setDrawCursor: (...a: unknown[]) => setDrawCursor(...a),
         setFileAccess: (sessionId: string, scope: FileScopeRequest | null) => setFileAccess(sessionId, scope),
         // Optional on the interface; a phone host has none. `hasPowerAction`
         // false leaves it undefined so the arm's "cannot lock or shut down
@@ -306,6 +312,7 @@ beforeEach(() => {
     setMonitor.mockReset();
     setMonitor.mockImplementation(async () => {});
     setPrivacyMode.mockClear();
+    setDrawCursor.mockClear();
     tauriInvoke.mockClear();
     armControlGuard.mockClear();
     releaseControlGuard.mockClear();
@@ -1169,6 +1176,69 @@ describe('file access on an armed host needs no prompt, and on an unarmed one st
  * and irreversible from the controller's side, so: gated exactly like input,
  * and the session is ended WITH A REASON before the OS call, not after.
  */
+describe('cursor ownership on an armed host (the "no mouse after the passphrase" report)', () => {
+    /**
+     * THE ORDER THE WIRE PRODUCES. The stage asks for the cursor as soon as
+     * it has a session id, and going active sends the offer and that request
+     * straight away — seconds before a person has typed the passphrase. The
+     * host dropped it at the UA gate and nothing ever asked again: it went on
+     * compositing its own pointer (a few pixels tall on a phone at fit), the
+     * phone drew none, and the owner saw no mouse at all. Field evidence:
+     * the agent's only session that day with no "host cursor compositing
+     * -> off" line is the one the passphrase was typed for.
+     */
+    it('holds a cursor request made before the proof and applies it after the held offer', async () => {
+        armed = true;
+        const { key } = await activeHostSession();
+        const before = sent.length;
+        await signal(key, { kind: 'offer', sdp: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n' });
+        await signal(key, { kind: 'set-cursor-owner', owned: true });
+        expect(setDrawCursor, 'nothing changes for a peer that has not proved the passphrase')
+            .not.toHaveBeenCalled();
+
+        verifyUaResponse.mockImplementation(async () => true);
+        await signal(key, { kind: 'ua-response', nonce: btoa('nonce-abc'), sig: btoa('ok') });
+
+        expect(setDrawCursor, 'proving the passphrase must apply the request it held')
+            .toHaveBeenCalledWith('ds-test', false);
+        // setDrawCursor is an IPC against the stream that answering the offer
+        // creates; served first, the real agent answers "no live stream".
+        expect(agentAnswerOffer.mock.invocationCallOrder[0])
+            .toBeLessThan(setDrawCursor.mock.invocationCallOrder[0]);
+        expect(await sentKinds(key, before), 'and the controller hears the ack it draws on')
+            .toContain('cursor-owner-active');
+    });
+
+    it('applies only the LATEST request it held', async () => {
+        armed = true;
+        const { key } = await activeHostSession();
+        await signal(key, { kind: 'offer', sdp: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n' });
+        await signal(key, { kind: 'set-cursor-owner', owned: true });
+        await signal(key, { kind: 'set-cursor-owner', owned: false });
+        verifyUaResponse.mockImplementation(async () => true);
+        await signal(key, { kind: 'ua-response', nonce: btoa('nonce-abc'), sig: btoa('ok') });
+        expect(setDrawCursor.mock.calls).toEqual([['ds-test', true]]);
+    });
+
+    it('never applies a held request for a peer that failed the proof', async () => {
+        armed = true;
+        const { key } = await activeHostSession();
+        await signal(key, { kind: 'offer', sdp: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n' });
+        await signal(key, { kind: 'set-cursor-owner', owned: true });
+        // verifyUaResponse answers false (the default): a wrong passphrase.
+        await signal(key, { kind: 'ua-response', nonce: btoa('nonce-abc'), sig: btoa('bad') });
+        expect(setDrawCursor).not.toHaveBeenCalled();
+    });
+
+    it('POSITIVE CONTROL: an unarmed host applies the request at once', async () => {
+        armed = false;
+        const { key } = await activeHostSession();
+        await signal(key, { kind: 'offer', sdp: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n' });
+        await signal(key, { kind: 'set-cursor-owner', owned: true });
+        expect(setDrawCursor).toHaveBeenCalledWith('ds-test', false);
+    });
+});
+
 describe('power actions', () => {
     // Spelled here as literals on purpose: the wire strings the host sends and
     // the controller matches on. If either side renames, this goes red.
