@@ -4,9 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.836 — 2026-10-07
 
-Remote control from a phone: typing works after tapping a text box, the pointer shows after the unattended passphrase, switching screens by zooming no longer jumps, and tapping a text box no longer blacks out the picture
+Phone remote control: typing works again, pointer after the passphrase, steady zoom when switching monitors, no black screen over the keyboard
 ### Fixed
 
 - **Typing reaches your PC again after you tap a text box.** When you tapped a box on the PC that already had the cursor in it (or tapped the picture while the keyboard was up), the keyboard opened but the tap itself took the focus away from it, so what you typed went nowhere (on some keyboards it arrived as odd key presses instead). A tap on the picture no longer takes the keyboard away. Comes with the phone's in-app update.
