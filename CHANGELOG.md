@@ -4,9 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.837 — 2026-10-07
 
-Videos get volume, speed and full-screen buttons at every size
+Videos get their own volume, speed and full-screen controls at every size
 ### Added
 
 - **Every video has its own volume, speed and full-screen buttons, however narrow it is.** A portrait video in a message used to get only Play, a three-dot menu and the timeline, because the built-in player hid the rest when there was no room. Videos now have Púca's own controls: play/pause, the timeline with the time, **volume** (a slider and Mute — beside the speaker on a wide video, in a small panel on a narrow one), **speed** (0.5× to 2×, without changing the pitch) and **full screen**. The same player is used for videos in messages and DMs, posted clips, a clip's preview before you post it, and videos attached to tasks. A very tall video (a phone's screen recording) gets a slightly wider box with black bars at the sides, so all of its buttons fit.
