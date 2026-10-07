@@ -175,6 +175,16 @@ export class TouchGestures {
         return this.pointers.size > 0;
     }
 
+    /** Re-express the pointer over a new captured surface: the same point on
+     *  the remote desktop, a different fraction. Sends nothing and reports
+     *  nothing (no camera pan), and — unlike `reset` — keeps any gesture in
+     *  progress: a finger still down carries on from the new value, which is
+     *  what the next delta must be added to. */
+    place(x: number, y: number): void {
+        this.px = clamp01(x);
+        this.py = clamp01(y);
+    }
+
     /** Place the pointer without sending anything — for a fresh session. */
     reset(x = 0.5, y = 0.5): void {
         this.cancelLongPress();

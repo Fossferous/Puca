@@ -745,6 +745,83 @@ export function carryFractionAcross(
     };
 }
 
+/** The desktop rectangle a capture covers: one screen, or (ALL_DISPLAYS) the
+ *  bounding box of every screen. null when the host did not measure it. */
+function surfaceRect(monitors: MonitorGeom[], surface: number): { left: number; top: number; w: number; h: number } | null {
+    const measured = (m: MonitorGeom): m is Required<MonitorGeom> =>
+        typeof m.left === 'number' && typeof m.top === 'number'
+        && typeof m.width === 'number' && typeof m.height === 'number'
+        && m.width > 0 && m.height > 0;
+    if (surface === ALL_DISPLAYS) {
+        if (monitors.length === 0 || !monitors.every(measured)) return null;
+        const rects = monitors as Required<MonitorGeom>[];
+        const left = Math.min(...rects.map(m => m.left));
+        const top = Math.min(...rects.map(m => m.top));
+        const w = Math.max(...rects.map(m => m.left + m.width)) - left;
+        const h = Math.max(...rects.map(m => m.top + m.height)) - top;
+        return w > 0 && h > 0 ? { left, top, w, h } : null;
+    }
+    const m = monitors.find(x => x.id === surface);
+    return m && measured(m) ? { left: m.left, top: m.top, w: m.width, h: m.height } : null;
+}
+
+/**
+ * A fraction of one captured surface, re-expressed over another — the same
+ * DESKTOP point, clamped onto the new surface when it lies off it. null when
+ * either surface is unmeasured (an old or webview host): the caller then keeps
+ * what it had.
+ *
+ * Every switch needs it, not only the edge hop (carryFractionAcross): the
+ * trackpad's pointer, the aim and the drawn cursor are all fractions OF THE
+ * CAPTURED SURFACE, and a zoom-follow into a screen of the composite, or back
+ * out of it, changes which surface that is. Left alone, the pointer at the
+ * middle of a portrait screen in the composite (x≈0.87) became the right-hand
+ * edge of that screen after following it, and the next finger movement
+ * re-centred the camera there and moved the real pointer with it.
+ */
+export function carrySurfaceFraction(
+    frac: { x: number; y: number },
+    monitors: MonitorGeom[],
+    from: number,
+    to: number,
+): { x: number; y: number } | null {
+    if (from === to) return { x: frac.x, y: frac.y };
+    const a = surfaceRect(monitors, from);
+    const b = surfaceRect(monitors, to);
+    if (!a || !b) return null;
+    return {
+        x: clamp01((a.left + frac.x * a.w - b.left) / b.w),
+        y: clamp01((a.top + frac.y * a.h - b.top) / b.h),
+    };
+}
+
+/** The width/height of the picture a capture of `surface` produces, from the
+ *  host's geometry (the agent's integer steps move it by well under a
+ *  percent). null when unmeasured. */
+export function surfaceAspect(monitors: MonitorGeom[], surface: number): number | null {
+    const r = surfaceRect(monitors, surface);
+    return r ? r.w / r.h : null;
+}
+
+/** Within this relative difference, a picture IS the expected capture's. */
+export const SWITCH_ASPECT_MATCH = 0.03;
+
+/**
+ * Can the picture's own shape tell the old capture from the new one? Only
+ * when the two differ by well over the match tolerance — two same-shaped
+ * screens cannot be told apart this way, and the caller falls back to the
+ * host's confirmation.
+ */
+export function aspectsDistinguish(fromAspect: number | null, toAspect: number | null): boolean {
+    if (!fromAspect || !toAspect || !(fromAspect > 0) || !(toAspect > 0)) return false;
+    return Math.abs(fromAspect / toAspect - 1) > 2 * SWITCH_ASPECT_MATCH;
+}
+
+/** Is a picture of this aspect the expected capture's? */
+export function aspectMatches(shown: number, expected: number): boolean {
+    return shown > 0 && expected > 0 && Math.abs(shown / expected - 1) <= SWITCH_ASPECT_MATCH;
+}
+
 /**
  * The transform for the SINGLE-monitor view that keeps what the user was
  * looking at in place: same centre point, same physical magnification (a

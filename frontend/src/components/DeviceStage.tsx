@@ -15,6 +15,7 @@
  * sent pixels would put the cursor on the wrong screen.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import {
     ALL_DISPLAYS,
     deviceDiagnosticsWindow,
@@ -44,12 +45,13 @@ import { tunnelStatus, type TunnelStatus } from '../api/devices/tunnel';
 import { getStreamQualityErrorMessage } from '../api/devices/streamQualityMessages';
 import { isInjectableKey, normalizedOverVideo, pictureBox } from '../api/devices/pointerMapping';
 import {
-    ZOOM_FOLLOW_IN, ZOOM_FOLLOW_OUT_AT, availableEdgeHops, captureSurfaceSize, caretBandFrom,
-    caretFollowTransform, carryFractionAcross, clampPanTo,
+    ZOOM_FOLLOW_IN, ZOOM_FOLLOW_OUT_AT, aspectMatches, aspectsDistinguish, availableEdgeHops,
+    captureSurfaceSize, caretBandFrom, caretFollowTransform, carrySurfaceFraction, clampPanTo,
+    surfaceAspect,
     initialMonitorRequest, manualCompositeHoldActive,
     monitorRegions, pickFollowTarget,
     remapAcrossBoundary, remapIntoComposite, remapIntoMonitor, viewportInVideo,
-    type EdgeHop, type MonitorGeom, type View as ZoomView,
+    type EdgeHop, type MonitorGeom, type Transform as ZoomTransform, type View as ZoomView,
 } from './deviceZoomFollow';
 import {
     autoKeyboardVerdict, autoKeyboardVerdictAtPress, suppressedByManualClose,
@@ -945,22 +947,34 @@ export function DeviceStage() {
     // rotation, on a window resize, and when the first frame finally arrives
     // and gives the video intrinsic dimensions.
     const [videoBox, setVideoBox] = useState<{ vw: number; vh: number; w: number; h: number } | null>(null);
+    /** Filled by the zoom-follow section below (a slot, because it is declared
+     *  further down): apply a pending switch's remap NOW, synchronously, if
+     *  the picture that just arrived is the new capture's. */
+    const followOnResizeRef = useRef<(() => void) | null>(null);
     useEffect(() => {
         const v = videoRef.current;
         if (!v) return;
         const read = () => {
             setVideoBox({ vw: v.videoWidth, vh: v.videoHeight, w: v.offsetWidth, h: v.offsetHeight });
         };
+        // The new screen's first frame and the remap that frames it must reach
+        // the screen TOGETHER. Through state and an effect the remap landed a
+        // render or two after the picture, which showed the new screen under
+        // the old view for a frame: a flash of the wrong place, or of black.
+        const onResize = () => {
+            followOnResizeRef.current?.();
+            read();
+        };
         read();
         // `resize` on a <video> fires when the INTRINSIC size changes — which is
         // what happens when the host switches to a differently shaped screen.
         v.addEventListener('loadedmetadata', read);
-        v.addEventListener('resize', read);
+        v.addEventListener('resize', onResize);
         const ro = new ResizeObserver(read);
         ro.observe(v);
         return () => {
             v.removeEventListener('loadedmetadata', read);
-            v.removeEventListener('resize', read);
+            v.removeEventListener('resize', onResize);
             ro.disconnect();
 
         };
@@ -1121,7 +1135,17 @@ export function DeviceStage() {
         becomes: { mode: 'none' } | { mode: 'single'; monitorId: number };
         fromVw: number;
         fromVh: number;
-        remap: (to: ZoomView) => { scale: number; x: number; y: number };
+        /** The picture's shape when the switch was asked for, and the shape
+         *  the new capture will have (the host's geometry). When they differ
+         *  the PICTURE says which capture is on the stage — see
+         *  applyPendingFollow. null = unmeasured. */
+        fromAspect: number | null;
+        expectAspect: number | null;
+        /** Computed when the new picture is on the stage, from the view as
+         *  it is THEN: a pinch that carried on while the host switched is
+         *  part of what the user is looking at, and remapping the view as it
+         *  was at the request threw it away (the zoom snapped back). */
+        remap: (to: ZoomView, fromTransform: ZoomTransform) => ZoomTransform;
         fallback: number;
         deadline: number;
         /** performance.now() at request, for the [zoom-follow] timing line —
@@ -1157,7 +1181,12 @@ export function DeviceStage() {
      *  dimensions when the frame finally lands. */
     const followCorrectionRef = useRef<{
         expectMonitor: number;
-        remap: (to: ZoomView) => { scale: number; x: number; y: number };
+        remap: (to: ZoomView, fromTransform: ZoomTransform) => ZoomTransform;
+        /** The view the first (blind) apply remapped FROM — the transform has
+         *  been the remap's output since, so re-running from it would remap
+         *  twice. null (the deadline's correction, no apply yet): the view as
+         *  it is when the correction runs. */
+        fromTransform: ZoomTransform | null;
         until: number;
         /** What the switch MEANS for auto mode, carried along so a confirm
          *  that outlives the pending deadline still records it. Without this
@@ -1177,19 +1206,72 @@ export function DeviceStage() {
         pendingFollowRef.current = null;
     }, []);
 
+    /** The host's screens, for callbacks that outlive a render. */
+    const monitorsRef = useRef<MonitorGeom[]>([]);
+    useEffect(() => { monitorsRef.current = session?.monitors ?? []; }, [session?.monitors]);
+
+    /** Which captured surface the pointer's fractions (the trackpad's
+     *  position, the aim, the drawn cursor) are currently fractions OF. */
+    const pointerSurfaceRef = useRef<number | null>(null);
+    /**
+     * Move the pointer's fractions onto a newly captured surface — the same
+     * desktop point (clamped onto the surface), never the same fraction.
+     * Idempotent per surface, so the two places a switch becomes real (its
+     * picture reaching the stage, the host's confirmation) can both call it.
+     * Sends nothing and pans nothing: the remote pointer has not moved, and
+     * the camera keeps the landing the remap chose.
+     */
+    const rebasePointer = useCallback((to: number) => {
+        const from = pointerSurfaceRef.current;
+        pointerSurfaceRef.current = to;
+        if (from === null || from === to) return;
+        const monitors = monitorsRef.current;
+        const carry = (f: { x: number; y: number }) => carrySurfaceFraction(f, monitors, from, to);
+        const aim = carry(lastAimRef.current);
+        if (!aim) return;   // unmeasured: nothing can be carried, keep what was
+        lastAimRef.current = aim;
+        const g = carry(gestures.position());
+        if (g) gestures.place(g.x, g.y);
+        setVirtualCursor(prev => carry(prev) ?? prev);
+    }, [gestures]);
+
+    /** A switch whose picture is on the stage before the host's confirm has
+     *  arrived (media is direct, the confirm rides the relay): the level-based
+     *  trigger must not judge the NEW picture against the OLD screen's
+     *  geometry meanwhile. Bounded, in case the confirm never comes. */
+    const awaitingConfirmRef = useRef<{ monitor: number; until: number } | null>(null);
+
     const applyPendingFollow = useCallback(() => {
         const p = pendingFollowRef.current;
         const v = videoRef.current;
-        if (!p || !v || !v.videoWidth || !v.offsetWidth) return;
-        // Never remap until the HOST confirmed the switch — a remap computed
-        // for the new capture but applied over the old one aims at nothing.
-        if (activeMonitorRef.current !== p.expectMonitor) return;
+        if (!p || !v || !v.videoWidth || !v.videoHeight || !v.offsetWidth) return;
+        // WHICH PICTURE IS ON THE STAGE. A remap computed for the new capture
+        // but applied over the old one aims at nothing, so this used to wait
+        // for the host's confirmation and then for "the frame size changed".
+        // Since the viewer fit, the OLD capture changes size too: the zoom that
+        // starts a follow also reports a bigger stage, and the composite was
+        // re-encoded (1360x640 -> 2720x1282) before the switch committed — the
+        // confirm then landed first and the remap ran against the composite.
+        // And the new screen's frames, which ride the direct media path, were
+        // shown under the composite's view until the relay's confirm caught
+        // up. When the two captures differ in SHAPE, the picture says which
+        // one it is: apply exactly when it has the new one's. Two same-shaped
+        // screens cannot be told apart that way, and wait for the confirm.
+        if (aspectsDistinguish(p.fromAspect, p.expectAspect)) {
+            if (!aspectMatches(v.videoWidth / v.videoHeight, p.expectAspect!)) return;
+        } else if (activeMonitorRef.current !== p.expectMonitor) {
+            return;
+        }
         const pict = pictureBox(v.videoWidth, v.videoHeight, v.offsetWidth, v.offsetHeight);
         if (!pict) return;
         const to: ZoomView = { pict, videoW: v.videoWidth, videoH: v.videoHeight };
-        const next = p.remap(to);
+        const fromTransform = transformRef.current;
+        const next = p.remap(to, fromTransform);
         console.debug(`[zoom-follow] applied ${Math.round(performance.now() - p.startedAt)}ms after request (monitor ${p.expectMonitor})`);
         autoFollowRef.current = p.becomes;
+        if (activeMonitorRef.current !== p.expectMonitor) {
+            awaitingConfirmRef.current = { monitor: p.expectMonitor, until: Date.now() + 3_000 };
+        }
         // Applying with UNCHANGED dimensions can mean two things: a genuine
         // same-size switch (correct), or the new capture's first frame is
         // simply late (the remap just aimed at the old frame). Keep the
@@ -1199,28 +1281,42 @@ export function DeviceStage() {
                 // onConfirmed: null — it runs below, and the correction's later
                 // re-run must not repeat it (a second pointer seed would yank a
                 // cursor the user may already have moved).
-                ? { expectMonitor: p.expectMonitor, remap: p.remap, until: Date.now() + 5_000, becomes: p.becomes, onConfirmed: null }
+                ? { expectMonitor: p.expectMonitor, remap: p.remap, fromTransform, until: Date.now() + 5_000, becomes: p.becomes, onConfirmed: null }
                 : null;
         const confirmed = p.onConfirmed;
         clearPendingFollow();
+        // The pointer crosses with the picture, before anything reads it.
+        rebasePointer(p.expectMonitor);
         setTransform(next);
         // After the transform: this hook re-seeds the pointer, and the paint
         // it drives (followPan → applyFollowPan) must clamp against the view
         // the switch just landed, not the one it left.
         confirmed?.();
-    }, [clearPendingFollow]);
+    }, [clearPendingFollow, rebasePointer]);
 
-    // Apply the pending remap once the switch is CONFIRMED and the intrinsic
-    // frame size has actually become the new capture's. The fallback timer in
-    // the pending entry covers the exotic same-dimensions switch, where no
-    // resize event ever fires.
+    // From the video's own resize event, in the same task as the new frame
+    // (see followOnResizeRef). flushSync: a render scheduled from here would
+    // commit after the browser has painted the frame.
+    useEffect(() => {
+        followOnResizeRef.current = () => {
+            if (pendingFollowRef.current) flushSync(applyPendingFollow);
+        };
+        return () => { followOnResizeRef.current = null; };
+    }, [applyPendingFollow]);
+
+    // Apply the pending remap once the new capture's picture is on the stage
+    // (applyPendingFollow decides — by its shape, or by the confirmation and
+    // a changed frame size). The fallback timer in the pending entry covers
+    // the exotic same-dimensions switch, where no resize event ever fires.
     useEffect(() => {
         activeMonitorRef.current = session?.activeMonitor ?? null;
         const p = pendingFollowRef.current;
-        if (session && p && session.activeMonitor === p.expectMonitor
-            && videoBox && (videoBox.vw !== p.fromVw || videoBox.vh !== p.fromVh)) {
+        if (session && p && videoBox
+            && (aspectsDistinguish(p.fromAspect, p.expectAspect)
+                || (session.activeMonitor === p.expectMonitor
+                    && (videoBox.vw !== p.fromVw || videoBox.vh !== p.fromVh)))) {
             applyPendingFollow();
-            return;
+            if (!pendingFollowRef.current) return;
         }
         // A correction left behind by a dims-unchanged apply: re-run it once
         // the real frame arrives, while the switch it belongs to still holds.
@@ -1240,11 +1336,15 @@ export function DeviceStage() {
                 // for is an AUTO switch however late its confirmation came, or
                 // the way back out is lost.
                 autoFollowRef.current = c.becomes;
-                setTransform(c.remap({ pict, videoW: v.videoWidth, videoH: v.videoHeight }));
+                rebasePointer(c.expectMonitor);
+                setTransform(c.remap(
+                    { pict, videoW: v.videoWidth, videoH: v.videoHeight },
+                    c.fromTransform ?? transformRef.current,
+                ));
                 c.onConfirmed?.();
             }
         }
-    }, [videoBox, session?.activeMonitor, session, applyPendingFollow]);
+    }, [videoBox, session?.activeMonitor, session, applyPendingFollow, rebasePointer]);
 
     // A screen change this feature did not ask for — the picker, the mobile
     // menu, the host itself — always wins: drop any pending auto switch and
@@ -1258,6 +1358,13 @@ export function DeviceStage() {
         const prev = lastActiveMonitorRef.current;
         lastActiveMonitorRef.current = active;
         if (active === null || active === prev) return;
+        // EVERY switch moves the pointer's surface — the picker's and the
+        // menu's as much as a follow's (whose apply may have done it already;
+        // this is then a no-op). The first announcement only says which
+        // surface the session started on.
+        if (pointerSurfaceRef.current === null) pointerSurfaceRef.current = active;
+        else rebasePointer(active);
+        awaitingConfirmRef.current = null;
         if (expectedAutoMonitorRef.current === active) {
             expectedAutoMonitorRef.current = null; // ours — consumed
             return;
@@ -1271,7 +1378,7 @@ export function DeviceStage() {
         // composite on purpose. Recorded as the scale it was chosen AT, so
         // zooming further in later reads as fresh intent and releases it.
         if (active === ALL_DISPLAYS) manualCompositeHoldRef.current = transformRef.current.scale;
-    }, [session?.activeMonitor, session?.id, clearPendingFollow, session]);
+    }, [session?.activeMonitor, session?.id, clearPendingFollow, session, rebasePointer]);
 
     // A NEW session must not inherit any of this: a pending switch from an
     // ended session applying its stale remap to the next session's video was
@@ -1282,6 +1389,11 @@ export function DeviceStage() {
         expectedAutoMonitorRef.current = null;
         manualCompositeHoldRef.current = null;
         autoFollowRef.current = { mode: 'none' };
+        awaitingConfirmRef.current = null;
+        // The new session's pointer starts on the surface it announced (the
+        // apply effect above has already mirrored it this commit), or on the
+        // first one it announces.
+        pointerSurfaceRef.current = activeMonitorRef.current;
     }, [session?.id, clearPendingFollow]);
 
     // EVERY SCREEN BY DEFAULT — the viewer's half. A host from 0.8.104 on
@@ -1336,7 +1448,7 @@ export function DeviceStage() {
     const beginMonitorSwitch = useCallback((
         expectMonitor: number,
         becomes: { mode: 'none' } | { mode: 'single'; monitorId: number },
-        remap: (to: ZoomView) => { scale: number; x: number; y: number },
+        remap: (to: ZoomView, fromTransform: ZoomTransform) => ZoomTransform,
         onConfirmed: (() => void) | null = null,
     ) => {
         const s = session;
@@ -1346,6 +1458,8 @@ export function DeviceStage() {
         pendingFollowRef.current = {
             expectMonitor, becomes, remap, onConfirmed,
             fromVw: v.videoWidth, fromVh: v.videoHeight,
+            fromAspect: v.videoWidth > 0 && v.videoHeight > 0 ? v.videoWidth / v.videoHeight : null,
+            expectAspect: surfaceAspect(s.monitors, expectMonitor),
             startedAt: performance.now(),
             // The fallback covers a same-size switch, where no resize
             // ever fires; a LATE frame instead of a same-size one is
@@ -1364,6 +1478,7 @@ export function DeviceStage() {
                     followCorrectionRef.current = {
                         expectMonitor: p.expectMonitor,
                         remap: p.remap,
+                        fromTransform: null,
                         until: Date.now() + 4_000,
                         becomes: p.becomes,
                         onConfirmed: p.onConfirmed,
@@ -1404,7 +1519,6 @@ export function DeviceStage() {
         const fromPict = pictureBox(v.videoWidth, v.videoHeight, v.offsetWidth, v.offsetHeight);
         if (!fromPict) return;
         const from: ZoomView = { pict: fromPict, videoW: v.videoWidth, videoH: v.videoHeight };
-        const t = transformRef.current;
         const fromMon = s.monitors.find(m => m.id === s.activeMonitor);
         const toMon = s.monitors.find(m => m.id === hop.neighbourId);
         // availableEdgeHops only answers from fully-measured geometry, so
@@ -1413,8 +1527,8 @@ export function DeviceStage() {
         const becomes = autoFollowRef.current.mode === 'single'
             ? { mode: 'single' as const, monitorId: hop.neighbourId }
             : { mode: 'none' as const };
-        beginMonitorSwitch(hop.neighbourId, becomes, to => remapAcrossBoundary({
-            box, from, fromTransform: t,
+        beginMonitorSwitch(hop.neighbourId, becomes, (to, fromTransform) => remapAcrossBoundary({
+            box, from, fromTransform,
             fromMon: fromMon as Required<MonitorGeom>,
             toMon: toMon as Required<MonitorGeom>,
             dir: hop.dir, to, maxZoom: MAX_ZOOM,
@@ -1431,6 +1545,8 @@ export function DeviceStage() {
             // B's near edge) makes the camera agree with the landing, and the
             // one explicit move walks the machine's pointer through the seam
             // so a click before any movement lands on the screen being viewed.
+            // The CARRY itself is rebasePointer's now (it runs for every
+            // switch, just before this); what is left here is the walk.
             // Confirmation-gated (see applyPendingFollow): a move sent before
             // the host has re-aimed input would land on the OLD monitor.
             // TRACKPAD MODE ONLY. In touch mode the camera never follows the
@@ -1440,15 +1556,13 @@ export function DeviceStage() {
             // applyFollowPan does not check the mode) toward the last tap,
             // yanking the view off the remap's landing.
             if (!isMouseModeRef.current) return;
-            const aim = lastAimRef.current;
-            if (!aim) return;
             // A finger already down owns the pointer: resetting under it would
             // forget (and strand) anything the gesture has pressed. A held
             // virtual-mouse button is the same fact by another route — the
             // seeded move would drag whatever it is holding across the seam.
             if (gestures.busy() || padPressedRef.current.size > 0) return;
-            const carried = carryFractionAcross(
-                aim, fromMon as Required<MonitorGeom>, toMon as Required<MonitorGeom>);
+            // Already carried onto this screen (clamped onto its near edge).
+            const carried = lastAimRef.current;
             gestures.reset(carried.x, carried.y);
             sendRef.current({ t: 'move', x: carried.x, y: carried.y });
         });
@@ -1461,6 +1575,12 @@ export function DeviceStage() {
         const timer = setTimeout(() => {
             const s = session;
             if (!s || pendingFollowRef.current) return;
+            // A switch already on the stage whose confirmation has not come:
+            // `s.activeMonitor` still names the screen it left, and judging
+            // the new picture against that screen's geometry would start
+            // another switch on top of this one.
+            const awaiting = awaitingConfirmRef.current;
+            if (awaiting && awaiting.monitor !== s.activeMonitor && Date.now() < awaiting.until) return;
             const v = videoRef.current;
             if (!v || !v.videoWidth || !v.offsetWidth) return;
             const box = { w: v.offsetWidth, h: v.offsetHeight };
@@ -1487,19 +1607,19 @@ export function DeviceStage() {
                 const region = regions.find(r => r.id === target);
                 if (!region) return;
                 begin(target, { mode: 'single', monitorId: target },
-                    to => remapIntoMonitor({ box, from, fromTransform: t, region, to, maxZoom: MAX_ZOOM }));
+                    (to, fromTransform) => remapIntoMonitor({ box, from, fromTransform, region, to, maxZoom: MAX_ZOOM }));
             } else if (
                 autoFollowRef.current.mode === 'single'
                 && s.activeMonitor === autoFollowRef.current.monitorId
                 && t.scale <= ZOOM_FOLLOW_OUT_AT
             ) {
                 const monitorId = autoFollowRef.current.monitorId;
-                begin(ALL_DISPLAYS, { mode: 'none' }, to => {
+                begin(ALL_DISPLAYS, { mode: 'none' }, (to, fromTransform) => {
                     const regions = monitorRegions(s.monitors, to.videoW, to.videoH);
                     const region = regions?.find(r => r.id === monitorId);
                     // Layout unknown on the way back: land on the whole grid.
                     if (!region) return { scale: 1, x: 0, y: 0 };
-                    return remapIntoComposite({ box, from, fromTransform: t, region, to });
+                    return remapIntoComposite({ box, from, fromTransform, region, to });
                 });
             }
             // NO AUTOMATIC MONITOR HOP. Panning into a screen's edge used to
@@ -1669,8 +1789,18 @@ export function DeviceStage() {
     // type" re-raise, so mounted is not the same as an IME being up — a
     // back-gesture dismissal, a hardware keyboard or DeX must all stop the
     // follow.
+    //
+    // AND ONLY WHILE THERE IS A BAND TO AIM INTO. Where the WebView is resized
+    // for the IME (the owner's phone; Android <= 14 generally), the surface
+    // itself shrinks to what is visible and caretBandFrom answers null — the
+    // whole surface is no keyboard band. Counting the camera active there
+    // anyway stood down everything that yields to it (the re-clamp on a box
+    // change, follow-the-cursor) while the camera itself could do nothing:
+    // a zoomed pan, legal for the tall box, pointed past the bottom of the
+    // re-laid-out picture and the stage went black when a text field was
+    // tapped ("selecting a text field sometimes shows all black").
     const caretFollowActive = isMobile && followCaret && activeMobileMenu === 'keyboard'
-        && kbInset.visible && sessionActiveId !== null;
+        && kbInset.visible && sessionActiveId !== null && caretBand !== null;
 
     // --- THE CARET CHANNEL, tracked for as long as anything here wants it ---
     //
@@ -2418,6 +2548,19 @@ export function DeviceStage() {
             send({ t: 'down', button: e.button });
             return;
         }
+        // A FINGER ON THE PICTURE IS NEVER A LOCAL FOCUS CHANGE. A touch is
+        // followed by compatibility mouse events, and that mousedown's default
+        // action moves focus to whatever was tapped — the picture is not
+        // focusable, so the keyboard bar's capture field lost focus to BODY.
+        // The IME stayed up (the native show keeps it up) but was no longer
+        // connected to anything, so typing went nowhere, and on a tap into a
+        // field that already held the caret it undid the very focus the
+        // auto-keyboard had just given (raised at the release, which the
+        // mousedown follows): "kb no longer seems to input". Cancelling the
+        // pointerdown suppresses those mouse events and nothing else — the
+        // stage drives the remote machine from pointer events alone. A mouse
+        // keeps its ordinary semantics.
+        if (e.pointerType !== 'mouse') e.preventDefault();
         // PRUNE STALE CONTACTS before counting this one. A pointer whose
         // up/cancel never reached us (capture lost on remount, or a
         // setPointerCapture that silently no-ops) leaves a permanent entry —

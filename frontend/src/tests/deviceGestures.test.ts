@@ -341,3 +341,23 @@ describe('a stranded contact (a pointerup that never arrived)', () => {
         expect(r.g.diag()).toMatchObject({ pruned: 1, blurCancels: 1 });
     });
 });
+
+describe('place() re-expresses the pointer over a new surface', () => {
+    it('moves the position without sending or reporting anything', () => {
+        r.g.place(0.25, 0.75);
+        expect(r.calls, 'no move, no cursor paint, no button').toEqual([]);
+        expect(r.g.position()).toEqual({ x: 0.25, y: 0.75 });
+    });
+
+    it('a drag in progress carries on FROM the new value', () => {
+        r.g.down(P(1, 100, 100));
+        r.g.move(P(1, 140, 100));                // past the slop: a drag
+        const before = r.moves().length;
+        r.g.place(0.1, 0.2);
+        r.g.move(P(1, 180, 100));                // +40 px over a 400 px picture
+        const m = r.moves().slice(before);
+        expect(m.length).toBeGreaterThan(0);
+        expect(m[m.length - 1].x).toBeCloseTo(0.1 + 40 / 400, 10);
+        expect(m[m.length - 1].y).toBeCloseTo(0.2, 10);
+    });
+});

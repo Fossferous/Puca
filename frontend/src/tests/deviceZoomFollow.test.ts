@@ -8,7 +8,8 @@ import { describe, it, expect } from 'vitest';
 import {
     ZOOM_FOLLOW_CONTAINMENT, ZOOM_FOLLOW_IN, ZOOM_FOLLOW_LANDING_MIN,
     ZOOM_FOLLOW_OUT_AT, ZOOM_FOLLOW_RETURN_MAX, ZOOM_FOLLOW_REARM_RATIO,
-    captureSurfaceSize, carryFractionAcross, clampPanTo, clampPanToStrip, initialMonitorRequest, manualCompositeHoldActive,
+    aspectMatches, aspectsDistinguish, captureSurfaceSize, carryFractionAcross, carrySurfaceFraction,
+    clampPanTo, clampPanToStrip, initialMonitorRequest, manualCompositeHoldActive, surfaceAspect,
     monitorRegions, pickFollowTarget, remapIntoComposite,
     remapIntoMonitor, viewportInVideo, type Region, type View,
 } from '../components/deviceZoomFollow';
@@ -599,5 +600,76 @@ describe('carryFractionAcross — the pointer keeps its desktop point over a hop
         expect(c.x).toBeCloseTo(0, 10);
         // y: desktop 720 → (720 - 360) / 1080 = 1/3 of the shorter screen.
         expect(c.y).toBeCloseTo(1 / 3, 10);
+    });
+});
+
+describe('carrySurfaceFraction — the pointer keeps its desktop point over ANY switch', () => {
+    // The owner's three screens: a 2560x1440 primary with portrait 1440x2560
+    // screens either side, raised above it. Every number is the arithmetic
+    // written out, never a transcribed output.
+    const OWNER = [
+        { id: 0, left: 0, top: 0, width: 2560, height: 1440 },
+        { id: 1, left: 2560, top: -700, width: 1440, height: 2560 },
+        { id: 2, left: -1440, top: -707, width: 1440, height: 2560 },
+    ];
+    // Union: x -1440..4000 (5440 wide), y -707..1860 (2567 tall).
+
+    it('composite -> one of its screens, and back, is the same desktop point', () => {
+        // The middle of Display 2 on the composite: x = (2560 + 720 + 1440) / 5440.
+        const onComposite = { x: (2560 + 720 + 1440) / 5440, y: (-700 + 1280 + 707) / 2567 };
+        const onD2 = carrySurfaceFraction(onComposite, OWNER, ALL_DISPLAYS, 1)!;
+        expect(onD2.x).toBeCloseTo(0.5, 10);
+        expect(onD2.y).toBeCloseTo(0.5, 10);
+        const back = carrySurfaceFraction(onD2, OWNER, 1, ALL_DISPLAYS)!;
+        expect(back.x).toBeCloseTo(onComposite.x, 10);
+        expect(back.y).toBeCloseTo(onComposite.y, 10);
+    });
+
+    it('a point off the new screen is clamped onto it', () => {
+        // The composite's middle is on the primary, nowhere near Display 2:
+        // desktop x = -1440 + 2720 = 1280, left of Display 2's left edge.
+        const c = carrySurfaceFraction({ x: 0.5, y: 0.5 }, OWNER, ALL_DISPLAYS, 1)!;
+        expect(c.x).toBe(0);
+        expect(c.y).toBeCloseTo((-707 + 0.5 * 2567 + 700) / 2560, 10);
+    });
+
+    it('the same surface is the identity, and an unmeasured one carries nothing', () => {
+        expect(carrySurfaceFraction({ x: 0.3, y: 0.7 }, OWNER, 1, 1)).toEqual({ x: 0.3, y: 0.7 });
+        const unmeasured = [{ id: 0 }, { id: 1, left: 1920, top: 0, width: 1920, height: 1080 }];
+        expect(carrySurfaceFraction({ x: 0.3, y: 0.7 }, unmeasured, 0, 1)).toBeNull();
+        expect(carrySurfaceFraction({ x: 0.3, y: 0.7 }, unmeasured, ALL_DISPLAYS, 1)).toBeNull();
+    });
+});
+
+describe('telling the old capture from the new one by its shape', () => {
+    const OWNER = [
+        { id: 0, left: 0, top: 0, width: 2560, height: 1440 },
+        { id: 1, left: 2560, top: -700, width: 1440, height: 2560 },
+        { id: 2, left: -1440, top: -707, width: 1440, height: 2560 },
+    ];
+
+    it("knows each surface's shape from the geometry", () => {
+        expect(surfaceAspect(OWNER, ALL_DISPLAYS)).toBeCloseTo(5440 / 2567, 10);
+        expect(surfaceAspect(OWNER, 1)).toBeCloseTo(1440 / 2560, 10);
+        expect(surfaceAspect([{ id: 0 }], 0)).toBeNull();
+    });
+
+    it("the agent's integer fit steps still match their surface", () => {
+        // The composite at step 4 and natively, Display 2 at step 2 and 3
+        // (sizes floored to even, as composite.rs does).
+        expect(aspectMatches(1360 / 640, 5440 / 2567)).toBe(true);
+        expect(aspectMatches(2720 / 1282, 5440 / 2567)).toBe(true);
+        expect(aspectMatches(720 / 1280, 1440 / 2560)).toBe(true);
+        expect(aspectMatches(480 / 852, 1440 / 2560)).toBe(true);
+        // ...and the other capture does not.
+        expect(aspectMatches(2720 / 1282, 1440 / 2560)).toBe(false);
+    });
+
+    it('distinguishes only shapes no picture could match both of', () => {
+        expect(aspectsDistinguish(5440 / 2567, 1440 / 2560)).toBe(true);
+        expect(aspectsDistinguish(2560 / 1440, 5440 / 2567)).toBe(true);
+        // Two same-shaped screens: the confirmation must decide.
+        expect(aspectsDistinguish(1920 / 1080, 2560 / 1440)).toBe(false);
+        expect(aspectsDistinguish(null, 1)).toBe(false);
     });
 });

@@ -275,6 +275,41 @@ describe('a phone session tracks the caret for its whole life', () => {
     });
 });
 
+describe('a finger on the picture never takes focus off the keyboard bar\'s field', () => {
+    // A touch is followed by compatibility mouse events, and that mousedown's
+    // default action moves focus to what was tapped — BODY, for the picture.
+    // The IME stayed up (the native show) attached to nothing: typing went
+    // nowhere, and a tap into a field that already held the caret undid the
+    // very focus the at-press raise had just given (owner report,
+    // 2026-10-07, "kb no longer seems to input"; reproduced in the Android
+    // WebView with Gboard). Cancelling the pointerdown suppresses those mouse
+    // events — jsdom has none to suppress, so this pins the cancellation and
+    // e2e/device-stage-real-browser.mjs proves the focus in a real browser.
+    const down = (pointerType: string) => new PointerEvent('pointerdown', {
+        bubbles: true, cancelable: true, pointerId: 3, pointerType, button: 0, ...clientOf(0.5, 0.5),
+    });
+
+    it('a touch pointerdown on the picture is cancelled', async () => {
+        await mountWith(session());
+        const ev = down('touch');
+        await act(async () => { surface().dispatchEvent(ev); });
+        expect(ev.defaultPrevented).toBe(true);
+        await act(async () => {
+            surface().dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 3, pointerType: 'touch', ...clientOf(0.5, 0.5) }));
+        });
+    });
+
+    it('POSITIVE CONTROL: a mouse keeps its ordinary semantics', async () => {
+        await mountWith(session());
+        const ev = down('mouse');
+        await act(async () => { surface().dispatchEvent(ev); });
+        expect(ev.defaultPrevented).toBe(false);
+        await act(async () => {
+            surface().dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 3, pointerType: 'mouse', ...clientOf(0.5, 0.5) }));
+        });
+    });
+});
+
 describe('a press that lands in a text box opens the keyboard', () => {
     it('a press, then a caret that was not there: the panel mounts and the native show is asked', async () => {
         await mountWith(session());
