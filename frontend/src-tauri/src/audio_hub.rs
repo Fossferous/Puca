@@ -578,7 +578,11 @@ mod tests {
     #[test]
     fn production_code_reads_no_environment() {
         let src = include_str!("audio_hub.rs");
-        let production = &src[..src.find("#[cfg(test)]\nmod tests").expect("tests marker")];
+        // Found by "\nmod tests" rather than "#[cfg(test)]\nmod tests": a
+        // Windows checkout (core.autocrlf, as on the CI runner) has "\r\n".
+        let end = src.find("\nmod tests").expect("tests marker");
+        assert!(src[..end].trim_end().ends_with("#[cfg(test)]"), "the marker is the test module");
+        let production = &src[..end];
         assert!(production.contains("fn perform("), "positive control: the scan covers the code");
         for needle in ["env::var", "env!(", "option_env!", "std::env"] {
             assert!(!production.contains(needle), "production code must not read {needle}");
