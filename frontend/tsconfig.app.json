@@ -30,7 +30,8 @@
   },
   "include": [
     "src",
-    "e2e/av-emulation/main.ts"
+    "e2e/av-emulation/main.ts",
+    "e2e/device-stage"
   ],
   "exclude": [
     "src/**/*.test.ts",
