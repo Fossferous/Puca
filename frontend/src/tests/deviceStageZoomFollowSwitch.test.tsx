@@ -269,13 +269,15 @@ describe('the view across a zoom-follow switch', () => {
         expect(near(before, after, 40), `centre ${JSON.stringify(before)} -> ${JSON.stringify(after)}`).toBe(true);
     });
 
-    it('the new screen\'s frames arriving BEFORE the confirm are not shown under the composite\'s view', async () => {
+    it('the new screen\'s picture arriving BEFORE the confirm is framed at once, without waiting for it', async () => {
         await mount();
         const before = await zoomIntoDisplay2();
         // Direct media beats the relay: the new screen is on the stage while
-        // `monitor-active` is still in flight. The view must already be the
-        // new screen's — the composite's transform over a portrait picture
-        // shows some other part of it, or its black bars.
+        // `monitor-active` is still in flight. The view must become the new
+        // screen's on the render that sees its picture, not when the confirm
+        // lands — the composite's transform over a portrait picture shows some
+        // other part of it, or its black bars. (A render after the frame, not
+        // the same frame: nothing here can hook the frame itself.)
         await frame(720, 1280);
         const shown = centreDesktop(1);
         expect(near(before, shown, 40), `centre ${JSON.stringify(before)} -> ${JSON.stringify(shown)}`).toBe(true);
@@ -360,6 +362,62 @@ describe('"selecting a text field sometimes shows all black" (owner report, 2026
         expect(host!.querySelector('.device-stage-keyboard-overlay'), 'precondition: the keyboard bar is up').toBeTruthy();
         expect(pictureCover(), 'the stage must still show the picture, not black').toBeGreaterThan(0.99);
     });
+
+    it('…and closing the keyboard gives back the view from before typing, as 0.9.835 did', async () => {
+        h.mobile = true;
+        dims = { w: 2560, h: 1440 };
+        await mount(0, false);
+        const p = pictureBox(dims.w, dims.h, BOX.w, BOX.h)!;
+        await zoomAt({ x: BOX.w / 2, y: p.offY + p.dispH - 8 }, 8);
+        await sleep(200);
+        const preTyping = transform();
+
+        const kbBtn = () => host!.querySelector('button[title="Keyboard"]') as HTMLButtonElement;
+        await act(async () => { kbBtn().click(); });
+        await sleep(50);
+        BOX.h = 300;
+        h.kb = { visible: true, top: KEYBAR_H + BOX.h, source: 'native' };
+        await act(async () => { h.kbWatch?.(h.kb); });
+        await act(async () => { video().dispatchEvent(new Event('resize')); });
+        await sleep(600);
+        expect(transform(), 'precondition: typing moved the view').not.toEqual(preTyping);
+
+        // The keyboard closes: the bar goes, the IME goes, the box grows back.
+        await act(async () => { kbBtn().click(); });
+        BOX.h = 799;
+        h.kb = { visible: false, top: BOX.h, source: 'native' };
+        await act(async () => { h.kbWatch?.(h.kb); });
+        await act(async () => { video().dispatchEvent(new Event('resize')); });
+        await sleep(600);
+        expect(host!.querySelector('.device-stage-keyboard-overlay'), 'precondition: the bar is down').toBeNull();
+        const back = transform();
+        expect(back.scale).toBeCloseTo(preTyping.scale, 6);
+        expect(back.x).toBeCloseTo(preTyping.x, 3);
+        expect(back.y).toBeCloseTo(preTyping.y, 3);
+    });
+
+    it('on a phone whose keyboard overlaps (a band), a band that drops out mid-typing does not hand the view back', async () => {
+        h.mobile = true;
+        dims = { w: 2560, h: 1440 };
+        await mount(0, false);
+        const kbBtn = () => host!.querySelector('button[title="Keyboard"]') as HTMLButtonElement;
+        await act(async () => { kbBtn().click(); });
+        await sleep(50);
+        // The WebView is NOT resized: the IME covers the lower part of the
+        // surface, so there is a band between the key bar and the keyboard.
+        h.kb = { visible: true, top: KEYBAR_H + 360, source: 'native' };
+        await act(async () => { h.kbWatch?.(h.kb); });
+        await act(async () => { video().dispatchEvent(new Event('resize')); });
+        // Nobody reports a caret: the camera places on the aim after its grace.
+        await sleep(800);
+        const typing = transform();
+        expect(typing.scale, 'precondition: the caret camera zoomed in').toBeGreaterThan(1);
+
+        // The band drops out for a moment (the keyboard changing height),
+        await act(async () => { h.kbWatch?.({ visible: true, top: null, source: 'native' }); });
+        await sleep(200);
+        expect(transform().scale, 'typing goes on: the view is not handed back mid-typing').toBeCloseTo(typing.scale, 6);
+    });
 });
 
 describe('the trackpad pointer across a zoom-follow switch', () => {
@@ -403,5 +461,71 @@ describe('the trackpad pointer across a zoom-follow switch', () => {
         const last = moves[moves.length - 1];
         // 576 desktop px down the main display is 0.40 of its 1440.
         expect(last.y!, `the pointer must stay on the row it was on (sent y=${last.y})`).toBeCloseTo(576 / 1440, 2);
+    });
+});
+
+describe('a pointer that is not on the screen being followed', () => {
+    /**
+     * Review finding on the carry above: the pointer on the MAIN display and
+     * a zoom into the right-hand part of Display 2. The desktop point is not
+     * on Display 2 at all, so carrying it clamped it onto Display 2's LEFT
+     * edge (x≈0) — out of the view at this zoom — and with the trackpad and
+     * follow-the-cursor (the phone's defaults) the first nudge flew the camera
+     * there: 778 desktop px. A pointer that cannot be carried onto the new
+     * screen is put where the user is looking instead: the middle of the view.
+     */
+    it('the first nudge stays where the user is looking', async () => {
+        h.mobile = true;
+        await mount();
+        // The pointer: the middle of the composite, on the main display.
+        await zoomAt(clientOnComposite(2560 + 1150, -700 + 1000), 20);
+        await sleep(200);
+        expect(h.requestMonitor.mock.calls.map(c => c[1]), 'precondition: Display 2 was followed').toEqual([1]);
+        await confirm(1);
+        await frame(720, 1280);
+        await sleep(400);
+        const before = centreDesktop(1);
+        expect(before.x, 'precondition: looking at the right-hand part of Display 2').toBeGreaterThan(2560 + 900);
+        h.sendInput.mockClear();
+
+        const s = surface();
+        const ev = (type: string, x: number, y: number) => new PointerEvent(type, {
+            bubbles: true, cancelable: true, pointerId: 8, pointerType: 'touch', clientX: x, clientY: y,
+        });
+        await act(async () => { s.dispatchEvent(ev('pointerdown', 200, 400)); });
+        for (let i = 1; i <= 6; i++) {
+            await act(async () => { s.dispatchEvent(ev('pointermove', 200 + i * 3, 400)); });
+            await sleep(20);
+        }
+        await act(async () => { s.dispatchEvent(ev('pointerup', 218, 400)); });
+        await sleep(100);
+
+        const moves = h.sendInput.mock.calls.map(c => c[1] as { t?: string; x?: number; y?: number }).filter(e => e?.t === 'move');
+        expect(moves.length, 'precondition: the drag moved the pointer').toBeGreaterThan(0);
+        const last = moves[moves.length - 1];
+        // Display 2 is 1440 wide from x=2560: the pointer is near what is shown.
+        expect(2560 + last.x! * 1440, `the pointer lands in the view (sent x=${last.x})`).toBeGreaterThan(before.x - 150);
+        const after = centreDesktop(1);
+        expect(Math.hypot(after.x - before.x, after.y - before.y), 'and the camera barely moves')
+            .toBeLessThan(60);
+    });
+});
+
+describe('a desktop with a touchscreen', () => {
+    // The phone's focus rule (a finger on the picture never moves local focus,
+    // DeviceStage's pointerdown) is a COARSE-pointer rule. On a desktop whose
+    // screen also takes touch, touching the picture must still take focus off
+    // a local text field, so the physical keyboard drives the PC again.
+    it('a touch on the picture is NOT cancelled there', async () => {
+        h.mobile = false;
+        await mount();
+        const ev = new PointerEvent('pointerdown', {
+            bubbles: true, cancelable: true, pointerId: 4, pointerType: 'touch', clientX: 100, clientY: 400,
+        });
+        await act(async () => { surface().dispatchEvent(ev); });
+        expect(ev.defaultPrevented).toBe(false);
+        await act(async () => {
+            surface().dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 4, pointerType: 'touch', clientX: 100, clientY: 400 }));
+        });
     });
 });

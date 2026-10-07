@@ -156,19 +156,26 @@ const clientOnComposite = (page, dx, dy) => page.evaluate(({ dx, dy }) => {
 // ---- 3: zoom-follow into a portrait screen ----------------------------------
 {
     const { ctx, page, pinch } = await open();
-    await page.evaluate(() => { window.__stage.knobs.commitMs = 150; window.__stage.knobs.confirmMs = 300; });
+    // A slow confirmation, as over a busy relay: the new screen's picture is
+    // on the stage well before the host says so.
+    await page.evaluate(() => { window.__stage.knobs.commitMs = 150; window.__stage.knobs.confirmMs = 800; });
     // The middle of the screen, so the landing is not pulled by the pan
     // clamp at an edge (the off-centre case is vitest's).
     const c = await clientOnComposite(page, 2560 + 720, -700 + 1280);
     await pinch(c, 60, 360);
-    // The trigger fires 120 ms after the pinch rests; sample until the switch
-    // is on the stage, then look at the very first frame of it.
+    // The trigger fires 120 ms after the pinch rests; sample until the new
+    // screen's picture is on the stage, give the stage two animation frames
+    // to react to it (NOT the same frame: the view follows a render after the
+    // picture), and look — while the confirmation is still in flight.
     let before = await centreDesktop(page);
     let onNew = null;
     for (let i = 0; i < 120 && !onNew; i++) {
-        const st = await page.evaluate(() => ({ cap: window.__stage.state.capturing, active: window.__stage.state.activeMonitor, vw: window.__stage.video().vw, vh: window.__stage.video().vh }));
+        const st = await page.evaluate(() => ({ cap: window.__stage.state.capturing, vw: window.__stage.video().vw, vh: window.__stage.video().vh }));
         if (st.cap === 255) before = await centreDesktop(page);
-        if (st.cap === 1 && st.vh > st.vw) onNew = { ...st, centre: await centreDesktop(page) };
+        if (st.cap === 1 && st.vh > st.vw) {
+            await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+            onNew = { active: await page.evaluate(() => window.__stage.state.activeMonitor), centre: await centreDesktop(page) };
+        }
         await page.waitForTimeout(5);
     }
     ck('precondition: zooming over Display 2 followed it', !!onNew);
@@ -184,8 +191,9 @@ const clientOnComposite = (page, dx, dy) => page.evaluate(({ dx, dy }) => {
     if (onNew) {
         const e = expected(onNew.centre);
         const d = Math.hypot(onNew.centre.x - e.x, onNew.centre.y - e.y);
-        ck('the new screen\'s FIRST frame is already shown in place (no flash while the confirm is in flight)',
-            d < 20, `${Math.round(d)} desktop px off; confirm ${onNew.active === 1 ? 'had' : 'had NOT'} arrived`);
+        ck('precondition: the confirmation has not arrived yet', onNew.active !== 1, String(onNew.active));
+        ck('the new screen is framed in place as soon as its picture arrives, not when the confirmation does',
+            d < 20, `${Math.round(d)} desktop px off`);
     }
     await page.waitForTimeout(1500);
     const settled = await centreDesktop(page);
@@ -235,6 +243,33 @@ const clientOnComposite = (page, dx, dy) => page.evaluate(({ dx, dy }) => {
     const last = moves[moves.length - 1];
     ck('the first nudge after the switch moves from the same desktop point', !!last && Math.abs(last.y - 576 / 1440) < 0.01,
         last ? `y=${last.y.toFixed(3)} (0.400 = same row; 0.500 = the stale fraction)` : 'no move');
+    await ctx.close();
+}
+
+// ---- 4b: …and when the PC's pointer is on ANOTHER screen ---------------------
+{
+    const { ctx, page, pinch, drag } = await open();
+    // The pointer is on the main display (the middle of the composite); the
+    // zoom goes deep into the right-hand part of Display 2. The pointer has no
+    // place on Display 2: clamped onto its far edge it sat out of view, and the
+    // first nudge flew the camera there (the review measured 778 desktop px).
+    const c = await clientOnComposite(page, 2560 + 1150, -700 + 1000);
+    await pinch(c, 40, 400);
+    await page.waitForTimeout(1500);
+    const followed = await page.evaluate(() => window.__stage.state.activeMonitor);
+    ck('precondition: Display 2 was followed', followed === 1, String(followed));
+    const before = await centreDesktop(page);
+    const n = await page.evaluate(() => window.__stage.inputs.length);
+    await drag({ x: 200, y: 400 }, { x: 203, y: 400 }, 3);
+    await page.waitForTimeout(300);
+    const after = await centreDesktop(page);
+    const moved = Math.hypot(after.x - before.x, after.y - before.y);
+    ck('a pointer from another screen does not fly the camera on the first nudge', moved < 60,
+        `the view moved ${Math.round(moved)} desktop px`);
+    const moves = await page.evaluate(n => window.__stage.inputs.slice(n).filter(e => e.t === 'move'), n);
+    const last = moves[moves.length - 1];
+    ck('…it is put where the user is looking', !!last && Math.abs(2560 + last.x * 1440 - before.x) < 150,
+        last ? `pointer at desktop x=${Math.round(2560 + last.x * 1440)}, view centre x=${Math.round(before.x)}` : 'no move');
     await ctx.close();
 }
 

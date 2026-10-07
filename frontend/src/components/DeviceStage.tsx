@@ -15,7 +15,6 @@
  * sent pixels would put the cursor on the wrong screen.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { flushSync } from 'react-dom';
 import {
     ALL_DISPLAYS,
     deviceDiagnosticsWindow,
@@ -46,12 +45,12 @@ import { getStreamQualityErrorMessage } from '../api/devices/streamQualityMessag
 import { isInjectableKey, normalizedOverVideo, pictureBox } from '../api/devices/pointerMapping';
 import {
     ZOOM_FOLLOW_IN, ZOOM_FOLLOW_OUT_AT, aspectMatches, aspectsDistinguish, availableEdgeHops,
-    captureSurfaceSize, caretBandFrom, caretFollowTransform, carrySurfaceFraction, clampPanTo,
-    surfaceAspect,
+    captureSurfaceSize, caretBandFrom, caretFollowTransform, carryPointer, clampPanTo,
+    surfaceAspect, visibleFractions,
     initialMonitorRequest, manualCompositeHoldActive,
     monitorRegions, pickFollowTarget,
     remapAcrossBoundary, remapIntoComposite, remapIntoMonitor, viewportInVideo,
-    type EdgeHop, type MonitorGeom, type Transform as ZoomTransform, type View as ZoomView,
+    type EdgeHop, type MonitorGeom, type Transform as ZoomTransform, type View as ZoomView, type Visible,
 } from './deviceZoomFollow';
 import {
     autoKeyboardVerdict, autoKeyboardVerdictAtPress, suppressedByManualClose,
@@ -303,6 +302,33 @@ if (typeof window !== 'undefined') {
             return rows.map(r => ({ ...r, caret, stageInput }));
         };
     }
+}
+
+/** The keys the keyboard bar forwards itself (DeviceStageMobileKeyboard's
+ *  PASSTHROUGH): the stage must not send them a second time. */
+const BAR_OWN_KEYS = new Set(['Enter', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']);
+
+/**
+ * A keydown in the keyboard bar's field that the stage's FULL key forwarding
+ * must carry: a physical keyboard's (a Bluetooth keyboard on a phone, DeX)
+ * modifiers, combos and non-text keys — Ctrl/Alt/Shift/Win, Ctrl+C, Delete,
+ * Home/End, the F-keys. Everything the field turns into text stays the
+ * field's (a plain character, a soft keyboard's 229/Unidentified keydown,
+ * Backspace — the field's padding forwards it), and so do the keys the bar
+ * forwards itself, so nothing is sent twice. Before the touch focus fix a tap
+ * on the picture moved focus to BODY and handed these to the full forwarder
+ * by accident; with the field keeping focus they went nowhere.
+ */
+function barKeyForTheRemote(e: KeyboardEvent): boolean {
+    const t = e.target as HTMLElement | null;
+    if (!t || !t.classList?.contains('device-stage-keyboard-capture')) return false;
+    if (e.isComposing || e.keyCode === 229) return false;
+    if (e.key === 'Process' || e.key === 'Unidentified' || e.key === 'Dead') return false;
+    if (BAR_OWN_KEYS.has(e.key)) return false;
+    const combo = e.ctrlKey || e.metaKey || (e.altKey && !e.getModifierState?.('AltGraph'));
+    if (!combo && Array.from(e.key).length === 1) return false;    // a character: text
+    if (!combo && e.key === 'Backspace') return false;            // the field's padding sends it
+    return true;
 }
 
 /** How long a mobile notice ("Clipboard sent", "Locking…") stays up. */
@@ -947,34 +973,22 @@ export function DeviceStage() {
     // rotation, on a window resize, and when the first frame finally arrives
     // and gives the video intrinsic dimensions.
     const [videoBox, setVideoBox] = useState<{ vw: number; vh: number; w: number; h: number } | null>(null);
-    /** Filled by the zoom-follow section below (a slot, because it is declared
-     *  further down): apply a pending switch's remap NOW, synchronously, if
-     *  the picture that just arrived is the new capture's. */
-    const followOnResizeRef = useRef<(() => void) | null>(null);
     useEffect(() => {
         const v = videoRef.current;
         if (!v) return;
         const read = () => {
             setVideoBox({ vw: v.videoWidth, vh: v.videoHeight, w: v.offsetWidth, h: v.offsetHeight });
         };
-        // The new screen's first frame and the remap that frames it must reach
-        // the screen TOGETHER. Through state and an effect the remap landed a
-        // render or two after the picture, which showed the new screen under
-        // the old view for a frame: a flash of the wrong place, or of black.
-        const onResize = () => {
-            followOnResizeRef.current?.();
-            read();
-        };
         read();
         // `resize` on a <video> fires when the INTRINSIC size changes — which is
         // what happens when the host switches to a differently shaped screen.
         v.addEventListener('loadedmetadata', read);
-        v.addEventListener('resize', onResize);
+        v.addEventListener('resize', read);
         const ro = new ResizeObserver(read);
         ro.observe(v);
         return () => {
             v.removeEventListener('loadedmetadata', read);
-            v.removeEventListener('resize', onResize);
+            v.removeEventListener('resize', read);
             ro.disconnect();
 
         };
@@ -1215,18 +1229,20 @@ export function DeviceStage() {
     const pointerSurfaceRef = useRef<number | null>(null);
     /**
      * Move the pointer's fractions onto a newly captured surface — the same
-     * desktop point (clamped onto the surface), never the same fraction.
-     * Idempotent per surface, so the two places a switch becomes real (its
-     * picture reaching the stage, the host's confirmation) can both call it.
-     * Sends nothing and pans nothing: the remote pointer has not moved, and
-     * the camera keeps the landing the remap chose.
+     * desktop point, never the same fraction; a point that is not on the new
+     * surface goes to the middle of `visible`, the part of it the stage will
+     * show (carryPointer says why). Idempotent per surface, so the two places
+     * a switch becomes real (its picture reaching the stage, the host's
+     * confirmation) can both call it. Sends nothing and pans nothing: the
+     * camera keeps the landing the remap chose, and the next move or tap
+     * puts the remote pointer where this one is drawn.
      */
-    const rebasePointer = useCallback((to: number) => {
+    const rebasePointer = useCallback((to: number, visible: Visible | null) => {
         const from = pointerSurfaceRef.current;
         pointerSurfaceRef.current = to;
         if (from === null || from === to) return;
         const monitors = monitorsRef.current;
-        const carry = (f: { x: number; y: number }) => carrySurfaceFraction(f, monitors, from, to);
+        const carry = (f: { x: number; y: number }) => carryPointer(f, monitors, from, to, visible);
         const aim = carry(lastAimRef.current);
         if (!aim) return;   // unmeasured: nothing can be carried, keep what was
         lastAimRef.current = aim;
@@ -1255,8 +1271,11 @@ export function DeviceStage() {
         // And the new screen's frames, which ride the direct media path, were
         // shown under the composite's view until the relay's confirm caught
         // up. When the two captures differ in SHAPE, the picture says which
-        // one it is: apply exactly when it has the new one's. Two same-shaped
-        // screens cannot be told apart that way, and wait for the confirm.
+        // one it is: apply as soon as the stage sees the new one's (the
+        // video's resize, a render after that frame is painted — not the same
+        // frame; nothing here can hook the frame itself), not when the relay
+        // gets round to confirming. Two same-shaped screens cannot be told
+        // apart that way, and wait for the confirm.
         if (aspectsDistinguish(p.fromAspect, p.expectAspect)) {
             if (!aspectMatches(v.videoWidth / v.videoHeight, p.expectAspect!)) return;
         } else if (activeMonitorRef.current !== p.expectMonitor) {
@@ -1286,23 +1305,13 @@ export function DeviceStage() {
         const confirmed = p.onConfirmed;
         clearPendingFollow();
         // The pointer crosses with the picture, before anything reads it.
-        rebasePointer(p.expectMonitor);
+        rebasePointer(p.expectMonitor, visibleFractions({ w: v.offsetWidth, h: v.offsetHeight }, pict, next));
         setTransform(next);
         // After the transform: this hook re-seeds the pointer, and the paint
         // it drives (followPan → applyFollowPan) must clamp against the view
         // the switch just landed, not the one it left.
         confirmed?.();
     }, [clearPendingFollow, rebasePointer]);
-
-    // From the video's own resize event, in the same task as the new frame
-    // (see followOnResizeRef). flushSync: a render scheduled from here would
-    // commit after the browser has painted the frame.
-    useEffect(() => {
-        followOnResizeRef.current = () => {
-            if (pendingFollowRef.current) flushSync(applyPendingFollow);
-        };
-        return () => { followOnResizeRef.current = null; };
-    }, [applyPendingFollow]);
 
     // Apply the pending remap once the new capture's picture is on the stage
     // (applyPendingFollow decides — by its shape, or by the confirmation and
@@ -1336,11 +1345,12 @@ export function DeviceStage() {
                 // for is an AUTO switch however late its confirmation came, or
                 // the way back out is lost.
                 autoFollowRef.current = c.becomes;
-                rebasePointer(c.expectMonitor);
-                setTransform(c.remap(
+                const landed = c.remap(
                     { pict, videoW: v.videoWidth, videoH: v.videoHeight },
                     c.fromTransform ?? transformRef.current,
-                ));
+                );
+                rebasePointer(c.expectMonitor, visibleFractions({ w: v.offsetWidth, h: v.offsetHeight }, pict, landed));
+                setTransform(landed);
                 c.onConfirmed?.();
             }
         }
@@ -1363,7 +1373,20 @@ export function DeviceStage() {
         // this is then a no-op). The first announcement only says which
         // surface the session started on.
         if (pointerSurfaceRef.current === null) pointerSurfaceRef.current = active;
-        else rebasePointer(active);
+        else if (pendingFollowRef.current?.expectMonitor !== active
+            && followCorrectionRef.current?.expectMonitor !== active) {
+            // A switch nobody is remapping (the picker, the menu): the view is
+            // the one on the stage, whichever picture it is over yet. A follow
+            // or a hop still to land carries the pointer when it lands, with
+            // the view it lands on — the view on the stage now is the OLD one.
+            const v = videoRef.current;
+            const pict = v && v.videoWidth && v.offsetWidth
+                ? pictureBox(v.videoWidth, v.videoHeight, v.offsetWidth, v.offsetHeight)
+                : null;
+            rebasePointer(active, v && pict
+                ? visibleFractions({ w: v.offsetWidth, h: v.offsetHeight }, pict, transformRef.current)
+                : null);
+        }
         awaitingConfirmRef.current = null;
         if (expectedAutoMonitorRef.current === active) {
             expectedAutoMonitorRef.current = null; // ours — consumed
@@ -1547,8 +1570,14 @@ export function DeviceStage() {
             // so a click before any movement lands on the screen being viewed.
             // The CARRY itself is rebasePointer's now (it runs for every
             // switch, just before this); what is left here is the walk.
-            // Confirmation-gated (see applyPendingFollow): a move sent before
-            // the host has re-aimed input would land on the OLD monitor.
+            // It runs when the switch LANDS (applyPendingFollow): on the
+            // host's confirmation, or earlier when the new screen's picture is
+            // already on the stage and its shape says so. Either way the agent
+            // has already re-aimed input: SetMonitor waits for the capture
+            // thread to commit the swap and aims input at the new screen
+            // before it answers (aim_input_at in puca-agent's session.rs), and
+            // the new screen's first frame follows the commit by ~200 ms — so
+            // this move cannot land on the OLD screen.
             // TRACKPAD MODE ONLY. In touch mode the camera never follows the
             // pointer and every tap aims absolutely, so the stale-fraction
             // bug this seed kills cannot happen there — while the seed itself
@@ -1799,8 +1828,19 @@ export function DeviceStage() {
     // a zoomed pan, legal for the tall box, pointed past the bottom of the
     // re-laid-out picture and the stage went black when a text field was
     // tapped ("selecting a text field sometimes shows all black").
-    const caretFollowActive = isMobile && followCaret && activeMobileMenu === 'keyboard'
-        && kbInset.visible && sessionActiveId !== null && caretBand !== null;
+    //
+    // TWO STATES, then. `typingViewActive` is the typing bout itself — what
+    // the pre-typing view is captured at and given back at the end of, and
+    // what a pinch counts against; it does not depend on the band, so a phone
+    // whose band is null gets its view back when the keyboard closes (as it
+    // always did), and a band that drops out for a moment (a rotation, the
+    // keyboard changing height) does not hand the view back mid-typing.
+    // `caretFollowActive` is the camera actually driving.
+    const typingViewActive = isMobile && followCaret && activeMobileMenu === 'keyboard'
+        && kbInset.visible && sessionActiveId !== null;
+    const caretFollowActive = typingViewActive && caretBand !== null;
+    /** Mirror for the pinch and wheel handlers. */
+    const typingViewActiveRef = useRef(false);
 
     // --- THE CARET CHANNEL, tracked for as long as anything here wants it ---
     //
@@ -1871,9 +1911,12 @@ export function DeviceStage() {
         };
     }, [wantCaretTracking, sessionActiveId, activeMonitorForTracking]);
 
+    // THE TYPING BOUT: the view to give back when it ends, and a clean slate
+    // for "the user zoomed while typing". Before the camera's own effect, so
+    // the view is captured before the camera's first solve can change it.
     useEffect(() => {
-        caretActiveRef.current = caretFollowActive;
-        if (!caretFollowActive || !sessionActiveId) return;
+        typingViewActiveRef.current = typingViewActive;
+        if (!typingViewActive) return;
         const v = videoRef.current;
         preCaretViewRef.current = {
             transform: transformRef.current,
@@ -1882,6 +1925,11 @@ export function DeviceStage() {
             videoH: v?.videoHeight ?? 0,
         };
         userZoomedDuringCaretRef.current = false;
+    }, [typingViewActive]);
+
+    useEffect(() => {
+        caretActiveRef.current = caretFollowActive;
+        if (!caretFollowActive || !sessionActiveId) return;
         caretFallbackUsedRef.current = false;
         caretForceRef.current = true;
         caretSawVisRef.current = 0;
@@ -2158,8 +2206,12 @@ export function DeviceStage() {
     // toggle went off) the box does not change and the clamp runs here.
     const activeMobileMenuRef = useRef(activeMobileMenu);
     useEffect(() => { activeMobileMenuRef.current = activeMobileMenu; }, [activeMobileMenu]);
+    // Keyed on the typing BOUT, not on the camera: a phone whose camera never
+    // drives (no band) still gets its view back, and a camera that drops out
+    // for a moment mid-typing does not hand it back early (the effect after
+    // this one bounds the view then instead).
     useEffect(() => {
-        if (caretFollowActive) {
+        if (typingViewActive) {
             caretWasActiveRef.current = true;
             return;
         }
@@ -2207,7 +2259,31 @@ export function DeviceStage() {
             }
             return prev.scale === 1 && prev.x === 0 && prev.y === 0 ? prev : { scale: 1, x: 0, y: 0 };
         });
-    }, [caretFollowActive]);
+    }, [typingViewActive]);
+
+    // THE CAMERA STOPPED, THE TYPING DID NOT (the band dropped out: a
+    // rotation, the keyboard changing height). The camera's relaxed clamp
+    // leaves blank below the picture on purpose, and nothing else owns the
+    // view now — bound it like any other. When the bout itself ended, the
+    // restore above has the view and this stands aside.
+    const cameraWasActiveRef = useRef(false);
+    useEffect(() => {
+        if (caretFollowActive) {
+            cameraWasActiveRef.current = true;
+            return;
+        }
+        if (!cameraWasActiveRef.current) return;
+        cameraWasActiveRef.current = false;
+        if (!typingViewActive) return;
+        const v = videoRef.current;
+        const surface = surfaceRef.current;
+        if (!v || !surface) return;
+        const rect = surface.getBoundingClientRect();
+        setTransform(prev => {
+            const c = clampPan(v, rect, prev.scale, prev.x, prev.y);
+            return c.x === prev.x && c.y === prev.y ? prev : { ...prev, x: c.x, y: c.y };
+        });
+    }, [caretFollowActive, typingViewActive]);
 
     // A pending frame must not outlive the stage — it would run against an
     // unmounted surface, and React would warn about the setState.
@@ -2456,7 +2532,7 @@ export function DeviceStage() {
                 // zoom THEY chose, not the one typing chose. (This branch is
                 // both gestures — a pan is a pinch with deltaScale ~1.) Set
                 // outside the updater — StrictMode invokes that twice.
-                if (caretActiveRef.current) userZoomedDuringCaretRef.current = true;
+                if (typingViewActiveRef.current) userZoomedDuringCaretRef.current = true;
 
                 setTransform(t => {
                     const newScale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, t.scale * deltaScale));
@@ -2559,8 +2635,11 @@ export function DeviceStage() {
         // mousedown follows): "kb no longer seems to input". Cancelling the
         // pointerdown suppresses those mouse events and nothing else — the
         // stage drives the remote machine from pointer events alone. A mouse
-        // keeps its ordinary semantics.
-        if (e.pointerType !== 'mouse') e.preventDefault();
+        // keeps its ordinary semantics, and so does a DESKTOP with a
+        // touchscreen (not a coarse pointer): there, touching the picture is
+        // how focus leaves a local text field so the physical keyboard drives
+        // the PC again.
+        if (isMobile && e.pointerType !== 'mouse') e.preventDefault();
         // PRUNE STALE CONTACTS before counting this one. A pointer whose
         // up/cancel never reached us (capture lost on remount, or a
         // setPointerCapture that silently no-ops) leaves a permanent entry —
@@ -2716,8 +2795,10 @@ export function DeviceStage() {
             }
             // Typing into a LOCAL input inside the stage (the files overlay's
             // rename/search fields, etc.) is not remote input — forwarding it
-            // typed every character into the controlled PC as well.
-            if (isEditableTarget(e.target)) return;
+            // typed every character into the controlled PC as well. The
+            // keyboard bar's own field is the exception for what a PHYSICAL
+            // keyboard sends that is not text (barKeyForTheRemote).
+            if (isEditableTarget(e.target) && !barKeyForTheRemote(e)) return;
             // A registered hotkey acts locally, exactly once — never ALSO
             // typed into the remote machine (toggle mute both muting you and
             // typing M into the game was the reported jank). Policy: while in
@@ -3040,7 +3121,7 @@ export function DeviceStage() {
                         const { clientX, clientY } = e;
                         // As with the pinch: a zoom the user asked for outranks
                         // the caret camera, now and at deactivation.
-                        if (caretActiveRef.current) userZoomedDuringCaretRef.current = true;
+                        if (typingViewActiveRef.current) userZoomedDuringCaretRef.current = true;
                         setTransform(t => {
                             const newScale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, t.scale - e.deltaY * 0.01));
                             const ratio = newScale / t.scale;

@@ -8,7 +8,7 @@ import { describe, it, expect } from 'vitest';
 import {
     ZOOM_FOLLOW_CONTAINMENT, ZOOM_FOLLOW_IN, ZOOM_FOLLOW_LANDING_MIN,
     ZOOM_FOLLOW_OUT_AT, ZOOM_FOLLOW_RETURN_MAX, ZOOM_FOLLOW_REARM_RATIO,
-    aspectMatches, aspectsDistinguish, captureSurfaceSize, carryFractionAcross, carrySurfaceFraction,
+    aspectMatches, aspectsDistinguish, captureSurfaceSize, carryPointer, carrySurfaceFraction, visibleFractions,
     clampPanTo, clampPanToStrip, initialMonitorRequest, manualCompositeHoldActive, surfaceAspect,
     monitorRegions, pickFollowTarget, remapIntoComposite,
     remapIntoMonitor, viewportInVideo, type Region, type View,
@@ -566,13 +566,14 @@ describe('availableEdgeHops — an edge only offers when it is genuinely an edge
     });
 });
 
-describe('carryFractionAcross — the pointer keeps its desktop point over a hop', () => {
+describe('carrySurfaceFraction over an edge hop — the desktop point, not the fraction', () => {
     const A = { id: 0, left: 0, top: 0, width: 1920, height: 1080 };
     const B = { id: 1, left: 1920, top: 0, width: 1920, height: 1080 };
+    const AB = [A, B];
 
     it('a point at the shared seam crosses to the near edge, not the far one', () => {
         // x ~ 1.0 on A ("A's right edge") is desktop x ~ 1920 = B's LEFT edge.
-        const c = carryFractionAcross({ x: 1, y: 0.4 }, A, B);
+        const c = carrySurfaceFraction({ x: 1, y: 0.4 }, AB, 0, 1)!;
         expect(c.x).toBeCloseTo(0, 10);
         expect(c.y).toBeCloseTo(0.4, 10);
         // The regression this kills: keeping the FRACTION would read as B's
@@ -582,13 +583,17 @@ describe('carryFractionAcross — the pointer keeps its desktop point over a hop
 
     it("the reverse hop clamps onto the neighbour's far-side seam", () => {
         // A point on B's LEFT edge is A's RIGHT edge — fraction 1 of A.
-        const c = carryFractionAcross({ x: 0, y: 0.4 }, B, A);
+        const c = carrySurfaceFraction({ x: 0, y: 0.4 }, AB, 1, 0)!;
         expect(c.x).toBeCloseTo(1, 10);
     });
 
-    it('a point far outside the neighbour clamps to [0,1] instead of leaving it', () => {
-        expect(carryFractionAcross({ x: 0, y: 0.5 }, A, B).x).toBe(0);
-        expect(carryFractionAcross({ x: 1, y: 0.5 }, B, A).x).toBe(1);
+    it('a point far outside the neighbour clamps to [0,1], and says it was off it', () => {
+        const a = carrySurfaceFraction({ x: 0, y: 0.5 }, AB, 0, 1)!;
+        expect(a.x).toBe(0);
+        expect(a.onSurface).toBe(false);
+        const b = carrySurfaceFraction({ x: 1, y: 0.5 }, AB, 1, 0)!;
+        expect(b.x).toBe(1);
+        expect(b.onSurface).toBe(false);
     });
 
     it('different sizes: the DESKTOP point is preserved, not the fraction', () => {
@@ -596,10 +601,11 @@ describe('carryFractionAcross — the pointer keeps its desktop point over a hop
         const wide = { id: 0, left: 0, top: 0, width: 2560, height: 1440 };
         const tall = { id: 1, left: 2560, top: 360, width: 1920, height: 1080 };
         // Desktop point (2560, 720) = wide's right edge, half down.
-        const c = carryFractionAcross({ x: 1, y: 0.5 }, wide, tall);
+        const c = carrySurfaceFraction({ x: 1, y: 0.5 }, [wide, tall], 0, 1)!;
         expect(c.x).toBeCloseTo(0, 10);
         // y: desktop 720 → (720 - 360) / 1080 = 1/3 of the shorter screen.
         expect(c.y).toBeCloseTo(1 / 3, 10);
+        expect(c.onSurface, 'exactly on the seam is on it').toBe(true);
     });
 });
 
@@ -634,7 +640,7 @@ describe('carrySurfaceFraction — the pointer keeps its desktop point over ANY 
     });
 
     it('the same surface is the identity, and an unmeasured one carries nothing', () => {
-        expect(carrySurfaceFraction({ x: 0.3, y: 0.7 }, OWNER, 1, 1)).toEqual({ x: 0.3, y: 0.7 });
+        expect(carrySurfaceFraction({ x: 0.3, y: 0.7 }, OWNER, 1, 1)).toEqual({ x: 0.3, y: 0.7, onSurface: true });
         const unmeasured = [{ id: 0 }, { id: 1, left: 1920, top: 0, width: 1920, height: 1080 }];
         expect(carrySurfaceFraction({ x: 0.3, y: 0.7 }, unmeasured, 0, 1)).toBeNull();
         expect(carrySurfaceFraction({ x: 0.3, y: 0.7 }, unmeasured, ALL_DISPLAYS, 1)).toBeNull();
@@ -671,5 +677,56 @@ describe('telling the old capture from the new one by its shape', () => {
         // Two same-shaped screens: the confirmation must decide.
         expect(aspectsDistinguish(1920 / 1080, 2560 / 1440)).toBe(false);
         expect(aspectsDistinguish(null, 1)).toBe(false);
+    });
+});
+
+describe('carryPointer — a pointer with no place on the new screen goes where the user looks', () => {
+    const OWNER = [
+        { id: 0, left: 0, top: 0, width: 2560, height: 1440 },
+        { id: 1, left: 2560, top: -700, width: 1440, height: 2560 },
+        { id: 2, left: -1440, top: -707, width: 1440, height: 2560 },
+    ];
+    // Display 2 on the stage, zoomed into its right-hand part.
+    const VIEW = { x0: 0.6, y0: 0.3, x1: 0.9, y1: 0.5 };
+
+    it('a pointer on ANOTHER screen, out of the view once clamped: the middle of the view', () => {
+        // The middle of the composite is on the main display, left of Display 2.
+        const c = carryPointer({ x: 0.5, y: 0.5 }, OWNER, ALL_DISPLAYS, 1, VIEW)!;
+        expect(c.x).toBeCloseTo(0.75, 10);
+        expect(c.y).toBeCloseTo(0.4, 10);
+    });
+
+    it('a pointer ON the new screen keeps its desktop point, in view or not', () => {
+        // Display 2's middle, on the composite.
+        const mid = { x: (2560 + 720 + 1440) / 5440, y: (-700 + 1280 + 707) / 2567 };
+        const c = carryPointer(mid, OWNER, ALL_DISPLAYS, 1, VIEW)!;
+        expect(c.x).toBeCloseTo(0.5, 10);
+        expect(c.y).toBeCloseTo(0.5, 10);
+    });
+
+    it('the edge hop: a pointer clamped onto the seam the view landed on stays on it', () => {
+        const A = { id: 0, left: 0, top: 0, width: 1920, height: 1080 };
+        const B = { id: 1, left: 1920, top: 0, width: 1920, height: 1080 };
+        // Hopping LEFT from B to A: the view lands against A's right edge.
+        const c = carryPointer({ x: 0.02, y: 0.4 }, [A, B], 1, 0, { x0: 0.8, y0: 0.2, x1: 1, y1: 0.6 })!;
+        expect(c.x).toBe(1);
+        expect(c.y).toBeCloseTo(0.4, 10);
+    });
+
+    it('with no view to go by, the clamped point it was', () => {
+        expect(carryPointer({ x: 0.5, y: 0.5 }, OWNER, ALL_DISPLAYS, 1, null)!.x).toBe(0);
+        expect(carryPointer({ x: 0.5, y: 0.5 }, [{ id: 0 }], ALL_DISPLAYS, 0, VIEW)).toBeNull();
+    });
+
+    it('visibleFractions: the part of the picture a transform shows', () => {
+        const pict = { offX: 0, offY: 100, dispW: 400, dispH: 200 };
+        expect(visibleFractions({ w: 400, h: 400 }, pict, { scale: 1, x: 0, y: 0 }))
+            .toEqual({ x0: 0, y0: 0, x1: 1, y1: 1 });
+        // 2x on the middle: canvas x 100..300 → 0.25..0.75; y 100..300 → 0..1.
+        const v = visibleFractions({ w: 400, h: 400 }, pict, { scale: 2, x: -200, y: -200 });
+        expect(v.x0).toBeCloseTo(0.25, 10);
+        expect(v.x1).toBeCloseTo(0.75, 10);
+        expect(v.y0).toBeCloseTo(0, 10);
+        expect(v.y1).toBeCloseTo(1, 10);
     });
 });

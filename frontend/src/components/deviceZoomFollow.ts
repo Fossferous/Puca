@@ -720,31 +720,6 @@ export function remapAcrossBoundary(opts: {
     return centreOn(box, to, scale, fx, fy);
 }
 
-/**
- * A pointer fraction of one monitor's surface re-expressed on a neighbour's,
- * preserving the DESKTOP-space point — the coordinate system both monitors
- * actually share. Clamped into [0,1]: at a hop the pointer is at the shared
- * edge (or, with HOP_ADJACENCY_TOL_PX, just past it), and the clamp is what
- * turns "a hair outside the neighbour" into "on its near edge".
- *
- * This exists because a hop that leaves the pointer's FRACTION untouched
- * silently changes what it means: x≈1.0 was "monitor A's right edge" and
- * becomes "monitor B's right edge" — the far side of the screen just hopped
- * onto. Everything that then consumes the fraction (the follow-cursor
- * camera, the next {t:'move'}, the caret fallback) drags the session to the
- * far edge, undoing remapAcrossBoundary's near-edge landing.
- */
-export function carryFractionAcross(
-    frac: { x: number; y: number },
-    fromMon: Required<MonitorGeom>,
-    toMon: Required<MonitorGeom>,
-): { x: number; y: number } {
-    return {
-        x: clamp01((fromMon.left + frac.x * fromMon.width - toMon.left) / toMon.width),
-        y: clamp01((fromMon.top + frac.y * fromMon.height - toMon.top) / toMon.height),
-    };
-}
-
 /** The desktop rectangle a capture covers: one screen, or (ALL_DISPLAYS) the
  *  bounding box of every screen. null when the host did not measure it. */
 function surfaceRect(monitors: MonitorGeom[], surface: number): { left: number; top: number; w: number; h: number } | null {
@@ -771,7 +746,7 @@ function surfaceRect(monitors: MonitorGeom[], surface: number): { left: number; 
  * either surface is unmeasured (an old or webview host): the caller then keeps
  * what it had.
  *
- * Every switch needs it, not only the edge hop (carryFractionAcross): the
+ * Every switch needs it, the edge hop as much as a zoom-follow: the
  * trackpad's pointer, the aim and the drawn cursor are all fractions OF THE
  * CAPTURED SURFACE, and a zoom-follow into a screen of the composite, or back
  * out of it, changes which surface that is. Left alone, the pointer at the
@@ -784,15 +759,59 @@ export function carrySurfaceFraction(
     monitors: MonitorGeom[],
     from: number,
     to: number,
-): { x: number; y: number } | null {
-    if (from === to) return { x: frac.x, y: frac.y };
+): { x: number; y: number; onSurface: boolean } | null {
+    if (from === to) return { x: frac.x, y: frac.y, onSurface: true };
     const a = surfaceRect(monitors, from);
     const b = surfaceRect(monitors, to);
     if (!a || !b) return null;
-    return {
-        x: clamp01((a.left + frac.x * a.w - b.left) / b.w),
-        y: clamp01((a.top + frac.y * a.h - b.top) / b.h),
-    };
+    const x = (a.left + frac.x * a.w - b.left) / b.w;
+    const y = (a.top + frac.y * a.h - b.top) / b.h;
+    return { x: clamp01(x), y: clamp01(y), onSurface: x >= 0 && x <= 1 && y >= 0 && y <= 1 };
+}
+
+/** The part of the picture the stage is showing, as fractions of it. */
+export interface Visible { x0: number; y0: number; x1: number; y1: number }
+
+/** Which part of the picture a transform shows in a box. */
+export function visibleFractions(box: Box, pict: Picture, t: Transform): Visible {
+    const fx = (sx: number) => clamp01(((sx - t.x) / t.scale - pict.offX) / pict.dispW);
+    const fy = (sy: number) => clamp01(((sy - t.y) / t.scale - pict.offY) / pict.dispH);
+    return { x0: fx(0), y0: fy(0), x1: fx(box.w), y1: fy(box.h) };
+}
+
+/** A carried point this close to the view (a fraction of the view's size)
+ *  still counts as in it: the edge hop lands the view exactly on the shared
+ *  seam, which is where a pointer from the screen it left is clamped to. */
+export const POINTER_VIEW_SLACK = 0.02;
+
+/**
+ * Where the pointer goes when the captured surface changes.
+ *
+ * On the new surface, the same desktop point (carrySurfaceFraction). A point
+ * that is NOT on the new surface — the PC's pointer is on another screen —
+ * has no such place: clamping it onto the nearest edge put it where the
+ * camera, which follows the pointer, flew on the first nudge (778 desktop px
+ * in the review's measurement). It goes where the user is looking instead,
+ * the middle of the view — unless the clamped point is in the view anyway
+ * (the edge hop's seam), which keeps the walk across it.
+ */
+export function carryPointer(
+    frac: { x: number; y: number },
+    monitors: MonitorGeom[],
+    from: number,
+    to: number,
+    visible: Visible | null,
+): { x: number; y: number } | null {
+    const c = carrySurfaceFraction(frac, monitors, from, to);
+    if (!c) return null;
+    if (c.onSurface || !visible) return { x: c.x, y: c.y };
+    const sx = (visible.x1 - visible.x0) * POINTER_VIEW_SLACK;
+    const sy = (visible.y1 - visible.y0) * POINTER_VIEW_SLACK;
+    const seen = c.x >= visible.x0 - sx && c.x <= visible.x1 + sx
+        && c.y >= visible.y0 - sy && c.y <= visible.y1 + sy;
+    return seen
+        ? { x: c.x, y: c.y }
+        : { x: (visible.x0 + visible.x1) / 2, y: (visible.y0 + visible.y1) / 2 };
 }
 
 /** The width/height of the picture a capture of `surface` produces, from the

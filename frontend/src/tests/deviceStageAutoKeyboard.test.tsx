@@ -310,6 +310,75 @@ describe('a finger on the picture never takes focus off the keyboard bar\'s fiel
     });
 });
 
+describe('a PHYSICAL keyboard while the keyboard bar is up (a Bluetooth keyboard, DeX)', () => {
+    // The bar's field has focus, and the stage's full key forwarding stands
+    // aside for editable targets — so only text and the bar's own keys
+    // (Enter, Tab, Esc, arrows) reached the PC: Ctrl/Alt combos, Delete,
+    // Home/End and the F-keys did not. (Before the focus fix a tap on the
+    // picture moved focus to BODY and so, by accident, handed them to the
+    // full forwarder.) Text must still go as TEXT, once.
+    async function withBar(): Promise<HTMLInputElement> {
+        await mountWith(session());
+        const btn = host!.querySelector('button[title="Keyboard"]') as HTMLButtonElement;
+        await act(async () => { btn.click(); });
+        await flush();
+        const field = host!.querySelector('input.device-stage-keyboard-capture') as HTMLInputElement;
+        expect(field, 'precondition: the bar is up').toBeTruthy();
+        field.focus();
+        h.sendInput.mockClear();
+        return field;
+    }
+    const press = async (field: HTMLElement, type: 'keydown' | 'keyup', init: KeyboardEventInit & { keyCode?: number }) => {
+        const ev = new KeyboardEvent(type, { bubbles: true, cancelable: true, ...init });
+        if (init.keyCode !== undefined) Object.defineProperty(ev, 'keyCode', { value: init.keyCode });
+        await act(async () => { field.dispatchEvent(ev); });
+        return ev;
+    };
+    const keys = () => h.sendInput.mock.calls.map(c => c[1] as { t?: string; code?: string; down?: boolean; text?: string });
+
+    it('Delete, Home, End and the F-keys go to the PC, down and up, and stay out of the field', async () => {
+        const field = await withBar();
+        for (const [key, code] of [['Delete', 'Delete'], ['Home', 'Home'], ['End', 'End'], ['F5', 'F5']] as const) {
+            const down = await press(field, 'keydown', { key, code });
+            expect(down.defaultPrevented, `${key} must not also act locally`).toBe(true);
+            await press(field, 'keyup', { key, code });
+            expect(keys().filter(e => e.t === 'key' && e.code === code).map(e => e.down), key).toEqual([true, false]);
+        }
+    });
+
+    it('Ctrl+C is a chord on the PC, and types nothing', async () => {
+        const field = await withBar();
+        await press(field, 'keydown', { key: 'Control', code: 'ControlLeft', ctrlKey: true });
+        await press(field, 'keydown', { key: 'c', code: 'KeyC', ctrlKey: true });
+        await press(field, 'keyup', { key: 'c', code: 'KeyC', ctrlKey: true });
+        await press(field, 'keyup', { key: 'Control', code: 'ControlLeft' });
+        expect(keys().filter(e => e.t === 'key').map(e => `${e.code}${e.down ? '+' : '-'}`))
+            .toEqual(['ControlLeft+', 'KeyC+', 'KeyC-', 'ControlLeft-']);
+        expect(keys().filter(e => e.t === 'text')).toEqual([]);
+    });
+
+    it('a plain character is left to the field, so it goes once, as text', async () => {
+        const field = await withBar();
+        const down = await press(field, 'keydown', { key: 'a', code: 'KeyA' });
+        expect(down.defaultPrevented, 'the field must get it').toBe(false);
+        expect(keys().filter(e => e.t === 'key'), 'no key event as well as the text').toEqual([]);
+    });
+
+    it('a soft keyboard\'s keydown (229 / Unidentified) is left to the field', async () => {
+        const field = await withBar();
+        const down = await press(field, 'keydown', { key: 'Unidentified', code: '', keyCode: 229 });
+        expect(down.defaultPrevented).toBe(false);
+        expect(keys()).toEqual([]);
+    });
+
+    it('Enter is sent once — by the bar, not twice', async () => {
+        const field = await withBar();
+        await press(field, 'keydown', { key: 'Enter', code: 'Enter' });
+        await press(field, 'keyup', { key: 'Enter', code: 'Enter' });
+        expect(keys().filter(e => e.t === 'key' && e.code === 'Enter').map(e => e.down)).toEqual([true, false]);
+    });
+});
+
 describe('a press that lands in a text box opens the keyboard', () => {
     it('a press, then a caret that was not there: the panel mounts and the native show is asked', async () => {
         await mountWith(session());
