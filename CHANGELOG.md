@@ -4,6 +4,17 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+Remote control from a phone: typing works after tapping a text box, the pointer shows after the unattended passphrase, switching screens by zooming no longer jumps, and tapping a text box no longer blacks out the picture
+### Fixed
+
+- **Typing reaches your PC again after you tap a text box.** When you tapped a box on the PC that already had the cursor in it (or tapped the picture while the keyboard was up), the keyboard opened but the tap itself took the focus away from it, so what you typed went nowhere (on some keyboards it arrived as odd key presses instead). A tap on the picture no longer takes the keyboard away. Comes with the phone's in-app update.
+- **The mouse pointer is drawn after you type the unattended passphrase.** On a PC armed for unattended access, the phone's request to draw the pointer itself was sent while you were still typing the passphrase, and the PC ignored it — so the PC kept drawing its own pointer, a few pixels tall on a phone, and the phone drew none. The phone now asks again once the PC accepts the passphrase (this alone fixes it, with the phone's in-app update), and the PC now remembers the request instead of ignoring it (with the next PC update, for phones that are not updated yet).
+- **Zooming into one screen of All Displays no longer jumps.** The view could land in the wrong place, show the new screen under the old view for a moment, undo a pinch you were still making, or jump again on the first finger movement afterwards (the pointer kept its position "as a fraction of the screen" instead of its place on the desktop). The new screen now appears exactly where you were looking, your pinch is kept, and the pointer stays where it was. Comes with the phone's in-app update.
+- **Tapping a text box while zoomed in no longer turns the picture black.** When the keyboard came up, the picture was re-laid out in the smaller space above it but your zoomed view was not moved with it, so it could point past the bottom of the picture — usually exactly when the text box was low on the screen. The view now stays on the picture. Comes with the phone's in-app update.
+- A text field on one screen is no longer reported to the phone as a cursor on the edge of the screen beside it (the PC's taskbar, on the screen to its right). With the next PC update.
+
 ## 0.9.835 — 2026-10-07
 
 Control Audio Hub from My Devices; the phone app is named Púca again
