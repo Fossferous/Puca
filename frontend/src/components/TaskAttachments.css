@@ -46,6 +46,15 @@
     border-radius: 6px;
 }
 
+/* On a touch screen the centre Play only clears the 44 px controls'
+   timeline from 168 px up (Chat.css, --video-min-h): at 160 px it overlapped
+   it by 4 px, so a tap on the button's lower rim seeked. */
+@media (pointer: coarse) {
+    .vpl.ta-video-frame {
+        height: 168px;
+    }
+}
+
 .ta-file,
 .ta-broken {
     display: inline-flex;

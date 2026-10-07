@@ -21,10 +21,20 @@ import { act, useRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { memoryLocalStorage } from './fixtures/fakeSink';
 
-const platform = vi.hoisted(() => ({ mobile: false }));
+const platform = vi.hoisted(() => ({ mobile: false, android: false }));
 vi.mock('../api/platform', async (orig) => ({
     ...(await orig<typeof import('../api/platform')>()),
     isMobile: () => platform.mobile,
+    isAndroidApp: () => platform.android,
+}));
+/** Android's system bars (api/systemBars.ts): how many hold them hidden. */
+const bars = vi.hoisted(() => ({ held: 0, released: 0 }));
+vi.mock('../api/systemBars', () => ({
+    holdSystemBarsHidden: () => {
+        bars.held++;
+        let done = false;
+        return () => { if (done) return; done = true; bars.held--; bars.released++; };
+    },
 }));
 /** Android's BACK gesture, as api/mobileApp.ts hands it over (an APK after
  *  0.9.836): who holds it, and how often it was let go. */
@@ -114,6 +124,9 @@ beforeEach(() => {
     vi.stubGlobal('localStorage', memoryLocalStorage());
     __resetVideoPlayerMemory();
     platform.mobile = false;
+    platform.android = false;
+    bars.held = 0;
+    bars.released = 0;
     back.holders = [];
     back.released = 0;
     container = document.createElement('div');
@@ -570,5 +583,172 @@ describe('touch', () => {
         expect(frame.dataset.shown).toBe('true');
         await act(async () => { vi.advanceTimersByTime(10000); });
         expect(frame.dataset.shown).toBe('true');
+    });
+});
+
+/* Review findings, 2026-10-07: a panel must never be left behind — under a
+   fullscreen frame, floating away from its button, or open while focus has
+   gone elsewhere — and the press that closes one only closes it. */
+describe('the volume and speed panels stay with their player', () => {
+    it('F pressed inside the open volume panel closes it, keeps focus in the player, then goes full screen', async () => {
+        const { frame } = await mount();
+        const open = btn(/^Volume, /, frame)!;
+        await click(open);
+        const slider = q('[role="dialog"][aria-label="Volume"] [role="slider"]')!;
+        expect(document.activeElement).toBe(slider);
+        await key(slider, 'f');
+        expect(frame.dataset.fs).toBe('app'); // jsdom has no Fullscreen API
+        // The fullscreen frame joins the top layer AFTER the panel and would
+        // cover it, with focus left in an invisible panel.
+        expect(q('[role="dialog"][aria-label="Volume"]')).toBeNull();
+        expect(document.activeElement).toBe(open);
+    });
+
+    it('a mouse click on the picture that closes an open panel only closes it; the next one plays', async () => {
+        const { video, frame, play } = await mount();
+        await click(btn(/^Playback speed/, frame)!);
+        expect(q('[role="menu"]')).not.toBeNull();
+        pointer('pointerdown', video, { pointerType: 'mouse' });
+        await click(video);
+        expect(q('[role="menu"]')).toBeNull();
+        expect(play).not.toHaveBeenCalled();
+        // Positive control: the same click with nothing open plays.
+        pointer('pointerdown', video, { pointerType: 'mouse' });
+        await click(video);
+        expect(play).toHaveBeenCalledTimes(1);
+    });
+
+    it('a dismissing press that never became a click on the picture does not swallow the next click', async () => {
+        const { video, frame, play } = await mount();
+        await click(btn(/^Playback speed/, frame)!);
+        pointer('pointerdown', video, { pointerType: 'mouse' }); // dragged off: no click follows
+        expect(q('[role="menu"]')).toBeNull();
+        pointer('pointerdown', video, { pointerType: 'mouse' });
+        await click(video);
+        expect(play).toHaveBeenCalledTimes(1);
+    });
+
+    it('a tap on the picture that closes an open panel leaves the controls up', async () => {
+        const { video, frame } = await mount();
+        await click(btn(/^Volume, /, frame)!);
+        pointer('pointerdown', video, { pointerType: 'touch' });
+        await click(video);
+        expect(q('[role="dialog"]')).toBeNull();
+        expect(frame.dataset.shown).toBe('true');
+    });
+
+    it('Tab out of the volume panel goes on to the speed button, Shift+Tab back to the volume button; either closes it', async () => {
+        const { frame } = await mount();
+        const vol = btn(/^Volume, /, frame)!;
+        await click(vol);
+        const slider = q('[role="dialog"] [role="slider"]')!;
+        // Tab from the panel's last control: on to what follows its button.
+        const tab = await key(slider, 'Tab');
+        expect(tab.defaultPrevented).toBe(true);
+        expect(q('[role="dialog"]')).toBeNull();
+        expect(document.activeElement).toBe(btn(/^Playback speed/, frame));
+        // Shift+Tab from its first control: back to its button.
+        await click(vol);
+        const mute = [...q('[role="dialog"]')!.querySelectorAll('button')].find((b) => /Mute/.test(b.textContent ?? ''))!;
+        mute.focus();
+        await key(mute, 'Tab', { shiftKey: true });
+        expect(q('[role="dialog"]')).toBeNull();
+        expect(document.activeElement).toBe(vol);
+        // Positive control: Tab from Mute to the slider stays inside, open.
+        await click(vol);
+        const mute2 = [...q('[role="dialog"]')!.querySelectorAll('button')].find((b) => /Mute/.test(b.textContent ?? ''))!;
+        mute2.focus();
+        const inside = await key(mute2, 'Tab');
+        expect(inside.defaultPrevented).toBe(false);
+        expect(q('[role="dialog"]')).not.toBeNull();
+    });
+
+    it('Tab out of the speed menu goes on to Full screen, Shift+Tab back to the speed button', async () => {
+        const { frame } = await mount();
+        const speed = btn(/^Playback speed/, frame)!;
+        await click(speed);
+        await key(document.activeElement!, 'Tab');
+        expect(q('[role="menu"]')).toBeNull();
+        expect(document.activeElement).toBe(btn('Full screen', frame));
+        await click(speed);
+        await key(document.activeElement!, 'Tab', { shiftKey: true });
+        expect(q('[role="menu"]')).toBeNull();
+        expect(document.activeElement).toBe(speed);
+    });
+
+    it('focus moved out of an open panel by any other way closes it; focus on the panel itself does not', async () => {
+        const outside = document.createElement('button');
+        document.body.appendChild(outside);
+        try {
+            const { frame } = await mount();
+            await click(btn(/^Volume, /, frame)!);
+            const panel = q<HTMLElement>('[role="dialog"]')!;
+            // A press on the panel's own blank space focuses the panel (it is
+            // the nearest focusable thing there): it stays open.
+            expect(panel.tabIndex).toBe(-1);
+            await act(async () => { panel.focus(); });
+            expect(q('[role="dialog"]')).not.toBeNull();
+            await act(async () => { outside.focus(); });
+            expect(q('[role="dialog"]')).toBeNull();
+        } finally {
+            outside.remove();
+        }
+    });
+
+    it('a panel whose button has scrolled out of sight closes, instead of being pinned to the window edge', async () => {
+        type Entry = { isIntersecting: boolean; target: Element };
+        const observed: Array<{ el: Element; cb: (entries: Entry[]) => void }> = [];
+        vi.stubGlobal('IntersectionObserver', class {
+            cb: (entries: Entry[]) => void;
+            constructor(cb: (entries: Entry[]) => void) { this.cb = cb; }
+            observe(el: Element) { observed.push({ el, cb: this.cb }); }
+            disconnect() {}
+            unobserve() {}
+            takeRecords() { return []; }
+        });
+        const { frame } = await mount();
+        const speed = btn(/^Playback speed/, frame)!;
+        await click(speed);
+        const watch = observed.find((o) => o.el === speed);
+        expect(watch, 'the open menu watches its own button').toBeTruthy();
+        // Positive control: still in sight, still open.
+        await act(async () => { watch!.cb([{ isIntersecting: true, target: speed }]); });
+        expect(q('[role="menu"]')).not.toBeNull();
+        await act(async () => { watch!.cb([{ isIntersecting: false, target: speed }]); });
+        expect(q('[role="menu"]')).toBeNull();
+    });
+});
+
+describe('the Android app', () => {
+    it('the in-app fullscreen hides the system bars while it lasts, and gives them back (exit, unmount)', async () => {
+        platform.mobile = true;
+        platform.android = true;
+        const { frame } = await mount();
+        expect(bars.held).toBe(0);
+        await click(btn('Full screen', frame)!);
+        expect(frame.dataset.fs).toBe('app');
+        expect(bars.held).toBe(1);
+        await click(btn('Exit full screen', frame)!);
+        expect(bars.held).toBe(0);
+        expect(bars.released).toBe(1);
+        await click(btn('Full screen', frame)!);
+        expect(bars.held).toBe(1);
+        await act(async () => { root.render(<div />); });
+        expect(bars.held).toBe(0);
+    });
+
+    it('a video shows no engine poster (the WebView draws a grey one with its own play icon); elsewhere none is set', async () => {
+        platform.mobile = true;
+        platform.android = true;
+        const { video } = await mount();
+        const poster = video.getAttribute('poster') ?? '';
+        expect(poster.startsWith('data:image/gif;base64,')).toBe(true);
+        await act(async () => { root.render(<div />); });
+        // Positive control: the desktop app and the web show the first frame,
+        // which any poster would hide.
+        platform.mobile = false;
+        platform.android = false;
+        const desk = await mount();
+        expect(desk.video.hasAttribute('poster')).toBe(false);
     });
 });

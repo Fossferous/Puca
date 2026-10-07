@@ -476,3 +476,49 @@ describe('the hello handshake arms BOTH directions, not just the receiver', () =
         expect(outbound).toHaveLength(0);
     });
 });
+
+/* "Escape always revokes" is the in-page mirror of the native kill switch,
+   and the native guard does not watch Escape — so this listener is the only
+   Escape revoke there is. Review finding 2026-10-07: it listened in the
+   bubble phase, where any component that keeps Escape to itself (the video
+   player closing its speed menu, the drawing canvas's document capture
+   listener) stopped it from ever arriving. */
+describe('Escape while this machine is being controlled', () => {
+    function stopper(): { inner: HTMLElement; remove: () => void } {
+        const box = document.createElement('div');
+        const inner = document.createElement('button');
+        box.appendChild(inner);
+        document.body.appendChild(box);
+        // What a component does with an Escape it handled itself (React's
+        // e.stopPropagation() stops the native event at its root the same way).
+        box.addEventListener('keydown', (e) => { if (e.key === 'Escape') e.stopPropagation(); });
+        return { inner, remove: () => box.remove() };
+    }
+
+    it('revokes even when the focused component keeps Escape to itself', async () => {
+        await activeHost();
+        const rc = await import('../api/remoteControl');
+        expect(rc.getControlState().controlledBy, 'precondition: a granted session').not.toBeNull();
+        const { inner, remove } = stopper();
+        try {
+            inner.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+            expect(sent.some(m => m.type === 'ControlEnd'), 'the session is ended').toBe(true);
+            expect(rc.getControlState().controlledBy).toBeNull();
+        } finally {
+            remove();
+        }
+    });
+
+    it('positive control: a key that is not Escape, stopped the same way, revokes nothing', async () => {
+        await activeHost();
+        const rc = await import('../api/remoteControl');
+        const { inner, remove } = stopper();
+        try {
+            inner.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+            expect(sent.some(m => m.type === 'ControlEnd')).toBe(false);
+            expect(rc.getControlState().controlledBy).not.toBeNull();
+        } finally {
+            remove();
+        }
+    });
+});

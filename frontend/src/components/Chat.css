@@ -1104,6 +1104,28 @@ button.message-attachment.error { color: #ffb4b4; }
        screen, beside the time (VideoPlayer.css). A taller picture than that
        is letterboxed inside it. */
     --video-min-w: 176px;
+    /* Never shorter than this on a touch screen (below). */
+    --video-min-h: 0px;
+}
+
+/* On a touch screen the player's bar is 96 px tall (a timeline and a row
+   of 44 px buttons), and its centre Play (56 px, centred 22 px above the
+   middle) only clears that timeline from 168 px up. A wide or small
+   landscape video was shorter than that: a 192x108 clip (review finding
+   2026-10-07) was a "short" player, which shows the bar's own Play instead
+   of the centre one, so four 44 px buttons wrapped in its 192 px row and the
+   bar stood 34 px above the picture, over the message before; and a
+   picture from 120 to 168 px tall (a 2:1 one in a phone's column) has the
+   centre Play over the timeline, which takes a tap on its rim and seeks
+   (measured on the 160 px Task tile: 4 px over it). The box keeps this
+   height, the picture letterboxed in it, like --video-min-w; player and
+   stand-in alike, so a swap still moves nothing.
+   e2e/video-controls-real-browser.mjs checks the small clip, and the centre
+   Play against the timeline on every player it lays out. */
+@media (pointer: coarse) {
+    .message-video {
+        --video-min-h: 168px;
+    }
 }
 
 .message-video video,
@@ -1133,6 +1155,7 @@ button.message-attachment.error { color: #ffb4b4; }
        height cap, and the picture is letterboxed in it. Player and stand-in
        alike, so the swap still moves nothing. */
     min-width: min(var(--video-min-w), 100%);
+    min-height: var(--video-min-h);
     max-height: var(--video-max-h);
 }
 

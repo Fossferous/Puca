@@ -54,6 +54,8 @@ import {
 import { outputGain } from './settingsStore';
 import { useLayerOnScreen } from './portalTarget';
 import { interceptBack } from '../api/mobileApp';
+import { isAndroidApp } from '../api/platform';
+import { holdSystemBarsHidden } from '../api/systemBars';
 import { FullscreenExitIcon, FullscreenIcon, PauseIcon, PlayIcon, SpeakerIcon, SpeakerLowIcon, SpeakerOffIcon } from './Icons';
 import {
     PLAYBACK_RATES, clamp01, clampTime, effectiveVolume, formatTime, keyAction, knownDuration, rateLabel,
@@ -145,6 +147,19 @@ function playSafely(v: HTMLVideoElement): void {
 
 const HIDE_AFTER_MS = 2500;
 
+/**
+ * A transparent 1x1 GIF: the poster of every video in the ANDROID app.
+ * Without a poster, the Android WebView paints its own default one — a large
+ * grey frame with a black ring and a play triangle — until playback starts
+ * (a seek while paused does not clear it either), and its triangle sat 22 px
+ * from Púca's centre Play button: two offset play icons on every video
+ * (review finding 2026-10-07, measured on the emulator). Transparent, the
+ * player's own black shows instead. Never set elsewhere: the desktop app and
+ * the web show the video's first frame, which any poster would hide. The
+ * app's CSP allows data: images (scripts/cap-index-csp.mjs).
+ */
+const ANDROID_POSTER = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
 export function VideoPlayer(props: VideoPlayerProps) {
     const {
         src, title, videoRef, videoClassName, videoStyle, frameClassName, frameStyle,
@@ -174,6 +189,12 @@ export function VideoPlayer(props: VideoPlayerProps) {
     const lastPointer = useRef<string>('mouse');
     const volumeBtn = useRef<HTMLButtonElement | null>(null);
     const speedBtn = useRef<HTMLButtonElement | null>(null);
+    const fsBtn = useRef<HTMLButtonElement | null>(null);
+    /** The press on the picture that closed an open panel (VpPanel's press
+     *  outside it): its click only closes, it does not also play or pause.
+     *  The native event itself, so the next press — this one's click never
+     *  came (dragged off) — forgets it. */
+    const dismissPress = useRef<Event | null>(null);
     const lastSeekAt = useRef(Number.NEGATIVE_INFINITY);
     const lastWakeAt = useRef(Number.NEGATIVE_INFINITY);
 
@@ -324,6 +345,11 @@ export function VideoPlayer(props: VideoPlayerProps) {
 
     const toggleFullscreen = () => {
         wake();
+        // An open panel closes first, focus back on its button: the
+        // fullscreen frame joins the top layer AFTER the panel and covered it,
+        // leaving focus — and the arrow keys — in a panel nobody could see
+        // (F pressed inside the volume panel; review finding 2026-10-07).
+        if (panel !== 'none') closePanel(true);
         if (fs === 'app') { setFs('none'); return; }
         if (fs === 'native') { void exitElementFullscreen(); return; }
         const el = frameRef.current;
@@ -359,6 +385,8 @@ export function VideoPlayer(props: VideoPlayerProps) {
 
     const onKeyDown = (e: ReactKeyboardEvent<HTMLSpanElement>) => {
         const t = e.target as HTMLElement;
+        const inPanel = t.closest('.vpl-panel');
+        if (inPanel && e.key === 'Tab') { onPanelTab(e, inPanel); return; }
         if (t.closest('[role="menu"]')) { onMenuKey(e); return; }
         const where: KeyTarget = t.dataset.vplKey === 'seek' ? 'seek'
             : t.dataset.vplKey === 'volume' ? 'volume'
@@ -389,15 +417,43 @@ export function VideoPlayer(props: VideoPlayerProps) {
             e.stopPropagation();
             closePanel(true);
             return;
-        } else if (e.key === 'Tab') {
-            closePanel(false);
-            return;
         } else {
             return;
         }
         e.preventDefault();
         e.stopPropagation();
         items[next]?.focus();
+    };
+
+    // Tab out of a panel: as if the panel came right after the button that
+    // opened it (what a popover opened by its button does natively) — on to
+    // what follows that button, or with Shift back to the button — and the
+    // panel closes. Inside the volume panel, Tab moves between its Mute and
+    // its slider as usual; the speed menu is one stop (its speeds are arrow
+    // keys), so any Tab leaves it. Review finding 2026-10-07: Tab from the
+    // volume slider left the player with the panel still open, and Shift+Tab
+    // from its Mute landed on Full screen (the panels sit after the bar in
+    // the DOM).
+    const onPanelTab = (e: ReactKeyboardEvent<HTMLSpanElement>, panelEl: Element) => {
+        if (e.altKey || e.ctrlKey || e.metaKey) return;
+        const t = e.target as HTMLElement;
+        const stops = [...panelEl.querySelectorAll<HTMLElement>('button, [role="slider"]')].filter((el) => el.tabIndex >= 0);
+        const leaving = panelEl.getAttribute('role') === 'menu'
+            || (e.shiftKey ? t === panelEl || t === stops[0] : t === stops[stops.length - 1]);
+        if (!leaving) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const from = panel;
+        setPanel('none');
+        const to = e.shiftKey ? (from === 'speed' ? speedBtn : volumeBtn) : (from === 'speed' ? fsBtn : speedBtn);
+        to.current?.focus({ preventScroll: true });
+    };
+
+    // The panels' own "press elsewhere" (VpPanel): a press on the picture
+    // closes the panel and nothing else.
+    const dismissPanel = (press?: Event) => {
+        if (press && press.target === videoEl.current) dismissPress.current = press;
+        closePanel(false);
     };
 
     // Leaving the in-app fullscreen from outside the player's own keys: Esc
@@ -429,10 +485,21 @@ export function VideoPlayer(props: VideoPlayerProps) {
         if (!appFs) return;
         return interceptBack(() => leaveAppFsRef.current());
     }, [appFs]);
+    // The Android app's status and navigation bars go while it lasts: the
+    // WebView sits between them, so without this the "full screen" video kept
+    // a strip above and below it (api/systemBars.ts). Nothing elsewhere.
+    useEffect(() => {
+        if (!appFs) return;
+        return holdSystemBarsHidden();
+    }, [appFs]);
 
     // A tap on the picture shows or hides the controls; a click plays or
     // pauses (lastPointer is set as the press begins).
     const onSurfaceClick = () => {
+        // The click of a press that closed an open panel: closing was all it
+        // meant (review finding 2026-10-07: dismissing the speed menu by
+        // clicking the picture also started the video).
+        if (dismissPress.current) { dismissPress.current = null; return; }
         if (lastPointer.current === 'mouse' || lastPointer.current === 'pen') {
             togglePlay();
             return;
@@ -442,6 +509,8 @@ export function VideoPlayer(props: VideoPlayerProps) {
     };
     const onPointerDownCapture = (e: ReactPointerEvent) => {
         lastPointer.current = e.pointerType || 'mouse';
+        // A later press: the dismissing one's click never came.
+        if (dismissPress.current && dismissPress.current !== e.nativeEvent) dismissPress.current = null;
     };
     // A moving mouse shows the controls and restarts the hide timer — at
     // most four times a second, not one render per mouse event.
@@ -514,6 +583,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
                 style={videoStyle}
                 src={src}
                 preload={preload}
+                poster={isAndroidApp() ? ANDROID_POSTER : undefined}
                 playsInline
                 title={title}
                 onClick={onSurfaceClick}
@@ -611,12 +681,12 @@ export function VideoPlayer(props: VideoPlayerProps) {
                     >
                         {rateLabel(rate)}
                     </button>
-                    <button type="button" className="vpl-btn vpl-fullscreen" aria-label={fsLabel} title={`${fsLabel} (F)`} onClick={toggleFullscreen}>
+                    <button ref={fsBtn} type="button" className="vpl-btn vpl-fullscreen" aria-label={fsLabel} title={`${fsLabel} (F)`} onClick={toggleFullscreen}>
                         {isFs ? <FullscreenExitIcon size={18} /> : <FullscreenIcon size={18} />}
                     </button>
                 </span>
             </span>
-            <VpPanel open={panel === 'volume'} anchor={volumeBtn} onDismiss={() => closePanel(false)} role="dialog" label="Volume" className="vpl-panel-volume">
+            <VpPanel open={panel === 'volume'} anchor={volumeBtn} onDismiss={dismissPanel} role="dialog" label="Volume" className="vpl-panel-volume">
                 <button type="button" className="vpl-panel-mute" onClick={toggleMute}>
                     <VolIcon size={18} /> {muted ? 'Unmute' : 'Mute'}
                 </button>
@@ -634,7 +704,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
                 <span className="vpl-panel-value" aria-hidden="true">{silent ? 0 : pct}%</span>
                 {masterPct < 100 && <span className="vpl-panel-note">Output Volume in Settings: {masterPct}%</span>}
             </VpPanel>
-            <VpPanel open={panel === 'speed'} anchor={speedBtn} onDismiss={() => closePanel(false)} role="menu" label="Playback speed" className="vpl-panel-speed">
+            <VpPanel open={panel === 'speed'} anchor={speedBtn} onDismiss={dismissPanel} role="menu" label="Playback speed" className="vpl-panel-speed">
                 {PLAYBACK_RATES.map((r) => (
                     <button
                         key={r}
@@ -755,7 +825,9 @@ function VpSlider({ kind, className, label, fraction, loaded, disabled = false, 
 interface VpPanelProps {
     open: boolean;
     anchor: RefObject<HTMLElement | null>;
-    onDismiss: () => void;
+    /** Closed from outside: a press elsewhere (that press), focus gone
+     *  elsewhere, or its button out of sight. */
+    onDismiss: (press?: Event) => void;
     role: 'dialog' | 'menu';
     label: string;
     className: string;
@@ -767,7 +839,11 @@ interface VpPanelProps {
  * also above a fullscreen player) and placed against their button inside the
  * window, above it when there is room, else below; where the Popover API is
  * missing, `position: fixed` places them the same way. A press anywhere else
- * closes one; so does Esc (the player's key handler).
+ * closes one; so does Esc (the player's key handler), Tab out of it (the
+ * player's too), focus going anywhere outside it and its button, and its
+ * button leaving the screen — scrolled out of the chat, say. Kept open and
+ * pinned to the window's edge, it covered the app's header with its button
+ * 364 px away (review finding 2026-10-07).
  */
 function VpPanel({ open, anchor, onDismiss, role, label, className, children }: VpPanelProps) {
     const ref = useRef<HTMLSpanElement | null>(null);
@@ -799,15 +875,29 @@ function VpPanel({ open, anchor, onDismiss, role, label, className, children }: 
         const onDown = (e: PointerEvent) => {
             const t = e.target as Node;
             if (el.contains(t) || anchor.current?.contains(t)) return;
-            dismissRef.current();
+            dismissRef.current(e);
         };
         document.addEventListener('pointerdown', onDown, true);
         window.addEventListener('resize', place);
         window.addEventListener('scroll', place, true);
+        // Its button out of sight — the viewport AND every scrolling box
+        // around it, which an IntersectionObserver takes into account (a
+        // fullscreen player is in the top layer, clipped by nothing but the
+        // screen) — closes it. Partly hidden is still there to place against.
+        let io: IntersectionObserver | null = null;
+        const a = anchor.current;
+        if (a && typeof IntersectionObserver !== 'undefined') {
+            io = new IntersectionObserver((entries) => {
+                const last = entries[entries.length - 1];
+                if (last && !last.isIntersecting) dismissRef.current();
+            });
+            io.observe(a);
+        }
         return () => {
             document.removeEventListener('pointerdown', onDown, true);
             window.removeEventListener('resize', place);
             window.removeEventListener('scroll', place, true);
+            io?.disconnect();
             if (popped) {
                 try { el.hidePopover(); } catch { /* already hidden */ }
             }
@@ -821,6 +911,16 @@ function VpPanel({ open, anchor, onDismiss, role, label, className, children }: 
             role={role}
             aria-label={label}
             popover="manual"
+            // Focusable (not tabbable): a press on its own blank space or
+            // text focuses the panel, not the player around it — which would
+            // read as focus leaving it.
+            tabIndex={-1}
+            onBlur={(e) => {
+                const to = e.relatedTarget;
+                if (!(to instanceof Node)) return; // to another window, or nowhere
+                if (e.currentTarget.contains(to) || anchor.current?.contains(to)) return;
+                dismissRef.current();
+            }}
         >
             {children}
         </span>

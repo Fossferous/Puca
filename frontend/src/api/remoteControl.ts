@@ -1492,6 +1492,15 @@ export function initRemoteControl() {
         // revokes, and the user's configured kill-switch combo does too (this is
         // a fail-safe mirror of the native hook, which also covers the case
         // where a controlled GAME has focus and this listener can't fire).
+        // CAPTURE phase, so no component can swallow it: the native guard does
+        // not watch Escape, so this is the only Escape revoke there is, and in
+        // the bubble phase any component that keeps Escape to itself left
+        // control with the other person: the video player closing its speed
+        // menu or leaving fullscreen (React's stopPropagation), the drawing
+        // canvas (a document capture listener that stops it) — review finding
+        // 2026-10-07. The window's capture phase runs before all of them.
+        // Nothing here stops the event, so that component still gets its
+        // Escape too.
         window.addEventListener('keydown', (e) => {
             if (!state.controlledBy) return;
             if (e.key === 'Escape') {
@@ -1506,7 +1515,7 @@ export function initRemoteControl() {
                 setNotice(`Remote control revoked (${kk.label}).`);
                 revokeControl();
             }
-        });
+        }, true);
     }
 
     // If the kill-switch settings change WHILE a session is active, re-arm the

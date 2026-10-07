@@ -145,7 +145,8 @@ have the same player, with every control on it at every size — a narrow portra
 - **Speed**: the `1×` button — 0.5×, 0.75×, 1×, 1.25×, 1.5× or 2×, without changing the pitch. A speed stays with that
   video until you close the app
 - **Full screen**: the corners button. It fills the screen in a browser and the whole window in the desktop app; in the
-  Android app it fills the app, and turning the phone sideways gives a landscape picture. Leave it with the same
+  Android app it fills the whole screen (the status and navigation bars step aside until you leave it; a swipe from
+  the edge brings them back), and turning the phone sideways gives a landscape picture. Leave it with the same
   button, **Esc**, or (with an Android app installed after 0.9.836) **Back**
 
 With the player focused (click it, or **Tab** to it): **Space** or **K** play/pause, **←** / **→** skip 5 seconds,

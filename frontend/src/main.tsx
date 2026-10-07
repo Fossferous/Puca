@@ -161,7 +161,12 @@ if (__RC_ENABLED__) {
 import { ensureMobileNotificationPermission, installMobileNav, setNotifyKeepAlive } from './api/mobileApp'
 import { syncTaskPlacesToNative } from './api/taskPlaces'
 import { installReconnectCatchup } from './api/reconnectCatchup'
+import { restoreSystemBarsAtBoot } from './api/systemBars'
 installMobileNav()
+// Android: an in-app update that applied (a WebView reload) while a video was
+// full screen left the status and navigation bars hidden with nothing on this
+// page holding them: give them back. No-op elsewhere (api/systemBars.ts).
+restoreSystemBarsAtBoot()
 // Desktop: the `puca://` invite link this launch carried, and any that arrive
 // while it runs (the web invite page's "Open in the Púca app"). Before React
 // renders, like the Android intent above: the link waits in the pending-

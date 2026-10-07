@@ -37,7 +37,21 @@
 //   7. a spoilered video: nothing in it is focusable until revealed;
 //   8. all eight themes, with and without high contrast: the panels' text
 //      against their surface, the bar's ink against its fade; a screenshot
-//      each.
+//      each;
+//   9. a SMALL landscape video (192x108) on the touchscreen: the box keeps a
+//      minimum height there, so the bar stays inside the player on one row
+//      and the centre Play clears the timeline (review finding 2026-10-07:
+//      the 108 px player wrapped Full screen onto a second row and drew the
+//      time and timeline 34 px above the picture); with a mouse it keeps its
+//      own 192x108;
+//  10. the panels never outlive their place: F from inside the volume panel
+//      closes it before going fullscreen, Tab out of it closes it, a click
+//      on the picture that dismisses one plays nothing, and wheel-scrolling
+//      the chat until the speed button is out of sight closes the menu.
+//
+// Every layout check also asks that the bar is inside its player and that
+// the centre Play button does not overlap the timeline (a tap on its rim
+// would seek).
 //
 // SILENT and headless: --mute-audio, the fixtures have NO audio track, and
 // every element is muted (asserted) before anything plays.
@@ -75,6 +89,7 @@ const FILES = {
     vland: { name: 'landscape.webm', ...seal(asset('landscape-480x270.webm')) },
     vspoil: { name: 'secret.webm', ...seal(asset('portrait-180x320.webm')) },
     vtask: { name: 'walkthrough.webm', ...seal(asset('portrait-180x320.webm')) },
+    vsmall: { name: 'reaction.webm', ...seal(asset('small-landscape-192x108.webm')) },
 };
 const ref = (id) => `[${FILES[id].name}](sovereign-enc:${id}?k=${FILES[id].key}&m=video%2Fwebm)`;
 const MSGS = [
@@ -83,6 +98,13 @@ const MSGS = [
     { id: 'm-land', content: ref('vland') },
     { id: 'm-spoil', content: `||${ref('vspoil')}||` },
     ...Array.from({ length: 40 }, (_, i) => ({ id: `t${i}`, content: `Line ${i + 1} of the conversation after the videos, so the list scrolls.` })),
+];
+// A page of its own for the small landscape video: the four above already
+// take every live player the chat allows (attachmentZone's cap).
+const SMALL_MSGS = [
+    { id: 'm-before', content: 'A message above the clip.' },
+    { id: 'm-small', content: ref('vsmall') },
+    ...Array.from({ length: 40 }, (_, i) => ({ id: `s${i}`, content: `Line ${i + 1} after the clip, so the list scrolls.` })),
 ];
 
 // ---- the page: the real MessageContent in a message list ------------------
@@ -190,7 +212,7 @@ const browser = await chromium.launch({ headless: true, ...(CHANNEL === 'bundled
 let shots = 0;
 const shot = async (page, name, clip) => { shots++; await page.screenshot({ path: path.join(outdir, `${name}.png`), ...(clip ? { clip } : {}) }); };
 
-async function open(name, ctxOpts, initScript) {
+async function open(name, ctxOpts, initScript, msgs = MSGS) {
     const ctx = await browser.newContext(ctxOpts);
     const page = await ctx.newPage();
     page.on('pageerror', (e) => { fail++; console.log(`FAIL [${name}] page error`, e.message); });
@@ -198,15 +220,16 @@ async function open(name, ctxOpts, initScript) {
         window.__MSGS = msgs;
         window.__TASK_REF = taskRef;
         localStorage.setItem('auth_token', 'rig-token');
-    }, [MSGS, { href: `sovereign-enc:vtask?k=${FILES.vtask.key}&m=video%2Fwebm`, name: FILES.vtask.name }]);
+    }, [msgs, { href: `sovereign-enc:vtask?k=${FILES.vtask.key}&m=video%2Fwebm`, name: FILES.vtask.name }]);
     if (initScript) await page.addInitScript(initScript);
     await page.goto(origin + '/');
     // Every video decrypted, mounted and its metadata loaded.
-    const ok = await page.waitForFunction(() => {
+    const chatVideos = msgs.filter((m) => m.content.includes('sovereign-enc:')).length;
+    const ok = await page.waitForFunction((n) => {
         const vids = [...document.querySelectorAll('.message-video video, .task-attachments video')];
-        return vids.length === 5 && vids.every((v) => v.readyState >= 1 && v.closest('.vpl'));
-    }, null, { timeout: 30000 }).then(() => true, () => false);
-    ck(ok, `[${name}] four chat videos and a Task's video decrypted into Púca's player, metadata loaded`);
+        return vids.length === n && vids.every((v) => v.readyState >= 1 && v.closest('.vpl'));
+    }, chatVideos + 1, { timeout: 30000 }).then(() => true, () => false);
+    ck(ok, `[${name}] ${chatVideos} chat video(s) and a Task's video decrypted into Púca's player, metadata loaded`);
     return { ctx, page };
 }
 
@@ -231,7 +254,8 @@ const layoutOf = (page, msg) => page.evaluate((msg) => {
     const center = frame.querySelector('.vpl-center');
     const video = frame.querySelector('video');
     return {
-        frame: r(frame), video: r(video), size: frame.dataset.size, shown: frame.dataset.shown, fs: frame.dataset.fs,
+        frame: r(frame), video: r(video), size: frame.dataset.size, short: frame.dataset.short, shown: frame.dataset.shown, fs: frame.dataset.fs,
+        bar: r(frame.querySelector('.vpl-bar')), seek: r(frame.querySelector('.vpl-seek')),
         ctl, center: center ? { shown: shown(center), hit: shown(center) && hit(center), rect: r(center) } : null,
         vw: document.documentElement.clientWidth, vh: document.documentElement.clientHeight,
         pageOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
@@ -268,6 +292,16 @@ function checkLayout(tag, L, { coarse, expectSize }) {
     ck(L.pageOverflow <= 0 && L.listOverflow <= 0, `${tag}: nothing scrolls sideways (clientWidth)`, `page ${L.pageOverflow}, list ${L.listOverflow}`);
     const tops = ['volume', 'speed', 'fullscreen'].map((k) => L.ctl[k]?.rect.t).filter((t) => t !== undefined);
     ck(tops.length === 3 && Math.max(...tops) - Math.min(...tops) < 1, `${tag}: volume, speed and fullscreen share one row (nothing wrapped)`, JSON.stringify(tops));
+    // The whole bar (its fade, the time, the timeline) inside the player:
+    // above it, it is drawn over the message before and takes its taps.
+    ck(L.bar.t >= L.frame.t - 0.5 && L.bar.b <= L.frame.b + 0.5, `${tag}: the bar is inside the player`, `bar ${L.bar.t.toFixed(1)}..${L.bar.b.toFixed(1)}, frame ${L.frame.t.toFixed(1)}..${L.frame.b.toFixed(1)}`);
+    // The centre Play clear of the timeline's hit area (painted after it, the
+    // timeline would take a tap on the button's rim and seek).
+    if (L.center?.shown) {
+        const c = L.center.rect;
+        const overlap = c.r > L.seek.l && c.l < L.seek.r && c.b > L.seek.t && c.t < L.seek.b;
+        ck(!overlap, `${tag}: the centre Play button clears the timeline`, `centre ${c.t.toFixed(1)}..${c.b.toFixed(1)}, timeline ${L.seek.t.toFixed(1)}..${L.seek.b.toFixed(1)}`);
+    }
 }
 
 // ======================= 1280x800, mouse ===================================
@@ -424,6 +458,10 @@ function checkLayout(tag, L, { coarse, expectSize }) {
         return items.map((b) => { const r = b.getBoundingClientRect(); const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return at === b; });
     });
     ck(fsMenu.length === 6 && fsMenu.every(Boolean), 'fullscreen: the speed menu opens ABOVE the fullscreen player and every speed is pressable', JSON.stringify(fsMenu));
+    // Its button is in the top layer, on screen: the "button out of sight"
+    // watch (an IntersectionObserver) must not read the chat behind as a clip.
+    await sleep(600);
+    ck(await page.evaluate(() => !!document.querySelector('.vpl-panel-speed')), 'fullscreen: the speed menu is still open 600 ms later (nothing closes it by mistake)');
     await shot(page, '02-desktop-fullscreen-speed-menu');
     await page.keyboard.press('Escape'); // closes the menu first
     await sleep(150);
@@ -531,7 +569,9 @@ function checkLayout(tag, L, { coarse, expectSize }) {
     await sleep(200);
     const Tk = await layoutOf(page, 'm-task');
     checkLayout('phone Task video', Tk, { coarse: true, expectSize: 'narrow' });
-    ck(Math.abs(Tk.frame.w - 240) < 1 && Math.abs(Tk.frame.h - 160) < 1 && Tk.objectFit === 'contain', "phone Task video: a 240x160 tile, the portrait picture letterboxed", `${Tk.frame.w}x${Tk.frame.h}`);
+    // 168 px tall on a touch screen (160 with a mouse): the centre Play
+    // clears the 44 px controls' timeline from there (TaskAttachments.css).
+    ck(Math.abs(Tk.frame.w - 240) < 1 && Math.abs(Tk.frame.h - 168) < 1 && Tk.objectFit === 'contain', "phone Task video: a 240x168 tile, the portrait picture letterboxed", `${Tk.frame.w}x${Tk.frame.h}`);
     await shot(page, '24-phone-task-video');
     await shot(page, '20-phone-chat');
 
@@ -682,12 +722,151 @@ function checkLayout(tag, L, { coarse, expectSize }) {
     await page.waitForSelector('.vpl-panel-speed', { timeout: 3000 });
     const above = await page.evaluate(() => [...document.querySelectorAll('.vpl-panel-speed [role="menuitemradio"]')].every((b) => { const r = b.getBoundingClientRect(); return document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) === b; }));
     ck(above, 'in-app fullscreen: the speed menu opens above it, every speed pressable');
+    await sleep(600);
+    ck(await page.evaluate(() => !!document.querySelector('.vpl-panel-speed')), 'in-app fullscreen: the speed menu is still open 600 ms later (its button is on screen in the top layer)');
     await shot(page, '30-in-app-fullscreen-menu');
     await page.keyboard.press('Escape'); // the menu
     await page.keyboard.press('Escape'); // the fullscreen
     await sleep(300);
     const T2 = await layoutOf(page, 'm-tall');
     ck(T2.fs === 'none' && Math.abs(T2.frame.w - T0.frame.w) < 1, 'in-app fullscreen: Esc leaves it, back in its box');
+    await ctx.close();
+}
+
+// ============ 9. a small landscape video (192x108) ===========================
+{
+    const phone = { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 };
+    const { ctx, page } = await open('phone small', phone, null, SMALL_MSGS);
+    await reveal(page, 'm-small');
+    await sleep(300);
+    const S = await layoutOf(page, 'm-small');
+    checkLayout('phone small landscape', S, { coarse: true, expectSize: 'narrow' });
+    ck(Math.abs(S.frame.w - 192) < 1 && Math.abs(S.frame.h - 168) < 1 && S.objectFit === 'contain',
+        'phone small landscape: a 192x168 box (the touch minimum height), the picture letterboxed in it', `${S.frame.w}x${S.frame.h} ${S.objectFit}`);
+    ck(S.short === 'false' && S.center?.hit && S.center.rect.w >= 44, 'phone small landscape: not "short": the centre Play is there, a 44 px target');
+    await shot(page, '40-phone-small-landscape');
+    await ctx.close();
+}
+{
+    const { ctx, page } = await open('desktop small', { viewport: { width: 1280, height: 800 } }, null, SMALL_MSGS);
+    await reveal(page, 'm-small');
+    await sleep(300);
+    const S = await layoutOf(page, 'm-small');
+    checkLayout('desktop small landscape', S, { coarse: false, expectSize: 'narrow' });
+    ck(Math.abs(S.frame.w - 192) < 1 && Math.abs(S.frame.h - 108) < 1, 'desktop small landscape (positive control): with a mouse it keeps its own 192x108', `${S.frame.w}x${S.frame.h}`);
+    ck(S.short === 'true' && !!S.ctl.play?.hit, 'desktop small landscape: short, so the bar carries its own Play, pressable');
+    await shot(page, '41-desktop-small-landscape');
+    await ctx.close();
+}
+
+// ============ 10. the panels never outlive their place ======================
+{
+    const { ctx, page } = await open('panels', { viewport: { width: 1280, height: 800 } });
+    await reveal(page, 'm-portrait');
+    await sleep(300);
+    const sel = '[data-msg="m-portrait"] .vpl';
+    // Muted through the player, ASSERTED, before anything could play.
+    await page.evaluate((s) => document.querySelector(s).focus(), sel);
+    await page.keyboard.press('m');
+    const mutedHere = (await media(page, 'm-portrait')).muted;
+    ck(mutedHere, 'panels: the element is muted before anything here could play');
+    if (!mutedHere) throw new Error('SAFETY: refusing to continue with an unmuted element');
+    const activeLabel = () => page.evaluate(() => {
+        const a = document.activeElement;
+        return { label: a?.getAttribute('aria-label') ?? a?.className ?? null, inPlayer: !!a?.closest('[data-msg="m-portrait"] .vpl') };
+    });
+    // Each step starts with no panel open (a press on the list's empty
+    // corner), so one step's failure is reported, not carried into the next.
+    const openVolumePanel = async () => {
+        await page.mouse.click(1270, 790);
+        await sleep(100);
+        await page.evaluate((s) => document.querySelector(`${s} .vpl-volume`).focus(), sel);
+        await page.keyboard.press('Enter');
+        const open = await page.waitForSelector('.vpl-panel-volume', { timeout: 3000 }).then(() => true, () => false);
+        ck(open, 'panels: Enter on the volume button opens its panel');
+        return open;
+    };
+
+    // F from inside the volume panel: the panel closes first, focus on its
+    // button, and the frame goes fullscreen with nothing left under it.
+    await openVolumePanel();
+    await page.keyboard.press('f');
+    await page.waitForFunction(() => !!document.fullscreenElement, null, { timeout: 3000 }).catch(() => {});
+    await sleep(300);
+    const fsF = await page.evaluate((s) => ({
+        fs: document.fullscreenElement?.matches(s) === true,
+        panel: !!document.querySelector('.vpl-panel-volume'),
+        active: document.activeElement?.getAttribute('aria-label') ?? null,
+        activeInFs: !!document.fullscreenElement?.contains(document.activeElement),
+    }), sel);
+    // Fullscreen, the player is wide: the same button now reads Mute/Unmute.
+    ck(fsF.fs && !fsF.panel && fsF.activeInFs && /^(Volume, |Mute$|Unmute$)/.test(fsF.active ?? ''), 'panels: F inside the volume panel closes it, then goes fullscreen with focus on the volume button', JSON.stringify(fsF));
+    await page.keyboard.press('f');
+    await page.waitForFunction(() => !document.fullscreenElement, null, { timeout: 3000 }).catch(() => {});
+    await sleep(300);
+    ck(await page.evaluate(() => !document.fullscreenElement), 'panels: F again leaves fullscreen');
+
+    // Tab out of the volume panel: on to the speed button; Shift+Tab from
+    // its Mute: back to the volume button. Closed either way.
+    await reveal(page, 'm-portrait');
+    await sleep(200);
+    await openVolumePanel();
+    await page.keyboard.press('Tab');
+    await sleep(100);
+    const tabOut = { ...(await activeLabel()), panel: await page.evaluate(() => !!document.querySelector('.vpl-panel-volume')) };
+    ck(!tabOut.panel && tabOut.inPlayer && /^Playback speed/.test(tabOut.label ?? ''), 'panels: Tab from the volume slider closes the panel and lands on the speed button', JSON.stringify(tabOut));
+    await openVolumePanel();
+    await page.keyboard.press('Shift+Tab'); // slider -> Mute, still inside
+    await sleep(50);
+    const stillOpen = await page.evaluate(() => !!document.querySelector('.vpl-panel-volume') && document.activeElement?.classList.contains('vpl-panel-mute'));
+    ck(stillOpen, 'panels (positive control): Shift+Tab from the slider moves to Mute, inside the open panel');
+    await page.keyboard.press('Shift+Tab');
+    await sleep(100);
+    const backOut = { ...(await activeLabel()), panel: await page.evaluate(() => !!document.querySelector('.vpl-panel-volume')) };
+    ck(!backOut.panel && /^Volume, /.test(backOut.label ?? ''), 'panels: Shift+Tab from Mute closes the panel and goes back to the volume button', JSON.stringify(backOut));
+
+    // A click on the picture that dismisses the speed menu plays nothing.
+    await page.mouse.click(1270, 790);
+    await sleep(100);
+    let P = await layoutOf(page, 'm-portrait');
+    await page.mouse.click(...center(P.ctl.speed.rect));
+    ck(await page.waitForSelector('.vpl-panel-speed', { timeout: 3000 }).then(() => true, () => false), 'panels: the speed button opens its menu');
+    if (!(await media(page, 'm-portrait')).muted) throw new Error('SAFETY: refusing to click a picture that could start an unmuted element');
+    await page.mouse.click(P.video.l + P.video.w / 2, P.video.t + 30);
+    await sleep(400);
+    const dismissed = { menu: await page.evaluate(() => !!document.querySelector('.vpl-panel-speed')), ...(await media(page, 'm-portrait')) };
+    ck(!dismissed.menu && dismissed.paused, 'panels: a click on the picture that closes the speed menu only closes it (nothing plays)', JSON.stringify({ menu: dismissed.menu, paused: dismissed.paused }));
+    await page.mouse.click(P.video.l + P.video.w / 2, P.video.t + 30);
+    await sleep(400);
+    ck(!(await media(page, 'm-portrait')).paused, 'panels (positive control): the next click on the picture plays (muted)');
+    await page.evaluate((s) => document.querySelector(`${s} video`).pause(), sel);
+
+    // Wheel-scrolling the chat: a little keeps the menu open beside its
+    // button; once the button is out of sight, the menu closes.
+    await reveal(page, 'm-portrait');
+    await sleep(200);
+    P = await layoutOf(page, 'm-portrait');
+    await page.mouse.click(...center(P.ctl.speed.rect));
+    ck(await page.waitForSelector('.vpl-panel-speed', { timeout: 3000 }).then(() => true, () => false), 'panels: the speed button opens its menu again');
+    await page.mouse.move(900, 400);
+    await page.mouse.wheel(0, 60);
+    await sleep(400);
+    const near = await page.evaluate((s) => {
+        const m = document.querySelector('.vpl-panel-speed');
+        const a = document.querySelector(`${s} .vpl-speed`).getBoundingClientRect();
+        if (!m) return { open: false };
+        const r = m.getBoundingClientRect();
+        return { open: true, gapAbove: a.top - r.bottom, gapBelow: r.top - a.bottom };
+    }, sel);
+    ck(near.open && (Math.abs(near.gapAbove - 6) < 1.5 || Math.abs(near.gapBelow - 6) < 1.5), 'panels (positive control): a small scroll keeps the speed menu open, still against its button', JSON.stringify(near));
+    await page.mouse.wheel(0, 900);
+    await sleep(500);
+    const far = await page.evaluate((s) => ({
+        open: !!document.querySelector('.vpl-panel-speed'),
+        anchorTop: document.querySelector(`${s} .vpl-speed`).getBoundingClientRect().top,
+    }), sel);
+    ck(!far.open && far.anchorTop < 0, 'panels: scrolled until the speed button is out of sight, the menu closes (not pinned to the window edge)', JSON.stringify(far));
+    await shot(page, '42-panels-after-scroll');
     await ctx.close();
 }
 

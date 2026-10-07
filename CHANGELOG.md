@@ -13,9 +13,15 @@ Videos get volume, speed and full-screen buttons at every size
   - A video's volume works with **Settings → Voice & Video → Output Volume**: the video's slider sets its share of what Output Volume allows (at 50 % Output Volume, a video at 100 % plays at half), and moving Output Volume reaches a video that is already playing. Videos used to ignore Output Volume.
   - The level you set is where the next video starts, until you close the app; a speed you choose stays with that video. Nothing is saved.
   - With the player focused: **Space** or **K** play/pause, **← →** skip 5 seconds, **↑ ↓** volume, **M** mute, **F** full screen, **Esc** leaves full screen.
-  - On a phone, tap the picture to show or hide the controls (a tap on the picture never starts the video; the round button in the middle does), they hide by themselves while it plays, and scrolling the chat over a video no longer moves its timeline.
-  - Full screen fills the screen in a browser and the whole window in the desktop app. In the Android app it fills the app (turn the phone sideways for a landscape picture); **Back** leaves full screen with the next Android app install — with only the in-app update, Back leaves the app as before, so use the full-screen button to come back out.
+  - On a phone, tap the picture to show or hide the controls (a tap on the picture never starts the video; the round button in the middle does), they hide by themselves while it plays, and scrolling the chat over a video no longer moves its timeline. A small or very wide video gets a slightly taller box on a phone, with black bars above and below, so its buttons fit on one row and the round Play button stays clear of the timeline.
+  - Full screen fills the screen in a browser and the whole window in the desktop app. In the Android app it fills the whole screen: the status bar and the navigation bar step aside until you leave it (a swipe from the edge brings them back). Turn the phone sideways for a landscape picture. **Back** leaves full screen with the next Android app install — with only the in-app update, Back leaves the app as before, so use the full-screen button to come back out.
+  - In the Android app, a video you have not played yet is black with Púca's Play button, instead of a grey picture with a second play symbol drawn under it.
+  - The volume and speed panels close when you go full screen, press **Tab** out of them, or scroll the chat until their button is out of sight, and a click on the picture that closes one does not also start the video.
   - Comes with the in-app update on Android and the web app, and with the next desktop update.
+
+### Fixed
+
+- **Esc always takes back remote control of this computer**, even while you are in a video's speed or volume panel, in a video's full screen, or making a drawing in a note or a task — places that use Esc themselves. Before, the first Esc there only closed the panel (or the drawing) and the other person kept control until a second one. With the next desktop update.
 
 ## 0.9.836 — 2026-10-07
 
