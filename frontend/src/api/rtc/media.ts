@@ -506,7 +506,15 @@ export class MediaManager {
         }
         const newAudio = mic.getAudioTracks()[0];
         if (!newAudio) return null;
-        newAudio.enabled = wasEnabled;
+        // The mute/PTT gate as it is NOW, not as it was when the open began:
+        // a mute or a push-to-talk release during the open (getUserMedia and
+        // the graph build — seconds for a Bluetooth hands-free open, and a
+        // default-follow starts it at whatever moment the OS moves) reached
+        // the track still in the stream, the old one. Stamping the start's
+        // value put a live mic on every mesh sender and into the SFU
+        // publication until VoicePanel re-asserted the gate after the swap.
+        const gateNow = streamAtStart.getAudioTracks()[0] ?? oldAudio;
+        newAudio.enabled = gateNow ? gateNow.enabled : wasEnabled;
         this.noMic = false; // we have a real mic again
 
         // Re-arm the device watch on the fresh capture. rawMic's current audio

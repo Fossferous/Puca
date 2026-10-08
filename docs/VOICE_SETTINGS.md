@@ -137,12 +137,15 @@ Browsers protect user privacy by not exposing device names until microphone perm
   Windows, or an app such as a headset switcher does it for you, or Windows
   does when a headset connects): on **Default**, the call moves to the new
   default about a second after the change, with no rejoin. You stay muted if
-  you were muted, push-to-talk stays push-to-talk, and your noise suppression,
-  echo cancellation and gain carry over. The browser itself never moves a
-  microphone that is already open, which is why this needs doing at all. If
-  the new default cannot be opened (another app holds it exclusively), the
-  call keeps the microphone it had. The same move is followed once; a default
-  that keeps changing is followed at most every 3 seconds.
+  you were muted (also if you mute while it is switching), push-to-talk stays
+  push-to-talk, and your noise suppression, echo cancellation and gain carry
+  over. The browser itself never moves a microphone that is already open,
+  which is why this needs doing at all. If the new default cannot be opened
+  (another app holds it exclusively), the call keeps the microphone it had.
+  A move between two inputs of one sound card (say *Microphone* and *Line In*)
+  is followed like any other, and a headset the call moved to that drops out
+  and comes back as the default is followed back. A default that keeps
+  changing is followed at most every 3 seconds.
 - **Your microphone disappears** (a Bluetooth headset goes out of range, a USB
   mic is unplugged): the call switches to the system default; if there is no
   microphone at all you stay in the call listen-only, and it reconnects by

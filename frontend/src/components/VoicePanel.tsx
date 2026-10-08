@@ -2236,13 +2236,11 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             })
             .then(() => {
                 // Re-assert the gate on the NEW track. reacquireAudioTrack
-                // snapshots `enabled` from the old track BEFORE its awaits
-                // (getUserMedia + an RNNoise wasm build — seconds), then stamps
-                // that stale value onto the replacement. Any mute, unmute, PTT
-                // press or release during that window was applied to a track
-                // that gets thrown away, so without this the mic could come
-                // back open while the UI says muted (or stay shut during a PTT
-                // hold). applyMicGate reads the CURRENT state.
+                // already stamps it with the gate as it stood at the swap (a
+                // mute or PTT change during its awaits went to the old track,
+                // which it reads), so this is the backstop: a re-acquire out
+                // of listen-only had no old track to read, and applyMicGate
+                // reads the CURRENT state from the panel itself.
                 applyMicGate();
                 return { ok: true, swapped } as MicRestartOutcome;
             })

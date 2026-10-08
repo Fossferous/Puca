@@ -33,7 +33,8 @@
  * only chased a capture whose deviceId was concrete — and on Chromium
  * desktop it is the literal string 'default', so it never did. The check is
  * now checkDefaultMoved(): the capture's groupId (fixed when it opened)
- * against the groupId the 'default' entry names NOW.
+ * against the groupId the 'default' entry names NOW, and, inside one group
+ * (two inputs of one sound card share it), the device names.
  *
  * Restarts go through VoicePanel's applyNoiseModeLive (re-acquire ->
  * replaceTrack on every mesh sender -> SFU republish -> re-assert the
@@ -43,14 +44,19 @@
  * the old device is still connected and working, so failing to move must
  * not cost the member their mic.
  *
- * NEVER LOOPS: a default-follow happens once per distinct default (the
- * entry's group + label), so a capture that can never match what the entry
- * says (an engine reporting groups inconsistently) costs one restart, not
- * one per event; and two follows are at least FOLLOW_MIN_GAP_MS apart, the
- * later one re-checked when the gap ends. The one exception is a follow that
- * could not OPEN the new default (another app holding it exclusively): that
- * is retried on a later device event, at most every FOLLOW_RETRY_MS, since
- * nothing changed and the device may have been freed since.
+ * NEVER LOOPS: a distinct default (the entry's group + label) is followed
+ * once for as long as the call is still on the capture that follow left it
+ * on, so a capture that can never match what the entry says (an engine
+ * reporting groups inconsistently) costs one restart, not one per event; a
+ * follow still running is never started again; and two follows are at least
+ * FOLLOW_MIN_GAP_MS apart, the later one re-checked when the gap ends. Once
+ * something else has moved the capture (a device-lost restart, the member's
+ * own Settings), the same default is a new decision: a headset that was
+ * followed, dropped out of range and came back as the default is followed
+ * again. A follow that could not OPEN the new default (another app holding it
+ * exclusively) is retried on a later device event, at most every
+ * FOLLOW_RETRY_MS, since nothing changed and the device may have been freed
+ * since.
  */
 import type { MicReacquireOptions, RawMicState } from './media';
 
@@ -94,6 +100,20 @@ export function plainLabel(label: string | undefined | null): string {
     return (m ? m[1] : l) || '(unnamed)';
 }
 
+/**
+ * Do two labels name the same device? Chromium labels the 'default' entry
+ * `<"Default", localised> - <device>` (AudioDeviceDescription::
+ * GetDefaultDeviceName), and a capture's label is the label its entry had
+ * when it opened (measured in headless Edge: identical, for 'default' and for
+ * a concrete device). So one device can be spelled with the prefix on one
+ * side and without it on the other, in any language; both spellings count as
+ * the same device, which keeps a different spelling from ever reading as a
+ * move.
+ */
+export function sameDeviceLabel(a: string, b: string): boolean {
+    return a === b || a.endsWith(` - ${b}`) || b.endsWith(` - ${a}`);
+}
+
 /** Which pseudo-device the member's input setting follows: 'default' for
  *  Default (`selection` null — selectedInputDeviceId's spelling of it),
  *  'communications' when they picked Chromium's Communications entry
@@ -110,11 +130,15 @@ export function followedPseudo(selection: string | null): PseudoInput | null {
  * Chromium desktop (WebView2 included) reports a capture of the 'default'
  * pseudo-device with deviceId 'default' and the groupId the entry had when
  * it opened, and the 'default' entry shares its groupId with the concrete
- * device it aliases. So the groups are the comparison; labels are compared
- * only when an engine gives no groups. An engine that opens the CONCRETE
- * device for a default request is compared through the alias instead.
- * Anything that cannot be compared is "not moved": a missed follow costs
- * what it cost before, a false one swaps a working mic for nothing.
+ * device it aliases. So the groups are the comparison. A group is not one
+ * input, though: Chromium gives an input the group of its controller's
+ * matching output, so 'Microphone' and 'Line In' on one codec, or the inputs
+ * of one USB interface, share it. Inside one group the labels decide
+ * (sameDeviceLabel), and they decide alone when an engine gives no groups.
+ * An engine that opens the CONCRETE device for a default request is compared
+ * through the alias instead (the one the entry names, when its group holds
+ * several). Anything that cannot be compared is "not moved": a missed follow
+ * costs what it cost before, a false one swaps a working mic for nothing.
  */
 export function checkDefaultMoved(
     selection: string | null,
@@ -128,25 +152,26 @@ export function checkDefaultMoved(
     const key = `${pseudo}|${entry.groupId}|${entry.label}`;
     const to = plainLabel(entry.label);
     const from = plainLabel(capture.label);
+    const same = { moved: false, why: 'still the same device' } as const;
     if (capture.deviceId === pseudo) {
+        const capLabel = capture.label ?? '';
+        const named = !!capLabel && !!entry.label;
         if (capture.groupId && entry.groupId) {
-            return capture.groupId === entry.groupId
-                ? { moved: false, why: 'still the same device' }
-                : { moved: true, pseudo, from, to, key };
+            if (capture.groupId !== entry.groupId) return { moved: true, pseudo, from, to, key };
+            return named && !sameDeviceLabel(capLabel, entry.label) ? { moved: true, pseudo, from, to, key } : same;
         }
-        if (capture.label && entry.label) {
-            return capture.label === entry.label
-                ? { moved: false, why: 'still the same device' }
-                : { moved: true, pseudo, from, to, key };
-        }
+        if (named) return sameDeviceLabel(capLabel, entry.label) ? same : { moved: true, pseudo, from, to, key };
         return { moved: false, why: 'the capture names no group or label to compare' };
     }
     if (capture.deviceId && !isPseudo(capture.deviceId)) {
         if (!entry.groupId) return { moved: false, why: `the '${pseudo}' entry names no group` };
         const aliases = inputs.filter(d => !isPseudo(d.deviceId) && d.groupId === entry.groupId);
         if (aliases.length === 0) return { moved: false, why: `the '${pseudo}' entry names no listed device` };
-        if (aliases.some(d => d.deviceId === capture.deviceId)) return { moved: false, why: 'still the same device' };
-        return { moved: true, pseudo, from, to: plainLabel(aliases[0].label), key };
+        // Several inputs in that group: the one the entry names, when a name says which.
+        const byName = entry.label ? aliases.filter(d => !!d.label && sameDeviceLabel(d.label, entry.label)) : [];
+        const target = byName.length ? byName : aliases;
+        if (target.some(d => d.deviceId === capture.deviceId)) return same;
+        return { moved: true, pseudo, from, to: plainLabel(target[0].label), key };
     }
     return { moved: false, why: `the capture is not on '${pseudo}'` };
 }
@@ -198,6 +223,12 @@ export interface MicWatchdogDeps {
 
 type Restart = { reason: string; keepOld: boolean; from?: string; to?: string; key?: string };
 
+/** Which capture this is, for the once-per-default rule: the device it
+ *  opened, as it opened it. None of the three changes while it lives; any
+ *  re-open onto another device (a lost-device restart, Settings) changes it. */
+const captureId = (c: RawMicState | null): string =>
+    c ? `${c.deviceId ?? ''}|${c.groupId ?? ''}|${c.label ?? ''}` : '';
+
 /** Start watching; returns the disposer. */
 export function startMicDeviceWatchdog(d: MicWatchdogDeps): () => void {
     const now = d.now ?? (() => Date.now());
@@ -206,11 +237,17 @@ export function startMicDeviceWatchdog(d: MicWatchdogDeps): () => void {
     let burstStart: number | null = null;
     let heard = { devicechange: 0, windows: 0 };
     let lastNative: NativeDefaultChange | null = null;
-    let running = false;
+    /** The restart in flight, if any. */
+    let current: Restart | null = null;
     let queued: Restart | null = null;
     let lastMuteRestart = -Infinity;
     let lastFollowAt = -Infinity;
     let lastFollowKey: string | null = null;
+    /** The capture lastFollowKey's follow left the call on (the new one, or
+     *  the old one it kept), as captureId() spells it; null until that
+     *  follow has finished. The once-per-default rule holds only while the
+     *  call is still on it. */
+    let lastFollowCapture: string | null = null;
     /** lastFollowKey's attempt could not open the new default. */
     let lastFollowFailed = false;
     let evaluating = false;
@@ -218,24 +255,28 @@ export function startMicDeviceWatchdog(d: MicWatchdogDeps): () => void {
 
     const restartMic = (r: Restart) => {
         if (disposed || !d.inVoice()) return;
-        if (running) {
+        if (current) {
             // At most one queued. Keep the old capture only if EVERY request
             // merged into it was a default-follow: a lost device has nothing
-            // left to keep.
+            // left to keep. Two follows merge into the later one, whose
+            // default is the one the call should end on.
             queued = queued
-                ? { ...(r.keepOld ? queued : r), keepOld: queued.keepOld && r.keepOld }
+                ? { ...(r.keepOld && !queued.keepOld ? queued : r), keepOld: queued.keepOld && r.keepOld }
                 : r;
             return;
         }
-        running = true;
+        current = r;
         const t0 = now();
         Promise.resolve(d.restartMic({ keepOldOnFailure: r.keepOld }))
             .then(outcome => {
                 const ms = Math.round(now() - t0);
                 const after = d.rawMic();
                 if (r.reason === 'default-moved') {
-                    // Only a follow that never opened is worth another try.
-                    if (r.key === lastFollowKey) lastFollowFailed = !!outcome && !outcome.ok && outcome.kept === true;
+                    if (r.key === lastFollowKey) {
+                        // Only a follow that never opened is worth another try.
+                        lastFollowFailed = !!outcome && !outcome.ok && outcome.kept === true;
+                        lastFollowCapture = captureId(after);
+                    }
                     if (!outcome) d.log(`[mic] default input changed: ${r.from} -> ${r.to}; not re-acquired (left the call or no SPEAK)`);
                     else if (!outcome.ok) {
                         d.log(outcome.kept
@@ -253,7 +294,7 @@ export function startMicDeviceWatchdog(d: MicWatchdogDeps): () => void {
             })
             .catch(() => { /* restartMic reports its own failures */ })
             .finally(() => {
-                running = false;
+                current = null;
                 const q = queued;
                 queued = null;
                 if (q && !disposed) restartMic(q);
@@ -355,9 +396,18 @@ export function startMicDeviceWatchdog(d: MicWatchdogDeps): () => void {
                 note(`${inputs.length} inputs; ${pseudo} -> ${target}; capturing ${capName}: ${v.why}`);
                 return;
             }
-            if (v.key === lastFollowKey && !(lastFollowFailed && now() - lastFollowAt >= FOLLOW_RETRY_MS)) {
+            if ([current, queued].some(r => r?.reason === 'default-moved' && r.key === v.key)) {
+                note(`${pseudo} -> ${target}; capturing ${capName}: already following this default, its re-acquire is still running`);
+                return;
+            }
+            // Once per default, but only while the call is still on what that
+            // follow left it on: once a lost-device restart or Settings has
+            // moved the capture, following the same default again is a new
+            // decision, not a loop.
+            if (v.key === lastFollowKey && captureId(cap) === lastFollowCapture
+                && !(lastFollowFailed && now() - lastFollowAt >= FOLLOW_RETRY_MS)) {
                 note(`${pseudo} -> ${target}; capturing ${capName}: `
-                    + (lastFollowFailed ? `it would not open ${Math.round((now() - lastFollowAt) / 1000)} s ago; retrying after ${FOLLOW_RETRY_MS / 1000} s` : 'already followed this default once, not again'));
+                    + (lastFollowFailed ? `it would not open ${Math.round((now() - lastFollowAt) / 1000)} s ago; retrying after ${FOLLOW_RETRY_MS / 1000} s` : 'already followed this default once and still on what that opened, not again'));
                 return;
             }
             const wait = lastFollowAt + FOLLOW_MIN_GAP_MS - now();
@@ -367,6 +417,7 @@ export function startMicDeviceWatchdog(d: MicWatchdogDeps): () => void {
                 return;
             }
             lastFollowKey = v.key;
+            lastFollowCapture = null;
             lastFollowAt = now();
             lastFollowFailed = false;
             d.log(`[mic] devices changed (${what || 'window visible again'}): ${pseudo} -> ${target}; capturing ${capName}: the default moved, following it`);
