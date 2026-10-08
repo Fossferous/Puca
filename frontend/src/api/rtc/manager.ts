@@ -4,7 +4,7 @@ import {
     CTL_STATE_LABEL, CTL_STREAM_ID, forgetControlChannels, registerControlChannel,
 } from './controlDc';
 import { withRelayOnlyIfRequested } from '../iceConfig';
-import { MediaManager } from './media';
+import { MediaManager, type MicReacquireOptions } from './media';
 import { getActiveIdentity, deriveMediaKey, mediaReadyTag, deriveMediaSessionKey, generateControlEphemeral } from '../e2ee';
 import { resolvePinnedIdentityKey } from '../keyVerification';
 import { registerScreenReceiver } from './receiverLatency';
@@ -959,18 +959,20 @@ export class WebRTCManager {
     }
 
     /** Re-acquire the mic with the current noise-suppression mode and swap it
-     *  onto every peer (used when the user changes the mode while in voice). */
-    async reapplyNoiseMode(): Promise<void> {
+     *  onto every peer (used when the user changes the mode while in voice,
+     *  and by the device watchdog). Resolves true when a new track went in;
+     *  rejects when keepOldOnFailure kept the old one (see MediaManager). */
+    async reapplyNoiseMode(opts?: MicReacquireOptions): Promise<boolean> {
         // Serialize: two rapid mode changes must not interleave their Web Audio
         // graph builds/teardowns (module-level graph state in noiseFilter.ts).
-        const run = this.noiseSwapChain.then(() => this.doReapplyNoiseMode());
-        this.noiseSwapChain = run.catch(() => undefined);
+        const run = this.noiseSwapChain.then(() => this.doReapplyNoiseMode(opts));
+        this.noiseSwapChain = run.then(() => undefined, () => undefined);
         return run;
     }
 
-    private async doReapplyNoiseMode(): Promise<void> {
-        const res = await this.media.reacquireAudioTrack();
-        if (!res) return;
+    private async doReapplyNoiseMode(opts?: MicReacquireOptions): Promise<boolean> {
+        const res = await this.media.reacquireAudioTrack(opts);
+        if (!res) return false;
         const { oldTrack, newTrack } = res;
         // Replace the MIC sender only, matched by track identity — never by
         // kind: a screen share with audio adds a second audio sender whose
@@ -983,6 +985,7 @@ export class WebRTCManager {
                 senders.find(s => s.track?.kind === 'audio' && !screenAudio.has(s.track));
             if (micSender) await micSender.replaceTrack(newTrack).catch(() => { /* peer gone */ });
         }
+        return true;
     }
 
     setOnRemoteStream(callback: RemoteStreamCallback) { this.onRemoteStream = callback; }

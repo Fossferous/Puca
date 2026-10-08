@@ -148,6 +148,13 @@ sysinfo = "0.32"
 # install left behind (needed in the LITE build especially).
 # Win32_Media_Audio_Endpoints = IAudioEndpointVolume for mic_levels.rs, which
 # only READS each microphone's Windows level into puca.log (never sets it).
-windows = { version = "0.58", features = ["Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_Devices_Display", "Win32_System_Com", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_System_SystemInformation", "Win32_Security_Cryptography", "Win32_Security", "Win32_System_Shutdown", "Win32_System_RemoteDesktop", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Services"] }
+# "implement" + Win32_UI_Shell_PropertiesSystem = the IMMNotificationClient
+# mic_default_watch.rs registers to hear the default microphone move (the
+# interface's OnPropertyValueChanged takes a PROPERTYKEY). Both are compile
+# features of the crate already in the lock. The #[implement] macro expands to
+# `::windows_core::` paths, hence windows-core below: the same 0.58 release the
+# windows crate already pulls in, named directly — no new crate in the lock.
+windows-core = "0.58"
+windows = { version = "0.58", features = ["implement", "Win32_UI_Shell_PropertiesSystem", "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_Devices_Display", "Win32_System_Com", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_System_SystemInformation", "Win32_Security_Cryptography", "Win32_Security", "Win32_System_Shutdown", "Win32_System_RemoteDesktop", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Services"] }
 
 

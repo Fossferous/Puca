@@ -126,8 +126,41 @@ Controls how loud other people's voices are to you:
 Browsers protect user privacy by not exposing device names until microphone permission is granted. Once you access Voice & Video settings, Púca requests permission and device names become visible.
 
 ### Choosing the Right Device
-- **Default**: Uses your system's default device (follows OS settings)
+- **Default**: Uses your system's default device (follows OS settings), and
+  keeps following it during a call — see below
 - **Specific Device**: Locks to that device even if system default changes
+- **Communications - …** (Chrome, Edge and the desktop app on Windows list it):
+  follows the Windows *communications* default instead, the same way
+
+### When your devices change during a call
+- **The system default moves** (you pick another default recording device in
+  Windows, or an app such as a headset switcher does it for you, or Windows
+  does when a headset connects): on **Default**, the call moves to the new
+  default about a second after the change, with no rejoin. You stay muted if
+  you were muted, push-to-talk stays push-to-talk, and your noise suppression,
+  echo cancellation and gain carry over. The browser itself never moves a
+  microphone that is already open, which is why this needs doing at all. If
+  the new default cannot be opened (another app holds it exclusively), the
+  call keeps the microphone it had. The same move is followed once; a default
+  that keeps changing is followed at most every 3 seconds.
+- **Your microphone disappears** (a Bluetooth headset goes out of range, a USB
+  mic is unplugged): the call switches to the system default; if there is no
+  microphone at all you stay in the call listen-only, and it reconnects by
+  itself when one returns.
+- **The device you chose comes back**: the call moves back to it.
+- Nothing else is followed: a device being plugged in or removed that is not
+  the default you are on changes nothing, and neither does any change while
+  **Specific Device** is chosen and that device is working.
+- The desktop app records each of these in its log
+  (`%LOCALAPPDATA%\com.sovereign.chat\logs\puca.log`): a
+  `[mic] Windows default input changed` line whenever Windows moves a default,
+  a `[mic] devices changed (…)` line during a call saying what the default is,
+  what the call is recording from and what it decided, and
+  `[mic] default input changed: <old> -> <new>; re-acquired in N ms` when the
+  call moves.
+- The **Mic Test** and voice-note recordings are not calls: they record from
+  whatever device they opened until they stop. Start them again to use a new
+  default.
 
 ---
 

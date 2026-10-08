@@ -27,6 +27,7 @@ const stripComments = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(
 const VP_RAW = read('components/VoicePanel.tsx');
 const VP = stripComments(VP_RAW);
 const CHAT = stripComments(read('components/Chat.tsx'));
+const WD = stripComments(read('api/rtc/micDeviceWatchdog.ts'));
 const GUIDE = readFileSync(join(here, '..', '..', '..', 'docs', 'USER_GUIDE.md'), 'utf8');
 
 /**
@@ -86,7 +87,7 @@ function voicePanelElement(code: string): string | null {
 
 interface Pin {
     name: string;
-    src: 'vp' | 'chat';
+    src: 'vp' | 'chat' | 'wd';
     holds: (code: string) => boolean;
     mutants: Array<[label: string, mutate: (code: string) => string]>;
 }
@@ -193,26 +194,39 @@ const PINS: Pin[] = [
         src: 'vp',
         holds: (c) => {
             const b = body(c, 'const applyNoiseModeLive = useCallback(');
-            return inOrder(b, 'if (speakDeniedRef.current) return Promise.resolve();', 'webrtcManager.reapplyNoiseMode()',
+            return inOrder(b, 'if (speakDeniedRef.current) return Promise.resolve(undefined);', 'webrtcManager.reapplyNoiseMode(opts)',
                 // A deny that lands while the re-acquire runs: no "mic died" notice.
-                '.then(() => {', 'if (speakDeniedRef.current) return;', 'if (!webrtcManager.isListenOnly()) {')
+                '.then((didSwap) => {', 'if (speakDeniedRef.current) return;', 'if (!webrtcManager.isListenOnly()) {')
                 && b!.includes('sfuMode && sfuManager.connected && !speakDeniedRef.current');
         },
         mutants: [
-            ['no early return', replaceNth('if (speakDeniedRef.current) return Promise.resolve();', '')],
+            ['no early return', replaceNth('if (speakDeniedRef.current) return Promise.resolve(undefined);', '')],
             ['a deny during the re-acquire runs the listen-only re-sync', replaceNth('                if (speakDeniedRef.current) return;', '')],
         ],
     },
     {
-        name: 'the device watchdog (onMicLost, evaluate) never restarts the mic of a member without SPEAK',
+        // The watchdog's own behaviour without SPEAK is tested in
+        // micDefaultFollow.test.ts; this pins that the panel hands it the
+        // real answer.
+        name: 'VoicePanel starts the device watchdog with the real SPEAK state and the guarded restart',
         src: 'vp',
-        holds: (c) => inOrder(body(c, 'const onMicLost = '), 'if (webrtcManager.isSpeakDenied()) return;', 'restartMic()')
-            // The OUTPUT half still runs for them (they are listening); only the input half stops.
-            && inOrder(body(c, 'const evaluate = '), 'applyOutputDevice(', 'if (webrtcManager.isSpeakDenied()) return;',
-                'webrtcManager.rawMicState()', 'restartMic()'),
+        holds: (c) => inOrder(c, 'startMicDeviceWatchdog({', 'isSpeakDenied: () => webrtcManager.isSpeakDenied(),',
+            'restartMic: (opts) => applyNoiseModeLiveRef.current(opts),'),
         mutants: [
-            ['onMicLost unguarded', replaceNth('if (webrtcManager.isSpeakDenied()) return;', '', 1)],
-            ['evaluate unguarded', replaceNth('if (webrtcManager.isSpeakDenied()) return;', '', 2)],
+            ['SPEAK always allowed', replaceNth('isSpeakDenied: () => webrtcManager.isSpeakDenied(),', 'isSpeakDenied: () => false,')],
+            ['the watchdog never started', replaceNth('startMicDeviceWatchdog({', 'void ({')],
+        ],
+    },
+    {
+        name: 'the device watchdog (onMicLost, evaluate) never restarts the mic of a member without SPEAK',
+        src: 'wd',
+        holds: (c) => inOrder(body(c, 'const onMicLost = '), 'if (d.isSpeakDenied()) return;', 'restartMic(')
+            // The OUTPUT half still runs for them (they are listening); only the input half stops.
+            && inOrder(body(c, 'const evaluate = '), 'd.rerouteOutputs();', 'if (d.isSpeakDenied())',
+                'd.rawMic()', 'restartMic('),
+        mutants: [
+            ['onMicLost unguarded', replaceNth('if (d.isSpeakDenied()) return;', '', 1)],
+            ['evaluate unguarded', replaceRe(/if \(d\.isSpeakDenied\(\)\) \{ note\([^;]*\); return; \}/, '')],
         ],
     },
     {
@@ -298,7 +312,7 @@ describe('the pin helpers (positive controls)', () => {
 });
 
 describe.each(PINS)('$name', ({ src, holds, mutants }) => {
-    const code = src === 'vp' ? VP : CHAT;
+    const code = src === 'vp' ? VP : src === 'wd' ? WD : CHAT;
 
     it('holds in the source', () => {
         expect(holds(code)).toBe(true);

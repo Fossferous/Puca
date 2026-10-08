@@ -25,6 +25,9 @@ import { goLiveBegin, goLiveMark, goLiveEnd } from '../api/goLiveTiming';
 import { useShareStarting } from './useShareStarting';
 import { noteRender, startHealthLog, stopHealthLog } from '../api/healthLog';
 import { attachDfPause } from '../api/dfPause';
+import { startMicDeviceWatchdog, describeMicError, type MicRestartOutcome } from '../api/rtc/micDeviceWatchdog';
+import type { MicReacquireOptions } from '../api/rtc/media';
+import { logMicDiag, subscribeNativeMicDefault } from '../api/micDiag';
 import { keepDetail, keepSummary } from './stableState';
 import { type NoiseSuppressionMode, type NoiseModeChange, NOISE_MODE_EVENT, getNoiseSuppressionMode, setNoiseSuppressionMode, changeNoiseModeLive, modeUsesWebAudio, rawInputHasHadSignal, hasLiveGainStage, isDeepFilterGateOpen, selectedInputDeviceId } from '../api/noiseFilter';
 import { registerHold, unregisterHold, registerPress, unregisterPress, startNativeFeed, stopNativeFeed, setNativeFeedHost } from '../api/hotkeys';
@@ -2172,13 +2175,24 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // pipeline, swapped into the mesh senders and (on SFU) republished. Also
     // the recovery path the audio-device watchdog below reuses — "restart the
     // mic through the current pipeline" is the same operation either way.
-    // Returns the whole chain so the watchdog can coalesce restarts.
-    const applyNoiseModeLive = useCallback(() => {
-        if (!isInVoiceRef.current) return Promise.resolve();
+    // Returns the whole chain so the watchdog can coalesce restarts, and
+    // what it came to so the watchdog can log it (undefined: not attempted).
+    // `opts.keepOldOnFailure` is the watchdog following a moved OS default:
+    // the old capture still works, so a new one that will not open keeps it
+    // (the re-acquire rejects and nothing below runs) rather than going
+    // listen-only.
+    const applyNoiseModeLive = useCallback((opts?: MicReacquireOptions): Promise<MicRestartOutcome | undefined> => {
+        if (!isInVoiceRef.current) return Promise.resolve(undefined);
         // No SPEAK: there is no mic to rebuild, and none may be opened.
-        if (speakDeniedRef.current) return Promise.resolve();
-        return webrtcManager.reapplyNoiseMode()
-            .then(() => {
+        if (speakDeniedRef.current) return Promise.resolve(undefined);
+        let swapped = false;
+        // Whether a failure came from opening the new mic (the old one is
+        // still the call's) or from publishing it afterwards.
+        let opened = false;
+        return webrtcManager.reapplyNoiseMode(opts)
+            .then((didSwap) => {
+                swapped = didSwap;
+                opened = true;
                 // SPEAK withdrawn while the re-acquire was running: the mic is
                 // closed on purpose (denySpeakLocally owns the UI), so none of
                 // the "mic came back" / "mic died" re-sync below applies.
@@ -2230,8 +2244,12 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 // back open while the UI says muted (or stay shut during a PTT
                 // hold). applyMicGate reads the CURRENT state.
                 applyMicGate();
+                return { ok: true, swapped } as MicRestartOutcome;
             })
-            .catch(err => console.warn('[VoicePanel] Failed to apply noise mode live:', err));
+            .catch((err): MicRestartOutcome => {
+                console.warn('[VoicePanel] Failed to apply noise mode live:', err);
+                return { ok: false, error: describeMicError(err), kept: !opened };
+            });
     }, [sfuMode, broadcastStatus, applyMicGate]);
     // Ref for the settingsChanged listener above, which is declared earlier in
     // the file (and deliberately mounted once).
@@ -2343,110 +2361,25 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     }, []);
 
     // ── Audio-device watchdog ────────────────────────────────────────────
-    // A Bluetooth headset walking out of range kills the call's audio both
-    // ways and nothing above notices: the raw capture track dies inside the
-    // noise graph (the PUBLISHED Web Audio track keeps emitting silence
-    // forever), and the <audio> sinks point at a device that no longer
-    // exists. Leaving and rejoining was the only fix. Three signals feed one
-    // recovery:
-    //   - 'sovereign:mic-device-lost' (media.ts): the raw track ended, or sat
-    //     muted for 3 s → restart the mic through the current pipeline NOW
-    //     (getMicStream falls back to the OS default, or degrades to
-    //     listen-only when nothing can be opened).
-    //   - devicechange: a device (re)appeared or vanished → re-route every
-    //     playing element to the chosen sink, and restart the mic if we are
-    //     listen-only, holding a dead/muted track, or holding the WRONG
-    //     device (the selected one returned, or the OS default moved back to
-    //     the headset — chase it; Chromium never re-points a live capture).
-    //   - visibilitychange → visible: mobile can park capture and swallow
-    //     device events while backgrounded; re-evaluate on return.
-    // Restarts reuse applyNoiseModeLive (re-acquire → replaceTrack on every
-    // mesh sender → SFU republish → re-assert the mute/PTT gate) and are
-    // coalesced: one in flight, at most one queued.
-    useEffect(() => {
-        let debounce: ReturnType<typeof setTimeout> | null = null;
-        let running = false;
-        let queued = false;
-        let lastMuteRestart = 0;
-        const restartMic = () => {
-            if (!isInVoiceRef.current) return;
-            if (running) { queued = true; return; }
-            running = true;
-            Promise.resolve(applyNoiseModeLiveRef.current()).finally(() => {
-                running = false;
-                if (queued) { queued = false; restartMic(); }
-            });
-        };
-        const onMicLost = (e: Event) => {
-            if (webrtcManager.isSpeakDenied()) return; // nothing may re-open the mic
-            const kind = (e as CustomEvent<{ kind?: string }>).detail?.kind;
-            if (kind === 'muted') {
-                // A wedged-but-still-registered device can hand back another
-                // born-muted track; don't re-open it in a tight loop. Real
-                // removals fire 'ended' or devicechange, which stay
-                // unthrottled.
-                const now = Date.now();
-                if (now - lastMuteRestart < 15000) return;
-                lastMuteRestart = now;
-            }
-            restartMic();
-        };
-        const evaluate = async () => {
-            if (!isInVoiceRef.current) return;
-            // OUTPUT half: chase the chosen sink. applyOutputDevice routes
-            // back to it when it reappears and falls back to the default when
-            // it is gone — either way the element keeps playing somewhere.
-            document.querySelectorAll('audio[id^="audio-"]').forEach(el =>
-                applyOutputDevice(el as HTMLAudioElement));
-            // INPUT half. Not for a member without SPEAK: "listen-only, so
-            // retry the mic" is exactly the loop that must never run for them.
-            if (webrtcManager.isSpeakDenied()) return;
-            const state = webrtcManager.rawMicState();
-            let restart = webrtcManager.isListenOnly() || !state || state.ended || state.muted;
-            if (!restart && state) {
-                try {
-                    const inputs = (await navigator.mediaDevices.enumerateDevices())
-                        .filter(d => d.kind === 'audioinput');
-                    const selected = selectedInputDeviceId();
-                    if (selected) {
-                        // The device the user chose is back, but we are still
-                        // holding the fallback we degraded to while it was away.
-                        restart = !!state.deviceId && state.deviceId !== selected
-                            && inputs.some(d => d.deviceId === selected);
-                    } else if (state.deviceId && state.deviceId !== 'default' && state.groupId) {
-                        // On "Default": the OS default moved (the headset came
-                        // back and reclaimed it) while our capture stayed put.
-                        // Chromium's 'default' pseudo-entry shares its groupId
-                        // with the concrete device it aliases.
-                        const alias = inputs.find(d => d.deviceId === 'default');
-                        const concrete = alias && inputs.find(d =>
-                            d.deviceId !== 'default' && d.groupId === alias.groupId);
-                        restart = !!concrete && concrete.deviceId !== state.deviceId;
-                    }
-                } catch { /* can't enumerate — nothing to chase */ }
-            }
-            if (restart) restartMic();
-        };
-        const onDeviceChange = () => {
-            if (!isInVoiceRef.current) return;
-            if (debounce) clearTimeout(debounce);
-            // Windows fires several devicechange events per Bluetooth
-            // (dis)connect; let the churn settle, then act once.
-            debounce = setTimeout(() => { debounce = null; void evaluate(); }, 800);
-        };
-        const onVisible = () => {
-            if (document.visibilityState === 'visible') onDeviceChange();
-        };
-        window.addEventListener('sovereign:mic-device-lost', onMicLost);
-        navigator.mediaDevices?.addEventListener?.('devicechange', onDeviceChange);
-        document.addEventListener('visibilitychange', onVisible);
-        return () => {
-            window.removeEventListener('sovereign:mic-device-lost', onMicLost);
-            navigator.mediaDevices?.removeEventListener?.('devicechange', onDeviceChange);
-            document.removeEventListener('visibilitychange', onVisible);
-            if (debounce) clearTimeout(debounce);
-        };
-    }, []);
+    // A dead or vanished mic, a chosen device coming back, an OS default that
+    // moved while the call kept recording the old device, and the output
+    // sinks: micDeviceWatchdog.ts decides, applyNoiseModeLive restarts
+    // (re-acquire -> replaceTrack on every mesh sender -> SFU republish ->
+    // re-assert the mute/PTT gate). Mounted once; it reads live state through
+    // refs and never restarts the mic of a member without SPEAK.
+    useEffect(() => startMicDeviceWatchdog({
+        mediaDevices: navigator.mediaDevices,
+        inVoice: () => isInVoiceRef.current,
+        isSpeakDenied: () => webrtcManager.isSpeakDenied(),
+        isListenOnly: () => webrtcManager.isListenOnly(),
+        rawMic: () => webrtcManager.rawMicState(),
+        selectedInput: selectedInputDeviceId,
+        restartMic: (opts) => applyNoiseModeLiveRef.current(opts),
+        rerouteOutputs: () => document.querySelectorAll('audio[id^="audio-"]').forEach(el =>
+            applyOutputDevice(el as HTMLAudioElement)),
+        log: logMicDiag,
+        subscribeNative: isTauri() ? subscribeNativeMicDefault : undefined,
+    }), []);
 
     const leaveVoice = useCallback(() => {
         clearInactivity();

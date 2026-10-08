@@ -52,6 +52,27 @@ export function rmsAmplitude(samples: Float32Array): number {
 // them in a real browser. Re-exported for the callers that import them here.
 export { capWouldReduce, shareVideoConstraints } from './shareHealth';
 
+/** Device-level truth about the open microphone (MediaManager.rawMicState). */
+export type RawMicState = {
+    ended: boolean;
+    muted: boolean;
+    deviceId?: string;
+    groupId?: string;
+    /** The capture's own label, fixed when it opened: on Chromium a capture
+     *  of the OS default reads `Default - <device>`. For log lines. */
+    label?: string;
+};
+
+export type MicReacquireOptions = {
+    /**
+     * The capture being replaced is still healthy (the OS default moved and
+     * nothing died): if the new one cannot be opened, keep the old one live
+     * and throw, instead of going listen-only. A lost device has nothing to
+     * keep, so its restart leaves this off.
+     */
+    keepOldOnFailure?: boolean;
+};
+
 export class MediaManager {
     private localStream: MediaStream | null = null;
     private screenShareStream: MediaStream | null = null;
@@ -161,9 +182,9 @@ export class MediaManager {
     /**
      * State of the RAW capture track — device-level truth the published stream
      * cannot give (see rawMicTrack). Null when no capture is open (listen-only
-     * or not in voice). Backs the devicechange evaluation in VoicePanel.
+     * or not in voice). Backs the device watchdog (micDeviceWatchdog.ts).
      */
-    rawMicState(): { ended: boolean; muted: boolean; deviceId?: string; groupId?: string } | null {
+    rawMicState(): RawMicState | null {
         const t = this.rawMicTrack;
         if (!t) return null;
         let settings: MediaTrackSettings = {};
@@ -175,6 +196,7 @@ export class MediaManager {
             muted: t.muted === true,
             deviceId: settings.deviceId,
             groupId: settings.groupId,
+            label: typeof t.label === 'string' ? t.label : undefined,
         };
     }
 
@@ -416,15 +438,19 @@ export class MediaManager {
      * old and new tracks so callers can find the mic's RTCRtpSender by track
      * IDENTITY (never by kind — a screen share adds a second audio sender whose
      * game audio must not be clobbered) and `replaceTrack` it (seamless, no
-     * renegotiation). Lets a noise-mode change apply live mid-call.
+     * renegotiation). Lets a noise-mode change apply live mid-call, and is
+     * the device watchdog's restart (micDeviceWatchdog.ts).
      */
-    async reacquireAudioTrack(): Promise<{ oldTrack: MediaStreamTrack | null; newTrack: MediaStreamTrack } | null> {
+    async reacquireAudioTrack(opts?: MicReacquireOptions): Promise<{ oldTrack: MediaStreamTrack | null; newTrack: MediaStreamTrack } | null> {
         if (!this.localStream) return null;
         // SPEAK denied: every re-acquire path (noise mode, device watchdog,
         // settings) ends here, and none of them may open a mic.
         if (this.speakDenied) return null;
         const oldAudio = this.localStream.getAudioTracks()[0] ?? null;
         const wasEnabled = oldAudio?.enabled ?? true;
+        // The capture open NOW, for keepOldOnFailure: still live after a
+        // failed open means it is still worth keeping.
+        const rawAtStart = this.rawMicTrack;
 
         const mode = getNoiseSuppressionMode();
         const streamAtStart = this.localStream;
@@ -434,6 +460,15 @@ export class MediaManager {
         try {
             rawMic = await this.getMicStream(mode);
         } catch (err) {
+            // Following a moved OS default while the old device still works:
+            // nothing was touched yet (the graph is swapped only after a new
+            // capture exists), so the call keeps the old mic. Throw so the
+            // caller can say it did not move.
+            if (opts?.keepOldOnFailure && !this.noMic && rawAtStart
+                && rawAtStart === this.rawMicTrack && rawAtStart.readyState === 'live') {
+                console.warn('[WebRTC] Could not open the new default microphone — keeping the current one:', err);
+                throw err;
+            }
             // A noise-mode change must not blow up a listen-only client (or one
             // whose mic vanished mid-call) — stay listen-only instead.
             if (!isNoMicError(err)) throw err;

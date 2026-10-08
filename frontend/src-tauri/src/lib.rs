@@ -55,6 +55,7 @@ mod sidecar;
 // invoke as best-effort. stream_boost.rs depends on nothing gated.
 mod stream_boost;
 mod support_log;
+mod mic_default_watch;
 mod mic_levels;
 // NOT gated: stream pop-out windows are a viewing feature, in Lite too.
 mod popout;
@@ -1451,6 +1452,11 @@ pub fn run() {
             // hibernation writes RAM to disk. Best effort; the app is fine without it.
             session_events::windows_impl::start(app.handle().clone());
 
+            // The Windows default microphone moving (mic_default_watch.rs):
+            // logged, and told to the page, whose device watchdog follows it
+            // mid-call. Listens only; best effort, like the feed above.
+            mic_default_watch::start(app.handle().clone());
+
             // Tray icon. This is what makes a notification possible at all when
             // the window is closed: until now `close` ended the process, so
             // there was no socket, no MessageNotification, and nothing for the
@@ -1782,6 +1788,8 @@ pub fn run() {
                 // per-window Destroyed: the open pop-outs' size and place for
                 // this session are written out here or never.
                 popout::save_on_exit(handle);
+                // Unregister the default-microphone listener (bounded wait).
+                mic_default_watch::stop();
                 #[cfg(feature = "remote-control")]
                 {
                     remote_control::release_all_ordered();
