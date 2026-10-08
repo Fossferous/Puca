@@ -8,9 +8,9 @@ import { wsClient, type ServerMessage } from '../api/websocket';
 import { VoicePanel } from './VoicePanel';
 import { OwnVoiceBanner } from './OwnVoiceBanner';
 import { roomLeftNotice, type OwnVoiceState } from '../api/ownVoice';
-import { getVoiceUsersInRoom, globalVoiceUsers, globalCameraUsers, isUserStreaming, subscribeToStreamState, subscribeToVoiceUsers, getSelectedStreams, getStreamData, getAllStreamers, selectStream, deselectStream, upsertVoiceUser, carrySelfVoiceChoiceTo } from './voiceState';
+import { getVoiceUsersInRoom, globalVoiceUsers, globalCameraUsers, isUserStreaming, subscribeToStreamState, subscribeToVoiceUsers, getSelectedStreams, getStreamData, getAllStreamers, selectStream, deselectStream, upsertVoiceUser, getSelfVoiceChoice } from './voiceState';
 import { useStreamStore } from '../stores/streamStore';
-import type { VoiceUserStatus } from './voiceState';
+import type { VoiceUserStatus, SelfVoiceChoice } from './voiceState';
 import './FileUpload.css';
 import { StreamStage } from './StreamStage';
 import { VoiceStage } from './VoiceStage';
@@ -832,7 +832,10 @@ export function Chat({ onLogout }: ChatProps) {
     const [popupPosition, setPopupPosition] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
 
     // Voice channel state
-    const [currentVoiceChannel, setCurrentVoiceChannel] = useState<Channel | null>(null);
+    // `movedWith`: set only when a moderator's move put us here - the member's
+    // own mute/deafen from the call they were moved out of (VoicePanel's
+    // arrivalChoice). A channel the member picks never carries one.
+    const [currentVoiceChannel, setCurrentVoiceChannel] = useState<(Channel & { movedWith?: SelfVoiceChoice }) | null>(null);
     // Mirror for handlers that must read it SYNCHRONOUSLY, before an await can
     // let something else change it. See handleVoiceMoved.
     const currentVoiceChannelRef = useRef<Channel | null>(null);
@@ -2710,11 +2713,10 @@ export function Chat({ onLogout }: ChatProps) {
                 // The destination mounts a NEW voice panel, which used to join
                 // with a fresh, open microphone: a member who had muted (or
                 // deafened) themselves arrived live, by someone else's hand.
-                // Carry their own choice into that join (voiceState).
-                const cur = currentVoiceChannelRef.current;
-                if (cur === null || cur.id === payload.from_channel_id) {
-                    carrySelfVoiceChoiceTo(`voice_${target.id}`);
-                }
+                // Their own choice rides WITH the channel (`movedWith`, the
+                // panel's arrivalChoice), so the move and the carry are one
+                // decision: when the move is not applied, nothing is carried.
+                const movedWith = getSelfVoiceChoice();
                 setCurrentVoiceChannel(prev =>
                     // `prev === null` is accepted only because wasInSource was
                     // true: that is the SFU teardown above having beaten us to
@@ -2722,7 +2724,7 @@ export function Chat({ onLogout }: ChatProps) {
                     // up between the directive and this resolve is placed in the
                     // destination anyway — which is what the moderator asked for,
                     // and they can hang up again.
-                    (prev === null || prev.id === payload.from_channel_id) ? target : prev
+                    (prev === null || prev.id === payload.from_channel_id) ? { ...target, movedWith } : prev
                 );
                 showToast(`${payload.moved_by} moved you to ${target.name}`);
             }).catch((err: unknown) => {
@@ -5327,6 +5329,7 @@ export function Chat({ onLogout }: ChatProps) {
                             // itself is not swapped: the panel reads sfuMode once at join.
                             canSpeak={hasPerm((channels.find(c => c.id === currentVoiceChannel.id) ?? currentVoiceChannel).my_permissions, PERM.SPEAK)}
                             canConnect={hasPerm((channels.find(c => c.id === currentVoiceChannel.id) ?? currentVoiceChannel).my_permissions, PERM.CONNECT)}
+                            arrivalChoice={currentVoiceChannel.movedWith ?? null}
                             // Clips policy of the VOICE channel's server (docs/CLIPS.md) —
                             // not the viewed one; the default post target is the viewed
                             // channel only when it belongs to that server.

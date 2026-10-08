@@ -41,11 +41,13 @@ const NO_MIC_NOTICE = 'No microphone detected — you joined in listen-only mode
 /** Shown when the mic DIED mid-call (device unplugged / Bluetooth out of
  *  range) and no other input could be opened. The device watchdog retries
  *  automatically when one returns. */
-const MIC_LOST_NOTICE = 'Your microphone disconnected and no other input is available — nobody can hear you. It will reconnect automatically when a microphone returns, and you stay muted then if you muted.';
+const MIC_LOST_NOTICE = 'Your microphone disconnected and no other input is available — nobody can hear you. It reconnects by itself when a microphone returns, and you come back muted if you had muted or deafened.';
 /** The Mute button while there is no microphone (listen-only, not for lack
- *  of SPEAK): pressing it decides how the member comes back when one returns. */
+ *  of SPEAK, not in an AFK channel): pressing it decides how the member comes
+ *  back when one returns. Deafened, it is disabled (undeafen first). */
 const MIC_GONE_TITLE = 'No microphone detected — listen-only mode. Mute now to stay muted when it comes back';
 const MIC_GONE_MUTED_TITLE = 'No microphone detected — you stay muted when it comes back. Click to unmute';
+const MIC_GONE_DEAFENED_TITLE = 'No microphone detected — you are deafened, so you stay muted when it comes back';
 /** In the call without SPEAK (a role or channel permission): listen-only BY
  *  PERMISSION. Deliberately not NO_MIC_NOTICE — no microphone help can fix it. */
 const SPEAK_DENIED_NOTICE = "You don't have permission to speak in this channel. You can hear everyone; nobody can hear you.";
@@ -61,6 +63,7 @@ import { holdStreamDiag, releaseStreamDiag } from '../api/streamDiag';
 import { isTauri, isAndroidApp } from '../api/platform';
 import { SpeakGate, parseVoiceSpeakState } from '../api/rtc/speakGate';
 import { shouldTakeOver } from '../api/ownVoice';
+import { pressMute, pressDeafen, imposeMute, micBack, micOpen, UNMUTED, type SelfMute, type MuteConstraints } from '../api/rtc/selfMute';
 import { setVoiceKeepAlive, openMobileAppSettings } from '../api/mobileApp';
 import { phonePanelQuery } from '../utils/phonePanel';
 import { isTouchDevice } from './settingsModal.utils';
@@ -102,7 +105,7 @@ import { useDfSettledOffer, keepRnnoiseForSession, KEEP_RNNOISE_NOTICE } from '.
 import './VoicePanel.css';
 
 
-import { globalVoiceUsers, globalScreenSharers, globalCameraUsers, globalCameraStreams, setUserSpeaking, clearSpeaking, notifyVoiceUsersChange, registerStopScreenShareCallback, stopOwnScreenShare, setCurrentStreamingUser, setSelfInVoice, setSelfDeafened, publishSelfVoiceChoice, takeCarriedVoiceChoice, upsertVoiceUser, applyVoiceStatus, globalSelectedStreams, globalStreamData, notifyStreamStateChange, clearAllStreams, selectStream, deselectStream, subscribeToStreamState } from './voiceState';
+import { globalVoiceUsers, globalScreenSharers, globalCameraUsers, globalCameraStreams, setUserSpeaking, clearSpeaking, notifyVoiceUsersChange, registerStopScreenShareCallback, stopOwnScreenShare, setCurrentStreamingUser, setSelfInVoice, setSelfDeafened, publishSelfVoiceChoice, type SelfVoiceChoice, upsertVoiceUser, applyVoiceStatus, globalSelectedStreams, globalStreamData, notifyStreamStateChange, clearAllStreams, selectStream, deselectStream, subscribeToStreamState } from './voiceState';
 
 interface VoicePanelProps {
     roomId: string;
@@ -149,6 +152,11 @@ interface VoicePanelProps {
      *  behind the "more controls" chevron: measured, a sixth button in the
      *  collapsed bar pushed the mic under the "Encrypted" pill. */
     onOpenActivities?: () => void;
+    /** A move the member did not make brought them here (a moderator's Move
+     *  to): their own mute and deafen from the call they were moved out of.
+     *  The FIRST join attempt starts with them instead of an open microphone,
+     *  whatever becomes of it; absent for a join the member makes. */
+    arrivalChoice?: SelfVoiceChoice | null;
 }
 
 // Remote camera feeds used to render here in a floating `remote-cameras-grid`
@@ -172,7 +180,7 @@ function clipPresence(roomId: string): number[] {
     return [...ids];
 }
 
-export function VoicePanel({ roomId, channelName, currentUserId, currentUsername, memberAvatars: _memberAvatars, memberSounds, onDisconnect, serverRequireMediaE2ee = false, isAfkChannel = false, afkTimeoutMs = DEFAULT_AFK_TIMEOUT_MS, onInactive, sfuMode = false, clipPolicy, onOpenActivities, canSpeak = true, canConnect = true }: VoicePanelProps) {
+export function VoicePanel({ roomId, channelName, currentUserId, currentUsername, memberAvatars: _memberAvatars, memberSounds, onDisconnect, serverRequireMediaE2ee = false, isAfkChannel = false, afkTimeoutMs = DEFAULT_AFK_TIMEOUT_MS, onInactive, sfuMode = false, clipPolicy, onOpenActivities, arrivalChoice = null, canSpeak = true, canConnect = true }: VoicePanelProps) {
     noteRender('voicePanel');
     const [isInVoice, setIsInVoice] = useState(false);
     /** RIGHT-CLICK THE PANEL FOR DIAGNOSTICS.
@@ -410,6 +418,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     /** Mirrors `selfMuted`, written WITH it (never by an effect after the
      *  commit): the mic-back recovery reads it in the same tick. */
     const selfMutedRef = useRef(false);
+    /** The arrivalChoice prop, for the FIRST join attempt only (joinVoice
+     *  takes it; leaving drops it). Read once: the prop is fixed per mount. */
+    const arrivalChoiceRef = useRef<SelfVoiceChoice | null>(arrivalChoice);
     // In-app input — the browser/mobile stand-in for the OS idle probe (and
     // the only input signal a web build can see). A ref write per event; no
     // state, no re-renders, no throttling needed.
@@ -509,22 +520,22 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     useEffect(() => { isScreenSharingRef.current = isScreenSharing; }, [isScreenSharing]);
     useEffect(() => { listenOnlyRef.current = listenOnly; }, [listenOnly]);
     useEffect(() => { isCameraOnRef.current = isCameraOn; }, [isCameraOn]);
-    useEffect(() => {
-        isDeafenedRef.current = isDeafened;
-        setSelfDeafened(isDeafened);
-    }, [isDeafened]);
+    // isMutedRef / selfMutedRef / isDeafenedRef are written WITH their state,
+    // by setMute below, never by an effect after the commit: a handler that
+    // runs before the next render (two hotkeys in one task) must see the
+    // previous handler's result.
     // Gone with the panel (the call ended): nothing is deafened any more.
     useEffect(() => () => setSelfDeafened(false), []);
     // The member's own mute/deafen, for a moderator's move to carry into the
-    // destination's panel (voiceState carrySelfVoiceChoiceTo). Only while in
-    // voice: leaving resets both, and that reset must not overwrite what the
-    // member had chosen when a forced removal ended the call (see voiceState).
+    // destination's panel (Chat's `movedWith`, read through voiceState's
+    // getSelfVoiceChoice). Only while in voice: leaving resets both, and that
+    // reset must not overwrite what the member had chosen when a forced
+    // removal ended the call (see voiceState).
     useEffect(() => {
         if (isInVoice) publishSelfVoiceChoice({ muted: selfMuted, deafened: isDeafened });
     }, [isInVoice, selfMuted, isDeafened]);
     useEffect(() => { onInactiveRef.current = onInactive; }, [onInactive]);
     useEffect(() => { isAfkChannelRef.current = isAfkChannel; }, [isAfkChannel]);
-    useEffect(() => { isMutedRef.current = isMuted; }, [isMuted]);
 
     // --- Input mode: voice activity / push-to-talk / push-to-mute -----------
     // The HOLD key gates the transmitted track locally (track.enabled) without
@@ -543,19 +554,33 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // was verified live while the UI showed nothing).
     const [holdKeyDown, setHoldKeyDown] = useState(false);
 
-    /** Single authority over whether the mic track transmits. `mutedOverride`
-     *  lets toggleMute/toggleDeafen apply their NEW state before React commits
-     *  it to isMutedRef. */
-    const applyMicGate = useCallback((mutedOverride?: boolean) => {
-        if (listenOnlyRef.current) return; // no track to gate
-        const muted = mutedOverride ?? isMutedRef.current;
-        const mode = voiceInputModeRef.current;
-        const open = !muted && !isAfkChannelRef.current && (
-            mode === 'pushToTalk' ? holdKeyDownRef.current :
-            mode === 'pushToMute' ? !holdKeyDownRef.current :
-            true);
-        webrtcManager.setAudioEnabled(open);
+    // The member's mute and deafen as they stand NOW (the refs), what the call
+    // imposes NOW, and the one writer of both - refs first, then the state the
+    // render shows. Every mute/deafen transition is a selfMute.ts function of
+    // muteNow(), written back through setMute() before anything reads it again.
+    const muteNow = useCallback((): SelfMute => ({
+        muted: isMutedRef.current, selfMuted: selfMutedRef.current, deafened: isDeafenedRef.current,
+    }), []);
+    const constraintsNow = useCallback((): MuteConstraints => ({
+        afk: isAfkChannelRef.current, speakDenied: speakDeniedRef.current, listenOnly: listenOnlyRef.current,
+    }), []);
+    const setMute = useCallback((next: SelfMute) => {
+        isMutedRef.current = next.muted;
+        selfMutedRef.current = next.selfMuted;
+        isDeafenedRef.current = next.deafened;
+        setIsMuted(next.muted);
+        setSelfMuted(next.selfMuted);
+        setIsDeafened(next.deafened);
+        setSelfDeafened(next.deafened);
     }, []);
+
+    /** Single authority over whether the mic track transmits, from the refs
+     *  (selfMute.ts micOpen): deafened or muted never, an AFK channel or no
+     *  SPEAK never, push-to-talk only while held. */
+    const applyMicGate = useCallback(() => {
+        if (listenOnlyRef.current) return; // no track to gate
+        webrtcManager.setAudioEnabled(micOpen(muteNow(), constraintsNow(), voiceInputModeRef.current, holdKeyDownRef.current));
+    }, [muteNow, constraintsNow]);
 
     const clearInactivity = useCallback(() => {
         if (inactivityTimer.current) { clearTimeout(inactivityTimer.current); inactivityTimer.current = null; }
@@ -1513,6 +1538,60 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         refreshVoiceUsersList();
     }, [refreshVoiceUsersList]);
 
+    // The speaking ring's detector and the silent-capture sentinel on OUR
+    // published microphone. At the join when there is one; when a microphone
+    // first arrives after a join without one (applyNoiseModeLive), since there
+    // was nothing to measure before: a member who joined with no microphone
+    // and plugged one in never had their own ring light. Once per call: a
+    // later track swap rebuilds them in place (media.ts vadRebuilds).
+    const armLocalDetectors = useCallback((localStream: MediaStream) => {
+        if (voiceDetectorCleanups.current.has(currentUserId)) return;
+        // Set up voice activity detection for local stream
+        const localCleanup = webrtcManager.createVoiceActivityDetector(
+            localStream,
+            (isSpeaking) => {
+                // Speaking is the primary activity signal: staying idle for
+                // 15 min moves us to AFK, so any speech resets the clock.
+                if (isSpeaking) resetInactivity();
+                setUserSpeaking(currentUserId, isSpeaking);
+            },
+            0.02 // threshold
+        );
+        voiceDetectorCleanups.current.set(currentUserId, localCleanup);
+
+        // Silent-capture sentinel: warn when the PUBLISHED mic has produced
+        // nothing but digital zeros since it went live (dead device, dead
+        // NS graph, OS-level mute) — the user otherwise talks into the void
+        // with every local indicator looking healthy. Keyed at -1 (never a
+        // real user id) so it rides the same cleanup path as the detectors.
+        const silenceCleanup = webrtcManager.createSilenceSentinel(localStream, (silent) => {
+            if (!silent) {
+                // Clear ONLY our own message: the dead-graph handler shares
+                // this slot, and its notice must survive the mic rebuild
+                // that follows (which is exactly what makes audio return).
+                setMicNotice(prev => (prev === MIC_SILENT_NOTICE ? null : prev));
+                return;
+            }
+            // Silence out means one of two very different things, and they
+            // are indistinguishable from here: the suppression graph died,
+            // or the MICROPHONE is producing nothing (hardware mute switch,
+            // OS mute, wrong device). This used to assume the graph whenever
+            // a graph mode was active — so a muted headset told the user
+            // RNNoise was broken and cost them noise suppression for the
+            // session, while the actual mute went unmentioned.
+            //
+            // Only the graph can be blamed when the RAW input was proven to
+            // carry speech. Absent that evidence it is the mic, and the mode
+            // is left exactly as the user set it.
+            if (modeUsesWebAudio(getNoiseSuppressionMode()) && rawInputHasHadSignal()) {
+                window.dispatchEvent(new CustomEvent('sovereign:noise-graph-dead'));
+                return;
+            }
+            setMicNotice(MIC_SILENT_NOTICE);
+        });
+        voiceDetectorCleanups.current.set(-1, silenceCleanup);
+    }, [currentUserId, resetInactivity]);
+
     // We lost SPEAK (the server's word mid-call, or an SFU grant without a
     // microphone): close the mic for good, stop sending it on every transport,
     // and say why. Idempotent.
@@ -1522,6 +1601,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         speakDeniedRef.current = true;
         setSpeakDenied(true);
         webrtcManager.setSpeakDenied(true);
+        // Shut it NOW (micOpen: no SPEAK never transmits), not after the
+        // unpublish and the release below, which take a network round trip on
+        // the SFU; a push-to-talk press in between cannot open it either.
+        applyMicGate();
         // The local VAD and the silence sentinel read the track being closed.
         voiceDetectorCleanups.current.get(currentUserId)?.();
         voiceDetectorCleanups.current.delete(currentUserId);
@@ -1535,10 +1618,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         // was. Nothing lifts this one mid-call (a grant waits for a rejoin).
         listenOnlyRef.current = true;
         setListenOnly(true);
-        isMutedRef.current = true;
-        setIsMuted(true);
-        broadcastStatus(true, isDeafenedRef.current);
-    }, [currentUserId, sfuMode, broadcastStatus]);
+        const next = imposeMute(muteNow());
+        setMute(next);
+        broadcastStatus(next.muted, next.deafened);
+    }, [currentUserId, sfuMode, broadcastStatus, applyMicGate, muteNow, setMute]);
     useEffect(() => { denySpeakLocallyRef.current = denySpeakLocally; }, [denySpeakLocally]);
 
     // The server's VoiceSpeakState for one member of this room.
@@ -1565,6 +1648,12 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         // overlap; a concurrent second join built a SECOND LiveKit session on
         // SFU channels — the loser leaked and fed the user's mic back to them.
         if (joiningRef.current || isInVoiceRef.current) return;
+        // The choice a moderator's move carried here belongs to THIS attempt,
+        // whatever becomes of it: taken before anything can refuse the join,
+        // so it never outlives a failed move into a later join the member
+        // makes themselves.
+        const carried = arrivalChoiceRef.current;
+        arrivalChoiceRef.current = null;
         // No CONNECT: refuse here, before any microphone prompt. The server
         // refuses the JoinRoom as well; this only spares the prompt and the
         // alert.
@@ -1586,18 +1675,12 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         webrtcManager.setSpeakDenied(deniedByHint);
         // A moderator moved us here: arrive with the mute and deafen the
         // member had chosen, not with a fresh open mic. Set before the mic
-        // opens, through the refs too, so the join's own gate (applyMicGate
+        // opens, through the refs, so the join's own gate (applyMicGate
         // below, before any sender exists) and every voice element created
         // for this call read it.
-        const carried = takeCarriedVoiceChoice(roomId);
         if (carried) {
             const muted = carried.muted || carried.deafened;
-            selfMutedRef.current = muted;
-            setSelfMuted(muted);
-            isMutedRef.current = muted;
-            setIsMuted(muted);
-            isDeafenedRef.current = carried.deafened;
-            setIsDeafened(carried.deafened);
+            setMute({ muted, selfMuted: muted, deafened: carried.deafened });
         }
 
         try {
@@ -1648,52 +1731,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
 
             // Skip the analysers entirely with no mic track: there is nothing to
             // measure, and createMediaStreamSource would throw + leak a context.
-            if (!noMic) {
-            // Set up voice activity detection for local stream
-            const localCleanup = webrtcManager.createVoiceActivityDetector(
-                localStream,
-                (isSpeaking) => {
-                    // Speaking is the primary activity signal: staying idle for
-                    // 15 min moves us to AFK, so any speech resets the clock.
-                    if (isSpeaking) resetInactivity();
-                    setUserSpeaking(currentUserId, isSpeaking);
-                },
-                0.02 // threshold
-            );
-            voiceDetectorCleanups.current.set(currentUserId, localCleanup);
-
-            // Silent-capture sentinel: warn when the PUBLISHED mic has produced
-            // nothing but digital zeros since it went live (dead device, dead
-            // NS graph, OS-level mute) — the user otherwise talks into the void
-            // with every local indicator looking healthy. Keyed at -1 (never a
-            // real user id) so it rides the same cleanup path as the detectors.
-            const silenceCleanup = webrtcManager.createSilenceSentinel(localStream, (silent) => {
-                if (!silent) {
-                    // Clear ONLY our own message: the dead-graph handler shares
-                    // this slot, and its notice must survive the mic rebuild
-                    // that follows (which is exactly what makes audio return).
-                    setMicNotice(prev => (prev === MIC_SILENT_NOTICE ? null : prev));
-                    return;
-                }
-                // Silence out means one of two very different things, and they
-                // are indistinguishable from here: the suppression graph died,
-                // or the MICROPHONE is producing nothing (hardware mute switch,
-                // OS mute, wrong device). This used to assume the graph whenever
-                // a graph mode was active — so a muted headset told the user
-                // RNNoise was broken and cost them noise suppression for the
-                // session, while the actual mute went unmentioned.
-                //
-                // Only the graph can be blamed when the RAW input was proven to
-                // carry speech. Absent that evidence it is the mic, and the mode
-                // is left exactly as the user set it.
-                if (modeUsesWebAudio(getNoiseSuppressionMode()) && rawInputHasHadSignal()) {
-                    window.dispatchEvent(new CustomEvent('sovereign:noise-graph-dead'));
-                    return;
-                }
-                setMicNotice(MIC_SILENT_NOTICE);
-            });
-            voiceDetectorCleanups.current.set(-1, silenceCleanup);
-            }
+            // (A microphone that arrives later arms them then: the recovery in
+            // applyNoiseModeLive.)
+            if (!noMic) armLocalDetectors(localStream);
 
             // One handler for BOTH transports: the mesh delivers per-peer voice
             // streams, the SFU delivers per-participant mic streams — the audio
@@ -2088,8 +2128,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             // ("can't talk in AFK"). The track stays negotiated but sends
             // silence; toggleMute is blocked below so the user can't lift it.
             if (isAfkChannel) {
+                // An imposed mute; the member's own choice is kept.
+                setMute(imposeMute(muteNow()));
                 webrtcManager.setAudioEnabled(false);
-                setIsMuted(true);
             } else {
                 // Arm the idle-move timer for a normal voice channel.
                 resetInactivity();
@@ -2214,7 +2255,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 }
             }
         }
-    }, [roomId, currentUserId, currentUsername, refreshVoiceUsersList, isAfkChannel, resetInactivity, sfuMode, applyMicGate, restateStatusSoon]);
+    }, [roomId, currentUserId, currentUsername, refreshVoiceUsersList, isAfkChannel, resetInactivity, sfuMode, applyMicGate, restateStatusSoon, setMute, muteNow, armLocalDetectors]);
 
     // Handle leaving voice
     // Apply the CURRENT noise mode to a live call: fresh mic through the new
@@ -2257,17 +2298,20 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         // if they were — unless another imposed mute still
                         // holds (an AFK channel). It used to unmute
                         // unconditionally, so a member who had muted
-                        // themselves came back live. The refs are written
-                        // now, not by the effects after the commit: the gate
-                        // below reads them in this tick. (The new track
-                        // itself came up shut: media.ts.)
-                        const muted = selfMutedRef.current || isDeafenedRef.current || isAfkChannelRef.current;
+                        // themselves came back live (selfMute.ts micBack).
+                        // The refs are written now: the gate below reads
+                        // them in this tick. (The new track itself came up
+                        // shut: media.ts.)
+                        const next = micBack(muteNow(), constraintsNow());
                         listenOnlyRef.current = false;
                         setListenOnly(false);
-                        isMutedRef.current = muted;
-                        setIsMuted(muted);
+                        setMute(next);
                         setMicNotice(null);
-                        broadcastStatus(muted, isDeafenedRef.current);
+                        broadcastStatus(next.muted, next.deafened);
+                        // The first microphone of a call joined without one:
+                        // its speaking ring and silence sentinel start now.
+                        const local = webrtcManager.getLocalStreamSync();
+                        if (local) armLocalDetectors(local);
                     }
                 } else if (!listenOnlyRef.current) {
                     // The OTHER direction: the re-acquire found NO usable mic
@@ -2278,10 +2322,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                     // An imposed mute: the member's own choice is kept.
                     listenOnlyRef.current = true;
                     setListenOnly(true);
-                    isMutedRef.current = true;
-                    setIsMuted(true);
+                    const next = imposeMute(muteNow());
+                    setMute(next);
                     setMicNotice(MIC_LOST_NOTICE);
-                    broadcastStatus(true, isDeafenedRef.current);
+                    broadcastStatus(next.muted, next.deafened);
                 }
                 // reapplyNoiseMode stops the old mic track and swaps a fresh
                 // one into the mesh senders only. On an SFU call the LiveKit
@@ -2308,7 +2352,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 console.warn('[VoicePanel] Failed to apply noise mode live:', err);
                 return { ok: false, error: describeMicError(err), kept: !opened };
             });
-    }, [sfuMode, broadcastStatus, applyMicGate]);
+    }, [sfuMode, broadcastStatus, applyMicGate, muteNow, constraintsNow, setMute, armLocalDetectors]);
     // Ref for the settingsChanged listener above, which is declared earlier in
     // the file (and deliberately mounted once).
     const applyNoiseModeLiveRef = useRef(applyNoiseModeLive);
@@ -2522,13 +2566,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         setIsInVoice(false);
         isInVoiceRef.current = false;
         // A join the member makes starts unmuted, as it always has. (A move
-        // they did not make carries their choice instead: joinVoice.)
-        isMutedRef.current = false;
-        setIsMuted(false);
-        selfMutedRef.current = false;
-        setSelfMuted(false);
-        isDeafenedRef.current = false;
-        setIsDeafened(false);
+        // they did not make carries their choice instead: joinVoice, and a
+        // carried choice never outlives the call it was for.)
+        setMute(UNMUTED);
+        arrivalChoiceRef.current = null;
         listenOnlyRef.current = false;
         setListenOnly(false); // a rejoin retries the microphone
         speakDeniedRef.current = false; // and re-decides SPEAK
@@ -2549,7 +2590,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         // scratch, or every share still running when we left would be silently
         // treated as a replay and never chime or open a tile.
         sharingAnnouncedRef.current.clear();
-    }, [roomId, currentUserId, refreshVoiceUsersList, clearInactivity, setConnecting, stopPendingTimer, setDfOffer]);
+    }, [roomId, currentUserId, refreshVoiceUsersList, clearInactivity, setConnecting, stopPendingTimer, setDfOffer, setMute]);
 
     // Keep the eviction handler's teardown pointer fresh (see RoomLeft handler).
     useEffect(() => { leaveVoiceRef.current = leaveVoice; }, [leaveVoice]);
@@ -2652,53 +2693,37 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
 
     // Handle mute toggle
     const toggleMute = useCallback(() => {
-        // AFK channels are talk-disabled: the mic stays hard-muted here.
-        // Without SPEAK no microphone comes back in this call either.
-        // Listen-only and the mute in force are read from the refs, which
-        // every transition writes at once: the closure's copies lag a render
-        // behind, and a press in that render right after the microphone came
-        // back would take the listen-only branch (or "unmute" a forced mute
-        // the member never chose) while the mic was already open.
-        if (isAfkChannel || speakDeniedRef.current) return;
-        // Deafen force-mutes and DISABLES the mute button — the hotkey path
-        // (Ctrl+M in-app, or the desktop-global feed) must match it, or it
-        // opens the mic while deafened: a transmitting-but-deaf state the UI
-        // treats as impossible and offers no button to undo. But a silent
-        // no-op reads as "the hotkey is broken" (field report) — say why.
-        if (isDeafened) {
-            setMuteNotice("You're deafened — undeafen to unmute.");
+        // Everything from the refs, through selfMute.ts pressMute, written
+        // back before anything reads it again: the closure's copies lag a
+        // render behind, and two presses handled before the next render (two
+        // desktop-global hotkeys in one task, a Stream Deck macro) each saw
+        // the state from before the first. Toggle Deafen then Toggle Mute in
+        // one task left a deafened member transmitting, unmuted.
+        //   - AFK channels are talk-disabled, and without SPEAK no microphone
+        //     comes back in this call: refused (their own copy says why).
+        //   - Deafen force-mutes and DISABLES the mute button; the hotkey path
+        //     must match it, or it opens the mic while deafened. A silent
+        //     no-op reads as "the hotkey is broken" (field report): say why.
+        //   - No microphone right now (listen-only): nothing to gate, and the
+        //     room already sees us muted. The press decides how we come back
+        //     when one returns (micBack restores selfMuted). It used to be a
+        //     silent no-op, so a member whose mic had dropped could not make
+        //     sure they would not come back live.
+        const press = pressMute(muteNow(), constraintsNow());
+        if (press.kind === 'refused') {
+            if (press.why === 'deafened') setMuteNotice("You're deafened — undeafen to unmute.");
             return;
         }
         resetInactivity(); // toggling mute counts as activity
-        if (listenOnlyRef.current) {
-            // No microphone right now: nothing to gate, and the room already
-            // sees us muted. What the press decides is how we come back when
-            // a microphone returns — muted, or live (the recovery restores
-            // selfMuted). It used to be a silent no-op, so a member whose mic
-            // had dropped could not make sure they would not come back live.
-            const next = !selfMutedRef.current;
-            selfMutedRef.current = next;
-            setSelfMuted(next);
-            if (next) playMuteSound(); else playUnmuteSound();
-            return;
+        setMute(press.next);
+        if (press.kind === 'toggled') {
+            // Through the gate, not straight to the track: unmuting in
+            // push-to-talk must NOT open the mic — it only re-arms the key.
+            applyMicGate();
+            broadcastStatus(press.next.muted, press.next.deafened);
         }
-        const newMuted = !isMutedRef.current;
-        // Through the gate, not straight to the track: unmuting in push-to-talk
-        // must NOT open the mic — it only re-arms the hold key.
-        applyMicGate(newMuted);
-        isMutedRef.current = newMuted;
-        setIsMuted(newMuted);
-        selfMutedRef.current = newMuted;
-        setSelfMuted(newMuted);
-        broadcastStatus(newMuted, isDeafened);
-
-        // Play appropriate sound
-        if (newMuted) {
-            playMuteSound();
-        } else {
-            playUnmuteSound();
-        }
-    }, [isDeafened, broadcastStatus, isAfkChannel, resetInactivity, applyMicGate]);
+        if (press.next.selfMuted) playMuteSound(); else playUnmuteSound();
+    }, [muteNow, constraintsNow, setMute, broadcastStatus, resetInactivity, applyMicGate]);
 
     // Tell the room we're muted once we're actually in voice. Kept as an
     // effect (rather than inline in joinVoice) so it runs after the join has
@@ -2707,8 +2732,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // is simply the later, safer moment.
     useEffect(() => {
         if (isInVoice && listenOnly) {
-            setIsMuted(true);
-            broadcastStatus(true, isDeafened);
+            // An imposed mute; the member's own choice is kept.
+            const next = imposeMute(muteNow());
+            setMute(next);
+            broadcastStatus(next.muted, next.deafened);
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps -- fire on entry to listen-only, not on every deafen change
     }, [isInVoice, listenOnly]);
@@ -2800,12 +2827,16 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // as untouched, and the feed silently watched nothing.)
     useEffect(() => {
         if (!isInVoice || !isTauri()) return;
-        // Listen-only / AFK: no mic, so no mic hotkeys — but the save-clip key
-        // still works while the buffer is armed (a system-audio-only clip).
-        const micKeys = !isAfkChannel && !listenOnly;
+        // AFK / no SPEAK: no mic, so no mic hotkeys; no microphone right now
+        // (listen-only): Toggle Mute and Toggle Deafen still work (Mute decides
+        // how the member comes back), push-to-talk has nothing to gate
+        // (hotkeyScope.ts). The save-clip key still works while the buffer is
+        // armed (a system-audio-only clip).
         const sync = () => {
             const { ids, keys } = computeNativeWatch(loadSettings(), {
-                micKeys,
+                afk: isAfkChannel,
+                speakDenied,
+                listenOnly,
                 voiceInputMode: voiceInputModeRef.current,
                 // In this effect's deps, so arming re-syncs the watch list
                 // immediately (a settings save is not something the user does
@@ -2831,7 +2862,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             // release then unseen. sync() swaps the watch list in place; the
             // feed's lifetime is the call's, in the effect below.
         };
-    }, [isInVoice, voiceInputMode, isAfkChannel, listenOnly, clipArmed]);
+    }, [isInVoice, voiceInputMode, isAfkChannel, listenOnly, speakDenied, clipArmed]);
 
     // The feed lives exactly as long as the call. Declared AFTER the sync
     // effect, so its cleanup runs after that one's on leave: listener off,
@@ -2894,25 +2925,15 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
 
     // Handle deafen toggle
     const toggleDeafen = useCallback(() => {
-        const newDeafened = !isDeafened;
-        setIsDeafened(newDeafened);
-
-        // When deafened, also mute mic. That mute is the member's own (it
-        // outlives the undeafen, as it always has), so it is recorded as
-        // their choice even while another mute is in force: deafening while
-        // listen-only must not come back live when the microphone returns.
-        if (newDeafened && !selfMutedRef.current) {
-            selfMutedRef.current = true;
-            setSelfMuted(true);
-        }
-        // The mute in force from the ref, not the closure: right after the
-        // microphone came back the closure still holds listen-only's
-        // imposed mute for a render, and deafening then left the mic open.
-        if (newDeafened && !isMutedRef.current) {
-            applyMicGate(true);
-            isMutedRef.current = true;
-            setIsMuted(true);
-        }
+        // From the refs and written back at once (selfMute.ts pressDeafen), like
+        // toggleMute: a Toggle Mute handled before the next render must see
+        // this deafen, or it unmutes a deafened member. Deafening mutes, as
+        // the member's own choice (it outlives the undeafen, as it always
+        // has), so deafening while listen-only does not come back live when
+        // the microphone returns.
+        const next = pressDeafen(muteNow());
+        setMute(next);
+        applyMicGate();
 
         // Mute all incoming voice audio. Deafen means "stop hearing people's
         // VOICE" — screen-share/stream audio is deliberately left alone (it
@@ -2920,18 +2941,18 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         // can deafen the chatter and still hear the game. Per-stream mute and
         // volume remain the way to silence a stream.
         document.querySelectorAll('[id^="audio-"]').forEach((el) => {
-            (el as HTMLAudioElement).muted = newDeafened;
+            (el as HTMLAudioElement).muted = next.deafened;
         });
 
-        broadcastStatus(newDeafened || isMutedRef.current, newDeafened);
+        broadcastStatus(next.muted, next.deafened);
 
         // Play appropriate sound
-        if (newDeafened) {
+        if (next.deafened) {
             playDeafenSound();
         } else {
             playUndeafenSound();
         }
-    }, [isDeafened, broadcastStatus, applyMicGate]);
+    }, [muteNow, setMute, broadcastStatus, applyMicGate]);
     // Keep the shortcut refs pointing at the freshest closures (the press
     // registrations above are mounted once per call).
     useEffect(() => { toggleMuteRef.current = toggleMute; }, [toggleMute]);
@@ -3536,12 +3557,14 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                 <button
                                     // Listen-only without a microphone: the button sets how
                                     // the member comes back when one returns (toggleMute),
-                                    // red while that is "muted".
-                                    className={`voice-btn ${listenOnly ? (selfMuted && !speakDenied ? 'no-mic active' : 'no-mic') : (isMuted || holdClosed ? 'active' : pttIdle ? 'ptt-idle' : '')}`}
+                                    // red while that is "muted". The refusals first, in
+                                    // the order toggleMute refuses (no SPEAK, AFK, then
+                                    // deafened): a disabled button must not say "click".
+                                    className={`voice-btn ${listenOnly ? (selfMuted && !speakDenied && !isAfkChannel ? 'no-mic active' : 'no-mic') : (isMuted || holdClosed ? 'active' : pttIdle ? 'ptt-idle' : '')}`}
                                     onClick={toggleMute}
                                     title={speakDenied ? "You don't have permission to speak in this channel"
-                                        : listenOnly ? (selfMuted ? MIC_GONE_MUTED_TITLE : MIC_GONE_TITLE)
                                         : isAfkChannel ? 'Microphone is disabled in AFK channels'
+                                        : listenOnly ? (isDeafened ? MIC_GONE_DEAFENED_TITLE : selfMuted ? MIC_GONE_MUTED_TITLE : MIC_GONE_TITLE)
                                             : holdClosed ? 'Push-to-mute held — mic muted'
                                                 : pttIdle ? 'Push to talk — hold your key to speak'
                                                     : (isMuted ? 'Unmute' : 'Mute')}

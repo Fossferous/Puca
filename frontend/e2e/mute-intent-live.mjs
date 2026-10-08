@@ -27,11 +27,18 @@
 //     muted (and the Mute button itself works while listen-only);
 //   - deafened -> lost -> back: still deafened AND muted;
 //   - push-to-talk, key not held -> lost -> back: nothing transmits;
+//   - Toggle Deafen and Toggle Mute pressed in ONE task (no render between:
+//     two desktop-global hotkey events behind a busy main thread, a macro),
+//     both orders, from unmuted and from muted, and longer alternations: a
+//     deafened member never transmits, and each ends in its known state;
+//   - joined with NO microphone, then one plugged in: B hears A iff A is
+//     unmuted (on mesh the join had no audio sender to put it on);
 //   - a moderator moves A to another channel: unmuted, A arrives live (the
 //     control); muted (then muted + deafened), A arrives muted (deafened)
 //     and nothing transmits;
 //   - A leaves and joins by itself: unmuted, as a join always started (the
 //     control: nothing a move carried leaks into a join the member makes);
+//   - moved while the microphone is gone, then it comes back: heard;
 //   - in the AFK channel -> lost -> back: still muted (the channel's own mute).
 //
 // Run it against a build from before the fix and the muted cases FAIL (the
@@ -198,9 +205,22 @@ const deafenButton = (p) => p.evaluate(() => {
     return b ? { title: b.getAttribute('title') } : null;
 });
 // The status line says so, except in an AFK channel (it says "AFK — mic
-// disabled" there); the Mute button's title says so everywhere.
+// disabled" there); the Mute button's `no-mic` look says so everywhere.
 const listenOnly = (p) => p.evaluate(() => /listen-only/.test(document.querySelector('.voice-connected-label')?.textContent ?? '')
-    || (document.querySelector('.voice-controls-compact .voice-btn')?.getAttribute('title') ?? '').startsWith('No microphone detected'));
+    || (document.querySelector('.voice-controls-compact .voice-btn')?.classList.contains('no-mic') ?? false));
+/** Toggle Mute (Ctrl+Shift+M) / Toggle Deafen (Ctrl+Shift+D) presses
+ *  dispatched in ONE task: no React render between them, which is what two
+ *  desktop-global hotkey events queued behind a busy main thread get (or a
+ *  Stream Deck macro). */
+const KEY = { M: ['KeyM', 'M', 77], D: ['KeyD', 'D', 68] };
+const burst = (p, seq) => p.evaluate((codes) => {
+    document.activeElement?.blur?.();
+    for (const [code, key, keyCode] of codes) {
+        const o = { key, code, keyCode, which: keyCode, ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true };
+        window.dispatchEvent(new KeyboardEvent('keydown', o));
+        window.dispatchEvent(new KeyboardEvent('keyup', o));
+    }
+}, seq.split('').map(c => KEY[c]));
 /** What B's sidebar says about A. */
 const rosterOf = (p, name) => p.evaluate((n) => {
     const li = [...document.querySelectorAll('.voice-user-name')].find(x => x.textContent.includes(n))?.closest('li');
@@ -223,6 +243,10 @@ const received = (p) => p.evaluate(async () => {
     }
     return { energy, packets };
 });
+const pcStates = (p) => p.evaluate(() => window.__pcs.filter(pc => pc.connectionState !== 'closed').map(pc => ({
+    cs: pc.connectionState, ss: pc.signalingState,
+    tx: pc.getTransceivers().map(t => `${t.mid}:${t.direction}/${t.currentDirection}:${t.sender.track ? t.sender.track.kind + (t.sender.track.enabled ? '+' : '-') : 'none'}`),
+})));
 async function energyOver(B, ms) {
     const r0 = await received(B); await sleep(ms); const r1 = await received(B);
     return { energy: +(r1.energy - r0.energy).toFixed(4), packets: r1.packets - r0.packets };
@@ -285,7 +309,10 @@ async function expectLive(A, B, label, nameA) {
     check(`${label}: B's sidebar shows A unmuted`, !!r && !r.muted && !r.deafened, JSON.stringify(r));
     const tE = Date.now();
     const e = await energyOver(B, 3000);
-    check(`${label}: B hears A (the measurement sees audio)`, e.energy > HEARD, `energy +${e.energy}, ${e.packets} packets in 3 s`);
+    // On a failure, what both ends' peer connections say (a renegotiation
+    // that never landed reads as a recvonly transceiver here).
+    const why = e.energy > HEARD ? '' : `; A ${JSON.stringify(await pcStates(A))}; B ${JSON.stringify(await pcStates(B))}`;
+    check(`${label}: B hears A (the measurement sees audio)`, e.energy > HEARD, `energy +${e.energy}, ${e.packets} packets in 3 s${why}`);
     const lit = (await sim(A)).speaking.filter(x => x.t >= tE);
     check(`${label}: A's own speaking ring lights for it`, lit.length > 0, `${lit.length} sample(s) in 3 s`);
 }
@@ -399,7 +426,68 @@ try {
     await sleep(1000);
     await expectLive(A, B, 'back to an open mic', uA);
 
-    // 6. A moderator moves A: unmuted (the control: a move mutes nobody),
+    // 6. Two keys in ONE task (no render between them): both orders, from
+    // unmuted and from muted, and longer alternations ending in a known state.
+    // Deafen mutes, Toggle Mute is refused while deafened, and nothing a burst
+    // does may leave a deafened member transmitting.
+    const reset = async (label, muted = false) => {
+        for (let i = 0; i < 3; i++) {
+            if ((await deafenButton(A))?.title === 'Undeafen') { await clickTitle(A, 'Undeafen'); await sleep(400); }
+            const want = muted ? 'Mute' : 'Unmute'; // the title to press away
+            if ((await muteButton(A))?.title === want) { await clickTitle(A, want); await sleep(400); }
+        }
+        await sleep(800);
+        const m = await muteButton(A);
+        check(`${label}: starts ${muted ? 'muted' : 'unmuted'}, not deafened`,
+            m?.title === (muted ? 'Unmute' : 'Mute') && (await deafenButton(A))?.title === 'Deafen', m?.title);
+    };
+    const bursts = [
+        // [keys, start muted?, ends: 'deafened' | 'muted' | 'live']
+        ['DM', false, 'deafened'], ['MD', false, 'deafened'],
+        ['DM', true, 'deafened'], ['MD', true, 'deafened'],
+        ['MDMDM', false, 'live'], ['DMDMD', false, 'deafened'], ['MMMMMMM', false, 'muted'],
+    ];
+    for (const [keys, startMuted, ends] of bursts) {
+        const label = `keys ${keys.split('').join('+')} in one task from ${startMuted ? 'muted' : 'unmuted'}`;
+        await reset(label, startMuted);
+        await burst(A, keys);
+        await sleep(1500);
+        if (ends === 'live') await expectLive(A, B, label, uA);
+        else await expectSilent(A, B, label, Date.now(), uA, { deafened: ends === 'deafened' });
+    }
+    await reset('after the bursts');
+
+    // 7. Joined with NO microphone at all, then one is plugged in. On a mesh
+    // call the join had no audio sender to put it on (only a receive-only
+    // transceiver), so an unmuted member stayed unheard while everyone saw
+    // them unmuted. B must receive A iff A is unmuted.
+    const joinWithoutMic = async (label) => {
+        check(`${label}: A disconnects`, await clickTitle(A, 'Disconnect'));
+        await sleep(1500);
+        await A.evaluate(() => { window.__osSim.gone = true; });
+        check(`${label}: A joins mi-one with no microphone`, await clickVoiceNamed(A, 'mi-one'));
+        check(`${label}: A joined listen-only`, !!await until(() => listenOnly(A), 20_000, 200));
+        await sleep(3000);
+    };
+    await joinWithoutMic('no mic at the join, unmuted');
+    await back(A, 'no mic at the join, unmuted');
+    await expectLive(A, B, 'no mic at the join, unmuted -> one plugged in', uA);
+    await joinWithoutMic('no mic at the join, muted');
+    check('no mic at the join, muted: A presses Mute while there is no microphone', await A.evaluate(() => {
+        const b = document.querySelector('.voice-controls-compact .voice-btn');
+        if (!b || b.disabled) return false;
+        b.click();
+        return true;
+    }));
+    await sleep(500);
+    t0 = Date.now();
+    await back(A, 'no mic at the join, muted');
+    await expectSilent(A, B, 'no mic at the join, muted -> one plugged in', t0, uA);
+    check('no mic at the join, muted: A unmutes by itself', await clickTitle(A, 'Unmute'));
+    await sleep(800);
+    await expectLive(A, B, 'no mic at the join, muted -> plugged in -> A unmutes', uA);
+
+    // 8. A moderator moves A: unmuted (the control: a move mutes nobody),
     // muted, then muted + deafened. Then A leaves and joins by itself (the
     // control: a join the member makes starts unmuted, as it always has, and
     // nothing a move carried leaks into it).
@@ -441,7 +529,20 @@ try {
     await expectLive(A, B, 'a join A makes itself starts unmuted (control: unchanged)', uA);
     check('own join: not deafened', (await deafenButton(A))?.title === 'Deafen');
 
-    // 7. In the AFK channel the mic is shut by the channel itself: a
+    // Moved WHILE the microphone is gone: the destination joins with no
+    // microphone (the same mesh shape as a join without one), and the member
+    // must be heard when it comes back, being unmuted.
+    await lose(A, 'moved while listen-only');
+    await clickVoiceNamed(B, 'mi-two');
+    await sleep(2500);
+    check('moved while listen-only: B moves A to mi-two', (await move(two)) === 200);
+    check('moved while listen-only: A arrives in mi-two, still listen-only', !!await until(async () =>
+        (await A.evaluate(() => document.querySelector('.voice-channel-name')?.textContent ?? '')) === 'mi-two' && await listenOnly(A), 20_000, 200));
+    await sleep(3000);
+    await back(A, 'moved while listen-only');
+    await expectLive(A, B, 'unmuted, moved while listen-only -> back', uA);
+
+    // 9. In the AFK channel the mic is shut by the channel itself: a
     // microphone coming back there must not report A unmuted (it did, though
     // the AFK gate kept the track shut).
     // A mutes first: a channel switch made WHILE the speaking ring is lit

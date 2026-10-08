@@ -150,9 +150,10 @@ Browsers protect user privacy by not exposing device names until microphone perm
   mic is unplugged): the call switches to the system default; if there is no
   microphone at all you stay in the call listen-only, and it reconnects by
   itself when one returns. You come back as you last set it: muted if
-  you were muted or deafened (or pressed **Mute** while it was gone, which
-  still works then), push-to-talk still waiting for its key, and live only
-  if you were.
+  you were muted or deafened (or pressed **Mute** or your Toggle Mute key
+  while it was gone, which still work then unless you are deafened),
+  push-to-talk still waiting for its key, and live only if you were. The
+  same holds when you joined with no microphone at all and plug one in.
 - **The device you chose comes back**: the call moves back to it.
 - Nothing else is followed: a device being plugged in or removed that is not
   the default you are on changes nothing, and neither does any change while

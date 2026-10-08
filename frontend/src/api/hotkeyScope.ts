@@ -73,8 +73,15 @@ export function markVoiceBindProvenance(s: Settings, field: string, userSet: boo
 
 /** The call-time inputs the feed decision depends on besides settings. */
 export type NativeWatchHost = {
-    /** False in an AFK channel or listen-only: no mic, so no mic hotkeys. */
-    micKeys: boolean;
+    /** In an AFK channel: the mic is disabled there, so no mic hotkeys. */
+    afk: boolean;
+    /** No SPEAK in this channel: no mic for the whole call, so none either. */
+    speakDenied: boolean;
+    /** No microphone open right now (none found, or it died). Toggle Mute and
+     *  Toggle Deafen still work then - Mute decides whether the member comes
+     *  back muted when one returns - so they stay watched; push-to-talk and
+     *  push-to-mute have nothing to gate and are dropped. */
+    listenOnly: boolean;
     voiceInputMode: 'open' | 'pushToTalk' | 'pushToMute';
     /** Clip replay buffer armed on this machine. */
     clipArmed: boolean;
@@ -91,11 +98,13 @@ export function computeNativeWatch(s: Settings, host: NativeWatchHost): NativeWa
         ids.push(id);
         keys.push(b.keyCode);
     };
-    if (host.micKeys) {
+    if (!host.afk && !host.speakDenied) {
         if (isVoiceBindGlobal(s, 'toggleMuteBinding')) watch('voice.toggleMute', s.toggleMuteBinding);
         if (isVoiceBindGlobal(s, 'toggleDeafenBinding')) watch('voice.toggleDeafen', s.toggleDeafenBinding);
-        if (host.voiceInputMode === 'pushToTalk') watch('voice.ptt', s.pttBinding);
-        else if (host.voiceInputMode === 'pushToMute') watch('voice.ptm', s.ptmBinding);
+        if (!host.listenOnly) {
+            if (host.voiceInputMode === 'pushToTalk') watch('voice.ptt', s.pttBinding);
+            else if (host.voiceInputMode === 'pushToMute') watch('voice.ptm', s.ptmBinding);
+        }
     }
     if (host.clipArmed) watch('voice.saveClip', s.saveClipBinding);
     return { ids, keys };

@@ -17,7 +17,7 @@ const DEF_DEAFEN = defaultSettings.toggleDeafenBinding!;
 const F10 = { keyCode: 121, ctrl: false, alt: true, shift: false, label: 'F10' };
 const F9 = { keyCode: 120, ctrl: false, alt: false, shift: false, label: 'F9' };
 const settings = (over: Partial<Settings>): Settings => ({ ...defaultSettings, ...over });
-const inCall = { micKeys: true, voiceInputMode: 'open' as const, clipArmed: false };
+const inCall = { afk: false, speakDenied: false, listenOnly: false, voiceInputMode: 'open' as const, clipArmed: false };
 
 describe('computeNativeWatch — what the desktop-global hook is asked to watch', () => {
     it('THE BUG: a bind the user chose that equals the shipped default is watched system-wide', () => {
@@ -59,12 +59,29 @@ describe('computeNativeWatch — what the desktop-global hook is asked to watch'
         expect(voiceBindScope(s, 'toggleMuteBinding')).toBe('unbound');
     });
 
-    it('no mic keys without a mic (AFK / listen-only); the clip key still rides while armed', () => {
+    it('no mic keys in an AFK channel, or without SPEAK; the clip key still rides while armed', () => {
         const s = settings({ globalVoiceHotkeys: true, saveClipBinding: F9, pttBinding: F10 });
-        expect(computeNativeWatch(s, { micKeys: false, voiceInputMode: 'pushToTalk', clipArmed: false }))
-            .toEqual({ ids: [], keys: [] });
-        expect(computeNativeWatch(s, { micKeys: false, voiceInputMode: 'pushToTalk', clipArmed: true }))
-            .toEqual({ ids: ['voice.saveClip'], keys: [F9.keyCode] });
+        for (const host of [{ afk: true, speakDenied: false, listenOnly: false }, { afk: false, speakDenied: true, listenOnly: true }]) {
+            expect(computeNativeWatch(s, { ...host, voiceInputMode: 'pushToTalk', clipArmed: false }))
+                .toEqual({ ids: [], keys: [] });
+            expect(computeNativeWatch(s, { ...host, voiceInputMode: 'pushToTalk', clipArmed: true }))
+                .toEqual({ ids: ['voice.saveClip'], keys: [F9.keyCode] });
+        }
+    });
+
+    it('no microphone right now (listen-only): Toggle Mute and Toggle Deafen stay watched, the hold keys go', () => {
+        // Mute decides whether the member comes back muted when a microphone
+        // returns (VoicePanel toggleMute), from a game too; push-to-talk and
+        // push-to-mute have no track to gate until one does.
+        const s = settings({ globalVoiceHotkeys: true, pttBinding: F10, ptmBinding: F9 });
+        const lo = { ...inCall, listenOnly: true };
+        expect(computeNativeWatch(s, { ...lo, voiceInputMode: 'pushToTalk' }))
+            .toEqual({ ids: ['voice.toggleMute', 'voice.toggleDeafen'], keys: [DEF_MUTE.keyCode, DEF_DEAFEN.keyCode] });
+        expect(computeNativeWatch(s, { ...lo, voiceInputMode: 'pushToMute' }).ids).toEqual(['voice.toggleMute', 'voice.toggleDeafen']);
+        // Control: the same call with a microphone watches the hold key too.
+        expect(computeNativeWatch(s, { ...inCall, voiceInputMode: 'pushToTalk' }).ids).toEqual(['voice.toggleMute', 'voice.toggleDeafen', 'voice.ptt']);
+        // A default left in-app stays in-app while listen-only as well.
+        expect(computeNativeWatch(settings({}), lo)).toEqual({ ids: [], keys: [] });
     });
 
     it('push-to-talk / push-to-mute keys ride only in their own input mode', () => {
@@ -76,7 +93,7 @@ describe('computeNativeWatch — what the desktop-global hook is asked to watch'
 
     it('ids and keys stay parallel (the Rust side is handed keys by index)', () => {
         const s = settings({ globalVoiceHotkeys: true, pttBinding: F10, saveClipBinding: F9 });
-        const w = computeNativeWatch(s, { micKeys: true, voiceInputMode: 'pushToTalk', clipArmed: true });
+        const w = computeNativeWatch(s, { ...inCall, voiceInputMode: 'pushToTalk', clipArmed: true });
         expect(w.ids).toEqual(['voice.toggleMute', 'voice.toggleDeafen', 'voice.ptt', 'voice.saveClip']);
         expect(w.keys).toEqual([DEF_MUTE.keyCode, DEF_DEAFEN.keyCode, F10.keyCode, F9.keyCode]);
     });

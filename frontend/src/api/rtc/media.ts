@@ -522,6 +522,9 @@ export class MediaManager {
         // VoicePanel opens it from the member's own choice once it has left
         // listen-only. Stamping the old value put an open mic on every mesh
         // sender (and into the SFU publication) before the panel re-gated it.
+        // On a mesh call joined with no microphone there is no sender to put
+        // it on: WebRTCManager.doReapplyNoiseMode ADDS it to each peer, as
+        // shut as this leaves it.
         newAudio.enabled = this.noMic ? false : (gateNow ? gateNow.enabled : wasEnabled);
         this.noMic = false; // we have a real mic again
 

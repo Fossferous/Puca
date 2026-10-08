@@ -978,12 +978,30 @@ export class WebRTCManager {
         // kind: a screen share with audio adds a second audio sender whose
         // game/system audio must not be clobbered by a noise-mode change.
         const screenAudio = new Set<MediaStreamTrack>(this.media.getScreenShareStreamSync()?.getAudioTracks() ?? []);
-        for (const [, peer] of this.peers) {
+        const localStream = this.media.getLocalStreamSync();
+        for (const [userId, peer] of this.peers) {
             const senders = peer.connection.getSenders();
             const micSender =
                 (oldTrack ? senders.find(s => s.track === oldTrack) : undefined) ??
                 senders.find(s => s.track?.kind === 'audio' && !screenAudio.has(s.track));
-            if (micSender) await micSender.replaceTrack(newTrack).catch(() => { /* peer gone */ });
+            if (micSender) {
+                await micSender.replaceTrack(newTrack).catch(() => { /* peer gone */ });
+            } else if (localStream && !(this.requireMediaE2ee && !isMediaE2eeSupported())) {
+                // No microphone sender on this peer at all: we joined with no
+                // microphone, so the join added only a receive-only audio
+                // transceiver (addLocalMediaToPeer), and there was nothing to
+                // replace. Without this the first microphone plugged in went
+                // to NOBODY on a mesh call while the member's button said Mute
+                // and everyone saw them unmuted. Add it the way a camera is
+                // added (in the voice stream, so the receiver files it as
+                // voice): onnegotiationneeded -> a glare-safe offer. It goes
+                // on as reacquireAudioTrack left it - shut, out of listen-only
+                // - and the panel opens it from the member's own choice.
+                // (Same fail-closed rule as addLocalMediaToPeer.)
+                try {
+                    this.wireSender(userId, peer.connection.addTrack(newTrack, localStream));
+                } catch { /* peer gone (a closed pc refuses addTrack) */ }
+            }
         }
         return true;
     }
