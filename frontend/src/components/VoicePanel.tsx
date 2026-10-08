@@ -2084,6 +2084,11 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 // hint was stale. Joined all the same — listen-only — and the
                 // mic is closed rather than left hot and unpublished.
                 if (!micAllowed && micTrack) await denySpeakLocallyRef.current();
+                // The publish held the gate shut where it was shut (livekit-
+                // client would have opened it: holdMicGateWhilePublishing), and
+                // a push-to-talk press during it was not let through: re-assert
+                // the gate as it stands now.
+                else if (micTrack) applyMicGate();
             }
 
             // Broadcast that we joined

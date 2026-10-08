@@ -328,6 +328,13 @@ async function expectFollow(A, B, logs, label, idx, { muted = false } = {}) {
         check(`${label}: the new track goes out muted and the button still says Unmute`,
             after.length > 0 && after.every(s => s.enabled === false) && await hasTitle(A, 'Unmute'),
             JSON.stringify(after.map(s => s.enabled)));
+        // Not just at the end: at no moment of the follow (on SFU the
+        // republish wraps the track in a LiveKit LocalAudioTrack, which
+        // used to switch it on until the panel re-gated it).
+        const log = await A.evaluate(() => window.__osSim.senderLog);
+        const hot = log.filter(e => e.t >= t0 && e.enabled);
+        check(`${label}: no audio sender carried an enabled track at any moment of the muted follow`, hot.length === 0,
+            JSON.stringify(hot.slice(0, 4).map(e => ({ ms: e.t - t0, sender: e.key, id: e.id.slice(0, 8) }))));
     } else {
         check(`${label}: the new track is open`, after.length > 0 && after.every(s => s.enabled === true), JSON.stringify(after.map(s => s.enabled)));
     }

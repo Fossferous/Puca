@@ -316,6 +316,45 @@ export function micPublishAllowed(
     return sources.length === 0 || sources.includes(MIC_PROTO_SOURCE);
 }
 
+/**
+ * Keep the mute / push-to-talk gate shut while livekit-client publishes a
+ * microphone track. Returns the release.
+ *
+ * Púca gates the mic with MediaStreamTrack.enabled (VoicePanel applyMicGate
+ * -> setAudioEnabled). livekit-client wraps a published MediaStreamTrack in a
+ * fresh LocalAudioTrack whose constructor re-syncs `enabled` to ITS OWN mute
+ * state (LocalTrack.setMediaStreamTrack: `enabled = !this.isMuted`), and a
+ * new LocalAudioTrack is unmuted. So every publish of a shut mic opened it:
+ * measured live (headless Edge, fake devices) on 2026-10-08, a push-to-talk
+ * member joining an SFU call went out ENABLED and stayed so until their
+ * first key press (the listener received audio energy 1.66, an open mic
+ * 1.59, push-to-talk on mesh 0: e2e/sfu-mic-gate-live.mjs), and a muted
+ * member's mic re-published mid-call (noise mode, a lost device, following
+ * the OS default) was open until VoicePanel re-gated it after the publish.
+ *
+ * While held, the gate can close but not open: a write of `false` goes
+ * through (a mute during the publish), a write of `true` is dropped
+ * (livekit-client's re-sync, or a push-to-talk press during the publish,
+ * which VoicePanel re-asserts as soon as the publish is done). A track whose
+ * `enabled` is not the platform's prototype accessor is left alone.
+ */
+export function holdMicGateWhilePublishing(track: MediaStreamTrack): () => void {
+    if (Object.prototype.hasOwnProperty.call(track, 'enabled')) return () => { /* already held, or not a real track */ };
+    let proto: object | null = Object.getPrototypeOf(track);
+    let desc: PropertyDescriptor | undefined;
+    while (proto && !(desc = Object.getOwnPropertyDescriptor(proto, 'enabled'))) proto = Object.getPrototypeOf(proto);
+    const get = desc?.get;
+    const set = desc?.set;
+    if (!get || !set) return () => { /* nothing to hold */ };
+    Object.defineProperty(track, 'enabled', {
+        configurable: true,
+        enumerable: true,
+        get() { return get.call(track); },
+        set(on: boolean) { if (!on || get.call(track)) set.call(track, on); },
+    });
+    return () => { delete (track as unknown as { enabled?: boolean }).enabled; };
+}
+
 /** `u<user id>#<per-connection nonce>` → user id (see backend sfu.rs). */
 export function userIdFromIdentity(identity: string): number | null {
     const m = /^u(\d+)#/.exec(identity);
@@ -585,18 +624,25 @@ export class SfuManager {
             // only what the grant allows; the caller learns the verdict from
             // connect()'s result and releases the mic it opened.
             if (micTrack && micPublishAllowed(room.localParticipant.permissions)) {
-                this.micPub = await room.localParticipant.publishTrack(micTrack, {
-                    source: Track.Source.Microphone,
-                    dtx: true,
-                    red: true,
-                    // Voice is mono. WebAudio-processed mic tracks (RNNoise)
-                    // report channelCount 2 at publish time, which would make
-                    // LiveKit negotiate stereo Opus — transmitting a left-only
-                    // defect faithfully and doubling bitrate for nothing. Never
-                    // set this in publishDefaults: screen-share game audio must
-                    // stay stereo.
-                    forceStereo: false,
-                });
+                // A push-to-talk or muted member's mic stays shut through the
+                // publish (holdMicGateWhilePublishing).
+                const releaseGate = holdMicGateWhilePublishing(micTrack);
+                try {
+                    this.micPub = await room.localParticipant.publishTrack(micTrack, {
+                        source: Track.Source.Microphone,
+                        dtx: true,
+                        red: true,
+                        // Voice is mono. WebAudio-processed mic tracks (RNNoise)
+                        // report channelCount 2 at publish time, which would make
+                        // LiveKit negotiate stereo Opus — transmitting a left-only
+                        // defect faithfully and doubling bitrate for nothing. Never
+                        // set this in publishDefaults: screen-share game audio must
+                        // stay stereo.
+                        forceStereo: false,
+                    });
+                } finally {
+                    releaseGate();
+                }
             }
 
             // Watch for channel-key epoch changes (member join/leave rotations).
@@ -725,12 +771,19 @@ export class SfuManager {
                 await this.room.localParticipant.unpublishTrack(pub.track.mediaStreamTrack, false);
             }
         }
-        this.micPub = await this.room.localParticipant.publishTrack(newTrack, {
-            source: Track.Source.Microphone,
-            dtx: true,
-            red: true,
-            forceStereo: false, // mono voice — see the initial mic publish
-        });
+        // The new track carries the gate (reacquireAudioTrack stamps it);
+        // keep a shut one shut through the publish (holdMicGateWhilePublishing).
+        const releaseGate = holdMicGateWhilePublishing(newTrack);
+        try {
+            this.micPub = await this.room.localParticipant.publishTrack(newTrack, {
+                source: Track.Source.Microphone,
+                dtx: true,
+                red: true,
+                forceStereo: false, // mono voice — see the initial mic publish
+            });
+        } finally {
+            releaseGate();
+        }
     }
 
     /** Take our microphone off the SFU (SPEAK revoked mid-call). The caller
