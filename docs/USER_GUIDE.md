@@ -238,7 +238,7 @@ The voice panel's buttons, by tooltip:
 
 | Tooltip | Action |
 |---------|--------|
-| **Mute** / **Unmute** | Stop or resume sending your microphone. Reads **Push to talk — hold your key to speak** in push-to-talk mode, **No microphone detected — listen-only mode** if there is none, and **You don't have permission to speak in this channel** if you do not have the Speak permission there |
+| **Mute** / **Unmute** | Stop or resume sending your microphone. Reads **Push to talk — hold your key to speak** in push-to-talk mode, **No microphone detected — listen-only mode. Mute now to stay muted when it comes back** if there is none, and **You don't have permission to speak in this channel** if you do not have the Speak permission there. With no microphone the button still works: it decides whether you come back muted when a microphone returns, and then reads **No microphone detected — you stay muted when it comes back. Click to unmute**. If you were muted or deafened when your microphone dropped out, you come back muted |
 | **Deafen** / **Undeafen** | Stop hearing everyone, which also mutes you |
 | **Noise suppression** | A picker, not a button: choose the microphone filter — **No suppression**, **Standard** or **RNNoise (ML)**. **DeepFilter (Max)** is listed too once **DeepFilterNet noise suppression** is ticked under **Settings → Advanced** |
 | **Turn On Camera** / **Turn Off Camera** | Share your webcam |
@@ -265,7 +265,7 @@ is in one of the server's voice channels (under the channel in the channel
 list, on a voice tile, or in the member list on the right; on a phone, tap
 them under the voice channel) and use the **Voice** section. You do not have
 to be in voice yourself.
-- **Move to** opens the list of voice channels right under it; pick one
+- **Move to** opens the list of voice channels right under it; pick one. Someone who had muted or deafened themselves arrives still muted or deafened
 - **Disconnect from voice** drops them out of the call; they can rejoin straight away
 
 A member sitting in the AFK channel can be disconnected but not moved out of it.

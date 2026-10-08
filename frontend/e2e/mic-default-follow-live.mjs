@@ -426,7 +426,8 @@ try {
         check(`${label}: ...and the old mic stays on every sender, live and open`,
             kept.length > 0 && JSON.stringify(kept.map(s => s.id)) === JSON.stringify(keep.map(s => s.id)) && kept.every(s => s.state === 'live' && s.enabled),
             JSON.stringify(kept.map(s => `${s.id.slice(0, 8)}:${s.state}:${s.enabled ? 'on' : 'off'}`)));
-        check(`${label}: ...A is not listen-only`, !(await hasTitle(A, 'No microphone detected — listen-only mode')));
+        check(`${label}: ...A is not listen-only`, !(await A.evaluate(() => [...document.querySelectorAll('button')]
+            .some(x => (x.getAttribute('title') || '').startsWith('No microphone detected')))));
         const keptLine = logsA.slice(lRef).find(l => l.line?.includes('could not open it'));
         check(`${label}: ...and the log says it kept the old one`, !!keptLine, keptLine?.line ?? 'no line');
         await flowing(A, B, `${label}: after the refused follow`);

@@ -8,7 +8,7 @@ import { wsClient, type ServerMessage } from '../api/websocket';
 import { VoicePanel } from './VoicePanel';
 import { OwnVoiceBanner } from './OwnVoiceBanner';
 import { roomLeftNotice, type OwnVoiceState } from '../api/ownVoice';
-import { getVoiceUsersInRoom, globalVoiceUsers, globalCameraUsers, isUserStreaming, subscribeToStreamState, subscribeToVoiceUsers, getSelectedStreams, getStreamData, getAllStreamers, selectStream, deselectStream, upsertVoiceUser } from './voiceState';
+import { getVoiceUsersInRoom, globalVoiceUsers, globalCameraUsers, isUserStreaming, subscribeToStreamState, subscribeToVoiceUsers, getSelectedStreams, getStreamData, getAllStreamers, selectStream, deselectStream, upsertVoiceUser, carrySelfVoiceChoiceTo } from './voiceState';
 import { useStreamStore } from '../stores/streamStore';
 import type { VoiceUserStatus } from './voiceState';
 import './FileUpload.css';
@@ -2706,6 +2706,14 @@ export function Chat({ onLogout }: ChatProps) {
                     // exists nowhere, mic still open. Land on the truth instead.
                     stranded('moved you out of the channel');
                     return;
+                }
+                // The destination mounts a NEW voice panel, which used to join
+                // with a fresh, open microphone: a member who had muted (or
+                // deafened) themselves arrived live, by someone else's hand.
+                // Carry their own choice into that join (voiceState).
+                const cur = currentVoiceChannelRef.current;
+                if (cur === null || cur.id === payload.from_channel_id) {
+                    carrySelfVoiceChoiceTo(`voice_${target.id}`);
                 }
                 setCurrentVoiceChannel(prev =>
                     // `prev === null` is accepted only because wasInSource was

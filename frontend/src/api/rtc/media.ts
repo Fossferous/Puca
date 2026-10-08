@@ -514,7 +514,15 @@ export class MediaManager {
         // value put a live mic on every mesh sender and into the SFU
         // publication until VoicePanel re-asserted the gate after the swap.
         const gateNow = streamAtStart.getAudioTracks()[0] ?? oldAudio;
-        newAudio.enabled = gateNow ? gateNow.enabled : wasEnabled;
+        // Out of listen-only (the microphone died, or there was none at the
+        // join) the track in the stream is a dead capture, or nothing: its
+        // gate says nothing about what the member wants NOW — they may have
+        // muted, deafened or pressed nothing since, and with no track there
+        // was only the `true` default. So the new one comes up SHUT, and
+        // VoicePanel opens it from the member's own choice once it has left
+        // listen-only. Stamping the old value put an open mic on every mesh
+        // sender (and into the SFU publication) before the panel re-gated it.
+        newAudio.enabled = this.noMic ? false : (gateNow ? gateNow.enabled : wasEnabled);
         this.noMic = false; // we have a real mic again
 
         // Re-arm the device watch on the fresh capture. rawMic's current audio

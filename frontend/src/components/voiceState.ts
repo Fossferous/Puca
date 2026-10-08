@@ -226,6 +226,36 @@ export function isSelfDeafened(): boolean {
     return selfDeafened;
 }
 
+// The member's OWN mute/deafen choice in their call (VoicePanel publishes it
+// while in voice), and the copy a move they did not make carries into the
+// next call. A moderator's "Move to" mounts a NEW voice panel for the
+// destination, and a new panel used to mean a fresh, unmuted microphone: a
+// member who had muted themselves arrived live. The published choice is
+// deliberately NOT cleared when the call ends, because on an SFU channel the
+// server's forced removal can tear the call down before the move directive
+// is read, and the directive must still carry what the member had chosen.
+export interface SelfVoiceChoice { muted: boolean; deafened: boolean }
+let selfVoiceChoice: SelfVoiceChoice = { muted: false, deafened: false };
+let carriedVoiceChoice: (SelfVoiceChoice & { roomId: string }) | null = null;
+
+export function publishSelfVoiceChoice(choice: SelfVoiceChoice): void {
+    selfVoiceChoice = { muted: choice.muted, deafened: choice.deafened };
+}
+
+/** A move the member did not make (a moderator's Move to): the next join of
+ *  `roomId` starts with the member's own mute/deafen instead of unmuted. */
+export function carrySelfVoiceChoiceTo(roomId: string): void {
+    carriedVoiceChoice = { roomId, ...selfVoiceChoice };
+}
+
+/** The choice carried into this join, once. Any join takes (and so drops)
+ *  it: a carry meant for one room never reaches a join the member chose. */
+export function takeCarriedVoiceChoice(roomId: string): SelfVoiceChoice | null {
+    const c = carriedVoiceChoice;
+    carriedVoiceChoice = null;
+    return c && c.roomId === roomId ? { muted: c.muted, deafened: c.deafened } : null;
+}
+
 // Voice user state change callbacks - for Chat.tsx sidebar to subscribe
 type VoiceUserCallback = () => void;
 const voiceUserListeners: Set<VoiceUserCallback> = new Set();

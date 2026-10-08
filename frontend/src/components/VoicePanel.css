@@ -146,10 +146,17 @@
 }
 
 /* Listen-only: no capture device at all. Reads as UNAVAILABLE rather than
-   "muted by choice" (which would imply a click could unmute). */
+   "muted by choice": no click makes the member heard until a microphone
+   returns (a click only decides whether they come back muted). */
 .voice-btn.no-mic {
     background: rgba(255, 255, 255, 0.04);
     opacity: 0.55;
+}
+
+/* ...and the member pressed Mute while it was gone: they come back muted.
+   Their own choice, so the muted red, still dimmed for the missing device. */
+.voice-btn.no-mic.active {
+    background: rgba(240, 71, 71, 0.2);
 }
 
 .listen-only-help {
