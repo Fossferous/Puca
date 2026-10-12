@@ -262,9 +262,13 @@ describe('WebRTCManager rejoin/rebuild detection (connId protocol)', () => {
             const mgr = new WebRTCManager();
             mgr.setLocalUserId(1);
 
-            // Established legacy session (no connIds anywhere).
+            // Established legacy session (no connIds anywhere). Drained by a
+            // bounded advance, not runAllTimers: these fake pcs never leave
+            // 'new', and draining EVERY timer would also fire the 8 s "ICE
+            // never started" rebuild (rtcIceRecovery.test.ts), which is not
+            // what this test is about.
             offerFrom(10);
-            await vi.runAllTimersAsync();
+            await vi.advanceTimersByTimeAsync(1000);
             const stale = FakePC.instances[0];
             expect(stale.appliedRemote).toHaveLength(1);
             expect(stale.signalingState).toBe('stable');
@@ -276,7 +280,7 @@ describe('WebRTCManager rejoin/rebuild detection (connId protocol)', () => {
                 throw new DOMException('m-lines order mismatch', 'InvalidAccessError');
             };
             offerFrom(10);
-            await vi.runAllTimersAsync();
+            await vi.advanceTimersByTimeAsync(1000);
 
             // The peer must be rebuilt in place (stale closed, fresh alive)...
             expect(stale.closed).toBe(true);

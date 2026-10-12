@@ -238,3 +238,95 @@ describe('WebRTCManager ICE-failure recovery ladder', () => {
         expect(MockPc.instances.length).toBe(1);
     });
 });
+
+describe('WebRTCManager: a pc whose ICE never started is rebuilt', () => {
+    /** Offer, answered: both ends 'stable', and the pc stays 'new' unless the
+     *  test moves it (the stall: ICE never ran, so no event ever fires). */
+    async function negotiate(mgr: WebRTCManager): Promise<MockPc> {
+        mgr.setLocalUserId(1);
+        await mgr.callUser(2);
+        const pc = MockPc.instances[MockPc.instances.length - 1];
+        pc.onnegotiationneeded?.();
+        await flush();
+        answerLatestOffer(2);
+        await flush();
+        expect(pc.signalingState).toBe('stable');
+        return pc;
+    }
+
+    it("stable but still 'new' at the deadline: closed and a fresh pc offers", async () => {
+        const mgr = new WebRTCManager();
+        const pc = await negotiate(mgr);
+        const offers = fakeWs.sentOffers.length;
+
+        await vi.advanceTimersByTimeAsync(7_900);
+        expect(pc.closed).toBe(false); // not before the deadline
+        await vi.advanceTimersByTimeAsync(200);
+        await flush();
+        MockPc.instances[1]?.onnegotiationneeded?.();
+        await flush();
+
+        expect(pc.closed).toBe(true);
+        expect(MockPc.instances.length).toBe(2);
+        expect(fakeWs.sentOffers.length).toBe(offers + 1); // the fresh pc negotiates
+    });
+
+    it('a pc whose ICE started (connecting) is left alone, however long it takes', async () => {
+        const mgr = new WebRTCManager();
+        const pc = await negotiate(mgr);
+        pc.transition('connecting');
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flush();
+        expect(pc.closed).toBe(false);
+        expect(MockPc.instances.length).toBe(1);
+    });
+
+    it('a stall that keeps recurring stops after the rebuild budget', async () => {
+        const mgr = new WebRTCManager();
+        await negotiate(mgr);
+        for (let i = 0; i < 6; i++) {
+            await vi.advanceTimersByTimeAsync(8_100);
+            await flush();
+            const fresh = MockPc.instances[MockPc.instances.length - 1];
+            if (!fresh.closed && fresh.signalingState === 'stable' && !fresh.localDescription) {
+                fresh.onnegotiationneeded?.();
+                await flush();
+                answerLatestOffer(2);
+                await flush();
+            }
+        }
+        // The first pc plus three rebuilds; the third rebuild's pc is kept.
+        expect(MockPc.instances.length).toBe(4);
+        expect(MockPc.instances[3].closed).toBe(false);
+    });
+
+    it("'connected' forgives the budget: a later stall is rebuilt again", async () => {
+        const mgr = new WebRTCManager();
+        await negotiate(mgr);
+        for (let i = 0; i < 3; i++) {
+            await vi.advanceTimersByTimeAsync(8_100);
+            await flush();
+            const fresh = MockPc.instances[MockPc.instances.length - 1];
+            fresh.onnegotiationneeded?.();
+            await flush();
+            answerLatestOffer(2);
+            await flush();
+        }
+        expect(MockPc.instances.length).toBe(4);
+        const pc4 = MockPc.instances[3];
+        pc4.transition('connected'); // budget forgiven
+        // Later the pair is rebuilt (the member left and came back) and the
+        // fresh pc stalls again.
+        mgr.closePeer(2);
+        await mgr.callUser(2);
+        const pc5 = MockPc.instances[MockPc.instances.length - 1];
+        expect(pc5).not.toBe(pc4);
+        pc5.onnegotiationneeded?.();
+        await flush();
+        answerLatestOffer(2);
+        await flush();
+        await vi.advanceTimersByTimeAsync(8_100);
+        await flush();
+        expect(pc5.closed).toBe(true);
+    });
+});

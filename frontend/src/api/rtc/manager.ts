@@ -131,6 +131,16 @@ export class WebRTCManager {
     // drive it forever.
     private stuckRebuilds: Map<UserId, number> = new Map();
     private readonly MAX_STUCK_REBUILDS = 4;
+    // "ICE never started" checks (see scheduleIceStartCheck), one per peer,
+    // bound to the pc they were armed for.
+    private iceStartTimers: Map<UserId, { pc: RTCPeerConnection; timer: number }> = new Map();
+    // Rebuilds spent on pcs whose ICE never started, since the last
+    // 'connected'. Separate from stuckRebuilds on purpose: that budget is
+    // forgiven by any applied description, and every rebuild applies one, so
+    // a stall that keeps recurring would rebuild forever on it.
+    private iceStartRebuilds: Map<UserId, number> = new Map();
+    private readonly ICE_START_DEADLINE_MS = 8000;
+    private readonly MAX_ICE_START_REBUILDS = 3;
     // Per-user teardown generation, bumped by every teardownPeer. An in-flight
     // getOrCreatePeer build captures it at start and re-checks after its
     // awaits: a bump means this peer was torn down mid-build (leave, connId
@@ -1061,6 +1071,43 @@ export class WebRTCManager {
         this.stuckRecoveryTimers.set(userId, timer);
     }
 
+    /**
+     * A pc whose offer/answer completed but whose ICE never started: both
+     * ends 'stable', connectionState still 'new', the answering browser
+     * gathering with not one local candidate. Seen in the 3-peer rig when a
+     * member rejoined with no microphone (a few rounds in a hundred on one
+     * day, none on another): the stall is inside Chromium's network startup,
+     * and the call is silent between that pair for good. Nothing else
+     * catches it: no 'failed' ever fires (ICE never ran), the stuck-pair
+     * watchdog only judges non-stable pcs, and the reviewer measured that
+     * restartIce() on the stalled pc does not revive it. A fresh pc does.
+     * Armed whenever a description is applied; bails if the pc moved on.
+     */
+    private scheduleIceStartCheck(userId: UserId): void {
+        const pc = this.peers.get(userId)?.connection;
+        if (!pc || this.iceStartTimers.get(userId)?.pc === pc) return; // none, or already armed for it
+        const prev = this.iceStartTimers.get(userId);
+        if (prev) clearTimeout(prev.timer);
+        const epoch = this.voiceEpoch;
+        const timer = window.setTimeout(() => {
+            if (this.iceStartTimers.get(userId)?.timer === timer) this.iceStartTimers.delete(userId);
+            if (this.voiceEpoch !== epoch || !this.inVoice) return;
+            const peer = this.peers.get(userId);
+            if (!peer || peer.connection !== pc) return; // rebuilt or gone
+            if (pc.connectionState !== 'new' || pc.signalingState !== 'stable') return; // started, or the stuck-pair watchdog's case
+            const rebuilds = (this.iceStartRebuilds.get(userId) ?? 0) + 1;
+            if (rebuilds > this.MAX_ICE_START_REBUILDS) {
+                console.warn(`[WebRTC] ICE to ${userId} never started after ${rebuilds - 1} rebuilds — leaving it`);
+                return;
+            }
+            this.iceStartRebuilds.set(userId, rebuilds);
+            console.warn(`[WebRTC] ICE to ${userId} never started ${this.ICE_START_DEADLINE_MS} ms after negotiating (gathering=${pc.iceGatheringState}) — rebuilding (attempt ${rebuilds})`);
+            this.closePeer(userId);
+            void this.callUser(userId);
+        }, this.ICE_START_DEADLINE_MS);
+        this.iceStartTimers.set(userId, { pc, timer });
+    }
+
     private async attemptReconnection(userId: UserId): Promise<void> {
         const attempts = (this.reconnectAttempts.get(userId) || 0) + 1;
         this.reconnectAttempts.set(userId, attempts);
@@ -1377,6 +1424,7 @@ export class WebRTCManager {
                 if (pending) clearTimeout(pending);
                 this.reconnectTimeouts.delete(userId);
                 this.stuckRebuilds.delete(userId); // healthy — reset the rebuild budget
+                this.iceStartRebuilds.delete(userId);
             } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'closed') {
                 // NOT terminal: ICE 'disconnected' recovers on its own all the
                 // time. Tearing the peer's tiles down here would flicker them
@@ -1612,6 +1660,7 @@ export class WebRTCManager {
         // stuck-rebuild budget spent on it is forgiven.
         this.stuckRebuilds.delete(fromUser);
         await this.flushPendingCandidates(fromUser, pc);
+        this.scheduleIceStartCheck(fromUser);
 
         if (description.type === 'offer') {
             await this.setupMediaKey(fromUser); // tag ready to advertise in the answer
@@ -1682,6 +1731,7 @@ export class WebRTCManager {
         }
         this.stuckRebuilds.delete(fromUser); // applied cleanly — healthy again
         await this.flushPendingCandidates(fromUser, pc);
+        this.scheduleIceStartCheck(fromUser);
         await this.setupMediaKey(fromUser);
         await pc.setLocalDescription(); // implicit answer
         const local = pc.localDescription;
@@ -1757,6 +1807,11 @@ export class WebRTCManager {
         const st = this.stuckRecoveryTimers.get(userId);
         if (st) clearTimeout(st);
         this.stuckRecoveryTimers.delete(userId);
+        // (iceStartRebuilds survives: a rebuild tears the peer down, and the
+        // budget must outlive that or it is no budget.)
+        const it = this.iceStartTimers.get(userId);
+        if (it) clearTimeout(it.timer);
+        this.iceStartTimers.delete(userId);
     }
 
     closeAll() {
@@ -1781,6 +1836,9 @@ export class WebRTCManager {
         this.stuckRecoveryTimers.forEach((t) => clearTimeout(t));
         this.stuckRecoveryTimers.clear();
         this.stuckRebuilds.clear();
+        this.iceStartTimers.forEach((t) => clearTimeout(t.timer));
+        this.iceStartTimers.clear();
+        this.iceStartRebuilds.clear();
         this.peerGeneration.clear();
         this.media.stopLocalStream();
         this.media.stopScreenShare();

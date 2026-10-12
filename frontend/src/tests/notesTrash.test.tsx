@@ -39,6 +39,11 @@ import { applyTaskEvent } from '../notes/model/taskEvents';
 import { getNotesPrefs, invalidateNotesPrefs, setNoteColor, setNoteLabels } from '../notes/model/notesPrefs';
 import { type TaskTabPref } from '../api/tasks';
 
+/** The fake server's clock: inside the 30-day trash window of the fixtures
+ *  below (trashed 2026-09-10, or 2026-09-19 when a test trashes one). Never
+ *  the real clock, or the window closes under the tests on a calendar date. */
+const FIXTURE_SERVER_NOW = Date.parse('2026-09-20T00:00:00Z');
+
 const settle = async () => {
     for (let i = 0; i < 12; i++) await act(async () => { await new Promise(r => setTimeout(r, 0)); });
 };
@@ -138,7 +143,10 @@ beforeEach(() => {
         trashed: [],
         prefs: [1, 2, 3].map(id => ({ kind: 'list', ref_id: id, is_favorite: false })),
         trashSupported: true,
-        nowMs: Date.now(),
+        // The SERVER's clock, pinned inside the fixtures' 30-day window (they
+        // were trashed 2026-09-10). It was the real clock, so every test that
+        // relies on it began failing on 2026-10-10, when the window closed.
+        nowMs: FIXTURE_SERVER_NOW,
         selfId: null,
         trashGate: null,
     };

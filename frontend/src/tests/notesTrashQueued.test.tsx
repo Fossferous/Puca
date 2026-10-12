@@ -43,6 +43,11 @@ import { resetNoteBusy } from '../notes/model/noteBusy';
 import { appOutbox, useQueuedListDeletes } from '../notes/model/notesOutbox';
 import { listContentKeys, type ListContentActions } from '../notes/model/useListContent';
 
+/** The fake server's clock: inside the 30-day trash window of the fixtures
+ *  below (trashed 2026-09-10, or 2026-09-19 when a test trashes one). Never
+ *  the real clock, or the window closes under the tests on a calendar date. */
+const FIXTURE_SERVER_NOW = Date.parse('2026-09-20T00:00:00Z');
+
 const settle = async (n = 12) => {
     for (let i = 0; i < n; i++) await act(async () => { await new Promise(r => setTimeout(r, 0)); });
 };
@@ -59,7 +64,7 @@ const offline = () => new TypeError('Failed to fetch');
 function installServer() {
     get.mockImplementation(async (path: string) => {
         if (!online) throw offline();
-        if (path === '/task-lists/features') return { body: true, attachments: true, trash: true, trash_retention_days: 30, max_body_len: 65536, server_now_ms: Date.now() };
+        if (path === '/task-lists/features') return { body: true, attachments: true, trash: true, trash_retention_days: 30, max_body_len: 65536, server_now_ms: FIXTURE_SERVER_NOW };
         if (path === '/task-lists?trashed=true') return trashed.map(id => row(id, true));
         if (path === '/task-lists') return live.map(id => row(id));
         if (path === '/task-tab-prefs') return live.map(id => ({ kind: 'list', ref_id: id, is_favorite: false }));
