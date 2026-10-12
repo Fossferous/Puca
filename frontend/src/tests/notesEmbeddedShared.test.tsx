@@ -107,13 +107,22 @@ const NEVER_EMBEDDED: Record<string, string> = {
     // Chat's copy is the bus's one sink).
     [path.join('components', 'MessageToasts.tsx')]: 'rendered only on Notes’ own page',
 };
+/** Portals whose target is an element INSIDE a layer that already went
+ *  through usePortalTarget() — never the body, so nothing for the sweep to
+ *  catch. Each with where it lands. */
+const INTO_OWN_LAYER: Record<string, string> = {
+    // The phone's "Add to note" button, into a slot in the open note's own
+    // footer (NoteEditor's toolsSlot); the editor is portaled through
+    // usePortalTarget() itself.
+    [path.join('notes', 'components', 'NoteContentSection.tsx')]: 'into NoteEditor’s footer slot',
+};
 
 describe('every portal embedded Notes can reach goes through usePortalTarget()', () => {
     it('the sweep finds none that portal to the body', () => {
         const offenders: string[] = [];
         for (const f of shellClosure()) {
             const rel = path.relative(SRC, f);
-            if (NEVER_EMBEDDED[rel]) continue;
+            if (NEVER_EMBEDDED[rel] || INTO_OWN_LAYER[rel]) continue;
             for (const o of portalOffences(fs.readFileSync(f, 'utf8'))) offenders.push(`${rel}: ${o}`);
         }
         expect(offenders).toEqual([]);

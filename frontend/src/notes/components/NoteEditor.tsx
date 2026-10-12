@@ -79,9 +79,13 @@ interface NoteEditorProps {
     /** The search that led here, so the note can say where it matched and
      *  step through its matches. Display only — never stored or sent. */
     query?: string;
+    /** Bumped to put the caret at the end of the note's text, keyboard up
+     *  (NoteContentSection's typeSignal): today's note, opened by New note. */
+    typeSignal?: number;
+    onTyped?: () => void;
 }
 
-export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPickLabels, onArchive, onSendToPuca, pucaHref, escapeBlocked = false, acceptKey, flashTaskId = null, query }: NoteEditorProps) {
+export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPickLabels, onArchive, onSendToPuca, pucaHref, escapeBlocked = false, acceptKey, flashTaskId = null, query, typeSignal = 0, onTyped }: NoteEditorProps) {
     const portalTarget = usePortalTarget();
     const ref = card.ref;
     // Its own query subscription with `live` so a shared note polls while open.
@@ -118,6 +122,10 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
     const addRef = useRef<HTMLInputElement>(null);
     const titleRef = useRef<HTMLInputElement>(null);
     const editorRef = useRef<HTMLDivElement>(null);
+    /** The footer's slot for the phone's "Add to note" button
+     *  (NoteContentSection's toolsSlot). State, not a ref: the section has to
+     *  render again once the footer exists. */
+    const [toolsSlot, setToolsSlot] = useState<HTMLSpanElement | null>(null);
     const onScreen = useLayerOnScreen();
     const onScreenRef = useRef(onScreen);
     useEffect(() => { onScreenRef.current = onScreen; });
@@ -389,7 +397,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                 )}
 
                 <div className="notes-editor-body" ref={bodyRef}>
-                    <NoteContentSection card={card} actions={actions} tasks={tasks} tasksLoaded={!tasksQuery.isPending} undo={undo} />
+                    <NoteContentSection card={card} actions={actions} tasks={tasks} tasksLoaded={!tasksQuery.isPending} undo={undo} typeSignal={typeSignal} onTyped={onTyped} toolsSlot={toolsSlot} />
                     {canCreate && (
                         <form className="notes-editor-add" onSubmit={addItem}>
                             <input
@@ -451,9 +459,15 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                 </div>
 
                 <div className="notes-editor-foot">
+                    {/* The phone's "Add to note" lands here (NoteAddMenu);
+                        empty, and `display: contents`, everywhere else. */}
+                    <span ref={setToolsSlot} className="notes-editor-tools-slot" />
                     <button type="button" className="notes-iconbtn" aria-label="Colour" title="Colour" onClick={e => onPickColor(card, e.currentTarget)}><PaletteIcon /></button>
-                    <button type="button" className="notes-iconbtn" aria-label="Labels" title="Labels" onClick={e => onPickLabels(card, e.currentTarget)}><TagIcon /></button>
-                    <button type="button" className="notes-iconbtn" aria-label={card.archived ? 'Unarchive' : 'Archive'} title={card.archived ? 'Unarchive' : 'Archive'} onClick={() => onArchive(card, !card.archived)}><ArchiveIcon /></button>
+                    {/* Labels, Archive and Close leave the phone's footer so
+                        it is ONE row (notes.css): the More menu has Labels…
+                        and Archive, and the X at the top closes. */}
+                    <button type="button" className="notes-iconbtn notes-foot-wide" aria-label="Labels" title="Labels" onClick={e => onPickLabels(card, e.currentTarget)}><TagIcon /></button>
+                    <button type="button" className="notes-iconbtn notes-foot-wide" aria-label={card.archived ? 'Unarchive' : 'Archive'} title={card.archived ? 'Unarchive' : 'Archive'} onClick={() => onArchive(card, !card.archived)}><ArchiveIcon /></button>
                     {noteReminders && (
                         <NoteReminderControl
                             note={{ title: card.title, dueAt: card.dueAt, schedule: card.schedule }}
@@ -472,7 +486,7 @@ export function NoteEditor({ card, actions, onClose, onMenu, onPickColor, onPick
                     )}
                     <span className="spacer" />
                     <button type="button" className="notes-iconbtn" aria-label="More actions" title="More" onClick={e => onMenu(e, card, e.currentTarget)}><MoreVerticalIcon /></button>
-                    <button type="button" className="notes-textbtn" onClick={onClose}>Close</button>
+                    <button type="button" className="notes-textbtn notes-foot-wide" onClick={onClose}>Close</button>
                 </div>
                 {pasteItems.dialog}
             </div>

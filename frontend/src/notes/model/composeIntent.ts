@@ -48,6 +48,13 @@ export interface ComposeIntent {
      * page itself — the composer focuses exactly as it always has.
      */
     readyToType?: boolean;
+    /**
+     * `title` is a SUGGESTION, not content: today's date on a daily note
+     * (model/dailyNote.ts). A composer closed with only that title in it is
+     * empty and creates nothing, exactly like an untouched blank one — the
+     * person asked to write, and wrote nothing. Edited, it counts as typed.
+     */
+    titleIsPrefill?: boolean;
 }
 
 /** The nav targets that mean "open the composer", in the widget's cell order.

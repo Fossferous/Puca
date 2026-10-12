@@ -141,6 +141,10 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     /** A ready-to-type request (ComposeIntent.readyToType) waiting for its
      *  field to be drawn: which composer it is for, or null. */
     const typeInto = useRef<'text' | 'list' | null>(null);
+    /** A title the composer was OPENED with as a suggestion (today's date on
+     *  a daily note, ComposeIntent.titleIsPrefill), or null. While the title
+     *  still reads exactly this, it is not something the person wrote. */
+    const prefilledTitle = useRef<string | null>(null);
     /** Nothing in this composer keeps the focus (so no keyboard for it). */
     const blurInside = () => {
         const a = document.activeElement;
@@ -178,7 +182,12 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
         const want = composeModeFor(initial.mode, content);
         setOpen(true);
         setMode(want === 'text' ? 'text' : 'list');
-        if (initial.title !== undefined) setTitle(initial.title.slice(0, MAX_TITLE_LENGTH));
+        if (initial.title !== undefined) {
+            setTitle(initial.title.slice(0, MAX_TITLE_LENGTH));
+            // A request that brings no title leaves the one on screen — and
+            // what it was — alone.
+            prefilledTitle.current = initial.titleIsPrefill ? initial.title.slice(0, MAX_TITLE_LENGTH) : null;
+        }
         if (initial.items?.length) {
             // A checklist read out of a share (composeIntent's takeShare).
             setItems(initial.items.slice(0, MAX_TAKEN_ITEMS).map(i => i.slice(0, MAX_ITEM_LENGTH)));
@@ -283,6 +292,7 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     };
     const reset = () => {
         typeInto.current = null;
+        prefilledTitle.current = null;
         setTitle(''); setItems(['']); setBody(''); setMode('list');
         // live, not the closure: reset() also runs after an await, and a
         // picture added during that wait has a URL of its own to free.
@@ -337,7 +347,10 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
     const draftNow = () => {
         const from = live.current;
         const raw = from.mode === 'list' ? from.items : [];
-        return { from, raw, empty: from.title.trim() === '' && cleanQuickItems(raw).length === 0 && !hasContent(from) };
+        // A suggested title left as it was is not content (titleIsPrefill):
+        // an untouched daily note must not create a dated, empty note.
+        const titled = from.title.trim() !== '' && from.title !== prefilledTitle.current;
+        return { from, raw, empty: !titled && cleanQuickItems(raw).length === 0 && !hasContent(from) };
     };
 
     // --- Paste and drop ---------------------------------------------------------

@@ -330,6 +330,27 @@ Púca's reminders. Anything you do in one is what you see in the other.
   APK takes the same update over the air and lands on the same field, but
   the keyboard waits for a tap, as before, and a drawing opened right after
   a list can still bring that list's keyboard back.
+
+  **Today's note.** A **new note** opened that way — the shortcut, the tile,
+  the widget, an intent such as MacroDroid's, or *Open Púca Notes to* → *A
+  new note* — is a daily note. Its title is **today's date**, written out in
+  the phone's own language and order (in American English, *Monday,
+  October 12, 2026*). If a note with
+  exactly that title already exists, that note opens instead, with the
+  cursor at the **end of its text** and the keyboard up, so a second tap on
+  the same day carries on where the first left off. If there is none yet,
+  the composer opens with the date already in the title and the cursor in
+  the text. A date you leave as it was counts as nothing typed, so closing
+  that composer without writing anything still saves nothing. The match is
+  on the local calendar, so a new day begins at midnight. A note in the
+  Trash, a channel's checklist and a note you have renamed are never
+  today's note, and if several match, the one edited most recently opens.
+  A new **list**, a drawing, a photo, a share and everything you start from
+  inside the app are unchanged. Opening the app on a new note waits up to
+  four seconds for your notes to load before it decides, so the day's note
+  is not missed just because the app has only just started. This comes with
+  the in-app update and needs no new APK
+  (`notes/model/dailyNote.ts`).
 - **Keyboard** — `/` search, `c` new note, `r` refresh, `Esc` close, `?` help.
 - **Installable, and it works offline** — a web app manifest lets a browser add
   Notes to the home screen or desktop, and a service worker scoped to
