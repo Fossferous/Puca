@@ -30,6 +30,7 @@
  * left), and its files are its own again.
  */
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { type Task, isAttachmentsLocked, parseTaskAttachments } from '../../api/tasks';
 import { type GalleryItem, fileIdsOf, galleryItemNoun, readStrokes, refsOfItem, withoutItem } from '../../api/noteMedia';
 import { type NoteBodyHandle, NoteBodyField } from '../../components/NoteBodyField';
@@ -53,6 +54,8 @@ import { AudioRecorder, type RecordedClip } from './AudioRecorder';
 import { canRecordAudio } from '../model/audioNote';
 import { transcribeClip } from '../model/transcribe';
 import { type EditorUndoApi, useEditorUndo } from './useEditorUndo';
+import { NoteAddMenu } from './NoteAddMenu';
+import { raiseNativeKeyboard } from '../native/notesNative';
 import '../noteContent.css';
 
 const COARSE = '(pointer: coarse) and (max-width: 1024px)';
@@ -69,9 +72,25 @@ interface Props {
      *  two at the same fixed position; without it this section keeps one of
      *  its own, which is what the unit tests drive. */
     undo?: EditorUndoApi;
+    /**
+     * Bumped to ask for the caret at the END of the note's text, keyboard up:
+     * today's note opened by New note (notes/model/dailyNote.ts). Once per
+     * new value, and only once the text field is drawn. 0 = never.
+     */
+    typeSignal?: number;
+    /** Called once `typeSignal` has been acted on, so the owner can drop it:
+     *  the next plain tap on this note must not bring the keyboard up. */
+    onTyped?: () => void;
+    /**
+     * Where the phone's "Add to note" button goes: a slot in the editor's
+     * footer (NoteEditor). Given AND on a phone, the add buttons and the
+     * Show/Hide checkboxes row leave the top of the note for that one button
+     * (NoteAddMenu); otherwise they stay where they always were.
+     */
+    toolsSlot?: HTMLElement | null;
 }
 
-export function NoteContentSection({ card, actions, tasks, tasksLoaded, undo }: Props) {
+export function NoteContentSection({ card, actions, tasks, tasksLoaded, undo, typeSignal = 0, onTyped, toolsSlot = null }: Props) {
     const c = actions.content;
     const [drawing, setDrawing] = useState<{ item?: GalleryItem; initial?: DrawingDoc } | null>(null);
     const [recording, setRecording] = useState(false);
@@ -91,6 +110,34 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded, undo }: 
     // The items as they are NOW, for a commit that runs after they changed.
     const tasksRef = useRef(tasks);
     useEffect(() => { tasksRef.current = tasks; });
+    // Ready to type at the end of the text (typeSignal). Waits for the field:
+    // the server's answer about note text can land after the note opens.
+    // Not under another screen (a dialog over the note): the keyboard would
+    // type into a field nobody can see — the composer's rule (QuickAdd's
+    // coveredField).
+    const typedFor = useRef(0);
+    const hasField = card.ref.kind === 'list' && actions.content.features.body;
+    useEffect(() => {
+        if (!typeSignal || typedFor.current === typeSignal || !hasField) return;
+        const field = bodyRef.current;
+        if (!field) return;
+        typedFor.current = typeSignal;
+        onTyped?.();
+        field.focusEnd();
+        // Next frame: text with a link in it is a read view, and the field
+        // that replaces it is focused by its own commit, not by this call.
+        requestAnimationFrame(() => {
+            const at = document.activeElement;
+            if (!(at instanceof HTMLElement) || at.closest('.note-body-field') === null) return;
+            if (typeof document.elementFromPoint === 'function') {
+                const r = at.getBoundingClientRect();
+                const hit = document.elementFromPoint(r.left + r.width / 2, r.top + Math.min(r.height / 2, 20));
+                const screen = hit?.closest('[role="dialog"]');
+                if (hit && !at.contains(hit) && screen && !screen.contains(at)) return;
+            }
+            void raiseNativeKeyboard();
+        });
+    });
     if (card.ref.kind !== 'list') return null;
     const listId = card.ref.id;
     const ref = card.ref;
@@ -102,6 +149,11 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded, undo }: 
     const refs = isAttachmentsLocked(opened) ? [] : parseTaskAttachments(opened);
     const text = readableBody(card.body);
     const bodyLocked = !!card.body && isUndecryptable(card.body);
+    // The phone's footer "Add to note" button takes the add buttons and the
+    // conversions (NoteAddMenu); the wide screen keeps them in place.
+    const menuMode = !!coarse && toolsSlot !== null;
+    const mediaEditable = showImages && !isAttachmentsLocked(opened) && !busy;
+    const canConvert = showBody && tasksLoaded && !bodyLocked;
 
     const addPhotos = async (files: File[]) => {
         setBusy(true);
@@ -333,8 +385,9 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded, undo }: 
                     placeholder={tasks.length > 0 ? 'Add some text…' : 'Take a note…'}
                 />
             )}
-            {showImages && (
+            {showImages && (!menuMode || refs.length > 0 || busy || isAttachmentsLocked(opened)) && (
                 <NoteImages
+                    hideActions={menuMode}
                     saveFolder={NOTES_FOLDER}
                     opened={opened}
                     editable
@@ -355,7 +408,7 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded, undo }: 
                     onSave={clip => keepClip(clip)}
                 />
             )}
-            {showBody && tasksLoaded && !bodyLocked && (text !== '' || tasks.length > 0) && (
+            {!menuMode && canConvert && (text !== '' || tasks.length > 0) && (
                 <div className="notes-convert-row">
                     {text !== '' && (
                         <button type="button" className="ni-action" disabled={converting} onClick={() => void showCheckboxes()}>Show checkboxes</button>
@@ -377,6 +430,18 @@ export function NoteContentSection({ card, actions, tasks, tasksLoaded, undo }: 
                 />
             )}
             {!undo && own.bar}
+            {menuMode && toolsSlot && createPortal(
+                <NoteAddMenu
+                    onAddPhotos={mediaEditable ? (files => void addPhotos(files)) : undefined}
+                    showCamera={!!coarse}
+                    onDraw={mediaEditable ? (() => void openDrawing()) : undefined}
+                    onRecord={mediaEditable && canRecordAudio() ? () => { setTranscribeNotice(null); setRecording(true); } : undefined}
+                    onShowCheckboxes={canConvert && text !== '' ? () => void showCheckboxes() : undefined}
+                    onHideCheckboxes={canConvert && tasks.length > 0 ? () => void hideCheckboxes() : undefined}
+                    converting={converting}
+                />,
+                toolsSlot,
+            )}
         </div>
     );
 }

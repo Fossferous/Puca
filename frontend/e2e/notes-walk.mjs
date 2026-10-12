@@ -3391,7 +3391,8 @@ ck('phone: a note’s file is a 44px tap target that saves it, inside the viewpo
     && !r.bodyScrollsHorizontally && r.under.length === 0,
     JSON.stringify({ fileBox, under: r.under }));
 await mshot('phone-file-note');
-await m.getByRole('button', { name: 'Close', exact: true }).tap();
+// The X at the top: the footer's text Close is not on a phone (one row).
+await m.locator('.notes-editor button[aria-label="Close note"]').tap();
 await m.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 }).catch(() => {});
 
 // Púca's Tasks view at 390x844: the Trash section at the end of the All tasks
@@ -3483,7 +3484,7 @@ await m.waitForSelector('.notes-editor .note-images', { timeout: 15000 });
 r = await audit();
 ck('phone: photo note editor — picture controls at size, text ≥ 16px', r.under.length === 0 && r.fonts['.nb-text'] >= 16, JSON.stringify({ u: r.under, f: r.fonts['.nb-text'] }));
 await mshot('phone-photo-note');
-await m.getByRole('button', { name: 'Close', exact: true }).tap();
+await m.locator('.notes-editor button[aria-label="Close note"]').tap();
 await m.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
 
 // The account menu's selects must not trigger the iOS zoom.
@@ -3594,6 +3595,30 @@ ck('phone: editor is full-screen', box && box.height >= vh - 2 && box.width >= 3
 r = await audit();
 ck('phone: editor title + add row ≥ 16px', r.fonts['.notes-editor-title'] >= 16 && r.fonts['.notes-editor-add input'] >= 16, JSON.stringify(r.fonts));
 ck('phone: editor tap targets at size', r.under.length === 0, JSON.stringify(r.under));
+// The top of an open note is for the note (the owner's report: "it should
+// not take up half of the screen"). Before, a checklist's first item sat at
+// y=420 of 844 behind the add pills and the checkbox row, and the footer
+// wrapped Close onto a second row. Now the add tools are ONE "Add to note"
+// in a one-row footer, its menu holding every one of them.
+const chrome = await m.evaluate(() => {
+    const item = document.querySelector('.notes-editor .tt-item');
+    const foot = document.querySelector('.notes-editor-foot');
+    const tops = [...foot.querySelectorAll('button, a')].filter(b => b.getBoundingClientRect().width > 0).map(b => Math.round(b.getBoundingClientRect().top));
+    return {
+        firstItem: item ? Math.round(item.getBoundingClientRect().top) : null,
+        pills: document.querySelectorAll('.notes-editor .ni-actions, .notes-editor .notes-convert-row').length,
+        footRows: new Set(tops).size,
+    };
+});
+ck('phone: the first item is in the top third, not halfway down', chrome.firstItem !== null && chrome.firstItem <= 281, JSON.stringify(chrome));
+ck('phone: no add pills or checkbox row above the items, and the footer is one row', chrome.pills === 0 && chrome.footRows === 1, JSON.stringify(chrome));
+await m.locator('.notes-editor-foot button[aria-label="Add to note"]').tap();
+await m.waitForSelector('[role="menu"]', { timeout: 5000 }).catch(() => {});
+const addItems = await m.locator('[role="menu"] [role="menuitem"]').allInnerTexts();
+ck('phone: "Add to note" holds the add tools', ['Add photo', 'Add file', 'Take photo', 'Draw'].every(t => addItems.some(a => a.includes(t))), JSON.stringify(addItems));
+await mshot('phone-editor-add-menu');
+await m.keyboard.press('Escape');
+await m.waitForSelector('[role="menu"]', { state: 'detached', timeout: 5000 }).catch(() => {});
 // A long web address must not widen the note. Seed one, measure, put it back.
 const LONG_URL = 'https://example.com/a/very/long/path/that/keeps/going/and/going/so/it/cannot/possibly/fit/on/one/line/at/390px?q=1';
 // Aimed at x:4 — the first word — and not at the middle of the box, because
@@ -3718,7 +3743,7 @@ if (await m.locator('.notes-editor-foot button[aria-label="List actions"]').coun
 } else {
     skip('phone: the list-actions popover', 'nothing is ticked in this note here');
 }
-await m.getByRole('button', { name: 'Close', exact: true }).tap();
+await m.locator('.notes-editor button[aria-label="Close note"]').tap();
 await m.waitForSelector('.notes-editor', { state: 'detached', timeout: 5000 });
 
 // themes: light + high contrast at 130% text, then amoled with animations off
@@ -4474,9 +4499,12 @@ try {
     });
     await toGrid();
     await a.locator('.notes-card', { hasText: 'Sketch' }).tap();
-    await a.waitForSelector('.notes-editor .ni-actions button[aria-label="Voice note"]', { timeout: 15000 });
+    // On the phone, Voice note is in the footer's "Add to note" menu, not a
+    // pill above the items (NoteAddMenu).
+    await a.waitForSelector('.notes-editor-foot button[aria-label="Add to note"]', { timeout: 15000 });
     const recordOnce = async () => {
-        await a.tap('.notes-editor .ni-actions button[aria-label="Voice note"]');
+        await a.tap('.notes-editor-foot button[aria-label="Add to note"]');
+        await a.getByRole('menuitem', { name: 'Voice note' }).tap();
         await a.waitForSelector('.notes-recorder', { timeout: 10000 });
         await sleep(1200);
         await a.tap('.notes-recorder button[aria-label="Stop recording"]');

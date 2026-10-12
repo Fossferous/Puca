@@ -608,10 +608,19 @@ Inside Notes:
   MacroDroid sending the shortcut's intent (the details are in
   [Púca Notes](NOTES.md)) — opens ready to type, with the keyboard up, in
   the Púca Notes app from the release after 0.9.826 on.
+  A new **note** opened that way is **today's note**: it is titled with
+  today's date, and if that note already exists it opens instead, with the
+  cursor at the end of its text. Closed without writing anything, it saves
+  nothing.
 - Click a note to open it. Inside, items work exactly as in Tasks: tick,
   edit, add subtasks, drag by the grip (the faint dotted handle at the left
   of the item) to reorder it or drag it to the right to nest it, set a due
   time from the clock, attach pictures from the paperclip.
+  On a phone the open note keeps the top of the screen for the note itself:
+  **Add to note** (the **+** at the bottom left) holds *Add photo*, *Add
+  file*, *Take photo*, *Draw*, *Voice note* and *Show/Hide checkboxes*;
+  **Labels** and **Archive** are in the **More** menu at the bottom right, and the **X**
+  at the top closes the note. A computer shows them as before.
 - An item that starts with `## ` is a **heading** — a section title with no
   checkbox, never counted as a step; **Turn into heading** on an item makes
   one, and **Turn into item** turns it back. One that still has a due time

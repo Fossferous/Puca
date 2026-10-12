@@ -905,6 +905,9 @@
     border-top: 1px solid var(--border-faint);
 }
 .notes-editor-foot .spacer { flex: 1; }
+/* The phone's "Add to note" slot (NoteEditor / NoteAddMenu): its button
+   sits in the row as if it were the row's own child. */
+.notes-editor-tools-slot { display: contents; }
 /* A footer button never shrinks below its tap size. The row gained "Send to
    Púca" and flex was happy to squeeze every icon to 39px wide at 390px —
    which the walk's tap-target check caught. */
@@ -1155,6 +1158,18 @@
        anchor is not a <button>, so mobile.css's 44px floor never applied. */
     .notes-editor-foot { row-gap: 4px; }
     .notes-editor-foot > .notes-open-puca { display: none; }
+    /* ONE row on a phone, Google Keep's bottom bar. The top of an open note
+       used to take half of a 390x844 screen — the add buttons and the
+       checkbox conversion sat between the text and the items, and this
+       footer wrapped onto a second row for Close — so with the keyboard up
+       the first item was off the screen. The add buttons and conversions
+       are now "Add to note" (NoteAddMenu), first in this row; Labels and
+       Archive are in the More menu, and the X at the top closes. Eight 44px
+       buttons fit 390px; a ticked list's List actions may wrap to a second
+       row, which the base rule allows. */
+    .notes-editor-foot > .notes-foot-wide { display: none; }
+    /* The title row: one slim toolbar, Keep-height, the 44px buttons intact. */
+    .notes-editor-head { padding: 4px 4px 0 16px; gap: 0; }
     .notes-editor-foot .notes-iconbtn, .notes-editor-foot .notes-textbtn { flex-shrink: 0; }
     .notes-editor-foot .notes-iconbtn { min-width: 44px; min-height: 44px; }
     .notes-editor-foot a.notes-iconbtn { min-width: 44px; min-height: 44px; }

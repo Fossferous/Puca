@@ -94,6 +94,13 @@ export interface NoteBodyHandle {
      * missing when the user typed while the phone was transcribing.
      */
     appendText: (text: string) => Promise<BodyAppendResult>;
+    /**
+     * Put the caret at the END of the text, ready to type more — today's
+     * note opened by Púca Notes' New note (notes/model/dailyNote.ts). A read
+     * view (text with a link in it) swaps to the field first. Nothing is
+     * changed or saved.
+     */
+    focusEnd: () => void;
 }
 
 /** What `onSave` answers: `true` (or `{ rev }`, naming the note's new
@@ -295,6 +302,20 @@ export const NoteBodyField = forwardRef<NoteBodyHandle, NoteBodyFieldProps>(func
             setDraft(next);
             setState('idle');
             return await flush() ? 'ok' : 'failed';
+        },
+        focusEnd: () => {
+            const end = latest.current.draft.length;
+            const el = areaRef.current;
+            if (!el) {
+                // The read view: the swap's own layout effect focuses the
+                // field it mounts and puts the caret here.
+                pendingCaret.current = end;
+                setEditing(true);
+                return;
+            }
+            el.focus();
+            el.setSelectionRange(end, end);
+            setEditing(true);
         },
     }), [flush, markDirty]);
 

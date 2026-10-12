@@ -181,9 +181,14 @@ export interface NoteImagesProps {
      *  MediaRecorder, no container, no microphone API) — the button is then
      *  not offered at all rather than failing when pressed. */
     onRecord?: () => void;
+    /** Leave out the row of add buttons (Add photo, Add file, Take photo,
+     *  Draw, Voice note): the host offers them itself — Púca Notes' phone
+     *  editor, from the "Add to note" button in its footer (NoteAddMenu). The
+     *  pictures, and their own Edit/Remove tools, are unchanged. */
+    hideActions?: boolean;
 }
 
-export function NoteImages({ opened, editable, busy = false, onAddPhotos, onRemove, onDraw, showCamera = false, onRecord, saveFolder }: NoteImagesProps) {
+export function NoteImages({ opened, editable, busy = false, onAddPhotos, onRemove, onDraw, showCamera = false, onRecord, saveFolder, hideActions = false }: NoteImagesProps) {
     const [zoom, setZoom] = useState<{ url: string; name: string; href: string } | null>(null);
     const pickRef = useRef<HTMLInputElement>(null);
     const fileRef = useRef<HTMLInputElement>(null);
@@ -238,7 +243,7 @@ export function NoteImages({ opened, editable, busy = false, onAddPhotos, onRemo
                     ))}
                 </div>
             )}
-            {canEdit && (onAddPhotos || onDraw || onRecord) && (
+            {canEdit && !hideActions && (onAddPhotos || onDraw || onRecord) && (
                 <div className="ni-actions">
                     {onAddPhotos && (
                         <>

@@ -38,6 +38,7 @@ import {
     ALL_PAGE_KEY, hasPageForPath, pageIndexForPath, pageRoutes, routeForIndex, type NotesPage,
 } from '../model/notesPages';
 import { type ComposeIntent, type ComposeMode, takeShare } from '../model/composeIntent';
+import { DAILY_WAIT_MS, dailyTitle, findDailyNote } from '../model/dailyNote';
 import { useNativeShareIn, type SharedIntoNotes } from '../native/useNativeShareIn';
 import { useNotesOpenTo } from '../native/useNotesOpenTo';
 import { restoreLabels } from '../model/notesBulk';
@@ -331,6 +332,9 @@ export function NotesShell({ onSignOut, expiredOffline = false, embedded, coldSt
             setQuickSignal(n => n + 1);
         }
     }, [navigate, path, query]);
+    /** A New note waiting to become today's note (below). */
+    const [dailyAsk, setDailyAsk] = useState<{ seq: number; until: number } | null>(null);
+    const dailySeq = useRef(0);
     // A shortcut, the tile, the widget, an app sending the same intent
     // (MacroDroid, Tasker) or "Open Púca Notes to": ready to type, keyboard
     // up (QuickAdd, ComposeIntent.readyToType). Except a LAUNCH drained by a
@@ -340,9 +344,61 @@ export function NotesShell({ onSignOut, expiredOffline = false, embedded, coldSt
     // `source` is absent for Open Púca Notes to, which only ever acts at the
     // app's own start or on a return to it.
     const onNativeCompose = useCallback((mode: ComposeMode, source?: NativeComposeSource) => {
-        openCompose({ mode, readyToType: source !== 'launch' || coldStart });
+        const readyToType = source !== 'launch' || coldStart;
+        // New note, ready to type: today's note (below) — decided once the
+        // notes are in, so an existing one is never missed for a second.
+        if (mode === 'text' && readyToType) {
+            dailySeq.current += 1;
+            setDailyAsk({ seq: dailySeq.current, until: Date.now() + DAILY_WAIT_MS });
+            return;
+        }
+        openCompose({ mode, readyToType });
     }, [openCompose, coldStart]);
     const composeTaken = useCallback(() => setComposeIntent(null), []);
+
+    // --- Today's note (model/dailyNote.ts) -----------------------------------------------
+    // New note ready to type — the launcher shortcut, the tile, the widget,
+    // MacroDroid's intent, Open Púca Notes to — opens TODAY's note: the one
+    // titled with today's date, caret at the end of its text, keyboard up;
+    // or, if there is none yet, the composer with that title already in and
+    // the caret in the text. The composer saves only on Done, and a title it
+    // was opened with is not content (ComposeIntent.titleIsPrefill), so an
+    // untouched one leaves no empty dated note behind.
+    //
+    // It WAITS for the notes: a cold start reads the request in
+    // milliseconds, and deciding before the list arrives would open a second
+    // note for a day that already has one.
+    // Bounded, as a share is: offline with nothing cached the list never
+    // comes, and the composer must still open.
+    /** The open note's "caret at the end, keyboard up" request: which note,
+     *  and a seq so the same note asked for twice is asked twice. Dropped
+     *  once acted on (NoteEditor's onTyped). */
+    const [typeTap, setTypeTap] = useState<{ key: string; seq: number } | null>(null);
+    const typeTaken = useCallback(() => setTypeTap(null), []);
+    const cardsRef = useRef(cards);
+    useEffect(() => { cardsRef.current = cards; });
+    useEffect(() => {
+        if (!dailyAsk) return;
+        const decide = () => {
+            setDailyAsk(null);
+            const now = new Date();
+            const today = findDailyNote(cardsRef.current, now);
+            if (today) {
+                setTypeTap({ key: today.key, seq: dailyAsk.seq });
+                openNote(today);
+                return;
+            }
+            // What the page believes about note text, exactly as New note has
+            // always decided (composeModeFor): a server that keeps none — or
+            // one whose answer is not in — gets the checklist it always got,
+            // with no date on it; a dated title is a daily NOTE's.
+            if (!contentRef.current.text) { openCompose({ mode: 'text', readyToType: true }); return; }
+            openCompose({ mode: 'text', readyToType: true, title: dailyTitle(now), titleIsPrefill: true });
+        };
+        if (!loading) { decide(); return; }
+        const t = setTimeout(decide, Math.max(0, dailyAsk.until - Date.now()));
+        return () => clearTimeout(t);
+    }, [dailyAsk, loading, openCompose, openNote]);
 
     // "Open Púca Notes to" (the account menu, Android app only): at the
     // app's start, and on coming back after five minutes away, the composer
@@ -352,7 +408,7 @@ export function NotesShell({ onSignOut, expiredOffline = false, embedded, coldSt
     // `openKey`, not `openCard`: a note in the address is open even while
     // the notes are still loading and its editor is not drawn yet.
     const openToIdle = !openKey && !popup && !help && !labelMgr && !sheet && !contextMenu && !drawer && !reminderModal
-        && composeIntent === null && !selection.active
+        && composeIntent === null && dailyAsk === null && !selection.active
         && !query.trim() && !remindersView && !trashView && !calendarView;
     const launchReports = useNotesOpenTo({
         enabled: isAndroidApp() && !isEmbedded,
@@ -918,6 +974,8 @@ export function NotesShell({ onSignOut, expiredOffline = false, embedded, coldSt
                     acceptKey={ownsKey}
                     flashTaskId={flashItem}
                     query={filter.kind === 'search' ? filter.query : undefined}
+                    typeSignal={typeTap?.key === openCard.key ? typeTap.seq : 0}
+                    onTyped={typeTaken}
                 />
             )}
 
