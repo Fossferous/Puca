@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.838 — 2026-10-12
 
+Calls follow your default microphone, you stay muted when a mic returns, and silent connections reconnect
 ### Fixed
 
 - **A call follows the system default microphone when it moves.** With your input device on **Default**, a call kept recording from the microphone it started with when the Windows default moved to another one — for example when a headset switcher, or Windows itself, picks a different default as a headset connects — until you left and rejoined. It now moves to the new default about a second after the change, without leaving the call: you stay muted if you were muted (also if you mute while it is switching), push-to-talk and your noise suppression carry over, and the others hear the new microphone without anyone rejoining. A headset that drops out and comes back as the default is followed back, and so is a move between two inputs of one sound card. If the new default cannot be opened, the call keeps the microphone it had. Choosing a specific microphone still locks the call to it. The desktop app's log now records every default-device change and what the call did about it. With the next desktop update, and in the web app in Chrome and Edge.
