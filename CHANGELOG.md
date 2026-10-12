@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.839 — 2026-10-12
 
+You stay muted across channel switches and Move here; New note opens today's note; roomier notes on phones
 ### Added
 
 - **New note opens today's note.** In the Púca Notes app, a new note started from outside the app — the long-press **New note** shortcut, the quick tile, the widget, an automation app such as MacroDroid sending the shortcut's intent, or **Open Púca Notes to → A new note** — is now titled with today's date, written out in your phone's language (for example "Monday, October 12, 2026"). If a note with that title already exists, it opens instead, with the cursor at the end of its text and the keyboard up, so you carry on the same day's note rather than starting another. If you close the new dated note without writing anything, nothing is saved. A new list, a drawing, a photo, a share and anything you start inside the app work as before. Comes with the in-app update; no new Notes app install needed.
