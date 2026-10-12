@@ -1501,7 +1501,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         }
 
         // Broadcast to others via special message
-        wsClient.sendChatMessage(roomId, buildVoiceStatus({ muted, deafened, buffering }));
+        // selfMuted from the ref, like buffering: every caller passes only the
+        // mute in force, and the member's own choice must be the CURRENT one.
+        wsClient.sendChatMessage(roomId, buildVoiceStatus({ muted, selfMuted: selfMutedRef.current, deafened, buffering }));
     }, [roomId, currentUserId, refreshVoiceUsersList]);
     // Always-fresh handle for the WS-effect timers and the reconnect handler:
     // adding broadcastStatus to those effects' deps would tear down and
@@ -1673,8 +1675,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         speakDeniedRef.current = deniedByHint;
         setSpeakDenied(deniedByHint);
         webrtcManager.setSpeakDenied(deniedByHint);
-        // A moderator moved us here: arrive with the mute and deafen the
-        // member had chosen, not with a fresh open mic. Set before the mic
+        // The call continues here (a moderator's move, the member's own
+        // switch, Move here): arrive with the mute and deafen the member had
+        // chosen, not with a fresh open mic. Set before the mic
         // opens, through the refs, so the join's own gate (applyMicGate
         // below, before any sender exists) and every voice element created
         // for this call read it.

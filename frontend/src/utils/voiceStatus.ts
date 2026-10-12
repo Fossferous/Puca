@@ -19,8 +19,17 @@ export interface VoiceStatus {
     buffering: boolean;
 }
 
-export function buildVoiceStatus(s: VoiceStatus): string {
-    return VOICE_STATUS_PREFIX + JSON.stringify({ muted: s.muted, deafened: s.deafened, buffering: s.buffering });
+/** What this client SENDS: also the member's own mute choice, which differs
+ *  from `muted` while the call imposes a mute (no microphone, an AFK
+ *  channel). Nobody's roster reads it; the server keeps it for the member's
+ *  OWN other devices, so Move here starts the call as the member left it
+ *  (ownVoice.ts `selfMuted`). Older servers relay it untouched. */
+export interface OwnVoiceStatus extends VoiceStatus {
+    selfMuted: boolean;
+}
+
+export function buildVoiceStatus(s: OwnVoiceStatus): string {
+    return VOICE_STATUS_PREFIX + JSON.stringify({ muted: s.muted, selfMuted: s.selfMuted, deafened: s.deafened, buffering: s.buffering });
 }
 
 /** Returns null when `content` is not a status ping. */

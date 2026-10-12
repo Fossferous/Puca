@@ -1009,6 +1009,22 @@ fn is_voice_status_ping(content: &str) -> bool {
     content.starts_with(VOICE_STATUS_PREFIX)
 }
 
+/// (own mute choice, deafened) out of a `__VOICE_STATUS__` ping, for the
+/// account's own devices (`OwnVoiceState`). The choice is `selfMuted` when
+/// the client sends it (0.9.839 and later) and the mute in force otherwise:
+/// an older client's `muted` also covers a mute the call imposed (no
+/// microphone, an AFK channel), which is the safe side to err on. None for
+/// anything that is not a ping with a JSON object behind the prefix.
+fn voice_status_flags(content: &str) -> Option<(bool, bool)> {
+    let body = content.strip_prefix(VOICE_STATUS_PREFIX)?;
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let o = v.as_object()?;
+    let flag = |k: &str| o.get(k).and_then(|x| x.as_bool());
+    let deafened = flag("deafened") == Some(true);
+    let self_muted = flag("selfMuted").or(flag("muted")) == Some(true);
+    Some((self_muted, deafened))
+}
+
 /// What a `ChatMessage` into a channel-backed room (`channel_<id>` or
 /// `voice_<id>`) is admitted as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1742,11 +1758,21 @@ fn own_voice_frame(
             server_name: None,
             here: false,
             device: None,
+            self_muted: None,
+            deafened: None,
         },
         Some((room_id, cid, conns)) => {
             let mut others: Vec<u64> = conns.iter().copied().filter(|&c| c != conn_id).collect();
             others.sort_unstable();
+            // Only what was reported in THIS room: a status left over from an
+            // earlier call says nothing about this one.
+            let status = state
+                .own_voice_status
+                .get(&user_id)
+                .and_then(|s| (s.0 == *room_id).then_some((s.1, s.2)));
             ServerMessage::OwnVoiceState {
+                self_muted: status.map(|s| s.0),
+                deafened: status.map(|s| s.1),
                 room_id: Some(room_id.clone()),
                 channel_id: Some(*cid),
                 server_id: labels.map(|l| l.0.clone()),
@@ -1768,6 +1794,10 @@ fn own_voice_frame(
 /// re-fetched if the call moved meanwhile, so what is sent is live state, not
 /// a picture from before the await.
 async fn send_own_voice_state(state: &Arc<AppState>, user_id: UserId, only: Option<u64>) {
+    // Out of voice: the reported status has nothing left to describe.
+    if own_voice_snapshot(state, user_id).is_none() {
+        state.own_voice_status.remove(&user_id);
+    }
     let targets: Vec<u64> = state
         .own_voice_conns(user_id)
         .into_iter()
@@ -3629,6 +3659,14 @@ async fn handle_message(
 
             let timestamp = Utc::now().timestamp();
 
+            // The account's own status ping, from a connection IN the call:
+            // remember it for the account's other devices (Move here starts
+            // the call as it was). Re-asserts repeat the same value and push
+            // nothing.
+            let own_status = (parse_voice_room(&room_id).is_some() && joined_rooms.contains(&room_id))
+                .then(|| voice_status_flags(&content))
+                .flatten();
+
             state.broadcast_to_room(
                 &room_id,
                 ServerMessage::ChatMessage {
@@ -3642,6 +3680,14 @@ async fn handle_message(
                 },
                 None,
             );
+
+            if let Some((self_muted, deafened)) = own_status {
+                let next = (room_id.clone(), self_muted, deafened);
+                let changed = state.own_voice_status.insert(user_id, next.clone()).as_ref() != Some(&next);
+                if changed {
+                    push_own_voice_state(state, user_id).await;
+                }
+            }
         }
 
         // WebRTC signaling is only legitimate between peers who share a voice
@@ -6456,7 +6502,20 @@ mod file_offer_presence_mask_tests {
 
 #[cfg(test)]
 mod chat_admission_tests {
-    use super::{chat_admission, is_voice_status_ping, ChatAdmission, VOICE_STATUS_PREFIX};
+    use super::{chat_admission, is_voice_status_ping, voice_status_flags, ChatAdmission, VOICE_STATUS_PREFIX};
+
+    #[test]
+    fn status_flags_take_the_choice_when_sent_and_the_mute_in_force_otherwise() {
+        let f = |b: &str| voice_status_flags(&format!("{VOICE_STATUS_PREFIX}{b}"));
+        assert_eq!(f(r#"{"muted":true,"deafened":false}"#), Some((true, false)));
+        assert_eq!(f(r#"{"muted":true,"selfMuted":false,"deafened":false}"#), Some((false, false)));
+        assert_eq!(f(r#"{"muted":false,"selfMuted":true,"deafened":true}"#), Some((true, true)));
+        assert_eq!(f(r#"{"muted":"yes"}"#), Some((false, false)), "only a real true counts");
+        assert_eq!(f("[true]"), None);
+        assert_eq!(f("not json"), None);
+        assert_eq!(voice_status_flags(r#"{"muted":true}"#), None, "no prefix, no status");
+    }
+
     use crate::permissions::{ChannelPermAccess, Permissions};
 
     fn allowed(perms: Permissions) -> ChannelPermAccess {
@@ -9365,6 +9424,124 @@ mod own_voice_state_tests {
         assert_eq!(phone_after_move, Some(lounge(true, None)));
         assert_eq!(pc_after_leave, Some(none), "hang up: nobody is in voice any more");
         assert!(!any_own(&old_after_leave) && !any_own(&old_last), "still nothing for the old client");
+    }
+
+    /// Move here starts the call as it was: the account's own mute choice and
+    /// deafen, as its device in the call reported them in its status ping,
+    /// reach its OTHER devices in OwnVoiceState - and nothing else does: not
+    /// a ping from a connection outside the call, not another account's, not
+    /// a status from an earlier call.
+    #[tokio::test]
+    async fn the_other_devices_learn_the_calls_mute_and_deafen_from_its_own_status_ping() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let mut ids = Vec::new();
+        for n in ["a", "b"] {
+            let (id,): (i32,) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id")
+                .bind(format!("ovm_{n}_{}", &tag[..12]))
+                .bind(b"s".as_ref())
+                .bind(b"v".as_ref())
+                .fetch_one(&pool)
+                .await
+                .expect("user");
+            ids.push(id);
+        }
+        let (a, b) = (ids[0], ids[1]);
+        let server = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, 'Friends', $2)")
+            .bind(&server)
+            .bind(a)
+            .execute(&pool)
+            .await
+            .expect("server");
+        for m in [a, b] {
+            sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)")
+                .bind(&server)
+                .bind(m)
+                .execute(&pool)
+                .await
+                .expect("member");
+        }
+        let everyone = (Permissions::VIEW_CHANNEL | Permissions::CONNECT | Permissions::SPEAK | Permissions::SEND_MESSAGES).bits() as i64;
+        sqlx::query(
+            "INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) \
+             VALUES ($1, '@everyone', '#99AAB5', $2, 0, true)",
+        )
+        .bind(&server)
+        .bind(everyone)
+        .execute(&pool)
+        .await
+        .expect("@everyone");
+        let (voice,): (i32,) = sqlx::query_as("INSERT INTO channels (server_id, name, type, sfu_mode) VALUES ($1, 'Lounge', 1, false) RETURNING id")
+            .bind(&server)
+            .fetch_one(&pool)
+            .await
+            .expect("voice");
+        let room = format!("voice_{voice}");
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+
+        let mut pc = Sock::open(&state, a, "m1", Some("own_voice"), Some("desktop"));
+        let mut phone = Sock::open(&state, a, "m2", Some("own_voice"), Some("mobile"));
+        let mut sb = Sock::open(&state, b, "m3", Some("own_voice"), Some("mobile"));
+        let ping = |body: serde_json::Value, room: &str| {
+            serde_json::json!({ "type": "ChatMessage", "payload": { "room_id": room, "content": format!("__VOICE_STATUS__{body}") } })
+        };
+        let flags = |frames: &[ServerMessage]| -> Option<(Option<bool>, Option<bool>)> {
+            frames.iter().rev().find_map(|m| match m {
+                ServerMessage::OwnVoiceState { self_muted, deafened, .. } => Some((*self_muted, *deafened)),
+                _ => None,
+            })
+        };
+
+        pc.send(&state, serde_json::json!({ "type": "JoinRoom", "payload": { "room_id": room } })).await.expect("pc joins");
+        sb.send(&state, serde_json::json!({ "type": "JoinRoom", "payload": { "room_id": room } })).await.expect("b joins");
+        let joined = flags(&phone.drain());
+        let _ = (pc.drain(), sb.drain());
+
+        // An OLD client's ping (no selfMuted): its `muted` stands for the choice.
+        pc.send(&state, ping(serde_json::json!({ "muted": true, "deafened": false, "buffering": false }), &room)).await.expect("ping");
+        let old_style = flags(&phone.drain());
+        // The same again (a re-assert on someone's UserJoined): nothing new.
+        pc.send(&state, ping(serde_json::json!({ "muted": true, "deafened": false, "buffering": false }), &room)).await.expect("ping");
+        let repeat = flags(&phone.drain());
+        // A current client with no microphone: muted in force, but its own
+        // choice is to talk - the choice is what travels.
+        pc.send(&state, ping(serde_json::json!({ "muted": true, "selfMuted": false, "deafened": false, "buffering": false }), &room)).await.expect("ping");
+        let listen_only = flags(&phone.drain());
+        pc.send(&state, ping(serde_json::json!({ "muted": true, "selfMuted": true, "deafened": true, "buffering": false }), &room)).await.expect("ping");
+        let deafened = flags(&phone.drain());
+        // Not from the call: the phone is outside it, and b is another account.
+        let _ = pc.drain();
+        let _ = phone.send(&state, ping(serde_json::json!({ "muted": false, "selfMuted": false, "deafened": false }), &room)).await;
+        sb.send(&state, ping(serde_json::json!({ "muted": false, "selfMuted": false, "deafened": false }), &room)).await.expect("b pings");
+        let strangers = (flags(&phone.drain()), flags(&pc.drain()));
+        let b_learns = flags(&sb.drain());
+
+        // Move here: the phone takes the call and is told how it stood.
+        phone.send(&state, serde_json::json!({ "type": "JoinRoom", "payload": { "room_id": room, "take_over": true } }))
+            .await
+            .expect("move here");
+        let moved = flags(&phone.drain());
+
+        // Hang up, and join again: a status from the call that ended is gone.
+        phone.send(&state, serde_json::json!({ "type": "LeaveRoom", "payload": { "room_id": room } })).await.ok();
+        let after_leave = flags(&pc.drain());
+        pc.send(&state, serde_json::json!({ "type": "JoinRoom", "payload": { "room_id": room } })).await.expect("pc joins again");
+        let rejoined = flags(&phone.drain());
+
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&server).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = ANY($1)").bind(vec![a, b]).execute(&pool).await;
+
+        assert_eq!(joined, Some((None, None)), "a call that has reported nothing: unknown, not 'unmuted'");
+        assert_eq!(old_style, Some((Some(true), Some(false))), "an old client's ping: its muted is the choice");
+        assert_eq!(repeat, None, "a repeated status pushes nothing");
+        assert_eq!(listen_only, Some((Some(false), Some(false))), "the member's own choice travels, not a mute the call imposed");
+        assert_eq!(deafened, Some((Some(true), Some(true))));
+        assert_eq!(strangers, (None, None), "a ping from outside the call, or from another account, changes nothing");
+        assert_eq!(b_learns, Some((Some(false), Some(false))), "b's ping is b's own status, told to b's devices only");
+        assert_eq!(moved, Some((Some(true), Some(true))), "Move here: the phone learns the call was muted and deafened");
+        assert_eq!(after_leave, Some((None, None)), "out of voice: nothing");
+        assert_eq!(rejoined, Some((None, None)), "a fresh call starts with nothing reported");
     }
 
     /// The displaced device is told WHY, and by which kind of device, so it can

@@ -402,6 +402,10 @@ understands the two requests below; a server that predates them answers an
 unknown client frame with an `Error`, so the official client sends neither
 until it has the frame. The shape is pinned by
 `frontend/src/tests/fixtures/ownVoiceState.json`, parsed by both sides' tests.
+`self_muted` and `deafened` are the member's own mute choice and deafen in
+that call, as the device in it last reported them in its `__VOICE_STATUS__`
+room ping (`selfMuted` when the client sends it, else `muted`); null until it
+has reported, so a device joining by Move here starts the call as it was.
 
 - `LeaveOwnVoice { room_id }` ends the call on the account's OTHER
   connections in that voice room. There is no target: it acts only on the

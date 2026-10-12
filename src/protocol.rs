@@ -432,6 +432,12 @@ pub enum ServerMessage {
     /// connection reported itself, or null. Names come from the database at
     /// send time; they reach only the account's own devices. The byte shape
     /// is pinned by `frontend/src/tests/fixtures/ownVoiceState.json`.
+    ///
+    /// `self_muted` / `deafened`: the member's own mute choice and deafen in
+    /// that call, as its device last reported them in its `__VOICE_STATUS__`
+    /// ping (the roster state everyone in the room is already told), so a
+    /// device pressing Move here starts the call as it was. Null when the
+    /// call has reported nothing yet; always present.
     OwnVoiceState {
         room_id: Option<String>,
         channel_id: Option<i64>,
@@ -440,6 +446,8 @@ pub enum ServerMessage {
         server_name: Option<String>,
         here: bool,
         device: Option<String>,
+        self_muted: Option<bool>,
+        deafened: Option<bool>,
     },
 
     /// A moderator moved you into a different voice channel. Join
@@ -1354,6 +1362,8 @@ mod own_voice_wire_tests {
             server_name: Some("Friends".into()),
             here: false,
             device: Some("desktop".into()),
+            self_muted: Some(true),
+            deafened: Some(false),
         })
         .unwrap();
         let none = serde_json::to_value(ServerMessage::OwnVoiceState {
@@ -1364,6 +1374,8 @@ mod own_voice_wire_tests {
             server_name: None,
             here: false,
             device: None,
+            self_muted: None,
+            deafened: None,
         })
         .unwrap();
         let displaced = serde_json::to_value(ServerMessage::RoomLeft {
@@ -1393,6 +1405,8 @@ mod own_voice_wire_tests {
             server_name: Some("Friends".into()),
             here: true,
             device: Some("desktop".into()),
+            self_muted: Some(true),
+            deafened: Some(false),
         })
         .unwrap();
         assert_ne!(here, fixture[0]);

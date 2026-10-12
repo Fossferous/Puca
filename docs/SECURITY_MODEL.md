@@ -1444,7 +1444,9 @@ socket's own token and touches only that account's other connections, so no
 one can end or take over anybody else's call with them, and a take-over join
 passes the same VIEW and `CONNECT` checks as any join before it removes
 anything. `OwnVoiceState` — which voice channel your account is in, its
-server's name, and the kind of device holding it — is sent only to your own
+server's name, the kind of device holding it, and whether you are muted or
+deafened in it (the same status the call's members are already shown) — is
+sent only to your own
 connections that asked for it, never to anyone else and never to the phone's
 background delivery socket. The device kind is whatever that device reported
 about itself (`?kind=`) and labels your devices to each other; nothing

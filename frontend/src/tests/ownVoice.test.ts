@@ -17,6 +17,7 @@ import fixture from './fixtures/ownVoiceState.json';
 import { wsClient } from '../api/websocket';
 import {
     callOnOtherDevice,
+    carriedFromOtherDevice,
     getOwnVoiceSnapshot,
     ownVoiceBannerText,
     parseOwnVoiceState,
@@ -90,13 +91,28 @@ describe('OwnVoiceState parsing (the pinned fixture)', () => {
             serverName: 'Friends',
             here: false,
             device: 'desktop',
+            selfMuted: true,
+            deafened: false,
         });
     });
 
     it('reads the not-in-voice frame', () => {
         expect(parseOwnVoiceState(NONE.payload)).toEqual({
             roomId: null, channelId: null, serverId: null, channelName: null, serverName: null, here: false, device: null,
+            selfMuted: null, deafened: null,
         });
+    });
+
+    it("reads the call's mute and deafen only when they are real booleans", () => {
+        // A server from before 0.9.839 sends neither key: unknown, never "unmuted".
+        const { self_muted: _s, deafened: _d, ...older } = ELSEWHERE.payload as Record<string, unknown>;
+        const old = parseOwnVoiceState(older);
+        expect(old?.selfMuted).toBeNull();
+        expect(old?.deafened).toBeNull();
+        const odd = parseOwnVoiceState({ ...ELSEWHERE.payload, self_muted: 'true', deafened: 1 });
+        expect(odd?.selfMuted).toBeNull();
+        expect(odd?.deafened).toBeNull();
+        expect(parseOwnVoiceState({ ...ELSEWHERE.payload, self_muted: false, deafened: true })).toMatchObject({ selfMuted: false, deafened: true });
     });
 
     it('refuses junk rather than inventing a call', () => {
@@ -220,5 +236,23 @@ describe('what each device says', () => {
         expect(callOnOtherDevice(getOwnVoiceSnapshot())).toBeNull();
         sock.deliver(NONE);
         expect(callOnOtherDevice(getOwnVoiceSnapshot())).toBeNull();
+    });
+});
+
+describe('carriedFromOtherDevice: how a call that comes over to this device arrives', () => {
+    const elsewhere = (selfMuted: boolean | null, deafened: boolean | null, here = false) => ({
+        supported: true,
+        state: { roomId: 'voice_42', channelId: 42, serverId: 's', channelName: 'Lounge', serverName: 'Friends', here, device: 'desktop' as const, selfMuted, deafened },
+    });
+    it('as the other device left it', () => {
+        expect(carriedFromOtherDevice(elsewhere(true, false))).toEqual({ muted: true, deafened: false });
+        expect(carriedFromOtherDevice(elsewhere(false, false))).toEqual({ muted: false, deafened: false });
+        expect(carriedFromOtherDevice(elsewhere(false, true))).toEqual({ muted: true, deafened: true });
+    });
+    it('nothing to carry: not reported, the call is here, or no call / no support', () => {
+        expect(carriedFromOtherDevice(elsewhere(null, null))).toBeNull();
+        expect(carriedFromOtherDevice(elsewhere(true, true, true))).toBeNull();
+        expect(carriedFromOtherDevice({ supported: false, state: elsewhere(true, true).state })).toBeNull();
+        expect(carriedFromOtherDevice({ supported: true, state: null })).toBeNull();
     });
 });

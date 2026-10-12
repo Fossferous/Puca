@@ -7,7 +7,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { wsClient, type ServerMessage } from '../api/websocket';
 import { VoicePanel } from './VoicePanel';
 import { OwnVoiceBanner } from './OwnVoiceBanner';
-import { roomLeftNotice, type OwnVoiceState } from '../api/ownVoice';
+import { carriedFromOtherDevice, roomLeftNotice, type OwnVoiceState } from '../api/ownVoice';
 import { getVoiceUsersInRoom, globalVoiceUsers, globalCameraUsers, isUserStreaming, subscribeToStreamState, subscribeToVoiceUsers, getSelectedStreams, getStreamData, getAllStreamers, selectStream, deselectStream, upsertVoiceUser, getSelfVoiceChoice } from './voiceState';
 import { useStreamStore } from '../stores/streamStore';
 import type { VoiceUserStatus, SelfVoiceChoice } from './voiceState';
@@ -832,9 +832,11 @@ export function Chat({ onLogout }: ChatProps) {
     const [popupPosition, setPopupPosition] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
 
     // Voice channel state
-    // `movedWith`: set only when a moderator's move put us here - the member's
-    // own mute/deafen from the call they were moved out of (VoicePanel's
-    // arrivalChoice). A channel the member picks never carries one.
+    // `movedWith`: the member's own mute/deafen to arrive with (VoicePanel's
+    // arrivalChoice), set when the call CONTINUES somewhere else: a
+    // moderator's move, the member switching channel mid-call, or Move here
+    // (the call as the other device left it). A fresh join carries none: it
+    // starts unmuted, as a join always has.
     const [currentVoiceChannel, setCurrentVoiceChannel] = useState<(Channel & { movedWith?: SelfVoiceChoice }) | null>(null);
     // Mirror for handlers that must read it SYNCHRONOUSLY, before an await can
     // let something else change it. See handleVoiceMoved.
@@ -2779,8 +2781,12 @@ export function Chat({ onLogout }: ChatProps) {
                 showToast("Couldn't find that voice channel.");
                 return;
             }
+            // The call arrives as the other device left it: muted if it was,
+            // deafened if it was (the server relays what that device last
+            // reported). Read at the press, from the call the banner showed.
+            const movedWith = carriedFromOtherDevice({ supported: true, state: call }) ?? undefined;
             // Never yank a device that joined something meanwhile.
-            setCurrentVoiceChannel(prev => prev ?? target);
+            setCurrentVoiceChannel(prev => prev ?? (movedWith ? { ...target, movedWith } : target));
         }).catch((err: unknown) => {
             console.error('Move here: failed to resolve the channel:', err);
             showToast("Couldn't reach the server — try again in a moment.");
@@ -3634,8 +3640,21 @@ export function Chat({ onLogout }: ChatProps) {
                 if (isMobile) setMobilePanel('chat');
             } else {
                 // Seamless switch: directly set the new channel
-                // VoicePanel will handle cleanup of old room and joining new room on remount
-                setCurrentVoiceChannel(channel);
+                // VoicePanel will handle cleanup of old room and joining new room on remount.
+                // The call continues, so the member's own mute and deafen come
+                // along (as Discord does) - the new channel mounts a new panel,
+                // and a new panel used to mean an open microphone:
+                //   - mid-call here: as this device has it, read NOW, at the
+                //     click (the old panel's teardown gets no say);
+                //   - out of voice here while the account's call is live on
+                //     another device: this join takes it over (the same channel
+                //     moves it, another ends it there), as that device left it.
+                // A join with no call anywhere starts unmuted, as it always has.
+                const own = getSelfVoiceChoice();
+                const elsewhere = carriedFromOtherDevice();
+                setCurrentVoiceChannel(prev => (prev
+                    ? { ...channel, movedWith: own }
+                    : elsewhere ? { ...channel, movedWith: elsewhere } : channel));
             }
         } else if (channel.channel_type === 2) { // Collection (category)
             // Show unified view of all subchannels

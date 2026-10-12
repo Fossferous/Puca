@@ -33,6 +33,11 @@ export interface OwnVoiceState {
     here: boolean;
     /** The kind of device holding the call, as it reported itself. */
     device: DeviceKind | null;
+    /** The member's own mute choice and deafen in that call, as the device
+     *  in it last reported them (null: not reported yet, or a server from
+     *  before 0.9.839). Move here starts the call with them. */
+    selfMuted: boolean | null;
+    deafened: boolean | null;
 }
 
 export interface OwnVoiceSnapshot {
@@ -68,7 +73,9 @@ export function parseOwnVoiceState(payload: unknown): OwnVoiceState | null {
     const channelId = typeof p.channel_id === 'number' && Number.isFinite(p.channel_id) ? p.channel_id : null;
     if (roomId !== null && channelId === null) return null;
     const device = DEVICE_KINDS.includes(p.device as DeviceKind) ? (p.device as DeviceKind) : null;
-    return { roomId, channelId, serverId, channelName, serverName, here: p.here, device };
+    const flag = (v: unknown): boolean | null => (typeof v === 'boolean' ? v : null);
+    return { roomId, channelId, serverId, channelName, serverName, here: p.here, device,
+        selfMuted: flag(p.self_muted), deafened: flag(p.deafened) };
 }
 
 /** An OwnVoiceState frame arrived on the live socket (websocket.ts). */
@@ -107,6 +114,21 @@ export function useOwnVoice(): OwnVoiceSnapshot {
 export function callOnOtherDevice(snap: OwnVoiceSnapshot): OwnVoiceState | null {
     const s = snap.state;
     return snap.supported && s && s.roomId && !s.here ? s : null;
+}
+
+/**
+ * How a call that continues on THIS device should arrive: muted if the
+ * member had muted (or deafened) it on the other device, deafened if it was.
+ * For every way the account's call comes over here - Move here, tapping its
+ * channel, or joining another channel while it is live elsewhere (voice is
+ * one call per account, so that ends it there). Null - join as a join always
+ * has - when the call is not on another device, or it has reported nothing
+ * (just joined, or a server from before 0.9.839).
+ */
+export function carriedFromOtherDevice(snap: OwnVoiceSnapshot = snapshot): { muted: boolean; deafened: boolean } | null {
+    const call = callOnOtherDevice(snap);
+    if (!call || (call.selfMuted === null && call.deafened === null)) return null;
+    return { muted: call.selfMuted === true || call.deafened === true, deafened: call.deafened === true };
 }
 
 /**

@@ -36,6 +36,12 @@
 //   - a moderator moves A to another channel: unmuted, A arrives live (the
 //     control); muted (then muted + deafened), A arrives muted (deafened)
 //     and nothing transmits;
+//   - A switches channel by itself mid-call: muted (then deafened) A arrives
+//     muted (deafened) and nothing transmits; unmuted A arrives live (the
+//     control);
+//   - Move here: A's account opens a second device, which takes the call
+//     over while A is muted: it arrives muted, nothing transmits; unmuted
+//     there, and moved back to the first device, it arrives live;
 //   - A leaves and joins by itself: unmuted, as a join always started (the
 //     control: nothing a move carried leaks into a join the member makes);
 //   - moved while the microphone is gone, then it comes back: heard;
@@ -163,6 +169,16 @@ async function register(ctx, u) {
     await p.fill('#username', u); await p.fill('#password', PASS); await p.click('button[type="submit"]');
     await p.waitForURL('**/chat', { timeout: 60_000 }); await p.waitForTimeout(1200);
     try { await p.check('.recovery-confirm input[type=checkbox]', { timeout: 4000 }); await p.click('.recovery-done-btn'); } catch { /* none */ }
+    try { await p.click('.welcome-popup-close', { timeout: 2000 }); } catch { /* none */ }
+    return p;
+}
+async function login(ctx, u) {
+    const p = await ctx.newPage();
+    await p.goto(APP + '/login');
+    await p.waitForSelector('#username', { timeout: 30_000 });
+    await p.fill('#username', u); await p.fill('#password', PASS); await p.click('button[type="submit"]');
+    await p.waitForURL('**/chat', { timeout: 60_000 }); await p.waitForTimeout(1200);
+    try { await p.click('.recovery-reminder button, button:has-text("Later")', { timeout: 3000 }); } catch { /* none */ }
     try { await p.click('.welcome-popup-close', { timeout: 2000 }); } catch { /* none */ }
     return p;
 }
@@ -319,6 +335,8 @@ async function expectLive(A, B, label, nameA) {
 
 const browserA = await chromium.launch({ channel: CHANNEL === 'bundled' ? undefined : CHANNEL, args });
 const browserB = await chromium.launch({ channel: CHANNEL === 'bundled' ? undefined : CHANNEL, args });
+// A's account on a second device (Move here).
+const browserA2 = await chromium.launch({ channel: CHANNEL === 'bundled' ? undefined : CHANNEL, args });
 try {
     const ctxA = await browserA.newContext({ permissions: ['microphone', 'camera'], viewport: { width: 1400, height: 900 } });
     await ctxA.addInitScript(osInit);
@@ -529,6 +547,85 @@ try {
     await expectLive(A, B, 'a join A makes itself starts unmuted (control: unchanged)', uA);
     check('own join: not deafened', (await deafenButton(A))?.title === 'Deafen');
 
+    // 8b. A switches channel BY ITSELF mid-call: the member's own mute and
+    // deafen come along (a new channel mounts a new panel, which used to mean
+    // an open microphone). The control: unmuted, A arrives live.
+    const switchA = async (name, label) => {
+        await clickVoiceNamed(B, name);
+        await sleep(2500);
+        const t = Date.now();
+        check(`${label}: A switches to ${name} itself`, await clickVoiceNamed(A, name));
+        check(`${label}: A is in ${name} with a mic sender`, !!await until(() => inChannel(name), 20_000, 200));
+        await sleep(3000);
+        return t;
+    };
+    check('switch: A mutes', await clickTitle(A, 'Mute'));
+    await sleep(800);
+    t0 = await switchA('mi-two', 'switch, muted');
+    await expectSilent(A, B, 'muted -> A switches channel itself', t0, uA);
+    check('switch: A deafens', await clickTitle(A, 'Deafen'));
+    await sleep(800);
+    t0 = await switchA('mi-one', 'switch, muted + deafened');
+    await expectSilent(A, B, 'muted + deafened -> A switches channel itself', t0, uA, { deafened: true });
+    check('switch: A undeafens', await clickTitle(A, 'Undeafen'));
+    await sleep(500);
+    check('switch: A unmutes', await clickTitle(A, 'Unmute'));
+    await sleep(800);
+    await switchA('mi-two', 'switch, unmuted');
+    await expectLive(A, B, 'unmuted -> A switches channel itself (control: arrives live)', uA);
+
+    // 8c. Move here: the same account on a SECOND device takes the call over.
+    // It must arrive as the first device left it - muted - and nothing may
+    // transmit; then unmuted there and moved back, the first arrives live.
+    const ctxA2 = await browserA2.newContext({ permissions: ['microphone', 'camera'], viewport: { width: 1400, height: 900 } });
+    await ctxA2.addInitScript(osInit);
+    const A2 = await login(ctxA2, uA);
+    await A2.evaluate((n) => window.__osSim.watchSpeaking(n), uA);
+    check('Move here: A mutes on the first device', await clickTitle(A, 'Mute'));
+    await sleep(1500);
+    const moveHere = async (p) => {
+        const btn = await until(() => p.evaluate(() => {
+            const b = document.querySelector('.own-voice-banner-btn.move');
+            return b && !b.disabled ? true : null;
+        }), 20_000, 200);
+        if (!btn) return false;
+        await p.evaluate(() => document.querySelector('.own-voice-banner-btn.move').click());
+        return true;
+    };
+    const inChannelOn = async (p, name) => (await p.evaluate(() => document.querySelector('.voice-channel-name')?.textContent ?? '')) === name
+        && (await senders(p)).length > 0;
+    t0 = Date.now();
+    check('Move here: the second device offers Move here, and it is pressed', await moveHere(A2));
+    check('Move here: the second device is in mi-two with a mic sender', !!await until(() => inChannelOn(A2, 'mi-two'), 20_000, 200));
+    check('Move here: the first device left the call', !!await until(async () => (await senders(A)).length === 0, 15_000, 200));
+    await sleep(3000);
+    await expectSilent(A2, B, 'muted on one device -> Move here on another', t0, uA);
+    check('Move here: A unmutes on the second device', await clickTitle(A2, 'Unmute'));
+    await sleep(1500);
+    await expectLive(A2, B, 'muted -> Move here -> unmuted there', uA);
+    check('Move here back: the first device offers Move here, and it is pressed', await moveHere(A));
+    check('Move here back: the first device is in mi-two with a mic sender', !!await until(() => inChannelOn(A, 'mi-two'), 20_000, 200));
+    await sleep(3000);
+    await expectLive(A, B, 'unmuted -> Move here back (control: arrives live)', uA);
+    // Tapping the call's channel on the other device moves it too - the same
+    // carry, through the channel list instead of the banner.
+    check('tap the channel: A mutes on the first device', await clickTitle(A, 'Mute'));
+    await sleep(1500);
+    await openServer(A2);
+    t0 = Date.now();
+    check('tap the channel: the second device taps mi-two', await clickVoiceNamed(A2, 'mi-two'));
+    check('tap the channel: the second device is in mi-two with a mic sender', !!await until(() => inChannelOn(A2, 'mi-two'), 20_000, 200));
+    check('tap the channel: the first device left the call', !!await until(async () => (await senders(A)).length === 0, 15_000, 200));
+    await sleep(3000);
+    await expectSilent(A2, B, 'muted on one device -> its channel tapped on another', t0, uA);
+    check('tap the channel: the second device hangs up', await clickTitle(A2, 'Disconnect'));
+    await sleep(1500);
+    await ctxA2.close();
+    // Back to mi-one, live, for the cases below: a join with no call anywhere
+    // starts unmuted.
+    await switchA('mi-one', 'back to mi-one');
+    await expectLive(A, B, 'a fresh join after the moves starts unmuted (control)', uA);
+
     // Moved WHILE the microphone is gone: the destination joins with no
     // microphone (the same mesh shape as a join without one), and the member
     // must be heard when it comes back, being unmuted.
@@ -566,6 +663,7 @@ try {
 } finally {
     await browserA.close().catch(() => {});
     await browserB.close().catch(() => {});
+    await browserA2.close().catch(() => {});
 }
 
 if (OUT) fs.writeFileSync(OUT, JSON.stringify(results, null, 2));

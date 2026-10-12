@@ -1008,6 +1008,13 @@ pub struct AppState {
     pub ws_conns_by_ip: DashMap<IpAddr, usize>,
     /// In-flight `/upload` requests per IP (see [`IpSlotKind::Upload`]).
     pub upload_streams: DashMap<IpAddr, usize>,
+    /// Each account's call as its device last reported it in its own
+    /// `__VOICE_STATUS__` ping: (room, own mute choice, deafened). Only ever
+    /// read into `OwnVoiceState` for the account's OWN devices, and only
+    /// while the account is still in that room (ws::own_voice_frame), so a
+    /// device pressing Move here starts the call muted if it was. Dropped
+    /// when the account leaves voice (ws::send_own_voice_state).
+    pub own_voice_status: DashMap<UserId, (String, bool, bool)>,
     /// Live `/events/tasks` streams per IP (see [`IpSlotKind::Events`]).
     pub event_streams: DashMap<IpAddr, usize>,
     /// Content-free task-change streams (src/task_events.rs). Its own
@@ -1432,6 +1439,7 @@ impl AppState {
             file_streams: DashMap::new(),
             ws_conns_by_ip: DashMap::new(),
             upload_streams: DashMap::new(),
+            own_voice_status: DashMap::new(),
             event_streams: DashMap::new(),
             task_events: crate::task_events::TaskEventHub::new(),
             sfu_rooms: DashMap::new(),

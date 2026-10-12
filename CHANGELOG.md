@@ -4,6 +4,12 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+
+- **You stay muted when you switch voice channels, and when you move a call to another device.** Switching to another voice channel during a call used to start you with your microphone open, even if you had muted or deafened yourself, so the people in the new channel could hear you at once. Now you arrive as you were: muted if you were muted, deafened if you were deafened (as on Discord). The same goes for moving a call between your devices — **Move here** on the bar that says you're in a call on another device, or tapping that call's channel there — which used to start the moved call with your microphone open. Only a call you start from nothing begins unmuted. Switching channels comes with the in-app update on Android and the web app, and with the next desktop update; moving a call also needs the device the call is on to be updated.
+
 ## 0.9.838 — 2026-10-12
 
 Calls follow your default microphone, you stay muted when a mic returns, and silent connections reconnect

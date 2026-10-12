@@ -3,9 +3,13 @@ import { VOICE_STATUS_PREFIX, buildVoiceStatus, parseVoiceStatus } from '../util
 
 describe('voiceStatus codec', () => {
     it('round-trips all three flags', () => {
-        const s = buildVoiceStatus({ muted: true, deafened: false, buffering: true });
+        const s = buildVoiceStatus({ muted: true, selfMuted: false, deafened: false, buffering: true });
         expect(s.startsWith(VOICE_STATUS_PREFIX)).toBe(true);
         expect(parseVoiceStatus(s)).toEqual({ muted: true, deafened: false, buffering: true });
+    });
+    it("carries the member's own choice for the server (src/ws.rs voice_status_flags reads `selfMuted`)", () => {
+        const body = JSON.parse(buildVoiceStatus({ muted: true, selfMuted: false, deafened: false, buffering: false }).slice(VOICE_STATUS_PREFIX.length));
+        expect(body).toEqual({ muted: true, selfMuted: false, deafened: false, buffering: false });
     });
     it('an OLD client payload (no buffering key) parses to buffering === false, never undefined', () => {
         const old = `${VOICE_STATUS_PREFIX}{"muted":true,"deafened":false}`;

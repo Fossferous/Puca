@@ -290,6 +290,11 @@ the call moves, it is never connected on both devices at once. Tapping a
 different voice channel moves you there, and the PC drops out of its call
 with the same notice.
 
+However the call comes over, it arrives as you left it: muted if you had
+muted, deafened if you had deafened. The same goes for switching to another
+voice channel during a call, on any device. Only a call you start from
+nothing begins unmuted.
+
 It works the other way round too: a call on your phone shows the bar on your
 PC. The bar says **in a browser** for a computer's web browser (a phone's or
 tablet's browser counts as your phone) and **on another device** when the
