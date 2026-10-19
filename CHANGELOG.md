@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.840 — 2026-10-19
 
+Stay signed in on this device; stopping your stream keeps the streams you're watching
 ### Fixed
 
 - **Stopping your own stream no longer closes the streams you're watching.** If you were sharing your screen while watching someone else's stream, stopping your share also closed their stream on your screen, and it vanished from the list so you couldn't open it again until they restarted it. Now only your own stream goes away: what you're watching keeps playing, and you stay on the stream view if anything is left to watch. Comes with the in-app update on Android and the web app, and with the next desktop update.
