@@ -8,6 +8,7 @@ one-line summary; this file is the full story. Versions follow
 
 ### Fixed
 
+- **Stopping your own stream no longer closes the streams you're watching.** If you were sharing your screen while watching someone else's stream, stopping your share also closed their stream on your screen, and it vanished from the list so you couldn't open it again until they restarted it. Now only your own stream goes away: what you're watching keeps playing, and you stay on the stream view if anything is left to watch. Comes with the in-app update on Android and the web app, and with the next desktop update.
 - **Púca no longer signs you out after a day away.** A sign-in in Púca lasted a day after you last used it, so someone who opened Púca once an evening, a little later each day, had to type their password again almost every day. Púca's sign-in screen now has **Stay signed in on this device**, as Púca Notes already did: ticked, the device stays signed in for up to a year as long as Púca is opened at least once a month. It starts ticked in the desktop and Android apps and unticked in a browser, the device remembers your choice (Púca Notes shares it), and **Sign out**, **Sign out of every device** and a password change still end the session at once. It applies from the next time you sign in. Comes with the in-app update on Android and the web app, and with the next desktop update.
 
 ## 0.9.839 — 2026-10-12

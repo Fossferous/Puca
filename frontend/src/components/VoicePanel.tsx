@@ -105,7 +105,7 @@ import { useDfSettledOffer, keepRnnoiseForSession, KEEP_RNNOISE_NOTICE } from '.
 import './VoicePanel.css';
 
 
-import { globalVoiceUsers, globalScreenSharers, globalCameraUsers, globalCameraStreams, setUserSpeaking, clearSpeaking, notifyVoiceUsersChange, registerStopScreenShareCallback, stopOwnScreenShare, setCurrentStreamingUser, setSelfInVoice, setSelfDeafened, publishSelfVoiceChoice, type SelfVoiceChoice, upsertVoiceUser, applyVoiceStatus, globalSelectedStreams, globalStreamData, notifyStreamStateChange, clearAllStreams, selectStream, deselectStream, subscribeToStreamState } from './voiceState';
+import { globalVoiceUsers, globalScreenSharers, globalCameraUsers, globalCameraStreams, setUserSpeaking, clearSpeaking, notifyVoiceUsersChange, registerStopScreenShareCallback, stopOwnScreenShare, dropOwnStream, setCurrentStreamingUser, setSelfInVoice, setSelfDeafened, publishSelfVoiceChoice, type SelfVoiceChoice, upsertVoiceUser, applyVoiceStatus, globalSelectedStreams, globalStreamData, notifyStreamStateChange, clearAllStreams, selectStream, deselectStream, subscribeToStreamState } from './voiceState';
 
 interface VoicePanelProps {
     roomId: string;
@@ -3164,8 +3164,8 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             return newMap;
         });
 
-        // Clear stream viewing state - this will switch view back to chat
-        clearAllStreams();
+        // Only OUR stream leaves the stage: what we are watching stays.
+        dropOwnStream(currentUserId);
     }, [isScreenSharing, roomId, currentUserId]);
 
     // Register the stop screen share callback when component mounts. The
@@ -3675,8 +3675,8 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                             newMap.delete(currentUserId);
                                             return newMap;
                                         });
-                                        // Clear stream viewing state - this will switch view back to chat
-                                        clearAllStreams();
+                                        // Only OUR stream leaves the stage: what we are watching stays.
+                                        dropOwnStream(currentUserId);
                                     } else {
                                         // Straight to the picker with the remembered
                                         // settings: the dialog is the arrow's job now.

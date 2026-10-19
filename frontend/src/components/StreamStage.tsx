@@ -6,7 +6,6 @@ import {
     getAllStreamers,
     deselectStream,
     selectStream,
-    clearAllStreams,
     stopOwnScreenShare,
     getCurrentStreamingUserId,
     notifyStreamStateChange,
@@ -748,9 +747,12 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                         <button
                             className="stop-watching-btn"
                             onClick={() => {
+                                // Ends our share and takes only OUR stream off
+                                // the stage (VoicePanel's stopMyScreenShare ->
+                                // dropOwnStream); back to the chat only if
+                                // nothing else is being watched.
                                 stopOwnScreenShare();
-                                clearAllStreams();
-                                onBackToChat();
+                                if (getSelectedStreams().length === 0) onBackToChat();
                             }}
                             title="Stop sharing your screen"
                         >
@@ -1213,7 +1215,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                         <>
                             <button
                                 className="scm-item scm-danger"
-                                onClick={() => { setCtxMenu(null); stopOwnScreenShare(); clearAllStreams(); onBackToChat(); }}
+                                onClick={() => { setCtxMenu(null); stopOwnScreenShare(); if (getSelectedStreams().length === 0) onBackToChat(); }}
                             >
                                 Stop Sharing <span className="scm-icon"><StopSharingIcon /></span>
                             </button>

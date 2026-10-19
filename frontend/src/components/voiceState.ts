@@ -344,6 +344,29 @@ export function getAllStreamers(): Array<{ userId: number; username: string; str
 }
 
 // Clear all stream state (called when leaving voice or stopping all streams)
+/**
+ * Your OWN share ended: take it off the stage and nothing else. Returns how
+ * many streams are still on the stage, so a caller can go back to the chat
+ * only when nothing is left to watch.
+ *
+ * Stopping a share used to call clearAllStreams(), which is for LEAVING the
+ * call: it also closed every stream you were watching, dropped everyone
+ * else's share from the stream list, and ended any remote control riding on
+ * one of them. Someone who shared while watching a friend's stream lost the
+ * friend's stream the moment they stopped their own.
+ */
+export function dropOwnStream(userId: number): number {
+    globalSelectedStreams.delete(userId);
+    globalStreamData.delete(userId);
+    globalScreenSharers.delete(userId);
+    const store = useStreamStore.getState();
+    if (store.focusedStreamId === userId) store.setFocusedStream(null);
+    notifyStreamStateChange();
+    return globalSelectedStreams.size;
+}
+
+/** Leaving the call: every stream, everyone's - never for stopping your own
+ *  share (dropOwnStream). */
 export function clearAllStreams() {
     globalSelectedStreams.clear();
     globalStreamData.clear();
