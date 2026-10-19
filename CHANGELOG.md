@@ -4,6 +4,12 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Security
+
+- **The desktop app's updater picks up this month's TLS and archive fixes.** It moves to rustls 0.23.46 (RUSTSEC-2026-0346 to 0349, published 14 October) and no longer contains the `zip` library at all (RUSTSEC-2026-0367 to 0369): Púca's updates are signed installers that are never unpacked, so the updater's archive support was dead weight. No change to how updates look or behave. With the next desktop update.
+
 ## 0.9.840 — 2026-10-19
 
 Stay signed in on this device; stopping your stream keeps the streams you're watching

@@ -58,7 +58,14 @@ tauri-plugin-notification = "2.4.0"
 tauri-plugin-dialog = "2"
 # In-place auto-update: banner click downloads the signed installer and
 # relaunches (no manual reinstall). Manifest at https://download.example.com/latest.json.
-tauri-plugin-updater = "2.11.0"
+# No `zip` feature (a default): it unpacks .zip/.tar.gz update archives, and
+# Púca never ships one - every update is a signed NSIS .exe with its .sig
+# (tauri.conf.json createUpdaterArtifacts: true), which the plugin writes and
+# runs without unpacking anything. Dropping it removes the `zip` crate from the
+# app entirely: zip 4.x has RUSTSEC-2026-0367/0368/0369 (extraction of hostile
+# archives) and every tauri-plugin-updater release through 2.14 requires ^4.
+# The other two defaults are kept as they were.
+tauri-plugin-updater = { version = "2.11.0", default-features = false, features = ["rustls-tls", "system-proxy"] }
 # Remember window size/position/maximized across launches (standard desktop-app behavior).
 tauri-plugin-window-state = "2"
 # Start with the OS, so a device can be reachable without someone launching the
