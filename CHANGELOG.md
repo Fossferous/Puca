@@ -4,6 +4,12 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+
+- **Púca no longer signs you out after a day away.** A sign-in in Púca lasted a day after you last used it, so someone who opened Púca once an evening, a little later each day, had to type their password again almost every day. Púca's sign-in screen now has **Stay signed in on this device**, as Púca Notes already did: ticked, the device stays signed in for up to a year as long as Púca is opened at least once a month. It starts ticked in the desktop and Android apps and unticked in a browser, the device remembers your choice (Púca Notes shares it), and **Sign out**, **Sign out of every device** and a password change still end the session at once. It applies from the next time you sign in. Comes with the in-app update on Android and the web app, and with the next desktop update.
+
 ## 0.9.839 — 2026-10-12
 
 You stay muted across channel switches and Move here; New note opens today's note; roomier notes on phones

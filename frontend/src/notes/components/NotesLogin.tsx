@@ -12,7 +12,8 @@
  */
 import { useState, type FormEvent } from 'react';
 import { useLocation } from 'react-router-dom';
-import { login, RetiredKeyFormatError, STAY_SIGNED_IN_KEY } from '../../api/auth';
+import { login, RetiredKeyFormatError } from '../../api/auth';
+import { readStaySignedIn, writeStaySignedIn } from '../../api/staySignedIn';
 import { isNetworkError } from '../../api/client';
 import { isMobile } from '../../api/platform';
 import '../../components/Login.css';
@@ -44,17 +45,6 @@ interface NotesLoginProps {
  *  never walked into. Either way the box is there and the answer sticks. */
 const STAY_DEFAULT = NATIVE;
 
-/** This device's answer to "stay signed in": a stored 'true' or 'false',
- *  else STAY_DEFAULT. Storage can throw (a locked-down profile), and a
- *  checkbox is not worth a blank screen — fall back to the default. */
-function readStaySignedIn(): boolean {
-    try {
-        const v = localStorage.getItem(STAY_SIGNED_IN_KEY);
-        if (v === 'true') return true;
-        if (v === 'false') return false;
-    } catch { /* fall through to the default */ }
-    return STAY_DEFAULT;
-}
 
 export function NotesLogin({ onSuccess }: NotesLoginProps) {
     const location = useLocation();
@@ -63,16 +53,14 @@ export function NotesLogin({ onSuccess }: NotesLoginProps) {
     const [password, setPassword] = useState('');
     const [error, setError] = useState('');
     const [busy, setBusy] = useState(false);
-    const [stay, setStay] = useState(readStaySignedIn);
+    const [stay, setStay] = useState(() => readStaySignedIn(STAY_DEFAULT));
 
     /** Remember the choice on the DEVICE, as soon as it is made — not on a
      *  successful sign-in. Someone who unticks the box and then mistypes their
      *  password should not have to untick it again. */
     const chooseStay = (next: boolean) => {
         setStay(next);
-        try {
-            localStorage.setItem(STAY_SIGNED_IN_KEY, next ? 'true' : 'false');
-        } catch { /* a profile that refuses storage still gets the session it asked for */ }
+        writeStaySignedIn(next);
     };
 
     const submit = async (e: FormEvent) => {

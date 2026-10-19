@@ -84,9 +84,10 @@ whether the tool fits your threat model.
 - **Personal notes' sealed fields are not bound to where they are stored.** The operator
   can move or replay your own note text and picture lists between your own notes without
   the client noticing, though never read them (§2, "Can do").
-- **A Púca Notes sign-in on the phone app stays signed in for up to a year unless you say otherwise.**
-  The Notes app's sign-in ticks *Stay signed in on this device* by default (a browser's
-  starts clear and has to be ticked): the token then lives
+- **A sign-in in the Púca desktop or Android app, or the Púca Notes phone app, stays signed in for up to a year unless you say otherwise.**
+  Their sign-in forms tick *Stay signed in on this device* by default (a browser's
+  starts clear and has to be ticked; the answer is stored per device and shared by both
+  forms): the token then lives
   30 days and renews on use, up to a year from the sign-in, and on the Notes phone app the
   background reminder check is use. In a browser Notes and Púca share one token, so the web
   app gets the same session. A copied token is therefore good for up to 30 days, renewable

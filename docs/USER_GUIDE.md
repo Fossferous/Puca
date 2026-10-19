@@ -21,6 +21,16 @@ see, the guide is wrong — please report it.
    saved my recovery code**, then click **Done**. You can generate a new code
    later in **Settings → My Account**, which retires the old one.
 
+### Staying signed in
+The sign-in screen has **Stay signed in on this device**. Ticked, the device
+stays signed in for up to a year, as long as Púca is opened at least once a
+month. Unticked, a sign-in lasts a day after you last used Púca (still up to
+a month while you keep using it), so a day away means signing in again. It
+starts ticked in the desktop and Android apps and unticked in a browser, and
+the device remembers your answer (Púca Notes shares it). **Sign out** ends
+either kind at once, and so do **Sign out of every device** and a password
+change.
+
 ### Forgot your password?
 On the sign-in screen, click **Forgot your password? Use your recovery code**:
 enter your username, the twelve words, and a new password. Your keys and

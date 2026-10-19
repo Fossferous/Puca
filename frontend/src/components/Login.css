@@ -264,3 +264,41 @@
     font-size: 14px;
     line-height: 1.4;
 }
+
+/* "Stay signed in on this device": the row is Login.css's .checkbox-label;
+   only the explanation under it and the phone sizes are new (the same rules
+   as Púca Notes' .notes-stay-*). Other stylesheets style every
+   `.form-group label` as an uppercase block heading, so the row restates
+   what it is with one more class than they have. */
+.form-group label.stay-signed-in-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    text-transform: none;
+    letter-spacing: normal;
+    font-weight: 400;
+}
+.form-group label.stay-signed-in-row input[type="checkbox"] {
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 0;
+}
+.stay-signed-in-hint {
+    margin: 0;
+    font-size: 0.75rem;
+    line-height: 1.45;
+    color: rgba(255, 255, 255, 0.6);
+}
+@media (pointer: coarse) and (max-width: 1024px) {
+    /* One 44px tap target; a 16px label so iOS does not zoom on focus. */
+    .stay-signed-in-row {
+        min-height: 44px;
+        align-items: center;
+    }
+    .stay-signed-in-row .checkbox-text { font-size: 16px; }
+    .stay-signed-in-row.checkbox-label input[type="checkbox"] {
+        width: 22px;
+        height: 22px;
+    }
+    .stay-signed-in-hint { font-size: 13px; }
+}

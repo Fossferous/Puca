@@ -6,6 +6,16 @@ import { isTauri, isMobile } from '../api/platform';
 import { fetchPublicConfig } from '../api/publicConfig';
 import { onPendingInviteAnnounced, peekPendingInvite } from '../api/pendingInvite';
 import './Login.css';
+import { readStaySignedIn, writeStaySignedIn } from '../api/staySignedIn';
+
+/** "Stay signed in on this device" starts TICKED in the desktop and Android
+ *  apps - a PC or a phone with the app installed is one person's, and the
+ *  ordinary session ends after a single day without opening the app - and
+ *  CLEAR in a browser, which is what gets shared or borrowed, so a long
+ *  session there is asked for, never walked into. Same rule as Púca Notes
+ *  (NotesLogin STAY_DEFAULT); the stored answer is shared with it. */
+const STAY_DEFAULT = isTauri() || isMobile();
+const STAY_HINT = 'This device then stays signed in for up to a year instead of a day, as long as Púca is opened at least once a month. Sign out to end it early.';
 
 interface LoginProps {
     onLoginSuccess: () => void;
@@ -58,6 +68,12 @@ export function Login({ onLoginSuccess }: LoginProps) {
     const [loading, setLoading] = useState(false);
     const [isRegistering, setIsRegistering] = useState(false);
     const [inviteCode, setInviteCode] = useState('');
+    const [stay, setStay] = useState(() => readStaySignedIn(STAY_DEFAULT));
+    /** Stored as soon as it is chosen (staySignedIn.ts has why). */
+    const chooseStay = (next: boolean) => {
+        setStay(next);
+        writeStaySignedIn(next);
+    };
     const [autoLoginAttempted, setAutoLoginAttempted] = useState(false);
     // Does THIS server gate sign-up behind an invite code? From GET /config.
     // null = not known yet, or the probe failed (an older server): then the
@@ -181,14 +197,14 @@ export function Login({ onLoginSuccess }: LoginProps) {
                 setError('');
                 setIsRegistering(false);
                 // Auto-login after registration
-                const token = await login(username, password);
+                const token = await login(username, password, { staySignedIn: stay });
                 // Session persistence rides on the sliding auth token now — no
                 // password is ever written to storage (see the note above).
                 await wsClient.connect(token);
                 onLoginSuccess();
             } else {
                 // Login existing user
-                const token = await login(username, password);
+                const token = await login(username, password, { staySignedIn: stay });
                 // No password is written to storage; the sliding auth token
                 // carries the session. Clear any legacy blob defensively.
                 localStorage.removeItem(CREDENTIALS_KEY);
@@ -485,8 +501,23 @@ export function Login({ onLoginSuccess }: LoginProps) {
                         </div>
                     )}
 
+                    <div className="form-group">
+                        <label className="checkbox-label stay-signed-in-row" htmlFor="stay-signed-in">
+                            <input
+                                id="stay-signed-in"
+                                type="checkbox"
+                                checked={stay}
+                                onChange={(e) => chooseStay(e.target.checked)}
+                                disabled={loading}
+                                aria-describedby="stay-signed-in-hint"
+                            />
+                            <span className="checkbox-text">Stay signed in on this device</span>
+                        </label>
+                        <p className="stay-signed-in-hint" id="stay-signed-in-hint">{STAY_HINT}</p>
+                    </div>
+
                     {sessionExpired && !error && (
-                        <div className="error-message">Your session expired — please sign in again.</div>
+                        <div className="error-message">Your session expired — please sign in again.{!stay && ' Tick Stay signed in to avoid this.'}</div>
                     )}
                     {error && <div className="error-message">{error}</div>}
 
