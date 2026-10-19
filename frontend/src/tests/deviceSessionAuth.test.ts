@@ -1416,6 +1416,25 @@ describe('display power actions', () => {
         return out;
     }
     const deviceEnds = () => sent.filter(m => m.type === 'DeviceEnd');
+    /**
+     * The frames sent since `from`, once `done` holds of them (or the deadline
+     * passes: the caller's expect then reports what was there). The topology
+     * pair's screen announce is fire-and-forget (session.ts `void
+     * announceMonitors`) behind the agent poke and a fresh listMonitors, so it
+     * lands an unknown number of ticks after the signal - `settle()`'s fixed 12
+     * was enough locally and not on a loaded CI runner (0.9.841's run: "the
+     * one-screen announce retires the stale list: expected undefined").
+     */
+    async function framesWhen(key: Uint8Array, from: number, done: (f: Record<string, unknown>[]) => boolean, ms = 3000) {
+        const deadline = Date.now() + ms;
+        let frames = await sentFrames(key, from);
+        while (!done(frames) && Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 20));
+            frames = await sentFrames(key, from);
+        }
+        return frames;
+    }
+    const hasKind = (k: string) => (f: Record<string, unknown>[]) => f.some(x => x.kind === k);
 
     it('displays_off runs the shell action, ACKS, and the session STAYS UP', async () => {
         armed = false;
@@ -1491,7 +1510,7 @@ describe('display power actions', () => {
         await signal(key, { kind: 'power', action: 'displays_detach_others' });
         expect(powerAction).toHaveBeenCalledWith('displays_detach_others');
         expect(displayTopologyChanged, 'the agent must rebuild its captures').toHaveBeenCalledTimes(1);
-        const frames = await sentFrames(key, before);
+        const frames = await framesWhen(key, before, hasKind('monitors'));
         const monitors = frames.find(f => f.kind === 'monitors');
         expect(monitors, 'the one-screen announce retires the stale list').toBeTruthy();
         expect((monitors!.monitors as unknown[]).length).toBe(1);
@@ -1511,7 +1530,7 @@ describe('display power actions', () => {
         const before = sent.length;
         await signal(key, { kind: 'power', action: 'displays_reattach' });
         expect(powerAction).toHaveBeenCalledWith('displays_reattach');
-        const frames = await sentFrames(key, before);
+        const frames = await framesWhen(key, before, f => hasKind('power-ack')(f) && hasKind('monitors')(f));
         expect(frames.find(f => f.kind === 'power-ack'), 'the ack must survive the poke failing').toBeTruthy();
         expect(frames.find(f => f.kind === 'monitors'), 'and the screens are still re-announced').toBeTruthy();
     });
@@ -1524,7 +1543,11 @@ describe('display power actions', () => {
         const before = sent.length;
         await signal(key, { kind: 'power', action: 'displays_off' });
         expect(displayTopologyChanged).not.toHaveBeenCalled();
-        const frames = await sentFrames(key, before);
+        // A negative needs the same patience the positives get: wait for the
+        // ack, then give an announce the time it would have had to show up.
+        await framesWhen(key, before, hasKind('power-ack'));
+        const frames = await framesWhen(key, before, hasKind('monitors'), 300);
+        expect(frames.find(f => f.kind === 'power-ack'), 'control: the action was handled').toBeTruthy();
         expect(frames.find(f => f.kind === 'monitors'),
             'a single-screen announce is topology-only').toBeUndefined();
     });
