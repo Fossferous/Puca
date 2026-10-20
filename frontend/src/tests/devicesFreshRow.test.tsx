@@ -156,6 +156,27 @@ describe('Control on a two-row machine', () => {
         await click(buttonNamed('Control'));
         expect(connectToDevice.mock.calls[0][0]).toBe('pc-signin');
     });
+
+    it('a click-time list that never answers does not hold Control: the painted card is used', async () => {
+        // After a phone changes network the request can hang rather than
+        // fail. Control used to stay greyed out until the app was closed.
+        listDevices.mockResolvedValueOnce([appRow(true), signInRow(false)]);
+        await mount();
+        listDevices.mockReturnValue(new Promise(() => {}));
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        try {
+            await click(buttonNamed('Control'));
+            expect(connectToDevice, 'still waiting on the list').not.toHaveBeenCalled();
+            expect(buttons().find(b => b.textContent?.trim() === 'Control')?.disabled).toBe(true);
+            await act(async () => { await vi.advanceTimersByTimeAsync(5_100); });
+            await settle();
+            expect(connectToDevice).toHaveBeenCalledTimes(1);
+            expect(connectToDevice.mock.calls[0][0]).toBe('pc');
+            expect(buttonNamed('Control')?.disabled, 'and the button is usable again').toBe(false);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
 });
 
 describe('the list re-reads itself', () => {

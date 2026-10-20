@@ -83,7 +83,9 @@ vi.mock('../api/devices/tunnel', () => ({ attachTunnelChannel: () => {}, closeTu
 vi.mock('../api/devices/deviceKeyRc', () => ({
     deviceKeyDh: async () => new Uint8Array(32).fill(3),
 }));
-vi.mock('../api/devices/peerKeys', () => ({ deviceStaticPubFor: async () => 'x25519:' + btoa('k') }));
+/** The host's static key lookup; a test swaps it for one that hangs. */
+const keys = vi.hoisted(() => ({ lookup: async (): Promise<string | null> => 'x25519:' + btoa('k') }));
+vi.mock('../api/devices/peerKeys', () => ({ deviceStaticPubFor: () => keys.lookup() }));
 vi.mock('../api/devices/unattendedPrompt', () => ({ requestUnattendedPassphrase: async () => null }));
 vi.mock('../api/devices/hostAgent', () => ({
     agentAnswerOffer: async () => 'v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\n',
@@ -138,6 +140,7 @@ async function activeHostSession(): Promise<string> {
 
 beforeEach(() => {
     wsUp = true;
+    keys.lookup = async () => 'x25519:' + btoa('k');
     releaseInput.mockClear();
     stopSession.mockClear();
 });
@@ -219,6 +222,95 @@ describe('a connect attempt is bounded, not eternal', () => {
             ).toBe(false);
         } finally {
             vi.useRealTimers();
+        }
+    });
+});
+
+/** Just enough peer connection for the controller to build its offer. */
+class SetupPc {
+    static built = 0;
+    connectionState = 'new';
+    onicecandidate: unknown = null;
+    onconnectionstatechange: unknown = null;
+    ontrack: unknown = null;
+    ondatachannel: unknown = null;
+    constructor() { SetupPc.built++; }
+    createDataChannel(label: string) {
+        return { label, readyState: 'connecting', onopen: null, onclose: null, onmessage: null, close: () => {}, send: () => {} };
+    }
+    addTransceiver() { return { receiver: { track: { kind: 'video', onunmute: null, stop: () => {} } } }; }
+    async createOffer() { return { type: 'offer' as const, sdp: 'v=0\r\n' }; }
+    async setLocalDescription() {}
+    async setRemoteDescription() {}
+    async addIceCandidate() {}
+    close(): void { this.connectionState = 'closed'; }
+}
+
+async function answerAccepted(id: string): Promise<void> {
+    const eph = (await import('../api/e2ee')).generateControlEphemeral();
+    handlers.get('DeviceConnectAnswered')!({ payload: { session_id: id, accepted: true, eph: eph.pubEncoded } });
+}
+
+describe('the setup after the host answers is bounded too', () => {
+    it('a host key lookup that never returns ends at the deadline, frees the slot, and builds nothing later', async () => {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        vi.stubGlobal('RTCPeerConnection', SetupPc);
+        SetupPc.built = 0;
+        let release: (v: string) => void = () => {};
+        keys.lookup = () => new Promise<string>(r => { release = r; });
+        try {
+            const { connectToDevice, activeSessions, subscribeSessions } = await boot();
+            const ended: Array<string | null> = [];
+            const unsub = subscribeSessions(list => { for (const s of list) if (s.phase === 'ended') ended.push(s.error); });
+            const id = await connectToDevice('dev-host');
+            await settle();
+            await answerAccepted(id);
+            await settle();
+            expect(activeSessions().find(x => x.id === id)?.phase, 'stuck in setup').toBe('connecting');
+            await vi.advanceTimersByTimeAsync(21_000);
+            await settle();
+            expect(activeSessions().find(x => x.id === id), 'a stalled setup must not live forever').toBeUndefined();
+            expect(ended.some(e => (e ?? '').includes('stalled while setting up'))).toBe(true);
+            expect(
+                sent.some(m => m.type === 'DeviceEnd' && m.payload?.session_id === id),
+                'the server counted it active: it must be told, or the slot stays taken',
+            ).toBe(true);
+            // The lookup finally answers: the ended session must not grow a
+            // key or a peer connection, nor send an offer.
+            const signalsBefore = sent.filter(m => m.type === 'DeviceSignal').length;
+            release('x25519:' + btoa('k'));
+            await settle(40);
+            unsub();
+            expect(SetupPc.built).toBe(0);
+            expect(sent.filter(m => m.type === 'DeviceSignal').length).toBe(signalsBefore);
+        } finally {
+            vi.useRealTimers();
+            vi.unstubAllGlobals();
+        }
+    });
+
+    it('control: a setup that completes reaches active and the deadline never fires over it', async () => {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        vi.stubGlobal('RTCPeerConnection', SetupPc);
+        SetupPc.built = 0;
+        try {
+            const { connectToDevice, activeSessions, subscribeSessions } = await boot();
+            const ended: Array<string | null> = [];
+            const unsub = subscribeSessions(list => { for (const s of list) if (s.phase === 'ended') ended.push(s.error); });
+            const id = await connectToDevice('dev-host');
+            await settle();
+            await answerAccepted(id);
+            for (let i = 0; i < 50 && activeSessions().find(x => x.id === id)?.phase !== 'active'; i++) await settle();
+            expect(activeSessions().find(x => x.id === id)?.phase, 'the harness reaches active').toBe('active');
+            expect(SetupPc.built).toBe(1);
+            await vi.advanceTimersByTimeAsync(25_000);
+            await settle();
+            unsub();
+            expect(ended.some(e => (e ?? '').includes('stalled while setting up'))).toBe(false);
+            expect(activeSessions().find(x => x.id === id)?.phase).toBe('active');
+        } finally {
+            vi.useRealTimers();
+            vi.unstubAllGlobals();
         }
     });
 });

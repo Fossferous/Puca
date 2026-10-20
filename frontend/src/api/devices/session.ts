@@ -73,6 +73,7 @@ import {
 } from './controlGuard';
 import { appIsBackgrounded } from '../pagePainting';
 import { linkRefusalPersistent } from './linkHealth';
+import { logRcConnect } from './connectLog';
 import {
     AUDIO_HUB_ACK_TIMEOUT_MS,
     AUDIO_HUB_RESULT_TIMEOUT_MS,
@@ -1350,7 +1351,7 @@ function markMediaArrived(s: Internal): void {
  *  a deadline that ran while the app was hidden or the socket was down
  *  measured a suspended webview, not the server, so it re-arms and waits out
  *  a fresh watched window instead of blaming anyone. */
-function armConnectDeadline(s: Internal, deferredMs = 0): void {
+function armConnectDeadline(s: Internal, deferredMs = 0, reason = NO_ANSWER): void {
     clearConnectDeadline(s);
     const armedAt = Date.now();
     s.connectTimer = setTimeout(() => {
@@ -1358,14 +1359,32 @@ function armConnectDeadline(s: Internal, deferredMs = 0): void {
         if (s.phase !== 'connecting' || sessions.get(s.id) !== s) return;
         const deferred = deferredMs + (Date.now() - armedAt);
         if ((appIsBackgrounded() || !wsClient.isConnected) && deferred < MAX_WATCHDOG_DEFER_MS) {
-            armConnectDeadline(s, deferred);
+            armConnectDeadline(s, deferred, reason);
             return;
         }
         // tellPeer: if the server DID create the session (and the host simply
         // never answered), this DeviceEnd releases its slot; if it never saw
         // the connect, ending an unknown session is a no-op there.
-        teardown(s, 'no answer from that device — check the connection and try again', true);
+        teardown(s, reason, true);
     }, CONNECT_DEADLINE_MS);
+}
+
+/** The connect deadline's words while the host has not answered. */
+const NO_ANSWER = 'no answer from that device — check the connection and try again';
+/** ...and once it HAS answered but the setup that follows (the host's key,
+ *  key agreement, the offer) stalled: every step of that awaits a fetch with
+ *  no time limit of its own, and the deadline used to be cleared at the
+ *  answer, so one hung fetch left 'connecting' with no clock at all while the
+ *  server, which already counted the session active, held the host's only
+ *  slot against every retry. */
+const SETUP_STALLED = 'the connection to that device stalled while setting up — try again';
+
+/** Is `s` still the live, still-connecting session an async setup step began
+ *  for? A step that resumes after the deadline (or anything else) ended it
+ *  must stop there: a dead session must not have a key agreed into it or a
+ *  peer connection built for it. */
+function stillConnecting(s: Internal): boolean {
+    return s.phase === 'connecting' && sessions.get(s.id) === s;
 }
 
 function clearConnectDeadline(s: Internal): void {
@@ -1409,6 +1428,14 @@ function teardown(s: Internal, reason: string, tellPeer: boolean, deliberate = f
     // deadline timer, a 'failed' connection state) reaches into whichever
     // session holds that id now and closes ITS ports and capture.
     const owns = sessions.get(s.id) === s;
+    // A controller attempt that ended without anyone meaning it to is the
+    // thing "Send diagnostics" must be able to explain (connectLog.ts).
+    if (s.role === 'controller' && !deliberate && s.phase !== 'ended') {
+        const kind = s.audioHub ? 'audio-hub' : s.filesOnly ? 'files' : 'control';
+        logRcConnect(`${kind} ended while ${s.phase}: ${reason}`
+            + ` (socket ${wsClient.isConnected ? 'up' : 'down'}`
+            + `${appIsBackgrounded() ? ', app backgrounded' : ''})`);
+    }
     // Before anything that can fail: a kill-switch hook and an idle timer that
     // outlive their session would fire into whatever holds that id next, and
     // the hook is a low-level input hook — not a thing to leave running for a
@@ -4318,8 +4345,10 @@ export function installDeviceSessions(): void {
             const s = p?.session_id ? sessions.get(p.session_id) : null;
             if (!s || s.role !== 'controller') return;
             // Answered — accepted or not — is what the connect deadline was
-            // waiting to hear; from here the media deadline owns the clock.
+            // waiting to hear. An acceptance re-arms it below for the setup,
+            // until the media deadline takes over at 'active'.
             clearConnectDeadline(s);
+            if (s.phase !== 'connecting') return;
 
             try {
                 if (!p?.accepted || !p.eph) {
@@ -4329,6 +4358,7 @@ export function installDeviceSessions(): void {
                     teardown(s, s.error, false);
                     return;
                 }
+                armConnectDeadline(s, 0, SETUP_STALLED);
                 // A shared host is a FOREIGN device: it is not in this
                 // account's list, so its key resolves through the share's
                 // narrow lookup and verifies against the OWNER's pinned
@@ -4344,7 +4374,10 @@ export function installDeviceSessions(): void {
                     const { deviceStaticPubFor } = await import('./peerKeys');
                     peerPub = await deviceStaticPubFor(s.peerDevice);
                 }
-                if (!peerPub || !(await establishKey(s, peerPub, p.eph))) {
+                if (!stillConnecting(s)) return;
+                const agreed = !!peerPub && await establishKey(s, peerPub, p.eph);
+                if (!stillConnecting(s)) { s.key = null; return; }
+                if (!agreed) {
                     s.error = 'could not agree a key with that device';
                     teardown(s, s.error, true);
                     return;
@@ -4357,7 +4390,17 @@ export function installDeviceSessions(): void {
                 const pc = await buildControllerPc(s);
                 const offer = await pc.createOffer();
                 await pc.setLocalDescription(offer);
+                if (!stillConnecting(s)) {
+                    // Ended while the offer was built: close what was built
+                    // for it (teardown already ran and will not again).
+                    try { pc.close(); } catch { /* already closed */ }
+                    if (s.pc === pc) s.pc = null;
+                    s.key = null;
+                    return;
+                }
                 await sendSignal(s, { kind: 'offer', sdp: offer.sdp, filesOnly: s.filesOnly });
+                if (!stillConnecting(s)) return;
+                clearConnectDeadline(s);
                 s.phase = 'active';
                 // Any cursor-ownership request the stage made while this was
                 // still connecting goes out now that it can.

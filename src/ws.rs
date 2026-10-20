@@ -4215,21 +4215,34 @@ async fn handle_message(
                     .as_ref()
                     .is_some_and(|c| c.iter().any(|x| x == "control"));
 
-            // A DETACHED session from this same controller device to this same
-            // host is a corpse this new connect supersedes: the OS killed the
-            // app rather than suspending it, the E2EE key died with the
-            // webview, and no reattach is coming. Ending it here keeps the
-            // one-session-per-host cap below from refusing the user's own
-            // immediate retry for the rest of the grace window.
-            if let Some((old_id, old_host_conn, old_host_user)) =
-                state.supersede_detached_session(user_id, &controller_device, &host_device)
+            // A STALE session from this same controller device to this same
+            // host is one this new connect supersedes: detached (the OS killed
+            // the app, the E2EE key died with the webview, no reattach is
+            // coming), or left on an older socket of the device (a phone that
+            // changed network, whose old socket has not timed out yet). Ending
+            // it here keeps the one-session-per-host cap below from refusing
+            // the user's own immediate retry. See supersede_stale_session.
+            if let Some((old_id, old_host_conn, old_host_user, old_controller_conn)) =
+                state.supersede_stale_session(user_id, &controller_device, &host_device, conn_id)
             {
+                let reason = "replaced by a new session from the same device";
                 state.send_to_conn(
                     old_host_user,
                     old_host_conn,
                     ServerMessage::DeviceEnded {
+                        session_id: old_id.clone(),
+                        reason: reason.to_string(),
+                    },
+                );
+                // Usually a dead socket and a no-op; but if it is alive (a
+                // second tab of the same browser) it must hear its session
+                // went, rather than keep a stage nothing feeds.
+                state.send_to_conn(
+                    user_id,
+                    old_controller_conn,
+                    ServerMessage::DeviceEnded {
                         session_id: old_id,
-                        reason: "replaced by a new session from the same device".to_string(),
+                        reason: reason.to_string(),
                     },
                 );
             }
@@ -4258,7 +4271,20 @@ async fn handle_message(
             // host is what stops a modified client ringing a machine repeatedly.
             let (mine, on_host) = state.count_device_sessions(user_id, &host_device);
             if mine >= MAX_DEVICE_SESSIONS_PER_USER {
-                return Err("too many device sessions".to_string());
+                // On the session id, like every other refusal here: a generic
+                // error reaches none of the device handlers, so the phone sat
+                // on "Connecting…" for its whole connect deadline and then
+                // blamed the device for not answering.
+                let _ = state.send_to_conn(
+                    user_id,
+                    conn_id,
+                    ServerMessage::DeviceEnded {
+                        session_id,
+                        reason: "too many remote sessions are open on this account — end one and try again"
+                            .to_string(),
+                    },
+                );
+                return Ok(());
             }
             // Under a cross-user share the HOST owner is a different account,
             // and `mine` only bounds the CALLER. Without this a coalition of
@@ -4559,7 +4585,7 @@ async fn handle_message(
                 return refuse("this connection has not attested as a device");
             };
             // Compare DEVICES, not connections. `conn_of_device` returns the
-            // first session matching the id in a linear scan, and one device
+            // newest socket matching the id, and one device
             // may hold several sockets at once (a reconnect overlapping its
             // predecessor, a second window). Comparing conn ids let a device
             // name itself, resolve to its OTHER socket, and pass a check whose

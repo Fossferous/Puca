@@ -445,7 +445,19 @@ class WebSocketClient {
                 const timeSinceLastPong = now - this.lastPongTime;
                 if (timeSinceLastPong > 45000) {
                     console.warn('[WS] No pong received in 45s, connection may be stale. Forcing reconnect.');
+                    // Reconnect from HERE, not from onclose. close() on a
+                    // socket whose transport is already dead (the usual result
+                    // of a phone changing network) only starts the closing
+                    // handshake, and onclose can wait as long as the browser
+                    // takes to give up on it. All that time the socket is
+                    // CLOSING, isConnected is false, and every remote-control
+                    // tap fails "not connected to the server" with no retry
+                    // scheduled. connect() detaches this socket's handlers
+                    // when the retry runs; an onclose that does arrive first
+                    // finds the retry already scheduled and adds none.
+                    this.stopHeartbeat();
                     this.ws?.close();
+                    this.attemptReconnect();
                     return;
                 }
                 // Send ping

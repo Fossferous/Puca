@@ -2070,11 +2070,17 @@ impl AppState {
     /// A linear scan is correct here: a user holds at most MAX_SESSIONS_PER_USER
     /// (10) sessions, so an index would cost more to maintain than it saves.
     pub fn conn_of_device(&self, user_id: UserId, device_id: &str) -> Option<u64> {
+        // The NEWEST: conn ids only grow, and when one device holds two
+        // sockets the older is the one being replaced. A PC that dropped
+        // without a close leaves its dead socket registered until the idle
+        // timeout, and ringing that one left the caller to wait out its
+        // connect deadline for "no answer".
         self.sessions.get(&user_id).and_then(|sessions| {
             sessions
                 .iter()
-                .find(|s| s.device_id.as_deref() == Some(device_id))
+                .filter(|s| s.device_id.as_deref() == Some(device_id))
                 .map(|s| s.conn_id)
+                .max()
         })
     }
 
@@ -2374,27 +2380,45 @@ impl AppState {
     }
 
     /// A fresh DeviceConnect from the same (user, controller device) to the
-    /// same host supersedes that pair's own DETACHED session. When the OS
-    /// killed the app rather than suspending it, the E2EE session key died
-    /// with the webview and no reattach can ever come — without this the
-    /// corpse holds the host's single slot for the whole grace window and the
-    /// user's immediate retry is refused with "already handling a session".
-    /// Returns `(session_id, host_conn, host_user)` so the host can be told.
-    pub fn supersede_detached_session(
+    /// same host, arriving on `conn_id`, supersedes that pair's own session
+    /// when it is STALE: either
+    ///
+    /// * DETACHED: the OS killed the app rather than suspending it, the E2EE
+    ///   session key died with the webview and no reattach can ever come; or
+    /// * bound to a DIFFERENT connection of that same device. The device has
+    ///   moved to a new socket, and a session it still holds is reattached to
+    ///   that socket on attestation, before any connect can be sent on it
+    ///   (one socket, in order). What is left on the old socket is one the
+    ///   device let go of, and a phone that changed network leaves exactly
+    ///   that: its old socket is still "live" here until the idle timeout, so
+    ///   the session was never detached, and a DeviceEnd from the new socket
+    ///   is a stranger's (end_device_session). Until the old socket timed out
+    ///   (75 s) every retry was refused with "already handling a session",
+    ///   which looked like the app had to be closed.
+    ///
+    /// A session on THIS connection is never taken: that is the same app
+    /// asking for a second session of another kind (Files while Control is
+    /// up), and the refusal it gets is the explained, long-standing one.
+    ///
+    /// Returns `(session_id, host_conn, host_user, controller_conn)` so the
+    /// host, and the old controller socket should it be alive after all
+    /// (another tab of the same browser), can be told.
+    pub fn supersede_stale_session(
         &self,
         user_id: UserId,
         controller_device: &str,
         host_device: &str,
-    ) -> Option<(String, u64, UserId)> {
+        conn_id: u64,
+    ) -> Option<(String, u64, UserId, u64)> {
         let mut found = None;
         self.device_sessions.retain(|id, s| {
             if found.is_none()
                 && s.controller_user == user_id
                 && s.controller_device == controller_device
                 && s.host_device == host_device
-                && s.controller_detached_at.is_some()
+                && (s.controller_detached_at.is_some() || s.controller_conn != conn_id)
             {
-                found = Some((id.clone(), s.host_conn, s.host_user));
+                found = Some((id.clone(), s.host_conn, s.host_user, s.controller_conn));
                 return false;
             }
             true
@@ -4189,27 +4213,66 @@ mod device_session_tests {
     }
 
     /// A new connect from the same controller device replaces its own
-    /// detached corpse — the OS killed the app, the key is gone, no reattach
-    /// is coming — but never touches a session whose controller is live.
+    /// detached corpse (the OS killed the app, the key is gone, no reattach
+    /// is coming), but never a session live on the connect's OWN socket.
     #[tokio::test]
-    async fn a_new_connect_supersedes_its_own_detached_corpse_only() {
+    async fn a_new_connect_supersedes_its_own_detached_corpse() {
         let state = test_state();
         state.device_sessions.insert("old".into(), session(10, 20));
         state.drop_device_sessions_for_conn(10);
 
-        let superseded = state.supersede_detached_session(1, "ctl", "host");
+        let superseded = state.supersede_stale_session(1, "ctl", "host", 12);
         assert_eq!(
             superseded,
-            Some(("old".to_string(), 20, 1)),
+            Some(("old".to_string(), 20, 1, 10)),
             "the corpse is removed and the host identified for notification"
         );
         assert!(!state.device_sessions.contains_key("old"));
 
         state.device_sessions.insert("live".into(), session(11, 21));
         assert!(
-            state.supersede_detached_session(1, "ctl", "host").is_none(),
-            "a session whose controller is still attached is not for taking"
+            state.supersede_stale_session(1, "ctl", "host", 11).is_none(),
+            "a session live on this same socket is not for taking (Files while Control is up)"
         );
+        assert!(state.device_sessions.contains_key("live"));
+    }
+
+    /// The phone changed network: its old socket is still registered and the
+    /// session on it was never detached, so the old rule refused the retry
+    /// from the new socket for as long as the old one took to time out.
+    #[tokio::test]
+    async fn a_device_that_moved_sockets_replaces_its_session_on_the_old_one() {
+        let state = test_state();
+        state.device_sessions.insert("stranded".into(), session(10, 20));
+        assert!(
+            state
+                .device_sessions
+                .get("stranded")
+                .expect("inserted")
+                .controller_detached_at
+                .is_none(),
+            "the old socket has not been seen to drop"
+        );
+        assert_eq!(state.count_device_sessions(1, "host").1, 1, "the host's one slot is taken");
+
+        assert_eq!(
+            state.supersede_stale_session(1, "ctl", "host", 11),
+            Some(("stranded".to_string(), 20, 1, 10)),
+            "a connect from the same device on a NEW socket takes it over"
+        );
+        assert_eq!(state.count_device_sessions(1, "host").1, 0, "slot freed for the retry");
+    }
+
+    /// Only the same user AND the same controller device AND the same host:
+    /// anything else is refused exactly as before.
+    #[tokio::test]
+    async fn another_device_user_or_host_does_not_supersede() {
+        let state = test_state();
+        state.device_sessions.insert("theirs".into(), session(10, 20));
+        assert!(state.supersede_stale_session(1, "some-other-device", "host", 11).is_none());
+        assert!(state.supersede_stale_session(2, "ctl", "host", 11).is_none());
+        assert!(state.supersede_stale_session(1, "ctl", "another-host", 11).is_none());
+        assert!(state.device_sessions.contains_key("theirs"));
     }
 
     /// The claim is checked, not believed: the right user with the WRONG
@@ -4441,6 +4504,12 @@ mod device_session_tests {
         let (tx_new, _rx_new) = mpsc::channel(4);
         let (new, _, _) = state.register_session(1, "u".into(), tx_new, false, None, String::new());
         state.attest_device(1, new, "devA".into());
+
+        // While BOTH are registered, the device resolves to the NEWER socket:
+        // the older one is the socket being replaced (a PC that dropped with
+        // no close keeps it registered until the idle timeout), and a connect
+        // rung there would wait out its whole deadline for "no answer".
+        assert_eq!(state.conn_of_device(1, "devA"), Some(new));
 
         // The old socket is what the disconnect path is about to unregister;
         // it still knows which device it carried.

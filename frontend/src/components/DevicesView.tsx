@@ -62,6 +62,7 @@ import { warmPeerKeys } from '../api/devices/peerKeys';
 import { fetchIceConfig } from '../api/iceConfig';
 import { agentDiagnosis } from '../api/devices/hostAgent';
 import { connectToDevice, subscribeSessions } from '../api/devices/session';
+import { logRcConnect } from '../api/devices/connectLog';
 import {
     wakeAndConnect,
     cancelWake,
@@ -116,6 +117,9 @@ import './DevicesView.css';
  *  as FriendsPanel, for the same reason: online/offline flips have no WS push
  *  to this surface, so without it the Control button only appears on reopen. */
 const PRESENCE_REFRESH_MS = 15_000;
+/** How long Control waits for the click-time device list (freshOnlineRow)
+ *  before it goes with the card as painted. */
+const FRESH_ROW_TIMEOUT_MS = 5_000;
 
 /** A unix-seconds timestamp as a date in the viewer's own format. */
 function localDate(unixSecs: number): string {
@@ -917,12 +921,28 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
         const userId = currentUserId();
         if (userId == null) return machine.onlineRow;
         void refresh(true); // repaint the grid; not on the critical path
+        // Bounded. The request has no time limit of its own, and right after a
+        // phone changes network it can hang instead of failing — which held
+        // `busyId`, so Control sat greyed out with no word until the app was
+        // closed. A slow answer gets the painted row, like a failed one.
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const timedOut = new Promise<'timeout'>(resolve => {
+            timer = setTimeout(() => resolve('timeout'), FRESH_ROW_TIMEOUT_MS);
+        });
+        const fetching = (async () => machineOf(await groupIntoMachines(await listDevices(userId)), machine.primary.id))();
+        // A fetch that loses the race and fails later has nobody awaiting it.
+        fetching.catch(() => undefined);
         try {
-            const list = await listDevices(userId);
-            const fresh = machineOf(await groupIntoMachines(list), machine.primary.id);
+            const fresh = await Promise.race([fetching, timedOut]);
+            if (fresh === 'timeout') {
+                logRcConnect(`device list took over ${FRESH_ROW_TIMEOUT_MS / 1000}s at Control; used the painted card`);
+                return machine.onlineRow;
+            }
             return fresh ? fresh.onlineRow : machine.onlineRow;
         } catch {
             return machine.onlineRow;
+        } finally {
+            if (timer) clearTimeout(timer);
         }
     };
 
