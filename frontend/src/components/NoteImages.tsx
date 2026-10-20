@@ -280,7 +280,7 @@ export function NoteImages({ opened, editable, busy = false, onAddPhotos, onRemo
                 </div>
             )}
             {busy && <div className="ni-busy" role="status">Saving…</div>}
-            {zoom && <ImageLightbox url={zoom.url} name={zoom.name} onClose={() => setZoom(null)} />}
+            {zoom && <ImageLightbox url={zoom.url} name={zoom.name} saveFolder={saveFolder} onClose={() => setZoom(null)} />}
         </div>
     );
 }

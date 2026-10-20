@@ -39,7 +39,6 @@ import { createPortal } from 'react-dom';
 import { useLayerOnScreen, usePortalTarget } from './portalTarget';
 import { canCopyImages, copyImageToClipboard, describeCopyFailure } from '../api/copyImage';
 import { CheckIcon, CloseIcon } from './Icons';
-import { isMobile, isTauri } from '../api/platform';
 import { saveEncryptedAttachment, saveFailureNote } from '../api/saveAttachment';
 import type { EncRef } from '../api/nativeDownloads';
 import { clampPanTo } from './deviceZoomFollow';
@@ -55,35 +54,21 @@ interface ImageLightboxProps {
     name?: string;
     onClose: () => void;
     /**
-     * The encrypted attachment this picture was opened from. In the Android
-     * app a transient `<a download>` of a blob saves NOTHING (the WebView has
-     * no download handler), so with a ref Download goes through
-     * saveEncryptedAttachment like every other attachment: natively into
-     * Pictures/Puca on an APK with the download plugin, Documents/Puca on an
-     * older one. Without a ref (Notes' own pictures), and on desktop and the
-     * web, it is the anchor it always was.
+     * The encrypted attachment this picture was opened from. Download goes
+     * through saveEncryptedAttachment like every other attachment, on every
+     * platform: with a ref the Android app saves natively into Pictures/Puca
+     * (Documents/Puca on an older APK); desktop writes through the
+     * attachment_save command; the web clicks a transient anchor. Without a
+     * ref (Notes' own pictures) it saves the decrypted copy the same way.
+     *
+     * Never a bare `<a download>` of the blob on desktop or a phone: in the
+     * Android WebView it saves NOTHING (no download handler), and in the
+     * desktop shell it is not a reliable download either — the viewer's
+     * Download did nothing there while every other attachment saved.
      */
     encRef?: EncRef | null;
-}
-
-/**
- * Save the blob without ever exposing its URL to a top-level navigation.
- *
- * A persistent `<a href={blobUrl} download>` looks safe, but Chrome's
- * "Open link in new tab" IGNORES the download attribute — and a blob: document
- * inherits this app's origin, so an SVG attachment (the MIME rides in the
- * attacker-supplied ref) could run script in-origin and read the token/E2EE
- * seed. A transient, programmatically-clicked anchor is not right-clickable, so
- * that route simply doesn't exist.
- */
-function downloadBlob(url: string, name?: string) {
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = name || 'image';
-    a.rel = 'noopener';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    /** The Documents/ folder a phone saves into; Púca Notes passes its own. */
+    saveFolder?: string;
 }
 
 const FIT: Transform = { scale: 1, x: 0, y: 0 };
@@ -94,7 +79,7 @@ const WHEEL_ZOOM_RATE = 0.002;
 /** The first contact of the current gesture — what a tap is judged from. */
 interface DownInfo { x: number; y: number; onPicture: boolean; moved: boolean }
 
-export function ImageLightbox({ url, name, onClose, encRef }: ImageLightboxProps) {
+export function ImageLightbox({ url, name, onClose, encRef, saveFolder }: ImageLightboxProps) {
     const portalTarget = usePortalTarget();
     const onScreen = useLayerOnScreen();
     const [copyState, setCopyState] = useState<'idle' | 'copying' | 'copied' | 'error'>('idle');
@@ -353,10 +338,10 @@ export function ImageLightbox({ url, name, onClose, encRef }: ImageLightboxProps
                     disabled={saveState === 'saving'}
                     title={saveState === 'saved' ? `Saved to ${saveNote}` : saveState === 'error' ? saveNote : undefined}
                     onClick={async () => {
-                        if (encRef === undefined || isTauri() || !isMobile()) { downloadBlob(url, name); return; }
                         setSaveState('saving');
                         try {
-                            const r = await saveEncryptedAttachment(url, encRef, name || 'image');
+                            const r = await saveEncryptedAttachment(url, encRef ?? null, name || 'image', saveFolder);
+                            if (r.cancelled) { setSaveState('idle'); return; } // the Save As dialog was dismissed
                             setSaveNote(r.where);
                             setSaveState('saved');
                         } catch (err) {

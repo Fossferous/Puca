@@ -346,19 +346,22 @@ describe('Android with the native download plugin', () => {
         expect(disk.calls).toEqual([]);
     });
 
-    it('a picture with no attachment ref (Notes\' own) keeps the plain anchor', async () => {
+    it('a picture with no attachment ref (Notes\' own) saves its decrypted copy into the Notes folder, never through an anchor', async () => {
+        // The anchor this replaced saves NOTHING in the Android WebView.
         const clicks: string[] = [];
         const orig = HTMLAnchorElement.prototype.click;
         HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) { clicks.push(this.download); };
+        vi.stubGlobal('fetch', vi.fn(async () => new Response(patternBytes(32, 5))));
         try {
-            await act(async () => { root.render(<ImageLightbox url="blob:pic" name="note.png" onClose={() => {}} />); });
+            await act(async () => { root.render(<ImageLightbox url="blob:pic" name="note.png" saveFolder={NOTES_FOLDER} onClose={() => {}} />); });
             await act(async () => { lightboxDownload().click(); });
-            await settle();
+            await waitFor(() => /Saved/.test(lightboxDownload().textContent ?? ''), 'saved to the device');
         } finally {
             HTMLAnchorElement.prototype.click = orig;
         }
-        expect(clicks).toEqual(['note.png']);
+        expect(clicks).toEqual([]);
         expect(h.saves).toEqual([]);
+        expect(lightboxDownload().title).toMatch(/^Saved to Documents\/Puca Notes\/note-\d{8}-\d{6}\.png$/);
     });
 
     it('Púca Notes\' own folder keeps the old path', async () => {
