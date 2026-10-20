@@ -68,7 +68,19 @@ const CAM_MID_KBPS: u64 = 500;
 /// it the tiles are ~320px and the low rung is what it asks for. Keep in step
 /// with GRID_MID_MAX_PARTICIPANTS in frontend/src/api/rtc/sfuManager.ts.
 const GRID_MID_MAX_PARTICIPANTS: usize = 4;
-const SHARE_KBPS: u64 = 4_500;
+/// What a screen share sent before its bitrate followed its quality, and what
+/// a client still sends when this server names no ceiling (an older server:
+/// `LEGACY_SHARE_KBPS` in frontend/src/api/rtc/shareBitrate.ts). It is also
+/// the lowest DEFAULT ceiling: a small uplink keeps what it had, never less.
+const SHARE_LEGACY_KBPS: u64 = 4_500;
+/// The most any share asks for: the top of the client's table (Source at
+/// 60 fps on a 4K screen, `SHARE_TOP_KBPS` in shareBitrate.ts). A ceiling
+/// above it buys nothing, so none is set above it.
+const SHARE_TOP_KBPS: u64 = 20_000;
+/// The lowest ceiling `SFU_SHARE_MAX_MBPS` may set: above the simulcast
+/// ladder's middle rung (SHARE_MID, 1.2 Mbps, in sfuManager.ts), so no rung of
+/// a laddered share ever sends more than the top this file charges for.
+const SHARE_MIN_KBPS: u64 = 1_500;
 /// WebRTC/SRTP overhead factor applied to media bitrates (×1.15).
 const OVERHEAD_NUM: u64 = 115;
 const OVERHEAD_DEN: u64 = 100;
@@ -441,6 +453,10 @@ struct SfuConfig {
     budget_kbps: u64,
     room_max_participants: usize,
     max_screen_shares: usize,
+    /// The most one screen share may send, kbps: handed to every client in
+    /// its join grant, which caps its share there, and charged per live share
+    /// per subscriber by admission. See [`share_ceiling_kbps`].
+    share_kbps: u64,
 }
 
 /// LiveKit Prometheus endpoint the egress sampler scrapes. Defaults to the
@@ -494,6 +510,7 @@ fn cfg_for(base: &str) -> SfuConfig {
         budget_kbps: 30_000,
         room_max_participants: 8,
         max_screen_shares: usize::MAX,
+        share_kbps: share_ceiling_kbps(30_000, None),
     }
 }
 
@@ -505,15 +522,17 @@ fn sfu_config() -> Option<SfuConfig> {
         return Some(cfg_for(&base));
     }
     let getenv = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+    let budget_kbps = getenv("SFU_EGRESS_BUDGET_MBPS")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(30)
+        * 1000;
     Some(SfuConfig {
         url: getenv("LIVEKIT_URL")?,
         api_url: getenv("LIVEKIT_API_URL"),
         api_key: getenv("LIVEKIT_API_KEY")?,
         api_secret: getenv("LIVEKIT_API_SECRET")?,
-        budget_kbps: getenv("SFU_EGRESS_BUDGET_MBPS")
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(30)
-            * 1000,
+        budget_kbps,
+        share_kbps: share_ceiling_kbps(budget_kbps, getenv("SFU_SHARE_MAX_MBPS").as_deref()),
         room_max_participants: getenv("SFU_ROOM_MAX_PARTICIPANTS")
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(8),
@@ -525,6 +544,39 @@ fn sfu_config() -> Option<SfuConfig> {
             .map(|n| if n == 0 { usize::MAX } else { n })
             .unwrap_or(usize::MAX),
     })
+}
+
+/// The most one screen share may send on this node, kbps.
+///
+/// A share's bitrate follows the quality its sharer picked
+/// (frontend/src/api/rtc/shareBitrate.ts), up to [`SHARE_TOP_KBPS`]. Every
+/// subscriber watching a share costs the node that much egress, so this is
+/// the node's own limit on it:
+///
+/// - `SFU_SHARE_MAX_MBPS` (decimals allowed), when the admin set one, kept
+///   inside [`SHARE_MIN_KBPS`]..=[`SHARE_TOP_KBPS`];
+/// - otherwise the largest share a four-person call with one live share can
+///   carry inside the egress budget even if everyone watches (the room
+///   [`room_egress_kbps`] prices at exactly the budget), never below what a
+///   share sent before ([`SHARE_LEGACY_KBPS`]) and never above the top.
+///
+/// So the default 30 Mbps budget gives about 5.5 Mbps (a residential uplink
+/// keeps working the way it did), 60 Mbps about 12 Mbps, and a large budget
+/// the whole table. A garbled value is ignored (the default applies) rather
+/// than read as 0.
+fn share_ceiling_kbps(budget_kbps: u64, raw_mbps: Option<&str>) -> u64 {
+    if let Some(mbps) = raw_mbps
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+    {
+        return ((mbps * 1000.0).round() as u64).clamp(SHARE_MIN_KBPS, SHARE_TOP_KBPS);
+    }
+    let n = GRID_MID_MAX_PARTICIPANTS as u64;
+    // room_egress_kbps(n, 1, s) = n * (s + (n - 2) * CAM_MID_KBPS) * 1.15 <= budget
+    let per_subscriber = budget_kbps.saturating_mul(OVERHEAD_DEN) / (n * OVERHEAD_NUM);
+    per_subscriber
+        .saturating_sub((n - 2) * CAM_MID_KBPS)
+        .clamp(SHARE_LEGACY_KBPS, SHARE_TOP_KBPS)
 }
 
 pub fn room_name_for_channel(channel_id: i64) -> String {
@@ -566,16 +618,22 @@ pub fn user_id_from_identity(identity: &str) -> Option<i64> {
 
 /// Projected server egress for one room under the mitigated model: every
 /// subscriber pulls the live screen shares (the client subscribes each share
-/// a user watches, and shares have no low simulcast layer to fall back to —
-/// so each one is charged at full rate) or, with no share live, one high
-/// camera layer as focus — plus low layers for the rest of the grid.
-fn room_egress_kbps(participants: usize, screen_shares: usize) -> u64 {
+/// a user watches, and a single-layer share - the default - has no lower
+/// layer to fall back to, so each one is charged at `share_kbps`, the most it
+/// may send on this node) or, with no share live, one high camera layer as
+/// focus — plus low layers for the rest of the grid.
+///
+/// A share is charged at the node's CEILING, not at what its quality asks
+/// for: the server never learns the quality, and a live quality change can
+/// raise a running share to the ceiling without a new join. The measured
+/// branch of admission is what admits on real traffic.
+fn room_egress_kbps(participants: usize, screen_shares: usize, share_kbps: u64) -> u64 {
     if participants < 2 {
         return 0;
     }
     let n = participants as u64;
     let focus = if screen_shares > 0 {
-        SHARE_KBPS * screen_shares as u64
+        share_kbps * screen_shares as u64
     } else {
         CAM_HIGH_KBPS
     };
@@ -587,14 +645,14 @@ fn room_egress_kbps(participants: usize, screen_shares: usize) -> u64 {
 /// Node-wide projected egress if one more participant were admitted to
 /// `adding_to`. A room absent from the map contributes 0 (first participant
 /// alone generates no egress).
-fn node_projected_egress_kbps(state: &AppState, adding_to: &str) -> u64 {
+fn node_projected_egress_kbps(state: &AppState, adding_to: &str, share_kbps: u64) -> u64 {
     state
         .sfu_rooms
         .iter()
         .map(|r| {
             let extra = usize::from(r.key() == adding_to);
             let n = r.participants.len() + r.reservations.len() + extra;
-            room_egress_kbps(n, r.screen_shares.len())
+            room_egress_kbps(n, r.screen_shares.len(), share_kbps)
         })
         .sum()
 }
@@ -602,8 +660,8 @@ fn node_projected_egress_kbps(state: &AppState, adding_to: &str) -> u64 {
 /// Worst-case egress a room ADDS on top of what the sampler has already seen:
 /// full projection for all seats minus the projection for the seats whose
 /// traffic is old enough to be inside the measurement window.
-fn unmeasured_room_kbps(settled: usize, total: usize, shares: usize) -> u64 {
-    room_egress_kbps(total, shares).saturating_sub(room_egress_kbps(settled, shares))
+fn unmeasured_room_kbps(settled: usize, total: usize, shares: usize, share_kbps: u64) -> u64 {
+    room_egress_kbps(total, shares, share_kbps).saturating_sub(room_egress_kbps(settled, shares, share_kbps))
 }
 
 /// How old a participant's join must be to count as INCLUDED in the stored
@@ -624,7 +682,7 @@ fn settled_cutoff(sample_age_secs: u64) -> Duration {
 /// cost of every seat the sample cannot include yet — reservations, joins
 /// newer than [`settled_cutoff`], and the seat being requested. `None` when
 /// the measurement is missing or stale (caller then has only the worst case).
-fn node_measured_projection_kbps(state: &AppState, adding_to: &str) -> Option<u64> {
+fn node_measured_projection_kbps(state: &AppState, adding_to: &str, share_kbps: u64) -> Option<u64> {
     let sampled_at = state.sfu_measured_at.load(Ordering::Relaxed);
     let now_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -647,7 +705,7 @@ fn node_measured_projection_kbps(state: &AppState, adding_to: &str) -> Option<u6
                 .count();
             let extra = usize::from(r.key() == adding_to);
             let total = r.participants.len() + r.reservations.len() + extra;
-            unmeasured_room_kbps(settled, total, r.screen_shares.len())
+            unmeasured_room_kbps(settled, total, r.screen_shares.len(), share_kbps)
         })
         .sum();
     Some(measured + pending)
@@ -2819,6 +2877,11 @@ pub struct SfuTokenResponse {
     pub room: String,
     /// Ladder + limits the client must apply when publishing.
     pub max_screen_shares: usize,
+    /// The most one screen share may send here, kbps ([`share_ceiling_kbps`]).
+    /// The client caps its share's quality-chosen bitrate to it; admission
+    /// charges every live share at it. A client that predates the field sends
+    /// [`SHARE_LEGACY_KBPS`], which no ceiling is below by default.
+    pub max_share_kbps: u64,
 }
 
 /// GET /channels/:channel_id/sfu-token — mint a LiveKit join token for this
@@ -2914,9 +2977,9 @@ pub async fn get_sfu_token(
         // Hybrid egress admission (see module docs): the worst-case projection
         // admits unconditionally when it fits; when it would refuse, a fresh
         // measurement of REAL egress may still show room for this seat.
-        let projected = node_projected_egress_kbps(&state, &room);
+        let projected = node_projected_egress_kbps(&state, &room, cfg.share_kbps);
         if projected > cfg.budget_kbps {
-            match node_measured_projection_kbps(&state, &room) {
+            match node_measured_projection_kbps(&state, &room, cfg.share_kbps) {
                 Some(measured) if measured <= cfg.budget_kbps => {
                     tracing::info!(
                         room,
@@ -2974,6 +3037,7 @@ pub async fn get_sfu_token(
         identity,
         room,
         max_screen_shares: cfg.max_screen_shares,
+        max_share_kbps: cfg.share_kbps,
     })
     .into_response()
 }
@@ -3054,17 +3118,18 @@ mod tests {
     #[test]
     fn egress_model_matches_design_envelope() {
         // Solo participant produces no server egress.
-        assert_eq!(room_egress_kbps(1, 0), 0);
+        let s = SHARE_LEGACY_KBPS;
+        assert_eq!(room_egress_kbps(1, 0, s), 0);
         // N=6 all-camera grid: 6 × (2500 + 4×150) × 1.15 ≈ 21.4 Mbps.
-        let n6 = room_egress_kbps(6, 0);
+        let n6 = room_egress_kbps(6, 0, s);
         assert!((21_000..22_000).contains(&n6), "n6={n6}");
-        // N=6 with a live share as focus: 6 × (4500 + 4×150) × 1.15 ≈ 35.2 Mbps.
-        let n6s = room_egress_kbps(6, 1);
+        // N=6 with a 4.5 Mbps share as focus: 6 × (4500 + 4×150) × 1.15 ≈ 35.2 Mbps.
+        let n6s = room_egress_kbps(6, 1, s);
         assert!((34_500..36_000).contains(&n6s), "n6s={n6s}");
         // N=8 all-camera: 8 × (2500 + 6×150) × 1.15 ≈ 31.3 Mbps — inside the
         // default 30 Mbps budget only without a share, which is the point of
         // admission control.
-        let n8 = room_egress_kbps(8, 0);
+        let n8 = room_egress_kbps(8, 0, s);
         assert!((30_500..32_000).contains(&n8), "n8={n8}");
     }
 
@@ -3078,61 +3143,142 @@ mod tests {
     /// and over-admit seats.
     #[test]
     fn a_small_grid_is_charged_for_the_mid_camera_rung() {
+        let s = SHARE_LEGACY_KBPS;
         // N=4: focus + 2 others at the MID rung.
         assert_eq!(
-            room_egress_kbps(4, 0),
+            room_egress_kbps(4, 0, s),
             4 * (CAM_HIGH_KBPS + 2 * CAM_MID_KBPS) * OVERHEAD_NUM / OVERHEAD_DEN
         );
         // N=6 is past the threshold: the tiles are ~320px and so is the rung.
         assert_eq!(
-            room_egress_kbps(6, 0),
+            room_egress_kbps(6, 0, s),
             6 * (CAM_HIGH_KBPS + 4 * CAM_LOW_KBPS) * OVERHEAD_NUM / OVERHEAD_DEN
         );
         // The step at the threshold must be UPWARD as the room SHRINKS — a
         // smaller room costs more per subscriber, which is the whole point.
         assert!(
-            room_egress_kbps(4, 0) / 4 > room_egress_kbps(6, 0) / 6,
+            room_egress_kbps(4, 0, s) / 4 > room_egress_kbps(6, 0, s) / 6,
             "per-subscriber egress must be higher in a small grid"
         );
     }
 
+    /// The value of `export const <name> = <number>;` in a client source.
+    fn client_const(src: &str, name: &str) -> u64 {
+        let line = src
+            .lines()
+            .find(|l| l.trim_start().starts_with(&format!("export const {name} =")))
+            .unwrap_or_else(|| panic!("the client no longer declares {name}"));
+        line.split('=')
+            .nth(1)
+            .and_then(|v| v.trim().trim_end_matches(';').replace('_', "").parse().ok())
+            .unwrap_or_else(|| panic!("could not read {name}'s value from {line:?}"))
+    }
+
     #[test]
-    fn the_client_publishes_the_share_bitrate_this_file_charges_for() {
-        // ONE NUMBER COMPILED TWICE. `SHARE_KBPS` is what admission charges
-        // every subscriber for every live share; `SHARE_BITRATE` is what the
-        // client actually publishes the top rung at. Nothing connects them but
-        // a comment, and a divergence is silent in the direction that matters:
-        // raise the client and the node admits seats whose egress it
-        // under-counted, which is a congestion incident rather than an error.
+    fn the_client_table_and_this_file_agree_on_a_shares_bitrate() {
+        // NUMBERS COMPILED TWICE. Admission charges every live share at the
+        // node's ceiling, which never exceeds SHARE_TOP_KBPS; the client holds
+        // a share to that ceiling and, on a server that names none, to the old
+        // cap. Nothing connects the two halves but these checks, and a
+        // divergence is silent in the direction that matters: a client table
+        // above the top, or a legacy cap above what old servers charge, puts
+        // real egress over what the node admitted.
+        let table = include_str!("../frontend/src/api/rtc/shareBitrate.ts");
+        assert!(
+            table.contains("export function shareBitrateKbps"),
+            "that is not the real shareBitrate.ts - the path is wrong and this test checks nothing"
+        );
+        assert_eq!(client_const(table, "SHARE_TOP_KBPS"), SHARE_TOP_KBPS, "the table's top");
+        assert_eq!(client_const(table, "LEGACY_SHARE_KBPS"), SHARE_LEGACY_KBPS, "the cap with no ceiling named");
+
         let client = include_str!("../frontend/src/api/rtc/sfuManager.ts");
         assert!(
             client.len() > 20_000,
-            "that is not the real sfuManager.ts ({} bytes) — the path is wrong \
-             and this test is checking nothing",
+            "that is not the real sfuManager.ts ({} bytes) - the path is wrong",
             client.len()
         );
-        let line = client
-            .lines()
-            .find(|l| l.trim_start().starts_with("const SHARE_BITRATE"))
-            .expect("sfuManager.ts no longer declares SHARE_BITRATE");
-        let bps: u64 = line
-            .split('=')
-            .nth(1)
-            .and_then(|v| v.trim().trim_end_matches(';').replace('_', "").parse().ok())
-            .expect("could not read SHARE_BITRATE's value");
-        assert_eq!(
-            bps,
-            SHARE_KBPS * 1000,
-            "the client publishes shares at {bps} bps but admission charges {} bps",
-            SHARE_KBPS * 1000,
+        // The client reads the ceiling under the name this server sends it...
+        assert!(client.contains("max_share_kbps"), "sfuManager.ts no longer reads max_share_kbps");
+        // ...and publishes through the table rather than a constant of its own.
+        assert!(
+            client.contains("shareBitrateKbps(") && !client.contains("const SHARE_BITRATE"),
+            "sfuManager.ts publishes shares at a bitrate of its own again, outside shareBitrate.ts"
         );
         // POSITIVE CONTROL for the search: the ladder this charge assumes is
         // really there, so a future `simulcast: false` cannot pass silently.
         assert!(
             client.contains("screenShareSimulcastLayers"),
-            "shares are no longer published with a simulcast ladder — a subscriber \
-             in trouble has nothing smaller to fall back to, and this file's \
-             worst-case charge became the ONLY case"
+            "shares are no longer published with a simulcast ladder"
+        );
+    }
+
+    #[test]
+    fn the_grant_names_the_ceiling_on_the_wire() {
+        // The client reads `max_share_kbps`; a renamed field would serialise
+        // fine and leave every client on the old cap without a word.
+        let v = serde_json::to_value(SfuTokenResponse {
+            url: "wss://x".into(),
+            token: "t".into(),
+            identity: "u1#00000000".into(),
+            room: "sfu_1".into(),
+            max_screen_shares: 1,
+            max_share_kbps: 12_043,
+        })
+        .expect("serialises");
+        assert_eq!(v["max_share_kbps"], 12_043);
+    }
+
+    #[test]
+    fn the_default_ceiling_fits_a_four_person_call_with_one_share_in_the_budget() {
+        for budget in [30_000u64, 45_000, 60_000, 80_000] {
+            let c = share_ceiling_kbps(budget, None);
+            if c > SHARE_LEGACY_KBPS && c < SHARE_TOP_KBPS {
+                // Exactly the largest that fits: one kbps more does not.
+                assert!(room_egress_kbps(4, 1, c) <= budget, "budget {budget}: {c} over");
+                assert!(room_egress_kbps(4, 1, c + 1) > budget, "budget {budget}: {c} is not the largest");
+            }
+        }
+        // The default 30 Mbps budget: ~5.5 Mbps, a little over the old cap.
+        assert_eq!(share_ceiling_kbps(30_000, None), 5_521);
+        // 60 Mbps: ~12 Mbps, so 1080p60's 10 Mbps fits.
+        assert_eq!(share_ceiling_kbps(60_000, None), 12_043);
+    }
+
+    #[test]
+    fn the_default_ceiling_never_drops_below_the_old_cap_nor_passes_the_top() {
+        // A small uplink keeps what it had: lower would make every share there
+        // worse than before for no admission it was not already making.
+        assert_eq!(share_ceiling_kbps(10_000, None), SHARE_LEGACY_KBPS);
+        assert_eq!(share_ceiling_kbps(0, None), SHARE_LEGACY_KBPS);
+        // A large one gets the whole table and no more: nothing sends above it.
+        assert_eq!(share_ceiling_kbps(600_000, None), SHARE_TOP_KBPS);
+        assert_eq!(share_ceiling_kbps(u64::MAX / 1000, None), SHARE_TOP_KBPS);
+    }
+
+    #[test]
+    fn an_admin_ceiling_wins_inside_its_bounds() {
+        assert_eq!(share_ceiling_kbps(600_000, Some("8")), 8_000);
+        assert_eq!(share_ceiling_kbps(600_000, Some(" 2.5 ")), 2_500);
+        // Lower than the old cap is allowed: the admin knows their uplink.
+        assert_eq!(share_ceiling_kbps(30_000, Some("3")), 3_000);
+        assert_eq!(share_ceiling_kbps(30_000, Some("0.1")), SHARE_MIN_KBPS);
+        assert_eq!(share_ceiling_kbps(30_000, Some("100")), SHARE_TOP_KBPS);
+        // Garbage is the default, never 0.
+        for bad in ["", "abc", "0", "-3", "NaN", "inf", "1e400"] {
+            assert_eq!(share_ceiling_kbps(30_000, Some(bad)), share_ceiling_kbps(30_000, None), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_higher_ceiling_is_charged_per_watcher() {
+        // What raising the ceiling costs admission: every subscriber pays the
+        // difference once per live share.
+        let more = room_egress_kbps(4, 1, 10_000) - room_egress_kbps(4, 1, SHARE_LEGACY_KBPS);
+        assert_eq!(more, 4 * (10_000 - SHARE_LEGACY_KBPS) * OVERHEAD_NUM / OVERHEAD_DEN);
+        // ...and a measured-branch joiner is charged at the same ceiling.
+        assert_eq!(
+            unmeasured_room_kbps(3, 4, 1, 10_000),
+            room_egress_kbps(4, 1, 10_000) - room_egress_kbps(3, 1, 10_000)
         );
     }
 
@@ -3140,11 +3286,9 @@ mod tests {
     fn share_focus_replaces_camera_focus_and_extra_shares_stack() {
         // One share swaps the focus cost rather than adding to it: the delta
         // between share and no-share at N=4 is 4 × 2000 × 1.15 = 9.2 Mbps.
-        let delta = room_egress_kbps(4, 1) - room_egress_kbps(4, 0);
-        assert_eq!(
-            delta,
-            4 * (SHARE_KBPS - CAM_HIGH_KBPS) * OVERHEAD_NUM / OVERHEAD_DEN
-        );
+        let s = 10_000;
+        let delta = room_egress_kbps(4, 1, s) - room_egress_kbps(4, 0, s);
+        assert_eq!(delta, 4 * (s - CAM_HIGH_KBPS) * OVERHEAD_NUM / OVERHEAD_DEN);
         // But each ADDITIONAL live share is charged at full share rate. Shares
         // DO have lower simulcast rungs now (SHARE_LOW/SHARE_MID in
         // sfuManager.ts), and a subscriber receives exactly one of them — so
@@ -3152,8 +3296,8 @@ mod tests {
         // and admission stays conservative instead of becoming wrong. It must
         // still grow with share count now that the client-side cap defaults to
         // unlimited.
-        let delta2 = room_egress_kbps(4, 2) - room_egress_kbps(4, 1);
-        assert_eq!(delta2, 4 * SHARE_KBPS * OVERHEAD_NUM / OVERHEAD_DEN);
+        let delta2 = room_egress_kbps(4, 2, s) - room_egress_kbps(4, 1, s);
+        assert_eq!(delta2, 4 * s * OVERHEAD_NUM / OVERHEAD_DEN);
     }
 
     #[test]
@@ -3262,15 +3406,16 @@ livekit_packet_bytes{direction=\"outgoing\",transmission=\"initial\"} 4242\n";
         // 4 settled seats, 6 total (1 reservation + 1 joiner), one live share:
         // the sample already contains the 4, so the branch adds only the
         // marginal worst case of the 2 unseen seats.
-        let add = unmeasured_room_kbps(4, 6, 1);
-        assert_eq!(add, room_egress_kbps(6, 1) - room_egress_kbps(4, 1));
+        let s = SHARE_LEGACY_KBPS;
+        let add = unmeasured_room_kbps(4, 6, 1, s);
+        assert_eq!(add, room_egress_kbps(6, 1, s) - room_egress_kbps(4, 1, s));
         assert!(add > 0);
         // Everyone settled → the measurement speaks for the whole room.
-        assert_eq!(unmeasured_room_kbps(5, 5, 1), 0);
+        assert_eq!(unmeasured_room_kbps(5, 5, 1, s), 0);
         // Webhook lag can leave settled > total transiently — clamp, don't wrap.
-        assert_eq!(unmeasured_room_kbps(6, 5, 1), 0);
+        assert_eq!(unmeasured_room_kbps(6, 5, 1, s), 0);
         // Nobody settled (fresh room): identical to the full worst-case model.
-        assert_eq!(unmeasured_room_kbps(0, 5, 0), room_egress_kbps(5, 0));
+        assert_eq!(unmeasured_room_kbps(0, 5, 0, s), room_egress_kbps(5, 0, s));
     }
 }
 

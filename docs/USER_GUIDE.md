@@ -427,6 +427,39 @@ sizes (**Settings → Advanced → Screen sharing**, **Send my screen at several
 sizes**) fixes each size when it starts, so its quality changes on the next
 share instead.
 
+### How much a share sends
+
+In a channel that uses SFU mode, the most a share sends follows its
+**Resolution** and **Frame Rate**, so fast motion (a game, a film) keeps
+its detail instead of smearing into blocks:
+
+| Resolution | 15 fps | 30 fps | 60 fps |
+|---|---|---|---|
+| 720p | 2.5 Mbps | 4 Mbps | 6 Mbps |
+| 1080p | 3.5 Mbps | 6 Mbps | 10 Mbps |
+| 1440p | 6 Mbps | 10 Mbps | 16 Mbps |
+| 4K (**Source** of a 4K screen) | 8 Mbps | 14 Mbps | 20 Mbps |
+
+These are ceilings, not targets: a still desktop sends far less. **Source**
+uses the row for the size of what you share, so Source on a 1080p screen is
+the 1080p row, and a very wide window counts as the larger picture it is. A
+quality change while you are sharing changes the ceiling with it.
+
+Each server has a ceiling of its own, because every viewer of a share costs
+the server that much upload: the server's operator can set one, and one sized
+to the server's upload applies otherwise (about 5.5 Mbps on the smallest
+setting). A share never sends more than the server's ceiling, whatever its
+quality. A server that has not been updated keeps every share at 4.5 Mbps,
+as before.
+
+Your own upload still decides in the end: on a slow connection the share
+drops to a smaller picture by itself and comes back when it can.
+A viewer whose connection is slower than your share gets a frozen picture unless you send it at several sizes: see
+[Viewing Streams](#viewing-streams).
+
+In a channel that does not use SFU mode, each viewer is sent their own copy
+of your share, at up to 8 Mbps each, whatever the quality.
+
 ### Viewing Streams
 When someone shares, their entry in the voice view shows a **LIVE** badge and a
 **Watch stream** button. The chat header also gains a **Watch live streams**
@@ -440,6 +473,15 @@ boosting a stream above 100% and **Stream Attenuation** work in the stream
 view. While a stream is popped out (**Pop out**, below), the small player
 shows the next stream you are watching instead of a second copy, and hides
 when every stream you watch is popped out.
+
+If a stream keeps freezing for you while it plays fine for others, your
+connection is slower than what the stream sends (see
+[How much a share sends](#how-much-a-share-sends)). In a channel that uses
+SFU mode, the sharer can fix it for you without lowering everyone's picture:
+**Settings → Advanced → Screen sharing → Send my screen at several sizes**
+sends a smaller copy that a slow connection gets instead (from their next
+share). Otherwise they can lower the stream's **Resolution** or **Frame
+Rate**.
 
 ### Stream Controls
 Hover a stream for its buttons, or right-click it for the same items as a menu:

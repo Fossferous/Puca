@@ -336,7 +336,9 @@ versions; details in the repo):
    work as deployed (deliberate follow-up, not an accident); the ufw allow must
    be persistent (healthcheck re-asserts ufw every 5 min); some consumer routers have
    no AQM, so the **node-global egress budget** (default 30 Mbps, shares
-   charged at 4.5 Mbps, reservations counted) is the bufferbloat defence — no
+   charged at the node's share ceiling — 4.5 Mbps until the share bitrate
+   began following its quality, now `SFU_SHARE_MAX_MBPS` or derived from the
+   budget — reservations counted) is the bufferbloat defence — no
    new router required at rarely-8 room sizes.
 
 **Built (branch `feature/sfu-tier2`):** migration 035 (`channels.sfu_mode`) +

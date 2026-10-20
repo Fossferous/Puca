@@ -123,7 +123,7 @@ export interface ShareAdaptAction {
 export class ShareAdapter {
     private rungs: number[];
     private fps: number;
-    private readonly capKbps: number;
+    private capKbps: number;
     private cur: number;
     private hist: number[] = [];
     private upReads = 0;
@@ -155,8 +155,11 @@ export class ShareAdapter {
     private fit(kbps: number): number { return this.rungs.find(r => this.need(r) <= kbps) ?? this.floor; }
 
     /** The capture changed size (a window resized, a live quality change):
-     *  rebuild the ladder and keep to the nearest rung not above the old one. */
-    resize(sourceHeight: number, fps: number): ShareAdaptAction {
+     *  rebuild the ladder and keep to the nearest rung not above the old one.
+     *  `maxKbps` is what the share may now spend (shareBitrate.ts follows the
+     *  quality); a change to it alone moves no rung. */
+    resize(sourceHeight: number, fps: number, maxKbps?: number): ShareAdaptAction {
+        if (maxKbps !== undefined) this.capKbps = 0.9 * maxKbps;
         if (Math.round(sourceHeight) === this.rungs[0] && fps === this.fps) return {};
         this.rungs = rungsFor(sourceHeight);
         this.fps = fps;

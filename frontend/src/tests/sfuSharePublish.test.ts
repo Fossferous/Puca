@@ -20,6 +20,7 @@
 import { describe, it, expect } from 'vitest';
 
 import { screenSharePublishOptions, publicationsHaveLadder } from '../api/rtc/sfuManager';
+import { LEGACY_SHARE_KBPS, SHARE_KBPS_TABLE } from '../api/rtc/shareBitrate';
 import { Track } from 'livekit-client';
 
 /** The extra rungs of a laddered share. The field is optional on the options
@@ -53,13 +54,15 @@ describe('the screen-share publish contract', () => {
     });
 
     it('keeps every extra rung BELOW the full picture', () => {
-        // The backend charges each share subscriber the top rung
-        // (SHARE_KBPS in src/sfu.rs) and a subscriber only ever receives one,
-        // so that charge is the correct worst case only while nothing here
-        // exceeds it. A rung above the primary would silently over-run the
-        // node's egress budget.
-        const o = screenSharePublishOptions(true);
-        const top = o.videoEncoding.maxBitrate;
+        // The backend charges each share subscriber the node's share ceiling
+        // (room_egress_kbps in src/sfu.rs), the most the top rung may carry,
+        // and a subscriber only ever receives one rung, so that charge is the
+        // correct worst case only while nothing here exceeds the top. A rung
+        // above the primary would silently over-run the node's egress budget.
+        // Checked at the LOWEST top a share can have (720p15), where a fixed
+        // rung is likeliest to overtake it.
+        const o = screenSharePublishOptions(true, SHARE_KBPS_TABLE[720][15] * 1000);
+        const top = o.screenShareEncoding.maxBitrate;
         for (const l of ladderLayers()) {
             expect(l.encoding.maxBitrate, 'no rung may exceed the primary').toBeLessThan(top);
             expect(l.width).toBeLessThan(1920);
@@ -99,7 +102,22 @@ describe('the screen-share publish contract', () => {
     });
 
     it('asks for 60 fps on the primary', () => {
-        expect(screenSharePublishOptions(true).videoEncoding.maxFramerate).toBe(60);
+        expect(screenSharePublishOptions(true).screenShareEncoding.maxFramerate).toBe(60);
+    });
+
+    it('carries its cap in the field livekit-client actually reads for a share', () => {
+        // For a ScreenShare source livekit-client REPLACES videoEncoding with
+        // screenShareEncoding (computeVideoEncodings), falling back to the
+        // room's publishDefaults. This field was videoEncoding until
+        // 2026-10-20: ignored, so a per-quality cap set there would never have
+        // reached the encoder.
+        const o = screenSharePublishOptions(false, 10_000_000) as Record<string, unknown>;
+        expect((o.screenShareEncoding as { maxBitrate: number }).maxBitrate).toBe(10_000_000);
+        expect(o.videoEncoding, 'a share cap in videoEncoding is silently ignored').toBeUndefined();
+    });
+
+    it('keeps the old 4.5 Mbps when the caller names no bitrate', () => {
+        expect(screenSharePublishOptions(false).screenShareEncoding.maxBitrate).toBe(LEGACY_SHARE_KBPS * 1000);
     });
 });
 
@@ -123,7 +141,8 @@ describe('turning the ladder off', () => {
         const on = screenSharePublishOptions(true);
         const off = screenSharePublishOptions(false);
         expect(off.videoCodec).toBe(on.videoCodec);
-        expect(off.videoEncoding).toEqual(on.videoEncoding);
+        expect(off.screenShareEncoding).toEqual(on.screenShareEncoding);
+        expect(on.screenShareEncoding.maxBitrate, 'compared something, not two undefineds').toBeGreaterThan(0);
         expect(off.source).toBe(on.source);
     });
 });

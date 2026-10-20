@@ -4,6 +4,12 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Changed
+
+- **Fast-motion screen shares stay sharp.** In SFU-mode channels every share was held to 4.5 Mbps whatever its quality, so fast motion at 1080p, and anything at 60 fps or 1440p, smeared and broke into blocks while the same picture looked clean on the sharer's screen. The most a share sends now follows its **Resolution** and **Frame Rate**: 4 Mbps for 720p at 30 fps, 6 Mbps for 720p60 and 1080p30, 10 Mbps for 1080p60, 16 Mbps for 1440p60 and up to 20 Mbps for a 4K screen at 60 fps (the full table is in the user guide). These are ceilings: a still desktop sends far less. A quality change mid-share moves the ceiling with it. Each server also sets a ceiling of its own, since every viewer costs it that much upload: its operator can set one (`SFU_SHARE_MAX_MBPS`), and otherwise one sized to its egress budget applies (about 5.5 Mbps on the default budget), with admission counting every live share at that ceiling. Needs the app update and the server update; until the server is updated, shares stay at 4.5 Mbps.
+
 ## 0.9.841 — 2026-10-19
 
 Desktop updater security fixes (rustls, no zip)

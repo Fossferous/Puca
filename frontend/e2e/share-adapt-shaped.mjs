@@ -39,8 +39,31 @@
 //
 // and check `netstat -ano` for its PID before the first run.
 //
+// Measured 2026-10-20 with SHAPE=viewer (1080p60 fast-motion pan, 300 ms
+// buffer, LiveKit 1.13.4 loopback, 60 s, viewer over the last 30 s):
+//
+//   viewer link   share                    viewer gets
+//   unshaped      10 Mbps, one layer       1080p @ 57 fps, ~10 Mbps
+//   6 Mbps        4.5 Mbps, one layer      1080p @ 57 fps
+//   6 Mbps        10 Mbps, one layer       FROZEN (0 fps, ~1,300 packets lost / 2 s)
+//   3 Mbps        4.5 Mbps, one layer      FROZEN (0 fps) — the old cap, same failure
+//   6 Mbps        10 Mbps, ladder          360p @ 53 fps
+//   3 Mbps        10 Mbps, ladder          360p @ 55 fps
+//
+// A single-layer share gives LiveKit nothing smaller to send, and it does not
+// pause the track either: a viewer whose link is below the share's bitrate
+// loses the picture entirely. Raising the bitrate moves that line up; the
+// ladder is what keeps such a viewer moving.
+//
+// SHAPE=viewer squeezes a VIEWER's download instead (only the viewer's media
+// goes through the bottleneck, LiveKit -> viewer): what somebody on a slow
+// line gets from a share bigger than their link. BITRATE sets the share's cap
+// (kbps), LADDER=1 publishes the simulcast ladder, CONTENT=pan the fast-motion
+// picture from encode-cost.mjs, FPS the capture rate.
+//
 // Usage (from frontend/):
 //   LK_KEY=<key> LK_SECRET=<secret> MODE=adapt RATE=450 node e2e/share-adapt-shaped.mjs
+//   ... SHAPE=viewer RATE=5000 BITRATE=10000 CONTENT=pan FPS=60 [LADDER=1]   (a viewer on a slow line)
 //   ... RATE=250 QUEUE=1000 LATER_RATE=5000 LATER_AT=40000 TOTAL=130000   (squeeze, then lift)
 //   ... RESHARE_STOP=40000 RESHARE_START=50000                             (a second share)
 // Env: LK_WS (ws://127.0.0.1:7880), LK_UDP (7882), SHAPER_PORT (7883), PAGE_PORT (7884),
@@ -65,37 +88,59 @@ const RATE = Number(env.RATE || 1000), QUEUE = Number(env.QUEUE || 500);
 const LATER_RATE = env.LATER_RATE ? Number(env.LATER_RATE) : null, LATER_AT = Number(env.LATER_AT || 45000);
 const RESHARE_STOP = env.RESHARE_STOP ? Number(env.RESHARE_STOP) : null, RESHARE_START = Number(env.RESHARE_START || 0);
 const TOTAL = Number(env.TOTAL || 90000);
+/** WHOSE link is squeezed: 'sharer' (its upload, the original question) or
+ *  'viewer' (its download: what a viewer on a slow line gets from a share it
+ *  cannot carry). Only the squeezed page's media goes through the shaper. */
+const SHAPE = env.SHAPE === 'viewer' ? 'viewer' : 'sharer';
+/** The share's cap, kbps (sfuManager publishes the quality's own, shareBitrate.ts). */
+const BITRATE = Number(env.BITRATE || 4500);
+/** LADDER=1 publishes the simulcast ladder (Settings, "Send my screen at several sizes"). */
+const LADDER = env.LADDER === '1';
+/** 'shapes' (the original) or 'pan' (fast-motion detail; see encode-cost.mjs). */
+const CONTENT = env.CONTENT || 'shapes';
+const FPS = Number(env.FPS || 30);
 const ROOM = 'shaped_' + Date.now().toString(36);
 const here = (p) => fileURLToPath(new URL(p, import.meta.url));
 
-// ---- the bottleneck: upstream only, rate-limited, drop-tail ----
-function startShaper({ rateKbps, queueMs }) {
+// ---- the bottleneck: one direction only, rate-limited, drop-tail ----
+// `down` squeezes what LiveKit sends to the page (a viewer's download);
+// otherwise what the page sends to LiveKit (a sharer's upload).
+function startShaper({ rateKbps, queueMs, down = false }) {
     const front = dgram.createSocket('udp4');
     const flows = new Map();
     const state = { rateKbps, queueMs };
     const stats = { dropped: 0, maxQueueMs: 0 };
+    const pace = (f, m, send) => {
+        const now = performance.now();
+        const start = Math.max(now, f.busyUntil);
+        if (start - now > state.queueMs) { stats.dropped++; return; }
+        stats.maxQueueMs = Math.max(stats.maxQueueMs, start - now);
+        f.busyUntil = start + (m.length * 8) / state.rateKbps;
+        // A packet still queued when the run ends must not hit a closed socket.
+        setTimeout(() => { if (!state.closed) send(); }, f.busyUntil - now);
+    };
     front.on('message', (m, rinfo) => {
         const k = `${rinfo.address}:${rinfo.port}`;
         let f = flows.get(k);
         if (!f) {
             const back = dgram.createSocket('udp4');
             back.bind(0, '127.0.0.1');
-            back.on('message', (d) => front.send(d, rinfo.port, rinfo.address));
             f = { back, busyUntil: 0 };
+            const fl = f;
+            back.on('message', (d) => {
+                if (down) pace(fl, d, () => front.send(d, rinfo.port, rinfo.address));
+                else if (!state.closed) front.send(d, rinfo.port, rinfo.address);
+            });
             flows.set(k, f);
         }
-        const now = performance.now();
-        const start = Math.max(now, f.busyUntil);
-        if (start - now > state.queueMs) { stats.dropped++; return; }
-        stats.maxQueueMs = Math.max(stats.maxQueueMs, start - now);
-        f.busyUntil = start + (m.length * 8) / state.rateKbps;
-        setTimeout(() => f.back.send(m, LK_UDP, '127.0.0.1'), f.busyUntil - now);
+        if (down) f.back.send(m, LK_UDP, '127.0.0.1');
+        else { const fl = f; pace(fl, m, () => fl.back.send(m, LK_UDP, '127.0.0.1')); }
     });
     front.bind(SHAPER_PORT, '127.0.0.1');
     return {
         set(o) { Object.assign(state, o); },
         take() { const s = { ...stats }; stats.maxQueueMs = 0; return s; },
-        close() { front.close(); for (const f of flows.values()) f.back.close(); },
+        close() { state.closed = true; front.close(); for (const f of flows.values()) f.back.close(); },
     };
 }
 
@@ -112,7 +157,7 @@ const adaptJs = (await build({
 })).outputFiles[0].text;
 const lkUmd = readFileSync(here('../node_modules/livekit-client/dist/livekit-client.umd.js'), 'utf8');
 
-const shaper = startShaper({ rateKbps: RATE, queueMs: QUEUE });
+const shaper = startShaper({ rateKbps: RATE, queueMs: QUEUE, down: SHAPE === 'viewer' });
 // LiveKit refuses an opaque origin, so the pages load from a loopback server.
 const srv = createServer((_, r) => { r.writeHead(200, { 'content-type': 'text/html' }); r.end('<!doctype html><title>shaped</title>'); });
 await new Promise(r => srv.listen(PAGE_PORT, '127.0.0.1', r));
@@ -121,12 +166,12 @@ const browser = await chromium.launch({
     args: ['--mute-audio', '--allow-loopback-in-peer-connection', '--autoplay-policy=no-user-gesture-required'],
 });
 
-async function page(name) {
+async function page(name, shaped) {
     const p = await browser.newPage();
     p.on('console', m => { if (m.type() === 'error') console.log(`  [${name}]`, m.text().slice(0, 160)); });
     await p.goto(`http://127.0.0.1:${PAGE_PORT}/`);
-    // Send every LiveKit media candidate through the bottleneck.
-    await p.evaluate(({ from, to }) => {
+    // Send every LiveKit media candidate of the squeezed page through the bottleneck.
+    if (shaped) await p.evaluate(({ from, to }) => {
         const rw = (s) => s.replace(new RegExp(`(127\\.0\\.0\\.1 )${from}( typ)`, 'g'), `$1${to}$2`);
         const P = RTCPeerConnection.prototype;
         const srd = P.setRemoteDescription, aic = P.addIceCandidate;
@@ -141,10 +186,12 @@ async function page(name) {
     return p;
 }
 
-const viewer = await page('viewer');
+const viewer = await page('viewer', SHAPE === 'viewer');
 await viewer.evaluate(async ({ url, tok }) => {
     const LK = window.LivekitClient;
     const room = new LK.Room({ adaptiveStream: false, dynacast: true });
+    window.__state = 'none';
+    room.on(LK.RoomEvent.TrackStreamStateChanged, (_pub, st) => { window.__state = st; });
     room.on(LK.RoomEvent.TrackSubscribed, (t, pub) => {
         document.querySelectorAll('video').forEach(v => v.remove());
         const el = t.attach(); el.muted = true; el.style.width = '1280px'; el.style.height = '720px';
@@ -156,41 +203,68 @@ await viewer.evaluate(async ({ url, tok }) => {
     window.__sample = async () => {
         if (!window.__v?.receiver) return null;
         let r = null; (await window.__v.receiver.getStats()).forEach(x => { if (x.type === 'inbound-rtp' && x.kind === 'video') r = x; });
-        return r ? { h: r.frameHeight, size: `${r.frameWidth}x${r.frameHeight}`, decoded: r.framesDecoded, freezes: r.freezeCount } : null;
+        return r ? { h: r.frameHeight, size: `${r.frameWidth}x${r.frameHeight}`, decoded: r.framesDecoded, freezes: r.freezeCount, lost: r.packetsLost, rx: r.bytesReceived, state: window.__state } : null;
     };
 }, { url: LK_WS, tok: token('viewer') });
 
-const sharer = await page('sharer');
-await sharer.evaluate(async ({ url, tok, MODE }) => {
+const sharer = await page('sharer', SHAPE === 'sharer');
+await sharer.evaluate(async ({ url, tok, MODE, BITRATE, LADDER, CONTENT, FPS }) => {
     const LK = window.LivekitClient;
-    // A game-like source: full-frame motion, which no encoder can coast on.
-    const W = 1866, H = 1080;
+    const W = CONTENT === 'pan' ? 1920 : 1866, H = 1080;
     const canvas = document.createElement('canvas'); canvas.width = W; canvas.height = H;
     const ctx = canvas.getContext('2d');
-    const shapes = Array.from({ length: 140 }, (_, i) => ({ x: (i * 137) % W, y: (i * 71) % H, vx: 2 + (i % 7), vy: 1 + (i % 5), r: 20 + (i % 60), hue: (i * 17) % 360 }));
     let f = 0;
-    setInterval(() => {
-        f++;
-        const g = ctx.createLinearGradient(0, (f * 2) % H, W, H); g.addColorStop(0, '#123'); g.addColorStop(1, '#0b1220');
-        ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
-        for (const s of shapes) { s.x = (s.x + s.vx) % W; s.y = (s.y + s.vy) % H; ctx.fillStyle = `hsl(${(s.hue + f) % 360} 90% 55%)`; ctx.fillRect(s.x, s.y, s.r, s.r); }
-        ctx.fillStyle = '#fff'; ctx.fillRect((f * 19) % W, 0, 60, H);
-    }, 1000 / 30);
+    if (CONTENT === 'pan') {
+        // encode-cost.mjs's fast-motion picture: detail panned at a fixed
+        // speed per SECOND, soft shapes and a slight blur like footage.
+        const tex = document.createElement('canvas'); tex.width = W * 2; tex.height = H * 2;
+        const t = tex.getContext('2d');
+        let seed = 7; const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+        t.fillStyle = '#3a5f2a'; t.fillRect(0, 0, tex.width, tex.height);
+        for (let i = 0; i < 60; i++) {
+            const x = rnd() * tex.width, y = rnd() * tex.height, r = (0.05 + rnd() * 0.2) * tex.width;
+            const g = t.createRadialGradient(x, y, 0, x, y, r);
+            g.addColorStop(0, `hsl(${rnd() * 360} ${30 + rnd() * 40}% ${30 + rnd() * 40}%)`); g.addColorStop(1, 'transparent');
+            t.fillStyle = g; t.fillRect(x - r, y - r, 2 * r, 2 * r);
+        }
+        for (let i = 0; i < (tex.width * tex.height) / 2500; i++) {
+            const s = 3 + rnd() * 36;
+            t.fillStyle = `hsl(${80 + rnd() * 60} ${30 + rnd() * 50}% ${20 + rnd() * 45}%)`;
+            t.fillRect(rnd() * tex.width, rnd() * tex.height, s, s * (0.3 + rnd()));
+        }
+        t.filter = 'blur(1px)'; t.drawImage(tex, 0, 0); t.filter = 'none';
+        setInterval(() => {
+            f++; const sec = f / FPS;
+            ctx.drawImage(tex, (sec * W * 0.5) % W, (Math.sin(sec * 1.3) * 0.5 + 0.5) * H * 0.9, W, H, 0, 0, W, H);
+        }, 1000 / FPS);
+    } else {
+        // A game-like source: full-frame motion, which no encoder can coast on.
+        const shapes = Array.from({ length: 140 }, (_, i) => ({ x: (i * 137) % W, y: (i * 71) % H, vx: 2 + (i % 7), vy: 1 + (i % 5), r: 20 + (i % 60), hue: (i * 17) % 360 }));
+        setInterval(() => {
+            f++;
+            const g = ctx.createLinearGradient(0, (f * 2) % H, W, H); g.addColorStop(0, '#123'); g.addColorStop(1, '#0b1220');
+            ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+            for (const s of shapes) { s.x = (s.x + s.vx) % W; s.y = (s.y + s.vy) % H; ctx.fillStyle = `hsl(${(s.hue + f) % 360} 90% 55%)`; ctx.fillRect(s.x, s.y, s.r, s.r); }
+            ctx.fillStyle = '#fff'; ctx.fillRect((f * 19) % W, 0, 60, H);
+        }, 1000 / FPS);
+    }
     // sfuManager's room options: LiveKit takes a share's bitrate and frame rate
-    // from publishDefaults.screenShareEncoding, not from publishTrack's
-    // videoEncoding (without this the share is capped at 2.5 Mbps / 15 fps).
+    // from screenShareEncoding, not from publishTrack's videoEncoding (without
+    // this the share is capped at 2.5 Mbps / 15 fps).
     const room = new LK.Room({ dynacast: true, adaptiveStream: false,
-        publishDefaults: { simulcast: true, screenShareEncoding: { maxBitrate: 4_500_000, maxFramerate: 60 } } });
+        publishDefaults: { simulcast: true, screenShareEncoding: { maxBitrate: BITRATE * 1000, maxFramerate: 60 } } });
     await room.connect(url, tok, { autoSubscribe: false });
     // A silent mic first, like a call: the share joins a transport already in use.
     const ac = new AudioContext(); const osc = ac.createOscillator(); const dst = ac.createMediaStreamDestination();
     const gain = ac.createGain(); gain.gain.value = 0.05; osc.connect(gain); gain.connect(dst); osc.start();
     await room.localParticipant.publishTrack(dst.stream.getAudioTracks()[0], { source: LK.Track.Source.Microphone });
     await new Promise(r => setTimeout(r, 15000));
-    // sfuManager.screenSharePublishOptions(false), both versions.
-    const opts = { source: LK.Track.Source.ScreenShare, simulcast: false, videoCodec: 'h264',
-        videoEncoding: { maxBitrate: 4_500_000, maxFramerate: 60 },
-        degradationPreference: MODE === 'adapt' ? 'maintain-resolution' : 'maintain-framerate' };
+    // sfuManager.screenSharePublishOptions: single layer (both versions) or
+    // the ladder, whose rungs are SHARE_LOW / SHARE_MID there.
+    const opts = { source: LK.Track.Source.ScreenShare, simulcast: LADDER, videoCodec: 'h264',
+        screenShareEncoding: { maxBitrate: BITRATE * 1000, maxFramerate: 60 },
+        degradationPreference: MODE === 'adapt' && !LADDER ? 'maintain-resolution' : 'maintain-framerate' };
+    if (LADDER) opts.screenShareSimulcastLayers = [new LK.VideoPreset(640, 360, 600_000, 30), new LK.VideoPreset(960, 540, 1_200_000, 60)];
     const timers = [];
     window.__changes = { height: 0, hint: 0 };
     // sfuManager.applyShareHeight + shareAdaptTick (publication held, not looked up).
@@ -211,7 +285,7 @@ await sharer.evaluate(async ({ url, tok, MODE }) => {
                 const set = mst.getSettings();
                 const sourceHeight = set.height > 0 ? set.height : 1080, fps = set.frameRate > 0 ? set.frameRate : 30;
                 if (st.sender !== sender || !st.adapter) {
-                    st.adapter = new PucaShareAdapt.ShareAdapter({ sourceHeight, fps, maxKbps: 4500 });
+                    st.adapter = new PucaShareAdapt.ShareAdapter({ sourceHeight, fps, maxKbps: BITRATE });
                     st.sender = sender;
                     await applyShareHeight(sender, sourceHeight, st.adapter.currentHeight);
                     return;
@@ -231,11 +305,11 @@ await sharer.evaluate(async ({ url, tok, MODE }) => {
         return tick();
     };
     window.__share = async () => {
-        const track = canvas.captureStream(30).getVideoTracks()[0];
+        const track = canvas.captureStream(FPS).getVideoTracks()[0];
         track.contentHint = 'motion'; // media.ts
         const pub = await room.localParticipant.publishTrack(track, opts);
         window.__track = track; window.__sender = pub.track.sender;
-        if (MODE === 'adapt') await adapt(pub, track);
+        if (MODE === 'adapt' && !LADDER) await adapt(pub, track);
     };
     window.__unshare = async () => {
         timers.forEach(clearInterval); timers.length = 0;
@@ -248,7 +322,7 @@ await sharer.evaluate(async ({ url, tok, MODE }) => {
         return o ? { h: o.frameHeight, size: `${o.frameWidth}x${o.frameHeight}`, encoded: o.framesEncoded, bytes: o.bytesSent, target: Math.round((o.targetBitrate || 0) / 1000), limit: o.qualityLimitationReason } : null;
     };
     await window.__share();
-}, { url: LK_WS, tok: token('sharer'), MODE });
+}, { url: LK_WS, tok: token('sharer'), MODE, BITRATE, LADDER, CONTENT, FPS });
 
 const t0 = Date.now();
 const series = [];
@@ -268,10 +342,12 @@ while (Date.now() - t0 < TOTAL) {
     const fps = prev && s.encoded >= prev.encoded ? Math.round((s.encoded - prev.encoded) / ((t - prev.t) / 1000)) : null;
     const kbps = prev && s.bytes >= prev.bytes ? Math.round(((s.bytes - prev.bytes) * 8) / (t - prev.t)) : null;
     const vfps = prevV && v && v.decoded >= prevV.decoded ? Math.round((v.decoded - prevV.decoded) / ((t - prevV.t) / 1000)) : null;
+    const vkbps = prevV && v && v.rx >= prevV.rx ? Math.round(((v.rx - prevV.rx) * 8) / (t - prevV.t)) : null;
+    const vlost = prevV && v ? (v.lost ?? 0) - (prevV.lost ?? 0) : null;
     prev = { ...s, t }; prevV = v ? { ...v, t } : null;
-    const row = { t: Math.round(t / 1000), sent: s.size, h: s.h, fps, kbps, target: s.target, limit: s.limit, queueMs: Math.round(q.maxQueueMs), viewer: v?.size ?? null, vh: v?.h ?? null, vfps, freezes: v?.freezes ?? null, changes };
+    const row = { t: Math.round(t / 1000), sent: s.size, h: s.h, fps, kbps, target: s.target, limit: s.limit, queueMs: Math.round(q.maxQueueMs), viewer: v?.size ?? null, vh: v?.h ?? null, vfps, vkbps, vlost, vstate: v?.state ?? null, freezes: v?.freezes ?? null, dropped: q.dropped, changes };
     series.push(row);
-    console.log(`${String(row.t).padStart(4)}s sent ${String(s.size).padEnd(10)} ${fps ?? '?'}fps ${kbps ?? '?'}kbps target=${s.target} ${s.limit} queue=${row.queueMs}ms | viewer ${row.viewer} @${vfps ?? '?'} freezes=${row.freezes} | rung changes ${changes.height}, hint changes ${changes.hint}`);
+    console.log(`${String(row.t).padStart(4)}s sent ${String(s.size).padEnd(10)} ${fps ?? '?'}fps ${kbps ?? '?'}kbps target=${s.target} ${s.limit} queue=${row.queueMs}ms | viewer ${row.viewer} @${vfps ?? '?'} ${vkbps ?? '?'}kbps lost+${vlost ?? '?'} ${row.vstate} freezes=${row.freezes} | rung changes ${changes.height}, hint changes ${changes.hint}`);
 }
 if (env.SHOT) await viewer.locator('video').first().screenshot({ path: env.SHOT }).catch(e => console.log('screenshot failed:', e.message));
 
@@ -280,7 +356,10 @@ const after = series.filter(r => r.t >= from);
 const full = after.find(r => r.h >= 1070);
 const tail = series.filter(r => r.t >= Math.max(30, from));
 const med = (xs) => { const a = xs.filter(x => x !== null).sort((x, y) => x - y); return a.length ? a[Math.floor(a.length / 2)] : null; };
-console.log(`\n${MODE}: ${LATER_RATE !== null || RESHARE_STOP !== null ? `full 1080p ${full ? `${full.t - from} s after t=${from}s` : 'never'}; ` : ''}viewer median ${med(tail.map(r => r.vh))} lines @ ${med(tail.map(r => r.vfps))} fps`);
+const frozen = tail.filter(r => r.vfps !== null && r.vfps < 5).length;
+console.log(`\nshape=${SHAPE} rate=${RATE} bitrate=${BITRATE} ladder=${LADDER} content=${CONTENT} fps=${FPS}:`
+    + ` viewer under 5 fps in ${frozen} of ${tail.length} samples, median ${med(tail.map(r => r.vkbps))} kbps received`);
+console.log(`${MODE}: ${LATER_RATE !== null || RESHARE_STOP !== null ? `full 1080p ${full ? `${full.t - from} s after t=${from}s` : 'never'}; ` : ''}viewer median ${med(tail.map(r => r.vh))} lines @ ${med(tail.map(r => r.vfps))} fps`);
 if (env.OUT) writeFileSync(env.OUT, JSON.stringify(series, null, 1));
 await browser.close();
 srv.close();

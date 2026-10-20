@@ -46,8 +46,8 @@ node deploy/migrate/udp-sink.mjs
 ```
 
 ```bash
-# on your machine — 4.5 Mbps is one screen share
-node deploy/migrate/udp-soak.mjs <vps-ip> 7882 4.5 30
+# on your machine — 10 Mbps is one 1080p 60 fps screen share to one viewer
+node deploy/migrate/udp-soak.mjs <vps-ip> 7882 10 30
 ```
 
 Read the per-window output, not the average. What fails a host is a **cliff**:

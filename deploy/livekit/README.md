@@ -110,8 +110,11 @@ curl -s -H "Authorization: Bearer $JWT" https://chat.example.com/channels/<id>/s
 ## Operational notes
 
 - **Egress budget is the whole ballgame.** The backend refuses joins once
-  projected node egress (all rooms, reservations included, shares charged at
-  4.5 Mbps) exceeds `SFU_EGRESS_BUDGET_MBPS`. Raise it only after measuring
+  projected node egress (all rooms, reservations included, every live share
+  charged at the node's share ceiling) exceeds `SFU_EGRESS_BUDGET_MBPS`. The
+  ceiling is `SFU_SHARE_MAX_MBPS`, or derived from the budget when unset (see
+  `.env.example`): a share's bitrate follows its quality, up to 20 Mbps, and
+  the ceiling is what keeps a small uplink from being asked for that. Raise it only after measuring
   the real uplink under load — saturating a residential line bufferbloats the
   entire household (there is no router AQM here by design decision).
 - **Measured admission (2026-07):** since stream-watching went opt-in

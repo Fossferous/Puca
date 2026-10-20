@@ -8,8 +8,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('livekit-client/e2ee-worker?worker', () => ({ default: class { terminate() { /* fake */ } } }));
 vi.mock('../api/channelKeys', () => ({ ensureChannelKey: vi.fn(async () => ({ key: new Uint8Array(32), epoch: 1 })) }));
+/** What the server's join grant says about a share's ceiling (undefined = an older server). */
+const grant: { maxShareKbps: number | undefined } = { maxShareKbps: undefined };
 vi.mock('../api/client', () => ({
-    apiClient: { get: vi.fn(async () => ({ url: 'ws://127.0.0.1:7880', token: 't', identity: 'u5#abc', max_screen_shares: 0 })) },
+    apiClient: { get: vi.fn(async () => ({ url: 'ws://127.0.0.1:7880', token: 't', identity: 'u5#abc', max_screen_shares: 0, max_share_kbps: grant.maxShareKbps })) },
 }));
 const ladder = { on: false };
 vi.mock('../components/settingsStore', async (importOriginal) => {
@@ -21,6 +23,8 @@ vi.mock('../components/settingsStore', async (importOriginal) => {
 class FakeSender {
     params: { encodings: Array<Record<string, unknown>>; degradationPreference?: string };
     sets: Array<{ scale: unknown; pref: unknown }> = [];
+    /** encodings[0].maxBitrate after every accepted setParameters. */
+    caps: unknown[] = [];
     statsCalls = 0;
     targetBps = 4_500_000;
     bytes = 0;
@@ -32,6 +36,7 @@ class FakeSender {
         if (this.refuse) throw new Error('InvalidModificationError');
         this.params = p;
         this.sets.push({ scale: p.encodings[0].scaleResolutionDownBy, pref: p.degradationPreference });
+        this.caps.push(p.encodings[0].maxBitrate);
     }
     async getStats() {
         this.statsCalls++;
@@ -41,6 +46,8 @@ class FakeSender {
     }
 }
 const senders: FakeSender[] = [];
+/** The options every video publishTrack was called with. */
+const published: Array<Record<string, unknown>> = [];
 
 vi.mock('livekit-client', async (importOriginal) => {
     const real = await importOriginal<typeof import('livekit-client')>();
@@ -51,6 +58,7 @@ vi.mock('livekit-client', async (importOriginal) => {
         getTrackPublications() { return this.pubs; }
         async publishTrack(track: MediaStreamTrack, opts: { source: string; simulcast?: boolean }) {
             const isVideo = track.kind === 'video';
+            if (isVideo) published.push(opts as unknown as Record<string, unknown>);
             const sender = isVideo ? new FakeSender(opts.simulcast ? 3 : 1) : undefined;
             if (sender) senders.push(sender);
             const pub = { source: opts.source, kind: isVideo ? real.Track.Kind.Video : real.Track.Kind.Audio, track: { mediaStreamTrack: track, sender } };
@@ -76,11 +84,13 @@ vi.mock('livekit-client', async (importOriginal) => {
 
 import { SfuManager } from '../api/rtc/sfuManager';
 import { SHARE_ADAPT_INTERVAL_MS } from '../api/rtc/shareAdapt';
+import { LEGACY_SHARE_KBPS, SHARE_KBPS_TABLE, SHARE_TOP_KBPS } from '../api/rtc/shareBitrate';
 
 const mic = () => ({ kind: 'audio', id: 'mic', enabled: true, stop: vi.fn() }) as unknown as MediaStreamTrack;
-function shareStream(height = 1080) {
-    const video = { kind: 'video', id: 'screen', enabled: true, contentHint: 'motion', stop: vi.fn(), getSettings: () => ({ height, width: Math.round(height * 16 / 9), frameRate: 30 }) };
-    return { video, stream: { getVideoTracks: () => [video], getAudioTracks: () => [] } as unknown as MediaStream };
+function shareStream(height = 1080, fps = 30) {
+    const cap = { height, fps };
+    const video = { kind: 'video', id: 'screen', enabled: true, contentHint: 'motion', stop: vi.fn(), getSettings: () => ({ height: cap.height, width: Math.round(cap.height * 16 / 9), frameRate: cap.fps }) };
+    return { video, cap, stream: { getVideoTracks: () => [video], getAudioTracks: () => [] } as unknown as MediaStream };
 }
 const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
 
@@ -180,5 +190,98 @@ describe('the share resolution picker, wired', () => {
         } finally {
             FakeSender.prototype.setParameters = orig;
         }
+    });
+});
+
+describe('the share bitrate follows its quality, under the server ceiling', () => {
+    let m: SfuManager;
+    const join = async (maxShareKbps: number | undefined) => {
+        grant.maxShareKbps = maxShareKbps;
+        m = new SfuManager();
+        await m.connect(12, mic());
+    };
+    const publishedCap = () => (published.at(-1)?.screenShareEncoding as { maxBitrate: number } | undefined)?.maxBitrate;
+    beforeEach(() => {
+        vi.useFakeTimers();
+        senders.length = 0;
+        published.length = 0;
+        ladder.on = false;
+    });
+    afterEach(async () => { await m.disconnect(); grant.maxShareKbps = undefined; vi.useRealTimers(); });
+
+    it('publishes 1080p60 at its own figure on a server that allows it', async () => {
+        await join(SHARE_TOP_KBPS);
+        await m.startScreenShare(shareStream(1080, 60).stream);
+        await flush();
+        expect(publishedCap()).toBe(SHARE_KBPS_TABLE[1080][60] * 1000);
+        expect(senders[0].caps.at(-1), 'and the adapter keeps the sender there').toBe(SHARE_KBPS_TABLE[1080][60] * 1000);
+    });
+
+    it('holds it to the ceiling the server named', async () => {
+        await join(5521);
+        await m.startScreenShare(shareStream(1080, 60).stream);
+        await flush();
+        expect(publishedCap()).toBe(5_521_000);
+        expect(senders[0].caps.at(-1)).toBe(5_521_000);
+    });
+
+    it('keeps the old 4.5 Mbps on a server that names no ceiling', async () => {
+        await join(undefined);
+        await m.startScreenShare(shareStream(1080, 60).stream);
+        await flush();
+        expect(publishedCap()).toBe(LEGACY_SHARE_KBPS * 1000);
+        expect(senders[0].caps.at(-1)).toBe(LEGACY_SHARE_KBPS * 1000);
+    });
+
+    it('moves the cap with a live quality change', async () => {
+        await join(SHARE_TOP_KBPS);
+        const { stream, cap } = shareStream(720, 30);
+        await m.startScreenShare(stream);
+        await flush();
+        expect(senders[0].caps.at(-1)).toBe(SHARE_KBPS_TABLE[720][30] * 1000);
+        cap.height = 1080;
+        cap.fps = 60;
+        await vi.advanceTimersByTimeAsync(SHARE_ADAPT_INTERVAL_MS);
+        expect(senders[0].caps.at(-1), 'up').toBe(SHARE_KBPS_TABLE[1080][60] * 1000);
+        // Frame rate alone, same size: no rung moves, the cap still must.
+        cap.fps = 30;
+        await vi.advanceTimersByTimeAsync(SHARE_ADAPT_INTERVAL_MS);
+        expect(senders[0].caps.at(-1), 'down').toBe(SHARE_KBPS_TABLE[1080][30] * 1000);
+    });
+
+    it('puts the cap back when something else changed it on the sender', async () => {
+        // A track swap makes livekit-client re-apply the encodings it
+        // published with (refreshSenderEncodings).
+        await join(SHARE_TOP_KBPS);
+        const { stream, cap } = shareStream(720, 30);
+        await m.startScreenShare(stream);
+        await flush();
+        cap.height = 1080;
+        cap.fps = 60;
+        const s = senders[0];
+        // Settle on the full picture first, so no rung change is coming that
+        // would re-apply the cap for its own reasons.
+        s.targetBps = 20_000_000;
+        await vi.advanceTimersByTimeAsync(SHARE_ADAPT_INTERVAL_MS * 8);
+        expect(s.sets.at(-1)?.scale, 'fixture: settled on the full picture').toBe(1);
+        const rungChanges = s.sets.filter((x, i, a) => i > 0 && x.scale !== a[i - 1].scale).length;
+        s.params.encodings[0].maxBitrate = SHARE_KBPS_TABLE[720][30] * 1000;
+        const before = s.caps.length;
+        await vi.advanceTimersByTimeAsync(SHARE_ADAPT_INTERVAL_MS);
+        expect(s.caps.length).toBeGreaterThan(before);
+        expect(s.caps.at(-1)).toBe(SHARE_KBPS_TABLE[1080][60] * 1000);
+        expect(s.sets.filter((x, i, a) => i > 0 && x.scale !== a[i - 1].scale).length, 'not by a rung change').toBe(rungChanges);
+        // POSITIVE CONTROL: left alone, it is not set again every tick.
+        const settled = s.caps.length;
+        await vi.advanceTimersByTimeAsync(SHARE_ADAPT_INTERVAL_MS * 2);
+        expect(s.caps.length, 'no setParameters when nothing changed').toBe(settled);
+    });
+
+    it('publishes a laddered share with its quality on the top rung', async () => {
+        ladder.on = true;
+        await join(SHARE_TOP_KBPS);
+        await m.startScreenShare(shareStream(1440, 60).stream);
+        await flush();
+        expect(publishedCap()).toBe(SHARE_KBPS_TABLE[1440][60] * 1000);
     });
 });

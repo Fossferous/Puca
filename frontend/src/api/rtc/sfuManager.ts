@@ -32,6 +32,7 @@ import { ensureChannelKey } from '../channelKeys';
 import { CTL_SFU_TOPIC, deliverSfuControlFrame } from './controlDc';
 import type { EncodeSample } from './shareHealth';
 import { ShareAdapter, SHARE_ADAPT_INTERVAL_MS } from './shareAdapt';
+import { LEGACY_SHARE_KBPS, shareBitrateKbps } from './shareBitrate';
 import type { RtpEndpoint } from './streamStats';
 import { deriveSfuMediaKey } from '../e2ee';
 import { registerScreenReceiver } from './receiverLatency';
@@ -45,6 +46,9 @@ interface SfuTokenResponse {
     identity: string;
     room: string;
     max_screen_shares: number;
+    /** The most one share may send on this node, kbps (src/sfu.rs
+     *  `share_ceiling_kbps`). Absent from a server that predates it. */
+    max_share_kbps?: number;
 }
 
 /**
@@ -102,7 +106,6 @@ const CAM_HIGH_BITRATE = 2_500_000;
 /// admission arithmetic (`room_egress_kbps`, src/sfu.rs) — the two must agree
 /// or the node admits seats whose egress it under-counted.
 const GRID_MID_MAX_PARTICIPANTS = 4;
-const SHARE_BITRATE = 4_500_000;
 
 /// The two rungs published BELOW a screen share's full picture, lowest first
 /// (the order `screenShareSimulcastLayers` documents).
@@ -136,9 +139,10 @@ const SHARE_BITRATE = 4_500_000;
 /// settingsStore.ts — and flipping the default is a separate decision that
 /// needs field `encoder=` lines from more than one machine.
 ///
-/// THE TOP RUNG IS SHARE_BITRATE, and a subscriber only ever receives ONE rung,
-/// so the backend's per-subscriber charge (`SHARE_KBPS`, src/sfu.rs) stays the
-/// correct worst case. A test there reads this file to keep the two in step.
+/// THE TOP RUNG IS THE SHARE'S OWN BITRATE (shareBitrate.ts, held to the
+/// server's `max_share_kbps`), and a subscriber only ever receives ONE rung,
+/// so the backend's per-subscriber charge (the node's share ceiling, src/sfu.rs
+/// `room_egress_kbps`) stays the correct worst case.
 ///
 /// 640x360 AND NOT 480x270, WHICH IS WHAT THIS WAS. Chromium refuses to use a
 /// hardware encoder below 360 lines, on purpose and regardless of the card:
@@ -180,13 +184,17 @@ export function screenSharePublishOptions(
     // malformed stored value must read as off. The inverted form was correct
     // while the default was on and would now quietly opt everyone in.
     simulcast: boolean = loadSettings().shareSimulcast === true,
+    // The share's ceiling, bps: what its quality may spend (shareBitrate.ts),
+    // already held to the server's. The default is what a share sent before
+    // the bitrate followed the quality.
+    maxBitrate: number = LEGACY_SHARE_KBPS * 1000,
 ) {
     const opts: {
         source: Track.Source;
         simulcast: boolean;
         screenShareSimulcastLayers?: VideoPreset[];
         videoCodec: 'h264';
-        videoEncoding: { maxBitrate: number; maxFramerate: number };
+        screenShareEncoding: { maxBitrate: number; maxFramerate: number };
         degradationPreference: 'maintain-framerate' | 'maintain-resolution';
     } = {
         source: Track.Source.ScreenShare,
@@ -204,22 +212,24 @@ export function screenSharePublishOptions(
         // markedly worse: 19 fps against h264's 56 on the same ladder and
         // machine.
         videoCodec: 'h264' as const,
-        videoEncoding: {
-            maxBitrate: SHARE_BITRATE,
+        // `screenShareEncoding`, NOT `videoEncoding`: for a ScreenShare source
+        // livekit-client replaces videoEncoding with screenShareEncoding
+        // (computeVideoEncodings, publishUtils.ts) and falls back to the
+        // room's publishDefaults for it. Until 2026-10-20 this field was
+        // `videoEncoding`, ignored, and the cap really came from the room
+        // defaults — which happened to hold the same 4.5 Mbps.
+        screenShareEncoding: {
+            maxBitrate,
             maxFramerate: 60,
         },
         // Under congestion, drop quality (resolution) not framerate.
         // A choppy game stream is worse than a blurry one.
         //
-        // WORTH KNOWING WHAT THIS COSTS AT SHARE_BITRATE. Measured with
-        // frontend/e2e/encode-cost.mjs at the 4.5 Mbps cap above: 1080p60 and
-        // 1440p60 CANNOT hold their resolution — this preference spends the
-        // pixels to keep the frames and both settle at 1280x720. So somebody
-        // who picks 1440p60 in the dialog is already receiving 720p, while
-        // still paying to capture and downscale 1440p. At 30 fps the same cap
-        // holds full 1080p. Raising SHARE_BITRATE would change that, and would
-        // also change the backend's per-subscriber admission arithmetic
-        // (SHARE_KBPS, src/sfu.rs) — not a one-sided knob.
+        // WORTH KNOWING WHAT THIS COSTS AT A LOW CAP. Measured with
+        // frontend/e2e/encode-cost.mjs at the old single 4.5 Mbps cap: 1080p60
+        // and 1440p60 could not hold their resolution under this preference
+        // and settled at 1280x720. The cap now follows the quality
+        // (shareBitrate.ts), on a server whose ceiling allows it.
         degradationPreference: 'maintain-framerate',
     };
     // WITHOUT A LADDER PÚCA PICKS THE RESOLUTION (shareAdapt.ts), so libwebrtc
@@ -238,16 +248,27 @@ export function screenSharePublishOptions(
 
 /**
  * Encode the share at `height` lines out of a `sourceHeight`-line capture,
- * holding that resolution (shareAdapt.ts). The capture itself is untouched:
- * the person's own preview, a clip and a later live quality change all still
- * see the full picture.
+ * holding that resolution (shareAdapt.ts), at no more than `maxKbps` when
+ * given (shareBitrate.ts). The capture itself is untouched: the person's own
+ * preview, a clip and a later live quality change all still see the full
+ * picture.
  */
-export async function applyShareHeight(sender: RTCRtpSender, sourceHeight: number, height: number): Promise<void> {
+export async function applyShareHeight(sender: RTCRtpSender, sourceHeight: number, height: number, maxKbps?: number): Promise<void> {
     const params = sender.getParameters() as RTCRtpSendParameters & { degradationPreference?: string };
     if (!params.encodings || params.encodings.length === 0) return;
     params.encodings[0].scaleResolutionDownBy = Math.max(1, sourceHeight / height);
+    if (maxKbps !== undefined) params.encodings[0].maxBitrate = maxKbps * 1000;
     params.degradationPreference = 'maintain-resolution';
     await sender.setParameters(params);
+}
+
+/** The single-layer share sender's current cap, bps, or undefined. */
+function senderMaxBitrate(sender: RTCRtpSender): number | undefined {
+    try {
+        return sender.getParameters().encodings?.[0]?.maxBitrate;
+    } catch {
+        return undefined;
+    }
 }
 
 /// LiveKit's frame-crypto keyring is 16 slots; epochs map onto it mod-16, so
@@ -386,6 +407,9 @@ export class SfuManager {
     // where the grant is applied keeps a 0-on-the-wire from meaning "refuse
     // every share" (count >= 0 is always true).
     private maxScreenShares = Number.POSITIVE_INFINITY;
+    /** The node's ceiling for one share, kbps (SfuTokenResponse.max_share_kbps).
+     *  0 = the server named none: shareBitrateKbps then keeps the old cap. */
+    private maxShareKbps = 0;
     private currentEpoch: number | null = null;
     /** Our sender is parked on a throwaway key because ensureChannelKey
      *  refused the current epoch (see refreshEpochKey). */
@@ -571,6 +595,7 @@ export class SfuManager {
         const grant = await apiClient.get<SfuTokenResponse>(`/channels/${channelId}/sfu-token`);
         // 0 (or a missing field) means unlimited, never "refuse every share".
         this.maxScreenShares = grant.max_screen_shares > 0 ? grant.max_screen_shares : Number.POSITIVE_INFINITY;
+        this.maxShareKbps = typeof grant.max_share_kbps === 'number' ? grant.max_share_kbps : 0;
         this.localUserId = userIdFromIdentity(grant.identity);
 
         const keyProvider = new EpochKeyProvider();
@@ -589,7 +614,9 @@ export class SfuManager {
                 videoCodec: 'vp8', // AV1/VP9 SVC is incompatible with E2EE
                 videoEncoding: { maxBitrate: CAM_HIGH_BITRATE, maxFramerate: 30 },
                 videoSimulcastLayers: [CAM_LOW, CAM_MID],
-                screenShareEncoding: { maxBitrate: SHARE_BITRATE, maxFramerate: 60 },
+                // Only a fallback: every share publishes its own
+                // (screenSharePublishOptions).
+                screenShareEncoding: { maxBitrate: LEGACY_SHARE_KBPS * 1000, maxFramerate: 60 },
                 dtx: true,
                 red: true,
             },
@@ -849,10 +876,10 @@ export class SfuManager {
     }
 
     /**
-     * Publish a screen-share stream (video + optional audio), capped at
-     * SHARE_BITRATE. Refuses past the room share cap — the admission budget
-     * charges shares at full rate, so exceeding it would push the node over
-     * its uplink envelope.
+     * Publish a screen-share stream (video + optional audio), capped at what
+     * its quality may spend (shareBitrate.ts) on this server. Refuses past the
+     * room share cap — the admission budget charges shares at full rate, so
+     * exceeding it would push the node over its uplink envelope.
      */
     async startScreenShare(stream: MediaStream): Promise<void> {
         if (!this.room) throw new Error('Not connected to SFU');
@@ -863,7 +890,7 @@ export class SfuManager {
         if (video) {
             // Read at publish time, so changing it takes effect on the
             // next share rather than the next launch.
-            const opts = screenSharePublishOptions();
+            const opts = screenSharePublishOptions(undefined, this.shareBitrateFor(video) * 1000);
             await this.room.localParticipant.publishTrack(video, opts);
             if (!opts.simulcast) this.startShareAdapt();
         }
@@ -912,6 +939,12 @@ export class SfuManager {
         return sample;
     }
 
+    /** The bitrate (kbps) this server lets a share of `track`'s capture send. */
+    private shareBitrateFor(track: MediaStreamTrack): number {
+        const set = track.getSettings();
+        return shareBitrateKbps(set.width ?? 0, set.height ?? 0, set.frameRate ?? 0, this.maxShareKbps);
+    }
+
     /** The running single-layer share's resolution picker (shareAdapt.ts). */
     private shareAdapt: {
         timer: ReturnType<typeof setInterval>;
@@ -954,9 +987,12 @@ export class SfuManager {
             const set = mst.getSettings();
             const sourceHeight = typeof set.height === 'number' && set.height > 0 ? set.height : 1080;
             const fps = typeof set.frameRate === 'number' && set.frameRate > 0 ? set.frameRate : 30;
+            // Read every tick: a live quality change (or a window resized)
+            // changes what the share may spend, not only its size.
+            const maxKbps = this.shareBitrateFor(mst);
             if (st.sender !== sender || !st.adapter) {
-                const adapter = new ShareAdapter({ sourceHeight, fps, maxKbps: SHARE_BITRATE / 1000 });
-                await applyShareHeight(sender, sourceHeight, adapter.currentHeight);
+                const adapter = new ShareAdapter({ sourceHeight, fps, maxKbps });
+                await applyShareHeight(sender, sourceHeight, adapter.currentHeight, maxKbps);
                 // A probe left running on the previous sender (a reconnect
                 // republished the track) must not outlive it: the new adapter
                 // starts out of probe mode.
@@ -968,8 +1004,13 @@ export class SfuManager {
                 return;
             }
             const adapter = st.adapter;
-            const resized = adapter.resize(sourceHeight, fps);
-            if (resized.height !== undefined) await applyShareHeight(sender, sourceHeight, resized.height);
+            const resized = adapter.resize(sourceHeight, fps, maxKbps);
+            // Also when only the ceiling moved (a resize to the same rung), or
+            // something else put the sender's own back: a track swap makes
+            // livekit-client re-apply the cap it published with.
+            if (resized.height !== undefined || senderMaxBitrate(sender) !== maxKbps * 1000) {
+                await applyShareHeight(sender, sourceHeight, adapter.currentHeight, maxKbps);
+            }
             let out: Record<string, unknown> | null = null;
             (await sender.getStats()).forEach((r) => {
                 const row = r as Record<string, unknown>;
@@ -985,7 +1026,7 @@ export class SfuManager {
                 limit: typeof o.qualityLimitationReason === 'string' ? o.qualityLimitationReason : 'none',
             });
             if (act.contentHint) { try { mst.contentHint = act.contentHint; } catch { /* not supported */ } }
-            if (act.height !== undefined) await applyShareHeight(sender, sourceHeight, act.height);
+            if (act.height !== undefined) await applyShareHeight(sender, sourceHeight, act.height, maxKbps);
         } catch {
             // Sender detached mid-tick, or setParameters refused: the adapter
             // may now believe in a rung that is not on the wire. Start over at
