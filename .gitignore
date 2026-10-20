@@ -183,6 +183,17 @@ frontend/src-tauri/src/icon_test.rs
 /dist-tarball.tar.gz
 /session-export*/
 /session-export-*.zip
+
+# Claude Code. Its memory and session transcripts live OUTSIDE this repo
+# (~/.claude/projects/...) and must never be copied in. Inside it, only the
+# shared dev-server config is public; per-machine settings (permissions, local
+# paths) and anything a session drops here stay local. CLAUDE.md, the working
+# agreement at the root, is tracked on purpose.
+.claude/*
+!.claude/launch.json
+**/.claude/projects/
+**/memory/MEMORY.md
+*.jsonl
 # OTA bundles. The prefix is per-deployment (MOBILE_BUNDLE_PREFIX in
 # hosts.conf), and a deployment older than the rename still uses its
 # original one — so match any prefix rather than the current product's.
