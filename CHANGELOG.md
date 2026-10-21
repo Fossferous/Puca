@@ -4,7 +4,17 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.842 — 2026-10-22
+
+Remote control with the lid closed; sharper fast-motion screen shares; reconnect and Download fixes
+### Added
+
+- **Remote control of a laptop with its lid closed.** A closed lid switches a laptop's screen off, so there was nothing to show: the phone sat on Connecting and then said only "could not connect to the device". Now it says why — "<PC>'s screen is off — is its lid closed?" — and the PC has a new option in **Devices**, under its sign-in-screen access: **Allow remote control with the lid closed**. Turning it on installs the open-source Virtual Display Driver once, behind Windows' own "install this device software?" prompt. From then on, when you connect to that PC and no screen is on, it switches on a virtual 1080p screen for the session ("<PC>'s screen is off — starting a virtual screen…") and switches it off again when the session ends or a real screen comes back, so it never sits beside your real screens. Turning the option off, or uninstalling Púca, removes the driver. Windows PCs only, not in Púca Lite. Needs the desktop update and the sign-in-screen service update on the PC (Devices offers it), and the app update on the phone.
+
+### Fixed
+
+- **Download in the picture viewer saves the picture again.** Opening a picture full size and pressing Download did nothing in the desktop app, and did nothing on Android for a picture in a note. It now saves the way every other attachment does: through the desktop app's own save (or **Save As**, if you ask where to save files), into Pictures on Android, and as a normal download in a browser. Comes with the in-app update on Android and the web app, and with the next desktop update.
+- **Remote control reconnects after a dropped connection without closing the app.** If a remote-control session from your phone ended badly — the phone changed network, the connection died mid-session — connecting again could fail or hang until you closed the Púca app and opened it again. The server now lets your phone replace its own stranded session at once, connects to the PC's current connection rather than one that has gone, and the app gives up on stalled steps instead of waiting forever and reconnects to the server as soon as it knows the old connection is dead. When a connection does fail, why is now recorded in **Settings → Send diagnostics**. Needs the app update and the server update.
 
 ### Changed
 
