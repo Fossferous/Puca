@@ -72,6 +72,7 @@ import { MobileToolbar, MobileToolbarToggle } from './DeviceStageMobileToolbar';
 import { MoreMenu, MonitorMenu, MouseMenu } from './DeviceStageMobileMenus';
 import { KeyboardOverlay } from './DeviceStageMobileKeyboard';
 import { DeviceStageVirtualMouse } from './DeviceStageVirtualMouse';
+import { virtualStartingMessage } from '../api/devices/noScreen';
 import {
     MonitorIcon, CopyIcon, CrosshairIcon, ForwardIcon, LiveDotIcon,
     ChevronRightIcon, ChevronUpIcon, ChevronDownIcon } from './Icons';
@@ -3288,7 +3289,13 @@ export function DeviceStage() {
                             // session — different promise from the first
                             // connect's "waiting", so different words.
                             ? 'The stream stalled — reconnecting it…'
-                            : 'Waiting for the device\'s screen…'}
+                            // The host has no screen switched on (a laptop
+                            // with its lid shut) and said it is starting its
+                            // virtual screen: the wait has a known cause, and
+                            // it is not the network (noScreen.ts).
+                            : session.hostScreen === 'virtual-starting'
+                                ? virtualStartingMessage(session.peerName)
+                                : 'Waiting for the device\'s screen…'}
                     </div>
                 )}
                 {!controlEnabled && (

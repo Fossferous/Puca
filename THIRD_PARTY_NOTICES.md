@@ -9,6 +9,9 @@ release, never edit by hand.
 
 - **DeepFilterNet (DFN3) wasm** — `frontend/src/wasm/df/`, licence and origin in
   `frontend/src/wasm/df/NOTICE.md`.
+- **Virtual Display Driver** (MIT, VirtualDrivers/Virtual-Display-Driver) —
+  `crates/puca-service/vdd/`, licence, release, hashes and signature in
+  `crates/puca-service/vdd/NOTICE.md`.
 
 ## npm packages in the web/desktop/mobile bundle (145)
 
@@ -66,7 +69,7 @@ release, never edit by hand.
 | bplist-creator@0.1.0 | MIT | https://github.com/nearinfinity/node-bplist-creator |
 | bplist-parser@0.3.1 | MIT | https://github.com/nearinfinity/node-bplist-parser |
 | bplist-parser@0.3.2 | MIT | https://github.com/nearinfinity/node-bplist-parser |
-| brace-expansion@5.0.7 | MIT | https://github.com/juliangruber/brace-expansion |
+| brace-expansion@5.0.12 | MIT | https://github.com/juliangruber/brace-expansion |
 | buffer-crc32@0.2.13 | MIT | git://github.com/brianloveswords/buffer-crc32 |
 | chownr@3.0.0 | BlueOak-1.0.0 | git://github.com/isaacs/chownr |
 | color-convert@2.0.1 | MIT | Qix-/color-convert |
@@ -160,7 +163,7 @@ release, never edit by hand.
 | yauzl@2.10.0 | MIT | https://github.com/thejoshwolfe/yauzl |
 | zustand@5.0.15 | MIT | https://github.com/pmndrs/zustand |
 
-## Rust crates in the server, desktop shell, native helpers and the wasm (848)
+## Rust crates in the server, desktop shell, native helpers and the wasm (845)
 
 | crate | licence | used by | origin |
 |---|---|---|---|
@@ -178,7 +181,6 @@ release, never edit by hand.
 | android_system_properties@0.1.6 | MIT OR Apache-2.0 | backend, desktop | https://github.com/nical/android_system_properties |
 | anyhow@1.0.104 | MIT OR Apache-2.0 | backend, desktop, wasm | https://github.com/dtolnay/anyhow |
 | anymap2@0.13.0 | MIT/Apache-2.0 | wasm | https://github.com/azriel91/anymap2 |
-| arbitrary@1.4.2 | MIT OR Apache-2.0 | desktop | https://github.com/rust-fuzz/arbitrary/ |
 | arrayvec@0.7.8 | MIT OR Apache-2.0 | puca-agent, puca-rtc, puca-spike-fswap | https://github.com/bluss/arrayvec |
 | asn1-rs-derive@0.6.0 | MIT OR Apache-2.0 | puca-agent, puca-rtc, puca-spike-fswap | https://github.com/rusticata/asn1-rs.git |
 | asn1-rs-impl@0.2.0 | MIT/Apache-2.0 | puca-agent, puca-rtc, puca-spike-fswap | https://github.com/rusticata/asn1-rs.git |
@@ -298,7 +300,6 @@ release, never edit by hand.
 | der-parser@10.0.0 | MIT OR Apache-2.0 | puca-agent, puca-rtc, puca-spike-fswap | https://github.com/rusticata/der-parser.git |
 | der@0.7.10 | Apache-2.0 OR MIT | backend, desktop, puca-agent, puca-rtc, puca-service, puca-spike-fswap, puca-ua, puca-waker | https://github.com/RustCrypto/formats/tree/master/der |
 | deranged@0.5.8 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-rtc, puca-spike-fswap, wasm | https://github.com/jhpratt/deranged |
-| derive_arbitrary@1.4.2 | MIT OR Apache-2.0 | desktop | https://github.com/rust-fuzz/arbitrary |
 | derive_more-impl@2.1.1 | MIT | desktop | https://github.com/JelteF/derive_more |
 | derive_more@2.1.1 | MIT | desktop | https://github.com/JelteF/derive_more |
 | derive-new@0.5.9 | MIT | wasm | https://github.com/nrc/derive-new |
@@ -677,7 +678,7 @@ release, never edit by hand.
 | rustls-platform-verifier-android@0.1.1 | MIT OR Apache-2.0 | desktop | https://github.com/rustls/rustls-platform-verifier |
 | rustls-platform-verifier@0.7.0 | MIT OR Apache-2.0 | desktop | https://github.com/rustls/rustls-platform-verifier |
 | rustls-webpki@0.103.14 | ISC | desktop | https://github.com/rustls/webpki |
-| rustls@0.23.45 | Apache-2.0 OR ISC OR MIT | desktop | https://github.com/rustls/rustls |
+| rustls@0.23.46 | Apache-2.0 OR ISC OR MIT | desktop | https://github.com/rustls/rustls |
 | rustversion@1.0.23 | MIT OR Apache-2.0 | backend, desktop, puca-service, puca-waker, wasm | https://github.com/dtolnay/rustversion |
 | ryu@1.0.23 | Apache-2.0 OR BSL-1.0 | backend, desktop, puca-service, puca-waker | https://github.com/dtolnay/ryu |
 | same-file@1.0.6 | Unlicense/MIT | desktop, wasm | https://github.com/BurntSushi/same-file |
@@ -1007,7 +1008,6 @@ release, never edit by hand.
 | zerotrie@0.2.5 | Unicode-3.0 | backend, desktop, puca-service, puca-waker | https://github.com/unicode-org/icu4x |
 | zerovec-derive@0.11.5 | Unicode-3.0 | backend, desktop, puca-service, puca-waker | https://github.com/unicode-org/icu4x |
 | zerovec@0.11.8 | Unicode-3.0 | backend, desktop, puca-service, puca-waker | https://github.com/unicode-org/icu4x |
-| zip@4.6.1 | MIT | desktop | https://github.com/zip-rs/zip2.git |
 | zmij@1.0.23 | MIT | backend, desktop, puca-agent, puca-input, puca-service, puca-spike-s5, puca-ua, puca-waker | https://github.com/dtolnay/zmij |
 | zvariant_derive@5.15.0 | MIT | desktop | https://github.com/z-galaxy/zbus/ |
 | zvariant_utils@4.2.0 | MIT | desktop | https://github.com/z-galaxy/zbus/ |

@@ -233,6 +233,61 @@ fn dispatch_power(plan: crate::power::Plan) -> Result<(), String> {
     })
 }
 
+/// The one place `PrepareScreen` reaches the displays and the service
+/// (`virtual_screen.rs`). A test must never wake the displays or switch a
+/// display device on the machine running it, and on a headless CI runner a
+/// real call would also turn every sealed-offer test into an eight-second wait
+/// for a screen that does not exist. So the test build answers what the test
+/// set, defaulting to `ready`: the behaviour of every build before this one.
+#[cfg(all(windows, not(test)))]
+fn prepare_screen(session_id: &str) -> crate::virtual_screen::ScreenState {
+    crate::virtual_screen::prepare(session_id)
+}
+
+/// Off Windows there is no virtual screen and no lid problem to name: capture
+/// is attempted exactly as it was.
+#[cfg(all(not(windows), not(test)))]
+fn prepare_screen(session_id: &str) -> crate::virtual_screen::ScreenState {
+    let _ = session_id;
+    crate::virtual_screen::ScreenState::Ready
+}
+
+#[cfg(test)]
+thread_local! {
+    static SCREEN_SEAM: std::cell::RefCell<(usize, crate::virtual_screen::ScreenState)> =
+        const { std::cell::RefCell::new((0, crate::virtual_screen::ScreenState::Ready)) };
+}
+
+#[cfg(test)]
+fn prepare_screen(session_id: &str) -> crate::virtual_screen::ScreenState {
+    let _ = session_id;
+    SCREEN_SEAM.with(|c| {
+        let mut c = c.borrow_mut();
+        c.0 += 1;
+        c.1
+    })
+}
+
+/// The sign-in-screen path's version of the host's `prepare_screen` polling:
+/// ask until `ready` or `off`, bounded by `PREPARE_CEILING`. `Err` is the code
+/// the phone names.
+#[cfg(windows)]
+fn wait_for_screen(session_id: &str) -> Result<(), &'static str> {
+    use crate::virtual_screen::{OffReason, ScreenState, PREPARE_CEILING};
+    let started = std::time::Instant::now();
+    loop {
+        match prepare_screen(session_id) {
+            ScreenState::Ready => return Ok(()),
+            ScreenState::Off(reason) => return Err(reason.code()),
+            ScreenState::Waking | ScreenState::Starting => {}
+        }
+        if started.elapsed() >= PREPARE_CEILING {
+            return Err(OffReason::VirtualFailed.code());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
 /// Where injected input must land for a given CAPTURE index.
 ///
 /// PURE, and separate from `aim_input_at`, so the mapping can be tested against
@@ -878,6 +933,21 @@ impl Agent {
     fn answer_offer_now(&mut self, session_id: &str, sdp: String) -> Response {
         #[cfg(windows)]
         {
+            // A SCREEN FIRST. The attended host polls `PrepareScreen` before
+            // it hands over an offer; this path has no app to do that, so it
+            // waits here, bounded, the one time a machine has no screen on (a
+            // shut lid at the sign-in screen). It holds this agent's pipe for
+            // the wait, which is the service link's own connection and nothing
+            // else's, and the controller is waiting for this answer anyway.
+            // `off` refuses with the code the phone names
+            // (virtual_screen::NO_SCREEN_*), passed through by the link as the
+            // session's end reason.
+            if let Some(refusal) = self.gate(crate::flavour::Capability::Capture) {
+                return refusal;
+            }
+            if let Err(code) = wait_for_screen(session_id) {
+                return Response::error(code);
+            }
             let ice_servers = self
                 .sealed
                 .get(session_id)
@@ -1511,6 +1581,23 @@ impl Agent {
                         Response::Ok
                     }
                     None => Response::error("no live stream for that session"),
+                }
+            }
+
+            Request::PrepareScreen { session_id } => {
+                // The same gate as StartStream: asking whether there is a
+                // screen is the first step of capturing it, and a flavour that
+                // may not capture has no business switching a display on.
+                if let Some(r) = self.gate(crate::flavour::Capability::Capture) {
+                    return r;
+                }
+                let state = prepare_screen(&session_id);
+                Response::Screen {
+                    state: state.wire().to_string(),
+                    reason: match state {
+                        crate::virtual_screen::ScreenState::Off(r) => Some(r.code().to_string()),
+                        _ => None,
+                    },
                 }
             }
 
@@ -4130,6 +4217,77 @@ mod tests {
                 a.sealed.get("s1").unwrap().pending_ice.len(), 1,
                 "a failed StartStream must not have drained (and lost) the held candidate"
             );
+        }
+    }
+
+    /// THE LID-CLOSED CASE ON THE SIGN-IN-SCREEN PATH: no screen, and no
+    /// virtual screen to switch on. The offer is refused with the code the
+    /// phone names, BEFORE StartStream runs. Before this, that path answered
+    /// the offer and the phone was left with "could not connect".
+    /// The negative control is the test above: with the seam at its default
+    /// (`ready`) the same offer goes on to StartStream and fails on the
+    /// fixture's SDP instead.
+    #[cfg(windows)]
+    #[test]
+    fn a_sealed_offer_with_no_screen_is_refused_with_the_code_the_phone_names() {
+        use crate::virtual_screen::{OffReason, ScreenState};
+        SCREEN_SEAM.with(|c| c.borrow_mut().1 = ScreenState::Off(OffReason::NoVirtualScreen));
+        let mut a = headless_agent();
+        a.handle(hello("s3cret-token", PROTOCOL_VERSION));
+        let seed = [5u8; 32];
+        let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
+        a.ua.arm(puca_ua::UaRecord::new([1u8; 16], sk.verifying_key().to_bytes()));
+        let key = open_sealed(&mut a, "s1");
+        let offer = seal_signal(&key, "s1", 0, serde_json::json!({ "kind": "offer", "sdp": "v=0\r\n" }));
+        a.handle(Request::SealedSignal { session_id: "s1".into(), payload: offer });
+
+        let nonce_b64 = match a.handle(Request::SealedChallenge { session_id: "s1".into() }) {
+            Response::SealedSignals { payloads } => {
+                let plain = crate::control_key::open(&key, &payloads[0]).expect("open");
+                let v: serde_json::Value = serde_json::from_str(&plain).unwrap();
+                v["nonce"].as_str().unwrap().to_string()
+            }
+            other => panic!("expected the challenge, got {other:?}"),
+        };
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let nonce_raw: [u8; 32] = b64.decode(&nonce_b64).unwrap().try_into().unwrap();
+        let msg = puca_ua::challenge_message("s1", &nonce_raw);
+        let sig = ed25519_dalek::Signer::sign(&sk, &msg);
+        let response = seal_signal(
+            &key,
+            "s1",
+            1,
+            serde_json::json!({ "kind": "ua-response", "nonce": nonce_b64, "sig": b64.encode(sig.to_bytes()) }),
+        );
+        match a.handle(Request::SealedSignal { session_id: "s1".into(), payload: response }) {
+            Response::Error { message } => assert_eq!(message, "no-screen:lid"),
+            other => panic!("expected the no-screen refusal, got {other:?}"),
+        }
+        assert_eq!(SCREEN_SEAM.with(|c| c.borrow().0), 1, "the screen must be asked about exactly once");
+        assert!(!a.streams.contains_key("s1"), "no stream may start for a machine with no screen");
+    }
+
+    #[test]
+    fn prepare_screen_answers_the_state_and_names_the_reason_only_when_off() {
+        use crate::virtual_screen::{OffReason, ScreenState};
+        let mut a = headless_agent();
+        a.handle(hello("s3cret-token", PROTOCOL_VERSION));
+        for (state, want, reason) in [
+            (ScreenState::Ready, "ready", None),
+            (ScreenState::Waking, "waking", None),
+            (ScreenState::Starting, "starting", None),
+            (ScreenState::Off(OffReason::NoVirtualScreen), "off", Some("no-screen:lid")),
+            (ScreenState::Off(OffReason::VirtualFailed), "off", Some("no-screen:virtual-failed")),
+        ] {
+            SCREEN_SEAM.with(|c| c.borrow_mut().1 = state);
+            match a.handle(Request::PrepareScreen { session_id: "s1".into() }) {
+                Response::Screen { state, reason: r } => {
+                    assert_eq!(state, want);
+                    assert_eq!(r.as_deref(), reason);
+                }
+                other => panic!("expected a screen answer, got {other:?}"),
+            }
         }
     }
 

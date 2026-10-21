@@ -92,4 +92,11 @@ windows = { version = "0.58", features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
+    # The virtual screen (src/virtual_screen_os.rs): SetupAPI / CfgMgr to
+    # install, switch and remove one device, and the native processor check
+    # that keeps the x64-only driver off an ARM64 PC.
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_System_SystemInformation",
+    # SetupGetInfDriverStoreLocationW is gated on it (its SP_ALTPLATFORM_INFO).
+    "Win32_System_Diagnostics_Debug",
 ] }

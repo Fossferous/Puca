@@ -16,6 +16,7 @@ import type {
     HostBackend, HostCapabilities, HostTransport, MonitorInfo, StartSessionOptions,
 } from './hostBackend';
 import { shellPowerAction } from './hostBackend';
+import { NO_SCREEN_LID_REASON } from './noScreen';
 
 /** One output as `list_monitors` describes it. */
 interface AgentMonitor {
@@ -54,6 +55,51 @@ interface AgentReply {
     /** `session_state`: why that agent's stream ended, when the host must not
      *  answer it with a restart ('no_frame': the display never produced one). */
     stream_end?: string;
+    /** `prepare_screen`: 'ready' | 'waking' | 'starting' | 'off'. */
+    state?: string;
+    /** `prepare_screen`, with 'off' only: the DeviceEnd code the phone names
+     *  (session.ts NO_SCREEN_LID_REASON / NO_SCREEN_VIRTUAL_FAILED_REASON). */
+    reason?: string;
+}
+
+/** What `prepare_screen` said. */
+export type HostScreen =
+    | { state: 'ready' }
+    | { state: 'waking' }
+    | { state: 'starting' }
+    | { state: 'off'; reason: string };
+
+/**
+ * Is there a screen for the agent to capture — and if not, is one coming?
+ *
+ * Asked BEFORE an offer is handed over (session.ts `prepareHostScreen`), and
+ * polled. A laptop with its lid shut has no screen on; without this the agent
+ * answered the offer, failed its capture seconds later, and the phone could
+ * only say "could not connect to the device" (crates/puca-agent
+ * virtual_screen.rs has the whole story).
+ *
+ * AN OLDER AGENT answers "bad request", and so does any reply this build
+ * cannot read: both read as `ready`, which is exactly what every build before
+ * this one did — answer the offer and let the capture find out. Never throws.
+ */
+export async function agentPrepareScreen(sessionId: string): Promise<HostScreen> {
+    try {
+        const reply = await request({ cmd: 'prepare_screen', session_id: sessionId });
+        switch (reply.state) {
+            case 'waking': return { state: 'waking' };
+            case 'starting': return { state: 'starting' };
+            case 'off':
+                // No reason from an agent that said off is still off; the
+                // lid reason is the honest guess about why there is no screen.
+                return {
+                    state: 'off',
+                    reason: typeof reply.reason === 'string' ? reply.reason : NO_SCREEN_LID_REASON,
+                };
+            default: return { state: 'ready' };
+        }
+    } catch {
+        return { state: 'ready' };
+    }
 }
 
 /**

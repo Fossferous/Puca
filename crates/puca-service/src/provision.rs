@@ -224,8 +224,25 @@ pub fn update_binaries(service_exe: &Path, agent_exe: &Path) -> Result<String, S
 /// still the outcome that matters. Reporting a partial success honestly beats
 /// refusing to uninstall because a log file was busy.
 pub fn deprovision() -> Result<String, String> {
+    let screen = remove_virtual_screen()?;
     crate::install::uninstall()?;
-    purge_except_secrets(&install_dir()?)
+    Ok(format!("{}{screen}", purge_except_secrets(&install_dir()?)?))
+}
+
+/// The virtual screen goes with the service that switches it, FIRST.
+///
+/// Its device and driver package live outside the install directory (in the
+/// device tree and the driver store), so the purge below would delete the
+/// record of them and leave them installed with nothing able to switch them
+/// off or find them again. A failure stops the deprovision while the service,
+/// and the record that names what to remove, still exist to try again.
+fn remove_virtual_screen() -> Result<String, String> {
+    if crate::virtual_screen_os::read_installed().is_none() {
+        // Still sweeps a settings key or files a half-finished install left.
+        let _ = crate::virtual_screen_os::remove();
+        return Ok(String::new());
+    }
+    crate::virtual_screen_os::remove().map(|m| format!("; {m}"))
 }
 
 /// Deprovision AND erase this machine's enrolment — the device private key,
@@ -243,8 +260,9 @@ pub fn deprovision() -> Result<String, String> {
 /// the UI now says so, and this is the explicit way to decline that.
 ///
 pub fn deprovision_and_forget() -> Result<String, String> {
+    let screen = remove_virtual_screen()?;
     crate::install::uninstall()?;
-    purge_including_secrets(&install_dir()?)
+    Ok(format!("{}{screen}", purge_including_secrets(&install_dir()?)?))
 }
 
 /// `purge_except_secrets`, and then `secrets/` as well.

@@ -77,6 +77,8 @@ const agentAddRemoteCandidate = vi.fn(async (_sid: string, line: string) => {
     calls.push(`candidate:${line}`);
 });
 vi.mock('../api/devices/hostAgent', () => ({
+    // A screen is there to capture (session.ts prepareHostScreen).
+    agentPrepareScreen: async () => ({ state: 'ready' }),
     agentAnswerOffer: (...a: unknown[]) => agentAnswerOffer(...(a as [])),
     agentAddRemoteCandidate: (sid: string, line: string) => agentAddRemoteCandidate(sid, line),
 }));

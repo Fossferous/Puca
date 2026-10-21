@@ -164,6 +164,12 @@ lines.push('## Redistributed binaries');
 lines.push('');
 lines.push('- **DeepFilterNet (DFN3) wasm** — `frontend/src/wasm/df/`, licence and origin in');
 lines.push('  `frontend/src/wasm/df/NOTICE.md`.');
+// Embedded in the Windows remote-access service (puca-service.exe) and
+// installed only when someone turns on "Allow remote control with the lid
+// closed". Signed release files copied unmodified, so no crate graph lists it.
+lines.push('- **Virtual Display Driver** (MIT, VirtualDrivers/Virtual-Display-Driver) —');
+lines.push('  `crates/puca-service/vdd/`, licence, release, hashes and signature in');
+lines.push('  `crates/puca-service/vdd/NOTICE.md`.');
 lines.push('');
 lines.push(`## npm packages in the web/desktop/mobile bundle (${npmPkgs.size})`);
 lines.push('');

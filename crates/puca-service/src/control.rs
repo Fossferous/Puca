@@ -169,6 +169,33 @@ pub enum ControlRequest {
     /// LocalSystem process calling `SendSAS` can, and this service is the only
     /// one of those — see [`crate::sas`].
     Sas,
+
+    /// Switch the lid-closed virtual screen on, or keep it on for another
+    /// lease (`crate::virtual_screen`). Sent by an agent about to stream a
+    /// machine that has no screen switched on, and every few seconds while it
+    /// streams one.
+    ///
+    /// AN EFFECT, ADMITTED, and the argument is the same shape as `Sas`'s:
+    ///   * **It carries no caller data.** A bare tag. The holder is the client
+    ///     PROCESS the kernel reports for the pipe, never a field.
+    ///   * **It reaches nothing secure.** It switches on one display device,
+    ///     the one an administrator installed through Windows' own consent
+    ///     prompt for exactly this. It does not touch the secure desktop,
+    ///     types nothing and runs nothing.
+    ///   * **It undoes itself.** The hold lapses unless it is renewed, and the
+    ///     service switches the screen off at its own start, so a caller
+    ///     cannot leave it on by dying.
+    ///   * **It is the console's own business.** Only the person signed in at
+    ///     this computer's own screen and the sign-in-screen agent (LocalSystem)
+    ///     are admitted. Another interactive account is not: a monitor
+    ///     appearing on somebody else's console is a nuisance they did not ask
+    ///     for.
+    VirtualScreenHold,
+    /// The caller is done with the virtual screen. When nobody holds it any
+    /// more it switches off.
+    VirtualScreenRelease,
+    /// Is the virtual screen installed, and is it on? Read for the app's switch.
+    VirtualScreenState,
 }
 
 /// The server's recorded answers about this machine's sign-in-screen link, as
@@ -255,6 +282,9 @@ pub enum ControlResponse {
         /// Whether an agent process is actually alive right now.
         agent_alive: bool,
     },
+    /// The answer to every virtual-screen request: installed, on, the device's
+    /// instance ID, and why a hold could not switch it on.
+    VirtualScreen(crate::virtual_screen::Report),
     /// The request was accepted. Carries no data: a relay's real answer comes
     /// back over the media/control channel, not through here.
     Ok,
@@ -503,6 +533,25 @@ pub fn check(
             }
         }
 
+        ControlRequest::VirtualScreenHold
+        | ControlRequest::VirtualScreenRelease
+        | ControlRequest::VirtualScreenState => {
+            // The `Sas` gate, for the reasons argued on `VirtualScreenHold`:
+            // the console's own user (either account kind) and the
+            // sign-in-screen agent. NOT gated on an agent running: the
+            // attended agent the app launched is not one this service
+            // supervises, and a release must always be able to reach the
+            // service.
+            match caller {
+                CallerTrust::ConsoleAdministrator
+                | CallerTrust::NotAdministrator
+                | CallerTrust::LocalSystem => Ok(()),
+                CallerTrust::NotConsoleUser => Err(ControlDenied::NotTheConsoleAdmin(
+                    "only the user signed in at this computer's own screen can do this",
+                )),
+            }
+        }
+
         ControlRequest::Relay { session, payload } => {
             if payload.is_empty() {
                 return Err(ControlDenied::BadPayload("an empty relay payload is not a message"));
@@ -555,6 +604,13 @@ mod tests {
             // four properties, argued in the same place. "It is like sas" is not
             // the argument; "it grants nothing a keyboard already grants" is.
             ControlRequest::Sas,
+            // THE VIRTUAL SCREEN'S HOLD IS AN EFFECT TOO, admitted with its
+            // own argument on the variant: no fields, one display device an
+            // administrator installed for this, nothing on the secure desktop,
+            // and it lapses on its own. Release and state are its other halves.
+            ControlRequest::VirtualScreenHold,
+            ControlRequest::VirtualScreenRelease,
+            ControlRequest::VirtualScreenState,
         ]
         .iter()
         .map(|r| {
@@ -563,7 +619,29 @@ mod tests {
         })
         .collect();
 
-        assert_eq!(tags, vec!["status", "request_keyframe", "relay", "sas"]);
+        assert_eq!(
+            tags,
+            vec![
+                "status",
+                "request_keyframe",
+                "relay",
+                "sas",
+                "virtual_screen_hold",
+                "virtual_screen_release",
+                "virtual_screen_state",
+            ]
+        );
+        // Like `Sas`, they carry nothing but the tag. A field would be a place
+        // for caller data to cross into a LocalSystem process that installs
+        // drivers.
+        for r in [
+            ControlRequest::VirtualScreenHold,
+            ControlRequest::VirtualScreenRelease,
+            ControlRequest::VirtualScreenState,
+        ] {
+            let v = serde_json::to_value(&r).unwrap();
+            assert_eq!(v.as_object().map(|o| o.len()), Some(1), "{v} must carry only its tag");
+        }
         for forbidden in ["inject", "click", "send_keys", "run", "exec", "launch", "input"] {
             assert!(
                 !tags.iter().any(|t| t.contains(forbidden)),
@@ -581,6 +659,61 @@ mod tests {
             sas.as_object().map(|o| o.len()),
             Some(1),
             "ControlRequest::Sas must carry nothing but its tag: {sas}",
+        );
+    }
+
+    /// The virtual-screen verbs admit the person at this computer's own
+    /// screen (either account kind) and the sign-in-screen agent, need no
+    /// supervised agent, and refuse everyone else.
+    #[test]
+    fn the_virtual_screen_needs_the_console_user_and_nothing_more() {
+        for req in [
+            ControlRequest::VirtualScreenHold,
+            ControlRequest::VirtualScreenRelease,
+            ControlRequest::VirtualScreenState,
+        ] {
+            for trust in [
+                CallerTrust::ConsoleAdministrator,
+                CallerTrust::NotAdministrator,
+                CallerTrust::LocalSystem,
+            ] {
+                // With no agent running: the attended agent is not supervised here.
+                assert!(check(&req, None, false, trust).is_ok(), "{req:?} for {trust:?}");
+            }
+            // Negative control: another interactive account.
+            assert!(matches!(
+                check(&req, Some(1), true, CallerTrust::NotConsoleUser),
+                Err(ControlDenied::NotTheConsoleAdmin(_))
+            ));
+        }
+    }
+
+    /// The bytes `puca-agent/src/virtual_screen.rs` writes and matches. The
+    /// agent cannot depend on this crate (see the SAS twin below), so both
+    /// ends pin the same literals.
+    #[test]
+    fn the_virtual_screen_wire_matches_what_the_agent_speaks() {
+        assert_eq!(
+            serde_json::to_string(&ControlRequest::VirtualScreenHold).unwrap(),
+            r#"{"t":"virtual_screen_hold"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ControlRequest::VirtualScreenRelease).unwrap(),
+            r#"{"t":"virtual_screen_release"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ControlRequest::VirtualScreenState).unwrap(),
+            r#"{"t":"virtual_screen_state"}"#
+        );
+        let reply = ControlResponse::VirtualScreen(crate::virtual_screen::Report {
+            installed: true,
+            on: false,
+            instance_id: Some(r"ROOT\DISPLAY\0001".into()),
+            unavailable: Some(crate::virtual_screen::Unavailable::EnableFailed),
+        });
+        assert_eq!(
+            serde_json::to_string(&reply).unwrap(),
+            r#"{"t":"virtual_screen","installed":true,"on":false,"instance_id":"ROOT\\DISPLAY\\0001","unavailable":"enable_failed"}"#
         );
     }
 

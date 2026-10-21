@@ -132,6 +132,96 @@ cross, so nobody ships or markets it beyond what it actually guarantees.
   another screen... switch to that screen") there too; harmless, but not quite
   right until it is updated.
 
+## A laptop with its lid closed
+
+A laptop with its lid shut and no monitor plugged in has **no active display**,
+even when it is kept awake ("When I close the lid: Do nothing"). There is
+nothing for the agent to capture. Until 2026-10-21 the phone could only say
+"could not connect to the device". The agent answered the offer, its capture
+failed eight seconds later on a stream thread that had not yet serviced a
+single ICE check, and the phone's connection timed out against a socket nobody
+answered.
+
+Two things changed.
+
+**The phone is told why.** Before the host hands its agent an offer, it asks
+`prepare_screen` (`crates/puca-agent/src/virtual_screen.rs`, polled by
+`session.ts` `prepareHostScreen`). With a screen on, the answer is immediate
+and nothing else changes. With none, the agent first wakes the displays (a
+sleeping monitor that detached its output usually comes back within 3 s). If
+there is still no screen, the session ends with a code the phone turns into a
+sentence (`frontend/src/api/devices/noScreen.ts`): "Work Laptop's screen is off —
+is its lid closed? Turn on 'Allow remote control with the lid closed' on that
+PC." The host sends the code followed by a plain sentence (`noScreenEndReason`),
+so a phone from before this shows words rather than a bare code. The
+sign-in-screen path does the same inside the agent, because no app is there to
+ask; it sends the bare code.
+
+**The PC can have a screen in software.** "Allow remote control with the lid
+closed" (Devices, on the PC itself, below the remote-access service it needs)
+installs the open-source **Virtual Display Driver** (MIT;
+`crates/puca-service/vdd/NOTICE.md` records the release, the SHA-256 of each
+file and the signature). In detail:
+
+- **Consent is Windows' own.** The driver is signed by SignPath Foundation, not
+  by Microsoft, so Windows asks "Would you like to install this device
+  software?" and names the publisher. Púca does not add that certificate to the
+  machine's Trusted Publishers to skip the question. The certificate signs many
+  unrelated projects, and trusting it machine-wide would trust all of them. The
+  install runs as an elevated helper in the user's own session
+  (`sovereign-service.exe virtual-screen-install`), because a service in
+  session 0 has no desktop to ask on. The admin-only installed copy of that
+  binary is the one raised, and the driver files are embedded in it, so nothing
+  installed comes from the user-writable app folder.
+- **Off unless needed.** The device rests DISABLED (Device Manager shows it
+  disabled). A virtual monitor that is always on would extend the desktop with
+  the lid open, and windows would open on a screen nobody can see. It is
+  switched on only when a remote session starts and the PC has no screen on,
+  through the service's control pipe (`virtual_screen_hold`, a 30 s lease the
+  agent renews every 10 s, `crates/puca-service/src/virtual_screen.rs`). It goes
+  off when the last session holding it stops streaming, or as soon as a real
+  screen is back (the lid opened).
+- **It cannot stay on by accident.** If the agent dies, its renewals stop and
+  the lease lapses. If the service dies, or the power fails mid-session, the
+  device's own persisted state is the crash marker. A service that is just
+  starting holds no leases, so it switches off any virtual screen it finds on.
+- **One mode.** 1920x1080 at 60 Hz, written to the driver's `vdd_settings.xml`
+  on every switch-on. The driver reads that file from the folder named by
+  `HKLM\SOFTWARE\MikeTheTech\VirtualDisplayDriver\VDDPATH`. Púca points it at
+  `%ProgramFiles%\Sovereign\service\virtual-screen`, which only administrators
+  can write. Unset, the driver would fall back to `C:\VirtualDisplayDriver`,
+  which any signed-in user can create.
+- **Not over someone else's copy.** The same driver is popular with
+  game-streaming setups. If another copy is installed (a `Root\MttVDD` device,
+  or that registry key without Púca's mark on it), the install refuses rather
+  than share its hardware ID, its settings and its control pipe.
+- **Removal.** Turning the option off, turning remote access off
+  (`deprovision`), and uninstalling Púca all remove the device, the driver
+  package (`oemNN.inf`, only after checking it still names this driver), the
+  settings key and the files. The uninstaller does it before it deletes the
+  service folder, which holds the record of what to remove
+  (`npm run check:installer-hooks` pins that order). By hand, from an
+  administrator prompt:
+  `"C:\Program Files\Sovereign\service\sovereign-service.exe" virtual-screen-remove`.
+
+**A property of the driver, recorded.** While the device is ON it serves a
+control pipe, `\\.\pipe\MTTVirtualDisplayPipe`, that any local process may
+open (`D:(A;;GA;;;WD)`, in the shipped binary). Its commands reload the driver,
+change the number of virtual screens and choose the GPU. The on-demand design
+limits that to remote sessions, and the read-only settings folder means
+nothing sent over the pipe can last into the next session.
+
+**What is verified, and what is not.** Every decision is unit-tested: when to
+switch on and off, the lease, the crash recovery, the real-or-virtual check
+and its positive control, the messages, and the wire on all three sides.
+Installing, enabling and removing the driver were NOT run on the developer's
+machine, deliberately: they change the machine's displays. They are verified
+on a real laptop, with its owner's permission. Look for the agent log's
+`[virtual-screen]` lines (`%LOCALAPPDATA%\Púca\agent.log`) and the service
+log's (`C:\ProgramData\Sovereign\service.log`). The first `holding …; active
+display adapters: …` line is the field check that the virtual screen's adapter
+is recognised as its own.
+
 ## My Devices file browser — big folders
 
 A folder listing travels as ONE data-channel message, and the limit that
