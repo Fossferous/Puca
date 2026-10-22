@@ -58,7 +58,14 @@ pub const MIN_CLIP_MS: i64 = 5_000;
 /// accounts — a declared id that IS a real co-member is required even if the
 /// log never saw them, because "the server missed it" and "the client made it
 /// up" are indistinguishable here and only one of those errs safely.
-pub fn union_approvers(log_hits: &HashSet<UserId>, declared: &[UserId], viewers: &HashSet<UserId>, proposer: UserId) -> Vec<UserId> {
+///
+/// `exempt` is who is never asked: stream-only members (docs/STREAM_ONLY.md).
+/// Such an account is run by automation for the server's owner and cannot
+/// answer a prompt, so with it in the set every clip of its call sat unanswered
+/// until it expired. Removed from the log's people AND the declared ones, so a
+/// client cannot put it back. Only the owner or an administrator can give the
+/// role, and the role's own description says its members are not asked.
+pub fn union_approvers(log_hits: &HashSet<UserId>, declared: &[UserId], viewers: &HashSet<UserId>, exempt: &HashSet<UserId>, proposer: UserId) -> Vec<UserId> {
     let mut set: HashSet<UserId> = log_hits.iter().copied().collect();
     let mut seen = HashSet::new();
     for &d in declared.iter().take(CLIP_MAX_DECLARED) {
@@ -67,6 +74,7 @@ pub fn union_approvers(log_hits: &HashSet<UserId>, declared: &[UserId], viewers:
         }
     }
     set.remove(&proposer);
+    set.retain(|id| !exempt.contains(id));
     let mut out: Vec<UserId> = set.into_iter().collect();
     out.sort_unstable();
     out
@@ -567,7 +575,18 @@ pub async fn propose_clip(
         Ok(v) => v,
         Err(_) => return plain(StatusCode::INTERNAL_SERVER_ERROR, "Could not resolve channel members"),
     };
-    let ids = union_approvers(&log_hits, &req.declared_participants, &viewers, user);
+    // Stream-only members are never asked (union_approvers). FAIL CLOSED: an
+    // error must not read as "nobody is stream-only", which would leave the
+    // clip waiting on an account that cannot answer — the old behaviour, so
+    // refusing is no worse; but it is retryable, so say so.
+    let exempt = match crate::permissions::stream_only_member_ids(&state.pool, &server_id).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("propose_clip: stream-only lookup failed: {e:?}");
+            return plain(StatusCode::SERVICE_UNAVAILABLE, "Could not confirm who was in that call. Try again in a moment.");
+        }
+    };
+    let ids = union_approvers(&log_hits, &req.declared_participants, &viewers, &exempt, user);
     if ids.len() > CLIP_MAX_APPROVERS { return plain(StatusCode::BAD_REQUEST, "Too many people were in that call for a clip to be approved"); }
     // Zero approvers is allowed ONLY with positive attestation that the clipper
     // was alone for the whole window; "no data" must never read as "nobody".
@@ -839,36 +858,55 @@ mod tests {
     fn union_adds_declared_co_members_and_never_removes_log_hits() {
         let viewers = set(&[1, 2, 3, 4, 5]);
         // log saw 2 and 3; client declares 3 and 4 (a co-member the log missed) and 99 (a stranger)
-        let out = union_approvers(&set(&[2, 3]), &[3, 4, 99], &viewers, 1);
+        let out = union_approvers(&set(&[2, 3]), &[3, 4, 99], &viewers, &set(&[]), 1);
         assert_eq!(out, vec![2, 3, 4]);
     }
 
     #[test]
     fn union_removes_the_proposer_and_dedupes() {
         let viewers = set(&[1, 2]);
-        assert_eq!(union_approvers(&set(&[1, 2]), &[2, 2, 1], &viewers, 1), vec![2]);
+        assert_eq!(union_approvers(&set(&[1, 2]), &[2, 2, 1], &viewers, &set(&[]), 1), vec![2]);
     }
 
     #[test]
     fn a_declared_list_cannot_shrink_the_set_and_is_filtered_to_viewers() {
         let viewers = set(&[1, 2, 3]);
         // declaring nobody still yields the log's people
-        assert_eq!(union_approvers(&set(&[2, 3]), &[], &viewers, 1), vec![2, 3]);
+        assert_eq!(union_approvers(&set(&[2, 3]), &[], &viewers, &set(&[]), 1), vec![2, 3]);
         // declaring only strangers adds nothing
-        assert_eq!(union_approvers(&set(&[2]), &[7, 8, 9], &viewers, 1), vec![2]);
+        assert_eq!(union_approvers(&set(&[2]), &[7, 8, 9], &viewers, &set(&[]), 1), vec![2]);
     }
 
     #[test]
     fn declared_is_capped_at_the_maximum() {
         let viewers: HashSet<UserId> = (1..=200).collect();
         let declared: Vec<UserId> = (2..=200).collect();
-        let out = union_approvers(&set(&[]), &declared, &viewers, 1);
+        let out = union_approvers(&set(&[]), &declared, &viewers, &set(&[]), 1);
         assert_eq!(out.len(), CLIP_MAX_DECLARED); // only the first 64 declared are even considered
     }
 
     #[test]
+    fn stream_only_members_are_never_asked_whether_seen_or_declared() {
+        let viewers = set(&[1, 2, 3, 4]);
+        // The log saw 2 (a person) and 3 (a stream-only account); the client
+        // also declares 3 and 4. 3 is exempt either way; 4 is a person.
+        assert_eq!(union_approvers(&set(&[2, 3]), &[3, 4], &viewers, &set(&[3]), 1), vec![2, 4]);
+        // Control: without the exemption the same inputs ask 3 as well.
+        assert_eq!(union_approvers(&set(&[2, 3]), &[3, 4], &viewers, &set(&[]), 1), vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn a_call_of_the_clipper_and_a_stream_only_account_needs_no_approval() {
+        // Empty set: propose_clip then posts it as a solo clip, provided the
+        // log shows the clipper in the call for the whole window
+        // (present_throughout) — the same attestation a truly solo clip needs.
+        let viewers = set(&[1, 3]);
+        assert!(union_approvers(&set(&[1, 3]), &[3], &viewers, &set(&[3]), 1).is_empty());
+    }
+
+    #[test]
     fn empty_everything_is_empty_not_a_panic() {
-        assert!(union_approvers(&set(&[]), &[], &set(&[]), 1).is_empty());
+        assert!(union_approvers(&set(&[]), &[], &set(&[]), &set(&[]), 1).is_empty());
     }
 
     fn proposal(proposer: UserId, voters: &[UserId]) -> ClipProposal {
