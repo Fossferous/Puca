@@ -56,7 +56,10 @@ describe('push-to-talk on a back button', () => {
     it('reports edges of the chosen button only, across controllers', () => {
         const changes: boolean[] = [];
         const t = new PushToTalkTracker(BACK_BUTTON_IDS.R4, held => changes.push(held));
-        t.feed([{ controller: 0, button: 33, pressed: true }]); // R5: not ours
+        t.feed([{ controller: 2, button: 33, pressed: true }]); // R5: not ours
+        t.feed([{ controller: 2, button: 44, pressed: true }]); // L4: not ours
+        expect(changes).toEqual([]);
+        expect(t.held).toBe(false);
         t.feed([{ controller: 0, button: 45, pressed: true }]);
         t.feed([{ controller: 0, button: 45, pressed: true }]); // repeat
         t.feed([{ controller: 1, button: 45, pressed: true }]); // a second pad, same button
