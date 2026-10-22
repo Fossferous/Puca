@@ -14,7 +14,7 @@ import { apiClient } from '../api/client';
 import { safeRepositoryUrl } from './privacyDisclosure.utils';
 import './SettingsModal.css';
 import { parseServerTimestamp } from '../utils/serverTime';
-import { type Settings, type KeyBinding, defaultSettings, loadSettings, saveSettings, inputGain } from './settingsStore';
+import { type Settings, type KeyBinding, type AutoOpenStreams, defaultSettings, loadSettings, saveSettings, inputGain } from './settingsStore';
 import {
     type NoiseSuppressionMode, type MicTestGraph, NOISE_MODE_EVENT,
     getNoiseSuppressionMode, changeNoiseModeLive, getMicConstraints, buildMicTestGraph,
@@ -2461,23 +2461,26 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                     </div>
                                     <div className="settings-option">
                                         <div className="option-info">
-                                            <label htmlFor="auto-watch-stream-only">Automatically watch streams from stream-only accounts</label>
+                                            <label htmlFor="auto-open-streams">Open streams automatically</label>
                                             <span className="option-hint">
-                                                When a stream-only account (one a server owner has set up to stream into
-                                                calls) is sharing in your call, its stream starts playing without a
-                                                Watch click: in a small player over the chat, or full size from the
-                                                call's view. Other people's streams still wait for you. It uses data
-                                                like any stream you watch, so you may want it off on a phone; it never
+                                                Start watching a stream in your voice channel without clicking Watch:
+                                                in a small player over the chat, or full size from the call's view.
+                                                Each opens once; close it and it stays closed until it starts again.
+                                                Stream-only accounts are ones a server owner has set up to stream into
+                                                calls. Streams use data, so you may want this off on a phone; it never
                                                 starts while your browser asks to save data.
                                             </span>
                                         </div>
-                                        <input
-                                            id="auto-watch-stream-only"
-                                            type="checkbox"
-                                            data-testid="settings-auto-watch-stream-only"
-                                            checked={settings.autoWatchStreamOnly}
-                                            onChange={(e) => updateSetting('autoWatchStreamOnly', e.target.checked)}
-                                        />
+                                        <select
+                                            id="auto-open-streams"
+                                            data-testid="settings-auto-open-streams"
+                                            value={settings.autoOpenStreams}
+                                            onChange={(e) => updateSetting('autoOpenStreams', e.target.value as AutoOpenStreams)}
+                                        >
+                                            <option value="off">Off</option>
+                                            <option value="stream-only">From stream-only accounts</option>
+                                            <option value="all">All streams</option>
+                                        </select>
                                     </div>
                                     <div className="settings-option">
                                         <label>Output Device</label>

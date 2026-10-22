@@ -27,7 +27,10 @@
 //      small player (the chat stays); a person joining while it is live gets
 //      it too (desktop), and so does a 390x844 phone (the docked player, inside
 //      the screen); a PERSON's share does not open by itself (the control);
-//      and once the owner closes it, it stays closed.
+//      and once the owner closes it, it stays closed;
+//   9. Open streams automatically = All streams: a PERSON's share then opens
+//      by itself too, the closed one stays closed, and the owner's stream
+//      view keeps its focus on the stream it was showing.
 // getStats only, never playback: the browser runs with --mute-audio, and the
 // account's screen is a canvas behind getDisplayMedia, as an automation would
 // supply it. Each check is a PASS/FAIL line; the exit code is the failures.
@@ -274,6 +277,9 @@ try {
     await phone.locator('.settings-nav-item', { hasText: 'Voice & Video' }).first().tap().catch(() => {});
     const setting = await reachable(phone, '[data-testid="settings-join-without-mic"]');
     check('390x844: Join voice without a microphone is reachable', setting.ok, JSON.stringify(setting));
+    const autoOpen = await reachable(phone, '[data-testid="settings-auto-open-streams"]');
+    check('390x844: Open streams automatically is reachable', autoOpen.ok, JSON.stringify(autoOpen));
+    check('...and defaults to From stream-only accounts', await phone.locator('[data-testid="settings-auto-open-streams"]').inputValue() === 'stream-only');
     await phone.screenshot({ path: path.join(OUT, 'settings-no-mic-phone.png') });
     await phoneCtx.close();
 
@@ -393,6 +399,29 @@ try {
     await owner.evaluate(async (id) => (await import('/src/components/voiceState.ts')).deselectStream(id), B);
     await sleep(4000);
     check('closing it sticks: not reopened while the same share goes on', !(await selectedStreams(owner)).includes(B), JSON.stringify(await selectedStreams(owner)));
+
+    // 9. All streams. The owner watches the account again by its own choice
+    // (a click's selection) with it in focus, then switches the setting.
+    await owner.evaluate(async (id) => {
+        (await import('/src/components/voiceState.ts')).selectStream(id);
+        (await import('/src/stores/streamStore.ts')).useStreamStore.getState().setFocusedStream(id);
+    }, B);
+    check('the owner is on the stream view, the account in focus', !!await until(async () => (await owner.locator('.stream-stage').count()) > 0, 8000));
+    await owner.evaluate(async () => {
+        const m = await import('/src/components/settingsStore.ts');
+        m.saveSettings({ ...m.loadSettings(), autoOpenStreams: 'all' });
+    });
+    await human.locator('[data-testid="voice-share-screen"]').click();
+    const H = await uidOf(human);
+    check('All streams: a person\'s share opens by itself', !!await until(async () => (await selectedStreams(owner)).includes(H), 15000), JSON.stringify(await selectedStreams(owner)));
+    const focus = await owner.evaluate(async () => (await import('/src/stores/streamStore.ts')).useStreamStore.getState().focusedStreamId);
+    check('...without taking the focus from the stream the owner was watching', focus === B, String(focus));
+    check('...and the owner is still on the stream view', (await owner.locator('.stream-stage').count()) > 0);
+    await human.locator('[data-testid="voice-stop-share"]').click();
+    await owner.evaluate(async () => {
+        const m = await import('/src/components/settingsStore.ts');
+        m.saveSettings({ ...m.loadSettings(), autoOpenStreams: 'stream-only' });
+    });
 
     // 5b. The owner ticks No receive in the role editor.
     await owner.locator('button[title="Server Settings"]').click();

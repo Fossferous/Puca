@@ -474,9 +474,12 @@ When someone shares, their entry in the voice view shows a **LIVE** badge and a
 account a server owner has set up; see
 [Stream-only accounts](STREAM_ONLY.md)) starts playing by itself instead:
 from the call's view as the stream view, from the chat in the small player.
-Close it and it stays closed until it next goes live. Turn this off under
-**Settings → Voice & Video → Automatically watch streams from stream-only
-accounts**; it never starts while your browser asks to save data. The chat header also gains a **Watch live streams**
+**Settings → Voice & Video → Open streams automatically** decides which
+streams do that: **Off**, **From stream-only accounts** (the default) or
+**All streams** in your voice channel. Each opens once: close it and it stays
+closed until it starts again. A stream that opens while you are already
+watching another is added beside it without moving your view, and nothing
+opens by itself while your browser asks to save data. The chat header also gains a **Watch live streams**
 button. Several streams can be watched at once; **Switch to Grid View** /
 **Switch to Focus View** changes the layout.
 
