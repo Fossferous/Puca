@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.846 — 2026-10-22
 
+Ready for Púca on the Steam Deck
 ### Added
 
 - **Ready for Púca on the Steam Deck.** The web app can now be driven by Púca for Steam Deck, a plugin for Decky Loader that brings Púca to the Deck's Game Mode: join a voice channel from the Quick Access menu while a game runs, mute, deafen or leave, see who is talking, push to talk on a back button, get message notifications over your game, and open the whole app for text chat. Everyone signs in with their own account, and calls stay end-to-end encrypted. The plugin is still being tested and comes separately; how to install and use it is in docs/STEAM_DECK.md. Nothing changes for anyone not using it. For anyone building their own integration, the embedding API the plugin uses is in docs/EMBEDDING.md.
