@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * How a screen share is published to the SFU.
  *

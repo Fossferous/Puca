@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The service-needs-update decision.
  *

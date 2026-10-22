@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The voice indicator measured the wrong thing.
  *

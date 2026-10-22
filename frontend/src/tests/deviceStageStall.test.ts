@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The stall watchdog must fire for a genuinely stalled decoder and for
  * NOTHING else. The false-positive bound is the load-bearing part: a still

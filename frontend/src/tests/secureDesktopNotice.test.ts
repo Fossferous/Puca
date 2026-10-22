@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * THE SECURE-DESKTOP NOTICE — saying why the picture froze.
  *

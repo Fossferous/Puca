@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 // Unit tests for the Púca Notes note model: the pure functions that turn
 // lists + tasks + Púca's tab prefs + the device-local Notes prefs into cards,
 // previews, search results and reminder groups. Every ordering/pin rule is

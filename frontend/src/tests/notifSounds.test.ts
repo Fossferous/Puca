@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, it, expect, beforeEach } from 'vitest';
 import { loadSettings, saveSettings, notifEnabled } from '../components/settingsStore';
 import { isChannelMuted, toggleChannelMute } from '../components/mutedChannelsStore';

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Putting a deleted item back (noteContent.ts recreateSubtree), and the
  * subtree the editor hands it (tasks.ts subtreeInOrder).

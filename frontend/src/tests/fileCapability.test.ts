@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Per-file capabilities (migrations/054_file_capabilities.sql): an attachment
  * upload asks the server for a capability, carries it inside the encrypted

@@ -954,7 +954,9 @@ Decline bottom-most and focused, no overflow, badge/refusal per stamp, no
 `<a href="sovereign-clip…">` anywhere. Look at the shots.
 
 Server-side in-memory presence log per voice room; `POST /channels/:v/clips`
-computes the approver set as UNION(server log, client-declared) − clipper;
+computes the approver set as UNION(server log, client-declared) − clipper −
+stream-only members (an account run by automation cannot answer, so it is
+never asked: docs/STREAM_ONLY.md; the lookup fails closed);
 approvers are prompted on any online device; a decline discards; all-approved
 lets the client upload parts and post a message whose `clip_consent` the server
 stamps with a **count and part ids only** (never identities). Votes are

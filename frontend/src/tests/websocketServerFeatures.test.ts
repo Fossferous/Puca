@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The presence capability handshake, client side.
  *

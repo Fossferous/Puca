@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The simulcast rung an unfocused remote video is subscribed at.
  *

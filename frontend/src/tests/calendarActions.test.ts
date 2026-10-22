@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
 import type { Task } from '../api/tasks';
 import { entriesInRange, type CalendarSource } from '../api/taskCalendar';

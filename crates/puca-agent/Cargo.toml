@@ -62,6 +62,10 @@ windows = { version = "0.58", features = [
     "Win32_System_IO",
     "Win32_Security",
     "Win32_Security_Authorization",
+    # QueryDisplayConfig + DisplayConfigGetDeviceInfo: which adapter each
+    # active display hangs off, so the virtual screen can be told apart from a
+    # real one (src/virtual_screen.rs).
+    "Win32_Devices_Display",
     # BCryptGenRandom, for STUN transaction ids. Not decoration: a predictable
     # transaction id lets anything that can reach this socket forge a Binding
     # response, and the address in that response is what we advertise to the

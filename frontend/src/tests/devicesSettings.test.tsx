@@ -253,7 +253,9 @@ describe('Devices settings', () => {
             expect(buttonNamed('Control')).toBeTruthy();
             await click(buttonNamed('Control'));
             await settle();
-            expect(connectToDevice).toHaveBeenCalledWith('dev1', undefined);
+            // The card's name rides along for the messages that name the PC
+            // ("…'s screen is off"; noScreen.ts). Display only.
+            expect(connectToDevice).toHaveBeenCalledWith('dev1', { peerName: 'Zeus-PC' });
         });
 
         it('decides the row from a FRESH list, not the one the card was painted from', async () => {

@@ -377,6 +377,21 @@ pub async fn create_channel(
             .fetch_all(&state.pool)
             .await
             .unwrap_or_default();
+            // Base VIEW is not visibility for a stream-only account: a new
+            // channel has no overwrite opening it for their role, so they
+            // resolve it to nothing and are not told its name either
+            // (docs/STREAM_ONLY.md). Fail closed: no answer, no fan-out.
+            let capped = match crate::permissions::stream_only_member_ids(&state.pool, &server_id).await {
+                Ok(ids) => Some(ids),
+                Err(e) => {
+                    tracing::error!("ChannelCreated: stream-only resolve failed for server {}: {}", server_id, e);
+                    None
+                }
+            };
+            let members: Vec<(i32,)> = match &capped {
+                Some(ids) => members.into_iter().filter(|(m,)| !ids.contains(&(*m as i64))).collect(),
+                None => Vec::new(),
+            };
             let channel_info = crate::protocol::ChannelInfo {
                 id: channel_id as i64,
                 name: payload.name.clone(),

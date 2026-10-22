@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The presence store: ONE place every status render reads from.
  *

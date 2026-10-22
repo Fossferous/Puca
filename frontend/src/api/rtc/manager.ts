@@ -564,6 +564,56 @@ export class WebRTCManager {
         return this.media.isListenOnly();
     }
 
+    /**
+     * NO RECEIVE (docs/STREAM_ONLY.md). The server tells the room which
+     * members' roles carry it (VoiceSpeakState `receives: false`). Mesh media
+     * is peer-to-peer, so the server cannot withhold it: this client simply
+     * never sends such a peer a track - mic, camera or share - on any path
+     * that adds or swaps one. Their stream still reaches us. Server state, like
+     * the share announcements: it survives a peer rebuild and is forgotten
+     * only when the member leaves or we do.
+     */
+    private noReceivePeers = new Set<UserId>();
+    /** This client's own member carries NO_RECEIVE: it plays nothing it is
+     *  sent (cooperating peers send it nothing to begin with). */
+    private selfNoReceive = false;
+
+    /** Does this client send `userId` media? */
+    sendsTo(userId: UserId): boolean {
+        return !this.noReceivePeers.has(userId);
+    }
+
+    /** The server's word on whether `userId` may be sent media. Withholding
+     *  takes our tracks off that peer's senders at once (replaceTrack(null):
+     *  no renegotiation, our receivers stay); lifting it adds them back. */
+    setPeerReceives(userId: UserId, receives: boolean): void {
+        const peer = this.peers.get(userId);
+        if (receives) {
+            if (!this.noReceivePeers.delete(userId)) return;
+            if (peer) void this.addLocalMediaToPeer(userId, peer.connection);
+            return;
+        }
+        if (this.noReceivePeers.has(userId)) return;
+        this.noReceivePeers.add(userId);
+        if (!peer) return;
+        for (const sender of peer.connection.getSenders()) {
+            if (sender.track) void sender.replaceTrack(null).catch(() => { /* peer gone */ });
+        }
+    }
+
+    /** The member left the room: their next join starts from the server's word. */
+    forgetPeerReceives(userId: UserId): void {
+        this.noReceivePeers.delete(userId);
+    }
+
+    setSelfReceives(receives: boolean): void {
+        this.selfNoReceive = !receives;
+    }
+
+    isSelfNoReceive(): boolean {
+        return this.selfNoReceive;
+    }
+
     /** SPEAK denied in this channel: the mic is never opened (see MediaManager). */
     setSpeakDenied(denied: boolean): void {
         this.media.setSpeakDenied(denied);
@@ -571,6 +621,15 @@ export class WebRTCManager {
 
     isSpeakDenied(): boolean {
         return this.media.isSpeakDenied();
+    }
+
+    /** Joined without a microphone on purpose (see MediaManager). */
+    setMicOffByChoice(off: boolean): void {
+        this.media.setMicOffByChoice(off);
+    }
+
+    isMicOffByChoice(): boolean {
+        return this.media.isMicOffByChoice();
     }
 
     /**
@@ -668,6 +727,7 @@ export class WebRTCManager {
         const localStream = this.media.getLocalStreamSync();
         if (!localStream) return;
         for (const [userId, peer] of this.peers) {
+            if (!this.sendsTo(userId)) continue;
             if (peer.connection.getSenders().some(s => s.track === track)) continue;
             // addTrack fires onnegotiationneeded → offer (no manual makeOffer).
             this.wireSender(userId, peer.connection.addTrack(track, localStream));
@@ -713,7 +773,7 @@ export class WebRTCManager {
 
         if (newTrack) {
             for (const [userId, peer] of this.peers) {
-                if (localStream) {
+                if (localStream && this.sendsTo(userId)) {
                     // addTrack fires onnegotiationneeded → offer (no manual makeOffer).
                     this.wireSender(userId, peer.connection.addTrack(newTrack, localStream));
                 }
@@ -732,6 +792,7 @@ export class WebRTCManager {
             // its track would swap the outgoing stream for the camera feed.
             const screenVideo = new Set<MediaStreamTrack>(this.media.getScreenShareStreamSync()?.getVideoTracks() ?? []);
             for (const [userId, peer] of this.peers) {
+                if (!this.sendsTo(userId)) continue;
                 const senders = peer.connection.getSenders();
                 const videoSender = senders.find(s =>
                     s.track?.kind === 'video' && !screenVideo.has(s.track));
@@ -874,6 +935,7 @@ export class WebRTCManager {
         // peer → a glare-safe offer. This is the path that must reach a late
         // joiner and the peer we're answering when a share starts mid-call.
         for (const [userId, peer] of this.peers) {
+            if (!this.sendsTo(userId)) continue;
             await this.addScreenShareTracks(userId, peer.connection, stream);
         }
     }
@@ -912,7 +974,10 @@ export class WebRTCManager {
             }
             return;
         }
-        if (localStream) {
+        // A NO-RECEIVE peer is sent nothing (see noReceivePeers); the
+        // receive-only transceiver below still lets us take their stream.
+        const sends = this.sendsTo(userId);
+        if (localStream && sends) {
             const existing = pc.getSenders();
             localStream.getTracks().forEach(track => {
                 if (!existing.some(s => s.track === track)) {
@@ -927,7 +992,7 @@ export class WebRTCManager {
         // initiates to everyone already here" invariant whenever the remote
         // still holds a stale peer entry for us. An explicit recvonly audio
         // transceiver makes us negotiate normally and tells the peer to send.
-        const hasLocalAudio = !!localStream?.getAudioTracks().length;
+        const hasLocalAudio = sends && !!localStream?.getAudioTracks().length;
         const hasAudioTransceiver = pc.getTransceivers()
             .some(t => t.sender.track?.kind === 'audio' || t.receiver.track?.kind === 'audio');
         if (!hasLocalAudio && !hasAudioTransceiver) {
@@ -935,7 +1000,7 @@ export class WebRTCManager {
         }
 
         const screen = this.media.getScreenShareStreamSync();
-        if (screen) await this.addScreenShareTracks(userId, pc, screen);
+        if (screen && sends) await this.addScreenShareTracks(userId, pc, screen);
     }
 
     /** Add screen-share tracks to a peer (deduped) and tune the video sender. */
@@ -990,6 +1055,7 @@ export class WebRTCManager {
         const screenAudio = new Set<MediaStreamTrack>(this.media.getScreenShareStreamSync()?.getAudioTracks() ?? []);
         const localStream = this.media.getLocalStreamSync();
         for (const [userId, peer] of this.peers) {
+            if (!this.sendsTo(userId)) continue;
             const senders = peer.connection.getSenders();
             const micSender =
                 (oldTrack ? senders.find(s => s.track === oldTrack) : undefined) ??
@@ -1310,6 +1376,13 @@ export class WebRTCManager {
 
             const peer = this.peers.get(userId);
             if (!peer) return;
+
+            // NO RECEIVE for ourselves: play nothing (a cooperating peer sends
+            // us nothing; an older one may still, and it is dropped here).
+            if (this.selfNoReceive) {
+                console.log(`[WebRTC] not playing ${event.track.kind} from ${userId}: this member receives no media`);
+                return;
+            }
 
             // Media-E2EE: decrypt incoming frames (no-op passthrough until enabled).
             if (isMediaE2eeSupported() && event.receiver && !this.transformedReceivers.has(event.receiver)) {
@@ -1818,6 +1891,8 @@ export class WebRTCManager {
         this.inVoice = false;
         this.videoGate.reset();
         this.heldShareAudio.clear();
+        this.noReceivePeers.clear();
+        this.selfNoReceive = false;
         this.voiceEpoch++;
         this.peers.forEach((peer) => peer.connection.close());
         this.peers.clear();

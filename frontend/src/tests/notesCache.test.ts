@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The sealed on-device cache (notes/model/notesCache.ts) and the offline
  * worker it relies on (scripts/notes-sw.mjs).

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * SECURITY POSITIVE CONTROL: "Require encryption for calls" must fail CLOSED on
  * a browser with no WebRTC Encoded Transform API.

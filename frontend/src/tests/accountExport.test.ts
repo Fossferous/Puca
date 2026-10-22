@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The data export's assembly: every sealed body the device can open appears
  * as plaintext, every one it cannot is reported — never dropped — and the

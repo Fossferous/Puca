@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Signing out revokes the previews of pictures still waiting to be sent.
  *

@@ -76,7 +76,9 @@ const SECONDS = Number(process.env.SECONDS || 5);
 const browser = await chromium.launch({
     headless: true,
     ...(CHANNEL === 'bundled' ? {} : { channel: CHANNEL }),
-    args: ['--autoplay-policy=no-user-gesture-required', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'],
+    // --mute-audio first: the fake capture device is a beeping tone and autoplay
+    // is allowed here, so without it a gate run could reach the speakers.
+    args: ['--mute-audio', '--autoplay-policy=no-user-gesture-required', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'],
 });
 const page = await (await browser.newContext({ permissions: ['camera'] })).newPage();
 await page.goto(origin);

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, it, expect } from 'vitest';
 import { clipPlaybackMode, downloadClipBytes, forEachClipPart, pickMseType, BLOB_FALLBACK_CAP_BYTES, type ClipDownloadProgress } from '../api/clips/clipPlayback';
 import { newClipSecrets, sealPart } from '../api/clips/clipCrypto';

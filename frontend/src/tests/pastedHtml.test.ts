@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * A checklist copied as RENDERED text reads from the clipboard's HTML
  * (notes/model/pastedHtml.ts, through noteContent.ts readPastedItems).

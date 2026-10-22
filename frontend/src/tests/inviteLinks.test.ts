@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Invite links (api/pendingInvite.ts + api/publicConfig.ts).
  *

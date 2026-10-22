@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * An attachment decrypted only to be sealed again under a fresh key — a
  * message captured into a note (copyRefsIntoMyNote), a note copied

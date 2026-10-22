@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Holder lifecycle of the streaming priority boost (api/streamBoost.ts).
  *

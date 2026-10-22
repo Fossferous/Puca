@@ -31,6 +31,9 @@ mod composite;
 // Cross-platform decision logic for the Windows-only stream module's
 // display-topology self-heal, kept here so every CI leg compiles and tests it.
 mod topology;
+// "Is there a screen to stream?" and the lid-closed virtual screen: pure
+// decisions on every leg, the service conversation on Windows only.
+mod virtual_screen;
 // Ungated, beside composite for the same reason: plain data used by code that
 // compiles on every platform.
 mod caret_wire;
@@ -58,6 +61,10 @@ mod unix_sock;
 /// Ctrl+Alt+Del, which no process but the SYSTEM service can raise.
 #[cfg(windows)]
 mod sas_client;
+// Is the lid closed? A built-in panel behind a closed lid can stay an active
+// output that never shows a frame (virtual_screen.rs, "the dark panel").
+#[cfg(windows)]
+mod lid;
 mod power;
 
 #[cfg(windows)]
@@ -322,6 +329,9 @@ fn main() {
     #[cfg(windows)]
     {
         println!("puca-agent listening on {pipe_name}");
+        // The lid switch, before the first session can ask whether there is a
+        // screen: its current state arrives once on subscription (lid.rs).
+        lid::start();
         // Told, never inferred. Only the service can launch this process at
         // all, and only it knows which account is at the console and has
         // already established that account is an administrator.

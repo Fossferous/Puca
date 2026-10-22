@@ -14,7 +14,7 @@ import { apiClient } from '../api/client';
 import { safeRepositoryUrl } from './privacyDisclosure.utils';
 import './SettingsModal.css';
 import { parseServerTimestamp } from '../utils/serverTime';
-import { type Settings, type KeyBinding, defaultSettings, loadSettings, saveSettings, inputGain } from './settingsStore';
+import { type Settings, type KeyBinding, type AutoOpenStreams, defaultSettings, loadSettings, saveSettings, inputGain } from './settingsStore';
 import { ladderSettingsFor, rememberedShareLadder, type ShareLadderMode } from '../api/rtc/shareLadder';
 import {
     type NoiseSuppressionMode, type MicTestGraph, NOISE_MODE_EVENT,
@@ -26,6 +26,7 @@ import { BUTTON_TO_VK, VK_LBUTTON, VK_RBUTTON, mouseVkLabel } from '../api/input
 import { isAndroidApp, isMobile, isTauri } from '../api/platform';
 import { isTouchDevice, settingsSections } from './settingsModal.utils';
 import { sendTestNotification } from '../api/desktopNotify';
+import { getUserMediaForMic, hostMicrophone, hostShowsNotifications } from '../api/embedHost';
 import {
     mobileBatteryStatus, mobileNotificationStatus, openMobileNotificationSettings,
     requestIgnoreBatteryOptimizations, requestMobileNotificationPermission,
@@ -806,7 +807,10 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
 
     // Enumerate audio devices - request permission first to get labels
     useEffect(() => {
-        if (isOpen && activeSection === 'voice') {
+        // An embedding host supplies the microphone and the list is replaced
+        // by its name (below): opening the mic to read labels would only
+        // switch it on for nothing.
+        if (isOpen && activeSection === 'voice' && !hostMicrophone()) {
             // Request mic permission first to get device labels
             navigator.mediaDevices.getUserMedia({ audio: true })
                 .then(stream => {
@@ -1077,7 +1081,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
         const stale = () => gen !== micTestGenRef.current;
         try {
             if (typeof MediaRecorder === 'undefined') throw new Error('this browser cannot record audio (no MediaRecorder)');
-            stream = await navigator.mediaDevices.getUserMedia({ audio: getMicConstraints(mode) });
+            stream = await getUserMediaForMic({ audio: getMicConstraints(mode) });
             if (stale()) { stream.getTracks().forEach(t => t.stop()); return; }
             micStreamRef.current = stream;
 
@@ -2070,6 +2074,13 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                     updateSetting('desktopNotifications', false);
                                                     return;
                                                 }
+                                                // An embedding host shows them itself
+                                                // (Púca for Steam Deck: Steam toasts),
+                                                // with no browser permission to ask.
+                                                if (hostShowsNotifications()) {
+                                                    updateSetting('desktopNotifications', true);
+                                                    return;
+                                                }
                                                 // On desktop ask the OS through Tauri, NOT the webview.
                                                 // WebView2 can refuse or ignore Notification.requestPermission,
                                                 // which left this toggle impossible to switch on — and with it
@@ -2429,6 +2440,16 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                     Adjust your voice and video settings.
                                 </p>
                                 <div className="settings-card">
+                                    {hostMicrophone() ? (
+                                    <div className="settings-option">
+                                        <div className="option-info">
+                                            <label>Input Device</label>
+                                            <span className="option-hint">
+                                                {hostMicrophone()} supplies the microphone: the system's default input.
+                                            </span>
+                                        </div>
+                                    </div>
+                                    ) : (
                                     <div className="settings-option">
                                         <label>Input Device</label>
                                         <select
@@ -2441,6 +2462,47 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                     {device.label || `Microphone ${device.deviceId.slice(0, 8)}`}
                                                 </option>
                                             ))}
+                                        </select>
+                                    </div>
+                                    )}
+                                    <div className="settings-option">
+                                        <div className="option-info">
+                                            <label htmlFor="join-without-mic">Join voice without a microphone</label>
+                                            <span className="option-hint">
+                                                Join calls with no microphone at all: you hear everyone and can still
+                                                share your screen, nobody hears you, and others see that you have no
+                                                microphone. Takes effect the next time you join a call.
+                                            </span>
+                                        </div>
+                                        <input
+                                            id="join-without-mic"
+                                            type="checkbox"
+                                            data-testid="settings-join-without-mic"
+                                            checked={settings.joinWithoutMic}
+                                            onChange={(e) => updateSetting('joinWithoutMic', e.target.checked)}
+                                        />
+                                    </div>
+                                    <div className="settings-option">
+                                        <div className="option-info">
+                                            <label htmlFor="auto-open-streams">Open streams automatically</label>
+                                            <span className="option-hint">
+                                                Start watching a stream in your voice channel without clicking Watch:
+                                                in a small player over the chat, or full size from the call's view.
+                                                Each opens once; close it and it stays closed until it starts again.
+                                                Stream-only accounts are ones a server owner has set up to stream into
+                                                calls. Streams use data, so you may want this off on a phone; it never
+                                                starts while your browser asks to save data.
+                                            </span>
+                                        </div>
+                                        <select
+                                            id="auto-open-streams"
+                                            data-testid="settings-auto-open-streams"
+                                            value={settings.autoOpenStreams}
+                                            onChange={(e) => updateSetting('autoOpenStreams', e.target.value as AutoOpenStreams)}
+                                        >
+                                            <option value="off">Off</option>
+                                            <option value="stream-only">From stream-only accounts</option>
+                                            <option value="all">All streams</option>
                                         </select>
                                     </div>
                                     <div className="settings-option">

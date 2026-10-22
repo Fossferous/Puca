@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Someone joins a server; can they actually say anything?
  *

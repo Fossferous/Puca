@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The reminder loop's two modes. Púca (and Notes in a browser) keeps today's
  * behaviour: a newly due item fires a notification. Púca Notes' Android app

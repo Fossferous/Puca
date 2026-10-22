@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Controller-side stream-quality routing: what happens to the UI when the host
  * answers badly, or does not answer at all.

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * What the mesh manager's diagnostics say about each video, for the health
  * line (healthLog.ts reads these rows when a call is peer-to-peer).

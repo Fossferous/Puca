@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * "You're in <channel> on your PC — Leave / Move here": the client half of the
  * wire contract and its capability gate.

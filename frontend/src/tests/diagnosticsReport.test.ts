@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * "Copy diagnostics" has to survive the moment it is used.
  *

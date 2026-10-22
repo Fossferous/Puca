@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * raiseNativeKeyboard and hideNativeKeyboard against the REAL @capacitor/core, with the plugin
  * header an Android app hands the page — the path an installed APK takes,

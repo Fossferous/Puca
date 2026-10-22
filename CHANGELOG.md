@@ -4,7 +4,49 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.846 — 2026-10-22
+
+Ready for Púca on the Steam Deck
+### Added
+
+- **Ready for Púca on the Steam Deck.** The web app can now be driven by Púca for Steam Deck, a plugin for Decky Loader that brings Púca to the Deck's Game Mode: join a voice channel from the Quick Access menu while a game runs, mute, deafen or leave, see who is talking, push to talk on a back button, get message notifications over your game, and open the whole app for text chat. Everyone signs in with their own account, and calls stay end-to-end encrypted. The plugin is still being tested and comes separately; how to install and use it is in docs/STEAM_DECK.md. Nothing changes for anyone not using it. For anyone building their own integration, the embedding API the plugin uses is in docs/EMBEDDING.md.
+
+## 0.9.845 — 2026-10-22
+
+Open streams automatically; streamers are not announced and their streams start by themselves
+### Changed
+
+- **Stream-only accounts are not announced, and their streams start by themselves.** With **Speak Join/Leave (TTS)** on, you no longer hear "X joined the channel" or "X left the channel" for a stream-only account (an automated account a server owner has set up to stream into calls); real people are announced as before, and the join and leave chime is unchanged. When such an account is sharing in your call, its stream now starts playing without a Watch click, once per share: from the call's view as the stream view, and from the chat in the small player over the chat (docked under the header on a phone), so whatever you are reading stays where it is. Close it and it stays closed until it next goes live. Needs the app update and the server update.
+- **Open streams without clicking Watch, if you want.** **Settings → Voice & Video → Open streams automatically** chooses which streams in your voice channel start playing by themselves: **Off**, **From stream-only accounts** (the default) or **All streams**. Each opens once, so a stream you close stays closed until it starts again. A stream that opens while you are already watching another is added beside it without moving your view: the stream in focus stays in focus, and the small player keeps showing what it was showing. Nothing opens by itself while your browser asks to save data. The setting is per device, so you can keep it off on a phone.
+
+## 0.9.844 — 2026-10-22
+
+Lid-closed remote control on laptops with a dark panel; clips no longer wait on stream-only accounts
+### Fixed
+
+- **Clips no longer wait on a stream-only account.** A clip needs the approval of everyone in the call, and an account with the **Stream only** role (one run by automation) cannot answer the prompt, so a clip taken while it was in the call never posted. Stream-only members are no longer asked: a clip needs only the people's approval, and a call of just you and the account needs none. The role's description in **Roles** now says its members are not asked to approve clips, which is why it is meant for accounts run by automation, not for people. Needs the server update.
+- **Remote control with the lid closed works on laptops that keep their panel switched on but dark.** On some laptops a closed lid does not remove the built-in screen: Windows keeps it, and simply never draws to it. 0.9.842 counted that as "a screen", so the phone waited, then said "could not connect to the device", and the virtual screen was never offered. The PC now checks the lid and treats its built-in screen behind a closed lid as off: you get "<PC>'s screen is off — is its lid closed? Turn on 'Allow remote control with the lid closed' on that PC" at once, or, with that option on, the virtual screen. When a real screen and a dark one are both there, the picture comes from the real one. And when a screen really never shows a picture, the phone now says "<PC>'s screen did not show anything — it may be asleep, or its lid closed" instead of "could not connect to the device". Needs the desktop update on the PC and the app update on the phone.
+
+## 0.9.843 — 2026-10-22
+
+Stream-only accounts, join voice without a microphone, stable automation hooks
+### Added
+
+- **Stream-only accounts.** A server owner can now hold an account that only streams into calls (for example one run by automation) to exactly that, enforced by the server: in **Server Settings → Roles**, **+ Stream Only Role** creates a role whose members can see, join and share their screen in the voice channels the owner ticks under **Voice channels this role may stream in**, and nothing else — no text channels, no messages, no invites, and no channel keys but those calls'. An optional **No receive** means nobody's audio or video is sent to such a member while everyone still sees its stream. Only the owner or an administrator can set either, and neither can be put on @everyone. The full story, including what the encryption does and does not promise, is in docs/STREAM_ONLY.md. Needs the app update and the server update.
+- **Join voice without a microphone.** **Settings → Voice & Video → Join voice without a microphone** joins calls with no microphone at all: no microphone prompt, no "microphone is producing silence" warning, no idle move to the AFK channel, and the others see a dashed **No microphone** mark next to your name instead of the muted one. You can still share your screen. Comes with the in-app update on Android and the web app, and with the next desktop update.
+- **Stable automation hooks.** The web client's server icons, voice channels, **Join Voice**, **Share Screen** / **Stop Sharing** and **Disconnect** carry `data-testid` attributes that are now a supported contract for driving Púca in a headless browser, listed in docs/AUTOMATION.md; a test keeps them from disappearing in a redesign.
+
+## 0.9.842 — 2026-10-22
+
+Remote control with the lid closed; sharper fast-motion screen shares; reconnect and Download fixes
+### Added
+
+- **Remote control of a laptop with its lid closed.** A closed lid switches a laptop's screen off, so there was nothing to show: the phone sat on Connecting and then said only "could not connect to the device". Now it says why — "<PC>'s screen is off — is its lid closed?" — and the PC has a new option in **Devices**, under its sign-in-screen access: **Allow remote control with the lid closed**. Turning it on installs the open-source Virtual Display Driver once, behind Windows' own "install this device software?" prompt. From then on, when you connect to that PC and no screen is on, it switches on a virtual 1080p screen for the session ("<PC>'s screen is off — starting a virtual screen…") and switches it off again when the session ends or a real screen comes back, so it never sits beside your real screens. Turning the option off, or uninstalling Púca, removes the driver. Windows PCs only, not in Púca Lite. Needs the desktop update and the sign-in-screen service update on the PC (Devices offers it), and the app update on the phone.
+
+### Fixed
+
+- **Download in the picture viewer saves the picture again.** Opening a picture full size and pressing Download did nothing in the desktop app, and did nothing on Android for a picture in a note. It now saves the way every other attachment does: through the desktop app's own save (or **Save As**, if you ask where to save files), into Pictures on Android, and as a normal download in a browser. Comes with the in-app update on Android and the web app, and with the next desktop update.
+- **Remote control reconnects after a dropped connection without closing the app.** If a remote-control session from your phone ended badly — the phone changed network, the connection died mid-session — connecting again could fail or hang until you closed the Púca app and opened it again. The server now lets your phone replace its own stranded session at once, connects to the PC's current connection rather than one that has gone, and the app gives up on stalled steps instead of waiting forever and reconnects to the server as soon as it knows the old connection is dead. When a connection does fail, why is now recorded in **Settings → Send diagnostics**. Needs the app update and the server update.
 
 ### Changed
 

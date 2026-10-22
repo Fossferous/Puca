@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 // Notes' timing rules: what Reminders lists and how (events never overdue,
 // snoozes sort by their time, repeating to-dos on their current occurrence),
 // "Edited", the search haystack, export, and "Make a copy".

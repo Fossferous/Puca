@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Download on a Púca Clip in the DESKTOP app and on the WEB saves the clip
  * with its duration and a seek index (api/clips/fmp4SaveFix.ts) — the very

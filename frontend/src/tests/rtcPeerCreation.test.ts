@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Regression test for the peer-creation TOCTOU leak (fixed alongside the
  * "CPU climbs over a long stream" bug): getOrCreatePeer awaits the ICE config

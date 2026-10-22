@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Dropping a file onto the chat in the WINDOWS desktop app.
  *

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * A shut microphone stays shut while it is published to the SFU.
  *

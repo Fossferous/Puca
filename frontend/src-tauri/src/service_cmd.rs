@@ -141,6 +141,22 @@ fn agent_path() -> Option<PathBuf> {
 /// user's own choice rather than as a failure — declining a UAC prompt is a
 /// valid answer, not an error condition.
 fn run_elevated(args: &[&str], which: ElevationSource) -> Result<(), String> {
+    run_elevated_with(args, which, 60_000, |_| None)
+}
+
+/// `run_elevated`, with how long to wait and a way to name an exit code.
+///
+/// The virtual screen's install needs both. It blocks on Windows' own
+/// "install this device software?" prompt, which a person reads before
+/// answering, so a minute is not enough. And "you declined that prompt" has
+/// its own exit code (`puca_service::virtual_screen::exit_code_for`), which
+/// must reach the user as that sentence rather than as "exit code 3".
+fn run_elevated_with(
+    args: &[&str],
+    which: ElevationSource,
+    timeout_ms: u32,
+    describe_exit: fn(u32) -> Option<&'static str>,
+) -> Result<(), String> {
     use windows::core::HSTRING;
     use windows::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, WAIT_OBJECT_0};
     use windows::Win32::UI::Shell::{
@@ -185,7 +201,7 @@ fn run_elevated(args: &[&str], which: ElevationSource) -> Result<(), String> {
         }
         let wait = windows::Win32::System::Threading::WaitForSingleObject(
             info.hProcess,
-            60_000,
+            timeout_ms,
         );
         let mut code = 0u32;
         let _ = windows::Win32::System::Threading::GetExitCodeProcess(info.hProcess, &mut code);
@@ -195,6 +211,9 @@ fn run_elevated(args: &[&str], which: ElevationSource) -> Result<(), String> {
             return Err("The elevated helper did not finish in time.".into());
         }
         if code != 0 {
+            if let Some(sentence) = describe_exit(code) {
+                return Err(sentence.to_string());
+            }
             // The helper prints the real reason to its own stderr, which is
             // hidden here. Rather than invent one, point at the state the UI can
             // re-read: `service_state` will show it is still off.
@@ -300,6 +319,113 @@ pub fn service_bundled_fingerprint() -> Result<Option<String>, String> {
     let Some(service) = service_path() else { return Ok(None) };
     let Some(agent) = agent_path() else { return Ok(None) };
     puca_service::install::pair_fingerprint(&service, &agent).map(Some)
+}
+
+/// "Allow remote control with the lid closed": what the switch draws from.
+#[derive(serde::Serialize)]
+pub struct VirtualScreenState {
+    /// The option is on: the virtual screen driver and its device are
+    /// installed (the service's own record, `virtual-screen.json`, which this
+    /// user may read but not write).
+    pub installed: bool,
+    /// Can this PC have it at all: an x64 PC with the remote-access service
+    /// installed, since that service is what switches the screen on and off.
+    pub available: bool,
+    /// Why not, when it cannot.
+    pub problem: Option<String>,
+}
+
+/// Read from the machine on every call, never a remembered flag: the device
+/// can be removed in Device Manager, or by an uninstall this app never saw.
+#[tauri::command]
+pub fn virtual_screen_state() -> VirtualScreenState {
+    let installed = puca_service::virtual_screen_os::read_installed().is_some();
+    let x64 = puca_service::virtual_screen_os::native_x64();
+    let service = matches!(puca_service::install::status(), Ok(Some(_)));
+    let problem = if !x64 {
+        Some(puca_service::virtual_screen::NOT_X64.to_string())
+    } else if !service {
+        Some(puca_service::virtual_screen::NEEDS_REMOTE_ACCESS.to_string())
+    } else {
+        None
+    };
+    VirtualScreenState { installed, available: x64 && service, problem }
+}
+
+/// The helper's exit code, as the sentence it stands for. 2 is the service
+/// binary's own "unknown command": an installed service older than this app,
+/// which has never heard of the virtual screen.
+fn describe_virtual_screen_exit(code: u32) -> Option<&'static str> {
+    puca_service::virtual_screen::message_for_exit_code(code).or(match code {
+        2 => Some(
+            "The remote-access service on this PC is older than the app. Update it first \
+             (\"Update the service\" on this page), then try again.",
+        ),
+        _ => None,
+    })
+}
+
+/// Turn it on: install the driver and its device, resting switched off.
+///
+/// ONE UAC prompt for the elevated helper, then WINDOWS' OWN prompt for the
+/// driver ("Would you like to install this device software? Publisher:
+/// SignPath Foundation"), which is the consent this feature is built around
+/// and is deliberately not suppressed (`crates/puca-service/vdd/NOTICE.md`).
+///
+/// The INSTALLED service binary is the one elevated (`PreferInstalled`): it
+/// carries the driver files embedded, so what gets installed comes from an
+/// admin-only copy, never from this user-writable app folder. Ten minutes,
+/// because a person reads the second prompt before answering it. Async, so the
+/// window keeps painting while Windows asks.
+#[tauri::command]
+pub async fn virtual_screen_install() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        run_elevated_with(
+            &["virtual-screen-install"],
+            ElevationSource::PreferInstalled,
+            10 * 60_000,
+            describe_virtual_screen_exit,
+        )
+    })
+    .await
+    .map_err(|e| format!("the install did not finish: {e}"))?
+}
+
+/// Turn it off: remove the device, its driver package, its settings and files.
+#[tauri::command]
+pub async fn virtual_screen_remove() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        run_elevated_with(
+            &["virtual-screen-remove"],
+            ElevationSource::PreferInstalled,
+            2 * 60_000,
+            describe_virtual_screen_exit,
+        )
+    })
+    .await
+    .map_err(|e| format!("the removal did not finish: {e}"))?
+}
+
+#[cfg(test)]
+mod virtual_screen_exit_tests {
+    use super::describe_virtual_screen_exit;
+
+    #[test]
+    fn a_declined_driver_prompt_reads_as_the_users_choice() {
+        assert_eq!(
+            describe_virtual_screen_exit(3),
+            Some(puca_service::virtual_screen::DECLINED)
+        );
+    }
+
+    #[test]
+    fn an_old_service_is_named_as_one_and_points_at_the_update() {
+        let m = describe_virtual_screen_exit(2).expect("an old service has its own sentence");
+        assert!(m.contains("older than the app"), "{m}");
+        // Negative control: a generic failure has no sentence, so the caller
+        // says "the helper reported an error" rather than guessing.
+        assert_eq!(describe_virtual_screen_exit(1), None);
+    }
 }
 
 #[cfg(test)]

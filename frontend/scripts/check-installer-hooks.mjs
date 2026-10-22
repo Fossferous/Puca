@@ -258,6 +258,48 @@ for (const [tag, other] of [['full', liteId], ['lite', fullId]]) {
 }
 console.log('  ok  control: each variant\'s scheme check FAILS for the other variant\'s exe');
 
+/**
+ * THE VIRTUAL SCREEN ("Allow remote control with the lid closed") must be
+ * removed BEFORE the service folder goes. Its device and driver package live
+ * in the device tree and the driver store, outside every folder the uninstaller
+ * deletes. The helper that removes them, and the record naming what to
+ * remove, live IN the service folder. Reordered, an uninstall would delete the
+ * record and leave a display driver nothing can identify as Púca's.
+ */
+function virtualScreenProblems(uninstall) {
+    if (!uninstall) return ['no Uninstall section in the preprocessed script'];
+    const problems = [];
+    const remove = uninstall.findIndex(l => l.startsWith('nsExec::Exec')
+        && l.includes('sovereign-service.exe') && l.includes('virtual-screen-remove'));
+    const scDelete = uninstall.findIndex(l => l.startsWith('nsExec::Exec') && l.includes('sc delete'));
+    const rmdir = uninstall.findIndex(l => l.startsWith('RMDir /r') && l.includes('Sovereign\\service'));
+    if (remove < 0) problems.push('Uninstall never runs sovereign-service.exe virtual-screen-remove');
+    if (scDelete < 0 || rmdir < 0) problems.push('Uninstall does not delete the service and its folder — the order check would be vacuous');
+    if (remove >= 0 && scDelete >= 0 && remove > scDelete) problems.push('the virtual screen is removed AFTER the service is deleted');
+    if (remove >= 0 && rmdir >= 0 && remove > rmdir) problems.push('the virtual screen is removed AFTER the service folder (its record and helper) is deleted');
+    return problems;
+}
+const fullUninstall = sectionLines(ppo.full, 'Uninstall');
+const vsProblems = virtualScreenProblems(fullUninstall);
+if (vsProblems.length) {
+    console.error('FAIL full: the virtual screen on uninstall:');
+    for (const p of vsProblems) console.error('  - ' + p);
+    process.exit(1);
+}
+// Negative controls: Lite installs no service and must not pass, and the same
+// full uninstall with the removal moved to the end must fail the order check.
+if (virtualScreenProblems(sectionLines(ppo.lite, 'Uninstall')).length === 0) {
+    console.error('FAIL control: the Lite uninstaller passes the virtual-screen check — the check proves nothing');
+    process.exit(1);
+}
+const at = fullUninstall.findIndex(l => l.includes('virtual-screen-remove'));
+const moved = [...fullUninstall.slice(0, at), ...fullUninstall.slice(at + 1), fullUninstall[at]];
+if (virtualScreenProblems(moved).length === 0) {
+    console.error('FAIL control: removing the virtual screen LAST still passes — the order check proves nothing');
+    process.exit(1);
+}
+console.log('  ok  full: uninstall removes the virtual screen before the service and its folder (controls: Lite and a reordered copy fail)');
+
 // And the thing this gate was written for: every call site passes an OLD_BINARY.
 const macro = readFileSync(join(tauriDir, 'installer-migrate.nsh'), 'utf8');
 if (!/!macro\s+MigrateRenamedInstall\s+OLD_NAME\s+OLD_BINARY\b/.test(macro)) {

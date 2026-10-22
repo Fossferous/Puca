@@ -68,6 +68,19 @@ function walkNpm(node, name) {
 const npmTree = JSON.parse(run('npm', ['ls', '--prod', '--all', '--json', '--long'], join(ROOT, 'frontend')));
 walkNpm({ dependencies: npmTree.dependencies }, null);
 
+// Púca for Steam Deck (integrations/decky) bundles its own production
+// dependencies into the plugin zip. Read from its lockfile, which records
+// each package's licence, so no install is needed to list them; its
+// development dependencies (and @decky/ui, which Decky provides at run time)
+// are not shipped and not listed.
+const deckyPkgs = new Map(); // name@version -> {license, repository}
+const deckyLock = JSON.parse(readFileSync(join(ROOT, 'integrations', 'decky', 'package-lock.json'), 'utf8'));
+for (const [key, entry] of Object.entries(deckyLock.packages || {})) {
+    if (!key.startsWith('node_modules/') || entry.dev) continue;
+    const name = key.slice(key.lastIndexOf('node_modules/') + 'node_modules/'.length);
+    deckyPkgs.set(`${name}@${entry.version}`, { license: entry.license || 'UNKNOWN', repository: entry.resolved || '' });
+}
+
 // ---------------------------------------------------------------- cargo
 //
 // THE "used by" COLUMN IS AN ATTRIBUTION CLAIM, so it walks the resolve graph
@@ -164,6 +177,12 @@ lines.push('## Redistributed binaries');
 lines.push('');
 lines.push('- **DeepFilterNet (DFN3) wasm** — `frontend/src/wasm/df/`, licence and origin in');
 lines.push('  `frontend/src/wasm/df/NOTICE.md`.');
+// Embedded in the Windows remote-access service (puca-service.exe) and
+// installed only when someone turns on "Allow remote control with the lid
+// closed". Signed release files copied unmodified, so no crate graph lists it.
+lines.push('- **Virtual Display Driver** (MIT, VirtualDrivers/Virtual-Display-Driver) —');
+lines.push('  `crates/puca-service/vdd/`, licence, release, hashes and signature in');
+lines.push('  `crates/puca-service/vdd/NOTICE.md`.');
 lines.push('');
 lines.push(`## npm packages in the web/desktop/mobile bundle (${npmPkgs.size})`);
 lines.push('');
@@ -173,6 +192,18 @@ for (const k of sortKeys(npmPkgs)) {
     const v = npmPkgs.get(k);
     if (v.license === 'UNKNOWN') unknown.push(k);
     lines.push(`| ${k} | ${v.license} | ${v.repository.replace(/^git\+/, '').replace(/\.git$/, '')} |`);
+}
+lines.push('');
+lines.push(`## npm packages in the Steam Deck plugin (${deckyPkgs.size})`);
+lines.push('');
+lines.push('Bundled into the zip that `integrations/decky` builds, which carries their licence texts.');
+lines.push('');
+lines.push('| package | licence | origin |');
+lines.push('|---|---|---|');
+for (const k of sortKeys(deckyPkgs)) {
+    const v = deckyPkgs.get(k);
+    if (v.license === 'UNKNOWN') unknown.push(k);
+    lines.push(`| ${k} | ${v.license} | ${v.repository} |`);
 }
 lines.push('');
 lines.push(`## Rust crates in the server, desktop shell, native helpers and the wasm (${cargoPkgs.size})`);

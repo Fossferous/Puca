@@ -75,6 +75,9 @@ import { appIsBackgrounded } from '../pagePainting';
 import { linkRefusalPersistent } from './linkHealth';
 import { logRcConnect } from './connectLog';
 import {
+    noScreenEndReason, noScreenMessage, NO_SCREEN_NO_FRAME_REASON, NO_SCREEN_VIRTUAL_FAILED_REASON,
+} from './noScreen';
+import {
     AUDIO_HUB_ACK_TIMEOUT_MS,
     AUDIO_HUB_RESULT_TIMEOUT_MS,
     buildAudioHubResult,
@@ -401,6 +404,15 @@ export interface DeviceControlSession {
      *  3; ...", the no-response timeout, a DDC refusal). Auto-clears; never
      *  a session error. */
     powerNotice: string | null;
+    /** CONTROLLER: what the person tapped to connect ("Work Laptop"), for the
+     *  messages that name the PC — "Work Laptop's screen is off…". Null when the
+     *  caller did not say, and the messages then say "That PC". */
+    peerName: string | null;
+    /** CONTROLLER: the host said it has no screen switched on and is starting
+     *  its virtual screen (a `screen-state` notice; noScreen.ts). Host-asserted
+     *  only, like `secureDesktop`. The stage puts it in place of "Waiting for
+     *  the device's screen…" until the picture arrives. */
+    hostScreen: 'virtual-starting' | null;
 }
 
 interface Internal extends DeviceControlSession {
@@ -850,6 +862,8 @@ function emit(): void {
         secureDesktop: s.secureDesktop,
         cursorClipped: s.cursorClipped,
         powerNotice: s.powerNotice,
+        peerName: s.peerName,
+        hostScreen: s.hostScreen,
         shareUser: s.share ? { id: s.share.peerUser, username: s.share.peerUsername } : null,
         viewOnly: s.share ? !s.share.capabilities.includes('control') : false,
         unattended: s.unattended,
@@ -1089,6 +1103,50 @@ async function openSignal(s: Internal, blob: string): Promise<Record<string, unk
     return obj;
 }
 
+/** How long the HOST waits for a screen before giving up. Longer than the
+ *  agent's own worst case (crates/puca-agent virtual_screen.rs
+ *  PREPARE_CEILING, 20 s), which normally answers first; this only bounds an
+ *  agent that keeps saying "waking" for ever. */
+export const HOST_SCREEN_PREP_CEILING_MS = 25_000;
+const HOST_SCREEN_POLL_MS = 500;
+
+/**
+ * HOST, agent transport: make sure the agent has a screen to capture before it
+ * is handed the offer. `true` = go ahead and answer. `false` = the session was
+ * ended here (with a reason the phone names) or ended by something else while
+ * waiting; the caller must do nothing more.
+ *
+ * Tells the phone ONCE when a virtual screen is being started, so its stage
+ * says so instead of "Waiting for the device's screen…", and so its own
+ * wait-for-video clock restarts (the virtual screen takes seconds to appear).
+ * An agent that does not know the request answers `ready`
+ * (hostAgent.ts `agentPrepareScreen`), so a mixed pair behaves as before.
+ */
+async function prepareHostScreen(s: Internal): Promise<boolean> {
+    const { agentPrepareScreen } = await import('./hostAgent');
+    const started = Date.now();
+    let toldStarting = false;
+    for (;;) {
+        if (s.phase === 'ended' || sessions.get(s.id) !== s) return false;
+        const screen = await agentPrepareScreen(s.id);
+        if ((s.phase as SessionPhase) === 'ended' || sessions.get(s.id) !== s) return false;
+        if (screen.state === 'ready') return true;
+        if (screen.state === 'off') {
+            teardown(s, noScreenEndReason(screen.reason), true);
+            return false;
+        }
+        if (screen.state === 'starting' && !toldStarting) {
+            toldStarting = true;
+            void sendSignal(s, { kind: 'screen-state', state: 'virtual-starting' }).catch(() => undefined);
+        }
+        if (Date.now() - started >= HOST_SCREEN_PREP_CEILING_MS) {
+            teardown(s, noScreenEndReason(NO_SCREEN_VIRTUAL_FAILED_REASON), true);
+            return false;
+        }
+        await new Promise(r => setTimeout(r, HOST_SCREEN_POLL_MS));
+    }
+}
+
 /**
  * Answer an SDP offer. THIS is the moment the screen starts leaving the machine,
  * so every caller must have cleared the unattended gate first.
@@ -1115,6 +1173,11 @@ async function answerOffer(
         // connections answering the same offer would both send, and the
         // controller would render whichever won.
         const { agentAnswerOffer } = await import('./hostAgent');
+        // A SCREEN FIRST. A machine with none switched on (a laptop with its
+        // lid shut) used to answer, fail its capture seconds later and leave
+        // the phone with "could not connect to the device". Ended here, with
+        // a reason the phone names, or held while a virtual screen starts.
+        if (!s.filesOnly && !(await prepareHostScreen(s))) return;
         // s.monitor is what the person at this machine picked in the consent
         // dialog — or, for an armed host with more than one screen, the
         // every-screen default applied before startSession. Passing null here
@@ -1157,6 +1220,18 @@ async function answerOffer(
             // channel is by sequence, and this must land with the answer's
             // picture, not behind it.
             void sendSignal(s, { kind: 'monitor-active', active: 0 });
+        }
+        // STEERED OFF A DARK PANEL. The agent captures another screen than
+        // the one asked for when that one is a built-in panel behind a closed
+        // lid (crates/puca-agent virtual_screen.rs steer_monitor). The viewer
+        // must be told, as for the every-screen fallback above, or it maps the
+        // pointer onto the screen it asked for rather than the one it gets.
+        const { agentSteeredMonitor } = await import('./hostAgent');
+        const steered = agentSteeredMonitor(s.id);
+        if (steered !== null && steered !== s.monitor) {
+            s.monitor = steered;
+            s.monitorDefaulted = false;
+            void sendSignal(s, { kind: 'monitor-active', active: steered });
         }
         // The stream exists from here, so queued candidates have somewhere to
         // go. Set BEFORE draining: a candidate arriving during the drain must
@@ -1335,6 +1410,8 @@ function clearMediaDeadline(s: Internal): void {
 function markMediaArrived(s: Internal): void {
     clearMediaDeadline(s);
     s.awaitingMedia = false;
+    // The virtual screen is up and showing: the notice has done its job.
+    s.hostScreen = null;
     if (s.mediaRestarting) {
         s.mediaRestarting = false;
         // The rebuilt stream may be running at the host's defaults (a restart
@@ -2213,9 +2290,8 @@ export async function pollSecureDesktop(): Promise<void> {
             // new stream.
             //
             // NOT for 'no_frame': the display never produced a first frame,
-            // and the viewer's own deadline already says the screens may be
-            // asleep. A restart cannot wake them and would replace that
-            // message with a generic one.
+            // and a restart cannot wake it. That case ends the session with
+            // a reason the phone names, just below.
             //
             // `!s.filesOnly` is NOT what keeps a files session out of here in
             // the ordinary case — the `hosts` filter above is. It is re-read
@@ -2234,6 +2310,21 @@ export async function pollSecureDesktop(): Promise<void> {
                 && sessions.get(s.id) === s && s.phase === 'active' && !s.filesOnly
                 && !s.transportDown && !s.peerReconnecting) {
                 reportStreamDied(s);
+            }
+            // THE DISPLAY NEVER PRODUCED A PICTURE ('no_frame'), so say so and
+            // end. This used to stay silent and leave it to the viewer's own
+            // 30 s wait for video, but the agent's stream (and its socket)
+            // ends after 12 s, and the phone's connection timed out first:
+            // "could not connect to the device", on a laptop whose screen was
+            // simply dark (0.9.842 field report). Ended HERE, by the side that
+            // knows why, with the same gates as the restart above.
+            if (streamLive === false
+                && streamEnd === AGENT_STREAM_END_NO_FRAME
+                && started && s.agentStreamStarted && s.agentStreamGen === gen
+                && sessions.get(s.id) === s && s.phase === 'active' && !s.filesOnly
+                && !s.transportDown && !s.peerReconnecting) {
+                teardown(s, noScreenEndReason(NO_SCREEN_NO_FRAME_REASON), true);
+                continue;
             }
             if (up !== s.secureDesktop) {
                 s.secureDesktop = up;
@@ -3293,6 +3384,9 @@ export async function connectToDevice(
             ownerUsername: string;
             capabilities: string[];
         };
+        /** The name the person sees for that device, for the messages that
+         *  name it ("Work Laptop's screen is off…"). Display only. */
+        peerName?: string;
     },
 ): Promise<string> {
     const myDevice = thisDeviceId();
@@ -3339,6 +3433,8 @@ export async function connectToDevice(
         cursorClipped: false,
         cursorClippedSent: null,
         powerNotice: null, pendingPowerAckTimer: null, powerNoticeTimer: null,
+        peerName: opts?.peerName?.trim() || null,
+        hostScreen: null,
     };
     sessions.set(id, s);
     emit();
@@ -3948,6 +4044,8 @@ export function installDeviceSessions(): void {
                 cursorClipped: false,
                 cursorClippedSent: null,
                 powerNotice: null, pendingPowerAckTimer: null, powerNoticeTimer: null,
+                peerName: null,
+                hostScreen: null,
             };
             sessions.set(s.id, s);
             emit();
@@ -4639,6 +4737,16 @@ export function installDeviceSessions(): void {
             followMachineToSignIn(host);
             return;
         }
+        // NO SCREEN ON THAT PC — a code (noScreen.ts), shown as a sentence
+        // this side writes, because the sentence names the PC and only this
+        // side knows what the person calls it. Replaces the generic "could
+        // not connect" the closed lid used to end in.
+        const named = p?.reason && s.role === 'controller' ? noScreenMessage(p.reason, s.peerName) : null;
+        if (named) {
+            s.error = named;
+            teardown(s, named, false);
+            return;
+        }
         // TRUNCATED: this string is chosen by the peer and RELAYED BY THE
         // SERVER, and it is now rendered in the app's own chrome. A reason is a
         // sentence; anything longer is not one, and there is no length this
@@ -4920,6 +5028,10 @@ function attendedInputAuth(
 
 function armHostControlGuard(s: Internal): void {
     if (s.role !== 'host' || s.filesOnly) return;
+    // Not for a session that ended while it was being answered (no screen to
+    // show, say): the guard is a low-level input hook, and one armed for a
+    // dead session would outlive it.
+    if (s.phase === 'ended' || sessions.get(s.id) !== s) return;
     // A share that grants no control cannot be driven, so the host is not
     // trapped behind somebody else's pointer and needs no physical escape.
     if (s.share && !s.share.capabilities.includes('control')) return;
@@ -5297,6 +5409,9 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
         w?: number;
         h?: number;
         clipped?: boolean;
+        /** screen-state: what the host says about its screen. Only
+         *  'virtual-starting' means anything today (noScreen.ts). */
+        state?: string;
     } | null;
     if (!data) return;
 
@@ -5899,6 +6014,21 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
             if (data.up && !s.secureDesktop) s.secureDesktopSince = Date.now();
             if (!data.up) s.secureDesktopSince = null;
             s.secureDesktop = data.up;
+            emit();
+            return;
+        }
+        if (data.kind === 'screen-state') {
+            if (s.role !== 'controller') return;
+            // The one state this build knows. Anything else — a malformed
+            // frame, a state a newer host invents — changes nothing.
+            if (data.state !== 'virtual-starting' || s.hostScreen === 'virtual-starting') return;
+            s.hostScreen = 'virtual-starting';
+            // The virtual screen takes seconds to appear, and they were being
+            // counted against the 30 s wait for video. Start that clock again,
+            // with the sentence that is true if it never shows.
+            if (s.awaitingMedia) {
+                armMediaDeadline(s, noScreenMessage(NO_SCREEN_VIRTUAL_FAILED_REASON, s.peerName) ?? undefined);
+            }
             emit();
             return;
         }

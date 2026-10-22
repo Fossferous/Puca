@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * L15 on the phone, JS side. A phone's reminder engine runs with Púca Notes
  * CLOSED and cannot open the sealed schedule or snooze, so:

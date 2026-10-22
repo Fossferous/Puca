@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * WHERE a search matched — the offset arithmetic behind the highlighting.
  *

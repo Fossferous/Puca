@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The voice panel's phone layout has ONE gate (utils/phonePanel.ts). These pin
  * that the JS gate and both stylesheets literally share it, and that the

@@ -94,6 +94,13 @@ import {
     type UnattendedAccessState,
 } from '../api/devices/lockScreen';
 import { linkRefusalPersistent } from '../api/devices/linkHealth';
+import {
+    virtualScreenState,
+    enableVirtualScreen,
+    disableVirtualScreen,
+    type VirtualScreenState,
+} from '../api/devices/virtualScreen';
+import { LID_CLOSED_OPTION } from '../api/devices/noScreen';
 import { getTunnelPolicy, setTunnelForwarding, tunnelSupported } from '../api/devices/tunnel';
 import {
     armUnattended,
@@ -325,6 +332,12 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
     // app ever seeing it, and a stored boolean would then show a switch that is
     // on while nothing is installed.
     const [lockScreen, setLockScreen] = useState<LockScreenState | null>(null);
+    // "Allow remote control with the lid closed": the virtual screen, read
+    // from the machine like the service above (it can be removed in Device
+    // Manager). Its own error line, shown in its own card: the page's error
+    // banner is a screen-height away from this switch.
+    const [virtualScreen, setVirtualScreen] = useState<VirtualScreenState | null>(null);
+    const [virtualScreenError, setVirtualScreenError] = useState<string | null>(null);
     // The two switches BEHIND the install: reachable at all, and armed with a
     // passphrase. Both are required, and both are read from the machine.
     const [signIn, setSignIn] = useState<UnattendedAccessState | null>(null);
@@ -613,6 +626,7 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
         if (autostartSupported()) void isAutostartEnabled().then(setAutostartState);
         if (lockScreenSupported()) {
             void lockScreenState().then(setLockScreen);
+            void virtualScreenState().then(setVirtualScreen);
             void unattendedAccessState().then(setSignIn);
             // The "what this app ships" half of the service-update check; the
             // "what is installed" half arrives inside unattendedAccessState.
@@ -772,6 +786,25 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
         // elevation prompt the switch must go back on its own, and if the helper
         // half-succeeded the truth is on the machine, not in our return value.
         setLockScreen(await lockScreenState());
+        // The virtual screen hangs off this service (and deprovision removes
+        // it), so its switch is re-read with it.
+        setVirtualScreen(await virtualScreenState());
+        setBusyId(null);
+    };
+
+    /**
+     * "Allow remote control with the lid closed": install or remove the
+     * virtual screen. Two prompts on the way on — Windows' administrator
+     * prompt, then its own "install this device software?" naming the
+     * driver's publisher — and the switch is re-read from the machine either
+     * way, so a declined prompt puts it back by itself.
+     */
+    const toggleVirtualScreen = async (on: boolean) => {
+        setBusyId('virtual-screen');
+        setVirtualScreenError(null);
+        const err = on ? await enableVirtualScreen() : await disableVirtualScreen();
+        if (err) setVirtualScreenError(err);
+        setVirtualScreen(await virtualScreenState());
         setBusyId(null);
     };
 
@@ -957,7 +990,11 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                 setError(`${machine.primary.name} is not reachable right now.`);
                 return;
             }
-            await connectToDevice(row.id, filesOnly ? { filesOnly: true } : undefined);
+            // The name rides along for the messages that name the PC
+            // ("Work Laptop's screen is off…"); display only.
+            await connectToDevice(row.id, filesOnly
+                ? { filesOnly: true, peerName: machine.primary.name }
+                : { peerName: machine.primary.name });
             // The stage takes over the screen from here (it mounts at the app
             // root, above this view); nothing to close.
         } catch (e) {
@@ -1018,6 +1055,7 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
         try {
             await connectToDevice(sh.host_device, {
                 filesOnly,
+                peerName: sh.host_device_name,
                 share: {
                     inviteId: sh.id,
                     ownerUser: sh.owner_user,
@@ -1932,6 +1970,85 @@ export function DevicesView({ onClose, onOpenSettings }: DevicesViewProps) {
                                 </button>
                             </div>
                         )}
+
+                        {/* "ALLOW REMOTE CONTROL WITH THE LID CLOSED" — the
+                            virtual screen. Behind the service, because the
+                            service is what switches it on and off: shown only
+                            once that exists, like the cards above. States
+                            what it installs BEFORE it is turned on, and that
+                            Windows will ask in its own words, because a
+                            driver is not something to consent to blind. The
+                            phone needs no switch: it is told what happens. */}
+                        {lockScreenSupported() && lockScreen?.installed && (() => {
+                            // A service older than this app has never heard of
+                            // the virtual screen, so turning it ON waits for
+                            // the update above. Turning it off never waits: a
+                            // service that installed it can remove it.
+                            const waitsForUpdate = !virtualScreen?.installed
+                                && serviceNeedsUpdate(signIn?.binsHash ?? null, bundledHash);
+                            return (
+                                <div className="dv-card device-option">
+                                    <div className="option-info">
+                                        <label htmlFor="device-lid-closed">{LID_CLOSED_OPTION}</label>
+                                        <span className="option-hint">
+                                            A laptop with its lid shut (or a PC with no monitor
+                                            switched on) has no screen for remote control to show, so
+                                            your phone cannot see or control it. With this on, Púca
+                                            switches on a virtual screen only while a remote session
+                                            needs one and no real screen is on, and switches it off
+                                            again afterwards. The rest of the time it stays off, so
+                                            nothing changes when you use this PC normally.
+                                            <br /><br />
+                                            <strong>What it installs:</strong> the open-source Virtual
+                                            Display Driver (MIT licence) as a device called
+                                            {' '}&ldquo;Virtual Display Driver&rdquo;, which Device
+                                            Manager shows as disabled while it is off. Windows asks
+                                            twice: once for permission to make the change, then in
+                                            its own words to install the driver, naming its
+                                            publisher, SignPath Foundation. The screen may flicker
+                                            once while it installs.
+                                            <br /><br />
+                                            Turning this off removes the device, the driver and its
+                                            settings. So does turning off lock-screen access above,
+                                            or uninstalling Púca.
+                                            {virtualScreen?.problem && (
+                                                <>
+                                                    <br /><br />
+                                                    <strong>{virtualScreen.problem}</strong>
+                                                </>
+                                            )}
+                                            {waitsForUpdate && (
+                                                <>
+                                                    <br /><br />
+                                                    <strong>
+                                                        Update the sign-in-screen service first (above):
+                                                        the one installed is older than this app.
+                                                    </strong>
+                                                </>
+                                            )}
+                                            {virtualScreenError && (
+                                                <>
+                                                    <br /><br />
+                                                    <strong role="alert">{virtualScreenError}</strong>
+                                                </>
+                                            )}
+                                        </span>
+                                    </div>
+                                    <input
+                                        id="device-lid-closed"
+                                        type="checkbox"
+                                        checked={virtualScreen?.installed ?? false}
+                                        disabled={
+                                            virtualScreen === null
+                                            || (!virtualScreen.installed && !virtualScreen.available)
+                                            || waitsForUpdate
+                                            || busyId === 'virtual-screen'
+                                        }
+                                        onChange={e => void toggleVirtualScreen(e.target.checked)}
+                                    />
+                                </div>
+                            );
+                        })()}
 
                         {lockScreenSupported() && lockScreen?.installed && signIn?.enrolled && (
                             <div className="dv-card device-option device-option-stacked">

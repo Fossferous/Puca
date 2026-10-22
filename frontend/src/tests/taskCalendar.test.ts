@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 // Tasks → calendar entries: plain items, events, series, completion, the
 // viewer's days (an overnight event covers two), all-day dates that do not
 // move with the viewer's zone, and the time-grid layout on a DST day.

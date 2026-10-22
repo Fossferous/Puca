@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The unlock handover's second half: after somebody signs in at a machine's
  * sign-in screen, the controller follows the picture to that machine's

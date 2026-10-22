@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The attachment cache's CIPHERTEXT files (api/cipherStore.ts, through the
  * real api/attachments.ts): an OPFS file per copy kept, so that showing it

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The lifecycle wedge these pin: an UNGRACEFUL end used to strand three kinds
  * of state — a 'connecting' session no answer would ever end, a server-side
@@ -88,6 +89,10 @@ const keys = vi.hoisted(() => ({ lookup: async (): Promise<string | null> => 'x2
 vi.mock('../api/devices/peerKeys', () => ({ deviceStaticPubFor: () => keys.lookup() }));
 vi.mock('../api/devices/unattendedPrompt', () => ({ requestUnattendedPassphrase: async () => null }));
 vi.mock('../api/devices/hostAgent', () => ({
+    // A screen is there to capture (session.ts prepareHostScreen).
+    agentPrepareScreen: async () => ({ state: 'ready' }),
+    // The stream captures the screen asked for (no dark panel to steer off).
+    agentSteeredMonitor: () => null,
     agentAnswerOffer: async () => 'v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\n',
 }));
 vi.mock('../api/devices/unattended', () => ({

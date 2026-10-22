@@ -104,6 +104,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", puca_service::provision::deprovision_and_forget()?);
             Ok(())
         }
+        // "Allow remote control with the lid closed": install the virtual
+        // screen driver and its device, resting switched OFF. Run elevated by
+        // the app, in the signed-in user's session, so Windows can show its
+        // own device-software prompt (src/virtual_screen_os.rs). The driver
+        // files come from THIS binary, not from a path on the command line.
+        //
+        // A failure EXITS with a code the app can turn back into a sentence
+        // (`virtual_screen::exit_code_for`): this process is raised with
+        // `runas`, so its output never reaches the app, and "you declined
+        // Windows' prompt" must not arrive as "the helper failed".
+        Some("virtual-screen-install") => match puca_service::virtual_screen_os::install() {
+            Ok(m) => {
+                println!("{m}");
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(puca_service::virtual_screen::exit_code_for(&e));
+            }
+        },
+        // Turning it off, and the uninstaller's hook: remove the device, the
+        // driver package, its settings key and its files.
+        Some("virtual-screen-remove") => match puca_service::virtual_screen_os::remove() {
+            Ok(m) => {
+                println!("{m}");
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(puca_service::virtual_screen::exit_code_for(&e));
+            }
+        },
         Some("uninstall") => {
             puca_service::install::uninstall()?;
             println!("uninstalled {}", puca_service::SERVICE_NAME);
@@ -118,7 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some("run") | None => windows_impl::run(),
         Some(other) => {
-            eprintln!("unknown command {other:?}; use provision <agent> | update <agent> | deprovision | deprovision-forget | status | install | uninstall | run");
+            eprintln!("unknown command {other:?}; use provision <agent> | update <agent> | deprovision | deprovision-forget | virtual-screen-install | virtual-screen-remove | status | install | uninstall | run");
             std::process::exit(2);
         }
     }
@@ -556,6 +588,18 @@ mod windows_impl {
             ServiceControlAccept::STOP | ServiceControlAccept::SESSION_CHANGE,
         ))?;
 
+        // THE VIRTUAL SCREEN'S CRASH RECOVERY, before anything can hold it: a
+        // service that is just starting holds no leases, so an enabled virtual
+        // screen is left over from a crash or a reboot mid-session. Then the
+        // tick that switches it off once every hold has lapsed — on its own
+        // thread, so a slow device call never delays the agent supervision
+        // below. Both are no-ops on a machine where it was never installed.
+        puca_service::virtual_screen_os::recover_at_start();
+        std::thread::spawn(|| loop {
+            std::thread::sleep(Duration::from_secs(2));
+            puca_service::virtual_screen_os::tick();
+        });
+
         let mut supervisor = Supervisor::new();
         let mut agents: HashMap<u32, AgentProcess> = HashMap::new();
         let mut policy = RestartPolicy::new();
@@ -642,6 +686,9 @@ mod windows_impl {
                             agent_alive: g.2,
                             agent_handle: g.3.clone(),
                             caller,
+                            // Filled in by the pipe loop, which is the only
+                            // place that holds the connection.
+                            client_pid: None,
                         }
                     },
                     |accepted| {

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * P2P INPUT (R4): the controller must not leave the relay until the agent
  * says it will serve the channel.

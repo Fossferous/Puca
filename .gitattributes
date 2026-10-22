@@ -64,3 +64,13 @@
 # _sqlx_migrations rows in the same controlled step, which is a data migration,
 # not a rename. That is why "Sovereign" still appears in some of these files.
 migrations/*.sql -text
+
+# The vendored Virtual Display Driver package (crates/puca-service/vdd/). Its
+# catalog (mttvdd.cat) is a signed list of the EXACT bytes of MttVDD.inf and
+# MttVDD.dll; the INF is UTF-16 text, and any line-ending conversion on
+# checkout would leave a package Windows refuses to install ("the hash for the
+# file is not present in the specified catalog"). The service also embeds these
+# files and checks their SHA-256 before installing them. Never let git touch them.
+crates/puca-service/vdd/MttVDD.inf binary
+crates/puca-service/vdd/MttVDD.dll binary
+crates/puca-service/vdd/mttvdd.cat binary

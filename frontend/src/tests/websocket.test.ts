@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * WebSocket client — the send path's failure mode.
  *

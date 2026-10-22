@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The link router (api/linkRouter.ts): what a click on a link does, per shell.
  *

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * A CONTROLLER must not lose the unattended challenge that an armed host sends
  * the instant it accepts.

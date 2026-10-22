@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * A cold-start `puca://` invite link survives an update installed AT LAUNCH.
  *

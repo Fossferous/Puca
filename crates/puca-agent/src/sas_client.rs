@@ -149,6 +149,39 @@ pub fn interpret(line: &str) -> Result<(), String> {
 /// rather than a blanket allow.
 #[cfg_attr(test, allow(dead_code))]
 pub fn raise_sas() -> Result<(), String> {
+    match exchange(SAS_REQUEST_LINE) {
+        Ok(line) => interpret(line.trim()),
+        Err(ExchangeError::Open(e)) => Err(describe_open_error(&e)),
+        Err(ExchangeError::Io(e)) => Err(e),
+    }
+}
+
+/// Why one request/response with the service did not complete.
+#[derive(Debug)]
+pub enum ExchangeError {
+    /// The pipe could not be opened (after retrying a busy one). Kept as the
+    /// OS error, because "not installed" (2) means something different to
+    /// each caller: for the SAS it is a fault to explain, for the virtual
+    /// screen it is simply "this PC has no remote-access service".
+    Open(std::io::Error),
+    /// Opened, but the conversation failed.
+    Io(String),
+}
+
+impl std::fmt::Display for ExchangeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExchangeError::Open(e) => write!(f, "{}", describe_open_error(e)),
+            ExchangeError::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// Send one line to the service's control pipe and return its answer line.
+/// Shared by the SAS and the virtual screen (`virtual_screen.rs`), so the two
+/// cannot disagree about what a local pipe conversation looks like.
+#[cfg_attr(test, allow(dead_code))]
+pub fn exchange(request_line: &str) -> Result<String, ExchangeError> {
     use std::os::windows::fs::OpenOptionsExt;
     const SECURITY_SQOS_PRESENT: u32 = 0x0010_0000;
     const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
@@ -162,23 +195,25 @@ pub fn raise_sas() -> Result<(), String> {
             .open(SERVICE_CONTROL_PIPE)
         {
             Ok(handle) => {
-                let mut writer = handle
-                    .try_clone()
-                    .map_err(|e| format!("could not clone the service pipe handle: {e}"))?;
+                let mut writer = handle.try_clone().map_err(|e| {
+                    ExchangeError::Io(format!("could not clone the service pipe handle: {e}"))
+                })?;
                 let mut reader = BufReader::new(handle);
                 writer
-                    .write_all(format!("{SAS_REQUEST_LINE}\n").as_bytes())
-                    .map_err(|e| format!("could not ask the Puca system service: {e}"))?;
+                    .write_all(format!("{request_line}\n").as_bytes())
+                    .map_err(|e| ExchangeError::Io(format!("could not ask the Puca system service: {e}")))?;
                 writer.flush().ok();
 
                 let mut line = String::new();
-                reader
-                    .read_line(&mut line)
-                    .map_err(|e| format!("could not read the system service's answer: {e}"))?;
+                reader.read_line(&mut line).map_err(|e| {
+                    ExchangeError::Io(format!("could not read the system service's answer: {e}"))
+                })?;
                 if line.trim().is_empty() {
-                    return Err("the Puca system service closed the connection".to_string());
+                    return Err(ExchangeError::Io(
+                        "the Puca system service closed the connection".to_string(),
+                    ));
                 }
-                return interpret(line.trim());
+                return Ok(line);
             }
             Err(e) => {
                 // RETRY ONLY A BUSY PIPE. "Not installed" and "access denied"
@@ -196,7 +231,7 @@ pub fn raise_sas() -> Result<(), String> {
             }
         }
     }
-    Err(describe_open_error(&last.unwrap_or_else(|| {
+    Err(ExchangeError::Open(last.unwrap_or_else(|| {
         std::io::Error::other("the service pipe could not be opened and gave no reason")
     })))
 }

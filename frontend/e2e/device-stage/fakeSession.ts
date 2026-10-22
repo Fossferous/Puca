@@ -98,6 +98,13 @@ const state = {
     step: null as number | null,
     pendingStep: null as { step: number; since: number } | null,
     unattended: true,
+    // The no-screen messages (no-screen-stage-real-browser.mjs): waiting for
+    // the first picture, the host's virtual-screen notice, and an ended
+    // session's error.
+    awaitingMedia: false,
+    hostScreen: null as 'virtual-starting' | null,
+    peerName: null as string | null,
+    endedWith: null as string | null,
 };
 
 const log: Array<Record<string, unknown>> = [];
@@ -110,14 +117,16 @@ const now = () => Math.round(performance.now() - t0);
 
 function session(): DeviceControlSession {
     return {
-        id: SID, role: 'controller', peerDevice: 'dev-host', phase: 'active',
-        stream, captureSize: null, error: null,
+        id: SID, role: 'controller', peerDevice: 'dev-host',
+        phase: state.endedWith === null ? 'active' : 'ended',
+        stream, captureSize: null, error: state.endedWith,
+        peerName: state.peerName, hostScreen: state.hostScreen,
         monitors: MONITORS.map(m => ({ ...m })),
         activeMonitor: state.activeMonitor,
         unattended: state.unattended,
         filesChannel: null, fileRoot: null, fileScopeKind: null, filesOnly: false, audioHub: false,
         privacyActive: false, cursorOwned: state.cursorOwned, reconnecting: false,
-        awaitingMedia: false, mediaRestarting: false, secureDesktop: false, cursorClipped: false,
+        awaitingMedia: state.awaitingMedia, mediaRestarting: false, secureDesktop: false, cursorClipped: false,
         shareUser: null, viewOnly: false, powerNotice: null,
     } as unknown as DeviceControlSession;
 }

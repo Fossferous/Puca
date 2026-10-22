@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * A mesh peer's EXTRA audio stream — neither their voice stream nor an
  * announced screen share — is held until the server announces a share.

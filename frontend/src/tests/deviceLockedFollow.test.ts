@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * THE LOCKED-FOLLOW FALLBACK (pollLockedFollow): a controller session stuck on
  * a secure-desktop banner follows to the machine's sign-in row — but ONLY when
@@ -77,6 +78,10 @@ vi.mock('../api/devices/deviceKeyRc', () => ({
 vi.mock('../api/devices/peerKeys', () => ({ deviceStaticPubFor: async () => 'x25519:' + btoa('k') }));
 vi.mock('../api/devices/unattendedPrompt', () => ({ requestUnattendedPassphrase: async () => null }));
 vi.mock('../api/devices/hostAgent', () => ({
+    // A screen is there to capture (session.ts prepareHostScreen).
+    agentPrepareScreen: async () => ({ state: 'ready' }),
+    // The stream captures the screen asked for (no dark panel to steer off).
+    agentSteeredMonitor: () => null,
     agentAnswerOffer: async () => 'v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\n',
 }));
 vi.mock('../api/devices/unattended', () => ({

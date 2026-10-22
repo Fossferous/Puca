@@ -152,6 +152,10 @@ export const liteAliases = RC_ENABLED ? [] : [
   // module out of the graph regardless of what Rollup decides about its
   // module-level state.
   { find: /^(\.\/controlDc|(\.\.\/)+api\/rtc\/controlDc)$/, replacement: src('api/rtc/controlDc.lite.ts') },
+  // The diagnostics report reads the remote-control connection log; its
+  // section is gated behind __RC_ENABLED__, and this keeps the real module
+  // (it lives in api/devices/) out of the graph.
+  { find: /^\.\/devices\/connectLog$/, replacement: src('api/rcConnectLog.lite.ts') },
 ]
 
 /**

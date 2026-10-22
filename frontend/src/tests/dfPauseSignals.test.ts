@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The signals dfPause.ts listens to, at their sources. The pause decision is
  * only as good as the events that re-run it: a mic gate, a peer connection

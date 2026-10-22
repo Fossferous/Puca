@@ -31,6 +31,7 @@ import { logMicDiag, subscribeNativeMicDefault } from '../api/micDiag';
 import { keepDetail, keepSummary } from './stableState';
 import { type NoiseSuppressionMode, type NoiseModeChange, NOISE_MODE_EVENT, getNoiseSuppressionMode, setNoiseSuppressionMode, changeNoiseModeLive, modeUsesWebAudio, rawInputHasHadSignal, hasLiveGainStage, isDeepFilterGateOpen, selectedInputDeviceId } from '../api/noiseFilter';
 import { registerHold, unregisterHold, registerPress, unregisterPress, startNativeFeed, stopNativeFeed, setNativeFeedHost } from '../api/hotkeys';
+import { notifyEmbedChanged, registerEmbedCall } from '../api/embedApi';
 import { computeNativeWatch } from '../api/hotkeyScope';
 
 /** Shared mic-health notice text — the sentinel clears only its own message
@@ -55,6 +56,9 @@ const SPEAK_DENIED_NOTICE = "You don't have permission to speak in this channel.
  *  opened mid-call (a permission prompt out of nowhere, and an SFU grant is
  *  minted per join); the next join picks it up. */
 const SPEAK_GRANTED_NOTICE = 'You can speak in this channel now. Leave and rejoin it to use your microphone.';
+/** The Mute button of a member who joined without a microphone ON PURPOSE
+ *  (Settings, or a stream-only account): nothing to unmute, nothing missing. */
+const NO_MIC_CHOSEN_TITLE = 'You joined without a microphone — nobody can hear you';
 /** No CONNECT on this voice channel: refused before the mic is ever asked for. */
 const CONNECT_DENIED_NOTICE = "You don't have permission to join this voice channel.";
 import { startHidingCaptureBar, stopHidingCaptureBar } from '../api/captureBar';
@@ -105,7 +109,7 @@ import { useDfSettledOffer, keepRnnoiseForSession, KEEP_RNNOISE_NOTICE } from '.
 import './VoicePanel.css';
 
 
-import { globalVoiceUsers, globalScreenSharers, globalCameraUsers, globalCameraStreams, setUserSpeaking, clearSpeaking, notifyVoiceUsersChange, registerStopScreenShareCallback, stopOwnScreenShare, dropOwnStream, setCurrentStreamingUser, setSelfInVoice, setSelfDeafened, publishSelfVoiceChoice, type SelfVoiceChoice, upsertVoiceUser, applyVoiceStatus, globalSelectedStreams, globalStreamData, notifyStreamStateChange, clearAllStreams, selectStream, deselectStream, subscribeToStreamState } from './voiceState';
+import { globalVoiceUsers, globalScreenSharers, globalCameraUsers, globalCameraStreams, setUserSpeaking, clearSpeaking, notifyVoiceUsersChange, registerStopScreenShareCallback, stopOwnScreenShare, dropOwnStream, setCurrentStreamingUser, setSelfInVoice, setSelfDeafened, publishSelfVoiceChoice, type SelfVoiceChoice, upsertVoiceUser, applyVoiceStatus, globalSelectedStreams, globalStreamData, notifyStreamStateChange, clearAllStreams, selectStream, deselectStream, subscribeToStreamState, setStreamOnlyMember, isStreamOnlyMember, clearStreamOnlyMembers } from './voiceState';
 
 interface VoicePanelProps {
     roomId: string;
@@ -143,6 +147,9 @@ interface VoicePanelProps {
      *  VoiceSpeakState frames are the authority once in the room (and the SFU
      *  grant for publishing). Absent means allowed (older server). */
     canSpeak?: boolean;
+    /** The member's role carries STREAM_ONLY here (docs/STREAM_ONLY.md): the
+     *  call is joined without a microphone and the idle move stays off. */
+    streamOnly?: boolean;
     /** This channel's CONNECT, same source. false: the join is refused locally
      *  (the server refuses it too) before any microphone prompt. */
     canConnect?: boolean;
@@ -180,7 +187,7 @@ function clipPresence(roomId: string): number[] {
     return [...ids];
 }
 
-export function VoicePanel({ roomId, channelName, currentUserId, currentUsername, memberAvatars: _memberAvatars, memberSounds, onDisconnect, serverRequireMediaE2ee = false, isAfkChannel = false, afkTimeoutMs = DEFAULT_AFK_TIMEOUT_MS, onInactive, sfuMode = false, clipPolicy, onOpenActivities, arrivalChoice = null, canSpeak = true, canConnect = true }: VoicePanelProps) {
+export function VoicePanel({ roomId, channelName, currentUserId, currentUsername, memberAvatars: _memberAvatars, memberSounds, onDisconnect, serverRequireMediaE2ee = false, isAfkChannel = false, afkTimeoutMs = DEFAULT_AFK_TIMEOUT_MS, onInactive, sfuMode = false, clipPolicy, onOpenActivities, arrivalChoice = null, canSpeak = true, canConnect = true, streamOnly = false }: VoicePanelProps) {
     noteRender('voicePanel');
     const [isInVoice, setIsInVoice] = useState(false);
     /** RIGHT-CLICK THE PANEL FOR DIAGNOSTICS.
@@ -355,6 +362,12 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // re-opening the mic (noise mode, device watchdog, settings).
     const [speakDenied, setSpeakDenied] = useState(false);
     const speakDeniedRef = useRef(false);
+    // Joined without a microphone ON PURPOSE (Settings > Voice, or a
+    // stream-only account): listenOnly is set too; this changes the copy (no
+    // "no microphone detected" help) and keeps the idle move off, since it
+    // reads voice activity this member cannot have.
+    const [micOffByChoice, setMicOffByChoice] = useState(false);
+    const micOffByChoiceRef = useRef(false);
     // SPEAK arrived mid-call while denied — takes effect on the next join.
     const [speakGrantedPending, setSpeakGrantedPending] = useState(false);
     // Receiver-side SPEAK enforcement for both transports (see speakGate.ts).
@@ -364,12 +377,14 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     const deliverVoiceRef = useRef<((userId: number, stream: MediaStream) => void) | null>(null);
     const canSpeakRef = useRef(canSpeak);
     const canConnectRef = useRef(canConnect);
+    const streamOnlyRef = useRef(streamOnly);
     // Always-fresh handles for the always-on WS effect and joinVoice (the
     // callbacks are defined further down, after broadcastStatus).
-    const applySpeakStateRef = useRef<(userId: number, canSpeak: boolean) => void>(() => { /* not mounted yet */ });
+    const applySpeakStateRef = useRef<(userId: number, canSpeak: boolean, receives: boolean, streamOnly: boolean) => void>(() => { /* not mounted yet */ });
     const denySpeakLocallyRef = useRef<() => Promise<void>>(async () => { /* not mounted yet */ });
     useEffect(() => { canSpeakRef.current = canSpeak; }, [canSpeak]);
     useEffect(() => { canConnectRef.current = canConnect; }, [canConnect]);
+    useEffect(() => { streamOnlyRef.current = streamOnly; }, [streamOnly]);
     // Aggregate media-E2EE status (polled) so the UI can show a lock — a
     // server-forced downgrade to transport-only is then visible.
     const [mediaSecure, setMediaSecure] = useState<{ total: number; encrypted: number; supported: boolean; enforced: boolean }>(
@@ -595,7 +610,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     const armInactivity = useCallback(function arm(ms: number) {
         clearInactivity();
         // Only arm when a move is possible and meaningful.
-        if (!onInactiveRef.current || isAfkChannelRef.current) return;
+        // No microphone by choice: no voice activity can ever reset the
+        // timer, so it would only measure how long the member stayed.
+        if (!onInactiveRef.current || isAfkChannelRef.current || micOffByChoiceRef.current) return;
         inactivityTimer.current = setTimeout(() => {
             void (async () => {
                 const timeoutMs = afkTimeoutMsRef.current;
@@ -985,8 +1002,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         if (!isInVoiceRef.current || Date.now() < speechMuteUntilRef.current) return;
         playAnnouncement(id, 'join'); // clip or chime (gated on voiceChime)
         // No spoken announcement for someone you blocked — TTS reads their
-        // display name aloud, which is the same "reach you anyway" problem.
-        if (!isBlocked(id)) speak(`${name} joined the channel`); // opt-in TTS
+        // display name aloud, which is the same "reach you anyway" problem —
+        // nor for a stream-only member, an automated account nobody needs
+        // narrated (its chime and clip stay: playAnnouncement above).
+        if (!isBlocked(id) && !isStreamOnlyMember(id)) speak(`${name} joined the channel`); // opt-in TTS
     }, [currentUserId, playAnnouncement]);
 
     /** Announce a leave only for someone we actually counted as present. */
@@ -996,7 +1015,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         if (!announcedRef.current.delete(id)) return; // never announced → stay silent
         if (!isInVoiceRef.current || Date.now() < speechMuteUntilRef.current) return;
         playAnnouncement(id, 'leave'); // clip or chime (gated on voiceChime)
-        if (!isBlocked(id)) speak(`${name ?? known ?? 'Someone'} left the channel`); // opt-in TTS
+        if (!isBlocked(id) && !isStreamOnlyMember(id)) speak(`${name ?? known ?? 'Someone'} left the channel`); // opt-in TTS
     }, [currentUserId, playAnnouncement]);
 
     // ---- Join-announce gate -----------------------------------------------
@@ -1425,6 +1444,8 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             // forgetting would let that still-live session be heard again.
             // Their next join starts from the server's word.
             if (tornDown) speakGateRef.current.forget(payload.user_id);
+            if (tornDown) webrtcManager.forgetPeerReceives(payload.user_id);
+            if (tornDown) setStreamOnlyMember(payload.user_id, false);
         };
 
         // Mesh receivers render only ANNOUNCED video (B7): keep the manager's
@@ -1457,7 +1478,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         const handleVoiceSpeakState = (msg: ServerMessage) => {
             const p = parseVoiceSpeakState(msg);
             if (!p || p.room_id !== roomId) return;
-            applySpeakStateRef.current(p.user_id, p.can_speak);
+            applySpeakStateRef.current(p.user_id, p.can_speak, p.receives, p.stream_only);
         };
         wsClient.on('VoiceSpeakState', handleVoiceSpeakState);
 
@@ -1497,13 +1518,16 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             user.isMuted = muted;
             user.isDeafened = deafened;
             user.isBuffering = buffering;
+            user.noMic = listenOnlyRef.current;
             refreshVoiceUsersList();
         }
 
         // Broadcast to others via special message
         // selfMuted from the ref, like buffering: every caller passes only the
         // mute in force, and the member's own choice must be the CURRENT one.
-        wsClient.sendChatMessage(roomId, buildVoiceStatus({ muted, selfMuted: selfMutedRef.current, deafened, buffering }));
+        // noMic: in the call with no microphone track at all (none could be
+        // opened, no SPEAK, or none on purpose) - shown as that, not as muted.
+        wsClient.sendChatMessage(roomId, buildVoiceStatus({ muted, selfMuted: selfMutedRef.current, deafened, buffering, noMic: listenOnlyRef.current }));
     }, [roomId, currentUserId, refreshVoiceUsersList]);
     // Always-fresh handle for the WS-effect timers and the reconnect handler:
     // adding broadcastStatus to those effects' deps would tear down and
@@ -1627,12 +1651,20 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     useEffect(() => { denySpeakLocallyRef.current = denySpeakLocally; }, [denySpeakLocally]);
 
     // The server's VoiceSpeakState for one member of this room.
-    const applySpeakState = useCallback((userId: number, allowed: boolean) => {
+    const applySpeakState = useCallback((userId: number, allowed: boolean, receives: boolean, streamOnly: boolean) => {
+        // A stream-only member (docs/STREAM_ONLY.md): no spoken join/leave
+        // announcement for them, and Chat auto-watches their share.
+        setStreamOnlyMember(userId, streamOnly);
         if (userId === currentUserId) {
             if (!allowed) void denySpeakLocally();
             else if (speakDeniedRef.current) setSpeakGrantedPending(true);
+            // NO RECEIVE for us: play nothing on the mesh (the SFU reads the
+            // same answer from its own grant).
+            webrtcManager.setSelfReceives(receives);
             return;
         }
+        // NO RECEIVE for them: this client sends them nothing (manager.ts).
+        webrtcManager.setPeerReceives(userId, receives);
         const action = speakGateRef.current.set(userId, allowed);
         if (action === 'retract') {
             console.log(`[VoicePanel] ${userId} may no longer speak here - no longer playing them`);
@@ -1675,6 +1707,12 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         speakDeniedRef.current = deniedByHint;
         setSpeakDenied(deniedByHint);
         webrtcManager.setSpeakDenied(deniedByHint);
+        // Without a microphone by choice: the member's setting, and always for
+        // a stream-only account. Decided before the mic would be asked for.
+        const offByChoice = streamOnlyRef.current || loadSettings().joinWithoutMic === true;
+        micOffByChoiceRef.current = offByChoice;
+        setMicOffByChoice(offByChoice);
+        webrtcManager.setMicOffByChoice(offByChoice);
         // The call continues here (a moderator's move, the member's own
         // switch, Move here): arrive with the mute and deafen the member had
         // chosen, not with a fresh open mic. Set before the mic
@@ -1730,6 +1768,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 username: currentUsername,
                 isMuted: noMic || isMutedRef.current,
                 isDeafened: isDeafenedRef.current,
+                noMic,
             });
 
             // Skip the analysers entirely with no mic track: there is nothing to
@@ -2577,6 +2616,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         setListenOnly(false); // a rejoin retries the microphone
         speakDeniedRef.current = false; // and re-decides SPEAK
         setSpeakDenied(false);
+        micOffByChoiceRef.current = false; // and re-reads the setting
+        setMicOffByChoice(false);
+        clearStreamOnlyMembers(); // the next call's frames say who is
         setSpeakGrantedPending(false);
         speakGateRef.current.reset();
         deliverVoiceRef.current = null;
@@ -2960,6 +3002,38 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // registrations above are mounted once per call).
     useEffect(() => { toggleMuteRef.current = toggleMute; }, [toggleMute]);
     useEffect(() => { toggleDeafenRef.current = toggleDeafen; }, [toggleDeafen]);
+
+    // An embedding host's controls for this call (docs/EMBEDDING.md): the
+    // same presses as the buttons, read from the same refs. A no-op without
+    // a host.
+    const isConnectingRef = useRef(isConnecting);
+    isConnectingRef.current = isConnecting;
+    useEffect(() => registerEmbedCall({
+        roomId,
+        state: () => ({
+            connected: isInVoiceRef.current,
+            connecting: isConnectingRef.current,
+            muted: isMutedRef.current,
+            deafened: isDeafenedRef.current,
+            noMicrophone: listenOnlyRef.current,
+            inputMode: voiceInputModeRef.current,
+            holdDown: holdKeyDownRef.current,
+        }),
+        setMuted: (want) => {
+            // Without a microphone a press only decides how the member comes
+            // back (selfMute.ts pressMute), so that is what is compared.
+            const now = () => (listenOnlyRef.current ? selfMutedRef.current : isMutedRef.current);
+            if (now() !== want) toggleMuteRef.current();
+            return now() === want;
+        },
+        setDeafened: (want) => {
+            if (isDeafenedRef.current !== want) toggleDeafenRef.current();
+            return want === isDeafenedRef.current;
+        },
+        leave: () => { leaveVoiceRef.current(); onDisconnectRef.current?.(); },
+    }), [roomId]);
+    useEffect(() => { notifyEmbedChanged(); },
+        [isInVoice, isConnecting, isMuted, selfMuted, isDeafened, listenOnly, voiceInputMode, holdKeyDown]);
 
     // PiP drag handlers (touch for mobile)
     const handlePipTouchStart = useCallback((e: React.TouchEvent) => {
@@ -3515,6 +3589,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             {!isInVoice ? (
                 <button
                     className="voice-join-btn-compact"
+                    // Automation contract (docs/AUTOMATION.md): join, when the
+                    // automatic join on opening the channel did not happen.
+                    data-testid="voice-join"
                     onClick={joinVoice}
                     disabled={isConnecting}
                 >
@@ -3523,11 +3600,11 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             ) : (
                 <>
                     {/* Connection Info */}
-                    <div className="voice-connection-info">
+                    <div className="voice-connection-info" data-testid="voice-connected">
                         <div className="voice-status-row">
                             <span className="voice-connected-icon">{isAfkChannel ? <MoonIcon /> : <SignalIcon />}</span>
                             <div className="voice-connection-text">
-                                <span className="voice-connected-label">{isAfkChannel ? 'AFK — mic disabled' : speakDenied ? "Voice Connected · can't speak" : listenOnly ? 'Voice Connected · listen-only' : 'Voice Connected'}</span>
+                                <span className="voice-connected-label">{isAfkChannel ? 'AFK — mic disabled' : micOffByChoice ? 'Voice Connected · no microphone' : speakDenied ? "Voice Connected · can't speak" : listenOnly ? 'Voice Connected · listen-only' : 'Voice Connected'}</span>
                                 <span className="voice-channel-name">{channelName || roomId}</span>
                             </div>
                             {mediaSecure.total > 0 && (
@@ -3568,12 +3645,13 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                     className={`voice-btn ${listenOnly ? (selfMuted && !speakDenied && !isAfkChannel ? 'no-mic active' : 'no-mic') : (isMuted || holdClosed ? 'active' : pttIdle ? 'ptt-idle' : '')}`}
                                     onClick={toggleMute}
                                     title={speakDenied ? "You don't have permission to speak in this channel"
+                                        : micOffByChoice ? NO_MIC_CHOSEN_TITLE
                                         : isAfkChannel ? 'Microphone is disabled in AFK channels'
                                         : listenOnly ? (isDeafened ? MIC_GONE_DEAFENED_TITLE : selfMuted ? MIC_GONE_MUTED_TITLE : MIC_GONE_TITLE)
                                             : holdClosed ? 'Push-to-mute held — mic muted'
                                                 : pttIdle ? 'Push to talk — hold your key to speak'
                                                     : (isMuted ? 'Unmute' : 'Mute')}
-                                    disabled={speakDenied || isDeafened || isAfkChannel}
+                                    disabled={speakDenied || micOffByChoice || isDeafened || isAfkChannel}
                                 >
                                     {listenOnly || isMuted || holdClosed || pttIdle
                                         ? <MicOffIcon size={18} />
@@ -3660,6 +3738,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         {!isMobile && (
                             <button
                                 className={`voice-btn vp-screenshare ${isScreenSharing || shareStarting.showing ? 'active screen-share' : ''}${shareStarting.showing ? ' starting' : ''}`}
+                                // Automation contract (docs/AUTOMATION.md): one button,
+                                // named for what a click does now.
+                                data-testid={isScreenSharing ? 'voice-stop-share' : 'voice-share-screen'}
                                 aria-busy={shareStarting.showing}
                                 onClick={async () => {
                                     // Already on its way: a second click would open a second picker.
@@ -3744,6 +3825,8 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         />
                         <button
                             className="voice-btn disconnect"
+                            // Automation contract (docs/AUTOMATION.md): leave.
+                            data-testid="voice-leave"
                             onClick={() => { leaveVoice(); onDisconnect?.(); }}
                             title="Disconnect"
                         >
@@ -3860,12 +3943,15 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
 
             {error && <div className="voice-error-mini">{error}</div>}
             {micNotice && <div className="voice-error-mini">{micNotice}</div>}
-            {speakDenied && (
+            {/* Joined without a microphone on purpose: Speak is moot (and a
+                stream-only account, which never has it, may not hear anyone
+                either: No receive). */}
+            {speakDenied && !micOffByChoice && (
                 <div className="voice-error-mini">
                     {speakGrantedPending ? SPEAK_GRANTED_NOTICE : SPEAK_DENIED_NOTICE}
                 </div>
             )}
-            {listenOnly && !speakDenied && (
+            {listenOnly && !speakDenied && !micOffByChoice && (
                 <div className="voice-error-mini">
                     {NO_MIC_NOTICE}
                     {/* Some WebView2 builds report a privacy-blocked mic as

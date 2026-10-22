@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The nav words the Android side sends and the page routes on, compared
  * against the REAL Java source.

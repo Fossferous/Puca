@@ -257,7 +257,7 @@ const PINS: Pin[] = [
         src: 'vp',
         holds: (c) => c.includes("wsClient.on('VoiceSpeakState', handleVoiceSpeakState)")
             && c.includes("wsClient.off('VoiceSpeakState', handleVoiceSpeakState)")
-            && /if \(!p \|\| p\.room_id !== roomId\) return;\s*applySpeakStateRef\.current\(p\.user_id, p\.can_speak\);/
+            && /if \(!p \|\| p\.room_id !== roomId\) return;\s*applySpeakStateRef\.current\(p\.user_id, p\.can_speak, p\.receives, p\.stream_only\);/
                 .test(body(c, 'const handleVoiceSpeakState = ') ?? ''),
         mutants: [
             ['any room', replaceNth(' || p.room_id !== roomId', '')],
@@ -267,7 +267,7 @@ const PINS: Pin[] = [
     {
         name: 'VoicePanel treats absent canSpeak / canConnect as allowed (an older server sends neither)',
         src: 'vp',
-        holds: (c) => /canSpeak = true, canConnect = true \}: VoicePanelProps\)/.test(c),
+        holds: (c) => /canSpeak = true, canConnect = true, streamOnly = false \}: VoicePanelProps\)/.test(c),
         mutants: [
             ['absent = denied', replaceNth('canSpeak = true,', 'canSpeak = false,')],
         ],

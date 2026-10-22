@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Sign-out has to actually sign out.
  *

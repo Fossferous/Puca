@@ -51,12 +51,15 @@ const DETECTORS = [
     { s: 'list_anticheat_processes', why: 'control-session anti-cheat gate' },
     { s: 'set_control_monitor', why: 'which monitor injected input maps onto' },
     { s: 'audio_hub_request', why: 'Audio Hub control through a device session' },
+    { s: 'virtual_screen_install', why: 'the lid-closed virtual screen driver install' },
     // Wire protocol
     { s: 'DeviceConnectRequested', why: 'incoming device-control session' },
     { s: 'ControlInput', why: 'input frames over the device channel' },
     { s: 'DeviceWake', why: 'Wake-on-LAN request/result frames' },
     // User-visible copy
     { s: 'is controlling this device', why: 'host-side control banner' },
+    { s: 'Allow remote control with the lid closed', why: 'the lid-closed virtual screen option' },
+    { s: 'no-screen:lid', why: 'the "that PC\'s screen is off" session end' },
 ];
 
 /**

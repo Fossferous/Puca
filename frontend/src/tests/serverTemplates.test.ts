@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The create-a-server wizard's choices are acted on (api/serverTemplates.ts).
  *

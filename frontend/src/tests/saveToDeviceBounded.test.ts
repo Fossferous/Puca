@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * No file write on a phone may send an unbounded string over the Capacitor
  * bridge.

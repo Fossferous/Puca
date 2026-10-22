@@ -29,8 +29,8 @@ use windows::Win32::Storage::FileSystem::{
     FlushFileBuffers, ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX,
 };
 use windows::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
-    PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
+    PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 
 /// What the pipe needs to know about the service to answer a request.
@@ -52,6 +52,11 @@ pub struct ServiceView {
     /// returns. `None` when no agent is running, which is also why the identity
     /// check happens BEFORE this is consulted.
     pub agent_handle: Option<(String, String, u32)>,
+    /// The client's PROCESS ID as the kernel reports it for this connection
+    /// (`GetNamedPipeClientProcessId`). The virtual screen's holds are keyed by
+    /// it, so no caller can renew or release another's. `None` when it could
+    /// not be read; a hold is then refused rather than filed under a guess.
+    pub client_pid: Option<u32>,
 }
 
 /// A relay the pipe accepted and the service should carry out.
@@ -193,6 +198,43 @@ fn dispatch_sas() -> Result<(), String> {
 // threads, and a shared cell would make one test's expectation another test's
 // flake. Each test gets its own, initialised to the honest default for a machine
 // that has never had the policy set.
+/// The one place a virtual-screen request reaches SetupAPI. A seam for the
+/// same reason as `dispatch_sas`: a test must never switch a display device on
+/// the machine running it.
+#[cfg(not(test))]
+fn dispatch_virtual_screen(req: &ControlRequest, pid: u32) -> crate::virtual_screen::Report {
+    match req {
+        ControlRequest::VirtualScreenHold => crate::virtual_screen_os::hold(pid),
+        ControlRequest::VirtualScreenRelease => crate::virtual_screen_os::release(pid),
+        _ => crate::virtual_screen_os::state(),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// (requests seen with their pid, the report to answer)
+    static VIRTUAL_SCREEN_STANDIN: std::cell::RefCell<(Vec<(String, u32)>, crate::virtual_screen::Report)> =
+        std::cell::RefCell::new((
+            Vec::new(),
+            crate::virtual_screen::Report {
+                installed: false,
+                on: false,
+                instance_id: None,
+                unavailable: Some(crate::virtual_screen::Unavailable::NotInstalled),
+            },
+        ));
+}
+
+#[cfg(test)]
+fn dispatch_virtual_screen(req: &ControlRequest, pid: u32) -> crate::virtual_screen::Report {
+    VIRTUAL_SCREEN_STANDIN.with(|c| {
+        let mut c = c.borrow_mut();
+        let tag = serde_json::to_value(req).unwrap()["t"].as_str().unwrap().to_string();
+        c.0.push((tag, pid));
+        c.1.clone()
+    })
+}
+
 #[cfg(test)]
 thread_local! {
     static SAS_STANDIN: std::cell::RefCell<(usize, Result<(), String>)> =
@@ -350,6 +392,24 @@ pub fn handle_line(line: &str, view: &ServiceView) -> (ControlResponse, Option<A
                 (ControlResponse::Refused { reason: e }, None)
             }
         },
+
+        ControlRequest::VirtualScreenHold | ControlRequest::VirtualScreenRelease => {
+            match view.client_pid {
+                Some(pid) => (ControlResponse::VirtualScreen(dispatch_virtual_screen(&req, pid)), None),
+                None => (
+                    ControlResponse::Refused {
+                        reason: "could not identify the calling process, so the virtual screen was \
+                                 not changed"
+                            .into(),
+                    },
+                    None,
+                ),
+            }
+        }
+        // A question, so it needs no holder.
+        ControlRequest::VirtualScreenState => {
+            (ControlResponse::VirtualScreen(dispatch_virtual_screen(&req, 0)), None)
+        }
 
         ControlRequest::UnattendedState => {
             let device_id = crate::link::enrolled_device_id();
@@ -516,6 +576,14 @@ pub(crate) fn serve_on(
         // cannot change who they are midway — while letting impersonation
         // actually succeed.
         let mut trust: Option<crate::control::CallerTrust> = None;
+        // The kernel's answer to "which process is on the other end", read
+        // once per connection like `trust`. See `ServiceView::client_pid`.
+        let client_pid = {
+            let mut pid = 0u32;
+            unsafe { GetNamedPipeClientProcessId(pipe.0, &mut pid) }
+                .ok()
+                .and_then(|()| (pid != 0).then_some(pid))
+        };
 
         loop {
             line.clear();
@@ -534,7 +602,9 @@ pub(crate) fn serve_on(
                     crate::launch::active_console_session().unwrap_or(u32::MAX),
                 )
             });
-            let (resp, accepted) = handle_line(line.trim(), &view(trust));
+            let mut current = view(trust);
+            current.client_pid = client_pid;
+            let (resp, accepted) = handle_line(line.trim(), &current);
             if let Some(a) = accepted {
                 on_accepted(a);
             }
@@ -571,6 +641,7 @@ mod tests {
             agent_alive: true,
             agent_handle: Some((r"\\.\pipe\sovereign-agent-2".into(), "tok".into(), 4242)),
             caller: crate::control::CallerTrust::ConsoleAdministrator,
+            client_pid: Some(5150),
         }
     }
 
@@ -620,6 +691,7 @@ mod tests {
             agent_alive: false,
             agent_handle: None,
             caller: crate::control::CallerTrust::ConsoleAdministrator,
+            client_pid: Some(5150),
         }
     }
 
@@ -714,6 +786,53 @@ mod tests {
     /// Make the stand-in answer `outcome` for the rest of this test.
     fn sas_answers(outcome: Result<(), String>) {
         super::SAS_STANDIN.with(|c| c.borrow_mut().1 = outcome);
+    }
+
+    fn virtual_screen_calls() -> Vec<(String, u32)> {
+        super::VIRTUAL_SCREEN_STANDIN.with(|c| c.borrow().0.clone())
+    }
+
+    #[test]
+    fn a_virtual_screen_hold_is_filed_under_the_kernels_pid_for_the_caller() {
+        let report = crate::virtual_screen::Report {
+            installed: true,
+            on: true,
+            instance_id: Some(r"ROOT\DISPLAY\0001".into()),
+            unavailable: None,
+        };
+        super::VIRTUAL_SCREEN_STANDIN.with(|c| c.borrow_mut().1 = report.clone());
+        let (resp, accepted) = handle_line(r#"{"t":"virtual_screen_hold"}"#, &running());
+        assert_eq!(accepted, None, "the effect happens here, not in the worker loop");
+        assert_eq!(resp, ControlResponse::VirtualScreen(report));
+        let (_, _) = handle_line(r#"{"t":"virtual_screen_release"}"#, &running());
+        assert_eq!(
+            virtual_screen_calls(),
+            vec![("virtual_screen_hold".to_string(), 5150), ("virtual_screen_release".to_string(), 5150)],
+        );
+    }
+
+    #[test]
+    fn a_hold_from_a_caller_whose_pid_is_unknown_is_refused_not_guessed() {
+        let view = ServiceView { client_pid: None, ..running() };
+        let (resp, _) = handle_line(r#"{"t":"virtual_screen_hold"}"#, &view);
+        assert!(matches!(resp, ControlResponse::Refused { .. }), "{resp:?}");
+        assert!(virtual_screen_calls().is_empty(), "nothing may be filed under a guessed holder");
+        // The state question needs no holder, and still answers.
+        let (resp, _) = handle_line(r#"{"t":"virtual_screen_state"}"#, &view);
+        assert!(matches!(resp, ControlResponse::VirtualScreen(_)), "{resp:?}");
+    }
+
+    #[test]
+    fn another_account_cannot_reach_the_virtual_screen_at_all() {
+        for line in [
+            r#"{"t":"virtual_screen_hold"}"#,
+            r#"{"t":"virtual_screen_release"}"#,
+            r#"{"t":"virtual_screen_state"}"#,
+        ] {
+            let (resp, _) = handle_line(line, &running_as(crate::control::CallerTrust::NotConsoleUser));
+            assert!(matches!(resp, ControlResponse::Refused { .. }), "{line}: {resp:?}");
+        }
+        assert!(virtual_screen_calls().is_empty(), "a refused request must not reach SetupAPI");
     }
 
     #[test]

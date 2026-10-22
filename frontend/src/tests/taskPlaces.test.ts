@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 // Unit tests for the device-local place store behind location reminders:
 // storage parsing (malformed blobs must degrade, never throw) and the pure
 // assignments × places → fences join the native push is built from. The

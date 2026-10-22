@@ -84,6 +84,30 @@ jobs:
       - name: dual-ship.sh / check-versions.sh refusal gates
         run: bash deploy/ops/ship-gates.test.sh
 
+  # Púca for Steam Deck (integrations/decky, docs/STEAM_DECK.md): a Decky
+  # Loader plugin with its own toolchain. The frontend job never sees it, and
+  # it is the one piece of Púca that runs inside someone else's program, so a
+  # type error here reaches a Deck as a plugin that will not load.
+  decky-plugin:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: integrations/decky
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - run: npm ci --no-audit --no-fund
+      - name: typecheck (plugin and page shim)
+        run: npm run typecheck
+      - name: vitest (settings, push-to-talk, the page protocol)
+        run: npm test
+      - name: unittest (the backend's checks)
+        run: python3 -m unittest discover -s tests -p "test_*.py"
+      - name: build (dist/index.js and dist/page-shim.js)
+        run: npm run build
+
   # Known-vulnerable Rust dependencies. Nothing watched for these: `npm audit`
   # covered the JS side, but an advisory against a crate in either Cargo.lock
   # could sit unnoticed indefinitely — in a product that ships E2EE and a

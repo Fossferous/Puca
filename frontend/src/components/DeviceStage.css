@@ -108,6 +108,12 @@
     display: flex;
     align-items: center;
     gap: 12px;
+    /* max-content, or the cap below is never reached: a fixed box placed at
+       left:50% shrinks to fit the HALF of the viewport to its right, so on a
+       390 px phone every reason wrapped inside 195 px. The no-screen sentence
+       ("…is its lid closed? Turn on …") ran to nine lines
+       (e2e/no-screen-stage-real-browser.mjs measures it). */
+    width: max-content;
     max-width: min(560px, calc(100vw - 32px));
     padding: 10px 14px;
     border-radius: 8px;

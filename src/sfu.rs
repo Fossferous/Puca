@@ -230,10 +230,11 @@ const SOURCE_BITS: [(&str, &str, i64, u8); 4] = [
 impl Grant {
     /// What a member's channel permissions entitle a session to: exactly what
     /// [`mint_join_token`] puts in the token (via [`publish_sources`]), with
-    /// subscribe and data always on.
+    /// data always on and subscribe on unless the member carries NO_RECEIVE
+    /// (docs/STREAM_ONLY.md).
     pub(crate) fn of(perms: Permissions) -> Grant {
         let (can_publish, sources) = publish_sources(perms);
-        Grant::effective(true, true, can_publish, &sources)
+        Grant::effective(perms.receives_media(), true, can_publish, &sources)
     }
 
     /// The grant to give a LIVE session whose member now has `perms`: the one
@@ -251,8 +252,11 @@ impl Grant {
         let full = Grant::of(perms);
         match held {
             None => full,
+            // Subscribe follows the permissions mid-call too, like SPEAK:
+            // NO_RECEIVE taken on or off reaches a live session at once.
+            // Withdrawing it unpublishes nothing of the member's own.
             Some(h) => Grant {
-                subscribe: true,
+                subscribe: full.subscribe,
                 data: true,
                 sources: (h.sources & !MIC_BIT) | (full.sources & MIC_BIT),
             },
@@ -2080,7 +2084,8 @@ fn mint_join_token(
             room_admin: false,
             room_list: false,
             can_publish,
-            can_subscribe: true,
+            // NO_RECEIVE: LiveKit forwards this session nobody's tracks.
+            can_subscribe: perms.receives_media(),
             can_publish_data: true,
             can_publish_sources,
         },
@@ -5889,4 +5894,51 @@ pub(crate) mod resync_tests {
         assert_eq!(camless_grant, Some(Grant::of(Permissions::SPEAK)), "confirmed: the join-time grant, camera removed");
     }
 
+}
+
+#[cfg(test)]
+mod no_receive_grant_tests {
+    use super::{cfg_for, mint_join_token, Grant, RIG_SECRET};
+    use crate::permissions::Permissions as P;
+
+    /// The `video` grant of a freshly minted join token, verified.
+    fn video_grant(perms: P) -> serde_json::Value {
+        let token = mint_join_token(&cfg_for("http://127.0.0.1:1"), "sfu_1", "7:abc", "bot", perms).expect("mint");
+        let mut v = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+        v.validate_aud = false;
+        jsonwebtoken::decode::<serde_json::Value>(&token, &jsonwebtoken::DecodingKey::from_secret(RIG_SECRET.as_bytes()), &v)
+            .expect("verifies")
+            .claims["video"]
+            .clone()
+    }
+
+    /// LiveKit itself enforces it: a NO_RECEIVE member's token says
+    /// canSubscribe false - explicitly, since an ABSENT canSubscribe is true to
+    /// LiveKit - and still lets it publish its share and use the data lane.
+    #[test]
+    fn a_no_receive_token_cannot_subscribe_but_can_share() {
+        let so = P::STREAM_ONLY_CAP | P::STREAM_ONLY | P::NO_RECEIVE;
+        let g = video_grant(so);
+        assert_eq!(g["canSubscribe"], false, "{g}");
+        assert_eq!(g["canPublish"], true, "{g}");
+        assert_eq!(g["canPublishData"], true, "{g}");
+        assert_eq!(g["canPublishSources"], serde_json::json!(["screen_share", "screen_share_audio"]), "{g}");
+        // NEGATIVE CONTROL: the same member without NO_RECEIVE subscribes.
+        assert_eq!(video_grant(so & !P::NO_RECEIVE)["canSubscribe"], true);
+        // An administrator is never no-receive.
+        assert_eq!(video_grant(P::all())["canSubscribe"], true);
+    }
+
+    /// Mid-call: the live grant the perms sweep applies follows NO_RECEIVE
+    /// both ways, and keeps the session's share as SPEAK's rule keeps it.
+    #[test]
+    fn the_live_grant_follows_no_receive_both_ways() {
+        let share = P::STREAM_ONLY_CAP | P::STREAM_ONLY;
+        let held = Grant::of(share);
+        let target = Grant::target(Some(held), share | P::NO_RECEIVE);
+        assert_eq!(target, Grant::of(share | P::NO_RECEIVE), "NO_RECEIVE set: subscribe off, share kept");
+        assert_ne!(target, held, "the sweep must see a change to apply");
+        let back = Grant::target(Some(target), share);
+        assert_eq!(back, held, "NO_RECEIVE lifted: subscribe back on");
+    }
 }

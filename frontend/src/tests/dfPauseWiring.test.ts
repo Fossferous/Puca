@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * applyDeepFilter's PAUSE wiring on the main thread: setPaused -> the
  * worklet's 'pause' / 'resume' messages, and the guards around them. The

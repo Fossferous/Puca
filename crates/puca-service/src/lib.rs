@@ -44,6 +44,12 @@ pub mod lan;
 pub mod wol;
 pub mod restart;
 pub mod supervisor;
+/// The lid-closed virtual screen: the lease book and every decision, portable
+/// so the cross-compile guard and the Linux CI leg test it.
+pub mod virtual_screen;
+/// ...and the SetupAPI half that carries those decisions out.
+#[cfg(windows)]
+pub mod virtual_screen_os;
 
 #[cfg(windows)]
 pub mod control_pipe;

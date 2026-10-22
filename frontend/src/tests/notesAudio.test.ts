@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Voice notes, the pure side: the container probe, the clip budget, naming,
  * how the gallery classifies a recording, and that a clip goes up RAW but

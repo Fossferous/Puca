@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The two decisions NotesDesktopView makes for embedded Notes
  * (components/notesDesktopView.utils.ts):

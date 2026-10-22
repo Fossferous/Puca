@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 // Cross-document session sync (api/sessionSync.ts): what a `storage` event
 // from ANOTHER tab means — sign-out (hard or soft), account switch, sign-in
 // — and that the shared per-account caches are cleared on the hard cases.

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * An ARMED host must not lose the controller's ICE candidates while it waits
  * for the unattended passphrase.
@@ -77,6 +78,10 @@ const agentAddRemoteCandidate = vi.fn(async (_sid: string, line: string) => {
     calls.push(`candidate:${line}`);
 });
 vi.mock('../api/devices/hostAgent', () => ({
+    // A screen is there to capture (session.ts prepareHostScreen).
+    agentPrepareScreen: async () => ({ state: 'ready' }),
+    // The stream captures the screen asked for (no dark panel to steer off).
+    agentSteeredMonitor: () => null,
     agentAnswerOffer: (...a: unknown[]) => agentAnswerOffer(...(a as [])),
     agentAddRemoteCandidate: (sid: string, line: string) => agentAddRemoteCandidate(sid, line),
 }));

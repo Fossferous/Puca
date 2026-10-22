@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Input events must reach the host in the order they were made.
  *

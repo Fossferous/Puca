@@ -280,6 +280,19 @@ pub enum Request {
     /// the app reads that as "no secure desktop" and simply never offers the
     /// bridge, which is precisely today's behaviour.
     SessionStatus { session_id: String },
+
+    /// Is there a screen to stream for this session — and if not, is one on its
+    /// way? Asked by the host BEFORE it hands over an offer, and polled until
+    /// the answer is `ready` or `off` (`virtual_screen.rs`, which has the whole
+    /// story). Without it a machine with no screen switched on (a laptop with
+    /// its lid shut) answered the offer, failed its capture eight seconds later
+    /// on a thread that had serviced no ICE, and the phone could only say
+    /// "could not connect to the device".
+    ///
+    /// ADDITIVE — do NOT bump PROTOCOL_VERSION for it, same rule as
+    /// SessionStatus. An older agent answers "bad request", and the host reads
+    /// that as `ready` and answers the offer exactly as it always did.
+    PrepareScreen { session_id: String },
     //
     // (see ALLOWED_FPS / ALLOWED_BITRATE_BPS below for what StartStream and
     // UpdateStream will accept)
@@ -487,6 +500,14 @@ pub enum Response {
     Streaming {
         session_id: String,
         answer_sdp: String,
+        /// The screen this stream ACTUALLY captures, present only when it is
+        /// not the one asked for: StartStream steers off a built-in panel
+        /// behind a closed lid, which never shows a frame
+        /// (`virtual_screen::steer_monitor`). The host must tell the viewer,
+        /// or its pointer mapping describes the wrong screen. ADDITIVE: an old
+        /// app ignores it, and an old agent never steers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<usize>,
     },
 
     /// Zero or more sealed frames for the caller to relay verbatim.
@@ -548,6 +569,17 @@ pub enum Response {
         stream_live: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stream_end: Option<String>,
+    },
+    /// Answer to `PrepareScreen`. `state` is `ready` (answer the offer now),
+    /// `waking` / `starting` (ask again shortly; `starting` means the virtual
+    /// screen is being switched on, which the phone is told), or `off` (there
+    /// will be no picture). `reason` comes only with `off`: the DeviceEnd code
+    /// the phone turns into a sentence (`virtual_screen::NO_SCREEN_LID`,
+    /// `NO_SCREEN_VIRTUAL_FAILED`).
+    Screen {
+        state: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     /// Nothing changed since the last frame. NOT an error — the caller repeats
     /// the previous frame. A still desktop produces these constantly.
@@ -631,6 +663,25 @@ mod tests {
             Request::SessionStatus { session_id } => assert_eq!(session_id, "s1"),
             other => panic!("the app's session_status frame reached the wrong arm: {other:?}"),
         }
+    }
+
+    /// The frame hostAgent.ts `agentPrepareScreen` writes, and the reply shape
+    /// it reads (`ok: 'screen'`, `state`, `reason` only when off).
+    #[test]
+    fn prepare_screen_parses_and_answers_in_the_shape_the_app_reads() {
+        let line = r#"{"cmd":"prepare_screen","session_id":"s1"}"#;
+        match serde_json::from_str::<Request>(line).expect("the app's frame must parse") {
+            Request::PrepareScreen { session_id } => assert_eq!(session_id, "s1"),
+            other => panic!("wrong arm: {other:?}"),
+        }
+        let ready = serde_json::to_string(&Response::Screen { state: "ready".into(), reason: None }).unwrap();
+        assert_eq!(ready, r#"{"ok":"screen","state":"ready"}"#);
+        let off = serde_json::to_string(&Response::Screen {
+            state: "off".into(),
+            reason: Some("no-screen:lid".into()),
+        })
+        .unwrap();
+        assert_eq!(off, r#"{"ok":"screen","state":"off","reason":"no-screen:lid"}"#);
     }
 
     /// The other half of the wire: the REPLY. `hostAgent.ts` reads

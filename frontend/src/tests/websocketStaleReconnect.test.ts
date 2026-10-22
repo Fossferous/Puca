@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * A socket the heartbeat finds dead is REPLACED, even if its close never
  * completes.

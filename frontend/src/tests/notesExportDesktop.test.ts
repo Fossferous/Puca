@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Púca Notes' export inside the DESKTOP app (Notes in Púca,
  * components/NotesDesktopView.tsx). The account menu's "Export notes as

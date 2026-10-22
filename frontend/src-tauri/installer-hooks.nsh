@@ -68,6 +68,28 @@
 ; would be worse than not trying at all. The dialog is suppressed under /S,
 ; because a silent uninstall must never block waiting for a click.
 !macro NSIS_HOOK_PREUNINSTALL
+  ; THE VIRTUAL SCREEN FIRST ("Allow remote control with the lid closed"),
+  ; while the binary that installed it is still on disk. Its device and driver
+  ; package live in the device tree and the driver store, outside every folder
+  ; removed below, so deleting the service folder first would strand them with
+  ; nothing left that knows they are Púca's. The helper touches only what its
+  ; own record (virtual-screen.json) names, and is a no-op when there is none.
+  ; Needs administrator rights like everything in this macro; a failure is
+  ; named in the message below rather than silently left.
+  StrCpy $R3 0
+  ${If} ${FileExists} "$PROGRAMFILES64\Sovereign\service\virtual-screen.json"
+    DetailPrint "Removing the virtual screen driver..."
+    nsExec::Exec '"$PROGRAMFILES64\Sovereign\service\sovereign-service.exe" virtual-screen-remove'
+    Pop $R3
+    ${If} $R3 == 0
+      DetailPrint "Virtual screen removed."
+    ${Else}
+      DetailPrint "Could not remove the virtual screen (needs administrator rights)."
+      ${IfNot} ${Silent}
+      MessageBox MB_ICONEXCLAMATION|MB_OK "Puca could not remove its virtual screen driver, because that needs administrator rights.$\r$\n$\r$\nTo remove it, open Command Prompt as administrator and run:$\r$\n$\r$\n    $\"$PROGRAMFILES64\Sovereign\service\sovereign-service.exe$\" virtual-screen-remove$\r$\n$\r$\nor remove $\"Virtual Display Driver$\" under Display adapters in Device Manager."
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
   nsExec::Exec 'sc query "SovereignRemote"'
   Pop $R0
   ${If} $R0 == 0

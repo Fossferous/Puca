@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The cross-user share grant — the crypto gate a friend's session stands on.
  *

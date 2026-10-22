@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The merged outbox against the REAL executor (notesOutbox.ts execOp) and the
  * one trash API (api/listContent.ts):

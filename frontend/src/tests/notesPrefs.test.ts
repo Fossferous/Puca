@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 // Unit tests for the Notes prefs store (colour / labels / archived / the four
 // reminder times / view). The global test setup replaces localStorage with vi.fn() stubs that
 // STORE NOTHING, so a test that only asserted "no throw" would pass against

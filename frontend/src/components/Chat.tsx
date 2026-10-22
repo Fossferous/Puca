@@ -8,7 +8,8 @@ import { wsClient, type ServerMessage } from '../api/websocket';
 import { VoicePanel } from './VoicePanel';
 import { OwnVoiceBanner } from './OwnVoiceBanner';
 import { carriedFromOtherDevice, roomLeftNotice, type OwnVoiceState } from '../api/ownVoice';
-import { getVoiceUsersInRoom, globalVoiceUsers, globalCameraUsers, isUserStreaming, subscribeToStreamState, subscribeToVoiceUsers, getSelectedStreams, getStreamData, getAllStreamers, selectStream, deselectStream, upsertVoiceUser, getSelfVoiceChoice } from './voiceState';
+import { getVoiceUsersInRoom, globalVoiceUsers, globalCameraUsers, isUserStreaming, subscribeToStreamState, subscribeToVoiceUsers, getSelectedStreams, getStreamData, getAllStreamers, selectStream, deselectStream, upsertVoiceUser, getSelfVoiceChoice, isStreamOnlyMember } from './voiceState';
+import { autoWatchPlan, browserSavesData } from '../utils/autoWatch';
 import { useStreamStore } from '../stores/streamStore';
 import type { VoiceUserStatus, SelfVoiceChoice } from './voiceState';
 import './FileUpload.css';
@@ -143,7 +144,7 @@ import { pipEngine, primePipSupport } from './streamPopout.utils';
 import {
     HomeIcon, ChannelsIcon, ChatIcon, MembersIcon, TasksIcon, MonitorIcon,
     HashIcon, ChecklistIcon, FolderIcon, NoteIcon, MessageIcon, CrownIcon,
-    SpeakerIcon, MicOffIcon, HeadphonesOffIcon, MoonIcon, ClipIcon,
+    SpeakerIcon, MicOffIcon, NoMicIcon, HeadphonesOffIcon, MoonIcon, ClipIcon,
     CameraIcon, ScreenShareIcon, LiveDotIcon,
     SmileIcon, ReplyIcon, ForwardIcon, PencilIcon, PinIcon, TrashIcon,
     PaperclipIcon, LockIcon, LockOpenIcon, BanIcon, EyeOffIcon, SendIcon,
@@ -169,7 +170,8 @@ import {
 import { presenceOf, usePresence, usePresenceKey, PRESENCE_LABEL } from '../api/presenceStore';
 import { startActivityReporter } from '../api/activityReporter';
 import { PresenceDot } from './PresenceDot';
-import { PERM, hasPerm } from '../api/permissionBits';
+import { PERM, hasPerm, isRestricted } from '../api/permissionBits';
+import { notifyEmbedChanged, registerEmbedSession } from '../api/embedApi';
 import {
     attachGamesSocket, dismissActivityNotice, getGamesState, onGamesServedChanged, requestJoin, setGamesRoom, startActivity, subscribeGames,
 } from '../api/games/gamesStore';
@@ -1164,6 +1166,10 @@ export function Chat({ onLogout }: ChatProps) {
 
     // PiP (Picture-in-Picture) mode: shows chat with stream overlay
     const [showPip, setShowPip] = useState(false);
+    // An AUTO-watch (a stream-only account's share, below) started while the
+    // chat view was up: the stream-state effect opens the picture-in-picture
+    // for it instead of switching the screen to the stream view. One-shot.
+    const autoWatchPipRef = useRef(false);
     // OS-level picture-in-picture: which stream (if any) is popped out into
     // the system PiP window (StreamPopout). Pinned to the tile that was
     // clicked; toggling the same tile brings it back, another tile switches.
@@ -1337,6 +1343,15 @@ export function Chat({ onLogout }: ChatProps) {
             console.debug('[Chat] Stream state update - hasStreams:', hasStreams, 'currentViewMode:', viewMode, 'showPip:', showPip);
             // Only auto-switch to stream if NOT in PiP mode
             if (hasStreams && (viewMode === 'chat' || viewMode === 'voice') && !showPip) {
+                if (autoWatchPipRef.current && viewMode === 'chat') {
+                    // Nobody clicked: watch it in the PiP (docked on a phone)
+                    // and leave the chat where it is. The flag is cleared
+                    // only once the PiP is up (the effect below): one
+                    // notification can run this callback twice, the second
+                    // time with the same stale showPip.
+                    setShowPip(true);
+                    return;
+                }
                 setViewMode('stream');
             } else if (!hasStreams && viewMode === 'stream') {
                 // Last stream ended — fall back to the voice tiles if we're
@@ -1350,6 +1365,56 @@ export function Chat({ onLogout }: ChatProps) {
         update(); // Check initial state
         return subscribeToStreamState(update);
     }, [viewMode, showPip, currentVoiceChannel]);
+
+    // The auto-watch's PiP is up, or the view moved on: its one-shot is spent.
+    useEffect(() => {
+        if (showPip || viewMode !== 'chat') autoWatchPipRef.current = false;
+    }, [showPip, viewMode]);
+
+    // AUTO-WATCH (docs/STREAM_ONLY.md): a share from a stream-only member of
+    // the call starts playing here without a Watch click, once per share -
+    // when we join while it is live and when it goes live while we are here.
+    // The rule is utils/autoWatch.ts; this applies it on every stream-state
+    // change (a share starting or ending, a member flagged stream-only, a
+    // selection) and on a settings change. The stream list only ever holds
+    // the call this client is in.
+    const autoWatchedRef = useRef(new Set<number>());
+    const viewModeRef = useRef(viewMode);
+    useEffect(() => { viewModeRef.current = viewMode; }, [viewMode]);
+    const viewerStreamOnlyRef = useRef(false);
+    useEffect(() => {
+        const row = currentVoiceChannel ? (channels.find(c => c.id === currentVoiceChannel.id) ?? currentVoiceChannel) : null;
+        viewerStreamOnlyRef.current = isRestricted(row?.my_permissions, PERM.STREAM_ONLY);
+    }, [channels, currentVoiceChannel]);
+    useEffect(() => {
+        const run = () => {
+            const plan = autoWatchPlan({
+                streamers: getAllStreamers().map(s => s.userId),
+                me: currentUserId,
+                selected: getSelectedStreams(),
+                handled: autoWatchedRef.current,
+                isStreamOnly: isStreamOnlyMember,
+                mode: loadSettings().autoOpenStreams,
+                saveData: browserSavesData(),
+                viewerIsStreamOnly: viewerStreamOnlyRef.current,
+            });
+            for (const id of plan.forget) autoWatchedRef.current.delete(id);
+            for (const id of plan.adopt) autoWatchedRef.current.add(id);
+            for (const id of plan.open) {
+                autoWatchedRef.current.add(id);
+                console.log(`[Chat] opening the share of ${id} by itself (Open streams automatically)`);
+                autoWatchPipRef.current = viewModeRef.current === 'chat';
+                selectStream(id);
+            }
+        };
+        run();
+        window.addEventListener('settingsChanged', run);
+        const unsub = subscribeToStreamState(run);
+        return () => {
+            unsub();
+            window.removeEventListener('settingsChanged', run);
+        };
+    }, [currentUserId]);
 
     // Leaving voice (hang-up, kicked, moved) while the voice tiles are up —
     // fall back to chat so the main area never shows a stage for a dead room.
@@ -1910,8 +1975,13 @@ export function Chat({ onLogout }: ChatProps) {
     // Initialize channel selection (but not if viewing a collection)
     useEffect(() => {
         if (currentServer && channels.length > 0 && !currentChannel && !currentCollection) {
-            const textChannel = channels.find(c => c.channel_type === 0) || channels[0];
-            setCurrentChannel(textChannel);
+            // A stream-only account (docs/STREAM_ONLY.md) sees only the voice
+            // channels opened for it and may read none of them: opening one as
+            // the text view would join a room the server refuses it (an alert)
+            // and fetch history it refuses too. It gets no text view at all.
+            const fallback = isRestricted(channels[0].my_permissions, PERM.STREAM_ONLY) ? undefined : channels[0];
+            const textChannel = channels.find(c => c.channel_type === 0) || fallback;
+            if (textChannel) setCurrentChannel(textChannel);
         }
     }, [currentServer, channels, currentChannel, currentCollection]);
 
@@ -2764,6 +2834,79 @@ export function Chat({ onLogout }: ChatProps) {
      * all the frame carries, and mounting the panel without the channel's
      * real `sfu_mode` would negotiate the wrong transport.
      */
+    /**
+     * Join `channel`'s call, or move this device's call there: the channel
+     * click's path, and an embedding host's (docs/EMBEDDING.md).
+     *
+     * Seamless switch: directly set the new channel. VoicePanel handles the
+     * cleanup of the old room and the join of the new one on remount. The
+     * call continues, so the member's own mute and deafen come along (as
+     * Discord does) - the new channel mounts a new panel, and a new panel
+     * used to mean an open microphone:
+     *   - mid-call here: as this device has it, read NOW, at the click (the
+     *     old panel's teardown gets no say);
+     *   - out of voice here while the account's call is live on another
+     *     device: this join takes it over (the same channel moves it, another
+     *     ends it there), as that device left it.
+     * A join with no call anywhere starts unmuted, as it always has.
+     */
+    const joinVoiceChannel = useCallback((channel: Channel) => {
+        const own = getSelfVoiceChoice();
+        const elsewhere = carriedFromOtherDevice();
+        setCurrentVoiceChannel(prev => (prev
+            ? { ...channel, movedWith: own }
+            : elsewhere ? { ...channel, movedWith: elsewhere } : channel));
+    }, []);
+
+    // An embedding host's view of this session (docs/EMBEDDING.md): no-ops
+    // without a host. The getters read refs, so registering once is enough;
+    // the change notice below tells the host when to read again.
+    const embedServersRef = useRef(servers);
+    embedServersRef.current = servers;
+    const embedCurrentServerRef = useRef(currentServer);
+    embedCurrentServerRef.current = currentServer;
+    const embedUserRef = useRef(currentUser ? { id: currentUser.sub, username: currentUser.username } : null);
+    embedUserRef.current = currentUser ? { id: currentUser.sub, username: currentUser.username } : null;
+    useEffect(() => registerEmbedSession({
+        user: () => embedUserRef.current,
+        servers: () => embedServersRef.current.map(s => ({ id: s.id, name: s.name })),
+        currentServerId: () => embedCurrentServerRef.current?.id ?? null,
+        voiceChannel: () => {
+            const c = currentVoiceChannelRef.current;
+            return c ? { id: c.id, serverId: c.server_id, name: c.name } : null;
+        },
+        listVoiceChannels: async (serverId) => {
+            const [list, voice] = await Promise.all([
+                queryClient.fetchQuery({ queryKey: keys.channels(serverId), queryFn: () => listChannels(serverId), staleTime: 30_000 }),
+                fetchVoiceUsers(serverId).catch(() => ({ voice_users: [] })),
+            ]);
+            return list.filter(c => c.channel_type === 1).map(c => ({
+                id: c.id,
+                name: c.name,
+                canConnect: hasPerm(c.my_permissions, PERM.CONNECT),
+                members: voice.voice_users
+                    .filter(v => v.room_id === `voice_${c.id}`)
+                    .map(v => ({ id: v.user_id, username: v.username })),
+            }));
+        },
+        joinVoice: async (serverId, channelId) => {
+            let list: Channel[];
+            try {
+                // Fresh, as moveOwnCallHere: the panel must mount with the
+                // channel's real sfu_mode and permissions.
+                list = await queryClient.fetchQuery({ queryKey: keys.channels(serverId), queryFn: () => listChannels(serverId), staleTime: 0 });
+            } catch {
+                return { ok: false, error: "couldn't reach the server" };
+            }
+            const target = list.find(c => c.id === channelId && c.channel_type === 1);
+            if (!target) return { ok: false, error: 'no such voice channel' };
+            if (!hasPerm(target.my_permissions, PERM.CONNECT)) return { ok: false, error: 'you may not join that channel' };
+            if (currentVoiceChannelRef.current?.id !== target.id) joinVoiceChannel(target);
+            return { ok: true };
+        },
+    }), [queryClient, joinVoiceChannel]);
+    useEffect(() => { notifyEmbedChanged(); }, [servers, currentServer?.id, currentVoiceChannel?.id, currentUserId]);
+
     const moveOwnCallHere = useCallback((call: OwnVoiceState) => {
         const serverId = call.serverId;
         const channelId = call.channelId;
@@ -3639,22 +3782,7 @@ export function Chat({ onLogout }: ChatProps) {
                 setViewMode('voice');
                 if (isMobile) setMobilePanel('chat');
             } else {
-                // Seamless switch: directly set the new channel
-                // VoicePanel will handle cleanup of old room and joining new room on remount.
-                // The call continues, so the member's own mute and deafen come
-                // along (as Discord does) - the new channel mounts a new panel,
-                // and a new panel used to mean an open microphone:
-                //   - mid-call here: as this device has it, read NOW, at the
-                //     click (the old panel's teardown gets no say);
-                //   - out of voice here while the account's call is live on
-                //     another device: this join takes it over (the same channel
-                //     moves it, another ends it there), as that device left it.
-                // A join with no call anywhere starts unmuted, as it always has.
-                const own = getSelfVoiceChoice();
-                const elsewhere = carriedFromOtherDevice();
-                setCurrentVoiceChannel(prev => (prev
-                    ? { ...channel, movedWith: own }
-                    : elsewhere ? { ...channel, movedWith: elsewhere } : channel));
+                joinVoiceChannel(channel);
             }
         } else if (channel.channel_type === 2) { // Collection (category)
             // Show unified view of all subchannels
@@ -5130,6 +5258,9 @@ export function Chat({ onLogout }: ChatProps) {
                                 >
                                     <div
                                         className={`channel voice-channel ${channel.is_afk ? 'afk' : ''} ${currentVoiceChannel?.id === channel.id ? 'active' : ''} ${draggingChannelId === channel.id ? 'dragging' : ''} ${dragOverChannelId === channel.id ? 'drag-over' : ''}`}
+                                        // Automation contract (docs/AUTOMATION.md): open + join.
+                                        data-testid="voice-channel"
+                                        data-channel-id={channel.id}
                                         onClick={() => handleChannelClick(channel)}
                                         onContextMenu={(e) => showContextMenu(e, [
                                             menuItems.channel.edit(() => setEditingChannel(channel)),
@@ -5240,7 +5371,11 @@ export function Chat({ onLogout }: ChatProps) {
                                                             {user.connecting && <span className="voice-status-icon connecting" title={mediaE2eeExplanation('negotiating', member?.display_name || user.username) ?? ''}><LockOpenIcon /></span>}
                                                             {/* Mic, not speaker: "muted" here is the user's own mic, and
                                                                 VoiceStage renders the same isMuted flag as MicOffIcon. */}
-                                                            {user.isMuted && <span className="voice-status-icon muted" title="Muted"><MicOffIcon /></span>}
+                                                            {/* No microphone at all (docs/STREAM_ONLY.md) reads
+                                                                as that, not as muted: there is nothing to unmute. */}
+                                                            {user.noMic
+                                                                ? <span className="voice-status-icon no-mic" title="No microphone" aria-label="No microphone"><NoMicIcon /></span>
+                                                                : user.isMuted && <span className="voice-status-icon muted" title="Muted"><MicOffIcon /></span>}
                                                             {user.isDeafened && <span className="voice-status-icon deafened" title="Deafened"><HeadphonesOffIcon /></span>}
                                                         </div>
                                                     </SpeakingLi>
@@ -5348,6 +5483,9 @@ export function Chat({ onLogout }: ChatProps) {
                             // itself is not swapped: the panel reads sfuMode once at join.
                             canSpeak={hasPerm((channels.find(c => c.id === currentVoiceChannel.id) ?? currentVoiceChannel).my_permissions, PERM.SPEAK)}
                             canConnect={hasPerm((channels.find(c => c.id === currentVoiceChannel.id) ?? currentVoiceChannel).my_permissions, PERM.CONNECT)}
+                            // A stream-only account (docs/STREAM_ONLY.md) joins with no
+                            // microphone and no idle move.
+                            streamOnly={isRestricted((channels.find(c => c.id === currentVoiceChannel.id) ?? currentVoiceChannel).my_permissions, PERM.STREAM_ONLY)}
                             arrivalChoice={currentVoiceChannel.movedWith ?? null}
                             // Clips policy of the VOICE channel's server (docs/CLIPS.md) —
                             // not the viewed one; the default post target is the viewed

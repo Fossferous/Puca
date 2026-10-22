@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Noise-suppression mode plumbing behind the Settings → Voice picker and the
  * pipeline mic test.

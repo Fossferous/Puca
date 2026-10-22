@@ -85,15 +85,28 @@ export interface VoiceSpeakState {
     room_id: string;
     user_id: number;
     can_speak: boolean;
+    /** False for a NO_RECEIVE member (docs/STREAM_ONLY.md): send them no
+     *  media. The server leaves the key out when it is true, so absent = true. */
+    receives: boolean;
+    /** True for a member capped by STREAM_ONLY (an automated streaming
+     *  account, docs/STREAM_ONLY.md). Absent = false. */
+    stream_only: boolean;
 }
 
 /** Parse the server's `VoiceSpeakState` (src/protocol.rs). Strict: a frame
  *  missing a field or carrying the wrong type is ignored rather than guessed
- *  at — guessing `can_speak` either way is worse than not acting. */
+ *  at — guessing `can_speak` either way is worse than not acting. `receives`
+ *  is optional (absent = true), and so is `stream_only` (absent = false); a
+ *  present one must be a boolean. */
 export function parseVoiceSpeakState(msg: { type?: unknown; payload?: unknown }): VoiceSpeakState | null {
     if (msg?.type !== 'VoiceSpeakState') return null;
     const p = msg.payload as Partial<VoiceSpeakState> | null | undefined;
     if (!p || typeof p.room_id !== 'string' || typeof p.user_id !== 'number'
         || !Number.isInteger(p.user_id) || typeof p.can_speak !== 'boolean') return null;
-    return { room_id: p.room_id, user_id: p.user_id, can_speak: p.can_speak };
+    if (p.receives !== undefined && typeof p.receives !== 'boolean') return null;
+    if (p.stream_only !== undefined && typeof p.stream_only !== 'boolean') return null;
+    return {
+        room_id: p.room_id, user_id: p.user_id, can_speak: p.can_speak,
+        receives: p.receives !== false, stream_only: p.stream_only === true,
+    };
 }

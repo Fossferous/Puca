@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * `puca://` invite links, the webview's half (api/deepLink.ts): the parser,
  * the "is this our server?" check, and how a link from the desktop shell —

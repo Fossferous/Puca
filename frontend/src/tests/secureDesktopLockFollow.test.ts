@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * THE UNSOLICITED-LOCK HANDOVER — a machine that locks itself follows to its
  * sign-in-screen row exactly as the manual Lock button does, but ONLY when it
@@ -114,7 +115,11 @@ vi.mock('../api/devices/unattendedPrompt', () => ({ requestUnattendedPassphrase:
 // picker and no human in the loop, which is exactly why the passphrase has to
 // gate it. agentAnswerOffer starting to stream is the observable that matters.
 const agentAnswerOffer = vi.fn(async () => 'v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\n');
-vi.mock('../api/devices/hostAgent', () => ({ agentAnswerOffer }));
+vi.mock('../api/devices/hostAgent', () => ({
+    // A screen is there to capture (session.ts prepareHostScreen).
+    agentPrepareScreen: async () => ({ state: 'ready' }),
+    agentSteeredMonitor: () => null,
+    agentAnswerOffer }));
 vi.mock('../api/devices/unattended', () => ({
     deriveUaSeed: () => new Uint8Array(32),
     signUaChallengeSeed: () => new Uint8Array(64),

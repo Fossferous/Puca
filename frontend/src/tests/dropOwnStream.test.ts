@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Stopping your own share takes only YOUR stream off the stage
  * (voiceState.dropOwnStream). It used to run clearAllStreams() - the

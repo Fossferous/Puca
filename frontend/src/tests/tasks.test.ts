@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 // Unit tests for the task helpers shared by ChecklistPanel and TasksView:
 // grouping into parent/subtask nodes, the Google Keep style completion
 // cascade, and the encrypt-to-self envelope used for personal lists.

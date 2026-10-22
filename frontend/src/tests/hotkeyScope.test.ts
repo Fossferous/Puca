@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Which voice hotkeys the desktop-global hook watches (api/hotkeyScope.ts).
  *

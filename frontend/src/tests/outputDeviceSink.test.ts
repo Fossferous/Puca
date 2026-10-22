@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Settings > Voice & Video > Output Device, for audio that is NOT voice.
  *

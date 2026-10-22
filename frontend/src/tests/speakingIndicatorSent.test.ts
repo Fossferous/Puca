@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The speaking indicator must light for what the room HEARS, not for
  * transients the noise suppressor has already all but removed.

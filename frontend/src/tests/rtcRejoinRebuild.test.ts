@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Regression tests for the leave/rejoin silent-audio bug (v0.5.90).
  *

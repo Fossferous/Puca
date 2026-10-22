@@ -45,6 +45,12 @@ applyAppearance(bootSettings)
 import { installLinkRouter } from './api/linkRouter'
 installLinkRouter()
 
+// An embedding host (Púca for Steam Deck: docs/EMBEDDING.md) declared itself
+// before this script ran: give it window.pucaEmbed. Nothing at all without
+// one (api/embedHost.ts).
+import { installEmbedApi } from './api/embedApi'
+installEmbedApi()
+
 // A file dropped outside a drop zone must not navigate the page to the file —
 // in the desktop app that would replace Púca with it, now that Tauri's native
 // drop handler (which swallowed every drop, the chat's included) is off

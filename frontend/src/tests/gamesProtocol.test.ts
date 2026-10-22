@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The games wire contract, client side (src/api/games/protocol.ts), pinned to
  * the SAME fixtures the server's tests pin `ServerMessage` / `ClientMessage`

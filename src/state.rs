@@ -494,6 +494,26 @@ pub fn now_unix_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// A voice member's rights, resolved from ONE channel resolution (the join's
+/// recheck, or the perms sweep): SPEAK, the NO_RECEIVE / STREAM_ONLY
+/// restrictions (docs/STREAM_ONLY.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VoiceRights {
+    pub can_speak: bool,
+    pub receives: bool,
+    pub reads_text: bool,
+}
+
+impl VoiceRights {
+    pub fn of(perms: crate::permissions::Permissions) -> Self {
+        VoiceRights {
+            can_speak: perms.has(crate::permissions::Permissions::SPEAK),
+            receives: perms.receives_media(),
+            reads_text: !perms.is_stream_only(),
+        }
+    }
+}
+
 /// A room that users can join (text channel, voice channel, or stream)
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -547,6 +567,13 @@ pub struct Room {
     /// `presence_log`, so an entry never outlives the membership it describes
     /// and a later re-join starts from the join gate's fresh answer.
     speak_denied: HashSet<UserId>,
+    /// Members of a VOICE room whose roles carry NO_RECEIVE (the room is told,
+    /// `VoiceSpeakState.receives`), and members capped by STREAM_ONLY, who are
+    /// not sent the room's text (`text_denied`, see `broadcast_text_to_room`).
+    /// Kept exactly like `speak_denied`: written through `set_voice_rights`
+    /// (members only), cleared inside `remove_member`.
+    receive_denied: HashSet<UserId>,
+    text_denied: HashSet<UserId>,
     /// Users who left this VOICE room since the last drain, for the games
     /// layer (docs/GAMES.md, *Where the departure hook goes*): a seated
     /// player's seat goes into its disconnect grace. Filled INSIDE
@@ -598,6 +625,8 @@ impl Room {
             share_stream_ids: HashMap::new(),
             presence_log: PresenceLog::new(now_unix_ms()),
             speak_denied: HashSet::new(),
+            receive_denied: HashSet::new(),
+            text_denied: HashSet::new(),
             game_departures: Vec::new(),
         }
     }
@@ -643,6 +672,38 @@ impl Room {
     /// Absent = may speak: only a resolved deny is stored.
     pub fn can_speak(&self, user_id: UserId) -> bool {
         !self.speak_denied.contains(&user_id)
+    }
+
+    /// Store all of a voice member's resolved rights at once. Returns true when
+    /// something the ROOM is told changed: speak, receive, or the text flag,
+    /// which the room hears as `VoiceSpeakState.stream_only`. A no-op for a
+    /// non-member, for the reason `set_can_speak` gives.
+    pub fn set_voice_rights(&mut self, user_id: UserId, rights: VoiceRights) -> bool {
+        if !self.members.contains(&user_id) {
+            return false;
+        }
+        let speak = self.set_can_speak(user_id, rights.can_speak);
+        let receive = if rights.receives {
+            self.receive_denied.remove(&user_id)
+        } else {
+            self.receive_denied.insert(user_id)
+        };
+        let text = if rights.reads_text {
+            self.text_denied.remove(&user_id)
+        } else {
+            self.text_denied.insert(user_id)
+        };
+        speak || receive || text
+    }
+
+    /// May the room's members send `user_id` media? Absent = yes.
+    pub fn receives(&self, user_id: UserId) -> bool {
+        !self.receive_denied.contains(&user_id)
+    }
+
+    /// Is `user_id` sent the room's text (chat that is not a status ping)?
+    pub fn reads_text(&self, user_id: UserId) -> bool {
+        !self.text_denied.contains(&user_id)
     }
 
     pub fn add_member(&mut self, user_id: UserId, conn_id: u64) {
@@ -849,6 +910,8 @@ impl Room {
         self.camera_users.retain(|&id| id != user_id);
         self.presence_log.close_at(user_id, now_unix_ms());
         self.speak_denied.remove(&user_id);
+        self.receive_denied.remove(&user_id);
+        self.text_denied.remove(&user_id);
         if was_member && self.id.starts_with("voice_") && !self.game_departures.contains(&user_id) {
             self.game_departures.push(user_id);
         }
@@ -2795,6 +2858,21 @@ impl AppState {
         }
     }
 
+    /// [`broadcast_to_room`] for TEXT (a chat message that is not a voice
+    /// status ping): skips the members the room holds as `text_denied` - the
+    /// stream-only accounts in a call, which may see and join the voice
+    /// channel and hold its key, but are not sent what is written in it
+    /// (docs/STREAM_ONLY.md).
+    pub fn broadcast_text_to_room(&self, room_id: &str, msg: ServerMessage) {
+        if let Some(room) = self.rooms.get(room_id) {
+            for &member_id in &room.members {
+                if room.reads_text(member_id) {
+                    self.send_to_user(member_id, msg.clone());
+                }
+            }
+        }
+    }
+
     /// Tell voice room `room_id` what the server holds for `user_id`'s speak
     /// right there — see `ServerMessage::VoiceSpeakState`: every OTHER member,
     /// and each of `user_id`'s own connections in the room except `skip_conn`
@@ -2825,6 +2903,9 @@ impl AppState {
             room_id: room_id.to_string(),
             user_id,
             can_speak: room.can_speak(user_id),
+            receives: room.receives(user_id),
+            // Text-denied in a voice room IS stream-only (VoiceRights::of).
+            stream_only: !room.reads_text(user_id),
         };
         for &member_id in &room.members {
             if member_id != user_id {
@@ -2852,6 +2933,8 @@ impl AppState {
                 room_id: room_id.to_string(),
                 user_id: member_id,
                 can_speak: room.can_speak(member_id),
+                receives: room.receives(member_id),
+                stream_only: !room.reads_text(member_id),
             };
             if self.send_to_conn(user_id, conn_id, msg) {
                 sent += 1;
@@ -5107,7 +5190,7 @@ mod speak_right_tests {
     fn speak_frames(rx: &mut mpsc::Receiver<ServerMessage>) -> Vec<(String, UserId, bool)> {
         let mut out = Vec::new();
         while let Ok(msg) = rx.try_recv() {
-            if let ServerMessage::VoiceSpeakState { room_id, user_id, can_speak } = msg {
+            if let ServerMessage::VoiceSpeakState { room_id, user_id, can_speak, .. } = msg {
                 out.push((room_id, user_id, can_speak));
             }
         }

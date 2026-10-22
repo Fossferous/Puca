@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Writing files on a phone (api/saveToDevice.ts) and the two callers this
  * change moved onto it: saving an attachment (both Android apps) and Púca

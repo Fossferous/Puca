@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Reconnect catch-up: after a socket gap, reconnecting while hidden must
  * notify for what arrived during the gap — and ONLY that. The backend has no

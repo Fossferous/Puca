@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * SfuManager actually runs the share's resolution picker (shareAdapt.ts) on a
  * single-layer share, leaves a laddered one alone, and stops when the share

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * api/plaintextHost.ts: a decrypted attachment's blob lives in a worker, and
  * taking it back terminates that worker as soon as nothing else lives in it,

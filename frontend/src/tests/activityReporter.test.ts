@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The activity reporter: what THIS device tells the server about the person
  * at it, and when.

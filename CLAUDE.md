@@ -327,10 +327,12 @@ python3 scripts/check-sql-bind-types.py     # one SQL text, one bind type per pa
 cd frontend/android && ./gradlew testDebugUnitTest    # the pure-Java logic
 cd frontend/notes-app/android && ./gradlew testDebugUnitTest   # Púca Notes' pure-Java logic (reminder plan/merge, token rule, geofence parity with Púca); needs a cap sync first (npm run notes:android) and ANDROID_HOME
 cd frontend/notes-app/android && ./gradlew :app:connectedDebugAndroidTest   # on a HEADLESS emulator (-no-window -no-audio): the bridge-typing test the JVM cannot reach (PluginArgsBridgeTest)
+cd integrations/decky && npm ci && npm run typecheck && npm test && npm run test:py && npm run build   # Púca for Steam Deck (the Decky plugin, docs/STEAM_DECK.md): its own toolchain and node_modules; `npm run package` makes the zip
 node frontend/e2e/feature-flows.mjs          # needs a backend + isolated DB
 cd frontend && node e2e/games-live.mjs          # card games as ACTIVITIES, BOTH halves, no reload after sign-in: on by default, the launcher, every page seeing an activity start (notice, tile, sidebar marks) within 2.5 s, the owner's switch off/on reaching everyone live, four players (one a 390x844 phone) and a spectator, >=10 Hold'em hands + >=5 Blackjack rounds (the 1.5 s deal pause measured), grace drops, every received frame scanned for leaked cards, an old-client socket sent no game or switch frame; needs APP= / API= against a throwaway backend (header of the file), ~12 min
 cd frontend && node e2e/games-walk.mjs          # the activities and the card table's layout: 1280x800 + 390x844 coarse pointer, the launcher's sheet, the notice and the tile, keyboard-open raise sheet, 44 px targets, 460 px overflow controls, all eight themes with and without high contrast for the table AND the activity surfaces (picker, notice, tile, sidebar marks; one screenshot each); same env
 cd frontend && node e2e/own-voice-2device.mjs   # Leave / Move here: ONE account on a desktop and a 390x844 phone context plus a second account in the call, mesh and (with LK_*) SFU; needs APP= / API= against a throwaway backend (header of the file)
+cd frontend && node e2e/stream-only-live.mjs   # an automated streaming account (docs/STREAM_ONLY.md) set up in the REAL role editor (1280x800 and 390x844 touch) and driven by the docs/AUTOMATION.md data-testids alone on a mesh call: only its opened voice channel listed, text refused, no microphone ever asked for, "No microphone" in the owner's roster, its share received, No receive stopping the owner's audio to it (control: received before), no silent-mic warning after 26 s; its join/leave never SPOKEN (speechSynthesis replaced by a recorder; a person's is, the control) and its share auto-watched (owner's small player with the chat kept, a person joining while live, a 390x844 docked player; a person's share not; closed stays closed); needs APP= / API= against a throwaway backend (header of the file)
 cd frontend && npm run check:installer-hooks # NSIS hook macros compile and every migrate call names the OLD binary (needs makensis; Tauri caches one under LOCALAPPDATA/tauri/NSIS)
 node scripts/gen-third-party-notices.mjs      # regenerates THIRD_PARTY_NOTICES.md; exits 1 on a dependency with no licence — commit the result before a release
 cd frontend && node e2e/ice-url-real-browser.mjs   # real RTCPeerConnection; no server needed
@@ -348,8 +350,57 @@ cd frontend && node e2e/notes-desktop-embed.mjs         # Púca Notes INSIDE the
 cd frontend && node e2e/member-popup-scroll.mjs <outdir>   # member profile popup: last role reachable by wheel (1280x720, 1280x460) and touch (390x844 sheet); needs API= and APP= against a throwaway backend (header of the file)
 cd frontend && node e2e/user-context-menu-reach.mjs <outdir> [baseURL]   # right-click user menu: Move to / Roles lists reachable by wheel and touch, menu inside the window (fixture harness, no backend; needs a vite dev server)
 cd frontend && node e2e/device-stage-real-browser.mjs [outdir]   # the REAL remote-control stage at 390x844 touch against a stand-in host (e2e/device-stage/fakeSession.ts, built by vite.stageharness.config.ts): a tap keeps the keyboard bar's field focused (negative control: a mouse click does not), a zoom-follow switch lands in place as soon as the new screen's picture arrives (before the confirmation) and keeps a pinch made meanwhile, and the trackpad pointer crosses with it (or, from another screen, lands in view); no server needed
+cd frontend && node e2e/no-screen-stage-real-browser.mjs [outdir]   # "<PC>'s screen is off" on the REAL stage (the device-stage harness): the virtual-screen-starting banner and the lid-closed end sentence on screen, unclipped and using their width at 390x844 touch and 1280x800, with a 2000 px element as the control that must FAIL; no server needed
 cd frontend && node e2e/video-controls-real-browser.mjs [outdir]   # Púca's own video controls on the REAL chat attachment path (bundled MessageContent + TaskAttachments, encrypted fixtures served as /files does): volume, speed and fullscreen visible and hit-testable at 176 px (portrait, 9:21 letterboxed), 44 px on touch, panels inside a 390 px window and above a fullscreen player, 2x really plays at 2x (1x as control), volume = video x Output Volume, keyboard only inside the player, a vertical swipe on the timeline scrolls and never seeks (sideways drag as control), a TAP on the centre Play reaches the button (a CSS-transformed button sent the click to the <video> on Android), in-app fullscreen in the top layer, all eight themes x contrast, a small 192x108 landscape video on touch (a 192x168 box: one row, bar inside the player; mouse keeps 192x108), every player's bar inside its frame and its centre Play clear of the timeline, panels that close on F / Tab / scrolled-away button and a dismissing click that plays nothing; silent fixtures, --mute-audio, muted asserted before any play; no server needed
 ```
+
+**`node scripts/gates.mjs` runs every gate above that needs no backend, dev
+server or emulator** — typecheck, vitest, lint, build, the three cargo suites,
+the SQL bind check, both JUnit suites, the Steam Deck plugin's suite, the installer hooks, the third-party
+notices (and that the result is committed) and the twelve no-server
+real-browser scripts — concurrently where they share no lock (cargo's
+`target/` is one lock; the real-browser scripts run one at a time, after
+vitest), compiles at below-normal priority, and NEVER a compile beside vitest
+or a real-browser script: eight of vitest's real-time tests timed out when
+cargo, the SQL bind check and gradle compiled alongside it, priority or not,
+and device-stage once missed its zoom-follow framing the same way. It skips a gate whose inputs are byte-identical to a run that PASSED
+in this checkout, and says so on its own line and again in the summary,
+naming the run it relies on; `--all` runs everything, `--plan` shows what
+would run, `--only <ids>` picks. A stamp is written only when every step
+exited 0 and the inputs did not change while it ran; a failure deletes the
+gate's stamp; an interrupted run writes none. Inputs are the whole working
+tree (tracked, modified and untracked-but-not-ignored) plus the toolchain and
+the INSTALLED node_modules; only the audited gates are narrower (the two JUnit
+suites; src-tauri, whose include_str! reads are re-audited on every run and
+widen it back to the whole tree if one leaves its list). For the test gates
+the release number is blanked out of the version carriers and CHANGELOG.md is
+not an input, so a release commit does not re-run a suite on code that just
+passed; build, lint and typecheck still see every byte. `cargo-backend`'s
+stamp records whether `TEST_DATABASE_URL` was set, and its summary counts the
+DB tests that skipped themselves. The summary always ends with the gates it
+does NOT run — those still need running by hand when the change reaches them.
+Stamps and per-gate logs live in `git rev-parse --git-path puca-gates`.
+
+**A `*.test.ts` runs WITHOUT a DOM unless its first line is
+`// @vitest-environment jsdom`; a `*.test.tsx` always gets jsdom.** jsdom was
+most of what a test file cost. The no-DOM environment
+(`frontend/src/tests/clientNodeEnvironment.ts`) keeps jsdom's client transform
+and browser module resolution — vitest's own `node` environment would load
+libraries' node builds — so the only difference is the DOM itself, and
+`src/tests/browserGlobalTrap.ts` polices that: every browser global (window,
+document, navigator, localStorage, WebSocket, …) answers `undefined` and the
+file FAILS naming each one the code read and who read it. That is the point:
+`typeof window === 'undefined'` silently taking the not-a-browser branch is the
+way a test passes for the wrong reason. A new `.ts` test that needs the DOM
+fails loudly with the line to add. vitest's `maxWorkers` is pinned in
+`vitest.config.ts` (3/8 of the logical CPUs) because its default,
+`os.availableParallelism() - 1`, read 4 - 1 = 3 on the owner's 16-thread
+machine; more than 6 there only made the real-time tests time out. A handful
+of tests wait in real time (deviceSessionLifecycle, deviceAudioHubController,
+authedMediaType, attachmentAutoload…) and slow down on a busy desktop: a
+timeout there with a game running is load until shown otherwise — re-run on a
+quieter machine or with `VITEST_MAX_WORKERS=3`, never retry until green. The
+runner warns when the machine is already busy before it starts.
 
 **`h264-profile-real-browser.mjs` exists because the share encoded in SOFTWARE
 for two weeks of field logs on machines with an idle NVENC, and no gate could
@@ -701,6 +752,17 @@ has never existed.
   chime plays only while the table is on screen), and a "playing" mark for
   people OUTSIDE the call (the frames go only to the call; Discord shows it
   server-wide).
+- **There is no bot account type.** An automated streaming account is an
+  ordinary account with the stream-only bundle (docs/STREAM_ONLY.md): the
+  restricting role bits `STREAM_ONLY` (capped server-side, in the one layering
+  function all three permission resolvers share, to View/Connect/Stream in
+  voice channels a ROLE overwrite opens) and `NO_RECEIVE` (SFU
+  `canSubscribe: false`, mesh peers told via `VoiceSpeakState.receives`), join
+  without a microphone, and the `data-testid` contract in docs/AUTOMATION.md
+  (pinned by `automationHooks.test.tsx`). NOT built: a media-only key (the
+  account holds its voice channel's key, which also covers that channel's
+  text; the server's refusal is what keeps the text from it) and a
+  server-set "automated" badge.
 - **A room id is only its canonical spelling** (`voice_42`, `channel_42`):
   since 2026-10-03 `parse_voice_room` / `parse_channel_room` refuse `voice_042`
   and `voice_+42`, which used to pass JoinRoom's check for channel 42 and key a

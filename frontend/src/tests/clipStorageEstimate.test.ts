@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * WHAT A SAVED CLIP COSTS, AND WHICH LIMIT IT HITS. Settings priced only the
  * RAM of the rolling buffer; nothing said how big a POSTED clip is, and the

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Publishing this machine's LAN details — to BOTH of its device rows.
  *

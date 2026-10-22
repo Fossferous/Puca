@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The channel-key epoch race (channelKeys.ts mintEpoch): when two members
  * try to establish the same epoch at once, the loser gets a 409 and must

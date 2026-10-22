@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * What "Make a copy" plans to make (noteText.ts copyPlanOf), and what stops
  * it (copyBlockersOf / copyRefusal).

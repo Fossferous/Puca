@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * MediaManager with SPEAK denied: the microphone is never opened.
  *

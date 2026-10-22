@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The data export opens a task's sealed schedule and snooze (migration 066)
  * the way it opens attachments — with the right AAD kind per scope — and,

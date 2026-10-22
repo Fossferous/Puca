@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Audio Hub, CONTROLLER side (the owner's phone): the session it opens, the
  * request it sends, and how it reads — or refuses — what comes back.
@@ -269,23 +270,38 @@ describe('a request and its answer', () => {
         const { id, key } = await activeController({ audioHub: true });
         // Fake ONLY the deadline clock, from BEFORE the request, so the short
         // deadline is one this test controls; the crypto still needs real
-        // turns of the event loop, which setImmediate gives it.
+        // turns of the event loop, which setImmediate gives it. How MANY turns
+        // depends on the machine: WebCrypto runs on libuv's thread pool, and a
+        // fixed 40 lost the race twice on a loaded desktop (2026-10-22) — the
+        // ack was still being unsealed when the clock jumped, so the request
+        // ended as "unsupported". So wait for what each step produces, bounded
+        // in REAL time (performance.now is not faked); never reaching it fails.
         vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-        const spin = async () => { for (let i = 0; i < 40; i++) await new Promise(r => setImmediate(r)); };
+        const armed = vi.spyOn(globalThis, 'setTimeout');
+        const spinUntil = async (what: string, done: () => boolean | Promise<boolean>) => {
+            const end = performance.now() + 4000;
+            while (!(await done())) {
+                if (performance.now() > end) throw new Error(`${what} never happened`);
+                await new Promise(r => setImmediate(r));
+            }
+        };
         try {
             let outcome: AudioHubOutcome | undefined;
             void sendAudioHubRequest(id, 'airpods-pc').then(o => { outcome = o; });
-            await spin();
+            await spinUntil('the request frame', async () => (await controllerFrames(key)).some(f => f.kind === 'audio-hub'));
             const req = (await controllerFrames(key)).find(f => f.kind === 'audio-hub')!;
             const sealed = await sealControl(key, JSON.stringify({ sid: id, n: hostSeq++, kind: 'audio-hub-ack', rid: req.rid }));
             handlers.get('DeviceSignalled')!({ payload: { session_id: id, payload: sealed } });
-            await spin();
+            // An opened ack re-arms the deadline with the LONG timeout.
+            await spinUntil('the ack being opened', () => armed.mock.calls.some(([, ms]) => ms === AUDIO_HUB_RESULT_TIMEOUT_MS));
             await vi.advanceTimersByTimeAsync(AUDIO_HUB_ACK_TIMEOUT_MS + 1000);
             expect(outcome, 'an acknowledged request is still being worked on').toBeUndefined();
             // POSITIVE CONTROL: the long deadline does end it.
             await vi.advanceTimersByTimeAsync(AUDIO_HUB_RESULT_TIMEOUT_MS);
             expect(outcome?.kind).toBe('error');
         } finally {
+            // The spy wraps the FAKE setTimeout: unwrap it before the fakes go.
+            armed.mockRestore();
             vi.useRealTimers();
         }
     });

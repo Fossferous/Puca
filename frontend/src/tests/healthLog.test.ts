@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The minute health line. It exists because a call degraded after hours on one
  * machine (2026-09-25) and nothing had been written down: so the line must

@@ -190,9 +190,11 @@ export async function buildDiagnosticsReport(): Promise<string> {
     lines.push('', '--- video encoding this machine can offer ---');
     lines.push(...await encodingSupportLines());
 
-    lines.push('', '--- remote control: connections that failed (this run) ---');
-    const rc = recentRcConnectLines();
-    lines.push(...(rc.length === 0 ? ['(none)'] : rc));
+    if (__RC_ENABLED__) {
+        lines.push('', '--- remote control: connections that failed (this run) ---');
+        const rc = recentRcConnectLines();
+        lines.push(...(rc.length === 0 ? ['(none)'] : rc));
+    }
 
     lines.push('', '--- voice / screen share (SFU) ---');
     const sfu = await attempt('sfu', () => sfuManager.voiceDiagnostics(WINDOW_MS));

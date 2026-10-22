@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The .ics / phone-calendar hand-off to Púca Notes' Android plugin
  * (NotesNativePlugin.java). The Java reads shareText's `filename`, `mime`,

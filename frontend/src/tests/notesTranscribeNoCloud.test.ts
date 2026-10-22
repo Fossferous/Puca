@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * A voice note is never sent anywhere to be written down.
  *

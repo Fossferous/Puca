@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * `GET /files/:id` echoes back the Content-Type the UPLOADER put in the
  * multipart part (`src/upload_handlers.rs` stores `field.content_type()`

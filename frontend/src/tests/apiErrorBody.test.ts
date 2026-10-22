@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * ApiError carries the server's MESSAGE, not its wire shape.
  *

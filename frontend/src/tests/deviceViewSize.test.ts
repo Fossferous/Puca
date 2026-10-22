@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * THE FIT — the viewer's half.
  *

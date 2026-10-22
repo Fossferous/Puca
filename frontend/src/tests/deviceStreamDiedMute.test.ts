@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * THE CONTROLLER'S MUTE ON A 'stream-died' THAT DESCRIBES THE STREAM A RESTART
  * ALREADY REPLACED.

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The read path for the sealed timing columns (tasks.ts openTaskTiming).
  * `schedule` and `snooze` never had a plaintext era, so a non-envelope value

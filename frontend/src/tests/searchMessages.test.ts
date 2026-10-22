@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Conversation search: what it must NOT return.
  *

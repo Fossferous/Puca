@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Púca Notes — text notes, photo/drawing notes: the pure pieces. The
  * checklist ⇄ text conversions, the composer's title, the gallery's pairing

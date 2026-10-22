@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, it, expect, beforeEach, beforeAll, vi } from 'vitest';
 import { buildForwardText } from '../components/contextMenuUtils';
 

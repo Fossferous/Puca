@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Waker SELECTION — which of your devices gets asked to broadcast.
  *

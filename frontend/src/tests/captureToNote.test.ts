@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * "Save to Notes" — the pure half (api/captureToNote.ts).
  *

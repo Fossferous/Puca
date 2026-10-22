@@ -1649,6 +1649,12 @@ pub fn run() {
             service_cmd::service_update,
             #[cfg(all(windows, feature = "remote-control"))]
             service_cmd::service_bundled_fingerprint,
+            #[cfg(all(windows, feature = "remote-control"))]
+            service_cmd::virtual_screen_state,
+            #[cfg(all(windows, feature = "remote-control"))]
+            service_cmd::virtual_screen_install,
+            #[cfg(all(windows, feature = "remote-control"))]
+            service_cmd::virtual_screen_remove,
             set_close_to_tray,
             get_running_apps,
             start_app_audio_capture,

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The one rule for checklist HEADINGS (api/taskHeading.ts): which text is a
  * heading, what it shows, how it is stored, which rows count — and the one

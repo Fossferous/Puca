@@ -859,6 +859,10 @@ pub fn start(
             // in the agent log's reap line, which is the only place a dead
             // TURN relay or a 20s ICE loss ever becomes legible post-hoc.
             let reason_cell = Arc::new(Mutex::new(String::from("exited")));
+            // Counted live for the virtual screen's holder, which keeps a
+            // session's hold only while it streams. The guard below uncounts
+            // it, on every way out of this thread.
+            crate::virtual_screen::stream_started(&session_id_clone);
             let _guard = TerminatedGuard {
                 session_id: session_id_clone,
                 generation,
@@ -909,6 +913,7 @@ impl Drop for TerminatedGuard {
             generation: self.generation,
             reason,
         });
+        crate::virtual_screen::stream_ended(&self.session_id);
     }
 }
 

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * v3 recoverable key-custody crypto tests.
  *
