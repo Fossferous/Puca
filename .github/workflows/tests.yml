@@ -107,6 +107,8 @@ jobs:
         run: python3 -m unittest discover -s tests -p "test_*.py"
       - name: build (dist/index.js and dist/page-shim.js)
         run: npm run build
+      - name: package (the zip Decky installs; refuses one Decky would not start)
+        run: python3 scripts/package.py
 
   # Known-vulnerable Rust dependencies. Nothing watched for these: `npm audit`
   # covered the JS side, but an advisory against a crate in either Cargo.lock

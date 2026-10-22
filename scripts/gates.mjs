@@ -184,10 +184,12 @@ const GATES = [
         ],
     },
     {
-        id: 'decky-plugin', cpu: 'heavy', title: 'integrations/decky: typecheck, vitest, unittest, build',
+        id: 'decky-plugin', cpu: 'heavy', title: 'integrations/decky: typecheck, vitest, unittest, build, package',
         // Púca for Steam Deck builds and tests on its own (its own package.json
-        // and node_modules) and reads nothing outside its folder.
-        inputs: ['integrations/decky/'],
+        // and node_modules). Packaging also reads the repository's LICENSE. The
+        // zip is part of the gate because it is what Decky runs: the first 0.1.0
+        // zip lost "type": "module", and Decky never started the plugin.
+        inputs: ['integrations/decky/', 'LICENSE'],
         fingerprint: ['node', 'decky-deps', 'python'],
         steps: [
             {
@@ -200,6 +202,7 @@ const GATES = [
             { run: 'npx vitest run', cwd: 'integrations/decky', env: { NO_COLOR: '1' }, check: vitestCheck },
             { run: `${python} -m unittest discover -s tests -p "test_*.py"`, cwd: 'integrations/decky' },
             { run: 'npm run build', cwd: 'integrations/decky' },
+            { run: `${python} scripts/package.py`, cwd: 'integrations/decky' },
         ],
     },
     {

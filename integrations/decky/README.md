@@ -55,7 +55,11 @@ npm run test:py          # unittest: the backend's checks (aiohttp not needed)
 npm run package          # build + out/puca-decky-<version>.zip (+ .sha256)
 ```
 
-The zip is deterministic: the same sources give the same bytes.
+The zip is deterministic: the same sources give the same bytes. Its
+`package.json` must keep `"type": "module"`: Decky imports `dist/index.js` as
+an ES module only then, and otherwise evaluates it as a legacy script, which
+fails at the first `export`. `scripts/package.py` refuses to build a zip
+without it, and `tests/test_package.py` checks it against Decky's own rule.
 `@decky/ui`, React and Steam's own globals are provided by Decky at run time
 and are not bundled. `@decky/api` (LGPL-2.1) is bundled, with its licence in
 the zip.
