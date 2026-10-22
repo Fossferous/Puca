@@ -404,12 +404,14 @@ const PINS: Pin[] = [
     {
         name: 'the Mute button: pressable while listen-only for lack of a microphone; its refusals (no SPEAK, AFK, deafened) never say "click"',
         src: 'vp',
-        holds: (c) => c.includes('disabled={speakDenied || isDeafened || isAfkChannel}')
+        // micOffByChoice: joined without a microphone ON PURPOSE (docs/STREAM_ONLY.md)
+        // - nothing can return, so nothing to press; a missing DEVICE stays pressable.
+        holds: (c) => c.includes('disabled={speakDenied || micOffByChoice || isDeafened || isAfkChannel}')
             && inOrder(c, 'title={speakDenied ? "You don\'t have permission to speak in this channel"',
                 ": isAfkChannel ? 'Microphone is disabled in AFK channels'",
                 ': listenOnly ? (isDeafened ? MIC_GONE_DEAFENED_TITLE : selfMuted ? MIC_GONE_MUTED_TITLE : MIC_GONE_TITLE)'),
         mutants: [
-            ['disabled while listen-only again', replaceNth('disabled={speakDenied || isDeafened || isAfkChannel}', 'disabled={listenOnly || isDeafened || isAfkChannel}')],
+            ['disabled while listen-only again', replaceNth('disabled={speakDenied || micOffByChoice || isDeafened || isAfkChannel}', 'disabled={listenOnly || isDeafened || isAfkChannel}')],
             ['a deafened member is told to click', replaceNth('(isDeafened ? MIC_GONE_DEAFENED_TITLE : selfMuted ?', '(selfMuted ?')],
         ],
     },

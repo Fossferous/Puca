@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use crate::auth::{validate_token, Claims};
 use crate::permissions::{get_user_channel_permissions, ChannelPermAccess, Permissions};
 use crate::protocol::{ClientMessage, ServerMessage, UserInfo};
-use crate::state::{AppState, DeviceReattachOutcome, DeviceSession, DeviceSessionState, UserId};
+use crate::state::{AppState, DeviceReattachOutcome, DeviceSession, DeviceSessionState, UserId, VoiceRights};
 
 /// Query parameters for WebSocket connection
 #[derive(Debug, Deserialize)]
@@ -1185,9 +1185,9 @@ fn perms_sweep_epoch(state: &AppState, server_id: &str) -> u64 {
 /// committed before this recheck read anything, so only one that started
 /// since can have written a newer answer; the sweep asked for here starts
 /// after this write and resolves the user afresh, restoring the newest.
-fn store_join_speak(state: &Arc<AppState>, room_id: &str, user_id: UserId, can_speak: bool, server_id: &str, epoch_before: u64) {
+fn store_join_speak(state: &Arc<AppState>, room_id: &str, user_id: UserId, rights: VoiceRights, server_id: &str, epoch_before: u64) {
     if let Some(mut room) = state.rooms.get_mut(room_id) {
-        room.set_can_speak(user_id, can_speak);
+        room.set_voice_rights(user_id, rights);
     }
     if perms_sweep_epoch(state, server_id) != epoch_before {
         drop(request_perms_sweep(state, server_id, 0));
@@ -2193,10 +2193,19 @@ const JOIN_NO_CONNECT: &str = "You don't have permission to join this voice chan
 ///   `Allowed` with VIEW can earn the specific CONNECT text; everything else,
 ///   `NotMember` and `NotFound` included, gets `JOIN_REFUSED` — both fail
 ///   closed, they differ only in what they say.
+///
+/// A stream-only member (docs/STREAM_ONLY.md) is refused every TEXT room. The
+/// only channels it can see at all are the voice channels opened for its role,
+/// and `channel_<id>` of one of those is the room REST-sent messages in that
+/// channel fan out to: joining it would hand the account the channel's text
+/// live, which READ_MESSAGE_HISTORY (stripped by the cap) governs only over
+/// REST.
 fn join_verdict(access: &ChannelPermAccess, voice: bool) -> Result<Option<bool>, &'static str> {
     match access {
         ChannelPermAccess::Allowed { perms, .. } if perms.has(Permissions::VIEW_CHANNEL) => {
-            if !voice {
+            if !voice && perms.is_stream_only() {
+                Err(JOIN_REFUSED)
+            } else if !voice {
                 Ok(None)
             } else if perms.has(Permissions::CONNECT) {
                 Ok(Some(perms.has(Permissions::SPEAK)))
@@ -3315,12 +3324,21 @@ async fn handle_message(
             // Store it BEFORE anything is sent, so the snapshot below and every
             // occupant's frame read it. The write guard is dropped at the end of
             // this statement; the senders take their own read guard.
+            //
+            // With it, from the SAME resolution, the member's NO_RECEIVE and
+            // STREAM_ONLY restrictions (docs/STREAM_ONLY.md): the room tells
+            // its peers not to send them media, and skips them for its text.
             if let Some(can_speak) = voice_can_speak {
+                let perms = match &access_after {
+                    ChannelPermAccess::Allowed { perms, .. } => *perms,
+                    _ => Permissions::empty(),
+                };
+                let rights = VoiceRights { can_speak, ..VoiceRights::of(perms) };
                 match (join_server.as_deref(), epoch_before) {
-                    (Some(sid), Some(epoch)) => store_join_speak(state, &room_id, user_id, can_speak, sid, epoch),
+                    (Some(sid), Some(epoch)) => store_join_speak(state, &room_id, user_id, rights, sid, epoch),
                     _ => {
                         if let Some(mut room) = state.rooms.get_mut(&room_id) {
-                            room.set_can_speak(user_id, can_speak);
+                            room.set_voice_rights(user_id, rights);
                         }
                     }
                 }
@@ -3667,19 +3685,25 @@ async fn handle_message(
                 .then(|| voice_status_flags(&content))
                 .flatten();
 
-            state.broadcast_to_room(
-                &room_id,
-                ServerMessage::ChatMessage {
-                    room_id: room_id.clone(),
-                    sender: UserInfo::new(user_id, username.to_string()),
-                    content,
-                    timestamp,
-                    // WS-relayed messages aren't persisted here, so no DB id exists.
-                    message_id: None,
-                    clip_consent: None,
-                },
-                None,
-            );
+            let is_ping = is_voice_status_ping(&content);
+            let frame = ServerMessage::ChatMessage {
+                room_id: room_id.clone(),
+                sender: UserInfo::new(user_id, username.to_string()),
+                content,
+                timestamp,
+                // WS-relayed messages aren't persisted here, so no DB id exists.
+                message_id: None,
+                clip_consent: None,
+            };
+            // A status ping is roster state and reaches everyone in the call;
+            // anything else is TEXT, which a stream-only member of the call is
+            // not sent (docs/STREAM_ONLY.md). Only a voice room can hold one:
+            // a stream-only member is refused every text room (join_verdict).
+            if is_ping {
+                state.broadcast_to_room(&room_id, frame, None);
+            } else {
+                state.broadcast_text_to_room(&room_id, frame);
+            }
 
             if let Some((self_muted, deafened)) = own_status {
                 let next = (room_id.clone(), self_muted, deafened);
@@ -5610,7 +5634,7 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
     // query — and the permissions the SFU pass hands LiveKit (sweep_grant).
     let mut allowed_cache: std::collections::HashMap<
         (i64, UserId, bool),
-        (bool, Option<bool>, Option<Permissions>, Option<bool>),
+        (bool, Option<VoiceRights>, Option<Permissions>, Option<bool>),
     > = std::collections::HashMap::new();
     for (room_id, cid, room_members) in snapshot {
         if let Some(set) = &scope {
@@ -5624,13 +5648,13 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
         // no time bound.
         let need_connect = parse_voice_room(&room_id).is_some();
         for member_id in room_members {
-            let (allowed, can_speak, _, can_play) = match allowed_cache.get(&(cid, member_id, need_connect)) {
+            let (allowed, rights, _, can_play) = match allowed_cache.get(&(cid, member_id, need_connect)) {
                 Some(&verdict) => verdict,
                 None => {
                     let access = get_user_channel_permissions(&state.pool, cid, member_id).await;
                     let verdict = (
                         sweep_keeps(scope_known, server_id, &access, need_connect),
-                        sweep_speak(server_id, &access, need_connect),
+                        sweep_rights(server_id, &access, need_connect),
                         sweep_grant(server_id, &access),
                         sweep_play(server_id, &access, need_connect),
                     );
@@ -5659,17 +5683,20 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
                 // resumes) sending. set_can_speak is a no-op for somebody who
                 // left since the snapshot; the write guard is dropped before
                 // the fan-out, which re-reads the flag under its own guard.
-                if let Some(can_speak) = can_speak {
+                // The receive right (NO_RECEIVE) rides the same frame and the
+                // same rule; the text flag (STREAM_ONLY) is stored silently.
+                if let Some(rights) = rights {
                     let changed = state
                         .rooms
                         .get_mut(&room_id)
-                        .is_some_and(|mut room| room.set_can_speak(member_id, can_speak));
+                        .is_some_and(|mut room| room.set_voice_rights(member_id, rights));
                     if changed {
                         state.broadcast_speak_state(&room_id, member_id, None);
                         tracing::info!(
-                            "Perms sweep: user {} may {}speak in {} (change in server {})",
+                            "Perms sweep: user {} may {}speak and {}receive in {} (change in server {})",
                             member_id,
-                            if can_speak { "" } else { "no longer " },
+                            if rights.can_speak { "" } else { "not " },
+                            if rights.receives { "" } else { "not " },
                             room_id,
                             server_id
                         );
@@ -5831,7 +5858,7 @@ async fn evict_sweep(state: &Arc<AppState>, server_id: &str, retries_left: u8) {
                 let access = get_user_channel_permissions(&state.pool, cid, uid).await;
                 let verdict = (
                     sweep_keeps(scope_known, server_id, &access, true),
-                    sweep_speak(server_id, &access, true),
+                    sweep_rights(server_id, &access, true),
                     sweep_grant(server_id, &access),
                     sweep_play(server_id, &access, true),
                 );
@@ -5953,11 +5980,18 @@ mod sweep_candidate_tests {
 /// another server is left alone, a member of THIS server who lacks the bits
 /// or is no longer a member is evicted, and one who cannot be resolved at
 /// all is left to the scheduled retry rather than dropped on a guess.
+///
+/// The text-room half of `join_verdict` too: a member who has BECOME
+/// stream-only (docs/STREAM_ONLY.md) while sitting in an opened voice
+/// channel's `channel_<id>` room still sees that channel, and must go.
 fn sweep_keeps(scope_known: bool, server_id: &str, access: &ChannelPermAccess, need_connect: bool) -> bool {
     match access {
         ChannelPermAccess::Allowed { server_id: sid, perms } => {
             if !scope_known && sid != server_id {
                 return true;
+            }
+            if !need_connect && perms.is_stream_only() {
+                return false;
             }
             perms.has(Permissions::VIEW_CHANNEL) && (!need_connect || perms.has(Permissions::CONNECT))
         }
@@ -6047,12 +6081,21 @@ fn sweep_play(server_id: &str, access: &ChannelPermAccess, voice: bool) -> Optio
     }
 }
 
+/// The speak half of [`sweep_rights`], which the sweep calls; kept for the
+/// tests that pin the speak rule on its own.
+#[cfg(test)]
 fn sweep_speak(server_id: &str, access: &ChannelPermAccess, voice: bool) -> Option<bool> {
+    sweep_rights(server_id, access, voice).map(|r| r.can_speak)
+}
+
+/// [`sweep_speak`] with the rest of a voice member's rights from the same
+/// resolution (VoiceRights: NO_RECEIVE, STREAM_ONLY). Same None cases.
+fn sweep_rights(server_id: &str, access: &ChannelPermAccess, voice: bool) -> Option<VoiceRights> {
     if !voice {
         return None;
     }
     match access {
-        ChannelPermAccess::Allowed { server_id: sid, perms } if sid == server_id => Some(perms.has(Permissions::SPEAK)),
+        ChannelPermAccess::Allowed { server_id: sid, perms } if sid == server_id => Some(VoiceRights::of(*perms)),
         ChannelPermAccess::Allowed { .. } | ChannelPermAccess::NotMember | ChannelPermAccess::NotFound => None,
     }
 }
@@ -7323,7 +7366,7 @@ mod voice_speak_join_tests {
         frames
             .iter()
             .filter_map(|m| match m {
-                ServerMessage::VoiceSpeakState { room_id, user_id, can_speak } if room_id == room => {
+                ServerMessage::VoiceSpeakState { room_id, user_id, can_speak, .. } if room_id == room => {
                     Some((*user_id, *can_speak))
                 }
                 _ => None,
@@ -7669,14 +7712,14 @@ mod voice_speak_join_tests {
 
         // Control: no sweep since the epoch was read - nothing asked for.
         let epoch = perms_sweep_epoch(&state, &sid);
-        store_join_speak(&state, &room, member, true, &sid, epoch);
+        store_join_speak(&state, &room, member, crate::state::VoiceRights { can_speak: true, receives: true, reads_text: true }, &sid, epoch);
         let control = (flag(), state.perms_sweeps.contains_key(&sid));
 
         // A sweep starts and writes the newest answer; then the join, which
         // read the epoch before it, writes its older one.
         evict_sweep(&state, &sid, 0).await;
         let swept = flag();
-        store_join_speak(&state, &room, member, true, &sid, epoch);
+        store_join_speak(&state, &room, member, crate::state::VoiceRights { can_speak: true, receives: true, reads_text: true }, &sid, epoch);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while (flag() != Some(false) || state.perms_sweeps.contains_key(&sid)) && std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -10499,5 +10542,262 @@ mod games_join_db_tests {
         assert!(dropped, "the request was dropped while the push was still waiting");
         assert!(stored, "the switch-on committed");
         assert_eq!(after, vec![true], "the switch-on still reached A");
+    }
+}
+
+#[cfg(test)]
+mod stream_only_ws_tests {
+    use super::{evict_sweep, handle_message, join_verdict, sweep_rights, JOIN_REFUSED};
+    use crate::permissions::{ChannelPermAccess, Permissions as P};
+    use crate::protocol::ServerMessage;
+    use crate::state::{AppState, UserId, VoiceRights};
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    fn allowed(perms: P) -> ChannelPermAccess {
+        ChannelPermAccess::Allowed { server_id: "s".into(), perms }
+    }
+
+    /// The cap of an opened voice channel, as the resolver hands it over.
+    fn capped() -> P {
+        P::STREAM_ONLY_CAP | P::STREAM_ONLY
+    }
+
+    #[test]
+    fn a_stream_only_member_joins_the_call_but_no_text_room() {
+        assert_eq!(join_verdict(&allowed(capped()), true), Ok(Some(false)), "admitted to the call, not to speak");
+        assert_eq!(join_verdict(&allowed(capped()), false), Err(JOIN_REFUSED), "channel_<voice id> is that channel's text");
+        // NEGATIVE CONTROL: the same bits without the cap join the text room.
+        assert_eq!(join_verdict(&allowed(P::STREAM_ONLY_CAP), false), Ok(None));
+        // An administrator carrying the bit is no stream-only member.
+        assert_eq!(join_verdict(&allowed(P::ADMINISTRATOR | P::STREAM_ONLY), false), Ok(None));
+    }
+
+    #[test]
+    fn the_sweep_takes_a_member_who_became_stream_only_out_of_the_text_room() {
+        use super::sweep_keeps;
+        assert!(!sweep_keeps(true, "s", &allowed(capped()), false), "the text room of an opened voice channel");
+        assert!(sweep_keeps(true, "s", &allowed(capped()), true), "while the call itself keeps them");
+        assert!(sweep_keeps(true, "s", &allowed(P::STREAM_ONLY_CAP), false), "negative control: an ordinary viewer stays");
+    }
+
+    #[test]
+    fn the_sweep_reads_all_the_rights_from_one_resolution() {
+        let r = sweep_rights("s", &allowed(capped() | P::NO_RECEIVE), true).expect("an answer");
+        assert_eq!(r, VoiceRights { can_speak: false, receives: false, reads_text: false });
+        let human = sweep_rights("s", &allowed(P::VIEW_CHANNEL | P::CONNECT | P::SPEAK), true).expect("an answer");
+        assert_eq!(human, VoiceRights { can_speak: true, receives: true, reads_text: true }, "negative control");
+        assert_eq!(sweep_rights("s", &allowed(capped()), false), None, "a text room has no voice rights");
+        assert_eq!(sweep_rights("other", &allowed(capped()), true), None, "another server's channel: no answer");
+    }
+
+    /// One registered socket of one user, driven through the real handler.
+    struct Sock {
+        uid: UserId,
+        name: String,
+        conn: u64,
+        rx: mpsc::Receiver<ServerMessage>,
+        joined: HashSet<String>,
+    }
+
+    impl Sock {
+        fn open(state: &Arc<AppState>, uid: i32, name: &str) -> Sock {
+            let (tx, rx) = mpsc::channel::<ServerMessage>(256);
+            let (conn, _, _) = state.register_session(uid as UserId, name.to_string(), tx, false, None, String::new());
+            Sock { uid: uid as UserId, name: name.to_string(), conn, rx, joined: HashSet::new() }
+        }
+
+        async fn send(&mut self, state: &Arc<AppState>, frame: serde_json::Value) -> Result<(), String> {
+            handle_message(state, self.uid, self.conn, &self.name, &frame.to_string(), &mut self.joined, "").await
+        }
+
+        async fn join(&mut self, state: &Arc<AppState>, room: &str) -> Result<(), String> {
+            self.send(state, serde_json::json!({ "type": "JoinRoom", "payload": { "room_id": room } })).await
+        }
+
+        async fn say(&mut self, state: &Arc<AppState>, room: &str, content: &str) -> Result<(), String> {
+            self.send(state, serde_json::json!({ "type": "ChatMessage", "payload": { "room_id": room, "content": content } })).await
+        }
+
+        fn drain(&mut self) -> Vec<ServerMessage> {
+            let mut out = Vec::new();
+            while let Ok(m) = self.rx.try_recv() {
+                out.push(m);
+            }
+            out
+        }
+    }
+
+    fn chat(frames: &[ServerMessage]) -> Vec<String> {
+        frames
+            .iter()
+            .filter_map(|m| match m {
+                ServerMessage::ChatMessage { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// (user, can_speak, receives) of every VoiceSpeakState for `room`.
+    fn rights(frames: &[ServerMessage], room: &str) -> Vec<(UserId, bool, bool)> {
+        frames
+            .iter()
+            .filter_map(|m| match m {
+                ServerMessage::VoiceSpeakState { room_id, user_id, can_speak, receives } if room_id == room => {
+                    Some((*user_id, *can_speak, *receives))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// END TO END through the real JoinRoom / ChatMessage handlers and the real
+    /// perms sweep (TEST_DATABASE_URL; skips without it). A "Stream only" role
+    /// with NO_RECEIVE, opened on one voice channel:
+    ///
+    /// - the account joins that call, flagged may-not-speak and may-not-receive
+    ///   to itself and to the human already there;
+    /// - it is refused the voice channel's text room, a text channel, and a
+    ///   voice channel nobody opened for it;
+    /// - in the call it is sent status pings (roster) but not chat text, which
+    ///   the human is (the control);
+    /// - the owner lifting NO_RECEIVE reaches the room through the sweep.
+    #[tokio::test]
+    async fn a_stream_only_account_streams_into_one_call_and_reads_nothing() {
+        let Some(pool) = crate::migrator::test_pool(4).await else { return };
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let mut ids: Vec<i32> = Vec::new();
+        for n in ["owner", "human", "bot"] {
+            let (id,): (i32,) = sqlx::query_as("INSERT INTO users (username, salt, verifier) VALUES ($1, $2, $3) RETURNING id")
+                .bind(format!("sows_{n}_{}", &tag[..12]))
+                .bind(b"s".as_ref())
+                .bind(b"v".as_ref())
+                .fetch_one(&pool)
+                .await
+                .expect("user");
+            ids.push(id);
+        }
+        let (owner_i, human_i, bot_i) = (ids[0], ids[1], ids[2]);
+        let sid = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, $2, $3)")
+            .bind(&sid)
+            .bind(format!("sows_{}", &tag[..12]))
+            .bind(owner_i)
+            .execute(&pool)
+            .await
+            .expect("server");
+        for m in [owner_i, human_i, bot_i] {
+            sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)")
+                .bind(&sid)
+                .bind(m)
+                .execute(&pool)
+                .await
+                .expect("member");
+        }
+        sqlx::query(
+            "INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) \
+             VALUES ($1, '@everyone', '#99AAB5', $2, 0, true)",
+        )
+        .bind(&sid)
+        .bind(P::DEFAULT_MEMBER.bits() as i64)
+        .execute(&pool)
+        .await
+        .expect("@everyone");
+        let (role,): (i64,) = sqlx::query_as(
+            "INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) \
+             VALUES ($1, 'Stream only', '#99AAB5', $2, 1, false) RETURNING id",
+        )
+        .bind(&sid)
+        .bind((P::STREAM | P::STREAM_ONLY | P::NO_RECEIVE).bits() as i64)
+        .fetch_one(&pool)
+        .await
+        .expect("role");
+        sqlx::query("INSERT INTO member_roles (server_id, user_id, role_id) VALUES ($1, $2, $3)")
+            .bind(&sid)
+            .bind(bot_i)
+            .bind(role)
+            .execute(&pool)
+            .await
+            .expect("member role");
+        let channel = |kind: i32| {
+            let (pool, sid) = (pool.clone(), sid.clone());
+            async move {
+                sqlx::query_as::<_, (i32,)>("INSERT INTO channels (server_id, name, type, sfu_mode) VALUES ($1, 'c', $2, false) RETURNING id")
+                    .bind(sid)
+                    .bind(kind)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("channel")
+                    .0
+            }
+        };
+        let stage = channel(1).await;
+        let lounge = channel(1).await;
+        let text = channel(0).await;
+        sqlx::query("INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny) VALUES ($1, $2, $3, 0)")
+            .bind(stage as i64)
+            .bind(role)
+            .bind((P::VIEW_CHANNEL | P::CONNECT | P::STREAM).bits() as i64)
+            .execute(&pool)
+            .await
+            .expect("open the stage");
+
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let room = format!("voice_{stage}");
+        let (human, bot) = (human_i as UserId, bot_i as UserId);
+        let mut s_human = Sock::open(&state, human_i, "human");
+        let mut s_bot = Sock::open(&state, bot_i, "bot");
+
+        s_human.join(&state, &room).await.expect("the human joins");
+        s_human.drain();
+        let joined = s_bot.join(&state, &room).await;
+        let bot_frames = s_bot.drain();
+        let human_frames = s_human.drain();
+
+        let refused_stage_text = s_bot.join(&state, &format!("channel_{stage}")).await;
+        let refused_text = s_bot.join(&state, &format!("channel_{text}")).await;
+        let refused_lounge = s_bot.join(&state, &format!("voice_{lounge}")).await;
+        // NEGATIVE CONTROL for the refusals: the human may join all three.
+        let human_text = s_human.join(&state, &format!("channel_{stage}")).await;
+        s_bot.drain();
+        s_human.drain();
+
+        s_human.say(&state, &room, "hello call").await.expect("the human may chat");
+        s_human.say(&state, &room, "__VOICE_STATUS__{\"muted\":true}").await.expect("ping");
+        let bot_heard = chat(&s_bot.drain());
+        let human_heard = chat(&s_human.drain());
+        // The bot may not chat either: no SEND_MESSAGES under the cap.
+        let bot_said = s_bot.say(&state, &room, "spam").await;
+
+        // The owner takes NO_RECEIVE off the role: the sweep tells the room.
+        sqlx::query("UPDATE server_roles SET permissions = $1 WHERE id = $2")
+            .bind((P::STREAM | P::STREAM_ONLY).bits() as i64)
+            .bind(role)
+            .execute(&pool)
+            .await
+            .expect("lift no-receive");
+        evict_sweep(&state, &sid, 0).await;
+        let after_lift = rights(&s_human.drain(), &room);
+        let still_in = state.rooms.get(&room).is_some_and(|r| r.members.contains(&bot));
+
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&sid).execute(&pool).await;
+        for u in [owner_i, human_i, bot_i] {
+            let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(u).execute(&pool).await;
+        }
+
+        assert_eq!(joined, Ok(()), "the account must be able to join the call opened for it");
+        assert!(rights(&bot_frames, &room).contains(&(bot, false, false)), "it is told it may neither speak nor receive: {:?}", rights(&bot_frames, &room));
+        assert!(rights(&bot_frames, &room).contains(&(human, true, true)), "and that the human may both");
+        assert!(rights(&human_frames, &room).contains(&(bot, false, false)), "the human's client must learn not to send it media");
+        assert!(refused_stage_text.is_err(), "the voice channel's text room must be refused");
+        assert!(refused_text.is_err(), "a text channel must be refused");
+        assert!(refused_lounge.is_err(), "a voice channel nobody opened must be refused");
+        assert_eq!(human_text, Ok(()), "negative control: an ordinary member joins the same text room");
+        assert_eq!(bot_heard, vec!["__VOICE_STATUS__{\"muted\":true}".to_string()], "the bot gets the roster ping and no text");
+        assert_eq!(human_heard.len(), 2, "control: the human gets both: {human_heard:?}");
+        assert!(bot_said.is_err(), "the cap carries no SEND_MESSAGES");
+        assert!(still_in, "lifting NO_RECEIVE must not take the account out of the call");
+        assert_eq!(after_lift, vec![(bot, false, true)], "the sweep tells the room it receives now, once");
     }
 }

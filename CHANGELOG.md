@@ -4,6 +4,15 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## 0.9.843 — 2026-10-22
+
+Stream-only accounts, join voice without a microphone, stable automation hooks
+### Added
+
+- **Stream-only accounts.** A server owner can now hold an account that only streams into calls (for example one run by automation) to exactly that, enforced by the server: in **Server Settings → Roles**, **+ Stream Only Role** creates a role whose members can see, join and share their screen in the voice channels the owner ticks under **Voice channels this role may stream in**, and nothing else — no text channels, no messages, no invites, and no channel keys but those calls'. An optional **No receive** means nobody's audio or video is sent to such a member while everyone still sees its stream. Only the owner or an administrator can set either, and neither can be put on @everyone. The full story, including what the encryption does and does not promise, is in docs/STREAM_ONLY.md. Needs the app update and the server update.
+- **Join voice without a microphone.** **Settings → Voice & Video → Join voice without a microphone** joins calls with no microphone at all: no microphone prompt, no "microphone is producing silence" warning, no idle move to the AFK channel, and the others see a dashed **No microphone** mark next to your name instead of the muted one. You can still share your screen. Comes with the in-app update on Android and the web app, and with the next desktop update.
+- **Stable automation hooks.** The web client's server icons, voice channels, **Join Voice**, **Share Screen** / **Stop Sharing** and **Disconnect** carry `data-testid` attributes that are now a supported contract for driving Púca in a headless browser, listed in docs/AUTOMATION.md; a test keeps them from disappearing in a redesign.
+
 ## 0.9.842 — 2026-10-22
 
 Remote control with the lid closed; sharper fast-motion screen shares; reconnect and Download fixes

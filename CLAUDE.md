@@ -331,6 +331,7 @@ node frontend/e2e/feature-flows.mjs          # needs a backend + isolated DB
 cd frontend && node e2e/games-live.mjs          # card games as ACTIVITIES, BOTH halves, no reload after sign-in: on by default, the launcher, every page seeing an activity start (notice, tile, sidebar marks) within 2.5 s, the owner's switch off/on reaching everyone live, four players (one a 390x844 phone) and a spectator, >=10 Hold'em hands + >=5 Blackjack rounds (the 1.5 s deal pause measured), grace drops, every received frame scanned for leaked cards, an old-client socket sent no game or switch frame; needs APP= / API= against a throwaway backend (header of the file), ~12 min
 cd frontend && node e2e/games-walk.mjs          # the activities and the card table's layout: 1280x800 + 390x844 coarse pointer, the launcher's sheet, the notice and the tile, keyboard-open raise sheet, 44 px targets, 460 px overflow controls, all eight themes with and without high contrast for the table AND the activity surfaces (picker, notice, tile, sidebar marks; one screenshot each); same env
 cd frontend && node e2e/own-voice-2device.mjs   # Leave / Move here: ONE account on a desktop and a 390x844 phone context plus a second account in the call, mesh and (with LK_*) SFU; needs APP= / API= against a throwaway backend (header of the file)
+cd frontend && node e2e/stream-only-live.mjs   # an automated streaming account (docs/STREAM_ONLY.md) set up in the REAL role editor (1280x800 and 390x844 touch) and driven by the docs/AUTOMATION.md data-testids alone on a mesh call: only its opened voice channel listed, text refused, no microphone ever asked for, "No microphone" in the owner's roster, its share received, No receive stopping the owner's audio to it (control: received before), no silent-mic warning after 26 s; needs APP= / API= against a throwaway backend (header of the file)
 cd frontend && npm run check:installer-hooks # NSIS hook macros compile and every migrate call names the OLD binary (needs makensis; Tauri caches one under LOCALAPPDATA/tauri/NSIS)
 node scripts/gen-third-party-notices.mjs      # regenerates THIRD_PARTY_NOTICES.md; exits 1 on a dependency with no licence — commit the result before a release
 cd frontend && node e2e/ice-url-real-browser.mjs   # real RTCPeerConnection; no server needed
@@ -750,6 +751,17 @@ has never existed.
   chime plays only while the table is on screen), and a "playing" mark for
   people OUTSIDE the call (the frames go only to the call; Discord shows it
   server-wide).
+- **There is no bot account type.** An automated streaming account is an
+  ordinary account with the stream-only bundle (docs/STREAM_ONLY.md): the
+  restricting role bits `STREAM_ONLY` (capped server-side, in the one layering
+  function all three permission resolvers share, to View/Connect/Stream in
+  voice channels a ROLE overwrite opens) and `NO_RECEIVE` (SFU
+  `canSubscribe: false`, mesh peers told via `VoiceSpeakState.receives`), join
+  without a microphone, and the `data-testid` contract in docs/AUTOMATION.md
+  (pinned by `automationHooks.test.tsx`). NOT built: a media-only key (the
+  account holds its voice channel's key, which also covers that channel's
+  text; the server's refusal is what keeps the text from it) and a
+  server-set "automated" badge.
 - **A room id is only its canonical spelling** (`voice_42`, `channel_42`):
   since 2026-10-03 `parse_voice_room` / `parse_channel_room` refuse `voice_042`
   and `voice_+42`, which used to pass JoinRoom's check for channel 42 and key a

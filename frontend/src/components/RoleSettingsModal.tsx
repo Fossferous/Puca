@@ -3,6 +3,7 @@ import { listRoles, createRole, updateRole, deleteRole, listMembersWithRoles, ty
 import { PERMISSIONS } from '../api/permissionBits';
 import { getToken, decodeJwtPayload } from '../api/auth';
 import { CloseIcon, CrownIcon } from './Icons';
+import { StreamOnlyRoleSection } from './StreamOnlyRoleSection';
 import './RoleSettingsModal.css';
 
 interface RoleSettingsModalProps {
@@ -130,6 +131,9 @@ export function RoleSettingsModal({
     // server honors unusable from the only roles UI in the app. Owners skip
     // the lookup; everyone else is checked against their own roles.
     const [canManage, setCanManage] = useState(isOwner);
+    // The owner or an administrator: the only editors the server lets set or
+    // clear the restricting bits (Stream only, No receive).
+    const [canRestrict, setCanRestrict] = useState(isOwner);
 
     // Editable fields for selected role
     const [editName, setEditName] = useState('');
@@ -167,6 +171,7 @@ export function RoleSettingsModal({
     // Resolve MANAGE_ROLES for non-owners from their own roles in this server.
     useEffect(() => {
         setCanManage(isOwner);
+        setCanRestrict(isOwner);
         if (!isOpen || isOwner) return;
         let cancelled = false;
         (async () => {
@@ -190,6 +195,9 @@ export function RoleSettingsModal({
                 if (!cancelled && (bits & (PERMISSIONS.MANAGE_ROLES | PERMISSIONS.ADMINISTRATOR)) !== 0) {
                     setCanManage(true);
                 }
+                if (!cancelled && (bits & PERMISSIONS.ADMINISTRATOR) !== 0) {
+                    setCanRestrict(true);
+                }
             } catch (err) {
                 console.error('[RoleSettingsModal] MANAGE_ROLES lookup failed:', err);
             }
@@ -212,6 +220,22 @@ export function RoleSettingsModal({
                 name: 'New Role',
                 color: '#99AAB5',
                 permissions: PERMISSIONS.VIEW_CHANNEL | PERMISSIONS.SEND_MESSAGES | PERMISSIONS.READ_MESSAGE_HISTORY,
+            });
+            setRoles(prev => [...prev, newRole].sort((a, b) => b.position - a.position));
+            setSelectedRole(newRole);
+        } catch {
+            setError('Failed to create role');
+        }
+    };
+
+    // The "Stream only" preset (docs/STREAM_ONLY.md): screen share, capped by
+    // the server to the voice channels the editor then opens for it.
+    const handleCreateStreamOnlyRole = async () => {
+        try {
+            const newRole = await createRole(serverId, {
+                name: 'Stream only',
+                color: '#99AAB5',
+                permissions: PERMISSIONS.STREAM | PERMISSIONS.STREAM_ONLY,
             });
             setRoles(prev => [...prev, newRole].sort((a, b) => b.position - a.position));
             setSelectedRole(newRole);
@@ -321,6 +345,15 @@ export function RoleSettingsModal({
                                 + Create Role
                             </button>
                         )}
+                        {canRestrict && (
+                            <button
+                                className="create-role-btn"
+                                data-testid="create-stream-only-role"
+                                onClick={handleCreateStreamOnlyRole}
+                            >
+                                + Stream Only Role
+                            </button>
+                        )}
                     </div>
 
                     {/* Right Panel - Role Editor */}
@@ -388,6 +421,14 @@ export function RoleSettingsModal({
                                             </div>
                                         </div>
                                     ))}
+
+                                    <StreamOnlyRoleSection
+                                        serverId={serverId}
+                                        role={selectedRole}
+                                        editPermissions={editPermissions}
+                                        onToggle={togglePermission}
+                                        canRestrict={canRestrict && canManage}
+                                    />
                                 </div>
 
                                 {canManage && (

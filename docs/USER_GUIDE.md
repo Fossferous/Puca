@@ -243,12 +243,20 @@ happens:
 - **Without Connect** you cannot join. The panel says
   **You don't have permission to join this voice channel.**
 
+To join calls with no microphone at all, tick **Settings → Voice & Video →
+Join voice without a microphone** (it applies on this device, from your next
+join). The app then never asks for microphone access, the panel reads
+**Voice Connected · no microphone**, you hear everyone and can still share
+your screen, and the others see a dashed microphone (**No microphone**) next
+to your name instead of the muted one. You are never moved to the AFK channel
+for being idle while joined this way.
+
 ### Voice Controls
 The voice panel's buttons, by tooltip:
 
 | Tooltip | Action |
 |---------|--------|
-| **Mute** / **Unmute** | Stop or resume sending your microphone. Reads **Push to talk — hold your key to speak** in push-to-talk mode, **No microphone detected — listen-only mode. Mute now to stay muted when it comes back** if there is none, and **You don't have permission to speak in this channel** if you do not have the Speak permission there. With no microphone the button, and your **Toggle Mute** key, still work (except while you are deafened, in an AFK channel, or without the Speak permission): they decide whether you come back muted when a microphone returns, and the button then reads **No microphone detected — you stay muted when it comes back. Click to unmute**; deafened, it reads **No microphone detected — you are deafened, so you stay muted when it comes back**. If you were muted or deafened when your microphone dropped out, you come back muted |
+| **Mute** / **Unmute** | Stop or resume sending your microphone. Reads **You joined without a microphone — nobody can hear you** when you joined without one on purpose, **Push to talk — hold your key to speak** in push-to-talk mode, **No microphone detected — listen-only mode. Mute now to stay muted when it comes back** if there is none, and **You don't have permission to speak in this channel** if you do not have the Speak permission there. With no microphone the button, and your **Toggle Mute** key, still work (except while you are deafened, in an AFK channel, or without the Speak permission): they decide whether you come back muted when a microphone returns, and the button then reads **No microphone detected — you stay muted when it comes back. Click to unmute**; deafened, it reads **No microphone detected — you are deafened, so you stay muted when it comes back**. If you were muted or deafened when your microphone dropped out, you come back muted |
 | **Deafen** / **Undeafen** | Stop hearing everyone, which also mutes you |
 | **Noise suppression** | A picker, not a button: choose the microphone filter — **No suppression**, **Standard** or **RNNoise (ML)**. **DeepFilter (Max)** is listed too once **DeepFilterNet noise suppression** is ticked under **Settings → Advanced** |
 | **Turn On Camera** / **Turn Off Camera** | Share your webcam |
@@ -556,7 +564,27 @@ Add Reactions, Send Messages, Read Message History, Manage Messages, Add
 Tasks, Complete Tasks, Manage Tasks, Connect, Speak, Video, Stream, Mute
 Members, Move Members, Create Clips, Manage Channels, Manage Roles, Manage
 Server, Kick Members, Ban Members, Create Invites, and Administrator (full
-access to all permissions).
+access to all permissions). Under **Automated Streaming**, the owner and
+administrators also see **Stream only** and **No receive** (next section).
+
+### Automated streaming accounts (Owner)
+An account that only streams into calls (one run by automation, for example)
+can be held to exactly that by the server:
+
+1. In **Server Settings → Roles**, click **+ Stream Only Role**
+2. Optionally tick **No receive** (nobody's audio or video is sent to it; the
+   others still see its stream), then **Save Changes**
+3. Under **Voice channels this role may stream in**, tick the voice channels
+   it may join
+4. Give the account that role, and no other
+
+A member with **Stream only** can see, join and share its screen in those voice
+channels and nothing else: no text channels, no messages, no invites, no
+microphone (it joins without one). Only the owner or an administrator can set
+or clear these two, and they cannot be put on @everyone. The details, and
+what the encryption does and does not promise here, are in
+[Stream-only accounts](STREAM_ONLY.md); the stable hooks automation can click
+are in [Automation hooks](AUTOMATION.md).
 
 ### Channel permissions (Manage Channels)
 A role's permissions apply in every channel. To change what a role may do in

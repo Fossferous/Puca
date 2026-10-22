@@ -143,7 +143,7 @@ import { pipEngine, primePipSupport } from './streamPopout.utils';
 import {
     HomeIcon, ChannelsIcon, ChatIcon, MembersIcon, TasksIcon, MonitorIcon,
     HashIcon, ChecklistIcon, FolderIcon, NoteIcon, MessageIcon, CrownIcon,
-    SpeakerIcon, MicOffIcon, HeadphonesOffIcon, MoonIcon, ClipIcon,
+    SpeakerIcon, MicOffIcon, NoMicIcon, HeadphonesOffIcon, MoonIcon, ClipIcon,
     CameraIcon, ScreenShareIcon, LiveDotIcon,
     SmileIcon, ReplyIcon, ForwardIcon, PencilIcon, PinIcon, TrashIcon,
     PaperclipIcon, LockIcon, LockOpenIcon, BanIcon, EyeOffIcon, SendIcon,
@@ -169,7 +169,7 @@ import {
 import { presenceOf, usePresence, usePresenceKey, PRESENCE_LABEL } from '../api/presenceStore';
 import { startActivityReporter } from '../api/activityReporter';
 import { PresenceDot } from './PresenceDot';
-import { PERM, hasPerm } from '../api/permissionBits';
+import { PERM, hasPerm, isRestricted } from '../api/permissionBits';
 import {
     attachGamesSocket, dismissActivityNotice, getGamesState, onGamesServedChanged, requestJoin, setGamesRoom, startActivity, subscribeGames,
 } from '../api/games/gamesStore';
@@ -1910,8 +1910,13 @@ export function Chat({ onLogout }: ChatProps) {
     // Initialize channel selection (but not if viewing a collection)
     useEffect(() => {
         if (currentServer && channels.length > 0 && !currentChannel && !currentCollection) {
-            const textChannel = channels.find(c => c.channel_type === 0) || channels[0];
-            setCurrentChannel(textChannel);
+            // A stream-only account (docs/STREAM_ONLY.md) sees only the voice
+            // channels opened for it and may read none of them: opening one as
+            // the text view would join a room the server refuses it (an alert)
+            // and fetch history it refuses too. It gets no text view at all.
+            const fallback = isRestricted(channels[0].my_permissions, PERM.STREAM_ONLY) ? undefined : channels[0];
+            const textChannel = channels.find(c => c.channel_type === 0) || fallback;
+            if (textChannel) setCurrentChannel(textChannel);
         }
     }, [currentServer, channels, currentChannel, currentCollection]);
 
@@ -5130,6 +5135,9 @@ export function Chat({ onLogout }: ChatProps) {
                                 >
                                     <div
                                         className={`channel voice-channel ${channel.is_afk ? 'afk' : ''} ${currentVoiceChannel?.id === channel.id ? 'active' : ''} ${draggingChannelId === channel.id ? 'dragging' : ''} ${dragOverChannelId === channel.id ? 'drag-over' : ''}`}
+                                        // Automation contract (docs/AUTOMATION.md): open + join.
+                                        data-testid="voice-channel"
+                                        data-channel-id={channel.id}
                                         onClick={() => handleChannelClick(channel)}
                                         onContextMenu={(e) => showContextMenu(e, [
                                             menuItems.channel.edit(() => setEditingChannel(channel)),
@@ -5240,7 +5248,11 @@ export function Chat({ onLogout }: ChatProps) {
                                                             {user.connecting && <span className="voice-status-icon connecting" title={mediaE2eeExplanation('negotiating', member?.display_name || user.username) ?? ''}><LockOpenIcon /></span>}
                                                             {/* Mic, not speaker: "muted" here is the user's own mic, and
                                                                 VoiceStage renders the same isMuted flag as MicOffIcon. */}
-                                                            {user.isMuted && <span className="voice-status-icon muted" title="Muted"><MicOffIcon /></span>}
+                                                            {/* No microphone at all (docs/STREAM_ONLY.md) reads
+                                                                as that, not as muted: there is nothing to unmute. */}
+                                                            {user.noMic
+                                                                ? <span className="voice-status-icon no-mic" title="No microphone" aria-label="No microphone"><NoMicIcon /></span>
+                                                                : user.isMuted && <span className="voice-status-icon muted" title="Muted"><MicOffIcon /></span>}
                                                             {user.isDeafened && <span className="voice-status-icon deafened" title="Deafened"><HeadphonesOffIcon /></span>}
                                                         </div>
                                                     </SpeakingLi>
@@ -5348,6 +5360,9 @@ export function Chat({ onLogout }: ChatProps) {
                             // itself is not swapped: the panel reads sfuMode once at join.
                             canSpeak={hasPerm((channels.find(c => c.id === currentVoiceChannel.id) ?? currentVoiceChannel).my_permissions, PERM.SPEAK)}
                             canConnect={hasPerm((channels.find(c => c.id === currentVoiceChannel.id) ?? currentVoiceChannel).my_permissions, PERM.CONNECT)}
+                            // A stream-only account (docs/STREAM_ONLY.md) joins with no
+                            // microphone and no idle move.
+                            streamOnly={isRestricted((channels.find(c => c.id === currentVoiceChannel.id) ?? currentVoiceChannel).my_permissions, PERM.STREAM_ONLY)}
                             arrivalChoice={currentVoiceChannel.movedWith ?? null}
                             // Clips policy of the VOICE channel's server (docs/CLIPS.md) —
                             // not the viewed one; the default post target is the viewed

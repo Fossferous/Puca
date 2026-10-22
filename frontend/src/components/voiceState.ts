@@ -29,6 +29,10 @@ export interface VoiceUserStatus {
      *  Advisory: a cooperating client asserts it; the approval gate is the
      *  real guarantee (docs/CLIPS.md). */
     isBuffering?: boolean;
+    /** In the call with no microphone at all (their __VOICE_STATUS__ says so;
+     *  docs/STREAM_ONLY.md): the roster shows "no microphone", not "muted".
+     *  Preserved across a StreamStarted replay like the other status flags. */
+    noMic?: boolean;
     avatarFileId?: string | null;
     /** Roster entry exists but their media is not yet decryptable by us — the
      *  join chime is being held until it is (or until the timeout). Written
@@ -56,13 +60,14 @@ let lastStatusSeq = 0;
 export function applyVoiceStatus(
     roomId: string,
     userId: number,
-    status: { muted: boolean; deafened: boolean; buffering: boolean },
+    status: { muted: boolean; deafened: boolean; buffering: boolean; noMic?: boolean },
 ): boolean {
     const user = globalVoiceUsers.get(roomId)?.get(userId);
     if (!user) return false;
     user.isMuted = status.muted;
     user.isDeafened = status.deafened;
     user.isBuffering = status.buffering;
+    user.noMic = status.noMic === true;
     user.statusSeq = ++lastStatusSeq;
     return true;
 }
@@ -101,6 +106,7 @@ export function upsertVoiceUser(
         isMuted: prev?.isMuted ?? fallback?.isMuted ?? false,
         isDeafened: prev?.isDeafened ?? fallback?.isDeafened ?? false,
         isBuffering: prev?.isBuffering ?? fallback?.isBuffering ?? false,
+        noMic: prev?.noMic,
         avatarFileId: user.avatarFileId ?? prev?.avatarFileId,
         connecting: prev?.connecting,
         statusSeq: prev?.statusSeq,

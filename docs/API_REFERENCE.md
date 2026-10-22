@@ -90,7 +90,7 @@ in this file is not registered there, so what IS listed is real.
 |--------|----------|------|-------------|
 | GET | `/servers/:id/roles` | ✅ | List roles |
 | POST | `/servers/:id/roles` | ✅ | Create role |
-| PATCH | `/servers/:id/roles/:role_id` | ✅ | Update role |
+| PATCH | `/servers/:id/roles/:role_id` | ✅ | Update role. The two restricting bits, `STREAM_ONLY` (`1 << 29`) and `NO_RECEIVE` (`1 << 30`, see [STREAM_ONLY.md](STREAM_ONLY.md)), are refused on @everyone with 400 `Stream only and No receive cannot be set on @everyone`; an editor who is not the owner or an administrator can neither add nor remove them (the role keeps what it had) |
 | DELETE | `/servers/:id/roles/:role_id` | ✅ | Delete role |
 | PUT | `/servers/:id/members/:user_id/roles/:role_id` | ✅ | Assign role. Needs Manage Roles, a role below your highest, and no bit you lack. A caller who is not an administrator (or the owner) may not target **themselves**: 403 `Cannot change your own roles`. A role's channel overwrites are not bits, so without this a Manage Roles holder could give themselves a permission-less role whose allow overwrite opens a hidden channel. |
 | DELETE | `/servers/:id/members/:user_id/roles/:role_id` | ✅ | Remove role. Same rules as assign, including the self-target refusal — removing from yourself the role that carries a deny overwrite would restore the channel it hides. |
@@ -323,7 +323,24 @@ occupant's speak right and tells the room with a server→client frame:
 
 ```json
 {"type":"VoiceSpeakState","payload":{"room_id":"voice_42","user_id":7,"can_speak":false}}
+{"type":"VoiceSpeakState","payload":{"room_id":"voice_42","user_id":7,"can_speak":false,"receives":false}}
 ```
+
+`receives` is present, and `false`, only for a member whose roles carry
+`NO_RECEIVE` ([STREAM_ONLY.md](STREAM_ONLY.md)); when it is absent the member
+receives. It rides the same frames, to the same connections, on the same
+changes as `can_speak`. A client reading `false` for a peer sends that peer no
+audio or video; read for itself, it plays nothing it is sent. On an SFU
+channel the join token of such a member carries `canSubscribe: false`, and a
+change mid-call is applied to the live session through `UpdateParticipant`.
+The second shape is pinned by
+`frontend/src/tests/fixtures/voiceSpeakStateNoReceive.json`.
+
+A member capped by `STREAM_ONLY` resolves to no permissions in every channel
+but the voice channels opened for one of its roles, so `JoinRoom` refuses it
+every other room with the generic text; it is also refused the
+`channel_<id>` room of an opened voice channel, and a `ChatMessage` in a
+voice room that is not a status ping is not relayed to it.
 
 `can_speak` is the member's channel-effective `SPEAK` (role permissions layered
 with the channel's overwrites; `ADMINISTRATOR` and the server owner always

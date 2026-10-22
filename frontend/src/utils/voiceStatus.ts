@@ -17,6 +17,10 @@ export interface VoiceStatus {
     /** Replay buffer armed on that user's machine (advisory — a cooperating
      *  client asserts it; the approval gate is the real guarantee). */
     buffering: boolean;
+    /** In the call with no microphone track at all (none could be opened, no
+     *  SPEAK, or joined without one on purpose): the roster says "no
+     *  microphone" rather than "muted". An older client never sends it. */
+    noMic: boolean;
 }
 
 /** What this client SENDS: also the member's own mute choice, which differs
@@ -29,7 +33,7 @@ export interface OwnVoiceStatus extends VoiceStatus {
 }
 
 export function buildVoiceStatus(s: OwnVoiceStatus): string {
-    return VOICE_STATUS_PREFIX + JSON.stringify({ muted: s.muted, selfMuted: s.selfMuted, deafened: s.deafened, buffering: s.buffering });
+    return VOICE_STATUS_PREFIX + JSON.stringify({ muted: s.muted, selfMuted: s.selfMuted, deafened: s.deafened, buffering: s.buffering, noMic: s.noMic });
 }
 
 /** Returns null when `content` is not a status ping. */
@@ -38,7 +42,7 @@ export function parseVoiceStatus(content: string): VoiceStatus | null {
     try {
         const o = JSON.parse(content.slice(VOICE_STATUS_PREFIX.length)) as Record<string, unknown>;
         if (!o || typeof o !== 'object') return null;
-        return { muted: o.muted === true, deafened: o.deafened === true, buffering: o.buffering === true };
+        return { muted: o.muted === true, deafened: o.deafened === true, buffering: o.buffering === true, noMic: o.noMic === true };
     } catch {
         return null;
     }

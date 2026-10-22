@@ -128,6 +128,13 @@ export const defaultSettings = {
     // No effect if no relay is available; the operator running TURN can still see
     // the relayed connections.
     forceRelayOnly: false,
+    // Join voice calls without a microphone: no prompt, no capture, no track
+    // at all (not a muted one), so nothing measures silence or calls it a
+    // missing device, and the idle-move to the AFK channel stays off (it
+    // reads voice activity, which this member cannot have). Others see "no
+    // microphone", not "muted". Per device. For listeners, and for automated
+    // streaming accounts (docs/STREAM_ONLY.md), which join this way anyway.
+    joinWithoutMic: false,
     // When true, images hosted on OTHER sites load automatically in messages.
     // Off by default: the URL is chosen by whoever SENT the message, so the
     // fetch hands that host your IP address, your user agent and the moment you

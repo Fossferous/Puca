@@ -68,6 +68,26 @@ bitflags! {
         // the sign bit, would go wrong).
         const PLAY_GAMES         = 1 << 28;
 
+        // STREAM ONLY (docs/STREAM_ONLY.md): a RESTRICTING bit, the one kind
+        // this otherwise additive model has. A member whose roles carry it
+        // (and who is not an ADMINISTRATOR) is capped, server-side, to
+        // STREAM_ONLY_CAP - see, join and stream - and only in VOICE channels
+        // where a role overwrite of one of their own roles explicitly allows
+        // CONNECT; every other channel, text included, resolves to nothing,
+        // so key distribution (VIEW-gated) never wraps a text channel's key
+        // for them. Server-scoped: not OVERWRITABLE, refused on @everyone,
+        // and only the owner or an ADMINISTRATOR may set or clear it
+        // (role_handlers). For accounts driven by automation.
+        const STREAM_ONLY        = 1 << 29;
+
+        // NO RECEIVE: the member publishes but is sent nobody's audio or
+        // video - the SFU join grant carries canSubscribe = false (enforced
+        // by LiveKit), and the mesh peers are told (VoiceSpeakState
+        // `receives: false`) so their own clients send it nothing. Also
+        // restricting, server-scoped and owner/admin-only like STREAM_ONLY;
+        // independent of it. JavaScript's `1 << 30` is exact (positive).
+        const NO_RECEIVE         = 1 << 30;
+
         // Default member permissions
         const DEFAULT_MEMBER = Self::VIEW_CHANNEL.bits()
                              | Self::SEND_MESSAGES.bits()
@@ -105,6 +125,64 @@ impl Permissions {
     /// Create from u64 (database value)
     pub fn from_bits_value(bits: u64) -> Self {
         Permissions::from_bits_truncate(bits)
+    }
+
+    /// The restricting bits: they TAKE rights away, so `has()` (which an
+    /// ADMINISTRATOR passes for every bit) is the wrong question for them -
+    /// ask [`Permissions::is_stream_only`] / [`Permissions::receives_media`].
+    pub const RESTRICTING: Self =
+        Self::from_bits_truncate(Self::STREAM_ONLY.bits() | Self::NO_RECEIVE.bits());
+
+    /// Everything a stream-only member can hold anywhere: see the channel, join
+    /// its call, share a screen (with its audio). No SPEAK (a screen share
+    /// needs none: sfu.rs `publish_sources`), no camera, no text.
+    pub const STREAM_ONLY_CAP: Self = Self::from_bits_truncate(
+        Self::VIEW_CHANNEL.bits() | Self::CONNECT.bits() | Self::STREAM.bits(),
+    );
+
+    /// A member capped by STREAM_ONLY. An ADMINISTRATOR never is (the owner
+    /// resolves to ADMINISTRATOR, and an admin's `Permissions::all()` contains
+    /// every bit, this one included).
+    pub fn is_stream_only(&self) -> bool {
+        !self.is_admin() && self.contains(Permissions::STREAM_ONLY)
+    }
+
+    /// May the SFU / mesh peers send this member media? False only for a
+    /// non-administrator carrying NO_RECEIVE.
+    pub fn receives_media(&self) -> bool {
+        self.is_admin() || !self.contains(Permissions::NO_RECEIVE)
+    }
+
+    /// SERVER-level permissions of a stream-only member: the cap plus the
+    /// restricting bits, nothing else (no invites, no tasks, no management).
+    /// Unchanged for everyone else. VIEW stays in, so a per-channel resolution
+    /// that starts from this base layers exactly as one that starts from the
+    /// raw OR of roles (layer_overwrite_rows intersects with the cap anyway).
+    pub fn server_capped(self) -> Self {
+        if self.is_stream_only() {
+            self & (Self::STREAM_ONLY_CAP | Self::RESTRICTING)
+        } else {
+            self
+        }
+    }
+}
+
+/// What kind of channel a resolution is for. Only the stream-only cap cares:
+/// it opens VOICE channels alone. `channels.type`: 0 text, 1 voice, 2 collection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelKind {
+    Voice,
+    /// Text, a collection, or any type a later migration adds.
+    Other,
+}
+
+impl ChannelKind {
+    pub fn from_type(channel_type: i32) -> Self {
+        if channel_type == 1 {
+            ChannelKind::Voice
+        } else {
+            ChannelKind::Other
+        }
     }
 }
 
@@ -164,6 +242,10 @@ pub fn compute_channel_permissions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The kind every pre-STREAM_ONLY layering test resolves for: none of them
+    /// is about the channel's kind, which only the stream-only cap reads.
+    const TEXT: ChannelKind = ChannelKind::Other;
 
     // Moderation hierarchy (can_moderate's pure core). Positive controls for the
     // audit finding: a bare KICK_MEMBERS / BAN_MEMBERS / timeout holder could act
@@ -253,14 +335,14 @@ mod tests {
     #[test]
     fn test_layer_no_rows_keeps_base() {
         let base = Permissions::DEFAULT_MEMBER;
-        assert_eq!(layer_overwrite_rows(1, base, &[]), base);
+        assert_eq!(layer_overwrite_rows(1, TEXT, base, &[]), base);
     }
 
     #[test]
     fn test_layer_everyone_deny_hides_channel() {
         let base = Permissions::DEFAULT_MEMBER;
         let rows = [(0, Permissions::VIEW_CHANNEL.bits() as i64, true)];
-        let effective = layer_overwrite_rows(1, base, &rows);
+        let effective = layer_overwrite_rows(1, TEXT, base, &rows);
         assert!(!effective.has(Permissions::VIEW_CHANNEL));
         assert!(effective.has(Permissions::SEND_MESSAGES));
     }
@@ -274,7 +356,7 @@ mod tests {
             (0, Permissions::VIEW_CHANNEL.bits() as i64, true),
             (Permissions::VIEW_CHANNEL.bits() as i64, 0, false),
         ];
-        let effective = layer_overwrite_rows(1, base, &rows);
+        let effective = layer_overwrite_rows(1, TEXT, base, &rows);
         assert!(effective.has(Permissions::VIEW_CHANNEL));
     }
 
@@ -288,14 +370,14 @@ mod tests {
             (0, Permissions::SEND_MESSAGES.bits() as i64, false),
             (Permissions::SEND_MESSAGES.bits() as i64, 0, false),
         ];
-        let effective = layer_overwrite_rows(1, base, &rows);
+        let effective = layer_overwrite_rows(1, TEXT, base, &rows);
         assert!(effective.has(Permissions::SEND_MESSAGES));
 
         let rows_reversed = [
             (Permissions::SEND_MESSAGES.bits() as i64, 0, false),
             (0, Permissions::SEND_MESSAGES.bits() as i64, false),
         ];
-        let effective = layer_overwrite_rows(1, base, &rows_reversed);
+        let effective = layer_overwrite_rows(1, TEXT, base, &rows_reversed);
         assert!(effective.has(Permissions::SEND_MESSAGES));
     }
 
@@ -303,7 +385,7 @@ mod tests {
     fn test_layer_admin_base_ignores_overwrites() {
         let base = Permissions::ADMINISTRATOR;
         let rows = [(0, Permissions::VIEW_CHANNEL.bits() as i64, true)];
-        let effective = layer_overwrite_rows(1, base, &rows);
+        let effective = layer_overwrite_rows(1, TEXT, base, &rows);
         assert!(effective.has(Permissions::VIEW_CHANNEL));
     }
 
@@ -319,7 +401,7 @@ mod tests {
         // the base is the OR of both and the helper cannot tell them apart).
         let base = Permissions::DEFAULT_MEMBER | Permissions::MANAGE_CHANNELS;
         let rows = [(0, Permissions::VIEW_CHANNEL.bits() as i64, true)];
-        let effective = layer_overwrite_rows(1, base, &rows);
+        let effective = layer_overwrite_rows(1, TEXT, base, &rows);
         assert!(!effective.has(Permissions::VIEW_CHANNEL));
         // The deny hides the channel; it does not strip the server-level bit
         // (which no overwrite may touch either way — it is not OVERWRITABLE).
@@ -333,7 +415,7 @@ mod tests {
         // is no member-targeted overwrite in this schema).
         let base = Permissions::DEFAULT_MEMBER | Permissions::MANAGE_CHANNELS;
         let rows = [(0, Permissions::VIEW_CHANNEL.bits() as i64, false)];
-        assert!(!layer_overwrite_rows(1, base, &rows).has(Permissions::VIEW_CHANNEL));
+        assert!(!layer_overwrite_rows(1, TEXT, base, &rows).has(Permissions::VIEW_CHANNEL));
     }
 
     #[test]
@@ -348,7 +430,7 @@ mod tests {
             (0, Permissions::VIEW_CHANNEL.bits() as i64, true),
             (0, Permissions::VIEW_CHANNEL.bits() as i64, false),
         ];
-        assert!(layer_overwrite_rows(1, base, &rows).has(Permissions::VIEW_CHANNEL));
+        assert!(layer_overwrite_rows(1, TEXT, base, &rows).has(Permissions::VIEW_CHANNEL));
     }
 
     #[test]
@@ -356,9 +438,9 @@ mod tests {
         // Positive control: the entitled path. A manager with no deny against
         // them still sees the channel, with or without unrelated overwrites.
         let base = Permissions::DEFAULT_MEMBER | Permissions::MANAGE_CHANNELS;
-        assert!(layer_overwrite_rows(1, base, &[]).has(Permissions::VIEW_CHANNEL));
+        assert!(layer_overwrite_rows(1, TEXT, base, &[]).has(Permissions::VIEW_CHANNEL));
         let rows = [(0, Permissions::SEND_MESSAGES.bits() as i64, true)];
-        let effective = layer_overwrite_rows(1, base, &rows);
+        let effective = layer_overwrite_rows(1, TEXT, base, &rows);
         assert!(effective.has(Permissions::VIEW_CHANNEL));
         assert!(!effective.has(Permissions::SEND_MESSAGES));
     }
@@ -373,7 +455,7 @@ mod tests {
             (0, Permissions::VIEW_CHANNEL.bits() as i64, true),
             (Permissions::VIEW_CHANNEL.bits() as i64, 0, false),
         ];
-        assert!(layer_overwrite_rows(1, base, &rows).has(Permissions::VIEW_CHANNEL));
+        assert!(layer_overwrite_rows(1, TEXT, base, &rows).has(Permissions::VIEW_CHANNEL));
     }
 
     #[test]
@@ -381,7 +463,9 @@ mod tests {
         // Sweep: for every OVERWRITABLE bit, a base holding MANAGE_CHANNELS plus
         // that bit loses it to an @everyone deny. Guards against a future
         // "manager keeps X" re-insert of any flavour.
-        let base = Permissions::all() & !Permissions::ADMINISTRATOR;
+        // Without the restricting bits: a stream-only base resolves a text
+        // channel to nothing at all, which would pass this sweep vacuously.
+        let base = Permissions::all() & !Permissions::ADMINISTRATOR & !Permissions::RESTRICTING;
         for i in 0..64u32 {
             let bit = Permissions::from_bits_truncate(1u64 << i);
             if bit.is_empty() || !Permissions::OVERWRITABLE.contains(bit) {
@@ -389,7 +473,7 @@ mod tests {
             }
             let rows = [(0, bit.bits() as i64, true)];
             assert!(
-                !layer_overwrite_rows(1, base, &rows).contains(bit),
+                !layer_overwrite_rows(1, TEXT, base, &rows).contains(bit),
                 "bit {i} survived its own deny"
             );
         }
@@ -400,7 +484,7 @@ mod tests {
         // A member without MANAGE_TASKS can be granted it per-channel.
         let base = Permissions::DEFAULT_MEMBER;
         let rows = [(Permissions::MANAGE_TASKS.bits() as i64, 0, false)];
-        let effective = layer_overwrite_rows(1, base, &rows);
+        let effective = layer_overwrite_rows(1, TEXT, base, &rows);
         assert!(effective.has(Permissions::MANAGE_TASKS));
     }
 }
@@ -463,7 +547,8 @@ pub async fn get_user_server_permissions(
         combined |= Permissions::from_bits_truncate(perm_bits as u64);
     }
 
-    combined
+    // A stream-only member holds the cap and nothing else server-wide.
+    combined.server_capped()
 }
 
 /// Check if user has a specific permission in a server
@@ -654,7 +739,12 @@ impl Permissions {
                 // Server-scoped, like the admin bits above: create_invite
                 // resolves SERVER permissions, so a channel overwrite for it
                 // would be a control that silently does nothing.
-                | Self::CREATE_INVITE.bits()),
+                | Self::CREATE_INVITE.bits()
+                // Restricting, and a property of the MEMBER (their roles), not
+                // of a channel: an overwrite allow of STREAM_ONLY would cap a
+                // member in one channel only, and a deny would lift the cap.
+                | Self::STREAM_ONLY.bits()
+                | Self::NO_RECEIVE.bits()),
     );
 }
 
@@ -697,7 +787,53 @@ impl Permissions {
 /// get_user_channels_permissions and get_channel_viewer_ids) go through this
 /// one function so the VIEW gate, channel listing and key-wrapping viewer set
 /// cannot disagree; do not add a rule to one of them without adding it here.
+///
+/// STREAM_ONLY is applied here too, for the same reason: a stream-only member
+/// (see the bit) resolves to nothing in any channel that is not a VOICE
+/// channel, and in a voice channel to nothing unless one of the rows is an
+/// allow of CONNECT by a role overwrite (not @everyone's) - the owner opening
+/// that channel for the role. Where it is open, the layered result is cut to
+/// STREAM_ONLY_CAP, and it is nothing at all unless VIEW and CONNECT both
+/// survived (a channel they may see but not join would hand them its key for
+/// no call). The restricting bits ride along so the SFU and the voice room can
+/// read NO_RECEIVE from a channel resolution.
 fn layer_overwrite_rows(
+    channel_id: i64,
+    kind: ChannelKind,
+    base: Permissions,
+    rows: &[(i64, i64, bool)],
+) -> Permissions {
+    if base.is_stream_only() {
+        return stream_only_layer(channel_id, kind, base, rows);
+    }
+    layer_rows(channel_id, base, rows)
+}
+
+/// [`layer_overwrite_rows`] for a stream-only base.
+fn stream_only_layer(
+    channel_id: i64,
+    kind: ChannelKind,
+    base: Permissions,
+    rows: &[(i64, i64, bool)],
+) -> Permissions {
+    if kind != ChannelKind::Voice {
+        return Permissions::empty();
+    }
+    let opened = rows
+        .iter()
+        .any(|&(allow, _, is_default)| !is_default && (allow as u64) & Permissions::CONNECT.bits() != 0);
+    if !opened {
+        return Permissions::empty();
+    }
+    let capped = layer_rows(channel_id, base, rows) & Permissions::STREAM_ONLY_CAP;
+    if !capped.contains(Permissions::VIEW_CHANNEL | Permissions::CONNECT) {
+        return Permissions::empty();
+    }
+    capped | (base & Permissions::RESTRICTING)
+}
+
+/// The plain layering, for every base but a stream-only one.
+fn layer_rows(
     channel_id: i64,
     base: Permissions,
     rows: &[(i64, i64, bool)],
@@ -745,9 +881,9 @@ pub async fn get_user_channel_permissions(
     channel_id: i64,
     user_id: i64,
 ) -> ChannelPermAccess {
-    // Channel -> owning server + owner status in one round-trip.
-    let row: Option<(Option<String>, bool)> = match sqlx::query_as(
-        "SELECT c.server_id, COALESCE(s.owner_id = $2, false) \
+    // Channel -> owning server + owner status + type in one round-trip.
+    let row: Option<(Option<String>, bool, i32)> = match sqlx::query_as(
+        "SELECT c.server_id, COALESCE(s.owner_id = $2, false), c.type \
          FROM channels c LEFT JOIN servers s ON c.server_id = s.id \
          WHERE c.id = $1",
     )
@@ -767,8 +903,8 @@ pub async fn get_user_channel_permissions(
         }
     };
 
-    let (server_id, is_owner) = match row {
-        Some((Some(sid), owner)) => (sid, owner),
+    let (server_id, is_owner, kind) = match row {
+        Some((Some(sid), owner, channel_type)) => (sid, owner, ChannelKind::from_type(channel_type)),
         _ => return ChannelPermAccess::NotFound,
     };
 
@@ -860,7 +996,7 @@ pub async fn get_user_channel_permissions(
 
     ChannelPermAccess::Allowed {
         server_id,
-        perms: layer_overwrite_rows(channel_id, base, &rows),
+        perms: layer_overwrite_rows(channel_id, kind, base, &rows),
     }
 }
 
@@ -919,12 +1055,27 @@ pub async fn get_user_channels_permissions(
             .push((allow, deny, is_default));
     }
 
+    // Only the stream-only cap reads a channel's kind, so only a stream-only
+    // caller pays for the lookup. A channel the query does not return is not a
+    // voice channel as far as the cap is concerned (fail closed: nothing).
+    let voice: std::collections::HashSet<i64> = if base.is_stream_only() {
+        sqlx::query_as::<_, (i64,)>(
+            "SELECT id::bigint FROM channels WHERE id::bigint = ANY($1) AND type = 1",
+        )
+        .bind(channel_ids)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|(id,)| id)
+        .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
+
     for &cid in channel_ids {
-        let perms = match by_channel.get(&cid) {
-            Some(rows) => layer_overwrite_rows(cid, base, rows),
-            None => base,
-        };
-        map.insert(cid, perms);
+        let kind = if voice.contains(&cid) { ChannelKind::Voice } else { ChannelKind::Other };
+        let rows = by_channel.get(&cid).map(Vec::as_slice).unwrap_or(&[]);
+        map.insert(cid, layer_overwrite_rows(cid, kind, base, rows));
     }
     Ok(map)
 }
@@ -943,6 +1094,14 @@ pub async fn get_channel_viewer_ids(
         .bind(server_id)
         .fetch_optional(pool)
         .await?;
+
+    // The channel's kind, for the stream-only cap (voice channels only). A
+    // channel that is gone reads as not-voice: the cap then admits no one.
+    let kind = sqlx::query_as::<_, (i32,)>("SELECT type FROM channels WHERE id = $1")
+        .bind(channel_id)
+        .fetch_optional(pool)
+        .await?
+        .map_or(ChannelKind::Other, |(t,)| ChannelKind::from_type(t));
 
     // Every member with the OR of their held-role bits (0 when roleless).
     // `AND sr.server_id = sm.server_id` is the C2 cross-server pin the other
@@ -1015,11 +1174,56 @@ pub async fn get_channel_viewer_ids(
             })
             .map(|&(_, allow, deny, is_default)| (allow, deny, is_default))
             .collect();
-        if layer_overwrite_rows(channel_id, base, &rows).has(Permissions::VIEW_CHANNEL) {
+        if layer_overwrite_rows(channel_id, kind, base, &rows).has(Permissions::VIEW_CHANNEL) {
             viewers.insert(uid);
         }
     }
     Ok(viewers)
+}
+
+/// Members of `server_id` capped by STREAM_ONLY (see the bit): their held
+/// roles carry it and their roles plus @everyone carry no ADMINISTRATOR; the
+/// owner never is. For a fan-out that resolves visibility from BASE
+/// permissions instead of a channel resolution (ChannelCreated) and so would
+/// otherwise reach them. FAIL CLOSED is the caller's: an Err must not read as
+/// "nobody is capped".
+pub async fn stream_only_member_ids(
+    pool: &sqlx::PgPool,
+    server_id: &str,
+) -> Result<std::collections::HashSet<i64>, sqlx::Error> {
+    let held: Vec<(i32, i64)> = sqlx::query_as(
+        "SELECT mr.user_id, COALESCE(BIT_OR(sr.permissions), 0) FROM member_roles mr \
+         JOIN server_roles sr ON sr.id = mr.role_id AND sr.server_id = mr.server_id \
+         WHERE mr.server_id = $1 GROUP BY mr.user_id \
+         HAVING (COALESCE(BIT_OR(sr.permissions), 0) & $2) <> 0",
+    )
+    .bind(server_id)
+    .bind(Permissions::STREAM_ONLY.bits() as i64)
+    .fetch_all(pool)
+    .await?;
+    if held.is_empty() {
+        return Ok(std::collections::HashSet::new());
+    }
+    let default_bits: i64 = sqlx::query_as::<_, (i64,)>(
+        "SELECT COALESCE(BIT_OR(permissions), 0) FROM server_roles \
+         WHERE server_id = $1 AND is_default = true",
+    )
+    .bind(server_id)
+    .fetch_one(pool)
+    .await?
+    .0;
+    let owner: Option<(i32,)> = sqlx::query_as("SELECT owner_id FROM servers WHERE id = $1")
+        .bind(server_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(held
+        .into_iter()
+        .filter(|&(uid, bits)| {
+            owner.map_or(true, |(o,)| o != uid)
+                && Permissions::from_bits_truncate((bits | default_bits) as u64).is_stream_only()
+        })
+        .map(|(uid, _)| uid as i64)
+        .collect())
 }
 
 /// Membership probe shared by the channel- and message-scoped checks.
@@ -1455,5 +1659,247 @@ mod migration_061_constants {
         assert!(!Permissions::DEFAULT_MEMBER.intersects(
             Permissions::MANAGE_CHANNELS | Permissions::MANAGE_ROLES | Permissions::KICK_MEMBERS | Permissions::BAN_MEMBERS
         ));
+    }
+}
+
+#[cfg(test)]
+mod stream_only_tests {
+    use super::*;
+
+    const P_VIEW: i64 = Permissions::VIEW_CHANNEL.bits() as i64;
+    const P_CONNECT: i64 = Permissions::CONNECT.bits() as i64;
+    const P_STREAM: i64 = Permissions::STREAM.bits() as i64;
+
+    /// What a server owner's "Stream only" role resolves from: @everyone's
+    /// defaults (which hand out VIEW, SEND, READ, SPEAK... everywhere), plus
+    /// the role's own bits.
+    fn stream_only_base() -> Permissions {
+        Permissions::DEFAULT_MEMBER | Permissions::STREAM | Permissions::STREAM_ONLY
+    }
+
+    /// The owner opening one voice channel for the role: a ROLE overwrite.
+    fn opened() -> [(i64, i64, bool); 1] {
+        [(P_VIEW | P_CONNECT | P_STREAM, 0, false)]
+    }
+
+    #[test]
+    fn the_bits_are_29_and_30_and_collide_with_nothing() {
+        assert_eq!(Permissions::STREAM_ONLY.bits(), 1 << 29);
+        assert_eq!(Permissions::NO_RECEIVE.bits(), 1 << 30);
+        assert!((Permissions::STREAM_ONLY & Permissions::NO_RECEIVE).is_empty());
+        assert!((Permissions::RESTRICTING & Permissions::PLAY_GAMES).is_empty());
+        assert!(!Permissions::DEFAULT_MEMBER.intersects(Permissions::RESTRICTING));
+    }
+
+    #[test]
+    fn restricting_bits_are_not_overwritable() {
+        assert!(!Permissions::OVERWRITABLE.intersects(Permissions::RESTRICTING));
+        // So a channel overwrite can neither impose the cap on an ordinary
+        // member nor lift it from a stream-only one.
+        let ordinary = Permissions::DEFAULT_MEMBER;
+        let impose = [(Permissions::STREAM_ONLY.bits() as i64, 0, false)];
+        let r = layer_overwrite_rows(1, ChannelKind::Other, ordinary, &impose);
+        assert!(!r.contains(Permissions::STREAM_ONLY));
+        assert!(r.has(Permissions::SEND_MESSAGES), "an allow of STREAM_ONLY capped nobody");
+        let lift = [(P_VIEW | P_CONNECT | P_STREAM, Permissions::STREAM_ONLY.bits() as i64, false)];
+        let r = layer_overwrite_rows(1, ChannelKind::Voice, stream_only_base(), &lift);
+        assert_eq!(r, Permissions::STREAM_ONLY_CAP | Permissions::STREAM_ONLY, "a deny of STREAM_ONLY lifted nothing");
+    }
+
+    #[test]
+    fn a_text_channel_resolves_to_nothing_even_when_opened() {
+        let r = layer_overwrite_rows(1, ChannelKind::Other, stream_only_base(), &opened());
+        assert_eq!(r, Permissions::empty());
+        // Every bit a role overwrite can carry, still nothing.
+        let all = [(Permissions::OVERWRITABLE.bits() as i64, 0, false)];
+        assert_eq!(layer_overwrite_rows(1, ChannelKind::Other, stream_only_base(), &all), Permissions::empty());
+        // NEGATIVE CONTROL: the same base without the bit reads the channel.
+        let ordinary = stream_only_base() & !Permissions::STREAM_ONLY;
+        let r = layer_overwrite_rows(1, ChannelKind::Other, ordinary, &[]);
+        assert!(r.has(Permissions::VIEW_CHANNEL) && r.has(Permissions::READ_MESSAGE_HISTORY));
+    }
+
+    #[test]
+    fn a_voice_channel_is_closed_until_a_role_overwrite_allows_connect() {
+        let base = stream_only_base();
+        assert_eq!(layer_overwrite_rows(1, ChannelKind::Voice, base, &[]), Permissions::empty());
+        // @everyone's allow does not open it: that would open every channel to
+        // every stream-only account at once.
+        let everyone = [(P_VIEW | P_CONNECT | P_STREAM, 0, true)];
+        assert_eq!(layer_overwrite_rows(1, ChannelKind::Voice, base, &everyone), Permissions::empty());
+        // A role overwrite allowing VIEW alone does not open it either.
+        let view_only = [(P_VIEW, 0, false)];
+        assert_eq!(layer_overwrite_rows(1, ChannelKind::Voice, base, &view_only), Permissions::empty());
+        // NEGATIVE CONTROL: an ordinary member joins it with no overwrite.
+        let ordinary = base & !Permissions::STREAM_ONLY;
+        assert!(layer_overwrite_rows(1, ChannelKind::Voice, ordinary, &[]).has(Permissions::CONNECT));
+    }
+
+    #[test]
+    fn an_opened_voice_channel_gives_the_cap_and_nothing_more() {
+        let r = layer_overwrite_rows(1, ChannelKind::Voice, stream_only_base(), &opened());
+        assert_eq!(r, Permissions::STREAM_ONLY_CAP | Permissions::STREAM_ONLY);
+        for bit in [
+            Permissions::SEND_MESSAGES,
+            Permissions::READ_MESSAGE_HISTORY,
+            Permissions::SPEAK,
+            Permissions::VIDEO,
+            Permissions::ATTACH_FILES,
+            Permissions::PLAY_GAMES,
+            Permissions::CREATE_CLIPS,
+        ] {
+            assert!(!r.has(bit), "{bit:?} leaked through the cap");
+        }
+        // The cap is an upper bound, not a grant: without STREAM anywhere, no
+        // share.
+        let no_stream = stream_only_base() & !Permissions::STREAM;
+        let only_join = [(P_VIEW | P_CONNECT, 0, false)];
+        let r = layer_overwrite_rows(1, ChannelKind::Voice, no_stream, &only_join);
+        assert!(r.has(Permissions::CONNECT) && !r.has(Permissions::STREAM));
+    }
+
+    #[test]
+    fn a_deny_still_closes_an_opened_channel() {
+        // Opened by one of the account's roles, VIEW denied by another: no key
+        // for a channel it may not see.
+        let rows = [(P_CONNECT | P_STREAM, 0, false), (0, P_VIEW, false)];
+        assert_eq!(layer_overwrite_rows(1, ChannelKind::Voice, stream_only_base(), &rows), Permissions::empty());
+        // @everyone denies VIEW, the role allows it back: open.
+        let rows = [(0, P_VIEW, true), (P_VIEW | P_CONNECT | P_STREAM, 0, false)];
+        assert!(layer_overwrite_rows(1, ChannelKind::Voice, stream_only_base(), &rows).has(Permissions::CONNECT));
+    }
+
+    #[test]
+    fn an_administrator_is_never_capped() {
+        let base = stream_only_base() | Permissions::ADMINISTRATOR;
+        assert!(!base.is_stream_only());
+        assert!(layer_overwrite_rows(1, ChannelKind::Other, base, &[]).has(Permissions::SEND_MESSAGES));
+        assert_eq!(base.server_capped(), base);
+        // And `Permissions::all()` (what an admin resolves to) still receives.
+        assert!(Permissions::all().receives_media());
+        assert!(!Permissions::all().is_stream_only());
+    }
+
+    #[test]
+    fn server_level_permissions_are_the_cap() {
+        let base = stream_only_base()
+            | Permissions::NO_RECEIVE
+            | Permissions::MANAGE_ROLES
+            | Permissions::CREATE_INVITE
+            | Permissions::KICK_MEMBERS;
+        let capped = base.server_capped();
+        assert_eq!(capped, Permissions::STREAM_ONLY_CAP | Permissions::RESTRICTING);
+        // NEGATIVE CONTROL: an ordinary member is untouched.
+        let ordinary = Permissions::DEFAULT_MEMBER | Permissions::MANAGE_ROLES;
+        assert_eq!(ordinary.server_capped(), ordinary);
+    }
+
+    #[test]
+    fn no_receive_is_independent_and_rides_through_layering() {
+        let ordinary = Permissions::DEFAULT_MEMBER | Permissions::NO_RECEIVE;
+        assert!(!ordinary.receives_media());
+        assert!(!ordinary.is_stream_only());
+        let r = layer_overwrite_rows(1, ChannelKind::Voice, ordinary, &[(0, P_CONNECT, true)]);
+        assert!(!r.receives_media(), "a channel resolution must still say no-receive");
+        let so = layer_overwrite_rows(1, ChannelKind::Voice, stream_only_base() | Permissions::NO_RECEIVE, &opened());
+        assert!(!so.receives_media());
+        assert!(Permissions::DEFAULT_MEMBER.receives_media(), "negative control");
+    }
+
+    #[test]
+    fn the_client_maps_carry_the_same_bits() {
+        let ts = include_str!("../frontend/src/api/permissionBits.ts");
+        assert_eq!(ts.matches("STREAM_ONLY: 1 << 29,").count(), 2, "STREAM_ONLY must be in BOTH PERM and PERMISSIONS");
+        assert_eq!(ts.matches("NO_RECEIVE: 1 << 30,").count(), 2, "NO_RECEIVE must be in BOTH PERM and PERMISSIONS");
+    }
+
+    /// The key-distribution rule, against a real database: the viewer set
+    /// `publish_channel_keys` wraps epoch keys for (get_channel_viewer_ids)
+    /// holds a stream-only account for the ONE voice channel opened for its
+    /// role and for nothing else, and the other two resolvers agree.
+    #[tokio::test]
+    async fn key_distribution_reaches_a_stream_only_account_for_its_voice_channel_only() {
+        let Some(pool) = crate::migrator::test_pool(2).await else { return };
+        async fn mk_user(pool: &sqlx::PgPool, tag: &str) -> i32 {
+            let name = format!("so_{tag}_{}", uuid::Uuid::new_v4());
+            sqlx::query_as::<_, (i32,)>("INSERT INTO users (username, salt, verifier) VALUES ($1, '00', '00') RETURNING id")
+                .bind(name)
+                .fetch_one(pool)
+                .await
+                .expect("user")
+                .0
+        }
+        async fn mk_channel(pool: &sqlx::PgPool, sid: &str, name: &str, kind: i32) -> i64 {
+            sqlx::query_as::<_, (i32,)>("INSERT INTO channels (server_id, name, type) VALUES ($1, $2, $3) RETURNING id")
+                .bind(sid)
+                .bind(name)
+                .bind(kind)
+                .fetch_one(pool)
+                .await
+                .expect("channel")
+                .0 as i64
+        }
+        let owner = mk_user(&pool, "owner").await;
+        let human = mk_user(&pool, "human").await;
+        let bot = mk_user(&pool, "bot").await;
+        let sid = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO servers (id, name, owner_id) VALUES ($1, 'so-test', $2)")
+            .bind(&sid).bind(owner).execute(&pool).await.expect("server");
+        for u in [owner, human, bot] {
+            sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)")
+                .bind(&sid).bind(u).execute(&pool).await.expect("member");
+        }
+        sqlx::query("INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) VALUES ($1, '@everyone', '#99AAB5', $2, 0, true)")
+            .bind(&sid).bind(Permissions::DEFAULT_MEMBER.bits() as i64).execute(&pool).await.expect("@everyone");
+        let (role,): (i64,) = sqlx::query_as("INSERT INTO server_roles (server_id, name, color, permissions, position, is_default) VALUES ($1, 'Stream only', '#99AAB5', $2, 1, false) RETURNING id")
+            .bind(&sid).bind((Permissions::STREAM | Permissions::STREAM_ONLY).bits() as i64).fetch_one(&pool).await.expect("role");
+        sqlx::query("INSERT INTO member_roles (server_id, user_id, role_id) VALUES ($1, $2, $3)")
+            .bind(&sid).bind(bot).bind(role).execute(&pool).await.expect("assign");
+        let text = mk_channel(&pool, &sid, "general", 0).await;
+        let stage = mk_channel(&pool, &sid, "stage", 1).await;
+        let lounge = mk_channel(&pool, &sid, "lounge", 1).await;
+        // Opened: the stage, for the role. The text channel gets the same
+        // overwrite, which must open nothing; the lounge gets none.
+        for cid in [stage, text] {
+            sqlx::query("INSERT INTO channel_permission_overwrites (channel_id, role_id, allow, deny) VALUES ($1, $2, $3, 0)")
+                .bind(cid).bind(role).bind(P_VIEW | P_CONNECT | P_STREAM)
+                .execute(&pool).await.expect("overwrite");
+        }
+
+        let (bot, human, owner) = (bot as i64, human as i64, owner as i64);
+        let v = get_channel_viewer_ids(&pool, stage, &sid).await.expect("viewers");
+        assert!(v.contains(&bot), "the account must get the key of the channel it streams into");
+        assert!(v.contains(&human) && v.contains(&owner));
+        let v = get_channel_viewer_ids(&pool, text, &sid).await.expect("viewers");
+        assert!(!v.contains(&bot), "a text channel's key must never be wrapped for a stream-only account");
+        assert!(v.contains(&human), "negative control: a human member still gets the text key");
+        let v = get_channel_viewer_ids(&pool, lounge, &sid).await.expect("viewers");
+        assert!(!v.contains(&bot), "an unopened voice channel's key must not reach it");
+        assert!(v.contains(&human));
+
+        // The single and the bulk resolvers agree with the viewer set.
+        match get_user_channel_permissions(&pool, stage, bot).await {
+            ChannelPermAccess::Allowed { perms, .. } => assert_eq!(perms, Permissions::STREAM_ONLY_CAP | Permissions::STREAM_ONLY),
+            _ => panic!("the bot is a member"),
+        }
+        match get_user_channel_permissions(&pool, text, bot).await {
+            ChannelPermAccess::Allowed { perms, .. } => assert_eq!(perms, Permissions::empty()),
+            _ => panic!("the bot is a member"),
+        }
+        let bulk = get_user_channels_permissions(&pool, &sid, bot, &[text, stage, lounge]).await.expect("bulk");
+        assert_eq!(bulk[&stage], Permissions::STREAM_ONLY_CAP | Permissions::STREAM_ONLY);
+        assert_eq!(bulk[&text], Permissions::empty());
+        assert_eq!(bulk[&lounge], Permissions::empty());
+        // Server level: no invites, no text.
+        let server = get_user_server_permissions(&pool, &sid, bot).await;
+        assert!(!server.has(Permissions::CREATE_INVITE) && !server.has(Permissions::SEND_MESSAGES));
+        // The base-permission fan-outs (ChannelCreated) leave out exactly it.
+        let capped = stream_only_member_ids(&pool, &sid).await.expect("capped ids");
+        assert_eq!(capped, std::collections::HashSet::from([bot]));
+
+        let _ = sqlx::query("DELETE FROM servers WHERE id = $1").bind(&sid).execute(&pool).await;
+        for u in [owner, human, bot] {
+            let _ = sqlx::query("DELETE FROM users WHERE id = $1").bind(u as i32).execute(&pool).await;
+        }
     }
 }
