@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The client half of the stream-only bundle (docs/STREAM_ONLY.md), off the
  * wire and in the media layer:
