@@ -1394,7 +1394,7 @@ export function Chat({ onLogout }: ChatProps) {
                 selected: getSelectedStreams(),
                 handled: autoWatchedRef.current,
                 isStreamOnly: isStreamOnlyMember,
-                enabled: loadSettings().autoWatchStreamOnly !== false,
+                mode: loadSettings().autoOpenStreams,
                 saveData: browserSavesData(),
                 viewerIsStreamOnly: viewerStreamOnlyRef.current,
             });
@@ -1402,7 +1402,7 @@ export function Chat({ onLogout }: ChatProps) {
             for (const id of plan.adopt) autoWatchedRef.current.add(id);
             for (const id of plan.open) {
                 autoWatchedRef.current.add(id);
-                console.log(`[Chat] auto-watching the share of stream-only member ${id}`);
+                console.log(`[Chat] opening the share of ${id} by itself (Open streams automatically)`);
                 autoWatchPipRef.current = viewModeRef.current === 'chat';
                 selectStream(id);
             }

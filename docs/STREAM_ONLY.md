@@ -162,12 +162,23 @@ from the same cap it enforces; no client works it out from role bits.
   the stream view; from the chat it opens in the small player over the chat
   (docked under the header on a phone), so nothing you are reading or typing
   is taken away. It plays at that stream's own volume and mute and the master
-  Output Volume, like any stream you watch. Everyone else's shares still wait
-  for a click.
-- **The control**: **Settings → Voice & Video → Automatically watch streams
-  from stream-only accounts**, on by default, per device. A stream costs data
-  like any other, so a phone on mobile data may want it off; it never starts
-  while the browser asks to save data (Chromium's Data Saver).
+  Output Volume, like any stream you watch. Everyone else's shares wait for a
+  click, unless you choose **All streams** (next point).
+- **The control**: **Settings → Voice & Video → Open streams automatically**,
+  per device, with three choices: **Off** (every stream waits for your
+  click), **From stream-only accounts** (the default, described above) and
+  **All streams** (every share in your voice channel opens the same way, once
+  per share). A stream costs data like any other, so a phone on mobile data
+  may want it off; nothing opens by itself while the browser asks to save data
+  (Chromium's Data Saver).
+- **Several at once.** Shares that are live when you join open together, in
+  the order the call lists them; one that starts later is added beside the
+  ones already open. Opening one never takes you anywhere: a stream view you
+  are already in gains it as another tile without moving its focus (in Focus
+  View the stream you were watching stays in the spotlight), and the small
+  player keeps showing the stream it was showing. Only from the chat (into
+  the small player) or the call's view (into the stream view) does a first
+  stream appear on its own.
 - **Autoplay.** The picture is a muted video and always starts. A browser
   starts a stream's sound only after you have used the page; you almost always
   have (you clicked to join the call), but if the call came back on its own

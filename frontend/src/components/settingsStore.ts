@@ -135,14 +135,16 @@ export const defaultSettings = {
     // microphone", not "muted". Per device. For listeners, and for automated
     // streaming accounts (docs/STREAM_ONLY.md), which join this way anyway.
     joinWithoutMic: false,
-    // Start watching a share from a STREAM-ONLY account (docs/STREAM_ONLY.md)
-    // in your call without a Watch click: when you join while it is live, and
-    // when it goes live while you are there. In the chat view it opens in the
-    // picture-in-picture (the docked mini-player on a phone) rather than
-    // taking the screen; from the call's view it opens the stream view. Not
-    // while the browser asks to save data. Per device, so a phone can turn it
-    // off on its own. Everyone else's shares still wait for a click.
-    autoWatchStreamOnly: true,
+    // Which shares in your call start playing without a Watch click
+    // (utils/autoWatch.ts): 'off' (every share waits for a click),
+    // 'stream-only' (shares from STREAM-ONLY accounts, docs/STREAM_ONLY.md;
+    // the default) or 'all' (every share in your voice channel). Once per
+    // share: closed, it stays closed until it starts again. In the chat view
+    // it opens in the picture-in-picture (the docked mini-player on a phone)
+    // rather than taking the screen; from the call's view it opens the
+    // stream view; a stream view already open just gains it, without moving
+    // its focus. Never while the browser asks to save data. Per device.
+    autoOpenStreams: 'stream-only' as AutoOpenStreams,
     // When true, images hosted on OTHER sites load automatically in messages.
     // Off by default: the URL is chosen by whoever SENT the message, so the
     // fetch hands that host your IP address, your user agent and the moment you
@@ -666,17 +668,34 @@ function migrateVoiceBindProvenance(parsed: Partial<Settings> | null): Partial<S
     return next;
 }
 
+/** Settings → Voice & Video → Open streams automatically. */
+export type AutoOpenStreams = 'off' | 'stream-only' | 'all';
+
+/**
+ * A profile from the build that had one switch for this
+ * (`autoWatchStreamOnly`, stream-only accounts only): switched off there means
+ * 'off' here, so nobody who turned it off finds streams opening again.
+ */
+function migrateAutoOpenStreams(parsed: Partial<Settings> | null): Partial<Settings> | null {
+    if (!parsed) return parsed;
+    const legacy = (parsed as { autoWatchStreamOnly?: unknown }).autoWatchStreamOnly;
+    const { autoWatchStreamOnly: _drop, ...rest } = parsed as Partial<Settings> & { autoWatchStreamOnly?: unknown };
+    void _drop;
+    if (rest.autoOpenStreams === undefined && legacy === false) return { ...rest, autoOpenStreams: 'off' };
+    return rest;
+}
+
 export function loadSettings(): Settings {
     try {
         const stored = localStorage.getItem(SETTINGS_KEY);
         const parsed = stored ? (JSON.parse(stored) as Partial<Settings>) : null;
         // Called even for `null` so the migration disarms itself on a fresh
         // profile — see the note inside.
-        const migrated = migrateVoiceBindProvenance(migrateDefaultVoiceKeybinds(
+        const migrated = migrateAutoOpenStreams(migrateVoiceBindProvenance(migrateDefaultVoiceKeybinds(
             migrateRequireMediaE2ee(
                 migrateBackgroundDelivery(migrateMicProcessingToggles(migrateClipArmOnJoin(parsed)) as Partial<Settings>),
             ),
-        ));
+        )) as Partial<Settings>);
         if (parsed) return { ...defaultSettings, ...migrated };
     } catch (e) {
         console.error('Failed to load settings:', e);

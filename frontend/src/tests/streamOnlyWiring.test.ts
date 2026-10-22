@@ -126,7 +126,7 @@ const PINS: Pin[] = [
         holds: (c) => inOrder(c,
             'const plan = autoWatchPlan({',
             'isStreamOnly: isStreamOnlyMember,',
-            'enabled: loadSettings().autoWatchStreamOnly !== false,',
+            'mode: loadSettings().autoOpenStreams,',
             'saveData: browserSavesData(),',
             'for (const id of plan.open) {',
             'autoWatchedRef.current.add(id);',
@@ -136,7 +136,7 @@ const PINS: Pin[] = [
             && /const unsub = subscribeToStreamState\(run\);/.test(c),
         mutants: [
             ['opens every share', replace('isStreamOnly: isStreamOnlyMember,', 'isStreamOnly: () => true,')],
-            ['ignores the setting', replace('enabled: loadSettings().autoWatchStreamOnly !== false,', 'enabled: true,')],
+            ['ignores the setting', replace('mode: loadSettings().autoOpenStreams,', "mode: 'all',")],
             ['reopens a closed share forever', (code) => {
                 const loop = code.indexOf('for (const id of plan.open) {');
                 const at = code.indexOf('autoWatchedRef.current.add(id);', loop);
