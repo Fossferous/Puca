@@ -30,7 +30,12 @@ class FakeSender {
     bytes = 0;
     frames = 0;
     refuse = false;
-    constructor(layers: number) { this.params = { encodings: Array.from({ length: layers }, () => ({ active: true })) }; }
+    /** What getStats names as the encoder (undefined = not reported yet). */
+    encoder: string | undefined = undefined;
+    constructor(layers: number) {
+        const rids = ['q', 'h', 'f'];
+        this.params = { encodings: Array.from({ length: layers }, (_, i) => (layers > 1 ? { rid: rids[i], active: true } : { active: true })) };
+    }
     getParameters() { return JSON.parse(JSON.stringify(this.params)); }
     async setParameters(p: FakeSender['params']) {
         if (this.refuse) throw new Error('InvalidModificationError');
@@ -42,12 +47,14 @@ class FakeSender {
         this.statsCalls++;
         this.bytes += (this.targetBps / 8) * 2;
         this.frames += 60;
-        return new Map([['o', { type: 'outbound-rtp', kind: 'video', targetBitrate: this.targetBps, bytesSent: this.bytes, framesEncoded: this.frames, qualityLimitationReason: 'none' }]]);
+        return new Map([['o', { type: 'outbound-rtp', kind: 'video', targetBitrate: this.targetBps, bytesSent: this.bytes, framesEncoded: this.frames, qualityLimitationReason: 'none', ...(this.encoder ? { encoderImplementation: this.encoder } : {}) }]]);
     }
 }
 const senders: FakeSender[] = [];
 /** The options every video publishTrack was called with. */
 const published: Array<Record<string, unknown>> = [];
+/** Every publish and unpublish, in order: 'pub:video', 'unpub:audio', ... */
+const ops: string[] = [];
 
 vi.mock('livekit-client', async (importOriginal) => {
     const real = await importOriginal<typeof import('livekit-client')>();
@@ -59,6 +66,7 @@ vi.mock('livekit-client', async (importOriginal) => {
         async publishTrack(track: MediaStreamTrack, opts: { source: string; simulcast?: boolean }) {
             const isVideo = track.kind === 'video';
             if (isVideo) published.push(opts as unknown as Record<string, unknown>);
+            ops.push(`pub:${track.kind}`);
             const sender = isVideo ? new FakeSender(opts.simulcast ? 3 : 1) : undefined;
             if (sender) senders.push(sender);
             const pub = { source: opts.source, kind: isVideo ? real.Track.Kind.Video : real.Track.Kind.Audio, track: { mediaStreamTrack: track, sender } };
@@ -66,6 +74,7 @@ vi.mock('livekit-client', async (importOriginal) => {
             return pub;
         }
         async unpublishTrack(track: MediaStreamTrack) {
+            ops.push(`unpub:${track.kind}`);
             this.pubs = this.pubs.filter(p => (p.track as { mediaStreamTrack: MediaStreamTrack }).mediaStreamTrack !== track);
         }
     }
@@ -283,5 +292,168 @@ describe('the share bitrate follows its quality, under the server ceiling', () =
         await m.startScreenShare(shareStream(1440, 60).stream);
         await flush();
         expect(publishedCap()).toBe(SHARE_KBPS_TABLE[1440][60] * 1000);
+    });
+});
+
+describe('sending a share at several sizes when it helps (shareLadder.ts)', () => {
+    let m: SfuManager;
+    // A High-profile H.264 entry in the SENDER capabilities: a hardware encoder.
+    const hardware = (on: boolean) => vi.stubGlobal('RTCRtpSender', {
+        getCapabilities: () => ({
+            codecs: [
+                { mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'packetization-mode=1;profile-level-id=42e01f' },
+                ...(on ? [{ mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'packetization-mode=1;profile-level-id=640032' }] : []),
+            ],
+            headerExtensions: [],
+        }),
+    });
+    const join = async () => {
+        grant.maxShareKbps = SHARE_TOP_KBPS;
+        m = new SfuManager();
+        await m.connect(12, mic());
+    };
+    const lastSimulcast = () => published.at(-1)?.simulcast;
+    const withAudio = (height: number, fps: number) => {
+        const s = shareStream(height, fps);
+        const audio = { kind: 'audio', id: 'share-audio', enabled: true, readyState: 'live', stop: vi.fn() } as unknown as MediaStreamTrack;
+        (s.video as unknown as { readyState: string }).readyState = 'live';
+        (s.stream as unknown as { getAudioTracks: () => MediaStreamTrack[] }).getAudioTracks = () => [audio];
+        return s;
+    };
+    beforeEach(() => {
+        vi.useFakeTimers();
+        senders.length = 0;
+        published.length = 0;
+        ops.length = 0;
+        ladder.on = false;
+    });
+    afterEach(async () => {
+        await m.disconnect();
+        grant.maxShareKbps = undefined;
+        vi.unstubAllGlobals();
+        vi.useRealTimers();
+    });
+
+    it('Automatic ladders a 1080p60 share on a hardware encoder, with the 720p middle rung', async () => {
+        hardware(true);
+        await join();
+        await m.startScreenShare(shareStream(1080, 60).stream);
+        await flush();
+        expect(lastSimulcast()).toBe(true);
+        const layers = published.at(-1)?.screenShareSimulcastLayers as Array<{ height: number }>;
+        expect(layers.map(l => l.height)).toEqual([360, 720]);
+    });
+
+    it('Automatic keeps a 720p30 share (4 Mbps) at one size, and any share without a hardware encoder', async () => {
+        hardware(true);
+        await join();
+        await m.startScreenShare(shareStream(720, 30).stream);
+        await flush();
+        expect(lastSimulcast()).toBe(false);
+        await m.stopScreenShare();
+        hardware(false);
+        await m.startScreenShare(shareStream(1080, 60).stream);
+        await flush();
+        expect(lastSimulcast(), 'no hardware encoder: one size').toBe(false);
+    });
+
+    it('drops an Automatic ladder whose encoder turns out to be software, audio and all', async () => {
+        hardware(true);
+        await join();
+        await m.startScreenShare(withAudio(1080, 60).stream);
+        await flush();
+        expect(lastSimulcast()).toBe(true);
+        senders.at(-1)!.encoder = 'SimulcastEncoderAdapter (OpenH264, OpenH264, OpenH264)';
+        ops.length = 0;
+        await vi.advanceTimersByTimeAsync(3000 * 3);
+        expect(lastSimulcast(), 'republished at one size').toBe(false);
+        expect(ops).toEqual(['unpub:video', 'unpub:audio', 'pub:video', 'pub:audio']);
+        // ...and it stays one size: the next live change does not ladder it again.
+        published.length = 0;
+        await m.retuneShare();
+        expect(published.length, 'no re-publish back to a ladder').toBe(0);
+    });
+
+    it('leaves an Automatic ladder alone when the encoder is hardware, and stops watching', async () => {
+        hardware(true);
+        await join();
+        await m.startScreenShare(shareStream(1080, 60).stream);
+        await flush();
+        senders.at(-1)!.encoder = 'SimulcastEncoderAdapter (MediaFoundationVideoEncodeAccelerator (NVIDIA H.264 Encoder MFT))';
+        const idle = vi.getTimerCount();
+        await vi.advanceTimersByTimeAsync(3000 * 4);
+        expect(published.length).toBe(1);
+        expect(vi.getTimerCount(), 'the watch ended').toBe(idle - 1);
+    });
+
+    it('does not second-guess Always', async () => {
+        ladder.on = true; // the old setting on = Always
+        hardware(false);
+        await join();
+        await m.startScreenShare(shareStream(1080, 60).stream);
+        await flush();
+        senders.at(-1)!.encoder = 'OpenH264';
+        await vi.advanceTimersByTimeAsync(3000 * 4);
+        expect(published.length).toBe(1);
+        expect(lastSimulcast()).toBe(true);
+    });
+
+    it('re-sizes a ladder IN PLACE on a live quality change, the bottom rung kept at 360 lines', async () => {
+        hardware(true);
+        await join();
+        const { stream, cap } = shareStream(1440, 60);
+        await m.startScreenShare(stream);
+        await flush();
+        const s = senders.at(-1)!;
+        cap.height = 1080;
+        cap.fps = 60;
+        expect(await m.retuneShare()).toBe(true);
+        expect(published.length, 'no re-publish').toBe(1);
+        const enc = s.params.encodings as Array<{ rid: string; scaleResolutionDownBy: number; maxBitrate: number; active: boolean }>;
+        expect(enc.map(e => [e.rid, e.scaleResolutionDownBy, e.maxBitrate])).toEqual([
+            ['q', 3, 600_000], ['h', 1.5, 2_500_000], ['f', 1, SHARE_KBPS_TABLE[1080][60] * 1000],
+        ]);
+        expect(enc.every(e => e.active), 'dynacast owns active').toBe(true);
+    });
+
+    it('re-publishes, audio included, when a live change moves between one size and several', async () => {
+        hardware(true);
+        await join();
+        const { stream, cap } = withAudio(720, 30);
+        await m.startScreenShare(stream);
+        await flush();
+        expect(lastSimulcast()).toBe(false);
+        ops.length = 0;
+        cap.height = 1080;
+        cap.fps = 60;
+        await m.retuneShare();
+        expect(lastSimulcast(), 'up to a ladder').toBe(true);
+        expect(ops).toEqual(['unpub:video', 'unpub:audio', 'pub:video', 'pub:audio']);
+        ops.length = 0;
+        cap.height = 720;
+        cap.fps = 30;
+        await m.retuneShare();
+        expect(lastSimulcast(), 'back to one size').toBe(false);
+        expect(ops).toEqual(['unpub:video', 'unpub:audio', 'pub:video', 'pub:audio']);
+    });
+
+    it('a share of one size that stays one size is not re-published', async () => {
+        hardware(false);
+        await join();
+        const { stream, cap } = shareStream(720, 30);
+        await m.startScreenShare(stream);
+        await flush();
+        cap.height = 1080;
+        await m.retuneShare();
+        expect(published.length).toBe(1);
+    });
+
+    it('leaving the call ends the encoder watch', async () => {
+        hardware(true);
+        await join();
+        await m.startScreenShare(shareStream(1080, 60).stream);
+        await flush();
+        await m.disconnect();
+        expect(vi.getTimerCount()).toBe(0);
     });
 });

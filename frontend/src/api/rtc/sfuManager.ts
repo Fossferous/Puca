@@ -24,7 +24,7 @@ import {
     type RemoteTrackPublication,
     type LocalTrackPublication,
 } from 'livekit-client';
-import { negotiatedH264Profile, preferHardwareH264ForSender } from './h264Profiles';
+import { hasHardwareH264, negotiatedH264Profile, preferHardwareH264ForSender } from './h264Profiles';
 import E2EEWorker from 'livekit-client/e2ee-worker?worker';
 import { apiClient } from '../client';
 import { noiseDiagnostics } from '../noiseFilter';
@@ -33,6 +33,10 @@ import { CTL_SFU_TOPIC, deliverSfuControlFrame } from './controlDc';
 import type { EncodeSample } from './shareHealth';
 import { ShareAdapter, SHARE_ADAPT_INTERVAL_MS } from './shareAdapt';
 import { LEGACY_SHARE_KBPS, shareBitrateKbps } from './shareBitrate';
+import {
+    isSoftwareEncoder, ladderEncodings, ladderRungs, rememberedShareLadder, shareWantsLadder,
+    type LadderRung, type ShareLadderMode,
+} from './shareLadder';
 import type { RtpEndpoint } from './streamStats';
 import { deriveSfuMediaKey } from '../e2ee';
 import { registerScreenReceiver } from './receiverLatency';
@@ -79,6 +83,8 @@ export function subscribedQuality(
     source: Track.Source,
     focused: boolean,
     participants: number,
+    // How many screen shares this viewer is watching (only read for a share).
+    watchedShares = 1,
 ): VideoQuality {
     if (focused) return VideoQuality.HIGH;
     // A share is the thing people are actually looking at, and its text is
@@ -87,7 +93,21 @@ export function subscribedQuality(
     // share). It already asked for MEDIUM at subscribe time; keeping that here
     // stops a focus change silently demoting one, which the old shared ternary
     // did.
-    if (source === Track.Source.ScreenShare) return VideoQuality.MEDIUM;
+    //
+    // HIGH WHILE ONE OR TWO SHARES ARE WATCHED (2026-10-21). Only Focus view
+    // focuses anyone; the default grid gives one watched share the whole stage
+    // and two of them half each, and a share sent at several sizes then
+    // arrived at its middle rung (720p, measured in the real app by
+    // e2e/share-ladder-live-sfu.mjs) instead of the full picture. That never
+    // showed while shares were one size, and Automatic now ladders most
+    // hardware-encoded ones. Asking for HIGH is a ceiling, not a demand:
+    // LiveKit still gives a viewer whose link cannot carry it a smaller rung,
+    // which is what the ladder is for. Admission already charges every watcher
+    // the top (src/sfu.rs room_egress_kbps). Three or more in a grid are small
+    // tiles, and the middle rung is the picture they show.
+    if (source === Track.Source.ScreenShare) {
+        return watchedShares <= 2 ? VideoQuality.HIGH : VideoQuality.MEDIUM;
+    }
     // A camera's rung follows the size its tile is actually rendered at, which
     // the voice grid derives from the head count (VoiceStage.css: one or two
     // people share a 640px-wide column, three or more get ~300-360px each).
@@ -135,9 +155,15 @@ const GRID_MID_MAX_PARTICIPANTS = 4;
 /// the fix). Machines with a hardware encoder now get it; machines without
 /// one still pay three software encodes for the ladder, and those are the
 /// ones already reporting that sharing makes their game stutter. So the
-/// ladder stays offered, not imposed — see `shareSimulcast` in
-/// settingsStore.ts — and flipping the default is a separate decision that
-/// needs field `encoder=` lines from more than one machine.
+/// ladder stayed offered, not imposed.
+///
+/// 2026-10-21: AUTOMATIC FOR HARDWARE ENCODERS. With the share's bitrate
+/// following its quality (10 Mbps for 1080p60), more viewers are below a
+/// one-size share and freeze. Measured with the app's own encoder choice:
+/// three rungs on NVENC cost no CPU limit. So `shareLadder` defaults to
+/// Automatic: a ladder when the machine offers a hardware encoder AND the
+/// share sends more than 4.5 Mbps, still never on a software-only machine
+/// (shareLadder.ts; the software fallback is startSoftwareWatch below).
 ///
 /// THE TOP RUNG IS THE SHARE'S OWN BITRATE (shareBitrate.ts, held to the
 /// server's `max_share_kbps`), and a subscriber only ever receives ONE rung,
@@ -162,8 +188,39 @@ const GRID_MID_MAX_PARTICIPANTS = 4;
 /// makes it hardware-eligible for nothing. The rule exists because hardware
 /// encoders look bad at tiny sizes — which is an argument for staying above
 /// the line, not below it.
-const SHARE_LOW = new VideoPreset(640, 360, 600_000, 30);
-const SHARE_MID = new VideoPreset(960, 540, 1_200_000, 60);
+///
+/// THE RUNGS NOW LIVE IN shareLadder.ts (LADDER_LOW is this 640x360), with the
+/// middle rung chosen by the capture: 720p at 2.5 Mbps from a 1080-line
+/// capture up, 540p below. Measured 2026-10-21: a 6 Mbps viewer of a 10 Mbps
+/// share settled on 720p @ ~57 fps with it, against 540p with the old rung.
+/// And the ladder is no longer only opt-in: see `shareLadder` in
+/// settingsStore.ts and shareLadder.ts for when Automatic turns it on.
+const preset = (r: LadderRung) => new VideoPreset(r.width, r.height, r.kbps * 1000, r.fps);
+/** The rungs below the full picture for a capture of this size, lowest first. */
+function ladderPresets(width: number, height: number): VideoPreset[] {
+    return ladderRungs(width, height).map(preset);
+}
+
+/** Does this machine offer a hardware H.264 encoder? The SENDER's capabilities
+ *  carry a High-profile entry only when one is there (h264Profiles.ts). */
+export function machineHasHardwareH264(): boolean {
+    try {
+        const caps = typeof RTCRtpSender !== 'undefined' && typeof RTCRtpSender.getCapabilities === 'function'
+            ? RTCRtpSender.getCapabilities('video')
+            : null;
+        return !!caps && hasHardwareH264(caps.codecs);
+    } catch {
+        return false;
+    }
+}
+
+/** How often an Automatic ladder's encoder is checked after it starts, how
+ *  many software readings drop the ladder, how many hardware readings end the
+ *  watch, and when it gives up waiting for a name at all. */
+const SOFTWARE_WATCH_MS = 3000;
+const SOFTWARE_READS = 2;
+const HARDWARE_READS = 3;
+const SOFTWARE_WATCH_MAX_MS = 60_000;
 
 /**
  * Everything about how a screen share is published, as a value.
@@ -183,12 +240,21 @@ export function screenSharePublishOptions(
     // `=== true`, not `!== false`: the default is OFF, so an absent or
     // malformed stored value must read as off. The inverted form was correct
     // while the default was on and would now quietly opt everyone in.
-    simulcast: boolean = loadSettings().shareSimulcast === true,
+    //
+    // Unset = the setting's own answer (shareLadder.ts): Always, Never, or
+    // Automatic — a ladder only on a machine with a hardware H.264 encoder
+    // and a share above 4.5 Mbps.
+    simulcast?: boolean,
     // The share's ceiling, bps: what its quality may spend (shareBitrate.ts),
     // already held to the server's. The default is what a share sent before
     // the bitrate followed the quality.
     maxBitrate: number = LEGACY_SHARE_KBPS * 1000,
+    // The capture's size, which picks the ladder's middle rung.
+    capture: { width: number; height: number } = { width: 1920, height: 1080 },
 ) {
+    const ladder = simulcast ?? shareWantsLadder(
+        rememberedShareLadder(loadSettings()), machineHasHardwareH264(), maxBitrate / 1000,
+    );
     const opts: {
         source: Track.Source;
         simulcast: boolean;
@@ -199,9 +265,9 @@ export function screenSharePublishOptions(
     } = {
         source: Track.Source.ScreenShare,
         // Three rungs, so the server has something to give a viewer who cannot
-        // take the full picture. See SHARE_LOW/SHARE_MID — and `shareSimulcast`
-        // in settingsStore.ts for why the person sharing can decline the cost.
-        simulcast,
+        // take the full picture. See shareLadder.ts — and `shareLadder` in
+        // settingsStore.ts for when that happens and who can decline the cost.
+        simulcast: ladder,
         // H.264 because it is the cheapest thing this engine will encode for
         // fast-motion content, and — since 2026-09-16 — because it is the one
         // codec here that CAN be hardware-accelerated: with the High profile
@@ -238,11 +304,11 @@ export function screenSharePublishOptions(
     // kept it there (2026-10-05), and it would shrink the picture again under
     // every rung Púca chose. A laddered share keeps it: LiveKit fixes those
     // rungs as ratios of the source, which Púca must not rescale.
-    if (!simulcast) opts.degradationPreference = 'maintain-resolution';
+    if (!ladder) opts.degradationPreference = 'maintain-resolution';
     // Omitted rather than sent alongside `simulcast: false`: the rungs would
     // be ignored, and a publish that carries layers it is not using is the
     // shape someone later reads as "simulcast is on".
-    if (simulcast) opts.screenShareSimulcastLayers = [SHARE_LOW, SHARE_MID];
+    if (ladder) opts.screenShareSimulcastLayers = ladderPresets(capture.width, capture.height);
     return opts;
 }
 
@@ -294,9 +360,12 @@ export interface LadderProbe {
  * Does any of these publications carry more than one encoding?
  *
  * Lifted out of the class so the decision can be tested without a live room —
- * it gates whether a running share may be re-capped, and it FAILS OPEN: every
- * answer that is not a positive sighting of a ladder is `false`, which permits
- * the re-cap. That direction is deliberate but only safe because the caller now
+ * it decides how a running share follows a re-cap (its rungs re-sized in
+ * place, or the share published again: retuneShare) and keeps the one-size
+ * resolution picker off a ladder, and it FAILS OPEN: every answer that is not
+ * a positive sighting of a ladder is `false`. (Wrongly false now costs a
+ * re-publish, a second of held picture; it used to permit a re-cap that took
+ * the rungs under 360 lines.) That direction is deliberate but only safe because the caller now
  * reads LIVE publications; when it read a stale snapshot, a reconnect turned
  * "cannot see a ladder" into "there is no ladder" while three rungs were on the
  * wire. Keep the two properties together: live input, and a test that a real
@@ -747,6 +816,7 @@ export class SfuManager {
 
     async disconnect(): Promise<void> {
         this.stopShareAdapt();
+        this.stopSoftwareWatch();
         if (this.epochTimer) {
             clearInterval(this.epochTimer);
             this.epochTimer = null;
@@ -887,20 +957,205 @@ export class SfuManager {
             throw new Error(`Share limit reached (${this.maxScreenShares} concurrent screen shares)`);
         }
         const video = stream.getVideoTracks()[0];
-        if (video) {
-            // Read at publish time, so changing it takes effect on the
-            // next share rather than the next launch.
-            const opts = screenSharePublishOptions(undefined, this.shareBitrateFor(video) * 1000);
-            await this.room.localParticipant.publishTrack(video, opts);
-            if (!opts.simulcast) this.startShareAdapt();
-        }
+        // Read at publish time, so changing it takes effect on the next share
+        // rather than the next launch.
+        this.shareLadderMode = rememberedShareLadder(loadSettings());
+        this.shareLadderFellBack = false;
+        if (video) await this.publishShareVideo(video, this.wantsLadder(video));
         const audio = stream.getAudioTracks()[0];
-        if (audio) {
-            await this.room.localParticipant.publishTrack(audio, {
-                source: Track.Source.ScreenShareAudio,
-                dtx: true,
-            });
+        if (audio) await this.publishShareAudio(audio);
+    }
+
+    /** The ladder setting the running share started with, and whether an
+     *  Automatic ladder was dropped because its encoder was software. */
+    private shareLadderMode: ShareLadderMode = 'auto';
+    private shareLadderFellBack = false;
+    /** One re-publish or re-tune at a time: two live changes clicked quickly
+     *  must not interleave their unpublish and publish. */
+    private shareOp: Promise<unknown> = Promise.resolve();
+
+    /** Should the share of `video` go out at several sizes right now? */
+    private wantsLadder(video: MediaStreamTrack): boolean {
+        if (this.shareLadderFellBack) return false;
+        return shareWantsLadder(this.shareLadderMode, machineHasHardwareH264(), this.shareBitrateFor(video));
+    }
+
+    private async publishShareVideo(video: MediaStreamTrack, ladder: boolean): Promise<void> {
+        if (!this.room) return;
+        const set = video.getSettings();
+        const opts = screenSharePublishOptions(ladder, this.shareBitrateFor(video) * 1000, {
+            width: set.width ?? 0,
+            height: set.height ?? 0,
+        });
+        await this.room.localParticipant.publishTrack(video, opts);
+        if (!opts.simulcast) this.startShareAdapt();
+        else if (this.shareLadderMode === 'auto') this.startSoftwareWatch();
+    }
+
+    private async publishShareAudio(audio: MediaStreamTrack): Promise<void> {
+        if (!this.room) return;
+        await this.room.localParticipant.publishTrack(audio, {
+            source: Track.Source.ScreenShareAudio,
+            dtx: true,
+        });
+    }
+
+    /**
+     * Publish the running share again, as one size or as a ladder. A sender's
+     * NUMBER of encodings is fixed when it is negotiated, so going between one
+     * size and three needs a new publication; viewers re-subscribe to it by
+     * themselves (they watch a USER, syncSubscriptions) and see about a second
+     * of the old frame.
+     *
+     * THE AUDIO GOES WITH IT. A viewer's share stream is rebuilt when the
+     * video is unsubscribed (TrackUnsubscribed drops it), so a video-only
+     * re-publish would leave every viewer — this version and older ones —
+     * with the picture back and the sound gone. Publishing the audio again
+     * re-adds it to the rebuilt stream on any client.
+     */
+    private republishShare(ladder: boolean): Promise<void> {
+        const run = this.shareOp.then(async () => {
+            const room = this.room;
+            if (!room) return;
+            const pubs = this.localSharePubs();
+            const video = pubs.find(p => p.kind === Track.Kind.Video)?.track?.mediaStreamTrack;
+            const audio = pubs.find(p => p.kind === Track.Kind.Audio)?.track?.mediaStreamTrack;
+            if (!video) return;
+            this.stopShareAdapt();
+            this.stopSoftwareWatch();
+            for (const t of [video, audio]) {
+                if (t) await room.localParticipant.unpublishTrack(t, false);
+            }
+            if (this.room !== room) return;
+            await this.publishShareVideo(video, ladder);
+            if (audio && video.readyState === 'live') await this.publishShareAudio(audio);
+        });
+        this.shareOp = run.catch(() => undefined);
+        return run;
+    }
+
+    /**
+     * Bring the running share in line with its capture after a live quality
+     * change (shareHealthLive.ts): what it may spend, whether it should be a
+     * ladder, and the size of each rung.
+     *
+     * A ladder that stays a ladder is re-sized IN PLACE: the rungs are ratios
+     * of the capture fixed at publish (`scaleResolutionDownBy`), and setting
+     * new ones on the same encodings is invisible to viewers. Re-capping the
+     * capture without this shrank every rung with it, and took the bottom one
+     * under the 360 lines below which Chromium will not encode in hardware —
+     * which is why a laddered share used to refuse live changes outright.
+     * Going between one size and three re-publishes (republishShare). A share
+     * of one size that stays one size needs nothing here: its resolution
+     * picker reads the capture and the cap on its next tick.
+     *
+     * Returns false when there is no SFU share to tune.
+     */
+    async retuneShare(): Promise<boolean> {
+        if (!this.room) return false;
+        const pub = this.localSharePubs().find(p => p.kind === Track.Kind.Video);
+        const video = pub?.track?.mediaStreamTrack;
+        if (!pub || !video) return false;
+        // The setting as it is NOW: someone who changes it and then the
+        // quality has asked for the new behaviour.
+        this.shareLadderMode = rememberedShareLadder(loadSettings());
+        const want = this.wantsLadder(video);
+        const has = publicationsHaveLadder([pub]);
+        if (want !== has) {
+            await this.republishShare(want);
+            return true;
         }
+        if (!has) return true;
+        const run = this.shareOp.then(() => this.resizeLadderInPlace(pub.track?.sender, video));
+        this.shareOp = run.catch(() => undefined);
+        await run;
+        return true;
+    }
+
+    private async resizeLadderInPlace(sender: RTCRtpSender | undefined, video: MediaStreamTrack): Promise<void> {
+        if (!sender) return;
+        const set = video.getSettings();
+        const want = ladderEncodings(set.width ?? 0, set.height ?? 0, this.shareBitrateFor(video));
+        const params = sender.getParameters();
+        for (const enc of params.encodings ?? []) {
+            const w = want.find(x => x.rid === enc.rid);
+            if (!w) continue;
+            // `active` is left alone: dynacast turns rungs on and off by
+            // whether anyone is watching them.
+            enc.scaleResolutionDownBy = w.scaleResolutionDownBy;
+            enc.maxBitrate = w.maxBitrate;
+            enc.maxFramerate = w.maxFramerate;
+        }
+        await sender.setParameters(params);
+    }
+
+    /** The Automatic ladder's encoder check (SOFTWARE_WATCH_MS above). */
+    private softwareWatch: ReturnType<typeof setInterval> | null = null;
+
+    /**
+     * Watch an AUTOMATIC ladder's encoder for its first readings, and drop the
+     * ladder if it turns out to be software.
+     *
+     * Automatic decides on the machine's capabilities (a High-profile entry
+     * means a hardware encoder is installed), and that can still end in
+     * OpenH264: a driver that fails to open, an encoder already busy with a
+     * recording. Three software encodes are what Automatic exists to avoid, so
+     * the share goes back to one size for the rest of its life. Always is the
+     * person's own choice and is not second-guessed.
+     */
+    private startSoftwareWatch(): void {
+        this.stopSoftwareWatch();
+        let soft = 0;
+        let hard = 0;
+        const started = Date.now();
+        const timer = setInterval(() => {
+            void (async () => {
+                if (this.softwareWatch !== timer) return;
+                if (Date.now() - started > SOFTWARE_WATCH_MAX_MS) { this.stopSoftwareWatch(); return; }
+                const names = await this.shareEncoderNames();
+                if (this.softwareWatch !== timer || names.length === 0) return;
+                if (names.some(isSoftwareEncoder)) {
+                    soft++;
+                    hard = 0;
+                } else {
+                    hard++;
+                    soft = 0;
+                }
+                if (hard >= HARDWARE_READS) { this.stopSoftwareWatch(); return; }
+                if (soft >= SOFTWARE_READS) {
+                    this.stopSoftwareWatch();
+                    this.shareLadderFellBack = true;
+                    console.warn('[share] the automatic ladder is encoding in software; sending one size instead');
+                    try { await this.republishShare(false); } catch { /* the share ended meanwhile */ }
+                }
+            })();
+        }, SOFTWARE_WATCH_MS);
+        this.softwareWatch = timer;
+    }
+
+    private stopSoftwareWatch(): void {
+        if (this.softwareWatch) clearInterval(this.softwareWatch);
+        this.softwareWatch = null;
+    }
+
+    /** The encoder named by every video rung of the local share (empty until
+     *  frames are encoded, and in a page that is not capturing). */
+    private async shareEncoderNames(): Promise<string[]> {
+        const names: string[] = [];
+        for (const pub of this.localSharePubs()) {
+            if (pub.kind !== Track.Kind.Video) continue;
+            const sender = pub.track?.sender;
+            if (!sender) continue;
+            try {
+                (await sender.getStats()).forEach((s) => {
+                    const r = s as unknown as Record<string, unknown>;
+                    if (r.type === 'outbound-rtp' && r.kind === 'video' && typeof r.encoderImplementation === 'string') {
+                        names.push(r.encoderImplementation);
+                    }
+                });
+            } catch { /* sender detached */ }
+        }
+        return names;
     }
 
     /**
@@ -1057,6 +1312,7 @@ export class SfuManager {
 
     async stopScreenShare(): Promise<void> {
         this.stopShareAdapt();
+        this.stopSoftwareWatch();
         if (!this.room) return;
         for (const pub of this.localSharePubs()) {
             if (pub.track) {
@@ -1123,7 +1379,7 @@ export class SfuManager {
                         ? this.pinnedCameras.get(uid)
                         : undefined;
                     pub.setVideoQuality(
-                        pinned ?? subscribedQuality(pub.source, focused, this.participantCount()),
+                        pinned ?? subscribedQuality(pub.source, focused, this.participantCount(), this.watchedVideo.size),
                     );
                 }
             }
@@ -1202,8 +1458,12 @@ export class SfuManager {
      * download — not just the rendering.
      */
     setWatchedVideo(userIds: Iterable<number>): void {
+        const before = this.watchedVideo.size;
         this.watchedVideo = new Set(userIds);
         this.syncSubscriptions();
+        // The rung a share asks for depends on how many are watched
+        // (subscribedQuality): re-ask for the ones already subscribed.
+        if (before !== this.watchedVideo.size) this.setFocusedRemote(this.focusedUserId);
     }
 
     /**
@@ -1736,7 +1996,7 @@ export class SfuManager {
             }
             case Track.Source.ScreenShare: {
                 pub.setVideoQuality(
-                    subscribedQuality(pub.source, uid === this.focusedUserId, this.participantCount()),
+                    subscribedQuality(pub.source, uid === this.focusedUserId, this.participantCount(), this.watchedVideo.size),
                 );
                 // Remote control needs the receiver in hand to drop its
                 // jitter buffer while this share is being DRIVEN (and give it

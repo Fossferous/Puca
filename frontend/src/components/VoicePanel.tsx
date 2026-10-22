@@ -3378,12 +3378,14 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                 // that reports success it did not get — the
                                 // setting IS saved, so the next share is
                                 // genuinely lower, and that is what to say.
-                                // `applied` false covers three real cases —
-                                // the engine refused, the cap would have
-                                // changed nothing, and the simulcast ladder
-                                // makes a live re-cap unsafe. All three leave
-                                // the running share alone and the SAVED
-                                // setting doing the work, which is what to say.
+                                // `applied` false covers two real cases —
+                                // the engine refused, and the cap would have
+                                // changed nothing. (A share sent at several
+                                // sizes used to be a third; its rungs are now
+                                // re-sized with it, sfuManager.retuneShare.)
+                                // Both leave the running share alone and the
+                                // SAVED setting doing the work, which is what
+                                // to say.
                                 if (applied) {
                                     // They asked for help and got a real
                                     // change; let the watch speak once more if

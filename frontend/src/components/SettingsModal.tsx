@@ -15,6 +15,7 @@ import { safeRepositoryUrl } from './privacyDisclosure.utils';
 import './SettingsModal.css';
 import { parseServerTimestamp } from '../utils/serverTime';
 import { type Settings, type KeyBinding, defaultSettings, loadSettings, saveSettings, inputGain } from './settingsStore';
+import { ladderSettingsFor, rememberedShareLadder, type ShareLadderMode } from '../api/rtc/shareLadder';
 import {
     type NoiseSuppressionMode, type MicTestGraph, NOISE_MODE_EVENT,
     getNoiseSuppressionMode, changeNoiseModeLive, getMicConstraints, buildMicTestGraph,
@@ -2881,27 +2882,34 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                     Advanced settings for power users.
                                 </p>
                                 {/* The cost of this one lands on the person SHARING, which
-                                    is why it is theirs to decline. See `shareSimulcast` in
-                                    settingsStore.ts for the call that produced it. */}
+                                    is why it is theirs to decide. See `shareLadder` in
+                                    settingsStore.ts and api/rtc/shareLadder.ts. */}
                                 <h3>Screen sharing</h3>
                                 <div className="settings-card">
                                     <div className="settings-option">
                                         <div className="option-info">
-                                            <label>Send my screen at several sizes</label>
+                                            <label htmlFor="share-ladder-mode">Send my screen at several sizes</label>
                                             <span className="option-hint">
                                                 Viewers on a slow connection get a smaller copy instead of a
-                                                frozen one. Off by default, because your computer has to encode
-                                                every size: on most machines that work is done in software, and
-                                                two extra copies is what turns a smooth share into a stuttering
-                                                game. Turn it on if you have CPU to spare and somebody watching
-                                                you keeps freezing. Other apps call this simulcast.
+                                                frozen picture. Your computer encodes every size, which costs
+                                                little on a graphics card and a lot in software. Automatic sends
+                                                several sizes only when your graphics card can encode the video
+                                                and the quality you picked sends more than 4.5 Mbps (1080p 30 fps
+                                                and up), and goes back to one size if the encoding turns out to
+                                                be in software. Choose Always if somebody watching you keeps
+                                                freezing and you have CPU to spare, or Never if your game
+                                                stutters while you share. Other apps call this simulcast.
                                             </span>
                                         </div>
-                                        <input
-                                            type="checkbox"
-                                            checked={settings.shareSimulcast !== false}
-                                            onChange={(e) => updateSetting('shareSimulcast', e.target.checked)}
-                                        />
+                                        <select
+                                            id="share-ladder-mode"
+                                            value={rememberedShareLadder(settings)}
+                                            onChange={(e) => commit(ladderSettingsFor(e.target.value as ShareLadderMode))}
+                                        >
+                                            <option value="auto">Automatic</option>
+                                            <option value="always">Always</option>
+                                            <option value="never">Never</option>
+                                        </select>
                                     </div>
                                 </div>
                                 <h3>Diagnostics</h3>

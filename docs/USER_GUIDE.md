@@ -422,10 +422,10 @@ While you are sharing, the same arrow (**Stream quality**) changes the
 up or down, without the picker and without dropping anyone watching. Each
 change applies at once, and is remembered for your next share. A window or
 screen is never sent larger than it is: ask for 1440p from a 1080p window and
-the stream says it is capturing 1080p. One exception: a share sent at several
-sizes (**Settings → Advanced → Screen sharing**, **Send my screen at several
-sizes**) fixes each size when it starts, so its quality changes on the next
-share instead.
+the stream says it is capturing 1080p. A share sent at several sizes (see
+below) changes too, every size with it. When a change means the share should
+go from one size to several, or back (see **Automatic** below), viewers see
+the picture hold for about a second while it switches.
 
 ### How much a share sends
 
@@ -454,8 +454,29 @@ as before.
 
 Your own upload still decides in the end: on a slow connection the share
 drops to a smaller picture by itself and comes back when it can.
-A viewer whose connection is slower than your share gets a frozen picture unless you send it at several sizes: see
-[Viewing Streams](#viewing-streams).
+
+### Several sizes, for viewers on slower connections
+
+A share sent at one size has nothing smaller for a viewer whose connection
+cannot carry it, and that viewer's picture freezes. So in a channel that uses
+SFU mode a share can go out at three sizes, and each viewer gets the largest
+one their connection carries: the full picture, a middle size (720p from a
+1080p or larger capture, 540p from a smaller one) and 360p. **Settings →
+Advanced → Screen sharing → Send my screen at several sizes**:
+
+- **Automatic** (the default): several sizes when your computer encodes video
+  on its graphics card and the quality you picked sends more than 4.5 Mbps
+  (1080p at 30 fps and up). On a graphics card the extra sizes cost almost
+  nothing; in software they cost a lot of CPU, so a computer without a
+  hardware encoder sends one size, and if the encoding turns out to be in
+  software after all the share goes back to one size by itself.
+- **Always**: several sizes for every share, in software too. For when someone
+  watching you keeps freezing and your computer has CPU to spare.
+- **Never**: one size. For when your game stutters while you share.
+
+The extra sizes add about 1.5-2.5 Mbps to your upload. A viewer on a slow
+connection may start on 360p and move up to the middle size within about
+half a minute.
 
 In a channel that does not use SFU mode, each viewer is sent their own copy
 of your share, at up to 8 Mbps each, whatever the quality.
@@ -477,11 +498,11 @@ when every stream you watch is popped out.
 If a stream keeps freezing for you while it plays fine for others, your
 connection is slower than what the stream sends (see
 [How much a share sends](#how-much-a-share-sends)). In a channel that uses
-SFU mode, the sharer can fix it for you without lowering everyone's picture:
-**Settings → Advanced → Screen sharing → Send my screen at several sizes**
-sends a smaller copy that a slow connection gets instead (from their next
-share). Otherwise they can lower the stream's **Resolution** or **Frame
-Rate**.
+SFU mode, a share sent at several sizes gives you a smaller copy by itself
+(see [Several sizes](#several-sizes-for-viewers-on-slower-connections)); if
+the sharer's computer sends one size, they can choose **Always** under
+**Settings → Advanced → Screen sharing → Send my screen at several sizes**, or
+lower the stream's **Resolution** or **Frame Rate**.
 
 ### Stream Controls
 Hover a stream for its buttons, or right-click it for the same items as a menu:

@@ -49,7 +49,22 @@ describe('subscribedQuality', () => {
         // unreadable. A focus change used to demote them via the shared
         // ternary, which is the bug this pins.
         for (const n of [2, 6, 12]) {
-            expect(subscribedQuality(Track.Source.ScreenShare, false, n)).toBe(VideoQuality.MEDIUM);
+            expect(subscribedQuality(Track.Source.ScreenShare, false, n, 3)).toBe(VideoQuality.MEDIUM);
+            expect(subscribedQuality(Track.Source.ScreenShare, false, n, 6)).toBe(VideoQuality.MEDIUM);
         }
+    });
+
+    it('asks for the full picture of one or two watched shares, focused or not', () => {
+        // The default grid focuses nobody, and one watched share fills the
+        // stage: a laddered share arrived at its 720p middle rung there
+        // (measured in the real app, e2e/share-ladder-live-sfu.mjs). HIGH is a
+        // ceiling; LiveKit still steps a slow link down the ladder.
+        for (const n of [2, 6, 12]) {
+            expect(subscribedQuality(Track.Source.ScreenShare, false, n, 1)).toBe(VideoQuality.HIGH);
+            expect(subscribedQuality(Track.Source.ScreenShare, false, n, 2)).toBe(VideoQuality.HIGH);
+            expect(subscribedQuality(Track.Source.ScreenShare, false, n), 'the default is one watched share').toBe(VideoQuality.HIGH);
+        }
+        // Cameras are unaffected by how many shares are watched.
+        expect(subscribedQuality(Track.Source.Camera, false, 2, 1)).toBe(VideoQuality.MEDIUM);
     });
 });

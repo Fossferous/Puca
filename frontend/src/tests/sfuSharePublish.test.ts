@@ -17,7 +17,7 @@
  * So the assertions below are not style. A ladder that silently becomes one
  * rung again puts that viewer back to two frames a second.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 
 import { screenSharePublishOptions, publicationsHaveLadder } from '../api/rtc/sfuManager';
 import { LEGACY_SHARE_KBPS, SHARE_KBPS_TABLE } from '../api/rtc/shareBitrate';
@@ -59,14 +59,25 @@ describe('the screen-share publish contract', () => {
         // and a subscriber only ever receives one rung, so that charge is the
         // correct worst case only while nothing here exceeds the top. A rung
         // above the primary would silently over-run the node's egress budget.
-        // Checked at the LOWEST top a share can have (720p15), where a fixed
-        // rung is likeliest to overtake it.
-        const o = screenSharePublishOptions(true, SHARE_KBPS_TABLE[720][15] * 1000);
-        const top = o.screenShareEncoding.maxBitrate;
-        for (const l of ladderLayers()) {
-            expect(l.encoding.maxBitrate, 'no rung may exceed the primary').toBeLessThan(top);
-            expect(l.width).toBeLessThan(1920);
+        // Checked for every quality with the capture it really has (the
+        // middle rung follows the capture), down to the lowest top a share can
+        // have (720p15), where a fixed rung is likeliest to overtake it.
+        const caps: Array<[keyof typeof SHARE_KBPS_TABLE, number, number]> = [
+            [720, 1280, 720], [1080, 1920, 1080], [1440, 2560, 1440], [2160, 3840, 2160],
+        ];
+        let checked = 0;
+        for (const [tier, w, h] of caps) {
+            for (const fps of [15, 30, 60] as const) {
+                const o = screenSharePublishOptions(true, SHARE_KBPS_TABLE[tier][fps] * 1000, { width: w, height: h });
+                const top = o.screenShareEncoding.maxBitrate;
+                for (const l of o.screenShareSimulcastLayers ?? []) {
+                    expect(l.encoding.maxBitrate, `${tier}p${fps}: no rung may exceed the primary`).toBeLessThan(top);
+                    expect(l.height, `${tier}p${fps}`).toBeLessThan(h);
+                    checked++;
+                }
+            }
         }
+        expect(checked, 'compared rungs, not nothing').toBe(caps.length * 3 * 2);
     });
 
     it('stays on H.264, which is the only codec that can carry the ladder', () => {
@@ -163,7 +174,7 @@ describe('who decides the resolution of a single-layer share', () => {
 });
 
 describe('the default, with nothing configured', () => {
-    it('does NOT impose extra encodes on a machine nobody has measured', () => {
+    it('does NOT impose extra encodes at the old cap, nor on a machine with no hardware encoder', () => {
         // THE REVERSAL, one day after shipping it on. The rig that cleared the
         // ladder measured a HARDWARE H.264 encoder; every stream-diag line in
         // the field read `encoder=OpenH264`, which is software. So the
@@ -178,8 +189,40 @@ describe('the default, with nothing configured', () => {
         // Called with NO argument on purpose: this is the path the app takes,
         // and the parameter's default is where the setting is read.
         const o = screenSharePublishOptions();
-        expect(o.simulcast, 'off unless the person sharing opts in').toBe(false);
+        expect(o.simulcast, 'Automatic leaves a 4.5 Mbps share at one size').toBe(false);
         expect(o.screenShareSimulcastLayers).toBeUndefined();
+        // jsdom has no RTCRtpSender: no hardware encoder, so even a 10 Mbps
+        // share stays one size under Automatic.
+        expect(screenSharePublishOptions(undefined, 10_000_000).simulcast).toBe(false);
+    });
+
+    it('ladders a share above the old cap on a machine with a hardware encoder', () => {
+        // The High-profile entry is what only a hardware encoder advertises
+        // (h264Profiles.ts hasHardwareH264).
+        const codecs = [
+            { mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f' },
+            { mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640032' },
+        ];
+        vi.stubGlobal('RTCRtpSender', { getCapabilities: () => ({ codecs, headerExtensions: [] }) });
+        try {
+            expect(screenSharePublishOptions(undefined, 10_000_000).simulcast).toBe(true);
+            expect(screenSharePublishOptions(undefined, 4_500_000).simulcast, 'not at the old cap').toBe(false);
+        } finally {
+            vi.unstubAllGlobals();
+        }
+        // POSITIVE CONTROL: the same share without the High entry stays one size.
+        vi.stubGlobal('RTCRtpSender', { getCapabilities: () => ({ codecs: codecs.slice(0, 1), headerExtensions: [] }) });
+        try {
+            expect(screenSharePublishOptions(undefined, 10_000_000).simulcast).toBe(false);
+        } finally {
+            vi.unstubAllGlobals();
+        }
+    });
+
+    it('picks the middle rung by the capture', () => {
+        const mid = (w: number, h: number) => screenSharePublishOptions(true, 10_000_000, { width: w, height: h }).screenShareSimulcastLayers?.[1];
+        expect(mid(1920, 1080)?.height).toBe(720);
+        expect(mid(1280, 720)?.height).toBe(540);
     });
 
 });
