@@ -27,7 +27,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 import {
     noScreenMessage, noScreenEndReason, virtualStartingMessage, LID_CLOSED_OPTION,
-    NO_SCREEN_LID_REASON, NO_SCREEN_VIRTUAL_FAILED_REASON,
+    NO_SCREEN_LID_REASON, NO_SCREEN_VIRTUAL_FAILED_REASON, NO_SCREEN_NO_FRAME_REASON,
 } from '../api/devices/noScreen';
 import { agentPrepareScreen } from '../api/devices/hostAgent';
 
@@ -55,9 +55,9 @@ describe('what the phone says when that PC has no screen on', () => {
     });
 
     it('the host sends the code AND a sentence, and both forms are recognised', () => {
-        for (const code of [NO_SCREEN_LID_REASON, NO_SCREEN_VIRTUAL_FAILED_REASON]) {
+        for (const code of [NO_SCREEN_LID_REASON, NO_SCREEN_VIRTUAL_FAILED_REASON, NO_SCREEN_NO_FRAME_REASON]) {
             const wire = noScreenEndReason(code);
-            expect(wire.startsWith(`${code} — that PC’s screen is off`)).toBe(true);
+            expect(wire.startsWith(`${code} — that PC’s screen`)).toBe(true);
             // What a phone that knows the code shows is the same either way.
             expect(noScreenMessage(wire, 'Work Laptop')).toBe(noScreenMessage(code, 'Work Laptop'));
             // An OLDER phone shows it as it comes: it must fit what one shows
@@ -69,6 +69,13 @@ describe('what the phone says when that PC has no screen on', () => {
         expect(noScreenEndReason(NO_SCREEN_LID_REASON)).toContain(LID_CLOSED_OPTION);
         // A code this build does not know passes through untouched.
         expect(noScreenEndReason('something-else')).toBe('something-else');
+    });
+
+    it('a stream that never showed a picture names the PC and both likely causes', () => {
+        const m = noScreenMessage(NO_SCREEN_NO_FRAME_REASON, 'Work Laptop')!;
+        expect(m).toBe('Work Laptop’s screen did not show anything — it may be asleep, or its lid closed. '
+            + 'Try again, or move its mouse.');
+        expect(noScreenMessage(noScreenEndReason(NO_SCREEN_NO_FRAME_REASON), 'Work Laptop')).toBe(m);
     });
 
     it('NEGATIVE CONTROL: any other reason is not rewritten', () => {

@@ -268,6 +268,38 @@ fn prepare_screen(session_id: &str) -> crate::virtual_screen::ScreenState {
     })
 }
 
+/// Where StartStream captures, given the screen it was asked for: off a dark
+/// built-in panel when another screen is lit (`virtual_screen::steer_monitor`).
+/// A seam because it reads the machine's displays and lid; the test build
+/// answers what the test set, defaulting to "as asked".
+#[cfg(all(windows, not(test)))]
+fn steer_target(requested: usize) -> usize {
+    let (outputs, dark) = crate::virtual_screen::outputs_and_dark();
+    let target = crate::virtual_screen::steer_monitor(
+        requested,
+        &outputs,
+        &dark,
+        crate::composite::ALL_DISPLAYS,
+    );
+    if target != requested {
+        eprintln!(
+            "[virtual-screen] capturing output {target} instead of {requested}: \
+             {dark:?} is a built-in panel behind a closed lid"
+        );
+    }
+    target
+}
+
+#[cfg(test)]
+thread_local! {
+    static STEER_SEAM: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn steer_target(requested: usize) -> usize {
+    STEER_SEAM.with(|c| c.get()).unwrap_or(requested)
+}
+
 /// The sign-in-screen path's version of the host's `prepare_screen` polling:
 /// ask until `ready` or `off`, bounded by `PREPARE_CEILING`. `Err` is the code
 /// the phone names.
@@ -972,7 +1004,7 @@ impl Agent {
                 // regardless.
                 input_auth: None,
             });
-            let Response::Streaming { answer_sdp, .. } = started else {
+            let Response::Streaming { answer_sdp, monitor: steered, .. } = started else {
                 // Pass the agent's own refusal through unchanged rather than
                 // replacing it with a generic one: "that session is already
                 // streaming" and "no monitor" send you to different places.
@@ -1008,7 +1040,23 @@ impl Agent {
                 return Response::error("could not seal the answer");
             };
             s.send_seq += 1;
-            Response::SealedSignals { payloads: vec![sealed] }
+            let mut payloads = vec![sealed];
+            // Steered off a dark panel: the same `monitor-active` the attended
+            // host sends, so the viewer maps the pointer onto the screen it is
+            // really shown.
+            if let Some(active) = steered {
+                let frame = serde_json::json!({
+                    "kind": "monitor-active",
+                    "active": active,
+                    "sid": session_id,
+                    "n": s.send_seq,
+                });
+                if let Some(sealed) = crate::control_key::seal(&s.key, &frame.to_string()) {
+                    s.send_seq += 1;
+                    payloads.push(sealed);
+                }
+            }
+            Response::SealedSignals { payloads }
         }
         #[cfg(not(windows))]
         {
@@ -1281,7 +1329,16 @@ impl Agent {
                 if self.streams.contains_key(&session_id) {
                     return Response::error("that session is already streaming");
                 }
-                let target_monitor = monitor.unwrap_or(0);
+                let requested = monitor.unwrap_or(0);
+                // OFF THE DARK PANEL. A built-in panel behind a closed lid can
+                // stay an active output that never shows a frame (the 0.9.842
+                // field case); capturing it is a black stage that ends twelve
+                // seconds later. With another screen lit (the virtual screen,
+                // or an external monitor) the stream captures that instead,
+                // and says so in its answer. A data-only stream captures
+                // nothing, so there is nothing to steer.
+                let target_monitor = if data_only { requested } else { steer_target(requested) };
+                let steered = (target_monitor != requested).then_some(target_monitor);
                 // EVERY screen this stream would hold, not just the index it
                 // was asked for: All Displays duplicates them all.
                 //
@@ -1391,7 +1448,7 @@ impl Agent {
                             self.sessions.insert(session_id.clone(), target_monitor);
                             Self::aim_input_at(&session_id, target_monitor);
                         }
-                        Response::Streaming { session_id, answer_sdp }
+                        Response::Streaming { session_id, answer_sdp, monitor: steered }
                     }
                     Err(e) => {
                         release_reservations(&mut self.monitor_reservations, &stream_key);
