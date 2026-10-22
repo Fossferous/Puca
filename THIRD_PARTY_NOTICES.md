@@ -163,6 +163,14 @@ release, never edit by hand.
 | yauzl@2.10.0 | MIT | https://github.com/thejoshwolfe/yauzl |
 | zustand@5.0.15 | MIT | https://github.com/pmndrs/zustand |
 
+## npm packages in the Steam Deck plugin (1)
+
+Bundled into the zip that `integrations/decky` builds, which carries their licence texts.
+
+| package | licence | origin |
+|---|---|---|
+| @decky/api@1.1.3 | LGPL-2.1 | https://registry.npmjs.org/@decky/api/-/api-1.1.3.tgz |
+
 ## Rust crates in the server, desktop shell, native helpers and the wasm (845)
 
 | crate | licence | used by | origin |

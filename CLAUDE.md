@@ -327,6 +327,7 @@ python3 scripts/check-sql-bind-types.py     # one SQL text, one bind type per pa
 cd frontend/android && ./gradlew testDebugUnitTest    # the pure-Java logic
 cd frontend/notes-app/android && ./gradlew testDebugUnitTest   # Púca Notes' pure-Java logic (reminder plan/merge, token rule, geofence parity with Púca); needs a cap sync first (npm run notes:android) and ANDROID_HOME
 cd frontend/notes-app/android && ./gradlew :app:connectedDebugAndroidTest   # on a HEADLESS emulator (-no-window -no-audio): the bridge-typing test the JVM cannot reach (PluginArgsBridgeTest)
+cd integrations/decky && npm ci && npm run typecheck && npm test && npm run test:py && npm run build   # Púca for Steam Deck (the Decky plugin, docs/STEAM_DECK.md): its own toolchain and node_modules; `npm run package` makes the zip
 node frontend/e2e/feature-flows.mjs          # needs a backend + isolated DB
 cd frontend && node e2e/games-live.mjs          # card games as ACTIVITIES, BOTH halves, no reload after sign-in: on by default, the launcher, every page seeing an activity start (notice, tile, sidebar marks) within 2.5 s, the owner's switch off/on reaching everyone live, four players (one a 390x844 phone) and a spectator, >=10 Hold'em hands + >=5 Blackjack rounds (the 1.5 s deal pause measured), grace drops, every received frame scanned for leaked cards, an old-client socket sent no game or switch frame; needs APP= / API= against a throwaway backend (header of the file), ~12 min
 cd frontend && node e2e/games-walk.mjs          # the activities and the card table's layout: 1280x800 + 390x844 coarse pointer, the launcher's sheet, the notice and the tile, keyboard-open raise sheet, 44 px targets, 460 px overflow controls, all eight themes with and without high contrast for the table AND the activity surfaces (picker, notice, tile, sidebar marks; one screenshot each); same env
@@ -355,7 +356,7 @@ cd frontend && node e2e/video-controls-real-browser.mjs [outdir]   # Púca's own
 
 **`node scripts/gates.mjs` runs every gate above that needs no backend, dev
 server or emulator** — typecheck, vitest, lint, build, the three cargo suites,
-the SQL bind check, both JUnit suites, the installer hooks, the third-party
+the SQL bind check, both JUnit suites, the Steam Deck plugin's suite, the installer hooks, the third-party
 notices (and that the result is committed) and the twelve no-server
 real-browser scripts — concurrently where they share no lock (cargo's
 `target/` is one lock; the real-browser scripts run one at a time, after

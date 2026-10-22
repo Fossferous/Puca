@@ -184,6 +184,23 @@ const GATES = [
         ],
     },
     {
+        id: 'decky-plugin', cpu: 'heavy', title: 'integrations/decky: typecheck, vitest, unittest, build',
+        // Púca for Steam Deck builds and tests on its own (its own package.json
+        // and node_modules) and reads nothing outside its folder.
+        inputs: ['integrations/decky/'],
+        fingerprint: ['node', 'decky-deps', 'python'],
+        steps: [
+            {
+                run: 'npm ci --no-audit --no-fund', cwd: 'integrations/decky',
+                when: () => !fs.existsSync(path.join(ROOT, 'integrations/decky/node_modules')),
+            },
+            { run: 'npm run typecheck', cwd: 'integrations/decky' },
+            { run: 'npx vitest run', cwd: 'integrations/decky', check: vitestCheck },
+            { run: `${python} -m unittest discover -s tests -p "test_*.py"`, cwd: 'integrations/decky' },
+            { run: 'npm run build', cwd: 'integrations/decky' },
+        ],
+    },
+    {
         id: 'installer-hooks', title: 'npm run check:installer-hooks (needs makensis)',
         inputs: ALL, fingerprint: ['node'],
         steps: [{ run: 'npm run check:installer-hooks', cwd: FE }],
@@ -299,6 +316,7 @@ function fingerprint(kind) {
         // what is INSTALLED, which package-lock.json (an input) is not.
         case 'fe-deps': v = `fe node_modules ${fileHash('frontend/node_modules/.package-lock.json')}`; break;
         case 'notes-deps': v = `notes node_modules ${fileHash('frontend/notes-app/node_modules/.package-lock.json')}`; break;
+        case 'decky-deps': v = `decky node_modules ${fileHash('integrations/decky/node_modules/.package-lock.json')}`; break;
         case 'rust': v = `${version('rustc', ['-V'])} | ${version('cargo', ['-V'])}`; break;
         case 'java': v = version(path.join(javaHome || '', 'bin', 'java'), ['-version'], { shell: false }); break;
         case 'python': v = version(python, ['--version']); break;
