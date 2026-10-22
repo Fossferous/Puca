@@ -20,7 +20,8 @@ type Win = Window & { __PUCA_EMBED_HOST__?: unknown };
 
 class FakeTrack {
     stopped = false;
-    constructor(public kind: 'audio' | 'video') {}
+    kind: 'audio' | 'video';
+    constructor(kind: 'audio' | 'video') { this.kind = kind; }
     stop() { this.stopped = true; }
 }
 class FakeStream {

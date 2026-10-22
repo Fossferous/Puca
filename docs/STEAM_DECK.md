@@ -18,7 +18,7 @@ Everyone uses their own Púca account on their own Deck.
   once for the install.
 - Your Púca account, and your Púca address: the one you open Púca at in a
   web browser, for example `chat.example.com`.
-- A Púca server running version **0.9.845 or newer**. The plugin tells you if
+- A Púca server running version **0.9.846 or newer**. The plugin tells you if
   yours is older. Whoever runs your server can update it.
 - Headphones or a headset are best. Without them the people you talk to may
   hear an echo of themselves from your Deck's speakers.
@@ -103,7 +103,7 @@ Press **···** → the plug icon → **Púca**.
 
 | You see | What to do |
 |---|---|
-| **This Púca server needs an update** | Your server's Púca is older than 0.9.845. Ask whoever runs it to update. You can still open Púca from the panel. |
+| **This Púca server needs an update** | Your server's Púca is older than 0.9.846. Ask whoever runs it to update. You can still open Púca from the panel. |
 | **Could not reach …** | Check the address under **Settings → Change Púca address**, and that the Deck is online. |
 | **Waiting for Game Mode** | The plugin runs in Game Mode only. Switch back to Game Mode. |
 | Nobody hears you | Check that **Push to talk** is set the way you want, and that the call does not say **Muted**. In Steam's **Settings → Audio**, check the microphone. |

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from 'vitest';
 import {
     HOLD_LEASE_MS, createEmbedApi, getEmbedState, holdFromEmbedHost, installEmbedApi, notifyEmbedChanged,
     registerEmbedCall, registerEmbedSession, resetEmbedApiForTest,
@@ -39,14 +39,14 @@ function fakeSession(over: Partial<EmbedSession> = {}): EmbedSession {
     };
 }
 
-function fakeCall(over: Partial<ReturnType<EmbedCallControls['state']>> = {}): EmbedCallControls & { leave: ReturnType<typeof vi.fn> } {
+function fakeCall(over: Partial<ReturnType<EmbedCallControls['state']>> = {}): EmbedCallControls & { leave: Mock<() => void> } {
     const st = { connected: true, connecting: false, muted: false, deafened: false, noMicrophone: false, inputMode: 'pushToTalk' as const, holdDown: false, ...over };
     return {
         roomId: 'voice_42',
         state: () => st,
         setMuted: vi.fn(() => true),
         setDeafened: vi.fn(() => true),
-        leave: vi.fn(),
+        leave: vi.fn<() => void>(),
     };
 }
 
@@ -142,13 +142,13 @@ describe('the state a host is sent', () => {
 
 describe('push-to-talk from the host', () => {
     const SPACE: KeyBinding = { keyCode: 32, ctrl: false, alt: false, shift: false, label: 'Space' };
-    let onDown: ReturnType<typeof vi.fn>;
-    let onUp: ReturnType<typeof vi.fn>;
+    let onDown: Mock<() => void>;
+    let onUp: Mock<() => void>;
 
     beforeEach(() => {
         declareHost();
-        onDown = vi.fn();
-        onUp = vi.fn();
+        onDown = vi.fn<() => void>();
+        onUp = vi.fn<() => void>();
         registerEmbedSession(fakeSession());
         registerEmbedCall(fakeCall({ inputMode: 'pushToTalk' }));
         registerHold('voice.ptt', () => null, { onDown, onUp });

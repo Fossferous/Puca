@@ -195,7 +195,9 @@ const GATES = [
                 when: () => !fs.existsSync(path.join(ROOT, 'integrations/decky/node_modules')),
             },
             { run: 'npm run typecheck', cwd: 'integrations/decky' },
-            { run: 'npx vitest run', cwd: 'integrations/decky', check: vitestCheck },
+            // Its vitest colours the summary despite FORCE_COLOR=0, and
+            // vitestCheck reads that summary as plain text.
+            { run: 'npx vitest run', cwd: 'integrations/decky', env: { NO_COLOR: '1' }, check: vitestCheck },
             { run: `${python} -m unittest discover -s tests -p "test_*.py"`, cwd: 'integrations/decky' },
             { run: 'npm run build', cwd: 'integrations/decky' },
         ],

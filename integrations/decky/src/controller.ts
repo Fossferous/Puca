@@ -50,8 +50,14 @@ type CallResult<T> = { ok: true; value: T } | { ok: false; error: string };
 /** A push-to-talk hold is renewed this often while the button is down; Púca
  *  lets go by itself 1.5 s after the last renewal (docs/EMBEDDING.md). */
 const HOLD_RENEW_MS = 500;
-/** After a page crash or a lost connection, try again this long after. */
+/** After a failure, try again this long after, doubling to RETRY_MAX_MS:
+ *  a Deck often wakes before its Wi-Fi does, and Púca must come back by
+ *  itself once it can. Reset when Púca is up. */
 const RETRY_MS = 5000;
+const RETRY_MAX_MS = 60000;
+/** A page that has not said it is Púca by then (an error page, a captive
+ *  portal, a server that is down) is reported, not waited on forever. */
+const LOAD_TIMEOUT_MS = 30000;
 
 const randomId = (): string => {
     const a = new Uint8Array(12);
@@ -75,7 +81,9 @@ class Controller {
     private inputRegistration: { unregister(): void } | null = null;
     private holdTimer: ReturnType<typeof setInterval> | null = null;
     private retryTimer: ReturnType<typeof setTimeout> | null = null;
+    private loadTimer: ReturnType<typeof setTimeout> | null = null;
     private bootSeq = 0;
+    private retries = 0;
     private started = false;
     private onPage = (payload: unknown) => this.handlePage(payload);
     private onStatus = (status: unknown) => this.handleStatus(status);
@@ -119,6 +127,7 @@ class Controller {
         removeEventListener('puca_page', this.onPage);
         removeEventListener('puca_status', this.onStatus);
         if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
+        this.clearLoadTimer();
         this.endHold();
         this.inputRegistration?.unregister();
         this.inputRegistration = null;
@@ -131,6 +140,7 @@ class Controller {
     private async boot(): Promise<void> {
         const seq = ++this.bootSeq;
         if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
+        this.clearLoadTimer();
         this.bridge.releaseAll();
         const url = this.snap.settings.appUrl;
         if (!url) {
@@ -140,10 +150,14 @@ class Controller {
         }
         const marker = `puca-decky-${randomId()}`;
         if (!this.view.create(marker)) {
+            // Steam's main window is not there yet (very early in a boot),
+            // or this is not Game Mode: look again shortly.
             this.update({ phase: 'no-game-mode', error: null, state: null });
+            this.retryLater();
             return;
         }
         this.update({ phase: 'loading', error: null, state: null });
+        this.armLoadTimer();
         let res: CallResult<null>;
         try {
             res = await call<[string, string], CallResult<null>>('attach', marker, url);
@@ -157,15 +171,34 @@ class Controller {
         }
     }
 
+    private armLoadTimer(): void {
+        this.clearLoadTimer();
+        this.loadTimer = setTimeout(() => {
+            this.loadTimer = null;
+            if (this.snap.phase !== 'loading') return;
+            const host = (() => { try { return new URL(this.snap.settings.appUrl).host; } catch { return 'your Púca server'; } })();
+            this.update({ phase: 'error', error: `${host} did not open Púca. Check the address and that the Deck is online.` });
+            this.retryLater();
+        }, LOAD_TIMEOUT_MS);
+    }
+
+    private clearLoadTimer(): void {
+        if (this.loadTimer) { clearTimeout(this.loadTimer); this.loadTimer = null; }
+    }
+
     private retryLater(): void {
         if (this.retryTimer || !this.started) return;
+        const delay = Math.min(RETRY_MAX_MS, RETRY_MS * 2 ** this.retries);
+        this.retries++;
         this.retryTimer = setTimeout(() => {
             this.retryTimer = null;
             if (this.started) void this.boot();
-        }, RETRY_MS);
+        }, delay);
     }
 
+    /** Try again now (the panel's button), with the waits starting over. */
     reload(): void {
+        this.retries = 0;
         void this.boot();
     }
 
@@ -272,6 +305,8 @@ class Controller {
         if (!msg) return;
         switch (msg.type) {
             case 'ready':
+                this.clearLoadTimer();
+                this.retries = 0;
                 if (msg.apiVersion === 1) {
                     if (this.snap.phase !== 'ready') {
                         this.update({ phase: 'ready', error: null });
@@ -303,7 +338,15 @@ class Controller {
             case 'navigated':
                 // A new document: whatever the old one held is gone.
                 this.bridge.releaseAll();
-                if (s.onApp === false) this.update({ phase: 'loading', state: null });
+                if (s.onApp === false) {
+                    // A link took the view away from Púca (Púca opens links
+                    // in a new window, so this is rare): say so, and Try
+                    // again brings it back.
+                    this.clearLoadTimer();
+                    this.update({ phase: 'error', error: 'The Púca view went to another page.', state: null });
+                } else if (this.snap.phase !== 'ready') {
+                    this.armLoadTimer();
+                }
                 return;
             case 'crashed':
             case 'detached':
@@ -314,7 +357,9 @@ class Controller {
                 this.retryLater();
                 return;
             case 'load-failed':
+                this.clearLoadTimer();
                 this.update({ phase: 'error', error: `Could not reach ${typeof s.host === 'string' ? s.host : 'your Púca server'}. Check the address and your connection.` });
+                this.retryLater();
                 return;
         }
     }

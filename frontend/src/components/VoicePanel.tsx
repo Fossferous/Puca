@@ -3028,7 +3028,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         },
         setDeafened: (want) => {
             if (isDeafenedRef.current !== want) toggleDeafenRef.current();
-            return isDeafenedRef.current === want;
+            return want === isDeafenedRef.current;
         },
         leave: () => { leaveVoiceRef.current(); onDisconnectRef.current?.(); },
     }), [roomId]);
