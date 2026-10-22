@@ -500,6 +500,14 @@ pub enum Response {
     Streaming {
         session_id: String,
         answer_sdp: String,
+        /// The screen this stream ACTUALLY captures, present only when it is
+        /// not the one asked for: StartStream steers off a built-in panel
+        /// behind a closed lid, which never shows a frame
+        /// (`virtual_screen::steer_monitor`). The host must tell the viewer,
+        /// or its pointer mapping describes the wrong screen. ADDITIVE: an old
+        /// app ignores it, and an old agent never steers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<usize>,
     },
 
     /// Zero or more sealed frames for the caller to relay verbatim.

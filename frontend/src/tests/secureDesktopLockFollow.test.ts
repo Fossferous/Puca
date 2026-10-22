@@ -117,7 +117,9 @@ vi.mock('../api/devices/unattendedPrompt', () => ({ requestUnattendedPassphrase:
 const agentAnswerOffer = vi.fn(async () => 'v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\n');
 vi.mock('../api/devices/hostAgent', () => ({
     // A screen is there to capture (session.ts prepareHostScreen).
-    agentPrepareScreen: async () => ({ state: 'ready' }), agentAnswerOffer }));
+    agentPrepareScreen: async () => ({ state: 'ready' }),
+    agentSteeredMonitor: () => null,
+    agentAnswerOffer }));
 vi.mock('../api/devices/unattended', () => ({
     deriveUaSeed: () => new Uint8Array(32),
     signUaChallengeSeed: () => new Uint8Array(64),

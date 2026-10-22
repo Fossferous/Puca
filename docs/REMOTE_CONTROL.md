@@ -157,6 +157,24 @@ so a phone from before this shows words rather than a bare code. The
 sign-in-screen path does the same inside the agent, because no app is there to
 ask; it sends the bare code.
 
+**A closed lid does not always remove the panel.** On some laptops, the
+owner's included (0.9.842 field report), the built-in panel stays an ACTIVE
+output with the lid shut and Windows simply never presents a frame to it.
+The first version counted that as "a screen", answered, and ended twelve
+seconds later with no picture. The agent now reads the lid switch
+(`crates/puca-agent/src/lid.rs`, the `GUID_LIDSWITCH_STATE_CHANGE`
+notification) and each active display's output technology, and treats a
+built-in panel (embedded DisplayPort, LVDS) behind a closed lid as DARK. A PC
+whose only screens are dark has no screen, at once: no wake grace, because a
+lid is not a sleeping monitor. When another screen is lit beside a dark panel
+(the virtual screen, or an external monitor), StartStream captures that one
+instead and the host tells the viewer which screen it got (`monitor-active`).
+A stream that still never shows a picture is ended by the host with its own
+reason ("<PC>'s screen did not show anything — it may be asleep, or its lid
+closed"). Before this, the phone's connection timed out first and said "could
+not connect to the device". An unknown lid state (a desktop PC, or no
+notification) changes nothing.
+
 **The PC can have a screen in software.** "Allow remote control with the lid
 closed" (Devices, on the PC itself, below the remote-access service it needs)
 installs the open-source **Virtual Display Driver** (MIT;

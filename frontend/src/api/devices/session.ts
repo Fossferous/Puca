@@ -74,7 +74,9 @@ import {
 import { appIsBackgrounded } from '../pagePainting';
 import { linkRefusalPersistent } from './linkHealth';
 import { logRcConnect } from './connectLog';
-import { noScreenEndReason, noScreenMessage, NO_SCREEN_VIRTUAL_FAILED_REASON } from './noScreen';
+import {
+    noScreenEndReason, noScreenMessage, NO_SCREEN_NO_FRAME_REASON, NO_SCREEN_VIRTUAL_FAILED_REASON,
+} from './noScreen';
 import {
     AUDIO_HUB_ACK_TIMEOUT_MS,
     AUDIO_HUB_RESULT_TIMEOUT_MS,
@@ -1219,6 +1221,18 @@ async function answerOffer(
             // picture, not behind it.
             void sendSignal(s, { kind: 'monitor-active', active: 0 });
         }
+        // STEERED OFF A DARK PANEL. The agent captures another screen than
+        // the one asked for when that one is a built-in panel behind a closed
+        // lid (crates/puca-agent virtual_screen.rs steer_monitor). The viewer
+        // must be told, as for the every-screen fallback above, or it maps the
+        // pointer onto the screen it asked for rather than the one it gets.
+        const { agentSteeredMonitor } = await import('./hostAgent');
+        const steered = agentSteeredMonitor(s.id);
+        if (steered !== null && steered !== s.monitor) {
+            s.monitor = steered;
+            s.monitorDefaulted = false;
+            void sendSignal(s, { kind: 'monitor-active', active: steered });
+        }
         // The stream exists from here, so queued candidates have somewhere to
         // go. Set BEFORE draining: a candidate arriving during the drain must
         // take the direct path rather than being appended to a list nobody will
@@ -2276,9 +2290,8 @@ export async function pollSecureDesktop(): Promise<void> {
             // new stream.
             //
             // NOT for 'no_frame': the display never produced a first frame,
-            // and the viewer's own deadline already says the screens may be
-            // asleep. A restart cannot wake them and would replace that
-            // message with a generic one.
+            // and a restart cannot wake it. That case ends the session with
+            // a reason the phone names, just below.
             //
             // `!s.filesOnly` is NOT what keeps a files session out of here in
             // the ordinary case — the `hosts` filter above is. It is re-read
@@ -2297,6 +2310,21 @@ export async function pollSecureDesktop(): Promise<void> {
                 && sessions.get(s.id) === s && s.phase === 'active' && !s.filesOnly
                 && !s.transportDown && !s.peerReconnecting) {
                 reportStreamDied(s);
+            }
+            // THE DISPLAY NEVER PRODUCED A PICTURE ('no_frame'), so say so and
+            // end. This used to stay silent and leave it to the viewer's own
+            // 30 s wait for video, but the agent's stream (and its socket)
+            // ends after 12 s, and the phone's connection timed out first:
+            // "could not connect to the device", on a laptop whose screen was
+            // simply dark (0.9.842 field report). Ended HERE, by the side that
+            // knows why, with the same gates as the restart above.
+            if (streamLive === false
+                && streamEnd === AGENT_STREAM_END_NO_FRAME
+                && started && s.agentStreamStarted && s.agentStreamGen === gen
+                && sessions.get(s.id) === s && s.phase === 'active' && !s.filesOnly
+                && !s.transportDown && !s.peerReconnecting) {
+                teardown(s, noScreenEndReason(NO_SCREEN_NO_FRAME_REASON), true);
+                continue;
             }
             if (up !== s.secureDesktop) {
                 s.secureDesktop = up;

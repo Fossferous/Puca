@@ -4,6 +4,14 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## 0.9.844 — 2026-10-22
+
+Lid-closed remote control on laptops with a dark panel; clips no longer wait on stream-only accounts
+### Fixed
+
+- **Clips no longer wait on a stream-only account.** A clip needs the approval of everyone in the call, and an account with the **Stream only** role (one run by automation) cannot answer the prompt, so a clip taken while it was in the call never posted. Stream-only members are no longer asked: a clip needs only the people's approval, and a call of just you and the account needs none. The role's description in **Roles** now says its members are not asked to approve clips, which is why it is meant for accounts run by automation, not for people. Needs the server update.
+- **Remote control with the lid closed works on laptops that keep their panel switched on but dark.** On some laptops a closed lid does not remove the built-in screen: Windows keeps it, and simply never draws to it. 0.9.842 counted that as "a screen", so the phone waited, then said "could not connect to the device", and the virtual screen was never offered. The PC now checks the lid and treats its built-in screen behind a closed lid as off: you get "<PC>'s screen is off — is its lid closed? Turn on 'Allow remote control with the lid closed' on that PC" at once, or, with that option on, the virtual screen. When a real screen and a dark one are both there, the picture comes from the real one. And when a screen really never shows a picture, the phone now says "<PC>'s screen did not show anything — it may be asleep, or its lid closed" instead of "could not connect to the device". Needs the desktop update on the PC and the app update on the phone.
+
 ## 0.9.843 — 2026-10-22
 
 Stream-only accounts, join voice without a microphone, stable automation hooks

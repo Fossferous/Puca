@@ -70,9 +70,14 @@ Two things it still gets, by design or as a known limit:
   account is sent the same content-free "a message landed" notice every
   member who can see the channel gets (which channel, which message id,
   who wrote it); the message itself is refused it.
-- [Clips](CLIPS.md) need the approval of everyone in the call, and an
-  automated account cannot give it: a clip proposed while it is in the call
-  will not post. Clips are off unless the server owner turns them on.
+- [Clips](CLIPS.md) need the approval of everyone in the call **except
+  stream-only members**: an automated account cannot answer the prompt, so it
+  is never asked, and a clip of a call it is in needs only the people's
+  approval (a call of just you and the account needs none). This is why the
+  role is for accounts run by automation and not for a person: whoever holds
+  it is not asked before a clip of their call is posted. Only the owner or an
+  administrator can give it, and its description in Roles says so. Clips are
+  off unless the server owner turns them on.
 
 ### How the cap is decided
 

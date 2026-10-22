@@ -98,7 +98,7 @@ export function StreamOnlyRoleSection({ serverId, role, editPermissions, onToggl
                     />
                     <div className="permission-info">
                         <span className="permission-label">Stream only</span>
-                        <span className="permission-desc">Members with this role can only join and screen share in the voice channels opened for it</span>
+                        <span className="permission-desc">Members with this role can only join and screen share in the voice channels opened for it, and are not asked to approve clips of their calls. For accounts run by automation, not for people.</span>
                     </div>
                 </label>
                 <label className="permission-item">
