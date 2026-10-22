@@ -32,6 +32,8 @@ const SRC = {
     vp: stripComments(read('components/VoicePanel.tsx')),
     chat: stripComments(read('components/Chat.tsx')),
     stage: stripComments(read('components/VoiceStage.tsx')),
+    audioHost: stripComments(read('components/StreamAudioHost.tsx')),
+    streamStage: stripComments(read('components/StreamStage.tsx')),
 };
 
 /** One declaration's text, to the closing brace at its own indentation. */
@@ -75,6 +77,95 @@ interface Pin {
 }
 
 const PINS: Pin[] = [
+    {
+        name: 'no spoken JOIN announcement for a stream-only member (blocked members keep theirs out too)',
+        src: 'vp',
+        holds: (c) => /if \(!isBlocked\(id\) && !isStreamOnlyMember\(id\)\) speak\(`\$\{name\} joined the channel`\);/
+            .test(body(c, 'const announceJoin = useCallback(') ?? ''),
+        mutants: [
+            ['announced anyway', replace('if (!isBlocked(id) && !isStreamOnlyMember(id)) speak(`${name} joined', 'if (!isBlocked(id)) speak(`${name} joined')],
+        ],
+    },
+    {
+        name: 'no spoken LEAVE announcement for a stream-only member',
+        src: 'vp',
+        holds: (c) => /if \(!isBlocked\(id\) && !isStreamOnlyMember\(id\)\) speak\(`\$\{name \?\? known \?\? 'Someone'\} left the channel`\);/
+            .test(body(c, 'const announceLeave = useCallback(') ?? ''),
+        mutants: [
+            ['announced anyway', replace("if (!isBlocked(id) && !isStreamOnlyMember(id)) speak(`${name ?? known", "if (!isBlocked(id)) speak(`${name ?? known")],
+        ],
+    },
+    {
+        name: "every VoiceSpeakState records the member's stream_only flag, theirs and ours",
+        src: 'vp',
+        holds: (c) => /setStreamOnlyMember\(userId, streamOnly\);\s*if \(userId === currentUserId\) \{/
+            .test(body(c, 'const applySpeakState = useCallback(') ?? ''),
+        mutants: [
+            ['never recorded', replace('setStreamOnlyMember(userId, streamOnly);', '')],
+        ],
+    },
+    {
+        name: 'a leaver is forgotten as stream-only only AFTER its leave was (not) announced',
+        src: 'vp',
+        holds: (c) => inOrder(body(c, 'const handleUserLeft = '), 'announceLeave(payload.user_id);', 'if (tornDown) setStreamOnlyMember(payload.user_id, false);'),
+        mutants: [
+            ['forgotten first: the leave would be spoken', swap('announceLeave(payload.user_id);', 'if (tornDown) setStreamOnlyMember(payload.user_id, false);')],
+        ],
+    },
+    {
+        name: 'leaving the call forgets every stream-only flag',
+        src: 'vp',
+        holds: (c) => (body(c, 'const leaveVoice = useCallback(') ?? '').includes('clearStreamOnlyMembers();'),
+        mutants: [
+            ['kept', replace('clearStreamOnlyMembers();', '')],
+        ],
+    },
+    {
+        name: "Chat auto-watches by the rule: stream-only members, the setting, data saving, once per share",
+        src: 'chat',
+        holds: (c) => inOrder(c,
+            'const plan = autoWatchPlan({',
+            'isStreamOnly: isStreamOnlyMember,',
+            'enabled: loadSettings().autoWatchStreamOnly !== false,',
+            'saveData: browserSavesData(),',
+            'for (const id of plan.open) {',
+            'autoWatchedRef.current.add(id);',
+            "autoWatchPipRef.current = viewModeRef.current === 'chat';",
+            'selectStream(id);')
+            && c.includes("window.addEventListener('settingsChanged', run);")
+            && /const unsub = subscribeToStreamState\(run\);/.test(c),
+        mutants: [
+            ['opens every share', replace('isStreamOnly: isStreamOnlyMember,', 'isStreamOnly: () => true,')],
+            ['ignores the setting', replace('enabled: loadSettings().autoWatchStreamOnly !== false,', 'enabled: true,')],
+            ['reopens a closed share forever', (code) => {
+                const loop = code.indexOf('for (const id of plan.open) {');
+                const at = code.indexOf('autoWatchedRef.current.add(id);', loop);
+                return loop === -1 || at === -1 ? code : code.slice(0, at) + code.slice(at + 'autoWatchedRef.current.add(id);'.length);
+            }],
+        ],
+    },
+    {
+        name: 'an auto-watch from the chat view opens the PiP instead of taking the screen; a click still switches',
+        src: 'chat',
+        // The flag is spent only once the PiP is up: one notification can run
+        // the stream-state callback twice with a stale showPip, and clearing
+        // it on the first run let the second take the screen (seen live).
+        holds: (c) => /if \(hasStreams && \(viewMode === 'chat' \|\| viewMode === 'voice'\) && !showPip\) \{\s*if \(autoWatchPipRef\.current && viewMode === 'chat'\) \{\s*setShowPip\(true\);\s*return;\s*\}\s*setViewMode\('stream'\);/.test(c)
+            && /useEffect\(\(\) => \{\s*if \(showPip \|\| viewMode !== 'chat'\) autoWatchPipRef\.current = false;\s*\}, \[showPip, viewMode\]\);/.test(c),
+        mutants: [
+            ['takes the screen', replace("if (autoWatchPipRef.current && viewMode === 'chat') {", "if (false) {")],
+            ['spent on the first run (the live bug)', replace("if (autoWatchPipRef.current && viewMode === 'chat') {", "if (autoWatchPipRef.current && viewMode === 'chat') {\n                    autoWatchPipRef.current = false;")],
+        ],
+    },
+    {
+        name: 'stream audio refused by the autoplay policy starts at the next gesture (audio host and stage)',
+        src: 'audioHost',
+        holds: (c) => c.includes('const unsubGesture = onUserGesture(host.reconcile);') && c.includes('unsubGesture();')
+            && /useEffect\(\(\) => onUserGesture\(\(\) => \{\s*const ctx = audioCtxRef\.current;\s*if \(ctx && ctx\.state === 'suspended'\) ctx\.resume\(\)/.test(SRC.streamStage),
+        mutants: [
+            ['the host never retries', replace('const unsubGesture = onUserGesture(host.reconcile);', 'const unsubGesture = () => {};')],
+        ],
+    },
     {
         name: 'the idle move (AFK) is never armed for a member with no microphone by choice',
         src: 'vp',

@@ -129,6 +129,33 @@ export const globalCameraUsers = new Map<number, string>(); // userId -> usernam
 // their own screen share, and other people's cameras must survive it.
 export const globalCameraStreams = new Map<number, MediaStream>();
 
+// Members of the call this client is in that the server flags stream-only
+// (VoiceSpeakState.stream_only: automated streaming accounts,
+// docs/STREAM_ONLY.md). Written only by the in-call VoicePanel from those
+// frames; read by its spoken join/leave announcements (left out for these
+// members) and by Chat's auto-watch of their shares. A change notifies the
+// stream-state bus, since it can make a live share auto-watchable.
+const streamOnlyMembers = new Set<number>();
+
+export function setStreamOnlyMember(userId: number, streamOnly: boolean): void {
+    const changed = streamOnly ? !streamOnlyMembers.has(userId) : streamOnlyMembers.has(userId);
+    if (!changed) return;
+    if (streamOnly) streamOnlyMembers.add(userId);
+    else streamOnlyMembers.delete(userId);
+    notifyStreamStateChange();
+}
+
+export function isStreamOnlyMember(userId: number): boolean {
+    return streamOnlyMembers.has(userId);
+}
+
+/** Leaving the call: nobody here is anybody's stream-only member any more. */
+export function clearStreamOnlyMembers(): void {
+    if (streamOnlyMembers.size === 0) return;
+    streamOnlyMembers.clear();
+    notifyStreamStateChange();
+}
+
 // Global state for speaking users - accessible from sidebar. WRITE it only
 // through setUserSpeaking / clearSpeaking below, so every change is announced.
 export const globalSpeakingUsers = new Set<number>(); // Set of userIds currently speaking

@@ -2460,6 +2460,26 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         />
                                     </div>
                                     <div className="settings-option">
+                                        <div className="option-info">
+                                            <label htmlFor="auto-watch-stream-only">Automatically watch streams from stream-only accounts</label>
+                                            <span className="option-hint">
+                                                When a stream-only account (one a server owner has set up to stream into
+                                                calls) is sharing in your call, its stream starts playing without a
+                                                Watch click: in a small player over the chat, or full size from the
+                                                call's view. Other people's streams still wait for you. It uses data
+                                                like any stream you watch, so you may want it off on a phone; it never
+                                                starts while your browser asks to save data.
+                                            </span>
+                                        </div>
+                                        <input
+                                            id="auto-watch-stream-only"
+                                            type="checkbox"
+                                            data-testid="settings-auto-watch-stream-only"
+                                            checked={settings.autoWatchStreamOnly}
+                                            onChange={(e) => updateSetting('autoWatchStreamOnly', e.target.checked)}
+                                        />
+                                    </div>
+                                    <div className="settings-option">
                                         <label>Output Device</label>
                                         <select
                                             value={settings.outputDeviceId}

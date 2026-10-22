@@ -106,6 +106,7 @@ const HOOKS: Hook[] = [
     { ids: ['share-go-live'], file: 'components/ScreenShareModal.tsx', attr: 'data-testid="share-go-live"', count: 2, needs: [/onClick=\{(handleSelectScreen|handleMixerGoLive)\}/] },
     { ids: ['voice-leave'], file: 'components/VoicePanel.tsx', attr: 'data-testid="voice-leave"', needs: ['leaveVoice();'] },
     { ids: ['settings-join-without-mic'], file: 'components/SettingsModal.tsx', attr: 'data-testid="settings-join-without-mic"', needs: ["updateSetting('joinWithoutMic', e.target.checked)", 'checked={settings.joinWithoutMic}'] },
+    { ids: ['settings-auto-watch-stream-only'], file: 'components/SettingsModal.tsx', attr: 'data-testid="settings-auto-watch-stream-only"', needs: ["updateSetting('autoWatchStreamOnly', e.target.checked)", 'checked={settings.autoWatchStreamOnly}'] },
     { ids: ['create-stream-only-role'], file: 'components/RoleSettingsModal.tsx', attr: 'data-testid="create-stream-only-role"', needs: ['onClick={handleCreateStreamOnlyRole}'] },
     { ids: ['role-automated-streaming'], file: 'components/StreamOnlyRoleSection.tsx', attr: 'data-testid="role-automated-streaming"', needs: ['stream-only-section'] },
     { ids: ['role-stream-only'], file: 'components/StreamOnlyRoleSection.tsx', attr: 'data-testid="role-stream-only"', needs: ["onToggle('STREAM_ONLY')", 'checked={has(PERMISSIONS.STREAM_ONLY)}'] },

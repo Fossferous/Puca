@@ -142,6 +142,38 @@ is no microphone:
 
 The member can still share their screen, with its sound.
 
+## How it shows up for the people in the call
+
+Everyone's client is told which members of their call are stream-only: the
+server adds `stream_only: true` to that member's `VoiceSpeakState` (the same
+frame that carries Speak and No receive, so it arrives with the join, before
+any announcement, and follows a role change mid-call). The server decides it,
+from the same cap it enforces; no client works it out from role bits.
+
+- **No spoken announcement.** With **Settings → Notifications → Speak
+  Join/Leave (TTS)** on, people hear "X joined the channel" / "X left the
+  channel" for real people only, never for a stream-only member. The join and
+  leave chime (and a member's own join/leave sound, when they have one) is a
+  separate path and plays as before. Púca has no join/leave toasts.
+- **Its stream starts by itself.** When a stream-only member is sharing in
+  your call (you join while it is live, or it goes live while you are there),
+  your client starts watching it without a Watch click, once per share: close
+  it, and it stays closed until its next share. From the call's view it opens
+  the stream view; from the chat it opens in the small player over the chat
+  (docked under the header on a phone), so nothing you are reading or typing
+  is taken away. It plays at that stream's own volume and mute and the master
+  Output Volume, like any stream you watch. Everyone else's shares still wait
+  for a click.
+- **The control**: **Settings → Voice & Video → Automatically watch streams
+  from stream-only accounts**, on by default, per device. A stream costs data
+  like any other, so a phone on mobile data may want it off; it never starts
+  while the browser asks to save data (Chromium's Data Saver).
+- **Autoplay.** The picture is a muted video and always starts. A browser
+  starts a stream's sound only after you have used the page; you almost always
+  have (you clicked to join the call), but if the call came back on its own
+  after a reload, the sound starts at your first click or key press instead
+  of never.
+
 ## What was verified, and what was not
 
 Verified by tests that run in the gates (each one checked to fail when the
@@ -162,7 +194,22 @@ rule it pins is removed):
   member plays nothing, no microphone is ever opened when joining without one,
   and the AFK, silent-microphone, roster and setting wiring
   (`frontend/src/tests/streamOnly*.test.ts`); the automation hooks
-  (`automationHooks.test.tsx`).
+  (`automationHooks.test.tsx`);
+- how it shows up in the call: the room is told `stream_only` (the socket
+  test above, and a third fixture); the auto-watch rule (`autoWatch.test.ts`:
+  stream-only members only, once per share, not your own, the setting, data
+  saving); and the wiring that leaves these members out of spoken
+  announcements and opens their share in the small player from the chat
+  (`streamOnlyWiring.test.ts`).
+
+Verified live by `frontend/e2e/stream-only-live.mjs` on a mesh call, in
+real browsers run with `--mute-audio` and the owner's `speechSynthesis`
+replaced by a recorder (nothing is ever spoken): the account's joining and
+leaving is never announced while a person's joining and leaving is (the
+control); its share opens by itself in the owner's small player while the
+chat stays, for a person joining while it is live, and in a 390x844 phone's
+docked player; a person's share does not open by itself (the control); and a
+closed share stays closed.
 
 Not verified by an automated gate: a real browser streaming into a real SFU
 call under a stream-only role (LiveKit is not part of the test rig). The SFU

@@ -324,7 +324,15 @@ occupant's speak right and tells the room with a server→client frame:
 ```json
 {"type":"VoiceSpeakState","payload":{"room_id":"voice_42","user_id":7,"can_speak":false}}
 {"type":"VoiceSpeakState","payload":{"room_id":"voice_42","user_id":7,"can_speak":false,"receives":false}}
+{"type":"VoiceSpeakState","payload":{"room_id":"voice_42","user_id":7,"can_speak":false,"receives":false,"stream_only":true}}
 ```
+
+`stream_only` is present, and `true`, only for a member capped by
+`STREAM_ONLY`; when it is absent the member is not. Clients leave such a
+member out of spoken join/leave announcements and start watching its share
+without a click. Same frames, same delivery, as `can_speak` and `receives`; a
+change mid-call reaches the room through the perms sweep. Pinned by
+`frontend/src/tests/fixtures/voiceSpeakStateStreamOnly.json`.
 
 `receives` is present, and `false`, only for a member whose roles carry
 `NO_RECEIVE` ([STREAM_ONLY.md](STREAM_ONLY.md)); when it is absent the member

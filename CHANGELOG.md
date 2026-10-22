@@ -4,6 +4,12 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Changed
+
+- **Stream-only accounts are not announced, and their streams start by themselves.** With **Speak Join/Leave (TTS)** on, you no longer hear "X joined the channel" or "X left the channel" for a stream-only account (an automated account a server owner has set up to stream into calls); real people are announced as before, and the join and leave chime is unchanged. When such an account is sharing in your call, its stream now starts playing without a Watch click, once per share: from the call's view as the stream view, and from the chat in the small player over the chat (docked under the header on a phone), so whatever you are reading stays where it is. Close it and it stays closed until it next goes live; everyone else's streams still wait for your click. Turn it off under **Settings → Voice & Video → Automatically watch streams from stream-only accounts** (on by default, per device); it never starts while your browser asks to save data. Needs the app update and the server update.
+
 ## 0.9.844 — 2026-10-22
 
 Lid-closed remote control on laptops with a dark panel; clips no longer wait on stream-only accounts

@@ -108,7 +108,7 @@ import { useDfSettledOffer, keepRnnoiseForSession, KEEP_RNNOISE_NOTICE } from '.
 import './VoicePanel.css';
 
 
-import { globalVoiceUsers, globalScreenSharers, globalCameraUsers, globalCameraStreams, setUserSpeaking, clearSpeaking, notifyVoiceUsersChange, registerStopScreenShareCallback, stopOwnScreenShare, dropOwnStream, setCurrentStreamingUser, setSelfInVoice, setSelfDeafened, publishSelfVoiceChoice, type SelfVoiceChoice, upsertVoiceUser, applyVoiceStatus, globalSelectedStreams, globalStreamData, notifyStreamStateChange, clearAllStreams, selectStream, deselectStream, subscribeToStreamState } from './voiceState';
+import { globalVoiceUsers, globalScreenSharers, globalCameraUsers, globalCameraStreams, setUserSpeaking, clearSpeaking, notifyVoiceUsersChange, registerStopScreenShareCallback, stopOwnScreenShare, dropOwnStream, setCurrentStreamingUser, setSelfInVoice, setSelfDeafened, publishSelfVoiceChoice, type SelfVoiceChoice, upsertVoiceUser, applyVoiceStatus, globalSelectedStreams, globalStreamData, notifyStreamStateChange, clearAllStreams, selectStream, deselectStream, subscribeToStreamState, setStreamOnlyMember, isStreamOnlyMember, clearStreamOnlyMembers } from './voiceState';
 
 interface VoicePanelProps {
     roomId: string;
@@ -379,7 +379,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     const streamOnlyRef = useRef(streamOnly);
     // Always-fresh handles for the always-on WS effect and joinVoice (the
     // callbacks are defined further down, after broadcastStatus).
-    const applySpeakStateRef = useRef<(userId: number, canSpeak: boolean, receives: boolean) => void>(() => { /* not mounted yet */ });
+    const applySpeakStateRef = useRef<(userId: number, canSpeak: boolean, receives: boolean, streamOnly: boolean) => void>(() => { /* not mounted yet */ });
     const denySpeakLocallyRef = useRef<() => Promise<void>>(async () => { /* not mounted yet */ });
     useEffect(() => { canSpeakRef.current = canSpeak; }, [canSpeak]);
     useEffect(() => { canConnectRef.current = canConnect; }, [canConnect]);
@@ -1001,8 +1001,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         if (!isInVoiceRef.current || Date.now() < speechMuteUntilRef.current) return;
         playAnnouncement(id, 'join'); // clip or chime (gated on voiceChime)
         // No spoken announcement for someone you blocked — TTS reads their
-        // display name aloud, which is the same "reach you anyway" problem.
-        if (!isBlocked(id)) speak(`${name} joined the channel`); // opt-in TTS
+        // display name aloud, which is the same "reach you anyway" problem —
+        // nor for a stream-only member, an automated account nobody needs
+        // narrated (its chime and clip stay: playAnnouncement above).
+        if (!isBlocked(id) && !isStreamOnlyMember(id)) speak(`${name} joined the channel`); // opt-in TTS
     }, [currentUserId, playAnnouncement]);
 
     /** Announce a leave only for someone we actually counted as present. */
@@ -1012,7 +1014,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         if (!announcedRef.current.delete(id)) return; // never announced → stay silent
         if (!isInVoiceRef.current || Date.now() < speechMuteUntilRef.current) return;
         playAnnouncement(id, 'leave'); // clip or chime (gated on voiceChime)
-        if (!isBlocked(id)) speak(`${name ?? known ?? 'Someone'} left the channel`); // opt-in TTS
+        if (!isBlocked(id) && !isStreamOnlyMember(id)) speak(`${name ?? known ?? 'Someone'} left the channel`); // opt-in TTS
     }, [currentUserId, playAnnouncement]);
 
     // ---- Join-announce gate -----------------------------------------------
@@ -1442,6 +1444,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             // Their next join starts from the server's word.
             if (tornDown) speakGateRef.current.forget(payload.user_id);
             if (tornDown) webrtcManager.forgetPeerReceives(payload.user_id);
+            if (tornDown) setStreamOnlyMember(payload.user_id, false);
         };
 
         // Mesh receivers render only ANNOUNCED video (B7): keep the manager's
@@ -1474,7 +1477,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         const handleVoiceSpeakState = (msg: ServerMessage) => {
             const p = parseVoiceSpeakState(msg);
             if (!p || p.room_id !== roomId) return;
-            applySpeakStateRef.current(p.user_id, p.can_speak, p.receives);
+            applySpeakStateRef.current(p.user_id, p.can_speak, p.receives, p.stream_only);
         };
         wsClient.on('VoiceSpeakState', handleVoiceSpeakState);
 
@@ -1647,7 +1650,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     useEffect(() => { denySpeakLocallyRef.current = denySpeakLocally; }, [denySpeakLocally]);
 
     // The server's VoiceSpeakState for one member of this room.
-    const applySpeakState = useCallback((userId: number, allowed: boolean, receives: boolean) => {
+    const applySpeakState = useCallback((userId: number, allowed: boolean, receives: boolean, streamOnly: boolean) => {
+        // A stream-only member (docs/STREAM_ONLY.md): no spoken join/leave
+        // announcement for them, and Chat auto-watches their share.
+        setStreamOnlyMember(userId, streamOnly);
         if (userId === currentUserId) {
             if (!allowed) void denySpeakLocally();
             else if (speakDeniedRef.current) setSpeakGrantedPending(true);
@@ -2611,6 +2617,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         setSpeakDenied(false);
         micOffByChoiceRef.current = false; // and re-reads the setting
         setMicOffByChoice(false);
+        clearStreamOnlyMembers(); // the next call's frames say who is
         setSpeakGrantedPending(false);
         speakGateRef.current.reset();
         deliverVoiceRef.current = null;

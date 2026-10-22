@@ -675,9 +675,9 @@ impl Room {
     }
 
     /// Store all of a voice member's resolved rights at once. Returns true when
-    /// something the ROOM must be told changed (speak or receive; the text
-    /// flag is the server's own business). A no-op for a non-member, for the
-    /// reason `set_can_speak` gives.
+    /// something the ROOM is told changed: speak, receive, or the text flag,
+    /// which the room hears as `VoiceSpeakState.stream_only`. A no-op for a
+    /// non-member, for the reason `set_can_speak` gives.
     pub fn set_voice_rights(&mut self, user_id: UserId, rights: VoiceRights) -> bool {
         if !self.members.contains(&user_id) {
             return false;
@@ -688,12 +688,12 @@ impl Room {
         } else {
             self.receive_denied.insert(user_id)
         };
-        if rights.reads_text {
-            self.text_denied.remove(&user_id);
+        let text = if rights.reads_text {
+            self.text_denied.remove(&user_id)
         } else {
-            self.text_denied.insert(user_id);
-        }
-        speak || receive
+            self.text_denied.insert(user_id)
+        };
+        speak || receive || text
     }
 
     /// May the room's members send `user_id` media? Absent = yes.
@@ -2904,6 +2904,8 @@ impl AppState {
             user_id,
             can_speak: room.can_speak(user_id),
             receives: room.receives(user_id),
+            // Text-denied in a voice room IS stream-only (VoiceRights::of).
+            stream_only: !room.reads_text(user_id),
         };
         for &member_id in &room.members {
             if member_id != user_id {
@@ -2932,6 +2934,7 @@ impl AppState {
                 user_id: member_id,
                 can_speak: room.can_speak(member_id),
                 receives: room.receives(member_id),
+                stream_only: !room.reads_text(member_id),
             };
             if self.send_to_conn(user_id, conn_id, msg) {
                 sent += 1;

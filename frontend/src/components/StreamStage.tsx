@@ -1,4 +1,5 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
+import { onUserGesture } from '../utils/onUserGesture';
 import {
     subscribeToStreamState,
     getSelectedStreams,
@@ -264,7 +265,7 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
                 // does; without this it always played on the OS default.
                 sinkRoutedRef.current = applyOutputDeviceToContext(ctx);
             }
-            if (ctx.state === 'suspended') ctx.resume().catch(() => { /* resumes on next gesture */ });
+            if (ctx.state === 'suspended') ctx.resume().catch(() => { /* resumes on the next gesture (below) */ });
 
             const existing = graphsRef.current.get(userId);
             if (existing?.trackId === track.id) {
@@ -477,6 +478,14 @@ export function StreamStage({ onBackToChat, onMinimize, poppedStreams = [], onTo
             return () => clearInterval(interval);
         }
     }, [selectedStreams, streamers, ensureStreamAudio]);
+
+    // The stage's graph context is born suspended when no click led here (a
+    // stream-only account's share, auto-watched): resume it at the first
+    // gesture, so its sound starts then rather than never.
+    useEffect(() => onUserGesture(() => {
+        const ctx = audioCtxRef.current;
+        if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => { /* still not allowed */ });
+    }), []);
 
     // SAFETY NET (0.6.7). Layout is now expressed purely as CSS classes over a
     // stable element set, so a focus/grid toggle no longer unmounts anything and

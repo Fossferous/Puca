@@ -34,6 +34,7 @@ import { DEFAULT_STREAM_VOLUME, getStreamMutes, getStreamVolumes } from './strea
 import { applyOutputDevice, outputGain } from './settingsStore';
 import { stageOwnsStreamAudio, streamAudioPlan, subscribeStageAudio } from './streamAudioRouting';
 import { installBackgroundResumeAll } from './deviceStageResume';
+import { onUserGesture } from '../utils/onUserGesture';
 
 function currentPlan() {
     const selected = getSelectedStreams();
@@ -192,7 +193,11 @@ export function StreamAudioHost() {
         // Android pauses media elements when the app backgrounds and never
         // un-pauses them; the stage and the float re-play theirs the same way.
         const unsubResume = installBackgroundResumeAll(host.elements);
+        // A stream started without a click (auto-watch) may have had its
+        // play() refused by the autoplay policy: retry at the next gesture.
+        const unsubGesture = onUserGesture(host.reconcile);
         return () => {
+            unsubGesture();
             unsubStreams();
             unsubStage();
             unsubResume();

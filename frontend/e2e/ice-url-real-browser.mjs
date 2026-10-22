@@ -101,7 +101,8 @@ const TURN_SERVER_CASES = [
     'turn::',
 ];
 
-const browser = await chromium.launch();
+// --mute-audio: nothing here plays sound, and a gate must never be able to.
+const browser = await chromium.launch({ args: ['--mute-audio'] });
 const page = await browser.newPage();
 // about:blank is enough — RTCPeerConnection needs no origin, no network and no
 // permissions to validate its configuration.

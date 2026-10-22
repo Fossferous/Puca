@@ -135,6 +135,14 @@ export const defaultSettings = {
     // microphone", not "muted". Per device. For listeners, and for automated
     // streaming accounts (docs/STREAM_ONLY.md), which join this way anyway.
     joinWithoutMic: false,
+    // Start watching a share from a STREAM-ONLY account (docs/STREAM_ONLY.md)
+    // in your call without a Watch click: when you join while it is live, and
+    // when it goes live while you are there. In the chat view it opens in the
+    // picture-in-picture (the docked mini-player on a phone) rather than
+    // taking the screen; from the call's view it opens the stream view. Not
+    // while the browser asks to save data. Per device, so a phone can turn it
+    // off on its own. Everyone else's shares still wait for a click.
+    autoWatchStreamOnly: true,
     // When true, images hosted on OTHER sites load automatically in messages.
     // Off by default: the URL is chosen by whoever SENT the message, so the
     // fetch hands that host your IP address, your user agent and the moment you

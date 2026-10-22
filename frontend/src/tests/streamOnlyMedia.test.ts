@@ -134,12 +134,16 @@ describe('VoiceSpeakState.receives', () => {
     it('is false only when the server says so (the fixtures src/protocol.rs pins)', () => {
         const plain = parseVoiceSpeakState(fixture('voiceSpeakState.json'));
         const noReceive = parseVoiceSpeakState(fixture('voiceSpeakStateNoReceive.json'));
-        expect(plain).toEqual({ room_id: 'voice_42', user_id: 7, can_speak: false, receives: true });
-        expect(noReceive).toEqual({ room_id: 'voice_42', user_id: 7, can_speak: false, receives: false });
+        const streamOnly = parseVoiceSpeakState(fixture('voiceSpeakStateStreamOnly.json'));
+        expect(plain).toEqual({ room_id: 'voice_42', user_id: 7, can_speak: false, receives: true, stream_only: false });
+        expect(noReceive).toEqual({ room_id: 'voice_42', user_id: 7, can_speak: false, receives: false, stream_only: false });
+        expect(streamOnly).toEqual({ room_id: 'voice_42', user_id: 7, can_speak: false, receives: false, stream_only: true });
     });
-    it('refuses a receives that is not a boolean rather than guessing', () => {
+    it('refuses a receives or stream_only that is not a boolean rather than guessing', () => {
         const junk = { type: 'VoiceSpeakState', payload: { room_id: 'voice_1', user_id: 1, can_speak: true, receives: 'no' } };
         expect(parseVoiceSpeakState(junk)).toBeNull();
+        const junk2 = { type: 'VoiceSpeakState', payload: { room_id: 'voice_1', user_id: 1, can_speak: true, stream_only: 1 } };
+        expect(parseVoiceSpeakState(junk2)).toBeNull();
     });
 });
 

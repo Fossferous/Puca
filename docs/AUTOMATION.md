@@ -33,6 +33,7 @@ Setup, done once by people rather than by the automation:
 | `data-testid` | Element |
 |---|---|
 | `settings-join-without-mic` | **Settings → Voice & Video → Join voice without a microphone** |
+| `settings-auto-watch-stream-only` | **Settings → Voice & Video → Automatically watch streams from stream-only accounts** |
 | `create-stream-only-role` | **+ Stream Only Role** in **Server Settings → Roles** |
 | `role-automated-streaming` | The role editor's **Automated Streaming** section |
 | `role-stream-only` | Its **Stream only** checkbox |

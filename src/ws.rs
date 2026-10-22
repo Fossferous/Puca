@@ -10644,8 +10644,21 @@ mod stream_only_ws_tests {
         frames
             .iter()
             .filter_map(|m| match m {
-                ServerMessage::VoiceSpeakState { room_id, user_id, can_speak, receives } if room_id == room => {
+                ServerMessage::VoiceSpeakState { room_id, user_id, can_speak, receives, .. } if room_id == room => {
                     Some((*user_id, *can_speak, *receives))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// (user, stream_only) of every VoiceSpeakState for `room`.
+    fn stream_only_flags(frames: &[ServerMessage], room: &str) -> Vec<(UserId, bool)> {
+        frames
+            .iter()
+            .filter_map(|m| match m {
+                ServerMessage::VoiceSpeakState { room_id, user_id, stream_only, .. } if room_id == room => {
+                    Some((*user_id, *stream_only))
                 }
                 _ => None,
             })
@@ -10790,6 +10803,9 @@ mod stream_only_ws_tests {
         assert!(rights(&bot_frames, &room).contains(&(bot, false, false)), "it is told it may neither speak nor receive: {:?}", rights(&bot_frames, &room));
         assert!(rights(&bot_frames, &room).contains(&(human, true, true)), "and that the human may both");
         assert!(rights(&human_frames, &room).contains(&(bot, false, false)), "the human's client must learn not to send it media");
+        assert!(stream_only_flags(&human_frames, &room).contains(&(bot, true)), "the human's client must learn it is a stream-only account");
+        assert!(stream_only_flags(&bot_frames, &room).contains(&(human, false)), "negative control: the human is not flagged");
+        assert!(stream_only_flags(&bot_frames, &room).contains(&(bot, true)), "the account is told about itself too");
         assert!(refused_stage_text.is_err(), "the voice channel's text room must be refused");
         assert!(refused_text.is_err(), "a text channel must be refused");
         assert!(refused_lounge.is_err(), "a voice channel nobody opened must be refused");

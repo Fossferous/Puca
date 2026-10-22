@@ -257,7 +257,7 @@ const PINS: Pin[] = [
         src: 'vp',
         holds: (c) => c.includes("wsClient.on('VoiceSpeakState', handleVoiceSpeakState)")
             && c.includes("wsClient.off('VoiceSpeakState', handleVoiceSpeakState)")
-            && /if \(!p \|\| p\.room_id !== roomId\) return;\s*applySpeakStateRef\.current\(p\.user_id, p\.can_speak, p\.receives\);/
+            && /if \(!p \|\| p\.room_id !== roomId\) return;\s*applySpeakStateRef\.current\(p\.user_id, p\.can_speak, p\.receives, p\.stream_only\);/
                 .test(body(c, 'const handleVoiceSpeakState = ') ?? ''),
         mutants: [
             ['any room', replaceNth(' || p.room_id !== roomId', '')],

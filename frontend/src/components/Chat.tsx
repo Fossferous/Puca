@@ -8,7 +8,8 @@ import { wsClient, type ServerMessage } from '../api/websocket';
 import { VoicePanel } from './VoicePanel';
 import { OwnVoiceBanner } from './OwnVoiceBanner';
 import { carriedFromOtherDevice, roomLeftNotice, type OwnVoiceState } from '../api/ownVoice';
-import { getVoiceUsersInRoom, globalVoiceUsers, globalCameraUsers, isUserStreaming, subscribeToStreamState, subscribeToVoiceUsers, getSelectedStreams, getStreamData, getAllStreamers, selectStream, deselectStream, upsertVoiceUser, getSelfVoiceChoice } from './voiceState';
+import { getVoiceUsersInRoom, globalVoiceUsers, globalCameraUsers, isUserStreaming, subscribeToStreamState, subscribeToVoiceUsers, getSelectedStreams, getStreamData, getAllStreamers, selectStream, deselectStream, upsertVoiceUser, getSelfVoiceChoice, isStreamOnlyMember } from './voiceState';
+import { autoWatchPlan, browserSavesData } from '../utils/autoWatch';
 import { useStreamStore } from '../stores/streamStore';
 import type { VoiceUserStatus, SelfVoiceChoice } from './voiceState';
 import './FileUpload.css';
@@ -1164,6 +1165,10 @@ export function Chat({ onLogout }: ChatProps) {
 
     // PiP (Picture-in-Picture) mode: shows chat with stream overlay
     const [showPip, setShowPip] = useState(false);
+    // An AUTO-watch (a stream-only account's share, below) started while the
+    // chat view was up: the stream-state effect opens the picture-in-picture
+    // for it instead of switching the screen to the stream view. One-shot.
+    const autoWatchPipRef = useRef(false);
     // OS-level picture-in-picture: which stream (if any) is popped out into
     // the system PiP window (StreamPopout). Pinned to the tile that was
     // clicked; toggling the same tile brings it back, another tile switches.
@@ -1337,6 +1342,15 @@ export function Chat({ onLogout }: ChatProps) {
             console.debug('[Chat] Stream state update - hasStreams:', hasStreams, 'currentViewMode:', viewMode, 'showPip:', showPip);
             // Only auto-switch to stream if NOT in PiP mode
             if (hasStreams && (viewMode === 'chat' || viewMode === 'voice') && !showPip) {
+                if (autoWatchPipRef.current && viewMode === 'chat') {
+                    // Nobody clicked: watch it in the PiP (docked on a phone)
+                    // and leave the chat where it is. The flag is cleared
+                    // only once the PiP is up (the effect below): one
+                    // notification can run this callback twice, the second
+                    // time with the same stale showPip.
+                    setShowPip(true);
+                    return;
+                }
                 setViewMode('stream');
             } else if (!hasStreams && viewMode === 'stream') {
                 // Last stream ended — fall back to the voice tiles if we're
@@ -1350,6 +1364,56 @@ export function Chat({ onLogout }: ChatProps) {
         update(); // Check initial state
         return subscribeToStreamState(update);
     }, [viewMode, showPip, currentVoiceChannel]);
+
+    // The auto-watch's PiP is up, or the view moved on: its one-shot is spent.
+    useEffect(() => {
+        if (showPip || viewMode !== 'chat') autoWatchPipRef.current = false;
+    }, [showPip, viewMode]);
+
+    // AUTO-WATCH (docs/STREAM_ONLY.md): a share from a stream-only member of
+    // the call starts playing here without a Watch click, once per share -
+    // when we join while it is live and when it goes live while we are here.
+    // The rule is utils/autoWatch.ts; this applies it on every stream-state
+    // change (a share starting or ending, a member flagged stream-only, a
+    // selection) and on a settings change. The stream list only ever holds
+    // the call this client is in.
+    const autoWatchedRef = useRef(new Set<number>());
+    const viewModeRef = useRef(viewMode);
+    useEffect(() => { viewModeRef.current = viewMode; }, [viewMode]);
+    const viewerStreamOnlyRef = useRef(false);
+    useEffect(() => {
+        const row = currentVoiceChannel ? (channels.find(c => c.id === currentVoiceChannel.id) ?? currentVoiceChannel) : null;
+        viewerStreamOnlyRef.current = isRestricted(row?.my_permissions, PERM.STREAM_ONLY);
+    }, [channels, currentVoiceChannel]);
+    useEffect(() => {
+        const run = () => {
+            const plan = autoWatchPlan({
+                streamers: getAllStreamers().map(s => s.userId),
+                me: currentUserId,
+                selected: getSelectedStreams(),
+                handled: autoWatchedRef.current,
+                isStreamOnly: isStreamOnlyMember,
+                enabled: loadSettings().autoWatchStreamOnly !== false,
+                saveData: browserSavesData(),
+                viewerIsStreamOnly: viewerStreamOnlyRef.current,
+            });
+            for (const id of plan.forget) autoWatchedRef.current.delete(id);
+            for (const id of plan.adopt) autoWatchedRef.current.add(id);
+            for (const id of plan.open) {
+                autoWatchedRef.current.add(id);
+                console.log(`[Chat] auto-watching the share of stream-only member ${id}`);
+                autoWatchPipRef.current = viewModeRef.current === 'chat';
+                selectStream(id);
+            }
+        };
+        run();
+        window.addEventListener('settingsChanged', run);
+        const unsub = subscribeToStreamState(run);
+        return () => {
+            unsub();
+            window.removeEventListener('settingsChanged', run);
+        };
+    }, [currentUserId]);
 
     // Leaving voice (hang-up, kicked, moved) while the voice tiles are up —
     // fall back to chat so the main area never shows a stage for a dead room.

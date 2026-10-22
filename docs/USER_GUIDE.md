@@ -470,7 +470,13 @@ of your share, at up to 8 Mbps each, whatever the quality.
 
 ### Viewing Streams
 When someone shares, their entry in the voice view shows a **LIVE** badge and a
-**Watch stream** button. The chat header also gains a **Watch live streams**
+**Watch stream** button. A share from a stream-only account (an automated
+account a server owner has set up; see
+[Stream-only accounts](STREAM_ONLY.md)) starts playing by itself instead:
+from the call's view as the stream view, from the chat in the small player.
+Close it and it stays closed until it next goes live. Turn this off under
+**Settings → Voice & Video → Automatically watch streams from stream-only
+accounts**; it never starts while your browser asks to save data. The chat header also gains a **Watch live streams**
 button. Several streams can be watched at once; **Switch to Grid View** /
 **Switch to Focus View** changes the layout.
 
