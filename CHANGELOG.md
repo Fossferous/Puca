@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.843 — 2026-10-22
 
+Stream-only accounts, join voice without a microphone, stable automation hooks
 ### Added
 
 - **Stream-only accounts.** A server owner can now hold an account that only streams into calls (for example one run by automation) to exactly that, enforced by the server: in **Server Settings → Roles**, **+ Stream Only Role** creates a role whose members can see, join and share their screen in the voice channels the owner ticks under **Voice channels this role may stream in**, and nothing else — no text channels, no messages, no invites, and no channel keys but those calls'. An optional **No receive** means nobody's audio or video is sent to such a member while everyone still sees its stream. Only the owner or an administrator can set either, and neither can be put on @everyone. The full story, including what the encryption does and does not promise, is in docs/STREAM_ONLY.md. Needs the app update and the server update.
