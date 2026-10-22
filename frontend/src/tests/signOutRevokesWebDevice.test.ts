@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Signing out revokes THIS browser's device enrolment — from Púca Notes too,
  * which never opens the socket and so never learns an attested id.

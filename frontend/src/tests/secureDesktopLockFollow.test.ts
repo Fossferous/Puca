@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * THE UNSOLICITED-LOCK HANDOVER — a machine that locks itself follows to its
  * sign-in-screen row exactly as the manual Lock button does, but ONLY when it

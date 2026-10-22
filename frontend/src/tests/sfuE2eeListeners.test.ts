@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The SFU call's E2EE badge and members who publish nothing.
  *

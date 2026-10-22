@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Púca Notes' "At a place" section and its pruning: which open items have a
  * saved place on this phone, and which completed items still carry one (a

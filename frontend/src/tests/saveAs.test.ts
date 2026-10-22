@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * "Ask where to save files" (desktop). Both writers — the transfer sink and the
  * attachment saver — run the OS Save As dialog first and treat a cancel as a

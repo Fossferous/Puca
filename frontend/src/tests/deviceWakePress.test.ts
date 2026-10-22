@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * What happens when the Wake button is PRESSED — the two defects that made
  * it "do nothing".

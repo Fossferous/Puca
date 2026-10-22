@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * `requireMediaE2ee` defaulted OFF, which made the mesh media-encryption layer
  * downgradable by the very party it defends against: the frame crypto is

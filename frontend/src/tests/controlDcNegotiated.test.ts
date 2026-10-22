@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The mesh control lane is ONE NEGOTIATED channel per peer connection.
  *

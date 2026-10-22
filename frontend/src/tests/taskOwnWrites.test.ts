@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The freshness stamp's blind spot: THIS device's own writes (review of
  * finding 8).

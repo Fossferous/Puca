@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * THE CARET CHANNEL — the viewer half of the wire.
  *

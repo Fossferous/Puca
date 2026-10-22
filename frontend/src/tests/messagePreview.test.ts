@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Message text -> one-line preview, the ONE function every preview surface
  * uses (reply banner, reply snapshot, pins, search, Quote, the collection

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * An SFU join by a member WITHOUT the Speak permission.
  *

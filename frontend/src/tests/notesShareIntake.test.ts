@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * A share arriving on a COLD START, which is the normal share path: the app
  * was not running, which is the whole point of the entry point.

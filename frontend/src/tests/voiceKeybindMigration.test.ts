@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Mute/deafen now ship BOUND (Ctrl+Shift+M / Ctrl+Shift+D) — "toggle mute
  * doesn't work" was a field report whose cause was that nothing was bound and

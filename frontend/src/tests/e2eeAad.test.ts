@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * v3 envelopes bind CONTEXT into the AES-GCM tag (api/e2ee.ts, "v3 context
  * binding"). These pin, at the primitive level and through the real message

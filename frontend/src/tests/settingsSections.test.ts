@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Which settings tabs a platform gets (settingsModal.utils' settingsSections()).
  *

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Session-expiry handling (bug: expired 24h JWT made every screen fail
  * SILENTLY — empty lists, looping 401 polls — with no re-login prompt).

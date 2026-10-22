@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Windowed MSE clip player — the fix for the field failure "Failed to execute
  * 'appendBuffer' on 'SourceBuffer': The SourceBuffer is full, and cannot free

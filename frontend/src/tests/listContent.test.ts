@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Púca Notes' list content (migration 065): the STRICT reader for a list's
  * sealed body and sidecar, capability detection against older servers, the

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { outputGain, applyOutputDevice, saveSettings, loadSettings } from '../components/settingsStore';
 

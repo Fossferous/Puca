@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 // The identity memo must follow storage once ANOTHER document changed it
 // (api/e2ee.ts getActiveIdentity): a sign-out in the Púca tab must not leave
 // the Notes tab sealing under the old seed, and an account switch must swap

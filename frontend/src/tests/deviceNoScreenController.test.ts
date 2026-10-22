@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * "WORK LAPTOP'S SCREEN IS OFF" — the controller half.
  *

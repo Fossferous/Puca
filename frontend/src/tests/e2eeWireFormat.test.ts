@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Known-answer tests for the FROZEN end-to-end-encryption wire format.
  *

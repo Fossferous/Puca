@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Tests for the custom join/leave clip overlap guard (playCustomUserSound).
  *

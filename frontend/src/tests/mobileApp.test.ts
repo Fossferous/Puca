@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The SovereignApp plugin wrapper: keep-alive reason merging, silent
  * degradation on an APK without the plugin, and the pending-navigation

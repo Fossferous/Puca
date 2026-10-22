@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Android notifications only ever had a window in which they COULD NOT fire.
  *

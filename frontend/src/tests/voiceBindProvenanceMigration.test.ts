@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * voiceBindProvenance_v1 — records, once, who chose the mute/deafen binds a
  * profile already holds. Before `voiceBindsUserSet` existed the desktop-global

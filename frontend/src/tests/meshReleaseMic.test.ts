@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * WebRTCManager.releaseMic — SPEAK withdrawn mid-call on a mesh call.
  *

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * H-1: every rendered message must be classifiable as secure / legacy-plaintext
  * / failed, so the UI can flag a message the server delivered as CLEARTEXT.

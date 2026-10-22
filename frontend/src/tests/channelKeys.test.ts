@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, it, expect, beforeEach, beforeAll, vi } from 'vitest';
 
 // A stateful fake of the API server for one channel's key endpoints.

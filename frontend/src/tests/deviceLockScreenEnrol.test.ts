@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Enrolling sign-in-screen access — one row per machine, ever.
  *

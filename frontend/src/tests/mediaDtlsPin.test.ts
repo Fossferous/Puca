@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The DTLS pin for mesh calls (api/rtc/mediaCrypto.ts advertiseDtlsPin /
  * verifyDtlsPin): a description carries a MAC, under the static pairwise media

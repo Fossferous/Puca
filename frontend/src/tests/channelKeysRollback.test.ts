@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Epoch rollback and rotation fail-open (0.9.810 audit, C-01).
  *

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * "Signed in, but the keys never came back" (auth.ts restoreIdentityAfterLogin
  * + IdentityBanner's contract).

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The recovery code is deliberately never persisted — so what survives a
  * reload is only whether the user ever CONFIRMED saving one. Documents the

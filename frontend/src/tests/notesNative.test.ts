@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Púca Notes' native bridge (notes/native/notesNative.ts): it must never
  * throw, it must degrade to today's behaviour where there is no plugin (the

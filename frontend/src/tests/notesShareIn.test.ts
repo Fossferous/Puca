@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Share INTO Púca Notes, at the bridge: the payload arrives ONCE, an older
  * APK (or the browser) answers an empty one and never throws, and what the

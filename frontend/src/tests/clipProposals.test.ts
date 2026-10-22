@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Clip consent protocol — client module (docs/CLIPS.md, api/clips/clipProposals.ts).
  *

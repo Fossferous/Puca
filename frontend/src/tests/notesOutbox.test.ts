@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Offline edits (notes/model/notesOutbox.ts): what queues, what rolls back,
  * the replay order, temporary ids, and what a refusal does.

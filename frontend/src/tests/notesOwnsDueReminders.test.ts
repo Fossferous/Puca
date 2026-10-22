@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Owner decision: when Púca Notes is installed AND able to deliver reminders,
  * Notes owns due-item reminders and Púca stays quiet — one alert per item,

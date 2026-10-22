@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * NO SCREEN ON THIS PC — the HOST half.
  *

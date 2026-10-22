@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Backgrounding the ANDROID app must not kill an active controller session.
  *

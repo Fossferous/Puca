@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * THE LOCKED-FOLLOW FALLBACK (pollLockedFollow): a controller session stuck on
  * a secure-desktop banner follows to the machine's sign-in row — but ONLY when

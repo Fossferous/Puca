@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Zoom-follows-monitor math. The worked example throughout: two 1920x1080
  * screens side by side, composite video 3840x1080 (step 1 — small enough to

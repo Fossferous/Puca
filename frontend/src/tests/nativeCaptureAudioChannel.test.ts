@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The desktop-audio Channel's LIFECYCLE, through the REAL `Channel` class of
  * @tauri-apps/api (not a fake), against a stand-in for the page side of

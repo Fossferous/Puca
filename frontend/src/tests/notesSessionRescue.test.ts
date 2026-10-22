@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The Android app's page can sleep in a cached process for more than a day
  * while the background job keeps renewing the session. When it resumes, its

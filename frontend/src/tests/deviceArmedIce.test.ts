@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * An ARMED host must not lose the controller's ICE candidates while it waits
  * for the unattended passphrase.

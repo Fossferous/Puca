@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The lifecycle wedge these pin: an UNGRACEFUL end used to strand three kinds
  * of state — a 'connecting' session no answer would ever end, a server-side

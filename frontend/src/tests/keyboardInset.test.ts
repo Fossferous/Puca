@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * WHERE THE SOFT KEYBOARD IS — three sources, one answer.
  *

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * A member who muted themselves is never made live by the app.
  *

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * H-2: a "peer-to-peer" file offer is relayed by the SERVER, so a malicious
  * operator can substitute the offered hash and MITM the DTLS while the

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * A new note goes FIRST among the unpinned — directly under the pinned ones —
  * in the default order (the owner's ask). That order is not Notes' own: it is

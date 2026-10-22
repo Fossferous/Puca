@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Which senders/receivers carry a stream, for Show Stream Stats: matched by
  * TRACK IDENTITY on both transports — a watched stream's tracks are its

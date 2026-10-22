@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * "Regenerate recovery code" (auth.ts regenerateRecoveryCode).
  *

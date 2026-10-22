@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * One PC, two device rows, ONE card.
  *

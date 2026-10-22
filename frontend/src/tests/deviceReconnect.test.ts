@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * A dropped WebSocket must HOLD an active device session for the reconnect,
  * not end it.

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The host's escape hatches for a DEVICE control session.
  *

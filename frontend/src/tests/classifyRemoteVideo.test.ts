@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The mesh video classification matrix. The case that forced the announced
  * id into existence: a LISTEN-ONLY peer (mic never pinned) who is sharing

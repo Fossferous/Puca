@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Regression tests for the ICE-failure recovery LADDER (mesh path).
  *

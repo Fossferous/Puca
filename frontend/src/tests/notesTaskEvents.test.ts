@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The live stream client (notes/model/taskEvents.ts): parsing, reconnect
  * policy, the fallbacks that keep today's behaviour, and the rule that an

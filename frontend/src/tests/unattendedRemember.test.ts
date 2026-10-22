@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The remembered-seed store behind "don't ask for the unattended passphrase
  * again for a while".

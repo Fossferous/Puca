@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * THE AGENT UNDER A LIVE SESSION WAS REPLACED — the host half of the recovery.
  *

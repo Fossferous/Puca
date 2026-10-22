@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The OTHER half of the device-control known-answer test.
  *

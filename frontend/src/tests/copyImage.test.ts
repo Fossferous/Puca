@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Copy-image: the decisions, and the one path that can be exercised in jsdom.
  *

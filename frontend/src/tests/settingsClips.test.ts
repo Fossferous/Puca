@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, it, expect } from 'vitest';
 import { defaultSettings } from '../components/settingsStore';
 import { BIND_FIELDS, KEYBIND_TAB_ROWS } from '../components/keybindFields';

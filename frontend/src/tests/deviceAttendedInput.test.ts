@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Attended remote control takes the DIRECT input channel, not the relay.
  *

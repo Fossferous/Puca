@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Pins the DeepFilter model tuning to MEASURED values.
  *

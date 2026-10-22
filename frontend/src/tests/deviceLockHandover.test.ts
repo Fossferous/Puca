@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The CONTROLLER's side of "Lock": the host ends the session with the
  * LOCK_HANDOVER_REASON, and this end decides what the person sees.

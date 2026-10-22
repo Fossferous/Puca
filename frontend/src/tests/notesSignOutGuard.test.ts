@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * A sign-out never silently deletes what Púca Notes has not synced yet.
  *

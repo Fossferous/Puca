@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * "Open this link outside the app" (api/openExternal.ts), per shell.
  *

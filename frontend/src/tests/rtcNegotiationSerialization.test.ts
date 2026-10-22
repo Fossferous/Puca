@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Regression tests for the duplicate-answer glare bug (perfect-negotiation
  * serialization, 2026-07-27).

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The unattended log sampler (api/streamDiag.ts) — the whole point is that a
  * human CANNOT read __pucaMeshDiag()/__pucaVoiceDiag() live while a

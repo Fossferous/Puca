@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Checklist HEADINGS in the pure model — reading a checklist in, counting
  * it, reminding from it, and writing it back out.

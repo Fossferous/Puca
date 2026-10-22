@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * URL schemes are case-insensitive, and this app has two of its own that carry
  * KEY MATERIAL in the href: `sovereign-enc:` (the per-file AES key) and

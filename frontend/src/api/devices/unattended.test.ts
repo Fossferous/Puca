@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ed25519 } from '@noble/curves/ed25519';
 import { argon2id } from '@noble/hashes/argon2.js';

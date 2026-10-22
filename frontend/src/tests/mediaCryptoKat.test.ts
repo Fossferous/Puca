@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * S4 — cross-language known-answer tests for the media frame AEAD.
  *

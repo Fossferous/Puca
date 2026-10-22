@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The two authorisation properties that 0.8.0 shipped WITHOUT, despite both
  * being described as enforced in comments and in a commit message.

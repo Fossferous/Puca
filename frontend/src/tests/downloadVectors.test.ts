@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 // jsdom (the shared setup file needs `window`); Node streams are polyfilled below if jsdom lacks them.
 /**
  * The SHARED vectors behind the Android app's native download path

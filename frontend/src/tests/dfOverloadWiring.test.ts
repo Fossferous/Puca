@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * applyDeepFilter's overload wiring, end to end on the main thread: the
  * worklet's episode reports -> DfOverloadPolicy -> standby + Worker gone +

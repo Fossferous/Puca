@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The "sign in again" notice (posted when Púca Notes' background job gets a
  * 401) opens the app with the target 'signin'. The page checks its OWN

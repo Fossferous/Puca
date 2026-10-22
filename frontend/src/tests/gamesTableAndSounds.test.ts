@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The card table's pure parts: where each seat sits around the oval
  * (api/games/tableLayout.ts), what each frame of events sounds like and when

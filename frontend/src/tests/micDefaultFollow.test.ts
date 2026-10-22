@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Following the OS default microphone mid-call (the owner's report,
  * 2026-10-07): Audio Hub moved the Windows default recording device from a

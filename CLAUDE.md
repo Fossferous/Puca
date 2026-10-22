@@ -352,6 +352,53 @@ cd frontend && node e2e/no-screen-stage-real-browser.mjs [outdir]   # "<PC>'s sc
 cd frontend && node e2e/video-controls-real-browser.mjs [outdir]   # Púca's own video controls on the REAL chat attachment path (bundled MessageContent + TaskAttachments, encrypted fixtures served as /files does): volume, speed and fullscreen visible and hit-testable at 176 px (portrait, 9:21 letterboxed), 44 px on touch, panels inside a 390 px window and above a fullscreen player, 2x really plays at 2x (1x as control), volume = video x Output Volume, keyboard only inside the player, a vertical swipe on the timeline scrolls and never seeks (sideways drag as control), a TAP on the centre Play reaches the button (a CSS-transformed button sent the click to the <video> on Android), in-app fullscreen in the top layer, all eight themes x contrast, a small 192x108 landscape video on touch (a 192x168 box: one row, bar inside the player; mouse keeps 192x108), every player's bar inside its frame and its centre Play clear of the timeline, panels that close on F / Tab / scrolled-away button and a dismissing click that plays nothing; silent fixtures, --mute-audio, muted asserted before any play; no server needed
 ```
 
+**`node scripts/gates.mjs` runs every gate above that needs no backend, dev
+server or emulator** — typecheck, vitest, lint, build, the three cargo suites,
+the SQL bind check, both JUnit suites, the installer hooks, the third-party
+notices (and that the result is committed) and the twelve no-server
+real-browser scripts — concurrently where they share no lock (cargo's
+`target/` is one lock; the real-browser scripts run one at a time, after
+vitest), compiles at below-normal priority, and NEVER a compile beside vitest:
+eight of its real-time tests timed out when cargo, the SQL bind check and
+gradle compiled alongside it, priority or not. It skips a gate whose inputs are byte-identical to a run that PASSED
+in this checkout, and says so on its own line and again in the summary,
+naming the run it relies on; `--all` runs everything, `--plan` shows what
+would run, `--only <ids>` picks. A stamp is written only when every step
+exited 0 and the inputs did not change while it ran; a failure deletes the
+gate's stamp; an interrupted run writes none. Inputs are the whole working
+tree (tracked, modified and untracked-but-not-ignored) plus the toolchain and
+the INSTALLED node_modules; only the audited gates are narrower (the two JUnit
+suites; src-tauri, whose include_str! reads are re-audited on every run and
+widen it back to the whole tree if one leaves its list). For the test gates
+the release number is blanked out of the version carriers and CHANGELOG.md is
+not an input, so a release commit does not re-run a suite on code that just
+passed; build, lint and typecheck still see every byte. `cargo-backend`'s
+stamp records whether `TEST_DATABASE_URL` was set, and its summary counts the
+DB tests that skipped themselves. The summary always ends with the gates it
+does NOT run — those still need running by hand when the change reaches them.
+Stamps and per-gate logs live in `git rev-parse --git-path puca-gates`.
+
+**A `*.test.ts` runs WITHOUT a DOM unless its first line is
+`// @vitest-environment jsdom`; a `*.test.tsx` always gets jsdom.** jsdom was
+most of what a test file cost. The no-DOM environment
+(`frontend/src/tests/clientNodeEnvironment.ts`) keeps jsdom's client transform
+and browser module resolution — vitest's own `node` environment would load
+libraries' node builds — so the only difference is the DOM itself, and
+`src/tests/browserGlobalTrap.ts` polices that: every browser global (window,
+document, navigator, localStorage, WebSocket, …) answers `undefined` and the
+file FAILS naming each one the code read and who read it. That is the point:
+`typeof window === 'undefined'` silently taking the not-a-browser branch is the
+way a test passes for the wrong reason. A new `.ts` test that needs the DOM
+fails loudly with the line to add. vitest's `maxWorkers` is pinned in
+`vitest.config.ts` (3/8 of the logical CPUs) because its default,
+`os.availableParallelism() - 1`, read 4 - 1 = 3 on the owner's 16-thread
+machine; more than 6 there only made the real-time tests time out. A handful
+of tests wait in real time (deviceSessionLifecycle, deviceAudioHubController,
+authedMediaType, attachmentAutoload…) and slow down on a busy desktop: a
+timeout there with a game running is load until shown otherwise — re-run on a
+quieter machine or with `VITEST_MAX_WORKERS=3`, never retry until green. The
+runner warns when the machine is already busy before it starts.
+
 **`h264-profile-real-browser.mjs` exists because the share encoded in SOFTWARE
 for two weeks of field logs on machines with an idle NVENC, and no gate could
 see it.** The LiveKit server registers only Constrained Baseline (`42e01f`)

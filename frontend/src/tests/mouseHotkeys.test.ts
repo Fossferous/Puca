@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Mouse-button hotkey bindings (the "PTT/PTM on Mouse 4" feature) and the
  * push-to-mute-hold regression: mouse buttons ride the same VK space as keys

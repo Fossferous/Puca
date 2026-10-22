@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 // The shared Reminders bucketing (api/reminderGroups.ts): the rules Púca's
 // Reminders tab and Púca Notes' Reminders view BOTH run. Overdue / Today /
 // Upcoming, soonest first; an event is never overdue; a snooze moves the row

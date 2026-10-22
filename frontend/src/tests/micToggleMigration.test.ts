@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The mic-processing toggles were retroactively activated. This undoes it once.
  *

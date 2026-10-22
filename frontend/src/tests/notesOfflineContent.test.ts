@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * A note's TEXT and its PICTURES made with no connection
  * (notes/model/notesOutbox.ts + notesBlobs.ts):

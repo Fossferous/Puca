@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The games store (src/api/games/gamesStore.ts), fed the contract's own
  * fixtures (src/tests/fixtures/games, what real engine tables serialise to)

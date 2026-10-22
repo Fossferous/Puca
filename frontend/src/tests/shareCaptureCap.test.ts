@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * A screen share must never capture more pixels than the person asked for.
  *

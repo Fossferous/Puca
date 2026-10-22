@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * JWT payloads carry names, and names have accents.
  *

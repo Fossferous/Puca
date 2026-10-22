@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * CURSOR OWNERSHIP — exactly one pointer, on every host version.
  *

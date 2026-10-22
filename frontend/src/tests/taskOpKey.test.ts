@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Create keys and the content-revision compare-and-swap, at the wire.
  *

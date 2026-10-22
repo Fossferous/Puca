@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Returning to the app must un-pause the stage's <video>.
  *

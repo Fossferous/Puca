@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The desktop device key signs exactly three transcripts (frontend/src-tauri/
  * src/device_key.rs `is_signable`): the connection attestation, the device

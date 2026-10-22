@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 // Unit tests for the pure message-action text helpers behind the unified
 // message toolbar: Quote (markdown "> " block appended to the composer) and
 // Forward (the "> ↪ Forwarded" prefix composed before re-encryption for the

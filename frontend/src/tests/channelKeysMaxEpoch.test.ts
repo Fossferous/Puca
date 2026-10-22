@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Epoch squatting (audit 2026-09-05, C12). Rotation used to target
  * `currentEpoch + 1` — the epoch the SERVER said was current, plus one. A

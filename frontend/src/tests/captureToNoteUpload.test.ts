@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * "Save to Notes" — the upload half: the anti-aliasing contract.
  *

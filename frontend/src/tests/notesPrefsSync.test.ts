@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Colour, labels, archive and the four reminder times follow the account
  * (notes/model/notesPrefsSync.ts).

@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * The visibility signal the device-session watchdogs are corroborated against.
  *

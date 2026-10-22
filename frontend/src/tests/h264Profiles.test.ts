@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Why every screen share this project ever logged encoded in SOFTWARE, and
  * the one-line ordering that stops it (api/rtc/h264Profiles.ts).

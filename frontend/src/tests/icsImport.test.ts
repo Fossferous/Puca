@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 // The paced .ics import: dedupe by UID, split before the per-list cap, back
 // off on 429 and resume exactly where it stopped, cancel cleanly.
 import { describe, expect, it, vi } from 'vitest';
