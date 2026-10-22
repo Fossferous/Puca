@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.844 — 2026-10-22
 
+Lid-closed remote control on laptops with a dark panel; clips no longer wait on stream-only accounts
 ### Fixed
 
 - **Clips no longer wait on a stream-only account.** A clip needs the approval of everyone in the call, and an account with the **Stream only** role (one run by automation) cannot answer the prompt, so a clip taken while it was in the call never posted. Stream-only members are no longer asked: a clip needs only the people's approval, and a call of just you and the account needs none. The role's description in **Roles** now says its members are not asked to approve clips, which is why it is meant for accounts run by automation, not for people. Needs the server update.
