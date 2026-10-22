@@ -19,6 +19,7 @@ import {
 } from './mobileApp';
 import { currentUserIdFromToken } from './auth';
 import { API_BASE_URL } from './config';
+import { hostSaysForeground, hostShowsNotifications, notifyHost } from './embedHost';
 
 export type NotifyDecision =
     | { fire: true }
@@ -215,6 +216,11 @@ export function notifyNewMessage(opts: {
 }): NotifyDecision {
     const mobileNative = isMobile() && mobileAppAvailable();
     const settings = loadSettings();
+    // An embedding host (embedHost.ts) shows them itself: Púca for Steam
+    // Deck as Steam toasts. Like the desktop app's, its path has no browser
+    // permission to ask, and only it can say whether the app is on screen —
+    // a hidden Steam browser view reports focus all the time.
+    const host = hostShowsNotifications();
     const inputs: NotifyInput = {
         isOwn: opts.isOwn,
         isMuted: opts.isMuted,
@@ -222,7 +228,7 @@ export function notifyNewMessage(opts: {
         // mobile this is visibilityState, because document.hasFocus() stays
         // TRUE in a backgrounded Android WebView and silently suppressed every
         // message notification. See appIsForeground.
-        hasFocus: appIsForeground(),
+        hasFocus: (host ? hostSaysForeground() : null) ?? appIsForeground(),
         // On desktop the WEBVIEW's permission is irrelevant — the notification
         // goes through the OS via Tauri, which asks for its own permission.
         // Leaving the webview check in place would gate the native path behind
@@ -230,7 +236,7 @@ export function notifyNewMessage(opts: {
         // every notification on the platform this feature exists for.
         // Android's native path likewise manages POST_NOTIFICATIONS itself
         // (unposted notifications are dropped by the OS, not errored).
-        permission: isTauri() || mobileNative ? 'granted' : notificationPermission(),
+        permission: isTauri() || mobileNative || host ? 'granted' : notificationPermission(),
         setting: isMobile() ? settings.mobileNotifications : settings.desktopNotifications,
         mobile: isMobile(),
         mobileNative,
@@ -249,6 +255,11 @@ export function notifyNewMessage(opts: {
     // still unseen. Cleared by Chat's window-focus listener.
     if (isBadgeWorthy(inputs)) setUnreadBadge(true);
     if (!decision.fire) return decision;
+
+    if (host) {
+        notifyHost({ title: opts.title, body: 'New message', key: opts.notifyKey ?? opts.title, kind: 'message' }, opts.onActivate);
+        return decision;
+    }
 
     // ANDROID: through the SovereignApp plugin — `new Notification()` in a
     // Capacitor WebView reaches nothing, same disease as WebView2 below. The
@@ -337,6 +348,15 @@ export function notifyTasksDue(count: number, due: DueReminder[] = []): void {
 
     const body = count === 1 ? 'A task is due' : `${count} tasks are due`;
 
+    if (hostShowsNotifications()) {
+        record('fired');
+        notifyHost({ title: 'Púca Tasks', body, key: 'tasks-due', kind: 'tasks' }, () => {
+            // Chat.tsx ignores `detail`; Púca Notes reads the ids (above).
+            try { window.dispatchEvent(new CustomEvent('sovereign:open-reminders', { detail: { ids: due.map(d => d.id) } })); } catch { /* non-DOM env */ }
+        });
+        return;
+    }
+
     if (isMobile() && mobileNative) {
         void (async () => {
             // Púca Notes on this phone AND able to deliver THESE (its own
@@ -409,6 +429,9 @@ export function notifyTasksDue(count: number, due: DueReminder[] = []): void {
  * failing silently — the failure mode this whole area suffered from.
  */
 export async function sendTestNotification(): Promise<{ ok: boolean; reason?: string }> {
+    if (notifyHost({ title: 'Púca', body: 'Test notification — this is what a new message looks like.', key: 'test', kind: 'test' })) {
+        return { ok: true };
+    }
     if (isMobile()) {
         if (!mobileAppAvailable()) {
             return { ok: false, reason: 'this APK is too old for notifications — install the current one' };

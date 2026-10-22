@@ -31,6 +31,7 @@ import { logMicDiag, subscribeNativeMicDefault } from '../api/micDiag';
 import { keepDetail, keepSummary } from './stableState';
 import { type NoiseSuppressionMode, type NoiseModeChange, NOISE_MODE_EVENT, getNoiseSuppressionMode, setNoiseSuppressionMode, changeNoiseModeLive, modeUsesWebAudio, rawInputHasHadSignal, hasLiveGainStage, isDeepFilterGateOpen, selectedInputDeviceId } from '../api/noiseFilter';
 import { registerHold, unregisterHold, registerPress, unregisterPress, startNativeFeed, stopNativeFeed, setNativeFeedHost } from '../api/hotkeys';
+import { notifyEmbedChanged, registerEmbedCall } from '../api/embedApi';
 import { computeNativeWatch } from '../api/hotkeyScope';
 
 /** Shared mic-health notice text — the sentinel clears only its own message
@@ -3001,6 +3002,38 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // registrations above are mounted once per call).
     useEffect(() => { toggleMuteRef.current = toggleMute; }, [toggleMute]);
     useEffect(() => { toggleDeafenRef.current = toggleDeafen; }, [toggleDeafen]);
+
+    // An embedding host's controls for this call (docs/EMBEDDING.md): the
+    // same presses as the buttons, read from the same refs. A no-op without
+    // a host.
+    const isConnectingRef = useRef(isConnecting);
+    isConnectingRef.current = isConnecting;
+    useEffect(() => registerEmbedCall({
+        roomId,
+        state: () => ({
+            connected: isInVoiceRef.current,
+            connecting: isConnectingRef.current,
+            muted: isMutedRef.current,
+            deafened: isDeafenedRef.current,
+            noMicrophone: listenOnlyRef.current,
+            inputMode: voiceInputModeRef.current,
+            holdDown: holdKeyDownRef.current,
+        }),
+        setMuted: (want) => {
+            // Without a microphone a press only decides how the member comes
+            // back (selfMute.ts pressMute), so that is what is compared.
+            const now = () => (listenOnlyRef.current ? selfMutedRef.current : isMutedRef.current);
+            if (now() !== want) toggleMuteRef.current();
+            return now() === want;
+        },
+        setDeafened: (want) => {
+            if (isDeafenedRef.current !== want) toggleDeafenRef.current();
+            return want === isDeafenedRef.current;
+        },
+        leave: () => { leaveVoiceRef.current(); onDisconnectRef.current?.(); },
+    }), [roomId]);
+    useEffect(() => { notifyEmbedChanged(); },
+        [isInVoice, isConnecting, isMuted, selfMuted, isDeafened, listenOnly, voiceInputMode, holdKeyDown]);
 
     // PiP drag handlers (touch for mobile)
     const handlePipTouchStart = useCallback((e: React.TouchEvent) => {

@@ -2,6 +2,7 @@ import { processAudioStream, getMicConstraints, getNoiseSuppressionMode, setNois
 import { inputGain } from '../../components/settingsStore';
 import { capWouldReduce, recapDisplayTrack, shareVideoConstraints, type LiveCapture } from './shareHealth';
 import { SpeakingDecision, VAD_TICK_MS, vadWindowSize } from './speakingDecision';
+import { getUserMediaForMic } from '../embedHost';
 
 /** Errors that mean "the requested mic device can't be opened" — the cases
  *  where retrying on the OS default is the right degradation. Matched by NAME,
@@ -298,7 +299,7 @@ export class MediaManager {
         console.warn('[WebRTC] Noise-suppression graph failed to build — falling back to Standard:', cause);
         setNoiseSuppressionMode('standard', false);
         try {
-            const fresh = await navigator.mediaDevices.getUserMedia({
+            const fresh = await getUserMediaForMic({
                 audio: getMicConstraints('standard'),
                 video: false,
             });
@@ -351,14 +352,14 @@ export class MediaManager {
                 } : false,
             });
             try {
-                this.localStream = await navigator.mediaDevices.getUserMedia(constraintsFor(false));
+                this.localStream = await getUserMediaForMic(constraintsFor(false));
             } catch (err) {
                 // The selected input device is gone/busy — degrade LOUDLY to the
                 // OS default rather than failing the whole call. (Video uses only
                 // 'ideal' constraints, so a device error here is the mic's.)
                 if (!audio || !selectedInputDeviceId() || !isDeviceError(err)) throw err;
                 console.warn('[WebRTC] Selected microphone unavailable — falling back to the system default:', err);
-                this.localStream = await navigator.mediaDevices.getUserMedia(constraintsFor(true));
+                this.localStream = await getUserMediaForMic(constraintsFor(true));
             }
 
             this.noMic = false;
@@ -441,11 +442,11 @@ export class MediaManager {
      *  default when that device can't be opened. */
     private async getMicStream(mode: NoiseSuppressionMode): Promise<MediaStream> {
         try {
-            return await navigator.mediaDevices.getUserMedia({ audio: getMicConstraints(mode) });
+            return await getUserMediaForMic({ audio: getMicConstraints(mode) });
         } catch (err) {
             if (!selectedInputDeviceId() || !isDeviceError(err)) throw err;
             console.warn('[WebRTC] Selected microphone unavailable — falling back to the system default:', err);
-            return await navigator.mediaDevices.getUserMedia({ audio: getMicConstraints(mode, { ignoreSelectedDevice: true }) });
+            return await getUserMediaForMic({ audio: getMicConstraints(mode, { ignoreSelectedDevice: true }) });
         }
     }
 

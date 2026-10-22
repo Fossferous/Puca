@@ -59,6 +59,10 @@ type HoldEntry = {
     getBinding: () => KeyBinding | null;
     handler: HoldHandler;
     held: boolean;
+    /** Held by an embedding host's own button (holdFromHost), not a key: a
+     *  window blur does not release it, the host's lease does (embedApi.ts).
+     *  Cleared by every release, whichever feed delivers it. */
+    byHost?: boolean;
 };
 
 type PressEntry = {
@@ -223,6 +227,7 @@ function onKeyUp(e: KeyboardEvent): void {
         // let go of Shift before the main key, and a hold must never stick.
         if (entry.held && e.keyCode === entry.getBinding()?.keyCode) {
             entry.held = false;
+            entry.byHost = false;
             entry.handler.onUp();
         }
     }
@@ -296,6 +301,7 @@ function onMouseUp(e: MouseEvent): void {
     for (const entry of holdActions.values()) {
         if (entry.held && vk === entry.getBinding()?.keyCode) {
             entry.held = false;
+            entry.byHost = false;
             entry.handler.onUp();
             wasHeld = true;
         }
@@ -319,10 +325,11 @@ function onMouseAux(e: MouseEvent): void {
     }
 }
 
-/** Release everything held — no stuck mic when no feed can see the keyup. */
+/** Release everything held — no stuck mic when no feed can see the keyup.
+ *  Not a host's hold: no key is involved, and its lease ends it. */
 function releaseAll(): void {
     for (const entry of holdActions.values()) {
-        if (entry.held) {
+        if (entry.held && !entry.byHost) {
             entry.held = false;
             entry.handler.onUp();
         }
@@ -378,6 +385,29 @@ export function registerPress(id: string, getBinding: () => KeyBinding | null, o
 
 export function unregisterPress(id: string): void {
     pressActions.delete(id);
+}
+
+/**
+ * An embedding host's own button holding a hold action (docs/EMBEDDING.md):
+ * Púca for Steam Deck's push-to-talk on a back button. By action id, not by
+ * key: the host has no key, and must reach only the action it names. Returns
+ * false when that action is not registered (no call, another input mode), so
+ * nothing is held. embedApi.ts leases the hold, since no window event can
+ * release it.
+ */
+export function holdFromHost(id: string, down: boolean): boolean {
+    const entry = holdActions.get(id);
+    if (!entry) return false;
+    if (down && !entry.held) {
+        entry.held = true;
+        entry.byHost = true;
+        entry.handler.onDown();
+    } else if (!down && entry.held && entry.byHost) {
+        entry.held = false;
+        entry.byHost = false;
+        entry.handler.onUp();
+    }
+    return true;
 }
 
 /**
@@ -448,6 +478,7 @@ export function nativeKeyEvent(kind: 'down' | 'up', key: {
             if (only && !only.has(id)) continue;
             if (entry.held && key.keyCode === entry.getBinding()?.keyCode) {
                 entry.held = false;
+                entry.byHost = false;
                 entry.handler.onUp();
             }
         }

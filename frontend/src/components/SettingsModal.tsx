@@ -25,6 +25,7 @@ import { BUTTON_TO_VK, VK_LBUTTON, VK_RBUTTON, mouseVkLabel } from '../api/input
 import { isAndroidApp, isMobile, isTauri } from '../api/platform';
 import { isTouchDevice, settingsSections } from './settingsModal.utils';
 import { sendTestNotification } from '../api/desktopNotify';
+import { getUserMediaForMic, hostMicrophone, hostShowsNotifications } from '../api/embedHost';
 import {
     mobileBatteryStatus, mobileNotificationStatus, openMobileNotificationSettings,
     requestIgnoreBatteryOptimizations, requestMobileNotificationPermission,
@@ -805,7 +806,10 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
 
     // Enumerate audio devices - request permission first to get labels
     useEffect(() => {
-        if (isOpen && activeSection === 'voice') {
+        // An embedding host supplies the microphone and the list is replaced
+        // by its name (below): opening the mic to read labels would only
+        // switch it on for nothing.
+        if (isOpen && activeSection === 'voice' && !hostMicrophone()) {
             // Request mic permission first to get device labels
             navigator.mediaDevices.getUserMedia({ audio: true })
                 .then(stream => {
@@ -1076,7 +1080,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
         const stale = () => gen !== micTestGenRef.current;
         try {
             if (typeof MediaRecorder === 'undefined') throw new Error('this browser cannot record audio (no MediaRecorder)');
-            stream = await navigator.mediaDevices.getUserMedia({ audio: getMicConstraints(mode) });
+            stream = await getUserMediaForMic({ audio: getMicConstraints(mode) });
             if (stale()) { stream.getTracks().forEach(t => t.stop()); return; }
             micStreamRef.current = stream;
 
@@ -2069,6 +2073,13 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                     updateSetting('desktopNotifications', false);
                                                     return;
                                                 }
+                                                // An embedding host shows them itself
+                                                // (Púca for Steam Deck: Steam toasts),
+                                                // with no browser permission to ask.
+                                                if (hostShowsNotifications()) {
+                                                    updateSetting('desktopNotifications', true);
+                                                    return;
+                                                }
                                                 // On desktop ask the OS through Tauri, NOT the webview.
                                                 // WebView2 can refuse or ignore Notification.requestPermission,
                                                 // which left this toggle impossible to switch on — and with it
@@ -2428,6 +2439,16 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                     Adjust your voice and video settings.
                                 </p>
                                 <div className="settings-card">
+                                    {hostMicrophone() ? (
+                                    <div className="settings-option">
+                                        <div className="option-info">
+                                            <label>Input Device</label>
+                                            <span className="option-hint">
+                                                {hostMicrophone()} supplies the microphone: the system's default input.
+                                            </span>
+                                        </div>
+                                    </div>
+                                    ) : (
                                     <div className="settings-option">
                                         <label>Input Device</label>
                                         <select
@@ -2442,6 +2463,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             ))}
                                         </select>
                                     </div>
+                                    )}
                                     <div className="settings-option">
                                         <div className="option-info">
                                             <label htmlFor="join-without-mic">Join voice without a microphone</label>

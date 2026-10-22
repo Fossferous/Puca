@@ -1,0 +1,10 @@
+{
+  "name": "Púca",
+  "author": "Púca contributors",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": ["chat", "voice", "communication"],
+    "description": "Púca voice chat in Game Mode: join a call, mute, push-to-talk on a back button, and message notifications over your game."
+  }
+}

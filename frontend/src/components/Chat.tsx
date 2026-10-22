@@ -171,6 +171,7 @@ import { presenceOf, usePresence, usePresenceKey, PRESENCE_LABEL } from '../api/
 import { startActivityReporter } from '../api/activityReporter';
 import { PresenceDot } from './PresenceDot';
 import { PERM, hasPerm, isRestricted } from '../api/permissionBits';
+import { notifyEmbedChanged, registerEmbedSession } from '../api/embedApi';
 import {
     attachGamesSocket, dismissActivityNotice, getGamesState, onGamesServedChanged, requestJoin, setGamesRoom, startActivity, subscribeGames,
 } from '../api/games/gamesStore';
@@ -2833,6 +2834,79 @@ export function Chat({ onLogout }: ChatProps) {
      * all the frame carries, and mounting the panel without the channel's
      * real `sfu_mode` would negotiate the wrong transport.
      */
+    /**
+     * Join `channel`'s call, or move this device's call there: the channel
+     * click's path, and an embedding host's (docs/EMBEDDING.md).
+     *
+     * Seamless switch: directly set the new channel. VoicePanel handles the
+     * cleanup of the old room and the join of the new one on remount. The
+     * call continues, so the member's own mute and deafen come along (as
+     * Discord does) - the new channel mounts a new panel, and a new panel
+     * used to mean an open microphone:
+     *   - mid-call here: as this device has it, read NOW, at the click (the
+     *     old panel's teardown gets no say);
+     *   - out of voice here while the account's call is live on another
+     *     device: this join takes it over (the same channel moves it, another
+     *     ends it there), as that device left it.
+     * A join with no call anywhere starts unmuted, as it always has.
+     */
+    const joinVoiceChannel = useCallback((channel: Channel) => {
+        const own = getSelfVoiceChoice();
+        const elsewhere = carriedFromOtherDevice();
+        setCurrentVoiceChannel(prev => (prev
+            ? { ...channel, movedWith: own }
+            : elsewhere ? { ...channel, movedWith: elsewhere } : channel));
+    }, []);
+
+    // An embedding host's view of this session (docs/EMBEDDING.md): no-ops
+    // without a host. The getters read refs, so registering once is enough;
+    // the change notice below tells the host when to read again.
+    const embedServersRef = useRef(servers);
+    embedServersRef.current = servers;
+    const embedCurrentServerRef = useRef(currentServer);
+    embedCurrentServerRef.current = currentServer;
+    const embedUserRef = useRef(currentUser ? { id: currentUser.sub, username: currentUser.username } : null);
+    embedUserRef.current = currentUser ? { id: currentUser.sub, username: currentUser.username } : null;
+    useEffect(() => registerEmbedSession({
+        user: () => embedUserRef.current,
+        servers: () => embedServersRef.current.map(s => ({ id: s.id, name: s.name })),
+        currentServerId: () => embedCurrentServerRef.current?.id ?? null,
+        voiceChannel: () => {
+            const c = currentVoiceChannelRef.current;
+            return c ? { id: c.id, serverId: c.server_id, name: c.name } : null;
+        },
+        listVoiceChannels: async (serverId) => {
+            const [list, voice] = await Promise.all([
+                queryClient.fetchQuery({ queryKey: keys.channels(serverId), queryFn: () => listChannels(serverId), staleTime: 30_000 }),
+                fetchVoiceUsers(serverId).catch(() => ({ voice_users: [] })),
+            ]);
+            return list.filter(c => c.channel_type === 1).map(c => ({
+                id: c.id,
+                name: c.name,
+                canConnect: hasPerm(c.my_permissions, PERM.CONNECT),
+                members: voice.voice_users
+                    .filter(v => v.room_id === `voice_${c.id}`)
+                    .map(v => ({ id: v.user_id, username: v.username })),
+            }));
+        },
+        joinVoice: async (serverId, channelId) => {
+            let list: Channel[];
+            try {
+                // Fresh, as moveOwnCallHere: the panel must mount with the
+                // channel's real sfu_mode and permissions.
+                list = await queryClient.fetchQuery({ queryKey: keys.channels(serverId), queryFn: () => listChannels(serverId), staleTime: 0 });
+            } catch {
+                return { ok: false, error: "couldn't reach the server" };
+            }
+            const target = list.find(c => c.id === channelId && c.channel_type === 1);
+            if (!target) return { ok: false, error: 'no such voice channel' };
+            if (!hasPerm(target.my_permissions, PERM.CONNECT)) return { ok: false, error: 'you may not join that channel' };
+            if (currentVoiceChannelRef.current?.id !== target.id) joinVoiceChannel(target);
+            return { ok: true };
+        },
+    }), [queryClient, joinVoiceChannel]);
+    useEffect(() => { notifyEmbedChanged(); }, [servers, currentServer?.id, currentVoiceChannel?.id, currentUserId]);
+
     const moveOwnCallHere = useCallback((call: OwnVoiceState) => {
         const serverId = call.serverId;
         const channelId = call.channelId;
@@ -3708,22 +3782,7 @@ export function Chat({ onLogout }: ChatProps) {
                 setViewMode('voice');
                 if (isMobile) setMobilePanel('chat');
             } else {
-                // Seamless switch: directly set the new channel
-                // VoicePanel will handle cleanup of old room and joining new room on remount.
-                // The call continues, so the member's own mute and deafen come
-                // along (as Discord does) - the new channel mounts a new panel,
-                // and a new panel used to mean an open microphone:
-                //   - mid-call here: as this device has it, read NOW, at the
-                //     click (the old panel's teardown gets no say);
-                //   - out of voice here while the account's call is live on
-                //     another device: this join takes it over (the same channel
-                //     moves it, another ends it there), as that device left it.
-                // A join with no call anywhere starts unmuted, as it always has.
-                const own = getSelfVoiceChoice();
-                const elsewhere = carriedFromOtherDevice();
-                setCurrentVoiceChannel(prev => (prev
-                    ? { ...channel, movedWith: own }
-                    : elsewhere ? { ...channel, movedWith: elsewhere } : channel));
+                joinVoiceChannel(channel);
             }
         } else if (channel.channel_type === 2) { // Collection (category)
             // Show unified view of all subchannels
