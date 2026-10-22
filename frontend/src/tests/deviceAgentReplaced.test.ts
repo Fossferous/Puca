@@ -99,7 +99,9 @@ vi.mock('../api/devices/unattendedPrompt', () => ({ requestUnattendedPassphrase:
 const agentAnswerOffer = vi.fn(async (..._a: unknown[]) => 'v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\n');
 vi.mock('../api/devices/hostAgent', () => ({
     // A screen is there to capture (session.ts prepareHostScreen).
-    agentPrepareScreen: async () => ({ state: 'ready' }), agentAnswerOffer: (...a: unknown[]) => agentAnswerOffer(...a) }));
+    agentPrepareScreen: async () => ({ state: 'ready' }),
+    agentSteeredMonitor: () => null,
+    agentAnswerOffer: (...a: unknown[]) => agentAnswerOffer(...a) }));
 vi.mock('../api/devices/unattended', () => ({
     deriveUaSeed: () => new Uint8Array(32),
     signUaChallengeSeed: () => new Uint8Array(64),
@@ -386,18 +388,28 @@ describe('the agent answering no longer holds this session\'s stream', () => {
         expect(await streamDiedSince(key, before)).toBe(0);
     });
 
-    it('a stream that never produced a frame stays with the viewer\'s own message', async () => {
+    it('a stream that never produced a frame is not restarted: the session ends saying why', async () => {
+        // Until 0.9.843 this stayed silent and left it to the viewer's own 30 s
+        // wait for video, which the phone's connection timeout beat ("could
+        // not connect to the device", 0.9.842 field report). It now ends with
+        // the no-frame reason (deviceNoScreenHost.test.ts has the details).
         const key = await streamingSession();
         const before = 0; // the whole session: a report from any tick would count
         status = { ...status, streamLive: false, streamEnd: 'no_frame' };
         await poll();
         expect(sessionStatus).toHaveBeenCalled();
         expect(await streamDiedSince(key, before), 'a restart cannot wake a sleeping panel').toBe(0);
+        const ends = sent.filter(m => m.type === 'DeviceEnd')
+            .map(m => (m.payload as { reason?: string } | undefined)?.reason ?? '');
+        expect(ends.length).toBe(1);
+        expect(ends[0].startsWith('no-screen:no-frame')).toBe(true);
 
-        // The control, same session: any other end is reported.
+        // The control, a fresh session: any other end is reported as a death.
+        agentAnswerOffer.mockClear();
+        const key2 = await streamingSession();
         status = { ...status, streamLive: false, streamEnd: undefined };
         await poll();
-        expect(await streamDiedSince(key, before)).toBe(1);
+        expect(await streamDiedSince(key2, 0)).toBe(1);
     });
 });
 

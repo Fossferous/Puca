@@ -60,6 +60,9 @@ interface AgentReply {
     /** `prepare_screen`, with 'off' only: the DeviceEnd code the phone names
      *  (session.ts NO_SCREEN_LID_REASON / NO_SCREEN_VIRTUAL_FAILED_REASON). */
     reason?: string;
+    /** `start_stream` (`streaming`): the screen the stream ACTUALLY captures,
+     *  present only when the agent steered off the one asked for. */
+    monitor?: number;
 }
 
 /** What `prepare_screen` said. */
@@ -193,6 +196,16 @@ export async function agentDiagnosis(): Promise<string | null> {
  * SDP has to reach session.ts's signalling path separately.
  */
 const answers = new Map<string, string>();
+/** The screen the agent ACTUALLY streams for a session, when it steered off
+ *  the one asked for. See `agentSteeredMonitor`. */
+const steeredMonitors = new Map<string, number>();
+
+/** The screen the last stream for `sessionId` really captures, or `null` when
+ *  it is the one that was asked for. The host passes a steer on to the viewer
+ *  as `monitor-active` (session.ts answerOffer). */
+export function agentSteeredMonitor(sessionId: string): number | null {
+    return steeredMonitors.get(sessionId) ?? null;
+}
 
 /** The answer the agent produced for `sessionId`, if it has one yet. */
 export function agentAnswerFor(sessionId: string): string | null {
@@ -271,6 +284,11 @@ export async function agentAnswerOffer(
     const answer = reply.answer_sdp;
     if (!answer) throw new Error('the agent started a stream but returned no answer');
     answers.set(sessionId, answer);
+    // Present only when the agent captured another screen than the one asked
+    // for (off a built-in panel behind a closed lid). Absent from older
+    // agents, which never steer.
+    if (typeof reply.monitor === 'number') steeredMonitors.set(sessionId, reply.monitor);
+    else steeredMonitors.delete(sessionId);
     return answer;
 }
 

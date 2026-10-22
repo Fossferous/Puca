@@ -19,6 +19,12 @@
 
 export const NO_SCREEN_LID_REASON = 'no-screen:lid';
 export const NO_SCREEN_VIRTUAL_FAILED_REASON = 'no-screen:virtual-failed';
+/** The stream ran but the display never produced a picture (the agent's
+ *  `stream_end: no_frame`): a screen that is asleep and did not wake, or a
+ *  dark panel the lid check could not see. Sent by the HOST from its status
+ *  poll, because the phone's own connection used to time out first and say
+ *  "could not connect to the device" (0.9.842 field report). */
+export const NO_SCREEN_NO_FRAME_REASON = 'no-screen:no-frame';
 
 /** The option's name, exactly as the PC's own settings card spells it. */
 export const LID_CLOSED_OPTION = 'Allow remote control with the lid closed';
@@ -37,6 +43,7 @@ const FALLBACK: Record<string, string> = {
     [NO_SCREEN_LID_REASON]: 'that PC’s screen is off. Is its lid closed? '
         + `Turn on “${LID_CLOSED_OPTION}” on it.`,
     [NO_SCREEN_VIRTUAL_FAILED_REASON]: 'that PC’s screen is off, and its virtual screen did not start.',
+    [NO_SCREEN_NO_FRAME_REASON]: 'that PC’s screen did not show anything. It may be asleep, or its lid closed.',
 };
 
 /**
@@ -54,7 +61,7 @@ export function noScreenEndReason(code: string): string {
 /** The code at the front of an end reason, in either form: the bare code (the
  *  sign-in-screen agent sends that) or the code with its sentence. */
 function codeOf(reason: string): string | null {
-    for (const code of [NO_SCREEN_LID_REASON, NO_SCREEN_VIRTUAL_FAILED_REASON]) {
+    for (const code of [NO_SCREEN_LID_REASON, NO_SCREEN_VIRTUAL_FAILED_REASON, NO_SCREEN_NO_FRAME_REASON]) {
         if (reason === code || reason.startsWith(`${code} `)) return code;
     }
     return null;
@@ -71,6 +78,10 @@ export function noScreenMessage(reason: string, pcName: string | null | undefine
     if (code === NO_SCREEN_VIRTUAL_FAILED_REASON) {
         return `${pc(pcName)}’s screen is off, and its virtual screen did not start. `
             + 'Open its lid, or try again.';
+    }
+    if (code === NO_SCREEN_NO_FRAME_REASON) {
+        return `${pc(pcName)}’s screen did not show anything — it may be asleep, or its lid closed. `
+            + 'Try again, or move its mouse.';
     }
     return null;
 }

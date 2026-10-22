@@ -16,8 +16,11 @@
  */
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
-// An old agent's status: no stream_live, so the 1 Hz poll never acts.
-const sessionStatus = vi.fn(async (..._a: unknown[]) => ({ secureDesktop: false, cursorClipped: false }));
+// What the agent's status poll answers. Default: an old agent's (no
+// stream_live), so the 1 Hz poll never acts.
+type Status = { secureDesktop: boolean; cursorClipped: boolean; streamLive?: boolean; streamEnd?: string };
+let status: Status = { secureDesktop: false, cursorClipped: false };
+const sessionStatus = vi.fn(async (..._a: unknown[]): Promise<Status> => ({ ...status }));
 const getStreamQuality = vi.fn(async (..._a: unknown[]) => ({ fps: 30, bitrate_kbps: 6000 }));
 const updateStream = vi.fn(async (..._a: unknown[]) => {});
 const stopSession = vi.fn(async (..._a: unknown[]) => {});
@@ -81,9 +84,12 @@ const agentAnswerOffer = vi.fn(async (..._a: unknown[]) => 'v=0\r\no=- 1 1 IN IP
 /** What the agent says about its screen, one answer per poll; the last
  *  repeats. Default: a screen is there. */
 let screens: Array<Record<string, unknown>> = [{ state: 'ready' }];
+let steeredTo: number | null = null;
 const agentPrepareScreen = vi.fn(async (..._a: unknown[]) => (screens.length > 1 ? screens.shift()! : screens[0]));
 vi.mock('../api/devices/hostAgent', () => ({
     agentPrepareScreen: (...a: unknown[]) => agentPrepareScreen(...a),
+    // The screen the agent steered to, or null for "as asked".
+    agentSteeredMonitor: () => steeredTo,
     agentAnswerOffer: (...a: unknown[]) => agentAnswerOffer(...a),
 }));
 vi.mock('../api/devices/unattended', () => ({
@@ -172,6 +178,8 @@ async function sentKinds(key: Uint8Array, from: number): Promise<string[]> {
 beforeEach(() => {
     shareCaps = null;
     screens = [{ state: 'ready' }];
+    steeredTo = null;
+    status = { secureDesktop: false, cursorClipped: false };
     agentPrepareScreen.mockClear();
     agentAnswerOffer.mockClear();
 });
@@ -247,4 +255,54 @@ describe('the host asks for a screen before it answers', () => {
             dateSpy.mockRestore();
         }
     }, 15_000);
+});
+
+
+describe('the screen the agent really captures', () => {
+    it('a stream steered off the dark panel tells the viewer which screen it got', async () => {
+        steeredTo = 1;
+        const key = await activeHostSession();
+        await signal(key, { kind: 'offer', sdp: OFFER });
+        const { openControl } = await import('../api/e2ee');
+        const actives: number[] = [];
+        for (const m of sent) {
+            const blob = (m as { payload?: { payload?: string } }).payload?.payload;
+            if (!blob) continue;
+            const plain = await openControl(key, blob);
+            const f = plain ? (JSON.parse(plain) as { kind?: string; active?: number }) : null;
+            if (f?.kind === 'monitor-active' && typeof f.active === 'number') actives.push(f.active);
+        }
+        expect(actives).toEqual([1]);
+    });
+
+    it('NEGATIVE CONTROL: a stream on the screen it asked for sends no monitor-active', async () => {
+        const key = await activeHostSession();
+        await signal(key, { kind: 'offer', sdp: OFFER });
+        expect(await sentKinds(key, 0)).not.toContain('monitor-active');
+    });
+});
+
+describe('a stream that never produced a picture', () => {
+    it('ends the session with the no-frame reason instead of leaving the phone to time out', async () => {
+        const key = await activeHostSession();
+        await signal(key, { kind: 'offer', sdp: OFFER });
+        expect(agentAnswerOffer).toHaveBeenCalledTimes(1);
+        status = { secureDesktop: false, cursorClipped: false, streamLive: false, streamEnd: 'no_frame' };
+        await sessionMod.pollSecureDesktop();
+        await settle();
+        const ends = (await sentOf('DeviceEnd')).map(e => e.payload?.reason);
+        expect(ends).toEqual([noScreenEndReason('no-screen:no-frame')]);
+        // ...and it is not ALSO restarted: a restart cannot wake a dark screen.
+        expect(await sentKinds(key, 0)).not.toContain('stream-died');
+    });
+
+    it('NEGATIVE CONTROL: a stream that died for another reason is restarted, not ended', async () => {
+        const key = await activeHostSession();
+        await signal(key, { kind: 'offer', sdp: OFFER });
+        status = { secureDesktop: false, cursorClipped: false, streamLive: false };
+        await sessionMod.pollSecureDesktop();
+        await settle();
+        expect(await sentOf('DeviceEnd')).toHaveLength(0);
+        expect(await sentKinds(key, 0)).toContain('stream-died');
+    });
 });

@@ -271,7 +271,15 @@ describe('a request and its answer', () => {
         // deadline is one this test controls; the crypto still needs real
         // turns of the event loop, which setImmediate gives it.
         vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-        const spin = async () => { for (let i = 0; i < 40; i++) await new Promise(r => setImmediate(r)); };
+        // Spun for REAL time, not a count of turns: WebCrypto finishes on
+        // node's thread pool, which a fixed 40 turns outran under a full,
+        // loaded run (the ack was still unread when the fake clock passed its
+        // short deadline, so the request ended 'unsupported'). Date is not
+        // faked here, so 250 ms of turns is a bound, not a sleep.
+        const spin = async () => {
+            const until = Date.now() + 250;
+            while (Date.now() < until) await new Promise(r => setImmediate(r));
+        };
         try {
             let outcome: AudioHubOutcome | undefined;
             void sendAudioHubRequest(id, 'airpods-pc').then(o => { outcome = o; });

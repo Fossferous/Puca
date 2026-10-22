@@ -153,19 +153,25 @@ impl Prep {
 ///
 /// A screen being present always wins, whatever was decided before: a panel
 /// that woke late, or the virtual screen arriving, both read as `ready`.
-pub fn decide(p: &Prep, now: Instant, outputs_present: bool) -> (ScreenState, Action) {
+///
+/// `lid_dark`: the only screens are built-in panels behind a CLOSED lid. That
+/// is not a sleeping monitor, and nothing wakes it, so the wake grace and the
+/// wake window are skipped: the virtual screen is asked for at once, and
+/// without one the answer is "off" at once.
+pub fn decide(p: &Prep, now: Instant, outputs_present: bool, lid_dark: bool) -> (ScreenState, Action) {
     if outputs_present {
         return (ScreenState::Ready, Action::None);
     }
     let waited = now.saturating_duration_since(p.since);
     match &p.asked {
+        None if lid_dark => (ScreenState::Starting, Action::AskForVirtual),
         None if !p.nudged => (ScreenState::Waking, Action::Nudge),
         None if waited < WAKE_GRACE => (ScreenState::Waking, Action::None),
         None => (ScreenState::Starting, Action::AskForVirtual),
         // No virtual screen: still give a sleeping panel the whole window it
-        // always had before saying "off".
+        // always had before saying "off". A closed lid gets no window.
         Some((_, HoldOutcome::Unavailable { reason, .. })) => {
-            if waited < WAKE_WINDOW {
+            if waited < WAKE_WINDOW && !lid_dark {
                 (ScreenState::Waking, Action::None)
             } else {
                 (ScreenState::Off(*reason), Action::None)
@@ -248,8 +254,96 @@ pub fn adapter_is_instance(adapter_path: &str, instance_id: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Is a REAL screen active again, given the adapter paths of every active
-/// display path?
+// ------------------------------------------------------------ the dark panel
+//
+// THE SECOND WAY A LAPTOP HAS NO SCREEN, found in the field on 0.9.842
+// (2026-10-22). This file first assumed a shut lid leaves NO active output.
+// On the owner's laptop it does not: with the lid shut, the built-in panel
+// stays in the desktop as an active DXGI output (Device Manager: "Generic PnP
+// Monitor", OK; WMI VideoOutputTechnology 11, embedded DisplayPort), and
+// Windows simply never presents a frame to it. So `prepare_screen` saw "a
+// screen", answered `ready`, and the stream ended twelve seconds later with
+// "no frame ever arrived". Neither a wake nudge nor a provoked repaint helps.
+// A panel behind a closed lid is not asleep; it is off by design.
+//
+// The fix asks Windows the two things that decide it: is the lid closed (the
+// lid switch's power-setting notification, `lid.rs`), and which active
+// displays are BUILT IN (the path's output technology). A built-in panel
+// behind a closed lid is DARK, and a PC whose only outputs are dark has no
+// screen: the virtual screen, or the named reason, exactly as when it has no
+// output at all.
+
+/// One active display path, as far as these decisions need it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayPath {
+    /// The GDI source name (`\\.\DISPLAY1`): what joins a path to a DXGI output.
+    pub gdi_name: String,
+    /// The target adapter's interface path: what tells the virtual screen's
+    /// own output apart (`adapter_is_instance`).
+    pub adapter_path: String,
+    /// The target is a built-in panel (`is_builtin_technology`).
+    pub builtin: bool,
+}
+
+/// Is a `DISPLAYCONFIG_VIDEO_OUTPUT_TECHNOLOGY` a panel built into the machine?
+/// Embedded DisplayPort (11) is what current laptops report, the owner's
+/// included. LVDS (6) is older laptops'. UDI embedded (13), and INTERNAL
+/// (0x80000000), are what a driver reports when it cannot name the link.
+/// Everything else (HDMI, external DisplayPort, the indirect virtual screen)
+/// is not built in.
+pub fn is_builtin_technology(tech: i32) -> bool {
+    matches!(tech, 6 | 11 | 13 | i32::MIN)
+}
+
+/// Which DXGI outputs are dark: built-in panels while the lid is closed.
+/// `outputs` pairs each DXGI index with its GDI device name. `lid_closed` is
+/// `None` when the lid's state is unknown (a desktop PC, or the notification
+/// never arrived). Then nothing is dark, which is exactly the behaviour before
+/// this existed. An output no path names is never called dark.
+pub fn dark_outputs(outputs: &[(usize, String)], paths: &[DisplayPath], lid_closed: Option<bool>) -> Vec<usize> {
+    if lid_closed != Some(true) {
+        return Vec::new();
+    }
+    outputs
+        .iter()
+        .filter(|(_, gdi)| paths.iter().any(|p| p.builtin && p.gdi_name.eq_ignore_ascii_case(gdi)))
+        .map(|(i, _)| *i)
+        .collect()
+}
+
+/// Is there anything to show: an output that is not dark?
+pub fn any_lit(outputs: &[usize], dark: &[usize]) -> bool {
+    outputs.iter().any(|o| !dark.contains(o))
+}
+
+/// Where a stream should capture, given the target it was asked for. A single
+/// dark screen moves to the first lit one. All Displays with exactly ONE lit
+/// screen becomes that screen: a composite of a lit tile beside a black one
+/// whose windows nobody can see is not worth a picture twice the size. Anything
+/// else stays as asked. `all` is the All-Displays sentinel.
+pub fn steer_monitor(target: usize, outputs: &[usize], dark: &[usize], all: usize) -> usize {
+    if dark.is_empty() {
+        return target;
+    }
+    let lit: Vec<usize> = outputs.iter().copied().filter(|o| !dark.contains(o)).collect();
+    let Some(&first) = lit.first() else { return target };
+    if target == all {
+        return if lit.len() == 1 { first } else { target };
+    }
+    if dark.contains(&target) {
+        first
+    } else {
+        target
+    }
+}
+
+/// Is a REAL screen active again, besides the virtual one?
+///
+/// Real means not the virtual screen, and not dark: a built-in panel behind a
+/// closed lid stays an active path the whole time the virtual screen is on
+/// (that is the case this file was fixed for), and counting it as "real" would
+/// release the virtual screen the moment it appeared. Opening the lid is what
+/// makes the panel real again.
 ///
 /// `None` when this cannot be told, which is when none of the active paths is
 /// the virtual screen's. While it is held and switched on, it should be one of
@@ -257,12 +351,25 @@ pub fn adapter_is_instance(adapter_path: &str, instance_id: &str) -> bool {
 /// others are real. Without this positive control a matcher that never matches
 /// would call the virtual screen itself "real", release it the moment it
 /// appeared, and flap for the whole session.
-pub fn real_screen_present(adapter_paths: &[String], instance_id: &str) -> Option<bool> {
-    let ours = adapter_paths.iter().filter(|p| adapter_is_instance(p, instance_id)).count();
+pub fn real_screen_present(paths: &[DisplayPath], instance_id: &str, lid_closed: Option<bool>) -> Option<bool> {
+    let ours = paths.iter().filter(|p| adapter_is_instance(&p.adapter_path, instance_id)).count();
     if ours == 0 {
         return None;
     }
-    Some(adapter_paths.len() > ours)
+    Some(paths.iter().any(|p| {
+        !adapter_is_instance(&p.adapter_path, instance_id) && !(p.builtin && lid_closed == Some(true))
+    }))
+}
+
+/// The lid switch's notification payload (`GUID_LIDSWITCH_STATE_CHANGE`): a
+/// DWORD, 0 = closed, 1 = open. Anything else is not a lid state.
+pub fn decode_lid(data: &[u8]) -> Option<bool> {
+    let bytes: [u8; 4] = data.get(..4)?.try_into().ok()?;
+    match u32::from_le_bytes(bytes) {
+        0 => Some(true),
+        1 => Some(false),
+        _ => None,
+    }
 }
 
 // ------------------------------------------------------------ the holds
@@ -314,7 +421,7 @@ impl Holds {
 // ------------------------------------------------------------ Windows
 
 #[cfg(windows)]
-pub use windows_impl::{prepare, stream_ended, stream_started};
+pub use windows_impl::{outputs_and_dark, prepare, stream_ended, stream_started};
 
 #[cfg(windows)]
 mod windows_impl {
@@ -367,7 +474,12 @@ mod windows_impl {
 
     /// Answer `prepare_screen` for `session_id`.
     pub fn prepare(session_id: &str) -> ScreenState {
-        let present = !puca_capture::outputs().is_empty();
+        // "A screen" means one Windows will actually present to: a built-in
+        // panel behind a closed lid is an active output that never shows a
+        // frame (the 0.9.842 field case), so it does not count.
+        let (outputs, dark) = outputs_and_dark();
+        let present = any_lit(&outputs, &dark);
+        let lid_dark = !present && !dark.is_empty();
         let now = Instant::now();
         let mut r = lock();
         // A virtual screen this process already holds (another session's)
@@ -380,8 +492,15 @@ mod windows_impl {
                 return ScreenState::Ready;
             }
         }
+        let fresh = !r.preps.contains_key(session_id);
         let prep = r.preps.entry(session_id.to_string()).or_insert_with(|| Prep::new(now)).clone();
-        let (state, action) = decide(&prep, now, present);
+        if fresh && lid_dark {
+            eprintln!(
+                "[virtual-screen] {session_id}: the lid is closed and the only screen is the built-in \
+                 panel {dark:?}, which shows nothing"
+            );
+        }
+        let (state, action) = decide(&prep, now, present, lid_dark);
         match action {
             Action::None => {}
             Action::Nudge => {
@@ -471,17 +590,18 @@ mod windows_impl {
                 (r.holds.is_empty(), r.held.clone().flatten())
             };
 
-            let paths = active_adapter_paths();
+            let paths = display_paths();
+            let lid = crate::lid::closed();
             if !logged_paths {
                 // The field check for `adapter_is_instance`: what Windows
-                // calls the active displays' adapters, beside the instance
-                // the service reported. Once per hold, so the log says it.
-                eprintln!("[virtual-screen] holding {instance:?}; active display adapters: {paths:?}");
+                // calls the active displays, beside the instance the service
+                // reported. Once per hold, so the log says it.
+                eprintln!("[virtual-screen] holding {instance:?}; lid closed: {lid:?}; active displays: {paths:?}");
                 logged_paths = !paths.is_empty();
             }
             let real_back = instance
                 .as_deref()
-                .and_then(|i| real_screen_present(&paths, i))
+                .and_then(|i| real_screen_present(&paths, i, lid))
                 .unwrap_or(false);
 
             if empty || real_back {
@@ -517,12 +637,46 @@ mod windows_impl {
         }
     }
 
-    /// The adapter interface path of every ACTIVE display path's target.
-    fn active_adapter_paths() -> Vec<String> {
+    /// The DXGI outputs (by index) and which of them are dark right now. The
+    /// one place the lid, the display paths and the capture enumeration meet,
+    /// shared by `prepare` and by StartStream's steering (session.rs).
+    pub fn outputs_and_dark() -> (Vec<usize>, Vec<usize>) {
+        let outs = puca_capture::outputs();
+        let indices: Vec<usize> = outs.iter().map(|o| o.index).collect();
+        let lid = crate::lid::closed();
+        if lid != Some(true) {
+            return (indices, Vec::new());
+        }
+        let named: Vec<(usize, String)> =
+            outs.iter().filter_map(|o| gdi_name(o.hmonitor).map(|n| (o.index, n))).collect();
+        let dark = dark_outputs(&named, &display_paths(), lid);
+        (indices, dark)
+    }
+
+    /// `\\.\DISPLAYn` for an HMONITOR: the name that joins a DXGI output to
+    /// its display path.
+    fn gdi_name(hmonitor: isize) -> Option<String> {
+        use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO, MONITORINFOEXW};
+        let mut info = MONITORINFOEXW::default();
+        info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+        let ok = unsafe {
+            GetMonitorInfoW(HMONITOR(hmonitor as *mut _), &mut info as *mut MONITORINFOEXW as *mut MONITORINFO)
+        };
+        if !ok.as_bool() {
+            return None;
+        }
+        let n = info.szDevice.iter().position(|c| *c == 0).unwrap_or(info.szDevice.len());
+        Some(String::from_utf16_lossy(&info.szDevice[..n]))
+    }
+
+    /// Every ACTIVE display path: its GDI source name, its target adapter's
+    /// interface path, and whether the target is a built-in panel.
+    fn display_paths() -> Vec<DisplayPath> {
         use windows::Win32::Devices::Display::{
             DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
             DISPLAYCONFIG_ADAPTER_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_ADAPTER_NAME,
-            DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
+            DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
+            DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
             QDC_ONLY_ACTIVE_PATHS,
         };
         use windows::Win32::Foundation::ERROR_SUCCESS;
@@ -546,8 +700,12 @@ mod windows_impl {
                 return out;
             }
             paths.truncate(n_paths as usize);
+            let text = |w: &[u16]| {
+                let n = w.iter().position(|c| *c == 0).unwrap_or(w.len());
+                String::from_utf16_lossy(&w[..n])
+            };
             for p in &paths {
-                let mut name = DISPLAYCONFIG_ADAPTER_NAME {
+                let mut adapter = DISPLAYCONFIG_ADAPTER_NAME {
                     header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
                         r#type: DISPLAYCONFIG_DEVICE_INFO_GET_ADAPTER_NAME,
                         size: std::mem::size_of::<DISPLAYCONFIG_ADAPTER_NAME>() as u32,
@@ -556,11 +714,30 @@ mod windows_impl {
                     },
                     ..Default::default()
                 };
-                if DisplayConfigGetDeviceInfo(&mut name.header) == ERROR_SUCCESS.0 as i32 {
-                    let w = &name.adapterDevicePath;
-                    let n = w.iter().position(|c| *c == 0).unwrap_or(w.len());
-                    out.push(String::from_utf16_lossy(&w[..n]));
-                }
+                let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+                    header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                        r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                        size: std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                        adapterId: p.sourceInfo.adapterId,
+                        id: p.sourceInfo.id,
+                    },
+                    ..Default::default()
+                };
+                let adapter_path = if DisplayConfigGetDeviceInfo(&mut adapter.header) == ERROR_SUCCESS.0 as i32 {
+                    text(&adapter.adapterDevicePath)
+                } else {
+                    String::new()
+                };
+                let gdi_name = if DisplayConfigGetDeviceInfo(&mut source.header) == ERROR_SUCCESS.0 as i32 {
+                    text(&source.viewGdiDeviceName)
+                } else {
+                    String::new()
+                };
+                out.push(DisplayPath {
+                    gdi_name,
+                    adapter_path,
+                    builtin: is_builtin_technology(p.targetInfo.outputTechnology.0),
+                });
             }
         }
         out
@@ -582,18 +759,18 @@ mod tests {
     #[test]
     fn a_machine_with_a_screen_is_ready_at_once_and_nothing_is_asked() {
         let now = t0();
-        assert_eq!(decide(&Prep::new(now), now, true), (ScreenState::Ready, Action::None));
+        assert_eq!(decide(&Prep::new(now), now, true, false), (ScreenState::Ready, Action::None));
     }
 
     #[test]
     fn no_screen_first_wakes_the_displays_then_waits_the_grace() {
         let now = t0();
         let mut p = Prep::new(now);
-        assert_eq!(decide(&p, now, false), (ScreenState::Waking, Action::Nudge));
+        assert_eq!(decide(&p, now, false, false), (ScreenState::Waking, Action::Nudge));
         p.nudged = true;
-        assert_eq!(decide(&p, now + Duration::from_secs(1), false), (ScreenState::Waking, Action::None));
+        assert_eq!(decide(&p, now + Duration::from_secs(1), false, false), (ScreenState::Waking, Action::None));
         // A panel that wakes inside the grace is simply ready.
-        assert_eq!(decide(&p, now + Duration::from_secs(2), true).0, ScreenState::Ready);
+        assert_eq!(decide(&p, now + Duration::from_secs(2), true, false).0, ScreenState::Ready);
     }
 
     #[test]
@@ -601,12 +778,12 @@ mod tests {
         let now = t0();
         let mut p = Prep::new(now);
         p.nudged = true;
-        assert_eq!(decide(&p, now + WAKE_GRACE, false), (ScreenState::Starting, Action::AskForVirtual));
+        assert_eq!(decide(&p, now + WAKE_GRACE, false, false), (ScreenState::Starting, Action::AskForVirtual));
         p.asked = Some((now + WAKE_GRACE, on()));
         // Asked once: from here only the clock moves it.
-        assert_eq!(decide(&p, now + WAKE_GRACE + Duration::from_secs(1), false), (ScreenState::Starting, Action::None));
+        assert_eq!(decide(&p, now + WAKE_GRACE + Duration::from_secs(1), false, false), (ScreenState::Starting, Action::None));
         // The virtual screen appearing is "ready".
-        assert_eq!(decide(&p, now + WAKE_GRACE + Duration::from_secs(4), true).0, ScreenState::Ready);
+        assert_eq!(decide(&p, now + WAKE_GRACE + Duration::from_secs(4), true, false).0, ScreenState::Ready);
     }
 
     #[test]
@@ -615,9 +792,9 @@ mod tests {
         let mut p = Prep::new(now);
         p.nudged = true;
         p.asked = Some((now, on()));
-        assert_eq!(decide(&p, now + VIRTUAL_START_WINDOW - Duration::from_millis(1), false).0, ScreenState::Starting);
+        assert_eq!(decide(&p, now + VIRTUAL_START_WINDOW - Duration::from_millis(1), false, false).0, ScreenState::Starting);
         assert_eq!(
-            decide(&p, now + VIRTUAL_START_WINDOW, false).0,
+            decide(&p, now + VIRTUAL_START_WINDOW, false, false).0,
             ScreenState::Off(OffReason::VirtualFailed)
         );
     }
@@ -630,10 +807,28 @@ mod tests {
         p.asked = Some((now + WAKE_GRACE, service_absent()));
         // Negative control: inside the old wake window a sleeping panel still
         // gets its chance, as it did before this existed.
-        assert_eq!(decide(&p, now + WAKE_WINDOW - Duration::from_millis(1), false).0, ScreenState::Waking);
-        assert_eq!(decide(&p, now + WAKE_WINDOW, false).0, ScreenState::Off(OffReason::NoVirtualScreen));
+        assert_eq!(decide(&p, now + WAKE_WINDOW - Duration::from_millis(1), false, false).0, ScreenState::Waking);
+        assert_eq!(decide(&p, now + WAKE_WINDOW, false, false).0, ScreenState::Off(OffReason::NoVirtualScreen));
         // ...and a panel waking at the last moment still wins.
-        assert_eq!(decide(&p, now + WAKE_WINDOW, true).0, ScreenState::Ready);
+        assert_eq!(decide(&p, now + WAKE_WINDOW, true, false).0, ScreenState::Ready);
+    }
+
+    #[test]
+    fn a_closed_lid_asks_for_the_virtual_screen_at_once_and_says_off_at_once_without_one() {
+        // THE 0.9.842 CASE. The panel behind the lid will not wake, so neither
+        // the wake grace nor the wake window is waited out.
+        let now = t0();
+        let p = Prep::new(now);
+        assert_eq!(decide(&p, now, false, true), (ScreenState::Starting, Action::AskForVirtual));
+        let mut asked = Prep::new(now);
+        asked.asked = Some((now, service_absent()));
+        assert_eq!(decide(&asked, now, false, true).0, ScreenState::Off(OffReason::NoVirtualScreen));
+        // Negative control: the same moment for a SLEEPING monitor (not the
+        // lid) still waits, nudges first, and keeps its wake window.
+        assert_eq!(decide(&p, now, false, false), (ScreenState::Waking, Action::Nudge));
+        assert_eq!(decide(&asked, now, false, false).0, ScreenState::Waking);
+        // And the virtual screen appearing is ready either way.
+        assert_eq!(decide(&asked, now, true, true).0, ScreenState::Ready);
     }
 
     #[test]
@@ -721,20 +916,103 @@ mod tests {
         assert!(!adapter_is_instance("", r"ROOT\DISPLAY\0001"));
     }
 
+    fn path(gdi: &str, adapter: &str, builtin: bool) -> DisplayPath {
+        DisplayPath { gdi_name: gdi.into(), adapter_path: adapter.into(), builtin }
+    }
+
+    fn virt() -> DisplayPath {
+        path(r"\\.\DISPLAY2", r"\\?\ROOT#DISPLAY#0001#{g}", false)
+    }
+
+    fn panel() -> DisplayPath {
+        path(r"\\.\DISPLAY1", r"\\?\PCI#VEN_10DE&DEV_1C20#4&1#{g}", true)
+    }
+
     #[test]
     fn a_real_screen_is_only_reported_when_the_virtual_one_is_recognised_too() {
-        let virt = r"\\?\ROOT#DISPLAY#0001#{g}".to_string();
-        let panel = r"\\?\PCI#VEN_8086&DEV_46A6#3&1#{g}".to_string();
         let id = r"ROOT\DISPLAY\0001";
-        // Lid closed, virtual screen on: no real screen.
-        assert_eq!(real_screen_present(&[virt.clone()], id), Some(false));
-        // Lid opened: the panel is back beside it.
-        assert_eq!(real_screen_present(&[panel.clone(), virt.clone()], id), Some(true));
+        // No panel at all, virtual screen on: no real screen.
+        assert_eq!(real_screen_present(&[virt()], id, Some(true)), Some(false));
+        // An external monitor beside it is real whatever the lid says.
+        let hdmi = path(r"\\.\DISPLAY3", r"\\?\PCI#VEN_10DE#4&1#{g}", false);
+        assert_eq!(real_screen_present(&[hdmi, virt()], id, Some(true)), Some(true));
         // THE POSITIVE CONTROL: the virtual screen is not among the active
         // paths (not up yet, or the matcher is wrong for this machine). Then
         // nothing is claimed, so the hold is not dropped on a guess.
-        assert_eq!(real_screen_present(&[panel], id), None);
-        assert_eq!(real_screen_present(&[], id), None);
+        assert_eq!(real_screen_present(&[panel()], id, Some(false)), None);
+        assert_eq!(real_screen_present(&[], id, Some(false)), None);
+    }
+
+    #[test]
+    fn the_dark_panel_beside_the_virtual_screen_is_not_a_real_screen_until_the_lid_opens() {
+        // THE 0.9.842 FIELD CASE: lid shut, the built-in panel still an active
+        // path. Counting it as real would let the virtual screen go the moment
+        // it appeared.
+        let id = r"ROOT\DISPLAY\0001";
+        assert_eq!(real_screen_present(&[panel(), virt()], id, Some(true)), Some(false));
+        // The lid opening is what makes the panel real again.
+        assert_eq!(real_screen_present(&[panel(), virt()], id, Some(false)), Some(true));
+        // An unknown lid is not "closed": the panel counts, as it always did.
+        assert_eq!(real_screen_present(&[panel(), virt()], id, None), Some(true));
+    }
+
+    #[test]
+    fn a_built_in_panel_behind_a_closed_lid_is_dark_and_nothing_else_is() {
+        let outputs = vec![(0, r"\\.\DISPLAY1".to_string()), (1, r"\\.\DISPLAY3".to_string())];
+        let hdmi = path(r"\\.\DISPLAY3", r"\\?\PCI#VEN_10DE#4&1#{g}", false);
+        let paths = vec![panel(), hdmi];
+        assert_eq!(dark_outputs(&outputs, &paths, Some(true)), vec![0]);
+        // Negative controls: lid open, lid unknown.
+        assert!(dark_outputs(&outputs, &paths, Some(false)).is_empty());
+        assert!(dark_outputs(&outputs, &paths, None).is_empty());
+        // GDI names compare case-insensitively, as Windows treats them.
+        let lower = vec![(0, r"\\.\display1".to_string())];
+        assert_eq!(dark_outputs(&lower, &paths, Some(true)), vec![0]);
+        // An output no path names is never called dark.
+        let unnamed = vec![(5, r"\\.\DISPLAY9".to_string())];
+        assert!(dark_outputs(&unnamed, &paths, Some(true)).is_empty());
+    }
+
+    #[test]
+    fn only_built_in_link_types_count_as_built_in() {
+        // eDP (the owner's laptop reports 11), LVDS, UDI embedded, INTERNAL.
+        for t in [11, 6, 13, i32::MIN] {
+            assert!(is_builtin_technology(t), "{t}");
+        }
+        // HDMI, external DisplayPort, DVI, the indirect (virtual) kinds, other.
+        for t in [5, 10, 4, 16, 17, -1, 0] {
+            assert!(!is_builtin_technology(t), "{t}");
+        }
+    }
+
+    #[test]
+    fn a_pc_whose_only_screen_is_dark_has_no_screen() {
+        assert!(!any_lit(&[0], &[0]), "the 0.9.842 case: one output, and it is the dark panel");
+        assert!(any_lit(&[0, 1], &[0]), "the virtual screen (or a monitor) beside it is lit");
+        assert!(any_lit(&[0], &[]), "lid open: the panel is lit");
+        assert!(!any_lit(&[], &[]), "no outputs at all is still no screen");
+    }
+
+    #[test]
+    fn capture_moves_off_the_dark_panel_only_when_something_else_is_lit() {
+        const ALL: usize = 255;
+        // The panel (0) dark, the virtual screen (1) lit.
+        assert_eq!(steer_monitor(0, &[0, 1], &[0], ALL), 1);
+        assert_eq!(steer_monitor(ALL, &[0, 1], &[0], ALL), 1, "a composite with one lit tile is that tile");
+        assert_eq!(steer_monitor(1, &[0, 1], &[0], ALL), 1, "already on a lit screen");
+        // Two lit screens beside the dark one: All Displays stays All Displays.
+        assert_eq!(steer_monitor(ALL, &[0, 1, 2], &[0], ALL), ALL);
+        // Negative controls: nothing dark, or nothing lit to move to.
+        assert_eq!(steer_monitor(0, &[0, 1], &[], ALL), 0);
+        assert_eq!(steer_monitor(0, &[0], &[0], ALL), 0);
+    }
+
+    #[test]
+    fn the_lid_payload_is_a_dword_zero_closed_one_open() {
+        assert_eq!(decode_lid(&0u32.to_le_bytes()), Some(true));
+        assert_eq!(decode_lid(&1u32.to_le_bytes()), Some(false));
+        assert_eq!(decode_lid(&2u32.to_le_bytes()), None);
+        assert_eq!(decode_lid(&[0, 0]), None, "too short is not a lid state");
     }
 
     #[test]

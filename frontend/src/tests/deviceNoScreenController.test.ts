@@ -93,6 +93,7 @@ Object.defineProperty(window, 'RTCPeerConnection', {
 });
 
 import { sealControl, generateControlEphemeral, deriveDeviceControlKey } from '../api/e2ee';
+import { noScreenEndReason } from '../api/devices/noScreen';
 
 async function settle(rounds = 12): Promise<void> {
     for (let i = 0; i < rounds; i++) await new Promise(r => setTimeout(r, 0));
@@ -165,6 +166,17 @@ describe('a session that ended because that PC has no screen on', () => {
             await settle();
         });
         expect(error).toMatch(/^Work Laptop’s screen is off, and its virtual screen did not start/);
+    });
+
+    it('a stream that never showed a picture becomes its own sentence, not "could not connect"', async () => {
+        const { id } = await activeController();
+        const error = await endedErrorOf(id, async () => {
+            handlers.get('DeviceEnded')!({
+                payload: { session_id: id, reason: noScreenEndReason('no-screen:no-frame') },
+            });
+            await settle();
+        });
+        expect(error).toMatch(/^Work Laptop’s screen did not show anything/);
     });
 
     it('NEGATIVE CONTROL: any other reason is shown as the host wrote it', async () => {
