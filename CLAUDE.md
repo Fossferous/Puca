@@ -358,9 +358,10 @@ the SQL bind check, both JUnit suites, the installer hooks, the third-party
 notices (and that the result is committed) and the twelve no-server
 real-browser scripts — concurrently where they share no lock (cargo's
 `target/` is one lock; the real-browser scripts run one at a time, after
-vitest), compiles at below-normal priority, and NEVER a compile beside vitest:
-eight of its real-time tests timed out when cargo, the SQL bind check and
-gradle compiled alongside it, priority or not. It skips a gate whose inputs are byte-identical to a run that PASSED
+vitest), compiles at below-normal priority, and NEVER a compile beside vitest
+or a real-browser script: eight of vitest's real-time tests timed out when
+cargo, the SQL bind check and gradle compiled alongside it, priority or not,
+and device-stage once missed its zoom-follow framing the same way. It skips a gate whose inputs are byte-identical to a run that PASSED
 in this checkout, and says so on its own line and again in the summary,
 naming the run it relies on; `--all` runs everything, `--plan` shows what
 would run, `--only <ids>` picks. A stamp is written only when every step

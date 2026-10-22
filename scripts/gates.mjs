@@ -90,8 +90,8 @@ const python = WIN ? 'python' : 'python3';
 
 /**
  * A gate: { id, title, inputs, ignoreVersion?, fingerprint, after?, cpu?, steps }.
- * cpu: 'heavy' (a compile) never runs beside an 'exclusive' gate (vitest);
- * anything else ('light', the default) runs beside either.
+ * cpu: 'heavy' (a compile) never runs beside an 'exclusive' gate (vitest, the
+ * real-browser scripts); anything else ('light', the default) runs beside either.
  * A step: { run, cwd?, lock?, env?, when?, nice?, check? } — `check(output, code)` returns an error string or null.
  */
 const GATES = [
@@ -196,9 +196,10 @@ const GATES = [
             { run: 'git diff --exit-code --stat -- THIRD_PARTY_NOTICES.md', check: (out, code) => (code ? 'THIRD_PARTY_NOTICES.md changed: commit the regenerated file' : null) },
         ],
     },
-    // Real-browser scripts that need no server. After vitest (several measure
-    // timing in a real browser, and vitest saturates the machine), one at a
-    // time. They passed beside the cargo compiles (2026-10-22).
+    // Real-browser scripts that need no server: one at a time, after vitest,
+    // and never beside a compile — most of them measure timing in a real
+    // browser, and device-stage failed once (2 of its 15 checks, "533 desktop
+    // px off") while cargo compiled alongside, passing in three runs without.
     ...[
         ['e2e-ice-url', 'ice-url-real-browser.mjs'],
         ['e2e-h264-profile', 'h264-profile-real-browser.mjs'],
@@ -219,6 +220,7 @@ const GATES = [
         id, title: `e2e/${file.split(' ')[0]} (real browser, no server)`,
         inputs: ALL, ignoreVersion: true, fingerprint: ['node', 'fe-deps'],
         after: ['vitest'],
+        cpu: 'exclusive',
         steps: [{ run: `node e2e/${file}`, cwd: FE, lock: 'browser' }],
     })),
 ];
