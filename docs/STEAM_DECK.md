@@ -16,6 +16,9 @@ Everyone uses their own Púca account on their own Deck.
 
 - A Steam Deck, or another SteamOS device, that you can switch to Desktop Mode
   once for the install.
+- Decky Loader **3.2.8 or newer**. Older versions do not start on the current
+  Steam client, so no Decky plugin appears at all. Step 1 installs the current
+  version.
 - Your Púca account, and your Púca address: the one you open Púca at in a
   web browser, for example `chat.example.com`.
 - A Púca server running version **0.9.846 or newer**. The plugin tells you if
@@ -28,7 +31,9 @@ Everyone uses their own Púca account on their own Deck.
 ### 1. Install Decky Loader
 
 Skip this step if your Deck already has Decky. Check by pressing **···**:
-Decky shows a plug icon at the bottom of the list.
+Decky shows a plug icon at the bottom of the list. If you installed Decky
+before but the plug icon is missing, your Decky is too old for the current
+Steam: do this step again. Your plugins and their settings are kept.
 
 1. Press the **Steam** button, then **Power** → **Switch to Desktop**.
 2. Open a web browser, go to **decky.xyz**, and download the installer.
@@ -103,6 +108,7 @@ Press **···** → the plug icon → **Púca**.
 
 | You see | What to do |
 |---|---|
+| No plug icon under **···** | Decky Loader is missing, or older than 3.2.8 and unable to start on the current Steam. Do step 1 of the install again; your plugins and their settings are kept. |
 | **This Púca server needs an update** | Your server's Púca is older than 0.9.846. Ask whoever runs it to update. You can still open Púca from the panel. |
 | **Could not reach …** | Check the address under **Settings → Change Púca address**, and that the Deck is online. |
 | **Waiting for Game Mode** | The plugin runs in Game Mode only. Switch back to Game Mode. |
@@ -115,8 +121,8 @@ Press **···** → the plug icon → **Púca**.
 ## Installing for someone else, over SSH
 
 This is for whoever looks after the Decks. It is the same as step 3, done from
-a computer. It needs the Deck's `sudo` password, and Decky Loader already
-installed (steps 1 and 2 still happen on the Deck).
+a computer. It needs the Deck's `sudo` password, and Decky Loader 3.2.8 or
+newer already installed (steps 1 and 2 still happen on the Deck).
 
 ```bash
 scp puca-decky-<version>.zip deck@<deck-address>:/tmp/
