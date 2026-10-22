@@ -2443,6 +2443,23 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         </select>
                                     </div>
                                     <div className="settings-option">
+                                        <div className="option-info">
+                                            <label htmlFor="join-without-mic">Join voice without a microphone</label>
+                                            <span className="option-hint">
+                                                Join calls with no microphone at all: you hear everyone and can still
+                                                share your screen, nobody hears you, and others see that you have no
+                                                microphone. Takes effect the next time you join a call.
+                                            </span>
+                                        </div>
+                                        <input
+                                            id="join-without-mic"
+                                            type="checkbox"
+                                            data-testid="settings-join-without-mic"
+                                            checked={settings.joinWithoutMic}
+                                            onChange={(e) => updateSetting('joinWithoutMic', e.target.checked)}
+                                        />
+                                    </div>
+                                    <div className="settings-option">
                                         <label>Output Device</label>
                                         <select
                                             value={settings.outputDeviceId}

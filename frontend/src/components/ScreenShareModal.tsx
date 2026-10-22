@@ -298,7 +298,7 @@ const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, launch = 's
                             <button className="stream-btn-secondary" onClick={handleCancel} disabled={busy}>
                                 Cancel
                             </button>
-                            <button className="stream-btn-primary" onClick={handleMixerGoLive} disabled={busy}>
+                            <button className="stream-btn-primary" data-testid="share-go-live" onClick={handleMixerGoLive} disabled={busy}>
                                 {busy ? 'Starting…' : 'Go Live →'}
                             </button>
                         </div>
@@ -368,7 +368,7 @@ const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, launch = 's
                     <button className="stream-btn-secondary" onClick={handleCancel} disabled={busy}>
                         Cancel
                     </button>
-                    <button className="stream-btn-primary" onClick={handleSelectScreen} disabled={busy}>
+                    <button className="stream-btn-primary" data-testid="share-go-live" onClick={handleSelectScreen} disabled={busy}>
                         {busy ? 'Opening picker…' : 'Select Screen & Go Live →'}
                     </button>
                 </div>

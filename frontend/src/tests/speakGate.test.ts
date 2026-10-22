@@ -70,7 +70,9 @@ describe('SpeakGate', () => {
 
 describe('parseVoiceSpeakState', () => {
     it('reads the exact frame the server serialises (src/protocol.rs pins the same fixture)', () => {
-        expect(parseVoiceSpeakState(fixture)).toEqual({ room_id: 'voice_42', user_id: 7, can_speak: false });
+        // No `receives` key on the wire = receives (only a NO_RECEIVE member's
+        // frame carries one; streamOnlyMedia.test.ts parses that fixture).
+        expect(parseVoiceSpeakState(fixture)).toEqual({ room_id: 'voice_42', user_id: 7, can_speak: false, receives: true });
     });
 
     it('ignores anything else rather than guessing can_speak', () => {

@@ -509,10 +509,22 @@ pub enum ServerMessage {
     /// The byte shape is pinned by
     /// `frontend/src/tests/fixtures/voiceSpeakState.json`, which the client's
     /// tests parse too.
+    ///
+    /// `receives` (docs/STREAM_ONLY.md): false for a member whose roles carry
+    /// NO_RECEIVE. A cooperating client reading it for a PEER sends that peer
+    /// no audio or video (mesh: the peer's own client is the only place that
+    /// can withhold it); read for ITSELF, it receives nothing. Left OUT of the
+    /// frame when true, so the frame for everyone else is byte-identical to
+    /// the one before the field existed (an older client ignores the key
+    /// either way); `voiceSpeakStateNoReceive.json` pins the false shape. The
+    /// same delivery rules as `can_speak`: the join snapshot, the joiner's
+    /// frame to the room, and the perms-change sweep when either flips.
     VoiceSpeakState {
         room_id: String,
         user_id: UserId,
         can_speak: bool,
+        #[serde(skip_serializing_if = "crate::protocol::is_true")]
+        receives: bool,
     },
 
     /// Received a chat message
@@ -1115,6 +1127,11 @@ pub enum ClipOutcome {
     Closed,
 }
 
+/// serde skip predicate: leave a `true` flag off the wire.
+pub(crate) fn is_true(b: &bool) -> bool {
+    *b
+}
+
 #[cfg(test)]
 mod clip_frame_tests {
     use super::*;
@@ -1310,6 +1327,7 @@ mod voice_speak_state_tests {
             room_id: "voice_42".into(),
             user_id: 7,
             can_speak: false,
+            receives: true,
         })
         .unwrap();
         assert_eq!(ours, fixture);
@@ -1323,6 +1341,7 @@ mod voice_speak_state_tests {
             room_id: "voice_42".into(),
             user_id: 7,
             can_speak: true,
+            receives: true,
         })
         .unwrap();
         assert_ne!(flipped, fixture);
@@ -1332,10 +1351,36 @@ mod voice_speak_state_tests {
             room_id: "voice_42".into(),
             user_id: 2_147_483_647,
             can_speak: true,
+            receives: true,
         })
         .unwrap();
         let back: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(back["payload"]["user_id"].as_i64(), Some(2_147_483_647));
+    }
+
+    /// The no-receive shape: `receives: false` is on the wire, and ONLY then
+    /// (the fixture above has no `receives` key, and still equals a frame with
+    /// `receives: true`). Pinned to the second fixture the client parses.
+    #[test]
+    fn a_no_receive_member_is_flagged_and_only_then() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../frontend/src/tests/fixtures/voiceSpeakStateNoReceive.json"
+        ))
+        .expect("the fixture is JSON");
+        let ours = serde_json::to_value(ServerMessage::VoiceSpeakState {
+            room_id: "voice_42".into(),
+            user_id: 7,
+            can_speak: false,
+            receives: false,
+        })
+        .unwrap();
+        assert_eq!(ours, fixture);
+        assert_eq!(fixture["payload"]["receives"], false);
+        let plain: serde_json::Value = serde_json::from_str(include_str!(
+            "../frontend/src/tests/fixtures/voiceSpeakState.json"
+        ))
+        .unwrap();
+        assert!(plain["payload"].get("receives").is_none(), "receives: true must stay off the wire");
     }
 }
 

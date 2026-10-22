@@ -106,9 +106,25 @@ export class MediaManager {
     }
 
     /** True when we are in the call without a microphone (listen-only):
-     *  none could be opened, or SPEAK is denied here. */
+     *  none could be opened, SPEAK is denied here, or the member joined
+     *  without one on purpose. */
     isListenOnly(): boolean {
-        return this.noMic || this.speakDenied;
+        return this.noMic || this.speakDenied || this.micOffByChoice;
+    }
+
+    /** "Join voice without a microphone" (Settings, Voice & Video; and every
+     *  stream-only account: docs/STREAM_ONLY.md): for the call being joined,
+     *  the mic is never asked for - no prompt, no capture, no track - exactly
+     *  like a SPEAK deny, but the member's own choice, so nothing reports it
+     *  as a missing device or a missing permission. */
+    private micOffByChoice = false;
+
+    setMicOffByChoice(off: boolean): void {
+        this.micOffByChoice = off;
+    }
+
+    isMicOffByChoice(): boolean {
+        return this.micOffByChoice;
     }
 
     /** Mark SPEAK denied (or allowed) for the call being joined. While denied,
@@ -311,7 +327,7 @@ export class MediaManager {
         }
         // No SPEAK here: never open the mic, not even to throw it away. A
         // valid (empty) handle still lets the call and the camera path work.
-        if (audio && this.speakDenied) {
+        if (audio && (this.speakDenied || this.micOffByChoice)) {
             audio = false;
             if (!video) {
                 this.localStream = new MediaStream();
@@ -416,6 +432,7 @@ export class MediaManager {
         // a headset in since). SPEAK is re-decided by the next join too.
         this.noMic = false;
         this.speakDenied = false;
+        this.micOffByChoice = false;
         // Also tear down the 'high'-mode Web Audio graph + its raw mic track.
         cleanupNoiseFilter();
     }
@@ -446,6 +463,8 @@ export class MediaManager {
         // SPEAK denied: every re-acquire path (noise mode, device watchdog,
         // settings) ends here, and none of them may open a mic.
         if (this.speakDenied) return null;
+        // Joined without a microphone on purpose: no path opens one either.
+        if (this.micOffByChoice) return null;
         const oldAudio = this.localStream.getAudioTracks()[0] ?? null;
         const wasEnabled = oldAudio?.enabled ?? true;
         // The capture open NOW, for keepOldOnFailure: still live after a

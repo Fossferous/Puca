@@ -338,6 +338,17 @@ export function micPublishAllowed(
 }
 
 /**
+ * May this grant subscribe to anything? False for a NO_RECEIVE member
+ * (docs/STREAM_ONLY.md), whose join token says canSubscribe: false and whom
+ * LiveKit forwards nothing; their client then asks for nothing either. An
+ * absent grant (not joined yet) or field reads as allowed, as LiveKit's own
+ * default is.
+ */
+export function subscribeAllowed(perms: { canSubscribe?: boolean } | undefined | null): boolean {
+    return perms?.canSubscribe !== false;
+}
+
+/**
  * Keep the mute / push-to-talk gate shut while livekit-client publishes a
  * microphone track. Returns the release.
  *
@@ -1216,6 +1227,8 @@ export class SfuManager {
      */
     private syncSubscriptions(): void {
         if (!this.room) return;
+        // NO RECEIVE: the grant itself says so (and LiveKit enforces it).
+        const receives = subscribeAllowed(this.room.localParticipant.permissions);
         for (const participant of this.room.remoteParticipants.values()) {
             const uid = userIdFromIdentity(participant.identity);
             if (uid === null || uid === this.localUserId) continue;
@@ -1223,12 +1236,12 @@ export class SfuManager {
             // a fresh worker ack (cryptorEnabled → true) re-admits.
             if (this.cryptorEnabled.get(participant.identity) === false) continue;
             for (const pub of participant.trackPublications.values()) {
-                const wanted =
+                const wanted = receives && (
                     pub.source === Track.Source.Microphone ||
                     pub.source === Track.Source.Camera ||
                     ((pub.source === Track.Source.ScreenShare ||
                         pub.source === Track.Source.ScreenShareAudio) &&
-                        this.watchedVideo.has(uid));
+                        this.watchedVideo.has(uid)));
                 try {
                     // Unconditional: setSubscribed sets DESIRED state while
                     // isSubscribed reports ACTUAL (track present). Gating on
@@ -1694,6 +1707,8 @@ export class SfuManager {
             .on(RoomEvent.TrackPublished, () => this.syncSubscriptions())
             .on(RoomEvent.ParticipantConnected, () => this.syncSubscriptions())
             .on(RoomEvent.Reconnected, () => this.syncSubscriptions())
+            // The perms sweep can flip NO_RECEIVE mid-call (UpdateParticipant).
+            .on(RoomEvent.ParticipantPermissionsChanged, () => this.syncSubscriptions())
             // Who can hear us (dfPause.ts). ConnectionStateChanged covers the
             // connect, every reconnect and the drop.
             .on(RoomEvent.ParticipantConnected, () => this.participantsChanged())

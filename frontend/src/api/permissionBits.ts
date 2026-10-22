@@ -41,7 +41,25 @@ export const PERM = {
     // nothing. Closing a table or removing a player is MOVE_MEMBERS.
     // Backend: permissions.rs PLAY_GAMES.
     PLAY_GAMES: 1 << 28,
+    // RESTRICTING bits (docs/STREAM_ONLY.md): they take rights away, so never
+    // ask hasPerm() about them (an ADMINISTRATOR "has" every bit) - use
+    // isRestricted(). STREAM_ONLY caps a member to seeing, joining and
+    // streaming in the voice channels opened for their role; NO_RECEIVE means
+    // nobody's audio or video is sent to them. Server-scoped, owner/admin only.
+    // Backend: permissions.rs STREAM_ONLY / NO_RECEIVE.
+    STREAM_ONLY: 1 << 29,
+    NO_RECEIVE: 1 << 30,
 } as const;
+
+/**
+ * Does an effective-permission bitset carry a RESTRICTING flag (STREAM_ONLY,
+ * NO_RECEIVE)? False for an ADMINISTRATOR, whom the server never restricts,
+ * and for missing bits (an older server never sends them).
+ */
+export function isRestricted(bits: number | null | undefined, flag: number): boolean {
+    if (bits === null || bits === undefined) return false;
+    return (bits & PERM.ADMINISTRATOR) === 0 && (bits & flag) !== 0;
+}
 
 /**
  * Check an effective-permission bitset for a flag.
@@ -94,4 +112,7 @@ export const PERMISSIONS = {
     CREATE_INVITE: 1 << 27,
     // Games (voice; overwritable per channel)
     PLAY_GAMES: 1 << 28,
+    // Automated streaming accounts (restricting; server-scoped, owner/admin only)
+    STREAM_ONLY: 1 << 29,
+    NO_RECEIVE: 1 << 30,
 } as const;

@@ -346,6 +346,9 @@ export function ServerList({
                     <div
                         key={server.id}
                         className={`server-icon ${currentServerId === server.id && !showingFriends ? 'active' : ''} ${draggingServerId === server.id ? 'dragging' : ''} ${isServerMuted(server.id) ? 'muted' : ''}`}
+                        // Automation contract (docs/AUTOMATION.md): select a server.
+                        data-testid="server-icon"
+                        data-server-id={server.id}
                         onClick={() => { if (!suppressClickRef.current) onSelectServer(server); }}
                         onContextMenu={(e) => handleContextMenu(e, server)}
                         title={server.name}

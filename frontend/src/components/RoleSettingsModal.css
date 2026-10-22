@@ -544,3 +544,18 @@
     flex: 1;
     min-height: 0;
 }
+
+/* Two create buttons (+ Create Role, + Stream Only Role) stack without a
+   doubled gap between them. */
+.create-role-btn + .create-role-btn {
+    margin-top: 0;
+}
+
+/* Automated Streaming (StreamOnlyRoleSection.tsx). */
+.stream-only-section .role-hint {
+    margin: 0 0 8px;
+}
+
+.stream-only-channels {
+    margin-top: 12px;
+}

@@ -39,13 +39,36 @@ impl RoleAuthority {
     /// Mask a requested permission bitmask down to the bits the actor actually
     /// holds (no-op when privileged) so a MANAGE_ROLES holder can't grant bits
     /// they lack (e.g. ADMINISTRATOR).
+    ///
+    /// The restricting bits (STREAM_ONLY, NO_RECEIVE: docs/STREAM_ONLY.md) are
+    /// the owner's and administrators' alone, even for an actor who carries
+    /// one: they decide whose keys and whose media an account receives.
     fn mask_permissions(&self, requested: i64) -> i64 {
         if self.is_privileged() {
             requested
         } else {
-            ((requested as u64) & self.perms.bits()) as i64
+            ((requested as u64) & self.perms.bits() & !Permissions::RESTRICTING.bits()) as i64
         }
     }
+
+    /// The permissions an edit leaves a role with: the request masked as
+    /// above, except that a non-privileged editor neither adds nor REMOVES a
+    /// restricting bit - the role keeps whichever it had. Without that, a
+    /// manager recolouring a stream-only role (the editor sends the whole
+    /// mask) would silently lift the cap.
+    fn edited_permissions(&self, requested: i64, existing: i64) -> i64 {
+        if self.is_privileged() {
+            requested
+        } else {
+            self.mask_permissions(requested) | (existing & Permissions::RESTRICTING.bits() as i64)
+        }
+    }
+}
+
+/// A restricting bit on @everyone would cap (or deafen) every member at once,
+/// owner aside: refused for every editor. Pure, for the tests.
+fn restricting_on_default(is_default: bool, requested: i64) -> bool {
+    is_default && (requested as u64) & Permissions::RESTRICTING.bits() != 0
 }
 
 /// Resolve the acting user's role authority in `server_id`.
@@ -316,18 +339,25 @@ pub async fn update_role(
     }
 
     // Load the target role (scoped to this server) to enforce hierarchy.
-    let target: Option<(bool, i32)> = sqlx::query_as(
-        "SELECT is_default, position FROM server_roles WHERE id = $1 AND server_id = $2",
+    let target: Option<(bool, i32, i64)> = sqlx::query_as(
+        "SELECT is_default, position, permissions FROM server_roles WHERE id = $1 AND server_id = $2",
     )
     .bind(role_id)
     .bind(&server_id)
     .fetch_optional(&state.pool)
     .await
     .unwrap_or(None);
-    let (target_is_default, target_position) = match target {
+    let (target_is_default, target_position, existing_permissions) = match target {
         Some(t) => t,
         None => return (StatusCode::NOT_FOUND, "Role not found").into_response(),
     };
+    if payload.permissions.is_some_and(|p| restricting_on_default(target_is_default, p)) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Stream only and No receive cannot be set on @everyone",
+        )
+            .into_response();
+    }
 
     // Hierarchy guard (H1/M11): non-owner, non-admin editors are bounded.
     let authority = get_role_authority(&state.pool, &server_id, claims.sub).await;
@@ -385,7 +415,7 @@ pub async fn update_role(
             qb.push(", ");
         }
         qb.push("permissions = ")
-            .push_bind(authority.mask_permissions(perms));
+            .push_bind(authority.edited_permissions(perms, existing_permissions));
         any = true;
     }
     if let Some(pos) = payload.position {
@@ -905,6 +935,36 @@ mod tests {
         // ADMINISTRATOR holder: no masking.
         let admin = authority(false, Permissions::ADMINISTRATOR, 10);
         assert_eq!(admin.mask_permissions(requested), requested);
+    }
+
+    #[test]
+    fn restricting_bits_are_the_owners_and_admins_alone() {
+        let so = (Permissions::STREAM_ONLY | Permissions::STREAM).bits() as i64;
+        let nr = Permissions::NO_RECEIVE.bits() as i64;
+        // A manager who even CARRIES no-receive cannot hand it out...
+        let manager = authority(false, Permissions::MANAGE_ROLES | Permissions::STREAM | Permissions::NO_RECEIVE, 5);
+        assert_eq!(manager.mask_permissions(so | nr), Permissions::STREAM.bits() as i64);
+        // ...nor lift it from a role that has it: an edit of a stream-only role
+        // that drops the bit (the editor sends the whole mask) keeps it.
+        let edited = manager.edited_permissions(Permissions::STREAM.bits() as i64, so);
+        assert_eq!(edited, so, "a non-privileged edit must not lift the cap");
+        // ...nor add one to a role that lacks it.
+        assert_eq!(manager.edited_permissions(so, 0), Permissions::STREAM.bits() as i64);
+        // NEGATIVE CONTROL: the owner and an administrator set and clear them.
+        for privileged in [authority(true, Permissions::empty(), 0), authority(false, Permissions::ADMINISTRATOR, 10)] {
+            assert_eq!(privileged.mask_permissions(so | nr), so | nr);
+            assert_eq!(privileged.edited_permissions(0, so | nr), 0);
+        }
+    }
+
+    #[test]
+    fn restricting_bits_are_refused_on_everyone() {
+        let so = Permissions::STREAM_ONLY.bits() as i64;
+        let nr = Permissions::NO_RECEIVE.bits() as i64;
+        assert!(restricting_on_default(true, so));
+        assert!(restricting_on_default(true, nr | Permissions::DEFAULT_MEMBER.bits() as i64));
+        assert!(!restricting_on_default(false, so), "an ordinary role may carry it");
+        assert!(!restricting_on_default(true, Permissions::DEFAULT_MEMBER.bits() as i64), "negative control");
     }
 
     #[test]

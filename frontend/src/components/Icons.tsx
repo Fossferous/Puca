@@ -344,6 +344,16 @@ export const MicOffIcon = makeIcon('MicOffIcon', <>
     <path d="m3.5 3.5 17 17" />
 </>);
 
+/** In the call with NO microphone at all (none could be opened, no permission
+ *  to speak, or joined without one on purpose) - not muted: there is nothing
+ *  to unmute. The capsule is drawn dashed, as absent; no negation slash, which
+ *  is MicOffIcon's (muted). */
+export const NoMicIcon = makeIcon('NoMicIcon', <>
+    <rect x="9" y="2.75" width="6" height="11.5" rx="3" strokeDasharray="2.25 2.25" />
+    <path d="M5.5 11.25v1a6.5 6.5 0 0 0 13 0v-1" />
+    <path d="M12 18.75v2.5" />
+</>);
+
 export const HeadphonesIcon = makeIcon('HeadphonesIcon', <>
     <path d="M3.5 17.5v-5.25a8.5 8.5 0 0 1 17 0v5.25" />
     <path d="M20.5 18.25a2 2 0 0 1-2 2h-.75a1.75 1.75 0 0 1-1.75-1.75v-2.75a1.75 1.75 0 0 1 1.75-1.75h2.75Z" />
@@ -1277,6 +1287,7 @@ export const ICONS = {
     // audio / voice
     mic: MicIcon,
     'mic-off': MicOffIcon,
+    'no-mic': NoMicIcon,
     headphones: HeadphonesIcon,
     'headphones-off': HeadphonesOffIcon,
     speaker: SpeakerIcon,

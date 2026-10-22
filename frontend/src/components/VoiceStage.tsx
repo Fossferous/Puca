@@ -10,7 +10,7 @@ import {
     subscribeToSpeaking,
 } from './voiceState';
 import { SmartAvatar } from './SmartAvatar';
-import { MicOffIcon, HeadphonesOffIcon, SpeakerIcon, UserAddIcon, PlayIcon, CameraIcon, LockOpenIcon, ClipIcon, FullscreenIcon } from './Icons';
+import { MicOffIcon, NoMicIcon, HeadphonesOffIcon, SpeakerIcon, UserAddIcon, PlayIcon, CameraIcon, LockOpenIcon, ClipIcon, FullscreenIcon } from './Icons';
 import { ActivityTile, type ActivityTileProps } from './games/ActivityTile';
 import { mediaE2eeExplanation } from '../api/rtc/e2eeStatus';
 import './VoiceStage.css';
@@ -172,7 +172,9 @@ export function VoiceStage({
                                 )}
                                 <div className="vs-name-chip">
                                     {user.isBuffering && <span title="Clip buffer on" aria-label="Clip buffer on"><ClipIcon size={14} className="vs-chip-icon buffering" /></span>}
-                                    {user.isMuted && <MicOffIcon size={14} className="vs-chip-icon muted" />}
+                                    {user.noMic
+                                        ? <span title="No microphone" aria-label="No microphone"><NoMicIcon size={14} className="vs-chip-icon muted" /></span>
+                                        : user.isMuted && <MicOffIcon size={14} className="vs-chip-icon muted" />}
                                     {user.isDeafened && <HeadphonesOffIcon size={14} className="vs-chip-icon muted" />}
                                     <span className="vs-chip-name">
                                         {name}{user.id === currentUserId ? ' (you)' : ''}
