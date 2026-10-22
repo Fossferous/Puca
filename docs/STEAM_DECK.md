@@ -80,7 +80,8 @@ Press **···** → the plug icon → **Púca**.
 - **Push to talk.** In the panel's **Settings**, set **Push to talk** to a back
   button. Hold it to talk, in games too. Set it back to **Off** and Púca listens
   for your voice again. Some games use the back buttons too: pick one your game
-  does not.
+  does not. It works with the Deck's own back buttons, not with a controller
+  you plug in.
 - **Messages.** Choose **Open Púca (messages)** to show the whole app. Tap
   where you want to type and the keyboard appears. Press **B** to go back to
   your game. A call keeps going while the app is hidden.
@@ -96,6 +97,10 @@ Press **···** → the plug icon → **Púca**.
   microphone, so the plugin opens it in Steam and hands it to Púca inside the
   Deck. Púca encrypts your voice before it leaves the Deck, exactly as it does
   on a computer.
+- **Push to talk reads the Deck's button itself.** Steam does not tell plugins
+  about the back buttons. So the plugin reads the one you picked straight from
+  the Deck's controller, on the Deck, and only while you are in a call. Nothing
+  about your controller leaves the Deck.
 - **Nothing is opened to your network.** The plugin talks to Steam through a
   connection that exists only inside the Deck. Decky Loader turns that
   connection on, and the plugin needs nothing else.
@@ -113,6 +118,7 @@ Press **···** → the plug icon → **Púca**.
 | **Could not reach …** | Check the address under **Settings → Change Púca address**, and that the Deck is online. |
 | **Waiting for Game Mode** | The plugin runs in Game Mode only. Switch back to Game Mode. |
 | Nobody hears you | Check that **Push to talk** is set the way you want, and that the call does not say **Muted**. In Steam's **Settings → Audio**, check the microphone. |
+| Push to talk does nothing | While you are in a call, the line under **Push to talk** in the panel's **Settings** says if the plugin cannot read the Deck's controller. It works with the Deck's own back buttons, not with a controller you plug in. |
 | Asked to sign in again | Steam sometimes clears the data of web pages it hosts. Sign in again, with **Stay signed in** ticked. |
 | Anything else | **Settings → Reload Púca** in the panel starts Púca again. |
 
