@@ -89,6 +89,20 @@
 // Call audio on the frozen 6 Mbps link: one interval concealed 69%; with the
 // ladder at most 4%.
 //
+// The same day with the SHARER's upload squeezed (SHAPE=sharer, and GATE=0:
+// a GATE=1 sharer reaches LiveKit around the shaper, queue 0 ms, which
+// measured nothing), 10 Mbps 1080p60, one viewer on a free link:
+//
+//   sharer upload   one layer (Púca's picker)      Automatic ladder
+//   4 Mbps          720p @ 58, viewer ~3.0 Mbps     top rung paused; 720p rung @ 57, ~2.4 Mbps
+//   8 Mbps          1080p @ 57, viewer ~5.3 Mbps    1080p @ 57 but ~3.3 Mbps: the lower rungs
+//                                                   take ~2.5 Mbps of the upload
+//
+// LiveKit keeps every rung up to the highest one watched turned on, so on an
+// upload that cannot carry the extra rungs they come out of the full
+// picture's bits: same size and frame rate, coarser in fast motion. Never is
+// the setting for that sharer.
+//
 // The viewer runs in a separate browser from a GATE=1 sharer: the fake-media
 // flags stop the browser hiding host IPs behind mDNS, in every page, and a
 // viewer with real host candidates reaches LiveKit around the shaper (the

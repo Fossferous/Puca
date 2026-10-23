@@ -486,8 +486,12 @@ Send my screen at several sizes**:
 - **Never**: one size. For when your game stutters while you share.
 
 Changing it while you share applies to that share at once. The extra sizes
-add about 1.5-2.5 Mbps to your upload. A viewer on a slow connection may
-start on 360p and move up to the middle size within about half a minute.
+add about 1.5-2.5 Mbps to your upload; if your upload is already the limit,
+that comes out of the full-size picture, which stays as large and as smooth
+but less detailed in fast motion, so on a slow upload **Never** keeps the
+most detail for the viewers who can take it. A viewer on a slow connection
+may start on 360p and move up to the middle size within about half a
+minute.
 Someone watching one or two streams gets the full picture whenever their
 connection carries it.
 

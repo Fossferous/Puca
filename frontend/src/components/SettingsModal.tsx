@@ -2825,7 +2825,8 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                         60 fps and up), and goes back to one size if the encoding
                                                         turns out to be in software. Choose Always if someone
                                                         watching you keeps freezing and you have CPU to spare, or
-                                                        Never if your game stutters while you share. A change
+                                                        Never if your game stutters while you share or your upload
+                                                        is slow (the extra sizes take about 2.5 Mbps of it). A change
                                                         applies at once to a stream you are already sharing (its
                                                         viewers may see the picture hold for a second).
                                                     </span>
