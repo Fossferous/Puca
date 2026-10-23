@@ -13,10 +13,11 @@
  */
 import { invoke } from '@tauri-apps/api/core';
 import type {
-    HostBackend, HostCapabilities, HostTransport, MonitorInfo, StartSessionOptions,
+    HostBackend, HostCapabilities, HostSessionStatus, HostTransport, MonitorInfo, StartSessionOptions,
 } from './hostBackend';
 import { shellPowerAction } from './hostBackend';
 import { NO_SCREEN_LID_REASON } from './noScreen';
+import { blockedAppName } from './inputReach';
 
 /** One output as `list_monitors` describes it. */
 interface AgentMonitor {
@@ -55,6 +56,13 @@ interface AgentReply {
     /** `session_state`: why that agent's stream ended, when the host must not
      *  answer it with a restart ('no_frame': the display never produced one). */
     stream_end?: string;
+    /** `session_state`: the program (`valheim.exe`) whose window would get
+     *  this session's input and that runs above the agent (as administrator),
+     *  so Windows drops that input silently. Absent when input lands. */
+    input_blocked?: string;
+    /** `session_state`: a program hid AND confined the pointer — a game in
+     *  mouse-look, which only relative moves (Game mode) steer. */
+    pointer_captured?: boolean;
     /** `prepare_screen`: 'ready' | 'waking' | 'starting' | 'off'. */
     state?: string;
     /** `prepare_screen`, with 'off' only: the DeviceEnd code the phone names
@@ -511,10 +519,15 @@ export function agentHostBackend(): HostBackend {
          *  media), so "could not ask" can never read as "the stream is gone" —
          *  the catch arm below carries no streamLive at all. `streamEnd` is
          *  the agent's reason the host must stay silent ('no_frame'), passed
-         *  through only when it is a string. */
+         *  through only when it is a string.
+         *
+         *  `inputBlocked` / `pointerCaptured`: whether this session's input
+         *  can land at all (the agent's input_reach.rs). Absent on an older
+         *  agent, which reads as "lands" — exactly what every build assumed
+         *  before the agent could tell. */
         async sessionStatus(
             sessionId: string,
-        ): Promise<{ secureDesktop: boolean; cursorClipped: boolean; streamLive?: boolean; streamEnd?: string }> {
+        ): Promise<HostSessionStatus> {
             try {
                 const reply = await request({ cmd: 'session_status', session_id: sessionId });
                 // `=== true`, not truthiness — a malformed reply must not be
@@ -526,6 +539,10 @@ export function agentHostBackend(): HostBackend {
                     cursorClipped: reply.cursor_clipped === true,
                     streamLive: typeof reply.stream_live === 'boolean' ? reply.stream_live : undefined,
                     streamEnd: typeof reply.stream_end === 'string' ? reply.stream_end : undefined,
+                    // Present only when the agent said so: absent is the old
+                    // agent and the ordinary case alike, both "input lands".
+                    inputBlocked: blockedAppName(reply.input_blocked) ?? undefined,
+                    pointerCaptured: reply.pointer_captured === true ? true : undefined,
                 };
             } catch {
                 return { secureDesktop: false, cursorClipped: false };

@@ -8,7 +8,7 @@
  * element and screen coordinates are NOT element coordinates.
  */
 import { describe, it, expect } from 'vitest';
-import { normalizedOverVideo } from '../api/devices/pointerMapping';
+import { normalizedOverVideo, wheelDy, WHEEL_NOTCH } from '../api/devices/pointerMapping';
 
 /** A video element with a fixed layout box and intrinsic size. */
 function fakeVideo(opts: {
@@ -114,5 +114,49 @@ describe('remote pointer mapping', () => {
             videoWidth: 1920, videoHeight: 1080,
         });
         expect(normalizedOverVideo(v, 0, 0)).toBeNull();
+    });
+});
+
+/**
+ * Which way, and how far, a wheel notch scrolls the remote machine.
+ *
+ * The DOM's deltaY is positive scrolling DOWN; the host's `wheel.dy` is
+ * positive scrolling UP (Windows MOUSEEVENTF_WHEEL, X11 buttons 4/5). The My
+ * Devices desktop stage sent deltaY unchanged from its first commit, so every
+ * scroll went the wrong way.
+ */
+describe('wheelDy', () => {
+    const px = (deltaY: number, extra: Partial<{ deltaX: number; shiftKey: boolean }> = {}) =>
+        wheelDy({ deltaX: 0, deltaY, deltaMode: 0, ...extra });
+
+    it('one notch DOWN (deltaY +100 in Chromium) is one notch down on the host: -120', () => {
+        expect(px(100)).toBe(-WHEEL_NOTCH);
+    });
+
+    it('one notch UP is +120, two notches +240', () => {
+        expect(px(-100)).toBe(WHEEL_NOTCH);
+        expect(px(-200)).toBe(2 * WHEEL_NOTCH);
+    });
+
+    it('line mode counts three lines a notch; page mode a page as three notches', () => {
+        expect(wheelDy({ deltaX: 0, deltaY: 3, deltaMode: 1 })).toBe(-WHEEL_NOTCH);
+        expect(wheelDy({ deltaX: 0, deltaY: -1, deltaMode: 2 })).toBe(3 * WHEEL_NOTCH);
+    });
+
+    it('a tiny touchpad delta still moves, the right way', () => {
+        expect(px(0.2)).toBe(-1);
+        expect(px(-0.2)).toBe(1);
+    });
+
+    it('Shift+wheel (Chromium turns it sideways) goes out as a notch the remote turns sideways itself', () => {
+        expect(px(0, { deltaX: 100, shiftKey: true })).toBe(-WHEEL_NOTCH);
+        // Sideways without Shift has no wire form: nothing, rather than a
+        // vertical scroll nobody asked for.
+        expect(px(0, { deltaX: 100 })).toBe(0);
+    });
+
+    it('nothing, or garbage, is nothing', () => {
+        expect(px(0)).toBe(0);
+        expect(px(Number.NaN)).toBe(0);
     });
 });

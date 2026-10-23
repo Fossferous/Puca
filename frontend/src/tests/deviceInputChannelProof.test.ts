@@ -481,6 +481,29 @@ describe('what the direct channel must NOT carry', () => {
         expect(onRelay()).toHaveLength(1);
     });
 
+    it('a LATENCY PROBE takes the channel but never tells the host somebody is driving', async () => {
+        // A probe goes out once a second whenever a desktop stage is open.
+        // Read as activity, it held an unattended session open past its
+        // 30-minute idle revoke for anyone who left the stage on a screen and
+        // walked away.
+        const { sendInput, sendLatencyProbe } = await import('../api/devices/session');
+        const id = await controllerSession();
+        await armed(id);
+        const aliveSignals = () => sent.filter(m => m.type === 'DeviceSignal' && JSON.stringify(m.payload).includes('input-alive'));
+
+        expect(sendLatencyProbe(id), 'a probe can go: the channel is armed').toBe(true);
+        await settle();
+        expect(onChannel(), 'the probe rode the channel').toHaveLength(1);
+        expect(onChannel()[0]).toContain('probe');
+        expect(aliveSignals(), 'and said nothing to the host').toEqual([]);
+
+        // POSITIVE CONTROL: real input on the same session does say so — the
+        // probe did not spend the once-a-minute signal either.
+        sendInput(id, { t: 'down', button: 0 });
+        await settle();
+        expect(aliveSignals()).toHaveLength(1);
+    });
+
     it('POSITIVE CONTROL: ordinary input on the same armed session takes the channel', async () => {
         // Without this the two tests above would pass against a session that
         // never armed at all.
@@ -493,5 +516,31 @@ describe('what the direct channel must NOT carry', () => {
 
         expect(onChannel()).toHaveLength(1);
         expect(onRelay()).toEqual([]);
+    });
+});
+
+describe("the stage's diagnostics reading", () => {
+    it('a getStats that never answers costs that session its numbers, never the reading', async () => {
+        // The stage hands in diagnosticsReport's withTimeout; this stand-in
+        // gives up the same way, in milliseconds. Without the bound reaching
+        // every getStats, the reading never comes back and this test times out.
+        const { deviceDiagnosticsWindow } = await import('../api/devices/session');
+        const id = await controllerSession();
+        const proto = StubPc.prototype as unknown as { getStats?: () => Promise<unknown> };
+        proto.getStats = () => new Promise(() => { /* never */ });
+        const bound = <T,>(step: Promise<T>, label: string) => new Promise<T>((resolve, reject) => {
+            const t = setTimeout(() => reject(new Error(`${label} gave no answer within 0 s`)), 30);
+            step.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
+        });
+        try {
+            const rows = await deviceDiagnosticsWindow(20, bound);
+            const row = rows.find(r => r.id === id);
+            expect(row, 'the session still has its row').toBeTruthy();
+            expect(row!.stats).toBe('unavailable');
+            expect(String(row!.statsError)).toContain('the picture statistics gave no answer');
+            expect(row, 'and no window numbers it could not measure').not.toHaveProperty('windowSeconds');
+        } finally {
+            delete proto.getStats;
+        }
     });
 });

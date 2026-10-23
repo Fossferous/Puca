@@ -42,6 +42,15 @@ mod file_transfer;
 mod input_wire;
 // Per-lane input counts for the log; ungated so every CI leg tests it.
 mod input_tally;
+// Whether the window that would receive input is above this agent (UIPI).
+mod input_reach;
+// Capturing soon after an input, and the latency probe. Its only caller is
+// the Windows stream loop; tests compile it everywhere.
+#[cfg(any(windows, test))]
+mod latency;
+// The host's pointer shape, for a viewer that draws the pointer itself.
+#[cfg(any(windows, test))]
+mod pointer_shape;
 mod file_log;
 
 #[cfg(windows)]

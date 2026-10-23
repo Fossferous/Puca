@@ -814,6 +814,10 @@ pub struct Agent {
     /// for days and nothing else ever removes an entry.
     #[cfg(windows)]
     ended_without_frame: std::collections::VecDeque<String>,
+    /// What `SessionStatus` last found about whether this agent's input can
+    /// reach the window in front (`input_reach`), so the log says it once
+    /// per change rather than once per poll.
+    reach_log: crate::input_reach::ReachLog,
 }
 
 /// How many `ended_without_frame` ids an agent remembers. Only the ids of
@@ -867,6 +871,7 @@ impl Agent {
             secure_desktop_up: std::collections::HashSet::new(),
             #[cfg(windows)]
             ended_without_frame: std::collections::VecDeque::new(),
+            reach_log: crate::input_reach::ReachLog::default(),
         }
     }
 
@@ -1714,7 +1719,33 @@ impl Agent {
                 };
                 #[cfg(not(windows))]
                 let (stream_live, stream_end) = (None, None);
-                Response::SessionState { secure_desktop, cursor_clipped, stream_live, stream_end }
+                // CAN THIS SESSION'S INPUT LAND AT ALL? A window above this
+                // agent's integrity level (an elevated game, Task Manager)
+                // silently swallows every injected event (input_reach.rs), and
+                // a game in mouse-look swallows absolute moves. Asked only for a
+                // session with a screen — a data-only stream has no input — and
+                // never by a SYSTEM agent, which sits above every application.
+                // The log line is written on CHANGE only, whichever session's
+                // poll sees it first: the answer is about the console, not the
+                // session.
+                let watched = self.sessions.contains_key(&session_id) && !self.flavour.is_elevated();
+                let blocked = if watched { crate::input_reach::probe() } else { None };
+                if watched {
+                    let own = crate::input_reach::own_level().unwrap_or(crate::input_reach::IL_MEDIUM);
+                    if let Some(line) = self.reach_log.observe(blocked.as_ref(), own) {
+                        eprintln!("{line}");
+                    }
+                }
+                let input_blocked = blocked.map(|b| b.app);
+                let pointer_captured = watched && crate::input_reach::pointer_captured();
+                Response::SessionState {
+                    secure_desktop,
+                    cursor_clipped,
+                    stream_live,
+                    stream_end,
+                    input_blocked,
+                    pointer_captured,
+                }
             }
 
             #[cfg(not(windows))]

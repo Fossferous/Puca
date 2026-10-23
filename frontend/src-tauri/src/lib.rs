@@ -544,6 +544,27 @@ fn log_stream_diag(line: String) {
     log::info!("[stream-diag] {line}");
 }
 
+/// Whether the main window is fullscreen because the remote-control stage
+/// asked (`stage_fullscreen`), so a page load can undo exactly that.
+#[cfg(feature = "remote-control")]
+static STAGE_FULLSCREEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Real fullscreen for the remote-control stage: the WINDOW, over the taskbar.
+///
+/// The Fullscreen API inside WebView2 fills the app's window, not the monitor
+/// (elementFullscreen.ts), which is the right call for a video player and not
+/// for driving another computer, where the local taskbar is in the way. Only
+/// the stage asks, and leaving is the stage's job; a page load (a reload, any
+/// navigation) undoes it in `on_page_load` below, so a page that went away
+/// cannot strand the app fullscreen with nothing on screen to leave it.
+#[cfg(feature = "remote-control")]
+#[tauri::command]
+fn stage_fullscreen(app: tauri::AppHandle, on: bool) -> Result<(), String> {
+    let window = app.get_webview_window("main").ok_or("there is no main window")?;
+    STAGE_FULLSCREEN.store(on, std::sync::atomic::Ordering::SeqCst);
+    window.set_fullscreen(on).map_err(|e| e.to_string())
+}
+
 /// Is Puca set to start with the OS?
 #[tauri::command]
 fn autostart_enabled(app: tauri::AppHandle) -> Result<bool, String> {
@@ -1409,6 +1430,12 @@ pub fn run() {
                     .on_page_load(move |_webview, payload| {
                         if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
                             popout::close_all(&reloader);
+                            // The stage that made the window fullscreen is gone
+                            // with the page; leave it, or nothing on screen can.
+                            #[cfg(feature = "remote-control")]
+                            if STAGE_FULLSCREEN.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                                let _ = _webview.set_fullscreen(false);
+                            }
                         }
                     })
                     .build()?;
@@ -1676,6 +1703,8 @@ pub fn run() {
             inject_input,
             #[cfg(feature = "remote-control")]
             inject_input_batch,
+            #[cfg(feature = "remote-control")]
+            stage_fullscreen,
             device_key_ensure,
             device_key_sign,
             ua_seed_protect,

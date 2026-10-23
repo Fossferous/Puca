@@ -106,6 +106,34 @@ cross, so nobody ships or markets it beyond what it actually guarantees.
   around it would be software rather than the OS's own ceiling. What ships instead
   is honesty: the viewer is told a Windows security screen is up, rather than
   being left looking at a frozen picture.
+- **An elevated window swallows My Devices input, and the viewer is told.**
+  The same UIPI rule applies to the My Devices agent the desktop app starts
+  (`crates/puca-agent`, medium integrity): a window whose program runs as
+  administrator — a game started by an elevated launcher, Task Manager on an
+  administrator account, an installer — silently drops every injected click
+  and key while the picture keeps updating. Windows says nothing: `SendInput`
+  answers as if it worked (Microsoft's documentation: neither the return value
+  nor `GetLastError` reveals a UIPI block), so the agent's own input tallies
+  read `failed=0`. The agent now asks, on the 1 Hz status poll, whether the
+  window in front (keys) or the one under the pointer (clicks) belongs to a
+  process above it (`crates/puca-agent/src/input_reach.rs`: the process's
+  integrity level, or a token it cannot even open), logs each change once
+  (`[input] Windows is dropping this agent's input to valheim.exe …`), and the
+  host relays the program's file name to the viewer (`input-blocked`), which
+  shows a banner naming it and what to do: close it, or start it again without
+  administrator rights. Found on 2026-10-23: a scheduled task started Steam
+  with highest privileges, so every game it launched was elevated. The
+  sign-in-screen (SYSTEM) agent sits above every application and never
+  reports it. Controlling an elevated window from an ordinary session is still
+  out of scope (see the bridge paragraph above for why the SYSTEM service
+  stays absent during an ordinary session).
+- **A game holding the pointer for mouse-look.** A game that hides the
+  pointer AND confines it (`ClipCursor`) re-centres it every frame and reads
+  raw motion, so absolute moves cannot turn its camera. The agent reports that
+  pair (`pointer_captured`; either alone is ordinary — a video player hides
+  the pointer, a windowed game confines it in its menus) and the desktop viewer
+  offers **Use Game mode**: relative moves under pointer lock, engaged by the
+  same click.
 - **No "anti-cheat safe" promise.** The process-name blocklist
   (`detect_anticheat`) is **risk reduction, not a guarantee**. It denies control
   by default when a known protected title is running, but:
@@ -359,6 +387,78 @@ exist to say where:
   The stream boost additionally raises the app process (it owns the IPC
   servicing thread and the inject worker, the hops the rig cannot reach) and
   the worker runs at HIGHEST.
+
+### My Devices: the loop, measured on one clock
+
+A My Devices session has its own loop: pointer → the agent's direct input
+channel (one SCTP message, no server) → the agent's stream thread injects it →
+the next capture → encode → network → jitter buffer → decode → the stage's
+`<video>`. Four things in it were cut, and one instrument measures the whole:
+
+- **The latency probe** (`frontend/src/api/devices/latencyProbe.ts`,
+  `crates/puca-agent/src/latency.rs`). The desktop stage sends
+  `{t:'probe', p}` on the direct channel once a second; the agent injects
+  nothing, takes a frame as soon as the floor below allows and sends it even
+  on a still screen (re-sending the held picture, with a 1 ms acquire so the
+  wait is not counted; never while a security screen blocks the capture, where
+  a re-send would hide the blockage), and answers on the caret channel with
+  that frame's RTP timestamp, which str0m writes into the header unchanged. `requestVideoFrameCallback` reports each presented frame's
+  `rtpTimestamp` and when it is expected on screen, so the probe resolves on
+  the viewer's clock alone: input to picture, including both networks and the
+  far machine, with no clock agreement between them. The stats chip shows the
+  median; the stats panel shows it with the agent's share (`host`: the probe's
+  arrival to its frame's send) and **Compare with the old timing** runs eight
+  probes each way, alternating, with `q:1` asking the agent for the old
+  capture timing — a before-and-after on the same machines in the same minute.
+  A probe stands for an input whose change is on screen at once, so it
+  measures the loop's own delays and none of an app's redraw. An agent older
+  than the probe never answers: three misses while pictures are arriving and
+  the stage says so and asks again every half minute (a miss with no picture
+  arriving — the stage minimised, a hidden window — proves nothing and is not
+  counted). Nothing is probed while control is paused, and a probe is not
+  activity: it never feeds an unattended session's idle clock. Only the direct
+  channel carries a probe: on the relay it would reach the host app, which has
+  no frame to answer with. A media restart starts the RTP clock again; frames
+  from before it are dropped, so they cannot answer a new probe.
+- **A change is taken as it appears** (`latency.rs`, `may_capture_early`).
+  The agent captures on a fixed clock, so a change an input made waited for
+  the next tick once it was on screen: half a frame on average, a whole one at
+  worst (17 / 33 ms at 30 fps). After an input the agent now watches for up to
+  100 ms, looking for a new frame every 2 ms, and takes the first one the
+  compositor presents; the clock carries on from it. A look that finds nothing
+  leaves the clock alone, and no frame is ever taken sooner than a whole frame
+  interval after the last one sent, so the session's frame rate — and with it
+  the encoder's bitrate, spent as bitrate/fps per frame — is never exceeded.
+  The gain is on a screen that was still, most of what a pointer and keyboard
+  do on a desktop: a menu, a typed letter or a highlight is captured within
+  about 2 ms of being drawn. A screen that changes every frame by itself (a
+  game, a video) is captured at the frame rate as before; only a higher frame
+  rate helps it. The first version pulled the next tick in to 2 ms after the
+  input and allowed half an interval: it usually captured before the app had
+  redrawn and then waited a whole frame from there, which could show a change
+  LATER than the old clock, and under continuous input on a busy screen it
+  doubled the frames and the bitrate. Measured in `latency.rs`'s tests: input
+  every 8 ms on a picture that changes every frame stays at 30 frames a second
+  at 30 fps.
+- **60 fps on your own network.** A desktop stage whose picture comes
+  directly over UDP with a round trip under 15 ms, still on the default
+  quality, steps up once to 60 fps / 10 Mbps and says so.
+- **8 ms move coalescing on the direct channel** (`MOVE_INTERVAL_DIRECT_MS`):
+  the relay's 16 ms exists for the relay's per-event cost, which the direct
+  channel does not pay.
+- **The pointer drawn here.** A desktop stage takes the pointer from the host
+  (the `set-cursor-owner` handshake the phone's trackpad uses), so the browser
+  draws your own mouse pointer over the picture with no delay, and the agent
+  reports the host's pointer SHAPE as a CSS keyword when it changes
+  (`crates/puca-agent/src/pointer_shape.rs`: the standard Windows pointers by
+  their shared handles, the arrow for one an application drew itself, and
+  `none` only while a program has TAKEN the pointer — hidden and confined, a
+  game in mouse-look; Windows also hides it on a machine with no mouse and
+  while you type in some apps, and then the arrow is drawn, since the agent is
+  not drawing one). **Mouse › Draw the pointer here (no delay)** turns it off;
+  Game mode hands the pointer back, because pointer lock hides this one, and
+  so does pausing control: watching, the host's own pointer is the one to
+  see.
 
 ## Testing note
 

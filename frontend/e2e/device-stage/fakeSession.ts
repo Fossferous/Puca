@@ -105,6 +105,10 @@ const state = {
     hostScreen: null as 'virtual-starting' | null,
     peerName: null as string | null,
     endedWith: null as string | null,
+    // The desktop walk (device-stage-desktop-real-browser.mjs): the host's
+    // pointer shape while this end draws the pointer, and an elevated window.
+    remoteCursor: null as string | null,
+    inputBlocked: null as string | null,
 };
 
 const log: Array<Record<string, unknown>> = [];
@@ -127,6 +131,7 @@ function session(): DeviceControlSession {
         filesChannel: null, fileRoot: null, fileScopeKind: null, filesOnly: false, audioHub: false,
         privacyActive: false, cursorOwned: state.cursorOwned, reconnecting: false,
         awaitingMedia: state.awaitingMedia, mediaRestarting: false, secureDesktop: false, cursorClipped: false,
+        remoteCursor: state.remoteCursor, inputBlocked: state.inputBlocked, pointerCaptured: false,
         shareUser: null, viewOnly: false, powerNotice: null,
     } as unknown as DeviceControlSession;
 }
@@ -252,12 +257,31 @@ export function requestMonitor(_sessionId: string, monitor: number): void {
     }, knobs.commitMs);
 }
 export function requestKeyframe(): boolean { return true; }
+/** The latency probe needs the agent's direct channel; the stand-in has none,
+ *  so the chip shows the estimate, as it does against an older agent. */
+export function latencyProbeUsable(): boolean { return false; }
+export function sendLatencyProbe(): boolean { return false; }
+export function noteFramePresented(): void { /* no probes in flight */ }
+export function subscribeLatency(): () => void { return () => { /* nothing to undo */ }; }
+/** The desktop bar's live stats: a steady 60 fps LAN session, counters that
+ *  advance with the clock so two readings give rates. */
+export async function deviceStatsSample(): Promise<Record<string, unknown>> {
+    const t = performance.now() / 1000;
+    return {
+        at: Date.now(), framesDecoded: Math.floor(t * 60), bytesReceived: Math.floor(t * 1_500_000),
+        freezeCount: 0, totalDecodeTime: t * 60 * 0.002, jitterBufferDelay: t * 60 * 0.012,
+        jitterBufferEmittedCount: Math.floor(t * 60), packetsLost: 0, packetsReceived: Math.floor(t * 1200),
+        frameWidth: 1920, frameHeight: 1080, rttMs: 3, path: 'direct', protocol: 'udp',
+        decoder: 'D3D11VideoDecoder', hardwareDecode: true, inputLane: 'channel',
+    };
+}
 export function endSession(): void { /* the harness never ends */ }
 export async function sendClipboard(): Promise<string | null> { return null; }
 export function sendStreamQuality(): void { /* not under test */ }
 export function setPrivacyMode(): void { /* not under test */ }
 export function sendPowerAction(): boolean { return true; }
-export async function deviceDiagnosticsWindow(): Promise<Record<string, unknown>[]> { return []; }
+/** One row, so a copy has something in it beside the stage's own state. */
+export async function deviceDiagnosticsWindow(): Promise<Record<string, unknown>[]> { return [{ id: 'harness', fps: 60 }]; }
 export function requestFileAccess(): void { /* not under test */ }
 export async function connectToDevice(): Promise<string> { return SID; }
 

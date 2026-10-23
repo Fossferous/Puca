@@ -19,7 +19,7 @@
  * dropping its capture without ever dispatching its up — what a backgrounded
  * app does to a gesture in flight.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
@@ -57,6 +57,11 @@ vi.mock('../api/devices/session', () => ({
     deviceDiagnosticsWindow: async () => h.diagRows,
     activeSessions: () => [],
     requestFileAccess: () => { /* noop */ },
+    deviceStatsSample: async () => null,
+    latencyProbeUsable: () => false,
+    sendLatencyProbe: () => false,
+    noteFramePresented: () => { /* noop */ },
+    subscribeLatency: () => () => { /* unsubscribe */ },
 }));
 vi.mock('../api/devices/tunnel', () => ({
     tunnelStatus: async () => ({ listeners: [], inbound_streams: 0, outbound_streams: 0, forwards: [] }),
@@ -198,11 +203,18 @@ async function copyStageInput(): Promise<Record<string, unknown>> {
     const copy = Array.from(host!.querySelectorAll('button')).find(b => b.textContent?.trim() === 'Copy diagnostics');
     expect(copy, 'the Mouse menu must offer Copy diagnostics').toBeTruthy();
     await act(async () => { copy!.click(); });
-    await flush();
-    expect(writeText).toHaveBeenCalledTimes(1);
+    // Copy diagnostics loads its bound on use (diagnosticsReport, as
+    // Settings does) before it measures: wait for the copy, not one flush.
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
     const rows = JSON.parse(writeText.mock.calls[0][0]) as Array<Record<string, unknown>>;
     return rows[0].stageInput as Record<string, unknown>;
 }
+
+// The module "Copy diagnostics" loads on use, loaded once here rather than
+// inside a test's own time.
+beforeAll(async () => {
+    await import('../api/diagnosticsReport');
+});
 
 describe('a trackpad left with a stranded finger', () => {
     it('POSITIVE CONTROL: while finger 2 still holds capture, a new finger IS a pinch and sends no move', async () => {

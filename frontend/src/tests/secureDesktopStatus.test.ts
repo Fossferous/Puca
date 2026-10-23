@@ -151,3 +151,42 @@ describe('the stream-liveness half of the same poll', () => {
         expect((await reply({ stream_live: false })).streamEnd).toBeUndefined();
     });
 });
+
+/**
+ * `input_blocked` / `pointer_captured` — can the controller's input land at
+ * all? The agent names a program running above it (as administrator), whose
+ * window Windows will not let it reach (UIPI), and says when a game has hidden
+ * and confined the pointer. Both only ever ADD a banner, so anything other than
+ * a clean value reads as "input lands"; the names are pinned on the Rust side
+ * too (protocol.rs `session_state_serialises_to_what_the_app_reads`).
+ */
+describe('the input-reach half of the same poll', () => {
+    beforeEach(() => { invokeMock.mockReset(); });
+
+    const reply = async (body: Record<string, unknown>) => {
+        invokeMock.mockResolvedValue(JSON.stringify({ ok: 'session_state', secure_desktop: false, ...body }));
+        return agentHostBackend().sessionStatus!('s1');
+    };
+
+    test('POSITIVE CONTROL: the program the agent names arrives, and so does a captured pointer', async () => {
+        expect(await reply({ input_blocked: 'valheim.exe', pointer_captured: true }))
+            .toMatchObject({ inputBlocked: 'valheim.exe', pointerCaptured: true });
+    });
+
+    test('an agent that predates the fields, and the ordinary case, read as "input lands"', async () => {
+        const r = await reply({});
+        expect(r.inputBlocked).toBeUndefined();
+        expect(r.pointerCaptured).toBeUndefined();
+    });
+
+    test('a path, an over-long name, a control character or a non-string is not a program name', async () => {
+        for (const bad of ['C:\\Valheim\\valheim.exe', 'Valheim/valheim.exe', 'x'.repeat(65), 'evil\nline.exe', 7, true, '', '  ']) {
+            expect((await reply({ input_blocked: bad })).inputBlocked, String(bad)).toBeUndefined();
+        }
+    });
+
+    test('pointer_captured needs a real true', async () => {
+        expect((await reply({ pointer_captured: 'yes' })).pointerCaptured).toBeUndefined();
+        expect((await reply({ pointer_captured: 1 })).pointerCaptured).toBeUndefined();
+    });
+});

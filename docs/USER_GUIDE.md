@@ -592,6 +592,73 @@ phone's own picture-in-picture instead, which the system limits in size.
 
 ---
 
+## My Devices — controlling your own computers
+
+With the full app (not Lite), **Devices** lists the computers you have
+signed in to; **Connect** on one shows its screen and lets you drive it with
+your mouse and keyboard. How it works and what it cannot reach is in
+[Remote screen control](REMOTE_CONTROL.md).
+
+### From a computer
+The bar above the picture:
+
+| Control | Action |
+|---------|--------|
+| **Screen** | Pick which screen to see, or **All displays**. **Fit the picture to this window (less lag)** asks for no more pixels than you can see. **Fullscreen** fills your monitor (also **Ctrl+Alt+Enter**). **Zoom** in and out (or **Ctrl**+wheel over the picture), **Fit** to go back; zoomed in, push the pointer against an edge of the picture to move along it. **Show stats** puts the live numbers over the picture. **Privacy mode (blank that computer's screen)**, and the display power actions: **Turn displays off**, **Turn displays off, keep primary**, **Turn displays on**, **Disable other displays**, **Re-enable displays** |
+| **Quality** | From **Max (15Mbps, 60fps)** down to **Low (1Mbps, 15fps)**. The tick is what that computer confirmed |
+| **Keyboard** | Keys your own computer would keep for itself: **Ctrl + Alt + Del**, **Alt + Tab**, **Alt + F4**, **Esc**, **Windows key**, **Windows + D (show the desktop)**, **Ctrl + Shift + Esc (Task Manager)**, **Print Screen**. **Type text…** types what you write or paste there as characters, so an emoji, an accented letter or a password from a manager arrives exactly as it is, whatever keyboard layout that computer uses; new lines press Enter. **Type this computer's clipboard** opens it with your clipboard in it. **Send the clipboard (paste it over there)** puts your clipboard on that computer, for Ctrl+V there |
+| **Mouse** | **Draw the pointer here (no delay)** (on by default): your own mouse pointer is drawn over the picture, so it moves with no delay at all, and it takes that computer's pointer shape — the text cursor over a field, the hand over a link, nothing while a game hides it; a marker shows where it was left while your mouse is off the picture. **Game mode (send mouse movement, for games)**: click the picture to capture your mouse, Esc lets it go. **Sensitivity** for Game mode |
+| **Files** | Browse, download from and upload to that computer |
+| **More** | **Lock**, **Shut down…** (asks first), **Copy diagnostics** (five seconds of numbers while you keep using it, for a problem report; if a step gets no answer — a clipboard prompt you cannot see, say — it says which instead of waiting), **Back to Púca (keep the session)** |
+| The stats chip | Frames a second and the delay from your hand to the picture, measured once a second while you control (with a newer Púca on that computer; otherwise "~" and only your side's share). "relay" when the picture is not coming directly. Click it for **Show stats**, which also has **Compare with the old timing**: a few seconds of measurements both ways, to see the difference on your own computers |
+| **Fullscreen** | Same as in **Screen** |
+| **Pause control** / **Resume control** | Watch without driving; nothing you press goes over. Also **Ctrl+Alt+Home** |
+| **Disconnect** | End the session |
+
+Your mouse moves that computer's pointer as you move it, click and scroll as
+usual. Every key goes to that computer, **Esc** included, except three:
+
+| Shortcut | Action |
+|---------|--------|
+| **Ctrl+Alt+Home** | Pause or resume control |
+| **Ctrl+Alt+End** | Ctrl+Alt+Del on that computer (your own computer keeps the real Ctrl+Alt+Del for itself) |
+| **Ctrl+Alt+Enter** | Fullscreen |
+
+In fullscreen, where the browser allows it, the Windows key and Alt+Tab go
+over too; hold **Esc** to leave fullscreen in a browser.
+
+The picture also tells you when your input cannot land:
+
+- **"… is running as administrator, so Windows blocks remote control from
+  clicking or typing in it"**: the window in front (or under the pointer) on
+  that computer belongs to a program running as administrator, and Windows
+  ignores remote clicks and keys aimed at it. Close it, or start it again
+  without administrator rights; for a game, start Steam or its launcher
+  normally rather than as administrator.
+- **"A game on … has taken the mouse pointer"**: a game is using the mouse
+  to look around, which ordinary pointer moves cannot do. **Use Game mode**
+  captures your mouse and sends its movement instead.
+- A Windows security screen (the lock screen, an administrator prompt), a
+  fullscreen app holding the pointer on another screen, and a laptop with its
+  lid closed each have their own message.
+
+### From a phone
+The bar at the bottom: **Display** (screens, quality, **Scale the picture to
+this screen (less lag)**, **Privacy mode (blank their screen)**), **Keyboard**
+(the keyboard bar, with Ctrl, Alt, Shift and Win that stay down for the next
+key, Esc, Tab, the arrows and the editing keys), **Mouse** (**Mouse mode** — the
+screen is a trackpad — or **Touch mode** — the pointer goes where you tap;
+**Show virtual mouse** for left, middle and right buttons and scrolling;
+**Follow the cursor while zoomed**; **Zoom to the text cursor while typing**;
+**Open the keyboard when a text box is tapped**; **Copy diagnostics**),
+**More** (**Browse files**, **Send clipboard**, **Insert Ctrl + Alt + Del**,
+**Alt + Tab**, **Alt + F4**, the display power actions, **Lock**,
+**Shut down…**), **Chat**, **Collapse** and **Close**. In **Mouse mode**: tap
+to click, long-tap to right-click, double-tap and move to drag, move three
+fingers up or down to scroll, two fingers to move the picture, pinch to zoom.
+
+---
+
 ## Roles & Permissions
 
 ### View Roles (Everyone)

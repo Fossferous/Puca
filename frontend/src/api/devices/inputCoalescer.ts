@@ -42,6 +42,14 @@ interface MotionEvent {
  *  notchy, because the cursor visibly steps rather than glides. */
 export const MOVE_INTERVAL_MS = 16;
 
+/** The same, on the agent's DIRECT channel (~125/s). The relay's cost is
+ *  what sets 16 ms — a seal, a WebSocket frame through the server and a pipe
+ *  round trip on the host per event — and the direct channel pays none of
+ *  that: one SCTP message straight to the agent, which injects it on its own
+ *  stream thread. Half the interval is half the wait a continuously moving
+ *  mouse adds before its position leaves this end (8 ms worst, ~4 average). */
+export const MOVE_INTERVAL_DIRECT_MS = 8;
+
 /** How long relative motion accumulates before it is emitted as one delta. */
 export const RMOVE_FLUSH_MS = 8;
 
@@ -72,6 +80,10 @@ export class InputCoalescer {
      *  happen, a held one is just late. */
     private readonly motionGate: (() => boolean) | null;
 
+    /** The move interval in force: the lane decides (MOVE_INTERVAL_MS on the
+     *  relay, MOVE_INTERVAL_DIRECT_MS on the direct channel). */
+    private readonly moveInterval: () => number;
+
     /** DIAGNOSTICS: motion events offered while the gate was CLOSED, since
      *  this coalescer was made. Each one was held (and superseded or summed
      *  into the next, unless a state event forced it out). Cumulative, so
@@ -88,12 +100,14 @@ export class InputCoalescer {
             cancel?: (h: ReturnType<typeof setTimeout>) => void;
         },
         motionGate?: () => boolean,
+        moveInterval?: () => number,
     ) {
         this.emit = emit;
         this.now = clock?.now ?? (() => Date.now());
         this.schedule = clock?.schedule ?? ((fn, ms) => setTimeout(fn, ms));
         this.cancel = clock?.cancel ?? (h => clearTimeout(h));
         this.motionGate = motionGate ?? null;
+        this.moveInterval = moveInterval ?? (() => MOVE_INTERVAL_MS);
     }
 
     /** Offer one event. It is emitted now, later, or superseded. */
@@ -113,10 +127,11 @@ export class InputCoalescer {
             // and, worse, latch the host a persistent window behind after one
             // jitter-bunched pair.
             const sinceMove = this.now() - this.lastMoveSent;
-            if (sinceMove >= MOVE_INTERVAL_MS) {
+            const interval = this.moveInterval();
+            if (sinceMove >= interval) {
                 this.flush();
             } else {
-                this.arm(MOVE_INTERVAL_MS - sinceMove);
+                this.arm(interval - sinceMove);
             }
             return;
         }
