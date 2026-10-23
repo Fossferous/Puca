@@ -11,6 +11,7 @@
 import type { PendingAttachment } from '../api/composerAttachments';
 import { audioMimeFor } from '../api/attachments';
 import { CloseIcon, EyeIcon, EyeOffIcon, FileIcon, MusicIcon, PendingIcon, RefreshIcon, WarningIcon } from './Icons';
+import { AttachmentImg } from './AttachmentImg';
 import './ComposerAttachments.css';
 
 interface ComposerAttachmentsProps {
@@ -32,8 +33,10 @@ export function ComposerAttachments({ attachments, onRemove, onToggleSpoiler, on
                     title={a.status === 'failed' ? (a.error ?? 'Upload failed') : a.name}
                 >
                     <span className="composer-chip-thumb" aria-hidden="true">
+                        {/* A thumbnail this engine cannot draw is the file
+                            icon, never a broken image (AttachmentImg). */}
                         {a.previewUrl
-                            ? <img src={a.previewUrl} alt="" />
+                            ? <AttachmentImg src={a.previewUrl} type={a.mime} alt="" fallback={<FileIcon />} />
                             : audioMimeFor(a.name, a.mime) ? <MusicIcon /> : <FileIcon />}
                         {a.status === 'uploading' && (
                             <span className="composer-chip-busy"><PendingIcon /></span>

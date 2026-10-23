@@ -31,7 +31,7 @@ const glareErr = { a: [], b: [] };
 const isGlare = (t) => /m-lines|InvalidAccessError|setRemoteDescription|setLocalDescription|wrong state|makeOffer/i.test(t);
 
 const browser = await chromium.launch({
-    args: ['--use-fake-ui-for-media-stream',
+    args: ['--mute-audio', '--use-fake-ui-for-media-stream',
         // Real-address host candidates: same-machine ICE must not coin-flip
         // on headless mDNS resolution (see voice-camera-2peer.mjs).
         '--disable-features=WebRtcHideLocalIpsWithMdns', '--use-fake-device-for-media-stream',
@@ -49,7 +49,8 @@ async function reg(ctx, u, bucket) {
     });
     await p.goto(APP + '/login');
     await p.waitForSelector('#username', { timeout: 10000 });
-    await p.click('.toggle-mode'); await p.waitForSelector('#inviteCode', { timeout: 5000 });
+    // The invite-code field exists only on a server that asks for one: wait for the form, not for it.
+    await p.click('.toggle-mode'); await p.waitForSelector('#password', { timeout: 5000 });
     await p.fill('#username', u); await p.fill('#password', PASS); await p.click('button[type="submit"]');
     await p.waitForURL('**/chat', { timeout: 30000 }); await p.waitForTimeout(1200);
     try { await p.check('.recovery-confirm input[type=checkbox]', { timeout: 4000 }); await p.click('.recovery-done-btn'); } catch { /* older */ }
@@ -70,22 +71,26 @@ async function joinVoice(p) {
     await p.waitForTimeout(3500);
     return ok;
 }
+// The documented automation hooks (docs/AUTOMATION.md): since the quick share
+// launch (1da0bd55) the web Share button goes live with no dialog, so there is
+// no "Go Live" button to find, and the stop button is icon-only. The share is
+// live when the same button turns into `voice-stop-share`.
+const SHARE = '[data-testid="voice-share-screen"]';
+const STOP_SHARE = '[data-testid="voice-stop-share"]';
 async function startShare(p) {
-    // Open the screen-share modal and go live (fake device auto-accepts).
-    const opened = await p.evaluate(() => {
-        const btn = [...document.querySelectorAll('button')].find(b =>
-            /share|screen/i.test((b.getAttribute('title') || '') + ' ' + b.className) && !/stop/i.test(b.textContent));
-        if (btn) { btn.click(); return true; } return false;
-    });
-    if (!opened) return false;
-    await p.waitForTimeout(800);
-    // Click "Select Screen & Go Live"
-    const live = await p.evaluate(() => {
-        const b = [...document.querySelectorAll('button')].find(x => /go live|select screen/i.test(x.textContent));
-        if (b) { b.click(); return true; } return false;
-    });
+    try {
+        await p.locator(SHARE).click({ timeout: 10000 });
+        await p.locator(STOP_SHARE).waitFor({ state: 'attached', timeout: 15000 });
+    } catch { return false; }
     await p.waitForTimeout(4000);
-    return live;
+    return true;
+}
+async function stopShare(p) {
+    try {
+        await p.locator(STOP_SHARE).click({ timeout: 10000 });
+        await p.locator(SHARE).waitFor({ state: 'attached', timeout: 15000 });
+    } catch { return false; }
+    return true;
 }
 // Does `page` receive a screen-share video from a remote peer with real frames?
 const receivesShare = (page) => page.evaluate(() => {
@@ -145,10 +150,7 @@ try {
     ck('B receives A\'s screen share (late joiner, after opting in)', await hasRemoteScreen(b));
 
     // Stop A's share to reset for scenario 2.
-    await a.evaluate(() => {
-        const btn = [...document.querySelectorAll('button')].find(x => /stop shar/i.test(x.textContent));
-        btn?.click();
-    });
+    ck('A stops screen share', await stopShare(a));
     await a.waitForTimeout(3000);
 
     // === Scenario 2: both connected; B (answerer side) starts sharing mid-call ===

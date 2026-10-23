@@ -349,6 +349,83 @@ public class SovereignAppPlugin extends Plugin {
         return o;
     }
 
+    /** HEIC decodes run here, one at a time: off the thread every plugin's
+     *  calls share, since a 50 MP photo takes a second or more. */
+    private static final java.util.concurrent.ExecutorService HEIF_DECODER =
+            java.util.concurrent.Executors.newSingleThreadExecutor();
+
+    /**
+     * A HEIC/HEIF photo as a JPEG, decoded by Android itself (ImageDecoder,
+     * API 28+). The WebView cannot decode HEIC, the format most phone cameras
+     * save, so the page asks for a JPEG before it encrypts a photo for upload
+     * and to show one someone already sent (frontend/src/api/heif.ts).
+     *
+     * {data: base64 HEIC, maxEdge, quality 0..1} -> {data: base64 JPEG,
+     * width, height}. The picture comes out the right way up (ImageDecoder
+     * applies the HEIF rotation) and with NO metadata: Bitmap.compress writes
+     * pixels only, so the location, camera and time in the original are not
+     * in the JPEG. Everything stays in memory. Rejects (the page then does
+     * without) below Android 9, for bytes that are not a HEIC, and on any
+     * decode failure.
+     */
+    @PluginMethod
+    public void heifToJpeg(PluginCall call) {
+        final String data = call.getString("data");
+        final int maxEdge = call.getInt("maxEdge", 4096);
+        final Double quality = call.getDouble("quality", 0.9);
+        if (data == null || data.isEmpty()) {
+            call.reject("no picture", "bad-input");
+            return;
+        }
+        // The page never sends more (api/heif.ts); a call that does is
+        // refused before anything else is copied out of it.
+        if (!HeifImages.inputFits(data.length())) {
+            call.reject("too large to convert here", "too-large");
+            return;
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            call.reject("needs Android 9 or newer", "unsupported");
+            return;
+        }
+        HEIF_DECODER.execute(() -> {
+            try {
+                byte[] in = Base64.decode(data, Base64.DEFAULT);
+                if (!HeifImages.isHeif(in)) {
+                    call.reject("not a HEIC picture", "not-heif");
+                    return;
+                }
+                android.graphics.ImageDecoder.Source src =
+                        android.graphics.ImageDecoder.createSource(java.nio.ByteBuffer.wrap(in));
+                Bitmap bmp = android.graphics.ImageDecoder.decodeBitmap(src, (decoder, info, source) -> {
+                    int w = info.getSize().getWidth();
+                    int h = info.getSize().getHeight();
+                    // Read from the header, before a pixel is decoded: a HEIC
+                    // claiming more than a phone photo has is refused here.
+                    if (!HeifImages.pixelsFit(w, h)) throw new IllegalArgumentException("too many pixels: " + w + "x" + h);
+                    decoder.setAllocator(android.graphics.ImageDecoder.ALLOCATOR_SOFTWARE);
+                    decoder.setTargetSampleSize(HeifImages.sampleSizeFor(w, h, maxEdge));
+                });
+                java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+                boolean ok = bmp.compress(Bitmap.CompressFormat.JPEG,
+                        HeifImages.jpegQuality(quality == null ? 0.9 : quality), out);
+                int w = bmp.getWidth();
+                int h = bmp.getHeight();
+                bmp.recycle();
+                if (!ok) {
+                    call.reject("could not write the JPEG", "encode");
+                    return;
+                }
+                JSObject ret = new JSObject();
+                ret.put("data", Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP));
+                ret.put("width", w);
+                ret.put("height", h);
+                call.resolve(ret);
+            } catch (Exception | OutOfMemoryError e) {
+                call.reject("could not decode the picture: " + e.getMessage(), "decode");
+            }
+        });
+    }
+
     /**
      * The phone's clipboard as text, for "Send clipboard" in a remote-control
      * session. Native or nothing: the Android System WebView implements the

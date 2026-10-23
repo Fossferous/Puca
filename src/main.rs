@@ -1032,6 +1032,8 @@ async fn main() -> anyhow::Result<()> {
     // the measured branch of SFU admission (no-op when the SFU tier or the
     // metrics endpoint isn't deployed; admission then stays worst-case only).
     sfu::spawn_egress_sampler(app_state.clone());
+    // Say so when an explicit SFU_SHARE_MAX_MBPS was clamped to its bounds.
+    sfu::warn_on_clamped_share_ceiling();
 
     // Idle/away presence: the server owns both clocks (src/presence.rs), so
     // a sweep promotes users a backgrounded phone could never report.

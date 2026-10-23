@@ -37,6 +37,16 @@ export interface MonitorInfo {
     top?: number;
 }
 
+/** One answer to `HostBackend.sessionStatus` (see there for each field). */
+export interface HostSessionStatus {
+    secureDesktop: boolean;
+    cursorClipped?: boolean;
+    streamLive?: boolean;
+    streamEnd?: string;
+    inputBlocked?: string | null;
+    pointerCaptured?: boolean;
+}
+
 export interface HostCapabilities {
     /** Can produce a video stream at all. */
     capture: boolean;
@@ -145,10 +155,14 @@ export interface HostBackend {
      *  a borrowed lock-screen agent lost at unlock, a respawned agent — or the
      *  agent reaped the stream itself), `undefined` means "cannot tell" and
      *  must never be acted on. `streamEnd` is why it ended, when the host must
-     *  stay silent about it ('no_frame'). */
-    sessionStatus?(
-        sessionId: string,
-    ): Promise<{ secureDesktop: boolean; cursorClipped?: boolean; streamLive?: boolean; streamEnd?: string }>;
+     *  stay silent about it ('no_frame').
+     *
+     *  `inputBlocked` names the program whose window would get this session's
+     *  input and that Windows will not let the agent reach (it runs as
+     *  administrator; see the agent's input_reach.rs). `pointerCaptured` says a
+     *  game has hidden and confined the pointer. Both optional for the same
+     *  skew reason: absent reads as "input lands". */
+    sessionStatus?(sessionId: string): Promise<HostSessionStatus>;
     /** Blank this machine's screen behind an overlay while it is controlled.
      *
      *  Only the agent can do this; the webview has no way to cover the desktop.

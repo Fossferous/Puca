@@ -21,6 +21,7 @@ import {
     type Channel,
 } from './servers';
 import { uploadFile } from './uploads';
+import { ImageMetadataError } from './imageMetadata';
 
 export interface ServerTemplate {
     /** Text channels, in order. The first replaces the stock `default`. */
@@ -94,8 +95,10 @@ export async function finishServerCreation(serverId: string, opts: FinishServerO
         try {
             const uploaded = await uploadFile(opts.iconFile);
             settings.icon_file_id = uploaded.id;
-        } catch {
-            warnings.push('The icon could not be uploaded — add it in Server Settings.');
+        } catch (err) {
+            warnings.push(err instanceof ImageMetadataError
+                ? `${err.message} You can add the icon later in Server Settings.`
+                : 'The icon could not be uploaded — add it in Server Settings.');
         }
     }
     if (opts.isPublic) settings.is_public = true;

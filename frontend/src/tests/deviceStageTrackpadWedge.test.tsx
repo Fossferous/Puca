@@ -57,6 +57,11 @@ vi.mock('../api/devices/session', () => ({
     deviceDiagnosticsWindow: async () => h.diagRows,
     activeSessions: () => [],
     requestFileAccess: () => { /* noop */ },
+    deviceStatsSample: async () => null,
+    latencyProbeUsable: () => false,
+    sendLatencyProbe: () => false,
+    noteFramePresented: () => { /* noop */ },
+    subscribeLatency: () => () => { /* unsubscribe */ },
 }));
 vi.mock('../api/devices/tunnel', () => ({
     tunnelStatus: async () => ({ listeners: [], inbound_streams: 0, outbound_streams: 0, forwards: [] }),
@@ -198,8 +203,9 @@ async function copyStageInput(): Promise<Record<string, unknown>> {
     const copy = Array.from(host!.querySelectorAll('button')).find(b => b.textContent?.trim() === 'Copy diagnostics');
     expect(copy, 'the Mouse menu must offer Copy diagnostics').toBeTruthy();
     await act(async () => { copy!.click(); });
-    await flush();
-    expect(writeText).toHaveBeenCalledTimes(1);
+    // Copy diagnostics measures and copies in steps, each awaited and
+    // bounded: wait for the copy, not one flush.
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
     const rows = JSON.parse(writeText.mock.calls[0][0]) as Array<Record<string, unknown>>;
     return rows[0].stageInput as Record<string, unknown>;
 }

@@ -56,7 +56,7 @@ export function mediaE2eeExplanation(reason: MediaE2eeReason, peerName: string, 
             // so a first-time Firefox/Safari user hits this with no idea why
             // nobody can hear them. Say exactly that, and exactly what changes it.
             return enforced
-                ? `This device or browser can’t end-to-end encrypt live media (${NO_ENCODED_TRANSFORM}). Because encryption is required for this call, media is blocked both ways here: your microphone and camera are not sent, and nobody’s voice or video plays. ${localUnsupportedRemedy(serverRequired)}`
+                ? `This device or browser can’t end-to-end encrypt live media (${NO_ENCODED_TRANSFORM}). Because encryption is required for this call, media is blocked both ways here: your microphone, camera and screen share are not sent, and nobody’s voice or video plays. ${localUnsupportedRemedy(serverRequired)}`
                 : `This device or browser can’t end-to-end encrypt live media (${NO_ENCODED_TRANSFORM}). Voice is still protected in transit (DTLS-SRTP), but the server could in principle access it.`;
         case 'peer-unsupported':
             return enforced
@@ -125,7 +125,7 @@ export function localMediaNotice(i: LocalMediaBlockInputs): { level: LocalMediaN
     }
     return {
         level: 'blocked',
-        text: `Voice is blocked in this browser: it can’t end-to-end encrypt live media (${NO_ENCODED_TRANSFORM}), and encryption is required for calls. If you join, your microphone and camera are not sent and nobody’s voice or video plays. ${localUnsupportedRemedy(i.serverRequired)}`,
+        text: `Voice is blocked in this browser: it can’t end-to-end encrypt live media (${NO_ENCODED_TRANSFORM}), and encryption is required for calls. If you join, your microphone, camera and screen share are not sent and nobody’s voice or video plays. ${localUnsupportedRemedy(i.serverRequired)}`,
     };
 }
 

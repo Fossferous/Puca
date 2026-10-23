@@ -21,11 +21,13 @@
 import { uploadFile, assertUploadable, ENCRYPTED_OVERHEAD_BYTES, MAX_UPLOAD_BYTES } from './uploads';
 import { API_BASE_URL } from './config';
 import { getToken } from './auth';
+import { stripImageMetadata } from './imageMetadata';
 import { readAttachmentBody } from './attachmentProgress';
 import { createPriorityLimiter, abortError, isAbortError } from './priorityLimiter';
 import { readVideoDims, type VideoDims } from './videoDims';
 import { hostPlaintext, dropAllPlaintext, freeNow, type PlainLease } from './plaintextHost';
 import { keepCipher, dropAllCiphertext, type CipherCopy } from './cipherStore';
+import { engineDecodesHeif, forgetHeifRequests, heifToJpegForDisplay, isHeifType, sniffImageType } from './heif';
 
 const PREFIX = 'sovereign-enc:';
 
@@ -274,7 +276,11 @@ export async function sealFileForUpload(file: File | PlainBytes): Promise<Sealed
     // have already pulled the whole file into memory and encrypted it. Account
     // for what encryption adds, or a file of exactly the cap fails at the server.
     assertUploadable({ name: file.name, size: given ? given.byteLength : (file as File).size }, ENCRYPTED_OVERHEAD_BYTES);
-    const raw = given ?? new Uint8Array(await (file as File).arrayBuffer());
+    // A photo's EXIF (where, when, on which device) is shown to everyone who can open it, so it
+    // is taken off HERE, losslessly, before the first byte is encrypted (api/imageMetadata.ts).
+    // A JPEG/PNG/WebP that cannot be taken apart throws and is not sent. Any other type is
+    // returned as it is; the bytes decide, not the declared type.
+    const raw = stripImageMetadata(given ?? new Uint8Array(await (file as File).arrayBuffer()));
     const keyBytes = crypto.getRandomValues(new Uint8Array(32));
     const nonce = crypto.getRandomValues(new Uint8Array(12));
     const key = await crypto.subtle.importKey('raw', keyBytes as BufferSource, 'AES-GCM', false, ['encrypt']);
@@ -294,8 +300,8 @@ export async function sealFileForUpload(file: File | PlainBytes): Promise<Sealed
 }
 
 /** Upload already-sealed ciphertext and build its ref. */
-export async function uploadSealedRef(sealed: SealedFile, opts?: { channelId?: number }): Promise<{ href: string; name: string; mime: string }> {
-    const uploaded = await uploadFile(new File([sealed.blob], 'attachment.enc', { type: 'application/octet-stream' }), { wantCap: true, channelId: opts?.channelId });
+export async function uploadSealedRef(sealed: SealedFile, opts?: { channelId?: number; signal?: AbortSignal }): Promise<{ href: string; name: string; mime: string }> {
+    const uploaded = await uploadFile(new File([sealed.blob], 'attachment.enc', { type: 'application/octet-stream' }), { wantCap: true, channelId: opts?.channelId, ...(opts?.signal ? { signal: opts.signal } : {}) });
     const href = `${PREFIX}${uploaded.id}?k=${sealed.key}&m=${encodeURIComponent(sealed.mime)}`
         + (uploaded.cap ? `&c=${encodeURIComponent(uploaded.cap)}` : '');
     return { href, name: sealed.name, mime: sealed.mime };
@@ -308,7 +314,7 @@ export async function uploadSealedRef(sealed: SealedFile, opts?: { channelId?: n
  * (encryptAndUpload) and task attachment refs. Plaintext the app decrypted
  * itself comes as bytes (PlainBytes), never as a File made from them.
  */
-export async function encryptAndUploadRef(file: File | PlainBytes, opts?: { channelId?: number }): Promise<{ href: string; name: string; mime: string }> {
+export async function encryptAndUploadRef(file: File | PlainBytes, opts?: { channelId?: number; signal?: AbortSignal }): Promise<{ href: string; name: string; mime: string }> {
     return uploadSealedRef(await sealFileForUpload(file), opts);
 }
 
@@ -329,7 +335,7 @@ export async function decryptParkedBlobUrl(bytes: Uint8Array, keyB64url: string,
  * Encrypt a file, upload the ciphertext, and return the markdown to insert into
  * the message composer (image syntax for images, link syntax otherwise).
  */
-export async function encryptAndUpload(file: File, opts?: { channelId?: number }): Promise<string> {
+export async function encryptAndUpload(file: File, opts?: { channelId?: number; signal?: AbortSignal }): Promise<string> {
     const { href, name, mime } = await encryptAndUploadRef(file, opts);
     return `${mime.startsWith('image/') ? '!' : ''}[${name}](${href})`;
 }
@@ -399,6 +405,8 @@ export async function encryptAndUpload(file: File, opts?: { channelId?: number }
 // and never gave it back while the app ran (515 MB after two). Sign-out
 // still clears everything (clearBlobCache), as does a reload.
 interface CacheEntry {
+    /** The server's id of the file. */
+    fileId: string;
     /** The file as fetched, nonce(12) || AES-GCM ciphertext: in OPFS once it
      *  is written there, never as a Blob (api/cipherStore.ts says why). */
     cipher: CipherCopy;
@@ -412,6 +420,9 @@ interface CacheEntry {
     bytes: number;
     /** The plaintext URL, while anyone holds or pins the entry. */
     plain: PlainLease | null;
+    /** The type `plain` is hosted under: `type`, or image/jpeg for a HEIC
+     *  this engine cannot show that the device decoded for display (openPlain). */
+    plainType: string;
     /** The plaintext on its way to a host (openPlain). */
     opening: Promise<PlainLease> | null;
     /** The plaintext the load just decrypted, for a holder that took the
@@ -632,12 +643,14 @@ async function loadEntry(cacheKey: string, id: string, keyB64url: string, mime: 
         if (dims) pictureSizes.set(id, dims);
     }
     const entry: CacheEntry = {
+        fileId: id,
         cipher: keepCipher(buf),
         keyB64url,
         type: playlist ? 'application/octet-stream' : safeBlobType(mime),
         playlist,
         bytes: pt.byteLength,
         plain: null,
+        plainType: playlist ? 'application/octet-stream' : safeBlobType(mime),
         opening: null,
         fresh: pt,
         refs: 0, seen: false, seq: ++useSeq, burst: 0,
@@ -673,8 +686,33 @@ function openPlain(e: CacheEntry): Promise<PlainLease> {
         }
         // Signed out meanwhile: no URL for the next user to find.
         if (generation !== cacheGeneration) throw abortError();
+        // A HEIC this engine cannot show (every Chromium, Firefox): the
+        // device's own decoder makes a JPEG of it for display, where the app
+        // has one and may use it (api/heif.ts mayDecodeHeifForDisplay). It is
+        // hosted like any plaintext, in place of the original, and goes with
+        // it; nowhere else does it exist.
+        let type = e.type;
+        // HEIC or not is the BYTES' answer, not the ref's (whatever the
+        // sender's device said): a JPEG labelled image/heic is shown as the
+        // JPEG it is (Chromium would sniff it, but AttachmentImg never hands a
+        // HEIC type to an <img> it cannot decode), and a HEIC labelled
+        // another picture type gets what a HEIC gets.
+        if (type.startsWith('image/')) {
+            const real = sniffImageType(new Uint8Array(pt, 0, Math.min(64, pt.byteLength)));
+            if (real && real !== type && (isHeifType(type) || real === 'image/heic')) type = real;
+        }
+        if (isHeifType(type) && !(await engineDecodesHeif())) {
+            const jpeg = await heifToJpegForDisplay(e.fileId, new Uint8Array(pt));
+            if (generation !== cacheGeneration) throw abortError();
+            if (jpeg) {
+                freeNow(pt);
+                pt = jpeg.byteOffset === 0 && jpeg.byteLength === jpeg.buffer.byteLength ? jpeg.buffer as ArrayBuffer : jpeg.slice().buffer as ArrayBuffer;
+                type = 'image/jpeg';
+            }
+        }
+        e.plainType = type;
         // Copied into the hosted Blob and emptied (freeNow).
-        const lease = await hostPlaintext(pt, e.type);
+        const lease = await hostPlaintext(pt, type);
         if (generation !== cacheGeneration) { lease.release(); throw abortError(); }
         return lease;
     })();
@@ -845,6 +883,9 @@ export async function decryptAttachmentBytes(id: string, keyB64url: string, mime
  *  once nothing it renders uses the URL any more. A second call does nothing. */
 export interface AttachmentHold {
     url: string;
+    /** What the URL's bytes are: the file's own type, or image/jpeg for a
+     *  HEIC decoded for display (a save from this URL is that JPEG). */
+    type: string;
     release: () => void;
 }
 
@@ -936,6 +977,7 @@ export async function acquireAttachmentUrl(
     let held = true;
     return {
         url: lease.url,
+        type: entry.plainType,
         release: () => {
             if (!held) return;
             held = false;
@@ -1023,6 +1065,12 @@ export async function prefetchAttachmentUrl(
     enforceRetainedBudget();
 }
 
+/** A file's plaintext size while the cache has it (null: not loaded): a
+ *  picture this device cannot show says how big the download is. */
+export function attachmentPlainBytes(id: string, keyB64url: string, mime: string): number | null {
+    return blobCache.get(cacheKeyOf(id, keyB64url, mime))?.bytes ?? null;
+}
+
 /** What the cache holds now, in bytes of plaintext (tests, diagnostics):
  *  shown now, seen and given back, loaded ahead and not yet seen — and how
  *  much of it is decrypted right now (`plainBytes`: only what is held
@@ -1066,6 +1114,7 @@ export function noteAttachmentPictureSize(id: string, dims: VideoDims): void {
  *  (cacheGeneration). */
 export function clearBlobCache(): void {
     cacheGeneration++;
+    forgetHeifRequests();
     for (const e of blobCache.values()) {
         e.plain?.release();
         e.plain = null;

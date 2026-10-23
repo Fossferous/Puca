@@ -354,6 +354,7 @@ cd frontend && node e2e/share-quality-live-real-browser.mjs   # a LIVE share re-
 cd frontend && node e2e/notes-dialog-escape-real-browser.mjs   # one REAL Escape closes only the top of two stacked NotesDialogs (jsdom cannot show the microtask checkpoint between listeners); no server needed
 cd frontend && node e2e/user-menu-move-to-real-browser.mjs   # right-click a member > Move to, and the server icon's Notification Settings: every listed item is ON SCREEN and is what document.elementFromPoint hits, real mouse at desktop and real taps at 390x844 (never locator.click(), which scrolls a clipped menu and false-passed the invisible flyout); no server needed
 cd frontend && node e2e/paste-html-real-browser.mjs     # a pasted checklist's clipboard HTML is READ in real Chromium and nothing in it loads, runs or stalls the parser (jsdom fetches nothing and is not Chromium's parser); no server needed
+cd frontend && node e2e/photo-metadata-real-browser.mjs   # a photo's EXIF (GPS, make, time, XMP, comments) is gone from the recipient's copy of a JPEG/PNG/WebP sent through the REAL seal + /upload path (api/attachments.ts bundled, real WebCrypto), and Chromium's decoder gives the SAME PIXELS, still upright (control: without the Orientation tag the decode lies down); a damaged JPEG is refused with nothing uploaded; no server needed (docs/SECURITY_MODEL.md, Photos are stripped of metadata)
 cd frontend && node e2e/plaintext-disk-real-browser.mjs   # decrypted attachments on the REAL disk (headless Edge, four throwaway profiles at once, simulated memory pressure; Chromium honours one pressure event per ~30 s): hosted plaintext lands in blob_storage (positive control) and is gone within seconds of release with no GC forced from outside, a blob the page still holds stays (negative control), cached ciphertext is an OPFS file and never a blob, sign-out takes plaintext that IS on disk off it, and avatars from authedMedia are data: URLs that keep no released picture on disk beside them (control: page blobs kept alive there DO); no server needed, ~30 s (docs/SECURITY_MODEL.md, Decrypted attachments on your own storage)
 cd frontend && node e2e/game-sounds-offline-real-browser.mjs   # every card-table sound rendered in a real browser's OfflineAudioContext (a buffer, never a speaker; --mute-audio): it renders, peaks near the game level and under the join chime, and is over in time; no server needed
 cd frontend && node e2e/poker-table-real-browser.mjs <outdir> [baseURL]   # the Poker table as a table (e2e/poker-table-harness.html, fixture-fed): five face-down board slots naming no card, the flop turning card by card (no animation with reduced motion), main + side pots with felt contrast, seats around the oval with nothing on anything, 1280x800 and 390x844; needs a vite dev server
@@ -362,14 +363,16 @@ cd frontend && node e2e/notes-desktop-embed.mjs         # Púca Notes INSIDE the
 cd frontend && node e2e/member-popup-scroll.mjs <outdir>   # member profile popup: last role reachable by wheel (1280x720, 1280x460) and touch (390x844 sheet); needs API= and APP= against a throwaway backend (header of the file)
 cd frontend && node e2e/user-context-menu-reach.mjs <outdir> [baseURL]   # right-click user menu: Move to / Roles lists reachable by wheel and touch, menu inside the window (fixture harness, no backend; needs a vite dev server)
 cd frontend && node e2e/device-stage-real-browser.mjs [outdir]   # the REAL remote-control stage at 390x844 touch against a stand-in host (e2e/device-stage/fakeSession.ts, built by vite.stageharness.config.ts): a tap keeps the keyboard bar's field focused (negative control: a mouse click does not), a zoom-follow switch lands in place as soon as the new screen's picture arrives (before the confirmation) and keeps a pinch made meanwhile, and the trackpad pointer crosses with it (or, from another screen, lands in view); no server needed
+cd frontend && node e2e/device-stage-desktop-real-browser.mjs [outdir]   # the REAL stage on a DESKTOP, real mouse and keyboard (the device-stage harness): a hover moves the remote pointer (control: paused, nothing), a notch down is -120, every bar menu inside the window and what elementFromPoint hits at 1280x800 and 900x700, a press outside an open menu clicks nothing over there (control: with none open it does), Esc forwarded, Ctrl+Alt+Home pauses and the banner's Resume is hit, the pointer drawn here in the host's shape (control: switched off, the host draws it), the elevated-window banner on screen and unclipped; no server needed
 cd frontend && node e2e/no-screen-stage-real-browser.mjs [outdir]   # "<PC>'s screen is off" on the REAL stage (the device-stage harness): the virtual-screen-starting banner and the lid-closed end sentence on screen, unclipped and using their width at 390x844 touch and 1280x800, with a 2000 px element as the control that must FAIL; no server needed
 cd frontend && node e2e/video-controls-real-browser.mjs [outdir]   # Púca's own video controls on the REAL chat attachment path (bundled MessageContent + TaskAttachments, encrypted fixtures served as /files does): volume, speed and fullscreen visible and hit-testable at 176 px (portrait, 9:21 letterboxed), 44 px on touch, panels inside a 390 px window and above a fullscreen player, 2x really plays at 2x (1x as control), volume = video x Output Volume, keyboard only inside the player, a vertical swipe on the timeline scrolls and never seeks (sideways drag as control), a TAP on the centre Play reaches the button (a CSS-transformed button sent the click to the <video> on Android), in-app fullscreen in the top layer, all eight themes x contrast, a small 192x108 landscape video on touch (a 192x168 box: one row, bar inside the player; mouse keeps 192x108), every player's bar inside its frame and its centre Play clear of the timeline, panels that close on F / Tab / scrolled-away button and a dismissing click that plays nothing; silent fixtures, --mute-audio, muted asserted before any play; no server needed
+cd frontend && node e2e/heic-real-browser.mjs [outdir]   # a REAL HEIC photo (src/tests/fixtures/heic) on the real send-and-show path (api/heif.ts, the real seal, the attachment cache and plaintext host workers, MessageContent / TaskAttachments / ComposerAttachments): Edge refuses it (the root cause), so on the web it is sent as it is and shown as a FILE CARD with name, size and a Download that saves the original byte for byte, never an <img> (a PNG beside it as control), 44 px Download on a 390x844 touchscreen; under a fake desktop shell `heif_to_jpeg` makes it a JPEG before the seal, the composer chip previews the JPEG, a HEIC sent earlier is decoded ONLY after Show photo (WIC runs in the app's own process) and then shows, and no plaintext worker or lease outlives the attachments; no server needed
 ```
 
 **`node scripts/gates.mjs` runs every gate above that needs no backend, dev
 server or emulator** — typecheck, vitest, lint, build, the three cargo suites,
 the SQL bind check, both JUnit suites, the Steam Deck plugin's suite, the installer hooks, the third-party
-notices (and that the result is committed) and the twelve no-server
+notices (and that the result is committed) and the fifteen no-server
 real-browser scripts — concurrently where they share no lock (cargo's
 `target/` is one lock; the real-browser scripts run one at a time, after
 vitest), compiles at below-normal priority, and NEVER a compile beside vitest
@@ -623,13 +626,16 @@ The rule that must never regress, whatever the exit code says:
 cd frontend && npm run lint 2>&1 | grep -c "rules-of-hooks"   # must print 0
 ```
 
-Two `react-hooks/exhaustive-deps` **warnings** remain, both known. `SmartAvatar.tsx`
-is deliberate: the effect must run after every render to catch `img.complete`
-flipping on the DOM node without telling React, so following the rule's advice
-(`[loaded]`) would break it. `StreamStage.tsx` (missing `setFocusedStream` dep)
-is unassessed — do not "fix" a hook-dep warning blind; dependency changes change
-behaviour. Warnings do not fail the gate, but a NEW warning in the lint output
-is a finding: read it, decide, then document it here or fix it.
+One `react-hooks/exhaustive-deps` **warning** remains, and it is known.
+`SmartAvatar.tsx` is deliberate: the effect must run after every render to catch
+`img.complete` flipping on the DOM node without telling React, so following the
+rule's advice (`[loaded]`) would break it. (`StreamStage.tsx`'s was the other
+one until 2026-09-26, 114a1034: its deps are `[focusedStream, setFocusedStream]`,
+and `setFocusedStream` is a zustand action whose identity never changes, which
+`src/tests/streamStore.test.ts` pins, so adding it changes nothing.) Do not
+"fix" a hook-dep warning blind; dependency changes change behaviour. Warnings do
+not fail the gate, but a NEW warning in the lint output is a finding: read it,
+decide, then document it here or fix it.
 
 Live suites need a backend against a **throwaway** database — never the dev or
 production one. See the header of `frontend/e2e/e2ee-live-verify.mjs`.

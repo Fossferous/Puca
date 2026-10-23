@@ -29,6 +29,9 @@ const psql = (sql) => execFileSync(PSQL, ['-U', 'postgres', '-h', 'localhost', '
 
 const browser = await chromium.launch({
     args: [
+        // First: the fake microphone is a beeping tone, and both peers play
+        // each other's voice, so without it a run reaches the speakers.
+        '--mute-audio',
         '--use-fake-ui-for-media-stream',
         '--use-fake-device-for-media-stream',
         // Real-address host candidates. Headless Chromium's mDNS (.local)
@@ -49,7 +52,10 @@ async function register(ctx, user) {
     await page.waitForURL('**/login');
     await page.waitForSelector('#username', { timeout: 10000 });
     await page.click('.toggle-mode', { timeout: 5000 });
-    await page.waitForSelector('#inviteCode', { timeout: 5000 });
+    // The sign-up form, by its password field: #inviteCode, which this used
+    // to wait for, is shown only when the server requires an invite code
+    // (REGISTRATION_INVITE_CODE), and this suite registers on an open server.
+    await page.waitForSelector('input[placeholder="Choose a password (min 8 characters)"]', { timeout: 5000 });
     await page.fill('#username', user);
     await page.fill('#password', PASS);
     await page.click('button[type="submit"]');

@@ -133,7 +133,7 @@ export function ListContentBlock({ list, features, onPatch, coarse, runWrite = u
             if (outcome !== 'saved') await afterFailedSave(outcome, added, files.length === 1 ? 'picture' : 'pictures');
         } catch (err) {
             console.error('Failed to upload picture:', err);
-            pushMessageToast({ title: err instanceof Error && err.name === 'TooManyAttachmentsError' ? err.message : 'Couldn’t upload the picture' });
+            pushMessageToast({ title: err instanceof Error && (err.name === 'TooManyAttachmentsError' || err.name === 'HeifNotSendableError' || err.name === 'ImageMetadataError') ? err.message : 'Couldn’t upload the picture' });
         } finally {
             setBusy(false);
         }

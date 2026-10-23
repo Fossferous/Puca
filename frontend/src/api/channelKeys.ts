@@ -23,7 +23,8 @@ import {
     type WrappedChannelKey,
 } from './e2ee';
 import { pinServedIdentityKey, hasIdentityPin, identityPinConflicts } from './keyVerification';
-import { currentUserIdFromToken } from './auth';
+import { currentUserIdFromToken, refuseOwnKeyMismatch, settleOwedOwnKeyCheck } from './auth';
+import { channelName, clearChannelDirectory, serverName, serverOfChannel } from './channelDirectory';
 
 interface ChannelKeyState {
     currentEpoch: number;
@@ -102,6 +103,111 @@ function rememberWrapper(channelId: number, userId: number, key: string): void {
 const inflight = new Map<number, Promise<ChannelKeyState>>();
 
 /**
+ * The member list a person can see for a server: GET
+ * /servers/:id/members-with-roles, the answer the member sidebar renders.
+ *
+ * WHY THIS EXISTS (audit 2026-10, F-2). The wrap set and the first-contact
+ * check below both came from GET /channels/:id/member-keys, which no screen
+ * renders, and nothing compared it with the list people see. So a server that
+ * listed an extra id there, and only there, was handed the channel key by
+ * every honest member who minted an epoch, and nothing on screen changed —
+ * while the docs said a forged member now had to sit "in the member list
+ * where you can see them". The key is now wrapped only for ids that are in
+ * BOTH, and a wrapper is trusted at first contact only if it is in both.
+ *
+ * The app installs the sidebar's own query here (main.tsx), so the check and
+ * the screen read one answer; anything else (Púca Notes, tests) asks the
+ * server directly. `fresh` reads past any cache.
+ */
+export type VisibleMembersSource = (serverId: string, fresh: boolean) => Promise<ReadonlyArray<{ id: number }>>;
+const askVisibleMembers: VisibleMembersSource = (serverId) => apiClient.get(`/servers/${serverId}/members-with-roles`);
+let visibleMembersSource: VisibleMembersSource = askVisibleMembers;
+export function setVisibleMembersSource(source: VisibleMembersSource | null): void {
+    visibleMembersSource = source ?? askVisibleMembers;
+}
+
+type VisibleMembers = { serverId: string; ids: Set<number> };
+
+/**
+ * Who the person can see as members of `channelId`'s server, for ONE load or
+ * mint, or null when that cannot be established. Null is never read as
+ * "nobody is a member": callers extend no new trust and wrap for nobody.
+ *
+ * `need` are the ids about to be relied on. A list that lacks any of them is
+ * read once more past the cache before anyone is refused: someone who joined
+ * a moment ago is in member-keys before they are in a list fetched before
+ * they joined, and refusing them would be a false alarm and a member who
+ * cannot read. If that read fails, nothing is established: the first list is
+ * the one in doubt, and must not stand in for the read meant to replace it.
+ *
+ * A list without US in it is not this server's member list (the endpoint
+ * answers [] when its own query fails), so it reads as null too.
+ */
+function visibleMembersReader(channelId: number): (need: readonly number[]) => Promise<VisibleMembers | null> {
+    let serverId: string | null | undefined;
+    let ids: Set<number> | null = null;
+    let readFresh = false;
+    const read = async (fresh: boolean): Promise<Set<number> | null> => {
+        try {
+            const list = await visibleMembersSource(serverId as string, fresh);
+            if (!Array.isArray(list)) return null;
+            const set = new Set(list.map((m) => Number(m.id)));
+            const me = currentUserIdFromToken();
+            return me !== null && set.has(me) ? set : null;
+        } catch {
+            return null;
+        }
+    };
+    return async (need) => {
+        if (serverId === undefined) serverId = await serverOfChannel(channelId);
+        if (!serverId) return null;
+        if (!ids && !readFresh) ids = await read(false);
+        if (!readFresh && !(ids && need.every((id) => ids!.has(id)))) {
+            readFresh = true;
+            ids = await read(true);
+        }
+        return ids ? { serverId, ids } : null;
+    };
+}
+
+/** An id the server listed on member-keys for a channel that is not in the
+ *  member list a person can see: never given the key (F-2), and said so. */
+export interface HiddenRecipientNotice {
+    channelId: number;
+    serverId: string;
+    channelName: string | null;
+    serverName: string | null;
+    userIds: number[];
+}
+const hiddenRecipients = new Map<number, HiddenRecipientNotice>();
+const HIDDEN_RECIPIENTS_EVENT = 'e2ee-hidden-recipients-changed';
+
+function reportHiddenRecipients(channelId: number, serverId: string, userIds: readonly number[]): void {
+    const prev = hiddenRecipients.get(channelId);
+    const all = [...new Set([...(prev?.userIds ?? []), ...userIds])].sort((a, b) => a - b);
+    if (prev && prev.userIds.length === all.length) return; // said already
+    console.warn(
+        `[e2ee] channel ${channelId} (server ${serverId}): the server lists ${all.join(', ')} as able to read it, ` +
+        `but not in the member list people see — not giving the channel key to ${all.length === 1 ? 'it' : 'them'}`,
+    );
+    hiddenRecipients.set(channelId, {
+        channelId, serverId, channelName: channelName(channelId), serverName: serverName(serverId), userIds: all,
+    });
+    try { window.dispatchEvent(new CustomEvent(HIDDEN_RECIPIENTS_EVENT)); } catch { /* non-DOM */ }
+}
+
+/** Every channel this session refused a hidden recipient for, oldest first. */
+export function hiddenRecipientNotices(): HiddenRecipientNotice[] {
+    return [...hiddenRecipients.values()];
+}
+
+/** Hear a new or grown notice. Returns the unsubscribe. */
+export function onHiddenRecipientsChange(cb: () => void): () => void {
+    window.addEventListener(HIDDEN_RECIPIENTS_EVENT, cb);
+    return () => window.removeEventListener(HIDDEN_RECIPIENTS_EVENT, cb);
+}
+
+/**
  * Key material THIS session generated, per channel and epoch.
  *
  * A served row whose key is byte-equal to one of these is fresh material no
@@ -151,6 +257,7 @@ async function attributeWrapper(
     row: ServerKeysResponse['keys'][number],
     identity: Identity,
     memberKeys: () => Promise<Map<number, string> | null>,
+    visibleMembers: (need: readonly number[]) => Promise<VisibleMembers | null>,
 ): Promise<WrapperTrust> {
     // 1. Pre-migration-037 rows carry no wrapper id. There is nothing to
     //    attribute them to, ever - readable, never encrypted under.
@@ -167,7 +274,9 @@ async function attributeWrapper(
     //    the KEK is X25519(senderPriv, ourPub), so a row whose sender key is our
     //    own published key can only have been produced by the holder of our
     //    private key. A forgery that merely CLAIMS our key fails the GCM tag in
-    //    unwrapChannelKey and never reaches the key map.
+    //    unwrapChannelKey and never reaches the key map. (A row that names US
+    //    as its wrapper under any OTHER key never gets here: loadKeys refuses
+    //    it first, at every epoch.)
     if (row.sender_public_key === identity.publicKeyEncoded) return 'trusted';
 
     // 3. A key CONTRADICTING what we already pinned or verified for this id is a
@@ -182,34 +291,49 @@ async function attributeWrapper(
 
     // 5. First contact with this wrapper for this channel. Accept only if the
     //    server ALSO publishes that id as a member of THIS channel under the
-    //    very same key. That is the step the fabricated-id attack cannot satisfy
-    //    without forging channel membership too - which puts a stranger in the
-    //    member list where a human can see them, instead of leaving the attack
-    //    invisible.
+    //    very same key.
     //
     //    Note this deliberately does NOT accept a bare identity pin. Pins are
-    //    permanent and mintEpoch creates one for every id the server lists as a
-    //    member, so honouring a pin here would let a server show a fabricated
-    //    member ONCE, have us pin it while wrapping, then withdraw it and still
-    //    be trusted to distribute keys forever after. Membership has to hold at
+    //    permanent and mintEpoch creates one for every member it wraps for,
+    //    so honouring a pin here would let a server show a fabricated member
+    //    ONCE, have us pin it while wrapping, then withdraw it and still be
+    //    trusted to distribute keys forever after. Membership has to hold at
     //    the moment we rely on it.
+    //
+    //    6. If the member-keys lookup FAILED (offline, 403) - which is not
+    //    evidence of anything - an existing pin stands in for it, so a dropped
+    //    request cannot take away the ability to send in a channel that was
+    //    fine a minute ago. It only means we decline to UPGRADE an unknown
+    //    wrapper on no evidence.
     const members = await memberKeys();
-    if (members) {
-        const published = members.get(row.sender_user_id);
-        if (published && published === row.sender_public_key) {
-            pinServedIdentityKey(row.sender_user_id, row.sender_public_key);
-            rememberWrapper(channelId, row.sender_user_id, row.sender_public_key);
-            return 'trusted';
-        }
+    const keyHolds = members
+        ? members.get(row.sender_user_id) === row.sender_public_key
+        : hasIdentityPin(row.sender_user_id, row.sender_public_key);
+    if (!keyHolds) return 'unverifiable';
+
+    // 7. And the wrapper must be someone the person can SEE as a member of
+    //    the channel's server (F-2). member-keys alone is the server's word,
+    //    rendered nowhere: an id listed there and only there is exactly the
+    //    stranger the step above was meant to put in plain sight, so it is
+    //    refused, and said so. A member list that cannot be read now gives
+    //    no new trust, a pin included: the server choosing to fail that one
+    //    request must not be the way round this step.
+    const visible = await visibleMembers([row.sender_user_id]);
+    if (!visible) return 'unverifiable';
+    if (!visible.ids.has(row.sender_user_id)) {
+        // Said only when member-keys itself listed them. With that lookup
+        // failed, this wrapper stood in on a pin, and a pinned wrapper who
+        // has since LEFT is ordinary: their rows outlive them (migration 015
+        // deletes only rows addressed TO a leaver). The server listed nobody,
+        // so there is nothing to report (second review, finding 4).
+        if (members) reportHiddenRecipients(channelId, visible.serverId, [row.sender_user_id]);
         return 'unverifiable';
     }
-
-    // 6. The membership lookup FAILED (offline, 403) - which is not evidence of
-    //    anything. Fall back to trust we already hold: an existing pin keeps
-    //    working exactly as before, so a network partition cannot take away the
-    //    ability to send in a channel that was fine a minute ago. It only means
-    //    we decline to UPGRADE an unknown wrapper on no evidence.
-    return hasIdentityPin(row.sender_user_id, row.sender_public_key) ? 'trusted' : 'unverifiable';
+    if (members) {
+        pinServedIdentityKey(row.sender_user_id, row.sender_public_key);
+        rememberWrapper(channelId, row.sender_user_id, row.sender_public_key);
+    }
+    return 'trusted';
 }
 
 /** Fetch and unwrap all channel keys currently addressed to us. */
@@ -247,11 +371,28 @@ async function loadKeys(channelId: number): Promise<ChannelKeyState> {
             return null;
         }
     };
+    // The member list people see, read at most twice per load (once from
+    // the cache, once past it) and only if a row needs first contact.
+    const visibleMembers = visibleMembersReader(channelId);
 
     // Our own user id is the recipient a v3 wrap was bound to (recipient_id
     // in the row); a signed-out rig has none, and then no v3 wrap can open.
     const me = currentUserIdFromToken() ?? -1;
+    let refusedOwnKey = false;
     for (const row of resp.keys) {
+        // A row that says WE wrapped it, under a key that is not ours. Only a
+        // server forging our identity produces one: we post our own key with
+        // every wrap, and a v3 key never changes. Taken at first contact, it
+        // passed every step of attributeWrapper (we are in member-keys under
+        // whatever key the server lists for us, and in the member list), and
+        // the client encrypted under a key the server chose (second review,
+        // finding 2). Refused at every epoch, and the identity with it.
+        if (row.sender_user_id === me && row.sender_public_key !== identity.publicKeyEncoded) {
+            if (!refusedOwnKey) refuseOwnKeyMismatch(`channel ${channelId}'s key rows`);
+            refusedOwnKey = true;
+            continue;
+        }
+
         // The conflict check runs at EVERY epoch, history included: it is free
         // (no network) and a substituted key for someone we already trust must
         // never be unwrapped, however old the row.
@@ -279,7 +420,7 @@ async function loadKeys(channelId: number): Promise<ChannelKeyState> {
         // the floor was tried and bought nothing except attributing the whole
         // history whenever the floor was 0 (audit C-01 review).
         if (row.epoch >= resp.current_epoch) {
-            const trust = await attributeWrapper(channelId, row, identity, memberKeys);
+            const trust = await attributeWrapper(channelId, row, identity, memberKeys, visibleMembers);
             if (trust === 'conflict') {
                 console.warn(
                     `[e2ee] channel ${channelId} epoch ${row.epoch}: refusing key - wrapper ` +
@@ -429,11 +570,39 @@ async function mintEpoch(
     epoch: number,
     generation: number
 ): Promise<Uint8Array | null> {
+    // A sign-in that could not read the key this server publishes for us
+    // reads it now, before we hand anyone a key (F-3).
+    if (!(await settleOwedOwnKeyCheck())) return null;
     const identity = getActiveIdentity();
     if (!identity) return null;
 
     console.debug(`[e2ee] mintEpoch(${channelId}) epoch=${epoch} gen=${generation}: fetching member keys`);
-    const members: MemberKey[] = await apiClient.get(`/channels/${channelId}/member-keys`);
+    const listed: MemberKey[] = await apiClient.get(`/channels/${channelId}/member-keys`);
+    // Our own entry must be OUR key. It is wrapped for like anyone else's,
+    // and pinned first: a server listing us under a key of its own got the
+    // channel key wrapped to it, by us, and F-2's check could not stop it,
+    // since we are in every list (second review, finding 2). Refused before
+    // anything is pinned or wrapped, and the identity with it. Missing from
+    // the list, we simply get no wrap of our own: nothing leaks.
+    const me = currentUserIdFromToken();
+    const mine = me === null ? undefined : listed.find((m) => m.user_id === me);
+    if (mine && mine.public_key !== identity.publicKeyEncoded) {
+        refuseOwnKeyMismatch(`channel ${channelId}'s member keys`);
+        return null;
+    }
+    // Wrap only for people the person can SEE as members of the channel's
+    // server (F-2): an id the server lists here and in no list on screen is
+    // never handed the key, and the refusal is said out loud. A member list
+    // that cannot be read means no mint at all - "try again in a moment" -
+    // never a mint for whoever member-keys names.
+    const visible = await visibleMembersReader(channelId)(listed.map((m) => m.user_id));
+    if (!visible) {
+        console.warn(`[e2ee] mintEpoch(${channelId}): the member list for this channel's server could not be read — not minting`);
+        return null;
+    }
+    const hidden = listed.filter((m) => !visible.ids.has(m.user_id)).map((m) => m.user_id);
+    if (hidden.length > 0) reportHiddenRecipients(channelId, visible.serverId, hidden);
+    const members = listed.filter((m) => visible.ids.has(m.user_id));
     // Pin each member's served identity key before wrapping the group key for it.
     // A server that substitutes one member's key would otherwise get the CK
     // wrapped for its key and recover the channel key; pinServedIdentityKey drops
@@ -760,4 +929,6 @@ export function clearChannelKeyCache(): void {
     inflight.clear();
     confirmedWrappers.clear();
     selfMinted.clear();
+    hiddenRecipients.clear();
+    clearChannelDirectory();
 }

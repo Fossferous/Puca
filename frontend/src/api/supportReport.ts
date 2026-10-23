@@ -20,6 +20,8 @@
  * arbitrary account by anything but the person's own pick.
  */
 import type { Server } from './servers';
+import { QUICK_TIMEOUT_MS, withTimeout } from './withTimeout';
+import { REPORT_BUDGET_MS } from './diagnosticsBudget';
 
 /** A server owner the report can go to. One entry per owner: someone in two
  *  servers run by the same person is not asked to choose between them. */
@@ -83,17 +85,53 @@ export function reportText(diagnostics: string, log: string | null): string {
     ].join('\n');
 }
 
-/** Everything the send touches, injectable for the tests. */
+/** Everything the send touches, injectable for the tests. The `signal` each
+ *  network step receives is aborted when the send gives up (a step timed out,
+ *  or the person closed the dialog), so the request really stops. */
 export interface SendDeps {
     version: () => Promise<string>;
     diagnostics: () => Promise<string>;
     /** null when there is no log file on this platform. */
     readLog: () => Promise<string | null>;
-    upload: (file: File) => Promise<string>;
-    openConversation: (userId: number) => Promise<{ id: string }>;
+    upload: (file: File, signal?: AbortSignal) => Promise<string>;
+    openConversation: (userId: number, signal?: AbortSignal) => Promise<{ id: string }>;
     encrypt: (text: string, recipientId: number) => Promise<string>;
-    post: (conversationId: string, wire: string) => Promise<unknown>;
+    post: (conversationId: string, wire: string, signal?: AbortSignal) => Promise<unknown>;
     now: () => Date;
+}
+
+/** Each step's own budget. A step that never answers must cost the send, with
+ *  a sentence the dialog can show, never the person's ability to close it
+ *  (the modal used to lock Close while sending, so one stalled step trapped
+ *  them there for good). */
+const NETWORK_STEP_MS = 20_000;
+const UPLOAD_BASE_MS = 60_000;
+/** Slowest uplink the upload is still waited for: 64 KB/s on top of the base,
+ *  so a multi-megabyte puca.log on a poor link gets its time. */
+const UPLOAD_FLOOR_BYTES_PER_S = 64 * 1024;
+/** A whole puca.log read off disk through the shell. */
+const READ_LOG_MS = 12_000;
+
+export const uploadTimeoutMs = (bytes: number): number =>
+    UPLOAD_BASE_MS + Math.ceil(bytes / UPLOAD_FLOOR_BYTES_PER_S) * 1000;
+
+function abortError(): Error {
+    const e = new Error('Sending was cancelled');
+    e.name = 'AbortError';
+    return e;
+}
+
+/** One bounded step: rejects on its own timeout, or at once when the send is
+ *  aborted, whichever the step's promise does not beat. */
+function step<T>(signal: AbortSignal, label: string, ms: number, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    if (signal.aborted) return Promise.reject(abortError());
+    return new Promise<T>((resolve, reject) => {
+        const onAbort = () => reject(abortError());
+        signal.addEventListener('abort', onAbort, { once: true });
+        withTimeout((async () => fn(signal))(), ms, label)
+            .then(resolve, reject)
+            .finally(() => signal.removeEventListener('abort', onAbort));
+    });
 }
 
 async function defaultDeps(): Promise<SendDeps> {
@@ -118,10 +156,10 @@ async function defaultDeps(): Promise<SendDeps> {
                 return `(the app log could not be read: ${e instanceof Error ? e.message : String(e)})`;
             }
         },
-        upload: file => encryptAndUpload(file),
-        openConversation: dms.startDMConversation,
+        upload: (file, signal) => encryptAndUpload(file, signal ? { signal } : undefined),
+        openConversation: (userId, signal) => dms.startDMConversation(userId, signal ? { signal } : undefined),
         encrypt: dms.encryptDMContent,
-        post: dms.sendDMMessageRest,
+        post: (conversationId, wire, signal) => dms.sendDMMessageRest(conversationId, wire, signal ? { signal } : undefined),
         now: () => new Date(),
     };
 }
@@ -131,19 +169,58 @@ async function defaultDeps(): Promise<SendDeps> {
  * bytes; throws with a message fit to show when any step fails, because a
  * half-sent report (a file uploaded with no message pointing at it) is simply
  * an orphan the server will reap, never something the recipient sees.
+ *
+ * Every step is bounded (see NETWORK_STEP_MS): a step that stalls fails the
+ * send with a sentence naming it, and aborts the requests still in flight.
+ * Measuring and reading the log degrade into the report instead, as a failed
+ * measurement already did. `opts.signal` is the dialog closing: it stops the
+ * send before the next step starts, so nothing is posted after the person has
+ * gone. The one thing a timeout cannot know is whether the final post reached
+ * the server before it was cut, and the message for that step says so.
  */
-export async function sendSupportReport(ownerId: number, note: string, deps?: SendDeps): Promise<number> {
-    const d = deps ?? await defaultDeps();
-    const [version, diagnostics, log] = await Promise.all([
-        d.version().catch(() => 'unknown'),
-        d.diagnostics().catch(e => `(diagnostics unavailable: ${e instanceof Error ? e.message : String(e)})`),
-        d.readLog(),
-    ]);
-    const text = reportText(diagnostics, log);
-    const file = new File([text], reportFileName(version, d.now()), { type: 'text/plain' });
-    const markdown = await d.upload(file);
-    const conv = await d.openConversation(ownerId);
-    const wire = await d.encrypt(reportMessage(version, note, markdown), ownerId);
-    await d.post(conv.id, wire);
-    return file.size;
+export async function sendSupportReport(
+    ownerId: number, note: string, deps?: SendDeps, opts?: { signal?: AbortSignal },
+): Promise<number> {
+    const ac = new AbortController();
+    const outer = opts?.signal;
+    const onOuterAbort = () => ac.abort();
+    if (outer?.aborted) ac.abort();
+    else outer?.addEventListener('abort', onOuterAbort, { once: true });
+    try {
+        const d = deps ?? await defaultDeps();
+        const { signal } = ac;
+        const [version, diagnostics, log] = await Promise.all([
+            step(signal, 'Reading the version', QUICK_TIMEOUT_MS, () => d.version()).catch(e => {
+                if (signal.aborted) throw e;
+                return 'unknown';
+            }),
+            step(signal, 'The measurement', REPORT_BUDGET_MS, () => d.diagnostics()).catch(e => {
+                if (signal.aborted) throw e;
+                return `(diagnostics unavailable: ${e instanceof Error ? e.message : String(e)})`;
+            }),
+            step(signal, 'Reading the app log', READ_LOG_MS, () => d.readLog()).catch(e => {
+                if (signal.aborted) throw e;
+                return `(the app log could not be read: ${e instanceof Error ? e.message : String(e)})`;
+            }),
+        ]);
+        const text = reportText(diagnostics, log);
+        const file = new File([text], reportFileName(version, d.now()), { type: 'text/plain' });
+        const markdown = await step(signal, 'The upload', uploadTimeoutMs(file.size), s => d.upload(file, s));
+        const conv = await step(signal, 'Opening the conversation with the owner', NETWORK_STEP_MS, s => d.openConversation(ownerId, s));
+        const wire = await step(signal, 'Encrypting the report', NETWORK_STEP_MS, () => d.encrypt(reportMessage(version, note, markdown), ownerId));
+        try {
+            await step(signal, 'Posting the message', NETWORK_STEP_MS, s => d.post(conv.id, wire, s));
+        } catch (e) {
+            if (!signal.aborted && e instanceof Error && /gave no answer within \d+ s$/.test(e.message)) {
+                throw new Error(`${e.message}. It may still have been delivered: check your direct messages with the owner before sending again`);
+            }
+            throw e;
+        }
+        return file.size;
+    } catch (e) {
+        ac.abort();
+        throw e;
+    } finally {
+        outer?.removeEventListener('abort', onOuterAbort);
+    }
 }

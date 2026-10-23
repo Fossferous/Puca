@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { getProfile, updateAvatar, updateProfile } from '../api/profile';
 import type { Profile } from '../api/profile';
+import { ImageMetadataError } from '../api/imageMetadata';
 import { uploadFile, discardUpload, isAudioType, MAX_SOUND_BYTES, formatFileSize } from '../api/uploads';
 import './UserProfileSettings.css';
 import { CloseIcon, PlayIcon } from './Icons';
@@ -110,8 +111,8 @@ export function UserProfileSettings({ isOpen, onClose }: UserProfileSettingsProp
             setSuccess('Avatar updated!');
             setTimeout(() => setSuccess(null), 2000);
             return true;
-        } catch {
-            setError('Failed to upload avatar');
+        } catch (err) {
+            setError(err instanceof ImageMetadataError ? err.message : 'Failed to upload avatar');
             return false;
         } finally {
             setIsUploading(false);

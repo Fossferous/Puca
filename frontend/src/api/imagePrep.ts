@@ -9,10 +9,13 @@
  *
  * Only what can be re-encoded without loss of meaning is touched: GIFs
  * (animation) and SVGs pass through unchanged, and so does anything already
- * small. Where the platform cannot decode the image (no createImageBitmap,
- * a HEIC the browser does not read, jsdom) the original goes through — the
- * upload cap still applies to it.
+ * small. A HEIC is first made a JPEG where this device can decode one
+ * (api/heif.ts): only WebKit shows a HEIC, so one sent as it is was a broken
+ * picture nearly everywhere. Where the platform cannot decode the image (no
+ * createImageBitmap, a HEIC nothing here reads, jsdom) the original goes
+ * through — the upload cap still applies to it.
  */
+import { convertHeifForUpload } from './heif';
 
 export const MAX_IMAGE_EDGE = 2048;
 /** Files at or under this size and edge are left alone. */
@@ -32,7 +35,8 @@ export function shouldShrink(type: string, bytes: number, w: number, h: number):
     return bytes > SMALL_IMAGE_BYTES || Math.max(w, h) > MAX_IMAGE_EDGE;
 }
 
-export async function prepareImageForUpload(file: File): Promise<File> {
+export async function prepareImageForUpload(original: File): Promise<File> {
+    const file = await convertHeifForUpload(original);
     if (typeof createImageBitmap !== 'function' || typeof document === 'undefined') return file;
     let bitmap: ImageBitmap;
     try {

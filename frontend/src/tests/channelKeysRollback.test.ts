@@ -65,7 +65,7 @@ const fake = {
 // partial mock is still being built - that cycle handed channelKeys the REAL
 // http client (401s from whatever listens on :3000). channelKeys409.test.ts has
 // the same shape for the same reason.
-vi.mock('../api/auth', () => ({ currentUserIdFromToken: () => 1, getToken: () => null, storeRenewedToken: () => {} }));
+vi.mock('../api/auth', () => ({ currentUserIdFromToken: () => 1, getToken: () => null, storeRenewedToken: () => {}, settleOwedOwnKeyCheck: async () => true, refuseOwnKeyMismatch: () => {} }));
 // Keep the real module's exports (mintEpoch reads `statusOf` to recognise the
 // 409); replace only the transport.
 vi.mock('../api/client', async (orig) => {
@@ -85,6 +85,11 @@ vi.mock('../api/client', async (orig) => {
                 };
             }
             if (url.endsWith('/member-keys')) return fake.members;
+            // An honest server: the member list people see holds everyone it
+            // lists for a channel's key, and the channels are listed under s1 (F-2).
+            if (url === '/servers') return [{ id: 's1', name: 'Test server' }];
+            if (url === '/servers/s1/channels') return [{ id: 7, name: 'seven' }, { id: 42, name: 'general' }, { id: 43, name: 'other' }];
+            if (url.endsWith('/members-with-roles')) return [{ id: 1 }, ...fake.members.map((m) => ({ id: m.user_id }))];
             throw new Error('unexpected GET ' + url);
         }),
         post: vi.fn(async (url: string, body: {

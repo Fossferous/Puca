@@ -70,7 +70,7 @@ import { shouldTakeOver } from '../api/ownVoice';
 import { pressMute, pressDeafen, imposeMute, micBack, micOpen, UNMUTED, type SelfMute, type MuteConstraints } from '../api/rtc/selfMute';
 import { setVoiceKeepAlive, openMobileAppSettings } from '../api/mobileApp';
 import { phonePanelQuery } from '../utils/phonePanel';
-import { isTouchDevice } from './settingsModal.utils';
+import { isTouchDevice, screenShareOffered } from './settingsModal.utils';
 import { buildVoiceStatus, parseVoiceStatus } from '../utils/voiceStatus';
 import { onArmedChange as onClipArmedChange, disarm as disarmClipBuffer, getReplayState } from '../api/clips/replayBuffer';
 import { DeclaredParticipants } from '../api/clips/clipParticipants';
@@ -288,8 +288,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     const pendingJoinsRef = useRef(new PendingJoins());
     const pendingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-    // Detect mobile for hiding screen share option
-    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    // Detect mobile for hiding screen share option (the same answer the
+    // sharing settings follow: settingsModal.utils screenShareOffered)
+    const isMobile = !screenShareOffered();
 
     // The PANEL-LAYOUT gate — DESIGN_PHILOSOPHY §2: it IS mobile.css's media
     // query (utils/phonePanel.ts), and nothing else. This decides whether the
@@ -3258,9 +3259,16 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     useEffect(() => {
         registerStopScreenShareCallback(stopMyScreenShare);
         webrtcManager.setOnScreenShareEnded(stopMyScreenShare);
+        // An SFU share that a failed re-publish could not put back ends the
+        // same way, and says why (sfuManager.restoreShare).
+        sfuManager.setOnShareLost((message) => {
+            setError(message);
+            stopMyScreenShare();
+        });
         return () => {
             registerStopScreenShareCallback(() => { });
             webrtcManager.setOnScreenShareEnded(null);
+            sfuManager.setOnShareLost(null);
         };
     }, [stopMyScreenShare]);
 
@@ -3461,12 +3469,14 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                 // that reports success it did not get — the
                                 // setting IS saved, so the next share is
                                 // genuinely lower, and that is what to say.
-                                // `applied` false covers three real cases —
-                                // the engine refused, the cap would have
-                                // changed nothing, and the simulcast ladder
-                                // makes a live re-cap unsafe. All three leave
-                                // the running share alone and the SAVED
-                                // setting doing the work, which is what to say.
+                                // `applied` false covers two real cases —
+                                // the engine refused, and the cap would have
+                                // changed nothing. (A share sent at several
+                                // sizes used to be a third; its rungs are now
+                                // re-sized with it, sfuManager.retuneShare.)
+                                // Both leave the running share alone and the
+                                // SAVED setting doing the work, which is what
+                                // to say.
                                 if (applied) {
                                     // They asked for help and got a real
                                     // change; let the watch speak once more if

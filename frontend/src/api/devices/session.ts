@@ -52,9 +52,12 @@ import {
 import { deviceKeyDh } from './deviceKeyRc';
 import { buildClipboardEvent, isClipboardEvent, readLocalClipboardDetailed, writeLocalClipboard, MAX_CLIPBOARD_BYTES } from './clipboard';
 import { getHostBackend } from './hostBackend';
+import { blockedAppName } from './inputReach';
+import { ProbeMatcher, type ProbeResult } from './latencyProbe';
+import { isLanPair } from './lanPath';
 import { attachTunnelChannel, closeTunnels } from './tunnel';
 import { SerialQueue } from '../serialQueue';
-import { InputCoalescer } from './inputCoalescer';
+import { InputCoalescer, MOVE_INTERVAL_DIRECT_MS, MOVE_INTERVAL_MS } from './inputCoalescer';
 import { issueUaChallenge, unattendedState, verifyUaResponse } from './unattendedHost';
 import {
     confirmUaSeed,
@@ -178,7 +181,7 @@ export const SHUTDOWN_REASON = 'the device is shutting down';
 /** The input kinds the diagnostic counts by name. Anything else is 'other':
  *  the wire's `t` is the peer's own string, and a diagnostic must never turn
  *  an arbitrary one into a key of its output. */
-const INPUT_KINDS = new Set(['move', 'rmove', 'down', 'up', 'wheel', 'key', 'text', 'sas', 'clipboard']);
+const INPUT_KINDS = new Set(['move', 'rmove', 'down', 'up', 'wheel', 'key', 'text', 'sas', 'clipboard', 'probe']);
 
 /** Events per second over a rolling window, for the diagnostics — plus what
  *  KIND each one was and which lane it took, cumulatively.
@@ -400,6 +403,21 @@ export interface DeviceControlSession {
      *  `cursor-clipped` notice, never guessed. Absent machinery (webview host,
      *  old agent) leaves it false — the pre-feature behaviour. */
     cursorClipped: boolean;
+    /** The program (`valheim.exe`) whose window would get this session's input
+     *  and that runs ABOVE the host's agent — as administrator — so Windows
+     *  drops every injected click and key aimed at it without a word (UIPI;
+     *  the agent's input_reach.rs, wording in inputReach.ts). Null while input
+     *  lands. Same trust rule as `secureDesktop`: HOST polled from the agent,
+     *  CONTROLLER only ever told by the host's `input-blocked` notice. */
+    inputBlocked: string | null;
+    /** A program on the host has hidden AND confined the pointer — a game in
+     *  mouse-look, which absolute moves cannot steer and Game mode can.
+     *  Host-asserted like `cursorClipped` (`pointer-captured` notice). */
+    pointerCaptured: boolean;
+    /** CONTROLLER: the host's pointer SHAPE as a CSS cursor keyword ('text',
+     *  'pointer', 'none', …), reported by the agent while this end draws the
+     *  pointer itself (pointer_shape.rs). Null until the host says. */
+    remoteCursor: string | null;
     /** CONTROLLER: transient display-power outcome line ("Turned off 2 of
      *  3; ...", the no-response timeout, a DDC refusal). Auto-clears; never
      *  a session error. */
@@ -574,6 +592,11 @@ interface Internal extends DeviceControlSession {
      *  clip — the exact `secureDesktopSent` pattern, for the exact same
      *  one-way-latch reason. Reset to `null` on any relay interruption. */
     cursorClippedSent: boolean | null;
+    /** HOST: what the controller was last TOLD about `inputBlocked` and
+     *  `pointerCaptured` — the `secureDesktopSent` pattern again, for the same
+     *  one-way-latch reason. `undefined` = not told, or may have missed it. */
+    inputBlockedSent?: string | null;
+    pointerCapturedSent?: boolean;
     /** CONTROLLER: when `secureDesktop` last became true (Date.now()), null
      *  while it is false. The locked-follow poller needs an AGE, not a flag:
      *  it deliberately waits out the host-side unsolicited-lock handover
@@ -749,6 +772,9 @@ interface Internal extends DeviceControlSession {
     inputRate: RateCounter;
     /** CONTROLLER: collapses outgoing pointer motion. Created on first input. */
     sendCoalescer: InputCoalescer | null;
+    /** CONTROLLER: the latency probe's matching (latencyProbe.ts), created on
+     *  the first probe. */
+    probes?: ProbeMatcher;
     /** HOST: collapses motion that survived the network, before it reaches the
      *  agent's one-at-a-time pipe. */
     recvCoalescer: InputCoalescer | null;
@@ -861,6 +887,9 @@ function emit(): void {
         mediaRestarting: s.mediaRestarting,
         secureDesktop: s.secureDesktop,
         cursorClipped: s.cursorClipped,
+        inputBlocked: s.inputBlocked,
+        pointerCaptured: s.pointerCaptured,
+        remoteCursor: s.remoteCursor,
         powerNotice: s.powerNotice,
         peerName: s.peerName,
         hostScreen: s.hostScreen,
@@ -2234,10 +2263,14 @@ export async function pollSecureDesktop(): Promise<void> {
             if (s.transportDown || s.peerReconnecting) {
                 s.secureDesktopSent = null;
                 s.cursorClippedSent = null;
+                s.inputBlockedSent = undefined;
+                s.pointerCapturedSent = undefined;
                 continue;
             }
             let up = false;
             let clipped = false;
+            let blocked: string | null = null;
+            let captured = false;
             // Captured BEFORE the await: which stream this poll is asking
             // about. See the stream-died check below.
             const gen = s.agentStreamGen;
@@ -2248,6 +2281,8 @@ export async function pollSecureDesktop(): Promise<void> {
                 const status = await backend.sessionStatus(s.id);
                 up = status.secureDesktop;
                 clipped = status.cursorClipped === true;
+                blocked = blockedAppName(status.inputBlocked);
+                captured = status.pointerCaptured === true;
                 streamLive = status.streamLive;
                 streamEnd = status.streamEnd;
             } catch {
@@ -2343,6 +2378,23 @@ export async function pollSecureDesktop(): Promise<void> {
             if (clipped !== s.cursorClippedSent) {
                 s.cursorClippedSent = clipped;
                 void sendSignal(s, { kind: 'cursor-clipped', clipped }).catch(() => undefined);
+            }
+            // CAN THE VIEWER'S INPUT LAND? An elevated window swallows it all
+            // (UIPI), a game in mouse-look swallows absolute moves; the agent
+            // sees both and nobody else can. Same edge-against-what-was-told
+            // rule as the two notices above.
+            if (blocked !== s.inputBlocked || captured !== s.pointerCaptured) {
+                s.inputBlocked = blocked;
+                s.pointerCaptured = captured;
+                emit();
+            }
+            if (blocked !== s.inputBlockedSent) {
+                s.inputBlockedSent = blocked;
+                void sendSignal(s, { kind: 'input-blocked', app: blocked }).catch(() => undefined);
+            }
+            if (captured !== s.pointerCapturedSent) {
+                s.pointerCapturedSent = captured;
+                void sendSignal(s, { kind: 'pointer-captured', captured }).catch(() => undefined);
             }
         }
     } finally {
@@ -2805,6 +2857,30 @@ async function handleInputHello(s: Internal, dc: RTCDataChannel, raw: unknown): 
 }
 
 function handleCaretMessage(s: Internal, raw: unknown): void {
+    // The latency probe's answer shares the agent's one way to this end; it is
+    // not a caret and must not count as a malformed one.
+    const answer = parseProbeAnswer(raw);
+    if (answer) {
+        s.probes?.answered(answer.p, answer.ts, answer.host);
+        return;
+    }
+    // And the agent saying it refused typed text: the direct channel has no
+    // other way back, and a frame dropped in silence is text that vanished.
+    const refused = parseInputRefused(raw);
+    if (refused) {
+        s.error = `Some typed text did not go over: ${refused}`;
+        emit();
+        return;
+    }
+    // So does the host's pointer shape, for a viewer drawing the pointer.
+    const shape = parseCursorShape(raw);
+    if (shape) {
+        if (shape !== s.remoteCursor) {
+            s.remoteCursor = shape;
+            emit();
+        }
+        return;
+    }
     const r = parseCaretFrame(raw);
     if (!r) {
         s.caretDroppedMalformed++;
@@ -2923,14 +2999,16 @@ export function revokeAllFileAccess(): number {
  * This samples the cumulative counters twice and reports the DELTAS, so the
  * caller can keep using the stage across the window and get the frame rate,
  * bandwidth and freezes that actually occurred while they were driving.
+ *
+ * `bound` limits each stats read (see `DiagStepBound`).
  */
-export async function deviceDiagnosticsWindow(ms = 5_000): Promise<Record<string, unknown>[]> {
+export async function deviceDiagnosticsWindow(ms = 5_000, bound: DiagStepBound = unbounded): Promise<Record<string, unknown>[]> {
     const raw = async () => {
         const out = new Map<string, { frames: number; bytes: number; freezes: number; decodeS: number; at: number }>();
         for (const s of sessions.values()) {
             if (s.role !== 'controller' || !s.pc) continue;
             try {
-                const stats = await s.pc.getStats();
+                const stats = await bound(s.pc.getStats(), 'the picture statistics');
                 stats.forEach(r => {
                     if (r.type !== 'inbound-rtp' || r.kind !== 'video') return;
                     out.set(s.id, {
@@ -2968,7 +3046,7 @@ export async function deviceDiagnosticsWindow(ms = 5_000): Promise<Record<string
     await new Promise(r => setTimeout(r, ms));
     const after = await raw();
     const inputAfter = inputSnap();
-    const rows = (await deviceDiagnostics()).map(row => {
+    const rows = (await deviceDiagnostics(bound)).map(row => {
         const i0 = inputBefore.get(String(row.id));
         const i1 = inputAfter.get(String(row.id));
         return i0 && i1 ? { ...row, ...inputWindow(i0, i1) } : row;
@@ -3033,7 +3111,18 @@ export function inputWindow(
     };
 }
 
-export async function deviceDiagnostics(): Promise<Record<string, unknown>[]> {
+/**
+ * Bounds one step of a diagnostics reading. The stage's "Copy diagnostics"
+ * passes diagnosticsReport's `withTimeout`, the bound "Send diagnostics" uses,
+ * so a session whose stats never answer costs that session's numbers and
+ * never the whole reading: an unbounded `getStats` held the button's
+ * measurement open for good. Unbounded by default — `__pucaDeviceDiag` has a
+ * person at the console watching it.
+ */
+export type DiagStepBound = <T>(step: Promise<T>, label: string) => Promise<T>;
+const unbounded: DiagStepBound = step => step;
+
+export async function deviceDiagnostics(bound: DiagStepBound = unbounded): Promise<Record<string, unknown>[]> {
     const out: Record<string, unknown>[] = [];
     for (const s of sessions.values()) {
         if (s.role !== 'controller') continue;
@@ -3099,7 +3188,7 @@ export async function deviceDiagnostics(): Promise<Record<string, unknown>[]> {
                 : null,
         };
         try {
-            const stats = await s.pc?.getStats();
+            const stats = s.pc ? await bound(s.pc.getStats(), 'the picture statistics') : undefined;
             // WHICH PATH the media is actually taking. The single most
             // valuable field here and it was missing: "3 fps with freezes"
             // reads completely differently over a TURN relay (bandwidth
@@ -3158,8 +3247,9 @@ export async function deviceDiagnostics(): Promise<Record<string, unknown>[]> {
             // What THIS stage last asked the host to fit, so a frame size that
             // did not change can be read against what was requested.
             row.viewSize = lastViewSize.get(s.id) ?? null;
-        } catch {
+        } catch (e) {
             row.stats = 'unavailable';
+            row.statsError = e instanceof Error ? e.message : String(e);
         }
         out.push(row);
     }
@@ -3169,6 +3259,86 @@ export async function deviceDiagnostics(): Promise<Record<string, unknown>[]> {
 if (typeof window !== 'undefined') {
     (window as unknown as Record<string, unknown>).__pucaDeviceDiag =
         () => deviceDiagnostics();
+}
+
+/**
+ * One reading of a CONTROLLER session's media for the desktop stage's live
+ * stats (liveStats.ts turns two readings into rates). Cumulative counters as
+ * the browser reports them, plus the path the media is taking now — the
+ * cheap subset of `deviceDiagnostics`, read once a second while the stats are
+ * on screen. Null for an unknown session, a host session, or no stats yet.
+ */
+export interface DeviceStatsSample {
+    at: number;
+    framesDecoded: number;
+    bytesReceived: number;
+    freezeCount: number;
+    totalDecodeTime: number;
+    jitterBufferDelay: number;
+    jitterBufferEmittedCount: number;
+    packetsLost: number;
+    packetsReceived: number;
+    frameWidth: number | null;
+    frameHeight: number | null;
+    rttMs: number | null;
+    /** 'relay' when either end of the selected pair is a TURN relay. */
+    path: 'direct' | 'relay' | null;
+    /** The selected pair is the local network itself (lanPath.ts): 'direct'
+     *  alone includes a path punched across the internet. Null with no pair. */
+    lan: boolean | null;
+    /** The selected pair's transport: 'udp' or 'tcp'. */
+    protocol: string | null;
+    decoder: string | null;
+    hardwareDecode: boolean | null;
+    /** Where this end's input is going: the agent's channel, or the relay. */
+    inputLane: string | null;
+}
+
+export async function deviceStatsSample(sessionId: string): Promise<DeviceStatsSample | null> {
+    const s = sessions.get(sessionId);
+    if (!s || s.role !== 'controller' || !s.pc) return null;
+    let stats: RTCStatsReport;
+    try {
+        stats = await s.pc.getStats();
+    } catch {
+        return null;
+    }
+    const out: DeviceStatsSample = {
+        at: Date.now(), framesDecoded: 0, bytesReceived: 0, freezeCount: 0, totalDecodeTime: 0,
+        jitterBufferDelay: 0, jitterBufferEmittedCount: 0, packetsLost: 0, packetsReceived: 0,
+        frameWidth: null, frameHeight: null, rttMs: null, path: null, lan: null, protocol: null,
+        decoder: null, hardwareDecode: null, inputLane: s.inputRate.lane ?? null,
+    };
+    let sawVideo = false;
+    stats.forEach(r => {
+        if (r.type === 'transport' && r.selectedCandidatePairId) {
+            const pair = stats.get(r.selectedCandidatePairId as string);
+            if (!pair) return;
+            const local = stats.get(pair.localCandidateId as string);
+            const remote = stats.get(pair.remoteCandidateId as string);
+            out.path = local?.candidateType === 'relay' || remote?.candidateType === 'relay' ? 'relay' : 'direct';
+            out.lan = isLanPair(local, remote);
+            out.protocol = typeof local?.protocol === 'string' ? local.protocol : null;
+            out.rttMs = typeof pair.currentRoundTripTime === 'number'
+                ? Math.round(pair.currentRoundTripTime * 1000)
+                : null;
+        }
+        if (r.type !== 'inbound-rtp' || r.kind !== 'video') return;
+        sawVideo = true;
+        out.framesDecoded = Number(r.framesDecoded) || 0;
+        out.bytesReceived = Number(r.bytesReceived) || 0;
+        out.freezeCount = Number(r.freezeCount) || 0;
+        out.totalDecodeTime = Number(r.totalDecodeTime) || 0;
+        out.jitterBufferDelay = Number(r.jitterBufferDelay) || 0;
+        out.jitterBufferEmittedCount = Number(r.jitterBufferEmittedCount) || 0;
+        out.packetsLost = Number(r.packetsLost) || 0;
+        out.packetsReceived = Number(r.packetsReceived) || 0;
+        out.frameWidth = typeof r.frameWidth === 'number' ? r.frameWidth : null;
+        out.frameHeight = typeof r.frameHeight === 'number' ? r.frameHeight : null;
+        out.decoder = typeof r.decoderImplementation === 'string' ? r.decoderImplementation : null;
+        out.hardwareDecode = typeof r.powerEfficientDecoder === 'boolean' ? r.powerEfficientDecoder : null;
+    });
+    return sawVideo ? out : null;
 }
 
 export function endSession(sessionId: string, reason = 'ended'): void {
@@ -3432,6 +3602,9 @@ export async function connectToDevice(
         secureDesktopSent: null,
         cursorClipped: false,
         cursorClippedSent: null,
+        inputBlocked: null,
+        pointerCaptured: false,
+        remoteCursor: null,
         powerNotice: null, pendingPowerAckTimer: null, powerNoticeTimer: null,
         peerName: opts?.peerName?.trim() || null,
         hostScreen: null,
@@ -3596,6 +3769,106 @@ export function sendInput(sessionId: string, event: unknown): boolean {
     return true;
 }
 
+/** `{t:'probe'}` — the latency probe, which only the agent's channel carries. */
+function isProbeEvent(event: unknown): boolean {
+    return (event as { t?: unknown } | null)?.t === 'probe';
+}
+
+/** The agent's answer to a probe on the caret channel
+ *  (`{"k":"probe","p":7,"ts":123456,"host":3.5}`, latency.rs), or null. */
+export function parseProbeAnswer(raw: unknown): { p: number; ts: number; host: number | null } | null {
+    if (typeof raw !== 'string' || !raw.includes('"probe"')) return null;
+    let v: unknown;
+    try { v = JSON.parse(raw); } catch { return null; }
+    const o = v as { k?: unknown; p?: unknown; ts?: unknown; host?: unknown } | null;
+    if (!o || o.k !== 'probe') return null;
+    if (typeof o.p !== 'number' || !Number.isInteger(o.p) || typeof o.ts !== 'number' || !Number.isFinite(o.ts)) return null;
+    return { p: o.p, ts: o.ts, host: typeof o.host === 'number' && Number.isFinite(o.host) ? o.host : null };
+}
+
+/** The CSS cursor keywords the host may name (pointer_shape.rs STANDARD, and
+ *  `none`). Anything else is refused: the value lands in a style. */
+const CURSOR_KEYWORDS = new Set([
+    'default', 'text', 'wait', 'crosshair', 'nwse-resize', 'nesw-resize', 'ew-resize',
+    'ns-resize', 'move', 'not-allowed', 'pointer', 'progress', 'help', 'none',
+]);
+
+/** The agent's `{"k":"cursor","css":"text"}` on the caret channel, or null. */
+/** `{"k":"refused","t":"text","why":"..."}` on the caret channel: the agent
+ *  refused a typed-text frame. The reason, shortened and made printable, or
+ *  null for anything else. */
+export function parseInputRefused(raw: unknown): string | null {
+    if (typeof raw !== 'string' || !raw.includes('"refused"')) return null;
+    let v: unknown;
+    try { v = JSON.parse(raw); } catch { return null; }
+    const o = v as { k?: unknown; t?: unknown; why?: unknown } | null;
+    if (!o || o.k !== 'refused' || o.t !== 'text') return null;
+    const why = typeof o.why === 'string' ? o.why : '';
+    // eslint-disable-next-line no-control-regex
+    const clean = why.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').trim().slice(0, MAX_REASON_LEN);
+    return clean || 'the other computer refused it';
+}
+
+export function parseCursorShape(raw: unknown): string | null {
+    if (typeof raw !== 'string' || !raw.includes('"cursor"')) return null;
+    let v: unknown;
+    try { v = JSON.parse(raw); } catch { return null; }
+    const o = v as { k?: unknown; css?: unknown } | null;
+    if (!o || o.k !== 'cursor' || typeof o.css !== 'string') return null;
+    return CURSOR_KEYWORDS.has(o.css) ? o.css : null;
+}
+
+/** Can a latency probe be sent on this session now? Only over the agent's
+ *  proved direct channel: the relay ends at the host app, which has no frame
+ *  to answer with. */
+export function latencyProbeUsable(sessionId: string): boolean {
+    const s = sessions.get(sessionId);
+    if (!s || s.role !== 'controller' || s.phase !== 'active' || !s.key) return false;
+    if (s.share && !s.share.capabilities.includes('control')) return false;
+    return inputUsesTheChannel({
+        proved: s.inputProved,
+        open: inputChannelUsable(s),
+        relayForced: false,
+        lastRelayInputAt: s.lastRelayInputAt,
+        now: Date.now(),
+    });
+}
+
+/**
+ * Send one latency probe (latencyProbe.ts). `classic` asks the agent for the
+ * OLD timing (no capture pulled in after the input), for the before-and-after
+ * comparison. Returns false when no probe could go: no direct channel, or one
+ * already in flight (one at a time, so a slow answer is never mistaken for a
+ * later probe's).
+ *
+ * Not through `sendInput`: a probe is not the user driving, so it must not
+ * feed the liveness ladder's "input but no frames" clock, and it moves nothing.
+ */
+export function sendLatencyProbe(sessionId: string, classic = false): boolean {
+    const s = sessions.get(sessionId);
+    if (!s || !latencyProbeUsable(sessionId)) return false;
+    const probes = s.probes ??= new ProbeMatcher();
+    if (probes.inFlight(performance.now()) > 0) return false;
+    const id = probes.sent(performance.now(), classic);
+    const event = classic ? { t: 'probe', p: id, q: 1 } : { t: 'probe', p: id };
+    void sealAndSendInput(s, event).then(ok => { if (!ok) probes.cancel(id); });
+    return true;
+}
+
+/** The stage presented a frame (`requestVideoFrameCallback`): its RTP
+ *  timestamp and when it is expected on screen (performance.now() time). */
+export function noteFramePresented(sessionId: string, rtpTimestamp: number, at: number): void {
+    sessions.get(sessionId)?.probes?.presented(rtpTimestamp, at);
+}
+
+/** Every probe this session resolves, as it resolves. */
+export function subscribeLatency(sessionId: string, cb: (r: ProbeResult) => void): () => void {
+    const s = sessions.get(sessionId);
+    if (!s || s.role !== 'controller') return () => { /* nothing to undo */ };
+    const probes = s.probes ??= new ProbeMatcher();
+    return probes.subscribe(cb);
+}
+
 /** Above this many unsent bytes on the socket, MOTION is HELD in the
  *  coalescer (still superseding/summing) rather than queued onto a stalled
  *  socket. Held, never dropped: the first version DROPPED it in the emit
@@ -3631,6 +3904,9 @@ function sendCoalescer(s: Internal): InputCoalescer {
             event => { void sealAndSendInput(s, event); },
             undefined,
             () => motionLaneState(s).open,
+            // Half the wait on the agent's direct channel, which pays none of
+            // the relay's per-event cost (MOVE_INTERVAL_DIRECT_MS).
+            () => (motionLaneState(s).lane === 'channel' ? MOVE_INTERVAL_DIRECT_MS : MOVE_INTERVAL_MS),
         );
     }
     return s.sendCoalescer;
@@ -3674,6 +3950,10 @@ async function sealAndSendInput(s: Internal, event: unknown): Promise<boolean> {
             lastRelayInputAt: s.lastRelayInputAt,
             now,
         });
+        // A LATENCY PROBE IS FOR THE AGENT ONLY. On the relay it would reach
+        // the host app, which knows no such input — and it would time the
+        // wrong path anyway.
+        if (!viaDc && isProbeEvent(event)) return false;
         try {
             if (viaDc) {
                 // UNDER THE KEY THE HELLO NAMED, which for an attended host is
@@ -3685,7 +3965,13 @@ async function sealAndSendInput(s: Internal, event: unknown): Promise<boolean> {
                 try {
                     dc!.send(JSON.stringify({ sid: s.id, payload: sealed }));
                     s.inputDcSeq++;
-                    s.inputRate.tick(event, 'channel');
+                    // A PROBE IS NOT SOMEBODY DRIVING. It goes out once a
+                    // second whenever a desktop stage is open, so counting it
+                    // here would hold an unattended session open past its
+                    // idle revoke for anyone who left the stage on a screen
+                    // and walked away — and pad the input tallies.
+                    const probe = isProbeEvent(event);
+                    if (!probe) s.inputRate.tick(event, 'channel');
                     // TELL THE HOST SOMEBODY IS DRIVING. An unattended session
                     // carries a 30-minute idle revoke, and the only thing that
                     // ever fed its clock was input arriving over the relay
@@ -3695,7 +3981,7 @@ async function sealAndSendInput(s: Internal, event: unknown): Promise<boolean> {
                     // after it started, while the person is still typing on it.
                     // The host cannot see this channel — the agent owns it and
                     // never pushes — so the end that knows says so.
-                    if (now - s.inputAliveSentAt >= INPUT_ALIVE_MS) {
+                    if (!probe && now - s.inputAliveSentAt >= INPUT_ALIVE_MS) {
                         s.inputAliveSentAt = now;
                         void sendSignal(s, { kind: 'input-alive' }).catch(() => undefined);
                     }
@@ -4043,6 +4329,9 @@ export function installDeviceSessions(): void {
                 secureDesktopSent: null,
                 cursorClipped: false,
                 cursorClippedSent: null,
+                inputBlocked: null,
+                pointerCaptured: false,
+                remoteCursor: null,
                 powerNotice: null, pendingPowerAckTimer: null, powerNoticeTimer: null,
                 peerName: null,
                 hostScreen: null,
@@ -4684,10 +4973,15 @@ export function installDeviceSessions(): void {
                             // set") must reach the controller — silently
                             // dropping it is how this control shipped for
                             // months as a no-op that reported success.
-                            if ((ev as { t?: unknown })?.t === 'sas') {
+                            //
+                            // And typed TEXT: a refused text frame is a whole
+                            // run of characters that vanished while the
+                            // controller's note said they were typed.
+                            const kind = (ev as { t?: unknown })?.t;
+                            if (kind === 'sas' || kind === 'text') {
                                 void sendSignal(s, {
                                     kind: 'input-failed',
-                                    t: 'sas',
+                                    t: kind,
                                     reason: msg.slice(0, MAX_REASON_LEN),
                                 }).catch(() => undefined);
                             }
@@ -5412,6 +5706,13 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
         /** screen-state: what the host says about its screen. Only
          *  'virtual-starting' means anything today (noScreen.ts). */
         state?: string;
+        /** input-blocked: the program whose window swallows the controller's
+         *  input (it runs as administrator), or null when input lands again.
+         *  Validated by `blockedAppName` at the handler. */
+        app?: unknown;
+        /** pointer-captured: a game hid and confined the host's pointer.
+         *  Validated with typeof at the handler. */
+        captured?: unknown;
     } | null;
     if (!data) return;
 
@@ -6042,6 +6343,25 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
             emit();
             return;
         }
+        if (data.kind === 'input-blocked') {
+            if (s.role !== 'controller') return;
+            // A program name or null, and nothing else: anything malformed
+            // reads as "input lands" (inputReach.ts) — this only ever adds a
+            // banner, and a garbled frame must not paste one over a session.
+            const app = blockedAppName(data.app);
+            if (app === s.inputBlocked) return;
+            s.inputBlocked = app;
+            emit();
+            return;
+        }
+        if (data.kind === 'pointer-captured') {
+            if (s.role !== 'controller') return;
+            if (typeof data.captured !== 'boolean') return;
+            if (data.captured === s.pointerCaptured) return;
+            s.pointerCaptured = data.captured;
+            emit();
+            return;
+        }
         if (data.kind === 'cursor-owner-failed') {
             if (s.role !== 'controller') return;
             // Leave cursorOwned alone — false is the safe state and it is
@@ -6117,9 +6437,9 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
         }
         if (data.kind === 'input-failed') {
             if (s.role !== 'controller') return;
-            if (data.t !== 'sas') return; // only the one input that asks for an answer
+            if (data.t !== 'sas' && data.t !== 'text') return; // the inputs that ask for an answer
             const why = typeof data.reason === 'string' ? data.reason.slice(0, MAX_REASON_LEN) : 'the host refused';
-            s.error = `Ctrl+Alt+Del could not be sent: ${why}`;
+            s.error = data.t === 'sas' ? `Ctrl+Alt+Del could not be sent: ${why}` : `Some typed text did not go over: ${why}`;
             emit();
             return;
         }

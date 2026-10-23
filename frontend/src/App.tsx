@@ -30,6 +30,7 @@ import { UpdateBanner } from './components/UpdateBanner';
 import { RcGlobals } from './components/RcGlobals';
 import { RecoveryCodeModal } from './components/RecoveryCodeModal';
 import { IdentityBanner } from './components/IdentityBanner';
+import { HiddenRecipientBanner } from './components/HiddenRecipientBanner';
 import { wireSessionDmKeyPublish } from './api/dmKeys';
 import { HotkeyBlockedBanner } from './components/HotkeyBlockedBanner';
 import { InviteLanding } from './components/InviteLanding';
@@ -467,6 +468,7 @@ function App() {
           <div className="app">
             <UpdateBanner />
             <IdentityBanner onSignOut={handleLogout} />
+            <HiddenRecipientBanner />
             <HotkeyBlockedBanner />
             <RecoveryCodeModal />
             <ClipApprovalPrompt />

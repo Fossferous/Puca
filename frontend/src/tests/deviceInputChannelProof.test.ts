@@ -481,6 +481,29 @@ describe('what the direct channel must NOT carry', () => {
         expect(onRelay()).toHaveLength(1);
     });
 
+    it('a LATENCY PROBE takes the channel but never tells the host somebody is driving', async () => {
+        // A probe goes out once a second whenever a desktop stage is open.
+        // Read as activity, it held an unattended session open past its
+        // 30-minute idle revoke for anyone who left the stage on a screen and
+        // walked away.
+        const { sendInput, sendLatencyProbe } = await import('../api/devices/session');
+        const id = await controllerSession();
+        await armed(id);
+        const aliveSignals = () => sent.filter(m => m.type === 'DeviceSignal' && JSON.stringify(m.payload).includes('input-alive'));
+
+        expect(sendLatencyProbe(id), 'a probe can go: the channel is armed').toBe(true);
+        await settle();
+        expect(onChannel(), 'the probe rode the channel').toHaveLength(1);
+        expect(onChannel()[0]).toContain('probe');
+        expect(aliveSignals(), 'and said nothing to the host').toEqual([]);
+
+        // POSITIVE CONTROL: real input on the same session does say so — the
+        // probe did not spend the once-a-minute signal either.
+        sendInput(id, { t: 'down', button: 0 });
+        await settle();
+        expect(aliveSignals()).toHaveLength(1);
+    });
+
     it('POSITIVE CONTROL: ordinary input on the same armed session takes the channel', async () => {
         // Without this the two tests above would pass against a session that
         // never armed at all.
@@ -493,5 +516,70 @@ describe('what the direct channel must NOT carry', () => {
 
         expect(onChannel()).toHaveLength(1);
         expect(onRelay()).toEqual([]);
+    });
+});
+
+describe('typed text the other end refused is said, not lost', () => {
+    const errorOf = async (id: string) => {
+        const { activeSessions } = await import('../api/devices/session');
+        return activeSessions().find(x => x.id === id)?.error ?? null;
+    };
+
+    it("the agent's refusal on the caret channel reaches the stage", async () => {
+        const id = await controllerSession();
+        expect(await errorOf(id)).toBeNull();
+        channels.get('caret')!.deliver('{"k":"refused","t":"text","why":"text contains the control character"}');
+        await settle();
+        expect(await errorOf(id)).toBe('Some typed text did not go over: text contains the control character');
+    });
+
+    it("the host app's refusal over the relay reaches the stage too", async () => {
+        const id = await controllerSession();
+        handlers.get('DeviceSignalled')!({
+            payload: {
+                session_id: id,
+                payload: `sealed:${JSON.stringify({ sid: id, n: 1_000_000, kind: 'input-failed', t: 'text', reason: 'empty text' })}`,
+            },
+        });
+        await settle();
+        expect(await errorOf(id)).toBe('Some typed text did not go over: empty text');
+    });
+
+    it('CONTROL: a refusal of any other input kind over the relay changes nothing', async () => {
+        const id = await controllerSession();
+        handlers.get('DeviceSignalled')!({
+            payload: {
+                session_id: id,
+                payload: `sealed:${JSON.stringify({ sid: id, n: 1_000_001, kind: 'input-failed', t: 'key', reason: 'x' })}`,
+            },
+        });
+        await settle();
+        expect(await errorOf(id)).toBeNull();
+    });
+});
+
+describe("the stage's diagnostics reading", () => {
+    it('a getStats that never answers costs that session its numbers, never the reading', async () => {
+        // The stage hands in diagnosticsReport's withTimeout; this stand-in
+        // gives up the same way, in milliseconds. Without the bound reaching
+        // every getStats, the reading never comes back and this test times out.
+        const { deviceDiagnosticsWindow } = await import('../api/devices/session');
+        const id = await controllerSession();
+        const proto = StubPc.prototype as unknown as { getStats?: () => Promise<unknown> };
+        proto.getStats = () => new Promise(() => { /* never */ });
+        const bound = <T,>(step: Promise<T>, label: string) => new Promise<T>((resolve, reject) => {
+            const t = setTimeout(() => reject(new Error(`${label} gave no answer within 0 s`)), 30);
+            step.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
+        });
+        try {
+            const rows = await deviceDiagnosticsWindow(20, bound);
+            const row = rows.find(r => r.id === id);
+            expect(row, 'the session still has its row').toBeTruthy();
+            expect(row!.stats).toBe('unavailable');
+            expect(String(row!.statsError)).toContain('the picture statistics gave no answer');
+            expect(row, 'and no window numbers it could not measure').not.toHaveProperty('windowSeconds');
+        } finally {
+            delete proto.getStats;
+        }
     });
 });

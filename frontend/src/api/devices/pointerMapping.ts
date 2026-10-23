@@ -119,6 +119,46 @@ export function isInjectableKey(code: string): boolean {
 }
 
 
+/** One wheel notch on the wire: Windows' WHEEL_DELTA, which the host injects
+ *  as-is (`ControlInput::Wheel`, "positive scrolls up/away"). */
+export const WHEEL_NOTCH = 120;
+/** What Chromium reports for one notch in pixel mode on a default Windows
+ *  setup (3 lines a notch at 100/3 px a line) — the denominator that turns a
+ *  local notch into exactly one remote one. */
+const PX_PER_NOTCH = 100;
+/** Line mode (Firefox, some drivers): three lines a notch. */
+const LINES_PER_NOTCH = 3;
+
+/**
+ * A browser wheel event -> the host's `wheel.dy`: positive scrolls UP, in
+ * WHEEL_DELTA units, so one notch here is one notch there.
+ *
+ * THE SIGN IS THE POINT. The DOM's `deltaY` is positive when the page scrolls
+ * DOWN; the host's contract (Windows `MOUSEEVENTF_WHEEL`, X11 buttons 4/5) is
+ * positive = UP. The My Devices desktop stage sent `deltaY` unchanged from its
+ * first commit (2026-07-28), so every scroll went the wrong way; the in-call
+ * viewer negated it all along. The magnitude was off too — 100 a notch where
+ * the host counts 120, so apps that wait for a whole notch scrolled late.
+ *
+ * Shift+wheel arrives from Chromium as a HORIZONTAL delta with `deltaY` 0. The
+ * remote already holds the forwarded Shift, so sending it as an ordinary
+ * vertical notch lets the remote app turn it sideways itself, as it would for
+ * a local Shift+wheel. A sideways swipe without Shift has no wire form yet and
+ * is dropped (0).
+ */
+export function wheelDy(e: { deltaX: number; deltaY: number; deltaMode: number; shiftKey?: boolean }): number {
+    let d = e.deltaY;
+    if (!d && e.shiftKey && e.deltaX) d = e.deltaX;
+    if (!Number.isFinite(d) || !d) return 0;
+    const notches = e.deltaMode === 1 ? d / LINES_PER_NOTCH
+        : e.deltaMode === 2 ? d * LINES_PER_NOTCH
+            : d / PX_PER_NOTCH;
+    const dy = Math.round(-notches * WHEEL_NOTCH);
+    // A tiny touchpad delta must still move the far end a little, in the
+    // direction it was going, rather than round to nothing.
+    return dy !== 0 ? dy : (d > 0 ? -1 : 1);
+}
+
 /**
  * Normalised picture position -> DOM screen coordinates.
  */

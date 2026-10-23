@@ -22,6 +22,7 @@ import { type TaskAttachmentRef, MAX_TASK_ATTACHMENTS, isAttachmentsLocked, pars
 import { type PlainBytes, type SealedFile, audioMimeFor, decryptAttachmentBytes, encryptAndUploadRef, parseEncAttachment, sealFileForUpload, uploadSealedRef } from './attachments';
 import { freeNow } from './plaintextHost';
 import { prepareImageForUpload } from './imagePrep';
+import { hasHeifName } from './heif';
 import { bytesFromB64, bytesToB64, parkedHref, parseParkedRef } from './parkedMedia';
 import { addTaskListAttachments, deleteFiles, removeTaskListAttachments } from './listContent';
 import { AUDIO_CANDIDATE_MIMES, assertClipUploadable, extForMime } from '../notes/model/audioNote';
@@ -99,7 +100,8 @@ export async function uploadPreparedFiles(files: PreparedFile[]): Promise<TaskAt
 async function filesForUpload(photos: File[], drawings: { files: DrawingFiles; base: string }[]): Promise<File[]> {
     // A non-image (a PDF, a spreadsheet) is not shrinkable and pulling it
     // through createImageBitmap only stalls a phone on a 25 MB file.
-    const prepared = await Promise.all(photos.map(f => (f.type.startsWith('image/') ? prepareImageForUpload(f) : Promise.resolve(f))));
+    // A .heic with no type (what Windows hands over) is a photo too.
+    const prepared = await Promise.all(photos.map(f => (f.type.startsWith('image/') || hasHeifName(f.name) ? prepareImageForUpload(f) : Promise.resolve(f))));
     const files: File[] = [...prepared];
     for (const d of drawings) {
         files.push(new File([d.files.png], `${d.base}.png`, { type: 'image/png' }));

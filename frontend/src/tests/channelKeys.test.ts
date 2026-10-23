@@ -45,6 +45,11 @@ vi.mock('../api/client', () => ({
                 if (fake.failMemberKeys) throw new Error('member-keys unreachable');
                 return fake.members;
             }
+            // An honest server: the member list people see holds everyone it
+            // lists for a channel's key, and the channels are listed under s1 (F-2).
+            if (url === '/servers') return [{ id: 's1', name: 'Test server' }];
+            if (url === '/servers/s1/channels') return [{ id: 7, name: 'seven' }, { id: 42, name: 'general' }, { id: 43, name: 'other' }];
+            if (url.endsWith('/members-with-roles')) return [{ id: 1 }, ...fake.members.map((m) => ({ id: m.user_id }))];
             throw new Error('unexpected GET ' + url);
         }),
         post: vi.fn(async (url: string, body: {
@@ -86,7 +91,7 @@ const ATTACKER = ['attacker', 'c3'.repeat(16)] as const;
 const PEER = ['peer', 'd4'.repeat(16)] as const;
 
 beforeAll(() => warmIdentities([ME, ATTACKER, PEER]), WARM_TIMEOUT_MS);
-import { ensureChannelKey, getChannelKeyForEpoch, clearChannelKeyCache } from '../api/channelKeys';
+import { ensureChannelKey, getChannelKeyForEpoch, clearChannelKeyCache, hiddenRecipientNotices } from '../api/channelKeys';
 import { apiClient } from '../api/client';
 import { pinServedIdentityKey } from '../api/keyVerification';
 
@@ -482,12 +487,46 @@ describe('channelKeys manager', () => {
             member_generation: 0, sender_user_id: 774,
         });
         fake.failMemberKeys = true;
+        // ...and, as anyone who wraps for this channel is on an honest server,
+        // in the member list people see (members-with-roles still answers).
+        fake.members.push({ user_id: 774, public_key: peer.publicKeyEncoded });
         clearChannelKeyCache();
 
         const res = await ensureChannelKey(42);
         expect(res).not.toBeNull();
         expect(res!.epoch).toBe(2);                                   // still usable
         expect(Buffer.from(res!.key)).toEqual(Buffer.from(realKey));
+    });
+
+    // F-2's half of the fallback above. A pin stands in for a member-keys
+    // answer that could not be had; it must not stand in for the member
+    // list people see too, or the server could get a pinned stranger
+    // trusted just by failing member-keys. Goes red if the fallback skips
+    // the visible-member check.
+    // And, the server having listed nobody (the lookup failed), nothing is
+    // reported: a pinned wrapper missing from the member list is usually
+    // someone who left, whose rows outlive them (second review, finding 4).
+    it('F-2: a FAILED membership lookup does not let a pin vouch for someone the member list does not show', async () => {
+        const peer = await testIdentity(...PEER);
+        const me = await testIdentity(...ME);
+        const realKey = generateChannelKey();
+        const wrapped = await wrapChannelKeyForMembers(peer, realKey, [
+            { userId: 1, publicKey: me.publicKeyEncoded },
+        ]);
+        pinServedIdentityKey(774, peer.publicKeyEncoded);
+        fake.currentEpoch = 2;
+        fake.published.push({
+            epoch: 2, wrapped_key: wrapped[0].wrappedKey,
+            sender_public_key: wrapped[0].senderPublicKey,
+            member_generation: 0, sender_user_id: 774,
+        });
+        fake.failMemberKeys = true;            // and 774 is in no member list
+        clearChannelKeyCache();
+
+        const res = await ensureChannelKey(42).catch(() => null);
+        expect(res === null || Buffer.from(res.key).equals(Buffer.from(realKey)) === false,
+            'the stranger\'s key was taken as the channel key').toBe(true);
+        expect(hiddenRecipientNotices(), 'reported as listed by a server whose list could not be read').toEqual([]);
     });
 
     // The bypass this fix would otherwise have left in ITSELF. mintEpoch pins

@@ -78,9 +78,10 @@ const SHARE_LEGACY_KBPS: u64 = 4_500;
 /// above it buys nothing, so none is set above it.
 const SHARE_TOP_KBPS: u64 = 20_000;
 /// The lowest ceiling `SFU_SHARE_MAX_MBPS` may set: above the simulcast
-/// ladder's middle rung (SHARE_MID, 1.2 Mbps, in sfuManager.ts), so no rung of
-/// a laddered share ever sends more than the top this file charges for.
-const SHARE_MIN_KBPS: u64 = 1_500;
+/// ladder's largest middle rung (720p at 2.5 Mbps, `LADDER_MID_TOP_KBPS` in
+/// frontend/src/api/rtc/shareLadder.ts), so no rung of a laddered share ever
+/// sends more than the top this file charges for. A test reads that file.
+const SHARE_MIN_KBPS: u64 = 3_000;
 /// WebRTC/SRTP overhead factor applied to media bitrates (×1.15).
 const OVERHEAD_NUM: u64 = 115;
 const OVERHEAD_DEN: u64 = 100;
@@ -581,6 +582,36 @@ fn share_ceiling_kbps(budget_kbps: u64, raw_mbps: Option<&str>) -> u64 {
     per_subscriber
         .saturating_sub((n - 2) * CAM_MID_KBPS)
         .clamp(SHARE_LEGACY_KBPS, SHARE_TOP_KBPS)
+}
+
+/// The startup line for an explicit `SFU_SHARE_MAX_MBPS` that
+/// [`share_ceiling_kbps`] clamped, or None when it was used as given (or is
+/// unset or unreadable, where the derived default applies anyway). An
+/// operator who set 2 for a small uplink is charged and sent 3: that must not
+/// happen without a word.
+fn share_ceiling_note(raw_mbps: Option<&str>) -> Option<String> {
+    let raw = raw_mbps?.trim();
+    let mbps = raw.parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0)?;
+    let asked = (mbps * 1000.0).round() as u64;
+    let used = asked.clamp(SHARE_MIN_KBPS, SHARE_TOP_KBPS);
+    (used != asked).then(|| {
+        format!(
+            "SFU_SHARE_MAX_MBPS={raw} is outside {}-{} Mbps; using {} Mbps. The lowest keeps a laddered share's 720p middle size under the ceiling; nothing sends more than the highest.",
+            SHARE_MIN_KBPS as f64 / 1000.0,
+            SHARE_TOP_KBPS as f64 / 1000.0,
+            used as f64 / 1000.0
+        )
+    })
+}
+
+/// Log a clamped `SFU_SHARE_MAX_MBPS` once, at startup ([`share_ceiling_note`]).
+pub fn warn_on_clamped_share_ceiling() {
+    if sfu_config().is_none() {
+        return;
+    }
+    if let Some(note) = share_ceiling_note(std::env::var("SFU_SHARE_MAX_MBPS").ok().as_deref()) {
+        tracing::warn!("{note}");
+    }
 }
 
 pub fn room_name_for_channel(channel_id: i64) -> String {
@@ -3215,6 +3246,15 @@ mod tests {
             client.contains("screenShareSimulcastLayers"),
             "shares are no longer published with a simulcast ladder"
         );
+        // A rung above the top would be egress this file never charges: every
+        // ceiling (SHARE_MIN_KBPS and up) must clear the largest middle rung.
+        let ladder = include_str!("../frontend/src/api/rtc/shareLadder.ts");
+        let mid = client_const(ladder, "LADDER_MID_TOP_KBPS");
+        assert!(mid > 0, "fixture: read the middle rung");
+        assert!(
+            SHARE_MIN_KBPS > mid,
+            "the lowest ceiling ({SHARE_MIN_KBPS} kbps) must stay above the ladder's middle rung ({mid} kbps)"
+        );
     }
 
     #[test]
@@ -3261,11 +3301,28 @@ mod tests {
     }
 
     #[test]
+    fn a_clamped_admin_ceiling_is_said_at_startup() {
+        let low = share_ceiling_note(Some(" 2 ")).expect("2 Mbps is below the floor");
+        assert!(low.contains("SFU_SHARE_MAX_MBPS=2 ") && low.contains("using 3 Mbps"), "{low}");
+        let high = share_ceiling_note(Some("100")).expect("100 Mbps is above the top");
+        assert!(high.contains("using 20 Mbps"), "{high}");
+        // POSITIVE CONTROL: a value used as given, and the cases where the
+        // derived default applies (unset, blank, garbage), say nothing.
+        for quiet in [Some("3"), Some("8.5"), Some("20"), None, Some(""), Some("abc"), Some("0"), Some("-2")] {
+            assert_eq!(share_ceiling_note(quiet), None, "{quiet:?}");
+        }
+    }
+
+    #[test]
     fn an_admin_ceiling_wins_inside_its_bounds() {
         assert_eq!(share_ceiling_kbps(600_000, Some("8")), 8_000);
-        assert_eq!(share_ceiling_kbps(600_000, Some(" 2.5 ")), 2_500);
+        assert_eq!(share_ceiling_kbps(600_000, Some(" 3.5 ")), 3_500);
         // Lower than the old cap is allowed: the admin knows their uplink.
         assert_eq!(share_ceiling_kbps(30_000, Some("3")), 3_000);
+        // ...down to the floor, which keeps the ladder's 720p rung (2.5 Mbps)
+        // under the top: 2 Mbps reads as 3 (it was allowed until 2026-10-23),
+        // and startup says so (share_ceiling_note).
+        assert_eq!(share_ceiling_kbps(30_000, Some("2")), 3_000);
         assert_eq!(share_ceiling_kbps(30_000, Some("0.1")), SHARE_MIN_KBPS);
         assert_eq!(share_ceiling_kbps(30_000, Some("100")), SHARE_TOP_KBPS);
         // Garbage is the default, never 0.

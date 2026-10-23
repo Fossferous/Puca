@@ -230,6 +230,7 @@ const GATES = [
         ['e2e-notes-dialog-escape', 'notes-dialog-escape-real-browser.mjs'],
         ['e2e-user-menu-move-to', 'user-menu-move-to-real-browser.mjs'],
         ['e2e-paste-html', 'paste-html-real-browser.mjs'],
+        ['e2e-photo-metadata', 'photo-metadata-real-browser.mjs'],
         ['e2e-plaintext-disk', 'plaintext-disk-real-browser.mjs'],
         ['e2e-game-sounds-offline', 'game-sounds-offline-real-browser.mjs'],
         // These two default to frontend/e2e/e2e-artifacts/, which is NOT
@@ -238,6 +239,8 @@ const GATES = [
         ['e2e-device-stage', 'device-stage-real-browser.mjs e2e-artifacts/device-stage-shots'],
         ['e2e-no-screen-stage', 'no-screen-stage-real-browser.mjs e2e-artifacts/no-screen-stage-shots'],
         ['e2e-video-controls', 'video-controls-real-browser.mjs'],
+        ['e2e-heic', 'heic-real-browser.mjs'],
+        ['e2e-device-stage-desktop', 'device-stage-desktop-real-browser.mjs'],
     ].map(([id, file]) => ({
         id, title: `e2e/${file.split(' ')[0]} (real browser, no server)`,
         inputs: ALL, ignoreVersion: true, fingerprint: ['node', 'fe-deps'],

@@ -39,6 +39,11 @@ pub struct VideoSender {
     /// derived from wall-clock instead would jump whenever the system clock
     /// moved — which stalls playback rather than erroring.
     started: Instant,
+    /// The RTP header timestamp of the last frame written: str0m puts the
+    /// 90 kHz media time in the header as it is, with no offset, so this is
+    /// exactly what the browser reports for that frame (`rtpTimestamp` in
+    /// `requestVideoFrameCallback`) — the agent's latency probe matches on it.
+    last_rtp: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -109,6 +114,7 @@ impl VideoSender {
             mid: None,
             pending: None,
             started: start,
+            last_rtp: None,
         }
     }
 
@@ -356,7 +362,14 @@ impl VideoSender {
         writer
             .write(pt, now, rtp_time, frame.data.clone())
             .map_err(RtcSetupError::from)?;
+        self.last_rtp = Some(rtp_time.numer() as u32);
         Ok(true)
+    }
+
+    /// The RTP timestamp of the last frame `send_frame` wrote, as it appears
+    /// in the packets' headers. None before the first frame.
+    pub fn last_rtp_timestamp(&self) -> Option<u32> {
+        self.last_rtp
     }
 
     /// The underlying Rtc, for the agent's own socket/timer loop.

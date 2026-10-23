@@ -25,8 +25,13 @@ ciphertext. This document describes how it works.
   > fabricated account in the member list — still receives the group key, because
   > a client cannot distinguish a fabricated member from a genuine new one
   > without out-of-band verification. What changed is that this now requires a
-  > stranger to be visible in the member list, rather than happening silently.
-  > Comparing safety numbers is what closes it completely.
+  > stranger to be visible in the member list, rather than happening silently:
+  > the key is wrapped only for, and a first-contact wrapper trusted only from,
+  > an id in BOTH the channel's member-keys list and the server's member list
+  > the app shows, and an id the server lists only for the key is refused with
+  > a notice naming the channel. That check arrived in 0.9.847 (audit 2026-10,
+  > F-2); before it, such an id got the key unseen. Comparing safety numbers
+  > is what closes it completely.
   >
   > DMs are not affected in the same way: the partner id comes from the
   > conversation you opened, not from a server-supplied key row.
@@ -42,9 +47,12 @@ ciphertext. This document describes how it works.
 > 32 bytes generated once, stored server-side wrapped under a password-derived
 > key (**Argon2id**, m=19456 KiB, t=2, p=1) and independently under a 12-word
 > recovery code, so forgetting the password no longer destroys the identity.
-> A v2 account migrates transparently at next login. `docs/E2EE_RECOVERY.md` is
-> the full v3 spec. Everything below about **DMs, channel keys, rotation and
-> the envelope formats is unchanged by v3** — it only changed key *custody*.
+> A v2 account migrated transparently at its next sign-in while that path
+> existed; the path is retired, and a v2 account still left is refused at
+> sign-in (`RetiredKeyFormatError`, `frontend/src/api/auth.ts`).
+> `docs/E2EE_RECOVERY.md` is the full v3 spec. Everything below about **DMs,
+> channel keys, rotation and the envelope formats is unchanged by v3** — it
+> only changed key *custody*.
 
 ### v2 (legacy): password-derived
 
@@ -67,9 +75,14 @@ pub      = X25519.getPublicKey(seed)
 - The 32-byte seed is cached in `localStorage` so page reloads (which keep the
   auth token) don't need the password again. It is cleared on logout.
 
-The public key is uploaded (`PATCH /keys/public`) on every login, which also
-migrates users who registered before this scheme. Public keys are stored with an
-`x25519:` prefix to distinguish them from the legacy P-256 keys.
+Under this scheme the public key was uploaded (`PATCH /keys/public`) on every
+login, which also migrated users who registered before it. That no longer
+happens: a v3 account's key is set at registration, and `PATCH /keys/public` is
+proof-gated and refuses to replace an established v3 key. Instead, since 0.9.847
+every sign-in checks that the key the unlocked seed derives is the one the
+server publishes for the account, and stops if it is not
+(`docs/E2EE_RECOVERY.md` §8). Public keys are stored with an `x25519:` prefix to
+distinguish them from the legacy P-256 keys.
 
 ## Direct messages (pairwise)
 
@@ -153,8 +166,11 @@ user, moved to another channel, relabelled to another epoch, moved between the
 message stream and a checklist, or (for a DM) flipped in direction fails the
 tag and shows `[Encrypted — does not belong here]`. There is no retry under
 another context (that would make the tag an oracle). v2 bodies keep opening
-forever. Self envelopes, channel key wraps, seed wraps and control frames stay
-v2 for now.
+forever. Self envelopes, seed wraps and control frames stay v2 for now.
+Channel key wraps have been v3 since 0.9.0: bound to their channel, epoch
+and recipient (`puca/v3/wrap/<channelId>/<epoch>/<recipientUserId>`), and
+once a device has opened a v3 wrap for a channel it refuses an unbound v2
+wrap at that epoch or later.
 
 An envelope-shaped body with any *other* `v` is `[Encrypted — unsupported
 version, update the app]`, never plaintext.
@@ -199,9 +215,11 @@ Remaining limitations:
 - A new member can only read messages from the epoch they were wrapped a key for
   onward; historical epochs are not back-wrapped to them (by design — they
   weren't present). Sharing history to new joiners is future work.
-- Bootstrap/rotation has a benign race if two holders act simultaneously;
-  last-writer-wins per recipient for that epoch. Server-assigned epochs would
-  remove the race.
+- Two holders rotating at once do not split the channel: the server takes
+  each epoch under an advisory lock and answers the second publisher with
+  409, and that client adopts the winner's key only if its wrapper is
+  attributable and at or above the device's epoch floor (`mintEpoch`,
+  `frontend/src/api/channelKeys.ts`).
 
 ## Cryptographic primitives
 

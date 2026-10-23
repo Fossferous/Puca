@@ -38,26 +38,17 @@ export async function sampleShareEncode(): Promise<EncodeSample | null> {
  * caller can tell the difference between "done" and "said done".
  */
 export async function applyShareQuality(q: ShareQuality): Promise<boolean> {
-    // NOT WHILE THIS SHARE HAS A LADDER. LiveKit fixes each simulcast rung as a
-    // RATIO of the source at publish time (`scaleResolutionDownBy`), so
-    // re-capping the track shrinks every rung with it: a 1080p share whose
-    // rungs are 640x360 / 960x540 / 1920x1080 becomes 426x240 / 640x360 /
-    // 1280x720, and the bottom rung drops back under the 360-line height below
-    // which Chromium will not use a hardware encoder at all — the exact thing
-    // SHARE_LOW was raised to 640x360 to avoid. Re-publishing to fix the ratios
-    // would end the share and drop every viewer, which is the cost this button
-    // exists to avoid. So the setting is saved and takes effect on the next
-    // share, and the caller says so rather than claiming otherwise.
-    //
-    // ASKED OF THE PUBLICATION, NOT OF THE SETTING. The first version of this
-    // guard read `loadSettings().shareSimulcast`, which is wrong twice over: it
-    // refused the re-cap on MESH calls, which have no LiveKit ladder to protect
-    // and where the button therefore did nothing for no reason; and it answered
-    // for the next share rather than the running one, so toggling the setting
-    // mid-share changed the answer about a publication that had not changed.
-    if (shareHasLadder()) return false;
+    // A SHARE SENT AT SEVERAL SIZES IS RE-SIZED TOO, since 2026-10-21. LiveKit
+    // fixes each rung as a RATIO of the capture at publish, so re-capping the
+    // capture alone would shrink every rung with it (the bottom one under the
+    // 360 lines below which Chromium will not encode in hardware). That is
+    // why this used to refuse a laddered share; retuneSfuShare now puts the
+    // rungs back in proportion in place, or re-publishes when the share should
+    // change between one size and several (sfuManager.retuneShare).
     const { width, height } = shareDimensions(q.resolution);
-    return webrtcManager.applyShareQuality(width, height, q.fps);
+    const ok = await webrtcManager.applyShareQuality(width, height, q.fps);
+    if (ok) await retuneSfuShare();
+    return ok;
 }
 
 /** Window event asking VoicePanel to open the live Stream quality panel —
@@ -71,8 +62,6 @@ export function requestShareQualityPanel(): void {
 /** What became of a live quality change (changeLiveShareQuality). */
 export type LiveQualityOutcome =
     | { kind: 'applied'; capture: LiveCapture }
-    /** An SFU share published with quality layers: see changeLiveShareQuality. */
-    | { kind: 'ladder' }
     | { kind: 'no-share' }
     | { kind: 'refused' };
 
@@ -82,15 +71,11 @@ export type LiveQualityOutcome =
  * The streamer's choice, where applyShareQuality above is the struggling
  * machine's one-way step down.
  *
- * Same ladder rule as applyShareQuality, for the same reason: LiveKit fixes
- * each quality layer as a RATIO of the capture at publish time, so re-sizing
- * the capture re-sizes every layer with it. Those shares report 'ladder' and
- * keep running as they are; the choice is still saved for the next share.
- * Quality layers are off by default, so most shares never meet this.
+ * A share sent at several sizes changes too, as in applyShareQuality: its
+ * rungs are re-sized with the capture (retuneSfuShare).
  */
 export async function changeLiveShareQuality(q: ShareQuality): Promise<LiveQualityOutcome> {
     if (!shareCaptureSize()) return { kind: 'no-share' };
-    if (shareHasLadder()) return { kind: 'ladder' };
     const { width, height } = shareDimensions(q.resolution);
     let capture: LiveCapture | null = null;
     try {
@@ -98,16 +83,19 @@ export async function changeLiveShareQuality(q: ShareQuality): Promise<LiveQuali
     } catch {
         capture = null;
     }
-    return capture ? { kind: 'applied', capture } : { kind: 'refused' };
+    if (!capture) return { kind: 'refused' };
+    await retuneSfuShare();
+    return { kind: 'applied', capture };
 }
 
-/** Is the running share published with more than one encoding? False on mesh
- *  (no publications) and false for a single-layer SFU share. */
-function shareHasLadder(): boolean {
+/** After the capture changed: the SFU share's cap, ladder and rungs follow it.
+ *  Nothing to do on mesh (no publications); a failure here leaves the share
+ *  running as it was, which is no worse than before the change. */
+async function retuneSfuShare(): Promise<void> {
     try {
-        return sfuManager.shareHasLadder();
-    } catch {
-        return false;   // not on an SFU call
+        await sfuManager.retuneShare();
+    } catch (e) {
+        console.warn('[share] could not re-tune the SFU share after a quality change', e);
     }
 }
 

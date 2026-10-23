@@ -32,8 +32,6 @@ function outcomeText(o: LiveQualityOutcome, asked: { width: number; height: numb
                 ? `${base} That is as large as what you are sharing goes.`
                 : base;
         }
-        case 'ladder':
-            return 'This share is sent at several sizes (Settings → Advanced → Screen sharing), and each size is fixed when the share starts, so it cannot change while live. Your choice is saved for your next share.';
         case 'refused':
             return 'The browser would not change the running capture. Your choice is saved for your next share.';
         case 'no-share':

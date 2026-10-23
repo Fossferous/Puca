@@ -3,10 +3,10 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { Server } from '../api/servers';
 
-const send = vi.fn<(ownerId: number, note: string) => Promise<number>>();
+const send = vi.fn<(ownerId: number, note: string, signal?: AbortSignal) => Promise<number>>();
 vi.mock('../api/supportReport', async (orig) => ({
     ...(await orig<typeof import('../api/supportReport')>()),
-    sendSupportReport: (ownerId: number, note: string) => send(ownerId, note),
+    sendSupportReport: (ownerId: number, note: string, _deps?: unknown, opts?: { signal?: AbortSignal }) => send(ownerId, note, opts?.signal),
 }));
 
 import { SupportReportModal } from '../components/SupportReportModal';
@@ -24,9 +24,10 @@ const checked = () => radios().filter(r => r.getAttribute('aria-checked') === 't
 const sendButton = () => [...host.querySelectorAll('button')].find(b => /Send report|Measuring/.test(b.textContent ?? ''))!;
 const flush = () => act(async () => { await new Promise(r => setTimeout(r, 0)); });
 
-function show(servers: Server[], me: number, preferred?: string) {
-    act(() => { root.render(<SupportReportModal servers={servers} currentUserId={me} preferredServerId={preferred} onClose={() => {}} />); });
+function show(servers: Server[], me: number, preferred?: string, onClose: () => void = () => {}) {
+    act(() => { root.render(<SupportReportModal servers={servers} currentUserId={me} preferredServerId={preferred} onClose={onClose} />); });
 }
+const closeButton = () => host.querySelector<HTMLButtonElement>('button[title="Close"]')!;
 
 describe('SupportReportModal', () => {
     beforeEach(() => {
@@ -61,7 +62,7 @@ describe('SupportReportModal', () => {
         });
         act(() => { sendButton().click(); });
         await flush();
-        expect(send).toHaveBeenCalledWith(6, 'stream froze');
+        expect(send).toHaveBeenCalledWith(6, 'stream froze', expect.any(AbortSignal));
         expect(host.textContent).toContain('Sent to the owner of Bravo (3.0 MB)');
     });
 
@@ -71,6 +72,36 @@ describe('SupportReportModal', () => {
         act(() => { sendButton().click(); });
         await flush();
         expect(host.textContent).toContain('Could not send the report: File too large');
+        expect(sendButton().disabled).toBe(false);
+    });
+
+    it('Close always works, also while a send is stuck, and it cancels that send', async () => {
+        send.mockImplementation(() => new Promise<number>(() => {}));
+        const onClose = vi.fn();
+        show([srv('a', 'Alpha', 5)], 1, undefined, onClose);
+        act(() => { sendButton().click(); });
+        await flush();
+        expect(sendButton().textContent).toContain('Measuring');
+        const signal = send.mock.calls[0][2]!;
+        expect(signal.aborted).toBe(false);
+        expect(closeButton().disabled).toBe(false);
+        act(() => { closeButton().click(); });
+        expect(onClose).toHaveBeenCalledTimes(1);
+        // The overlay dismisses it too.
+        act(() => { host.querySelector<HTMLElement>('.forward-modal-overlay')!.click(); });
+        expect(onClose).toHaveBeenCalledTimes(2);
+        // Leaving the page (the dialog unmounting) is what cancels the send.
+        act(() => root.render(<div />));
+        expect(signal.aborted).toBe(true);
+    });
+
+    it('a send that times out says so and leaves the dialog usable', async () => {
+        send.mockRejectedValue(new Error('The upload gave no answer within 61 s'));
+        show([srv('a', 'Alpha', 5)], 1);
+        act(() => { sendButton().click(); });
+        await flush();
+        expect(host.textContent).toContain('Could not send the report: The upload gave no answer within 61 s');
+        expect(closeButton().disabled).toBe(false);
         expect(sendButton().disabled).toBe(false);
     });
 

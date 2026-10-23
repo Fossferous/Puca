@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Server } from '../api/servers';
 import { ownerChoices, sendSupportReport } from '../api/supportReport';
 import { isTauri } from '../api/platform';
@@ -32,19 +32,26 @@ export function SupportReportModal({ servers, currentUserId, preferredServerId, 
     const [error, setError] = useState<string | null>(null);
     const target = choices.find(c => c.ownerId === picked) ?? choices[0] ?? null;
     const sending = state === 'sending';
+    // Closing (or leaving the page) stops a send in flight: nothing is posted
+    // to the owner after the dialog is gone.
+    const inFlight = useRef<AbortController | null>(null);
+    useEffect(() => () => inFlight.current?.abort(), []);
 
     const send = async () => {
         if (!target || sending) return;
         setState('sending');
         setError(null);
+        const ac = new AbortController();
+        inFlight.current = ac;
         try {
-            const bytes = await sendSupportReport(target.ownerId, note);
+            const bytes = await sendSupportReport(target.ownerId, note, undefined, { signal: ac.signal });
             const size = bytes >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
             setMessage(target.isSelf
                 ? `Sent to your own messages (${size}).`
                 : `Sent to the owner of ${target.serverName} (${size}). They'll find it in your direct messages.`);
             setState('sent');
         } catch (e) {
+            if (ac.signal.aborted) return;
             console.error('[SupportReport] send failed:', e);
             setError(`Could not send the report: ${e instanceof Error ? e.message : String(e)}`);
             setState('idle');
@@ -52,9 +59,9 @@ export function SupportReportModal({ servers, currentUserId, preferredServerId, 
     };
 
     return (
-        <div className="forward-modal-overlay" onClick={sending ? undefined : onClose}>
+        <div className="forward-modal-overlay" onClick={onClose}>
             <div className="forward-modal support-report-modal" role="dialog" aria-label="Send diagnostics" onClick={e => e.stopPropagation()}>
-                <button className="forward-modal-close" onClick={onClose} disabled={sending} title="Close"><CloseIcon size={18} /></button>
+                <button className="forward-modal-close" onClick={onClose} title="Close"><CloseIcon size={18} /></button>
                 <h2>Send diagnostics</h2>
                 {state === 'sent' ? (
                     <>

@@ -14,10 +14,10 @@
  * out in the right order" would also pass on a class that did nothing at all.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { InputCoalescer, MOVE_INTERVAL_MS, RMOVE_FLUSH_MS } from '../api/devices/inputCoalescer';
+import { InputCoalescer, MOVE_INTERVAL_DIRECT_MS, MOVE_INTERVAL_MS, RMOVE_FLUSH_MS } from '../api/devices/inputCoalescer';
 
 /** A coalescer on a clock the test drives. */
-function rig(motionGate?: () => boolean) {
+function rig(motionGate?: () => boolean, moveInterval?: () => number) {
     const emitted: unknown[] = [];
     let now = 1_000;
     const timers = new Map<number, { at: number; fn: () => void }>();
@@ -31,7 +31,7 @@ function rig(motionGate?: () => boolean) {
             return id as unknown as ReturnType<typeof setTimeout>;
         },
         cancel: h => { timers.delete(h as unknown as number); },
-    }, motionGate);
+    }, motionGate, moveInterval);
 
     return {
         emitted,
@@ -281,5 +281,22 @@ describe('the real timer path', () => {
         } finally {
             vi.useRealTimers();
         }
+    });
+});
+
+describe('the move interval follows the lane', () => {
+    it('on the direct channel a moving mouse goes out every 8 ms instead of 16', () => {
+        let lane: 'channel' | 'relay' = 'channel';
+        const r = rig(undefined, () => (lane === 'channel' ? MOVE_INTERVAL_DIRECT_MS : MOVE_INTERVAL_MS));
+        // A steady stream of moves, one a millisecond, for 32 ms.
+        for (let i = 0; i < 32; i++) { r.push(move(i, i)); r.tick(1); }
+        const direct = r.emitted.length;
+        expect(direct, 'about one every 8 ms').toBeGreaterThanOrEqual(4);
+        r.emitted.length = 0;
+        lane = 'relay';
+        for (let i = 0; i < 32; i++) { r.push(move(i, i)); r.tick(1); }
+        expect(r.emitted.length, 'the relay keeps its 16 ms').toBeLessThanOrEqual(3);
+        // POSITIVE CONTROL: the two lanes really differ.
+        expect(direct).toBeGreaterThan(r.emitted.length);
     });
 });

@@ -141,6 +141,17 @@ download button underneath. A file the player cannot open, or a type it does not
 A video with no picture your device can show — a sound-only .webm, or a video in a format your device cannot
 decode — gets the audio player, marked **Sound only: no picture to show**; download it to watch it elsewhere.
 
+A photo in **HEIC** (what most phone cameras save) is turned into a JPEG on your device before it is sent, so
+everyone can see it: in the Android app (Android 9 or newer), in the desktop app when Windows has the HEIF Image
+Extensions and HEVC Video Extensions from the Microsoft Store, and in Safari. Its chip shows the JPEG and its name
+ends in .jpg. The JPEG keeps only the picture: not the location, camera or time the phone stored with it. Where
+your device cannot convert it (a browser other than Safari, a PC without those extensions), the HEIC is sent with
+its location, camera and time removed; if they cannot be removed, it is not sent and its chip says why. A HEIC
+picture someone sent is shown in the Android app (and **Download** in its picture viewer saves the JPEG you see);
+elsewhere it is a card with its name, size and a **Download** button that saves the file. In the desktop app the card also has **Show photo**, which opens
+it with Windows' own decoder (it needs those two extensions). It waits for you because that decoder runs inside the
+app, without the protection the app gives every other picture.
+
 ### Watch a Video
 Videos in messages and DMs, posted clips, a clip's preview before you post it and videos attached to tasks all
 have the same player, with every control on it at every size — a narrow portrait video included:
@@ -188,6 +199,9 @@ app as in the browser, wherever you could send a message. Wherever a message is 
 results — an attachment appears as a small icon and its file name; a spoiler
 shows only **Spoiler image** (or video, audio, file). Search finds an attachment by its file
 name, except a spoilered one.
+
+### Photos and where they were taken
+Púca removes the hidden details a phone adds to a photo (where it was taken, the phone's model, the exact time) before it sends a JPEG, PNG or WebP, so the people you send it to see the picture and nothing else. Nothing is compressed or resized, and portrait photos still arrive upright. If a photo is too damaged for that, it is not sent and the message tells you to re-save it. Photos sent earlier keep their details.
 
 ### Paste Images
 1. Copy an image (or a file) to the clipboard
@@ -430,10 +444,10 @@ While you are sharing, the same arrow (**Stream quality**) changes the
 up or down, without the picker and without dropping anyone watching. Each
 change applies at once, and is remembered for your next share. A window or
 screen is never sent larger than it is: ask for 1440p from a 1080p window and
-the stream says it is capturing 1080p. One exception: a share sent at several
-sizes (**Settings → Advanced → Screen sharing**, **Send my screen at several
-sizes**) fixes each size when it starts, so its quality changes on the next
-share instead.
+the stream says it is capturing 1080p. A share sent at several sizes (see
+below) changes too, every size with it. When a change means the share should
+go from one size to several, or back (see **Automatic** below), viewers see
+the picture hold for about a second while it switches.
 
 ### How much a share sends
 
@@ -462,8 +476,41 @@ as before.
 
 Your own upload still decides in the end: on a slow connection the share
 drops to a smaller picture by itself and comes back when it can.
-A viewer whose connection is slower than your share gets a frozen picture unless you send it at several sizes: see
-[Viewing Streams](#viewing-streams).
+
+### Several sizes, for viewers on slower connections
+
+A share sent at one size has nothing smaller for a viewer whose connection
+cannot carry it, and that viewer's picture freezes. So in a channel that uses
+SFU mode a share can go out at three sizes, and each viewer gets the largest
+one their connection carries: the full picture, a middle size (720p from a
+1080p or larger picture, 540p from a smaller one) and 360p. A small window
+gets only the sizes that are smaller than it, and one of 360 lines or less
+is always sent at one size. **Settings → Voice & Video → Screen Sharing →
+Send my screen at several sizes**:
+
+- **Automatic** (the default): several sizes when your computer encodes video
+  on its graphics card and the quality you picked sends more than 4.5 Mbps
+  (1080p at 30 fps, 720p at 60 fps and up). On a graphics card the extra
+  sizes cost almost nothing; in software they cost a lot of CPU, so a
+  computer without a hardware encoder sends one size, and if the encoding
+  turns out to be in software after all the share goes back to one size by
+  itself.
+- **Always**: several sizes for every share, in software too. For when someone
+  watching you keeps freezing and your computer has CPU to spare.
+- **Never**: one size. For when your game stutters while you share.
+
+Changing it while you share applies to that share at once. The extra sizes
+add about 1.5-2.5 Mbps to your upload; if your upload is already the limit,
+that comes out of the full-size picture, which stays as large and as smooth
+but less detailed in fast motion, so on a slow upload **Never** keeps the
+most detail for the viewers who can take it. A viewer on a slow connection
+may start on 360p and move up to the middle size once their connection has
+shown it can carry it, which took from ten seconds to a minute and a half in
+testing.
+Someone watching one or two streams gets the full picture whenever their
+connection carries it. Someone on an older version of Púca gets the middle
+size in the grid view until they update (Focus view still shows them the full
+picture).
 
 In a channel that does not use SFU mode, each viewer is sent their own copy
 of your share, at up to 8 Mbps each, whatever the quality.
@@ -494,11 +541,11 @@ when every stream you watch is popped out.
 If a stream keeps freezing for you while it plays fine for others, your
 connection is slower than what the stream sends (see
 [How much a share sends](#how-much-a-share-sends)). In a channel that uses
-SFU mode, the sharer can fix it for you without lowering everyone's picture:
-**Settings → Advanced → Screen sharing → Send my screen at several sizes**
-sends a smaller copy that a slow connection gets instead (from their next
-share). Otherwise they can lower the stream's **Resolution** or **Frame
-Rate**.
+SFU mode, a share sent at several sizes gives you a smaller copy by itself
+(see [Several sizes](#several-sizes-for-viewers-on-slower-connections)); if
+the sharer's computer sends one size, they can choose **Always** under
+**Settings → Voice & Video → Screen Sharing → Send my screen at several
+sizes**, or lower the stream's **Resolution** or **Frame Rate**.
 
 ### Stream Controls
 Hover a stream for its buttons, or right-click it for the same items as a menu:
@@ -545,6 +592,73 @@ Leaving the call, or the sharer stopping, closes its window.
 
 In a browser, and in the Android app, **Pop out** uses the browser's or the
 phone's own picture-in-picture instead, which the system limits in size.
+
+---
+
+## My Devices — controlling your own computers
+
+With the full app (not Lite), **Devices** lists the computers you have
+signed in to; **Connect** on one shows its screen and lets you drive it with
+your mouse and keyboard. How it works and what it cannot reach is in
+[Remote screen control](REMOTE_CONTROL.md).
+
+### From a computer
+The bar above the picture:
+
+| Control | Action |
+|---------|--------|
+| **Screen** | Pick which screen to see, or **All displays**. **Fit the picture to this window (less lag)** asks for no more pixels than you can see. **Fullscreen** fills your monitor (also **Ctrl+Alt+Enter**). **Zoom** in and out (or **Ctrl**+wheel over the picture), **Fit** to go back; zoomed in, push the pointer against an edge of the picture to move along it. **Show stats** puts the live numbers over the picture. **Privacy mode (blank that computer's screen)**, and the display power actions: **Turn displays off**, **Turn displays off, keep primary**, **Turn displays on**, **Disable other displays**, **Re-enable displays** |
+| **Quality** | From **Max (15Mbps, 60fps)** down to **Low (1Mbps, 15fps)**. The tick is what that computer confirmed |
+| **Keyboard** | Keys your own computer would keep for itself: **Ctrl + Alt + Del**, **Alt + Tab**, **Alt + F4**, **Esc**, **Windows key**, **Windows + D (show the desktop)**, **Ctrl + Shift + Esc (Task Manager)**, **Print Screen**. **Type text…** types what you write or paste there as characters, so an emoji, an accented letter or a password from a manager arrives exactly as it is, whatever keyboard layout that computer uses; new lines press Enter, and invisible control characters (a pasted text can hold some) are left out, with a note saying how many. **Type this computer's clipboard** opens it with your clipboard in it. **Send the clipboard (paste it over there)** puts your clipboard on that computer, for Ctrl+V there |
+| **Mouse** | **Draw the pointer here (no delay)** (on by default): your own mouse pointer is drawn over the picture, so it moves with no delay at all, and it takes that computer's pointer shape — the text cursor over a field, the hand over a link, nothing while a game hides it; a marker shows where it was left while your mouse is off the picture. With an older Púca on that computer, which cannot tell this computer its pointer shape, that computer draws its own pointer as before. **Game mode (send mouse movement, for games)**: click the picture to capture your mouse, Esc lets it go. **Sensitivity** for Game mode |
+| **Files** | Browse, download from and upload to that computer |
+| **More** | **Lock**, **Shut down…** (asks first), **Copy diagnostics** (five seconds of numbers while you keep using it, for a problem report; if a step gets no answer — a clipboard prompt you cannot see, say — it says which instead of waiting), **Back to Púca (keep the session)** |
+| The stats chip | Frames a second and the delay from your hand to the picture, measured once a second while you control (with a newer Púca on that computer; otherwise "~" and only your side's share). "relay" when the picture is not coming directly. Click it for **Show stats**, which also has **Compare with the old timing**: a few seconds of measurements both ways, to see the difference on your own computers |
+| **Fullscreen** | Same as in **Screen** |
+| **Pause control** / **Resume control** | Watch without driving; nothing you press goes over. Also **Ctrl+Alt+Home** |
+| **Disconnect** | End the session |
+
+Your mouse moves that computer's pointer as you move it, click and scroll as
+usual. Every key goes to that computer, **Esc** included, except three:
+
+| Shortcut | Action |
+|---------|--------|
+| **Ctrl+Alt+Home** | Pause or resume control |
+| **Ctrl+Alt+End** | Ctrl+Alt+Del on that computer (your own computer keeps the real Ctrl+Alt+Del for itself) |
+| **Ctrl+Alt+Enter** | Fullscreen |
+
+In fullscreen, where the browser allows it, the Windows key and Alt+Tab go
+over too; hold **Esc** to leave fullscreen in a browser.
+
+The picture also tells you when your input cannot land:
+
+- **"… is running as administrator, so Windows blocks remote control from
+  clicking or typing in it"**: the window in front (or under the pointer) on
+  that computer belongs to a program running as administrator, and Windows
+  ignores remote clicks and keys aimed at it. Close it, or start it again
+  without administrator rights; for a game, start Steam or its launcher
+  normally rather than as administrator.
+- **"A game on … has taken the mouse pointer"**: a game is using the mouse
+  to look around, which ordinary pointer moves cannot do. **Use Game mode**
+  captures your mouse and sends its movement instead.
+- A Windows security screen (the lock screen, an administrator prompt), a
+  fullscreen app holding the pointer on another screen, and a laptop with its
+  lid closed each have their own message.
+
+### From a phone
+The bar at the bottom: **Display** (screens, quality, **Scale the picture to
+this screen (less lag)**, **Privacy mode (blank their screen)**), **Keyboard**
+(the keyboard bar, with Ctrl, Alt, Shift and Win that stay down for the next
+key, Esc, Tab, the arrows and the editing keys), **Mouse** (**Mouse mode** — the
+screen is a trackpad — or **Touch mode** — the pointer goes where you tap;
+**Show virtual mouse** for left, middle and right buttons and scrolling;
+**Follow the cursor while zoomed**; **Zoom to the text cursor while typing**;
+**Open the keyboard when a text box is tapped**; **Copy diagnostics**),
+**More** (**Browse files**, **Send clipboard**, **Insert Ctrl + Alt + Del**,
+**Alt + Tab**, **Alt + F4**, the display power actions, **Lock**,
+**Shut down…**), **Chat**, **Collapse** and **Close**. In **Mouse mode**: tap
+to click, long-tap to right-click, double-tap and move to drag, move three
+fingers up or down to scroll, two fingers to move the picture, pinch to zoom.
 
 ---
 

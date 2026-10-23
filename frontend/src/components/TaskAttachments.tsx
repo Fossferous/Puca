@@ -21,6 +21,8 @@ import { saveEncryptedAttachment, saveFailureNote } from '../api/saveAttachment'
 import type { EncRef } from '../api/nativeDownloads';
 import { followOutputDeviceRef } from './settingsStore';
 import { VideoPlayer } from './VideoPlayer';
+import { AttachmentImg } from './AttachmentImg';
+import { isHeifType, jpegName } from '../api/heif';
 import './TaskAttachments.css';
 
 interface TaskAttachmentsProps {
@@ -46,7 +48,7 @@ function AttachmentItem({ refItem }: { refItem: TaskAttachmentRef }) {
     // application/octet-stream but named *.mkv is a video (File.type is
     // routinely empty for mkv), one named *.mp3 is audio, and the blob
     // should be media-typed.
-    const { url, failed } = useHeldAttachmentUrl(
+    const { url, failed, type } = useHeldAttachmentUrl(
         parsed ? { id: parsed.id, key: parsed.key, mime: videoMimeFor(name, parsed.mime) ?? audioMimeFor(name, parsed.mime) ?? parsed.mime, cap: parsed.cap } : null,
         // In use: kept while the app is in the background. A save keeps it
         // only while the save reads it, not for the Android app's native
@@ -62,17 +64,28 @@ function AttachmentItem({ refItem }: { refItem: TaskAttachmentRef }) {
         return <div className="ta-thumb ta-pending" title={refItem.name} />;
     }
     if (parsed.mime.startsWith('image/')) {
+        // A picture this device cannot show (a HEIC outside WebKit with no
+        // decoder in the app, a corrupt file) is its download button, never a
+        // broken image (AttachmentImg). One the device decoded for display is
+        // a JPEG, and a save from the lightbox is that JPEG.
+        const decodedHeif = isHeifType(parsed.mime) && type === 'image/jpeg';
+        const shownName = decodedHeif ? jpegName(refItem.name) : refItem.name;
         return (
             <>
-                <img
+                <AttachmentImg
+                    type={type}
                     className="ta-thumb"
                     src={url}
                     alt={refItem.name}
                     title={refItem.name}
                     onClick={() => setZoomed(true)}
+                    pending={<div className="ta-thumb ta-pending" title={refItem.name} />}
+                    fallback={<TaskFileDownload url={url} name={refItem.name} encRef={parsed} save={save} />}
                 />
                 {zoomed && (
-                    <ImageLightbox url={url} name={refItem.name} encRef={parsed} onClose={() => setZoomed(false)} />
+                    // Saves what is shown: with the ref, the Android app would
+                    // save the original HEIC natively (MessageContent says more).
+                    <ImageLightbox url={url} name={shownName} encRef={decodedHeif ? null : parsed} onClose={() => setZoomed(false)} />
                 )}
             </>
         );

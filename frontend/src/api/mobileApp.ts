@@ -84,6 +84,10 @@ interface SovereignAppPlugin {
      *  the Android WebView cannot READ the clipboard from JS at all. `ok:false`
      *  = the clip could not be read; older APKs reject the call. */
     readClipboard(): Promise<{ ok: boolean; text?: string; reason?: string }>;
+    /** A HEIC/HEIF photo (base64) as a JPEG (base64), through Android's own
+     *  ImageDecoder (APKs after 0.9.846, Android 9+; older reject): the
+     *  WebView cannot decode HEIC (api/heif.ts). */
+    heifToJpeg(opts: { data: string; maxEdge: number; quality: number }): Promise<{ data: string; width: number; height: number }>;
     /** OS picture-in-picture for a watched stream (APKs from 0.8.96). The
      *  Android WebView has no web PiP API, so the native side floats the
      *  WebView itself in a PiP window shaped like the video; PipActivity.java
@@ -637,6 +641,26 @@ export async function readMobileClipboard(): Promise<{ text: string } | { unsupp
     } catch {
         // An APK without the method rejects — the caller says so honestly.
         return { unsupported: true };
+    }
+}
+
+/**
+ * A HEIC photo as JPEG bytes (base64), decoded by the phone (api/heif.ts).
+ * `never`: this phone or this installed app never will (not Púca's Android
+ * app, an APK without the method, Android before 9), so the caller stops
+ * asking; `failed`: this photo could not be converted (any other failure,
+ * including one the app caught running out of memory).
+ */
+export async function heifToJpegNatively(b64: string, maxEdge: number, quality: number): Promise<{ data: string } | { never: true } | { failed: true }> {
+    if (!android() || !Capacitor.isNativePlatform() || !Capacitor.isPluginAvailable('SovereignApp')) return { never: true };
+    try {
+        const r = await App.heifToJpeg({ data: b64, maxEdge, quality });
+        return typeof r?.data === 'string' && r.data ? { data: r.data } : { failed: true };
+    } catch (err) {
+        const code = (err as { code?: unknown } | null)?.code;
+        console.warn('[heif] the app could not convert it:', code ?? '', err instanceof Error ? err.message : err);
+        // UNIMPLEMENTED: Capacitor's answer for a method the installed APK lacks.
+        return code === 'UNIMPLEMENTED' || code === 'unsupported' ? { never: true } : { failed: true };
     }
 }
 

@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
-    ownerChoices, reportFileName, reportMessage, reportText, sendSupportReport, type SendDeps,
+    ownerChoices, reportFileName, reportMessage, reportText, sendSupportReport, uploadTimeoutMs, type SendDeps,
 } from '../api/supportReport';
+import { REPORT_BUDGET_MS, REPORT_WORST_CASE_MS } from '../api/diagnosticsBudget';
 import type { Server } from '../api/servers';
 
 const srv = (id: string, name: string, owner_id: number): Server =>
@@ -111,6 +112,104 @@ describe('sendSupportReport', () => {
         const f = fakeDeps({ encrypt: async () => { throw new Error('no key'); } });
         await expect(sendSupportReport(42, '', f.deps)).rejects.toThrow('no key');
         expect(f.posted).toBeNull();
+    });
+
+    describe('a step that never answers', () => {
+        const never = () => new Promise<never>(() => {});
+        beforeEach(() => { vi.useFakeTimers(); });
+        afterEach(() => { vi.useRealTimers(); });
+
+        /** Starts the send, lets `ms` of fake time pass, returns how it ended. */
+        async function outcome(f: ReturnType<typeof fakeDeps>, ms: number, opts?: { signal?: AbortSignal }) {
+            const p = sendSupportReport(42, '', f.deps, opts).then(() => 'sent', (e: Error) => e.message);
+            await vi.advanceTimersByTimeAsync(ms);
+            return p;
+        }
+
+        it('upload: fails with a sentence, posts nothing and aborts the request', async () => {
+            let seen: AbortSignal | undefined;
+            const f = fakeDeps({ upload: (_f, s) => { seen = s; return never(); } });
+            const settled = vi.fn();
+            const p = sendSupportReport(42, '', f.deps).then(() => 'sent', (e: Error) => e.message).then(r => { settled(); return r; });
+            await vi.advanceTimersByTimeAsync(59_000);
+            expect(settled).not.toHaveBeenCalled(); // the base budget is generous
+            await vi.advanceTimersByTimeAsync(2_000);
+            expect(await p).toBe('The upload gave no answer within 61 s');
+            expect(seen!.aborted).toBe(true);
+            expect(f.calls).not.toContain('post');
+        });
+
+        it('upload: a big log gets more time than the base', async () => {
+            const big = 'x'.repeat(8 * 1024 * 1024);
+            const f = fakeDeps({ readLog: async () => big, upload: () => never() });
+            expect(uploadTimeoutMs(big.length)).toBeGreaterThan(180_000);
+            const settled = vi.fn();
+            void sendSupportReport(42, '', f.deps).catch(() => {}).then(settled);
+            await vi.advanceTimersByTimeAsync(170_000);
+            expect(settled).not.toHaveBeenCalled();
+            await vi.advanceTimersByTimeAsync(uploadTimeoutMs(big.length));
+            expect(settled).toHaveBeenCalled();
+        });
+
+        it('opening the conversation', async () => {
+            const f = fakeDeps({ openConversation: () => never() });
+            expect(await outcome(f, 90_000)).toMatch(/^Opening the conversation with the owner gave no answer within 20 s$/);
+            expect(f.calls).toEqual(['upload']);
+        });
+
+        it('encryption', async () => {
+            const f = fakeDeps({ encrypt: () => never() });
+            expect(await outcome(f, 90_000)).toBe('Encrypting the report gave no answer within 20 s');
+            expect(f.posted).toBeNull();
+        });
+
+        it('the final post: says it may still have been delivered, and cancels it', async () => {
+            let seen: AbortSignal | undefined;
+            const f = fakeDeps({ post: (_c, _w, s) => { seen = s; return never(); } });
+            const msg = await outcome(f, 90_000);
+            expect(msg).toMatch(/^Posting the message gave no answer within 20 s/);
+            expect(msg).toContain('may still have been delivered');
+            expect(seen!.aborted).toBe(true);
+        });
+
+        it('the log read, the measurement and the version degrade into the report instead of failing it', async () => {
+            const f = fakeDeps({ version: never, diagnostics: never, readLog: never });
+            expect(await outcome(f, REPORT_BUDGET_MS + 1000)).toBe('sent');
+            vi.useRealTimers(); // FileReader below runs on real timers
+            const text = await readText(f.uploaded!);
+            expect(text).toContain('diagnostics unavailable: The measurement gave no answer within ' + REPORT_BUDGET_MS / 1000 + ' s');
+            expect(text).toContain('the app log could not be read: Reading the app log gave no answer within 12 s');
+            expect(f.uploaded!.name).toMatch(/^puca-report-unknown-/);
+        });
+
+        it('a measurement whose sections each take their whole cap is NOT cut off', async () => {
+            // buildDiagnosticsReport runs its sections one after another, so the
+            // slowest honest report takes the SUM of their caps. One section's
+            // cap (12 s) as the whole measurement's bound threw away a report
+            // every section had answered in time.
+            const f = fakeDeps({
+                diagnostics: () => new Promise<string>(r => setTimeout(() => r('DIAG-AT-THE-WORST-CASE'), REPORT_WORST_CASE_MS)),
+            });
+            expect(REPORT_WORST_CASE_MS).toBeGreaterThan(12_000);
+            expect(await outcome(f, REPORT_WORST_CASE_MS + 100)).toBe('sent');
+            vi.useRealTimers();
+            const text = await readText(f.uploaded!);
+            expect(text).toContain('DIAG-AT-THE-WORST-CASE');
+            expect(text).not.toContain('diagnostics unavailable');
+        });
+
+        it('closing the dialog (outer signal) stops the send at once and posts nothing', async () => {
+            const ac = new AbortController();
+            let seen: AbortSignal | undefined;
+            const f = fakeDeps({ upload: (_f, s) => { seen = s; return never(); } });
+            const p = sendSupportReport(42, '', f.deps, { signal: ac.signal }).then(() => 'sent', (e: Error) => e.name);
+            await vi.advanceTimersByTimeAsync(10);
+            ac.abort();
+            expect(await p).toBe('AbortError');
+            expect(seen!.aborted).toBe(true);
+            expect(f.calls).toEqual([]);
+            expect(f.posted).toBeNull();
+        });
     });
 
     it('a failed measurement or version still sends, saying what failed', async () => {

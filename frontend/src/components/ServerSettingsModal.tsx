@@ -5,6 +5,7 @@ import {
     INVITE_EXPIRY_CHOICES, INVITE_DEFAULT_EXPIRY_HOURS,
     listBans, unbanMember, listReports, resolveReport, listAuditLog,
 } from '../api/servers';
+import { ImageMetadataError } from '../api/imageMetadata';
 import { uploadFile, discardUpload } from '../api/uploads';
 import { fetchPublicConfig } from '../api/publicConfig';
 import { inviteLink } from '../api/pendingInvite';
@@ -267,8 +268,8 @@ export function ServerSettingsModal({
             if (iconFileId && iconFileId !== savedIconId) discardUpload(iconFileId);
             setIconFileId(uploaded.id);
             setIconPreview(await fetchFileUrl(uploaded.id));
-        } catch {
-            setError('Failed to upload icon');
+        } catch (err) {
+            setError(err instanceof ImageMetadataError ? err.message : 'Failed to upload icon');
         } finally {
             setIsUploading(false);
         }
