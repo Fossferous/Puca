@@ -381,6 +381,31 @@ Yes, and the send path fails closed rather than falling back to plaintext.
   (`migrations/014_e2ee_channel_keys.sql`, `src/key_handlers.rs`).
 - **Attachments:** separately AES-256-GCM encrypted under a per-file key carried inside the
   already-encrypted message, and decrypted on your device only while they are shown (below).
+- **Photos are stripped of metadata before they are encrypted**
+  ([`imageMetadata.ts`](../frontend/src/api/imageMetadata.ts), called from `sealFileForUpload` in
+  `attachments.ts`, which every attachment of every surface passes through: composer, DMs, tasks,
+  notes, including a note's photo sealed offline). The recipients of an attachment are exactly the
+  people its EXIF would be shown to, and end-to-end encryption does nothing about them. It is
+  **lossless**: the compressed picture is copied byte for byte, never decoded or re-encoded.
+  JPEG loses APP1 (Exif, XMP, extended XMP), APP13 (Photoshop/IPTC), APP11 (JUMBF/C2PA), every
+  other application segment except JFIF's header, the ICC profile (APP2) and Adobe's colour
+  transform (APP14), COM comments, a JFIF thumbnail, and everything after the end of the image
+  (Motion Photo video, MPF secondary images). PNG loses eXIf, tEXt, iTXt, zTXt, tIME, every
+  unknown ancillary chunk and anything after IEND. WebP loses EXIF, XMP and unknown chunks
+  (inside animation frames too) and anything after the RIFF. **Orientation is kept**, as the only
+  entry of a minimal EXIF block Púca writes itself (32 bytes in a JPEG, a 26-byte `eXIf` chunk,
+  a 26-byte `EXIF` chunk with the VP8X flag), never copied from the file; the alternative,
+  baking the rotation in, would mean re-encoding. A JPEG, PNG or WebP (by its magic bytes, not its
+  declared type) whose segments or chunks cannot be walked is **refused with a message**, not sent:
+  passing it on would be the way a block the parser could not see still reaches the recipient. A
+  JPEG or PNG merely cut off inside its picture data is sent after the part before the cut is
+  checked. Any other format passes through unchanged. **Known limits:** AVIF, TIFF, BMP and GIF
+  (whose comment and application extensions can hold text) are not processed; files sent before
+  this change keep their EXIF; the ICC profile is kept because removing it changes the colours.
+  Checked by `frontend/src/tests/imageMetadata.test.ts` (truncation at every byte, thousands of random
+  corruptions), `frontend/src/tests/attachmentMetadata.test.ts` (the real seal and upload, opened with the
+  key as a recipient would) and `frontend/e2e/photo-metadata-real-browser.mjs` (real decoder:
+  same pixels, still upright).
 - **Fail-closed:** if the key isn't available the client throws rather than sending
   ([`servers.ts:420`](../frontend/src/api/servers.ts#L420),
   [`dms.ts:150`](../frontend/src/api/dms.ts#L150)). Edits go through the same path.

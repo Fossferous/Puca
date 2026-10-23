@@ -29,6 +29,21 @@ The server is run by whoever invited you, and it necessarily sees:
   limiting), and the identifiers of any phone registered for wake signals;
 - the ciphertext of everything below — which it cannot read.
 
+## What the people you send a photo to can read
+
+End-to-end encryption keeps an attachment from the server; the people in the
+channel or conversation, by design, can open it. A phone photo carries a hidden
+label (EXIF) with a GPS position, the camera's make and model, the time it was
+taken and sometimes the editing program, so Púca removes it **on your device,
+before the photo is encrypted**, for every JPEG, PNG and WebP you attach in a
+channel, a DM, a task or a note, and for avatars, server icons and custom
+emoji (which the server stores as ordinary pictures). Nothing is re-compressed
+or resized: the picture's bytes are copied as they are and only the metadata
+containers are left out. A rotation flag is kept in a block Púca writes itself,
+so a portrait photo is not sent lying down. Not covered: GIF, SVG, AVIF, TIFF,
+BMP, video and audio are sent as they are, and a photo sent before this change
+keeps its label. `docs/SECURITY_MODEL.md` has the list of what is removed.
+
 ## What the server operator cannot read
 
 Messages, direct messages, attachments and checklist content are encrypted on

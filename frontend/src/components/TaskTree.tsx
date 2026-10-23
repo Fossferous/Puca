@@ -32,6 +32,7 @@ const INDENT_PX = 24;
 import { DEFAULT_REMINDER_TIMES, REMINDER_PRESETS, presetInstant, type ReminderTimes } from '../api/reminderTimes';
 import { PERM, hasPerm } from '../api/permissionBits';
 import { encryptAndUploadRef } from '../api/attachments';
+import { ImageMetadataError } from '../api/imageMetadata';
 import { ApiError } from '../api/client';
 import { TaskAttachments } from './TaskAttachments';
 import { NoteLinkText } from './NoteLinkText';
@@ -508,7 +509,7 @@ export function TaskTree({
             } catch (err) {
                 console.error('Failed to attach file:', file.name, err);
                 failures.push(file.name);
-                if (err instanceof ApiError && err.status === 403) refusal = err.message;
+                if ((err instanceof ApiError && err.status === 403) || err instanceof ImageMetadataError) refusal = err.message;
             }
         }
         setUploadingIds(prev => { const n = new Set(prev); n.delete(task.id); return n; });

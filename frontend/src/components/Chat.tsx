@@ -99,6 +99,7 @@ import { ENC_HISTORY_LOCKED } from '../api/decryptMarkers';
 import { unlockHistoryWithRecoveryCode, ensureSignAttestation, type UnlockResult } from '../api/dmKeys';
 import { HomeSidebar } from './HomeSidebar';
 import { encryptAndUploadRef, parseEncAttachment } from '../api/attachments';
+import { ImageMetadataError } from '../api/imageMetadata';
 import { FileTooLargeError, MAX_UPLOAD_BYTES, discardUpload } from '../api/uploads';
 import {
     buildOutgoingContent,
@@ -981,7 +982,7 @@ export function Chat({ onLogout }: ChatProps) {
      */
     const describeUploadFailure = useCallback((err: unknown, file: File): string => {
         console.error('Failed to upload file:', file.name, err);
-        return err instanceof FileTooLargeError
+        return err instanceof FileTooLargeError || err instanceof ImageMetadataError
             ? err.message
             // 507 is the storage quota, and it is PERMANENT until the user frees
             // space — "Please try again" invited an infinite retry that could

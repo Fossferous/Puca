@@ -189,6 +189,9 @@ results — an attachment appears as a small icon and its file name; a spoiler
 shows only **Spoiler image** (or video, audio, file). Search finds an attachment by its file
 name, except a spoilered one.
 
+### Photos and where they were taken
+Púca removes the hidden details a phone adds to a photo (where it was taken, the phone's model, the exact time) before it sends a JPEG, PNG or WebP, so the people you send it to see the picture and nothing else. Nothing is compressed or resized, and portrait photos still arrive upright. If a photo is too damaged for that, it is not sent and the message tells you to re-save it. Photos sent earlier keep their details.
+
 ### Paste Images
 1. Copy an image (or a file) to the clipboard
 2. **Ctrl+V** in the message box — it becomes a chip, the same as an attached file

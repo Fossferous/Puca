@@ -138,7 +138,7 @@ export function useTrashedLists() {
 /** What to tell the user when uploading a note's media failed. The size and
  *  slot errors say the real numbers; anything else is a connection. */
 function mediaFailureText(err: unknown): string {
-    if (err instanceof Error && (err.name === 'TooManyAttachmentsError' || err.name === 'ClipTooLargeError' || err.name === 'FileTooLargeError')) return err.message;
+    if (err instanceof Error && (err.name === 'TooManyAttachmentsError' || err.name === 'ClipTooLargeError' || err.name === 'FileTooLargeError' || err.name === 'ImageMetadataError')) return err.message;
     return 'Couldn’t upload that — check your connection';
 }
 
