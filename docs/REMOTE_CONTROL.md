@@ -429,7 +429,9 @@ the next capture → encode → network → jitter buffer → decode → the sta
   leaves the clock alone, and no frame is ever taken sooner than a whole frame
   interval after the last one sent, so the session's frame rate — and with it
   the encoder's bitrate, spent as bitrate/fps per frame — is never exceeded.
-  The gain is on a screen that was still, most of what a pointer and keyboard
+  Nothing is watched while a security screen blocks the capture: each look
+  would ask DXGI to rebuild the lost duplication, and input kept re-arming
+  the watch. The gain is on a screen that was still, most of what a pointer and keyboard
   do on a desktop: a menu, a typed letter or a highlight is captured within
   about 2 ms of being drawn. A screen that changes every frame by itself (a
   game, a video) is captured at the frame rate as before; only a higher frame
