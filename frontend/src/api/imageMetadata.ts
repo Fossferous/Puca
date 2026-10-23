@@ -37,7 +37,10 @@
  * is still there for the recipient's. A JPEG or PNG that is merely CUT SHORT
  * inside its picture data (a download that stopped) is not malformed in that
  * sense: everything before the cut is walked and checked, the rest is picture,
- * and it goes through. (A WebP's chunk sizes must add up; one cut short is refused.) Anything that is not one of the three formats — GIF, SVG, AVIF,
+ * and it goes through, as does a PNG missing only some of its last chunk's
+ * CRC. Padding between a JPEG's segments is skipped as every decoder skips it
+ * (it is never copied, so nothing in it can reach the output). A WebP's chunk
+ * sizes must add up; one cut short is refused. Anything that is not one of the three formats — GIF, SVG, AVIF,
  * a PDF, a video — is returned untouched; the caller does not need to know the
  * type first, the bytes decide.
  */
@@ -79,13 +82,31 @@ export function stripImageMetadata(bytes: Uint8Array): Uint8Array {
 export async function stripFileMetadata(file: File): Promise<File> {
     // Only what is, or may be, a picture is read: a 25 MB video is not pulled into memory for this.
     if (file.type && !/^image\/(jpeg|jpg|pjpeg|png|webp|x-png)$/i.test(file.type)) return file;
-    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (!file.type) {
+        // No declared type (a .mkv, a .heic from Windows, a 4 GB archive sent peer to peer): its
+        // first bytes say whether it is one of the three, before anything large is read.
+        let head: Uint8Array;
+        try { head = await readBytes(file.slice(0, 12)); } catch { return file; }
+        if (!sniffStrippable(head)) return file;
+    }
+    const bytes = await readBytes(file);
     const out = stripImageMetadata(bytes);
     if (out === bytes) return file;
     return new File([out as BlobPart], file.name, { type: file.type, lastModified: file.lastModified });
 }
 
 // ---------------------------------------------------------------- helpers
+
+/** A blob's bytes; FileReader where the engine's Blob has no arrayBuffer() (jsdom). */
+function readBytes(b: Blob): Promise<Uint8Array> {
+    if (typeof b.arrayBuffer === 'function') return b.arrayBuffer().then(x => new Uint8Array(x));
+    return new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(new Uint8Array(r.result as ArrayBuffer));
+        r.onerror = () => rej(r.error);
+        r.readAsArrayBuffer(b);
+    });
+}
 
 function ascii(b: Uint8Array, at: number, n: number): string {
     let s = '';
@@ -165,11 +186,19 @@ function stripJpeg(b: Uint8Array): Uint8Array {
     let sawFrame = false;
     let i = 2; // after SOI
     while (i < n) {
-        if (b[i] !== 0xFF) throw new ImageMetadataError('JPEG', 'a marker is missing');
+        if (b[i] !== 0xFF) {
+            // Bytes that belong to no segment: some cameras and editors leave padding between
+            // them, and every decoder reads on to the next marker (libjpeg does). So do we. They
+            // are not copied: the output is rebuilt from the segments that were read.
+            removed = true;
+            const ff = b.indexOf(0xFF, i);
+            if (ff < 0) break;
+            i = ff;
+        }
         while (i + 1 < n && b[i + 1] === 0xFF) i++; // fill bytes
-        if (i + 1 >= n) throw new ImageMetadataError('JPEG', 'it ends inside a marker');
+        if (i + 1 >= n) { removed = true; break; } // a lone FF at the very end
         const m = b[i + 1];
-        if (m === 0x00) throw new ImageMetadataError('JPEG', 'a stray byte sits between segments');
+        if (m === 0x00) { removed = true; i += 2; continue; } // FF 00 outside a scan: not a marker
         if (m === 0xD9) { // EOI: whatever follows is not the picture
             into.push(b.subarray(i, i + 2));
             if (i + 2 < n) removed = true;
@@ -309,6 +338,9 @@ function stripPng(b: Uint8Array): Uint8Array {
             // A picture cut off inside its data goes through as it is; a metadata chunk cut off
             // is debris. Anything else cannot be walked.
             if (type === 'IDAT' || type === 'fdAT') { parts.push(b.subarray(i, n)); break; }
+            // The end marker without all of its CRC (a file clipped by a few bytes): it is the
+            // whole picture, and the marker is written out in full.
+            if (type === 'IEND') { parts.push(pngChunk('IEND', new Uint8Array(0))); removed = true; break; }
             if (!PNG_KEEP.has(type) && type.charCodeAt(0) >= 0x61) { removed = true; break; }
             throw new ImageMetadataError('PNG', `the ${type} chunk is longer than the file`);
         }

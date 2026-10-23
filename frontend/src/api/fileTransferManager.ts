@@ -16,6 +16,7 @@ import { loadSettings } from '../components/settingsStore';
 import { fetchIceConfig, withRelayOnlyIfRequested } from './iceConfig';
 import { lastSinkChoice, type PreparedSink } from './transferSinks';
 import { capacitorSinkDiag } from './capacitorSink';
+import { stripFileMetadata } from './imageMetadata';
 import {
     sendFile,
     sha256OfBlob,
@@ -396,6 +397,22 @@ class FileTransferManager {
         };
         this.transfers.set(id, t);
         this.emit();
+
+        // A picture over the upload cap (a 40 MB phone JPEG) comes here instead of through the
+        // seal, so its EXIF is taken off here, the same way (api/imageMetadata.ts): the peer is
+        // the one person it could be shown to, and one person is still a person. Done before the
+        // digest, which must be the digest of what is sent.
+        try {
+            const clean = await stripFileMetadata(file);
+            if (clean !== file) { file = clean; t.file = clean; t.size = clean.size; }
+        } catch (err) {
+            // Nothing offered, nothing to tear down (the same as a failed hash, below).
+            t.state = 'failed';
+            t.error = (err as Error).message;
+            this.emit();
+            return id;
+        }
+        if (t.abort.aborted) return id;      // cancelled while stripping
 
         try {
             t.sha256 = await sha256OfBlob(
