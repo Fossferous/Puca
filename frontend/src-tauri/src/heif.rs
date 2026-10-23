@@ -284,7 +284,11 @@ mod tests {
     /// Whether this machine can decode HEIF at all (the Store extensions),
     /// asked of WIC directly, NOT through `convert`: a CI runner usually
     /// cannot, and the test then says SKIP; but a `convert` that fails on a
-    /// machine that CAN decode is a failure, never a skip.
+    /// machine that CAN decode is a failure, never a skip. Two answers mean
+    /// "cannot": COMPONENTNOTFOUND (no HEIF decoder at all) and
+    /// COMPONENTINITIALIZEFAILURE, which is what Windows Server 2025 (the CI
+    /// runner) gives: its built-in HEIF container decoder is registered but
+    /// cannot start without the HEVC extension.
     #[cfg(windows)]
     fn heif_decoder_installed() -> bool {
         use windows::Win32::Graphics::Imaging::*;
@@ -296,7 +300,10 @@ mod tests {
             s.InitializeFromMemory(FIXTURE).unwrap();
             match f.CreateDecoderFromStream(&s, std::ptr::null(), WICDecodeMetadataCacheOnDemand).and_then(|d| d.GetFrame(0)) {
                 Ok(_) => true,
-                Err(e) if e.code() == windows::Win32::Foundation::WINCODEC_ERR_COMPONENTNOTFOUND => {
+                Err(e)
+                    if e.code() == windows::Win32::Foundation::WINCODEC_ERR_COMPONENTNOTFOUND
+                        || e.code() == windows::Win32::Foundation::WINCODEC_ERR_COMPONENTINITIALIZEFAILURE =>
+                {
                     eprintln!("SKIP: no HEIF decoder on this machine (install the HEIF and HEVC extensions)");
                     false
                 }
