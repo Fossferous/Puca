@@ -21,6 +21,7 @@
 import { uploadFile, assertUploadable, ENCRYPTED_OVERHEAD_BYTES, MAX_UPLOAD_BYTES } from './uploads';
 import { API_BASE_URL } from './config';
 import { getToken } from './auth';
+import { stripImageMetadata } from './imageMetadata';
 import { readAttachmentBody } from './attachmentProgress';
 import { createPriorityLimiter, abortError, isAbortError } from './priorityLimiter';
 import { readVideoDims, type VideoDims } from './videoDims';
@@ -275,7 +276,11 @@ export async function sealFileForUpload(file: File | PlainBytes): Promise<Sealed
     // have already pulled the whole file into memory and encrypted it. Account
     // for what encryption adds, or a file of exactly the cap fails at the server.
     assertUploadable({ name: file.name, size: given ? given.byteLength : (file as File).size }, ENCRYPTED_OVERHEAD_BYTES);
-    const raw = given ?? new Uint8Array(await (file as File).arrayBuffer());
+    // A photo's EXIF (where, when, on which device) is shown to everyone who can open it, so it
+    // is taken off HERE, losslessly, before the first byte is encrypted (api/imageMetadata.ts).
+    // A JPEG/PNG/WebP that cannot be taken apart throws and is not sent. Any other type is
+    // returned as it is; the bytes decide, not the declared type.
+    const raw = stripImageMetadata(given ?? new Uint8Array(await (file as File).arrayBuffer()));
     const keyBytes = crypto.getRandomValues(new Uint8Array(32));
     const nonce = crypto.getRandomValues(new Uint8Array(12));
     const key = await crypto.subtle.importKey('raw', keyBytes as BufferSource, 'AES-GCM', false, ['encrypt']);

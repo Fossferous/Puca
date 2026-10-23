@@ -33,6 +33,7 @@ import { DEFAULT_REMINDER_TIMES, REMINDER_PRESETS, presetInstant, type ReminderT
 import { PERM, hasPerm } from '../api/permissionBits';
 import { encryptAndUploadRef } from '../api/attachments';
 import { HeifNotSendableError, convertHeifForUpload } from '../api/heif';
+import { ImageMetadataError } from '../api/imageMetadata';
 import { ApiError } from '../api/client';
 import { TaskAttachments } from './TaskAttachments';
 import { NoteLinkText } from './NoteLinkText';
@@ -510,7 +511,7 @@ export function TaskTree({
             } catch (err) {
                 console.error('Failed to attach file:', file.name, err);
                 failures.push(file.name);
-                if (err instanceof ApiError && err.status === 403) refusal = err.message;
+                if ((err instanceof ApiError && err.status === 403) || err instanceof ImageMetadataError) refusal = err.message;
                 // A HEIC that could not be sent without its location says so.
                 if (err instanceof HeifNotSendableError) refusal = err.message;
             }

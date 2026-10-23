@@ -230,6 +230,7 @@ const GATES = [
         ['e2e-notes-dialog-escape', 'notes-dialog-escape-real-browser.mjs'],
         ['e2e-user-menu-move-to', 'user-menu-move-to-real-browser.mjs'],
         ['e2e-paste-html', 'paste-html-real-browser.mjs'],
+        ['e2e-photo-metadata', 'photo-metadata-real-browser.mjs'],
         ['e2e-plaintext-disk', 'plaintext-disk-real-browser.mjs'],
         ['e2e-game-sounds-offline', 'game-sounds-offline-real-browser.mjs'],
         // These two default to frontend/e2e/e2e-artifacts/, which is NOT

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { getProfile, updateAvatar, updateProfile } from '../api/profile';
 import type { Profile } from '../api/profile';
+import { ImageMetadataError, stripFileMetadata } from '../api/imageMetadata';
 import { uploadFile, discardUpload, isAudioType, MAX_SOUND_BYTES, formatFileSize } from '../api/uploads';
 import './UserProfileSettings.css';
 import { CloseIcon, PlayIcon } from './Icons';
@@ -104,14 +105,15 @@ export function UserProfileSettings({ isOpen, onClose }: UserProfileSettingsProp
         setError(null);
         setSuccess(null);
         try {
-            const uploaded = await uploadFile(new File([file], name, { type }));
+            // A picture's EXIF is plaintext on the server and readable by everyone: off before it leaves.
+            const uploaded = await uploadFile(await stripFileMetadata(new File([file], name, { type })));
             await updateAvatar(uploaded.id);
             setProfile(prev => prev ? { ...prev, avatar_url: `/files/${uploaded.id}` } : null);
             setSuccess('Avatar updated!');
             setTimeout(() => setSuccess(null), 2000);
             return true;
-        } catch {
-            setError('Failed to upload avatar');
+        } catch (err) {
+            setError(err instanceof ImageMetadataError ? err.message : 'Failed to upload avatar');
             return false;
         } finally {
             setIsUploading(false);
