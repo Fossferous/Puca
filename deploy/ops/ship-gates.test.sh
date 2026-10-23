@@ -1060,6 +1060,113 @@ STUB
 	rm -f "$TMP/served-bundle" "$TMP/served-code" "$TMP/notes-ota.json"
 fi
 
+echo
+echo "--- dual-ship.sh decky: the Steam Deck plugin, linked, signed, newer ---"
+# Installed plugins install an update only when it verifies under the key they
+# carry (integrations/decky/src/update.ts). dual-ship.sh checks that against
+# the release the download site offers NOW, with the release verifier, before
+# it uploads anything. Releases here are made by the release script's own
+# signer (scripts/signing.mjs) with throwaway keys.
+if [ -z "$PY" ]; then
+	check "python (zipfile) is available to build the fixture plugin zips" 0 "neither python nor python3 runs"
+else
+	mkdir -p "$TMP/integrations/decky/scripts" "$TMP/integrations/decky/py_modules" "$TMP/deck"
+	cp "$REPO/integrations/decky/scripts/verify_update.py" "$TMP/integrations/decky/scripts/"
+	cp "$REPO/integrations/decky/py_modules/puca_update.py" "$TMP/integrations/decky/py_modules/"
+	SIGNER="$REPO/integrations/decky/scripts/signing.mjs"
+	deck_key() { # <name>: $TMP/deck/<name>.pem and its public half, <name>.json
+		node --input-type=module -e "
+			import { generateKeyPairSync } from 'node:crypto'; import { writeFileSync } from 'node:fs'; import { pathToFileURL } from 'node:url';
+			const m = await import(pathToFileURL(process.argv[1]).href);
+			const pem = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' });
+			writeFileSync(process.argv[2], pem); writeFileSync(process.argv[3], JSON.stringify(m.publicJwk(pem)));
+		" "$SIGNER" "$TMP/deck/$1.pem" "$TMP/deck/$1.json"
+	}
+	deck_release() { # <version> <signing key> <embedded key, or none> <dir>: <dir>/puca-decky-<version>.zip + <dir>/puca-decky.json
+		mkdir -p "$4"
+		"$PY" - "$1" "$( [ "$3" = none ] || echo "$TMP/deck/$3.json")" "$4" <<'PYEOF'
+import json, sys, zipfile
+version, key, out = sys.argv[1], sys.argv[2], sys.argv[3]
+with zipfile.ZipFile(f"{out}/puca-decky-{version}.zip", "w") as z:
+    z.writestr("puca/package.json", json.dumps({"name": "puca-decky", "version": version}))
+    if key:
+        z.writestr("puca/update-key.json", open(key, encoding="utf-8").read())
+PYEOF
+		node --input-type=module -e "
+			import { readFileSync, writeFileSync } from 'node:fs'; import { basename } from 'node:path'; import { pathToFileURL } from 'node:url';
+			const m = await import(pathToFileURL(process.argv[1]).href);
+			const [zip, version, pem, out] = process.argv.slice(2);
+			writeFileSync(out, JSON.stringify(m.signRelease(readFileSync(zip), basename(zip), version, readFileSync(pem))));
+		" "$SIGNER" "$4/puca-decky-$1.zip" "$1" "$TMP/deck/$2.pem" "$4/puca-decky.json"
+	}
+	deck_page() { # <plugin version on the page> [nolink]
+		{
+			echo '<html><body>'
+			[ "${2:-}" = nolink ] || echo '<a href="/steam-deck/puca-decky.zip">Púca for Steam Deck</a>'
+			echo "<div class=\"meta\">v$1 &middot; Steam Deck</div>"
+			echo '</body></html>'
+		} > "$TMP/deploy/download-site/index.html"
+	}
+	# The download host: $TMP/deck/published.zip is what it offers now (none: 404).
+	cat > "$TMP/bin/ssh" <<STUB
+#!/usr/bin/env bash
+echo "ssh \$*" >> "$LOG"
+case "\$*" in
+	*curl*http_code*steam-deck/puca-decky.zip*) if [ -f "$TMP/deck/code" ]; then cat "$TMP/deck/code"; elif [ -f "$TMP/deck/published.zip" ]; then echo 200; else echo 404; fi ;;
+	*curl*steam-deck/*sha256sum*) sha256sum < /dev/null | cut -d' ' -f1 ;;
+	*curl*steam-deck/puca-decky.zip*) cat "$TMP/deck/published.zip" 2>/dev/null ;;
+esac
+exit 0
+STUB
+	chmod +x "$TMP/bin/ssh"
+	deck_key a; deck_key b
+	deck_release 0.1.0 a a "$TMP/deck/a-0.1.0"
+	deck_release 0.2.0 a a "$TMP/deck/a-0.2.0"
+	deck_release 0.2.0 b b "$TMP/deck/b-0.2.0"
+	deck_release 0.3.0 a a "$TMP/deck/a-0.3.0"
+	deck_release 0.2.0 a none "$TMP/deck/keyless-0.2.0"
+	good=("$TMP/deck/a-0.2.0/puca-decky-0.2.0.zip" "$TMP/deck/a-0.2.0/puca-decky.json")
+
+	deck_page 0.2.0 nolink
+	out="$(ship decky "${good[@]}")"; rc=$?
+	check "REFUSES when the page does not link the plugin" "$([ $rc -ne 0 ] && [ "$(has "$out" 'does not link steam-deck/puca-decky.zip')" = 1 ] && echo 1 || echo 0)" "$out"
+	check "and refuses BEFORE touching any host"           "$([ ! -s "$LOG" ] && echo 1 || echo 0)" "$(cat "$LOG")"
+	deck_page 0.1.0
+	out="$(ship decky "${good[@]}")"; rc=$?
+	check "REFUSES when the page names another plugin version" "$([ $rc -ne 0 ] && [ "$(has "$out" 'does not name v0.2.0')" = 1 ] && echo 1 || echo 0)" "$out"
+
+	deck_page 0.2.0
+	rm -f "$TMP/deck/published.zip" "$TMP/deck/code"
+	out="$(ship decky "${good[@]}")"
+	check "the first release ever (nothing published) is NOT refused" "$([ "$(has "$out" 'REFUSING')" = 0 ] && [ "$(has "$out" 'this is the first')" = 1 ] && [ "$(has "$out" '=== Steam Deck plugin 0.2.0 -> sandbox ===')" = 1 ] && echo 1 || echo 0)" "$out"
+	check "and uploads the manifest AFTER the zip"                   "$(awk '/scp .*puca-decky-0\.2\.0\.zip/{z=NR} /scp .*puca-decky\.json\.new/{m=NR} END{print (z && m && z < m) ? 1 : 0}' "$LOG")" "$(cat "$LOG")"
+
+	cp "$TMP/deck/a-0.1.0/puca-decky-0.1.0.zip" "$TMP/deck/published.zip"
+	out="$(ship decky "${good[@]}")"
+	check "a newer release under the published key is NOT refused (positive control)" "$([ "$(has "$out" 'REFUSING')" = 0 ] && [ "$(has "$out" 'installed plugins will accept it')" = 1 ] && echo 1 || echo 0)" "$out"
+	out="$(ship decky "$TMP/deck/b-0.2.0/puca-decky-0.2.0.zip" "$TMP/deck/b-0.2.0/puca-decky.json")"; rc=$?
+	check "REFUSES a release signed with another key than the published one" "$([ $rc -ne 0 ] && [ "$(has "$out" 'installed plugins would refuse it')" = 1 ] && echo 1 || echo 0)" "$out"
+	check "and uploads nothing"                                              "$(grep -q '^scp ' "$LOG" && echo 0 || echo 1)" "$(cat "$LOG")"
+
+	cp "$TMP/deck/a-0.3.0/puca-decky-0.3.0.zip" "$TMP/deck/published.zip"
+	out="$(ship decky "${good[@]}")"; rc=$?
+	check "REFUSES a release that is not newer than the published one" "$([ $rc -ne 0 ] && [ "$(has "$out" 'is not newer than the published 0.3.0')" = 1 ] && echo 1 || echo 0)" "$out"
+
+	rm -f "$TMP/deck/published.zip"
+	out="$(ship decky "$TMP/deck/keyless-0.2.0/puca-decky-0.2.0.zip" "$TMP/deck/keyless-0.2.0/puca-decky.json")"; rc=$?
+	check "REFUSES a zip built without the update key" "$([ $rc -ne 0 ] && [ "$(has "$out" 'no update-key.json')" = 1 ] && echo 1 || echo 0)" "$out"
+	cp "$TMP/deck/a-0.2.0/puca-decky.json" "$TMP/deck/tampered.json"
+	"$PY" -c "import json,sys; m=json.load(open(sys.argv[1])); m['sha256']='0'*64; json.dump(m, open(sys.argv[1],'w'))" "$TMP/deck/tampered.json"
+	out="$(ship decky "$TMP/deck/a-0.2.0/puca-decky-0.2.0.zip" "$TMP/deck/tampered.json")"; rc=$?
+	check "REFUSES a manifest that does not match its zip" "$([ $rc -ne 0 ] && [ "$(has "$out" "manifest's SHA-256 is not the zip's")" = 1 ] && echo 1 || echo 0)" "$out"
+
+	echo 500 > "$TMP/deck/code"
+	out="$(ship decky "${good[@]}")"; rc=$?
+	check "REFUSES when the published release cannot be read" "$([ $rc -ne 0 ] && [ "$(has "$out" 'could not read the published Steam Deck plugin')" = 1 ] && echo 1 || echo 0)" "$out"
+	rm -f "$TMP/deck/code"
+	restore_recording_ssh 2>/dev/null || true
+fi
+
 if [ "$fails" -gt 0 ]; then
 	echo "$fails FAILED"
 	exit 1

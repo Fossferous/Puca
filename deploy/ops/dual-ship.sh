@@ -28,6 +28,9 @@
 #   dual-ship.sh apk           <Puca-x.y.z.apk> <version>
 #   dual-ship.sh apk-lite      <Puca-Lite-x.y.z.apk> <version>
 #   dual-ship.sh apk-notes     <Puca-Notes-x.y.z.apk> <version>
+#   dual-ship.sh decky         <puca-decky-x.y.z.zip> <puca-decky.json>
+#                              (Púca for Steam Deck, its own version: made by
+#                               `npm run release` in integrations/decky)
 #
 # The *-lite subcommands ship the build with NO remote control (see
 # CLAUDE.md's "Lite variant" section) ALONGSIDE the corresponding full one —
@@ -108,8 +111,9 @@ label_of() { echo "${1%%:*}"; }
 #
 # Prefer an untracked local page when one exists (.gitignore covers
 # index.local.html). Otherwise the TRACKED template is used — it is generic,
-# so its one deployment-specific sentence ("The app connects to ...") carries
-# the token __API_HOST__, which is filled in from hosts.conf here. Either way
+# so its deployment-specific text carries tokens filled in from hosts.conf
+# here: __API_HOST__ ("The app connects to ..."), __APP_HOST__ and
+# __DOWNLOAD_HOST__ (the address typed into Decky to install the plugin). Either way
 # the result is RENDERED into $PAGE_DIR and then checked for a leftover
 # placeholder domain (require_no_placeholder_domain) before it goes anywhere:
 # this is the one artefact whose content end users actually read, and the
@@ -125,7 +129,7 @@ render_download_page() {
 		PAGE_SOURCE="$HERE/../download-site/index.html"
 	fi
 	PAGE="$PAGE_DIR/index.html"
-	sed -e "s|__API_HOST__|$API_HOST|g" -e "s|__APP_HOST__|$APP_HOST|g" "$PAGE_SOURCE" > "$PAGE"
+	sed -e "s|__API_HOST__|$API_HOST|g" -e "s|__APP_HOST__|$APP_HOST|g" -e "s|__DOWNLOAD_HOST__|$DOWNLOAD_HOST|g" "$PAGE_SOURCE" > "$PAGE"
 }
 
 # Refuse to publish a page that still names a placeholder domain. The same
@@ -1541,6 +1545,100 @@ cmd_apk_notes() {
 	done
 }
 
+# Púca for Steam Deck (integrations/decky, docs/STEAM_DECK.md): the Decky
+# plugin's zip, and the manifest its own updater reads. The plugin has its own
+# version, not Púca's; `npm run release -- --key <release key>` in
+# integrations/decky builds, signs and checks both (scripts/sign-update.mjs).
+#
+# Installed plugins look for steam-deck/puca-decky.json on the download site
+# their Púca server names, and install what it offers only when its signature
+# verifies under the key they carry (src/update.ts). So this refuses to
+# publish unless scripts/verify_update.py passes against the release the
+# download site offers NOW: a release the installed plugins would refuse,
+# published, strands every Deck on the old version with no word why, and so
+# does one that is not newer than what they have.
+#
+# Each host gets the versioned zip, the stable steam-deck/puca-decky.zip that
+# the download page links (the address people type into Decky's "Install
+# Plugin from URL"), and the manifest LAST: a plugin that reads it always
+# finds the zip it names.
+cmd_decky() {
+	local zip="${1:?usage: dual-ship.sh decky <puca-decky-x.y.z.zip> <puca-decky.json>}" manifest="${2:?usage: dual-ship.sh decky <zip> <manifest>}"
+	local name; name="$(basename "$zip")"
+	if ! [[ "$name" =~ ^puca-decky-[0-9]+(\.[0-9]+){1,3}\.zip$ ]]; then
+		echo "REFUSING: $name is not named puca-decky-<version>.zip"
+		exit 1
+	fi
+	local version="${name#puca-decky-}"; version="${version%.zip}"
+	local verify="$HERE/../../integrations/decky/scripts/verify_update.py"
+	if [ ! -f "$verify" ]; then
+		echo "REFUSING: $verify is missing; it is what proves installed plugins will accept this release."
+		exit 1
+	fi
+	render_download_page; local page="$PAGE"
+	require_page_advertises "$page" "$version" "steam-deck/puca-decky.zip" "Steam Deck plugin"
+	ensure_download_dirs
+
+	# The release the download site offers now carries the key every
+	# installed plugin holds. Read it from the first host, over its loopback.
+	local first="${HOSTS[0]}" installed="$PAGE_DIR/published-puca-decky.zip" code against=()
+	code="$(ssh_to "$first" "curl -s $CURL_TLS -o /dev/null -w '%{http_code}' --resolve $DOWNLOAD_HOST:443:127.0.0.1 'https://$DOWNLOAD_HOST/steam-deck/puca-decky.zip' --max-time 60" || true)"
+	case "$code" in
+		200)
+			ssh_to "$first" "curl -s $CURL_TLS --resolve $DOWNLOAD_HOST:443:127.0.0.1 'https://$DOWNLOAD_HOST/steam-deck/puca-decky.zip' --max-time 120" > "$installed"
+			against=(--installed "$installed")
+			;;
+		404)
+			echo "INFO  no Steam Deck plugin is published yet: this is the first"
+			;;
+		*)
+			echo "REFUSING: could not read the published Steam Deck plugin from $(label_of "$first") (HTTP ${code:-none})."
+			echo "Without it nothing shows that installed plugins will accept this release."
+			exit 1
+			;;
+	esac
+	if ! "$PY" "$verify" "$zip" "$manifest" "${against[@]}"; then
+		echo "REFUSING: integrations/decky/scripts/verify_update.py did not pass (above)."
+		exit 1
+	fi
+
+	local local_sha manifest_sha entry label served path
+	local_sha="$(sha256sum "$zip" | cut -d' ' -f1)"
+	manifest_sha="$(sha256sum "$manifest" | cut -d' ' -f1)"
+	for entry in "${HOSTS[@]}"; do
+		if ! ssh_to "$entry" "mkdir -p '$INSTALL_DIR/downloads/steam-deck'"; then
+			echo "FAIL  $(label_of "$entry"): cannot create $INSTALL_DIR/downloads/steam-deck — nothing has been uploaded to any host"
+			exit 1
+		fi
+	done
+	for entry in "${HOSTS[@]}"; do
+		label="$(label_of "$entry")"
+		echo "=== Steam Deck plugin $version -> $label ==="
+		scp_to "$entry" "$zip" "${entry#*:}:$INSTALL_DIR/downloads/steam-deck/$name"
+		ssh_to "$entry" "set -e; cd '$INSTALL_DIR/downloads/steam-deck'; chmod 644 '$name'; cp '$name' puca-decky.zip.new; mv puca-decky.zip.new puca-decky.zip"
+		scp_to "$entry" "$manifest" "${entry#*:}:$INSTALL_DIR/downloads/steam-deck/puca-decky.json.new"
+		ssh_to "$entry" "set -e; cd '$INSTALL_DIR/downloads/steam-deck'; chmod 644 puca-decky.json.new; mv puca-decky.json.new puca-decky.json"
+		ship_download_page "$entry" "$page" "$version" "$label" "decky"
+		for path in "steam-deck/$name" steam-deck/puca-decky.zip; do
+			served="$(ssh_to "$entry" "curl -s $CURL_TLS --resolve $DOWNLOAD_HOST:443:127.0.0.1 'https://$DOWNLOAD_HOST/$path' --max-time 120 | sha256sum | cut -d' ' -f1")"
+			if [ "$served" = "$local_sha" ]; then
+				echo "PASS  $label serves /$path"
+			else
+				echo "FAIL  $label /$path is not the zip being shipped"
+				FAILED+=("$label:decky-zip")
+			fi
+		done
+		served="$(ssh_to "$entry" "curl -s $CURL_TLS --resolve $DOWNLOAD_HOST:443:127.0.0.1 'https://$DOWNLOAD_HOST/steam-deck/puca-decky.json' --max-time 60 | sha256sum | cut -d' ' -f1")"
+		if [ "$served" = "$manifest_sha" ]; then
+			echo "PASS  $label serves the update manifest for $version"
+		else
+			echo "FAIL  $label steam-deck/puca-decky.json is not the manifest being shipped"
+			FAILED+=("$label:decky-manifest")
+		fi
+		record_sha256 "$entry" "$label" "$local_sha" "steam-deck/$name"
+	done
+}
+
 main() {
 	local sub="${1:-}"; shift || true
 	case "$sub" in
@@ -1554,7 +1652,8 @@ main() {
 		apk)            cmd_apk "$@" ;;
 		apk-lite)       cmd_apk_lite "$@" ;;
 		apk-notes)      cmd_apk_notes "$@" ;;
-		*) echo "usage: dual-ship.sh {webapp|mobile|mobile-lite|mobile-notes|installer|installer-lite|backend|apk|apk-lite|apk-notes} ..." >&2; exit 2 ;;
+		decky)          cmd_decky "$@" ;;
+		*) echo "usage: dual-ship.sh {webapp|mobile|mobile-lite|mobile-notes|installer|installer-lite|backend|apk|apk-lite|apk-notes|decky} ..." >&2; exit 2 ;;
 	esac
 
 	# Independent of what was shipped: confirm each host identifies as itself,

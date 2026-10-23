@@ -634,10 +634,17 @@ the crowd. Three checks, cheapest first:
 
 - `dual-ship.sh` — pushes one artifact to **every** host in `hosts.conf` and
   verifies it on each over that host's own loopback:
-  `webapp | mobile | mobile-lite | installer | installer-lite | backend | apk | apk-lite | apk-notes`.
+  `webapp | mobile | mobile-lite | installer | installer-lite | backend | apk | apk-lite | apk-notes | decky`.
   Also publishes `SHA256SUMS.txt`, the release notes and the privacy statement
   beside the installers, and refuses to ship a download page that does not
   advertise the release or still names a placeholder domain.
+  - `decky <puca-decky-X.Y.Z.zip> <puca-decky.json>` publishes Púca for Steam
+    Deck, which has its own version. Make both files with
+    `npm run release -- --key <release key>` in `integrations/decky`; Púca's
+    releases sign with the mobile OTA key (`mobile-updater-rsa.key`). Installed
+    plugins install an update only when it verifies under the key they carry,
+    so this refuses a release that the one published now would not accept, or
+    that is not newer than it.
 - `scan-installers.sh` — asks Windows Defender about the two installers BEFORE
   they ship, and exits non-zero if it objects. 0.9.806 shipped and immediately
   tripped `Trojan:Win32/Bearfoos.B!ml` on every desktop that auto-updated,

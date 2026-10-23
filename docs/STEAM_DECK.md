@@ -49,15 +49,18 @@ Steam: do this step again. Your plugins and their settings are kept.
 
 ### 3. Install Púca for Steam Deck
 
-The plugin is one file, `puca-decky-<version>.zip`. It comes with each Púca
-release, or from whoever runs your server.
+Your Púca server's download page has it, under **Púca for Steam Deck**,
+with the address to type. It ends in `/steam-deck/puca-decky.zip`.
 
 1. In Decky's settings, open **Developer**.
-2. Choose **Install Plugin from URL**. Type the address of the zip file and
-   choose **Install**.
+2. Choose **Install Plugin from URL**. Type the address from the download
+   page, for example `https://download.example.com/steam-deck/puca-decky.zip`,
+   and choose **Install**.
    - If the file is already on the Deck, choose **Install Plugin from ZIP
      File** instead and pick it.
 3. Confirm. **Púca** now appears in Decky's list, with an icon of two rings.
+
+You do this once. After that the plugin keeps itself up to date.
 
 ### 4. Sign in
 
@@ -89,6 +92,10 @@ Press **···** → the plug icon → **Púca**.
   Turn them, or their sound, off in the panel's **Settings**. Which messages
   notify you follows your settings in Púca: muted servers and channels stay
   quiet.
+- **Updates.** When a new version is out, **Update** appears at the top of the
+  panel. Choose it and confirm, and Púca restarts on the new version. It waits
+  until you are out of a call. The bottom of **Settings** shows the version
+  you have.
 
 ## Good to know
 
@@ -116,6 +123,12 @@ Press **···** → the plug icon → **Púca**.
   Púca from your server each time it starts, so it is always the server's
   current version. The [security model](SECURITY_MODEL.md) explains what that
   means for trust. Your messages and calls are end-to-end encrypted as usual.
+- **Where updates come from.** The plugin itself runs inside Steam, with more
+  reach than a web page, so it is held to more. It looks for new versions on
+  your Púca server's download site, and installs one only when it is signed
+  with the release key of whoever runs your server, which is kept off the
+  server. Someone who broke into the server could change the web page it
+  serves, but could not hand your Deck a plugin update.
 
 ## If something is wrong
 
@@ -127,7 +140,8 @@ Press **···** → the plug icon → **Púca**.
 | **Waiting for Game Mode** | The plugin runs in Game Mode only. Switch back to Game Mode. |
 | Nobody hears you | Check that **Push to talk** is set the way you want, and that the call does not say **Muted**. In Steam's **Settings → Audio**, check the microphone: with its volume at zero the Deck's microphone is muted, and Púca can only send silence. |
 | Push to talk does nothing | Choose the button again in the panel's **Settings**, by pressing it. While you are in a call, the line under **Push to talk** says if the plugin cannot read the Deck's controller. It works with the Deck's own back buttons, not with a controller you plug in. |
-| Moved to the AFK channel while playing | Your server's Púca may be too old to know about the Deck's controls. Ask whoever runs it to update. |
+| Moved to the AFK channel while playing | Your server's Púca may be too old to know about the Deck's controls: ask whoever runs it to update. The plugin reads only the Deck's own controls, so playing with a controller plugged in does not count. |
+| No **Update**, though the download page has a newer version | The plugin looks a little after Púca starts and then every six hours. Your server's Púca may be too old to tell it where the download page is: ask whoever runs it to update. Meanwhile, installing from the address again (step 3) updates it too. |
 | Asked to sign in again | Steam sometimes clears the data of web pages it hosts. Sign in again, with **Stay signed in** ticked. |
 | Anything else | **Settings → Reload Púca** in the panel starts Púca again. |
 

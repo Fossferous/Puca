@@ -1,6 +1,8 @@
 """Package the plugin for Decky Loader's "Install Plugin from ZIP File" / "from URL".
 
     npm run package          (builds first, then runs this)
+    npm run release -- --key <release key>   (the same, plus the update key
+                                              and a signature: scripts/sign-update.mjs)
 
 Writes out/puca-decky-<version>.zip and a .sha256 beside it. The zip holds one
 folder, puca/, with what Decky runs: plugin.json, package.json, main.py,
@@ -8,6 +10,11 @@ py_modules/, dist/ (the frontend and the page shim), the licence and the
 notices for the third-party code inside dist/index.js. The archive is
 deterministic: the same inputs give the same bytes, so its hash can be
 published.
+
+With --update-key <update-key.json> the zip also carries the release key's
+public half, which is what lets this build check, and install, the next one
+(src/update.ts). Without it the plugin cannot update itself: fine for a
+build that stays on one Deck, wrong for anything published.
 """
 import hashlib
 import json
@@ -35,11 +42,23 @@ at the address above.
 """
 
 
+TEXT_SUFFIXES = (".py", ".js", ".json", ".md", ".txt")
+
+
+def as_lf(arcname: str, data: bytes) -> bytes:
+    """Text goes into the zip with LF line ends, whatever the checkout used:
+    Git for Windows checks text out with CRLF by default, and the same source
+    would otherwise make a different zip, and SHA-256, on each machine."""
+    if arcname.endswith(TEXT_SUFFIXES) or arcname in ("LICENSE", "NOTICE"):
+        return data.replace(b"\r\n", b"\n")
+    return data
+
+
 def add(z: zipfile.ZipFile, arcname: str, data: bytes) -> None:
     info = zipfile.ZipInfo(f"{FOLDER}/{arcname}", date_time=STAMP)
     info.compress_type = zipfile.ZIP_DEFLATED
     info.external_attr = 0o644 << 16
-    z.writestr(info, data)
+    z.writestr(info, as_lf(arcname, data))
 
 
 def read(*parts: str) -> bytes:
@@ -61,12 +80,39 @@ def zip_package_json(pkg: dict) -> bytes:
     return json.dumps(slim, indent=2).encode() + b"\n"
 
 
+def read_update_key(path: str) -> bytes:
+    """update-key.json for the zip: an RSA public key of 2048 bits or more, in
+    JWK form, written canonically (only kty, n and e)."""
+    with open(path, "rb") as f:
+        try:
+            k = json.loads(f.read().decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            k = None
+    if not isinstance(k, dict) or k.get("kty") != "RSA" or not isinstance(k.get("n"), str) or not isinstance(k.get("e"), str):
+        raise ValueError(f"{path} is not an RSA public key in JWK form")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", k["n"]) or not re.fullmatch(r"[A-Za-z0-9_-]+", k["e"]):
+        raise ValueError(f"{path} is not base64url")
+    if len(k["n"]) < 342:
+        raise ValueError("the release key must be 2048 bits or more")
+    return json.dumps({"kty": "RSA", "n": k["n"], "e": k["e"]}, separators=(",", ":")).encode() + b"\n"
+
+
 def is_es_module(bundle: bytes) -> bool:
     """Rollup's ES module output has a top-level export; a plain script has none."""
     return re.search(rb"(?m)^export\s", bundle) is not None
 
 
-def main() -> int:
+def main(argv: list[str]) -> int:
+    update_key = None
+    if argv:
+        if len(argv) != 2 or argv[0] != "--update-key":
+            print("usage: package.py [--update-key <update-key.json>]", file=sys.stderr)
+            return 2
+        try:
+            update_key = read_update_key(argv[1])
+        except (OSError, ValueError) as e:
+            print(e, file=sys.stderr)
+            return 1
     pkg = json.loads(read(PLUGIN, "package.json"))
     version = pkg["version"]
     for needed in ("index.js", "page-shim.js"):
@@ -96,6 +142,8 @@ def main() -> int:
     for name in sorted(os.listdir(os.path.join(PLUGIN, "py_modules"))):
         if name.endswith(".py"):
             files[f"py_modules/{name}"] = read(PLUGIN, "py_modules", name)
+    if update_key is not None:
+        files["update-key.json"] = update_key
 
     out_dir = os.path.join(PLUGIN, "out")
     os.makedirs(out_dir, exist_ok=True)
@@ -107,8 +155,10 @@ def main() -> int:
     with open(out + ".sha256", "w", encoding="utf-8") as f:
         f.write(f"{digest}  {os.path.basename(out)}\n")
     print(f"{out}\n{len(files)} files, sha256 {digest}")
+    if update_key is None:
+        print("no --update-key: this build cannot update itself (fine for a test, not for publishing)")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

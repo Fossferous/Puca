@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from 'vitest';
 import {
-    HOLD_LEASE_MS, createEmbedApi, getEmbedState, holdFromEmbedHost, installEmbedApi, notifyEmbedChanged,
+    HOLD_LEASE_MS, createEmbedApi, downloadOrigin, getEmbedState, holdFromEmbedHost, installEmbedApi, notifyEmbedChanged,
     registerEmbedCall, registerEmbedSession, resetEmbedApiForTest,
     type EmbedCallControls, type EmbedSession,
 } from '../api/embedApi';
@@ -291,7 +291,7 @@ describe('downloadSite: where a host looks for its own updates', () => {
     });
 
     it('answers null when the server publishes none, or something that is not https', async () => {
-        for (const [status, body] of [[404, {}], [200, {}], [200, { download_url: 'http://plain.example.org/' }], [200, { download_url: 42 }], [200, null]] as const) {
+        for (const [status, body] of [[404, {}], [200, {}], [200, { download_url: 'http://plain.example.org/' }], [200, { download_url: 'http://127.0.0.1.example.org/' }], [200, { download_url: 42 }], [200, null]] as const) {
             vi.stubGlobal('fetch', answer(status, body));
             await expect(createEmbedApi().downloadSite()).resolves.toBeNull();
         }
@@ -300,5 +300,14 @@ describe('downloadSite: where a host looks for its own updates', () => {
     it('answers null when the server cannot be reached', async () => {
         vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch'); }));
         await expect(createEmbedApi().downloadSite()).resolves.toBeNull();
+    });
+
+    it('takes plain http only on the loopback, where a local test server lives', () => {
+        expect(downloadOrigin('http://127.0.0.1:8899/Puca-Setup.exe')).toBe('http://127.0.0.1:8899');
+        expect(downloadOrigin('http://localhost:8899/')).toBe('http://localhost:8899');
+        expect(downloadOrigin('https://downloads.example.org:8443/x')).toBe('https://downloads.example.org:8443');
+        for (const bad of ['http://downloads.example.org/', 'http://127.0.0.1.example.org/', 'http://10.0.0.2/', 'ftp://127.0.0.1/', 'not a url', 'javascript:alert(1)']) {
+            expect(downloadOrigin(bad), bad).toBeNull();
+        }
     });
 });

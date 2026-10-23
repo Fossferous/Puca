@@ -26,6 +26,7 @@ PUSH_TO_TALK = ("off", "L4", "R4", "L5", "R5")
 PAGE_METHODS = frozenset({
     "getState", "listVoiceChannels", "joinVoice", "leaveVoice", "setMuted",
     "setDeafened", "setInputMode", "holdPushToTalk", "activateNotification",
+    "downloadSite",
 })
 
 REQUEST_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")

@@ -1,6 +1,6 @@
 {
   "name": "puca-decky",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Púca on the Steam Deck: a Decky Loader plugin that runs Púca's web client in Game Mode",
   "type": "module",
@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.shim.json",
     "test": "vitest run",
     "test:py": "python -m unittest discover -s tests -p \"test_*.py\"",
-    "package": "npm run build && python scripts/package.py"
+    "package": "npm run build && python scripts/package.py",
+    "release": "npm run build && node scripts/sign-update.mjs"
   },
   "devDependencies": {
     "@decky/rollup": "1.0.2",

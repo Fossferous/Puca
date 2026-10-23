@@ -165,7 +165,7 @@ Every command goes through the same code as the app's own controls:
 | `setInputMode('open' \| 'pushToTalk' \| 'pushToMute')` | `boolean` | Saves **Settings → Voice & Video → Input mode** for this device. |
 | `holdPushToTalk(held)` | `boolean` (an action was held) | The host's push-to-talk button. See below. |
 | `activateNotification(id)` | `boolean` | The person tapped notification `id`. |
-| `downloadSite()` | `Promise<string \| null>` | The server's download site: the origin of `download_url` in its `/app-version`, read fresh, or `null` when it publishes none. A host looks for its own updates there, so the address comes from the server the person uses. |
+| `downloadSite()` | `Promise<string \| null>` | The server's download site: the origin of `download_url` in its `/app-version`, read fresh, or `null` when it publishes none. https only, or plain http on the device's own loopback (a local test server). A host looks for its own updates there, so the address comes from the server the person uses. |
 
 ### Push-to-talk is a lease
 

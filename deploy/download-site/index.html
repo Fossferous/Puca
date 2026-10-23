@@ -149,6 +149,29 @@
       </div>
     </div>
 
+    <!-- id="steam-deck" is a stable anchor for links from the docs. -->
+    <div class="notes-app" id="steam-deck">
+      <b>Púca for Steam Deck</b> &mdash; voice and messages in Game Mode: join a call from the
+      Quick Access menu, push to talk on a back button, and new messages over your game. A plugin
+      for Decky Loader; it keeps itself up to date from this server.
+      <div class="downloads">
+        <!-- steam-deck/puca-decky.zip is always the newest release: dual-ship.sh's `decky`
+             subcommand uploads it beside the versioned zip and the manifest the plugin's own
+             updater reads, and refuses to publish until this page links it and the .meta line
+             below names the release. The plugin's version is its own, not Púca's. -->
+        <a class="btn secondary" href="/steam-deck/puca-decky.zip" download>Púca for Steam Deck (.zip)</a>
+      </div>
+      <div class="meta">v0.2.0 &middot; Steam Deck in Game Mode &middot; Decky Loader 3.2.8 or newer</div>
+      <p class="apk-note">
+        <b>To install it on the Deck:</b> with Decky Loader installed, open Decky's settings, turn
+        on <b>Developer mode</b>, then under <b>Developer</b> choose <b>Install Plugin from URL</b>
+        and type <code>https://__DOWNLOAD_HOST__/steam-deck/puca-decky.zip</code>. Then press
+        <b>&middot;&middot;&middot;</b>, open <b>Púca</b>, and sign in with your own account. New
+        versions show up in its panel with an <b>Update</b> button, and only versions signed by this
+        server's release key are installed.
+      </p>
+    </div>
+
     <div class="steps">
       <b>Getting started</b><br>
       1. Download and run the installer (Windows) or the .apk (Android).<br>

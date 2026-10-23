@@ -16,6 +16,10 @@ page when any control is in use, never which, so Púca's AFK move does not take
 a player out of the call. In Settings it reports which back button the person
 presses, to choose push to talk by pressing it.
 
+And it fetches the plugin's own updates from the download site the person's
+Púca server names (puca_update.py). Whether one may be installed is decided
+by its signature, in the frontend (src/update.ts), before Decky is asked.
+
 It keeps the plugin's four settings and nothing else. No account data, no
 message content and no audio pass through here: the microphone goes from one
 Steam page to the other over WebRTC, and only its connection setup (SDP)
@@ -35,6 +39,8 @@ from puca_buttons import BUTTONS, GripLearner, InputWatch
 from puca_cdp import CdpError, PucaPage, find_target
 from puca_settings import (MARKER, PAGE_METHODS, check_mic_answer, load_settings,
                            normalize_app_url, save_settings)
+from puca_update import (MAX_MANIFEST_BYTES, MAX_ZIP_BYTES, clear_updates, download_origin, manifest_url,
+                         read_key, read_manifest, save_update, sha256_hex, ssl_context, zip_url)
 
 
 def _settings_path() -> str:
@@ -46,13 +52,45 @@ def _shim_source() -> str:
         return f.read()
 
 
+class FetchError(Exception):
+    pass
+
+
+async def _fetch(url: str, limit: int) -> bytes | None:
+    """GET url: the body, or None for a 404. Anything bigger than limit is
+    refused, never cut short; anything else that goes wrong is a FetchError."""
+    import aiohttp  # bundled with Decky; imported here so the module loads without it in tests
+    try:
+        timeout = aiohttp.ClientTimeout(total=120, sock_connect=15)
+        async with aiohttp.ClientSession(timeout=timeout) as http:
+            async with http.get(url, ssl=ssl_context(), max_redirects=3) as res:
+                if res.status == 404:
+                    return None
+                if res.status != 200:
+                    raise FetchError(f"the download site answered {res.status}")
+                if (res.content_length or 0) > limit:
+                    raise FetchError("the download is too large")
+                body = bytearray()
+                async for chunk in res.content.iter_chunked(64 * 1024):
+                    body += chunk
+                    if len(body) > limit:
+                        raise FetchError("the download is too large")
+                return bytes(body)
+    except FetchError:
+        raise
+    except Exception as e:
+        raise FetchError(f"could not reach the download site ({type(e).__name__})") from e
+
+
 class Plugin:
     page: PucaPage | None = None
     controls: InputWatch | None = None
     learning: asyncio.Future | None = None
 
     async def _main(self):
-        decky.logger.info("Púca for Steam Deck backend started")
+        decky.logger.info("Púca for Steam Deck %s backend started", decky.DECKY_PLUGIN_VERSION)
+        # An update downloaded last time was installed (this is it) or abandoned.
+        clear_updates(decky.DECKY_PLUGIN_RUNTIME_DIR)
 
     async def _unload(self):
         await self.cancel_learn()
@@ -223,3 +261,51 @@ class Plugin:
         got, self.learning = self.learning, None
         if got is not None and not got.done():
             got.set_result(None)
+
+    # ---- Updates for the plugin itself ---------------------------------------------
+
+    async def plugin_version(self) -> str:
+        return decky.DECKY_PLUGIN_VERSION
+
+    async def check_update(self, site: Any) -> dict:
+        """What the download site offers, for the frontend to judge:
+        {"current": this version, "key": the release key this build carries
+        (or None), "offer": the manifest (or None when it publishes none)}."""
+        origin = download_origin(site)
+        if origin is None:
+            return {"ok": False, "error": "no download site"}
+        try:
+            raw = await _fetch(manifest_url(origin), MAX_MANIFEST_BYTES)
+        except FetchError as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "value": {
+            "current": decky.DECKY_PLUGIN_VERSION,
+            "key": read_key(decky.DECKY_PLUGIN_DIR),
+            "offer": read_manifest(raw) if raw is not None else None,
+        }}
+
+    async def download_update(self, site: Any, version: Any) -> dict:
+        """Fetch the version the person chose, check it against the
+        manifest's SHA-256, and keep it where Decky can install it from:
+        {"path", "offer"}. The signature is the frontend's to check."""
+        origin = download_origin(site)
+        if origin is None:
+            return {"ok": False, "error": "no download site"}
+        try:
+            raw = await _fetch(manifest_url(origin), MAX_MANIFEST_BYTES)
+            offer = read_manifest(raw) if raw is not None else None
+            if offer is None or offer["version"] != version:
+                return {"ok": False, "error": "the download site no longer offers that version"}
+            data = await _fetch(zip_url(origin, offer), MAX_ZIP_BYTES)
+        except FetchError as e:
+            return {"ok": False, "error": str(e)}
+        if data is None:
+            return {"ok": False, "error": "the download site does not have the file it names"}
+        if sha256_hex(data) != offer["sha256"]:
+            return {"ok": False, "error": "the download was damaged on the way; try again"}
+        try:
+            path = save_update(decky.DECKY_PLUGIN_RUNTIME_DIR, offer, data)
+        except OSError as e:
+            return {"ok": False, "error": f"could not save it ({e.strerror or type(e).__name__})"}
+        decky.logger.info("downloaded update %s (%d bytes)", offer["version"], len(data))
+        return {"ok": True, "value": {"path": path, "offer": offer}}

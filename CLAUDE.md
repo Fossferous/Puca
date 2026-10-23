@@ -152,7 +152,7 @@ REFUSED. **Change that crate and the version check fails until you run
 `ship-waker.sh`.**
 
 **Ship with `deploy/ops/dual-ship.sh {webapp|mobile|mobile-lite|mobile-notes|installer|
-installer-lite|backend|apk|apk-lite|apk-notes} ...`, never a manual `scp`/`ssh` to one
+installer-lite|backend|apk|apk-lite|apk-notes|decky} ...`, never a manual `scp`/`ssh` to one
 box.** A single-host deploy leaves the others silently stale, which looks
 identical to a successful release. dual-ship.sh refuses to report success
 unless it verified EVERY host individually, over that host's own loopback — if
@@ -181,6 +181,18 @@ subcommand has that gate — the page's own HTML comments say which names must
 be kept in step by hand. **There is no lite webapp and no lite backend** —
 the web app and the server are shared unconditionally between both variants,
 so `webapp` and `backend` ship once and cover both.
+
+**`decky` ships Púca for Steam Deck, on its OWN version** (`integrations/decky/
+package.json`, not tauri.conf.json): `npm run release -- --key <mobile-updater-rsa.key>`
+in `integrations/decky` builds, signs and checks `out/puca-decky-<ver>.zip` and
+`out/puca-decky.json`, and `dual-ship.sh decky <zip> <json>` publishes them under
+`downloads/steam-deck/` with a stable `puca-decky.zip` (what the page links and people
+type into Decky). Installed plugins update themselves from there, and install only what
+verifies under the key they carry, so the ship refuses a release the PUBLISHED one would
+not accept, or one that is not newer (`integrations/decky/scripts/verify_update.py`, against the zip the
+download site serves now). Ship the plugin when it changes, not every release; raise its
+version first. Its update check asks the page for `downloadSite()` (docs/EMBEDDING.md,
+new after 0.9.846): until a webapp with it ships, installed plugins see no updates.
 
 Mobile OTA is variant-aware over one query param: the installed app requests
 `GET /api/mobile-updates/check?variant=lite` (full omits the param), and

@@ -9,6 +9,7 @@ one-line summary; this file is the full story. Versions follow
 ### Improved
 
 - **Púca for Steam Deck: push to talk is chosen by pressing the button.** In the panel's Settings, choose **Choose a back button** and press the one you want. The four back buttons are easy to mix up by name, and in testing the one called "R4" was R5 every time.
+- **Púca for Steam Deck keeps itself up to date, and the download page offers it.** The download page has a Púca for Steam Deck section with the address to type into Decky. Once installed, the plugin looks for new versions on your server's download site and shows **Update** in its panel (never during a call). Because the plugin runs inside Steam, it installs only versions signed with the server operator's release key, which stays off the server: whoever broke into a server could change its web page, but not the plugin on your Deck. For that, the web app now tells the plugin where its server's download site is (`downloadSite`, docs/EMBEDDING.md).
 - **Púca for Steam Deck says when nobody can hear you.** If the Deck's own microphone is muted or turned all the way down in Steam's settings, the panel says so, and while you are in a call and not muted in Púca a notification pops up over your game, once each time it happens. Until now a call looked fine while it carried only silence.
 
 ### Fixed

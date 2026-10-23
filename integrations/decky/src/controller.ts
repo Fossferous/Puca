@@ -17,6 +17,7 @@ import { readPageMessage, readState, readVoiceChannels, type EmbedState, type Em
 import {
     DEFAULT_SETTINGS, normalizeAppUrl, PUSH_TO_TALK_BUTTONS, readSettings, type PluginSettings, type PushToTalkButton,
 } from './settings';
+import { isNewer, readKey, readOffer, verifyOffer, type UpdateKey, type UpdateOffer } from './update';
 
 export const FULL_VIEW_ROUTE = '/puca';
 
@@ -53,6 +54,19 @@ export interface Snapshot {
      *  or the backend's error), while a call is trying to. */
     pttError: string | null;
     viewOpen: boolean;
+    /** This plugin's version, as Decky runs it. */
+    pluginVersion: string | null;
+    /** A newer plugin that the download site offers, signed with the release
+     *  key (update.ts); null when there is none. */
+    update: UpdateState | null;
+}
+
+export interface UpdateState {
+    version: string;
+    /** Downloading it, or handing it to Decky. */
+    busy: boolean;
+    /** Why the last try did not work. */
+    error: string | null;
 }
 
 /** What learnButton found: the back button pressed, none in time, or why
@@ -73,6 +87,9 @@ const LOAD_TIMEOUT_MS = 30000;
 const JOIN_WAIT_MS = 8000;
 /** How long Settings waits for a back button to be pressed. */
 const LEARN_TIMEOUT_S = 15;
+/** The first look for a plugin update once Púca is up, then how often. */
+const UPDATE_FIRST_CHECK_MS = 20 * 1000;
+const UPDATE_EVERY_MS = 6 * 60 * 60 * 1000;
 
 const randomId = (): string => {
     const a = new Uint8Array(12);
@@ -84,6 +101,7 @@ class Controller {
     private snap: Snapshot = {
         phase: 'starting', error: null, settings: DEFAULT_SETTINGS, state: null,
         micOn: false, micSilent: false, talking: false, pttError: null, viewOpen: false,
+        pluginVersion: null, update: null,
     };
     private listeners = new Set<() => void>();
     private view = new PucaBrowserView();
@@ -111,6 +129,10 @@ class Controller {
     private bootSeq = 0;
     private retries = 0;
     private started = false;
+    private updateTimer: ReturnType<typeof setTimeout> | null = null;
+    /** Where the offered update comes from, and the key that checked it. */
+    private updateFrom: { site: string; offer: UpdateOffer; key: UpdateKey } | null = null;
+    private noKeyLogged = false;
     private onPage = (payload: unknown) => this.handlePage(payload);
     private onStatus = (status: unknown) => this.handleStatus(status);
 
@@ -145,6 +167,10 @@ class Controller {
             console.warn('[Púca] could not read settings:', err);
         }
         this.update({ settings });
+        void call<[], unknown>('plugin_version').then(
+            v => { if (typeof v === 'string') this.update({ pluginVersion: v }); },
+            () => {},
+        );
         await this.boot();
     }
 
@@ -156,6 +182,7 @@ class Controller {
         removeEventListener('puca_status', this.onStatus);
         removeEventListener('puca_button', this.onButton);
         if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
+        if (this.updateTimer) { clearTimeout(this.updateTimer); this.updateTimer = null; }
         this.clearLoadTimer();
         this.hold.reset();
         if (this.watching) {
@@ -362,6 +389,7 @@ class Controller {
                         this.update({ phase: 'ready', error: null });
                         void this.refreshState();
                         if (this.snap.settings.pushToTalk !== 'off') void this.pageCall('setInputMode', ['pushToTalk']);
+                        this.scheduleUpdateCheck(UPDATE_FIRST_CHECK_MS);
                     }
                 } else {
                     this.update({ phase: 'unsupported', error: null });
@@ -491,6 +519,110 @@ class Controller {
 
     cancelLearn(): void {
         void call('cancel_learn').catch(() => {});
+    }
+
+    // ---- Updates for the plugin itself --------------------------------------------------
+
+    private scheduleUpdateCheck(ms: number): void {
+        if (this.updateTimer) clearTimeout(this.updateTimer);
+        this.updateTimer = setTimeout(() => {
+            this.updateTimer = null;
+            void this.checkForUpdate().finally(() => { if (this.started) this.scheduleUpdateCheck(UPDATE_EVERY_MS); });
+        }, ms);
+    }
+
+    /**
+     * Ask the download site of the person's own Púca server whether a newer
+     * plugin is published, and believe it only when the release key signed
+     * it (update.ts). Quiet when there is nothing to say: an older Púca that
+     * names no download site, a site that publishes no plugin, or a build
+     * without a key.
+     */
+    private async checkForUpdate(): Promise<void> {
+        if (this.snap.phase !== 'ready') return;
+        const site = await this.pageCall<string | null>('downloadSite');
+        if (!site.ok || typeof site.value !== 'string') return;
+        type Check = { current?: unknown; key?: unknown; offer?: unknown };
+        let r: CallResult<Check>;
+        try {
+            r = await call<[string], CallResult<Check>>('check_update', site.value);
+        } catch (err) {
+            console.warn('[Púca] update check failed:', err);
+            return;
+        }
+        if (!r.ok) {
+            console.log(`[Púca] update check: ${r.error}`);
+            return;
+        }
+        const current = typeof r.value.current === 'string' ? r.value.current : null;
+        const key = readKey(r.value.key);
+        const offer = readOffer(r.value.offer);
+        if (!key) {
+            if (!this.noKeyLogged) console.log('[Púca] this build carries no update key: new versions are installed by hand');
+            this.noKeyLogged = true;
+            return;
+        }
+        if (!current || !offer || !isNewer(offer.version, current)) {
+            if (this.snap.update && !this.snap.update.busy) this.update({ update: null });
+            this.updateFrom = null;
+            return;
+        }
+        if (!await verifyOffer(offer, key)) {
+            console.warn(`[Púca] ${site.value} offers ${offer.version}, but it is not signed with this plugin's release key: ignored`);
+            return;
+        }
+        this.updateFrom = { site: site.value, offer, key };
+        if (this.snap.update?.version !== offer.version) this.update({ update: { version: offer.version, busy: false, error: null } });
+    }
+
+    /**
+     * The panel's Update button: download the update, check it again, and
+     * hand it to Decky. Decky checks the file against the same SHA-256, asks
+     * the person to confirm, and reloads the plugin, which ends a call: so
+     * never during one.
+     */
+    async installUpdate(): Promise<void> {
+        const from = this.updateFrom;
+        const u = this.snap.update;
+        if (!from || !u || u.busy) return;
+        if (this.snap.state?.call) {
+            this.update({ update: { ...u, error: 'Leave the call first: updating restarts Púca.' } });
+            return;
+        }
+        this.update({ update: { ...u, busy: true, error: null } });
+        const fail = (error: string) => this.update({ update: { version: u.version, busy: false, error } });
+        type Download = { path?: unknown; offer?: unknown };
+        let r: CallResult<Download>;
+        try {
+            r = await call<[string, string], CallResult<Download>>('download_update', from.site, u.version);
+        } catch (err) {
+            fail(`The update could not be downloaded: ${String((err as Error)?.message ?? err)}`);
+            return;
+        }
+        if (!r.ok) {
+            fail(`The update could not be downloaded: ${r.error}`);
+            return;
+        }
+        // The backend checked the file against this offer's SHA-256. The
+        // offer itself must still be the one the release key signed.
+        const offer = readOffer(r.value.offer);
+        if (!offer || offer.version !== u.version || typeof r.value.path !== 'string' || !await verifyOffer(offer, from.key)) {
+            fail('The download site changed the update while it was being fetched. Try again later.');
+            return;
+        }
+        const decky = (window as unknown as { DeckyBackend?: { call?: (route: string, ...args: unknown[]) => Promise<unknown> } }).DeckyBackend;
+        if (typeof decky?.call !== 'function') {
+            fail('This Decky Loader cannot install it from here. Install the new version from Decky\'s settings instead.');
+            return;
+        }
+        try {
+            await decky.call('utilities/install_plugin', `file://${r.value.path}`, 'Púca', offer.version, offer.sha256, 2);
+        } catch (err) {
+            fail(`Decky could not install it: ${String((err as Error)?.message ?? err)}`);
+            return;
+        }
+        // Decky now shows its own confirmation. If it is cancelled, the button is back.
+        this.update({ update: { version: u.version, busy: false, error: null } });
     }
 }
 

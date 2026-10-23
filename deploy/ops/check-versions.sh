@@ -449,6 +449,33 @@ for entry in "${HOSTS[@]}"; do
 		FAILED+=("$label/webapp")
 	fi
 
+	# PÚCA FOR STEAM DECK, ON ITS OWN VERSION (dual-ship.sh decky).
+	#
+	# The Decky plugin is versioned apart from Púca, so it is not held to
+	# $EXPECTED. What must hold is that every host offers the SAME release,
+	# because installed plugins update from whichever host answers, and that
+	# the zip the manifest names is really there. Published nowhere is INFO:
+	# the plugin is optional.
+	deck_ver="$(body "$entry" "$DOWNLOAD_HOST" /steam-deck/puca-decky.json | ver_of || true)"
+	deck_ver="${deck_ver:-none}"
+	if [ -z "${DECK_FIRST:-}" ]; then DECK_FIRST="$deck_ver"; DECK_FIRST_HOST="$label"; fi
+	if [ "$deck_ver" != "$DECK_FIRST" ]; then
+		printf 'FAIL  %-22s %s here, %s on %s - ship it to every host (dual-ship.sh decky)\n' \
+			"Steam Deck plugin" "$deck_ver" "$DECK_FIRST" "$DECK_FIRST_HOST"
+		FAILED+=("$label/steam-deck")
+	elif [ "$deck_ver" = "none" ]; then
+		printf 'INFO  %-22s not published\n' "Steam Deck plugin"
+	else
+		deck_code="$(ssh_to "$entry" "curl -s $CURL_TLS -o /dev/null -w '%{http_code}' --resolve '$DOWNLOAD_HOST:443:127.0.0.1' 'https://$DOWNLOAD_HOST/steam-deck/puca-decky-$deck_ver.zip' --max-time 25" 2>/dev/null || true)"
+		if [ "$deck_code" = "200" ]; then
+			printf 'PASS  %-22s %s\n' "Steam Deck plugin" "$deck_ver"
+		else
+			printf 'FAIL  %-22s the manifest offers %s, but its zip answers HTTP %s\n' \
+				"Steam Deck plugin" "$deck_ver" "${deck_code:-<none>}"
+			FAILED+=("$label/steam-deck-zip")
+		fi
+	fi
+
 	# THE LAN WAKER, WHICH NOTHING USED TO LOOK AT.
 	#
 	# It is the one shipped artefact with no version surface: no endpoint, no

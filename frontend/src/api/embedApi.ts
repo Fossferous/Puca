@@ -271,6 +271,20 @@ export interface PucaEmbedApi {
 /** How long downloadSite waits for the server. */
 const DOWNLOAD_SITE_TIMEOUT_MS = 8000;
 
+/** An https origin, or http on this device's own loopback (a local test
+ *  server); null for anything else. */
+export function downloadOrigin(url: string): string | null {
+    let u: URL;
+    try {
+        u = new URL(url);
+    } catch {
+        return null;
+    }
+    if (u.protocol === 'https:') return u.origin;
+    const loopback = u.hostname === 'localhost' || u.hostname === '[::1]' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(u.hostname);
+    return u.protocol === 'http:' && loopback ? u.origin : null;
+}
+
 /**
  * The server's download site: the origin of `download_url` in its
  * /app-version (update_routes.rs serves the operator's file), or null when it
@@ -286,7 +300,7 @@ async function downloadSite(): Promise<string | null> {
         if (!res.ok) return null;
         const info = (await res.json()) as { download_url?: unknown } | null;
         const url = typeof info?.download_url === 'string' ? info.download_url : '';
-        return url.startsWith('https://') ? new URL(url).origin : null;
+        return url ? downloadOrigin(url) : null;
     } catch {
         return null;
     } finally {

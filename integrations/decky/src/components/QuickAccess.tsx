@@ -50,9 +50,36 @@ export function QuickAccess() {
     const snap = useSnapshot();
     return (
         <>
+            <Update snap={snap} />
             <Main snap={snap} />
             <Settings snap={snap} />
         </>
+    );
+}
+
+/**
+ * A newer plugin, signed with the release key, from the person's own Púca
+ * server. Not shown during a call: installing it restarts Púca, so it waits
+ * at the top of the panel until the call is over.
+ */
+function Update({ snap }: { snap: Snapshot }) {
+    const u = snap.update;
+    if (!u || snap.state?.call) return null;
+    return (
+        <PanelSection title="Update">
+            <PanelSectionRow>
+                <Field
+                    label={`Púca for Steam Deck ${u.version}`}
+                    description={u.error ?? 'A new version, from your Púca server. Decky asks you to confirm, then Púca restarts.'}
+                    focusable={false}
+                />
+            </PanelSectionRow>
+            <PanelSectionRow>
+                <ButtonItem layout="below" disabled={u.busy} onClick={() => { void controller.installUpdate(); }}>
+                    {u.busy ? 'Getting the update…' : 'Update'}
+                </ButtonItem>
+            </PanelSectionRow>
+        </PanelSection>
     );
 }
 
@@ -396,6 +423,11 @@ function Settings({ snap }: { snap: Snapshot }) {
             <PanelSectionRow>
                 <ButtonItem layout="below" onClick={() => controller.reload()}>Reload Púca</ButtonItem>
             </PanelSectionRow>
+            {snap.pluginVersion && (
+                <PanelSectionRow>
+                    <Field label="Púca for Steam Deck" focusable={false}>{snap.pluginVersion}</Field>
+                </PanelSectionRow>
+            )}
         </PanelSection>
     );
 }

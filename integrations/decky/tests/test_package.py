@@ -54,5 +54,43 @@ class ZipPackageJsonTests(unittest.TestCase):
         self.assertFalse(package.is_es_module(b"const s = 'not an export';\n  export_name();\n"))
 
 
+class LineEndingTests(unittest.TestCase):
+    """The same source makes the same zip on any machine: Git for Windows
+    checks text out with CRLF, which would change the zip's SHA-256."""
+
+    def test_text_goes_in_with_lf(self):
+        for name in ("main.py", "py_modules/puca_cdp.py", "dist/index.js", "plugin.json", "LICENSE", "NOTICE",
+                     "LICENSES/LGPL-2.1.txt", "update-key.json"):
+            self.assertEqual(package.as_lf(name, b"a\r\nb\r\n"), b"a\nb\n", name)
+
+    def test_anything_else_is_left_as_it_is(self):
+        self.assertEqual(package.as_lf("assets/icon.png", b"\x89PNG\r\n\x1a\n"), b"\x89PNG\r\n\x1a\n")
+
+
+class UpdateKeyTests(unittest.TestCase):
+    """--update-key: what lets a published build install the next one."""
+
+    N = "s" * 342  # 2048 bits, as base64url
+
+    def _key_file(self, value) -> str:
+        import tempfile
+        f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")
+        with f:
+            f.write(value if isinstance(value, str) else json.dumps(value))
+        self.addCleanup(os.remove, f.name)
+        return f.name
+
+    def test_only_the_public_half_goes_in(self):
+        key = package.read_update_key(self._key_file({"kty": "RSA", "n": self.N, "e": "AQAB", "d": "private", "p": "x"}))
+        self.assertEqual(json.loads(key), {"kty": "RSA", "n": self.N, "e": "AQAB"})
+        self.assertNotIn(b"private", key)
+
+    def test_anything_else_is_refused(self):
+        for bad in ({"kty": "EC", "n": self.N, "e": "AQAB"}, {"kty": "RSA", "n": self.N[:200], "e": "AQAB"},
+                    {"kty": "RSA", "n": self.N + "+", "e": "AQAB"}, {"kty": "RSA", "e": "AQAB"}, [1], "{not json"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                package.read_update_key(self._key_file(bad))
+
+
 if __name__ == "__main__":
     unittest.main()
