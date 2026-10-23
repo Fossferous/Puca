@@ -5,6 +5,7 @@ import { embedKeys, registerEmbedSignIn } from '../api/embedSignIn';
 import { embedHost } from '../api/embedHost';
 import { wsClient } from '../api/websocket';
 import { isTauri, isMobile } from '../api/platform';
+import { isIosStandalone } from '../api/iosStandalone';
 import { fetchPublicConfig } from '../api/publicConfig';
 import { onPendingInviteAnnounced, peekPendingInvite } from '../api/pendingInvite';
 import './Login.css';
@@ -17,8 +18,10 @@ import { readStaySignedIn, writeStaySignedIn } from '../api/staySignedIn';
  *  session there is asked for, never walked into. Same rule as Púca Notes
  *  (NotesLogin STAY_DEFAULT); the stored answer is shared with it. An
  *  embedding host (Púca for Steam Deck) is an installed app on one person's
- *  device too. */
-const STAY_DEFAULT = isTauri() || isMobile() || !!embedHost();
+ *  device too, and so is a Home Screen app on an iPhone or iPad
+ *  (api/iosStandalone.ts; the download page and the User Guide tell people to
+ *  sign in once there). A Safari TAB is still a browser: clear. */
+const STAY_DEFAULT = isTauri() || isMobile() || !!embedHost() || isIosStandalone();
 const STAY_HINT = 'This device then stays signed in for up to a year instead of a day, as long as Púca is opened at least once a month. Sign out to end it early.';
 
 interface LoginProps {

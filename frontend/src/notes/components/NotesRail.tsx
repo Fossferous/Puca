@@ -5,6 +5,7 @@
  */
 import { ArchiveIcon, BellIcon, CalendarIcon, NoteIcon, PencilIcon, PopOutIcon, TagIcon, TrashIcon } from '../../components/Icons';
 import { isMobile } from '../../api/platform';
+import { isIosStandalone } from '../../api/iosStandalone';
 import { type NoteFilter } from '../model/notesModel';
 
 /** Inside the Notes Android shell there is no Púca page to open — `/` IS
@@ -84,7 +85,8 @@ export function NotesRail({ filter, labels, reminderBadge, counts, open, onClose
                         <TrashIcon /><span className="notes-rail-label">Trash</span>
                     </button>
                 )}
-                {!NATIVE && !inPuca && (
+                {/* Not in a Home Screen app (here and in the menus): see AccountMenu. */}
+                {!NATIVE && !inPuca && !isIosStandalone() && (
                     <a className="notes-rail-item" href="/" target="_blank" rel="noopener">
                         <PopOutIcon /><span className="notes-rail-label">Open Púca</span>
                     </a>

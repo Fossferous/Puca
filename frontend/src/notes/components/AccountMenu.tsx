@@ -19,6 +19,7 @@ import { DownloadIcon, HelpIcon, LogoutIcon, PopOutIcon, UploadIcon } from '../.
 import { NotesLocationSettings } from '../native/NotesLocationSettings';
 import { NotesTileSetting } from '../native/NotesTileSetting';
 import { isAndroidApp, isMobile } from '../../api/platform';
+import { isIosStandalone } from '../../api/iosStandalone';
 import { type ReminderTimes } from '../../api/reminderTimes';
 import { asNotesOpenTo, type NotesOpenTo, type NotesSortMode } from '../model/notesPrefs';
 import { NotesUpdateMenu } from './NotesUpdateMenu';
@@ -140,7 +141,10 @@ export function AccountMenu({ username, sort, onSort, openTo, onOpenTo, times, o
             <button type="button" className="notes-menu-item" onClick={onExportJson}><DownloadIcon /> {NATIVE ? 'Save as JSON' : 'Export notes as JSON'}</button>
             {onShare && <button type="button" className="notes-menu-item" onClick={onShare}><UploadIcon /> Share notes…</button>}
             <button type="button" className="notes-menu-item" onClick={onHelp}><HelpIcon /> Keyboard shortcuts</button>
-            {!NATIVE && !inPuca && <a className="notes-menu-item" href="/" target="_blank" rel="noopener"><PopOutIcon /> Open Púca</a>}
+            {/* Not in a Home Screen app: a standalone window has no second window, so a
+                _blank link replaces this app (and Púca's socket and call, if Notes was
+                reached from inside it) with the page it opens. */}
+            {!NATIVE && !inPuca && !isIosStandalone() && <a className="notes-menu-item" href="/" target="_blank" rel="noopener"><PopOutIcon /> Open Púca</a>}
             {NATIVE && <><div className="notes-menu-sep" /><NotesUpdateMenu /></>}
             <div className="notes-menu-sep" />
             <button type="button" className="notes-menu-item" onClick={onSignOut}><LogoutIcon /> Sign out</button>

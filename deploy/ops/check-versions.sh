@@ -297,6 +297,36 @@ for entry in "${HOSTS[@]}"; do
 		FAILED+=("$label/notes-sw-cache")
 	fi
 
+	# The iPhone Home Screen app's manifest (/manifest.json) must come back as
+	# JSON with the right name, and the icon it names as a PNG. It is probed because
+	# the SPA fallback (`try_files ... /index.html`) answers a MISSING file with the
+	# page and a 200, so a manifest that did not deploy looks fine to a status check
+	# and Safari simply offers a plain bookmark. It is `.json`, not `.webmanifest`,
+	# on purpose: Caddy takes a type from the host's mime database (Go has no
+	# built-in `.webmanifest`) and sends nosniff, so that name can go out as
+	# text/plain on a host whose database lacks it; `.json` is always application/json.
+	# No `"start_url"` in the answer means no manifest: INFO, a webapp older than it.
+	mf="$(ssh_to "$entry" "curl -s $CURL_TLS -i --resolve '$APP_HOST:443:127.0.0.1' 'https://$APP_HOST/manifest.json' --max-time 25" 2>/dev/null || true)"
+	mf_is="$(printf '%s\n' "$mf" | grep -c '"start_url"' || true)"
+	if [ "${mf_is:-0}" -eq 0 ]; then
+		printf 'INFO  %-22s %s serves no /manifest.json (a webapp older than the iPhone web app)\n' "web app manifest" "$APP_HOST"
+	else
+		mf_json="$(printf '%s\n' "$mf" | grep -ci '^content-type:.*json' || true)"
+		mf_name="$(printf '%s\n' "$mf" | grep -c '"name"[[:space:]]*:[[:space:]]*"P.*ca"' || true)"
+		icon_magic="$(ssh_to "$entry" "curl -s $CURL_TLS --resolve '$APP_HOST:443:127.0.0.1' 'https://$APP_HOST/icon-192.png' --max-time 25 | head -c 4 | od -An -tx1" 2>/dev/null | tr -d ' \r\n' || true)"
+		if [ "${mf_json:-0}" -gt 0 ] && [ "${mf_name:-0}" -gt 0 ] && [ "$icon_magic" = "89504e47" ]; then
+			printf 'PASS  %-22s /manifest.json is JSON named Púca, its icon is a PNG, on %s\n' "web app manifest" "$APP_HOST"
+		else
+			printf 'FAIL  %-22s on %s: content-type JSON=%s, name Púca=%s, /icon-192.png PNG=%s (magic %s)\n' \
+				"web app manifest" "$APP_HOST" "$([ "${mf_json:-0}" -gt 0 ] && echo yes || echo NO)" \
+				"$([ "${mf_name:-0}" -gt 0 ] && echo yes || echo NO)" "$([ "$icon_magic" = "89504e47" ] && echo yes || echo NO)" "${icon_magic:-none}"
+			printf '      An iPhone would add a plain bookmark, not the app. The files are in frontend/public/ and\n'
+			printf '      ship with the webapp: re-ship it to EVERY host (dual-ship.sh webapp), and check the proxy\n'
+			printf '      does not rewrite /manifest.json or /icon-192.png.\n'
+			FAILED+=("$label/web-app-manifest")
+		fi
+	fi
+
 	# --- LITE surfaces (the build with no remote control) -------------------
 	# A deployment that never shipped lite is legitimate: absence of EVERY
 	# lite surface is INFO, not FAIL. But once lite IS deployed, the

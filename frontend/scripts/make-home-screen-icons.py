@@ -7,7 +7,7 @@ WHY THESE ARE GENERATED, NOT HAND-EXPORTED. iPhone fills any transparency in an
 apple-touch-icon with black and rounds the corners itself, so the transparent
 512 px favicon came out as the mark floating on a black tile. These are OPAQUE
 squares in the app's own dark background (the default theme's --bg-primary,
-the same colour as theme_color in manifest.webmanifest) with the mark drawn
+the same colour as theme_color in manifest.json) with the mark drawn
 from the 512 px source, never upscaled from the 32 px favicon.
 
   apple-touch-icon.png   180x180  full-bleed square; iOS applies its own mask

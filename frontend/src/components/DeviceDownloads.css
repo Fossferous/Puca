@@ -113,7 +113,8 @@
     .device-downloads {
         left: 0;
         right: 0;
-        bottom: 60px;
+        /* Above the bottom nav: its 60px plus the home-indicator inset (mobile.css). */
+        bottom: calc(var(--mobile-nav-height, 60px) + var(--safe-area-bottom, 0px));
         width: auto;
         border-radius: 12px 12px 0 0;
     }

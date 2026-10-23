@@ -793,7 +793,14 @@ app to your Home Screen from Safari, and it opens full screen with its own icon.
 4. Tap **Add**. Open **Púca** from your Home Screen and sign in there.
 
 It needs iOS 16 or newer. The Home Screen app keeps its own sign-in, separate
-from Safari's, so you sign in once inside it.
+from Safari's, so you sign in once inside it, and **Stay signed in on this
+device** starts ticked there (it is clear in a Safari tab).
+
+Púca Notes: inside the Home Screen app there is no **Open in Púca Notes** button
+in the Tasks view, because a window with no second window would replace Púca
+(and drop a call you are in). Open `/notes/` on your server in Safari, or add Púca
+Notes to the Home Screen on its own the same way; Notes then has no **Open Púca**
+link either.
 
 What is different from the Android and Windows apps:
 

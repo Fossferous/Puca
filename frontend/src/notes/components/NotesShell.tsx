@@ -21,6 +21,7 @@ import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { decodeJwtPayload, getToken, logoutEverywhere } from '../../api/auth';
 import { isNetworkError } from '../../api/client';
 import { isAndroidApp, isMobile } from '../../api/platform';
+import { isIosStandalone } from '../../api/iosStandalone';
 import { desktopNotificationState, enableDesktopNotifications, notificationPermission } from '../../api/desktopNotify';
 import { useTaskFeature } from '../../api/taskFeatures';
 import { ContextMenu, type ContextMenuItem } from '../../components/ContextMenu';
@@ -593,7 +594,7 @@ export function NotesShell({ onSignOut, expiredOffline = false, embedded, coldSt
     // --- Card menu -----------------------------------------------------------------------------
     // In the Notes Android shell `/` is this very page, so there is nothing to
     // open; on the web it is Púca, one origin over. Embedded, Notes is IN Púca.
-    const pucaHref = isMobile() || isEmbedded ? null : `${window.location.origin}/`;
+    const pucaHref = isMobile() || isEmbedded || isIosStandalone() ? null : `${window.location.origin}/`;
     const copyAsText = async (card: NoteCard) => {
         try {
             await navigator.clipboard.writeText(noteToMarkdown(card));

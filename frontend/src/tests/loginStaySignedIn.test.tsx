@@ -103,6 +103,26 @@ describe('Púca sign-in: Stay signed in on this device', () => {
         expect(box()?.checked).toBe(true);
     });
 
+    it('is ticked by default in an iPhone Home Screen app, but not in a Safari tab', async () => {
+        // The download page and the User Guide say "sign in once" there; an
+        // installed app is one person's, like the Android app.
+        Object.defineProperty(navigator, 'standalone', { value: true, configurable: true });
+        try {
+            await mount();
+            expect(box()?.checked).toBe(true);
+            await submit();
+            expect(lastOpts()).toEqual({ staySignedIn: true });
+            await act(async () => root!.unmount());
+            root = null;
+            container.remove();
+            Object.defineProperty(navigator, 'standalone', { value: false, configurable: true }); // a Safari tab
+            await mount();
+            expect(box()?.checked).toBe(false);
+        } finally {
+            delete (navigator as unknown as Record<string, unknown>).standalone;
+        }
+    });
+
     it('is clear by default in a browser, and the ordinary session is asked for', async () => {
         await mount();
         expect(box()?.checked).toBe(false);

@@ -16,6 +16,7 @@ import { login, RetiredKeyFormatError } from '../../api/auth';
 import { readStaySignedIn, writeStaySignedIn } from '../../api/staySignedIn';
 import { isNetworkError } from '../../api/client';
 import { isMobile } from '../../api/platform';
+import { isIosStandalone } from '../../api/iosStandalone';
 import '../../components/Login.css';
 
 /** In the Notes Android shell, "Púca" is the separate Púca app, not a link. */
@@ -42,8 +43,10 @@ interface NotesLoginProps {
  *  browser starts CLEAR: there the long session is Púca's too (one origin,
  *  one token), and a browser is the thing that gets shared or borrowed — so
  *  a year-long Púca session on someone else's computer has to be asked for,
- *  never walked into. Either way the box is there and the answer sticks. */
-const STAY_DEFAULT = NATIVE;
+ *  never walked into. A Notes page added to an iPhone's Home Screen is an
+ *  installed app like the phone one: ticked. Either way the box is there and
+ *  the answer sticks. */
+const STAY_DEFAULT = NATIVE || isIosStandalone();
 
 
 export function NotesLogin({ onSuccess }: NotesLoginProps) {
