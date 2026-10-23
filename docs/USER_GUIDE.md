@@ -781,6 +781,41 @@ confirmation first.
 
 ---
 
+## iPhone and iPad
+
+There is no Púca app in the App Store. On an iPhone or iPad you add Púca's web
+app to your Home Screen from Safari, and it opens full screen with its own icon.
+
+1. Open your server's web address in **Safari** (the download page has an
+   **Open Púca** button, and a QR code you can scan from a computer's screen).
+2. Tap **Share**, the square with an arrow pointing up.
+3. Tap **Add to Home Screen** (scroll down the list if you do not see it).
+4. Tap **Add**. Open **Púca** from your Home Screen and sign in there.
+
+It needs iOS 16 or newer. The Home Screen app keeps its own sign-in, separate
+from Safari's, so you sign in once inside it.
+
+What is different from the Android and Windows apps:
+
+- **No notifications while Púca is closed.** iPhone can send them to a web app;
+  Púca does not use that yet, so new messages show up when you open it.
+- **Calls.** Safari cannot do the frame-by-frame encryption Púca uses for
+  ordinary calls. With **Require encryption for calls** on (the default), Púca
+  tells you before you join and keeps your microphone, camera and screen out of
+  the call, so you would neither hear nor be heard, rather than send them where
+  your server could read them. Turn it off in **Settings → Privacy & Safety** to
+  take part with encryption in transit only. In channels that use SFU mode the
+  call is encrypted by a different layer that Safari may support; that has not
+  been tried on an iPhone.
+- **My Devices.** An iPhone cannot be controlled from elsewhere and cannot share
+  its own screen. Controlling a Windows PC from it uses the same code as on
+  Android; that has not been tried on an iPhone.
+- **Photos work.** Safari reads iPhone photos (HEIC) itself, so Púca turns one
+  into a JPEG on the phone before sending it, without the location the camera
+  saved with it.
+
+---
+
 ## Púca Notes (notes)
 
 Púca Notes shows your task lists as notes, Google-Keep style. It uses the

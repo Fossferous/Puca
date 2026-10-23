@@ -58,6 +58,12 @@ installEmbedApi()
 import { installFileDropGuard } from './api/fileDropGuard'
 installFileDropGuard(window)
 
+// Púca on an iPhone's Home Screen: safe-area handling for that one mode, which
+// index.html cannot carry because the Android and desktop apps share it
+// (api/iosStandalone.ts). Nothing anywhere else.
+import { installIosStandalone } from './api/iosStandalone'
+installIosStandalone()
+
 // Desktop shell: the tray capture badge, the tooltip and the native clip
 // capture threads live in the PROCESS, but every one of them is driven from
 // here. A webview reload (F5, a crash recovery, a dev reload) throws away the

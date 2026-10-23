@@ -554,6 +554,27 @@ check "a page whose tokens are all known is NOT refused"    "$([ "$(has "$out" '
 check "and nothing __LIKE_THIS__ survives into it"          "$([ -f "$TMP/uploaded/index.html" ] && ! grep -qE '__[A-Z_]+__' "$TMP/uploaded/index.html" && echo 1 || echo 0)" "$(cat "$TMP/uploaded/index.html" 2>/dev/null | head -5)"
 
 echo
+echo "--- the iPhone section's QR code is made at render time, locally ---"
+# __APP_QR_SVG__ is not a host, so render_download_page makes it with
+# deploy/ops/make-qr-svg.mjs. Two ways to lie to a visitor: leave the token (the
+# check above catches that) or ship an empty box where the code should be.
+cp "$REPO/deploy/ops/make-qr-svg.mjs" "$TMP/deploy/ops/"
+page_with 9.9.9 Puca-Setup.exe Puca-Lite-Setup.exe
+echo '<figure class="qr">__APP_QR_SVG__</figure>' >> "$TMP/deploy/download-site/index.html"
+rm -f "$TMP/uploaded/index.html"
+out="$(ship installer "$TMP/setup.exe" "$TMP/setup.exe.sig" 9.9.9 "notes")"; rc=$?
+check "a page with the QR token is NOT refused"              "$([ "$(has "$out" 'unsubstituted token')" = 0 ] && [ "$(has "$out" 'could not make one')" = 0 ] && echo 1 || echo 0)" "$out"
+check "its token became an inline SVG"                       "$([ -f "$TMP/uploaded/index.html" ] && grep -q '<figure class="qr"><svg xmlns=' "$TMP/uploaded/index.html" && echo 1 || echo 0)" "$(head -c 300 "$TMP/uploaded/index.html" 2>/dev/null)"
+check "that encodes the web app's host, not a placeholder"   "$([ -f "$TMP/uploaded/index.html" ] && grep -q 'aria-label="QR code for app.invalid"' "$TMP/uploaded/index.html" && echo 1 || echo 0)" "$(grep -o 'aria-label="[^"]*"' "$TMP/uploaded/index.html" 2>/dev/null | head -2)"
+check "and no token survives"                                "$([ -f "$TMP/uploaded/index.html" ] && ! grep -qE '__[A-Z_]+__' "$TMP/uploaded/index.html" && echo 1 || echo 0)"
+rm -f "$TMP/deploy/ops/make-qr-svg.mjs"
+: > "$LOG"
+out="$(ship installer "$TMP/setup.exe" "$TMP/setup.exe.sig" 9.9.9 "notes")"; rc=$?
+check "REFUSES when the QR maker is missing"                 "$([ $rc -ne 0 ] && [ "$(has "$out" 'could not make one')" = 1 ] && echo 1 || echo 0)" "$out"
+check "before touching any host"                             "$([ ! -s "$LOG" ] && echo 1 || echo 0)" "$(cat "$LOG")"
+page_with 9.9.9 Puca-Setup.exe Puca-Lite-Setup.exe
+
+echo
 echo "--- dual-ship.sh mobile: the manifest version must match the bundle's own .version sidecar ---"
 # encrypt-bundle.mjs writes <bundle>.version from the build's version.json; a
 # manifest that disagrees with it is the one-slip lockout 0.9.811 closes.
