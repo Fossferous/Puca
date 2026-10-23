@@ -282,6 +282,53 @@ describe('an elevated program swallowing the input (UIPI)', () => {
     });
 });
 
+describe('Esc with the mouse captured (Game mode)', () => {
+    // In fullscreen under the keyboard lock the browser hands a short Esc to
+    // the page and lets go of the pointer only on a LONG press, which repeats
+    // Esc into the game meanwhile. The stage lets go on the short press itself.
+    let exit: ReturnType<typeof vi.fn>;
+    let locked: Element | null = null;
+    beforeEach(() => {
+        exit = vi.fn(() => { locked = null; });
+        locked = null;
+        Object.defineProperty(document, 'pointerLockElement', { configurable: true, get: () => locked });
+        (document as unknown as { exitPointerLock: unknown }).exitPointerLock = exit;
+    });
+    afterEach(() => {
+        delete (document as unknown as { pointerLockElement?: unknown }).pointerLockElement;
+        delete (document as unknown as { exitPointerLock?: unknown }).exitPointerLock;
+    });
+    const esc = (repeat = false) => act(async () => {
+        window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape', key: 'Escape', repeat, bubbles: true, cancelable: true }));
+    });
+
+    it('a short Esc lets go of the captured mouse, and still goes over', async () => {
+        h.storage.set('sovereign-fps-mode', 'on');
+        await mount();
+        locked = surface();
+        await esc();
+        expect(exit, 'the stage let go itself').toHaveBeenCalledTimes(1);
+        const keys = h.sendInput.mock.calls.map(c => c[1] as { t?: string; code?: string }).filter(e => e.t === 'key');
+        expect(keys.map(k => k.code), 'Esc reached the game as in a window').toEqual(['Escape']);
+    });
+
+    it("a held Esc's repeats ask nothing more", async () => {
+        h.storage.set('sovereign-fps-mode', 'on');
+        await mount();
+        locked = surface();
+        await esc(true);
+        expect(exit).not.toHaveBeenCalled();
+    });
+
+    it('CONTROL: with nothing captured, Esc only goes over', async () => {
+        await mount();
+        await esc();
+        expect(exit).not.toHaveBeenCalled();
+        const keys = h.sendInput.mock.calls.map(c => c[1] as { t?: string; code?: string }).filter(e => e.t === 'key');
+        expect(keys.map(k => k.code)).toEqual(['Escape']);
+    });
+});
+
 describe('a game that has taken the pointer', () => {
     let lock: ReturnType<typeof vi.fn>;
     beforeEach(() => {

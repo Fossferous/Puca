@@ -3221,6 +3221,15 @@ export function DeviceStage() {
             // can see). Only the releases above still run, and minimising let
             // go of everything held already.
             if (isMinimized) return;
+            // ESC LETS GO OF A CAPTURED MOUSE (Game mode), everywhere. In a
+            // window the browser does it; in fullscreen under the keyboard
+            // lock it hands Esc to the page and lets go only on a LONG press,
+            // which meanwhile repeats Esc into the game — so "Esc releases
+            // it" was untrue there. The key still goes over, as in a window.
+            if (e.code === 'Escape' && !e.repeat && document.pointerLockElement
+                && document.pointerLockElement === surfaceRef.current) {
+                document.exitPointerLock();
+            }
             // THE STAGE'S OWN CHORDS (stageShortcuts.ts), never forwarded.
             // Esc is not one any more: it used to pause control, which made
             // it the one key the desktop could never send.
