@@ -415,6 +415,27 @@ describe('sending a share at several sizes when it helps (shareLadder.ts)', () =
         expect(vi.getTimerCount(), 'the watch ended').toBe(idle - 1);
     });
 
+    it('watches an Automatic ladder again after an in-place re-size, and still drops it if that lands in software', async () => {
+        hardware(true);
+        await join();
+        const { stream, cap } = shareStream(1080, 60);
+        await m.startScreenShare(stream);
+        await flush();
+        const s = senders.at(-1)!;
+        s.encoder = 'SimulcastEncoderAdapter (MediaFoundationVideoEncodeAccelerator (NVIDIA H.264 Encoder MFT))';
+        await vi.advanceTimersByTimeAsync(3000 * 4);
+        expect(published.length, 'fixture: the first watch saw hardware and ended').toBe(1);
+        // 1080p60 -> 1440p60: three sizes still, re-sized in place...
+        cap.height = 1440;
+        await m.retuneShare();
+        expect(published.length, 'in place').toBe(1);
+        // ...and the encoders re-opened in software.
+        s.encoder = 'SimulcastEncoderAdapter (OpenH264, OpenH264, OpenH264)';
+        await vi.advanceTimersByTimeAsync(3000 * 3);
+        expect(lastSimulcast(), 'one size').toBe(false);
+        expect(published.length).toBe(2);
+    });
+
     it('does not second-guess Always', async () => {
         ladder.on = true; // the old setting on = Always
         hardware(false);

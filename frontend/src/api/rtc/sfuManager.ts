@@ -1128,6 +1128,12 @@ export class SfuManager {
                 await this.republishShareNow(gen);
             } else if (want.length > 0) {
                 await this.resizeLadderInPlace(sender, video, want);
+                // Watched again: a re-size can re-open the encoders, and a
+                // ladder that Always started and Automatic now keeps has never
+                // been watched at all. Software there still means one size.
+                if (this.shareLadderMode === 'auto' && gen === this.shareGen && !this.softwareWatch) {
+                    this.startSoftwareWatch(gen);
+                }
             }
             return true;
         });
