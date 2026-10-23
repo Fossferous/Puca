@@ -467,7 +467,11 @@ the next capture → encode → network → jitter buffer → decode → the sta
   not drawing one). **Mouse › Draw the pointer here (no delay)** turns it off;
   Game mode hands the pointer back, because pointer lock hides this one, and
   so does pausing control: watching, the host's own pointer is the one to
-  see.
+  see. An agent too old to report shapes (it still gives the pointer up when
+  asked) is found by its silence: no shape within 3 s of the hand-over, and
+  the pointer goes back to the host for the rest of the session. Such an
+  agent reports no captured pointer either, so the Game mode hint never
+  appears for it; the Mouse menu's Game mode still works.
 
 ## Testing note
 

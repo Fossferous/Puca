@@ -555,6 +555,51 @@ describe('the pointer drawn here, with no delay', () => {
         expect(lastOwnership()).toEqual(['ds-1', true]);
     });
 
+    describe('an agent too old to send shapes', () => {
+        afterEach(() => { vi.useRealTimers(); });
+        const emitSession = (over: Record<string, unknown>) => act(async () => {
+            h.snapshot = [session(over)];
+            for (const l of h.listeners) l(h.snapshot);
+        });
+
+        // The host hands the pointer over AFTER the stage asks: mounted
+        // first, then the clock faked, then the hand-over arrives.
+        it('no shape within 3 s of the hand-over: the pointer goes back to the host for the session', async () => {
+            await mount();
+            expect(lastOwnership()).toEqual(['ds-1', true]);
+            vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+            await emitSession({ cursorOwned: true, remoteCursor: null });
+            act(() => { vi.advanceTimersByTime(2_900); });
+            expect(lastOwnership(), 'not before the wait is up').toEqual(['ds-1', true]);
+            act(() => { vi.advanceTimersByTime(200); });
+            expect(lastOwnership(), 'the host draws its own pointer again').toEqual(['ds-1', false]);
+            expect(surface().style.cursor, "and this one is the stylesheet's").toBe('');
+            // For the rest of the session: a later hand-over report does not take it again.
+            act(() => { vi.advanceTimersByTime(10_000); });
+            expect(lastOwnership()).toEqual(['ds-1', false]);
+        });
+
+        it('CONTROL: an agent that sends its shape keeps the pointer drawn here', async () => {
+            await mount();
+            vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+            await emitSession({ cursorOwned: true, remoteCursor: 'text' });
+            act(() => { vi.advanceTimersByTime(10_000); });
+            expect(lastOwnership()).toEqual(['ds-1', true]);
+            expect(surface().style.cursor).toBe('text');
+        });
+
+        it('a shape that comes a moment after the hand-over counts', async () => {
+            await mount();
+            vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+            await emitSession({ cursorOwned: true, remoteCursor: null });
+            act(() => { vi.advanceTimersByTime(1_000); });
+            await emitSession({ cursorOwned: true, remoteCursor: 'pointer' });
+            act(() => { vi.advanceTimersByTime(10_000); });
+            expect(lastOwnership()).toEqual(['ds-1', true]);
+            expect(surface().style.cursor).toBe('pointer');
+        });
+    });
+
     it('Game mode hands it back too: pointer lock hides this pointer', async () => {
         h.storage.set('sovereign-fps-mode', 'on');
         await mount();

@@ -390,6 +390,10 @@ function barKeyForTheRemote(e: KeyboardEvent): boolean {
 /** How long a mobile notice ("Clipboard sent", "Locking…") stays up. */
 const NOTE_LIFETIME_MS = 6000;
 
+/** How long after the host hands the pointer over its first shape report may
+ *  take before the agent is taken to be one that sends none (see below). */
+const SHAPE_WAIT_MS = 3000;
+
 /** How long "Copy diagnostics" measures for, while you keep driving. */
 const DIAG_WINDOW_MS = 5_000;
 
@@ -1347,8 +1351,23 @@ export function DeviceStage() {
     // paused: watching, the host's own pointer — wherever it is, whoever is
     // moving it — is the one to see, and this one would only wear whatever
     // shape the host's had when the pause began.
+    //
+    // AN OLDER AGENT SENDS NO SHAPES. It gives the pointer up when asked (the
+    // phone trackpad's handshake predates this), so drawing it here would put
+    // an arrow over every text field and link — and over a game's mouse-look —
+    // for good. So the shape decides: no report within SHAPE_WAIT_MS of the
+    // host handing the pointer over, and it goes back to the host for the
+    // rest of the session, which draws its own as before.
     const cursorOwned = session?.cursorOwned === true;
-    const desktopPointer = !isMobile && instantPointer && !fpsMode && controlEnabled;
+    const [noShapesFor, setNoShapesFor] = useState<string | null>(null);
+    const desktopPointer = !isMobile && instantPointer && !fpsMode && controlEnabled
+        && noShapesFor !== sessionActiveId;
+    const shapeReported = session?.remoteCursor != null;
+    useEffect(() => {
+        if (!sessionActiveId || !desktopPointer || !cursorOwned || shapeReported) return;
+        const t = setTimeout(() => setNoShapesFor(sessionActiveId), SHAPE_WAIT_MS);
+        return () => clearTimeout(t);
+    }, [sessionActiveId, desktopPointer, cursorOwned, shapeReported]);
     useEffect(() => {
         if (!sessionActiveId) return;
         const want = (isMobile && isMouseMode) || desktopPointer;
