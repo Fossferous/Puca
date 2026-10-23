@@ -24,7 +24,7 @@ import { setHotkeyCaptureMode } from '../api/hotkeys';
 import { ClipSettings } from './ClipSettings';
 import { BUTTON_TO_VK, VK_LBUTTON, VK_RBUTTON, mouseVkLabel } from '../api/inputCodes';
 import { isAndroidApp, isMobile, isTauri } from '../api/platform';
-import { isTouchDevice, settingsSections } from './settingsModal.utils';
+import { isTouchDevice, screenShareOffered, settingsSections } from './settingsModal.utils';
 import { sendTestNotification } from '../api/desktopNotify';
 import { getUserMediaForMic, hostMicrophone, hostShowsNotifications } from '../api/embedHost';
 import {
@@ -2803,11 +2803,12 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                 {/* Screen sharing. The cost of this one lands on the person
                                     SHARING, which is why it is theirs to decide; see
                                     api/rtc/shareLadder.ts for when Automatic sends several
-                                    sizes. Not on phones, which cannot share a screen (the
-                                    voice panel offers no Share Screen there). A change
+                                    sizes. Shown wherever the voice panel offers Share Screen
+                                    (screenShareOffered): not on phones, but on a 2-in-1 in
+                                    tablet mode, which shares under Automatic too. A change
                                     reaches a running share at once
                                     (sfuManager.followLadderSetting). */}
-                                {!phone && (
+                                {screenShareOffered() && (
                                     <>
                                         <h3>Screen Sharing</h3>
                                         <div className="settings-card">

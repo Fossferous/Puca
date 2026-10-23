@@ -35,6 +35,20 @@ export function isTouchDevice(): boolean {
         && window.matchMedia(COARSE_POINTER_QUERY).matches;
 }
 
+/** The user agents the voice panel offers no Share Screen to: phones and
+ *  tablets, whose browsers cannot capture a screen. */
+const NO_SCREEN_SHARE_UA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i;
+
+/**
+ * Does this device offer Share Screen? The voice panel decides by user agent,
+ * and every setting that only matters to someone sharing follows the SAME
+ * answer — not isTouchDevice(), which a Windows 2-in-1 in tablet mode
+ * answers yes while it can still share.
+ */
+export function screenShareOffered(userAgent: string = typeof navigator !== 'undefined' ? navigator.userAgent : ''): boolean {
+    return !NO_SCREEN_SHARE_UA.test(userAgent);
+}
+
 /** Every tab, in nav order. Filtered per platform by settingsSections(). */
 const ALL_SETTINGS_SECTIONS: readonly SettingsSection[] = [
     { id: 'account', label: 'My Account', icon: 'user' },

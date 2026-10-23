@@ -164,3 +164,18 @@ export function ladderEncodings(
 export function isSoftwareEncoder(name: string | undefined): boolean {
     return typeof name === 'string' && /OpenH264|libvpx|libaom/i.test(name);
 }
+
+/**
+ * What an `encoderImplementation` says: software, hardware, or nothing yet.
+ * ANY software rung inside Chromium's simulcast wrapper makes it software.
+ * Hardware is only what Chromium names its accelerated encoders with
+ * (MediaFoundationVideoEncodeAccelerator on Windows, and the VideoToolbox /
+ * VA-API / V4L2 / MediaCodec ones elsewhere; "ExternalEncoder" in older
+ * builds). Anything else — empty, "unknown", a name this does not know — is
+ * no evidence either way, rather than a hardware encoder by default.
+ */
+export function encoderKind(name: string | undefined): 'software' | 'hardware' | 'unknown' {
+    if (typeof name !== 'string' || name.trim() === '') return 'unknown';
+    if (isSoftwareEncoder(name)) return 'software';
+    return /EncodeAccelerator|ExternalEncoder|MediaFoundation|VideoToolbox|Vaapi|V4L2|MediaCodec/i.test(name) ? 'hardware' : 'unknown';
+}

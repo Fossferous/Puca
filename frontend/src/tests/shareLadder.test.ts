@@ -14,6 +14,7 @@ import {
     LADDER_MID_540,
     LADDER_MID_720,
     LADDER_MID_TOP_KBPS,
+    encoderKind,
     isSoftwareEncoder,
     ladderEncodings,
     ladderRungs,
@@ -184,5 +185,20 @@ describe('software encoders', () => {
     it('does not mistake a hardware encoder for one', () => {
         expect(isSoftwareEncoder('MediaFoundationVideoEncodeAccelerator (NVIDIA H.264 Encoder MFT)')).toBe(false);
         expect(isSoftwareEncoder(undefined)).toBe(false);
+    });
+
+    it('names hardware only from what Chromium calls its accelerated encoders', () => {
+        expect(encoderKind('MediaFoundationVideoEncodeAccelerator (NVIDIA H.264 Encoder MFT)')).toBe('hardware');
+        expect(encoderKind('SimulcastEncoderAdapter (MediaFoundationVideoEncodeAccelerator, MediaFoundationVideoEncodeAccelerator)')).toBe('hardware');
+        expect(encoderKind('VideoToolboxVideoEncodeAccelerator')).toBe('hardware');
+        expect(encoderKind('ExternalEncoder')).toBe('hardware');
+        // One software rung among hardware ones is software.
+        expect(encoderKind('SimulcastEncoderAdapter (MediaFoundationVideoEncodeAccelerator, OpenH264)')).toBe('software');
+    });
+
+    it('takes a name it does not know for no evidence, not for hardware', () => {
+        for (const n of [undefined, '', '  ', 'unknown', 'SimulcastEncoderAdapter', 'SomeFutureEncoder']) {
+            expect(encoderKind(n), String(n)).toBe('unknown');
+        }
     });
 });
