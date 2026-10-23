@@ -4,6 +4,17 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Improved
+
+- **Púca for Steam Deck: push to talk is chosen by pressing the button.** In the panel's Settings, choose **Choose a back button** and press the one you want. The four back buttons are easy to mix up by name, and in testing the one called "R4" was R5 every time.
+- **Púca for Steam Deck says when nobody can hear you.** If the Deck's own microphone is muted or turned all the way down in Steam's settings, the panel says so, and while you are in a call and not muted in Púca a notification pops up over your game, once each time it happens. Until now a call looked fine while it carried only silence.
+
+### Fixed
+
+- **Playing on a Steam Deck no longer moves you to the AFK channel.** Púca for Steam Deck now tells Púca when the Deck's controls are in use, never which, so someone who plays while they listen to a call stays in it. The desktop app already did this with the keyboard and mouse. Until now, the hidden page the plugin runs saw no input at all, and after the server's AFK time a listening player was moved out mid-game. Other programs that embed Púca can do the same through `idleSeconds` (docs/EMBEDDING.md). Nothing changes anywhere else.
+
 ## 0.9.846 — 2026-10-22
 
 Ready for Púca on the Steam Deck

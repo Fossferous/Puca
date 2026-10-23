@@ -50,6 +50,9 @@ interface Bridge {
     };
 
     let foreground = false;
+    /** When the Deck's controls were last in use (the backend notes it while
+     *  it reads them, during a call); null while it does not. */
+    let lastInputAt: number | null = null;
 
     // ---- The microphone bridge's receiving end -----------------------------
 
@@ -164,6 +167,9 @@ interface Bridge {
         notify: (notification: unknown) => send({ type: 'notify', notification }),
         onStateChange: (state: unknown) => send({ type: 'state', state }),
         isForeground: () => foreground,
+        // Púca's AFK move (docs/EMBEDDING.md): a player's input goes to the
+        // game and the Deck's controls, never to this hidden page.
+        idleSeconds: () => (lastInputAt === null ? null : Math.max(0, (Date.now() - lastInputAt) / 1000)),
     });
     // Handed to the FIRST reader only (Púca's startup, which keeps its own
     // copy): a script that runs later finds nothing to borrow.
@@ -205,6 +211,14 @@ interface Bridge {
             },
             setForeground(on: boolean): void {
                 foreground = on === true;
+            },
+            /** The Deck's controls are in use now. */
+            noteInput(): void {
+                lastInputAt = Date.now();
+            },
+            /** The backend stopped reading them: "cannot tell" again. */
+            clearInput(): void {
+                lastInputAt = null;
             },
             releaseMics(): void {
                 [...bridges.keys()].forEach(release);

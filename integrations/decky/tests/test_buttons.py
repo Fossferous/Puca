@@ -1,5 +1,5 @@
-"""The back-button reader (push-to-talk), without a Deck:
-python -m unittest discover -s tests
+"""The Deck's controls (push to talk, presence, choosing a button), without a
+Deck: python -m unittest discover -s tests
 
 The messages are built from the Linux driver's table (drivers/hid/hid-steam.c,
 steam_deck_button_mappings), restated here on its own rather than read from
@@ -74,7 +74,7 @@ class ReportTests(unittest.TestCase):
 
     def test_an_unknown_button_is_refused(self):
         with self.assertRaises(ValueError):
-            pb.ButtonWatch("A", lambda held: None, io=FakeIO())
+            pb.InputWatch("A", lambda held: None, io=FakeIO())
 
 
 class FakeHandle:
@@ -165,7 +165,7 @@ class WatchTests(unittest.TestCase):
     def make(self, button="R4", **kw):
         io = FakeIO(**kw)
         got = []
-        return io, got, pb.ButtonWatch(button, got.append, io=io)
+        return io, got, pb.InputWatch(button, got.append, io=io)
 
     def test_down_then_a_heartbeat_every_half_second_then_up(self):
         io, got, w = self.make()
@@ -267,6 +267,150 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(got, [True])
 
 
+N2 = "/dev/hidraw2"
+
+
+class ControlsTests(unittest.TestCase):
+    def test_grips_held_names_every_grip_down(self):
+        self.assertEqual(pb.grips_held(deck_report()), frozenset())
+        self.assertEqual(pb.grips_held(deck_report("R5", "L4")), frozenset({"R5", "L4"}))
+        self.assertIsNone(pb.grips_held(deck_report("R5", kind=0x01)))
+
+    def test_in_use_means_a_control_the_driver_names_or_a_touch(self):
+        self.assertFalse(pb.controls_in_use(deck_report()))
+        # A, B, d-pad up, Menu, both pad touches, L3, R3, both stick touches, Quick Access.
+        for byte, bit in [(8, 7), (8, 5), (9, 0), (9, 6), (10, 3), (10, 4), (10, 6), (11, 2), (13, 6), (13, 7), (14, 2)]:
+            self.assertTrue(pb.controls_in_use(deck_report(extra=[(byte, bit)])), (byte, bit))
+        for name in GRIPS:
+            self.assertTrue(pb.controls_in_use(deck_report(name)), name)
+        # Bits the driver lists as unknown, and the motion/analogue bytes, are not.
+        for byte, bit in [(10, 5), (10, 7), (11, 0), (12, 3), (13, 0), (13, 3), (14, 0), (20, 1), (40, 0)]:
+            self.assertFalse(pb.controls_in_use(deck_report(extra=[(byte, bit)])), (byte, bit))
+        self.assertIsNone(pb.controls_in_use(deck_report(kind=0x04)))
+
+
+class PresenceTests(unittest.TestCase):
+    def make(self, button=None):
+        io = FakeIO()
+        got, seen = [], []
+        return io, got, seen, pb.InputWatch(button, got.append, lambda: seen.append(io.t), io=io)
+
+    def test_in_use_is_said_at_once_then_at_most_every_ten_seconds(self):
+        io, got, seen, w = self.make()
+        w.start()
+        io.deliver(N2, deck_report())
+        self.assertEqual(seen, [], "nothing touched")
+        thumb = deck_report(extra=[(13, 6)])  # a thumb resting on the left stick
+        io.deliver(N2, thumb)
+        self.assertEqual(seen, [100.0])
+        for _ in range(20):  # five seconds of play
+            io.advance(0.25)
+            io.deliver(N2, thumb)
+        self.assertEqual(seen, [100.0])
+        for _ in range(24):  # six more
+            io.advance(0.25)
+            io.deliver(N2, thumb)
+        self.assertEqual(len(seen), 2)
+        self.assertGreaterEqual(seen[1] - seen[0], 10.0)
+        self.assertEqual(got, [], "no push-to-talk button chosen: nothing is ever held")
+
+    def test_untouched_controls_say_nothing(self):
+        io, got, seen, w = self.make()
+        w.start()
+        for _ in range(40):
+            io.advance(0.25)
+            io.deliver(N2, deck_report())
+        self.assertEqual(seen, [])
+
+    def test_without_push_to_talk_the_stream_still_counts_as_the_controller_being_there(self):
+        # The input state, not a button, is what proves the node is alive:
+        # a presence-only watch must not reopen its nodes every two seconds.
+        io, got, seen, w = self.make()
+        w.start()
+        old = dict(io.fds)
+        for _ in range(16):
+            io.advance(0.25)
+            io.deliver(N2, deck_report())
+        self.assertEqual(io.closed, [])
+        self.assertEqual(io.fds, old)
+
+    def test_push_to_talk_and_presence_together(self):
+        io, got, seen, w = self.make("R5")
+        w.start()
+        io.deliver(N2, deck_report("R5"))
+        self.assertEqual(got, [True])
+        self.assertEqual(seen, [100.0], "the grip held is a control in use too")
+        io.deliver(N2, deck_report())
+        self.assertEqual(got, [True, False])
+
+    def test_a_watch_with_no_presence_callback_is_fine(self):
+        io = FakeIO()
+        got = []
+        w = pb.InputWatch("R5", got.append, io=io)
+        w.start()
+        io.deliver(N2, deck_report("R5", extra=[(13, 6)]))
+        self.assertEqual(got, [True])
+
+
+class LearnTests(unittest.TestCase):
+    def make(self, nodes=("/dev/hidraw0", N2)):
+        io = FakeIO(nodes)
+        got = []
+        return io, got, pb.GripLearner(got.append, io=io)
+
+    def test_the_first_grip_pressed_is_the_answer_once(self):
+        io, got, learner = self.make()
+        self.assertIsNone(learner.start())
+        io.deliver(N2, deck_report())
+        io.deliver(N2, deck_report(extra=OTHERS))
+        self.assertEqual(got, [], "A, B, Menu and stick touches are not back grips")
+        io.deliver(N2, deck_report("R5"))
+        self.assertEqual(got, ["R5"])
+        io.deliver(N2, deck_report())
+        io.deliver(N2, deck_report("R4"))
+        self.assertEqual(got, ["R5"])
+
+    def test_a_grip_already_held_counts_only_when_pressed_again(self):
+        io, got, learner = self.make()
+        learner.start()
+        io.deliver(N2, deck_report("L4"))
+        io.deliver(N2, deck_report("L4"))
+        self.assertEqual(got, [])
+        io.deliver(N2, deck_report())
+        io.deliver(N2, deck_report("L4"))
+        self.assertEqual(got, ["L4"])
+
+    def test_two_grips_at_once_answer_the_same_one_every_time(self):
+        io, got, learner = self.make()
+        learner.start()
+        io.deliver(N2, deck_report())
+        io.deliver(N2, deck_report("R5", "L5"))
+        self.assertEqual(got, ["L5"])
+
+    def test_it_says_why_it_cannot_read(self):
+        _, _, learner = self.make(nodes=())
+        self.assertEqual(learner.start(), "no-controller")
+        io, _, learner = self.make(nodes=(N2,))
+        io.denied = {N2}
+        self.assertEqual(learner.start(), "no-access")
+
+    def test_stop_closes_everything(self):
+        io, _, learner = self.make()
+        learner.start()
+        learner.stop()
+        self.assertEqual(sorted(io.closed), sorted(io.fds.values()))
+        self.assertEqual(io.readers, {})
+
+    def test_a_node_that_goes_away_is_dropped(self):
+        io, got, learner = self.make()
+        learner.start()
+        gone = io.fds[N2]
+        io.deliver(N2, deck_report())
+        io.deliver(N2, OSError(19, "No such device"))
+        self.assertIn(gone, io.closed)
+        self.assertEqual(got, [])
+
+
 @unittest.skipUnless(sys.platform.startswith("linux"), "reads a file descriptor on the asyncio loop, as on the Deck (Linux)")
 class RunningLoopTests(unittest.TestCase):
     def test_reads_on_the_running_loop(self):
@@ -282,7 +426,7 @@ class RunningLoopTests(unittest.TestCase):
                     return r
 
             got = []
-            watch = pb.ButtonWatch("R4", got.append, io=PipeIO(), heartbeat_s=0.05)
+            watch = pb.InputWatch("R4", got.append, io=PipeIO(), heartbeat_s=0.05)
             self.assertIsNone(watch.start())
             os.write(w, deck_report("R4"))
             await asyncio.sleep(0.3)

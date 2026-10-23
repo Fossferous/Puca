@@ -1,4 +1,5 @@
-"""Push-to-talk on a back button: the Deck's own controller, read directly.
+"""The Deck's own controls, read directly: push to talk, presence, and choosing
+the push-to-talk button by pressing it.
 
 Steam's button feed for its own interface (SteamClient.Input's
 RegisterForControllerInputMessages) cannot be counted on for this. In tests on
@@ -9,10 +10,17 @@ most while a game is in front. Reading the controller directly caught every
 hold in those tests, with an app in front or not.
 
 So the backend reads the controller itself, from /dev/hidraw, which SteamOS
-lets the signed-in user read (the seat's ACL; no root). Only one bit of one
-message type is looked at, only while the frontend asks for it (a button is
-chosen and Púca is in a call), and nothing leaves this module but "held" and
-"released".
+lets the signed-in user read (the seat's ACL; no root). It reads only while
+the frontend asks:
+
+- in a call: the chosen push-to-talk grip, held or not; and whether ANY
+  control is being touched or pressed, never which, so that Púca's AFK move
+  does not take a player out of the call mid-game (docs/EMBEDDING.md,
+  idleSeconds);
+- while the person chooses a push-to-talk button: which back grip they press
+  next.
+
+Nothing leaves this module but "held", "released", "in use" and a grip's name.
 
 The layout is the Linux driver's (drivers/hid/hid-steam.c,
 steam_deck_button_mappings). Every message is 64 bytes and starts 01 00, with
@@ -20,6 +28,10 @@ its type in byte 2; type 0x09 is the Deck's input state, where the grips are
 
     L4 (left top)    byte 13 bit 1        R4 (right top)    byte 13 bit 2
     L5 (left lower)  byte  9 bit 7        R5 (right lower)  byte 10 bit 0
+
+and "in use" means any button that table names, or the capacitive touch of a
+stick or a trackpad (a player's thumbs rest there). Bits it lists as unknown
+are left out.
 
 The controller streams that state 250 times a second, held or not (measured:
 one node of the three, a frame counter stepping by 1). hidraw gives every
@@ -39,19 +51,46 @@ REPORT_SIZE = 64
 DECK_STATE = 0x09
 BUTTON_BITS = {"L4": (13, 1), "R4": (13, 2), "L5": (9, 7), "R5": (10, 0)}
 BUTTONS = tuple(BUTTON_BITS)
+# (byte, mask) of every control counted as "in use". hid-steam.c names all of
+# byte 8 (the triggers' clicks, the bumpers, A B X Y) and byte 9 (the d-pad,
+# View, Steam, Menu, L5); in byte 10 R5, both pad clicks, both pad touches and
+# L3 (bits 5 and 7 unknown); in byte 11 R3; in byte 13 L4, R4 and both stick
+# touches; in byte 14 the Quick Access button.
+CONTROL_MASKS = ((8, 0xFF), (9, 0xFF), (10, 0x5F), (11, 0x04), (13, 0xC6), (14, 0x04))
 
-HEARTBEAT_S = 0.5  # "still held", while held: Púca lets go 1.5 s after the last one
-STALE_S = 1.0      # no state for this long (the stream runs every 4 ms): the controller is gone
-RESCAN_S = 2.0     # look for the controller again this often while running (a suspend replaces it)
+HEARTBEAT_S = 0.5   # "still held", while held: Púca lets go 1.5 s after the last one
+STALE_S = 1.0       # no state for this long (the stream runs every 4 ms): the controller is gone
+RESCAN_S = 2.0      # look for the controller again this often while running (a suspend replaces it)
+PRESENCE_S = 10.0   # "in use", at most this often while it goes on
+
+
+def deck_state(report: bytes) -> bool:
+    """Is this message the Deck's input state?"""
+    return len(report) == REPORT_SIZE and report[0] == 0x01 and report[1] == 0x00 and report[2] == DECK_STATE
 
 
 def button_held(report: bytes, button: str) -> bool | None:
-    """The chosen button in one controller message: True or False for the
+    """The chosen grip in one controller message: True or False for the
     Deck's input state, None for any other message."""
-    if len(report) != REPORT_SIZE or report[0] != 0x01 or report[1] != 0x00 or report[2] != DECK_STATE:
+    if not deck_state(report):
         return None
     byte, bit = BUTTON_BITS[button]
     return bool(report[byte] >> bit & 1)
+
+
+def grips_held(report: bytes) -> frozenset[str] | None:
+    """The back grips held in one message, None for any other message."""
+    if not deck_state(report):
+        return None
+    return frozenset(name for name, (byte, bit) in BUTTON_BITS.items() if report[byte] >> bit & 1)
+
+
+def controls_in_use(report: bytes) -> bool | None:
+    """Is any control touched or pressed? (Which one is not kept.) None for
+    any other message."""
+    if not deck_state(report):
+        return None
+    return any(report[byte] & mask for byte, mask in CONTROL_MASKS)
 
 
 def deck_controller_nodes(sys_class: str = "/sys/class/hidraw", dev: str = "/dev") -> list[str]:
@@ -71,6 +110,14 @@ def deck_controller_nodes(sys_class: str = "/sys/class/hidraw", dev: str = "/dev
         if f"HID_ID={DECK_HID_ID}" in lines:
             found.append(os.path.join(dev, name))
     return found
+
+
+def _deliver(fn: Callable[..., Any], *args: Any) -> None:
+    """Call a callback that may be a coroutine function (decky.emit is)."""
+    result = fn(*args)
+    if inspect.isawaitable(result):
+        # A frontend that is not listening is not an error here.
+        asyncio.ensure_future(result).add_done_callback(lambda t: t.cancelled() or t.exception())
 
 
 class HidrawIO:
@@ -105,25 +152,35 @@ class HidrawIO:
         return time.monotonic()
 
 
-class ButtonWatch:
-    """One back button, followed on every node of the Deck's controller.
+class InputWatch:
+    """The Deck's controls during a call, followed on every node of its
+    controller.
 
-    emit(True) when it goes down and every HEARTBEAT_S while it stays down;
-    emit(False) when it comes up, when the controller stops reporting, and on
-    stop(). The frontend lets go by itself when the heartbeat stops, so no
-    failure here can leave a microphone transmitting."""
+    - Push to talk (`button`, or None for none): emit_button(True) when it
+      goes down and every HEARTBEAT_S while it stays down; emit_button(False)
+      when it comes up, when the controller stops reporting, and on stop().
+      The frontend lets go by itself when the heartbeat stops, so no failure
+      here can leave a microphone transmitting.
+    - Presence: emit_presence() when any control is in use, at once and then
+      at most every PRESENCE_S while it goes on.
+    """
 
-    def __init__(self, button: str, emit: Callable[[bool], Any], io: Any = None,
-                 heartbeat_s: float = HEARTBEAT_S, stale_s: float = STALE_S, rescan_s: float = RESCAN_S) -> None:
-        if button not in BUTTON_BITS:
+    def __init__(self, button: str | None, emit_button: Callable[[bool], Any],
+                 emit_presence: Callable[[], Any] | None = None, io: Any = None,
+                 heartbeat_s: float = HEARTBEAT_S, stale_s: float = STALE_S,
+                 rescan_s: float = RESCAN_S, presence_s: float = PRESENCE_S) -> None:
+        if button is not None and button not in BUTTON_BITS:
             raise ValueError(f"unknown button {button!r}")
         self.button = button
-        self._emit = emit
+        self._emit = emit_button
+        self._emit_presence = emit_presence
         self.io = io if io is not None else HidrawIO()
-        self.heartbeat_s, self.stale_s, self.rescan_s = heartbeat_s, stale_s, rescan_s
+        self.heartbeat_s, self.stale_s = heartbeat_s, stale_s
+        self.rescan_s, self.presence_s = rescan_s, presence_s
         self._fds: dict[str, Any] = {}
         self._held: set[str] = set()
         self._last_state = 0.0
+        self._presence_at: float | None = None
         self._beat: Any = None
         self._rescan: Any = None
         self.running = False
@@ -193,7 +250,9 @@ class ButtonWatch:
         fd = self._fds.get(path)
         if fd is None:
             return
+        seen = False
         state = None
+        in_use = False
         while True:
             try:
                 report = self.io.read(fd)
@@ -205,14 +264,22 @@ class ButtonWatch:
             if not report:
                 self._drop(path)
                 return
-            held = button_held(report, self.button)
-            if held is not None:
-                state = held
+            if not deck_state(report):
+                continue
+            seen = True
+            if self.button is not None:
+                state = button_held(report, self.button)
+            if controls_in_use(report):
+                in_use = True
+        if not seen:
+            return
+        self._last_state = self.io.now()
         if state is not None:
-            self._last_state = self.io.now()
             self._set(path, state)
+        if in_use:
+            self._presence()
 
-    # ---- Held / released ---------------------------------------------------------
+    # ---- Held / released, in use -------------------------------------------------
 
     def _set(self, path: str, held: bool) -> None:
         was = bool(self._held)
@@ -221,13 +288,13 @@ class ButtonWatch:
         else:
             self._held.discard(path)
         if self._held and not was:
-            self._send(True)
+            _deliver(self._emit, True)
             self._beat = self.io.later(self.heartbeat_s, self._tick)
         elif was and not self._held:
             if self._beat is not None:
                 self._beat.cancel()
                 self._beat = None
-            self._send(False)
+            _deliver(self._emit, False)
 
     def _tick(self) -> None:
         self._beat = None
@@ -239,11 +306,88 @@ class ButtonWatch:
             for path in list(self._held):
                 self._set(path, False)
             return
-        self._send(True)
+        _deliver(self._emit, True)
         self._beat = self.io.later(self.heartbeat_s, self._tick)
 
-    def _send(self, held: bool) -> None:
-        result = self._emit(held)
-        if inspect.isawaitable(result):
-            # A frontend that is not listening is not an error here.
-            asyncio.ensure_future(result).add_done_callback(lambda t: t.cancelled() or t.exception())
+    def _presence(self) -> None:
+        if self._emit_presence is None:
+            return
+        now = self.io.now()
+        if self._presence_at is not None and now - self._presence_at < self.presence_s:
+            return
+        self._presence_at = now
+        _deliver(self._emit_presence)
+
+
+class GripLearner:
+    """Which back grip the person presses next: for choosing the push-to-talk
+    button by pressing it instead of by its name. R4 and R5 are easy to mix
+    up; in testing, "R4" was R5 every time. A grip already held when this
+    starts does not count until it is let go and pressed again.
+    on_learned(name) is called once."""
+
+    def __init__(self, on_learned: Callable[[str], Any], io: Any = None) -> None:
+        self._on_learned = on_learned
+        self.io = io if io is not None else HidrawIO()
+        self._fds: dict[str, Any] = {}
+        self._before: dict[str, frozenset[str]] = {}
+        self.done = False
+
+    def start(self) -> str | None:
+        """Open the controller: None, or what the panel can say
+        ("no-controller", "no-access")."""
+        denied = False
+        for path in self.io.nodes():
+            try:
+                fd = self.io.open(path)
+            except PermissionError:
+                denied = True
+                continue
+            except OSError:
+                continue
+            self._fds[path] = fd
+            self.io.watch(fd, lambda p=path: self._readable(p))
+        if self._fds:
+            return None
+        return "no-access" if denied else "no-controller"
+
+    def stop(self) -> None:
+        for path in list(self._fds):
+            self._drop(path)
+
+    def _drop(self, path: str) -> None:
+        fd = self._fds.pop(path, None)
+        if fd is None:
+            return
+        self.io.unwatch(fd)
+        try:
+            self.io.close(fd)
+        except OSError:
+            pass
+
+    def _readable(self, path: str) -> None:
+        fd = self._fds.get(path)
+        if fd is None:
+            return
+        while not self.done:
+            try:
+                report = self.io.read(fd)
+            except OSError:
+                self._drop(path)
+                return
+            if report is None:
+                return
+            if not report:
+                self._drop(path)
+                return
+            held = grips_held(report)
+            if held is None:
+                continue
+            before = self._before.get(path)
+            self._before[path] = held
+            if before is None:
+                continue  # the first state is where it starts from
+            pressed = held - before
+            if pressed:
+                self.done = True
+                _deliver(self._on_learned, sorted(pressed)[0])

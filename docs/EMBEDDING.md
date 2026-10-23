@@ -29,6 +29,7 @@ window.__PUCA_EMBED_HOST__ = {
   notify(notification) {},          // optional: shows notifications
   onStateChange(state) {},          // optional: receives the state below
   isForeground() {},                // optional: is the app on screen?
+  idleSeconds() {},                 // optional: how long since the person used the device?
 };
 ```
 
@@ -112,6 +113,29 @@ due. A hidden Steam browser view reports `document.hasFocus()` as true all
 the time, which alone would hold every notification back. A host that cannot
 answer (missing, or throwing) falls back to the page's own focus.
 
+### `idleSeconds() → number | null` (may return a Promise)
+
+This answers "how many seconds since the person last used the device?" for
+input the page itself never receives. The app's move to the AFK channel uses
+it where the desktop app uses the system's idle time. Rules:
+
+- **Who is idle.** By Discord's rules: someone who has neither spoken nor
+  touched anything for the server's AFK time is moved. Someone playing a game
+  is not.
+- **Why a host must answer.** A page in a hidden view sees no input while its
+  person plays. Without an answer, a player who only listens is moved
+  mid-game. Púca for Steam Deck answers from the Deck's own controls: whether
+  any is touched or pressed, never which.
+- **Page input still counts.** Input inside the page (typing in the full view)
+  counts as well; the more recent of the two decides.
+- **No answer.** `null` means "cannot tell right now": the app falls back to
+  input inside the page alone, as in a browser tab.
+- **Errors.** A function that throws, or answers anything but a finite
+  number ≥ 0, is treated like a failed desktop probe. The app waits a whole
+  window again rather than move someone who may be there.
+- **Desktop.** The desktop app's own probe is used instead whenever it has
+  one.
+
 ### `onStateChange(state)`
 
 The app calls this with the state snapshot below whenever it changes.
@@ -141,6 +165,7 @@ Every command goes through the same code as the app's own controls:
 | `setInputMode('open' \| 'pushToTalk' \| 'pushToMute')` | `boolean` | Saves **Settings → Voice & Video → Input mode** for this device. |
 | `holdPushToTalk(held)` | `boolean` (an action was held) | The host's push-to-talk button. See below. |
 | `activateNotification(id)` | `boolean` | The person tapped notification `id`. |
+| `downloadSite()` | `Promise<string \| null>` | The server's download site: the origin of `download_url` in its `/app-version`, read fresh, or `null` when it publishes none. A host looks for its own updates there, so the address comes from the server the person uses. |
 
 ### Push-to-talk is a lease
 

@@ -98,7 +98,8 @@ import { getFileUrl } from '../api/uploads';
 import { isBlocked } from './blockStore';
 import { hasLiveVideo } from '../utils/mediaLiveness';
 import { ShareAnnouncements } from '../utils/shareAnnouncements';
-import { decideAfk, DEFAULT_AFK_TIMEOUT_MS } from '../utils/afkIdle';
+import { combineHostIdle, decideAfk, DEFAULT_AFK_TIMEOUT_MS } from '../utils/afkIdle';
+import { hostIdleSeconds, hostReportsIdle } from '../api/embedHost';
 import { PendingJoins, JOIN_PRESENT_GRACE_MS, JOIN_ANNOUNCE_TIMEOUT_MS, PENDING_JOIN_POLL_MS } from '../utils/pendingJoins';
 import { shouldTearDownDepartedPeer } from '../utils/departedPeer';
 import { getLocalUserVolumes, getLocalUserMutes } from './userVolumeStore';
@@ -630,6 +631,14 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         const { invoke } = await import('@tauri-apps/api/core');
                         const idleSecs = await invoke<number>('get_idle_seconds');
                         if (idleSecs >= 0) osIdleSecs = idleSecs;
+                    } catch { arm(timeoutMs); return; }
+                } else if (hostReportsIdle()) {
+                    // An embedding host sees input this page never does: on a
+                    // Steam Deck the player's input goes to the game and the
+                    // Deck's controls, and the hidden page sees none of it.
+                    // Same fail-open on an error as the desktop probe.
+                    try {
+                        osIdleSecs = combineHostIdle(await hostIdleSeconds(), lastAppInputRef.current, Date.now());
                     } catch { arm(timeoutMs); return; }
                 }
                 const d = decideAfk({

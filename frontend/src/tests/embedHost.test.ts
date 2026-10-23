@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
-    activateHostNotification, embedHost, getUserMediaForMic, hostMicrophone, hostSaysForeground,
-    hostShowsNotifications, notifyHost, resetEmbedHostForTest, type EmbedNotification,
+    activateHostNotification, embedHost, getUserMediaForMic, hostIdleSeconds, hostMicrophone, hostReportsIdle,
+    hostSaysForeground, hostShowsNotifications, notifyHost, resetEmbedHostForTest, type EmbedNotification,
 } from '../api/embedHost';
 import { notifyNewMessage, sendTestNotification } from '../api/desktopNotify';
 import { loadSettings } from '../components/settingsStore';
@@ -248,5 +248,40 @@ describe('a host that shows notifications', () => {
         expect(() => notifyNewMessage({ title: 'z', isOwn: false, isMuted: false })).not.toThrow();
         expect(notify).toHaveBeenCalledTimes(1);
         warn.mockRestore();
+    });
+});
+
+describe('a host that says how long the person has been away (the AFK move)', () => {
+    it('is not asked for at all without a host, or a host that does not say', async () => {
+        expect(hostReportsIdle()).toBe(false);
+        expect(await hostIdleSeconds()).toBeNull();
+        declare({ apiVersion: 1, name: 'Deck' });
+        expect(hostReportsIdle()).toBe(false);
+        expect(await hostIdleSeconds()).toBeNull();
+    });
+
+    it('passes the seconds through, sync or async, from the object that declared them', async () => {
+        const host = { apiVersion: 1, name: 'Deck', last: 42, idleSeconds(this: { last: number }) { return this.last; } };
+        declare(host);
+        expect(hostReportsIdle()).toBe(true);
+        expect(await hostIdleSeconds()).toBe(42);
+        declare({ apiVersion: 1, name: 'Deck', idleSeconds: async () => 0 });
+        expect(await hostIdleSeconds()).toBe(0);
+    });
+
+    it('takes "cannot tell right now" as no answer, which leaves the in-app path', async () => {
+        declare({ apiVersion: 1, name: 'Deck', idleSeconds: () => null });
+        expect(await hostIdleSeconds()).toBeNull();
+        declare({ apiVersion: 1, name: 'Deck', idleSeconds: () => undefined });
+        expect(await hostIdleSeconds()).toBeNull();
+    });
+
+    it('refuses an answer that is not a number of seconds, and a host that throws: the check waits instead', async () => {
+        for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY, '30', {}]) {
+            declare({ apiVersion: 1, name: 'Deck', idleSeconds: () => bad });
+            await expect(hostIdleSeconds()).rejects.toThrow(TypeError);
+        }
+        declare({ apiVersion: 1, name: 'Deck', idleSeconds: () => { throw new Error('boom'); } });
+        await expect(hostIdleSeconds()).rejects.toThrow('boom');
     });
 });

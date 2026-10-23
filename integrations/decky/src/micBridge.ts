@@ -9,8 +9,12 @@
  * A capture lives exactly as long as Púca wants it: until the page releases
  * it (Púca stopped the track), the connection fails or closes, the page goes
  * away, or the plugin unloads. `count` says how many are open, so the Quick
- * Access panel can show when the microphone is in use.
+ * Access panel can show when the microphone is in use. `silent` says whether
+ * one is delivering only digital silence (a muted or zeroed system
+ * microphone, micSilence.ts), read from the bridge's own sender statistics:
+ * a level, never the audio.
  */
+import { SilenceVerdict } from './micSilence';
 import type { MicConstraints } from './protocol';
 
 export interface MicAnswer {
@@ -22,6 +26,8 @@ interface Capture {
     pc: RTCPeerConnection;
     stream: MediaStream | null;
     timer: ReturnType<typeof setTimeout> | null;
+    levels: ReturnType<typeof setInterval> | null;
+    verdict: SilenceVerdict;
 }
 
 /** How long a bridge may take to connect before it is given up. */
@@ -29,9 +35,12 @@ const CONNECT_TIMEOUT_MS = 15000;
 /** How long a disconnected bridge may take to come back. */
 const DISCONNECT_GRACE_MS = 5000;
 const MAX_CAPTURES = 4;
+/** How often each capture's level is read for the silence verdict. */
+const LEVEL_CHECK_MS = 2000;
 
 export class MicBridge {
     private captures = new Map<string, Capture>();
+    private wasSilent = false;
 
     constructor(
         private sendAnswer: (id: string, reply: MicAnswer) => Promise<void>,
@@ -40,10 +49,16 @@ export class MicBridge {
         /** Opens the microphone; a test hands in a synthetic source instead. */
         private capture: (constraints: MediaStreamConstraints) => Promise<MediaStream>
             = c => navigator.mediaDevices.getUserMedia(c),
+        /** Whether any open capture is delivering only digital silence. */
+        private onSilenceChange: (silent: boolean) => void = () => {},
     ) {}
 
     get count(): number {
         return [...this.captures.values()].filter(c => c.stream).length;
+    }
+
+    get silent(): boolean {
+        return [...this.captures.values()].some(c => c.stream && c.verdict.isSilent);
     }
 
     async request(id: string, constraints: MicConstraints, offer: { type: 'offer'; sdp: string }): Promise<void> {
@@ -53,7 +68,7 @@ export class MicBridge {
             return;
         }
         const pc = new RTCPeerConnection({ iceServers: [] });
-        const capture: Capture = { pc, stream: null, timer: null };
+        const capture: Capture = { pc, stream: null, timer: null, levels: null, verdict: new SilenceVerdict() };
         this.captures.set(id, capture);
         let stream: MediaStream;
         try {
@@ -112,6 +127,7 @@ export class MicBridge {
         const state = pc.connectionState;
         if (state === 'connected') {
             if (c.timer) { clearTimeout(c.timer); c.timer = null; }
+            if (!c.levels) c.levels = setInterval(() => { void this.checkLevel(id, pc); }, LEVEL_CHECK_MS);
         } else if (state === 'failed' || state === 'closed') {
             this.release(id);
         } else if (state === 'disconnected') {
@@ -122,16 +138,50 @@ export class MicBridge {
         }
     }
 
+    /** One reading of the capture's level (its sender's media-source stats). */
+    private async checkLevel(id: string, pc: RTCPeerConnection): Promise<void> {
+        const c = this.captures.get(id);
+        if (!c || c.pc !== pc) return;
+        let source: { totalAudioEnergy: number; totalSamplesDuration: number } | null = null;
+        try {
+            const stats = await pc.getStats();
+            for (const r of stats.values() as IterableIterator<Record<string, unknown>>) {
+                if (r.type === 'media-source' && r.kind === 'audio'
+                    && typeof r.totalAudioEnergy === 'number' && typeof r.totalSamplesDuration === 'number') {
+                    source = { totalAudioEnergy: r.totalAudioEnergy, totalSamplesDuration: r.totalSamplesDuration };
+                }
+            }
+        } catch {
+            return; // closing: nothing to judge
+        }
+        if (!source || this.captures.get(id) !== c) return;
+        if (c.verdict.update(source.totalAudioEnergy, source.totalSamplesDuration) !== null) this.reportSilence();
+    }
+
+    private reportSilence(): void {
+        const silent = this.silent;
+        if (silent === this.wasSilent) return;
+        this.wasSilent = silent;
+        if (silent) this.log('the microphone is delivering only digital silence (muted or turned all the way down)');
+        this.onSilenceChange(silent);
+    }
+
     /** Close one capture: the microphone goes off when the last one closes. */
     release(id: string): void {
-        if (this.drop(id)) this.onCountChange(this.count);
+        if (this.drop(id)) {
+            this.onCountChange(this.count);
+            this.reportSilence();
+        }
     }
 
     /** Close every capture (the page went away, or the plugin unloads). */
     releaseAll(): void {
         let any = false;
         for (const id of [...this.captures.keys()]) any = this.drop(id) || any;
-        if (any) this.onCountChange(this.count);
+        if (any) {
+            this.onCountChange(this.count);
+            this.reportSilence();
+        }
     }
 
     private drop(id: string): boolean {
@@ -139,6 +189,7 @@ export class MicBridge {
         if (!c) return false;
         this.captures.delete(id);
         if (c.timer) clearTimeout(c.timer);
+        if (c.levels) clearInterval(c.levels);
         c.stream?.getTracks().forEach(t => t.stop());
         try { c.pc.close(); } catch { /* already closed */ }
         return true;

@@ -11,9 +11,12 @@ import { createElement } from 'react';
 import { PucaBrowserView } from './browserView';
 import { PucaIcon } from './components/icons';
 import { MicBridge, type MicAnswer } from './micBridge';
+import { SilentNotice } from './micSilence';
 import { HoldFollower } from './ptt';
 import { readPageMessage, readState, readVoiceChannels, type EmbedState, type EmbedVoiceChannel, type PageNotification } from './protocol';
-import { DEFAULT_SETTINGS, normalizeAppUrl, readSettings, type PluginSettings, type PushToTalkButton } from './settings';
+import {
+    DEFAULT_SETTINGS, normalizeAppUrl, PUSH_TO_TALK_BUTTONS, readSettings, type PluginSettings, type PushToTalkButton,
+} from './settings';
 
 export const FULL_VIEW_ROUTE = '/puca';
 
@@ -41,13 +44,20 @@ export interface Snapshot {
     state: EmbedState | null;
     /** The Deck's microphone is open for Púca. */
     micOn: boolean;
+    /** It is delivering only digital silence: muted, or turned all the way
+     *  down in Steam's Settings → Audio (micSilence.ts). */
+    micSilent: boolean;
     /** The push-to-talk button is held. */
     talking: boolean;
-    /** Why push-to-talk cannot read the controller ("no-controller",
-     *  "no-access", or the backend's error), while it is trying to. */
+    /** Why the Deck's controls cannot be read ("no-controller", "no-access",
+     *  or the backend's error), while a call is trying to. */
     pttError: string | null;
     viewOpen: boolean;
 }
+
+/** What learnButton found: the back button pressed, none in time, or why
+ *  the controller cannot be read. */
+export type LearnResult = { button: PushToTalkButton } | { button: null } | { error: string };
 
 type CallResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
@@ -59,6 +69,10 @@ const RETRY_MAX_MS = 60000;
 /** A page that has not said it is Púca by then (an error page, a captive
  *  portal, a server that is down) is reported, not waited on forever. */
 const LOAD_TIMEOUT_MS = 30000;
+/** A join that finds Púca still starting (a reload) waits this long for it. */
+const JOIN_WAIT_MS = 8000;
+/** How long Settings waits for a back button to be pressed. */
+const LEARN_TIMEOUT_S = 15;
 
 const randomId = (): string => {
     const a = new Uint8Array(12);
@@ -69,7 +83,7 @@ const randomId = (): string => {
 class Controller {
     private snap: Snapshot = {
         phase: 'starting', error: null, settings: DEFAULT_SETTINGS, state: null,
-        micOn: false, talking: false, pttError: null, viewOpen: false,
+        micOn: false, micSilent: false, talking: false, pttError: null, viewOpen: false,
     };
     private listeners = new Set<() => void>();
     private view = new PucaBrowserView();
@@ -77,17 +91,21 @@ class Controller {
         (id, reply) => this.answerMic(id, reply),
         count => this.update({ micOn: count > 0 }),
         line => console.log(`[Púca] ${line}`),
+        undefined,
+        silent => this.update({ micSilent: silent }),
     );
+    private silentNotice = new SilentNotice();
     // Push-to-talk: Púca's hold follows the backend's "puca_button" signal.
     private hold = new HoldFollower({
         down: () => { this.update({ talking: true }); void this.pageCall('holdPushToTalk', [true]); },
         renew: () => { void this.pageCall('holdPushToTalk', [true]); },
         up: () => { this.update({ talking: false }); void this.pageCall('holdPushToTalk', [false]); },
     });
-    /** The button the backend is following now, if any. */
-    private watching: PushToTalkButton | null = null;
+    /** What the backend is following during a call: the push-to-talk button,
+     *  or 'none' (presence only); null outside a call. */
+    private watching: PushToTalkButton | 'none' | null = null;
     private watchSeq = 0;
-    private onButton = (held: unknown) => { if (this.watching) this.hold.signal(held); };
+    private onButton = (held: unknown) => { if (this.watching && this.watching !== 'none') this.hold.signal(held); };
     private retryTimer: ReturnType<typeof setTimeout> | null = null;
     private loadTimer: ReturnType<typeof setTimeout> | null = null;
     private bootSeq = 0;
@@ -108,7 +126,8 @@ class Controller {
     private update(patch: Partial<Snapshot>): void {
         this.snap = { ...this.snap, ...patch };
         this.listeners.forEach(fn => fn());
-        this.syncButtonWatch();
+        this.syncInputWatch();
+        this.syncSilentNotice();
     }
 
     // ---- Life cycle ------------------------------------------------------------
@@ -142,8 +161,9 @@ class Controller {
         if (this.watching) {
             this.watching = null;
             this.watchSeq++;
-            void call('unwatch_button').catch(() => {});
+            void call('unwatch_input').catch(() => {});
         }
+        void call('cancel_learn').catch(() => {});
         this.bridge.releaseAll();
         this.view.destroy();
         void call('detach').catch(() => {});
@@ -261,9 +281,27 @@ class Controller {
     async join(serverId: string, channelId: number): Promise<string | null> {
         // A join starts call audio: let the page play it as after a click.
         this.view.activate();
-        const r = await this.pageCall<{ ok: boolean; error?: string }>('joinVoice', [serverId, channelId]);
-        if (!r.ok) return r.error;
+        let r = await this.pageCall<{ ok: boolean; error?: string }>('joinVoice', [serverId, channelId]);
+        if (!r.ok && r.error === 'unsupported') {
+            // Púca is between pages (a reload): its control API comes back
+            // with it. Wait for that, then try once more.
+            if (await this.untilPageAnswers(JOIN_WAIT_MS)) {
+                r = await this.pageCall<{ ok: boolean; error?: string }>('joinVoice', [serverId, channelId]);
+            }
+        }
+        if (!r.ok) return r.error === 'unsupported' ? 'Púca is still starting. Try again in a moment.' : r.error;
         return r.value?.ok ? null : (r.value?.error ?? 'could not join');
+    }
+
+    /** Wait until the page's control API answers again, up to ms. */
+    private async untilPageAnswers(ms: number): Promise<boolean> {
+        const until = Date.now() + ms;
+        while (Date.now() < until) {
+            const r = await this.pageCall('getState');
+            if (r.ok) return true;
+            await new Promise(res => setTimeout(res, 400));
+        }
+        return false;
     }
 
     leave(): void {
@@ -394,29 +432,65 @@ class Controller {
         });
     }
 
-    // ---- Push-to-talk on a back button ------------------------------------------------
+    // ---- The microphone's level --------------------------------------------------------
+
+    /** A muted or zeroed system microphone sends silence while everything
+     *  else looks fine. The panel says so (Snapshot.micSilent); this pops it
+     *  up over the game when the person is trying to be heard (micSilence.ts). */
+    private syncSilentNotice(): void {
+        if (!this.silentNotice.update(this.snap.micSilent, this.snap.state?.call ?? null, Date.now())) return;
+        toaster.toast({
+            title: "Your Deck's microphone is muted",
+            body: "Nobody can hear you. Turn the microphone up in Steam's Settings, Audio.",
+            logo: createElement(PucaIcon, { size: 40 }),
+            playSound: this.snap.settings.notificationSound,
+        });
+    }
+
+    // ---- The Deck's controls: push-to-talk, presence ------------------------------------
 
     /**
-     * The backend reads the controller only while push-to-talk can matter: a
-     * button is chosen and Púca is in (or joining) a call. Runs on every
-     * snapshot change; does nothing unless the answer changed.
+     * The backend reads the controls only during a call: the push-to-talk
+     * button when one is chosen, and always whether they are in use, which
+     * keeps a player out of Púca's AFK move. Runs on every snapshot change;
+     * does nothing unless the answer changed.
      */
-    private syncButtonWatch(): void {
+    private syncInputWatch(): void {
         const choice = this.snap.settings.pushToTalk;
-        const want = this.started && choice !== 'off' && this.snap.state?.call ? choice : null;
+        const want = this.started && this.snap.state?.call ? (choice === 'off' ? 'none' : choice) : null;
         if (want === this.watching) return;
         this.watching = want;
         this.hold.reset();
         const seq = ++this.watchSeq;
         if (want === null) {
-            void call('unwatch_button').catch(() => {});
+            void call('unwatch_input').catch(() => {});
             if (this.snap.pttError !== null) this.update({ pttError: null });
             return;
         }
-        void call<[string], CallResult<string | null>>('watch_button', want).then(
+        void call<[string | null], CallResult<string | null>>('watch_input', want === 'none' ? null : want).then(
             r => { if (seq === this.watchSeq) this.update({ pttError: r.ok ? r.value : r.error }); },
             err => { if (seq === this.watchSeq) this.update({ pttError: String((err as Error)?.message ?? err) }); },
         );
+    }
+
+    /** Settings: the back button the person presses next becomes push to
+     *  talk. Choosing by pressing, because R4 and R5 are easy to mix up. */
+    async learnButton(): Promise<LearnResult> {
+        let r: CallResult<string | null>;
+        try {
+            r = await call<[number], CallResult<string | null>>('learn_button', LEARN_TIMEOUT_S);
+        } catch (err) {
+            return { error: String((err as Error)?.message ?? err) };
+        }
+        if (!r.ok) return { error: r.error };
+        const button = PUSH_TO_TALK_BUTTONS.find(b => b !== 'off' && b === r.value);
+        if (!button || button === 'off') return { button: null };
+        await this.saveSettings({ pushToTalk: button });
+        return { button };
+    }
+
+    cancelLearn(): void {
+        void call('cancel_learn').catch(() => {});
     }
 }
 

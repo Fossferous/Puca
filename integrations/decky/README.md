@@ -15,7 +15,8 @@ plugin's own.
 - **`src/` (frontend, Steam's own page).**
   - Creates the view (`browserView.ts`).
   - Draws the Quick Access panel and the `/puca` full view (`components/`).
-  - Opens the microphone (`micBridge.ts`).
+  - Opens the microphone (`micBridge.ts`), and notices when it delivers only
+    digital silence: a muted or zeroed system microphone (`micSilence.ts`).
   - Turns the backend's back-button signal into Púca's push-to-talk hold
     (`ptt.ts`).
   - Turns notifications into Steam toasts (`controller.ts`).
@@ -25,8 +26,11 @@ plugin's own.
     address.
   - Relays between page and frontend. Only messages from Púca's own main-frame
     page are accepted (`puca_cdp.PucaPage`).
-  - Reads the push-to-talk button from the Deck's controller
-    (`puca_buttons.py`).
+  - Reads the Deck's controls during a call (`puca_buttons.py`): the
+    push-to-talk button, and whether any control is in use, which it tells
+    the page so Púca's AFK move does not take a player out of the call
+    (`idleSeconds`, docs/EMBEDDING.md). In Settings, it reports which back
+    button is pressed, so push to talk is chosen by pressing it.
   - Stores the plugin's four settings.
 - **`src/shim/pageShim.ts` (inside the Púca page).** Built separately into
   `dist/page-shim.js`.

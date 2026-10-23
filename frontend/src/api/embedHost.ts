@@ -13,13 +13,16 @@
  * on first use, and its functions are copied out, so a script that runs later
  * can neither opt the page in nor swap a host function.
  *
- * This file holds what the rest of the app asks of a host: the microphone and
- * notifications. Steam's browser refuses getUserMedia to every site that is
- * not Steam's own (measured on a Deck, 2026-10-22: NotAllowedError in a
- * browser view, in an iframe, and with a DevTools permission grant), so the
- * plugin opens the microphone in Steam's own context and hands the page the
- * track. And there is no notification prompt to answer there, so
- * notifications go to the host, which shows them as Steam toasts.
+ * This file holds what the rest of the app asks of a host: the microphone,
+ * notifications and presence. Steam's browser refuses getUserMedia to every
+ * site that is not Steam's own (measured on a Deck, 2026-10-22:
+ * NotAllowedError in a browser view, in an iframe, and with a DevTools
+ * permission grant), so the plugin opens the microphone in Steam's own
+ * context and hands the page the track. There is no notification prompt to
+ * answer there, so notifications go to the host, which shows them as Steam
+ * toasts. And the page never sees the person play (their input goes to the
+ * game and the Deck's controls), so the host says how long they have been
+ * away, or Púca's AFK move would take a player out of the call mid-game.
  */
 
 export const EMBED_API_VERSION = 1;
@@ -47,6 +50,11 @@ export interface EmbedHost {
     onStateChange?: (state: unknown) => void;
     /** Is the app on screen? Decides whether a notification is due. */
     isForeground?: () => boolean;
+    /** Seconds since the person last used the device, as the host sees it:
+     *  input the page itself never receives (Púca for Steam Deck reads the
+     *  Deck's own controls). Null when the host cannot tell right now. The
+     *  AFK move uses it as the desktop app uses the system's idle time. */
+    idleSeconds?: () => number | null | Promise<number | null>;
 }
 
 let resolved: EmbedHost | null | undefined;
@@ -82,6 +90,7 @@ function readDeclaration(): EmbedHost | null {
         notify: bound<EmbedHost['notify']>(o.notify),
         onStateChange: bound<EmbedHost['onStateChange']>(o.onStateChange),
         isForeground: bound<EmbedHost['isForeground']>(o.isForeground),
+        idleSeconds: bound<EmbedHost['idleSeconds']>(o.idleSeconds),
     });
     console.log(`[embed] running inside ${host.name}`);
     return host;
@@ -161,6 +170,33 @@ export function hostSaysForeground(): boolean | null {
     } catch {
         return null;
     }
+}
+
+// ---- Presence --------------------------------------------------------------
+
+/** Whether the host can tell how long the person has been away from the
+ *  device. The AFK check (VoicePanel) asks it where the desktop app asks the
+ *  operating system. */
+export function hostReportsIdle(): boolean {
+    return !!embedHost()?.idleSeconds;
+}
+
+/**
+ * Seconds since the person last used the device, by the host's answer, or null
+ * when there is no host that says or it cannot tell right now. Throws when the
+ * host's function throws or answers something that is not a number of seconds:
+ * the AFK check treats that as a failed probe and waits a whole window again,
+ * because moving someone who is there is the worse mistake.
+ */
+export async function hostIdleSeconds(): Promise<number | null> {
+    const h = embedHost();
+    if (!h?.idleSeconds) return null;
+    const v = await h.idleSeconds();
+    if (v === null || v === undefined) return null;
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+        throw new TypeError(`${h.name} answered idleSeconds with ${String(v)}`);
+    }
+    return v;
 }
 
 /** Hand a notification to the host. False when there is no host that shows

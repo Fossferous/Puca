@@ -44,6 +44,20 @@
  *    observe has been silent for the whole window.
  */
 
+/**
+ * The idle to judge by when an embedding host reports one (docs/EMBEDDING.md,
+ * `idleSeconds`). The host sees input this page never does: Púca for Steam
+ * Deck reads the Deck's own controls, where a player's input goes. Input
+ * inside the page still counts (typing in the full view), so the more recent
+ * of the two decides. The result is used where the desktop app uses the
+ * system's idle time; null (the host cannot tell) leaves the in-app path.
+ */
+export function combineHostIdle(hostIdleSecs: number | null, lastAppInputMs: number | null, nowMs: number): number | null {
+    if (hostIdleSecs === null) return null;
+    const appIdleSecs = lastAppInputMs === null ? Infinity : Math.max(0, (nowMs - lastAppInputMs) / 1000);
+    return Math.min(hostIdleSecs, appIdleSecs);
+}
+
 /** Discord's five AFK-timeout choices, in minutes. */
 export const AFK_TIMEOUT_CHOICES_MIN = [1, 5, 15, 30, 60] as const;
 

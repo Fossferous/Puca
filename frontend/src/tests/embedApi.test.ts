@@ -274,3 +274,31 @@ describe('installing', () => {
         expect(() => { (window as Win).pucaEmbed = {}; }).toThrow();
     });
 });
+
+describe('downloadSite: where a host looks for its own updates', () => {
+    beforeEach(() => declareHost());
+    afterEach(() => { vi.unstubAllGlobals(); });
+
+    const answer = (status: number, body: unknown) => vi.fn(async (..._args: unknown[]) => new Response(JSON.stringify(body), { status }));
+
+    it("answers the origin of the server's download_url, read fresh from its /app-version", async () => {
+        const fetchMock = answer(200, { version: '0.9.846', download_url: 'https://downloads.example.org/some/page?x=1' });
+        vi.stubGlobal('fetch', fetchMock);
+        await expect(createEmbedApi().downloadSite()).resolves.toBe('https://downloads.example.org');
+        const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+        expect(url).toMatch(/\/app-version$/);
+        expect(init.cache).toBe('no-store');
+    });
+
+    it('answers null when the server publishes none, or something that is not https', async () => {
+        for (const [status, body] of [[404, {}], [200, {}], [200, { download_url: 'http://plain.example.org/' }], [200, { download_url: 42 }], [200, null]] as const) {
+            vi.stubGlobal('fetch', answer(status, body));
+            await expect(createEmbedApi().downloadSite()).resolves.toBeNull();
+        }
+    });
+
+    it('answers null when the server cannot be reached', async () => {
+        vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch'); }));
+        await expect(createEmbedApi().downloadSite()).resolves.toBeNull();
+    });
+});

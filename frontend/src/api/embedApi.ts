@@ -11,6 +11,7 @@
  * push-to-talk is the registered hold action. Nothing here decides anything
  * the app would decide differently.
  */
+import { API_BASE_URL } from './config';
 import { EMBED_API_VERSION, activateHostNotification, embedHost } from './embedHost';
 import { holdFromHost } from './hotkeys';
 import {
@@ -264,6 +265,33 @@ export interface PucaEmbedApi {
     setInputMode(mode: EmbedInputMode): boolean;
     holdPushToTalk(held: boolean): boolean;
     activateNotification(id: string): boolean;
+    downloadSite(): Promise<string | null>;
+}
+
+/** How long downloadSite waits for the server. */
+const DOWNLOAD_SITE_TIMEOUT_MS = 8000;
+
+/**
+ * The server's download site: the origin of `download_url` in its
+ * /app-version (update_routes.rs serves the operator's file), or null when it
+ * publishes none. A host looks for its own updates there (Púca for Steam
+ * Deck: docs/STEAM_DECK.md), so the address comes from the server the person
+ * signed in to, never from this repo.
+ */
+async function downloadSite(): Promise<string | null> {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), DOWNLOAD_SITE_TIMEOUT_MS);
+    try {
+        const res = await fetch(`${API_BASE_URL}/app-version`, { cache: 'no-store', signal: ctrl.signal });
+        if (!res.ok) return null;
+        const info = (await res.json()) as { download_url?: unknown } | null;
+        const url = typeof info?.download_url === 'string' ? info.download_url : '';
+        return url.startsWith('https://') ? new URL(url).origin : null;
+    } catch {
+        return null;
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
 export function createEmbedApi(): PucaEmbedApi {
@@ -299,6 +327,7 @@ export function createEmbedApi(): PucaEmbedApi {
         },
         holdPushToTalk: (held: boolean) => holdFromEmbedHost(held === true),
         activateNotification: (id: string) => (typeof id === 'string' ? activateHostNotification(id) : false),
+        downloadSite: () => downloadSite(),
     });
 }
 

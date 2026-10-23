@@ -9,10 +9,12 @@ own scripts, opens the configured Púca address, and relays between the two
                      from Púca's own main-frame page (puca_cdp.PucaPage);
   frontend -> page   page_call / mic_answer / set_foreground below.
 
-Push-to-talk lives here too: Steam's interface never hears the back grips, so
-while the frontend asks (a button is chosen and Púca is in a call) this side
-reads that one button from the Deck's controller and sends "puca_button"
-events (puca_buttons.py).
+The Deck's controls are read here too (puca_buttons.py), because Steam's own
+button feed cannot be counted on while a game is in front. During a call this
+side sends "puca_button" events for the push-to-talk button, and tells the
+page when any control is in use, never which, so Púca's AFK move does not take
+a player out of the call. In Settings it reports which back button the person
+presses, to choose push to talk by pressing it.
 
 It keeps the plugin's four settings and nothing else. No account data, no
 message content and no audio pass through here: the microphone goes from one
@@ -21,6 +23,7 @@ crosses this process.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import secrets
@@ -28,7 +31,7 @@ from typing import Any
 
 import decky
 
-from puca_buttons import BUTTONS, ButtonWatch
+from puca_buttons import BUTTONS, GripLearner, InputWatch
 from puca_cdp import CdpError, PucaPage, find_target
 from puca_settings import (MARKER, PAGE_METHODS, check_mic_answer, load_settings,
                            normalize_app_url, save_settings)
@@ -45,17 +48,20 @@ def _shim_source() -> str:
 
 class Plugin:
     page: PucaPage | None = None
-    buttons: ButtonWatch | None = None
+    controls: InputWatch | None = None
+    learning: asyncio.Future | None = None
 
     async def _main(self):
         decky.logger.info("Púca for Steam Deck backend started")
 
     async def _unload(self):
-        await self.unwatch_button()
+        await self.cancel_learn()
+        await self.unwatch_input()
         await self.detach()
 
     async def _uninstall(self):
-        await self.unwatch_button()
+        await self.cancel_learn()
+        await self.unwatch_input()
         await self.detach()
 
     # ---- Settings ---------------------------------------------------------
@@ -142,21 +148,78 @@ class Plugin:
         except Exception:
             pass
 
-    # ---- Push-to-talk -----------------------------------------------------
+    # ---- The Deck's controls -------------------------------------------------
 
-    async def watch_button(self, button: Any) -> dict:
-        """Follow one back button until unwatch_button: "puca_button" events,
-        True when it goes down and again every half second while it stays
-        down, False when it comes up. The value is why it cannot yet
-        ("no-controller", "no-access"), or None; it keeps looking either way."""
-        await self.unwatch_button()
-        if button not in BUTTONS:
+    async def watch_input(self, button: Any = None) -> dict:
+        """Follow the Deck's controls during a call, until unwatch_input.
+
+        - `button` (or None): the push-to-talk grip. "puca_button" events say
+          True when it goes down and again every half second while it stays
+          down, and False when it comes up.
+        - Presence, always: the page hears when any control is in use, for
+          Púca's AFK move.
+
+        The value is why the controller cannot be read yet ("no-controller",
+        "no-access"), or None; it keeps looking either way."""
+        await self.unwatch_input()
+        if button is not None and button not in BUTTONS:
             return {"ok": False, "error": "unknown button"}
-        watch = ButtonWatch(button, lambda held: decky.emit("puca_button", held))
-        self.buttons = watch
-        return {"ok": True, "value": watch.start()}
+        watch = InputWatch(button, lambda held: decky.emit("puca_button", held), self._controls_in_use)
+        self.controls = watch
+        problem = watch.start()
+        if problem is None:
+            # Joining was the person's own doing: present from here.
+            self._controls_in_use()
+        return {"ok": True, "value": problem}
 
-    async def unwatch_button(self) -> None:
-        watch, self.buttons = self.buttons, None
+    async def unwatch_input(self) -> None:
+        watch, self.controls = self.controls, None
         if watch is not None:
             watch.stop()
+            await self._page_eval("window.__pucaDeckyShim.clearInput()")
+
+    def _controls_in_use(self) -> None:
+        asyncio.ensure_future(self._page_eval("window.__pucaDeckyShim.noteInput()"))
+
+    async def _page_eval(self, expression: str) -> None:
+        page = self.page
+        if page is None:
+            return
+        try:
+            await page.evaluate(expression)
+        except Exception:
+            pass  # a page that is reloading learns it again on the next note
+
+    async def learn_button(self, timeout_s: Any = 15) -> dict:
+        """The back grip the person presses next, within timeout_s (at most
+        30): {"ok": True, "value": "R5"}, value None when nothing was pressed
+        in time or the frontend cancelled; ok False when the controller cannot
+        be read."""
+        await self.cancel_learn()
+        loop = asyncio.get_running_loop()
+        got = loop.create_future()
+        self.learning = got
+        learner = GripLearner(lambda name: got.done() or got.set_result(name))
+        problem = learner.start()
+        try:
+            if problem is not None:
+                return {"ok": False, "error": problem}
+            try:
+                seconds = min(max(float(timeout_s), 1.0), 30.0)
+            except (TypeError, ValueError):
+                seconds = 15.0
+            try:
+                return {"ok": True, "value": await asyncio.wait_for(asyncio.shield(got), seconds)}
+            except asyncio.TimeoutError:
+                return {"ok": True, "value": None}
+        finally:
+            learner.stop()
+            if self.learning is got:
+                self.learning = None
+            if not got.done():
+                got.cancel()
+
+    async def cancel_learn(self) -> None:
+        got, self.learning = self.learning, None
+        if got is not None and not got.done():
+            got.set_result(None)

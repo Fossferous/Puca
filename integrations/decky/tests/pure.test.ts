@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { NOTICE_EVERY_MS, SilenceVerdict, SilentNotice, SILENT_AFTER_S } from '../src/micSilence';
 import { HoldFollower } from '../src/ptt';
 import { readPageMessage, readState, readVoiceChannels } from '../src/protocol';
 import { normalizeAppUrl, readSettings } from '../src/settings';
@@ -95,6 +96,84 @@ describe('push-to-talk follows the backend', () => {
         for (const x of [0, 'false', null, undefined, {}, [false]]) f.signal(x);
         expect(calls).toEqual(['down']);
         expect(f.held).toBe(true);
+    });
+});
+
+describe("a muted Deck microphone is noticed", () => {
+    // Fed RTCAudioSourceStats' running totals: totalAudioEnergy, totalSamplesDuration.
+    it('says silent after a few seconds of captured audio with no energy at all, and says it once', () => {
+        const v = new SilenceVerdict();
+        expect(SILENT_AFTER_S).toBe(3);
+        expect(v.update(0, 2)).toBeNull();
+        expect(v.update(0, 4)).toBe(true);
+        expect(v.isSilent).toBe(true);
+        expect(v.update(0, 6)).toBeNull();
+    });
+
+    it('never calls a working microphone silent, however quiet the room', () => {
+        const v = new SilenceVerdict();
+        for (let i = 1; i <= 20; i++) expect(v.update(i * 1e-9, i * 2)).toBeNull();
+        expect(v.isSilent).toBe(false);
+    });
+
+    it('notices a microphone muted in the middle of a call: what arrived since the last reading counts, not the totals', () => {
+        const v = new SilenceVerdict();
+        v.update(0.5, 2);
+        v.update(1.0, 4);
+        expect(v.update(1.0, 6)).toBeNull();
+        expect(v.update(1.0, 8)).toBe(true);
+    });
+
+    it('clears as soon as any energy arrives again', () => {
+        const v = new SilenceVerdict();
+        v.update(0, 2);
+        v.update(0, 4);
+        expect(v.update(1e-7, 6)).toBe(false);
+        expect(v.isSilent).toBe(false);
+    });
+
+    it('ignores readings with nothing new in them, and garbage', () => {
+        const v = new SilenceVerdict();
+        expect(v.update(0, 0)).toBeNull();
+        expect(v.update(Number.NaN, 2)).toBeNull();
+        expect(v.update(0, Number.POSITIVE_INFINITY)).toBeNull();
+        expect(v.update(0, 2)).toBeNull();
+        expect(v.update(0, 2)).toBeNull(); // no time passed: not "silent for longer"
+        expect(v.isSilent).toBe(false);
+    });
+
+    describe('the notice over the game', () => {
+        const live = { connected: true, muted: false, deafened: false, noMicrophone: false };
+
+        it('pops up when someone in the call is trying to be heard, once', () => {
+            const n = new SilentNotice();
+            expect(n.update(true, live, 0)).toBe(true);
+            expect(n.update(true, live, 1000)).toBe(false);
+            expect(n.update(true, { ...live }, 2000), 'the same stretch of silence').toBe(false);
+            expect(n.update(true, live, NOTICE_EVERY_MS * 2), 'however long it lasts: the panel keeps saying it').toBe(false);
+        });
+
+        it('stays quiet for someone who muted or deafened themselves, has no microphone, or is not in the call yet', () => {
+            const n = new SilentNotice();
+            expect(n.update(true, { ...live, muted: true }, 0)).toBe(false);
+            expect(n.update(true, { ...live, deafened: true }, 0)).toBe(false);
+            expect(n.update(true, { ...live, noMicrophone: true }, 0)).toBe(false);
+            expect(n.update(true, { ...live, connected: false }, 0)).toBe(false);
+            expect(n.update(true, null, 0)).toBe(false);
+            expect(n.update(false, live, 0)).toBe(false);
+            // POSITIVE CONTROL: the same silence, the moment they can be heard.
+            expect(n.update(true, live, 0)).toBe(true);
+        });
+
+        it('comes back each time it starts again, but not more often than every five minutes', () => {
+            const n = new SilentNotice();
+            expect(NOTICE_EVERY_MS).toBe(5 * 60 * 1000);
+            expect(n.update(true, live, 0)).toBe(true);
+            expect(n.update(false, live, 1000), 'turned up').toBe(false);
+            expect(n.update(true, live, 2000), 'down again, too soon').toBe(false);
+            expect(n.update(false, live, 3000)).toBe(false);
+            expect(n.update(true, live, NOTICE_EVERY_MS)).toBe(true);
+        });
     });
 });
 

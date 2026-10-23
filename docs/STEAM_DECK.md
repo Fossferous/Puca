@@ -77,11 +77,11 @@ Press **···** → the plug icon → **Púca**.
   first.
 - **In a call.** **Mute**, **Deafen** and **Leave** are at the top. Below them
   is everyone in the call; a green dot means they are talking.
-- **Push to talk.** In the panel's **Settings**, set **Push to talk** to a back
-  button. Hold it to talk, in games too. Set it back to **Off** and Púca listens
-  for your voice again. Some games use the back buttons too: pick one your game
-  does not. It works with the Deck's own back buttons, not with a controller
-  you plug in.
+- **Push to talk.** In the panel's **Settings**, choose **Choose a back
+  button**, then press the back button you want. Hold it to talk, in games
+  too. **Turn off push to talk** and Púca listens for your voice again. Some
+  games use the back buttons too: pick one your game does not. It works with
+  the Deck's own back buttons, not with a controller you plug in.
 - **Messages.** Choose **Open Púca (messages)** to show the whole app. Tap
   where you want to type and the keyboard appears. Press **B** to go back to
   your game. A call keeps going while the app is hidden.
@@ -97,11 +97,18 @@ Press **···** → the plug icon → **Púca**.
   microphone, so the plugin opens it in Steam and hands it to Púca inside the
   Deck. Púca encrypts your voice before it leaves the Deck, exactly as it does
   on a computer.
-- **Push to talk reads the Deck's button itself.** Steam does not reliably
-  tell plugins about the back buttons, least of all while a game is in front.
-  So the plugin reads the one you picked straight from the Deck's controller,
-  on the Deck, and only while you are in a call. Nothing about your controller
-  leaves the Deck.
+- **A muted microphone is noticed.** If the Deck's microphone is muted or
+  turned all the way down, the panel says so and a notification pops up over
+  your game, instead of you talking to nobody.
+- **The plugin reads the Deck's controls itself, during calls.** Steam does
+  not reliably tell plugins about them, least of all while a game is in front.
+  The plugin uses two things:
+  - the push-to-talk button you picked, held or not;
+  - whether any control is being touched or pressed, never which. Púca uses
+    that to keep you in the call while you play without talking. Otherwise it
+    would move you to the AFK channel, as it does with anyone idle.
+
+  This happens on the Deck only. Nothing about your controller leaves it.
 - **Nothing is opened to your network.** The plugin talks to Steam through a
   connection that exists only inside the Deck. Decky Loader turns that
   connection on, and the plugin needs nothing else.
@@ -119,7 +126,8 @@ Press **···** → the plug icon → **Púca**.
 | **Could not reach …** | Check the address under **Settings → Change Púca address**, and that the Deck is online. |
 | **Waiting for Game Mode** | The plugin runs in Game Mode only. Switch back to Game Mode. |
 | Nobody hears you | Check that **Push to talk** is set the way you want, and that the call does not say **Muted**. In Steam's **Settings → Audio**, check the microphone: with its volume at zero the Deck's microphone is muted, and Púca can only send silence. |
-| Push to talk does nothing | While you are in a call, the line under **Push to talk** in the panel's **Settings** says if the plugin cannot read the Deck's controller. It works with the Deck's own back buttons, not with a controller you plug in. |
+| Push to talk does nothing | Choose the button again in the panel's **Settings**, by pressing it. While you are in a call, the line under **Push to talk** says if the plugin cannot read the Deck's controller. It works with the Deck's own back buttons, not with a controller you plug in. |
+| Moved to the AFK channel while playing | Your server's Púca may be too old to know about the Deck's controls. Ask whoever runs it to update. |
 | Asked to sign in again | Steam sometimes clears the data of web pages it hosts. Sign in again, with **Stay signed in** ticked. |
 | Anything else | **Settings → Reload Púca** in the panel starts Púca again. |
 

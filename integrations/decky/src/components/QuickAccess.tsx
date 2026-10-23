@@ -7,10 +7,10 @@ import {
     ButtonItem, DialogButton, DropdownItem, Field, Focusable, PanelSection, PanelSectionRow, SteamSpinner,
     TextField, ToggleField,
 } from '@decky/ui';
-import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { controller, type Snapshot } from '../controller';
 import type { EmbedCall, EmbedState, EmbedVoiceChannel } from '../protocol';
-import { PUSH_TO_TALK_BUTTONS, type PushToTalkButton } from '../settings';
+import type { PushToTalkButton } from '../settings';
 import {
     HeadphonesIcon, HeadphonesOffIcon, LeaveIcon, MicIcon, MicOffIcon, NoMicIcon, SpeakingDot,
 } from './icons';
@@ -29,13 +29,18 @@ const BUTTON_LABELS: Record<PushToTalkButton, string> = {
     R5: 'R5 (lower right back button)',
 };
 
+/** Why the Deck's controls cannot be read, in plain words. */
+function controllerProblem(problem: string): string {
+    if (problem === 'no-controller') return "Can't find the Deck's controller. Push to talk works with a Steam Deck's own back buttons.";
+    if (problem === 'no-access') return "Can't read the Deck's controller on this system.";
+    return `The Deck's controller can't be read: ${problem}`;
+}
+
 /** What Settings says under Push to talk: the choice, or why it is not working. */
 function pushToTalkNote(button: PushToTalkButton, problem: string | null): string {
     if (button === 'off') return 'Off: Púca listens for your voice.';
-    if (problem === 'no-controller') return "Push to talk can't find the Deck's controller. It works with a Steam Deck's own back buttons.";
-    if (problem === 'no-access') return "Push to talk can't read the Deck's controller on this system.";
-    if (problem) return `Push to talk is not working: ${problem}`;
-    return `Hold ${button} to talk, in games too.`;
+    if (problem) return controllerProblem(problem);
+    return `Hold ${BUTTON_LABELS[button]} to talk, in games too.`;
 }
 
 const row: CSSProperties = { display: 'flex', alignItems: 'center', gap: 8 };
@@ -157,6 +162,11 @@ function Call({ call, snap }: { call: EmbedCall; snap: Snapshot }) {
     return (
         <PanelSection title={call.channelName || 'Voice call'}>
             <Note title={callStatus(call, snap)} />
+            {snap.micSilent && !call.noMicrophone && (
+                <Note title="Your Deck's microphone is muted">
+                    Nobody can hear you. Turn the microphone up in Steam's Settings, Audio.
+                </Note>
+            )}
             <PanelSectionRow>
                 <Focusable style={{ display: 'flex', gap: 6 }} flow-children="horizontal">
                     <DialogButton
@@ -165,7 +175,7 @@ function Call({ call, snap }: { call: EmbedCall; snap: Snapshot }) {
                         onClick={() => controller.setMuted(!call.muted)}
                     >
                         {call.noMicrophone ? <NoMicIcon /> : call.muted ? <MicOffIcon /> : <MicIcon />}
-                        {call.muted ? 'Unmute' : 'Mute'}
+                        {call.noMicrophone ? 'No mic' : call.muted ? 'Unmute' : 'Mute'}
                     </DialogButton>
                     <DialogButton
                         style={{ ...row, minWidth: 0, flex: 1, justifyContent: 'center', padding: '8px 4px' }}
@@ -301,21 +311,65 @@ function AddressForm({ initial, onDone }: { initial: string; onDone?: () => void
     );
 }
 
+/**
+ * Push to talk is chosen by pressing the button, not by its name: R4 and R5
+ * are easy to mix up (in testing, "R4" was R5 every time).
+ */
+function PushToTalk({ snap }: { snap: Snapshot }) {
+    const choice = snap.settings.pushToTalk;
+    const [learning, setLearning] = useState(false);
+    const [message, setMessage] = useState<string | null>(null);
+    const learningRef = useRef(false);
+    // Closing the panel stops listening: a press later must not change the button.
+    useEffect(() => () => { if (learningRef.current) controller.cancelLearn(); }, []);
+
+    const choose = async () => {
+        setMessage(null);
+        setLearning(true);
+        learningRef.current = true;
+        const r = await controller.learnButton();
+        learningRef.current = false;
+        setLearning(false);
+        if ('error' in r) setMessage(controllerProblem(r.error));
+        else if (r.button === null) setMessage('No back button was pressed.');
+    };
+
+    return (
+        <>
+            <PanelSectionRow>
+                <Field
+                    label="Push to talk"
+                    description={learning ? 'Press the back button you want to use…' : (message ?? pushToTalkNote(choice, snap.pttError))}
+                    focusable={false}
+                />
+            </PanelSectionRow>
+            <PanelSectionRow>
+                {learning ? (
+                    <ButtonItem layout="below" onClick={() => controller.cancelLearn()}>Cancel</ButtonItem>
+                ) : (
+                    <ButtonItem layout="below" onClick={() => { void choose(); }}>
+                        {choice === 'off' ? 'Choose a back button' : 'Choose another back button'}
+                    </ButtonItem>
+                )}
+            </PanelSectionRow>
+            {choice !== 'off' && !learning && (
+                <PanelSectionRow>
+                    <ButtonItem layout="below" onClick={() => { setMessage(null); void controller.saveSettings({ pushToTalk: 'off' }); }}>
+                        Turn off push to talk
+                    </ButtonItem>
+                </PanelSectionRow>
+            )}
+        </>
+    );
+}
+
 function Settings({ snap }: { snap: Snapshot }) {
     const s = snap.settings;
     const [editing, setEditing] = useState(false);
     if (snap.phase === 'no-address') return null;
     return (
         <PanelSection title="Settings">
-            <PanelSectionRow>
-                <DropdownItem
-                    label="Push to talk"
-                    description={pushToTalkNote(s.pushToTalk, snap.pttError)}
-                    rgOptions={PUSH_TO_TALK_BUTTONS.map(b => ({ data: b, label: BUTTON_LABELS[b] }))}
-                    selectedOption={s.pushToTalk}
-                    onChange={o => { void controller.saveSettings({ pushToTalk: o.data as PushToTalkButton }); }}
-                />
-            </PanelSectionRow>
+            <PushToTalk snap={snap} />
             <PanelSectionRow>
                 <ToggleField
                     label="Notifications"

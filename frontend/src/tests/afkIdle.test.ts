@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { decideAfk, AFK_TIMEOUT_CHOICES_MIN, DEFAULT_AFK_TIMEOUT_MS } from '../utils/afkIdle';
+import { combineHostIdle, decideAfk, AFK_TIMEOUT_CHOICES_MIN, DEFAULT_AFK_TIMEOUT_MS } from '../utils/afkIdle';
 
 // The Discord copy (see afkIdle.ts's header): idle for the window = moved,
 // with NO exemption for muted / deafened / listen-only — those aren't even
@@ -71,5 +71,38 @@ describe('decideAfk — Discord AFK rules', () => {
     it('exposes exactly Discord\'s five timeout choices and the legacy default', () => {
         expect([...AFK_TIMEOUT_CHOICES_MIN]).toEqual([1, 5, 15, 30, 60]);
         expect(DEFAULT_AFK_TIMEOUT_MS).toBe(15 * 60 * 1000);
+    });
+});
+
+// An embedding host (docs/EMBEDDING.md, idleSeconds) stands where the desktop
+// app's OS probe stands. Púca for Steam Deck reads the Deck's own controls: in
+// a hidden Steam page there is no in-app input while someone plays, and the
+// in-app path alone moved a listening player to AFK mid-game.
+describe('combineHostIdle — an embedding host says how long the person has been away', () => {
+    const afk = (osIdleSecs: number | null, lastAppInputMs: number | null = null) =>
+        decideAfk({ timeoutMs: T, broadcasting: false, osIdleSecs, lastAppInputMs, nowMs: NOW }).action;
+
+    it('keeps a player who has been touching the controls, with no input in the page at all', () => {
+        expect(combineHostIdle(5, null, NOW)).toBe(5);
+        expect(afk(combineHostIdle(5, null, NOW))).toBe('wait');
+    });
+
+    it('moves someone who has touched neither the controls nor the page for the window', () => {
+        expect(afk(combineHostIdle(15 * 60, NOW - 16 * 60_000, NOW))).toBe('move');
+    });
+
+    it('lets input inside the page count too: typing in the full view is presence', () => {
+        expect(combineHostIdle(20 * 60, NOW - 30_000, NOW)).toBe(30);
+        expect(afk(combineHostIdle(20 * 60, NOW - 30_000, NOW))).toBe('wait');
+    });
+
+    it('treats a host that "cannot tell" as no probe: the in-app path decides, as before', () => {
+        expect(combineHostIdle(null, NOW - 30_000, NOW)).toBeNull();
+        expect(afk(combineHostIdle(null, NOW - 30_000, NOW), NOW - 30_000)).toBe('wait');
+        expect(afk(combineHostIdle(null, null, NOW), null)).toBe('move');
+    });
+
+    it('never answers a negative idle for input stamped a little in the future', () => {
+        expect(combineHostIdle(100, NOW + 5000, NOW)).toBe(0);
     });
 });
