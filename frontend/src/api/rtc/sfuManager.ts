@@ -1494,12 +1494,14 @@ export class SfuManager {
         timer: ReturnType<typeof setInterval>;
         adapter: ShareAdapter | null;
         sender: RTCRtpSender | null;
+        /** The capture it picks for, whose contentHint it may set. */
+        track: MediaStreamTrack | null;
         busy: boolean;
     } | null = null;
 
     private startShareAdapt(): void {
         this.stopShareAdapt();
-        const st = { timer: setInterval(() => { void this.shareAdaptTick(st); }, SHARE_ADAPT_INTERVAL_MS), adapter: null, sender: null, busy: false };
+        const st = { timer: setInterval(() => { void this.shareAdaptTick(st); }, SHARE_ADAPT_INTERVAL_MS), adapter: null, sender: null, track: null, busy: false };
         this.shareAdapt = st;
         // At once, not in 2 s: the start rung must be in place before the first
         // keyframe has gone far (shareAdapt.ts, WHY IT STARTS AT 540p).
@@ -1507,14 +1509,16 @@ export class SfuManager {
     }
 
     private stopShareAdapt(): void {
-        if (this.shareAdapt) clearInterval(this.shareAdapt.timer);
+        const st = this.shareAdapt;
+        if (st) clearInterval(st.timer);
         this.shareAdapt = null;
         // The picker's probe ('detail', shareAdapt.ts) is the picker's own.
         // Whatever carries the share next — a ladder after a re-publish, a new
         // picker, nothing — gets the share's 'motion' back (media.ts sets it
         // at capture); a ladder left on 'detail' is encoded as a document.
-        const mst = this.localSharePubs().find(p => p.kind === Track.Kind.Video)?.track?.mediaStreamTrack;
-        if (mst?.contentHint === 'detail') { try { mst.contentHint = 'motion'; } catch { /* not supported */ } }
+        // Only on the track the picker itself ran: this is also on the way
+        // out of a call (disconnect), which must not depend on the room.
+        if (st?.track?.contentHint === 'detail') { try { st.track.contentHint = 'motion'; } catch { /* not supported */ } }
     }
 
     /**
@@ -1551,6 +1555,7 @@ export class SfuManager {
                 // setParameters is retried rather than believed.
                 st.adapter = adapter;
                 st.sender = sender;
+                st.track = mst;
                 return;
             }
             const adapter = st.adapter;
