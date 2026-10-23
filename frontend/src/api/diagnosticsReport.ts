@@ -22,6 +22,7 @@ import { webrtcManager } from './webrtc';
 import { currentAppVersion } from './appVersion';
 import { h264SendProfilesLine } from './rtc/h264Profiles';
 import { recentRcConnectLines } from './devices/connectLog';
+import { QUICK_TIMEOUT_MS, withTimeout } from './withTimeout';
 
 /** Milliseconds of measurement. Rates and delays are meaningless as
  *  point-in-time counters, so the diagnostics take two samples this far apart —
@@ -32,19 +33,7 @@ const WINDOW_MS = 4000;
  *  so. The windowed stats sections need WINDOW_MS plus the getStats calls on
  *  either side; nothing else should take more than a moment. */
 export const STEP_TIMEOUT_MS = WINDOW_MS + 8000;
-/** Each WebCodecs question, and the clipboard write. */
-export const QUICK_TIMEOUT_MS = 3000;
-
-/** Rejects if `p` has not settled within `ms`. A step that never answers must
- *  cost the report that step, never the whole report: on 2026-09-25 a
- *  clipboard permission prompt nobody could see held `writeText` open, and
- *  the menu said "Measuring for a few seconds…" for good. */
-export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error(`${label} gave no answer within ${Math.round(ms / 1000)} s`)), ms);
-        p.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
-    });
-}
+export { QUICK_TIMEOUT_MS, withTimeout };
 
 /** `undefined` rather than a throw: a diagnostics report that fails because one
  *  of its sections failed is worth less than a partial one, and the section

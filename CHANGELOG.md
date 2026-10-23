@@ -4,6 +4,12 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+
+- **Send diagnostics can no longer trap you in its dialog.** While a report was being sent, Close was switched off, so one step that never answered (the log read, the upload, the server) left you stuck there until you quit the app. Every step now has its own time limit, sized to its job (an upload gets longer the bigger your log is), and a step that runs out fails the send with a plain sentence naming it. Close and clicking outside the dialog always work, and closing it cancels the send, so nothing is posted to the owner after you have gone.
+
 ## 0.9.846 — 2026-10-22
 
 Ready for Púca on the Steam Deck

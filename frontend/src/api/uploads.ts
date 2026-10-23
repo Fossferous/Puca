@@ -64,7 +64,7 @@ export function assertUploadable(file: Pick<File, 'name' | 'size'>, overhead = 0
 /**
  * Upload a file
  */
-export function uploadFile(file: File, opts?: { wantCap?: boolean; channelId?: number }): Promise<UploadedFile> {
+export function uploadFile(file: File, opts?: { wantCap?: boolean; channelId?: number; signal?: AbortSignal }): Promise<UploadedFile> {
     assertUploadable(file);
 
     const formData = new FormData();
@@ -81,7 +81,10 @@ export function uploadFile(file: File, opts?: { wantCap?: boolean; channelId?: n
     const headers: Record<string, string> = {};
     if (opts?.wantCap) headers['X-Puca-Want-Cap'] = '1';
     if (opts?.channelId != null) headers['X-Puca-Channel'] = String(opts.channelId);
-    return apiClient.post('/upload', formData, Object.keys(headers).length ? { headers } : undefined);
+    const init: { headers?: Record<string, string>; signal?: AbortSignal } = {};
+    if (Object.keys(headers).length) init.headers = headers;
+    if (opts?.signal) init.signal = opts.signal;
+    return apiClient.post('/upload', formData, Object.keys(init).length ? init : undefined);
 }
 
 /**

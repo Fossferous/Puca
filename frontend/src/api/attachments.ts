@@ -294,8 +294,8 @@ export async function sealFileForUpload(file: File | PlainBytes): Promise<Sealed
 }
 
 /** Upload already-sealed ciphertext and build its ref. */
-export async function uploadSealedRef(sealed: SealedFile, opts?: { channelId?: number }): Promise<{ href: string; name: string; mime: string }> {
-    const uploaded = await uploadFile(new File([sealed.blob], 'attachment.enc', { type: 'application/octet-stream' }), { wantCap: true, channelId: opts?.channelId });
+export async function uploadSealedRef(sealed: SealedFile, opts?: { channelId?: number; signal?: AbortSignal }): Promise<{ href: string; name: string; mime: string }> {
+    const uploaded = await uploadFile(new File([sealed.blob], 'attachment.enc', { type: 'application/octet-stream' }), { wantCap: true, channelId: opts?.channelId, ...(opts?.signal ? { signal: opts.signal } : {}) });
     const href = `${PREFIX}${uploaded.id}?k=${sealed.key}&m=${encodeURIComponent(sealed.mime)}`
         + (uploaded.cap ? `&c=${encodeURIComponent(uploaded.cap)}` : '');
     return { href, name: sealed.name, mime: sealed.mime };
@@ -308,7 +308,7 @@ export async function uploadSealedRef(sealed: SealedFile, opts?: { channelId?: n
  * (encryptAndUpload) and task attachment refs. Plaintext the app decrypted
  * itself comes as bytes (PlainBytes), never as a File made from them.
  */
-export async function encryptAndUploadRef(file: File | PlainBytes, opts?: { channelId?: number }): Promise<{ href: string; name: string; mime: string }> {
+export async function encryptAndUploadRef(file: File | PlainBytes, opts?: { channelId?: number; signal?: AbortSignal }): Promise<{ href: string; name: string; mime: string }> {
     return uploadSealedRef(await sealFileForUpload(file), opts);
 }
 
@@ -329,7 +329,7 @@ export async function decryptParkedBlobUrl(bytes: Uint8Array, keyB64url: string,
  * Encrypt a file, upload the ciphertext, and return the markdown to insert into
  * the message composer (image syntax for images, link syntax otherwise).
  */
-export async function encryptAndUpload(file: File, opts?: { channelId?: number }): Promise<string> {
+export async function encryptAndUpload(file: File, opts?: { channelId?: number; signal?: AbortSignal }): Promise<string> {
     const { href, name, mime } = await encryptAndUploadRef(file, opts);
     return `${mime.startsWith('image/') ? '!' : ''}[${name}](${href})`;
 }
