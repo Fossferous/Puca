@@ -503,7 +503,9 @@ most detail for the viewers who can take it. A viewer on a slow connection
 may start on 360p and move up to the middle size within about half a
 minute.
 Someone watching one or two streams gets the full picture whenever their
-connection carries it.
+connection carries it. Someone on an older version of Púca gets the middle
+size in the grid view until they update (Focus view still shows them the full
+picture).
 
 In a channel that does not use SFU mode, each viewer is sent their own copy
 of your share, at up to 8 Mbps each, whatever the quality.
