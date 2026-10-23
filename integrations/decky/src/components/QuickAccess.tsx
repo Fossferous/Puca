@@ -406,6 +406,14 @@ function Channels({ state }: { state: EmbedState }) {
     );
 }
 
+/**
+ * What hides a password in Steam's TextField. Its input is rendered as
+ * `{ type: "text", ...props it does not know }`, and the Steam build tested
+ * (Oct 2026) never reads bIsPassword, so the password showed as it was typed:
+ * the spread `type` is what masks it. bIsPassword stays, for builds that read it.
+ */
+const PASSWORD_INPUT = { type: 'password' } as object;
+
 /** Signing in from the panel, through Púca's own sign-in form in the page.
  *  Creating an account, or a forgotten password, still happen in Púca. */
 function SignIn() {
@@ -428,7 +436,7 @@ function SignIn() {
                 <TextField label="Username" value={username} disabled={busy} onChange={e => setUsername(e.target.value)} />
             </PanelSectionRow>
             <PanelSectionRow>
-                <TextField label="Password" bIsPassword value={password} disabled={busy} onChange={e => setPassword(e.target.value)} />
+                <TextField label="Password" bIsPassword {...PASSWORD_INPUT} value={password} disabled={busy} onChange={e => setPassword(e.target.value)} />
             </PanelSectionRow>
             <PanelSectionRow>
                 <ToggleField
