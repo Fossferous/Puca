@@ -99,6 +99,7 @@ import { ENC_HISTORY_LOCKED } from '../api/decryptMarkers';
 import { unlockHistoryWithRecoveryCode, ensureSignAttestation, type UnlockResult } from '../api/dmKeys';
 import { HomeSidebar } from './HomeSidebar';
 import { encryptAndUploadRef, parseEncAttachment } from '../api/attachments';
+import { convertHeifForUpload, hasHeifName, isHeifType } from '../api/heif';
 import { FileTooLargeError, MAX_UPLOAD_BYTES, discardUpload } from '../api/uploads';
 import {
     buildOutgoingContent,
@@ -108,6 +109,7 @@ import {
     markUploading,
     pendingAttachment,
     removeAttachment,
+    replaceFile,
     toggleSpoiler as toggleChipSpoiler,
     type PendingAttachment,
 } from '../api/composerAttachments';
@@ -1020,12 +1022,35 @@ export function Chat({ onLogout }: ChatProps) {
      *  E2EE upload in the background, ready/failed reflected on the chip.
      *  Only image/* gets a thumbnail object URL — the chip renders it in an
      *  <img>, and a video blob in an <img> paints an empty square (worse than
-     *  the file icon it would otherwise get). */
+     *  the file icon it would otherwise get).
+     *
+     *  A photo that may be a HEIC (a phone camera's; api/heif.ts) is made a
+     *  JPEG first, so every reader's app can show it: its chip waits (no
+     *  thumbnail: no engine but WebKit could draw one) until the JPEG is
+     *  ready, then shows the JPEG's thumbnail and name and uploads that. */
     const enqueueUpload = useCallback((file: File, opts?: { spoiler?: boolean }) => {
-        const chip = pendingAttachment(file, file.type.startsWith('image/') ? URL.createObjectURL(file) : null, opts?.spoiler ?? false);
+        const mayBeHeif = isHeifType(file.type) || hasHeifName(file.name) || file.type === '';
+        const chip = pendingAttachment(file, !mayBeHeif && file.type.startsWith('image/') ? URL.createObjectURL(file) : null, opts?.spoiler ?? false);
         pendingFilesRef.current.set(chip.localId, file);
         setPendingAttachments(prev => [...prev, chip]);
-        settleUpload(chip.localId, file);
+        if (!mayBeHeif) {
+            settleUpload(chip.localId, file);
+            return;
+        }
+        void convertHeifForUpload(file).then((sent) => {
+            // Removed while it was converted: nothing was uploaded, so
+            // nothing is waiting to be discarded either.
+            if (!pendingFilesRef.current.has(chip.localId)) {
+                abandonedUploadsRef.current.delete(chip.localId);
+                return;
+            }
+            if (sent !== file) {
+                pendingFilesRef.current.set(chip.localId, sent);
+                const preview = URL.createObjectURL(sent);
+                setPendingAttachments(prev => replaceFile(prev, chip.localId, sent, preview));
+            }
+            settleUpload(chip.localId, sent);
+        });
     }, [settleUpload]);
 
     const retryUpload = useCallback((localId: string) => {

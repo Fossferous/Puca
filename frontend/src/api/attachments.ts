@@ -26,6 +26,7 @@ import { createPriorityLimiter, abortError, isAbortError } from './priorityLimit
 import { readVideoDims, type VideoDims } from './videoDims';
 import { hostPlaintext, dropAllPlaintext, freeNow, type PlainLease } from './plaintextHost';
 import { keepCipher, dropAllCiphertext, type CipherCopy } from './cipherStore';
+import { engineDecodesHeif, forgetHeifRequests, heifToJpegForDisplay, isHeifType } from './heif';
 
 const PREFIX = 'sovereign-enc:';
 
@@ -399,6 +400,8 @@ export async function encryptAndUpload(file: File, opts?: { channelId?: number; 
 // and never gave it back while the app ran (515 MB after two). Sign-out
 // still clears everything (clearBlobCache), as does a reload.
 interface CacheEntry {
+    /** The server's id of the file. */
+    fileId: string;
     /** The file as fetched, nonce(12) || AES-GCM ciphertext: in OPFS once it
      *  is written there, never as a Blob (api/cipherStore.ts says why). */
     cipher: CipherCopy;
@@ -412,6 +415,9 @@ interface CacheEntry {
     bytes: number;
     /** The plaintext URL, while anyone holds or pins the entry. */
     plain: PlainLease | null;
+    /** The type `plain` is hosted under: `type`, or image/jpeg for a HEIC
+     *  this engine cannot show that the device decoded for display (openPlain). */
+    plainType: string;
     /** The plaintext on its way to a host (openPlain). */
     opening: Promise<PlainLease> | null;
     /** The plaintext the load just decrypted, for a holder that took the
@@ -632,12 +638,14 @@ async function loadEntry(cacheKey: string, id: string, keyB64url: string, mime: 
         if (dims) pictureSizes.set(id, dims);
     }
     const entry: CacheEntry = {
+        fileId: id,
         cipher: keepCipher(buf),
         keyB64url,
         type: playlist ? 'application/octet-stream' : safeBlobType(mime),
         playlist,
         bytes: pt.byteLength,
         plain: null,
+        plainType: playlist ? 'application/octet-stream' : safeBlobType(mime),
         opening: null,
         fresh: pt,
         refs: 0, seen: false, seq: ++useSeq, burst: 0,
@@ -673,8 +681,24 @@ function openPlain(e: CacheEntry): Promise<PlainLease> {
         }
         // Signed out meanwhile: no URL for the next user to find.
         if (generation !== cacheGeneration) throw abortError();
+        // A HEIC this engine cannot show (every Chromium, Firefox): the
+        // device's own decoder makes a JPEG of it for display, where the app
+        // has one and may use it (api/heif.ts mayDecodeHeifForDisplay). It is
+        // hosted like any plaintext, in place of the original, and goes with
+        // it; nowhere else does it exist.
+        let type = e.type;
+        if (isHeifType(e.type) && !(await engineDecodesHeif())) {
+            const jpeg = await heifToJpegForDisplay(e.fileId, new Uint8Array(pt));
+            if (generation !== cacheGeneration) throw abortError();
+            if (jpeg) {
+                freeNow(pt);
+                pt = jpeg.byteOffset === 0 && jpeg.byteLength === jpeg.buffer.byteLength ? jpeg.buffer as ArrayBuffer : jpeg.slice().buffer as ArrayBuffer;
+                type = 'image/jpeg';
+            }
+        }
+        e.plainType = type;
         // Copied into the hosted Blob and emptied (freeNow).
-        const lease = await hostPlaintext(pt, e.type);
+        const lease = await hostPlaintext(pt, type);
         if (generation !== cacheGeneration) { lease.release(); throw abortError(); }
         return lease;
     })();
@@ -845,6 +869,9 @@ export async function decryptAttachmentBytes(id: string, keyB64url: string, mime
  *  once nothing it renders uses the URL any more. A second call does nothing. */
 export interface AttachmentHold {
     url: string;
+    /** What the URL's bytes are: the file's own type, or image/jpeg for a
+     *  HEIC decoded for display (a save from this URL is that JPEG). */
+    type: string;
     release: () => void;
 }
 
@@ -936,6 +963,7 @@ export async function acquireAttachmentUrl(
     let held = true;
     return {
         url: lease.url,
+        type: entry.plainType,
         release: () => {
             if (!held) return;
             held = false;
@@ -1023,6 +1051,12 @@ export async function prefetchAttachmentUrl(
     enforceRetainedBudget();
 }
 
+/** A file's plaintext size while the cache has it (null: not loaded): a
+ *  picture this device cannot show says how big the download is. */
+export function attachmentPlainBytes(id: string, keyB64url: string, mime: string): number | null {
+    return blobCache.get(cacheKeyOf(id, keyB64url, mime))?.bytes ?? null;
+}
+
 /** What the cache holds now, in bytes of plaintext (tests, diagnostics):
  *  shown now, seen and given back, loaded ahead and not yet seen — and how
  *  much of it is decrypted right now (`plainBytes`: only what is held
@@ -1066,6 +1100,7 @@ export function noteAttachmentPictureSize(id: string, dims: VideoDims): void {
  *  (cacheGeneration). */
 export function clearBlobCache(): void {
     cacheGeneration++;
+    forgetHeifRequests();
     for (const e of blobCache.values()) {
         e.plain?.release();
         e.plain = null;

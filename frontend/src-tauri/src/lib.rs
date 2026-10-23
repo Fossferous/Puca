@@ -25,6 +25,8 @@ mod device_key;
 // page's "Open in the Púca app", registered by the installer in both builds).
 mod deep_link;
 mod file_transfer;
+// HEIC photo -> JPEG through WIC, for the page (frontend/src/api/heif.ts).
+mod heif;
 // Detection + removal of remote-control machinery a previous FULL install left
 // on this machine (the SovereignRemote LocalSystem service and its secrets).
 // NOT gated: the LITE build is the one that needs it, because removing remote
@@ -1776,6 +1778,7 @@ pub fn run() {
             clear_webview_permissions,
             file_transfer::transfer_begin,
             file_transfer::transfer_write,
+            heif::heif_to_jpeg,
             file_transfer::transfer_finish,
             file_transfer::transfer_abort,
             rc_leftovers::rc_leftovers_status,

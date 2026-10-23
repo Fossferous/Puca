@@ -32,6 +32,7 @@ const INDENT_PX = 24;
 import { DEFAULT_REMINDER_TIMES, REMINDER_PRESETS, presetInstant, type ReminderTimes } from '../api/reminderTimes';
 import { PERM, hasPerm } from '../api/permissionBits';
 import { encryptAndUploadRef } from '../api/attachments';
+import { convertHeifForUpload } from '../api/heif';
 import { ApiError } from '../api/client';
 import { TaskAttachments } from './TaskAttachments';
 import { NoteLinkText } from './NoteLinkText';
@@ -503,7 +504,8 @@ export function TaskTree({
         // (over the 10 MB cap, network) are surfaced per file at the end.
         for (const file of files) {
             try {
-                const { href, name } = await encryptAndUploadRef(file, { channelId });
+                // A phone's HEIC goes up as a JPEG every app can show (api/heif.ts).
+                const { href, name } = await encryptAndUploadRef(await convertHeifForUpload(file), { channelId });
                 added.push({ href, name });
             } catch (err) {
                 console.error('Failed to attach file:', file.name, err);

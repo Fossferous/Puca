@@ -33,12 +33,12 @@ export interface HeldRef {
 export function useHeldAttachmentUrl(
     ref: HeldRef | null,
     opts: { enabled?: boolean; keep?: boolean } = {},
-): { url: string | null; failed: boolean } {
+): { url: string | null; failed: boolean; type: string | null } {
     const { enabled = true, keep = false } = opts;
     const awake = useAttachmentsAwake();
     const want = !!ref && enabled && (awake || keep);
     const k = ref ? `${ref.id}\n${ref.key}\n${ref.mime}\n${ref.cap ?? ''}` : '';
-    const [state, setState] = useState<{ k: string; url: string | null; failed: boolean }>({ k: '', url: null, failed: false });
+    const [state, setState] = useState<{ k: string; url: string | null; failed: boolean; type: string | null }>({ k: '', url: null, failed: false, type: null });
     useEffect(() => {
         if (!ref || !want) return;
         let alive = true;
@@ -48,22 +48,23 @@ export function useHeldAttachmentUrl(
             .then((h) => {
                 if (!alive) { h.release(); return; }
                 hold = h;
-                setState({ k, url: h.url, failed: false });
+                setState({ k, url: h.url, failed: false, type: h.type });
             })
             .catch((err) => {
                 if (!alive || isAbortError(err)) return;
-                setState({ k, url: null, failed: true });
+                setState({ k, url: null, failed: true, type: null });
             });
         return () => {
             alive = false;
             ac.abort();
             // After the commit that stopped rendering it (see above).
             hold?.release();
-            setState((s) => (s.k === k ? { k, url: null, failed: s.failed } : s));
+            setState((s) => (s.k === k ? { k, url: null, failed: s.failed, type: null } : s));
         };
         // `k` stands for `ref` (every field of it).
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [k, want]);
     const mine = state.k === k;
-    return { url: want && mine ? state.url : null, failed: mine && state.failed };
+    // `type`: what the URL's bytes are (an AttachmentHold's `type`).
+    return { url: want && mine ? state.url : null, failed: mine && state.failed, type: want && mine ? state.type : null };
 }

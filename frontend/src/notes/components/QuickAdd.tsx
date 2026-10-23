@@ -41,6 +41,7 @@ import { appendTranscript, canRecordAudio } from '../model/audioNote';
 import { followOutputDeviceRef } from '../../components/settingsStore';
 import { transcribeClip } from '../model/transcribe';
 import { hideNativeKeyboard, raiseNativeKeyboard } from '../native/notesNative';
+import { AttachmentImg } from '../../components/AttachmentImg';
 import '../../components/NoteImages.css';
 import '../noteContent.css';
 
@@ -599,8 +600,13 @@ export function QuickAdd({ onCreate, sheet = false, onDismiss, openSignal = 0, c
                         )}
                         {pictures.map(p => (
                             <figure key={p.key}>
+                                {/* A photo this engine cannot draw (a HEIC outside
+                                    WebKit: it is made a JPEG when the note is
+                                    saved, api/imagePrep.ts) is its named chip,
+                                    never a broken image (AttachmentImg). */}
                                 {p.url
-                                    ? <img src={p.url} alt={p.drawing ? 'Drawing' : (p.photo?.name ?? 'Photo')} />
+                                    ? <AttachmentImg src={p.url} type={p.drawing ? 'image/png' : p.photo?.type} alt={p.drawing ? 'Drawing' : (p.photo?.name ?? 'Photo')}
+                                        fallback={<span className="ni-file"><PaperclipIcon /><span className="ni-file-name">{p.photo?.name ?? 'File'}</span></span>} />
                                     : <span className="ni-file"><PaperclipIcon /><span className="ni-file-name">{p.photo?.name ?? 'File'}</span></span>}
                                 <button type="button" className="ni-tool" aria-label={p.url ? 'Remove picture' : 'Remove file'} title="Remove" onClick={() => removePicture(p.key)}>
                                     <CloseIcon size={14} />

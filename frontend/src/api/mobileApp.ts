@@ -84,6 +84,10 @@ interface SovereignAppPlugin {
      *  the Android WebView cannot READ the clipboard from JS at all. `ok:false`
      *  = the clip could not be read; older APKs reject the call. */
     readClipboard(): Promise<{ ok: boolean; text?: string; reason?: string }>;
+    /** A HEIC/HEIF photo (base64) as a JPEG (base64), through Android's own
+     *  ImageDecoder (APKs after 0.9.846, Android 9+; older reject): the
+     *  WebView cannot decode HEIC (api/heif.ts). */
+    heifToJpeg(opts: { data: string; maxEdge: number; quality: number }): Promise<{ data: string; width: number; height: number }>;
     /** OS picture-in-picture for a watched stream (APKs from 0.8.96). The
      *  Android WebView has no web PiP API, so the native side floats the
      *  WebView itself in a PiP window shaped like the video; PipActivity.java
@@ -637,6 +641,22 @@ export async function readMobileClipboard(): Promise<{ text: string } | { unsupp
     } catch {
         // An APK without the method rejects — the caller says so honestly.
         return { unsupported: true };
+    }
+}
+
+/**
+ * A HEIC photo as JPEG bytes, decoded by the phone (api/heif.ts). null where
+ * this is not Púca's Android app, on an APK without the method, on Android
+ * before 9, or on any failure: the caller then does without.
+ */
+export async function heifToJpegNatively(b64: string, maxEdge: number, quality: number): Promise<string | null> {
+    if (!android() || !Capacitor.isNativePlatform() || !Capacitor.isPluginAvailable('SovereignApp')) return null;
+    try {
+        const r = await App.heifToJpeg({ data: b64, maxEdge, quality });
+        return typeof r?.data === 'string' && r.data ? r.data : null;
+    } catch (err) {
+        console.warn('[heif] the app could not convert it:', err instanceof Error ? err.message : err);
+        return null;
     }
 }
 

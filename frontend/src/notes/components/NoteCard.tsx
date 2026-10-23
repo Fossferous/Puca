@@ -16,10 +16,11 @@ import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { type Task, isAttachmentsLocked, parseTaskAttachments, isTaskOverdue, formatDueShort, type TaskAttachmentRef } from '../../api/tasks';
 import { parseEncAttachment } from '../../api/attachments';
 import { useHeldAttachmentUrl } from '../../components/useHeldAttachmentUrl';
+import { AttachmentImg } from '../../components/AttachmentImg';
 import { isUndecryptable } from '../../api/decryptMarkers';
 import { PERM, hasPerm } from '../../api/permissionBits';
 import {
-    ArchiveIcon, CheckboxCheckedIcon, CheckboxIcon, ClockIcon, GripIcon, LockIcon, MembersIcon, MoreVerticalIcon, PaletteIcon, PinIcon, SearchIcon, TagIcon, WarningIcon,
+    ArchiveIcon, CheckboxCheckedIcon, CheckboxIcon, ClockIcon, GripIcon, ImageIcon, LockIcon, MembersIcon, MoreVerticalIcon, PaletteIcon, PinIcon, SearchIcon, TagIcon, WarningIcon,
 } from '../../components/Icons';
 import { NoteLinkText } from '../../components/NoteLinkText';
 import { type NoteCard as NoteCardModel, previewRows, nearestDue } from '../model/notesModel';
@@ -77,10 +78,13 @@ function ImageThumb({ refItem, visible }: { refItem: TaskAttachmentRef; visible:
     // card is mounted (and the app on screen: useHeldAttachmentUrl).
     const [reached, setReached] = useState(visible);
     if (visible && !reached) setReached(true);
-    const { url, failed } = useHeldAttachmentUrl(parsed ? { id: parsed.id, key: parsed.key, mime: parsed.mime, cap: parsed.cap } : null, { enabled: reached });
+    const { url, failed, type } = useHeldAttachmentUrl(parsed ? { id: parsed.id, key: parsed.key, mime: parsed.mime, cap: parsed.cap } : null, { enabled: reached });
     if (!parsed || failed) return <span className="notes-thumb file" title={refItem.name}><WarningIcon /></span>;
     if (!url) return <span className="notes-thumb pending" title={refItem.name} />;
-    return <img className="notes-thumb" src={url} alt={refItem.name} title={refItem.name} loading="lazy" />;
+    // One this device cannot show (a HEIC outside WebKit with no decoder in
+    // the app) is the file mark, never a broken image (AttachmentImg).
+    const asFile = <span className="notes-thumb file" title={refItem.name}><ImageIcon /></span>;
+    return <AttachmentImg type={type} className="notes-thumb" src={url} alt={refItem.name} title={refItem.name} loading="lazy" fallback={asFile} pending={<span className="notes-thumb pending" title={refItem.name} />} />;
 }
 
 function NoteCardImpl({

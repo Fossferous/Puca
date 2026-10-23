@@ -48,6 +48,19 @@ export function pendingAttachment(
     };
 }
 
+/** The file the chip stands for was replaced before its upload began (a
+ *  HEIC made into a JPEG: api/heif.ts): its name, type and thumbnail follow. */
+export function replaceFile(
+    list: PendingAttachment[],
+    localId: string,
+    file: { name?: string; type?: string },
+    previewUrl: string | null,
+): PendingAttachment[] {
+    return list.map(a => (a.localId === localId
+        ? { ...a, name: file.name || a.name, mime: file.type || 'application/octet-stream', previewUrl }
+        : a));
+}
+
 /** Back to 'uploading' (a retry); clears the old error. */
 export function markUploading(list: PendingAttachment[], localId: string): PendingAttachment[] {
     return list.map(a => (a.localId === localId ? { ...a, status: 'uploading' as const, error: undefined } : a));

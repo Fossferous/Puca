@@ -9,7 +9,9 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import { parseMessage, isSafeUrl, type Node } from '../utils/messageParser';
 import { isImageUrl } from '../api/linkPreview';
 import { attachmentsAwake, subscribeAttachmentsAwake, useAttachmentsAwake } from '../api/attachmentAwake';
-import { isEncAttachment, parseEncAttachment, acquireAttachmentUrl, prefetchAttachmentUrl, noteAttachmentInterest, attachmentPictureSize, noteAttachmentPictureSize, videoMimeFor, audioMimeFor, isPlaylistBlobUrl, type AttachmentHold } from '../api/attachments';
+import { isEncAttachment, parseEncAttachment, acquireAttachmentUrl, prefetchAttachmentUrl, noteAttachmentInterest, attachmentPictureSize, noteAttachmentPictureSize, attachmentPlainBytes, videoMimeFor, audioMimeFor, isPlaylistBlobUrl, type AttachmentHold } from '../api/attachments';
+import { askToShowHeif, canShowHeifOnRequest, isHeifType, jpegName } from '../api/heif';
+import { AttachmentImg } from './AttachmentImg';
 import { isAbortError } from '../api/priorityLimiter';
 import { useAttachmentZone, usePlayerGrant, loadUrgency, scrollRootOf, type ShownSize } from './attachmentZone';
 import { isClipRef, isScrubbedClipRef } from '../api/clips/clipRef';
@@ -19,11 +21,11 @@ import { AttachmentLoading } from './AttachmentLoading';
 import type { ClipConsent } from '../api/servers';
 import { openExternalUrl } from '../api/openExternal';
 import { ImageLightbox } from './ImageLightbox';
-import { LockIcon, CheckCircleIcon, WarningIcon, PaperclipIcon, MusicIcon, SpeakerIcon } from './Icons';
+import { LockIcon, CheckCircleIcon, WarningIcon, PaperclipIcon, MusicIcon, SpeakerIcon, ImageIcon } from './Icons';
 import { saveEncryptedAttachment, saveFailureNote } from '../api/saveAttachment';
 import type { EncRef } from '../api/nativeDownloads';
 import { remoteImagesAllowed, followOutputDeviceRef } from './settingsStore';
-import { bytesOfText } from '../api/loadProgressText';
+import { bytesOfText, formatLoadedMB } from '../api/loadProgressText';
 import type { MemberWithRoles, Channel } from '../api/servers';
 
 /**
@@ -129,6 +131,11 @@ const SpoilerCover = createContext(false);
  *  using (api/attachmentAwake.ts). */
 function EncryptedAttachment({ href, name }: { href: string; name: string }) {
     const [url, setUrl] = useState<string | null>(null);
+    // What `url`'s bytes are (AttachmentHold's `type`).
+    const [heldType, setHeldType] = useState<string | null>(null);
+    // The reader pressed Show photo on a HEIC the desktop app may decode only
+    // when asked (api/heif.ts mayDecodeHeifForDisplay).
+    const [askedShow, setAskedShow] = useState(false);
     const [failed, setFailed] = useState(false);
     const [zoomed, setZoomed] = useState(false);
     // Bumping this re-runs the fetch effect — `failed` used to latch forever,
@@ -255,6 +262,7 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
             .then((h) => {
                 if (!alive) { h.release(); return; }
                 hold = h;
+                setHeldType(h.type);
                 setUrl(h.url);
             })
             .catch((err) => {
@@ -274,6 +282,7 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
             // wanted, another ref, or unmounted), so letting it go is safe.
             hold?.release();
             setUrl(null);
+            setHeldType(null);
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [href, fileMime, attempt, want]);
@@ -380,18 +389,69 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
         return <AttachmentLoading fileId={info.id} ref={bindSlot} />;
     }
     if (isImage) {
-        return (
-            // stopPropagation for the same reason as the video branch below:
-            // a revealed spoiler wraps this span, and the zoom click would
-            // bubble into its toggle — opening the lightbox while re-hiding
-            // the spoiler underneath it. Unrevealed spoilers never see this
-            // (pointer-events:none), so the revealing tap still works.
-            <span className="message-image" ref={bindSlot} onClick={(e) => e.stopPropagation()}>
-                {/* Enlarge in-app. openAttachmentBlob's window.open of a blob:
-                    URL is a no-op in the Tauri and Capacitor shells. */}
-                <img src={shown} alt={name} loading="lazy" onClick={() => setZoomed(true)} />
-                {zoomed && <ImageLightbox url={shown} name={name} encRef={info} onClose={() => setZoomed(false)} />}
+        // A picture this device cannot show — a HEIC outside WebKit that the
+        // app had no decoder for (api/heif.ts), a corrupt file — is a card
+        // with its name, kind and size and the Download button: never a
+        // broken image (AttachmentImg). A HEIC the device decoded for display
+        // is a JPEG (heldType), and a save from the lightbox is that JPEG.
+        const heif = isHeifType(info.mime);
+        const bytes = attachmentPlainBytes(info.id, info.key, fileMime);
+        // The desktop app decodes a received HEIC only when asked (its codec
+        // runs in the app's own process); asked and still a HEIC: Windows
+        // could not (no HEIF/HEVC extensions).
+        const offerShow = heif && heldType !== 'image/jpeg' && canShowHeifOnRequest();
+        const card = (
+            // stopPropagation: the same spoiler-toggle reason as the video.
+            <span className="message-audio message-picture-file" ref={bindSlot} onClick={(e) => e.stopPropagation()}>
+                <span className="message-audio-card">
+                    <span className="message-audio-name">
+                        <ImageIcon />
+                        <span className="message-audio-title">{name || 'picture'}</span>
+                    </span>
+                    <span className="message-audio-note">
+                        {heif ? 'HEIC photo' : 'Picture'}{bytes !== null ? `, ${bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : formatLoadedMB(bytes)}` : ''}
+                        {offerShow && askedShow
+                            ? ": Windows could not open it. Installing the HEIF Image Extensions and HEVC Video Extensions from the Microsoft Store lets it; or download it."
+                            : offerShow
+                                ? ". Show photo opens it with Windows' own decoder."
+                                : ": this device can't show it here. Download it to open it."}
+                    </span>
+                </span>
+                {offerShow && !askedShow && (
+                    <button
+                        type="button"
+                        className="message-attachment"
+                        onClick={() => { askToShowHeif(info.id); setAskedShow(true); setAttempt(a => a + 1); }}
+                    >
+                        <ImageIcon /> Show photo
+                    </button>
+                )}
+                <AttachmentDownload url={shown} name={name || 'attachment'} encRef={info} save={save} />
             </span>
+        );
+        return (
+            <AttachmentImg
+                type={heldType}
+                src={shown}
+                alt={name}
+                loading="lazy"
+                onClick={() => setZoomed(true)}
+                fallback={card}
+                pending={<AttachmentLoading fileId={info.id} ref={bindSlot} />}
+                wrap={(img) => (
+                    // stopPropagation for the same reason as the video branch below:
+                    // a revealed spoiler wraps this span, and the zoom click would
+                    // bubble into its toggle — opening the lightbox while re-hiding
+                    // the spoiler underneath it. Unrevealed spoilers never see this
+                    // (pointer-events:none), so the revealing tap still works.
+                    <span className="message-image" ref={bindSlot} onClick={(e) => e.stopPropagation()}>
+                        {/* Enlarge in-app. openAttachmentBlob's window.open of a blob:
+                            URL is a no-op in the Tauri and Capacitor shells. */}
+                        {img}
+                        {zoomed && <ImageLightbox url={shown} name={heif && heldType === 'image/jpeg' ? jpegName(name) : name} encRef={info} onClose={() => setZoomed(false)} />}
+                    </span>
+                )}
+            />
         );
     }
     // A playlist (its BYTES open with #EXTM3U, whatever the ref says) never

@@ -1244,6 +1244,16 @@ button.message-attachment.error { color: #ffb4b4; }
     margin-top: 4px;
 }
 
+/* A picture this device cannot show (a HEIC outside WebKit with no decoder
+   in the app: api/heif.ts) wears the audio card's look: its name, a line
+   saying what it is and why it is not shown, and the Download button under
+   it, which is its only action, so a finger gets a full 44 px for it. */
+@media (pointer: coarse) {
+    .message-picture-file .message-attachment {
+        min-height: 44px;
+    }
+}
+
 /* ==== Spoilered media ====
    Text spoilers hide by painting the glyphs out (color: transparent below);
    an embedded image or video needs a REAL cover — before this, media inside
