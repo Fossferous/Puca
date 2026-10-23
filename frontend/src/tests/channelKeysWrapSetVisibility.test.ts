@@ -17,8 +17,9 @@
  * These cases go red against that code: the stranger is wrapped for, no
  * member list is asked for, and nothing is said. The controls are the other
  * half: a member who joined a moment ago (in member-keys before a cached
- * member list has them) must still get the key with no alarm, and a member
- * list that comes back degraded must not read as "nobody is a member".
+ * member list has them) must still get the key with no alarm — and if the
+ * read past the cache fails, must not be reported off the stale list — and a
+ * member list that comes back degraded must not read as "nobody is a member".
  */
 import { describe, it, expect, beforeEach, beforeAll, vi } from 'vitest';
 
@@ -35,8 +36,8 @@ const fake = {
     /** What the channel-key code is told: the wrap set. */
     memberKeys: [] as { user_id: number; public_key: string | null }[],
     /** What a person is shown: the server member list, one answer per read
-     *  (the last one repeats). */
-    visibleAnswers: [] as { id: number }[][],
+     *  (the last one repeats); an Error is a read that fails. */
+    visibleAnswers: [] as ({ id: number }[] | Error)[],
     /** Where the channel appears in our own lists. */
     channelsOfS1: [{ id: 42, name: 'general' }] as { id: number; name: string }[],
     /** The rows the server received on POST /keys. */
@@ -63,7 +64,9 @@ vi.mock('../api/client', () => ({
             if (url.endsWith('/member-keys')) return fake.memberKeys;
             if (url.endsWith('/members-with-roles')) {
                 fake.visibleListRequests++;
-                return fake.visibleAnswers.length > 1 ? fake.visibleAnswers.shift()! : (fake.visibleAnswers[0] ?? []);
+                const answer = fake.visibleAnswers.length > 1 ? fake.visibleAnswers.shift()! : (fake.visibleAnswers[0] ?? []);
+                if (answer instanceof Error) throw answer;
+                return answer;
             }
             if (url === '/servers') return [{ id: 's1', name: 'Home' }];
             if (url === '/servers/s1/channels') return fake.channelsOfS1;
@@ -193,6 +196,42 @@ describe('the wrap set versus the member list a person sees', () => {
         expect(recipients()).toEqual([1, 2]);
         expect(fake.visibleListRequests).toBe(2);
         expect(hiddenRecipientNotices(), 'a false alarm about a real new member').toEqual([]);
+    });
+
+    it('CONTROL: when reading past the cache FAILS, the newcomer is not reported and nothing is minted on the stale list', async () => {
+        const newcomer = await testIdentity(...NEWCOMER);
+        fake.memberKeys = [
+            { user_id: 1, public_key: (await testIdentity(...ME)).publicKeyEncoded },
+            { user_id: 2, public_key: newcomer.publicKeyEncoded },
+        ];
+        // The first read is from before they joined; the read past it fails.
+        fake.visibleAnswers = [[{ id: 1 }], new Error('offline')];
+
+        const got = await ensureChannelKey(42);
+
+        expect(fake.visibleListRequests).toBe(2);
+        expect(hiddenRecipientNotices(), 'a false alarm about a real new member').toEqual([]);
+        expect(got, 'minted on the list the second read was meant to replace').toBeNull();
+        expect(fake.posted).toEqual([]);
+    });
+
+    it('CONTROL: nor is a first-contact wrapper who just joined, when reading past the cache fails', async () => {
+        const me = await testIdentity(...ME);
+        const newcomer = await testIdentity(...NEWCOMER);
+        const real = generateChannelKey();
+        const [row] = await wrapChannelKeyForMembers(newcomer, real, [{ userId: 1, publicKey: me.publicKeyEncoded }], { channelId: 42, epoch: 1 });
+        fake.currentEpoch = 1;
+        fake.rows = [{ epoch: 1, wrapped_key: row.wrappedKey, sender_public_key: row.senderPublicKey, sender_user_id: 2 }];
+        fake.memberKeys = [
+            { user_id: 1, public_key: me.publicKeyEncoded },
+            { user_id: 2, public_key: newcomer.publicKeyEncoded },
+        ];
+        fake.visibleAnswers = [[{ id: 1 }], new Error('offline')];
+
+        await ensureChannelKey(42);
+
+        expect(hiddenRecipientNotices(), 'a false alarm about a real new member').toEqual([]);
+        expect(fake.posted, 'minted on a list known to be stale').toEqual([]);
     });
 
     it('CONTROL: a member list without us in it (a degraded answer) mints nothing and alarms nobody', async () => {

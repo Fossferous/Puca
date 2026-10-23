@@ -137,7 +137,8 @@ type VisibleMembers = { serverId: string; ids: Set<number> };
  * read once more past the cache before anyone is refused: someone who joined
  * a moment ago is in member-keys before they are in a list fetched before
  * they joined, and refusing them would be a false alarm and a member who
- * cannot read.
+ * cannot read. If that read fails, nothing is established: the first list is
+ * the one in doubt, and must not stand in for the read meant to replace it.
  *
  * A list without US in it is not this server's member list (the endpoint
  * answers [] when its own query fails), so it reads as null too.
@@ -163,8 +164,7 @@ function visibleMembersReader(channelId: number): (need: readonly number[]) => P
         if (!ids && !readFresh) ids = await read(false);
         if (!readFresh && !(ids && need.every((id) => ids!.has(id)))) {
             readFresh = true;
-            const again = await read(true);
-            if (again) ids = again;
+            ids = await read(true);
         }
         return ids ? { serverId, ids } : null;
     };
