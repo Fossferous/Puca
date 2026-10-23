@@ -271,7 +271,7 @@ export async function deviceStatsSample(): Promise<Record<string, unknown>> {
         at: Date.now(), framesDecoded: Math.floor(t * 60), bytesReceived: Math.floor(t * 1_500_000),
         freezeCount: 0, totalDecodeTime: t * 60 * 0.002, jitterBufferDelay: t * 60 * 0.012,
         jitterBufferEmittedCount: Math.floor(t * 60), packetsLost: 0, packetsReceived: Math.floor(t * 1200),
-        frameWidth: 1920, frameHeight: 1080, rttMs: 3, path: 'direct', protocol: 'udp',
+        frameWidth: 1920, frameHeight: 1080, rttMs: 3, path: 'direct', lan: true, protocol: 'udp',
         decoder: 'D3D11VideoDecoder', hardwareDecode: true, inputLane: 'channel',
     };
 }

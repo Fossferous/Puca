@@ -82,7 +82,7 @@ describe('the live numbers', () => {
     const sample = (over: Partial<DeviceStatsSample>): DeviceStatsSample => ({
         at: 0, framesDecoded: 0, bytesReceived: 0, freezeCount: 0, totalDecodeTime: 0,
         jitterBufferDelay: 0, jitterBufferEmittedCount: 0, packetsLost: 0, packetsReceived: 0,
-        frameWidth: 1920, frameHeight: 1080, rttMs: 4, path: 'direct', protocol: 'udp',
+        frameWidth: 1920, frameHeight: 1080, rttMs: 4, path: 'direct', lan: true, protocol: 'udp',
         decoder: null, hardwareDecode: true, inputLane: 'channel', ...over,
     });
 

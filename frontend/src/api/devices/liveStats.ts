@@ -28,6 +28,8 @@ export interface LiveStats {
     freezes: number;
     frame: string | null;
     path: DeviceStatsSample['path'];
+    /** The local network itself, not merely "not relayed" (lanPath.ts). */
+    lan: boolean | null;
     protocol: string | null;
     decoder: string | null;
     hardwareDecode: boolean | null;
@@ -60,6 +62,7 @@ export function liveStatsFrom(a: DeviceStatsSample, b: DeviceStatsSample): LiveS
         freezes: Math.max(0, b.freezeCount - a.freezeCount),
         frame: b.frameWidth && b.frameHeight ? `${b.frameWidth}x${b.frameHeight}` : null,
         path: b.path,
+        lan: b.lan,
         protocol: b.protocol,
         decoder: b.decoder,
         hardwareDecode: b.hardwareDecode,

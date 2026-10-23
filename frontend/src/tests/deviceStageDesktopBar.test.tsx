@@ -29,8 +29,10 @@ const h = vi.hoisted(() => ({
     sendLatencyProbe: vi.fn(() => false),
     probeUsable: false,
     storage: new Map<string, string>(),
-    /** What deviceStatsSample answers: null (no stats) unless a test sets it. */
-    statsPath: null as null | { path: 'direct' | 'relay'; protocol: string; rttMs: number },
+    /** What deviceStatsSample answers: null (no stats) unless a test sets it.
+     *  `lossPct` makes each reading lose that share of its packets. */
+    statsPath: null as null | { path: 'direct' | 'relay'; lan: boolean; protocol: string; rttMs: number; lossPct?: number },
+    statsReadings: 0,
 }));
 
 vi.mock('../api/devices/session', () => ({
@@ -53,14 +55,20 @@ vi.mock('../api/devices/session', () => ({
     setPrivacyMode: (...a: unknown[]) => h.setPrivacyMode(...a),
     sendPowerAction: (...a: unknown[]) => (h.sendPowerAction as unknown as (...x: unknown[]) => boolean)(...a),
     deviceDiagnosticsWindow: async () => [],
-    deviceStatsSample: async () => (h.statsPath
-        ? {
+    deviceStatsSample: async () => {
+        if (!h.statsPath) return null;
+        // Cumulative counters, as the browser's are: each reading adds 1000
+        // packets, `lossPct` of them lost.
+        const n = ++h.statsReadings * 1000;
+        const { lossPct = 0, ...path } = h.statsPath;
+        return {
             at: Date.now(), framesDecoded: Math.floor(performance.now() / 16), bytesReceived: 0, freezeCount: 0,
-            totalDecodeTime: 0, jitterBufferDelay: 0, jitterBufferEmittedCount: 0, packetsLost: 0, packetsReceived: 0,
+            totalDecodeTime: 0, jitterBufferDelay: 0, jitterBufferEmittedCount: 0,
+            packetsLost: Math.round((n * lossPct) / 100), packetsReceived: Math.round((n * (100 - lossPct)) / 100),
             frameWidth: 1920, frameHeight: 1080, decoder: null, hardwareDecode: null, inputLane: 'channel',
-            ...h.statsPath,
-        }
-        : null),
+            ...path,
+        };
+    },
     activeSessions: () => [],
     requestFileAccess: () => { /* noop */ },
     latencyProbeUsable: () => h.probeUsable,
@@ -81,6 +89,7 @@ vi.mock('../api/keyboardInset', () => ({
 }));
 
 const { DeviceStage } = await import('../components/DeviceStage');
+const { useStreamStore } = await import('../stores/streamStore');
 
 const BOX = { left: 0, top: 0, width: 1280, height: 720 };
 beforeEach(() => {
@@ -107,6 +116,8 @@ beforeEach(() => {
     h.listeners.clear();
     h.snapshot = [];
     h.statsPath = null;
+    h.statsReadings = 0;
+    useStreamStore.getState().clearAllStreams();
     for (const f of [h.sendInput, h.sendPowerAction, h.setPrivacyMode, h.requestMonitor, h.sendStreamQuality, h.endSession, h.setCursorOwned, h.sendLatencyProbe]) f.mockClear();
     h.probeUsable = false;
 });
@@ -398,7 +409,7 @@ describe('60 fps on your own network', () => {
     const settleStats = () => act(async () => { await new Promise(r => setTimeout(r, 1300)); });
 
     it('a direct UDP picture with a short round trip steps up ONCE to 60 fps / 10 Mbps, and says so', async () => {
-        h.statsPath = { path: 'direct', protocol: 'udp', rttMs: 3 };
+        h.statsPath = { path: 'direct', lan: true, protocol: 'udp', rttMs: 3 };
         await mount();
         await settleStats();
         await flush();
@@ -410,18 +421,79 @@ describe('60 fps on your own network', () => {
     }, 15_000);
 
     it('a relayed picture stays where it is', async () => {
-        h.statsPath = { path: 'relay', protocol: 'udp', rttMs: 3 };
+        h.statsPath = { path: 'relay', lan: false, protocol: 'udp', rttMs: 3 };
         await mount();
         await settleStats();
         expect(h.sendStreamQuality).not.toHaveBeenCalled();
     }, 15_000);
 
     it('a long round trip stays where it is', async () => {
-        h.statsPath = { path: 'direct', protocol: 'udp', rttMs: 40 };
+        h.statsPath = { path: 'direct', lan: true, protocol: 'udp', rttMs: 40 };
         await mount();
         await settleStats();
         expect(h.sendStreamQuality).not.toHaveBeenCalled();
     }, 15_000);
+
+    it('a path punched across the internet is "direct" but not your own network: it stays where it is', async () => {
+        h.statsPath = { path: 'direct', lan: false, protocol: 'udp', rttMs: 3 };
+        await mount();
+        await settleStats();
+        await settleStats();
+        expect(h.sendStreamQuality).not.toHaveBeenCalled();
+        expect(host!.textContent).not.toContain('On your own network');
+    }, 15_000);
+
+    /** The quality as the host would confirm it, so the stage sees its own step. */
+    const confirming = () => h.sendStreamQuality.mockImplementation((...a: unknown[]) => {
+        const [id, fps, bitrate] = a as [string, number, number];
+        useStreamStore.getState().setStreamQuality(id, { fps, bitrate });
+    });
+
+    it('stepped up, a path that leaves your own network goes back to 30 fps once, and says so', async () => {
+        confirming();
+        h.statsPath = { path: 'direct', lan: true, protocol: 'udp', rttMs: 3 };
+        await mount();
+        await settleStats();
+        await flush();
+        expect(h.sendStreamQuality.mock.calls).toEqual([['ds-1', 60, 10000]]);
+        h.statsPath = { path: 'relay', lan: false, protocol: 'udp', rttMs: 30 };
+        await settleStats();
+        await flush();
+        expect(h.sendStreamQuality.mock.calls.at(-1)).toEqual(['ds-1', 30, 6000]);
+        expect(host!.textContent).toContain('No longer on your own network: back to 30 fps');
+        await settleStats();
+        expect(h.sendStreamQuality, 'once').toHaveBeenCalledTimes(2);
+    }, 20_000);
+
+    it('stepped up, two readings in a row losing packets go back to 30 fps', async () => {
+        confirming();
+        h.statsPath = { path: 'direct', lan: true, protocol: 'udp', rttMs: 3 };
+        await mount();
+        await settleStats();
+        await flush();
+        expect(h.sendStreamQuality).toHaveBeenCalledTimes(1);
+        h.statsPath = { ...h.statsPath, lossPct: 5 };
+        await settleStats();
+        await settleStats();
+        await settleStats();
+        await flush();
+        expect(h.sendStreamQuality.mock.calls.at(-1)).toEqual(['ds-1', 30, 6000]);
+        expect(host!.textContent).toContain('Packets are being lost: back to 30 fps');
+    }, 20_000);
+
+    it('a quality somebody picked after the step-up is theirs: nothing steps it down', async () => {
+        confirming();
+        h.statsPath = { path: 'direct', lan: true, protocol: 'udp', rttMs: 3 };
+        await mount();
+        await settleStats();
+        await flush();
+        act(() => { useStreamStore.getState().setStreamQuality('ds-1', { fps: 30, bitrate: 3000 }); });
+        await flush();
+        h.statsPath = { path: 'relay', lan: false, protocol: 'udp', rttMs: 30 };
+        await settleStats();
+        await settleStats();
+        expect(h.sendStreamQuality).toHaveBeenCalledTimes(1);
+    }, 20_000);
 });
 
 describe('the pointer drawn here, with no delay', () => {

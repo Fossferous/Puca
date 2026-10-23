@@ -54,6 +54,7 @@ import { buildClipboardEvent, isClipboardEvent, readLocalClipboardDetailed, writ
 import { getHostBackend } from './hostBackend';
 import { blockedAppName } from './inputReach';
 import { ProbeMatcher, type ProbeResult } from './latencyProbe';
+import { isLanPair } from './lanPath';
 import { attachTunnelChannel, closeTunnels } from './tunnel';
 import { SerialQueue } from '../serialQueue';
 import { InputCoalescer, MOVE_INTERVAL_DIRECT_MS, MOVE_INTERVAL_MS } from './inputCoalescer';
@@ -3274,6 +3275,9 @@ export interface DeviceStatsSample {
     rttMs: number | null;
     /** 'relay' when either end of the selected pair is a TURN relay. */
     path: 'direct' | 'relay' | null;
+    /** The selected pair is the local network itself (lanPath.ts): 'direct'
+     *  alone includes a path punched across the internet. Null with no pair. */
+    lan: boolean | null;
     /** The selected pair's transport: 'udp' or 'tcp'. */
     protocol: string | null;
     decoder: string | null;
@@ -3294,7 +3298,7 @@ export async function deviceStatsSample(sessionId: string): Promise<DeviceStatsS
     const out: DeviceStatsSample = {
         at: Date.now(), framesDecoded: 0, bytesReceived: 0, freezeCount: 0, totalDecodeTime: 0,
         jitterBufferDelay: 0, jitterBufferEmittedCount: 0, packetsLost: 0, packetsReceived: 0,
-        frameWidth: null, frameHeight: null, rttMs: null, path: null, protocol: null,
+        frameWidth: null, frameHeight: null, rttMs: null, path: null, lan: null, protocol: null,
         decoder: null, hardwareDecode: null, inputLane: s.inputRate.lane ?? null,
     };
     let sawVideo = false;
@@ -3305,6 +3309,7 @@ export async function deviceStatsSample(sessionId: string): Promise<DeviceStatsS
             const local = stats.get(pair.localCandidateId as string);
             const remote = stats.get(pair.remoteCandidateId as string);
             out.path = local?.candidateType === 'relay' || remote?.candidateType === 'relay' ? 'relay' : 'direct';
+            out.lan = isLanPair(local, remote);
             out.protocol = typeof local?.protocol === 'string' ? local.protocol : null;
             out.rttMs = typeof pair.currentRoundTripTime === 'number'
                 ? Math.round(pair.currentRoundTripTime * 1000)

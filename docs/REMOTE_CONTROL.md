@@ -442,9 +442,16 @@ the next capture → encode → network → jitter buffer → decode → the sta
   doubled the frames and the bitrate. Measured in `latency.rs`'s tests: input
   every 8 ms on a picture that changes every frame stays at 30 frames a second
   at 30 fps.
-- **60 fps on your own network.** A desktop stage whose picture comes
-  directly over UDP with a round trip under 15 ms, still on the default
-  quality, steps up once to 60 fps / 10 Mbps and says so.
+- **60 fps on your own network.** A desktop stage whose picture comes over
+  the local network itself — both ends of the selected ICE pair host
+  candidates, the far one on a private or link-local address
+  (`frontend/src/api/devices/lanPath.ts`; the stats' "direct" alone means
+  "not relayed", which includes a NAT-traversed path across the internet) —
+  over UDP with a round trip under 15 ms, still on the default quality, steps
+  up once to 60 fps / 10 Mbps and says so. It steps back down once, and says
+  why, if the path stops being the local network or two readings in a row
+  lose 2% of their packets (the agent has no congestion control to do it);
+  a quality somebody picked since is left alone.
 - **8 ms move coalescing on the direct channel** (`MOVE_INTERVAL_DIRECT_MS`):
   the relay's 16 ms exists for the relay's per-event cost, which the direct
   channel does not pay.

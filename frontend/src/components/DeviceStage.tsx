@@ -2801,25 +2801,62 @@ export function DeviceStage() {
     const qualityValue = shown ? `${shown.bitrate},${shown.fps}` : '6000,30';
 
     // 60 FPS ON YOUR OWN NETWORK. A session starts at 30 fps / 6 Mbps, which
-    // suits a link across the internet; across a room it only costs time: the
-    // host captures on a fixed clock, so whatever you did waits up to a whole
-    // frame (33 ms, 17 on average) before it is even captured, and the stream
-    // has bandwidth to spare. Once the picture is coming directly over UDP with
-    // a round trip under 15 ms, and nobody has picked a quality yet, step up
-    // ONCE to 60 fps / 10 Mbps (the Ultra preset) and say so. Desktop only — a
-    // phone pays for decoding twice the frames in battery.
+    // suits a link across the internet; across a room it only costs time: a
+    // change waits for the next frame to be captured, and the stream has
+    // bandwidth to spare. Once the picture comes over the local network ITSELF
+    // (`lan`: both ends of the selected pair host candidates, the far one on a
+    // private address — the stats' 'direct' only means "not relayed", which
+    // includes a path punched across the internet), over UDP with a round trip
+    // under 15 ms, and nobody has picked a quality yet, step up ONCE to 60 fps
+    // / 10 Mbps (the Ultra preset) and say so. Desktop only — a phone pays for
+    // decoding twice the frames in battery.
+    //
+    // AND BACK DOWN, once: the agent has no congestion control to do it. If
+    // the path stops being the local network (a reconnect through a relay, a
+    // laptop that roamed) or two readings in a row lose 2% of the packets,
+    // the stage returns to the default and says why — unless somebody has
+    // picked a quality since, which is theirs.
     const autoQualityRef = useRef<string | null>(null);
-    const lanDirect = !!liveStats && liveStats.path === 'direct' && liveStats.protocol === 'udp'
+    /** The session this stage stepped up itself, while that still stands. */
+    const autoSteppedRef = useRef<string | null>(null);
+    /** ...and once the host has confirmed it: until then a different quality
+     *  is only this render not having caught up yet, not somebody's choice. */
+    const autoConfirmedRef = useRef<string | null>(null);
+    /** Readings in a row that lost packets, while stepped up. */
+    const lossRunRef = useRef(0);
+    const onLan = !!liveStats && liveStats.lan === true && liveStats.protocol === 'udp'
         && liveStats.rttMs !== null && liveStats.rttMs < 15;
     useEffect(() => {
-        if (isMobile || !sessionId || !lanDirect) return;
+        if (isMobile || !sessionId || !onLan) return;
         if (autoQualityRef.current === sessionId) return;
         autoQualityRef.current = sessionId;
         if (qualityPending || qualityValue !== '6000,30') return;   // somebody chose
+        autoSteppedRef.current = sessionId;
+        autoConfirmedRef.current = null;
+        lossRunRef.current = 0;
         sendStreamQuality(sessionId, 60, 10_000);
         // eslint-disable-next-line react-hooks/set-state-in-effect
         setClipboardNote('On your own network: streaming at 60 fps for less delay (Quality to change)');
-    }, [isMobile, sessionId, lanDirect, qualityPending, qualityValue]);
+    }, [isMobile, sessionId, onLan, qualityPending, qualityValue]);
+    useEffect(() => {
+        if (isMobile || !sessionId || !liveStats || autoSteppedRef.current !== sessionId) return;
+        if (qualityPending) return;                    // a change is on its way
+        if (qualityValue === '10000,60') autoConfirmedRef.current = sessionId;
+        if (autoConfirmedRef.current !== sessionId) return;   // ours not confirmed yet
+        if (qualityValue !== '10000,60') {             // somebody chose since: theirs
+            autoSteppedRef.current = null;
+            return;
+        }
+        lossRunRef.current = liveStats.lossPct !== null && liveStats.lossPct >= 2 ? lossRunRef.current + 1 : 0;
+        const leftLan = liveStats.lan === false;
+        if (!leftLan && lossRunRef.current < 2) return;
+        autoSteppedRef.current = null;
+        sendStreamQuality(sessionId, 30, 6000);
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setClipboardNote(leftLan
+            ? 'No longer on your own network: back to 30 fps'
+            : 'Packets are being lost: back to 30 fps');
+    }, [isMobile, sessionId, liveStats, qualityPending, qualityValue]);
     useEffect(() => {
         if (!sessionId) return;
         let clearTimer: ReturnType<typeof setTimeout> | null = null;
