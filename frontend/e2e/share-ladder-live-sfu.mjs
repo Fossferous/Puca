@@ -25,6 +25,9 @@
 //   F  Settings -> Never         expect one encoding at once (a re-publish),
 //      then Automatic again      and the ladder back (another re-publish),
 //                                through the real Settings > Voice & Video
+//   G  the shared "window" shrinks expect the SAME sender, its rungs re-sized
+//      to 1152x648               in place by the follow check (q 360, h 540
+//                                lines): no quality change was asked for
 // After each, the viewer's decoded frame rate over a few seconds; across each
 // RE-publish (C, D, F) also the longest stretch with no new frame on the
 // viewer, sampled every 100 ms: what "the picture holds" costs.
@@ -72,12 +75,14 @@ const keepPeerConnections = () => {
 /** The sharer's screen: a 2560x1440 canvas at 60 fps with real motion. */
 const syntheticScreen = () => {
     navigator.mediaDevices.getDisplayMedia = async () => {
-        const w = 2560, h = 1440;
         const c = document.createElement('canvas');
-        c.width = w; c.height = h;
+        c.width = 2560; c.height = 1440;
+        // Phase G resizes it, as a shared window is resized.
+        window.__screenCanvas = c;
         const g = c.getContext('2d');
         let n = 0;
         const draw = () => {
+            const w = c.width, h = c.height;
             n++;
             g.fillStyle = `hsl(${(n * 7) % 360} 40% 20%)`; g.fillRect(0, 0, w, h);
             for (let i = 0; i < 24; i++) {
@@ -397,6 +402,21 @@ try {
     for (const [name, ms] of [['C', cGap.gapMs], ['D', dGap.gapMs], ['F Never', fGap1.gapMs], ['F Automatic', fGap2.gapMs]]) {
         check(`${name}: the picture held for under 3 s across the re-publish`, ms < 3000, { gapMs: ms });
     }
+
+    // G: the shared window shrinks under the live 720p cap; the ladder must
+    // follow it in place (followShareTick), its bottom rung kept at 360 lines.
+    await sharer.evaluate(() => { const c = window.__screenCanvas; c.width = 1152; c.height = 648; });
+    await sleep(8000);
+    const g = await sharer.evaluate(readShareSenders);
+    const gSender = g.find(x => x.capture.startsWith('1152x648')) ?? g[0];
+    result.phases.G = { senders: g, viewer: await viewerRate(viewer) };
+    check('G: the capture is the smaller window', gSender?.capture.startsWith('1152x648'), gSender?.capture);
+    if (laddered(f2Sender)) {
+        check('G: the same sender (followed in place)', gSender?.id === f2Sender.id, { before: f2Sender.id, after: gSender?.id });
+        const sc = Object.fromEntries((gSender?.encodings ?? []).map(x => [x.rid, x.scale]));
+        check('G: rungs re-sized for 648 lines: 360 / 540 / 648', Math.abs(648 / sc.q - 360) < 1 && Math.abs(648 / sc.h - 540) < 1 && sc.f === 1, sc);
+    }
+    check('G: the viewer kept watching', result.phases.G.viewer.fps > 10, result.phases.G.viewer);
 } catch (e) {
     result.error = String(e?.message || e);
     console.log('ERROR', result.error);

@@ -1362,8 +1362,7 @@ export class SfuManager {
         }
         if (key !== st.seen) {
             st.seen = key;
-            st.reads = 1;
-            return;
+            st.reads = 0;
         }
         if (++st.reads < SHARE_FOLLOW_READS) return;
         st.seen = null;
