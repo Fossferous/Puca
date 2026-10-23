@@ -298,6 +298,30 @@ for (const [label, w, h] of [['desktop 1280x800', 1280, 800], ['narrow 900x700',
         ck(`${label}: a clipboard that never answers ends in a note naming it`, !!third, third ? `${third} (${Date.now() - t0} ms)` : 'still waiting after 8 s');
     }
 
+    // 6b. An agent too old to report pointer shapes: the stage takes the
+    // pointer, hears no shape within 3 s, and hands it back to the host for
+    // the session (the default above, a current agent, keeps it).
+    if (w === 1280) {
+        await page.evaluate(() => { window.__stage.knobs.sendsShapes = false; window.__stage.state.remoteCursor = null; window.__stage.emit(); });
+        const toggleDraw = async () => {
+            await press(page, page.locator('.dsb-menu-btn', { hasText: 'Mouse' }).first());
+            await page.waitForTimeout(100);
+            await press(page, page.locator('.dsb-menu .dsb-item', { hasText: 'Draw the pointer here' }).first());
+            await page.waitForTimeout(150);
+        };
+        // Off if it is on, then on: a fresh take, by the menu a person uses.
+        const drawIsOn = () => page.evaluate(() => localStorage.getItem('device-stage-instant-pointer') !== 'off');
+        if (await drawIsOn()) await toggleDraw();
+        await toggleDraw();
+        await page.waitForFunction(() => window.__stage.state.cursorOwned === true, null, { timeout: 3000 }).catch(() => undefined);
+        const tookIt = await page.evaluate(() => window.__stage.state.cursorOwned);
+        await page.waitForTimeout(3500);
+        const after = await page.evaluate(() => ({ owned: window.__stage.state.cursorOwned, cursor: getComputedStyle(document.querySelector('.device-stage-surface')).cursor }));
+        ck(`${label}: an agent that sends no shapes gets the pointer back within 3 s`, tookIt === true && after.owned === false && after.cursor === 'crosshair',
+            `took it ${tookIt}; after 3.5 s owned ${after.owned}, cursor ${after.cursor}`);
+        await page.evaluate(() => { window.__stage.knobs.sendsShapes = true; });
+    }
+
     // 7. Minimised to the chat ("Back to Púca"), the keyboard is the app's: a
     // key typed with the focus off the composer, Enter, Delete, Ctrl+A and the
     // stage's own Ctrl+Alt+End send NOTHING. CONTROL: back on the stage, the
