@@ -26,6 +26,7 @@ import { useTaskFeature } from '../../api/taskFeatures';
 import { ContextMenu, type ContextMenuItem } from '../../components/ContextMenu';
 import { useContextMenu } from '../../components/contextMenuUtils';
 import { IdentityBanner } from '../../components/IdentityBanner';
+import { HiddenRecipientBanner } from '../../components/HiddenRecipientBanner';
 import { MessageToasts } from '../../components/MessageToasts';
 import { pushMessageToast } from '../../components/messageToastBus';
 import { PlusIcon, WarningIcon } from '../../components/Icons';
@@ -829,6 +830,9 @@ export function NotesShell({ onSignOut, expiredOffline = false, embedded, coldSt
     return (
         <div className={`notes-app${isEmbedded ? ' embedded' : ''}`}>
             {!isEmbedded && <IdentityBanner onSignOut={onSignOut} />}
+            {/* Notes seals shared channel checklists under channel keys too;
+                embedded, the app's own banner shows it. */}
+            {!isEmbedded && <HiddenRecipientBanner />}
             <NotesTopBar
                 ref={searchRef}
                 query={query}

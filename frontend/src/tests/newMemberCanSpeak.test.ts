@@ -51,6 +51,11 @@ vi.mock('../api/client', () => ({
                 };
             }
             if (url.endsWith('/member-keys')) return fake.members;
+            // An honest server: the member list people see holds everyone it
+            // lists for a channel's key, and the channels are listed under s1 (F-2).
+            if (url === '/servers') return [{ id: 's1', name: 'Test server' }];
+            if (url === '/servers/s1/channels') return [{ id: 77, name: 'general' }];
+            if (url.endsWith('/members-with-roles')) return [{ id: 1 }, ...fake.members.map((m) => ({ id: m.user_id }))];
             throw new Error('unexpected GET ' + url);
         }),
         post: vi.fn(async (url: string, body: {

@@ -80,6 +80,9 @@ beforeAll(() => {
                 keys: serverKeys.published.filter(k => k.epoch === serverKeys.currentEpoch),
             });
             if (path.endsWith('/member-keys')) return json(serverKeys.members);
+            // An honest server: the member list people see holds everyone it
+            // lists for a channel's key (F-2).
+            if (path === '/servers/s1/members-with-roles') return json([{ id: 1 }, ...serverKeys.members.map(m => ({ id: m.user_id }))]);
             if (/^\/users\/\d+\/public-key$/.test(path)) return json({ public_key: peerPublicKey });
         }
         if (method === 'POST') {
