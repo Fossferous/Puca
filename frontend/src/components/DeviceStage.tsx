@@ -2501,6 +2501,28 @@ export function DeviceStage() {
             activePointers.current.set(e.pointerId, e);
         }
 
+        // A HOVERING POINTER AIMS THE REMOTE ONE. A mouse (or a pen above the
+        // screen) moves the host's pointer whether or not a button is down:
+        // hover menus, tooltips, a game's cursor and the host's own pointer all
+        // follow it. Only a pointer with NO contact takes this branch — a touch
+        // has no hover, and a pressed pointer is the drag below. The trackpad
+        // is relative by design, so a mouse plugged into a phone in trackpad
+        // mode leaves the machine in charge.
+        //
+        // This was lost on 2026-07-30, when pinch-to-zoom gated every move on a
+        // held contact: from then on a desktop moved the remote pointer only
+        // when a button went down, so it sat still under hover and jumped on
+        // each click. The 2026-10-23 "mouse doesn't always work" report, read
+        // off the host's tallies: exactly one move per click (`move=1 down=1
+        // up=1`) on every desktop session, a continuous stream from the phone.
+        if (activePointers.current.size === 0 && e.pointerType !== 'touch' && !(isMobile && isMouseMode)) {
+            const v = videoRef.current;
+            if (!v) return;
+            const p = normalizedOverVideo(v, e.clientX, e.clientY);
+            if (p) send({ t: 'move', x: p.x, y: p.y });
+            return;
+        }
+
         // THE MACHINE SEES EVERY MOVE, including multi-finger ones. It was
         // only fed from the single-pointer branch below, so the three-finger
         // wheel it implements could never run — the gesture menu advertised a
