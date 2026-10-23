@@ -1,6 +1,7 @@
 import { isTauri } from '../api/platform';
 import { isMediaE2eeSupported } from '../api/rtc/mediaCrypto';
 import { setIconStyle, type IconStyle } from './iconStyle';
+import type { ShareLadderMode } from '../api/rtc/shareLadder';
 // App settings persisted in localStorage. Extracted from SettingsModal so that
 // component file only exports a component (keeps React Fast Refresh working).
 
@@ -304,8 +305,25 @@ export const defaultSettings = {
      *
      *  Turn it on only with evidence: check `encoder` in the sharer's
      *  `__pucaVoiceDiag()` — three rungs are affordable in hardware and are not
-     *  in software. */
+     *  in software.
+     *
+     *  SUPERSEDED BY `shareLadder` (2026-10-21), kept because a profile that
+     *  turned it on must keep the ladder: rememberedShareLadder reads it, and
+     *  the control writes both (ladderSettingsFor). */
     shareSimulcast: false,
+    /** Settings → Voice & Video → Screen Sharing → Send my screen at several
+     *  sizes: 'auto' (default), 'always', 'never'.
+     *
+     *  Automatic ladders an SFU share only on a machine with a hardware H.264
+     *  encoder, and only when the share sends more than 4.5 Mbps — where three
+     *  encodes cost almost nothing and viewers on slower links otherwise get a
+     *  frozen picture (measured; see api/rtc/shareLadder.ts). The owner's call
+     *  on those measurements, 2026-10-23. A software-only machine keeps one
+     *  size unless its owner chooses Always. Read it through
+     *  rememberedShareLadder, never directly: an unset value with the old
+     *  `shareSimulcast` on means Always. A change reaches a running share at
+     *  once (sfuManager.followLadderSetting). */
+    shareLadder: 'auto' as ShareLadderMode,
     /** The size and frame rate the screen-share dialog opens on, remembered
      *  from last time.
      *

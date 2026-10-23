@@ -78,9 +78,10 @@ const SHARE_LEGACY_KBPS: u64 = 4_500;
 /// above it buys nothing, so none is set above it.
 const SHARE_TOP_KBPS: u64 = 20_000;
 /// The lowest ceiling `SFU_SHARE_MAX_MBPS` may set: above the simulcast
-/// ladder's middle rung (SHARE_MID, 1.2 Mbps, in sfuManager.ts), so no rung of
-/// a laddered share ever sends more than the top this file charges for.
-const SHARE_MIN_KBPS: u64 = 1_500;
+/// ladder's largest middle rung (720p at 2.5 Mbps, `LADDER_MID_TOP_KBPS` in
+/// frontend/src/api/rtc/shareLadder.ts), so no rung of a laddered share ever
+/// sends more than the top this file charges for. A test reads that file.
+const SHARE_MIN_KBPS: u64 = 3_000;
 /// WebRTC/SRTP overhead factor applied to media bitrates (×1.15).
 const OVERHEAD_NUM: u64 = 115;
 const OVERHEAD_DEN: u64 = 100;
@@ -3215,6 +3216,15 @@ mod tests {
             client.contains("screenShareSimulcastLayers"),
             "shares are no longer published with a simulcast ladder"
         );
+        // A rung above the top would be egress this file never charges: every
+        // ceiling (SHARE_MIN_KBPS and up) must clear the largest middle rung.
+        let ladder = include_str!("../frontend/src/api/rtc/shareLadder.ts");
+        let mid = client_const(ladder, "LADDER_MID_TOP_KBPS");
+        assert!(mid > 0, "fixture: read the middle rung");
+        assert!(
+            SHARE_MIN_KBPS > mid,
+            "the lowest ceiling ({SHARE_MIN_KBPS} kbps) must stay above the ladder's middle rung ({mid} kbps)"
+        );
     }
 
     #[test]
@@ -3263,9 +3273,12 @@ mod tests {
     #[test]
     fn an_admin_ceiling_wins_inside_its_bounds() {
         assert_eq!(share_ceiling_kbps(600_000, Some("8")), 8_000);
-        assert_eq!(share_ceiling_kbps(600_000, Some(" 2.5 ")), 2_500);
+        assert_eq!(share_ceiling_kbps(600_000, Some(" 3.5 ")), 3_500);
         // Lower than the old cap is allowed: the admin knows their uplink.
         assert_eq!(share_ceiling_kbps(30_000, Some("3")), 3_000);
+        // ...down to the floor, which keeps the ladder's 720p rung (2.5 Mbps)
+        // under the top: 2 Mbps reads as 3 (it was allowed until 2026-10-23).
+        assert_eq!(share_ceiling_kbps(30_000, Some("2")), 3_000);
         assert_eq!(share_ceiling_kbps(30_000, Some("0.1")), SHARE_MIN_KBPS);
         assert_eq!(share_ceiling_kbps(30_000, Some("100")), SHARE_TOP_KBPS);
         // Garbage is the default, never 0.

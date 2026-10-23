@@ -60,18 +60,24 @@ describe('MediaManager.setShareQuality', () => {
 describe('changeLiveShareQuality', () => {
     const live = vi.hoisted(() => ({
         size: { width: 1280, height: 720 } as { width: number; height: number } | null,
-        ladder: false,
         result: null as { width: number; height: number; fps: number } | null,
+        /** What the struggling machine's step-down re-cap returns. */
+        stepOk: false,
         calls: [] as unknown[][],
+        retunes: 0,
     }));
     vi.mock('../api/webrtc', () => ({
         webrtcManager: {
             shareCaptureSize: () => live.size,
             setShareQuality: async (...a: unknown[]) => { live.calls.push(a); return live.result; },
-            applyShareQuality: async () => false,
+            applyShareQuality: async (...a: unknown[]) => { live.calls.push(a); return live.stepOk; },
         },
     }));
-    vi.mock('../api/rtc/sfuManager', () => ({ sfuManager: { shareHasLadder: () => live.ladder } }));
+    // Only retuneShare: nothing here may ask whether the share is laddered
+    // any more (it used to, and refused).
+    vi.mock('../api/rtc/sfuManager', () => ({
+        sfuManager: { retuneShare: async () => { live.retunes++; return true; } },
+    }));
 
     // The REAL module (this file mocks it for the panel below), with the
     // transports under it mocked.
@@ -79,9 +85,10 @@ describe('changeLiveShareQuality', () => {
 
     beforeEach(() => {
         live.size = { width: 1280, height: 720 };
-        live.ladder = false;
+        live.stepOk = false;
         live.result = { width: 1920, height: 1080, fps: 60 };
         live.calls = [];
+        live.retunes = 0;
     });
 
     it('applies the chosen size to the running capture', async () => {
@@ -91,11 +98,32 @@ describe('changeLiveShareQuality', () => {
         expect(live.calls).toEqual([[1920, 1080, 60]]);
     });
 
-    it('leaves a share with quality layers alone (each layer is a ratio fixed at publish)', async () => {
-        live.ladder = true;
+    it('has the SFU share re-tuned after the re-cap, so a share sent at several sizes changes too', async () => {
+        // It used to refuse a laddered share: re-capping shrank every rung
+        // with the capture. sfuManager.retuneShare now puts the rungs back in
+        // proportion, or re-publishes when the number of sizes changes.
         const { changeLiveShareQuality } = await real();
-        await expect(changeLiveShareQuality({ resolution: '1440', fps: 60 })).resolves.toEqual({ kind: 'ladder' });
-        expect(live.calls).toEqual([]);
+        await expect(changeLiveShareQuality({ resolution: '1440', fps: 60 }))
+            .resolves.toEqual({ kind: 'applied', capture: { width: 1920, height: 1080, fps: 60 } });
+        expect(live.calls).toEqual([[2560, 1440, 60]]);
+        expect(live.retunes, 'after the capture changed').toBe(1);
+    });
+
+    it('re-tunes after the struggling machine\'s step down too, and only when it happened', async () => {
+        const { applyShareQuality } = await real();
+        await expect(applyShareQuality({ resolution: '720', fps: 30 })).resolves.toBe(false);
+        expect(live.retunes, 'refused: nothing to follow').toBe(0);
+        live.stepOk = true;
+        await expect(applyShareQuality({ resolution: '720', fps: 30 })).resolves.toBe(true);
+        expect(live.calls.at(-1)).toEqual([1280, 720, 30]);
+        expect(live.retunes).toBe(1);
+    });
+
+    it('does not re-tune when the capture refused the change', async () => {
+        live.result = null;
+        const { changeLiveShareQuality } = await real();
+        await expect(changeLiveShareQuality({ resolution: '720', fps: 30 })).resolves.toEqual({ kind: 'refused' });
+        expect(live.retunes).toBe(0);
     });
 
     it('says so when nothing is shared, or the browser refused', async () => {
@@ -179,15 +207,12 @@ describe('the Stream quality panel', () => {
         expect(text()).toContain('as large as what you are sharing goes');
     });
 
-    it('explains a share sent at several sizes, and a refusal — both saved for next time', async () => {
-        panel.outcome = { kind: 'ladder' };
-        const loadSettings = await open();
-        await act(async () => { button('1440p').click(); });
-        expect(text()).toContain('sent at several sizes');
-        expect(loadSettings().shareResolution).toBe('1440');
+    it('explains a refusal, and saves the choice for next time', async () => {
         panel.outcome = { kind: 'refused' };
+        const loadSettings = await open();
         await act(async () => { button('Source').click(); });
         expect(text()).toContain('would not change the running capture');
+        expect(loadSettings().shareResolution).toBe('source');
     });
 
     it('one change at a time', async () => {

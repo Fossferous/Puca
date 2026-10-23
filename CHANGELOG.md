@@ -6,7 +6,9 @@ one-line summary; this file is the full story. Versions follow
 
 ## Unreleased
 
-### Security
+### Changed
+
+- **Viewers on slower connections keep watching a stream instead of freezing.** In channels that use SFU mode, a stream sent at one size had nothing smaller for a viewer whose connection could not carry it, so their picture froze: a 1080p 60 fps stream (up to 10 Mbps) stood still for a viewer on a 6 Mbps line. A stream now goes out at three sizes by itself when your computer encodes video on its graphics card and the stream sends more than 4.5 Mbps (1080p at 30 fps, 720p at 60 fps and up), and each viewer gets the largest size their connection carries, with a new 720p middle size for 1080p and larger streams: the same viewer now gets 720p at about 56 frames a second. On a graphics card the extra sizes cost almost nothing and add about 1.5-2.5 Mbps of upload (where your upload is already the limit, that comes out of the full-size picture's detail, and **Never** keeps it); a computer without a hardware encoder keeps sending one size, and a stream whose encoding turns out to be in software goes back to one size by itself. **Send my screen at several sizes** has moved to **Settings → Voice & Video → Screen Sharing** and is now **Automatic** (the default), **Always** or **Never**; if you had turned the old switch on, it reads **Always**. A change to it while you share applies at once, and so does a **Resolution** or **Frame Rate** change on a stream sent at several sizes, which used to wait for your next share; when a change switches between one size and several, viewers see the picture hold for about a second. Watching one or two streams, you now get the full picture of a stream sent at several sizes rather than its middle size. Server operators: `SFU_SHARE_MAX_MBPS` now goes no lower than 3 Mbps (a lower value reads as 3), so the 720p middle size always fits under the ceiling.
 
 ### Improved
 
