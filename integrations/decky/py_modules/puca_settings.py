@@ -31,7 +31,7 @@ BUTTON_JOBS = ("pushToTalk", "muteButton", "deafenButton")
 PAGE_METHODS = frozenset({
     "getState", "listVoiceChannels", "joinVoice", "leaveVoice", "setMuted",
     "setDeafened", "setInputMode", "holdPushToTalk", "activateNotification",
-    "downloadSite", "signIn",
+    "downloadSite", "signIn", "startShare", "stopShare",
 })
 
 # What a page_call runs in Púca's page. The method and its arguments go over
@@ -141,6 +141,18 @@ def check_mic_answer(request_id: Any, answer: Any, error: Any) -> Optional[Tuple
     if clean_answer is None and clean_error is None:
         clean_error = {"name": "NotReadableError", "message": "no microphone"}
     return request_id, clean_answer, clean_error
+
+
+def check_request_id(request_id: Any) -> Optional[str]:
+    """A request id the page made (a microphone or a share), or None."""
+    return request_id if isinstance(request_id, str) and REQUEST_ID.match(request_id) else None
+
+
+def check_share_error(error: Any) -> str:
+    """Why a share was refused, as the page is told it: plain text, short."""
+    if not isinstance(error, str) or not error.strip():
+        return "not allowed"
+    return re.sub(r"[\x00-\x1f\x7f]", " ", error.strip())[:200]
 
 
 def read_page_message(payload: Any) -> Optional[dict]:

@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
-    activateHostNotification, embedHost, getUserMediaForMic, hostIdleSeconds, hostMicrophone, hostReportsIdle,
-    hostSaysForeground, hostShowsNotifications, notifyHost, resetEmbedHostForTest, type EmbedNotification,
+    activateHostNotification, embedHost, getDisplayMediaForShare, getUserMediaForMic, hostIdleSeconds, hostMicrophone,
+    hostReportsIdle, hostSaysForeground, hostScreenShare, hostShowsNotifications, notifyHost, resetEmbedHostForTest,
+    screenShareAvailable, type EmbedNotification,
 } from '../api/embedHost';
 import { notifyNewMessage, sendTestNotification } from '../api/desktopNotify';
 import { loadSettings } from '../components/settingsStore';
@@ -171,6 +172,61 @@ describe('a host that supplies the microphone', () => {
         await getUserMediaForMic({ audio: false, video: true });
         expect(hostGum).not.toHaveBeenCalled();
         expect(browserGum).toHaveBeenCalledWith({ audio: false, video: true });
+    });
+});
+
+describe('screen sharing', () => {
+    const browserGdm = vi.fn();
+    let savedGdm: unknown;
+    beforeEach(() => {
+        browserGdm.mockReset();
+        const md = navigator.mediaDevices as unknown as Record<string, unknown>;
+        savedGdm = md.getDisplayMedia;
+        md.getDisplayMedia = browserGdm;
+    });
+    afterEach(() => {
+        (navigator.mediaDevices as unknown as Record<string, unknown>).getDisplayMedia = savedGdm;
+    });
+    const options = { video: { width: 1280, height: 800, frameRate: 30 }, audio: false };
+
+    it('without a host: the browser picker, with the options exactly as given, and Share is offered', async () => {
+        const stream = new FakeStream([new FakeTrack('video')]);
+        browserGdm.mockResolvedValue(stream);
+        expect(screenShareAvailable()).toBe(true);
+        expect(hostScreenShare()).toBeNull();
+        await expect(getDisplayMediaForShare(options)).resolves.toBe(stream);
+        expect(browserGdm).toHaveBeenCalledWith(options);
+    });
+
+    it('a host that supplies the picture is asked, the browser never', async () => {
+        const stream = new FakeStream([new FakeTrack('video')]);
+        const hostGdm = vi.fn().mockResolvedValue(stream);
+        declare({ apiVersion: 1, name: 'Deck', getDisplayMedia: hostGdm });
+        expect(screenShareAvailable()).toBe(true);
+        expect(hostScreenShare()).toBe('Deck');
+        await expect(getDisplayMediaForShare(options)).resolves.toBe(stream);
+        expect(hostGdm).toHaveBeenCalledWith(options);
+        expect(browserGdm).not.toHaveBeenCalled();
+    });
+
+    it('a host that supplies none: no Share at all, and the browser is never tried (it refuses there)', async () => {
+        declare({ apiVersion: 1, name: 'Deck', getUserMedia: vi.fn() });
+        expect(screenShareAvailable()).toBe(false);
+        expect(hostScreenShare()).toBeNull();
+        await expect(getDisplayMediaForShare(options)).rejects.toMatchObject({ name: 'NotSupportedError' });
+        expect(browserGdm).not.toHaveBeenCalled();
+    });
+
+    it('an answer with no picture is NotReadableError, and what came is released', async () => {
+        const audio = new FakeTrack('audio');
+        declare({ apiVersion: 1, name: 'Deck', getDisplayMedia: vi.fn().mockResolvedValue(new FakeStream([audio])) });
+        await expect(getDisplayMediaForShare(options)).rejects.toMatchObject({ name: 'NotReadableError' });
+        expect(audio.stopped).toBe(true);
+    });
+
+    it("passes the host's refusal through by name (no press in the panel)", async () => {
+        declare({ apiVersion: 1, name: 'Deck', getDisplayMedia: vi.fn().mockRejectedValue(new DOMException('ask in the panel', 'NotAllowedError')) });
+        await expect(getDisplayMediaForShare(options)).rejects.toMatchObject({ name: 'NotAllowedError' });
     });
 });
 

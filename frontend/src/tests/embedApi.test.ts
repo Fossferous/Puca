@@ -39,14 +39,18 @@ function fakeSession(over: Partial<EmbedSession> = {}): EmbedSession {
     };
 }
 
-function fakeCall(over: Partial<ReturnType<EmbedCallControls['state']>> = {}): EmbedCallControls & { leave: Mock<() => void> } {
-    const st = { connected: true, connecting: false, muted: false, deafened: false, noMicrophone: false, inputMode: 'pushToTalk' as const, holdDown: false, ...over };
+function fakeCall(over: Partial<ReturnType<EmbedCallControls['state']>> = {}): EmbedCallControls & {
+    leave: Mock<() => void>; startShare: Mock<EmbedCallControls['startShare']>; stopShare: Mock<EmbedCallControls['stopShare']>;
+} {
+    const st = { connected: true, connecting: false, muted: false, deafened: false, noMicrophone: false, inputMode: 'pushToTalk' as const, holdDown: false, sharing: false, ...over };
     return {
         roomId: 'voice_42',
         state: () => st,
         setMuted: vi.fn(() => true),
         setDeafened: vi.fn(() => true),
         leave: vi.fn<() => void>(),
+        startShare: vi.fn<EmbedCallControls['startShare']>(async () => ({ ok: true })),
+        stopShare: vi.fn<EmbedCallControls['stopShare']>(() => true),
     };
 }
 
@@ -309,5 +313,56 @@ describe('downloadSite: where a host looks for its own updates', () => {
         for (const bad of ['http://downloads.example.org/', 'http://127.0.0.1.example.org/', 'http://10.0.0.2/', 'ftp://127.0.0.1/', 'not a url', 'javascript:alert(1)']) {
             expect(downloadOrigin(bad), bad).toBeNull();
         }
+    });
+});
+
+describe("sharing the screen (a host's Share and Stop)", () => {
+    const declareSharingHost = (getDisplayMedia?: () => Promise<MediaStream>) => {
+        (window as Win).__PUCA_EMBED_HOST__ = { apiVersion: 1, name: 'Test host', ...(getDisplayMedia && { getDisplayMedia }) };
+        resetEmbedHostForTest();
+    };
+
+    it('is advertised where the host supplies the picture, so a host can tell an older page apart', () => {
+        declareSharingHost(vi.fn());
+        expect(getEmbedState().features).toContain('share');
+    });
+
+    it('is not advertised to a host that supplies no picture: startShare could only fail there', () => {
+        declareSharingHost();
+        expect(getEmbedState().features).not.toContain('share');
+        expect(getEmbedState().features).toEqual(['downloadSite', 'signIn']);
+    });
+
+    it('reaches the call, with the call telling a host how it went', async () => {
+        declareSharingHost(vi.fn());
+        const api = createEmbedApi();
+        await expect(api.startShare()).resolves.toEqual({ ok: false, error: 'not in a call' });
+        expect(api.stopShare()).toBe(false);
+        const call = fakeCall();
+        call.startShare.mockResolvedValueOnce({ ok: false, error: 'you may not stream here' });
+        registerEmbedCall(call);
+        await expect(api.startShare()).resolves.toEqual({ ok: false, error: 'you may not stream here' });
+        await expect(api.startShare()).resolves.toEqual({ ok: true });
+        expect(call.startShare).toHaveBeenCalledTimes(2);
+        expect(api.stopShare()).toBe(true);
+        expect(call.stopShare).toHaveBeenCalledTimes(1);
+    });
+
+    it('is refused, without asking the call, by a host that supplies no picture', async () => {
+        declareSharingHost(undefined);
+        const api = createEmbedApi();
+        const call = fakeCall();
+        registerEmbedCall(call);
+        await expect(api.startShare()).resolves.toEqual({ ok: false, error: 'this host supplies no picture' });
+        expect(call.startShare).not.toHaveBeenCalled();
+    });
+
+    it('says in the state whether this device is sharing', () => {
+        declareSharingHost(vi.fn());
+        registerEmbedSession(fakeSession());
+        registerEmbedCall(fakeCall({ sharing: true }));
+        expect(getEmbedState().call?.sharing).toBe(true);
+        registerEmbedCall(fakeCall());
+        expect(getEmbedState().call?.sharing).toBe(false);
     });
 });

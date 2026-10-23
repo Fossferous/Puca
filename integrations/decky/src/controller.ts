@@ -2,11 +2,12 @@
  * The plugin's core, outside React: it owns the hidden Púca view, talks to the
  * backend (main.py), answers the page's microphone requests, turns a back
  * button (which the backend reads) into push-to-talk and Púca's notifications
- * into Steam toasts. The Quick Access panel and the full view only read its
- * snapshot and call it.
+ * into Steam toasts, and decides when the page may share the screen and when
+ * the shared picture pauses (share.ts). The Quick Access panel and the full
+ * view only read its snapshot and call it.
  */
 import { addEventListener, call, removeEventListener, toaster } from '@decky/api';
-import { Navigation } from '@decky/ui';
+import { Navigation, Router } from '@decky/ui';
 import { createElement } from 'react';
 import { PucaBrowserView } from './browserView';
 import { PucaIcon } from './components/icons';
@@ -21,6 +22,7 @@ import {
     assignButton, DEFAULT_SETTINGS, jobOf, normalizeAppUrl, PUSH_TO_TALK_BUTTONS, readSettings, watchedButtons,
     type ButtonJob, type PluginSettings, type PushToTalkButton,
 } from './settings';
+import { ASK_MS, pauseReason, readScreenSignals, SHARE_POLL_MS, ShareArming, type PauseReason } from './share';
 import { isNewer, readKey, readOffer, verifyOffer, type UpdateKey, type UpdateOffer } from './update';
 
 export const FULL_VIEW_ROUTE = '/puca';
@@ -61,6 +63,17 @@ export interface Snapshot {
      *  or the backend's error), while a call is trying to. */
     pttError: string | null;
     viewOpen: boolean;
+    /** The Deck's screen is being captured for the page's share. */
+    shareActive: boolean;
+    /** Why the shared picture is paused right now, while shareActive. */
+    sharePaused: PauseReason | null;
+    /** The page asked for the screen by itself (Púca's own Share button):
+     *  the panel puts it to the person. */
+    shareAsk: boolean;
+    /** The panel's Share screen is starting a share. */
+    shareBusy: boolean;
+    /** Why the last share did not start, or stopped by itself. */
+    shareError: string | null;
     /** This plugin's version, as Decky runs it. */
     pluginVersion: string | null;
     /** A newer plugin that the download site offers, signed with the release
@@ -114,6 +127,7 @@ class Controller {
     private snap: Snapshot = {
         phase: 'starting', error: null, settings: DEFAULT_SETTINGS, state: null,
         micOn: false, micSilent: false, talking: false, micSwitchedOn: false, pttError: null, viewOpen: false,
+        shareActive: false, sharePaused: null, shareAsk: false, shareBusy: false, shareError: null,
         pluginVersion: null, update: null,
     };
     private listeners = new Set<() => void>();
@@ -162,8 +176,15 @@ class Controller {
     /** Where the offered update comes from, and the key that checked it. */
     private updateFrom: { site: string; offer: UpdateOffer; key: UpdateKey } | null = null;
     private noKeyLogged = false;
+    /** Whose press the page's request for the screen is (share.ts). */
+    private arming = new ShareArming();
+    /** The page's share request the backend is capturing for. */
+    private shareId: string | null = null;
+    private sharePoll: ReturnType<typeof setInterval> | null = null;
+    private askTimer: ReturnType<typeof setTimeout> | null = null;
     private onPage = (payload: unknown) => this.handlePage(payload);
     private onStatus = (status: unknown) => this.handleStatus(status);
+    private onShare = (payload: unknown) => this.handleShareEvent(payload);
 
     // ---- The store React reads ------------------------------------------------
 
@@ -180,6 +201,7 @@ class Controller {
         this.syncInputWatch();
         this.syncMicForCall();
         this.syncSilentNotice();
+        this.syncShare();
     }
 
     // ---- Life cycle ------------------------------------------------------------
@@ -190,6 +212,7 @@ class Controller {
         addEventListener('puca_page', this.onPage);
         addEventListener('puca_status', this.onStatus);
         addEventListener('puca_button', this.onButton);
+        addEventListener('puca_share', this.onShare);
         let settings = DEFAULT_SETTINGS;
         try {
             settings = readSettings(await call<[], unknown>('get_settings'));
@@ -211,9 +234,11 @@ class Controller {
         removeEventListener('puca_page', this.onPage);
         removeEventListener('puca_status', this.onStatus);
         removeEventListener('puca_button', this.onButton);
+        removeEventListener('puca_share', this.onShare);
         if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
         if (this.updateTimer) { clearTimeout(this.updateTimer); this.updateTimer = null; }
         this.clearLoadTimer();
+        this.endShare();
         this.hold.reset();
         if (this.watching) {
             this.watching = null;
@@ -419,6 +444,193 @@ class Controller {
         }
     }
 
+    // ---- Sharing the Deck's screen (share.ts) ------------------------------------------
+
+    /** The panel's Share screen: Púca shares, and its request for the screen
+     *  counts as this press. Also the panel's yes to a request Púca made by
+     *  itself. Null when it worked, or what to say. */
+    async startShare(): Promise<string | null> {
+        if (this.snap.shareAsk) return this.answerShareAsk(true);
+        if (!this.snap.state?.call?.connected) return 'Join a call first.';
+        if (this.snap.shareBusy || this.shareId !== null) return null;
+        this.update({ shareBusy: true, shareError: null });
+        this.arming.arm(Date.now());
+        const r = await this.pageCall<{ ok: boolean; error?: string }>('startShare');
+        this.arming.disarm();
+        this.update({ shareBusy: false });
+        let err: string | null = null;
+        if (!r.ok) err = r.error === 'unsupported' ? 'Púca is still starting. Try again in a moment.' : r.error;
+        else if (!r.value?.ok) err = r.value?.error ?? 'no answer';
+        // A share that started after all (a slow server) is shown as one, not
+        // as an error; and a reason the backend already gave is kept.
+        if (err && this.shareId === null && !this.snap.state?.call?.sharing && !this.snap.shareError) {
+            this.update({ shareError: `Could not share your screen: ${err}` });
+        }
+        return err;
+    }
+
+    /** The panel's Stop sharing. */
+    async stopShare(): Promise<void> {
+        await this.pageCall('stopShare');
+        // Púca lets go of the track, which stops the capture (share-release);
+        // stop it from here too, in case the page cannot answer.
+        this.endShare();
+    }
+
+    /** The panel's answer to a request Púca made by itself. */
+    async answerShareAsk(yes: boolean): Promise<string | null> {
+        const id = this.arming.take(Date.now());
+        this.clearAskTimer();
+        this.update({ shareAsk: false });
+        if (!id) return yes ? 'Púca stopped waiting. Press Share screen in Púca again.' : null;
+        if (!yes) {
+            this.refuseShare(id, 'not allowed');
+            return null;
+        }
+        return this.beginShare(id);
+    }
+
+    /** The page asks for the screen (its host's getDisplayMedia). */
+    private shareRequested(id: string): void {
+        if (!this.snap.state?.call?.connected || this.shareId !== null) {
+            this.refuseShare(id, this.shareId !== null ? 'already sharing' : 'not in a call');
+            return;
+        }
+        const d = this.arming.request(id, Date.now());
+        if ('start' in d) {
+            void this.beginShare(d.start);
+            return;
+        }
+        if (d.refuse) this.refuseShare(d.refuse, 'replaced');
+        this.update({ shareAsk: true, shareError: null });
+        this.clearAskTimer();
+        this.askTimer = setTimeout(() => {
+            this.askTimer = null;
+            const late = this.arming.expire(Date.now());
+            if (late) {
+                this.update({ shareAsk: false });
+                this.refuseShare(late, 'no answer');
+            }
+        }, ASK_MS + 100);
+        toaster.toast({
+            title: 'Share your screen?',
+            body: 'Púca asks to share it. Answer in the Quick Access menu, under Púca.',
+            logo: createElement(PucaIcon, { size: 40 }),
+            playSound: false,
+        });
+    }
+
+    private async beginShare(id: string): Promise<string | null> {
+        this.shareId = id;
+        this.update({ shareActive: true, sharePaused: this.screenPause(), shareError: null });
+        let r: CallResult<null>;
+        try {
+            r = await call<[string], CallResult<null>>('share_start', id);
+        } catch (err) {
+            r = { ok: false, error: String((err as Error)?.message ?? err) };
+        }
+        if (this.shareId !== id) return null;  // let go of meanwhile
+        if (!r.ok) {
+            this.clearShare();
+            this.update({ shareError: `Could not share your screen: ${r.error}` });
+            return r.error;
+        }
+        // It starts paused, and shows the game once the looks say the game
+        // alone is on screen.
+        this.sharePoll = setInterval(() => this.checkSharePause(), SHARE_POLL_MS);
+        this.checkSharePause();
+        console.log('[Púca] sharing the screen');
+        toaster.toast({
+            title: "You're sharing your screen",
+            body: "Your game only: Steam's menus, the keyboard, notifications and Púca never show.",
+            logo: createElement(PucaIcon, { size: 40 }),
+            playSound: false,
+        });
+        return null;
+    }
+
+    private refuseShare(id: string, why: string): void {
+        void call<[string, string], void>('share_refuse', id, why).catch(() => {});
+    }
+
+    /** The page let go of a share: it stopped it, or stopped waiting for it. */
+    private shareReleased(id: string): void {
+        if (this.arming.withdraw(id)) {
+            this.clearAskTimer();
+            this.update({ shareAsk: false });
+            return;
+        }
+        if (id !== this.shareId) return;
+        this.clearShare();
+        void call<[string], void>('share_stop', id).catch(() => {});
+    }
+
+    /** End whatever is shared or asked for, from this side: Stop, a reload, leaving. */
+    private endShare(): void {
+        const asked = this.arming.take(Date.now());
+        if (asked !== null) this.refuseShare(asked, 'cancelled');
+        if (this.snap.shareAsk) {
+            this.clearAskTimer();
+            this.update({ shareAsk: false });
+        }
+        if (this.shareId === null) return;
+        this.clearShare();
+        void call('share_stop').catch(() => {});
+    }
+
+    private clearShare(): void {
+        this.shareId = null;
+        if (this.sharePoll) { clearInterval(this.sharePoll); this.sharePoll = null; }
+        if (this.snap.shareActive || this.snap.sharePaused !== null) this.update({ shareActive: false, sharePaused: null });
+    }
+
+    private clearAskTimer(): void {
+        if (this.askTimer) { clearTimeout(this.askTimer); this.askTimer = null; }
+    }
+
+    /** The backend's capture stopped by itself: the screen feed went, or the page did. */
+    private handleShareEvent(payload: unknown): void {
+        const p = payload && typeof payload === 'object' ? payload as Record<string, unknown> : null;
+        if (p?.type !== 'ended' || p.id !== this.shareId) return;
+        this.clearShare();
+        const why = typeof p.why === 'string' ? p.why.slice(0, 160) : 'it stopped';
+        this.update({ shareError: `Your screen share stopped: ${why}` });
+        toaster.toast({ title: 'Your screen share stopped', body: why, logo: createElement(PucaIcon, { size: 40 }), playSound: false });
+    }
+
+    /** Why the picture must pause now, from Steam's own state (share.ts). */
+    private screenPause(): PauseReason | null {
+        const notifications = (window as unknown as { NotificationStore?: unknown }).NotificationStore;
+        return pauseReason(readScreenSignals(Router.WindowStore?.GamepadUIMainWindowInstance, notifications, this.snap.viewOpen));
+    }
+
+    /**
+     * A look at the screen, every SHARE_POLL_MS while sharing and at once when
+     * the full view opens or closes: whether the game alone is on it, and when
+     * that was seen. The backend shows only what lies between two looks that
+     * saw the game alone (puca_share.ShowGate), so a look goes every time, not
+     * only when the answer changes: one that is late, or never comes, holds
+     * the picture back.
+     */
+    private checkSharePause(): void {
+        if (this.shareId === null) return;
+        const at = Date.now();
+        const reason = this.screenPause();
+        if (reason !== this.snap.sharePaused) {
+            console.log(`[Púca] share ${reason ? `paused: ${reason}` : 'showing the game'}`);
+            this.update({ sharePaused: reason });
+        }
+        void call<[boolean, number], void>('share_seen', reason === null, at).catch(() => {});
+    }
+
+    /** A share outlives neither its call nor its page, and nor does what the
+     *  panel said about the last one. */
+    private syncShare(): void {
+        if (this.snap.state?.call) return;
+        if (this.shareId !== null || this.snap.shareAsk) this.endShare();
+        if (this.snap.shareError) this.update({ shareError: null });
+    }
+
     // ---- The full view ---------------------------------------------------------------
 
     openFullView(): void {
@@ -427,18 +639,21 @@ class Controller {
     }
 
     showView(rect: { x: number; y: number; width: number; height: number }): void {
-        this.view.show(rect);
-        this.view.activate();
         if (!this.snap.viewOpen) {
+            // Púca on screen pauses a share, before the view is drawn.
             this.update({ viewOpen: true });
+            this.checkSharePause();
             void call('set_foreground', true).catch(() => {});
         }
+        this.view.show(rect);
+        this.view.activate();
     }
 
     hideView(): void {
         this.view.hide();
         if (this.snap.viewOpen) {
             this.update({ viewOpen: false });
+            this.checkSharePause();
             void call('set_foreground', false).catch(() => {});
         }
     }
@@ -475,6 +690,12 @@ class Controller {
             case 'mic-release':
                 this.bridge.release(msg.id);
                 return;
+            case 'share-request':
+                this.shareRequested(msg.id);
+                return;
+            case 'share-release':
+                this.shareReleased(msg.id);
+                return;
         }
     }
 
@@ -484,6 +705,7 @@ class Controller {
             case 'navigated':
                 // A new document: whatever the old one held is gone.
                 this.bridge.releaseAll();
+                this.endShare();
                 if (s.onApp === false) {
                     // A link took the view away from Púca (Púca opens links
                     // in a new window, so this is rare): say so, and Try
@@ -497,6 +719,7 @@ class Controller {
             case 'crashed':
             case 'detached':
                 this.bridge.releaseAll();
+                this.endShare();
                 this.hold.reset();
                 if (!this.started) return;
                 this.update({ phase: 'error', error: 'Púca stopped. Restarting…', state: null });

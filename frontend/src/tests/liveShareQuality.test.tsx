@@ -230,7 +230,8 @@ describe('the ways in (VoicePanel is not mountable under vitest)', () => {
     const stage = readFileSync(join(__dirname, '..', 'components', 'StreamStage.tsx'), 'utf8');
 
     it('the arrow beside Share stays while live and opens the live panel then', () => {
-        expect(vp).toMatch(/\{!isMobile && \(\s*<button\s+className="voice-btn vp-share-options"/);
+        // Not hidden while live: only on a phone, or inside a host that supplies no picture (hostShareWiring.test.ts).
+        expect(vp).toMatch(/\{!isMobile && shareAvailable && \(\s*<button\s+className="voice-btn vp-share-options"/);
         expect(vp).toMatch(/if \(isScreenSharing\) \{ setShowLiveQuality\(true\); return; \}/);
         expect(vp).toMatch(/<LiveShareQualityModal\s+isOpen=\{showLiveQuality && isScreenSharing\}/);
     });

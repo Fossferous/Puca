@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useLayoutEffect, useRef } from 'react';
+import { useState, useEffect, useCallback, useLayoutEffect, useRef, type ComponentProps } from 'react';
 import { createPortal } from 'react-dom';
 import { webrtcManager } from '../api/webrtc';
 import { sfuManager } from '../api/rtc/sfuManager';
@@ -10,6 +10,11 @@ import { isE2EESupported } from 'livekit-client';
 import { loadSettings, saveSettings, inputGain, outputGain, applyOutputDevice } from './settingsStore';
 import { wsClient, type ServerMessage, type MessageHandler } from '../api/websocket';
 import ScreenShareModal from './ScreenShareModal';
+
+/** Go Live's arguments, as ScreenShareModal hands them over. */
+type GoLiveArgs = Parameters<ComponentProps<typeof ScreenShareModal>['onGoLive']>;
+type GoLiveAudio = GoLiveArgs[0];
+type GoLiveApps = GoLiveArgs[1];
 import { StreamAudioSourcesModal } from './StreamAudioSourcesModal';
 import { LiveShareQualityModal } from './LiveShareQualityModal';
 import { MicPermissionHelp } from './MicPermissionHelp';
@@ -31,7 +36,7 @@ import { logMicDiag, subscribeNativeMicDefault } from '../api/micDiag';
 import { keepDetail, keepSummary } from './stableState';
 import { type NoiseSuppressionMode, type NoiseModeChange, NOISE_MODE_EVENT, getNoiseSuppressionMode, setNoiseSuppressionMode, changeNoiseModeLive, modeUsesWebAudio, rawInputHasHadSignal, hasLiveGainStage, isDeepFilterGateOpen, selectedInputDeviceId } from '../api/noiseFilter';
 import { registerHold, unregisterHold, registerPress, unregisterPress, startNativeFeed, stopNativeFeed, setNativeFeedHost } from '../api/hotkeys';
-import { notifyEmbedChanged, registerEmbedCall } from '../api/embedApi';
+import { notifyEmbedChanged, registerEmbedCall, type EmbedResult } from '../api/embedApi';
 import { computeNativeWatch } from '../api/hotkeyScope';
 
 /** Shared mic-health notice text — the sentinel clears only its own message
@@ -99,7 +104,7 @@ import { isBlocked } from './blockStore';
 import { hasLiveVideo } from '../utils/mediaLiveness';
 import { ShareAnnouncements } from '../utils/shareAnnouncements';
 import { combineHostIdle, decideAfk, DEFAULT_AFK_TIMEOUT_MS } from '../utils/afkIdle';
-import { hostIdleSeconds, hostReportsIdle } from '../api/embedHost';
+import { hostIdleSeconds, hostReportsIdle, screenShareAvailable } from '../api/embedHost';
 import { PendingJoins, JOIN_PRESENT_GRACE_MS, JOIN_ANNOUNCE_TIMEOUT_MS, PENDING_JOIN_POLL_MS } from '../utils/pendingJoins';
 import { shouldTearDownDepartedPeer } from '../utils/departedPeer';
 import { getLocalUserVolumes, getLocalUserMutes } from './userVolumeStore';
@@ -3018,6 +3023,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     // a host.
     const isConnectingRef = useRef(isConnecting);
     isConnectingRef.current = isConnecting;
+    // A host's Share and Stop (startHostShare and stopMyScreenShare below).
+    const startHostShareRef = useRef<(() => Promise<EmbedResult>) | null>(null);
+    const stopMyScreenShareRef = useRef<(() => void) | null>(null);
+    const hostShareBusyRef = useRef(false);
     useEffect(() => registerEmbedCall({
         roomId,
         state: () => ({
@@ -3028,6 +3037,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             noMicrophone: listenOnlyRef.current,
             inputMode: voiceInputModeRef.current,
             holdDown: holdKeyDownRef.current,
+            sharing: isScreenSharingRef.current,
         }),
         setMuted: (want) => {
             // Without a microphone a press only decides how the member comes
@@ -3041,9 +3051,17 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
             return want === isDeafenedRef.current;
         },
         leave: () => { leaveVoiceRef.current(); onDisconnectRef.current?.(); },
+        startShare: () => (startHostShareRef.current
+            ? startHostShareRef.current()
+            : Promise.resolve<EmbedResult>({ ok: false, error: 'the call is still starting' })),
+        stopShare: () => {
+            if (!isScreenSharingRef.current) return false;
+            stopMyScreenShareRef.current?.();
+            return true;
+        },
     }), [roomId]);
     useEffect(() => { notifyEmbedChanged(); },
-        [isInVoice, isConnecting, isMuted, selfMuted, isDeafened, listenOnly, voiceInputMode, holdKeyDown]);
+        [isInVoice, isConnecting, isMuted, selfMuted, isDeafened, listenOnly, voiceInputMode, holdKeyDown, isScreenSharing]);
 
     // PiP drag handlers (touch for mobile)
     const handlePipTouchStart = useCallback((e: React.TouchEvent) => {
@@ -3251,6 +3269,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
         // Only OUR stream leaves the stage: what we are watching stays.
         dropOwnStream(currentUserId);
     }, [isScreenSharing, roomId, currentUserId]);
+    useEffect(() => { stopMyScreenShareRef.current = stopMyScreenShare; }, [stopMyScreenShare]);
 
     // Register the stop screen share callback when component mounts. The
     // manager's onScreenShareEnded fires when the share ends on its own
@@ -3384,6 +3403,147 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     if (!allEncrypted && e2eeTooltipLines.length === 0) {
         e2eeTooltipLines.push('Setting up encryption…');
     }
+
+    // Go Live's whole path, from a captured share to a live one: the dialog's
+    // Go Live, and an embedding host's startShare (startHostShare below). Says
+    // how it ended, which a host is told: live, or why not.
+    const goLive = async (audioChoice: GoLiveAudio, apps?: GoLiveApps): Promise<EmbedResult> => {
+        const isDesktop = isTauri();
+        try {
+            if (isDesktop && audioChoice === 'app' && apps && apps.length > 0) {
+                const { startMultiAppAudioTrack, startGameAudioTrack } = await import('../api/appAudio');
+                try {
+                    // Mixer: exactly the ticked apps, mixed natively. One app
+                    // closing drops its audio; the stream itself continues.
+                    const track = await startMultiAppAudioTrack(apps, (_pid, name) => {
+                        setError(`${name} closed — its audio was removed from the stream.`);
+                    });
+                    webrtcManager.addGameAudioToScreenShare(track);
+                } catch (mixerErr) {
+                    // Fall back to legacy single-app capture ONLY when the
+                    // installed binary predates the mixer command — a genuine
+                    // capture failure must surface as one (outer catch), not
+                    // silently retry as something else.
+                    const msg = String(mixerErr);
+                    const commandMissing = /not found|unknown|not allowed/i.test(msg)
+                        && msg.includes('start_multi_app_audio_capture');
+                    if (!commandMissing) throw mixerErr;
+                    console.warn('[VoicePanel] Mixer command missing (older binary), falling back to single-app:', mixerErr);
+                    const first = apps[0];
+                    const gameTrack = await startGameAudioTrack(first.pid, () => {
+                        setError(`${first.name} closed — stream ended.`);
+                        stopOwnScreenShare();
+                    });
+                    webrtcManager.addGameAudioToScreenShare(gameTrack);
+                    if (apps.length > 1) {
+                        setError('Multi-app audio needs the latest desktop update — streaming the first app only.');
+                    }
+                }
+            } else if (!isDesktop && audioChoice === 'none') {
+                // Drop the browser-captured audio track the user opted out of.
+                webrtcManager.getScreenShareStreamForPreview()?.getAudioTracks().forEach(t => t.stop());
+            }
+        } catch (audioErr) {
+            console.error('[VoicePanel] Stream audio capture failed:', audioErr);
+            setError('Audio capture failed — streaming video only.');
+        }
+        goLiveMark('audio');
+
+        // Announce FIRST, publish on the server's echo (B7): the
+        // STREAM bit is enforced on the announcement, and peers
+        // render only announced video — publishing first would
+        // put the tracks on the wire for a share the server is
+        // about to refuse.
+        if (!isInVoiceRef.current) {
+            stopHidingCaptureBar();
+            webrtcManager.stopScreenShare();
+            return { ok: false, error: 'left the call' };
+        }
+        const announcedStream = webrtcManager.getScreenShareStreamForPreview();
+        const ack = await wsClient.startScreenShareAcked(roomId, announcedStream?.id, currentUserId);
+        goLiveMark('ack');
+        if (!ack.ok) {
+            goLiveEnd('refused');
+            console.warn('[VoicePanel] screen share refused by the server:', ack.message);
+            setError(ack.message);
+            wsClient.stopScreenShare(roomId); // retract: a timeout may still have been accepted
+            stopHidingCaptureBar();
+            webrtcManager.stopScreenShare();
+            return { ok: false, error: ack.message || 'the server refused the share' };
+        }
+
+        if (sfuMode) {
+            // SFU path: publish the captured stream (video + any game/system
+            // audio) to LiveKit — capped bitrate, refuses past the share cap.
+            try {
+                const sfuStream = webrtcManager.getScreenShareStreamForPreview();
+                if (sfuStream) await sfuManager.startScreenShare(sfuStream);
+            } catch (shareErr) {
+                console.warn('[VoicePanel] SFU screen share refused:', shareErr);
+                goLiveEnd('failed');
+                setError((shareErr as Error).message || 'Screen share failed');
+                wsClient.stopScreenShare(roomId); // retract the announcement
+                stopHidingCaptureBar();
+                webrtcManager.stopScreenShare();
+                return { ok: false, error: (shareErr as Error).message || 'Screen share failed' };
+            }
+        } else {
+            await webrtcManager.addScreenShareToPeers();
+        }
+        goLiveMark('published');
+        // The capture + publish awaits above can outlive the call
+        // (channel switch / hang-up mid-picker): announcing then
+        // would hit the server's membership gate. Same guard as
+        // the camera path — release and bail.
+        if (!isInVoiceRef.current) {
+            void sfuManager.stopScreenShare();
+            stopHidingCaptureBar();
+            webrtcManager.stopScreenShare();
+            return { ok: false, error: 'left the call' };
+        }
+        const stream = webrtcManager.getScreenShareStreamForPreview();
+        // Announced (and acknowledged) above, before any track was published.
+        setIsScreenSharing(true); // the effect below keeps WebView2's redundant "is sharing" bar hidden
+        goLiveEnd('live');
+        setCurrentStreamingUser(currentUserId);
+        if (selfPreviewRef.current && stream) selfPreviewRef.current.srcObject = stream;
+        if (stream) {
+            setScreenSharers(prev => new Map(prev).set(currentUserId, { username: currentUsername || `User ${currentUserId}`, stream }));
+            globalStreamData.set(currentUserId, { username: currentUsername || `User ${currentUserId}`, stream });
+            selectStream(currentUserId); // adds to the global set + notifies
+        }
+        return { ok: true };
+    };
+
+    // An embedding host's Share (docs/EMBEDDING.md, startShare): the host's
+    // picture at the Deck's own size, no audio, then Go Live's own path. One
+    // at a time, like the button.
+    const startHostShare = async (): Promise<EmbedResult> => {
+        if (!isInVoiceRef.current) return { ok: false, error: 'not in a call' };
+        if (isScreenSharingRef.current) return { ok: true };
+        if (hostShareBusyRef.current) return { ok: false, error: 'already starting' };
+        hostShareBusyRef.current = true;
+        goLiveBegin();
+        shareStarting.begin();
+        try {
+            try {
+                await webrtcManager.getScreenShareStream({ width: 1280, height: 800, fps: 30, audio: false });
+            } catch (err) {
+                goLiveEnd('cancelled');
+                webrtcManager.stopScreenShare();
+                const e = err as { name?: string; message?: string } | null;
+                return { ok: false, error: e?.name === 'NotAllowedError' ? 'not allowed' : (e?.message || 'no picture') };
+            }
+            goLiveMark('picker');
+            return await goLive('none');
+        } finally {
+            shareStarting.end();
+            hostShareBusyRef.current = false;
+        }
+    };
+    startHostShareRef.current = startHostShare;
+    // Inside a host that supplies no picture the Share button could only fail.
+    const shareAvailable = screenShareAvailable();
 
     return (
         <>
@@ -3751,8 +3911,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                 {controlsExpanded ? <ChevronDownIcon size={18} /> : <ChevronUpIcon size={18} />}
                             </button>
                         )}
-                        {/* Hide screen share on mobile - not supported */}
-                        {!isMobile && (
+                        {/* Hide screen share on mobile - not supported - and inside an
+                            embedding host that supplies no picture, where it could only fail */}
+                        {!isMobile && shareAvailable && (
                             <button
                                 className={`voice-btn vp-screenshare ${isScreenSharing || shareStarting.showing ? 'active screen-share' : ''}${shareStarting.showing ? ' starting' : ''}`}
                                 // Automation contract (docs/AUTOMATION.md): one button,
@@ -3790,7 +3951,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                                 <ScreenShareIcon size={18} />
                             </button>
                         )}
-                        {!isMobile && (
+                        {!isMobile && shareAvailable && (
                             <button
                                 className="voice-btn vp-share-options"
                                 onClick={() => {
@@ -4065,112 +4226,7 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                         return null;
                     }
                 }}
-                onGoLive={async (audioChoice, apps) => {
-                    const isDesktop = isTauri();
-                    try {
-                        if (isDesktop && audioChoice === 'app' && apps && apps.length > 0) {
-                            const { startMultiAppAudioTrack, startGameAudioTrack } = await import('../api/appAudio');
-                            try {
-                                // Mixer: exactly the ticked apps, mixed natively. One app
-                                // closing drops its audio; the stream itself continues.
-                                const track = await startMultiAppAudioTrack(apps, (_pid, name) => {
-                                    setError(`${name} closed — its audio was removed from the stream.`);
-                                });
-                                webrtcManager.addGameAudioToScreenShare(track);
-                            } catch (mixerErr) {
-                                // Fall back to legacy single-app capture ONLY when the
-                                // installed binary predates the mixer command — a genuine
-                                // capture failure must surface as one (outer catch), not
-                                // silently retry as something else.
-                                const msg = String(mixerErr);
-                                const commandMissing = /not found|unknown|not allowed/i.test(msg)
-                                    && msg.includes('start_multi_app_audio_capture');
-                                if (!commandMissing) throw mixerErr;
-                                console.warn('[VoicePanel] Mixer command missing (older binary), falling back to single-app:', mixerErr);
-                                const first = apps[0];
-                                const gameTrack = await startGameAudioTrack(first.pid, () => {
-                                    setError(`${first.name} closed — stream ended.`);
-                                    stopOwnScreenShare();
-                                });
-                                webrtcManager.addGameAudioToScreenShare(gameTrack);
-                                if (apps.length > 1) {
-                                    setError('Multi-app audio needs the latest desktop update — streaming the first app only.');
-                                }
-                            }
-                        } else if (!isDesktop && audioChoice === 'none') {
-                            // Drop the browser-captured audio track the user opted out of.
-                            webrtcManager.getScreenShareStreamForPreview()?.getAudioTracks().forEach(t => t.stop());
-                        }
-                    } catch (audioErr) {
-                        console.error('[VoicePanel] Stream audio capture failed:', audioErr);
-                        setError('Audio capture failed — streaming video only.');
-                    }
-                    goLiveMark('audio');
-
-                    // Announce FIRST, publish on the server's echo (B7): the
-                    // STREAM bit is enforced on the announcement, and peers
-                    // render only announced video — publishing first would
-                    // put the tracks on the wire for a share the server is
-                    // about to refuse.
-                    if (!isInVoiceRef.current) {
-                        stopHidingCaptureBar();
-                        webrtcManager.stopScreenShare();
-                        return;
-                    }
-                    const announcedStream = webrtcManager.getScreenShareStreamForPreview();
-                    const ack = await wsClient.startScreenShareAcked(roomId, announcedStream?.id, currentUserId);
-                    goLiveMark('ack');
-                    if (!ack.ok) {
-                        goLiveEnd('refused');
-                        console.warn('[VoicePanel] screen share refused by the server:', ack.message);
-                        setError(ack.message);
-                        wsClient.stopScreenShare(roomId); // retract: a timeout may still have been accepted
-                        stopHidingCaptureBar();
-                        webrtcManager.stopScreenShare();
-                        return;
-                    }
-
-                    if (sfuMode) {
-                        // SFU path: publish the captured stream (video + any game/system
-                        // audio) to LiveKit — capped bitrate, refuses past the share cap.
-                        try {
-                            const sfuStream = webrtcManager.getScreenShareStreamForPreview();
-                            if (sfuStream) await sfuManager.startScreenShare(sfuStream);
-                        } catch (shareErr) {
-                            console.warn('[VoicePanel] SFU screen share refused:', shareErr);
-                            goLiveEnd('failed');
-                            setError((shareErr as Error).message || 'Screen share failed');
-                            wsClient.stopScreenShare(roomId); // retract the announcement
-                            stopHidingCaptureBar();
-                        webrtcManager.stopScreenShare();
-                            return;
-                        }
-                    } else {
-                        await webrtcManager.addScreenShareToPeers();
-                    }
-                    goLiveMark('published');
-                    // The capture + publish awaits above can outlive the call
-                    // (channel switch / hang-up mid-picker): announcing then
-                    // would hit the server's membership gate. Same guard as
-                    // the camera path — release and bail.
-                    if (!isInVoiceRef.current) {
-                        void sfuManager.stopScreenShare();
-                        stopHidingCaptureBar();
-                        webrtcManager.stopScreenShare();
-                        return;
-                    }
-                    const stream = webrtcManager.getScreenShareStreamForPreview();
-                    // Announced (and acknowledged) above, before any track was published.
-                    setIsScreenSharing(true); // the effect below keeps WebView2's redundant "is sharing" bar hidden
-                    goLiveEnd('live');
-                    setCurrentStreamingUser(currentUserId);
-                    if (selfPreviewRef.current && stream) selfPreviewRef.current.srcObject = stream;
-                    if (stream) {
-                        setScreenSharers(prev => new Map(prev).set(currentUserId, { username: currentUsername || `User ${currentUserId}`, stream }));
-                        globalStreamData.set(currentUserId, { username: currentUsername || `User ${currentUserId}`, stream });
-                        selectStream(currentUserId); // adds to the global set + notifies
-                    }
-                }}
+                onGoLive={async (audioChoice, apps) => { await goLive(audioChoice, apps); }}
             />
 
             <StreamAudioSourcesModal

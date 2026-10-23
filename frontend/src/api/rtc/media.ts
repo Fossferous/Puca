@@ -2,7 +2,7 @@ import { processAudioStream, getMicConstraints, getNoiseSuppressionMode, setNois
 import { inputGain } from '../../components/settingsStore';
 import { capWouldReduce, recapDisplayTrack, shareVideoConstraints, type LiveCapture } from './shareHealth';
 import { SpeakingDecision, VAD_TICK_MS, vadWindowSize } from './speakingDecision';
-import { getUserMediaForMic } from '../embedHost';
+import { getDisplayMediaForShare, getUserMediaForMic } from '../embedHost';
 
 /** Errors that mean "the requested mic device can't be opened" — the cases
  *  where retrying on the OS default is the right degradation. Matched by NAME,
@@ -699,7 +699,9 @@ export class MediaManager {
                 (displayMediaOptions as DisplayMediaStreamOptions & { systemAudio?: 'include' | 'exclude' }).systemAudio = 'include';
             }
 
-            this.screenShareStream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
+            // An embedding host supplies the picture itself (embedHost.ts); anywhere
+            // else this is the browser's own picker.
+            this.screenShareStream = await getDisplayMediaForShare(displayMediaOptions);
 
             if (captureAudio && this.screenShareStream.getAudioTracks().length === 0) {
                 // The user picked a surface without audio (e.g. a window) or

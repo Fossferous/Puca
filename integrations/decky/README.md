@@ -27,6 +27,8 @@ plugin's own.
     and into mute and deafen toggles with a short notice over the game
     (`ptt.ts`, `controller.ts`).
   - Turns notifications into Steam toasts (`controller.ts`).
+  - Decides when the page may share the screen and when the picture pauses
+    (`share.ts`): see *Sharing the screen*.
 - **`main.py` + `py_modules/` (backend, Python inside Decky).**
   - Attaches to that one view over Steam's DevTools endpoint on 127.0.0.1:8080.
   - Injects the page shim before Púca's scripts run, and opens the configured
@@ -41,12 +43,13 @@ plugin's own.
   - Switches the Deck's muted microphone on for a call and back after
     (`puca_mic.py`, through `wpctl`), keeping a note in its runtime folder so
     a plugin that dies mid-call puts it back on its next start.
+  - Captures and encodes the screen for a share (`puca_share.py`).
   - Fetches the plugin's own updates (`puca_update.py`): see *Updates*.
   - Stores the plugin's settings.
 - **`src/shim/pageShim.ts` (inside the Púca page).** Built separately into
-  `dist/page-shim.js`.
+  `dist/page-shim.js`, with `src/shim/h264.ts` bundled in.
   - Declares the plugin as Púca's embedding host.
-  - Holds the receiving end of the microphone bridge.
+  - Holds the receiving end of the microphone bridge, and of a screen share.
 
 **Why the microphone takes a detour.** Steam's browser refuses
 `getUserMedia` to any site that is not Steam's own. Measured on a Deck,
@@ -96,6 +99,57 @@ the signed-in user read; no root is needed.
   press, however long the button stays down.
 - **In games.** hidraw gives every reader its own copy of each message, so
   this takes nothing from Steam and keeps working while a game has focus.
+
+## Sharing the screen
+
+Steam's browser refuses `getDisplayMedia` to web pages too, so the screen
+takes the backend's way round, with tools SteamOS already has:
+
+1. **Capture.** Game Mode's compositor publishes the screen as a PipeWire
+   video source, `gamescope`. `gst-launch-1.0` reads it with `pipewiresrc`,
+   thins it to 30 fps and converts it to NV12 at 1280x800. WirePlumber's own
+   linking fails on this SteamOS (0.5.14: every video stream is "target not
+   found"), so the capture starts unlinked and the backend links it with
+   `pw-link`.
+2. **Encode.** `ffmpeg` encodes H.264 on the Deck's own video engine
+   (`h264_vaapi`): no B-frames, a keyframe every second, a delimiter before
+   every access unit.
+3. **Hand-off.** The backend splits the stream at the delimiters and hands
+   each access unit to the page as base64 over the DevTools connection it
+   already has (`Runtime.callFunctionOn`, never as a user gesture). The shim
+   decodes it with WebCodecs into a `MediaStreamTrackGenerator` track, which
+   it hands Púca from the host's `getDisplayMedia`. Púca then shares it like
+   any screen, end-to-end encrypted.
+
+What keeps it to the game:
+
+- **Only from a press.** The page's request for the screen is answered only
+  after **Share screen** in the panel (a request in the next 20 s counts as
+  that press). A request with no press, from Púca's own Share button, is put
+  to the person in the panel.
+- **Looks.** The frontend looks at Steam's own state every 100 ms while
+  sharing (`share.ts`): the side menus, the on-screen keyboard, the current
+  toast, the app gamescope shows in front, and the full view. It tells the
+  backend each time whether the game alone is on screen, and when it looked
+  (`share_seen`). Anything else on screen, or unreadable, is a pause; the
+  page then shows a **Paused** card, every second for viewers who join.
+- **Nothing goes unless two looks vouch for it.** An access unit waits in the
+  backend until looks on both sides of when it began, at most 250 ms apart,
+  said the game alone was on screen (`puca_share.ShowGate`). A "paused" look,
+  a gap between looks (one lost, or Steam too busy to look) and a unit that
+  waits more than 600 ms all drop what is waiting. So a look that is late or
+  never comes holds the picture back; it cannot let anything out. Every
+  share starts paused; after a pause nothing that began in the next 500 ms
+  goes (menus slide away, toasts fade), and then only from a keyframe.
+
+Measured on a Deck (2026-10-23, an idle screen): reading the feed at 30 fps
+costs about 0.05 W, the conversion and the hardware encode about 0.02 W more.
+Steam's browser then encodes the call's copy in software: in a channel in
+SFU mode as H.264, peer to peer as VP8, which costs about four times as much
+(at 1280x800 and 30 fps, with a decoder on the Deck in the measurement too:
+0.3 of a CPU thread and 0.1 W for H.264, 1.1 threads and 1 W for VP8).
+Peer-to-peer media encryption knows only VP8's headers, so that one cannot be
+H.264 (docs/EMBEDDING.md, *getDisplayMedia*).
 
 ## Updates
 
@@ -149,8 +203,8 @@ it uploads anything.
 ```bash
 npm ci
 npm run typecheck
-npm test                 # vitest: settings, push-to-talk, the page protocol
-npm run test:py          # unittest: the backend's checks, the back-button reader, updates (aiohttp not needed)
+npm test                 # vitest: settings, push-to-talk, the page protocol, sharing's rules
+npm run test:py          # unittest: the backend's checks, the back-button reader, updates, the share's capture (aiohttp not needed)
 npm run package          # build + out/puca-decky-<version>.zip (+ .sha256), without an update key
 ```
 

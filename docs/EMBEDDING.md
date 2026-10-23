@@ -26,6 +26,7 @@ window.__PUCA_EMBED_HOST__ = {
   apiVersion: 1,                    // required; any other value: not embedded
   name: 'Púca for Steam Deck',      // shown in Settings and log lines
   getUserMedia(constraints) {},     // optional: supplies the microphone
+  getDisplayMedia(options) {},      // optional: supplies a screen share's picture
   notify(notification) {},          // optional: shows notifications
   onStateChange(state) {},          // optional: receives the state below
   isForeground() {},                // optional: is the app on screen?
@@ -42,7 +43,7 @@ cannot swap a host function.
 The host must declare itself only on the Púca origin it means to embed. The
 declaration gives the page nothing a page script could not already do. It
 gives the HOST the page's microphone track, its notifications and its call
-state.
+state, and the choice of what a screen share shows.
 
 ## What the app asks of the host
 
@@ -75,6 +76,32 @@ Chromium 126), the refusal (`NotAllowedError`) came in each of these places:
 - in a browser view;
 - in an iframe inside Steam's own page;
 - with a DevTools permission grant in force.
+
+### `getDisplayMedia(options) → Promise<MediaStream>`
+
+When this is present, the app calls it instead of
+`navigator.mediaDevices.getDisplayMedia` for a screen share: the Share
+dialog's capture and the host's own `startShare()`. The host decides what is
+shared. The app's options (size, frame rate, whether to ask for sound) are
+what it would have asked the browser for, and the host may ignore them.
+
+- **No hook, no button.** Inside a host without it, the app hides **Share**
+  and the arrow beside it: Steam's browser refuses `getDisplayMedia` to web
+  pages as it refuses the microphone, so they could only fail there.
+- **Errors.** Refuse with a `DOMException`. The app treats a refusal like a
+  cancelled browser picker: the share does not start.
+- **No video track.** An answer without one is treated as
+  `NotReadableError`, and any tracks in it are stopped.
+- **Stopping.** The app stops the share's tracks with `track.stop()`: the
+  host's signal to stop capturing. A host that ends the picture itself ends
+  the track (its `ended` event), and the app ends the share as it does when
+  the browser's own "Stop sharing" is pressed.
+- **Encoding.** The app encodes a host's picture like any other share: H.264
+  through the server (SFU mode), the browser's own choice (VP8) peer to peer.
+  Peer-to-peer media encryption (`mediaCrypto.ts`) knows only VP8's header
+  sizes, so a host's share must not be steered to H.264 there, however much
+  cheaper that would be (in Steam's browser about a quarter of VP8's cost,
+  measured at 1280x800 and 30 fps): `hostShareWiring.test.ts` keeps it so.
 
 ### `notify({ id, title, body, key, kind })`
 
@@ -175,6 +202,8 @@ Every command goes through the same code as the app's own controls:
 | `activateNotification(id)` | `boolean` | The person tapped notification `id`. |
 | `signIn(username, password, staySignedIn?)` | `Promise<{ ok: true, keys? } \| { ok: false, error }>` | Signs in through the sign-in form's own code, while the form is on screen: the same exchange, socket and success hand-off. `keys` is there when the account's encryption keys did not come back with the sign-in (`'refused'` or `'unavailable'`, as in the state below): the person is signed in all the same. `error`: `'invalid'` (wrong username or password), `'reset-required'` (the account needs the security update the form then shows, finished in the full view), `'unavailable'` (no form on screen: signed in, or loading), `'busy'` (a sign-in, reset or recovery already running, from the host or the form itself), `'missing'`, `'signed-in'`, or a message. `staySignedIn` is yes when it is `true` or left out, and no for anything else; it is remembered like the form's box once the sign-in worked. A host that offers this handles a password: it should pass it straight through and never keep it. |
 | `downloadSite()` | `Promise<string \| null>` | The server's download site: the origin of `download_url` in its `/app-version`, read fresh, or `null` when it publishes none. https only, or plain http on the device's own loopback (a local test server). A host looks for its own updates there, so the address comes from the server the person uses. |
+| `startShare()` | `Promise<{ ok: true } \| { ok: false, error }>` | Shares this device's screen into the call through the Share dialog's own **Go Live**: video only, 1280x800 at 30 fps, the picture from the host's `getDisplayMedia`. `ok` once the server took the share (and at once when already sharing). `error`: `'not in a call'`, `'this host supplies no picture'` (no `getDisplayMedia`), `'already starting'`, `'not allowed'` (the host refused), `'left the call'`, or a message (the server refused, the capture failed). |
+| `stopShare()` | `boolean` | Stops this device's share, as **Stop Sharing**. `false` when it was not sharing. |
 
 ### Push-to-talk is a lease
 
@@ -198,7 +227,7 @@ lose.
 interface EmbedState {
   apiVersion: 1;
   appVersion: string;             // the web client's version
-  features: string[];             // optional calls this page has: 'downloadSite', 'signIn'
+  features: string[];             // optional calls this page has: 'downloadSite', 'signIn', 'share'
   signedIn: boolean;
   keys: 'ok' | 'refused' | 'unavailable' | null; // the account's encryption keys here; null signed out
   user: { id: number; username: string } | null;
@@ -215,6 +244,7 @@ interface EmbedState {
     noMicrophone: boolean;        // in the call without one (none, no SPEAK, or by choice)
     inputMode: 'open' | 'pushToTalk' | 'pushToMute';
     holdDown: boolean;            // push-to-talk / push-to-mute held right now
+    sharing: boolean;             // this device is sharing its screen
     members: {
       id: number; username: string;
       speaking: boolean; muted: boolean; deafened: boolean;
@@ -245,7 +275,8 @@ full view. A page from before it sends no `keys`.
 
 - **End-to-end encryption.** Calls, messages and files are encrypted in the
   page exactly as in a browser. The host receives the microphone track
-  before encryption, which is what supplying the microphone means. It never
+  before encryption, which is what supplying the microphone means, and
+  supplies a shared screen's picture before encryption too. It never
   receives keys or message text.
 - **Where the code comes from.** An embedded web client is still code the
   server sends on every load, with the trust that implies

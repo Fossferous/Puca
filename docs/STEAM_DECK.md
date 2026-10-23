@@ -6,6 +6,7 @@ Púca in Game Mode, while a game is running:
 - **Join a voice channel** from the Quick Access menu (the **···** button).
 - **Mute, deafen or leave**, and see who is talking.
 - **Push to talk, mute and deafen** on the back buttons (L4, R4, L5, R5).
+- **Share your screen** into the call: everyone in it sees your game.
 - See **new messages pop up** over your game.
 - **Open the whole Púca app** for text chat. Tap to type and the on-screen
   keyboard appears.
@@ -85,6 +86,15 @@ Press **···** → the plug icon → **Púca**.
   than one server, choose the server first.
 - **In a call.** **Mute**, **Deafen** and **Leave** are at the top. Below them
   is everyone in the call; a green dot means they are talking.
+- **Share your screen.** In a call, choose **Share screen**: everyone in the
+  call sees your game, end-to-end encrypted like the rest of the call. Choose
+  **Stop sharing** to end it. While this menu is open they see **Paused**;
+  close it and your game is back within a second or two. The picture is
+  1280x800 at 30 frames a second, without sound.
+  - If you press **Share** in the full Púca app instead, the plugin asks you
+    first: a notice pops up, and **Share screen** in this panel answers it.
+  - The panel shows **Share screen** only when your server's Púca can share
+    from the Deck (version 0.9.848 or newer).
 - **Back buttons.** Under **Settings**, each of these can have a back
   button. Choose **Choose** (or **Change**) next to one, then press the back
   button you want:
@@ -144,6 +154,22 @@ Press **···** → the plug icon → **Púca**.
   a log, and it is handed to Púca as a value, never as part of a script. Púca's
   own sign-in then works as it always does: it sends the server a proof of
   the password, never the password itself.
+- **A shared screen shows your game, and nothing of Steam's or Púca's.** The
+  share starts only when you choose **Share screen** in the panel. While any
+  of these is on screen, the picture pauses and the call sees **Paused**
+  instead:
+  - the Quick Access menu or the Steam menu;
+  - the on-screen keyboard, so a password typed on it never shows;
+  - a notification, such as a message popping up;
+  - Púca's own full view;
+  - Steam itself: the library, the store, or Steam's pages over your game.
+    With no game running there is nothing to share, so it stays paused.
+
+  If the plugin cannot tell whether one of these is on screen (after a Steam
+  update, say), it pauses rather than guess. The Deck's own video engine
+  encodes the screen, as Steam's game recording does; Púca then sends it like
+  any shared screen. Nothing is recorded: the picture exists only on its way
+  into the call.
 - **If your encryption keys did not unlock.** The panel says so at the top,
   as the full app's banner does: messages can't be read on the Deck, and calls
   may not be end-to-end encrypted, until you put it right in Púca. Choose
@@ -173,6 +199,9 @@ Press **···** → the plug icon → **Púca**.
 | Nobody hears you | Check that **Push to talk** is set the way you want, and that the call does not say **Muted**. In Steam's **Settings → Audio**, check the microphone: with its volume at zero the Deck's microphone is muted, and Púca can only send silence. **Turn the microphone on for calls** in the panel's **Settings** does that for you. |
 | A back button does nothing | Choose the button again in the panel's **Settings**, by pressing it. While you are in a call, the line under each back button says if the plugin cannot read the Deck's controller. They work with the Deck's own back buttons, not with a controller you plug in. |
 | Moved to the AFK channel while playing | Your server's Púca may be too old to know about the Deck's controls: ask whoever runs it to update. The plugin reads only the Deck's own controls, so playing with a controller plugged in does not count. |
+| No **Share screen** in a call | Your server's Púca is older than 0.9.848, or your Steam is too old to show a shared picture. Ask whoever runs the server to update. |
+| The call sees **Paused** while you play | Something besides your game is on screen: a menu, the keyboard, a notification, Púca, or Steam's own pages. Go back to the game; the picture returns within a second or two. |
+| **Your screen share stopped** | The message says why. The Deck must be in Game Mode, with its screen on. Choose **Share screen** to start again. |
 | No **Update**, though the download page has a newer version | The plugin looks a little after Púca starts and then every six hours. Your server's Púca may be too old to tell it where the download page is: ask whoever runs it to update. Meanwhile, installing from the address again (step 3) updates it too. |
 | Asked to sign in again | Steam sometimes clears the data of web pages it hosts. Sign in again, with **Stay signed in** ticked. |
 | Anything else | **Settings → Reload Púca** in the panel starts Púca again. |
