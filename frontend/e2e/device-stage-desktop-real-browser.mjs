@@ -261,6 +261,43 @@ for (const [label, w, h] of [['desktop 1280x800', 1280, 800], ['narrow 900x700',
     if (w === 1280) await page.screenshot({ path: join(outdir, `banner-${w}.png`) });
     await page.evaluate(() => { window.__stage.state.inputBlocked = null; window.__stage.emit(); });
 
+    // 6. Copy diagnostics in a real browser: it ends, whatever the clipboard
+    // says — never stuck at "Measuring…" — and, with the clipboard allowed,
+    // the copy holds the rows and the stage's own state.
+    if (w === 1280) {
+        const copyDiag = async () => {
+            await press(page, page.locator('button[aria-label="More"]'));
+            await page.waitForTimeout(100);
+            await press(page, page.locator('.dsb-menu .dsb-item', { hasText: 'Copy diagnostics' }).first());
+        };
+        const finalNote = () => page.waitForFunction(
+            () => /Diagnostics copied|Could not copy diagnostics/.exec(document.body.textContent ?? '')?.[0] ?? null,
+            null, { timeout: 6000 },
+        ).then(hnd => hnd.jsonValue()).catch(() => null);
+        await copyDiag();
+        const first = await finalNote();
+        ck(`${label}: Copy diagnostics ends with a note, clipboard allowed or not`, !!first, first ?? 'still waiting after 6 s');
+        await page.waitForTimeout(6500); // that note's own lifetime
+        await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: base });
+        await copyDiag();
+        const second = await finalNote();
+        const copied = await page.evaluate(() => navigator.clipboard.readText()).catch(e => `read failed: ${e}`);
+        ck(`${label}: …and with the clipboard allowed, the copy is the report`,
+            second === 'Diagnostics copied' && copied.includes('"harness"') && copied.includes('"caret"') && copied.includes('"stageInput"'),
+            `${second}; ${copied.slice(0, 60).replace(/\s+/g, ' ')}`);
+        // The 0.9.819 failure itself: a clipboard that never answers (a
+        // permission prompt nobody can see). It must end, and say why.
+        await page.waitForTimeout(6500);
+        await page.evaluate(() => { navigator.clipboard.writeText = () => new Promise(() => { /* never */ }); });
+        const t0 = Date.now();
+        await copyDiag();
+        const third = await page.waitForFunction(
+            () => /Could not copy diagnostics: the clipboard gave no answer[^.]*\. Is a permission prompt waiting\?/.exec(document.body.textContent ?? '')?.[0] ?? null,
+            null, { timeout: 8000 },
+        ).then(hnd => hnd.jsonValue()).catch(() => null);
+        ck(`${label}: a clipboard that never answers ends in a note naming it`, !!third, third ? `${third} (${Date.now() - t0} ms)` : 'still waiting after 8 s');
+    }
+
     // The stats chip.
     const chip = await page.locator('.dsb-stats-chip').textContent().catch(() => null);
     ck(`${label}: the stats chip shows the frame rate`, !!chip && /\d+ fps/.test(chip), chip ?? 'missing');

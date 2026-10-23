@@ -280,7 +280,8 @@ export async function sendClipboard(): Promise<string | null> { return null; }
 export function sendStreamQuality(): void { /* not under test */ }
 export function setPrivacyMode(): void { /* not under test */ }
 export function sendPowerAction(): boolean { return true; }
-export async function deviceDiagnosticsWindow(): Promise<Record<string, unknown>[]> { return []; }
+/** One row, so a copy has something in it beside the stage's own state. */
+export async function deviceDiagnosticsWindow(): Promise<Record<string, unknown>[]> { return [{ id: 'harness', fps: 60 }]; }
 export function requestFileAccess(): void { /* not under test */ }
 export async function connectToDevice(): Promise<string> { return SID; }
 

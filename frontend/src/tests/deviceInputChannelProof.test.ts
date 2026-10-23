@@ -518,3 +518,29 @@ describe('what the direct channel must NOT carry', () => {
         expect(onRelay()).toEqual([]);
     });
 });
+
+describe("the stage's diagnostics reading", () => {
+    it('a getStats that never answers costs that session its numbers, never the reading', async () => {
+        // The stage hands in diagnosticsReport's withTimeout; this stand-in
+        // gives up the same way, in milliseconds. Without the bound reaching
+        // every getStats, the reading never comes back and this test times out.
+        const { deviceDiagnosticsWindow } = await import('../api/devices/session');
+        const id = await controllerSession();
+        const proto = StubPc.prototype as unknown as { getStats?: () => Promise<unknown> };
+        proto.getStats = () => new Promise(() => { /* never */ });
+        const bound = <T,>(step: Promise<T>, label: string) => new Promise<T>((resolve, reject) => {
+            const t = setTimeout(() => reject(new Error(`${label} gave no answer within 0 s`)), 30);
+            step.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
+        });
+        try {
+            const rows = await deviceDiagnosticsWindow(20, bound);
+            const row = rows.find(r => r.id === id);
+            expect(row, 'the session still has its row').toBeTruthy();
+            expect(row!.stats).toBe('unavailable');
+            expect(String(row!.statsError)).toContain('the picture statistics gave no answer');
+            expect(row, 'and no window numbers it could not measure').not.toHaveProperty('windowSeconds');
+        } finally {
+            delete proto.getStats;
+        }
+    });
+});

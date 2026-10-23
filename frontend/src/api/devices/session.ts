@@ -2990,14 +2990,16 @@ export function revokeAllFileAccess(): number {
  * This samples the cumulative counters twice and reports the DELTAS, so the
  * caller can keep using the stage across the window and get the frame rate,
  * bandwidth and freezes that actually occurred while they were driving.
+ *
+ * `bound` limits each stats read (see `DiagStepBound`).
  */
-export async function deviceDiagnosticsWindow(ms = 5_000): Promise<Record<string, unknown>[]> {
+export async function deviceDiagnosticsWindow(ms = 5_000, bound: DiagStepBound = unbounded): Promise<Record<string, unknown>[]> {
     const raw = async () => {
         const out = new Map<string, { frames: number; bytes: number; freezes: number; decodeS: number; at: number }>();
         for (const s of sessions.values()) {
             if (s.role !== 'controller' || !s.pc) continue;
             try {
-                const stats = await s.pc.getStats();
+                const stats = await bound(s.pc.getStats(), 'the picture statistics');
                 stats.forEach(r => {
                     if (r.type !== 'inbound-rtp' || r.kind !== 'video') return;
                     out.set(s.id, {
@@ -3035,7 +3037,7 @@ export async function deviceDiagnosticsWindow(ms = 5_000): Promise<Record<string
     await new Promise(r => setTimeout(r, ms));
     const after = await raw();
     const inputAfter = inputSnap();
-    const rows = (await deviceDiagnostics()).map(row => {
+    const rows = (await deviceDiagnostics(bound)).map(row => {
         const i0 = inputBefore.get(String(row.id));
         const i1 = inputAfter.get(String(row.id));
         return i0 && i1 ? { ...row, ...inputWindow(i0, i1) } : row;
@@ -3100,7 +3102,18 @@ export function inputWindow(
     };
 }
 
-export async function deviceDiagnostics(): Promise<Record<string, unknown>[]> {
+/**
+ * Bounds one step of a diagnostics reading. The stage's "Copy diagnostics"
+ * passes diagnosticsReport's `withTimeout`, the bound "Send diagnostics" uses,
+ * so a session whose stats never answer costs that session's numbers and
+ * never the whole reading: an unbounded `getStats` held the button's
+ * measurement open for good. Unbounded by default — `__pucaDeviceDiag` has a
+ * person at the console watching it.
+ */
+export type DiagStepBound = <T>(step: Promise<T>, label: string) => Promise<T>;
+const unbounded: DiagStepBound = step => step;
+
+export async function deviceDiagnostics(bound: DiagStepBound = unbounded): Promise<Record<string, unknown>[]> {
     const out: Record<string, unknown>[] = [];
     for (const s of sessions.values()) {
         if (s.role !== 'controller') continue;
@@ -3166,7 +3179,7 @@ export async function deviceDiagnostics(): Promise<Record<string, unknown>[]> {
                 : null,
         };
         try {
-            const stats = await s.pc?.getStats();
+            const stats = s.pc ? await bound(s.pc.getStats(), 'the picture statistics') : undefined;
             // WHICH PATH the media is actually taking. The single most
             // valuable field here and it was missing: "3 fps with freezes"
             // reads completely differently over a TURN relay (bandwidth
@@ -3225,8 +3238,9 @@ export async function deviceDiagnostics(): Promise<Record<string, unknown>[]> {
             // What THIS stage last asked the host to fit, so a frame size that
             // did not change can be read against what was requested.
             row.viewSize = lastViewSize.get(s.id) ?? null;
-        } catch {
+        } catch (e) {
             row.stats = 'unavailable';
+            row.statsError = e instanceof Error ? e.message : String(e);
         }
         out.push(row);
     }

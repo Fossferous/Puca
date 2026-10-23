@@ -18,6 +18,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     ALL_DISPLAYS,
     deviceDiagnosticsWindow,
+    type DiagStepBound,
     endSession,
     requestKeyframe,
     setCaretTracking,
@@ -387,6 +388,75 @@ function barKeyForTheRemote(e: KeyboardEvent): boolean {
 
 /** How long a mobile notice ("Clipboard sent", "Locking…") stays up. */
 const NOTE_LIFETIME_MS = 6000;
+
+/** How long "Copy diagnostics" measures for, while you keep driving. */
+const DIAG_WINDOW_MS = 5_000;
+
+/** Copy diagnostics' note for a step that failed: the bound's own words when
+ *  the step gave no answer (withTimeout's "<step> gave no answer within N s")
+ *  — and for the clipboard the likeliest reason, a permission prompt nobody
+ *  can see — or else what refused it. */
+function diagFailedNote(e: unknown, step: 'the measurement' | 'the clipboard'): string {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.startsWith(step)) {
+        return `Could not copy diagnostics: ${msg}${step === 'the clipboard' ? '. Is a permission prompt waiting?' : ''}`;
+    }
+    return step === 'the clipboard'
+        ? 'Could not copy diagnostics: the clipboard refused it'
+        : 'Could not copy diagnostics: the measurement failed';
+}
+
+/**
+ * "Copy diagnostics", start to finish: measure across the window while the
+ * person keeps driving, merge in this stage's own state, copy. Resolves with
+ * the note to show; never rejects and never hangs.
+ *
+ * EVERY STEP IS BOUNDED, with the bound "Send diagnostics" uses
+ * (diagnosticsReport's withTimeout), loaded on use as Settings loads it. Each
+ * step has hung or can: a getStats that never answers, and — 0.9.819, the
+ * desktop app — a clipboard permission prompt nobody could see, which held
+ * writeText open for good. Out here, not in the component, because the React
+ * Compiler's lint gives up on a component holding a try/finally or a dynamic
+ * import, silencing its other checks.
+ */
+async function measureAndCopyDiagnostics(): Promise<string> {
+    try {
+        const { withTimeout, QUICK_TIMEOUT_MS } = await import('../api/diagnosticsReport');
+        const bound: DiagStepBound = (step, label) => withTimeout(step, QUICK_TIMEOUT_MS, label);
+        let rows: Record<string, unknown>[];
+        try {
+            // The window, its three stats reads (before, after and the
+            // snapshot), each bounded inside, and a second to spare.
+            rows = await withTimeout(
+                deviceDiagnosticsWindow(DIAG_WINDOW_MS, bound),
+                DIAG_WINDOW_MS + 3 * QUICK_TIMEOUT_MS + 1_000,
+                'the measurement',
+            );
+        } catch (e) {
+            return diagFailedNote(e, 'the measurement');
+        }
+        // The caret half lives in this component (the band, the IME source,
+        // the fallback), and this button is the only console a signed release
+        // APK has — so it has to be merged in here, not left to the window
+        // global nobody on a phone can reach. Read at the END of the window,
+        // like the rows, as the pointer state is: the state while they are
+        // still driving, not before.
+        const caret = caretDiag.read();
+        const stageInput = stageInputDiag.read();
+        const text = JSON.stringify(rows.map(r => ({ ...r, caret, stageInput })), null, 2);
+        try {
+            // Refused (permission, insecure context) or never answered: say
+            // which, rather than a button that silently did nothing.
+            await withTimeout(navigator.clipboard.writeText(text), QUICK_TIMEOUT_MS, 'the clipboard');
+        } catch (e) {
+            return diagFailedNote(e, 'the clipboard');
+        }
+        return 'Diagnostics copied — paste them into the chat';
+    } catch {
+        // The bound itself would not load, or a reading threw.
+        return 'Could not copy diagnostics';
+    }
+}
 
 export function DeviceStage() {
     // COARSE POINTER, not window width.
@@ -2543,15 +2613,20 @@ export function DeviceStage() {
      *  swallowing it looks like the paste failed on the far side. */
     const [clipboardNote, setClipboardNote] = useState<string | null>(null);
     const [clipboardBusy, setClipboardBusy] = useState(false);
+    /** "Copy diagnostics" is measuring or copying: its note stays up. */
+    const [diagBusy, setDiagBusy] = useState(false);
     // A note is a moment's feedback, not a fixture. Nothing cleared it before,
     // so after the first More-menu tap the mobile banner stayed up for the
     // rest of the session — over the remote screen. Same lifetime as the
-    // quality note; the timer restarts on every new note.
+    // quality note; the timer restarts on every new note. Not while Copy
+    // diagnostics is still working: the lifetime took its "Measuring…" away
+    // at 6 s whatever happened next, so a step that never answered left a
+    // button that looked as if it had done nothing at all.
     useEffect(() => {
-        if (!clipboardNote) return;
+        if (!clipboardNote || diagBusy) return;
         const t = setTimeout(() => setClipboardNote(null), NOTE_LIFETIME_MS);
         return () => clearTimeout(t);
-    }, [clipboardNote]);
+    }, [clipboardNote, diagBusy]);
 
     /**
      * The stage's own numbers, onto the clipboard.
@@ -2568,30 +2643,22 @@ export function DeviceStage() {
      * captures a binding that does not exist yet, which eslint's immutability
      * rule catches and a reader should not have to reason about.
      */
+    const diagRunningRef = useRef(false);
     const copyDiagnostics = useCallback(async () => {
-        setClipboardNote(null);
-        try {
-            // MEASURED WHILE DRIVING, not at the moment of the tap: reaching
-            // this button means letting go, and a still desktop stops
-            // producing frames on purpose — so a one-shot reading reports the
-            // pause rather than the problem. Close the menu and keep using it.
-            setClipboardNote('Measuring for 5s — close this and keep using it…');
-            const rows = await deviceDiagnosticsWindow(5_000);
-            // The caret half lives in this component (the band, the IME source,
-            // the fallback), and this button is the only console a signed release
-            // APK has — so it has to be merged in here, not left to the window
-            // global nobody on a phone can reach.
-            const caret = caretDiag.read();
-            // Read at the END of the window, like the rows: the state the
-            // trackpad is in while they are still driving, not before.
-            const stageInput = stageInputDiag.read();
-            await navigator.clipboard.writeText(JSON.stringify(rows.map(r => ({ ...r, caret, stageInput })), null, 2));
-            setClipboardNote('Diagnostics copied — paste them into the chat');
-        } catch {
-            // Clipboard can be refused (permission, insecure context). Say so
-            // rather than leaving a button that silently does nothing.
-            setClipboardNote('Could not copy diagnostics');
-        }
+        // One at a time: a second press while the first is measuring would
+        // only race it to the clipboard.
+        if (diagRunningRef.current) return;
+        diagRunningRef.current = true;
+        setDiagBusy(true);
+        // MEASURED WHILE DRIVING, not at the moment of the tap: reaching
+        // this button means letting go, and a still desktop stops producing
+        // frames on purpose — so a one-shot reading reports the pause rather
+        // than the problem. Close the menu and keep using it.
+        setClipboardNote(`Measuring for ${DIAG_WINDOW_MS / 1000}s — close this and keep using it…`);
+        const note = await measureAndCopyDiagnostics();
+        diagRunningRef.current = false;
+        setDiagBusy(false);
+        setClipboardNote(note);
     }, []);
     /** The one-shot clipboard send (puts this computer's clipboard on the
      *  other one, to paste there). */
