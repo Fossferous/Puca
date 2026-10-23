@@ -384,7 +384,12 @@ Yes, and the send path fails closed rather than falling back to plaintext.
 - **Photos are stripped of metadata before they are encrypted**
   ([`imageMetadata.ts`](../frontend/src/api/imageMetadata.ts), called from `sealFileForUpload` in
   `attachments.ts`, which every attachment of every surface passes through: composer, DMs, tasks,
-  notes, including a note's photo sealed offline). The recipients of an attachment are exactly the
+  notes, including a note's photo sealed offline). Two other doors are covered the same way:
+  `uploadFile` in [`uploads.ts`](../frontend/src/api/uploads.ts), through which every picture
+  the server stores in the clear passes (avatar, server icon, the create-a-server wizard's icon,
+  emoji), and `fileTransferManager.offerFile`, the peer-to-peer path a DM file over the 25 MB
+  upload cap takes instead of the seal. The cap is checked on the file as chosen, before the
+  strip. A test walks the source and fails if anything else posts to `/upload`. The recipients of an attachment are exactly the
   people its EXIF would be shown to, and end-to-end encryption does nothing about them. It is
   **lossless**: the compressed picture is copied byte for byte, never decoded or re-encoded.
   JPEG loses APP1 (Exif, XMP, extended XMP), APP13 (Photoshop/IPTC), APP11 (JUMBF/C2PA), every
@@ -396,7 +401,9 @@ Yes, and the send path fails closed rather than falling back to plaintext.
   entry of a minimal EXIF block Púca writes itself (32 bytes in a JPEG, a 26-byte `eXIf` chunk,
   a 26-byte `EXIF` chunk with the VP8X flag), never copied from the file; the alternative,
   baking the rotation in, would mean re-encoding. A JPEG, PNG or WebP (by its magic bytes, not its
-  declared type) whose segments or chunks cannot be walked is **refused with a message**, not sent:
+  declared type) whose segments or chunks cannot be walked is **refused with a message**, not sent
+  (padding between a JPEG's segments is skipped as every decoder skips it, and a PNG clipped inside
+  its last chunk's CRC passes, so a received file saved to a note or copied can still be re-sealed):
   passing it on would be the way a block the parser could not see still reaches the recipient. A
   JPEG or PNG merely cut off inside its picture data is sent after the part before the cut is
   checked. Any other format passes through unchanged. **Known limits:** AVIF, TIFF, BMP and GIF

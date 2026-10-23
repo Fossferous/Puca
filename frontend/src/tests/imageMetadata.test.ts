@@ -23,6 +23,7 @@ describe('JPEG', () => {
         const input = jpeg(everything);
         expect(leaked(input).sort()).toEqual(['GPS latitude', 'IPTC', 'XMP', 'camera make', 'camera model', 'capture date', 'comment']);
         expect(contains(input, 'MOTIONPHOTO-VIDEO-')).toBe(true);
+        expect(contains(input, 'MPF')).toBe(true);
         const out = stripImageMetadata(input);
         expect(leaked(out)).toEqual([]);
         expect(contains(out, 'MOTIONPHOTO-VIDEO-')).toBe(false);
@@ -88,7 +89,9 @@ describe('JPEG', () => {
         const input = jpeg({ progressive: true, comment: true });
         const out = stripImageMetadata(input);
         expect(leaked(out)).toEqual([]);
-        expect(jpegSegments(out).filter(s => s.marker === 0xDA)).toHaveLength(1); // jpegSegments stops at the first
+        // Both scan headers survive (the first is [1,1,0,0,63,0], the second [1,1,0,1,63,0]).
+        expect(contains(out, Uint8Array.from([0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00]))).toBe(true);
+        expect(contains(out, Uint8Array.from([0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x01, 0x3F, 0x00]))).toBe(true);
         expect(contains(out, Uint8Array.from([0x9A, 0xFF, 0x00, 0xBC]))).toBe(true);
         expect(indexOfBytes(out, Uint8Array.from([0xFF, 0xC4]), indexOfBytes(out, SCAN) + SCAN.length)).toBeGreaterThan(0);
     });
@@ -122,8 +125,23 @@ describe('JPEG', () => {
         bad(Uint8Array.from([0xFF, 0xD8, 0xFF])); // SOI then a bare marker
         bad(Uint8Array.from([0xFF, 0xD8, 0xFF, 0xE1, 0x00])); // header cut
         bad(cat([0xFF, 0xD8], jseg(0xE1, enc('Exif\0\0')), [0xFF, 0xD9])); // no scan at all
-        bad(cat([0xFF, 0xD8], jseg(0xFE, enc('hi')), Uint8Array.from([0x12, 0x34]))); // garbage where a marker belongs
+        bad(cat([0xFF, 0xD8], jseg(0xFE, enc('hi')), Uint8Array.from([0x12, 0x34]))); // junk and then nothing: no picture
         bad(ok.subarray(0, comAt + 6)); // cut inside the comment
+    });
+
+    it('reads on past padding between segments, as every decoder does, and drops it', () => {
+        const clean = stripImageMetadata(jpeg({ comment: true }));
+        const comAt = indexOfBytes(jpeg({ comment: true }), Uint8Array.from([0xFF, 0xFE]));
+        const input = jpeg({ comment: true });
+        // Junk (a zero run, text with no FF in it, a lone FF 00) between the comment and what follows it.
+        const comEnd = comAt + 2 + ((input[comAt + 2] << 8) | input[comAt + 3]);
+        const padded = cat(input.subarray(0, comEnd), [0, 0, 0], enc('JUNK-SECRETCOMMENT-pad'), [0xFF, 0x00], [0, 0], input.subarray(comEnd));
+        expect(contains(padded, 'JUNK-SECRETCOMMENT-pad')).toBe(true);
+        const out = stripImageMetadata(padded);
+        expect(contains(out, 'JUNK')).toBe(false);
+        expect(leaked(out)).toEqual([]);
+        expect(Array.from(out)).toEqual(Array.from(stripImageMetadata(input)));
+        expect(clean.length).toBe(out.length);
     });
 
     it('says why, in words a person can act on', () => {
@@ -143,7 +161,8 @@ describe('PNG', () => {
         expect(leaked(out)).toEqual([]);
         const types = pngChunks(out).map(c => c.type);
         expect(types).toEqual(['IHDR', 'eXIf', 'sRGB', 'gAMA', 'iCCP', 'pHYs', 'IDAT', 'IEND']);
-        expect(out.length).toBe(out.length);
+        expect(out.length).toBeLessThan(input.length);
+        expect(contains(input, SECRET_IPTC)).toBe(true); // control: the unknown chunk and the tail carried it
         expect(contains(out, SECRET_IPTC)).toBe(false);
     });
 
@@ -203,6 +222,16 @@ describe('PNG', () => {
         const huge = Uint8Array.from(input); huge[8] = 0x7F; // IHDR longer than the file
         bad(huge);
         // A metadata chunk cut off at the end is debris, not an error.
+        // A file clipped inside the CRC of its IEND (1 to 4 bytes short) is a whole picture.
+        const whole = png({ orientation: null });
+        for (let cut = 1; cut <= 4; cut++) {
+            const out = stripImageMetadata(whole.subarray(0, whole.length - cut));
+            const chunks = pngChunks(out);
+            expect(chunks.at(-1)!.type, `cut ${cut}`).toBe('IEND');
+            expect(chunks.every(c => c.crcOk), `cut ${cut}`).toBe(true);
+        }
+        // ...but not one clipped inside a chunk the picture needs.
+        bad(whole.subarray(0, 8 + 25 + 13 + 10)); // inside the gAMA chunk behind sRGB
         expect(leaked(stripImageMetadata(cat(png({ text: false }).subarray(0, 40), enc('\0\0\0\xff')))).length).toBe(0);
     });
 });
@@ -390,6 +419,19 @@ describe('malformed input never crashes the send', () => {
                 settle(cat(magic, junk));
             }
         }
+    });
+});
+
+describe('a big file with no declared type is not read whole to find out what it is', () => {
+    it('looks at the first 12 bytes only, unless they say JPEG / PNG / WebP', async () => {
+        const big = new File([new Uint8Array(4096)], 'archive.bin');
+        let whole = 0;
+        const real = big.arrayBuffer.bind(big);
+        Object.defineProperty(big, 'arrayBuffer', { value: () => { whole++; return real(); } });
+        expect(await stripFileMetadata(big)).toBe(big);
+        expect(whole).toBe(0);
+        const photo = new File([jpeg({ comment: true }) as unknown as Uint8Array<ArrayBuffer>], 'photo');
+        expect(leaked(new Uint8Array(await (await stripFileMetadata(photo)).arrayBuffer()))).toEqual([]);
     });
 });
 

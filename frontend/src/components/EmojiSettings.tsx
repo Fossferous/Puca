@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { listEmojis, createEmoji, deleteEmoji } from '../api/reactions';
 import type { CustomEmoji } from '../api/reactions';
-import { ImageMetadataError, stripFileMetadata } from '../api/imageMetadata';
+import { ImageMetadataError } from '../api/imageMetadata';
 import { uploadFile, discardUpload } from '../api/uploads';
 import { getToken, decodeJwtPayload } from '../api/auth';
 import './EmojiSettings.css';
@@ -88,7 +88,7 @@ export function EmojiSettings({ isOpen, onClose, serverId, serverName, isOwner, 
         setError(null);
 
         try {
-            const uploaded = await uploadFile(await stripFileMetadata(selectedFile));
+            const uploaded = await uploadFile(selectedFile);
             try {
                 await createEmoji(serverId, newEmojiName.trim(), uploaded.id);
             } catch (e) {

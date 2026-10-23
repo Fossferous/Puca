@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { indexOfBytes, jpeg, leaked } from './fixtures/photoMetadata';
+import { stripImageMetadata } from '../api/imageMetadata';
 
 /**
  * Negotiation logic for peer-to-peer transfers. The byte pump is covered in
@@ -189,6 +191,32 @@ describe('offering a file', () => {
         expect(offer!.payload.sha256).toBe(
             '9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a',
         );
+    });
+
+    it('takes the EXIF off a picture before the digest: a photo over the upload cap comes this way, not through the seal', async () => {
+        const photo = jpeg({ xmp: true, comment: true });
+        expect(leaked(photo)).not.toEqual([]);
+        const file = new File([Uint8Array.from(photo)], 'IMG_0001.jpg', { type: 'image/jpeg' });
+        const id = await fileTransferManager.offerFile(42, 'bob', file);
+        // What the peer will receive is what the offer's size and digest describe: the stripped file.
+        const sentBytes = stripImageMetadata(photo);
+        expect(leaked(sentBytes)).toEqual([]);
+        const offer = sent.find(m => m.type === 'FileOffer' && m.payload.transfer_id === id)!;
+        expect(offer.payload.size).toBe(sentBytes.length);
+        expect(offer.payload.size).toBeLessThan(photo.length);
+        const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', Uint8Array.from(sentBytes)));
+        expect(offer.payload.sha256).toBe(Array.from(digest, b => b.toString(16).padStart(2, '0')).join(''));
+    });
+
+    it('does not offer a JPEG it cannot take apart, and says why', async () => {
+        const bad = Uint8Array.from(jpeg({ comment: true }));
+        const at = indexOfBytes(bad, Uint8Array.from([0xFF, 0xFE]));
+        bad[at + 2] = 0xFF; bad[at + 3] = 0xFF;
+        const id = await fileTransferManager.offerFile(42, 'bob', new File([bad], 'broken.jpg', { type: 'image/jpeg' }));
+        const t = fileTransferManager.list().find(x => x.id === id)!;
+        expect(t.state).toBe('failed');
+        expect(t.error).toMatch(/was not sent/);
+        expect(sent.filter(m => m.payload?.transfer_id === id)).toHaveLength(0);
     });
 
     it('uses an id the server will accept (8..64 chars, [A-Za-z0-9-])', async () => {

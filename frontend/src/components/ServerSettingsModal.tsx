@@ -5,7 +5,7 @@ import {
     INVITE_EXPIRY_CHOICES, INVITE_DEFAULT_EXPIRY_HOURS,
     listBans, unbanMember, listReports, resolveReport, listAuditLog,
 } from '../api/servers';
-import { ImageMetadataError, stripFileMetadata } from '../api/imageMetadata';
+import { ImageMetadataError } from '../api/imageMetadata';
 import { uploadFile, discardUpload } from '../api/uploads';
 import { fetchPublicConfig } from '../api/publicConfig';
 import { inviteLink } from '../api/pendingInvite';
@@ -261,7 +261,7 @@ export function ServerSettingsModal({
         setIsUploading(true);
         setError(null);
         try {
-            const uploaded = await uploadFile(await stripFileMetadata(file));
+            const uploaded = await uploadFile(file);
             // Picking a second icon before saving strands the first one: it is
             // uploaded, counts against the quota, and nothing will ever point
             // at it. Only discard a pick that was never saved.
