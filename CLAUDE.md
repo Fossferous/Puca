@@ -611,13 +611,16 @@ The rule that must never regress, whatever the exit code says:
 cd frontend && npm run lint 2>&1 | grep -c "rules-of-hooks"   # must print 0
 ```
 
-Two `react-hooks/exhaustive-deps` **warnings** remain, both known. `SmartAvatar.tsx`
-is deliberate: the effect must run after every render to catch `img.complete`
-flipping on the DOM node without telling React, so following the rule's advice
-(`[loaded]`) would break it. `StreamStage.tsx` (missing `setFocusedStream` dep)
-is unassessed — do not "fix" a hook-dep warning blind; dependency changes change
-behaviour. Warnings do not fail the gate, but a NEW warning in the lint output
-is a finding: read it, decide, then document it here or fix it.
+One `react-hooks/exhaustive-deps` **warning** remains, and it is known.
+`SmartAvatar.tsx` is deliberate: the effect must run after every render to catch
+`img.complete` flipping on the DOM node without telling React, so following the
+rule's advice (`[loaded]`) would break it. (`StreamStage.tsx`'s was the other
+one until 2026-09-26, 114a1034: its deps are `[focusedStream, setFocusedStream]`,
+and `setFocusedStream` is a zustand action whose identity never changes, which
+`src/tests/streamStore.test.ts` pins, so adding it changes nothing.) Do not
+"fix" a hook-dep warning blind; dependency changes change behaviour. Warnings do
+not fail the gate, but a NEW warning in the lint output is a finding: read it,
+decide, then document it here or fix it.
 
 Live suites need a backend against a **throwaway** database — never the dev or
 production one. See the header of `frontend/e2e/e2ee-live-verify.mjs`.
