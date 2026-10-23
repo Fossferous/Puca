@@ -274,6 +274,25 @@ export class WebRTCManager {
             peer.mediaCrypto.requireE2ee = enabled;
             this.emitMediaE2ee(userId);
         }
+        // Where frames can be encrypted, the transforms read requireE2ee on
+        // every frame, so the flag above is the whole change. Where they
+        // cannot, nothing reads it per frame: what each peer is sent and shown
+        // was settled when it was built (addLocalMediaToPeer, ontrack) and when
+        // each track was published (publishBlockedByEnforcement). Turned on
+        // mid-call (the member's setting, or the server's policy arriving),
+        // the mic, camera and share already on those connections went on out
+        // as plain DTLS-SRTP, and everyone's voice went on playing, while the
+        // panel said media was blocked both ways. So rebuild every peer
+        // through those guards: closing the connection stops both directions
+        // at once, and the fresh one carries exactly what the setting now
+        // allows (nothing while it is on, everything again once it is off).
+        if (!isMediaE2eeSupported()) {
+            for (const userId of [...this.peers.keys()]) {
+                console.warn(`[media-e2ee] encryption ${enabled ? 'now' : 'no longer'} required on an engine that cannot encrypt — rebuilding the connection to ${userId}`);
+                this.closePeer(userId);
+                void this.callUser(userId);
+            }
+        }
     }
     isRequireMediaE2ee(): boolean { return this.requireMediaE2ee; }
 
@@ -726,6 +745,7 @@ export class WebRTCManager {
     publishCameraTrack(track: MediaStreamTrack): void {
         const localStream = this.media.getLocalStreamSync();
         if (!localStream) return;
+        if (this.publishBlockedByEnforcement()) return;
         for (const [userId, peer] of this.peers) {
             if (!this.sendsTo(userId)) continue;
             if (peer.connection.getSenders().some(s => s.track === track)) continue;
@@ -771,7 +791,8 @@ export class WebRTCManager {
         const newTrack = await this.media.toggleVideo(enable);
         const localStream = this.media.getLocalStreamSync();
 
-        if (newTrack) {
+        // The local preview still works; only the publish is refused.
+        if (newTrack && !this.publishBlockedByEnforcement()) {
             for (const [userId, peer] of this.peers) {
                 if (localStream && this.sendsTo(userId)) {
                     // addTrack fires onnegotiationneeded → offer (no manual makeOffer).
@@ -787,6 +808,7 @@ export class WebRTCManager {
         const localStream = this.media.getLocalStreamSync();
 
         if (newTrack && localStream) {
+            if (this.publishBlockedByEnforcement()) return localStream;
             // Never grab the screen-share video sender: while sharing with the
             // camera on, "first video sender" IS the screen share — replacing
             // its track would swap the outgoing stream for the camera feed.
@@ -930,6 +952,7 @@ export class WebRTCManager {
     async addScreenShareToPeers(): Promise<void> {
         const stream = this.media.getScreenShareStreamSync();
         if (!stream) return;
+        if (this.publishBlockedByEnforcement()) return;
 
         // addScreenShareTracks' addTrack calls fire onnegotiationneeded on each
         // peer → a glare-safe offer. This is the path that must reach a late
@@ -1001,6 +1024,28 @@ export class WebRTCManager {
 
         const screen = this.media.getScreenShareStreamSync();
         if (screen && sends) await this.addScreenShareTracks(userId, pc, screen);
+    }
+
+    /**
+     * The camera / screen-share twin of the guard in addLocalMediaToPeer.
+     *
+     * That guard only covers the tracks present when a peer is BUILT. A camera
+     * turned on or a share started mid-call reaches the peers through
+     * publishCameraTrack / toggleVideo / switchCamera / addScreenShareToPeers,
+     * each of which added the track and called wireSender — a no-op without the
+     * Encoded Transform API — so on Safari, iOS, Firefox and the WebKit shells
+     * the setting blocked the microphone at join and then let the camera and
+     * the screen go out as plain DTLS-SRTP. True means publish nothing, and
+     * say so on every peer, exactly as the join-time guard does.
+     */
+    private publishBlockedByEnforcement(): boolean {
+        if (!(this.requireMediaE2ee && !isMediaE2eeSupported())) return false;
+        console.warn('[media-e2ee] not publishing camera/share: encryption required but unsupported here');
+        for (const [userId, peer] of this.peers) {
+            peer.mediaE2eeReason = 'local-unsupported';
+            this.emitMediaE2ee(userId);
+        }
+        return true;
     }
 
     /** Add screen-share tracks to a peer (deduped) and tune the video sender. */

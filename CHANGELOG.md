@@ -4,6 +4,12 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Security
+
+- **"Require encryption for calls" now keeps your camera and screen share out of a call too, in browsers that cannot encrypt calls.** Firefox and Safari (including on iPhone and iPad) cannot end-to-end encrypt calls, so with the setting on, Púca keeps your media out of the call rather than send it in a form the server could access. It did that for your microphone, but a camera you turned on or a screen you shared during the call was still sent, encrypted only in transit, while the voice panel said your media was blocked. Now the camera and the screen share are held back as well: you still see your own preview, nobody else receives it, and the panel names all three. Turning the setting on in the middle of a call (yours in **Settings → Privacy & Safety**, or the server owner's in **Server Settings**) now applies at once, where before it changed only what the panel said until the next call; turning it off brings the call's sound and video back without rejoining, after a moment's reconnect. Chrome, Edge, Brave and the Windows and Android apps were never affected: they encrypt calls end to end. Comes with the web app update.
+
 ## 0.9.846 — 2026-10-22
 
 Ready for Púca on the Steam Deck
