@@ -25,8 +25,6 @@ import {
     requestMonitor,
     sendClipboard,
     sendInput,
-    sendPowerAction,
-    sendStreamQuality,
     sendViewSize,
     subscribeCaret,
     subscribeSessions,
@@ -38,11 +36,11 @@ import {
 } from '../api/keyboardInset';
 import { isEditableTarget, matchesRegisteredHotkey } from '../api/hotkeys';
 import { useStreamStore } from '../stores/streamStore';
-import { STREAM_QUALITY_PRESETS, parsePresetValue, presetValue } from '../api/devices/streamQualityPresets';
 import { readFitResolutionPreference, viewSizeFor, FIT_RESOLUTION_KEY, type FitResolution } from '../api/devices/viewSize';
 import { tunnelStatus, type TunnelStatus } from '../api/devices/tunnel';
 import { getStreamQualityErrorMessage } from '../api/devices/streamQualityMessages';
 import { isInjectableKey, normalizedOverVideo, pictureBox, wheelDy } from '../api/devices/pointerMapping';
+import { stageShortcut } from '../api/devices/stageShortcuts';
 import {
     ZOOM_FOLLOW_IN, ZOOM_FOLLOW_OUT_AT, aspectMatches, aspectsDistinguish, availableEdgeHops,
     captureSurfaceSize, caretBandFrom, caretFollowTransform, carryPointer, clampPanTo,
@@ -63,8 +61,8 @@ import { stageInputDiagnostics, type StageInputState } from '../api/devices/stag
 import { isMobile as isNativeMobile } from '../api/platform';
 import { computeRmoveScale } from '../api/remoteControl';
 import {
-    FPS_SENS_MAX, FPS_SENS_MIN, FPS_SENS_STEP,
-    fmtSens, loadFpsMode, loadFpsSens, saveFpsMode, saveFpsSens,
+    FPS_SENS_MAX, FPS_SENS_MIN,
+    loadFpsMode, loadFpsSens, saveFpsMode, saveFpsSens,
 } from '../utils/fpsSens';
 import { DeviceFileManager } from './DeviceFileManager';
 import './DeviceStage.css';
@@ -74,8 +72,15 @@ import { KeyboardOverlay } from './DeviceStageMobileKeyboard';
 import { DeviceStageVirtualMouse } from './DeviceStageVirtualMouse';
 import { virtualStartingMessage } from '../api/devices/noScreen';
 import { inputBlockedMessage } from '../api/devices/inputReach';
+import { MAX_TYPED_CHARS, typeTextEvents } from '../api/devices/typeText';
+import { readLocalClipboardDetailed } from '../api/devices/clipboard';
+import { useDeviceLiveStats } from '../api/devices/useDeviceLiveStats';
+import { DeviceStageDesktopBar } from './DeviceStageDesktopBar';
+import { DeviceStageStats } from './DeviceStageStats';
+import { DeviceStageTypeText } from './DeviceStageTypeText';
+import { enterStageFullscreen, leaveStageFullscreen, onFullscreenChange, stageElementFullscreen } from './stageFullscreen';
 import {
-    MonitorIcon, CopyIcon, CrosshairIcon, ForwardIcon, LiveDotIcon,
+    CrosshairIcon, LiveDotIcon, PlayIcon,
     ChevronRightIcon, ChevronUpIcon, ChevronDownIcon } from './Icons';
 import './DeviceStageMobile.css';
 
@@ -165,6 +170,16 @@ function detectCoarsePointer(): boolean {
 
 /** Remembered across sessions: a chosen input mode should not reset. */
 const MOUSE_MODE_KEY = 'device-stage-mouse-mode';
+const SHOW_STATS_KEY = 'device-stage-show-stats';
+
+/** OFF by default: the bar's chip already says fps and delay at a glance. */
+function readShowStatsPreference(): boolean {
+    try {
+        return localStorage.getItem(SHOW_STATS_KEY) === 'on';
+    } catch {
+        return false;
+    }
+}
 const VIRTUAL_MOUSE_KEY = 'device-stage-virtual-mouse';
 const FOLLOW_CURSOR_KEY = 'device-stage-follow-cursor';
 const FOLLOW_CARET_KEY = 'device-stage-follow-caret';
@@ -463,7 +478,19 @@ export function DeviceStage() {
     const surfaceRef = useRef<HTMLDivElement | null>(null);
     const [tunnels, setTunnels] = useState<TunnelStatus | null>(null);
     const [showFiles, setShowFiles] = useState(false);
-    const [showDisplaysMenu, setShowDisplaysMenu] = useState(false);
+    /** The desktop bar has a menu open: no key goes to the remote meanwhile,
+     *  and Escape closes the menu instead (DeviceStageDesktopBar). A ref, read
+     *  by the window key listener, which must not re-subscribe on every open. */
+    const barMenuOpenRef = useRef(false);
+    const onBarMenuOpenChange = useCallback((open: boolean) => { barMenuOpenRef.current = open; }, []);
+    /** The live stats panel over the picture (desktop), remembered. */
+    const [showStats, setShowStats] = useState(readShowStatsPreference);
+    /** "Type text…": the dialog's starting text, or null while it is closed. */
+    const [typeText, setTypeText] = useState<string | null>(null);
+    /** Real fullscreen (stageFullscreen.ts) is on. */
+    const [fullscreen, setFullscreen] = useState(false);
+    /** The stage root, which is what goes fullscreen. */
+    const stageRootRef = useRef<HTMLDivElement | null>(null);
 
     // GAME MODE (desktop only): relative mouse via pointer lock, for games
     // that read raw-input deltas. Absolute {t:'move'} teleports the OS cursor
@@ -740,6 +767,9 @@ export function DeviceStage() {
     // during a render. Declared ABOVE the release-everything effect below,
     // which has to reach it.
     const [gestures] = useState(() => new TouchGestures());
+    /** The release-everything routine below, for the pause path to call
+     *  BEFORE control goes off. A no-op while there is no session. */
+    const releaseAllRef = useRef<() => void>(() => { /* no session */ });
 
     // Release everything we are holding on the host when input can no longer
     // reach us (alt-tab mid-press would otherwise leave the host's button or
@@ -782,12 +812,28 @@ export function DeviceStage() {
         const onVisibility = () => { if (document.hidden) releaseAll(); };
         window.addEventListener('blur', releaseAll);
         document.addEventListener('visibilitychange', onVisibility);
+        releaseAllRef.current = releaseAll;
         return () => {
             window.removeEventListener('blur', releaseAll);
             document.removeEventListener('visibilitychange', onVisibility);
+            releaseAllRef.current = () => { /* no session */ };
             releaseAll(); // ending the session must not strand a held button
         };
     }, [sessionActiveId, gestures]);
+
+    /** Pause or resume control. PAUSING LETS GO FIRST, the blur rule: a key
+     *  or button held at that moment used to stay down on the host until the
+     *  window lost focus — the key listener was gone, so its release never
+     *  went out. The release runs while control is still on, so it is sent.
+     *  A captured mouse is let go too: paused input goes nowhere, and a lock
+     *  that stayed would trap the cursor in a picture that ignores it. */
+    const setControl = useCallback((on: boolean) => {
+        if (!on) {
+            releaseAllRef.current();
+            if (document.pointerLockElement) document.exitPointerLock();
+        }
+        setControlEnabled(on);
+    }, []);
 
     const adjustFpsSens = (delta: number) => {
         setFpsSens(s => {
@@ -2454,6 +2500,123 @@ export function DeviceStage() {
             setClipboardNote('Could not copy diagnostics');
         }
     }, []);
+    /** The one-shot clipboard send (puts this computer's clipboard on the
+     *  other one, to paste there). */
+    const sendClipboardNow = useCallback(() => {
+        const id = sessionIdRef.current;
+        if (!id) return;
+        setClipboardBusy(true);
+        setClipboardNote(null);
+        void sendClipboard(id)
+            .then(err => setClipboardNote(err ?? 'Clipboard sent'))
+            .catch(() => setClipboardNote('Could not send the clipboard'))
+            .finally(() => setClipboardBusy(false));
+    }, []);
+
+    /** TYPE text on the remote machine (typeText.ts), through `send` — the
+     *  pause gate applies, as it does to every key. */
+    const typeOnRemote = useCallback((text: string) => {
+        // Said, not assumed: `send` drops everything while control is paused,
+        // and "Typed 40 characters" over a pause would be a note that lies.
+        if (!controlEnabled) {
+            setClipboardNote('Control is paused — nothing was typed');
+            return;
+        }
+        const events = typeTextEvents(text);
+        for (const ev of events) send(ev);
+        if (events.length) setClipboardNote(`Typed ${Array.from(text).length} characters`);
+    }, [send, controlEnabled]);
+
+    /** "Type this computer's clipboard": shown in the Type text box first, so
+     *  what is about to be typed over there is seen before it goes — a
+     *  clipboard can hold a password, or far more than was meant. */
+    const typeClipboard = useCallback(async () => {
+        const r = await readLocalClipboardDetailed();
+        if (!r.ok) {
+            setClipboardNote(r.why === 'unsupported'
+                ? 'This app cannot read the clipboard'
+                : 'Could not read this computer’s clipboard');
+            return;
+        }
+        if (!r.text) {
+            setClipboardNote('The clipboard is empty');
+            return;
+        }
+        setTypeText(r.text.length > MAX_TYPED_CHARS * 2 ? r.text.slice(0, MAX_TYPED_CHARS * 2) : r.text);
+    }, []);
+
+    const toggleShowStats = useCallback(() => {
+        setShowStats(on => {
+            try { localStorage.setItem(SHOW_STATS_KEY, on ? 'off' : 'on'); } catch { /* this session only */ }
+            return !on;
+        });
+    }, []);
+    /** The desktop bar's live numbers: polled only on a desktop stage. */
+    const liveStats = useDeviceLiveStats(isMobile ? null : sessionActiveId, !isMobile);
+
+    // ZOOM FROM THE BAR, about the middle of the picture (Ctrl+wheel zooms
+    // at the pointer). The same floor, ceiling and pan clamp as the wheel.
+    const zoomBy = useCallback((op: 'in' | 'out' | 'reset') => {
+        const surface = surfaceRef.current;
+        const rect = surface ? surface.getBoundingClientRect() : null;
+        setTransform(t => {
+            if (op === 'reset') return { scale: 1, x: 0, y: 0 };
+            const newScale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, op === 'in' ? t.scale * 1.25 : t.scale / 1.25));
+            if (newScale === 1 || !rect) return { scale: newScale, x: 0, y: 0 };
+            const ratio = newScale / t.scale;
+            const fx = rect.width / 2;
+            const fy = rect.height / 2;
+            const c = clampPan(videoRef.current, rect, newScale, fx - (fx - t.x) * ratio, fy - (fy - t.y) * ratio);
+            return { scale: newScale, x: c.x, y: c.y };
+        });
+    }, []);
+
+    // FULLSCREEN (stageFullscreen.ts): the window over the taskbar in the
+    // desktop app, the element (with the keyboard lock) everywhere it is
+    // granted. Mirrored for the key listener and the teardown.
+    const fullscreenRef = useRef(false);
+    useEffect(() => { fullscreenRef.current = fullscreen; }, [fullscreen]);
+    const toggleFullscreen = useCallback(() => {
+        if (fullscreenRef.current) {
+            fullscreenRef.current = false;
+            setFullscreen(false);
+            void leaveStageFullscreen();
+            return;
+        }
+        const el = stageRootRef.current;
+        if (!el) return;
+        void enterStageFullscreen(el).then(ok => {
+            fullscreenRef.current = ok;
+            setFullscreen(ok);
+        });
+    }, []);
+    // Left from outside — a long Esc, the browser's own exit — the window
+    // layer follows, so the two never disagree.
+    useEffect(() => onFullscreenChange(() => {
+        if (stageElementFullscreen() || !fullscreenRef.current) return;
+        fullscreenRef.current = false;
+        setFullscreen(false);
+        void leaveStageFullscreen();
+    }), []);
+    /** Back to the app with the session kept (the phone's Chat button), out of
+     *  fullscreen first: a fullscreen window showing the chat is no use. */
+    const minimizeStage = useCallback(() => {
+        if (fullscreenRef.current) {
+            fullscreenRef.current = false;
+            setFullscreen(false);
+            void leaveStageFullscreen();
+        }
+        setIsMinimized(true);
+    }, []);
+    // A session that ends, or a stage that goes away, leaves fullscreen: the
+    // app must not be left covering the screen with nothing to leave it by.
+    useEffect(() => () => {
+        if (!fullscreenRef.current) return;
+        fullscreenRef.current = false;
+        setFullscreen(false);
+        void leaveStageFullscreen();
+    }, [sessionActiveId]);
+
     // Confirmed quality (set from the host's ack) and whether a change is in
     // flight. Reading the store here is what makes the <select> reflect the
     // stream instead of the last click.
@@ -2822,21 +2985,18 @@ export function DeviceStage() {
     }, [send, isMobile, isMouseMode, gestures, fpsMode]);
 
     useEffect(() => {
-        if (!controlEnabled) return;
+        if (!session) return;
 
         const onKey = (e: KeyboardEvent) => {
-            if (!session) return;
-            if (e.key === 'Escape') {
-                setControlEnabled(false);
-                return;
-            }
             // RELEASES FIRST, decided by what was actually forwarded — never
             // by the guards below. Modifier state and focus can change while
             // a key is held (press M, add Ctrl+Shift, release M), and running
             // a keyup through matchesRegisteredHotkey/isEditableTarget
             // swallowed exactly those releases: the host never got the
             // key-up and the key stayed logically held on the controlled
-            // machine (a game kept strafing) until a blur released all.
+            // machine (a game kept strafing) until a blur released all. Past
+            // the pause gate too (sendInput, not `send`), which is why this
+            // listener stays on while control is paused.
             if (e.type !== 'keydown') {
                 if (!heldKeysRef.current.has(e.code)) return; // never forwarded down
                 heldKeysRef.current.delete(e.code);
@@ -2844,6 +3004,26 @@ export function DeviceStage() {
                 sendInput(session.id, { t: 'key', code: e.code, down: false });
                 return;
             }
+            // THE STAGE'S OWN CHORDS (stageShortcuts.ts), never forwarded.
+            // Esc is not one any more: it used to pause control, which made
+            // it the one key the desktop could never send.
+            const shortcut = stageShortcut(e);
+            if (shortcut) {
+                e.preventDefault();
+                e.stopPropagation();
+                if (e.repeat) return;
+                if (shortcut === 'pause') setControl(!controlEnabled);
+                else if (shortcut === 'fullscreen') { if (!isMobile) toggleFullscreen(); }
+                else if (controlEnabled && !session.viewOnly && !sendInput(session.id, { t: 'sas' })) {
+                    setClipboardNote('Not connected — Ctrl+Alt+Del was not sent');
+                } else if (controlEnabled && !session.viewOnly) {
+                    setClipboardNote('Ctrl+Alt+Del sent');
+                }
+                return;
+            }
+            if (!controlEnabled) return;
+            // A menu in the bar (or a dialog over the stage) has the keyboard.
+            if (barMenuOpenRef.current) return;
             // Typing into a LOCAL input inside the stage (the files overlay's
             // rename/search fields, etc.) is not remote input — forwarding it
             // typed every character into the controlled PC as well. The
@@ -2869,7 +3049,7 @@ export function DeviceStage() {
             window.removeEventListener('keydown', onKey, true);
             window.removeEventListener('keyup', onKey, true);
         };
-    }, [session, controlEnabled]);
+    }, [session, controlEnabled, setControl, toggleFullscreen, isMobile]);
 
 
     if (!session) {
@@ -2900,6 +3080,7 @@ export function DeviceStage() {
 
     return (
         <div
+            ref={stageRootRef}
             className="device-stage"
             role="dialog"
             aria-modal="true"
@@ -2913,225 +3094,42 @@ export function DeviceStage() {
                 : undefined}
         >
             {!isMobile && (
-                <div className="device-stage-bar">
-                    <span className="device-stage-title">
-                        {session.phase === 'connecting' ? 'Connecting…' : 'Controlling a device'}
-                    </span>
-                    {!!tunnels?.listeners.length && (
-                        <span
-                            className="device-stage-tunnels"
-                            title={tunnels.listeners
-                                .map(l => `127.0.0.1:${l.local_port} \u2192 ${l.target_host}:${l.target_port}`)
-                                .join('\n')}
-                        >
-                            <ForwardIcon />
-                            {` ${tunnels.listeners.length} forward${tunnels.listeners.length === 1 ? '' : 's'}`}
-                            {tunnels.active_streams > 0 && ` \u00B7 ${tunnels.active_streams} active`}
-                        </span>
-                    )}
-                    {session.monitors.length > 1 && (
-                        <label className="device-stage-monitor">
-                            <span className="device-stage-monitor-label">Screen</span>
-                            <select
-                                value={session.activeMonitor ?? session.monitors[0].id}
-                                aria-label="Which screen to view"
-                                onChange={e => requestMonitor(session.id, Number(e.target.value))}
-                            >
-                                {session.monitors.map(m => (
-                                    <option key={m.id} value={m.id}>{m.label}</option>
-                                ))}
-                                {/* The composite the mobile picker already
-                                    offers. Also load-bearing for the select
-                                    itself: a session switched to the
-                                    composite elsewhere sets activeMonitor to
-                                    the sentinel, and a controlled select with
-                                    no matching option renders BLANK. */}
-                                <option value={ALL_DISPLAYS}>All displays</option>
-                            </select>
-                        </label>
-                    )}
-                    <label className="device-stage-monitor">
-                        <span className="device-stage-monitor-label">Quality</span>
-                        {/* Values are KILObits, matching the wire field and
-                            `sendStreamQuality`. They used to be bits, which the
-                            agent's IPC boundary then multiplied by 1000 again —
-                            so every preset asked for 1000x its label and was
-                            refused, and the picture never changed.
-
-                            CONTROLLED off the store, so it shows what the host
-                            confirmed rather than what was last clicked: a
-                            refused change now snaps back instead of lying. */}
-                        <select
-                            value={qualityValue}
-                            aria-label="Stream quality"
-                            disabled={qualityPending}
-                            onChange={e => {
-                                const parsed = parsePresetValue(e.target.value);
-                                if (parsed) sendStreamQuality(session.id, parsed.fps, parsed.bitrateKbps);
-                            }}
-                        >
-                            {STREAM_QUALITY_PRESETS.map(p => (
-                                <option key={presetValue(p)} value={presetValue(p)}>{p.label}</option>
-                            ))}
-                        </select>
-                    </label>
-                    <label className="device-stage-monitor">
-                        <span className="device-stage-monitor-label">Resolution</span>
-                        {/* "Fit" asks the host for no more pixels than this
-                            stage can show — the default, because the default
-                            was what was slow (viewSize.ts). "Full" is for the
-                            reader who zooms constantly and would rather pay
-                            the decode than watch the step change under a
-                            pinch. Local to this viewer: nothing to confirm. */}
-                        <select
-                            value={fitResolution}
-                            aria-label="Stream resolution"
-                            onChange={e => setFitResolutionRemembered(e.target.value === 'full' ? 'full' : 'fit')}
-                        >
-                            <option value="fit">Fit to this screen</option>
-                            <option value="full">Full resolution</option>
-                        </select>
-                    </label>
-                    {session.error && <span className="device-stage-error">{session.error}</span>}
-                    {qualityError && <span className="device-stage-error">{qualityError}</span>}
-                    <button
-                        className="device-stage-btn"
-                        aria-pressed={fpsMode}
-                        onClick={() => setGameMode(!fpsMode)}
-                        title="Game mode: relative mouse (pointer lock) for games that read raw input"
-                    >
-                        <CrosshairIcon /> {fpsMode ? 'Game mode on' : 'Game mode'}
-                    </button>
-                    {fpsMode && (
-                        <span className="device-stage-fps-sens">
-                            <button
-                                className="device-stage-btn"
-                                onClick={() => adjustFpsSens(-FPS_SENS_STEP)}
-                                disabled={fpsSens <= FPS_SENS_MIN}
-                                title="Lower Game-mode sensitivity"
-                            >
-                                −
-                            </button>
-                            <span title="Game mode mouse sensitivity">{fmtSens(fpsSens)}</span>
-                            <button
-                                className="device-stage-btn"
-                                onClick={() => adjustFpsSens(FPS_SENS_STEP)}
-                                disabled={fpsSens >= FPS_SENS_MAX}
-                                title="Raise Game-mode sensitivity"
-                            >
-                                +
-                            </button>
-                        </span>
-                    )}
-                    <button
-                        className="device-stage-btn"
-                        aria-pressed={controlEnabled}
-                        onClick={() => setControlEnabled(v => !v)}
-                    >
-                        {controlEnabled ? 'Pause control' : 'Resume control'}
-                    </button>
-                    {/* sendClipboard has existed and been tested since 0.8.x
-                        with NO caller — a working feature nobody could reach.
-                        One-shot and user-initiated by design: password
-                        managers put secrets on the clipboard, so an automatic
-                        mirror would stream them to the other machine. The
-                        outcome is shown because the call reports its own
-                        failure rather than throwing (a silent no-op here reads
-                        as "the paste did not work over there"). */}
-                    <button
-                        className="device-stage-btn"
-                        disabled={clipboardBusy}
-                        onClick={() => {
-                            setClipboardBusy(true);
-                            setClipboardNote(null);
-                            void sendClipboard(session.id)
-                                .then(err => setClipboardNote(err ?? 'Clipboard sent'))
-                                .catch(() => setClipboardNote('Could not send the clipboard'))
-                                .finally(() => setClipboardBusy(false));
-                        }}
-                        title="Send this device's clipboard text to the device you are controlling"
-                    >
-                        {clipboardBusy ? 'Sending…' : <><CopyIcon /> Send clipboard</>}
-                    </button>
-                    {clipboardNote && (
-                        <span className="device-stage-note">{clipboardNote}</span>
-                    )}
-                    {/* DISPLAY POWER (W4): minimal popover, three actions, no
-                        confirm — undo is one click. The outcome (ack detail,
-                        refusal, or the 5s old-host timeout) renders through
-                        session.powerNotice below. */}
-                    {!session.viewOnly && <span className="device-stage-displays">
-                        <button
-                            className="device-stage-btn"
-                            aria-expanded={showDisplaysMenu}
-                            aria-haspopup="menu"
-                            onClick={() => setShowDisplaysMenu(v => !v)}
-                            title="Turn the controlled device's displays off or on"
-                        >
-                            <MonitorIcon /> Displays
-                        </button>
-                        {showDisplaysMenu && (
-                            // The backdrop, same reasoning as the mobile menus'
-                            // (see their comment): the stage forwards every
-                            // pointer event as REAL input, so a forgotten
-                            // popover must close on the first outside tap
-                            // rather than letting it click the remote desktop.
-                            <span
-                                className="device-stage-displays-backdrop"
-                                onPointerDown={e => { e.preventDefault(); e.stopPropagation(); }}
-                                onPointerUp={e => {
-                                    e.preventDefault();
-                                    e.stopPropagation();
-                                    setShowDisplaysMenu(false);
-                                }}
-                            />
-                        )}
-                        {showDisplaysMenu && (
-                            <span className="device-stage-displays-menu" role="menu">
-                                {([
-                                    ['displays_off', 'Turn displays off'],
-                                    ['displays_off_keep_primary', 'Off, keep primary'],
-                                    ['displays_on', 'Turn displays on'],
-                                    // The topology pair: DISABLE removes the
-                                    // non-primary displays from the desktop
-                                    // (windows re-arrange onto the primary)
-                                    // rather than darkening panels; restored
-                                    // by the second entry, by the session
-                                    // ending, or by the host app restarting.
-                                    ['displays_detach_others', 'Disable other displays'],
-                                    ['displays_reattach', 'Re-enable displays'],
-                                ] as const).map(([action, label]) => (
-                                    <button
-                                        key={action}
-                                        className="device-stage-btn"
-                                        role="menuitem"
-                                        onClick={() => {
-                                            setShowDisplaysMenu(false);
-                                            if (!sendPowerAction(session.id, action)) {
-                                                setClipboardNote('Not connected — displays unchanged');
-                                            }
-                                        }}
-                                    >{label}</button>
-                                ))}
-                            </span>
-                        )}
-                    </span>}
-                    {session.powerNotice && (
-                        <span className="device-stage-note" role="status">{session.powerNotice}</span>
-                    )}
-                    <button
-                        className="device-stage-btn"
-                        onClick={() => setShowFiles(v => !v)}
-                    >
-                        Files
-                    </button>
-                    <button
-                        className="device-stage-btn device-stage-btn-danger"
-                        onClick={() => endSession(session.id, 'you disconnected')}
-                    >
-                        Disconnect
-                    </button>
-                </div>
+                <DeviceStageDesktopBar
+                    session={session}
+                    controlEnabled={controlEnabled}
+                    onSetControl={setControl}
+                    fpsMode={fpsMode}
+                    onSetGameMode={setGameMode}
+                    fpsSens={fpsSens}
+                    onAdjustSens={adjustFpsSens}
+                    fitResolution={fitResolution}
+                    onSetFit={setFitResolutionRemembered}
+                    qualityValue={qualityValue}
+                    qualityPending={qualityPending}
+                    zoom={transform.scale}
+                    onZoom={zoomBy}
+                    fullscreen={fullscreen}
+                    onToggleFullscreen={toggleFullscreen}
+                    showStats={showStats}
+                    onToggleStats={toggleShowStats}
+                    stats={liveStats}
+                    tunnels={tunnels}
+                    onOpenFiles={() => setShowFiles(v => !v)}
+                    onMinimize={minimizeStage}
+                    onCopyDiagnostics={() => void copyDiagnostics()}
+                    onSendClipboard={sendClipboardNow}
+                    clipboardBusy={clipboardBusy}
+                    onTypeText={() => setTypeText('')}
+                    onTypeClipboard={() => void typeClipboard()}
+                    onNotice={setClipboardNote}
+                    onMenuOpenChange={onBarMenuOpenChange}
+                    notes={<>
+                        {session.error && <span className="device-stage-error">{session.error}</span>}
+                        {qualityError && <span className="device-stage-error">{qualityError}</span>}
+                        {clipboardNote && <span className="device-stage-note">{clipboardNote}</span>}
+                        {session.powerNotice && <span className="device-stage-note" role="status">{session.powerNotice}</span>}
+                    </>}
+                />
             )}
 
             <div
@@ -3288,8 +3286,8 @@ export function DeviceStage() {
                         prompt. Windows hides these from ordinary remote control.
                         Sign-in-screen access (Devices &rsaquo; this computer)
                         reaches the lock and sign-in screens; an administrator
-                        prompt can be cancelled with Ctrl+Alt+Del from the More
-                        menu.
+                        prompt can be cancelled with Ctrl+Alt+Del
+                        {isMobile ? ' from the More menu.' : ' from the Keyboard menu, or Ctrl+Alt+End.'}
                     </div>
                 )}
                 {/* A ClipCursor conflict: a fullscreen app is holding the
@@ -3357,11 +3355,27 @@ export function DeviceStage() {
                                 : 'Waiting for the device\'s screen…'}
                     </div>
                 )}
+                {/* WITH ITS OWN RESUME: a phone paused by a Bluetooth keyboard's
+                    chord had no Resume button anywhere (the desktop bar's is
+                    the only one), so the banner told it to press something it
+                    did not have. Inside the input surface, so the press stops
+                    here and never reaches the remote machine. */}
                 {!controlEnabled && (
                     <div className="device-stage-paused">
-                        Control paused — you are only watching. Press Resume to take over.
+                        <span>Control paused — you are only watching.</span>
+                        <button
+                            type="button"
+                            className="device-stage-btn"
+                            onPointerDown={e => e.stopPropagation()}
+                            onPointerUp={e => e.stopPropagation()}
+                            onPointerMove={e => e.stopPropagation()}
+                            onClick={() => setControl(true)}
+                        >
+                            <PlayIcon /> Resume
+                        </button>
                     </div>
                 )}
+                {!isMobile && showStats && <DeviceStageStats stats={liveStats} />}
                 {!isMobile && fpsMode && !pointerLocked && controlEnabled && (
                     <div className="device-stage-fps-hint">
                         <CrosshairIcon /> Click the screen to capture your mouse · Esc releases it
@@ -3439,7 +3453,8 @@ export function DeviceStage() {
 
             {!isMobile && (
                 <div className="device-stage-hint">
-                    Press <kbd>Esc</kbd> to pause control without disconnecting.
+                    <kbd>Ctrl+Alt+Home</kbd> pauses control · <kbd>Ctrl+Alt+End</kbd> sends Ctrl+Alt+Del ·
+                    {' '}<kbd>Ctrl+Alt+Enter</kbd> fullscreen · every other key, Esc included, goes to that computer
                 </div>
             )}
 
@@ -3582,6 +3597,14 @@ export function DeviceStage() {
             )}
             
             {showFiles && <DeviceFileManager sessionId={session.id} onClose={() => setShowFiles(false)} />}
+            {typeText !== null && (
+                <DeviceStageTypeText
+                    peerName={session.peerName}
+                    initial={typeText}
+                    onType={typeOnRemote}
+                    onClose={() => setTypeText(null)}
+                />
+            )}
         </div>
     );
 }

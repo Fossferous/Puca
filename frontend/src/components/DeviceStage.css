@@ -24,33 +24,6 @@
     flex-wrap: wrap;
 }
 
-/* Displays popover (W4): anchored to its button, above the stage. */
-.device-stage-displays-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 29;
-    background: transparent;
-}
-.device-stage-displays {
-    position: relative;
-    display: inline-flex;
-}
-.device-stage-displays-menu {
-    position: absolute;
-    top: calc(100% + 4px);
-    left: 0;
-    z-index: 30;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding: 6px;
-    background: var(--background-floating, #232428);
-    border: 1px solid var(--background-modifier-accent, #3f4147);
-    border-radius: 6px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
-    white-space: nowrap;
-}
-
 .device-stage-title {
     font-weight: 600;
 }
@@ -425,3 +398,205 @@
 }
 .device-stage-capture-hint > svg { flex: none; }
 .device-stage-capture-hint > .device-stage-btn { flex: none; }
+
+/* ---- The desktop bar (DeviceStageDesktopBar): menus over the picture ---- */
+
+/* The spacer, not auto margins, splits the bar: menus on the left, the live
+   chip and the session controls on the right. The flat bar's first-button
+   push does not apply here. */
+.dsb > .device-stage-btn:first-of-type { margin-left: 0; }
+.dsb .device-stage-error,
+.dsb .device-stage-note { margin-left: 0; }
+.dsb-spacer { flex: 1 1 auto; }
+.dsb .device-stage-btn svg { vertical-align: -0.2em; }
+
+.dsb-menu-wrap {
+    position: relative;
+    display: inline-flex;
+}
+.dsb-menu-btn.open {
+    background: var(--background-modifier-selected, rgba(255, 255, 255, 0.2));
+}
+.dsb-icon-btn {
+    padding: 6px 8px;
+}
+
+/* Same job as the old Displays popover's backdrop: a press outside an open
+   menu closes it and stops there, rather than falling through to the surface,
+   which forwards every press to the remote machine as a real click. */
+.dsb-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 29;
+    background: transparent;
+}
+.dsb-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    z-index: 30;
+    display: flex;
+    flex-direction: column;
+    min-width: 260px;
+    max-height: calc(100vh - 80px);
+    overflow-y: auto;
+    padding: 6px;
+    background: var(--background-floating, #232428);
+    border: 1px solid var(--background-modifier-accent, #3f4147);
+    border-radius: 6px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+.dsb-menu-end { left: auto; right: 0; }
+.dsb-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 32px;
+    padding: 6px 10px;
+    border: none;
+    border-radius: 4px;
+    background: none;
+    color: var(--text-normal, #dcddde);
+    font: inherit;
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.dsb-item:hover:not(:disabled),
+.dsb-item:focus-visible { background: var(--background-modifier-hover, rgba(255, 255, 255, 0.08)); }
+.dsb-item:disabled { opacity: 0.5; cursor: default; }
+.dsb-item.danger { color: var(--danger, #f04747); }
+.dsb-item-icon { display: inline-flex; width: 18px; flex: 0 0 18px; justify-content: center; }
+.dsb-item-label { flex: 1 1 auto; }
+.dsb-item-hint { color: var(--text-muted, #949ba4); font-size: 12px; }
+/* A ticked row: the box marks it, so checkboxes and radios read the same. */
+.dsb-item[aria-checked] .dsb-item-icon::before {
+    content: '';
+    width: 12px;
+    height: 12px;
+    border: 1.5px solid var(--text-muted, #949ba4);
+    border-radius: 3px;
+}
+.dsb-item[role="menuitemradio"] .dsb-item-icon::before { border-radius: 50%; }
+.dsb-item.checked .dsb-item-icon::before {
+    background: var(--brand-experiment, #5865f2);
+    border-color: var(--brand-experiment, #5865f2);
+}
+.dsb-item[aria-checked] .dsb-item-icon > svg { display: none; }
+.dsb-sep {
+    height: 1px;
+    margin: 4px 2px;
+    background: var(--background-modifier-accent, #3f4147);
+}
+.dsb-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    font-size: 13px;
+}
+.dsb-row-label { flex: 1 1 auto; color: var(--text-normal, #dcddde); }
+.dsb-zoom-value { min-width: 44px; text-align: center; font-variant-numeric: tabular-nums; }
+.dsb-shortcuts { display: flex; flex-direction: column; gap: 4px; padding: 4px 10px 6px; font-size: 12px; color: var(--text-muted, #949ba4); }
+.dsb-shortcut { display: flex; gap: 8px; align-items: baseline; }
+.dsb-shortcut kbd {
+    flex: 0 0 auto;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.12);
+    font-family: inherit;
+    color: var(--text-normal, #dcddde);
+}
+.dsb-shortcut-note { white-space: normal; max-width: 280px; }
+.dsb-confirm { gap: 8px; padding: 12px; max-width: 320px; white-space: normal; font-size: 13px; color: var(--text-normal, #dcddde); }
+.dsb-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* The live chip: fps and delay at a glance; a click opens the full panel. */
+.dsb-stats-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 28px;
+    padding: 2px 10px;
+    border: 1px solid var(--background-modifier-accent, #3f4147);
+    border-radius: 14px;
+    background: none;
+    color: var(--text-muted, #b9bbbe);
+    font: inherit;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+}
+.dsb-stats-chip[aria-pressed="true"] { color: var(--text-normal, #dcddde); }
+.dsb-stats-chip.relay { border-color: var(--warning, #faa61a); }
+
+.device-stage-btn-primary {
+    background: var(--brand-experiment, #5865f2);
+    color: #fff;
+}
+.device-stage-btn:disabled { opacity: 0.55; cursor: default; }
+
+/* The stats panel: top-right of the picture, out of the way of the banners
+   parked at the top centre, and inert to the pointer — it sits on the input
+   surface and must not catch the clicks meant for the picture. */
+.device-stage-stats {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.72);
+    color: #fff;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+    max-width: min(46%, 380px);
+}
+.device-stage-stats th { padding-right: 10px; text-align: left; font-weight: 600; color: #c8cacc; white-space: nowrap; vertical-align: top; }
+.device-stage-stats td { color: #fff; }
+
+/* The paused banner carries its own Resume (the phone had none). */
+.device-stage-paused {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+/* "Type text…" — a small dialog over the stage, above its bar's menus. */
+.device-stage-typetext-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.45);
+}
+.device-stage-typetext {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: min(560px, calc(100vw - 32px));
+    padding: 16px;
+    border-radius: 8px;
+    background: var(--background-primary, #313338);
+    color: var(--text-normal, #dcddde);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+.device-stage-typetext-help { font-size: 12px; color: var(--text-muted, #b9bbbe); }
+.device-stage-typetext textarea {
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 110px;
+    padding: 8px;
+    border: 1px solid var(--background-modifier-accent, #3f4147);
+    border-radius: 4px;
+    background: var(--background-secondary, #2b2d31);
+    color: inherit;
+    font: inherit;
+    font-size: 14px;
+    resize: vertical;
+}
+.device-stage-typetext-actions { display: flex; justify-content: flex-end; gap: 8px; }

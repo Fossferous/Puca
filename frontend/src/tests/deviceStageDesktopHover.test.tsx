@@ -153,6 +153,8 @@ async function fire(...events: MouseEvent[]) {
     await flush();
 }
 
+const text = () => host!.textContent ?? '';
+
 const sent = (t: string) => h.sendInput.mock.calls
     .map(c => c[1] as { t?: string; x?: number; y?: number })
     .filter(e => e.t === t);
@@ -191,7 +193,7 @@ describe('a hovering desktop mouse', () => {
 
     it('paused control sends no hover', async () => {
         await mount();
-        const pause = Array.from(host!.querySelectorAll('button')).find(b => b.textContent === 'Pause control');
+        const pause = Array.from(host!.querySelectorAll('button')).find(b => b.textContent?.trim() === 'Pause control');
         expect(pause, 'the desktop bar offers Pause control').toBeTruthy();
         await act(async () => { pause!.click(); });
         await flush();
@@ -203,8 +205,8 @@ describe('a hovering desktop mouse', () => {
     it('Game mode without its pointer lock sends no absolute hover', async () => {
         h.storage.set('sovereign-fps-mode', 'on');
         await mount();
-        const game = Array.from(host!.querySelectorAll('button')).find(b => /Game mode/.test(b.textContent ?? ''));
-        expect(game?.getAttribute('aria-pressed'), 'precondition: Game mode is on').toBe('true');
+        // Game mode on, its lock not yet taken: the stage asks for the click.
+        expect(text(), 'precondition: Game mode is on').toContain('Click the screen to capture your mouse');
         h.sendInput.mockClear();
         await fire(pe('pointermove', 320, 180));
         expect(sent('move'), 'relative mode never degrades to absolute moves').toEqual([]);
@@ -245,7 +247,6 @@ describe('a phone', () => {
     });
 });
 
-const text = () => host!.textContent ?? '';
 
 describe('an elevated program swallowing the input (UIPI)', () => {
     it('POSITIVE CONTROL: the stage names it and says what to do', async () => {
@@ -307,8 +308,9 @@ describe('a game that has taken the pointer', () => {
         expect(lock, 'the click is the gesture pointer lock needs').toHaveBeenCalledTimes(1);
         expect(lock.mock.contexts[0], 'locked on the surface, where relative moves are read')
             .toBe(host!.querySelector('.device-stage-surface'));
-        const game = Array.from(host!.querySelectorAll('button')).find(b => /Game mode/.test(b.textContent ?? '') && b !== btn);
-        expect(game?.getAttribute('aria-pressed'), 'Game mode is on').toBe('true');
+        // jsdom grants no lock (the mock above records the ask), so Game mode
+        // shows its own "click the screen" hint: that is Game mode on.
+        expect(text(), 'Game mode is on').toContain('Click the screen to capture your mouse');
         expect(h.storage.get('sovereign-fps-mode'), 'and remembered like the toolbar toggle').toBe('on');
         expect(text(), 'the hint goes once Game mode is on').not.toContain('has taken the mouse pointer');
     });

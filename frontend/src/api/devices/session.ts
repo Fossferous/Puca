@@ -3213,6 +3213,82 @@ if (typeof window !== 'undefined') {
         () => deviceDiagnostics();
 }
 
+/**
+ * One reading of a CONTROLLER session's media for the desktop stage's live
+ * stats (liveStats.ts turns two readings into rates). Cumulative counters as
+ * the browser reports them, plus the path the media is taking now — the
+ * cheap subset of `deviceDiagnostics`, read once a second while the stats are
+ * on screen. Null for an unknown session, a host session, or no stats yet.
+ */
+export interface DeviceStatsSample {
+    at: number;
+    framesDecoded: number;
+    bytesReceived: number;
+    freezeCount: number;
+    totalDecodeTime: number;
+    jitterBufferDelay: number;
+    jitterBufferEmittedCount: number;
+    packetsLost: number;
+    packetsReceived: number;
+    frameWidth: number | null;
+    frameHeight: number | null;
+    rttMs: number | null;
+    /** 'relay' when either end of the selected pair is a TURN relay. */
+    path: 'direct' | 'relay' | null;
+    /** The selected pair's transport: 'udp' or 'tcp'. */
+    protocol: string | null;
+    decoder: string | null;
+    hardwareDecode: boolean | null;
+    /** Where this end's input is going: the agent's channel, or the relay. */
+    inputLane: string | null;
+}
+
+export async function deviceStatsSample(sessionId: string): Promise<DeviceStatsSample | null> {
+    const s = sessions.get(sessionId);
+    if (!s || s.role !== 'controller' || !s.pc) return null;
+    let stats: RTCStatsReport;
+    try {
+        stats = await s.pc.getStats();
+    } catch {
+        return null;
+    }
+    const out: DeviceStatsSample = {
+        at: Date.now(), framesDecoded: 0, bytesReceived: 0, freezeCount: 0, totalDecodeTime: 0,
+        jitterBufferDelay: 0, jitterBufferEmittedCount: 0, packetsLost: 0, packetsReceived: 0,
+        frameWidth: null, frameHeight: null, rttMs: null, path: null, protocol: null,
+        decoder: null, hardwareDecode: null, inputLane: s.inputRate.lane ?? null,
+    };
+    let sawVideo = false;
+    stats.forEach(r => {
+        if (r.type === 'transport' && r.selectedCandidatePairId) {
+            const pair = stats.get(r.selectedCandidatePairId as string);
+            if (!pair) return;
+            const local = stats.get(pair.localCandidateId as string);
+            const remote = stats.get(pair.remoteCandidateId as string);
+            out.path = local?.candidateType === 'relay' || remote?.candidateType === 'relay' ? 'relay' : 'direct';
+            out.protocol = typeof local?.protocol === 'string' ? local.protocol : null;
+            out.rttMs = typeof pair.currentRoundTripTime === 'number'
+                ? Math.round(pair.currentRoundTripTime * 1000)
+                : null;
+        }
+        if (r.type !== 'inbound-rtp' || r.kind !== 'video') return;
+        sawVideo = true;
+        out.framesDecoded = Number(r.framesDecoded) || 0;
+        out.bytesReceived = Number(r.bytesReceived) || 0;
+        out.freezeCount = Number(r.freezeCount) || 0;
+        out.totalDecodeTime = Number(r.totalDecodeTime) || 0;
+        out.jitterBufferDelay = Number(r.jitterBufferDelay) || 0;
+        out.jitterBufferEmittedCount = Number(r.jitterBufferEmittedCount) || 0;
+        out.packetsLost = Number(r.packetsLost) || 0;
+        out.packetsReceived = Number(r.packetsReceived) || 0;
+        out.frameWidth = typeof r.frameWidth === 'number' ? r.frameWidth : null;
+        out.frameHeight = typeof r.frameHeight === 'number' ? r.frameHeight : null;
+        out.decoder = typeof r.decoderImplementation === 'string' ? r.decoderImplementation : null;
+        out.hardwareDecode = typeof r.powerEfficientDecoder === 'boolean' ? r.powerEfficientDecoder : null;
+    });
+    return sawVideo ? out : null;
+}
+
 export function endSession(sessionId: string, reason = 'ended'): void {
     const s = sessions.get(sessionId);
     // DELIBERATE: this is only reached from a control the user pressed.
