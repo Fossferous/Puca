@@ -503,6 +503,9 @@ describe('channelKeys manager', () => {
     // list people see too, or the server could get a pinned stranger
     // trusted just by failing member-keys. Goes red if the fallback skips
     // the visible-member check.
+    // And, the server having listed nobody (the lookup failed), nothing is
+    // reported: a pinned wrapper missing from the member list is usually
+    // someone who left, whose rows outlive them (second review, finding 4).
     it('F-2: a FAILED membership lookup does not let a pin vouch for someone the member list does not show', async () => {
         const peer = await testIdentity(...PEER);
         const me = await testIdentity(...ME);
@@ -523,7 +526,7 @@ describe('channelKeys manager', () => {
         const res = await ensureChannelKey(42).catch(() => null);
         expect(res === null || Buffer.from(res.key).equals(Buffer.from(realKey)) === false,
             'the stranger\'s key was taken as the channel key').toBe(true);
-        expect(hiddenRecipientNotices()).toEqual([expect.objectContaining({ channelId: 42, serverId: 's1', userIds: [774] })]);
+        expect(hiddenRecipientNotices(), 'reported as listed by a server whose list could not be read').toEqual([]);
     });
 
     // The bypass this fix would otherwise have left in ITSELF. mintEpoch pins

@@ -59,14 +59,21 @@ export async function serverOfChannel(channelId: number): Promise<string | null>
         // One walk at a time, and a WHOLE one: callers waiting on it may be
         // looking for different channels.
         walk ??= (async () => {
+            let servers: Array<{ id: string; name?: string }>;
             try {
-                const servers: Array<{ id: string; name?: string }> = await apiClient.get('/servers');
+                servers = await apiClient.get('/servers');
+                if (!Array.isArray(servers)) return;
                 noteServers(servers);
-                for (const s of servers) {
-                    noteChannels(s.id, await apiClient.get(`/servers/${s.id}/channels`));
-                }
             } catch {
-                // Offline, or a server we can no longer read: unknown.
+                return; // offline: unknown
+            }
+            for (const s of servers) {
+                try {
+                    noteChannels(s.id, await apiClient.get(`/servers/${s.id}/channels`));
+                } catch {
+                    // A server we can no longer read: the channel may be in
+                    // the next one.
+                }
             }
         })().finally(() => { walk = null; });
         await walk;

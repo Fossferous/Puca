@@ -208,15 +208,12 @@ import { ErrorBoundary } from './components/ErrorBoundary.tsx'
 import { queryClient } from './api/queryClient.ts'
 import { keys, fetchMembersWithPresence } from './hooks/queries'
 import { setVisibleMembersSource } from './api/channelKeys'
+import { visibleMembersFromQueries } from './api/visibleMembersQuery'
 
 // The channel-key code wraps a key only for people in the member list a
 // person can see (api/channelKeys.ts, audit F-2): hand it THE query the member
 // sidebar renders, so the check and the screen read one answer.
-setVisibleMembersSource((serverId, fresh) => queryClient.fetchQuery({
-  queryKey: keys.members(serverId),
-  queryFn: () => fetchMembersWithPresence(serverId),
-  staleTime: fresh ? 0 : 10_000,
-}))
+setVisibleMembersSource(visibleMembersFromQueries(queryClient, keys.members, fetchMembersWithPresence))
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

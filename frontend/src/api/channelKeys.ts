@@ -23,7 +23,7 @@ import {
     type WrappedChannelKey,
 } from './e2ee';
 import { pinServedIdentityKey, hasIdentityPin, identityPinConflicts } from './keyVerification';
-import { currentUserIdFromToken } from './auth';
+import { currentUserIdFromToken, refuseOwnKeyMismatch, settleOwedOwnKeyCheck } from './auth';
 import { channelName, clearChannelDirectory, serverName, serverOfChannel } from './channelDirectory';
 
 interface ChannelKeyState {
@@ -274,7 +274,9 @@ async function attributeWrapper(
     //    the KEK is X25519(senderPriv, ourPub), so a row whose sender key is our
     //    own published key can only have been produced by the holder of our
     //    private key. A forgery that merely CLAIMS our key fails the GCM tag in
-    //    unwrapChannelKey and never reaches the key map.
+    //    unwrapChannelKey and never reaches the key map. (A row that names US
+    //    as its wrapper under any OTHER key never gets here: loadKeys refuses
+    //    it first, at every epoch.)
     if (row.sender_public_key === identity.publicKeyEncoded) return 'trusted';
 
     // 3. A key CONTRADICTING what we already pinned or verified for this id is a
@@ -319,7 +321,12 @@ async function attributeWrapper(
     const visible = await visibleMembers([row.sender_user_id]);
     if (!visible) return 'unverifiable';
     if (!visible.ids.has(row.sender_user_id)) {
-        reportHiddenRecipients(channelId, visible.serverId, [row.sender_user_id]);
+        // Said only when member-keys itself listed them. With that lookup
+        // failed, this wrapper stood in on a pin, and a pinned wrapper who
+        // has since LEFT is ordinary: their rows outlive them (migration 015
+        // deletes only rows addressed TO a leaver). The server listed nobody,
+        // so there is nothing to report (second review, finding 4).
+        if (members) reportHiddenRecipients(channelId, visible.serverId, [row.sender_user_id]);
         return 'unverifiable';
     }
     if (members) {
@@ -371,7 +378,21 @@ async function loadKeys(channelId: number): Promise<ChannelKeyState> {
     // Our own user id is the recipient a v3 wrap was bound to (recipient_id
     // in the row); a signed-out rig has none, and then no v3 wrap can open.
     const me = currentUserIdFromToken() ?? -1;
+    let refusedOwnKey = false;
     for (const row of resp.keys) {
+        // A row that says WE wrapped it, under a key that is not ours. Only a
+        // server forging our identity produces one: we post our own key with
+        // every wrap, and a v3 key never changes. Taken at first contact, it
+        // passed every step of attributeWrapper (we are in member-keys under
+        // whatever key the server lists for us, and in the member list), and
+        // the client encrypted under a key the server chose (second review,
+        // finding 2). Refused at every epoch, and the identity with it.
+        if (row.sender_user_id === me && row.sender_public_key !== identity.publicKeyEncoded) {
+            if (!refusedOwnKey) refuseOwnKeyMismatch(`channel ${channelId}'s key rows`);
+            refusedOwnKey = true;
+            continue;
+        }
+
         // The conflict check runs at EVERY epoch, history included: it is free
         // (no network) and a substituted key for someone we already trust must
         // never be unwrapped, however old the row.
@@ -549,11 +570,26 @@ async function mintEpoch(
     epoch: number,
     generation: number
 ): Promise<Uint8Array | null> {
+    // A sign-in that could not read the key this server publishes for us
+    // reads it now, before we hand anyone a key (F-3).
+    if (!(await settleOwedOwnKeyCheck())) return null;
     const identity = getActiveIdentity();
     if (!identity) return null;
 
     console.debug(`[e2ee] mintEpoch(${channelId}) epoch=${epoch} gen=${generation}: fetching member keys`);
     const listed: MemberKey[] = await apiClient.get(`/channels/${channelId}/member-keys`);
+    // Our own entry must be OUR key. It is wrapped for like anyone else's,
+    // and pinned first: a server listing us under a key of its own got the
+    // channel key wrapped to it, by us, and F-2's check could not stop it,
+    // since we are in every list (second review, finding 2). Refused before
+    // anything is pinned or wrapped, and the identity with it. Missing from
+    // the list, we simply get no wrap of our own: nothing leaks.
+    const me = currentUserIdFromToken();
+    const mine = me === null ? undefined : listed.find((m) => m.user_id === me);
+    if (mine && mine.public_key !== identity.publicKeyEncoded) {
+        refuseOwnKeyMismatch(`channel ${channelId}'s member keys`);
+        return null;
+    }
     // Wrap only for people the person can SEE as members of the channel's
     // server (F-2): an id the server lists here and in no list on screen is
     // never handed the key, and the refusal is said out loud. A member list

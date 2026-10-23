@@ -13,9 +13,11 @@ vi.mock('../api/auth', () => ({
     identityRestoreReason: () => state.reason,
     onIdentityRestoreChange: () => () => {},
     retryIdentityRestore: vi.fn(async () => {}),
+    settleOwedOwnKeyCheck: vi.fn(async () => true),
 }));
 
 import { IdentityBanner } from '../components/IdentityBanner';
+import { settleOwedOwnKeyCheck } from '../api/auth';
 
 let root: Root | null = null;
 let host: HTMLDivElement;
@@ -49,5 +51,11 @@ describe('IdentityBanner', () => {
     it('CONTROL: any other failure keeps the "keys unavailable" wording', () => {
         mount();
         expect(host.textContent).toContain('Encryption keys unavailable');
+    });
+
+    it('settles an own-key check that a sign-in could not finish, once, when the app starts', () => {
+        vi.mocked(settleOwedOwnKeyCheck).mockClear();
+        mount();
+        expect(settleOwedOwnKeyCheck, 'an unchecked sign-in was never checked again').toHaveBeenCalledTimes(1);
     });
 });
