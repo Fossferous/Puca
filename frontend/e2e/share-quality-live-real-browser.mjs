@@ -14,6 +14,28 @@
 // audio track exists. Do NOT add --use-fake-ui-for-media-stream: it makes
 // headless auto-pick the whole monitor.
 //
+// THE SIZES (640x360@15 -> 1280x720@30 -> 854x480@10) are the ones
+// shareHealth.ts records, and they are deliberately not 1080p. This used to
+// go 720p@15 -> 1080p@30 and failed on the owner's desktop in most runs from
+// 2026-10-22 on, reporting 1 fps. Measured 2026-10-23 with a game running
+// (CPU about half busy): every step before the raise was fine. But after a
+// raise to 1920x1080@30, the CAPTURE delivered 1-10 frames a second
+// (media-source framesPerSecond, the encoder reporting no limitation).
+// Counted in Edge 155:
+// - 1080p in a 1920x1080 tab: 9 of 11 runs;
+// - 1080p in a 2560x1440 tab: 6 of 13;
+// - 1600x900: 0 of 13;
+// - this sequence: 0 of 8.
+// Chrome 155 (2 of 4) and Chromium 153 (1 of 5) did it too. So 1080p@30
+// headless tab capture, with VP8 encode and decode, all in one process, is
+// a throughput test of the machine. This script asks something else: can a
+// live capture go up and down in place, with the encoder following.
+//
+// What it does not do any more: pass a stalled pipeline. A share sending
+// 1 fps once satisfied "follows it down" (an upper bound passes at zero).
+// Frames now have to flow at the starting cap first, and the down step needs
+// a floor as well as a ceiling.
+//
 //   cd frontend && node e2e/share-quality-live-real-browser.mjs
 //
 // No server and no build needed.
@@ -58,7 +80,7 @@ const r = await tab.evaluate(async () => {
     const { shareVideoConstraints, recapDisplayTrack } = window.ShareHealth;
     const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
     const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: shareVideoConstraints(1280, 720, 15), audio: false, preferCurrentTab: true, selfBrowserSurface: 'include',
+        video: shareVideoConstraints(640, 360, 15), audio: false, preferCurrentTab: true, selfBrowserSurface: 'include',
     });
     const track = stream.getVideoTracks()[0];
     const surface = track.getSettings().displaySurface;
@@ -86,7 +108,7 @@ const r = await tab.evaluate(async () => {
     await sleep(1500);
     out.sentStill = await sent();
     // UP: a cap raised on a live track.
-    out.up = await recapDisplayTrack(track, 1920, 1080, 30);
+    out.up = await recapDisplayTrack(track, 1280, 720, 30);
     await sleep(4000);
     out.sentUp = await sent();
     out.liveAfterUp = track.readyState;
@@ -114,14 +136,18 @@ if (r.surface !== 'browser') {
     await browser.close(); server.close();
     process.exit(2);
 }
-ck(r.start.height === 720 && r.start.frameRate === 15, 'the share starts at its cap', `${r.start.width}x${r.start.height}@${r.start.frameRate}`);
+ck(r.start.height === 360 && r.start.frameRate === 15, 'the share starts at its cap', `${r.start.width}x${r.start.height}@${r.start.frameRate}`);
+// POSITIVE CONTROL: frames flow at the starting cap, so a low rate later is
+// the step under test, not a pipeline that never ran.
+ck(r.sentStart && r.sentStart.fps >= 10 && r.sentStart.fps <= 17, 'the encoder sends at the starting rate', String(r.sentStart?.fps));
 ck(r.sentStill && r.sentStart && r.sentStill.h === r.sentStart.h, 'negative control: the sent size holds when nothing changes', `${r.sentStart?.h} -> ${r.sentStill?.h}`);
-ck(r.up && r.up.height === 1080 && r.up.fps === 30, 'raising the cap re-sizes the live capture UP', JSON.stringify(r.up));
+ck(r.up && r.up.height === 720 && r.up.fps === 30, 'raising the cap re-sizes the live capture UP', JSON.stringify(r.up));
 ck(r.liveAfterUp === 'live', 'the track stays live across the change');
 ck(r.sentUp && r.sentStart && r.sentUp.h > r.sentStart.h, 'the encoder follows it up (more lines sent)', `${r.sentStart?.h} -> ${r.sentUp?.h}`);
 ck(r.sentUp && r.sentUp.fps > 20, 'and at the higher frame rate', String(r.sentUp?.fps));
 ck(r.down && r.down.height === 480 && r.down.fps === 10, 'lowering it re-sizes the capture DOWN', JSON.stringify(r.down));
-ck(r.sentDown && r.sentDown.h <= 480 && r.sentDown.fps <= 12, 'the encoder follows it down', JSON.stringify(r.sentDown));
+ck(r.sentDown && r.sentUp && r.sentDown.h <= 480 && r.sentDown.h < r.sentUp.h && r.sentDown.fps >= 6 && r.sentDown.fps <= 12,
+    'the encoder follows it down (fewer lines, about 10 fps)', JSON.stringify(r.sentDown));
 ck(r.beyond && r.beyondTrack && r.beyond.width === r.beyondTrack.width && r.beyond.height === r.beyondTrack.height && r.beyond.fps === r.beyondTrack.fps,
     'a cap past the source reports what the track produces, read back', `${JSON.stringify(r.beyond)} vs track ${JSON.stringify(r.beyondTrack)}`);
 ck(r.sameTrack, 'no new track: the share never restarted');
