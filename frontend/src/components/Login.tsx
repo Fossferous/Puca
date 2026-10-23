@@ -1,6 +1,8 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { useLocation } from 'react-router-dom';
 import { login, register, resetPasswordMigration, REMEMBER_ME_KEY } from '../api/auth';
+import { registerEmbedSignIn } from '../api/embedSignIn';
+import { embedHost } from '../api/embedHost';
 import { wsClient } from '../api/websocket';
 import { isTauri, isMobile } from '../api/platform';
 import { fetchPublicConfig } from '../api/publicConfig';
@@ -13,8 +15,10 @@ import { readStaySignedIn, writeStaySignedIn } from '../api/staySignedIn';
  *  ordinary session ends after a single day without opening the app - and
  *  CLEAR in a browser, which is what gets shared or borrowed, so a long
  *  session there is asked for, never walked into. Same rule as Púca Notes
- *  (NotesLogin STAY_DEFAULT); the stored answer is shared with it. */
-const STAY_DEFAULT = isTauri() || isMobile();
+ *  (NotesLogin STAY_DEFAULT); the stored answer is shared with it. An
+ *  embedding host (Púca for Steam Deck) is an installed app on one person's
+ *  device too. */
+const STAY_DEFAULT = isTauri() || isMobile() || !!embedHost();
 const STAY_HINT = 'This device then stays signed in for up to a year instead of a day, as long as Púca is opened at least once a month. Sign out to end it early.';
 
 interface LoginProps {
@@ -74,6 +78,31 @@ export function Login({ onLoginSuccess }: LoginProps) {
         setStay(next);
         writeStaySignedIn(next);
     };
+    // An embedding host (Púca for Steam Deck) signs in from its own panel
+    // through exactly this form's path (docs/EMBEDDING.md, signIn): the same
+    // SRP exchange, socket and success hand-off, and the same answers.
+    useEffect(() => registerEmbedSignIn(async (name, pass, stayIn) => {
+        try {
+            chooseStay(stayIn);
+            const token = await login(name, pass, { staySignedIn: stayIn });
+            localStorage.removeItem(CREDENTIALS_KEY);
+            await wsClient.connect(token);
+            onLoginSuccess();
+            return { ok: true };
+        } catch (err) {
+            const status = (err as { status?: number } | null)?.status;
+            if (status === 403) {
+                // The security update this form shows; it is finished in the
+                // full app, where the person types a new password.
+                setUsername(name);
+                setShowResetForm(true);
+                setError('Security Update: Please set a new password for your account.');
+                return { ok: false, error: 'reset-required' };
+            }
+            if (status === 401) return { ok: false, error: 'invalid' };
+            return { ok: false, error: err instanceof Error && err.message ? err.message : 'failed' };
+        }
+    }), [onLoginSuccess]);
     const [autoLoginAttempted, setAutoLoginAttempted] = useState(false);
     // Does THIS server gate sign-up behind an invite code? From GET /config.
     // null = not known yet, or the probe failed (an older server): then the

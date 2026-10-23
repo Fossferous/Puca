@@ -33,9 +33,9 @@ export interface EmbedNotification {
     title: string;
     /** Content-free, as every notification here is (desktopNotify.ts). */
     body: string;
-    /** Collapses repeats from one conversation: 'dm:<id>', 'chan:<serverId>', 'tasks-due', 'test'. */
+    /** Collapses repeats from one conversation: 'dm:<id>', 'chan:<serverId>', 'tasks-due', 'test', 'clip:<id>'. */
     key: string;
-    kind: 'message' | 'tasks' | 'test';
+    kind: 'message' | 'tasks' | 'test' | 'clip';
 }
 
 /** The host's declaration, as read: every function bound to the object it came from. */

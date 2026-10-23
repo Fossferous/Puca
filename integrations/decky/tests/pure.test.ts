@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NOTICE_EVERY_MS, SilenceVerdict, SilentNotice, SILENT_AFTER_S } from '../src/micSilence';
 import { HoldFollower, PressFollower } from '../src/ptt';
-import { readPageMessage, readState, readVoiceChannels } from '../src/protocol';
+import { liveChannels, readPageMessage, readState, readVoiceChannels } from '../src/protocol';
 import { assignButton, DEFAULT_SETTINGS, jobOf, normalizeAppUrl, readSettings, watchedButtons } from '../src/settings';
 
 describe('the Púca address', () => {
@@ -235,6 +235,35 @@ describe("a muted Deck microphone is noticed", () => {
     });
 });
 
+describe('live now: who is talking where, on every server', () => {
+    const ch = (id: number, name: string, n: number) => ({
+        id, name, canConnect: true, members: Array.from({ length: n }, (_, i) => ({ id: id * 100 + i, username: `u${id}${i}` })),
+    });
+
+    it('keeps the channels with people in them, busiest first, then by server and channel', () => {
+        const servers = [{ id: 'b', name: 'Beta' }, { id: 'a', name: 'Alpha' }];
+        const live = liveChannels(servers, new Map([
+            ['a', [ch(1, 'Lounge', 2), ch(2, 'Empty', 0), ch(3, 'Games', 2)]],
+            ['b', [ch(4, 'Raid', 3), ch(5, 'Chill', 0)]],
+        ]));
+        expect(live.map(l => `${l.serverName}/${l.channel.name}`)).toEqual(['Beta/Raid', 'Alpha/Games', 'Alpha/Lounge']);
+        expect(live[0].serverId).toBe('b');
+    });
+
+    it('a tie goes by server name before channel name', () => {
+        const live = liveChannels([{ id: 'b', name: 'Beta' }, { id: 'a', name: 'Alpha' }], new Map([
+            ['b', [ch(1, 'Arena', 2)]],
+            ['a', [ch(2, 'Lounge', 2)]],
+        ]));
+        expect(live.map(l => `${l.serverName}/${l.channel.name}`)).toEqual(['Alpha/Lounge', 'Beta/Arena']);
+    });
+
+    it('a server with nothing listed, or not known, adds nothing', () => {
+        expect(liveChannels([{ id: 'x', name: 'X' }], new Map())).toEqual([]);
+        expect(liveChannels([], new Map([['a', [ch(1, 'Lounge', 2)]]]))).toEqual([]);
+    });
+});
+
 describe('what the page sends', () => {
     const state = {
         apiVersion: 1, appVersion: '0.9.845', signedIn: true,
@@ -262,12 +291,24 @@ describe('what the page sends', () => {
         expect(s.servers[0].name.length).toBe(200);
     });
 
+    it("reads the page's optional calls, so an older page is told apart", () => {
+        expect(readState(state)!.features).toEqual([]);
+        expect(readState({ ...state, features: ['signIn', 'downloadSite', 7, '', 'x'.repeat(60)] })!.features)
+            .toEqual(['signIn', 'downloadSite', 'x'.repeat(40)]);
+        expect(readState({ ...state, features: 'signIn' })!.features).toEqual([]);
+        expect(readState({ ...state, features: Array.from({ length: 80 }, (_, i) => `f${i}`) })!.features).toHaveLength(50);
+    });
+
     it('accepts each message type, and nothing else', () => {
         expect(readPageMessage({ type: 'ready', apiVersion: 1 })).toEqual({ type: 'ready', apiVersion: 1, appVersion: '' });
         expect(readPageMessage({ type: 'ready', apiVersion: null })).toEqual({ type: 'ready', apiVersion: null, appVersion: '' });
         expect(readPageMessage({ type: 'state', state })).toMatchObject({ type: 'state' });
         expect(readPageMessage({ type: 'notify', notification: { id: 'n1', title: 'alice sent a message', body: 'New message', key: 'chan:s1', kind: 'message' } }))
             .toEqual({ type: 'notify', notification: { id: 'n1', title: 'alice sent a message', body: 'New message', key: 'chan:s1', kind: 'message' } });
+        expect(readPageMessage({ type: 'notify', notification: { id: 'n2', title: 'Approval needed', body: 'Open Púca to approve or decline', key: 'clip:9', kind: 'clip' } }))
+            .toMatchObject({ notification: { key: 'clip:9', kind: 'clip' } });
+        expect(readPageMessage({ type: 'notify', notification: { id: 'n3', title: 'x', kind: 'shout' } }))
+            .toMatchObject({ notification: { kind: 'message' } });
         expect(readPageMessage({ type: 'mic-release', id: 'm1' })).toEqual({ type: 'mic-release', id: 'm1' });
         expect(readPageMessage({ type: 'eval', code: 'x' })).toBeNull();
         expect(readPageMessage('state')).toBeNull();

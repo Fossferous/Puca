@@ -14,7 +14,11 @@ plugin's own.
 
 - **`src/` (frontend, Steam's own page).**
   - Creates the view (`browserView.ts`).
-  - Draws the Quick Access panel and the `/puca` full view (`components/`).
+  - Draws the Quick Access panel and the `/puca` full view (`components/`):
+    the call, **Live now** (voice channels with people in them, on every
+    server, from the page's `listVoiceChannels`), the server's channels, a
+    sign-in form that uses the page's own sign-in (`signIn`, when the page
+    lists it in `features`), and Settings.
   - Opens the microphone (`micBridge.ts`), and notices when it delivers only
     digital silence: a muted or zeroed system microphone (`micSilence.ts`).
   - Turns the backend's back-button signals into Púca's push-to-talk hold,

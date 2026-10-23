@@ -67,17 +67,22 @@ You do this once. After that the plugin keeps itself up to date.
 1. Press **···** → the plug icon → **Púca**.
 2. Type your Púca address and choose **Save**. The keyboard opens when you
    select the field; **Steam + X** opens it too.
-3. Choose **Open Púca to sign in**. Sign in with your own account and tick
-   **Stay signed in on this device**, so you only do this once.
-4. Press **B** to go back.
+3. Type your username and password under **Sign in to Púca** and choose
+   **Sign in**. Leave **Stay signed in** on, so you only do this once.
+   - To create an account or reset a forgotten password, choose **New
+     account or forgotten password: open Púca** instead, and press **B** to
+     come back.
+   - If the panel shows **Open Púca to sign in** instead, your server's Púca
+     is older: sign in there, with **Stay signed in on this device** ticked.
 
 ## Use it
 
 Press **···** → the plug icon → **Púca**.
 
-- **Join a call.** Pick a voice channel under **Voice channels**. Each one
-  lists who is in it. If you are in more than one server, choose the server
-  first.
+- **Join a call.** **Live now** lists the voice channels with people in
+  them, on every server you are in: pick one to join them. **Voice channels**
+  lists all of a server's channels, with who is in each; if you are in more
+  than one server, choose the server first.
 - **In a call.** **Mute**, **Deafen** and **Leave** are at the top. Below them
   is everyone in the call; a green dot means they are talking.
 - **Back buttons.** Under **Settings**, each of these can have a back
@@ -130,6 +135,14 @@ Press **···** → the plug icon → **Púca**.
     would move you to the AFK channel, as it does with anyone idle.
 
   This happens on the Deck only. Nothing about your controller leaves it.
+- **Others see you as active while you play.** During a call, the Deck's
+  controls count as you being there, for your idle and away status as well
+  as for the AFK channel. Outside a call the plugin does not read the
+  controls, so while Púca is hidden you show as idle.
+- **Signing in from the panel.** Your password goes from the panel to Púca
+  inside the Deck, through the plugin, once. It is never stored or written to
+  a log. Púca's own sign-in then works as it always does: it sends the server
+  a proof of the password, never the password itself.
 - **Nothing is opened to your network.** The plugin talks to Steam through a
   connection that exists only inside the Deck. Decky Loader turns that
   connection on, and the plugin needs nothing else.

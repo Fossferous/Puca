@@ -22,6 +22,7 @@ import { apiClient, ApiError, isNetworkError } from '../client';
 import { wsClient, type ServerMessage } from '../websocket';
 import { appIsForeground, isAndroidApp, isTauri } from '../platform';
 import { postMobileNotification } from '../mobileApp';
+import { hostSaysForeground, notifyHost } from '../embedHost';
 
 export type ClipVote = 'pending' | 'approved' | 'declined';
 export type ClipOutcome = 'approved' | 'declined' | 'expired' | 'cancelled' | 'closed';
@@ -353,6 +354,12 @@ async function hydrateAndPrompt(clipId: string): Promise<void> {
     }
     if (isAndroidApp() && !appIsForeground()) {
         void postMobileNotification('clip:' + clipId, 'Approval needed', 'Open Púca to approve or decline', 'clip:' + clipId);
+    }
+    // An embedding host (Púca for Steam Deck) shows it over the game, the
+    // same content-free words; the approval happens in the full app, where
+    // the prompt already is. A no-op without a host.
+    if (hostSaysForeground() !== true) {
+        notifyHost({ title: 'Approval needed', body: 'Open Púca to approve or decline', key: 'clip:' + clipId, kind: 'clip' });
     }
 }
 

@@ -5,11 +5,11 @@
  */
 import {
     ButtonItem, DialogButton, DropdownItem, Field, Focusable, PanelSection, PanelSectionRow, SteamSpinner,
-    TextField, ToggleField,
+    TextField, ToggleField, useQuickAccessVisible,
 } from '@decky/ui';
 import { Fragment, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { controller, type Snapshot } from '../controller';
-import type { EmbedCall, EmbedState, EmbedVoiceChannel } from '../protocol';
+import type { EmbedCall, EmbedState, EmbedVoiceChannel, LiveChannel } from '../protocol';
 import { BUTTON_JOBS, type ButtonChoice, type ButtonJob, type PushToTalkButton } from '../settings';
 import {
     HeadphonesIcon, HeadphonesOffIcon, LeaveIcon, MicIcon, MicOffIcon, NoMicIcon, SpeakingDot,
@@ -160,6 +160,7 @@ function Ready({ snap }: { snap: Snapshot }) {
     const state = snap.state;
     if (!state) return null;
     if (!state.signedIn) {
+        if (state.features.includes('signIn')) return <SignIn />;
         return (
             <PanelSection>
                 <Note title="Sign in to Púca">
@@ -172,6 +173,7 @@ function Ready({ snap }: { snap: Snapshot }) {
     return (
         <>
             {state.call && <Call call={state.call} snap={snap} />}
+            <LiveNow state={state} />
             <Channels state={state} />
             <PanelSection>
                 <OpenButton label="Open Púca (messages)" />
@@ -252,26 +254,83 @@ function Call({ call, snap }: { call: EmbedCall; snap: Snapshot }) {
     );
 }
 
+/** Who is talking where right now, on every server the person is in: one
+ *  tap joins them. Out of the way when nobody is in a voice channel. */
+function LiveNow({ state }: { state: EmbedState }) {
+    const [live, setLive] = useState<LiveChannel[] | null>(null);
+    const [joining, setJoining] = useState<string | null>(null);
+    const [error, setError] = useState<string | null>(null);
+    const here = state.call ? `${state.call.serverId}:${state.call.channelId}` : null;
+    const servers = state.servers.map(s => s.id).join(',');
+    const shown = useQuickAccessVisible();
+
+    useEffect(() => {
+        // The panel stays mounted while the menu is closed: one look per
+        // server is too many to keep making for nobody.
+        if (!shown) return;
+        let alive = true;
+        const load = () => { void controller.listLiveChannels().then(l => { if (alive) setLive(l); }); };
+        load();
+        // Who is in which channel changes while the panel is open.
+        const t = setInterval(load, 10000);
+        return () => { alive = false; clearInterval(t); };
+    }, [here, servers, shown]);
+
+    if (!live || live.length === 0) return null;
+
+    const join = async (l: LiveChannel, key: string) => {
+        setError(null);
+        setJoining(key);
+        const err = await controller.join(l.serverId, l.channel.id);
+        setJoining(null);
+        if (err) setError(`Could not join ${l.channel.name}: ${err}`);
+    };
+
+    return (
+        <PanelSection title="Live now">
+            {live.map(l => {
+                const key = `${l.serverId}:${l.channel.id}`;
+                const who = l.channel.members.map(m => m.username).join(', ');
+                return (
+                    <PanelSectionRow key={key}>
+                        <ButtonItem
+                            layout="below"
+                            label={state.servers.length > 1 ? l.serverName : undefined}
+                            disabled={key === here || !l.channel.canConnect || joining !== null}
+                            description={<span style={muted}>{who}</span>}
+                            onClick={() => { void join(l, key); }}
+                        >
+                            {key === here ? `${l.channel.name}: you are here` : joining === key ? `Joining ${l.channel.name}…` : l.channel.name}
+                        </ButtonItem>
+                    </PanelSectionRow>
+                );
+            })}
+            {error && <Note title={error} />}
+        </PanelSection>
+    );
+}
+
 function Channels({ state }: { state: EmbedState }) {
     const [serverId, setServerId] = useState<string | null>(state.call?.serverId ?? state.currentServerId ?? state.servers[0]?.id ?? null);
     const [channels, setChannels] = useState<EmbedVoiceChannel[] | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [joining, setJoining] = useState<number | null>(null);
     const callChannel = state.call?.channelId ?? null;
+    const shown = useQuickAccessVisible();
 
     useEffect(() => {
         if (!serverId && state.servers[0]) setServerId(state.servers[0].id);
     }, [serverId, state.servers]);
 
     useEffect(() => {
-        if (!serverId) return;
+        if (!serverId || !shown) return;
         let live = true;
         const load = () => { void controller.listVoiceChannels(serverId).then(c => { if (live) setChannels(c); }); };
         load();
         // Who is in which channel changes while the panel is open.
         const t = setInterval(load, 10000);
         return () => { live = false; clearInterval(t); };
-    }, [serverId, callChannel]);
+    }, [serverId, callChannel, shown]);
 
     if (state.servers.length === 0) {
         return (
@@ -321,6 +380,50 @@ function Channels({ state }: { state: EmbedState }) {
                 );
             })}
             {error && <Note title={error} />}
+        </PanelSection>
+    );
+}
+
+/** Signing in from the panel, through Púca's own sign-in form in the page.
+ *  Creating an account, or a forgotten password, still happen in Púca. */
+function SignIn() {
+    const [username, setUsername] = useState('');
+    const [password, setPassword] = useState('');
+    const [stay, setStay] = useState(true);
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const submit = async () => {
+        setBusy(true);
+        setError(null);
+        const err = await controller.signIn(username.trim(), password, stay);
+        setPassword('');
+        setBusy(false);
+        setError(err);
+    };
+    return (
+        <PanelSection title="Sign in to Púca">
+            <PanelSectionRow>
+                <TextField label="Username" value={username} disabled={busy} onChange={e => setUsername(e.target.value)} />
+            </PanelSectionRow>
+            <PanelSectionRow>
+                <TextField label="Password" bIsPassword value={password} disabled={busy} onChange={e => setPassword(e.target.value)} />
+            </PanelSectionRow>
+            <PanelSectionRow>
+                <ToggleField
+                    label="Stay signed in"
+                    description="Up to a year on this Deck, as long as Púca is opened once a month."
+                    checked={stay}
+                    disabled={busy}
+                    onChange={setStay}
+                />
+            </PanelSectionRow>
+            {error && <Note title={error} />}
+            <PanelSectionRow>
+                <ButtonItem layout="below" disabled={busy || !username.trim() || !password} onClick={() => { void submit(); }}>
+                    {busy ? 'Signing in…' : 'Sign in'}
+                </ButtonItem>
+            </PanelSectionRow>
+            <OpenButton label="New account or forgotten password: open Púca" />
         </PanelSection>
     );
 }

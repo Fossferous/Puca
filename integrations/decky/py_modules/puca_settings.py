@@ -31,7 +31,7 @@ BUTTON_JOBS = ("pushToTalk", "muteButton", "deafenButton")
 PAGE_METHODS = frozenset({
     "getState", "listVoiceChannels", "joinVoice", "leaveVoice", "setMuted",
     "setDeafened", "setInputMode", "holdPushToTalk", "activateNotification",
-    "downloadSite",
+    "downloadSite", "signIn",
 })
 
 REQUEST_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")

@@ -13,7 +13,10 @@ import { PucaIcon } from './components/icons';
 import { MicBridge, type MicAnswer } from './micBridge';
 import { SilentNotice } from './micSilence';
 import { HoldFollower, PressFollower } from './ptt';
-import { readPageMessage, readState, readVoiceChannels, type EmbedState, type EmbedVoiceChannel, type PageNotification } from './protocol';
+import {
+    liveChannels, readPageMessage, readState, readVoiceChannels,
+    type EmbedState, type EmbedVoiceChannel, type LiveChannel, type PageNotification,
+} from './protocol';
 import {
     assignButton, DEFAULT_SETTINGS, jobOf, normalizeAppUrl, PUSH_TO_TALK_BUTTONS, readSettings, watchedButtons,
     type ButtonJob, type PluginSettings, type PushToTalkButton,
@@ -95,6 +98,8 @@ const LOAD_TIMEOUT_MS = 30000;
 const JOIN_WAIT_MS = 8000;
 /** How long Settings waits for a back button to be pressed. */
 const LEARN_TIMEOUT_S = 15;
+/** "Live now" looks at this many of the person's servers at most. */
+const LIVE_SERVERS_MAX = 25;
 /** The first look for a plugin update once Púca is up, then how often. */
 const UPDATE_FIRST_CHECK_MS = 20 * 1000;
 const UPDATE_EVERY_MS = 6 * 60 * 60 * 1000;
@@ -330,6 +335,17 @@ class Controller {
         return r.ok ? readVoiceChannels(r.value) : [];
     }
 
+    /** Voice channels with people in them, across every server the person
+     *  is in: the panel's "Live now". */
+    async listLiveChannels(): Promise<LiveChannel[]> {
+        const state = this.snap.state;
+        if (!state?.signedIn) return [];
+        const servers = state.servers.slice(0, LIVE_SERVERS_MAX);
+        const channels = new Map<string, EmbedVoiceChannel[]>();
+        await Promise.all(servers.map(async s => { channels.set(s.id, await this.listVoiceChannels(s.id)); }));
+        return liveChannels(servers, channels);
+    }
+
     async join(serverId: string, channelId: number): Promise<string | null> {
         // A join starts call audio: let the page play it as after a click.
         this.view.activate();
@@ -358,6 +374,33 @@ class Controller {
 
     leave(): void {
         void this.pageCall('leaveVoice');
+    }
+
+    /**
+     * Sign in from the panel, through the page's own sign-in form
+     * (docs/EMBEDDING.md, signIn). The password goes from the panel to Púca's
+     * page inside the Deck and nowhere else; it is never stored or logged.
+     * Null when it worked (the page then reports itself signed in), or what
+     * to say.
+     */
+    async signIn(username: string, password: string, staySignedIn: boolean): Promise<string | null> {
+        const r = await this.pageCall<{ ok: boolean; error?: string }>('signIn', [username, password, staySignedIn]);
+        if (!r.ok) {
+            if (r.error === 'unsupported') return 'Púca is still starting. Try again in a moment.';
+            // The backend gave up waiting; the sign-in itself may still finish.
+            if (r.error === 'TimeoutError') return 'Púca took too long to answer. If it signs you in, this panel will show it.';
+            return `Could not sign in: ${r.error}`;
+        }
+        if (r.value?.ok) return null;
+        switch (r.value?.error) {
+            case 'invalid': return 'Wrong username or password.';
+            case 'reset-required': return 'Your account needs a security update. Open Púca to finish it.';
+            case 'unavailable': return 'Púca is not showing its sign-in. Try again in a moment, or open Púca and sign in there.';
+            case 'busy': return 'Already signing in…';
+            case 'missing': return 'Type your username and password.';
+            case 'signed-in': return null;
+            default: return `Could not sign in: ${r.value?.error ?? 'no answer'}`;
+        }
     }
 
     setMuted(muted: boolean): void {

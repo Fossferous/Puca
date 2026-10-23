@@ -98,6 +98,7 @@ class MessageTests(unittest.TestCase):
 
     def test_page_methods_are_the_embedding_commands_only(self):
         self.assertIn("joinVoice", ps.PAGE_METHODS)
+        self.assertIn("signIn", ps.PAGE_METHODS)
         self.assertNotIn("eval", ps.PAGE_METHODS)
         self.assertNotIn("constructor", ps.PAGE_METHODS)
 

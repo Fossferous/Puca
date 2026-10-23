@@ -1,6 +1,6 @@
 {
   "name": "puca-decky",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Púca on the Steam Deck: a Decky Loader plugin that runs Púca's web client in Game Mode",
   "type": "module",

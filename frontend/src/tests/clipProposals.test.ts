@@ -12,7 +12,7 @@
  *  - a vote that never reached the server leaves myVote pending;
  *  - `clipsAvailable` is a strict `=== true` on real fields.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -44,6 +44,7 @@ vi.mock('../api/mobileApp', () => ({ postMobileNotification: vi.fn(async () => {
 
 const { ApiError } = await import('../api/client');
 const mod = await import('../api/clips/clipProposals');
+const embedHostMod = await import('../api/embedHost');
 
 const fire = (type: string, payload: unknown) => { for (const h of handlers.get(type) ?? []) h({ type, payload }); };
 const flush = () => new Promise(r => setTimeout(r, 0));
@@ -63,6 +64,47 @@ beforeEach(() => {
     get.mockReset(); post.mockReset(); del.mockReset();
     mod.__resetClipProposalsForTests();
     mod.wireClipProposals();
+});
+
+describe('an embedding host (Púca for Steam Deck) hears about a clip that needs approval', () => {
+    type Win = Window & { __PUCA_EMBED_HOST__?: unknown };
+    const notify = vi.fn();
+    let onScreen = false;
+    beforeEach(() => {
+        notify.mockReset();
+        onScreen = false;
+        (window as Win).__PUCA_EMBED_HOST__ = { apiVersion: 1, name: 'Test host', notify, isForeground: () => onScreen };
+        embedHostMod.resetEmbedHostForTest();
+    });
+    afterEach(() => {
+        delete (window as Win).__PUCA_EMBED_HOST__;
+        embedHostMod.resetEmbedHostForTest();
+    });
+
+    it('once, content-free, collapsed per clip', async () => {
+        get.mockResolvedValue(view());
+        fire('ClipProposed', { clip_id: 'c1', expires_in_ms: 1_800_000 });
+        await flush();
+        expect(notify).toHaveBeenCalledTimes(1);
+        expect(notify.mock.calls[0][0]).toMatchObject({ title: 'Approval needed', body: 'Open Púca to approve or decline', key: 'clip:c1', kind: 'clip' });
+    });
+
+    it('not while Púca is on screen, where the prompt already shows', async () => {
+        onScreen = true;
+        get.mockResolvedValue(view());
+        fire('ClipProposed', { clip_id: 'c1', expires_in_ms: 1_800_000 });
+        await flush();
+        expect(notify).not.toHaveBeenCalled();
+        // POSITIVE CONTROL: the prompt itself is there.
+        expect(mod.getClipProposalState().incoming).toHaveLength(1);
+    });
+
+    it('not for a clip already answered on another device', async () => {
+        get.mockResolvedValue(view({ my_vote: 'approved' }));
+        fire('ClipProposed', { clip_id: 'c1', expires_in_ms: 1_800_000 });
+        await flush();
+        expect(notify).not.toHaveBeenCalled();
+    });
 });
 
 describe('doorbell → hydrate → prompt', () => {

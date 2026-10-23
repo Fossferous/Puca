@@ -23,10 +23,12 @@ And it fetches the plugin's own updates from the download site the person's
 Púca server names (puca_update.py). Whether one may be installed is decided
 by its signature, in the frontend (src/update.ts), before Decky is asked.
 
-It keeps the plugin's settings and nothing else. No account data, no
-message content and no audio pass through here: the microphone goes from one
-Steam page to the other over WebRTC, and only its connection setup (SDP)
-crosses this process.
+It keeps the plugin's settings and nothing else. No message content and no
+audio pass through here: the microphone goes from one Steam page to the other
+over WebRTC, and only its connection setup (SDP) crosses this process. The
+one piece of account data that does is a password typed into the panel's
+"Sign in" (page_call signIn): it passes through once, in memory, on its way
+to Púca's own sign-in in the page, and is never stored or logged.
 """
 from __future__ import annotations
 

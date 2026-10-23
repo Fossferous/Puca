@@ -13,6 +13,7 @@
  */
 import { API_BASE_URL } from './config';
 import { EMBED_API_VERSION, activateHostNotification, embedHost } from './embedHost';
+import { signInFromHost, type EmbedSignInResult } from './embedSignIn';
 import { holdFromHost } from './hotkeys';
 import {
     globalVoiceUsers, isUserSpeaking, subscribeSelfInVoice, subscribeToSpeaking, subscribeToVoiceUsers,
@@ -54,9 +55,15 @@ export interface EmbedCall {
     members: EmbedMember[];
 }
 
+/** The calls this page has beyond apiVersion 1's first set, so a host can
+ *  offer what the server's Púca supports and fall back where it does not. */
+export const EMBED_FEATURES = ['downloadSite', 'signIn'] as const;
+
 export interface EmbedState {
     apiVersion: number;
     appVersion: string;
+    /** EMBED_FEATURES, on a page that has them. */
+    features: string[];
     signedIn: boolean;
     user: { id: number; username: string } | null;
     servers: { id: string; name: string }[];
@@ -74,6 +81,7 @@ export interface EmbedVoiceChannel {
 }
 
 export type EmbedResult = { ok: true } | { ok: false; error: string };
+export type { EmbedSignInResult } from './embedSignIn';
 
 /** What Chat knows: the account, its servers, which voice channel is open. */
 export interface EmbedSession {
@@ -164,6 +172,7 @@ export function getEmbedState(): EmbedState {
     return {
         apiVersion: EMBED_API_VERSION,
         appVersion: typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '',
+        features: [...EMBED_FEATURES],
         signedIn: !!session && !!user,
         user,
         servers: session?.servers() ?? [],
@@ -266,6 +275,7 @@ export interface PucaEmbedApi {
     holdPushToTalk(held: boolean): boolean;
     activateNotification(id: string): boolean;
     downloadSite(): Promise<string | null>;
+    signIn(username: string, password: string, staySignedIn?: boolean): Promise<EmbedSignInResult>;
 }
 
 /** How long downloadSite waits for the server. */
@@ -342,6 +352,9 @@ export function createEmbedApi(): PucaEmbedApi {
         holdPushToTalk: (held: boolean) => holdFromEmbedHost(held === true),
         activateNotification: (id: string) => (typeof id === 'string' ? activateHostNotification(id) : false),
         downloadSite: () => downloadSite(),
+        signIn: async (username: string, password: string, staySignedIn?: boolean): Promise<EmbedSignInResult> => (
+            session?.user() ? { ok: false, error: 'signed-in' } : signInFromHost(username, password, staySignedIn)
+        ),
     });
 }
 

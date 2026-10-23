@@ -24,6 +24,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { wsClient } from '../api/websocket';
 import { startActivityReporter, decideReport, REPORT_AFTER_SECS } from '../api/activityReporter';
 import { setUserSpeaking, clearSpeaking } from '../components/voiceState';
+import { resetEmbedHostForTest } from '../api/embedHost';
 
 type Sock = { send: (d: string) => void; onmessage: ((e: { data: string }) => void) | null };
 const sock = () => (wsClient as unknown as { ws: Sock }).ws;
@@ -205,5 +206,66 @@ describe('startActivityReporter', () => {
         window.dispatchEvent(new Event('keydown'));
         await vi.advanceTimersByTimeAsync(10 * 60_000);
         expect(activity()).toEqual([]);
+    });
+});
+
+describe('an embedding host that reports idle (Púca for Steam Deck)', () => {
+    type Win = Window & { __PUCA_EMBED_HOST__?: unknown };
+    let hostIdle: number | null = null;
+    const declare = () => {
+        (window as Win).__PUCA_EMBED_HOST__ = { apiVersion: 1, name: 'Test host', idleSeconds: () => hostIdle };
+        resetEmbedHostForTest();
+    };
+    afterEach(() => {
+        delete (window as Win).__PUCA_EMBED_HOST__;
+        resetEmbedHostForTest();
+        hostIdle = null;
+    });
+
+    it('a hidden page whose person is using the device stays active', async () => {
+        declare();
+        hostIdle = 2; // the Deck's controls in use
+        await openSocket(true);
+        stop = startActivityReporter({ userId: 1, pollMs: 15_000 }); // the default probe
+        setHidden(true);
+        await vi.advanceTimersByTimeAsync(11 * 60_000);
+        expect(activity().filter(x => x !== null)).toEqual([]);
+        // ...and idle once the host says so, judged like the desktop's probe.
+        hostIdle = 700;
+        await vi.advanceTimersByTimeAsync(16_000);
+        expect(activity().at(-1)).toBeGreaterThanOrEqual(REPORT_AFTER_SECS);
+    });
+
+    it('typing in the page counts beside the host: the more recent input decides', async () => {
+        declare();
+        hostIdle = 700; // the Deck's controls untouched for a while
+        await openSocket(true);
+        stop = startActivityReporter({ userId: 1, pollMs: 15_000 });
+        await vi.advanceTimersByTimeAsync(76_000);
+        expect(activity().at(-1), 'idle: no input anywhere for over a minute').toBeGreaterThanOrEqual(REPORT_AFTER_SECS);
+        window.dispatchEvent(new KeyboardEvent('keydown')); // typing in the full view
+        expect(activity().at(-1)).toBeNull();
+        // The next polls still hear 700 s from the host; the page's own input
+        // is 15 and 30 s old, so the person is still there.
+        await vi.advanceTimersByTimeAsync(31_000);
+        expect(activity().at(-1)).toBeNull();
+    });
+
+    it('CONTROL: the same hidden page with no host is inactive at once', async () => {
+        await openSocket(true);
+        stop = startActivityReporter({ userId: 1, pollMs: 15_000 });
+        setHidden(true);
+        await vi.advanceTimersByTimeAsync(16_000);
+        expect(activity().some(x => x !== null)).toBe(true);
+    });
+
+    it('a host that cannot tell leaves the page its own rules', async () => {
+        declare();
+        hostIdle = null; // not in a call: the plugin is not reading the controls
+        await openSocket(true);
+        stop = startActivityReporter({ userId: 1, pollMs: 15_000 });
+        setHidden(true);
+        await vi.advanceTimersByTimeAsync(16_000);
+        expect(activity().some(x => x !== null)).toBe(true);
     });
 });
