@@ -1,12 +1,13 @@
 /**
  * Push-to-talk on a back button, from the plugin's backend.
  *
- * Steam's interface never hears the Deck's back grips: measured on 2026-10-22
- * in Game Mode, SteamClient.Input.RegisterForControllerInputMessages delivered
- * B and nothing at all for R4. So the backend reads the chosen button from the
- * controller itself (py_modules/puca_buttons.py) and sends "puca_button":
- * true when it goes down and every half second while it stays down, false when
- * it comes up.
+ * Steam's button feed for its own interface
+ * (SteamClient.Input.RegisterForControllerInputMessages) cannot be counted on
+ * for this. In tests on a Deck it missed the back grip entirely while another
+ * app was in front, and that is when push to talk matters. So the backend
+ * reads the chosen button from the controller itself
+ * (py_modules/puca_buttons.py). It sends "puca_button": true when the button
+ * goes down and every half second while it stays down, false when it comes up.
  *
  * HoldFollower turns those into Púca's hold, and lets go by itself when the
  * "still held" stops arriving: a lost release, or a backend that died

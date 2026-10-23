@@ -48,12 +48,18 @@ Two measured details:
 - the bridge adds about 40 ms (a 1 ms round trip, plus Chromium's jitter
   buffer).
 
-**Why push-to-talk reads the controller itself.** Steam's interface never
-hears the back grips, so a plugin cannot get them from Steam. Measured on a
-Deck in Game Mode, 2026-10-22: `SteamClient.Input.RegisterForControllerInputMessages`
-delivered a press of B, and nothing at all for two 3-second holds of R4. So the
-backend reads the Deck's controller from `/dev/hidraw`, which SteamOS lets the
-signed-in user read; no root is needed.
+**Why push-to-talk reads the controller itself.** Steam's button feed for its
+own interface, `SteamClient.Input.RegisterForControllerInputMessages`, cannot
+be counted on for this. Tests on a Deck in Game Mode, 2026-10-22/23:
+
+- it reported the lower right grip (its button 33) in most rounds;
+- in one round, while another app was in front, it reported nothing at all
+  for the same button, and push to talk matters most while a game is in
+  front;
+- the backend's own reader caught every hold in every round.
+
+The backend reads the Deck's controller from `/dev/hidraw`, which SteamOS lets
+the signed-in user read; no root is needed.
 
 - **Layout.** The Linux driver's (`drivers/hid/hid-steam.c`,
   `steam_deck_button_mappings`):

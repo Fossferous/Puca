@@ -1,13 +1,18 @@
 """Push-to-talk on a back button: the Deck's own controller, read directly.
 
-Steam's interface never hears the back grips. Measured on a Deck in Game Mode
-(2026-10-22, Steam client 1791918634): SteamClient.Input's
-RegisterForControllerInputMessages delivered B, and nothing at all for two
-3-second holds of R4. So the backend reads the controller itself, from
-/dev/hidraw, which SteamOS lets the signed-in user read (the seat's ACL; no
-root). Only one bit of one message type is looked at, only while the frontend
-asks for it (a button is chosen and Púca is in a call), and nothing leaves
-this module but "held" and "released".
+Steam's button feed for its own interface (SteamClient.Input's
+RegisterForControllerInputMessages) cannot be counted on for this. In tests on
+a Deck in Game Mode (2026-10-22/23, Steam client 1791918634) it reported the
+lower right grip (its button 33) in most rounds, and nothing at all for the
+same button in one round while another app was in front. Push to talk matters
+most while a game is in front. Reading the controller directly caught every
+hold in those tests, with an app in front or not.
+
+So the backend reads the controller itself, from /dev/hidraw, which SteamOS
+lets the signed-in user read (the seat's ACL; no root). Only one bit of one
+message type is looked at, only while the frontend asks for it (a button is
+chosen and Púca is in a call), and nothing leaves this module but "held" and
+"released".
 
 The layout is the Linux driver's (drivers/hid/hid-steam.c,
 steam_deck_button_mappings). Every message is 64 bytes and starts 01 00, with
