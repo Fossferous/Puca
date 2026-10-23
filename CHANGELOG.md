@@ -4,8 +4,9 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
-## Unreleased
+## 0.9.848 — 2026-10-23
 
+Púca on your iPhone or iPad, from the Home Screen
 ### Added
 
 - **Púca for Steam Deck: share your screen into a call.** In a call, **Share screen** in the Quick Access panel shows everyone in the call your game, end-to-end encrypted like the rest of the call, and **Stop sharing** ends it. The Deck's own video engine encodes the screen, as Steam's game recording does. Only the game is shared: while the Quick Access menu, the Steam menu, the on-screen keyboard, a notification, Púca's full view or Steam's own pages are on screen, the call sees **Paused** instead, and what was captured in the moment before one of them appeared is never sent. A share starts only from a press in the panel; **Share** in the full Púca app asks there first. The picture is 1280x800 at 30 frames a second, without sound. Needs this web app update and Púca for Steam Deck 0.4.0, which comes separately: the panel offers it as an update once it is out. (docs/STEAM_DECK.md)
