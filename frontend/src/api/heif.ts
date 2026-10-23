@@ -35,7 +35,6 @@
  */
 import { Capacitor } from '@capacitor/core';
 import { isTauri } from './platform';
-import { heifToJpegNatively } from './mobileApp';
 
 /** The long edge a converted photo keeps at most: a 12 MP phone photo
  *  (4000x3000) goes through at full size; a 50 MP one is brought down to it. */
@@ -198,7 +197,11 @@ async function nativeToJpeg(bytes: Uint8Array): Promise<Uint8Array | null> {
         }
         // The Púca Notes app is a different native app with no such method:
         // only Púca's own registers SovereignApp (heifToJpegNatively checks).
+        // Loaded only here: api/mobileApp registers Púca's Android plugin when
+        // it loads, which every bundle that shows an attachment (Púca Notes'
+        // too) would otherwise do.
         if (hasNativeHeifConverter()) {
+            const { heifToJpegNatively } = await import('./mobileApp');
             const out = await heifToJpegNatively(bytesToB64(bytes), MAX_HEIF_EDGE, HEIF_JPEG_QUALITY);
             return out ? Uint8Array.from(atob(out), c => c.charCodeAt(0)) : null;
         }
