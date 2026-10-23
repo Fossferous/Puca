@@ -4,6 +4,12 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+
+- **Photos from a phone show in chats instead of a broken picture.** Most phone cameras save photos as HEIC, and the desktop app, the Android app and every browser but Safari cannot display that format, so a photo sent from a phone's gallery showed as a broken picture. Púca now turns a HEIC into a JPEG on your device before it is encrypted and sent, so everyone sees it: in the Android app (Android 9 or newer), in the desktop app when Windows has the HEIF Image Extensions and HEVC Video Extensions from the Microsoft Store (many PCs come with them), and in Safari. The JPEG keeps the picture, the right way up, at up to 4096 pixels on its longest side, and nothing else: not the location, camera or time the phone stored in the original. A HEIC that was already sent, or that came from somewhere that could not convert it, is a card with the file's name and size and a **Download** button that saves the original, never a broken picture. The Android app shows the photo itself instead. In the desktop app the card has a **Show photo** button: Windows' own decoder opens it inside the app, outside the protection the app's web view gives every other picture, so the app waits until you ask before it opens a photo someone else sent. The same goes for pictures in Tasks and notes, and for the thumbnail in the message box, which shows the converted photo. The Android conversion comes with the new Android app; the desktop one with the next desktop update.
+
 ## 0.9.846 — 2026-10-22
 
 Ready for Púca on the Steam Deck

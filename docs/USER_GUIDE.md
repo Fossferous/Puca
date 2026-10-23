@@ -141,6 +141,16 @@ download button underneath. A file the player cannot open, or a type it does not
 A video with no picture your device can show — a sound-only .webm, or a video in a format your device cannot
 decode — gets the audio player, marked **Sound only: no picture to show**; download it to watch it elsewhere.
 
+A photo in **HEIC** (what most phone cameras save) is turned into a JPEG on your device before it is sent, so
+everyone can see it: in the Android app (Android 9 or newer), in the desktop app when Windows has the HEIF Image
+Extensions and HEVC Video Extensions from the Microsoft Store, and in Safari. Its chip shows the JPEG and its name
+ends in .jpg. The JPEG keeps only the picture: not the location, camera or time the phone stored with it. Where
+your device cannot convert it (a browser other than Safari, a PC without those extensions), the HEIC is sent as
+it is. A HEIC picture someone sent is shown in the Android app; elsewhere it is a card with its name, size and a
+**Download** button that saves the original file. In the desktop app the card also has **Show photo**, which opens
+it with Windows' own decoder (it needs those two extensions). It waits for you because that decoder runs inside the
+app, without the protection the app gives every other picture.
+
 ### Watch a Video
 Videos in messages and DMs, posted clips, a clip's preview before you post it and videos attached to tasks all
 have the same player, with every control on it at every size — a narrow portrait video included:

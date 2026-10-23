@@ -238,6 +238,7 @@ const GATES = [
         ['e2e-device-stage', 'device-stage-real-browser.mjs e2e-artifacts/device-stage-shots'],
         ['e2e-no-screen-stage', 'no-screen-stage-real-browser.mjs e2e-artifacts/no-screen-stage-shots'],
         ['e2e-video-controls', 'video-controls-real-browser.mjs'],
+        ['e2e-heic', 'heic-real-browser.mjs'],
     ].map(([id, file]) => ({
         id, title: `e2e/${file.split(' ')[0]} (real browser, no server)`,
         inputs: ALL, ignoreVersion: true, fingerprint: ['node', 'fe-deps'],

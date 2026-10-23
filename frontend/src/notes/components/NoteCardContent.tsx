@@ -14,6 +14,7 @@ import { type GalleryItem } from '../../api/noteMedia';
 import { parseParkedRef } from '../../api/parkedMedia';
 import { parkedObjectUrl } from '../../api/parkedPreview';
 import { useHeldAttachmentUrl } from '../../components/useHeldAttachmentUrl';
+import { AttachmentImg } from '../../components/AttachmentImg';
 import { NoteLinkText } from '../../components/NoteLinkText';
 import { findRanges, snippetAround } from '../model/noteSearch';
 import { Highlight } from './Highlight';
@@ -39,7 +40,10 @@ function HeroImage({ item, visible }: { item: GalleryItem; visible: boolean }) {
     }, [visible, href, parkedUrl]);
     const url = p ? held.url : parkedUrl;
     if (!url) return <span className="notes-hero-pending" />;
-    return <img src={url} alt={item.ref.name} className={item.kind === 'drawing' ? 'drawing' : ''} loading="lazy" />;
+    // One this device cannot show (a HEIC outside WebKit with no decoder in
+    // the app) leaves the hero: the editor's gallery offers it as a file.
+    const type = p ? held.type : parseParkedRef(href)?.mime ?? null;
+    return <AttachmentImg type={type} src={url} alt={item.ref.name} className={item.kind === 'drawing' ? 'drawing' : ''} loading="lazy" fallback={null} />;
 }
 
 export function NoteHero({ items, visible }: { items: GalleryItem[]; visible: boolean }) {

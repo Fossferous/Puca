@@ -433,6 +433,20 @@ What Púca does about it, since 0.9.834:
   opens, and the desktop app relies on that: WebView2 removed a killed run's files within
   seconds of the next start (measured in Edge, the same engine). Púca Notes' own Android
   app gets the rest of this with its update, but not the removal at start.
+- **A HEIC photo shown through the device's own decoder stays in the same lifecycle.** No
+  engine but WebKit decodes HEIC, so the desktop and Android apps decode one for display
+  natively (Windows Imaging Component from a memory stream; Android's ImageDecoder from a
+  buffer) and get a JPEG back over the app's bridge, in memory; that JPEG is hosted in
+  place of the plaintext, under the same worker, and goes when it would have gone
+  (`frontend/src/api/heif.ts`, `frontend/e2e/heic-real-browser.mjs`). Sending one, the
+  device makes the JPEG before it is encrypted, and the JPEG carries no metadata: the
+  location, camera and time stored in the HEIC are not sent. A HEIC someone ELSE sent is
+  decoded by the Android app by itself (the OS parses and decodes it in its own sandboxed
+  media processes), but by the desktop app only when the reader presses **Show photo**:
+  WIC loads the HEIF and HEVC codecs into the app's own process, which has none of the
+  sandbox WebView2 decodes every other picture in, and decoding whatever arrives would
+  give any channel member a zero-click path into codecs that have had remote-code-execution
+  bugs.
 
 What remains: the files of what is **on screen** can be on the Android app's storage while
 they are shown (inside the app's private, encrypted-by-the-phone storage, which other apps

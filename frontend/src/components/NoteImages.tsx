@@ -43,6 +43,8 @@ import { ImageLightbox } from './ImageLightbox';
 import { CameraIcon, CheckCircleIcon, CloseIcon, ImageIcon, LockIcon, MicIcon, PaperclipIcon, PencilIcon, WarningIcon } from './Icons';
 import { followOutputDeviceRef } from './settingsStore';
 import { useHeldAttachmentUrl } from './useHeldAttachmentUrl';
+import { AttachmentImg } from './AttachmentImg';
+import { isHeifType, jpegName } from '../api/heif';
 import './NoteImages.css';
 
 /**
@@ -95,7 +97,7 @@ function FileDownload({ refItem, folder }: { refItem: TaskAttachmentRef; folder?
     );
 }
 
-function Picture({ refItem, onOpen, zoomed }: { refItem: TaskAttachmentRef; onOpen: (url: string) => void; zoomed: boolean }) {
+function Picture({ refItem, onOpen, zoomed, folder }: { refItem: TaskAttachmentRef; onOpen: (url: string, type: string | null) => void; zoomed: boolean; folder?: string }) {
     const [parkedUrl, setParkedUrl] = useState<string | null>(null);
     const [parkedFailed, setParkedFailed] = useState(false);
     const href = refItem.href;
@@ -119,10 +121,24 @@ function Picture({ refItem, onOpen, zoomed }: { refItem: TaskAttachmentRef; onOp
         return <span className="ni-broken" title={refItem.name}><WarningIcon /> {refItem.name}</span>;
     }
     if (!url) return <span className="ni-pending" aria-label={`Loading ${refItem.name}`} />;
+    // A picture this device cannot show (a HEIC outside WebKit with no
+    // decoder in the app, a corrupt file) is its download button, never a
+    // broken image (AttachmentImg). A parked one is what this device picked,
+    // under the type it was picked with.
+    const type = p ? held.type : parseParkedRef(href)?.mime ?? null;
     return (
-        <button type="button" className="ni-open" onClick={() => onOpen(url)} aria-label={`Open ${refItem.name}`}>
-            <img src={url} alt={refItem.name} />
-        </button>
+        <AttachmentImg
+            type={type}
+            src={url}
+            alt={refItem.name}
+            pending={<span className="ni-pending" aria-label={`Loading ${refItem.name}`} />}
+            fallback={<FileDownload refItem={refItem} folder={folder} />}
+            wrap={(img) => (
+                <button type="button" className="ni-open" onClick={() => onOpen(url, type)} aria-label={`Open ${refItem.name}`}>
+                    {img}
+                </button>
+            )}
+        />
     );
 }
 
@@ -224,7 +240,10 @@ export function NoteImages({ opened, editable, busy = false, onAddPhotos, onRemo
                                 ? <FileDownload refItem={item.ref} folder={saveFolder} />
                                 : item.kind === 'audio'
                                     ? <AudioClip refItem={item.ref} folder={saveFolder} />
-                                    : <Picture refItem={item.ref} zoomed={zoom?.href === item.ref.href} onOpen={url => setZoom({ url, name: item.ref.name, href: item.ref.href })} />}
+                                    : <Picture refItem={item.ref} folder={saveFolder} zoomed={zoom?.href === item.ref.href}
+                                    // A HEIC the device decoded for display is a JPEG: saved from
+                                    // the lightbox, it is one, and named so.
+                                    onOpen={(url, type) => setZoom({ url, name: type === 'image/jpeg' && isHeifType(parseEncAttachment(item.ref.href)?.mime) ? jpegName(item.ref.name) : item.ref.name, href: item.ref.href })} />}
                             {canEdit && (
                                 <div className="ni-tools">
                                     {item.kind === 'drawing' && onDraw && (
