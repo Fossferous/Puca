@@ -3923,7 +3923,13 @@ async function sealAndSendInput(s: Internal, event: unknown): Promise<boolean> {
                 try {
                     dc!.send(JSON.stringify({ sid: s.id, payload: sealed }));
                     s.inputDcSeq++;
-                    s.inputRate.tick(event, 'channel');
+                    // A PROBE IS NOT SOMEBODY DRIVING. It goes out once a
+                    // second whenever a desktop stage is open, so counting it
+                    // here would hold an unattended session open past its
+                    // idle revoke for anyone who left the stage on a screen
+                    // and walked away — and pad the input tallies.
+                    const probe = isProbeEvent(event);
+                    if (!probe) s.inputRate.tick(event, 'channel');
                     // TELL THE HOST SOMEBODY IS DRIVING. An unattended session
                     // carries a 30-minute idle revoke, and the only thing that
                     // ever fed its clock was input arriving over the relay
@@ -3933,7 +3939,7 @@ async function sealAndSendInput(s: Internal, event: unknown): Promise<boolean> {
                     // after it started, while the person is still typing on it.
                     // The host cannot see this channel — the agent owns it and
                     // never pushes — so the end that knows says so.
-                    if (now - s.inputAliveSentAt >= INPUT_ALIVE_MS) {
+                    if (!probe && now - s.inputAliveSentAt >= INPUT_ALIVE_MS) {
                         s.inputAliveSentAt = now;
                         void sendSignal(s, { kind: 'input-alive' }).catch(() => undefined);
                     }

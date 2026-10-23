@@ -481,6 +481,29 @@ describe('what the direct channel must NOT carry', () => {
         expect(onRelay()).toHaveLength(1);
     });
 
+    it('a LATENCY PROBE takes the channel but never tells the host somebody is driving', async () => {
+        // A probe goes out once a second whenever a desktop stage is open.
+        // Read as activity, it held an unattended session open past its
+        // 30-minute idle revoke for anyone who left the stage on a screen and
+        // walked away.
+        const { sendInput, sendLatencyProbe } = await import('../api/devices/session');
+        const id = await controllerSession();
+        await armed(id);
+        const aliveSignals = () => sent.filter(m => m.type === 'DeviceSignal' && JSON.stringify(m.payload).includes('input-alive'));
+
+        expect(sendLatencyProbe(id), 'a probe can go: the channel is armed').toBe(true);
+        await settle();
+        expect(onChannel(), 'the probe rode the channel').toHaveLength(1);
+        expect(onChannel()[0]).toContain('probe');
+        expect(aliveSignals(), 'and said nothing to the host').toEqual([]);
+
+        // POSITIVE CONTROL: real input on the same session does say so — the
+        // probe did not spend the once-a-minute signal either.
+        sendInput(id, { t: 'down', button: 0 });
+        await settle();
+        expect(aliveSignals()).toHaveLength(1);
+    });
+
     it('POSITIVE CONTROL: ordinary input on the same armed session takes the channel', async () => {
         // Without this the two tests above would pass against a session that
         // never armed at all.

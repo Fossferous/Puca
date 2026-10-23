@@ -8,8 +8,11 @@
  * sign-in screen). The phone has always typed text this way; the desktop had
  * no route to it.
  *
- * Keys typed in this box stay here (the stage does not forward keys aimed at
- * a field of its own), Escape closes it, and Ctrl+Enter types it.
+ * While it is open the keyboard is the dialog's (the stage forwards nothing,
+ * and `data-owns-keys` keeps its buttons out of every page shortcut too): Tab
+ * between its controls, Enter or Space on them, Escape to close and
+ * Ctrl+Enter to type it, from anywhere in it. The dialog itself takes the
+ * focus a click on its padding would otherwise drop on the page.
  */
 import { useEffect, useRef, useState } from 'react';
 import { MAX_TYPED_CHARS } from '../api/devices/typeText';
@@ -35,7 +38,18 @@ export function DeviceStageTypeText({ peerName, initial = '', onType, onClose }:
             className="device-stage-typetext-backdrop"
             onPointerDown={e => { if (e.target === e.currentTarget) { e.preventDefault(); onClose(); } }}
         >
-            <div className="device-stage-typetext" role="dialog" aria-modal="true" aria-labelledby="dstt-title">
+            <div
+                className="device-stage-typetext"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="dstt-title"
+                data-owns-keys=""
+                tabIndex={-1}
+                onKeyDown={e => {
+                    if (e.key === 'Escape') { e.preventDefault(); onClose(); }
+                    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit(); }
+                }}
+            >
                 <strong id="dstt-title">Type text on {pc}</strong>
                 <span className="device-stage-typetext-help">
                     Typed as characters where the cursor is over there, so its keyboard layout cannot change them.
@@ -48,10 +62,6 @@ export function DeviceStageTypeText({ peerName, initial = '', onType, onClose }:
                     spellCheck={false}
                     aria-label="Text to type"
                     onChange={e => setText(e.target.value)}
-                    onKeyDown={e => {
-                        if (e.key === 'Escape') { e.preventDefault(); onClose(); }
-                        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit(); }
-                    }}
                 />
                 {tooLong && (
                     <span className="device-stage-error">

@@ -81,9 +81,19 @@ impl ShapeReporter {
     }
 }
 
-/// The host's pointer right now, as a CSS keyword: `none` while it is hidden
-/// (a game in mouse-look, a video playing fullscreen), the standard shape's
-/// keyword, or `default` for one an application drew itself.
+/// The keyword for a pointer Windows is not showing. `none` only when a
+/// program has TAKEN it — hidden and confined, a game in mouse-look — where a
+/// pointer here would be one the game is not using. Otherwise the ordinary
+/// arrow: Windows also hides the pointer on a machine with no mouse attached
+/// and, in some apps, while you type, and a viewer that draws the pointer
+/// itself must still have one to aim with — this agent is not drawing it.
+pub(crate) fn shape_when_hidden(captured: bool) -> &'static str {
+    if captured { "none" } else { "default" }
+}
+
+/// The host's pointer right now, as a CSS keyword: `none` while a program has
+/// taken it (`shape_when_hidden`), the standard shape's keyword, or `default`
+/// for one an application drew itself.
 #[cfg(windows)]
 pub(crate) fn current_css() -> &'static str {
     use std::sync::OnceLock;
@@ -107,7 +117,10 @@ pub(crate) fn current_css() -> &'static str {
         return "default";
     }
     if info.flags.0 & SHOWING == 0 {
-        return "none";
+        // Two user32 reads, only while the pointer is hidden.
+        let captured = puca_input::read_cursor_clip()
+            .is_some_and(|(clip, virt)| crate::input_reach::captured(true, clip, virt));
+        return shape_when_hidden(captured);
     }
     let h = info.hCursor.0 as isize;
     handles.iter().find(|(hh, _)| *hh == h).map(|(_, css)| *css).unwrap_or("default")
@@ -128,6 +141,12 @@ mod tests {
         let known = ["default", "text", "wait", "crosshair", "nwse-resize", "nesw-resize", "ew-resize",
             "ns-resize", "move", "not-allowed", "pointer", "progress", "help"];
         assert!(STANDARD.iter().all(|(_, c)| known.contains(c)));
+    }
+
+    #[test]
+    fn a_hidden_pointer_is_none_only_when_a_program_has_taken_it() {
+        assert_eq!(shape_when_hidden(true), "none", "a game in mouse-look");
+        assert_eq!(shape_when_hidden(false), "default", "no mouse attached, or hidden while typing: still a pointer to aim with");
     }
 
     #[test]

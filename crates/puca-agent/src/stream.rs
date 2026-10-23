@@ -1304,9 +1304,12 @@ fn run(
 
     let mut frame_interval = Duration::from_secs_f64(1.0 / current_fps.max(1) as f64);
     let mut next_frame = Instant::now();
-    // When the pump last ran, for the floor under an input's pull-in, and the
-    // latency probe waiting for its frame (latency.rs).
-    let mut last_capture_at: Option<Instant> = None;
+    // Catching an input's change (latency.rs): until when to watch for it,
+    // when the last frame was ENCODED (the floor under any early frame: the
+    // encoder's per-frame budget is what it protects), and the latency probe
+    // waiting for its frame.
+    let mut watching_until: Option<Instant> = None;
+    let mut last_frame_at: Option<Instant> = None;
     let mut probe: Option<crate::latency::Probe> = None;
     let mut want_keyframe = true;
     let mut rx_count: u64 = 0;
@@ -2108,20 +2111,18 @@ fn run(
                                                     let arrived = Instant::now();
                                                     probe = Some(crate::latency::Probe { id, arrived });
                                                     if !crate::latency::wants_classic(&event_json) {
-                                                        next_frame = next_frame.min(crate::latency::capture_after_input(
-                                                            arrived, last_capture_at, frame_interval,
+                                                        next_frame = next_frame.min(crate::latency::probe_capture_at(
+                                                            arrived, last_frame_at, frame_interval,
                                                         ));
                                                     }
                                                 }
                                                 continue;
                                             }
-                                            // CAPTURE SOON AFTER IT (latency.rs): what
-                                            // this input changes is in the very next
-                                            // frame instead of waiting for the clock.
+                                            // WATCH FOR WHAT IT CHANGES (latency.rs):
+                                            // taken the moment it is on screen, not at
+                                            // the clock's next tick.
                                             if mode == StreamMode::Video && !crate::latency::wants_classic(&event_json) {
-                                                next_frame = next_frame.min(crate::latency::capture_after_input(
-                                                    Instant::now(), last_capture_at, frame_interval,
-                                                ));
+                                                watching_until = Some(Instant::now() + crate::latency::WATCH_FOR);
                                             }
                                             match serde_json::from_str::<puca_input::ControlInput>(
                                                 &event_json,
@@ -2375,19 +2376,46 @@ fn run(
         // `capture.is_some()` is the guard, not `mode`: the SetMonitor
         // transition briefly takes the capture out, and the invariant that
         // matters here is "there is one to pump", not "this session wants one".
-        if capture.is_some() && now >= next_frame {
-            next_frame += frame_interval;
-            if now > next_frame + frame_interval {
-                next_frame = now;
+        //
+        // Two ways in: the clock's tick, or an EARLY LOOK for an input's
+        // change (latency.rs) — a new picture or nothing, never the held one
+        // re-sent, and the clock is touched only if it found one.
+        let due = now >= next_frame;
+        let early = !due
+            && crate::latency::may_capture_early(now, watching_until, next_frame, last_frame_at, frame_interval);
+        if capture.is_some() && (due || early) {
+            if due {
+                next_frame += frame_interval;
+                if now > next_frame + frame_interval {
+                    next_frame = now;
+                }
             }
-            last_capture_at = Some(now);
             // A probe nobody could answer in a second is stale (a capture
             // that is not producing anything); the viewer has given up on it.
             if probe.is_some_and(|p| now.duration_since(p.arrived) > Duration::from_secs(1)) {
                 probe = None;
             }
-            match pump_frame(capture.as_mut().expect("checked is_some above"), &mut encoder, &mut sender, current_bitrate, current_fps, &mut want_keyframe, now, &mut pump_stats, &mut last_frame, frames_sent == 0, switch_awaits_whole_picture(switch_started, now), view_size, &mut fit, probe.is_some()) {
-                Ok(sent) => {
+            // A probe asks for a picture even of a still screen — but not of a
+            // BLOCKED capture (a security screen up): re-sending the held
+            // picture once a second ended the blockage on every probe, so the
+            // 5 s rebuild never came and the viewer's picture looked alive.
+            let why = if early {
+                PumpFor::Look
+            } else if probe.is_some() && blocked_since.is_none() {
+                PumpFor::Probe
+            } else {
+                PumpFor::Tick
+            };
+            match pump_frame(capture.as_mut().expect("checked is_some above"), &mut encoder, &mut sender, current_bitrate, current_fps, &mut want_keyframe, now, &mut pump_stats, &mut last_frame, frames_sent == 0, switch_awaits_whole_picture(switch_started, now), view_size, &mut fit, why) {
+                Ok(pumped) => {
+                    let sent = pumped.sent;
+                    last_frame_at = Some(now);
+                    if early {
+                        // Caught as it appeared: the clock carries on from
+                        // this frame, and the watch is over.
+                        next_frame = now + frame_interval;
+                        watching_until = None;
+                    }
                     frames_sent += u64::from(sent);
                     flushed_frame = sent;
                     // THE PROBE'S FRAME is this one: answer with its RTP time
@@ -2426,7 +2454,7 @@ fn run(
                         }
                     }
                     skipped = 0;
-                    if blocked_since.take().is_some() {
+                    if pumped_ends_blockage(pumped.still_blocked, &mut blocked_since, now) {
                         if blocked_reported {
                             eprintln!("[stream] the secure desktop is gone; capture resumed");
                         }
@@ -2456,6 +2484,10 @@ fn run(
                         eprintln!("[stream] encoded a frame but the writer refused it");
                     }
                 }
+                // An early look that found nothing new: the clock keeps its
+                // schedule, and the still-screen and security-screen
+                // bookkeeping below is the tick's business.
+                Err(PumpError::NoChange | PumpError::SecureDesktop) if early => {}
                 Err(PumpError::NoChange) => {
                     skipped += 1;
                     if skipped == 30 || skipped == 150 {
@@ -2627,6 +2659,14 @@ fn run(
                     }
                 }
                 Err(PumpError::EncoderFilling) => {
+                    // The encoder took a picture and is still filling: a
+                    // frame for the floor, and for an early look a caught
+                    // change like any other.
+                    last_frame_at = Some(now);
+                    if early {
+                        next_frame = now + frame_interval;
+                        watching_until = None;
+                    }
                     // Counted SEPARATELY from a still screen. Lumping the two
                     // together under one message is what hid half a second of
                     // encoder buffering: both look like "no frame came out",
@@ -2663,6 +2703,16 @@ fn run(
         let wait = match capture {
             Some(_) => wait.min(next_frame.saturating_duration_since(Instant::now())),
             None => wait,
+        };
+        // WATCHING for an input's change (latency.rs): look again in a couple
+        // of milliseconds rather than at the next tick — once the floor under
+        // early frames has passed; before that a look would only be refused.
+        let wait = match (capture.as_ref(), watching_until) {
+            (Some(_), Some(until)) if Instant::now() < until => {
+                let floor_ends = last_frame_at.map_or_else(Instant::now, |t| t + frame_interval);
+                wait.min(floor_ends.saturating_duration_since(Instant::now()).max(crate::latency::WATCH_POLL))
+            }
+            _ => wait,
         };
         // A file answer in flight must not be parked behind a long idle wait:
         // a FILES-ONLY session has no frame cadence, so its str0m timeout can
@@ -3348,6 +3398,67 @@ fn should_report_secure_desktop(
     }
 }
 
+/// What a pump is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PumpFor {
+    /// The clock's tick: a new picture, or the held one re-sent for something
+    /// waiting on a picture (a keyframe, the viewer fit).
+    Tick,
+    /// The clock's tick with a latency probe waiting (latency.rs): send a
+    /// picture even of a still screen, and do not sit out the acquire wait
+    /// for a change that is not coming — that wait would be in the reading.
+    Probe,
+    /// An early look for an input's change (latency.rs): a NEW picture or
+    /// nothing, and no wait — the loop looks again in a couple of ms.
+    Look,
+}
+
+impl PumpFor {
+    /// How long the capture may wait for a new picture: the tick its usual
+    /// 5 ms, a probe 1 ms (the wait would be in the reading), a look none.
+    fn acquire_ms(self) -> u32 {
+        match self {
+            PumpFor::Tick => 5,
+            PumpFor::Probe => 1,
+            PumpFor::Look => 0,
+        }
+    }
+}
+
+/// Is something waiting for a picture, so that a still screen's HELD one is
+/// re-sent? On the clock's tick: a keyframe, the viewer fit, or a probe.
+/// Never for an early look, which takes a new picture or nothing.
+fn needs_picture(why: PumpFor, want_keyframe: bool, fit_needs: bool) -> bool {
+    why != PumpFor::Look && (want_keyframe || fit_needs || why == PumpFor::Probe)
+}
+
+/// A frame went out: does it end a blockage (a security screen owning the
+/// display)? A real picture does. The HELD picture re-sent while the capture
+/// still answers AccessLost — for a keyframe request, the fit or a probe —
+/// does not: the blockage starts there if it had not, and its clock keeps
+/// running toward the rebuild. Reading a re-send as the end of it reset that
+/// clock on every probe (once a second), so the 5 s rebuild — the only
+/// recovery for a lost D3D device — never came, and the secure-desktop notice
+/// flipped off and on. True when this frame ends one.
+fn pumped_ends_blockage(still_blocked: bool, blocked_since: &mut Option<Instant>, now: Instant) -> bool {
+    if still_blocked {
+        blocked_since.get_or_insert(now);
+        false
+    } else {
+        blocked_since.take().is_some()
+    }
+}
+
+/// A pump that put a frame through the encoder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Pumped {
+    /// The writer took it.
+    sent: bool,
+    /// The capture is blocked (AccessLost) and the frame was the HELD picture,
+    /// re-sent for something waiting on one: the security screen is still up.
+    still_blocked: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn pump_frame(
     capture: &mut AnyCapture,
@@ -3367,17 +3478,19 @@ fn pump_frame(
     // frames (composite::FitState).
     view: Option<(u32, u32)>,
     fit: &mut crate::composite::FitState,
-    // A latency probe is waiting for this frame (latency.rs): send one even
-    // on a still screen, and do not sit out the acquire wait for a change
-    // that is not coming — that wait would be counted in the reading.
-    probe_waiting: bool,
-) -> Result<bool, PumpError> {
+    // What this pump is for: the clock's tick, the tick a latency probe is
+    // waiting on, or an early look for an input's change (PumpFor).
+    why: PumpFor,
+) -> Result<Pumped, PumpError> {
     let t_capture = Instant::now();
     // Something WAITING for a picture: a keyframe (a rebuilt encoder, a peer's
     // request), the viewer fit (a stage change, a step settling) or a latency
-    // probe. Each is a reason to re-send the held picture of a still screen.
-    let need_picture = *want_keyframe || fit.needs_frame() || probe_waiting;
-    let acquire_ms = if probe_waiting { 1 } else { 5 };
+    // probe. Each is a reason to re-send the held picture of a still screen —
+    // on the clock's tick. An early look takes a NEW picture or nothing.
+    let need_picture = needs_picture(why, *want_keyframe, fit.needs_frame());
+    let acquire_ms = why.acquire_ms();
+    // The capture answered AccessLost and the held picture is re-sent anyway.
+    let mut still_blocked = false;
     // BORROWED, not owned. The composite path used to hand back a cloned
     // canvas every tick — 56 MB per frame on a three-screen desktop, competing
     // for memory bandwidth with the encoder that is about to read it.
@@ -3408,7 +3521,8 @@ fn pump_frame(
                 Err(CaptureError::Timeout) if !should_resend_still(need_picture, holding) => {
                     return Err(PumpError::NoChange)
                 }
-                Err(CaptureError::Timeout) | Err(CaptureError::AccessLost) => {}
+                Err(CaptureError::AccessLost) => still_blocked = true,
+                Err(CaptureError::Timeout) => {}
                 Err(e) => return Err(PumpError::Fatal(format!("capture: {e}"))),
             }
             let (w, h, s, b) = v.surface();
@@ -3444,6 +3558,7 @@ fn pump_frame(
                             PumpError::NoChange
                         });
                     }
+                    still_blocked = secure;
                 }
                 Err(e) => return Err(PumpError::Fatal(format!("capture: {e}"))),
             }
@@ -3533,7 +3648,7 @@ fn pump_frame(
             }
             stats.encode.add(encode_took);
             stats.send.add(t_send.elapsed());
-            Ok(sent)
+            Ok(Pumped { sent, still_blocked })
         }
         Err(EncodeError::NeedMoreInput) => {
             stats.filling += 1;
@@ -3571,6 +3686,40 @@ impl Stream {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_resend_during_a_blockage_does_not_end_it() {
+        use super::{pumped_ends_blockage, should_rebuild_capture};
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut blocked = None;
+        // The first blocked tick re-sent the held picture (a keyframe wanted).
+        assert!(!pumped_ends_blockage(true, &mut blocked, t0));
+        assert_eq!(blocked, Some(t0), "the blockage starts there");
+        // A probe a second for six seconds, each answered with the held picture.
+        for s in 1..=6 {
+            assert!(!pumped_ends_blockage(true, &mut blocked, t0 + Duration::from_secs(s)));
+        }
+        assert_eq!(blocked, Some(t0), "its clock never restarted");
+        assert!(should_rebuild_capture(t0, None, t0 + Duration::from_secs(6)), "so the rebuild comes");
+        // A real picture ends it, once.
+        assert!(pumped_ends_blockage(false, &mut blocked, t0 + Duration::from_secs(7)));
+        assert_eq!(blocked, None);
+        assert!(!pumped_ends_blockage(false, &mut blocked, t0 + Duration::from_secs(8)));
+    }
+
+    #[test]
+    fn an_early_look_takes_a_new_picture_or_nothing() {
+        use super::{needs_picture, PumpFor};
+        assert!(!needs_picture(PumpFor::Look, true, true), "never the held picture re-sent");
+        assert_eq!(PumpFor::Look.acquire_ms(), 0, "and no wait: the loop looks again soon");
+        assert!(needs_picture(PumpFor::Probe, false, false), "a probe gets a picture of a still screen");
+        assert_eq!(PumpFor::Probe.acquire_ms(), 1);
+        assert!(needs_picture(PumpFor::Tick, true, false));
+        assert!(needs_picture(PumpFor::Tick, false, true));
+        assert!(!needs_picture(PumpFor::Tick, false, false));
+        assert_eq!(PumpFor::Tick.acquire_ms(), 5);
+    }
+
     use super::*;
 
     /// The id rides the reply when the request carried one, and never appears

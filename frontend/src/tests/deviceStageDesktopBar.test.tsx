@@ -26,6 +26,8 @@ const h = vi.hoisted(() => ({
     sendStreamQuality: vi.fn(),
     endSession: vi.fn(),
     setCursorOwned: vi.fn(),
+    sendLatencyProbe: vi.fn(() => false),
+    probeUsable: false,
     storage: new Map<string, string>(),
     /** What deviceStatsSample answers: null (no stats) unless a test sets it. */
     statsPath: null as null | { path: 'direct' | 'relay'; protocol: string; rttMs: number },
@@ -61,8 +63,8 @@ vi.mock('../api/devices/session', () => ({
         : null),
     activeSessions: () => [],
     requestFileAccess: () => { /* noop */ },
-    latencyProbeUsable: () => false,
-    sendLatencyProbe: () => false,
+    latencyProbeUsable: () => h.probeUsable,
+    sendLatencyProbe: () => h.sendLatencyProbe(),
     noteFramePresented: () => { /* noop */ },
     subscribeLatency: () => () => { /* unsubscribe */ },
 }));
@@ -105,7 +107,8 @@ beforeEach(() => {
     h.listeners.clear();
     h.snapshot = [];
     h.statsPath = null;
-    for (const f of [h.sendInput, h.sendPowerAction, h.setPrivacyMode, h.requestMonitor, h.sendStreamQuality, h.endSession, h.setCursorOwned]) f.mockClear();
+    for (const f of [h.sendInput, h.sendPowerAction, h.setPrivacyMode, h.requestMonitor, h.sendStreamQuality, h.endSession, h.setCursorOwned, h.sendLatencyProbe]) f.mockClear();
+    h.probeUsable = false;
 });
 
 let root: Root | null = null;
@@ -270,6 +273,37 @@ describe('the menus reach the session layer as the phone\'s do', () => {
         expect(host!.querySelector('.device-stage-typetext'), 'and closes').toBeNull();
     });
 
+    it("while Type text is open the keyboard is the dialog's: its buttons, Esc, and keys after its padding took a click", async () => {
+        await mount();
+        await openMenu('Keyboard');
+        await click(menuItem('Type text…'));
+        const dialog = host!.querySelector<HTMLElement>('.device-stage-typetext');
+        expect(dialog, 'the dialog is open').toBeTruthy();
+        const cancel = byText('Cancel')!;
+        // Tab onto Cancel, then Enter and Space on it.
+        await act(async () => {
+            cancel.focus();
+            cancel.dispatchEvent(new KeyboardEvent('keydown', { code: 'Enter', key: 'Enter', bubbles: true, cancelable: true }));
+            cancel.dispatchEvent(new KeyboardEvent('keydown', { code: 'Space', key: ' ', bubbles: true, cancelable: true }));
+        });
+        // The focus dropped to the page (a click on the padding, before the
+        // dialog took it), then a key: the window is its target.
+        await act(async () => { cancel.blur(); });
+        await key('keydown', 'KeyP');
+        expect(keyFrames(), 'none of it went over').toEqual([]);
+        // Esc from the button closes the dialog, and is not sent either.
+        await act(async () => {
+            cancel.focus();
+            cancel.dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape', key: 'Escape', bubbles: true, cancelable: true }));
+        });
+        await flush();
+        expect(host!.querySelector('.device-stage-typetext'), 'Esc closed it').toBeNull();
+        expect(keyFrames()).toEqual([]);
+        // POSITIVE CONTROL: with it closed, the same key goes over.
+        await key('keydown', 'KeyP');
+        expect(keyFrames()).toEqual(['KeyP↓']);
+    });
+
     it('Screen: a monitor, privacy mode and display power', async () => {
         await mount();
         await openMenu('Screen');
@@ -374,7 +408,8 @@ describe('the pointer drawn here, with no delay', () => {
     it("once the host hands it over, this pointer takes the host's shape", async () => {
         await mount({ cursorOwned: true, remoteCursor: 'text' });
         expect(surface().style.cursor).toBe('text');
-        // Hidden over there (a game, a video): hidden here.
+        // Taken over there (a game in mouse-look; the agent says `none` for
+        // nothing else): hidden here.
         h.snapshot = [session({ cursorOwned: true, remoteCursor: 'none' })];
         await act(async () => { for (const l of h.listeners) l(h.snapshot); });
         await flush();
@@ -408,9 +443,42 @@ describe('the pointer drawn here, with no delay', () => {
         expect(h.storage.get('device-stage-instant-pointer')).toBe('off');
     });
 
+    it('pausing hands the pointer back to the host — watching, its own is the one to see — and resuming takes it again', async () => {
+        await mount({ cursorOwned: true, remoteCursor: 'text' });
+        expect(lastOwnership()).toEqual(['ds-1', true]);
+        expect(surface().style.cursor).toBe('text');
+        await key('keydown', 'Home', { ctrlKey: true, altKey: true });
+        expect(host!.textContent).toContain('Control paused');
+        expect(lastOwnership(), 'the host draws its own again').toEqual(['ds-1', false]);
+        expect(surface().style.cursor, "and this one is the stylesheet's, not a shape frozen at the pause").toBe('');
+        await key('keydown', 'Home', { ctrlKey: true, altKey: true });
+        expect(lastOwnership()).toEqual(['ds-1', true]);
+    });
+
     it('Game mode hands it back too: pointer lock hides this pointer', async () => {
         h.storage.set('sovereign-fps-mode', 'on');
         await mount();
         expect(h.setCursorOwned.mock.calls.some(c => c[1] === true), 'never taken in Game mode').toBe(false);
+    });
+});
+
+describe('the measured delay', () => {
+    afterEach(() => { vi.useRealTimers(); });
+
+    it('is measured while you control, and never while paused: a probe is not a hand', async () => {
+        h.probeUsable = true;
+        h.sendLatencyProbe.mockImplementation(() => true);
+        // The probe's clock only; the rest of the stage keeps real timers.
+        vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'performance'] });
+        await mount();
+        await act(async () => { vi.advanceTimersByTime(3_050); });
+        expect(h.sendLatencyProbe.mock.calls.length, 'about one a second').toBeGreaterThanOrEqual(3);
+        await key('keydown', 'Home', { ctrlKey: true, altKey: true });
+        expect(host!.textContent).toContain('Control paused');
+        h.sendLatencyProbe.mockClear();
+        await act(async () => { vi.advanceTimersByTime(5_000); });
+        expect(h.sendLatencyProbe, 'paused: none').not.toHaveBeenCalled();
+        await key('keydown', 'Home', { ctrlKey: true, altKey: true });
+        expect(h.sendLatencyProbe, 'resumed: measuring again at once').toHaveBeenCalledTimes(1);
     });
 });

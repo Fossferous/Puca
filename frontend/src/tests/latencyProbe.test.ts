@@ -52,6 +52,45 @@ describe('the latency probe', () => {
         expect(results.map(r => r.id)).toEqual([id]);
     });
 
+    it("a media restart: the RTP clock starts again near zero, and the old stream's frames answer nothing", () => {
+        const { m, results } = rig();
+        // Half an hour into a session: timestamps around 162 million.
+        for (let i = 0; i < 5; i++) m.presented(162_000_000 + i * 3000, 100 + i * 33);
+        // The stream restarts; its clock starts again.
+        m.presented(1_000, 400);
+        const id = m.sent(500, false);
+        // The answer names a frame of the NEW stream. The old frames are
+        // "later" by the clock and were shown before the probe even left;
+        // matched, they read 0 ms.
+        m.answered(id, 4_000, 3);
+        expect(results, 'nothing from before the restart answers it').toEqual([]);
+        m.presented(4_000, 548);
+        expect(results.map(r => r.totalMs)).toEqual([48]);
+    });
+
+    it('frames of the OLD stream shown after the probe left still do not answer a probe of the new one', () => {
+        const { m, results } = rig();
+        const id = m.sent(500, false);
+        m.presented(162_000_000, 510);
+        m.presented(162_003_000, 543);
+        // The restart lands, and the probe's frame is one of the new stream.
+        m.presented(1_000, 600);
+        m.answered(id, 4_000, 3);
+        expect(results, 'not the old frames at 510 or 543').toEqual([]);
+        m.presented(4_000, 650);
+        expect(results.map(r => r.totalMs)).toEqual([150]);
+    });
+
+    it('a frame shown before the probe left never answers it', () => {
+        const { m, results } = rig();
+        m.presented(90_000, 990);
+        const id = m.sent(1000, false);
+        m.answered(id, 90_000, 2);
+        expect(results).toEqual([]);
+        m.presented(93_000, 1031);
+        expect(results.map(r => r.totalMs)).toEqual([31]);
+    });
+
     it('an answer for an unknown or already-answered probe changes nothing', () => {
         const { m, results } = rig();
         m.answered(99, 1, 1);

@@ -171,6 +171,66 @@ for (const [label, w, h] of [['desktop 1280x800', 1280, 800], ['narrow 900x700',
         ck(`${label}: Resume resumes, and its press clicks nothing over there`, !(await page.locator('.device-stage-paused').count()) && (await sentOf(page, 'down')).length === 0);
     }
 
+    // 4b. Edge pan: zoomed in from the Screen menu, the pointer parked on the
+    // stage's right edge looks further right and keeps aiming; a press made
+    // MID-PAN stops it; it runs to the picture's edge; at Fit an edge is only
+    // an edge.
+    const canvasPan = () => page.evaluate(() => {
+        const m = /translate\((-?[\d.]+)px, (-?[\d.]+)px\) scale\(([\d.]+)\)/.exec(document.querySelector('.device-stage-canvas')?.style.transform ?? '');
+        return m ? { x: +m[1], y: +m[2], scale: +m[3] } : null;
+    });
+    const zoomMenu = async label => {
+        await press(page, page.locator('.dsb-menu-btn', { hasText: 'Screen' }).first());
+        await page.waitForTimeout(100);
+        // The zoom row's own buttons: "Fit" alone would also match the
+        // picture's "Fit to this screen", which comes first.
+        const row = page.locator('.dsb-menu .dsb-row[aria-label="Zoom"] button');
+        await press(page, label === 'Fit' ? row.filter({ hasText: /^Fit$/ }) : row.and(page.locator(`[aria-label="${label}"]`)));
+        await page.waitForTimeout(100);
+        await page.keyboard.press('Escape');
+        await page.waitForTimeout(100);
+    };
+    await zoomMenu('Zoom in');
+    await zoomMenu('Zoom in');
+    const surf = await page.locator('.device-stage-surface').boundingBox();
+    const z0 = await canvasPan();
+    // The far right the clamp allows: the stage's width times the zoom past 1.
+    const maxLeft = -surf.width * ((z0?.scale ?? 1) - 1);
+    await page.mouse.move(surf.x + surf.width - 4, surf.y + surf.height / 2);
+    await clearSent(page);
+    await page.waitForTimeout(120);
+    const zMid = await canvasPan();
+    const aimedMid = (await sentOf(page, 'move')).length;
+    ck(`${label}: zoomed in (${z0?.scale}x), the right edge looks further right`, !!z0 && !!zMid && z0.scale > 1 && zMid.x < z0.x - 20 && Math.abs(zMid.y - z0.y) < 0.5, `x ${z0?.x} -> ${zMid?.x} in 120 ms`);
+    ck(`${label}: …aiming the remote pointer while the hand is still`, aimedMid >= 3, `${aimedMid} moves in 120 ms`);
+    await page.mouse.down();
+    const z2 = await canvasPan();
+    await clearSent(page);
+    await page.waitForTimeout(300);
+    const z3 = await canvasPan();
+    const duringPress = (await sentOf(page, 'move')).length;
+    await page.mouse.up();
+    ck(`${label}: a press made mid-pan stops it (no drag under a moving picture)`,
+        !!z2 && z2.x > maxLeft + 20 && JSON.stringify(z2) === JSON.stringify(z3) && duringPress === 0,
+        `pressed at x ${z2?.x} (edge ${maxLeft}), ${z3?.x} after 300 ms, ${duringPress} moves`);
+    // The next hover carries on, to the picture's edge and no further.
+    await page.mouse.move(surf.x + surf.width - 5, surf.y + surf.height / 2);
+    await page.waitForTimeout(700);
+    const zEnd = await canvasPan();
+    await clearSent(page);
+    await page.waitForTimeout(200);
+    const zAfter = await canvasPan();
+    ck(`${label}: …and runs to the picture's edge, then stops`,
+        !!zEnd && Math.abs(zEnd.x - maxLeft) < 0.5 && JSON.stringify(zEnd) === JSON.stringify(zAfter) && (await sentOf(page, 'move')).length === 0,
+        `x ${zEnd?.x} (edge ${maxLeft})`);
+    await zoomMenu('Fit');
+    await page.mouse.move(surf.x + surf.width / 2, surf.y + surf.height / 2);
+    await page.mouse.move(surf.x + surf.width - 4, surf.y + surf.height / 2);
+    const f0 = await canvasPan();
+    await page.waitForTimeout(300);
+    const f1 = await canvasPan();
+    ck(`${label}: CONTROL — at Fit an edge is only an edge`, f0?.scale === 1 && JSON.stringify(f0) === JSON.stringify(f1), JSON.stringify(f1));
+
     // 5. The pointer drawn here, in the host's shape; the elevated banner.
     await page.waitForFunction(() => window.__stage.state.cursorOwned, null, { timeout: 3000 }).catch(() => undefined);
     await page.evaluate(() => { window.__stage.state.remoteCursor = 'text'; window.__stage.emit(); });

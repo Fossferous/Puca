@@ -398,10 +398,11 @@ the next capture → encode → network → jitter buffer → decode → the sta
 - **The latency probe** (`frontend/src/api/devices/latencyProbe.ts`,
   `crates/puca-agent/src/latency.rs`). The desktop stage sends
   `{t:'probe', p}` on the direct channel once a second; the agent injects
-  nothing, sends its next frame even on a still screen (re-sending the held
-  picture, with a 1 ms acquire so the wait is not counted) and answers on the
-  caret channel with that frame's RTP timestamp, which str0m writes into the
-  header unchanged. `requestVideoFrameCallback` reports each presented frame's
+  nothing, takes a frame as soon as the floor below allows and sends it even
+  on a still screen (re-sending the held picture, with a 1 ms acquire so the
+  wait is not counted; never while a security screen blocks the capture, where
+  a re-send would hide the blockage), and answers on the caret channel with
+  that frame's RTP timestamp, which str0m writes into the header unchanged. `requestVideoFrameCallback` reports each presented frame's
   `rtpTimestamp` and when it is expected on screen, so the probe resolves on
   the viewer's clock alone: input to picture, including both networks and the
   far machine, with no clock agreement between them. The stats chip shows the
@@ -409,15 +410,36 @@ the next capture → encode → network → jitter buffer → decode → the sta
   arrival to its frame's send) and **Compare with the old timing** runs eight
   probes each way, alternating, with `q:1` asking the agent for the old
   capture timing — a before-and-after on the same machines in the same minute.
-  An agent older than the probe never answers; three misses and the stage
-  stops asking. Only the direct channel carries a probe: on the relay it would
-  reach the host app, which has no frame to answer with.
-- **Capture right after an input** (`latency.rs` `capture_after_input`). The
-  agent captured on a fixed clock, so a change an input made waited for the
-  next tick: half a frame on average, a whole one at worst (17 / 33 ms at
-  30 fps). An input now pulls the next capture in to 2 ms after it, never
-  closer than half a frame after the last capture (at most twice the asked-for
-  rate, and only while input keeps coming faster than the clock).
+  A probe stands for an input whose change is on screen at once, so it
+  measures the loop's own delays and none of an app's redraw. An agent older
+  than the probe never answers: three misses while pictures are arriving and
+  the stage says so and asks again every half minute (a miss with no picture
+  arriving — the stage minimised, a hidden window — proves nothing and is not
+  counted). Nothing is probed while control is paused, and a probe is not
+  activity: it never feeds an unattended session's idle clock. Only the direct
+  channel carries a probe: on the relay it would reach the host app, which has
+  no frame to answer with. A media restart starts the RTP clock again; frames
+  from before it are dropped, so they cannot answer a new probe.
+- **A change is taken as it appears** (`latency.rs`, `may_capture_early`).
+  The agent captures on a fixed clock, so a change an input made waited for
+  the next tick once it was on screen: half a frame on average, a whole one at
+  worst (17 / 33 ms at 30 fps). After an input the agent now watches for up to
+  100 ms, looking for a new frame every 2 ms, and takes the first one the
+  compositor presents; the clock carries on from it. A look that finds nothing
+  leaves the clock alone, and no frame is ever taken sooner than a whole frame
+  interval after the last one sent, so the session's frame rate — and with it
+  the encoder's bitrate, spent as bitrate/fps per frame — is never exceeded.
+  The gain is on a screen that was still, most of what a pointer and keyboard
+  do on a desktop: a menu, a typed letter or a highlight is captured within
+  about 2 ms of being drawn. A screen that changes every frame by itself (a
+  game, a video) is captured at the frame rate as before; only a higher frame
+  rate helps it. The first version pulled the next tick in to 2 ms after the
+  input and allowed half an interval: it usually captured before the app had
+  redrawn and then waited a whole frame from there, which could show a change
+  LATER than the old clock, and under continuous input on a busy screen it
+  doubled the frames and the bitrate. Measured in `latency.rs`'s tests: input
+  every 8 ms on a picture that changes every frame stays at 30 frames a second
+  at 30 fps.
 - **60 fps on your own network.** A desktop stage whose picture comes
   directly over UDP with a round trip under 15 ms, still on the default
   quality, steps up once to 60 fps / 10 Mbps and says so.
@@ -429,9 +451,14 @@ the next capture → encode → network → jitter buffer → decode → the sta
   draws your own mouse pointer over the picture with no delay, and the agent
   reports the host's pointer SHAPE as a CSS keyword when it changes
   (`crates/puca-agent/src/pointer_shape.rs`: the standard Windows pointers by
-  their shared handles, `none` while hidden, the arrow for one an application
-  drew itself). **Mouse › Draw the pointer here (no delay)** turns it off;
-  Game mode hands the pointer back, because pointer lock hides this one.
+  their shared handles, the arrow for one an application drew itself, and
+  `none` only while a program has TAKEN the pointer — hidden and confined, a
+  game in mouse-look; Windows also hides it on a machine with no mouse and
+  while you type in some apps, and then the arrow is drawn, since the agent is
+  not drawing one). **Mouse › Draw the pointer here (no delay)** turns it off;
+  Game mode hands the pointer back, because pointer lock hides this one, and
+  so does pausing control: watching, the host's own pointer is the one to
+  see.
 
 ## Testing note
 

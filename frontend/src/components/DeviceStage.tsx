@@ -41,6 +41,7 @@ import { readFitResolutionPreference, viewSizeFor, FIT_RESOLUTION_KEY, type FitR
 import { tunnelStatus, type TunnelStatus } from '../api/devices/tunnel';
 import { getStreamQualityErrorMessage } from '../api/devices/streamQualityMessages';
 import { isInjectableKey, normalizedOverVideo, pictureBox, wheelDy } from '../api/devices/pointerMapping';
+import { EDGE_PAN_TICK_MS, edgePanVelocity } from '../api/devices/edgePan';
 import { stageShortcut } from '../api/devices/stageShortcuts';
 import {
     ZOOM_FOLLOW_IN, ZOOM_FOLLOW_OUT_AT, aspectMatches, aspectsDistinguish, availableEdgeHops,
@@ -505,6 +506,7 @@ export function DeviceStage() {
     const [pointerOutside, setPointerOutside] = useState(false);
     /** "Type text…": the dialog's starting text, or null while it is closed. */
     const [typeText, setTypeText] = useState<string | null>(null);
+    const typeTextOpen = typeText !== null;
     /** Real fullscreen (stageFullscreen.ts) is on. */
     const [fullscreen, setFullscreen] = useState(false);
     /** The stage root, which is what goes fullscreen. */
@@ -861,16 +863,71 @@ export function DeviceStage() {
         });
     };
 
+    // EDGE PAN (api/devices/edgePan.ts). Zoomed in on a desktop, the pointer
+    // pushing into the band along an edge of the stage scrolls the picture: a
+    // mouse has nothing else to pan with, since its buttons, its wheel and
+    // every key go to the other machine. One tick a frame while it pushes —
+    // first aim the remote pointer at what is under ours now (the picture
+    // moved, the hand did not), then step the pan. It stops at the picture's
+    // edge, when the pointer leaves the band or the stage, when a button goes
+    // down (a press must not become a drag under a moving picture), and on
+    // entering Game mode. Only a hover move starts it (onPointerMove).
+    //
+    // An interval that stops itself, not a timeout that re-arms itself: a
+    // callback naming itself made the React Compiler's lint give up on this
+    // whole component, which silenced every set-state-in-effect check in it.
+    const edgePanRef = useRef<{ x: number; y: number; at: number; timer: ReturnType<typeof setInterval> | null }>(
+        { x: 0, y: 0, at: 0, timer: null },
+    );
+    const stopEdgePan = useCallback(() => {
+        const ep = edgePanRef.current;
+        if (ep.timer !== null) clearInterval(ep.timer);
+        ep.timer = null;
+    }, []);
+    useEffect(() => stopEdgePan, [stopEdgePan]);
+    const edgePanStep = useCallback(() => {
+        const ep = edgePanRef.current;
+        const surface = surfaceRef.current;
+        const v = videoRef.current;
+        const t = transformRef.current;
+        const rect = surface?.getBoundingClientRect();
+        const { vx, vy } = rect
+            ? edgePanVelocity(ep.x - rect.left, ep.y - rect.top, rect.width, rect.height)
+            : { vx: 0, vy: 0 };
+        if (!v || !rect || t.scale <= 1 || activePointers.current.size > 0 || (!vx && !vy)) {
+            stopEdgePan();
+            return;
+        }
+        const now = performance.now();
+        const dt = Math.min(0.05, Math.max(0, now - ep.at) / 1000);
+        ep.at = now;
+        const p = normalizedOverVideo(v, ep.x, ep.y);
+        if (p) sendRef.current({ t: 'move', x: p.x, y: p.y });
+        const want = clampPan(v, rect, t.scale, t.x - vx * dt, t.y - vy * dt);
+        if (want.x === t.x && want.y === t.y) {
+            stopEdgePan();
+            return;
+        }
+        // Against the updater's own `prev`, as every pan here: the ref only
+        // catches up in a passive effect.
+        setTransform(cur => {
+            if (cur.scale <= 1) return cur;
+            const c = clampPan(v, rect, cur.scale, cur.x - vx * dt, cur.y - vy * dt);
+            return c.x === cur.x && c.y === cur.y ? cur : { scale: cur.scale, x: c.x, y: c.y };
+        });
+    }, [stopEdgePan]);
+
     /** Game mode on or off. LET GO FIRST — same rule as the touch/trackpad
      *  switch: each mode tracks its own pressed state and will not release the
      *  other's, so toggling mid-hold stranded a button down on the host. */
     const setGameMode = useCallback((on: boolean) => {
+        stopEdgePan();
         for (const button of fpsPressedRef.current) send({ t: 'up', button });
         fpsPressedRef.current.clear();
         releaseRecordedPresses(touchDownSent.current, send);
         saveFpsMode(on);
         setFpsMode(on);
-    }, [send]);
+    }, [send, stopEdgePan]);
     /** The captured-pointer hint's button: Game mode on AND the mouse captured,
      *  in the one click that pointer lock needs as its gesture. */
     const enterGameMode = useCallback(() => {
@@ -1216,9 +1273,12 @@ export function DeviceStage() {
     // takes the pointer too (unless "Draw the pointer here" is off), and the
     // host reports its SHAPE instead (`remoteCursor`), which becomes this
     // pointer's. Not in Game mode: pointer lock hides this pointer, and the
-    // host's own is then the only one there is.
+    // host's own is then the only one there is. And not while control is
+    // paused: watching, the host's own pointer — wherever it is, whoever is
+    // moving it — is the one to see, and this one would only wear whatever
+    // shape the host's had when the pause began.
     const cursorOwned = session?.cursorOwned === true;
-    const desktopPointer = !isMobile && instantPointer && !fpsMode;
+    const desktopPointer = !isMobile && instantPointer && !fpsMode && controlEnabled;
     useEffect(() => {
         if (!sessionActiveId) return;
         const want = (isMobile && isMouseMode) || desktopPointer;
@@ -2592,7 +2652,8 @@ export function DeviceStage() {
     const liveStats = useDeviceLiveStats(isMobile ? null : sessionActiveId, !isMobile);
     /** And the measured input-to-picture time (the latency probe). */
     const getVideo = useCallback(() => videoRef.current, []);
-    const latency = useLatencyProbe(isMobile ? null : sessionActiveId, !isMobile, getVideo);
+    // Not while paused: there is no hand to measure, and a probe is not one.
+    const latency = useLatencyProbe(isMobile ? null : sessionActiveId, !isMobile && controlEnabled, getVideo);
 
     // ZOOM FROM THE BAR, about the middle of the picture (Ctrl+wheel zooms
     // at the pointer). The same floor, ceiling and pan clamp as the wheel.
@@ -2785,6 +2846,20 @@ export function DeviceStage() {
             if (!v) return;
             const p = normalizedOverVideo(v, e.clientX, e.clientY);
             if (p) send({ t: 'move', x: p.x, y: p.y });
+            // Zoomed in, the band along an edge pans (edge pan, above).
+            if (!isMobile) {
+                const ep = edgePanRef.current;
+                ep.x = e.clientX;
+                ep.y = e.clientY;
+                if (ep.timer === null && transformRef.current.scale > 1) {
+                    const r = e.currentTarget.getBoundingClientRect();
+                    const { vx, vy } = edgePanVelocity(e.clientX - r.left, e.clientY - r.top, r.width, r.height);
+                    if (vx || vy) {
+                        ep.at = performance.now();
+                        ep.timer = setInterval(edgePanStep, EDGE_PAN_TICK_MS);
+                    }
+                }
+            }
             return;
         }
 
@@ -2878,9 +2953,10 @@ export function DeviceStage() {
                 if (p) send({ t: 'move', x: p.x, y: p.y });
             }
         }
-    }, [send, isMobile, isMouseMode, gestures, fpsMode, fpsSens, session]);
+    }, [send, isMobile, isMouseMode, gestures, fpsMode, fpsSens, session, edgePanStep]);
 
     const onPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+        stopEdgePan();
         // GAME MODE (desktop): handled entirely here — no pointer capture
         // (setPointerCapture throws under an active lock), no pinch
         // bookkeeping, no absolute move.
@@ -2982,7 +3058,7 @@ export function DeviceStage() {
             };
             lastPinchInfo.current = { dist, center };
         }
-    }, [send, isMobile, isMouseMode, gestures, fpsMode, controlEnabled, keyBarH, toolbarH]);
+    }, [send, isMobile, isMouseMode, gestures, fpsMode, controlEnabled, keyBarH, toolbarH, stopEdgePan]);
 
     const onPointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
         // GAME MODE: send 'up' iff we relayed the matching 'down'. Keying on
@@ -3083,8 +3159,11 @@ export function DeviceStage() {
                 return;
             }
             if (!controlEnabled) return;
-            // A menu in the bar (or a dialog over the stage) has the keyboard.
-            if (barMenuOpenRef.current) return;
+            // A menu in the bar, or the Type text dialog over the stage, has
+            // the keyboard: Tab onto its buttons, Enter or Space on them, Esc,
+            // and anything typed after a click on its padding moved the focus
+            // to the page — none of it is for the machine over there.
+            if (barMenuOpenRef.current || typeTextOpen) return;
             // Typing into a LOCAL input inside the stage (the files overlay's
             // rename/search fields, etc.) is not remote input — forwarding it
             // typed every character into the controlled PC as well. The
@@ -3110,7 +3189,7 @@ export function DeviceStage() {
             window.removeEventListener('keydown', onKey, true);
             window.removeEventListener('keyup', onKey, true);
         };
-    }, [session, controlEnabled, setControl, toggleFullscreen, isMobile]);
+    }, [session, controlEnabled, setControl, toggleFullscreen, isMobile, typeTextOpen]);
 
 
     if (!session) {
@@ -3216,7 +3295,9 @@ export function DeviceStage() {
                     ? { marginTop: chromeFrozen?.top ?? keyBarH, marginBottom: chromeFrozen?.bottom ?? toolbarH }
                     : desktopCursorStyle}
                 onPointerEnter={desktopPointer ? () => setPointerOutside(false) : undefined}
-                onPointerLeave={desktopPointer ? () => {
+                onPointerLeave={!isMobile ? () => {
+                    stopEdgePan();
+                    if (!desktopPointer) return;
                     // Where the remote pointer was left, for the marker.
                     setVirtualCursor(lastAimRef.current);
                     setPointerOutside(true);

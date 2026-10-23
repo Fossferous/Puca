@@ -330,3 +330,110 @@ describe('a game that has taken the pointer', () => {
         expect(useGameMode()).toBeUndefined();
     });
 });
+
+describe('edge pan: zoomed in, an edge of the stage moves the picture', () => {
+    /** The canvas's pan and zoom, read off its style as the browser gets it. */
+    const pan = () => {
+        const el = host!.querySelector<HTMLElement>('.device-stage-canvas');
+        const m = /translate\((-?[\d.]+)px, (-?[\d.]+)px\) scale\(([\d.]+)\)/.exec(el?.style.transform ?? '');
+        return m ? { x: Number(m[1]), y: Number(m[2]), scale: Number(m[3]) } : null;
+    };
+    async function zoomIn() {
+        await act(async () => {
+            surface().dispatchEvent(new WheelEvent('wheel', {
+                bubbles: true, cancelable: true, ctrlKey: true, deltaY: -100, clientX: 640, clientY: 360,
+            }));
+        });
+        await flush();
+    }
+    /** The edge-pan clock is a 16 ms interval; fake it (and the clock it
+     *  reads) after the mount, whose own settling waits on real timers. */
+    const fakeClock = () => vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'performance'] });
+    afterEach(() => { vi.useRealTimers(); });
+
+    it('pushing against the right edge looks further right, aiming the remote pointer as the picture moves', async () => {
+        await mount();
+        await zoomIn();
+        const start = pan()!;
+        expect(start.scale, 'Ctrl+wheel zoomed in').toBeGreaterThan(1);
+        fakeClock();
+        h.sendInput.mockClear();
+        act(() => { surface().dispatchEvent(pe('pointermove', 1278, 360)); });
+        act(() => { vi.advanceTimersByTime(320); });
+        const after = pan()!;
+        expect(after.x, 'the picture moved left under a still pointer').toBeLessThan(start.x);
+        expect(after.y, 'and only sideways').toBeCloseTo(start.y, 6);
+        expect(after.scale).toBe(start.scale);
+        expect(sent('move').length, 'the remote pointer follows what is under ours').toBeGreaterThan(5);
+    });
+
+    it('stops at the picture\'s edge', async () => {
+        await mount();
+        await zoomIn();
+        fakeClock();
+        act(() => { surface().dispatchEvent(pe('pointermove', 1279, 360)); });
+        act(() => { vi.advanceTimersByTime(5000); });
+        const end = pan()!;
+        // 1280 px of stage, picture at 2x: the right edge is at x = -1280.
+        expect(end.x, 'clamped at the right edge of the picture').toBeCloseTo(-1280 * (end.scale - 1), 3);
+        // One more tick aims the remote pointer at where the picture came to
+        // rest, finds nothing left to pan, and ends the clock.
+        h.sendInput.mockClear();
+        act(() => { vi.advanceTimersByTime(32); });
+        expect(sent('move').length, 'the last aim').toBeLessThanOrEqual(1);
+        h.sendInput.mockClear();
+        act(() => { vi.advanceTimersByTime(320); });
+        expect(sent('move'), 'nothing left to pan: the clock stopped').toEqual([]);
+        expect(pan()).toEqual(end);
+    });
+
+    it('a press stops it — a click must not become a drag under a moving picture', async () => {
+        await mount();
+        await zoomIn();
+        fakeClock();
+        act(() => { surface().dispatchEvent(pe('pointermove', 1278, 360)); });
+        act(() => { vi.advanceTimersByTime(64); });
+        act(() => { surface().dispatchEvent(pe('pointerdown', 1278, 360)); });
+        const held = pan();
+        h.sendInput.mockClear();
+        act(() => { vi.advanceTimersByTime(320); });
+        expect(pan(), 'no pan while the button is down').toEqual(held);
+        expect(sent('move'), 'and no move: the press stays a click').toEqual([]);
+        act(() => { surface().dispatchEvent(pe('pointerup', 1278, 360)); });
+    });
+
+    it('leaving the stage stops it', async () => {
+        await mount();
+        await zoomIn();
+        fakeClock();
+        act(() => { surface().dispatchEvent(pe('pointermove', 1278, 360)); });
+        act(() => { vi.advanceTimersByTime(64); });
+        act(() => { surface().dispatchEvent(new MouseEvent('pointerout', { bubbles: true, relatedTarget: document.body })); });
+        const left = pan();
+        h.sendInput.mockClear();
+        act(() => { vi.advanceTimersByTime(320); });
+        expect(pan()).toEqual(left);
+        expect(sent('move')).toEqual([]);
+    });
+
+    it('CONTROL: at the whole picture an edge is only an edge', async () => {
+        await mount();
+        fakeClock();
+        act(() => { surface().dispatchEvent(pe('pointermove', 1278, 360)); });
+        act(() => { vi.advanceTimersByTime(320); });
+        expect(pan()).toEqual({ x: 0, y: 0, scale: 1 });
+        expect(sent('move'), 'the hover itself, and nothing on a clock').toHaveLength(1);
+    });
+
+    it('CONTROL: zoomed in, the middle of the stage pans nothing', async () => {
+        await mount();
+        await zoomIn();
+        const start = pan();
+        fakeClock();
+        h.sendInput.mockClear();
+        act(() => { surface().dispatchEvent(pe('pointermove', 700, 400)); });
+        act(() => { vi.advanceTimersByTime(320); });
+        expect(pan()).toEqual(start);
+        expect(sent('move')).toHaveLength(1);
+    });
+});

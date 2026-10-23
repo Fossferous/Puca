@@ -80,13 +80,19 @@ export class ProbeMatcher {
         p.ts = ts >>> 0;
         p.hostMs = hostMs;
         // Already on screen (the frame beat its answer over the network)?
-        const shown = this.presentedFrames.find(f => rtpAtOrAfter(f.ts, p.ts!));
+        // Only a frame shown after the probe left can carry it.
+        const shown = this.presentedFrames.find(f => f.at >= p.sentAt && rtpAtOrAfter(f.ts, p.ts!));
         if (shown) this.resolve(id, p, shown.at);
     }
 
     /** A frame with RTP timestamp `ts` is expected on screen at `at`. */
     presented(ts: number, at: number): void {
         const frame = { ts: ts >>> 0, at };
+        // A CLOCK THAT WENT BACKWARDS is a new stream: a media restart starts
+        // its RTP clock again near zero, and the frames kept from the old one
+        // — later by that clock — would answer the next probes at 0 ms.
+        const last = this.presentedFrames[this.presentedFrames.length - 1];
+        if (last && !rtpAtOrAfter(frame.ts, last.ts)) this.presentedFrames.length = 0;
         this.presentedFrames.push(frame);
         if (this.presentedFrames.length > PRESENTED_KEPT) this.presentedFrames.shift();
         // The answered frame itself, or — if the renderer skipped it — the
