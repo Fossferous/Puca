@@ -25,6 +25,7 @@ import {
     requestMonitor,
     sendClipboard,
     sendInput,
+    sendStreamQuality,
     sendViewSize,
     subscribeCaret,
     subscribeSessions,
@@ -75,6 +76,7 @@ import { inputBlockedMessage } from '../api/devices/inputReach';
 import { MAX_TYPED_CHARS, typeTextEvents } from '../api/devices/typeText';
 import { readLocalClipboardDetailed } from '../api/devices/clipboard';
 import { useDeviceLiveStats } from '../api/devices/useDeviceLiveStats';
+import { useLatencyProbe } from '../api/devices/useLatencyProbe';
 import { DeviceStageDesktopBar } from './DeviceStageDesktopBar';
 import { DeviceStageStats } from './DeviceStageStats';
 import { DeviceStageTypeText } from './DeviceStageTypeText';
@@ -171,6 +173,17 @@ function detectCoarsePointer(): boolean {
 /** Remembered across sessions: a chosen input mode should not reset. */
 const MOUSE_MODE_KEY = 'device-stage-mouse-mode';
 const SHOW_STATS_KEY = 'device-stage-show-stats';
+const INSTANT_POINTER_KEY = 'device-stage-instant-pointer';
+
+/** ON by default: a desktop drawing the pointer itself is the one latency
+ *  the hand can never feel (see the ownership effect below). */
+function readInstantPointerPreference(): boolean {
+    try {
+        return localStorage.getItem(INSTANT_POINTER_KEY) !== 'off';
+    } catch {
+        return true;
+    }
+}
 
 /** OFF by default: the bar's chip already says fps and delay at a glance. */
 function readShowStatsPreference(): boolean {
@@ -485,6 +498,11 @@ export function DeviceStage() {
     const onBarMenuOpenChange = useCallback((open: boolean) => { barMenuOpenRef.current = open; }, []);
     /** The live stats panel over the picture (desktop), remembered. */
     const [showStats, setShowStats] = useState(readShowStatsPreference);
+    /** Desktop: draw the pointer HERE, with no delay (the ownership effect). */
+    const [instantPointer, setInstantPointer] = useState(readInstantPointerPreference);
+    /** Desktop with the pointer drawn here: the mouse has left the picture, so
+     *  a marker shows where the remote pointer was left. */
+    const [pointerOutside, setPointerOutside] = useState(false);
     /** "Type text…": the dialog's starting text, or null while it is closed. */
     const [typeText, setTypeText] = useState<string | null>(null);
     /** Real fullscreen (stageFullscreen.ts) is on. */
@@ -1190,17 +1208,31 @@ export function DeviceStage() {
     // Handing it back on the way out (and at teardown, below) matters as much
     // as taking it: a host left not drawing its cursor would show ITS user a
     // machine with no pointer.
+    //
+    // AND ON A DESKTOP, for the opposite reason: there the pointer is the
+    // real mouse's, and the browser draws it over the picture with no delay
+    // at all, while the host's copy, drawn into the video, trails it by the
+    // whole loop — the one latency the hand can always feel. So the desktop
+    // takes the pointer too (unless "Draw the pointer here" is off), and the
+    // host reports its SHAPE instead (`remoteCursor`), which becomes this
+    // pointer's. Not in Game mode: pointer lock hides this pointer, and the
+    // host's own is then the only one there is.
     const cursorOwned = session?.cursorOwned === true;
+    const desktopPointer = !isMobile && instantPointer && !fpsMode;
     useEffect(() => {
         if (!sessionActiveId) return;
-        const want = isMobile && isMouseMode;
+        const want = (isMobile && isMouseMode) || desktopPointer;
         setCursorOwned(sessionActiveId, want);
         return () => {
             // Best effort: if the session is already gone this is a no-op,
             // and the host's capture dies with it either way.
             if (want) setCursorOwned(sessionActiveId, false);
         };
-    }, [sessionActiveId, isMobile, isMouseMode]);
+    }, [sessionActiveId, isMobile, isMouseMode, desktopPointer]);
+    /** The local pointer's shape while the desktop draws it: the host's. */
+    const desktopCursorStyle: React.CSSProperties | undefined = desktopPointer && cursorOwned
+        ? { cursor: session?.remoteCursor ?? 'default' }
+        : undefined;
 
     // THE POINTER HALF OF "COPY DIAGNOSTICS". Rendered state goes through a
     // ref (the same split as the caret diagnostic below); the machine and the
@@ -1208,7 +1240,8 @@ export function DeviceStage() {
     const inputDiagStateRef = useRef<Omit<StageInputState, 'stageContacts' | 'gesture'>>({
         isMobile, isMouseMode, fpsMode, controlEnabled, cursorOwned, cursorDrawn: false,
     });
-    const cursorDrawn = cursorOwned && cursorAt !== null;
+    // On a desktop the browser draws it; the marker is only for outside.
+    const cursorDrawn = cursorOwned && (cursorAt !== null || desktopPointer);
     useEffect(() => {
         inputDiagStateRef.current = { isMobile, isMouseMode, fpsMode, controlEnabled, cursorOwned, cursorDrawn };
     }, [isMobile, isMouseMode, fpsMode, controlEnabled, cursorOwned, cursorDrawn]);
@@ -2545,6 +2578,10 @@ export function DeviceStage() {
         setTypeText(r.text.length > MAX_TYPED_CHARS * 2 ? r.text.slice(0, MAX_TYPED_CHARS * 2) : r.text);
     }, []);
 
+    const setInstantPointerRemembered = useCallback((on: boolean) => {
+        setInstantPointer(on);
+        try { localStorage.setItem(INSTANT_POINTER_KEY, on ? 'on' : 'off'); } catch { /* this session only */ }
+    }, []);
     const toggleShowStats = useCallback(() => {
         setShowStats(on => {
             try { localStorage.setItem(SHOW_STATS_KEY, on ? 'off' : 'on'); } catch { /* this session only */ }
@@ -2553,6 +2590,9 @@ export function DeviceStage() {
     }, []);
     /** The desktop bar's live numbers: polled only on a desktop stage. */
     const liveStats = useDeviceLiveStats(isMobile ? null : sessionActiveId, !isMobile);
+    /** And the measured input-to-picture time (the latency probe). */
+    const getVideo = useCallback(() => videoRef.current, []);
+    const latency = useLatencyProbe(isMobile ? null : sessionActiveId, !isMobile, getVideo);
 
     // ZOOM FROM THE BAR, about the middle of the picture (Ctrl+wheel zooms
     // at the pointer). The same floor, ceiling and pan clamp as the wheel.
@@ -2625,6 +2665,27 @@ export function DeviceStage() {
     const pendingQuality = useStreamStore(st => (sessionId ? st.pendingQualities[sessionId] : undefined));
     const shown = pendingQuality ?? confirmedQuality;
     const qualityValue = shown ? `${shown.bitrate},${shown.fps}` : '6000,30';
+
+    // 60 FPS ON YOUR OWN NETWORK. A session starts at 30 fps / 6 Mbps, which
+    // suits a link across the internet; across a room it only costs time: the
+    // host captures on a fixed clock, so whatever you did waits up to a whole
+    // frame (33 ms, 17 on average) before it is even captured, and the stream
+    // has bandwidth to spare. Once the picture is coming directly over UDP with
+    // a round trip under 15 ms, and nobody has picked a quality yet, step up
+    // ONCE to 60 fps / 10 Mbps (the Ultra preset) and say so. Desktop only — a
+    // phone pays for decoding twice the frames in battery.
+    const autoQualityRef = useRef<string | null>(null);
+    const lanDirect = !!liveStats && liveStats.path === 'direct' && liveStats.protocol === 'udp'
+        && liveStats.rttMs !== null && liveStats.rttMs < 15;
+    useEffect(() => {
+        if (isMobile || !sessionId || !lanDirect) return;
+        if (autoQualityRef.current === sessionId) return;
+        autoQualityRef.current = sessionId;
+        if (qualityPending || qualityValue !== '6000,30') return;   // somebody chose
+        sendStreamQuality(sessionId, 60, 10_000);
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setClipboardNote('On your own network: streaming at 60 fps for less delay (Quality to change)');
+    }, [isMobile, sessionId, lanDirect, qualityPending, qualityValue]);
     useEffect(() => {
         if (!sessionId) return;
         let clearTimer: ReturnType<typeof setTimeout> | null = null;
@@ -3102,6 +3163,8 @@ export function DeviceStage() {
                     onSetGameMode={setGameMode}
                     fpsSens={fpsSens}
                     onAdjustSens={adjustFpsSens}
+                    instantPointer={instantPointer}
+                    onSetInstantPointer={setInstantPointerRemembered}
                     fitResolution={fitResolution}
                     onSetFit={setFitResolutionRemembered}
                     qualityValue={qualityValue}
@@ -3113,6 +3176,7 @@ export function DeviceStage() {
                     showStats={showStats}
                     onToggleStats={toggleShowStats}
                     stats={liveStats}
+                    latency={latency.reading}
                     tunnels={tunnels}
                     onOpenFiles={() => setShowFiles(v => !v)}
                     onMinimize={minimizeStage}
@@ -3150,7 +3214,13 @@ export function DeviceStage() {
                 // owns the picture while it is up.
                 style={isMobile && ((chromeFrozen?.top ?? keyBarH) > 0 || (chromeFrozen?.bottom ?? toolbarH) > 0)
                     ? { marginTop: chromeFrozen?.top ?? keyBarH, marginBottom: chromeFrozen?.bottom ?? toolbarH }
-                    : undefined}
+                    : desktopCursorStyle}
+                onPointerEnter={desktopPointer ? () => setPointerOutside(false) : undefined}
+                onPointerLeave={desktopPointer ? () => {
+                    // Where the remote pointer was left, for the marker.
+                    setVirtualCursor(lastAimRef.current);
+                    setPointerOutside(true);
+                } : undefined}
                 onPointerMove={onPointerMove}
                 onPointerDown={onPointerDown}
                 onPointerUp={onPointerUp}
@@ -3218,7 +3288,7 @@ export function DeviceStage() {
                         Inside the transformed canvas, so a pinch-zoom moves
                         the picture and the pointer together; the inverse scale
                         keeps it a constant size on screen at any zoom. */}
-                    {cursorOwned && cursorAt && (
+                    {cursorOwned && cursorAt && (isMobile || (desktopPointer && pointerOutside)) && (
                         <div
                             className="device-stage-virtual-cursor"
                             style={{
@@ -3375,7 +3445,14 @@ export function DeviceStage() {
                         </button>
                     </div>
                 )}
-                {!isMobile && showStats && <DeviceStageStats stats={liveStats} />}
+                {!isMobile && showStats && (
+                    <DeviceStageStats
+                        stats={liveStats}
+                        latency={latency.reading}
+                        comparison={latency.comparison}
+                        onCompare={latency.compare}
+                    />
+                )}
                 {!isMobile && fpsMode && !pointerLocked && controlEnabled && (
                     <div className="device-stage-fps-hint">
                         <CrosshairIcon /> Click the screen to capture your mouse · Esc releases it

@@ -600,3 +600,19 @@
     resize: vertical;
 }
 .device-stage-typetext-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* The panel's one control: the before-and-after comparison. It alone takes
+   the pointer (the panel does not), and stops its own presses there. */
+.device-stage-stats-compare {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+    flex-wrap: wrap;
+}
+.device-stage-stats-compare .device-stage-btn {
+    pointer-events: auto;
+    min-height: 26px;
+    padding: 3px 8px;
+    font-size: 12px;
+}

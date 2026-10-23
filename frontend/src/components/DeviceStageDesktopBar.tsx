@@ -32,6 +32,7 @@ import { STREAM_QUALITY_PRESETS, parsePresetValue, presetValue } from '../api/de
 import type { FitResolution } from '../api/devices/viewSize';
 import type { TunnelStatus } from '../api/devices/tunnel';
 import type { LiveStats } from '../api/devices/liveStats';
+import type { LatencyReading } from '../api/devices/useLatencyProbe';
 import { FPS_SENS_MAX, FPS_SENS_MIN, FPS_SENS_STEP, fmtSens } from '../utils/fpsSens';
 import {
     ActivityIcon, ChatIcon, ChevronDownIcon, CopyIcon, CrosshairIcon, DisconnectIcon, FolderIcon, ForwardIcon,
@@ -49,6 +50,9 @@ export interface DesktopBarProps {
     onSetGameMode: (on: boolean) => void;
     fpsSens: number;
     onAdjustSens: (delta: number) => void;
+    /** Draw the pointer here, with no delay (the host reports its shape). */
+    instantPointer: boolean;
+    onSetInstantPointer: (on: boolean) => void;
     fitResolution: FitResolution;
     onSetFit: (next: FitResolution) => void;
     qualityValue: string;
@@ -60,6 +64,8 @@ export interface DesktopBarProps {
     showStats: boolean;
     onToggleStats: () => void;
     stats: LiveStats | null;
+    /** The measured input-to-picture time (the latency probe), when there is one. */
+    latency: LatencyReading | null;
     tunnels: TunnelStatus | null;
     onOpenFiles: () => void;
     onMinimize: () => void;
@@ -109,13 +115,15 @@ const Sep = () => <div className="dsb-sep" role="separator" />;
 
 /** The chip's latency figure: the measured input-to-picture time when the
  *  host answers the probe, else this end's share (a floor, shown with ~). */
-function latencyText(stats: LiveStats): string | null {
+function latencyText(stats: LiveStats, latency: LatencyReading | null): string | null {
+    if (latency?.totalMs != null) return `${Math.round(latency.totalMs)} ms`;
     if (stats.hereMs === null) return null;
     return `~${stats.hereMs} ms`;
 }
 
-function statsTitle(stats: LiveStats): string {
+function statsTitle(stats: LiveStats, latency: LatencyReading | null): string {
     const rows = [
+        latency?.totalMs != null && `Input to picture, measured: ${Math.round(latency.totalMs)} ms${latency.hostMs != null ? ` (that computer: ${Math.round(latency.hostMs)} ms)` : ''}`,
         stats.frame && `Picture ${stats.frame}${stats.fps !== null ? ` at ${stats.fps} fps` : ''}`,
         stats.path && `Path ${stats.path === 'relay' ? 'via a relay (TURN)' : 'direct'}${stats.protocol ? ` over ${stats.protocol.toUpperCase()}` : ''}`,
         stats.rttMs !== null && `Round trip ${stats.rttMs} ms`,
@@ -182,7 +190,7 @@ export function DeviceStageDesktopBar(p: DesktopBarProps) {
     );
 
     const stats = p.stats;
-    const latency = stats ? latencyText(stats) : null;
+    const latency = stats ? latencyText(stats, p.latency) : null;
 
     return (
         <div className="device-stage-bar dsb">
@@ -364,6 +372,12 @@ export function DeviceStageDesktopBar(p: DesktopBarProps) {
                     {open === 'mouse' && (
                         <div className="dsb-menu" role="menu" aria-label="Mouse">
                             <Item
+                                icon={<MouseIcon />}
+                                label="Draw the pointer here (no delay)"
+                                checked={p.instantPointer}
+                                onClick={act(() => p.onSetInstantPointer(!p.instantPointer))}
+                            />
+                            <Item
                                 icon={<CrosshairIcon />}
                                 label="Game mode (send mouse movement, for games)"
                                 checked={p.fpsMode}
@@ -434,7 +448,7 @@ export function DeviceStageDesktopBar(p: DesktopBarProps) {
                 <button
                     type="button"
                     className={`dsb-stats-chip${stats.path === 'relay' ? ' relay' : ''}`}
-                    title={statsTitle(stats)}
+                    title={statsTitle(stats, p.latency)}
                     aria-label="Show stats"
                     aria-pressed={p.showStats}
                     onClick={p.onToggleStats}

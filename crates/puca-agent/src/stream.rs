@@ -1304,6 +1304,10 @@ fn run(
 
     let mut frame_interval = Duration::from_secs_f64(1.0 / current_fps.max(1) as f64);
     let mut next_frame = Instant::now();
+    // When the pump last ran, for the floor under an input's pull-in, and the
+    // latency probe waiting for its frame (latency.rs).
+    let mut last_capture_at: Option<Instant> = None;
+    let mut probe: Option<crate::latency::Probe> = None;
     let mut want_keyframe = true;
     let mut rx_count: u64 = 0;
     let mut tx_count: u64 = 0;
@@ -1382,6 +1386,10 @@ fn run(
     // controller takes ownership; survives capture rebuilds (monitor
     // switches) so ownership cannot be silently revoked by a picker click.
     let mut draw_host_cursor = true;
+    // While the viewer draws the pointer itself (draw_host_cursor off), which
+    // SHAPE the host is showing, said on the caret channel when it changes
+    // (pointer_shape.rs).
+    let mut shape_reporter = crate::pointer_shape::ShapeReporter::default();
     // File replies the channel refused for want of send budget, retried each
     // pass. FIFO — order is the matching rule for id-less clients.
     let mut pending_fs_replies: std::collections::VecDeque<(str0m::channel::ChannelId, Vec<u8>)> =
@@ -1766,6 +1774,9 @@ fn run(
                     if let Some(c) = capture.as_mut() {
                         c.set_draw_cursor(on);
                     }
+                    // A viewer that has just taken the pointer needs its shape
+                    // at once, not at the next change.
+                    shape_reporter.reset();
                     // The retained still-frame holds the OLD cursor baked into
                     // its pixels, and a motionless desktop re-encodes exactly
                     // that frame. It used to be DROPPED here, which on a still
@@ -2087,6 +2098,31 @@ fn run(
                                         |k, p| crate::control_key::open(k, p),
                                     ) {
                                         Ok(event_json) => {
+                                            // THE LATENCY PROBE (latency.rs): nothing
+                                            // to inject — capture as an input would
+                                            // make it, send the next frame even on a
+                                            // still screen, answer with its RTP time.
+                                            // Only a video stream can answer one.
+                                            if let Some(id) = crate::latency::parse_probe(&event_json) {
+                                                if mode == StreamMode::Video {
+                                                    let arrived = Instant::now();
+                                                    probe = Some(crate::latency::Probe { id, arrived });
+                                                    if !crate::latency::wants_classic(&event_json) {
+                                                        next_frame = next_frame.min(crate::latency::capture_after_input(
+                                                            arrived, last_capture_at, frame_interval,
+                                                        ));
+                                                    }
+                                                }
+                                                continue;
+                                            }
+                                            // CAPTURE SOON AFTER IT (latency.rs): what
+                                            // this input changes is in the very next
+                                            // frame instead of waiting for the clock.
+                                            if mode == StreamMode::Video && !crate::latency::wants_classic(&event_json) {
+                                                next_frame = next_frame.min(crate::latency::capture_after_input(
+                                                    Instant::now(), last_capture_at, frame_interval,
+                                                ));
+                                            }
                                             match serde_json::from_str::<puca_input::ControlInput>(
                                                 &event_json,
                                             ) {
@@ -2267,6 +2303,26 @@ fn run(
             }
         }
 
+        // --- the pointer's shape, for a viewer that draws the pointer ---------
+        //
+        // The viewer owns the pointer (draw_host_cursor off): its browser draws
+        // your real mouse pointer over the picture with no delay, and needs the
+        // host's SHAPE — I-beam, hand, resize, busy, hidden (pointer_shape.rs).
+        // Looked at every 30 ms, said only when it changes; a write SCTP refuses
+        // is said again on the next look rather than queued behind newer ones.
+        if !draw_host_cursor && mode == StreamMode::Video && shape_reporter.due(now) {
+            if let Some(cid) = caret_channel {
+                let css = crate::pointer_shape::current_css();
+                if let Some(css) = shape_reporter.observe(now, css) {
+                    if let Some(mut c) = sender.rtc_mut().channel(cid) {
+                        if let Ok(true) = c.write(false, &crate::pointer_shape::cursor_line(css)) {
+                            shape_reporter.sent(css);
+                        }
+                    }
+                }
+            }
+        }
+
         // --- display-topology self-heal --------------------------------------
         //
         // Windows re-shapes the desktop under a live capture with no signal to
@@ -2324,10 +2380,29 @@ fn run(
             if now > next_frame + frame_interval {
                 next_frame = now;
             }
-            match pump_frame(capture.as_mut().expect("checked is_some above"), &mut encoder, &mut sender, current_bitrate, current_fps, &mut want_keyframe, now, &mut pump_stats, &mut last_frame, frames_sent == 0, switch_awaits_whole_picture(switch_started, now), view_size, &mut fit) {
+            last_capture_at = Some(now);
+            // A probe nobody could answer in a second is stale (a capture
+            // that is not producing anything); the viewer has given up on it.
+            if probe.is_some_and(|p| now.duration_since(p.arrived) > Duration::from_secs(1)) {
+                probe = None;
+            }
+            match pump_frame(capture.as_mut().expect("checked is_some above"), &mut encoder, &mut sender, current_bitrate, current_fps, &mut want_keyframe, now, &mut pump_stats, &mut last_frame, frames_sent == 0, switch_awaits_whole_picture(switch_started, now), view_size, &mut fit, probe.is_some()) {
                 Ok(sent) => {
                     frames_sent += u64::from(sent);
                     flushed_frame = sent;
+                    // THE PROBE'S FRAME is this one: answer with its RTP time
+                    // on the caret channel, the agent's one way to the viewer.
+                    if sent {
+                        if let (Some(p), Some(ts), Some(cid)) = (probe, sender.last_rtp_timestamp(), caret_channel) {
+                            probe = None;
+                            let line = crate::latency::probe_reply(p.id, ts, Instant::now().duration_since(p.arrived));
+                            if let Some(mut c) = sender.rtc_mut().channel(cid) {
+                                // Dropped, not queued, when SCTP is full: the
+                                // viewer times the probe out and sends another.
+                                let _ = c.write(false, &line);
+                            }
+                        }
+                    }
                     if sent {
                         // Only a WHOLE picture ends a switch (on_frame_sent).
                         // An All Displays frame can go out with a screen still
@@ -3292,12 +3367,17 @@ fn pump_frame(
     // frames (composite::FitState).
     view: Option<(u32, u32)>,
     fit: &mut crate::composite::FitState,
+    // A latency probe is waiting for this frame (latency.rs): send one even
+    // on a still screen, and do not sit out the acquire wait for a change
+    // that is not coming — that wait would be counted in the reading.
+    probe_waiting: bool,
 ) -> Result<bool, PumpError> {
     let t_capture = Instant::now();
     // Something WAITING for a picture: a keyframe (a rebuilt encoder, a peer's
-    // request) or the viewer fit (a stage change, a step settling). Either is
-    // a reason to re-send the held picture of a still screen.
-    let need_picture = *want_keyframe || fit.needs_frame();
+    // request), the viewer fit (a stage change, a step settling) or a latency
+    // probe. Each is a reason to re-send the held picture of a still screen.
+    let need_picture = *want_keyframe || fit.needs_frame() || probe_waiting;
+    let acquire_ms = if probe_waiting { 1 } else { 5 };
     // BORROWED, not owned. The composite path used to hand back a cloned
     // canvas every tick — 56 MB per frame on a three-screen desktop, competing
     // for memory bandwidth with the encoder that is about to read it.
@@ -3317,7 +3397,7 @@ fn pump_frame(
             // canvas is not re-sent either; the stranded-switch net fetches
             // the screens still missing.
             let holding = v.holds_picture(session_cold, switch_waiting);
-            match v.refresh(5) {
+            match v.refresh(acquire_ms) {
                 Ok(()) => {}
                 // STILL SCREEN — see the long note on the Single arm below.
                 // Same rule, same function: an inline copy of this condition
@@ -3335,7 +3415,7 @@ fn pump_frame(
             (w, h, s, b)
         }
         AnyCapture::Single(c) => {
-            match c.next_frame(5) {
+            match c.next_frame(acquire_ms) {
                 Ok(f) => {
                     *last_frame = Some(f);
                 }

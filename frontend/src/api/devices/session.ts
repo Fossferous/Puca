@@ -53,9 +53,10 @@ import { deviceKeyDh } from './deviceKeyRc';
 import { buildClipboardEvent, isClipboardEvent, readLocalClipboardDetailed, writeLocalClipboard, MAX_CLIPBOARD_BYTES } from './clipboard';
 import { getHostBackend } from './hostBackend';
 import { blockedAppName } from './inputReach';
+import { ProbeMatcher, type ProbeResult } from './latencyProbe';
 import { attachTunnelChannel, closeTunnels } from './tunnel';
 import { SerialQueue } from '../serialQueue';
-import { InputCoalescer } from './inputCoalescer';
+import { InputCoalescer, MOVE_INTERVAL_DIRECT_MS, MOVE_INTERVAL_MS } from './inputCoalescer';
 import { issueUaChallenge, unattendedState, verifyUaResponse } from './unattendedHost';
 import {
     confirmUaSeed,
@@ -179,7 +180,7 @@ export const SHUTDOWN_REASON = 'the device is shutting down';
 /** The input kinds the diagnostic counts by name. Anything else is 'other':
  *  the wire's `t` is the peer's own string, and a diagnostic must never turn
  *  an arbitrary one into a key of its output. */
-const INPUT_KINDS = new Set(['move', 'rmove', 'down', 'up', 'wheel', 'key', 'text', 'sas', 'clipboard']);
+const INPUT_KINDS = new Set(['move', 'rmove', 'down', 'up', 'wheel', 'key', 'text', 'sas', 'clipboard', 'probe']);
 
 /** Events per second over a rolling window, for the diagnostics — plus what
  *  KIND each one was and which lane it took, cumulatively.
@@ -412,6 +413,10 @@ export interface DeviceControlSession {
      *  mouse-look, which absolute moves cannot steer and Game mode can.
      *  Host-asserted like `cursorClipped` (`pointer-captured` notice). */
     pointerCaptured: boolean;
+    /** CONTROLLER: the host's pointer SHAPE as a CSS cursor keyword ('text',
+     *  'pointer', 'none', …), reported by the agent while this end draws the
+     *  pointer itself (pointer_shape.rs). Null until the host says. */
+    remoteCursor: string | null;
     /** CONTROLLER: transient display-power outcome line ("Turned off 2 of
      *  3; ...", the no-response timeout, a DDC refusal). Auto-clears; never
      *  a session error. */
@@ -766,6 +771,9 @@ interface Internal extends DeviceControlSession {
     inputRate: RateCounter;
     /** CONTROLLER: collapses outgoing pointer motion. Created on first input. */
     sendCoalescer: InputCoalescer | null;
+    /** CONTROLLER: the latency probe's matching (latencyProbe.ts), created on
+     *  the first probe. */
+    probes?: ProbeMatcher;
     /** HOST: collapses motion that survived the network, before it reaches the
      *  agent's one-at-a-time pipe. */
     recvCoalescer: InputCoalescer | null;
@@ -880,6 +888,7 @@ function emit(): void {
         cursorClipped: s.cursorClipped,
         inputBlocked: s.inputBlocked,
         pointerCaptured: s.pointerCaptured,
+        remoteCursor: s.remoteCursor,
         powerNotice: s.powerNotice,
         peerName: s.peerName,
         hostScreen: s.hostScreen,
@@ -2847,6 +2856,22 @@ async function handleInputHello(s: Internal, dc: RTCDataChannel, raw: unknown): 
 }
 
 function handleCaretMessage(s: Internal, raw: unknown): void {
+    // The latency probe's answer shares the agent's one way to this end; it is
+    // not a caret and must not count as a malformed one.
+    const answer = parseProbeAnswer(raw);
+    if (answer) {
+        s.probes?.answered(answer.p, answer.ts, answer.host);
+        return;
+    }
+    // So does the host's pointer shape, for a viewer drawing the pointer.
+    const shape = parseCursorShape(raw);
+    if (shape) {
+        if (shape !== s.remoteCursor) {
+            s.remoteCursor = shape;
+            emit();
+        }
+        return;
+    }
     const r = parseCaretFrame(raw);
     if (!r) {
         s.caretDroppedMalformed++;
@@ -3552,6 +3577,7 @@ export async function connectToDevice(
         cursorClippedSent: null,
         inputBlocked: null,
         pointerCaptured: false,
+        remoteCursor: null,
         powerNotice: null, pendingPowerAckTimer: null, powerNoticeTimer: null,
         peerName: opts?.peerName?.trim() || null,
         hostScreen: null,
@@ -3716,6 +3742,91 @@ export function sendInput(sessionId: string, event: unknown): boolean {
     return true;
 }
 
+/** `{t:'probe'}` — the latency probe, which only the agent's channel carries. */
+function isProbeEvent(event: unknown): boolean {
+    return (event as { t?: unknown } | null)?.t === 'probe';
+}
+
+/** The agent's answer to a probe on the caret channel
+ *  (`{"k":"probe","p":7,"ts":123456,"host":3.5}`, latency.rs), or null. */
+export function parseProbeAnswer(raw: unknown): { p: number; ts: number; host: number | null } | null {
+    if (typeof raw !== 'string' || !raw.includes('"probe"')) return null;
+    let v: unknown;
+    try { v = JSON.parse(raw); } catch { return null; }
+    const o = v as { k?: unknown; p?: unknown; ts?: unknown; host?: unknown } | null;
+    if (!o || o.k !== 'probe') return null;
+    if (typeof o.p !== 'number' || !Number.isInteger(o.p) || typeof o.ts !== 'number' || !Number.isFinite(o.ts)) return null;
+    return { p: o.p, ts: o.ts, host: typeof o.host === 'number' && Number.isFinite(o.host) ? o.host : null };
+}
+
+/** The CSS cursor keywords the host may name (pointer_shape.rs STANDARD, and
+ *  `none`). Anything else is refused: the value lands in a style. */
+const CURSOR_KEYWORDS = new Set([
+    'default', 'text', 'wait', 'crosshair', 'nwse-resize', 'nesw-resize', 'ew-resize',
+    'ns-resize', 'move', 'not-allowed', 'pointer', 'progress', 'help', 'none',
+]);
+
+/** The agent's `{"k":"cursor","css":"text"}` on the caret channel, or null. */
+export function parseCursorShape(raw: unknown): string | null {
+    if (typeof raw !== 'string' || !raw.includes('"cursor"')) return null;
+    let v: unknown;
+    try { v = JSON.parse(raw); } catch { return null; }
+    const o = v as { k?: unknown; css?: unknown } | null;
+    if (!o || o.k !== 'cursor' || typeof o.css !== 'string') return null;
+    return CURSOR_KEYWORDS.has(o.css) ? o.css : null;
+}
+
+/** Can a latency probe be sent on this session now? Only over the agent's
+ *  proved direct channel: the relay ends at the host app, which has no frame
+ *  to answer with. */
+export function latencyProbeUsable(sessionId: string): boolean {
+    const s = sessions.get(sessionId);
+    if (!s || s.role !== 'controller' || s.phase !== 'active' || !s.key) return false;
+    if (s.share && !s.share.capabilities.includes('control')) return false;
+    return inputUsesTheChannel({
+        proved: s.inputProved,
+        open: inputChannelUsable(s),
+        relayForced: false,
+        lastRelayInputAt: s.lastRelayInputAt,
+        now: Date.now(),
+    });
+}
+
+/**
+ * Send one latency probe (latencyProbe.ts). `classic` asks the agent for the
+ * OLD timing (no capture pulled in after the input), for the before-and-after
+ * comparison. Returns false when no probe could go: no direct channel, or one
+ * already in flight (one at a time, so a slow answer is never mistaken for a
+ * later probe's).
+ *
+ * Not through `sendInput`: a probe is not the user driving, so it must not
+ * feed the liveness ladder's "input but no frames" clock, and it moves nothing.
+ */
+export function sendLatencyProbe(sessionId: string, classic = false): boolean {
+    const s = sessions.get(sessionId);
+    if (!s || !latencyProbeUsable(sessionId)) return false;
+    const probes = s.probes ??= new ProbeMatcher();
+    if (probes.inFlight(performance.now()) > 0) return false;
+    const id = probes.sent(performance.now(), classic);
+    const event = classic ? { t: 'probe', p: id, q: 1 } : { t: 'probe', p: id };
+    void sealAndSendInput(s, event).then(ok => { if (!ok) probes.cancel(id); });
+    return true;
+}
+
+/** The stage presented a frame (`requestVideoFrameCallback`): its RTP
+ *  timestamp and when it is expected on screen (performance.now() time). */
+export function noteFramePresented(sessionId: string, rtpTimestamp: number, at: number): void {
+    sessions.get(sessionId)?.probes?.presented(rtpTimestamp, at);
+}
+
+/** Every probe this session resolves, as it resolves. */
+export function subscribeLatency(sessionId: string, cb: (r: ProbeResult) => void): () => void {
+    const s = sessions.get(sessionId);
+    if (!s || s.role !== 'controller') return () => { /* nothing to undo */ };
+    const probes = s.probes ??= new ProbeMatcher();
+    return probes.subscribe(cb);
+}
+
 /** Above this many unsent bytes on the socket, MOTION is HELD in the
  *  coalescer (still superseding/summing) rather than queued onto a stalled
  *  socket. Held, never dropped: the first version DROPPED it in the emit
@@ -3751,6 +3862,9 @@ function sendCoalescer(s: Internal): InputCoalescer {
             event => { void sealAndSendInput(s, event); },
             undefined,
             () => motionLaneState(s).open,
+            // Half the wait on the agent's direct channel, which pays none of
+            // the relay's per-event cost (MOVE_INTERVAL_DIRECT_MS).
+            () => (motionLaneState(s).lane === 'channel' ? MOVE_INTERVAL_DIRECT_MS : MOVE_INTERVAL_MS),
         );
     }
     return s.sendCoalescer;
@@ -3794,6 +3908,10 @@ async function sealAndSendInput(s: Internal, event: unknown): Promise<boolean> {
             lastRelayInputAt: s.lastRelayInputAt,
             now,
         });
+        // A LATENCY PROBE IS FOR THE AGENT ONLY. On the relay it would reach
+        // the host app, which knows no such input — and it would time the
+        // wrong path anyway.
+        if (!viaDc && isProbeEvent(event)) return false;
         try {
             if (viaDc) {
                 // UNDER THE KEY THE HELLO NAMED, which for an attended host is
@@ -4165,6 +4283,7 @@ export function installDeviceSessions(): void {
                 cursorClippedSent: null,
                 inputBlocked: null,
                 pointerCaptured: false,
+                remoteCursor: null,
                 powerNotice: null, pendingPowerAckTimer: null, powerNoticeTimer: null,
                 peerName: null,
                 hostScreen: null,

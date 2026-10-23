@@ -25,7 +25,10 @@ const h = vi.hoisted(() => ({
     requestMonitor: vi.fn(),
     sendStreamQuality: vi.fn(),
     endSession: vi.fn(),
+    setCursorOwned: vi.fn(),
     storage: new Map<string, string>(),
+    /** What deviceStatsSample answers: null (no stats) unless a test sets it. */
+    statsPath: null as null | { path: 'direct' | 'relay'; protocol: string; rttMs: number },
 }));
 
 vi.mock('../api/devices/session', () => ({
@@ -41,16 +44,27 @@ vi.mock('../api/devices/session', () => ({
     sendInput: (...a: unknown[]) => (h.sendInput as unknown as (...x: unknown[]) => boolean)(...a),
     requestMonitor: (...a: unknown[]) => h.requestMonitor(...a),
     requestKeyframe: () => true,
-    setCursorOwned: () => { /* noop */ },
+    setCursorOwned: (...a: unknown[]) => h.setCursorOwned(...a),
     endSession: (...a: unknown[]) => h.endSession(...a),
     sendClipboard: async () => null,
     sendStreamQuality: (...a: unknown[]) => h.sendStreamQuality(...a),
     setPrivacyMode: (...a: unknown[]) => h.setPrivacyMode(...a),
     sendPowerAction: (...a: unknown[]) => (h.sendPowerAction as unknown as (...x: unknown[]) => boolean)(...a),
     deviceDiagnosticsWindow: async () => [],
-    deviceStatsSample: async () => null,
+    deviceStatsSample: async () => (h.statsPath
+        ? {
+            at: Date.now(), framesDecoded: Math.floor(performance.now() / 16), bytesReceived: 0, freezeCount: 0,
+            totalDecodeTime: 0, jitterBufferDelay: 0, jitterBufferEmittedCount: 0, packetsLost: 0, packetsReceived: 0,
+            frameWidth: 1920, frameHeight: 1080, decoder: null, hardwareDecode: null, inputLane: 'channel',
+            ...h.statsPath,
+        }
+        : null),
     activeSessions: () => [],
     requestFileAccess: () => { /* noop */ },
+    latencyProbeUsable: () => false,
+    sendLatencyProbe: () => false,
+    noteFramePresented: () => { /* noop */ },
+    subscribeLatency: () => () => { /* unsubscribe */ },
 }));
 vi.mock('../api/devices/tunnel', () => ({
     tunnelStatus: async () => ({ listeners: [], inbound_streams: 0, outbound_streams: 0, forwards: [] }),
@@ -90,7 +104,8 @@ beforeEach(() => {
     vi.mocked(localStorage.setItem).mockImplementation((k: string, v: string) => { h.storage.set(k, v); });
     h.listeners.clear();
     h.snapshot = [];
-    for (const f of [h.sendInput, h.sendPowerAction, h.setPrivacyMode, h.requestMonitor, h.sendStreamQuality, h.endSession]) f.mockClear();
+    h.statsPath = null;
+    for (const f of [h.sendInput, h.sendPowerAction, h.setPrivacyMode, h.requestMonitor, h.sendStreamQuality, h.endSession, h.setCursorOwned]) f.mockClear();
 });
 
 let root: Root | null = null;
@@ -313,5 +328,89 @@ describe('a view-only share', () => {
         await openMenu('Screen');
         expect(menuItem('Turn displays off')).toBeUndefined();
         expect(menuItem('Privacy mode (blank that computer\'s screen)')).toBeUndefined();
+    });
+});
+
+describe('60 fps on your own network', () => {
+    // The live stats need two readings a second apart before the path is known.
+    const settleStats = () => act(async () => { await new Promise(r => setTimeout(r, 1300)); });
+
+    it('a direct UDP picture with a short round trip steps up ONCE to 60 fps / 10 Mbps, and says so', async () => {
+        h.statsPath = { path: 'direct', protocol: 'udp', rttMs: 3 };
+        await mount();
+        await settleStats();
+        await flush();
+        expect(h.sendStreamQuality).toHaveBeenCalledTimes(1);
+        expect(h.sendStreamQuality).toHaveBeenCalledWith('ds-1', 60, 10000);
+        expect(host!.textContent).toContain('streaming at 60 fps');
+        await settleStats();
+        expect(h.sendStreamQuality, 'once per session').toHaveBeenCalledTimes(1);
+    }, 15_000);
+
+    it('a relayed picture stays where it is', async () => {
+        h.statsPath = { path: 'relay', protocol: 'udp', rttMs: 3 };
+        await mount();
+        await settleStats();
+        expect(h.sendStreamQuality).not.toHaveBeenCalled();
+    }, 15_000);
+
+    it('a long round trip stays where it is', async () => {
+        h.statsPath = { path: 'direct', protocol: 'udp', rttMs: 40 };
+        await mount();
+        await settleStats();
+        expect(h.sendStreamQuality).not.toHaveBeenCalled();
+    }, 15_000);
+});
+
+describe('the pointer drawn here, with no delay', () => {
+    const surface = () => host!.querySelector<HTMLElement>('.device-stage-surface')!;
+    const lastOwnership = () => h.setCursorOwned.mock.calls.at(-1);
+
+    it('a desktop takes the pointer from the host by default', async () => {
+        await mount();
+        expect(lastOwnership()).toEqual(['ds-1', true]);
+    });
+
+    it("once the host hands it over, this pointer takes the host's shape", async () => {
+        await mount({ cursorOwned: true, remoteCursor: 'text' });
+        expect(surface().style.cursor).toBe('text');
+        // Hidden over there (a game, a video): hidden here.
+        h.snapshot = [session({ cursorOwned: true, remoteCursor: 'none' })];
+        await act(async () => { for (const l of h.listeners) l(h.snapshot); });
+        await flush();
+        expect(surface().style.cursor).toBe('none');
+    });
+
+    it("POSITIVE CONTROL: a host that kept its pointer leaves this one alone (the stylesheet's crosshair)", async () => {
+        await mount({ cursorOwned: false, remoteCursor: 'text' });
+        expect(surface().style.cursor).toBe('');
+    });
+
+    it('the marker shows where the remote pointer was left only while the mouse is outside the picture', async () => {
+        await mount({ cursorOwned: true, remoteCursor: 'default' });
+        const marker = () => host!.querySelector('.device-stage-virtual-cursor');
+        expect(marker(), 'the real pointer is the pointer').toBeNull();
+        // React makes enter/leave out of over/out with a relatedTarget, as a
+        // browser's mouse produces them crossing the surface's edge.
+        await act(async () => { surface().dispatchEvent(new MouseEvent('pointerout', { bubbles: true, relatedTarget: document.body })); });
+        await flush();
+        expect(marker(), 'outside: where it was left').toBeTruthy();
+        await act(async () => { surface().dispatchEvent(new MouseEvent('pointerover', { bubbles: true, relatedTarget: document.body })); });
+        await flush();
+        expect(marker(), 'back over the picture: the real pointer again').toBeNull();
+    });
+
+    it('turning it off in the Mouse menu hands the pointer back to the host, remembered', async () => {
+        await mount();
+        await openMenu('Mouse');
+        await click(menuItem('Draw the pointer here (no delay)'));
+        expect(lastOwnership()).toEqual(['ds-1', false]);
+        expect(h.storage.get('device-stage-instant-pointer')).toBe('off');
+    });
+
+    it('Game mode hands it back too: pointer lock hides this pointer', async () => {
+        h.storage.set('sovereign-fps-mode', 'on');
+        await mount();
+        expect(h.setCursorOwned.mock.calls.some(c => c[1] === true), 'never taken in Game mode').toBe(false);
     });
 });

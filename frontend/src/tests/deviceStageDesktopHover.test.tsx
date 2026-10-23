@@ -53,6 +53,11 @@ vi.mock('../api/devices/session', () => ({
     deviceDiagnosticsWindow: async () => [],
     activeSessions: () => [],
     requestFileAccess: () => { /* noop */ },
+    deviceStatsSample: async () => null,
+    latencyProbeUsable: () => false,
+    sendLatencyProbe: () => false,
+    noteFramePresented: () => { /* noop */ },
+    subscribeLatency: () => () => { /* unsubscribe */ },
 }));
 vi.mock('../api/devices/tunnel', () => ({
     tunnelStatus: async () => ({ listeners: [], inbound_streams: 0, outbound_streams: 0, forwards: [] }),

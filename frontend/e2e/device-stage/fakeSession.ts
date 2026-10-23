@@ -252,6 +252,12 @@ export function requestMonitor(_sessionId: string, monitor: number): void {
     }, knobs.commitMs);
 }
 export function requestKeyframe(): boolean { return true; }
+/** The latency probe needs the agent's direct channel; the stand-in has none,
+ *  so the chip shows the estimate, as it does against an older agent. */
+export function latencyProbeUsable(): boolean { return false; }
+export function sendLatencyProbe(): boolean { return false; }
+export function noteFramePresented(): void { /* no probes in flight */ }
+export function subscribeLatency(): () => void { return () => { /* nothing to undo */ }; }
 /** The desktop bar's live stats: a steady 60 fps LAN session, counters that
  *  advance with the clock so two readings give rates. */
 export async function deviceStatsSample(): Promise<Record<string, unknown>> {

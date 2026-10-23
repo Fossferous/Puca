@@ -388,6 +388,51 @@ exist to say where:
   servicing thread and the inject worker, the hops the rig cannot reach) and
   the worker runs at HIGHEST.
 
+### My Devices: the loop, measured on one clock
+
+A My Devices session has its own loop: pointer → the agent's direct input
+channel (one SCTP message, no server) → the agent's stream thread injects it →
+the next capture → encode → network → jitter buffer → decode → the stage's
+`<video>`. Four things in it were cut, and one instrument measures the whole:
+
+- **The latency probe** (`frontend/src/api/devices/latencyProbe.ts`,
+  `crates/puca-agent/src/latency.rs`). The desktop stage sends
+  `{t:'probe', p}` on the direct channel once a second; the agent injects
+  nothing, sends its next frame even on a still screen (re-sending the held
+  picture, with a 1 ms acquire so the wait is not counted) and answers on the
+  caret channel with that frame's RTP timestamp, which str0m writes into the
+  header unchanged. `requestVideoFrameCallback` reports each presented frame's
+  `rtpTimestamp` and when it is expected on screen, so the probe resolves on
+  the viewer's clock alone: input to picture, including both networks and the
+  far machine, with no clock agreement between them. The stats chip shows the
+  median; the stats panel shows it with the agent's share (`host`: the probe's
+  arrival to its frame's send) and **Compare with the old timing** runs eight
+  probes each way, alternating, with `q:1` asking the agent for the old
+  capture timing — a before-and-after on the same machines in the same minute.
+  An agent older than the probe never answers; three misses and the stage
+  stops asking. Only the direct channel carries a probe: on the relay it would
+  reach the host app, which has no frame to answer with.
+- **Capture right after an input** (`latency.rs` `capture_after_input`). The
+  agent captured on a fixed clock, so a change an input made waited for the
+  next tick: half a frame on average, a whole one at worst (17 / 33 ms at
+  30 fps). An input now pulls the next capture in to 2 ms after it, never
+  closer than half a frame after the last capture (at most twice the asked-for
+  rate, and only while input keeps coming faster than the clock).
+- **60 fps on your own network.** A desktop stage whose picture comes
+  directly over UDP with a round trip under 15 ms, still on the default
+  quality, steps up once to 60 fps / 10 Mbps and says so.
+- **8 ms move coalescing on the direct channel** (`MOVE_INTERVAL_DIRECT_MS`):
+  the relay's 16 ms exists for the relay's per-event cost, which the direct
+  channel does not pay.
+- **The pointer drawn here.** A desktop stage takes the pointer from the host
+  (the `set-cursor-owner` handshake the phone's trackpad uses), so the browser
+  draws your own mouse pointer over the picture with no delay, and the agent
+  reports the host's pointer SHAPE as a CSS keyword when it changes
+  (`crates/puca-agent/src/pointer_shape.rs`: the standard Windows pointers by
+  their shared handles, `none` while hidden, the arrow for one an application
+  drew itself). **Mouse › Draw the pointer here (no delay)** turns it off;
+  Game mode hands the pointer back, because pointer lock hides this one.
+
 ## Testing note
 
 Everything up to the OS boundary is verified with automated tests (relay
