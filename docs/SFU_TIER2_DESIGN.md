@@ -206,8 +206,21 @@ The SFU is necessary but not sufficient. The project succeeds or fails on this l
    track's estimate otherwise stays flat for a minute or more after the link
    recovers. Measurements are in the module header; re-run them with
    `frontend/e2e/share-adapt-shaped.mjs` (a loopback LiveKit plus a userspace
-   upload bottleneck, `MODE=shipped|adapt`; setup in its header). A laddered share (the `shareSimulcast` setting) is left to
+   upload bottleneck, `MODE=shipped|adapt`; setup in its header). A laddered share is left to
    libwebrtc's `maintain-framerate`, because its rungs are fixed ratios.
+   **The VIEWER's download is the last piece** (2026-10-23,
+   `frontend/src/api/rtc/shareLadder.ts`): a single-layer share gives the SFU
+   nothing to send a viewer whose link is below its bitrate, and LiveKit
+   neither pauses nor adapts it (`allow_pause` and send-side BWE measured to
+   change nothing; that viewer froze). So a share is laddered — 360p, a middle
+   rung of 720p (from 1080-line captures) or 540p, and the full picture —
+   by default whenever the sharer has a hardware H.264 encoder and the share
+   sends more than 4.5 Mbps (the `shareLadder` setting: Automatic / Always /
+   Never), and dropped back to one layer if the encoder turns out to be
+   software. A live quality change re-sizes the rungs in place, or re-publishes
+   the share when the number of rungs changes. `SHARE_MIN_KBPS` in
+   `src/sfu.rs` keeps every node ceiling above the 720p rung. Re-measure with
+   `frontend/e2e/share-adapt-shaped.mjs SHAPE=viewer LADDER=auto`.
 5. **Audio-first**: audio is ~50 kbps and always fine; never let video pressure
    starve audio. Prioritize audio in the congestion controller.
 

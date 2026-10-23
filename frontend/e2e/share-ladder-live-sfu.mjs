@@ -1,7 +1,8 @@
 // A screen share sent at several sizes, end to end in the REAL app over a
 // real SFU: does Automatic ladder it, does a live quality change re-size the
-// rungs in place, and does a change between one size and several re-publish
-// without losing the viewer?
+// rungs in place, does a change between one size and several re-publish
+// without losing the viewer, and does a changed setting reach the running
+// share?
 //
 // WHY. sfuManager decides the ladder (shareLadder.ts), re-sizes a running
 // ladder with setParameters and re-publishes on a transition; the unit tests
@@ -18,6 +19,12 @@
 //   C  Stream quality -> 720p30  expect one encoding (4 Mbps: Automatic says
 //                                one size): a re-publish
 //   D  Stream quality -> 1080p60 expect 3 encodings again
+//   E  Stream quality -> 720p60  expect the SAME sender, the middle rung now
+//                                540p (q 360, h 540, f 720 lines): 6 Mbps is
+//                                still a ladder under Automatic
+//   F  Settings -> Never         expect one encoding at once (a re-publish),
+//      then Automatic again      and the ladder back (another re-publish),
+//                                through the real Settings > Voice & Video
 // After each, the viewer's decoded frame rate over a few seconds.
 //
 // Everything is headless and muted: nothing opens on the desktop, nothing plays.
@@ -158,6 +165,19 @@ async function liveQuality(p, resolution, fps) {
     await click('Done');
     await p.waitForTimeout(500);
     return { clicked: r && f, status: status.slice(0, 200) };
+}
+
+/** Settings > Voice & Video > Send my screen at several sizes, through the UI. */
+async function setLadderSetting(p, value) {
+    await p.locator('button[title="Settings"]').first().click({ timeout: 5000 });
+    await p.locator('.settings-nav-item', { hasText: 'Voice & Video' }).first().click({ timeout: 5000 });
+    const sel = p.locator('#share-ladder-mode');
+    await sel.waitFor({ timeout: 5000 });
+    await sel.selectOption(value);
+    const now = await sel.inputValue();
+    await p.locator('button.settings-close').first().click({ timeout: 5000 }).catch(() => p.keyboard.press('Escape'));
+    await p.waitForTimeout(500);
+    return now;
 }
 
 /** Every sender carrying the live share track: its encodings, and a token
@@ -303,6 +323,44 @@ try {
     if (result.hardwareH264) check('D: a ladder again at 1080p60', laddered(dSender), dSender?.encodings);
     check('D: the viewer kept watching after the switch', result.phases.D.viewer.fps > 10, result.phases.D.viewer);
     check('D: full size again', result.phases.D.viewer.sizes.includes('1920x1080'), result.phases.D.viewer.sizes);
+
+    // E: 1080p60 -> 720p60 (6 Mbps, still a ladder): in place, middle rung 540p.
+    result.phases.E = { change: await liveQuality(sharer, '720p', 60) };
+    await sleep(3000);
+    const e = await sharer.evaluate(readShareSenders);
+    result.phases.E.senders = e;
+    result.phases.E.viewer = await viewerRate(viewer);
+    const eSender = e.find(s => s.capture.startsWith('1280x720')) ?? e[0];
+    if (laddered(dSender)) {
+        check('E: the same sender (no re-publish)', eSender?.id === dSender.id, { before: dSender.id, after: eSender?.id });
+        const sc = Object.fromEntries((eSender?.encodings ?? []).map(x => [x.rid, x.scale]));
+        check('E: rungs re-sized in place: 360 / 540 / 720 lines', sc.q === 2 && Math.abs(sc.h - 720 / 540) < 1e-6 && sc.f === 1, sc);
+        const h = eSender?.encodings.find(x => x.rid === 'h');
+        check('E: the middle rung sends 540p\'s bitrate', h?.maxBitrate === 1_200_000, h);
+    }
+    check('E: the viewer kept watching', result.phases.E.viewer.fps > 10, result.phases.E.viewer);
+    check('E: full size, now 720p', result.phases.E.viewer.sizes.includes('1280x720'), result.phases.E.viewer.sizes);
+
+    // F: the setting itself, changed while sharing.
+    result.phases.F = { never: await setLadderSetting(sharer, 'never') };
+    await sleep(4000);
+    const f1 = await sharer.evaluate(readShareSenders);
+    const f1Sender = f1.find(s => s.capture.startsWith('1280x720')) ?? f1[0];
+    result.phases.F.afterNever = { senders: f1, viewer: await viewerRate(viewer) };
+    check('F: Never sends one size at once', (f1Sender?.encodings.length ?? 0) === 1, f1Sender?.encodings);
+    if (laddered(eSender)) check('F: ...by publishing again (a new sender)', f1Sender?.id !== eSender.id, { before: eSender.id, after: f1Sender?.id });
+    check('F: the viewer kept watching after Never', result.phases.F.afterNever.viewer.fps > 10, result.phases.F.afterNever.viewer);
+    result.phases.F.auto = await setLadderSetting(sharer, 'auto');
+    await sleep(4000);
+    const f2 = await sharer.evaluate(readShareSenders);
+    const f2Sender = f2.find(s => s.capture.startsWith('1280x720')) ?? f2[0];
+    result.phases.F.afterAuto = { senders: f2, viewer: await viewerRate(viewer) };
+    if (result.hardwareH264) {
+        check('F: Automatic again brings the ladder back', laddered(f2Sender), f2Sender?.encodings);
+        check('F: ...on a new sender', f2Sender?.id !== f1Sender?.id, { before: f1Sender?.id, after: f2Sender?.id });
+    }
+    check('F: the viewer kept watching after Automatic', result.phases.F.afterAuto.viewer.fps > 10, result.phases.F.afterAuto.viewer);
+    check('F: ...at full size', result.phases.F.afterAuto.viewer.sizes.includes('1280x720'), result.phases.F.afterAuto.viewer.sizes);
 } catch (e) {
     result.error = String(e?.message || e);
     console.log('ERROR', result.error);

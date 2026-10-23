@@ -3276,6 +3276,9 @@ mod tests {
         assert_eq!(share_ceiling_kbps(600_000, Some(" 3.5 ")), 3_500);
         // Lower than the old cap is allowed: the admin knows their uplink.
         assert_eq!(share_ceiling_kbps(30_000, Some("3")), 3_000);
+        // ...down to the floor, which keeps the ladder's 720p rung (2.5 Mbps)
+        // under the top: 2 Mbps reads as 3 (it was allowed until 2026-10-23).
+        assert_eq!(share_ceiling_kbps(30_000, Some("2")), 3_000);
         assert_eq!(share_ceiling_kbps(30_000, Some("0.1")), SHARE_MIN_KBPS);
         assert_eq!(share_ceiling_kbps(30_000, Some("100")), SHARE_TOP_KBPS);
         // Garbage is the default, never 0.

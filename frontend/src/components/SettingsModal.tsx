@@ -2800,6 +2800,50 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                     )}
                                 </div>
 
+                                {/* Screen sharing. The cost of this one lands on the person
+                                    SHARING, which is why it is theirs to decide; see
+                                    api/rtc/shareLadder.ts for when Automatic sends several
+                                    sizes. Not on phones, which cannot share a screen (the
+                                    voice panel offers no Share Screen there). A change
+                                    reaches a running share at once
+                                    (sfuManager.followLadderSetting). */}
+                                {!phone && (
+                                    <>
+                                        <h3>Screen Sharing</h3>
+                                        <div className="settings-card">
+                                            <div className="settings-option">
+                                                <div className="option-info">
+                                                    <label htmlFor="share-ladder-mode">Send my screen at several sizes</label>
+                                                    <span className="option-hint">
+                                                        In channels that send streams through the server (SFU
+                                                        mode), viewers whose connection is slower than your
+                                                        stream get a smaller copy instead of a frozen picture.
+                                                        Your computer encodes every size: little work for a
+                                                        graphics card, a lot in software. Automatic sends several
+                                                        sizes when your graphics card encodes the video and your
+                                                        stream sends more than 4.5 Mbps (1080p at 30 fps, 720p at
+                                                        60 fps and up), and goes back to one size if the encoding
+                                                        turns out to be in software. Choose Always if someone
+                                                        watching you keeps freezing and you have CPU to spare, or
+                                                        Never if your game stutters while you share. A change
+                                                        applies at once to a stream you are already sharing (its
+                                                        viewers may see the picture hold for a second).
+                                                    </span>
+                                                </div>
+                                                <select
+                                                    id="share-ladder-mode"
+                                                    value={rememberedShareLadder(settings)}
+                                                    onChange={(e) => commit(ladderSettingsFor(e.target.value as ShareLadderMode))}
+                                                >
+                                                    <option value="auto">Automatic</option>
+                                                    <option value="always">Always</option>
+                                                    <option value="never">Never</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                    </>
+                                )}
+
                                 {/* Clips — the desktop replay buffer (api/clips/). There is
                                     no experimental gate any more (settingsClips.test.ts pins
                                     its absence): arming is gated only by the server owner's
@@ -2943,37 +2987,6 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                 <p className="settings-description">
                                     Advanced settings for power users.
                                 </p>
-                                {/* The cost of this one lands on the person SHARING, which
-                                    is why it is theirs to decide. See `shareLadder` in
-                                    settingsStore.ts and api/rtc/shareLadder.ts. */}
-                                <h3>Screen sharing</h3>
-                                <div className="settings-card">
-                                    <div className="settings-option">
-                                        <div className="option-info">
-                                            <label htmlFor="share-ladder-mode">Send my screen at several sizes</label>
-                                            <span className="option-hint">
-                                                Viewers on a slow connection get a smaller copy instead of a
-                                                frozen picture. Your computer encodes every size, which costs
-                                                little on a graphics card and a lot in software. Automatic sends
-                                                several sizes only when your graphics card can encode the video
-                                                and the quality you picked sends more than 4.5 Mbps (1080p 30 fps
-                                                and up), and goes back to one size if the encoding turns out to
-                                                be in software. Choose Always if somebody watching you keeps
-                                                freezing and you have CPU to spare, or Never if your game
-                                                stutters while you share. Other apps call this simulcast.
-                                            </span>
-                                        </div>
-                                        <select
-                                            id="share-ladder-mode"
-                                            value={rememberedShareLadder(settings)}
-                                            onChange={(e) => commit(ladderSettingsFor(e.target.value as ShareLadderMode))}
-                                        >
-                                            <option value="auto">Automatic</option>
-                                            <option value="always">Always</option>
-                                            <option value="never">Never</option>
-                                        </select>
-                                    </div>
-                                </div>
                                 <h3>Diagnostics</h3>
                                 <div className="settings-card">
                                     <div className="settings-option">

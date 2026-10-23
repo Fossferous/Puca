@@ -469,22 +469,27 @@ A share sent at one size has nothing smaller for a viewer whose connection
 cannot carry it, and that viewer's picture freezes. So in a channel that uses
 SFU mode a share can go out at three sizes, and each viewer gets the largest
 one their connection carries: the full picture, a middle size (720p from a
-1080p or larger capture, 540p from a smaller one) and 360p. **Settings →
-Advanced → Screen sharing → Send my screen at several sizes**:
+1080p or larger picture, 540p from a smaller one) and 360p. A small window
+gets only the sizes that are smaller than it, and one of 360 lines or less
+is always sent at one size. **Settings → Voice & Video → Screen Sharing →
+Send my screen at several sizes**:
 
 - **Automatic** (the default): several sizes when your computer encodes video
   on its graphics card and the quality you picked sends more than 4.5 Mbps
-  (1080p at 30 fps and up). On a graphics card the extra sizes cost almost
-  nothing; in software they cost a lot of CPU, so a computer without a
-  hardware encoder sends one size, and if the encoding turns out to be in
-  software after all the share goes back to one size by itself.
+  (1080p at 30 fps, 720p at 60 fps and up). On a graphics card the extra
+  sizes cost almost nothing; in software they cost a lot of CPU, so a
+  computer without a hardware encoder sends one size, and if the encoding
+  turns out to be in software after all the share goes back to one size by
+  itself.
 - **Always**: several sizes for every share, in software too. For when someone
   watching you keeps freezing and your computer has CPU to spare.
 - **Never**: one size. For when your game stutters while you share.
 
-The extra sizes add about 1.5-2.5 Mbps to your upload. A viewer on a slow
-connection may start on 360p and move up to the middle size within about
-half a minute.
+Changing it while you share applies to that share at once. The extra sizes
+add about 1.5-2.5 Mbps to your upload. A viewer on a slow connection may
+start on 360p and move up to the middle size within about half a minute.
+Someone watching one or two streams gets the full picture whenever their
+connection carries it.
 
 In a channel that does not use SFU mode, each viewer is sent their own copy
 of your share, at up to 8 Mbps each, whatever the quality.
@@ -518,8 +523,8 @@ connection is slower than what the stream sends (see
 SFU mode, a share sent at several sizes gives you a smaller copy by itself
 (see [Several sizes](#several-sizes-for-viewers-on-slower-connections)); if
 the sharer's computer sends one size, they can choose **Always** under
-**Settings → Advanced → Screen sharing → Send my screen at several sizes**, or
-lower the stream's **Resolution** or **Frame Rate**.
+**Settings → Voice & Video → Screen Sharing → Send my screen at several
+sizes**, or lower the stream's **Resolution** or **Frame Rate**.
 
 ### Stream Controls
 Hover a stream for its buttons, or right-click it for the same items as a menu:

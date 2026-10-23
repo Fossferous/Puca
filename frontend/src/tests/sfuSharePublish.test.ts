@@ -86,8 +86,9 @@ describe('the screen-share publish contract', () => {
         // three rungs at 56 / 56 / 16 fps where the same ladder in VP8 falls
         // to 19 / 7 / 4. Switching codec here without re-measuring would turn
         // a fix for one viewer into a regression for everybody. (That run used
-        // a hardware H.264 encoder the shipped app does not get — which is why
-        // the ladder is off by default, not why h264 is the right codec.)
+        // a hardware H.264 encoder the shipped app did not get then — which is
+        // why Automatic ladders only where one is offered, not why h264 is the
+        // right codec.)
         expect(screenSharePublishOptions(true).videoCodec).toBe('h264');
     });
 
@@ -135,8 +136,9 @@ describe('the screen-share publish contract', () => {
 
 describe('turning the ladder off', () => {
     // The cost of the ladder lands on the person SHARING -- two extra encodes
-    // and about 1.5 Mbps more upload -- so `shareSimulcast` lets them decline
-    // it. Nobody should have to choose between sharing a game and playing it.
+    // and about 1.5 Mbps more upload -- so `shareLadder` (Never) lets them
+    // decline it. Nobody should have to choose between sharing a game and
+    // playing it.
 
     it('publishes a single encoding, with no layers left behind', () => {
         const o = screenSharePublishOptions(false);
@@ -184,8 +186,9 @@ describe('the default, with nothing configured', () => {
         // game stuttering while they share. (The software encode was a
         // profile-negotiation accident, fixed 2026-09-16 — h264Profiles.ts —
         // but machines without a hardware encoder still exist and are still
-        // the ones complaining, so the default stays off until field lines
-        // from several of them say otherwise.)
+        // the ones complaining, so the default never imposes it on one:
+        // Automatic ladders only where a hardware encoder is offered, and only
+        // above the old cap — shareLadder.ts.)
         //
         // Called with NO argument on purpose: this is the path the app takes,
         // and the parameter's default is where the setting is read.
@@ -226,13 +229,34 @@ describe('the default, with nothing configured', () => {
         expect(mid(1280, 720)?.height).toBe(540);
     });
 
+    it('sends one size when the capture has nothing smaller to offer, even when asked for several', () => {
+        // A rung the size of the capture is a second full-size encode for
+        // nothing (livekit-client never scales a rung up).
+        const tiny = screenSharePublishOptions(true, 6_000_000, { width: 640, height: 360 });
+        expect(tiny.simulcast).toBe(false);
+        expect(tiny.screenShareSimulcastLayers).toBeUndefined();
+        expect(tiny.degradationPreference, 'one size: Púca picks its resolution').toBe('maintain-resolution');
+        // 540 lines: only the 360p rung is smaller.
+        const small = screenSharePublishOptions(true, 6_000_000, { width: 960, height: 540 });
+        expect(small.simulcast).toBe(true);
+        expect(small.screenShareSimulcastLayers?.map(l => l.height)).toEqual([360]);
+    });
+
+    it('keeps the middle rung under a low server ceiling', () => {
+        // A server from before SHARE_MIN_KBPS was raised may cap a share at
+        // 2 Mbps; a 2.5 Mbps middle rung would then send more than the top.
+        const o = screenSharePublishOptions(true, 2_000_000, { width: 1920, height: 1080 });
+        expect(o.screenShareSimulcastLayers?.map(l => l.height)).toEqual([360, 540]);
+        for (const l of o.screenShareSimulcastLayers ?? []) expect(l.encoding.maxBitrate).toBeLessThan(2_000_000);
+    });
+
 });
 
 describe('deciding whether the RUNNING share has a simulcast ladder', () => {
-    // The guard that decides whether "Lower it" may re-cap the live track.
-    // Re-capping a laddered share shrinks every rung with the source, pushing
-    // the bottom one under Chromium's 360-line hardware-encode floor — which
-    // is the whole reason SHARE_LOW was raised to 640x360.
+    // The guard that keeps the one-size resolution picker (shareAdaptTick)
+    // off a ladder: its first encoding is the BOTTOM rung, and re-scaling it
+    // as if it were the whole share pushes it under Chromium's 360-line
+    // hardware-encode floor — the whole reason the bottom rung is 640x360.
     const vid = (encodings: unknown[] | undefined) => ({
         kind: Track.Kind.Video,
         track: { sender: { getParameters: () => ({ encodings }) } },
@@ -240,17 +264,16 @@ describe('deciding whether the RUNNING share has a simulcast ladder', () => {
 
     it('sees a real ladder', () => {
         // THE ASSERTION THAT MATTERS. This guard fails OPEN — anything it
-        // cannot read reads as "no ladder" and permits the re-cap — so the one
+        // cannot read reads as "no ladder" and lets the picker in — so the one
         // thing that must never regress is that a genuine ladder IS seen.
         expect(publicationsHaveLadder([vid([{}, {}, {}])])).toBe(true);
         expect(publicationsHaveLadder([vid([{}, {}])])).toBe(true);
     });
 
     it('does not invent one from a single-encoding share', () => {
-        // POSITIVE CONTROL for the case above: a share published with
-        // simulcast off must stay re-cappable, or "Lower it" does nothing for
-        // the people who turned the ladder off precisely because their machine
-        // could not afford it.
+        // POSITIVE CONTROL for the case above: a share published at one size
+        // must keep its resolution picker, or nobody chooses its resolution
+        // for the people whose machine could not afford the ladder.
         expect(publicationsHaveLadder([vid([{}])])).toBe(false);
         expect(publicationsHaveLadder([vid([])])).toBe(false);
         expect(publicationsHaveLadder([vid(undefined)])).toBe(false);
@@ -268,7 +291,7 @@ describe('deciding whether the RUNNING share has a simulcast ladder', () => {
     it('is false, not a throw, when there is nothing to read', () => {
         // A mesh call has no publications at all; a publication mid-teardown
         // has no track; a detached sender throws. None of those may take down
-        // the click handler.
+        // the picker's tick.
         expect(publicationsHaveLadder([])).toBe(false);
         expect(publicationsHaveLadder([{ kind: Track.Kind.Video, track: null }])).toBe(false);
         expect(publicationsHaveLadder([{ kind: Track.Kind.Video, track: { sender: null } }])).toBe(false);

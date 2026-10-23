@@ -60,8 +60,9 @@ describe('MediaManager.setShareQuality', () => {
 describe('changeLiveShareQuality', () => {
     const live = vi.hoisted(() => ({
         size: { width: 1280, height: 720 } as { width: number; height: number } | null,
-        ladder: false,
         result: null as { width: number; height: number; fps: number } | null,
+        /** What the struggling machine's step-down re-cap returns. */
+        stepOk: false,
         calls: [] as unknown[][],
         retunes: 0,
     }));
@@ -69,11 +70,13 @@ describe('changeLiveShareQuality', () => {
         webrtcManager: {
             shareCaptureSize: () => live.size,
             setShareQuality: async (...a: unknown[]) => { live.calls.push(a); return live.result; },
-            applyShareQuality: async () => false,
+            applyShareQuality: async (...a: unknown[]) => { live.calls.push(a); return live.stepOk; },
         },
     }));
+    // Only retuneShare: nothing here may ask whether the share is laddered
+    // any more (it used to, and refused).
     vi.mock('../api/rtc/sfuManager', () => ({
-        sfuManager: { shareHasLadder: () => live.ladder, retuneShare: async () => { live.retunes++; return true; } },
+        sfuManager: { retuneShare: async () => { live.retunes++; return true; } },
     }));
 
     // The REAL module (this file mocks it for the panel below), with the
@@ -82,7 +85,7 @@ describe('changeLiveShareQuality', () => {
 
     beforeEach(() => {
         live.size = { width: 1280, height: 720 };
-        live.ladder = false;
+        live.stepOk = false;
         live.result = { width: 1920, height: 1080, fps: 60 };
         live.calls = [];
         live.retunes = 0;
@@ -95,14 +98,24 @@ describe('changeLiveShareQuality', () => {
         expect(live.calls).toEqual([[1920, 1080, 60]]);
     });
 
-    it('changes a share sent at several sizes too, and has the SFU share re-tuned after the re-cap', async () => {
-        // It used to refuse: re-capping shrank every rung with the capture.
-        // sfuManager.retuneShare now puts the rungs back in proportion.
-        live.ladder = true;
+    it('has the SFU share re-tuned after the re-cap, so a share sent at several sizes changes too', async () => {
+        // It used to refuse a laddered share: re-capping shrank every rung
+        // with the capture. sfuManager.retuneShare now puts the rungs back in
+        // proportion, or re-publishes when the number of sizes changes.
         const { changeLiveShareQuality } = await real();
         await expect(changeLiveShareQuality({ resolution: '1440', fps: 60 }))
             .resolves.toEqual({ kind: 'applied', capture: { width: 1920, height: 1080, fps: 60 } });
         expect(live.calls).toEqual([[2560, 1440, 60]]);
+        expect(live.retunes, 'after the capture changed').toBe(1);
+    });
+
+    it('re-tunes after the struggling machine\'s step down too, and only when it happened', async () => {
+        const { applyShareQuality } = await real();
+        await expect(applyShareQuality({ resolution: '720', fps: 30 })).resolves.toBe(false);
+        expect(live.retunes, 'refused: nothing to follow').toBe(0);
+        live.stepOk = true;
+        await expect(applyShareQuality({ resolution: '720', fps: 30 })).resolves.toBe(true);
+        expect(live.calls.at(-1)).toEqual([1280, 720, 30]);
         expect(live.retunes).toBe(1);
     });
 

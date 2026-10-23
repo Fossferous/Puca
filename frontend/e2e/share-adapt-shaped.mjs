@@ -72,6 +72,23 @@
 //     at most 4%) but arrives late: the jitter buffer grows from ~30 ms to
 //     ~100-160 ms, on top of the router's queue.
 //
+// 2026-10-23, the shipped decision: LADDER=auto (the app's own Automatic,
+// shareLadder.ts, so 360p + 720p + full), RTX 4080 SUPER, NVIDIA H.264 Encoder
+// MFT on every rung, 300 ms buffer, 120 s, viewer judged from 30 s on:
+//
+//   viewer link   share                       viewer gets
+//   6 Mbps        10 Mbps, one layer          FROZEN: under 5 fps in 43 of 43 samples
+//   6 Mbps        10 Mbps, Automatic          720p @ 56 fps, under 5 fps in 0 of 39 (720p from ~9 s)
+//   3 Mbps        10 Mbps, one layer          FROZEN: 41 of 41
+//   3 Mbps        10 Mbps, Automatic          360p @ 30 fps; 4 of 41 under 5 fps, each while
+//                                             LiveKit tried the 720p rung and backed off
+//   50 Mbps       10 Mbps, Automatic          1080p @ 56 fps, 0 of 46: a fast viewer loses nothing
+//   6 Mbps        4.5 Mbps, Automatic         one layer (not above 4.5 Mbps), 1080p @ 57, 0 of 43
+//
+// The ladder's sharer upload: ~11.2-12.0 Mbps against ~9.5-9.9 for one layer.
+// Call audio on the frozen 6 Mbps link: one interval concealed 69%; with the
+// ladder at most 4%.
+//
 // The viewer runs in a separate browser from a GATE=1 sharer: the fake-media
 // flags stop the browser hiding host IPs behind mDNS, in every page, and a
 // viewer with real host candidates reaches LiveKit around the shaper (the
@@ -83,9 +100,16 @@
 // (kbps), LADDER=1 publishes the simulcast ladder, CONTENT=pan the fast-motion
 // picture from encode-cost.mjs, FPS the capture rate.
 //
+// LADDER=auto decides as the app does (Settings: Automatic): the REAL
+// shareLadder.ts, bundled at start, asks this browser's sender capabilities
+// for a hardware H.264 encoder (h264Profiles.ts hasHardwareH264) and the share
+// for more than 4.5 Mbps, and picks the rungs for the capture (ladderRungs:
+// 360p plus a 720p middle rung from a 1080-line capture). LADDER_MID is
+// ignored then. The verdict is printed before the share starts.
+//
 // Usage (from frontend/):
 //   LK_KEY=<key> LK_SECRET=<secret> MODE=adapt RATE=450 node e2e/share-adapt-shaped.mjs
-//   ... SHAPE=viewer RATE=6000 BITRATE=10000 CONTENT=pan FPS=60 GATE=1 [LADDER=1 LADDER_MID=1280x720x2500x60]   (a viewer on a slow line)
+//   ... SHAPE=viewer RATE=6000 BITRATE=10000 CONTENT=pan FPS=60 GATE=1 [LADDER=auto | LADDER=1 LADDER_MID=1280x720x2500x60]   (a viewer on a slow line)
 //   ... RATE=250 QUEUE=1000 LATER_RATE=5000 LATER_AT=40000 TOTAL=130000   (squeeze, then lift)
 //   ... RESHARE_STOP=40000 RESHARE_START=50000                             (a second share)
 // Env: LK_WS (ws://127.0.0.1:7880), LK_UDP (7882), SHAPER_PORT (7883), PAGE_PORT (7884),
@@ -116,8 +140,10 @@ const TOTAL = Number(env.TOTAL || 90000);
 const SHAPE = env.SHAPE === 'viewer' ? 'viewer' : 'sharer';
 /** The share's cap, kbps (sfuManager publishes the quality's own, shareBitrate.ts). */
 const BITRATE = Number(env.BITRATE || 4500);
-/** LADDER=1 publishes the simulcast ladder (Settings, "Send my screen at several sizes"). */
+/** LADDER=1 publishes the simulcast ladder (Settings, "Send my screen at
+ *  several sizes": Always); LADDER=auto lets the app's own Automatic decide. */
 const LADDER = env.LADDER === '1';
+const LADDER_AUTO = env.LADDER === 'auto';
 /** 'shapes' (the original) or 'pan' (fast-motion detail; see encode-cost.mjs). */
 const CONTENT = env.CONTENT || 'shapes';
 const FPS = Number(env.FPS || 30);
@@ -189,6 +215,10 @@ const adaptJs = (await build({
 const h264Js = (await build({
     entryPoints: [here('../src/api/rtc/h264Profiles.ts')], bundle: true, write: false, format: 'iife', globalName: 'PucaH264',
 })).outputFiles[0].text;
+// The app's ladder decision and rungs (Automatic), for LADDER=auto.
+const ladderJs = (await build({
+    entryPoints: [here('../src/api/rtc/shareLadder.ts')], bundle: true, write: false, format: 'iife', globalName: 'PucaLadder',
+})).outputFiles[0].text;
 const lkUmd = readFileSync(here('../node_modules/livekit-client/dist/livekit-client.umd.js'), 'utf8');
 
 const shaper = startShaper({ rateKbps: RATE, queueMs: QUEUE, down: SHAPE === 'viewer' });
@@ -226,6 +256,7 @@ async function page(name, shaped) {
     await p.addScriptTag({ content: lkUmd });
     await p.addScriptTag({ content: adaptJs });
     await p.addScriptTag({ content: h264Js });
+    await p.addScriptTag({ content: ladderJs });
     // sfuManager's preferHardwareH264ForSender, applied to every video
     // transceiver the page creates (before its first offer).
     await p.evaluate(() => {
@@ -270,7 +301,7 @@ await viewer.evaluate(async ({ url, tok }) => {
 }, { url: LK_WS, tok: token('viewer') });
 
 const sharer = await page('sharer', SHAPE === 'sharer');
-await sharer.evaluate(async ({ url, tok, MODE, BITRATE, LADDER, CONTENT, FPS, LADDER_MID, GATE }) => {
+const decided = await sharer.evaluate(async ({ url, tok, MODE, BITRATE, LADDER: LADDER_ON, LADDER_AUTO, CONTENT, FPS, LADDER_MID, GATE }) => {
     const LK = window.LivekitClient;
     if (GATE) window.__gate = await navigator.mediaDevices.getUserMedia({ video: { width: 160, height: 120 }, audio: false });
     const W = CONTENT === 'pan' ? 1920 : 1866, H = 1080;
@@ -323,11 +354,18 @@ await sharer.evaluate(async ({ url, tok, MODE, BITRATE, LADDER, CONTENT, FPS, LA
     await room.localParticipant.publishTrack(dst.stream.getAudioTracks()[0], { source: LK.Track.Source.Microphone });
     await new Promise(r => setTimeout(r, 15000));
     // sfuManager.screenSharePublishOptions: single layer (both versions) or
-    // the ladder, whose rungs are SHARE_LOW / SHARE_MID there.
+    // the ladder. LADDER=1 uses 360p + LADDER_MID; LADDER=auto asks the app's
+    // own shareLadder.ts, as Automatic does: a hardware encoder in the SENDER
+    // capabilities, more than 4.5 Mbps, and the rungs the capture has room for.
+    const hardware = PucaH264.hasHardwareH264(RTCRtpSender.getCapabilities('video')?.codecs ?? []);
+    const autoRungs = LADDER_AUTO && PucaLadder.shareWantsLadder('auto', hardware, BITRATE)
+        ? PucaLadder.ladderRungs(W, H, BITRATE) : [];
+    const LADDER = LADDER_ON || autoRungs.length > 0;
     const opts = { source: LK.Track.Source.ScreenShare, simulcast: LADDER, videoCodec: 'h264',
         screenShareEncoding: { maxBitrate: BITRATE * 1000, maxFramerate: 60 },
         degradationPreference: MODE === 'adapt' && !LADDER ? 'maintain-resolution' : 'maintain-framerate' };
-    if (LADDER) opts.screenShareSimulcastLayers = [new LK.VideoPreset(640, 360, 600_000, 30),
+    if (LADDER_AUTO && LADDER) opts.screenShareSimulcastLayers = autoRungs.map(r => new LK.VideoPreset(r.width, r.height, r.kbps * 1000, r.fps));
+    else if (LADDER) opts.screenShareSimulcastLayers = [new LK.VideoPreset(640, 360, 600_000, 30),
         new LK.VideoPreset(LADDER_MID[0], LADDER_MID[1], LADDER_MID[2] * 1000, LADDER_MID[3])];
     const timers = [];
     window.__changes = { height: 0, hint: 0 };
@@ -395,7 +433,9 @@ await sharer.evaluate(async ({ url, tok, MODE, BITRATE, LADDER, CONTENT, FPS, LA
             target: Math.round(rows.reduce((n, r) => n + (r.targetBitrate || 0), 0) / 1000), limit: o.qualityLimitationReason, rungs, enc };
     };
     await window.__share();
-}, { url: LK_WS, tok: token('sharer'), MODE, BITRATE, LADDER, CONTENT, FPS, LADDER_MID, GATE });
+    return { hardware, ladder: LADDER, rungs: (opts.screenShareSimulcastLayers ?? []).map(l => `${l.width}x${l.height}@${l.encoding.maxBitrate / 1000}k`) };
+}, { url: LK_WS, tok: token('sharer'), MODE, BITRATE, LADDER, LADDER_AUTO, CONTENT, FPS, LADDER_MID, GATE });
+console.log(`share: hardware H.264 offered ${decided.hardware}; ${LADDER_AUTO ? 'Automatic says ' : ''}${decided.ladder ? `ladder ${decided.rungs.join(' + ')} + full` : 'one size'}`);
 
 const t0 = Date.now();
 const series = [];
@@ -438,7 +478,7 @@ const full = after.find(r => r.h >= 1070);
 const tail = series.filter(r => r.t >= Math.max(30, from));
 const med = (xs) => { const a = xs.filter(x => x !== null).sort((x, y) => x - y); return a.length ? a[Math.floor(a.length / 2)] : null; };
 const frozen = tail.filter(r => r.vfps !== null && r.vfps < 5).length;
-console.log(`\nshape=${SHAPE} rate=${RATE} bitrate=${BITRATE} ladder=${LADDER} content=${CONTENT} fps=${FPS}:`
+console.log(`\nshape=${SHAPE} rate=${RATE} bitrate=${BITRATE} ladder=${LADDER_AUTO ? `auto(${decided.ladder})` : LADDER} content=${CONTENT} fps=${FPS}:`
     + ` viewer under 5 fps in ${frozen} of ${tail.length} samples, median ${med(tail.map(r => r.vkbps))} kbps received;`
     + ` call audio concealed median ${med(tail.map(r => r.aConcealPct))}% (max ${Math.max(...tail.map(r => r.aConcealPct ?? 0))}%), jitter buffer median ${med(tail.map(r => r.aJbMs))} ms`);
 console.log(`${MODE}: ${LATER_RATE !== null || RESHARE_STOP !== null ? `full 1080p ${full ? `${full.t - from} s after t=${from}s` : 'never'}; ` : ''}viewer median ${med(tail.map(r => r.vh))} lines @ ${med(tail.map(r => r.vfps))} fps`);
@@ -447,3 +487,7 @@ await browser.close();
 if (browserS !== browser) await browserS.close();
 srv.close();
 shaper.close();
+// Everything above is closed, but something (an idle keep-alive socket or the
+// esbuild service) kept node alive for minutes after the summary on Windows,
+// which made a scripted matrix wait out its timeout between runs.
+process.exit(0);
