@@ -68,7 +68,8 @@ function AttachmentItem({ refItem }: { refItem: TaskAttachmentRef }) {
         // decoder in the app, a corrupt file) is its download button, never a
         // broken image (AttachmentImg). One the device decoded for display is
         // a JPEG, and a save from the lightbox is that JPEG.
-        const shownName = isHeifType(parsed.mime) && type === 'image/jpeg' ? jpegName(refItem.name) : refItem.name;
+        const decodedHeif = isHeifType(parsed.mime) && type === 'image/jpeg';
+        const shownName = decodedHeif ? jpegName(refItem.name) : refItem.name;
         return (
             <>
                 <AttachmentImg
@@ -82,7 +83,9 @@ function AttachmentItem({ refItem }: { refItem: TaskAttachmentRef }) {
                     fallback={<TaskFileDownload url={url} name={refItem.name} encRef={parsed} save={save} />}
                 />
                 {zoomed && (
-                    <ImageLightbox url={url} name={shownName} encRef={parsed} onClose={() => setZoomed(false)} />
+                    // Saves what is shown: with the ref, the Android app would
+                    // save the original HEIC natively (MessageContent says more).
+                    <ImageLightbox url={url} name={shownName} encRef={decodedHeif ? null : parsed} onClose={() => setZoomed(false)} />
                 )}
             </>
         );

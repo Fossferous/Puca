@@ -26,13 +26,19 @@ vi.mock('../api/auth', async (orig) => ({ ...(await orig<typeof import('../api/a
 const invoke = vi.fn();
 vi.mock('@tauri-apps/api/core', async (orig) => ({ ...(await orig<typeof import('@tauri-apps/api/core')>()), invoke: (...a: unknown[]) => invoke(...a) }));
 const phoneConvert = vi.fn();
+const saved = vi.fn();
+vi.mock('../api/saveAttachment', async (orig) => ({
+    ...(await orig<typeof import('../api/saveAttachment')>()),
+    saveEncryptedAttachment: async (...a: unknown[]) => { saved(...a); return { cancelled: false, where: 'Pictures' }; },
+}));
 vi.mock('../api/mobileApp', async (orig) => ({ ...(await orig<typeof import('../api/mobileApp')>()), heifToJpegNatively: (...a: unknown[]) => phoneConvert(...a) }));
 
 import { acquireAttachmentUrl, clearBlobCache } from '../api/attachments';
 import {
-    __setEngineDecodesHeif, askToShowHeif, convertHeifForUpload, engineDecodesHeif, fileIsHeif, fitHeifEdge, hasHeifName, heifToJpegForDisplay,
-    isHeifType, jpegName, sniffHeif,
+    __resetNativeHeif, __setEngineDecodesHeif, askToShowHeif, convertHeifForUpload, engineDecodesHeif, fileIsHeif, fitHeifEdge, hasHeifName,
+    heifToJpegForDisplay, HeifNotSendableError, isHeifType, jpegName, MAX_NATIVE_HEIF_BYTES_ANDROID, sniffHeif, sniffImageType,
 } from '../api/heif';
+import { stripHeifMetadata } from '../api/heifMetadata';
 import { Capacitor } from '@capacitor/core';
 import { pendingAttachment, replaceFile, serializeAttachments, markReady } from '../api/composerAttachments';
 import { MessageContent } from '../components/MessageContent';
@@ -43,6 +49,12 @@ import { NoteImages } from '../components/NoteImages';
 /** 64x48 stored with a 90-degree irot (shows 48x64), EXIF with a camera name
  *  and GPS; made with libheif for these tests. */
 const HEIC = new Uint8Array(readFileSync(join(__dirname, 'fixtures', 'heic', 'rotated-gps.heic')));
+/** The same kind of photo with XMP beside its Exif (camera "PucaTestCamXmp"). */
+const HEIC_XMP = new Uint8Array(readFileSync(join(__dirname, 'fixtures', 'heic', 'exif-xmp.heic')));
+const has = (bytes: Uint8Array, text: string) => Buffer.from(bytes).includes(text);
+/** A HEIC whose boxes cannot be read past its ftyp: neither convertible nor
+ *  strippable here. */
+const BROKEN_HEIC = (() => { const b = new Uint8Array(200); b.set(HEIC.subarray(0, 28)); b.set([0, 0, 0, 0xff, 0x6d, 0x65, 0x74, 0x61], 28); return b; })();
 /** What the desktop app's converter hands back in these tests: a JPEG's
  *  start (SOI + JFIF APP0), enough to tell it from the HEIC. */
 const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xff, 0xd9]);
@@ -113,6 +125,17 @@ describe('which files are HEIC (the same cases as HeifImagesTest.java)', () => {
         expect(fitHeifEdge(4000, 3000)).toEqual({ w: 4000, h: 3000 });
     });
 
+    it('what the bytes are, whatever the label: sniffImageType', () => {
+        expect(sniffImageType(JPEG)).toBe('image/jpeg');
+        expect(sniffImageType(PNG)).toBe('image/png');
+        expect(sniffImageType(HEIC.subarray(0, 64))).toBe('image/heic');
+        expect(sniffImageType(ftyp('avif', 'mif1'))).toBe('image/avif');
+        expect(sniffImageType(new TextEncoder().encode('GIF89a......'))).toBe('image/gif');
+        expect(sniffImageType(new TextEncoder().encode('RIFF\0\0\0\0WEBPVP8 '))).toBe('image/webp');
+        expect(sniffImageType(ftyp('isom', 'mp41'))).toBeNull();
+        expect(sniffImageType(new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"/>'))).toBeNull();
+    });
+
     it('jsdom, like Chromium, does not decode HEIC itself', async () => {
         __setEngineDecodesHeif(null);
         expect(await engineDecodesHeif()).toBe(false);
@@ -125,11 +148,47 @@ function asDesktopApp(on: boolean) {
     if (on) w.__TAURI_INTERNALS__ = {}; else delete w.__TAURI_INTERNALS__;
 }
 
+describe("a HEIC's metadata, blanked when it has to go as it is", () => {
+    it('Exif: the location and camera are gone, every box and offset kept', () => {
+        expect(has(HEIC, 'PucaTestCam'), 'control: the fixture names its camera').toBe(true);
+        const out = stripHeifMetadata(HEIC)!;
+        expect(out).not.toBeNull();
+        expect(out.length).toBe(HEIC.length);
+        expect(has(out, 'PucaTestCam')).toBe(false);
+        // Only the metadata item's bytes changed: the picture (mdat's HEVC)
+        // and every box header are as they were.
+        const changed = [...out].map((v, i) => (v !== HEIC[i] ? i : -1)).filter(i => i >= 0);
+        expect(changed.length).toBeGreaterThan(0);
+        expect(changed.length).toBeLessThan(100);
+        expect(sniffHeif(out.subarray(0, 64))).toBe(true);
+        // The stand-in is an EXIF block with no entries (a big-endian TIFF header).
+        const at = changed[0] - 4 >= 0 ? Buffer.from(out).indexOf(Buffer.from([0x4d, 0x4d, 0, 0x2a])) : -1;
+        expect(at).toBeGreaterThan(0);
+    });
+
+    it('XMP too', () => {
+        expect(has(HEIC_XMP, 'PucaTestCamXmp'), 'control: the XMP names the camera').toBe(true);
+        const out = stripHeifMetadata(HEIC_XMP)!;
+        expect(has(out, 'PucaTestCamXmp')).toBe(false);
+        expect(has(out, 'PucaTestCam')).toBe(false);
+        expect(has(out, 'adobe:ns:meta/')).toBe(true);
+    });
+
+    it('anything it cannot read with certainty is null, never a half-stripped file', () => {
+        expect(stripHeifMetadata(BROKEN_HEIC)).toBeNull();
+        expect(stripHeifMetadata(JPEG)).toBeNull();
+        expect(stripHeifMetadata(HEIC.subarray(0, 300))).toBeNull();
+    });
+});
+
 describe('sending: a HEIC becomes a JPEG where the device can make one', () => {
     beforeEach(() => {
         __setEngineDecodesHeif(false);
+        __resetNativeHeif();
         invoke.mockReset();
+        phoneConvert.mockReset();
     });
+    afterEach(() => { vi.restoreAllMocks(); });
     afterEach(() => asDesktopApp(false));
 
     it('the desktop app converts it through the native layer, named .jpg', async () => {
@@ -161,7 +220,6 @@ describe('sending: a HEIC becomes a JPEG where the device can make one', () => {
         for (const f of [
             new File([JPEG as BlobPart], 'photo.jpg', { type: 'image/jpeg' }),
             new File([PNG as BlobPart], 'shot.png', { type: 'image/png' }),
-            new File([JPEG as BlobPart], 'liar.heic', { type: 'image/heic' }),
             new File([ftyp('avif', 'mif1') as BlobPart], 'a.avif', { type: '' }),
         ]) {
             expect(await convertHeifForUpload(f)).toBe(f);
@@ -169,15 +227,84 @@ describe('sending: a HEIC becomes a JPEG where the device can make one', () => {
         expect(invoke).not.toHaveBeenCalled();
     });
 
-    it('where nothing can convert it (the web app, a PC without the HEIF extensions), the original goes', async () => {
+    it('a JPEG labelled HEIC goes under its real type, so every reader shows it', async () => {
+        asDesktopApp(true);
+        const liar = new File([JPEG as BlobPart], 'liar.heic', { type: 'image/heic' });
+        const sent = await convertHeifForUpload(liar);
+        expect(sent.type).toBe('image/jpeg');
+        expect(sent.name).toBe('liar.heic');
+        expect(new Uint8Array(await sent.arrayBuffer())).toEqual(JPEG);
+        expect(invoke).not.toHaveBeenCalled();
+    });
+
+    it('where nothing can convert it, it goes as a HEIC with its metadata blanked, never with the location', async () => {
         const heic = new File([HEIC as BlobPart], 'IMG.heic', { type: 'image/heic' });
         // The web app: no native layer, and the engine cannot decode it.
-        expect(await convertHeifForUpload(heic)).toBe(heic);
+        const web = await convertHeifForUpload(heic);
         expect(invoke).not.toHaveBeenCalled();
         // The desktop app without the extensions: the command fails.
         asDesktopApp(true);
         invoke.mockRejectedValue(new Error('component not found'));
-        expect(await convertHeifForUpload(heic)).toBe(heic);
+        const desktop = await convertHeifForUpload(heic);
+        for (const sent of [web, desktop]) {
+            expect(sent).not.toBe(heic);
+            expect(sent.name).toBe('IMG.heic');
+            expect(sent.type).toBe('image/heic');
+            const bytes = new Uint8Array(await sent.arrayBuffer());
+            expect(bytes.length).toBe(HEIC.length);
+            expect(has(bytes, 'PucaTestCam')).toBe(false);
+        }
+    });
+
+    it('a .heic with no type that cannot be converted is still typed image/heic, so readers get its card', async () => {
+        const sent = await convertHeifForUpload(new File([HEIC as BlobPart], 'IMG.heic'));
+        expect(sent.type).toBe('image/heic');
+    });
+
+    it('one that can be neither converted nor stripped is refused, saying why', async () => {
+        const err = await convertHeifForUpload(new File([BROKEN_HEIC as BlobPart], 'odd.heic', { type: 'image/heic' })).catch(e => e);
+        expect(err).toBeInstanceOf(HeifNotSendableError);
+        expect(String(err.message)).toContain('"odd.heic" wasn\'t sent');
+        expect(String(err.message)).toContain('location');
+    });
+
+    it('the Android app: a photo too large for the bridge is never handed to it', async () => {
+        vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
+        vi.spyOn(Capacitor, 'getPlatform').mockReturnValue('android');
+        vi.spyOn(Capacitor, 'isPluginAvailable').mockReturnValue(true);
+        phoneConvert.mockResolvedValue({ data: Buffer.from(JPEG).toString('base64') });
+        const big = new Uint8Array(MAX_NATIVE_HEIF_BYTES_ANDROID + 1);
+        big.set(HEIC);
+        const sent = await convertHeifForUpload(new File([big as BlobPart], 'big.heic', { type: 'image/heic' }));
+        expect(phoneConvert).not.toHaveBeenCalled();
+        expect(sent.type).toBe('image/heic');
+        // Control: one at the cap's size is handed over.
+        await convertHeifForUpload(new File([HEIC as BlobPart], 'small.heic', { type: 'image/heic' }));
+        expect(phoneConvert).toHaveBeenCalledTimes(1);
+    });
+
+    it('the Android app: one conversion at a time, and an app that never will is not asked again', async () => {
+        vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
+        vi.spyOn(Capacitor, 'getPlatform').mockReturnValue('android');
+        vi.spyOn(Capacitor, 'isPluginAvailable').mockReturnValue(true);
+        let inFlight = 0, most = 0;
+        phoneConvert.mockImplementation(async () => {
+            inFlight++; most = Math.max(most, inFlight);
+            await new Promise(r => setTimeout(r, 15));
+            inFlight--;
+            return { data: Buffer.from(JPEG).toString('base64') };
+        });
+        const files = Array.from({ length: 5 }, (_, i) => new File([HEIC as BlobPart], `p${i}.heic`, { type: 'image/heic' }));
+        const out = await Promise.all(files.map(f => convertHeifForUpload(f)));
+        expect(out.every(f => f.type === 'image/jpeg')).toBe(true);
+        expect(phoneConvert).toHaveBeenCalledTimes(5);
+        expect(most, 'conversions running at once').toBe(1);
+        // An APK without the method (or Android 8): asked once, then never.
+        phoneConvert.mockReset();
+        phoneConvert.mockResolvedValue({ never: true });
+        await convertHeifForUpload(files[0]);
+        await convertHeifForUpload(files[1]);
+        expect(phoneConvert).toHaveBeenCalledTimes(1);
     });
 });
 
@@ -237,7 +364,10 @@ describe('showing one someone already sent', () => {
 
     beforeEach(() => {
         __setEngineDecodesHeif(false);
+        __resetNativeHeif();
         invoke.mockReset();
+        phoneConvert.mockReset();
+        saved.mockReset();
         served = new Map();
         blobTypes = new Map();
         vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
@@ -278,7 +408,7 @@ describe('showing one someone already sent', () => {
         vi.spyOn(Capacitor, 'getPlatform').mockReturnValue('android');
         vi.spyOn(Capacitor, 'isPluginAvailable').mockReturnValue(true);
         let given = '';
-        phoneConvert.mockImplementation(async (b64: string) => { given = b64; return Buffer.from(JPEG).toString('base64'); });
+        phoneConvert.mockImplementation(async (b64: string) => { given = b64; return { data: Buffer.from(JPEG).toString('base64') }; });
         const key = await seal('ha', HEIC);
         const hold = await acquireAttachmentUrl('ha', key, 'image/heic');
         expect(hold.type).toBe('image/jpeg');
@@ -364,6 +494,75 @@ describe('showing one someone already sent', () => {
         const card = container.querySelector('.message-picture-file');
         expect(card?.textContent).toContain('Windows could not open it');
         expect([...card!.querySelectorAll('button')].map(b => b.textContent?.trim())).toEqual(['IMG.heic']);
+    });
+
+    it('a JPEG labelled image/heic is shown as the JPEG it is', async () => {
+        const key = await seal('m-liar', JPEG);
+        const hold = await acquireAttachmentUrl('m-liar', key, 'image/heic');
+        expect(hold.type).toBe('image/jpeg');
+        hold.release();
+        await act(async () => { root.render(<MessageContent content={`![liar.heic](${ref('m-liar', key, 'image/heic')})`} members={[]} />); });
+        await settle();
+        expect(container.querySelector('.message-image img')).not.toBeNull();
+        expect(container.querySelector('.message-picture-file')).toBeNull();
+    });
+
+    it('a HEIC labelled image/jpeg, or sent with no type under a .heic name, gets the HEIC card', async () => {
+        const key = await seal('m-hj', HEIC);
+        const k2 = await seal('m-ho', HEIC);
+        await act(async () => {
+            root.render(<>
+                <MessageContent content={`![a.jpg](${ref('m-hj', key, 'image/jpeg')})`} members={[]} />
+                <MessageContent content={`[b.heic](${ref('m-ho', k2, 'application/octet-stream')})`} members={[]} />
+            </>);
+        });
+        await settle();
+        expect(container.querySelector('img')).toBeNull();
+        const cards = [...container.querySelectorAll('.message-picture-file')].map(c => c.textContent);
+        expect(cards.length).toBe(2);
+        expect(cards.every(t => t?.includes('HEIC photo'))).toBe(true);
+    });
+
+    it('positive control: an octet-stream file with another name is still a plain download', async () => {
+        const key = await seal('m-bin', HEIC);
+        await act(async () => { root.render(<MessageContent content={`[notes.bin](${ref('m-bin', key, 'application/octet-stream')})`} members={[]} />); });
+        await settle();
+        expect(container.querySelector('.message-picture-file')).toBeNull();
+        expect(container.querySelector('button.message-attachment')?.textContent).toContain('notes.bin');
+    });
+
+    it('Download from the lightbox saves what is shown: a decoded HEIC is saved as its JPEG, never natively from the original', async () => {
+        vi.spyOn(Capacitor, 'isNativePlatform').mockReturnValue(true);
+        vi.spyOn(Capacitor, 'getPlatform').mockReturnValue('android');
+        vi.spyOn(Capacitor, 'isPluginAvailable').mockReturnValue(true);
+        phoneConvert.mockResolvedValue({ data: Buffer.from(JPEG).toString('base64') });
+        const key = await seal('m-dl', HEIC);
+        const k2 = await seal('m-dl2', PNG);
+        await act(async () => {
+            root.render(<>
+                <MessageContent content={`![IMG.heic](${ref('m-dl', key, 'image/heic')})`} members={[]} />
+                <MessageContent content={`![shot.png](${ref('m-dl2', k2, 'image/png')})`} members={[]} />
+            </>);
+        });
+        await settle();
+        const download = async (alt: string) => {
+            await act(async () => { (container.querySelector(`img[alt="${alt}"]`) as HTMLImageElement).click(); });
+            await settle();
+            const btn = document.querySelector('.image-lightbox-dl') as HTMLButtonElement;
+            await act(async () => { btn.click(); });
+            await settle();
+            const call = saved.mock.calls.at(-1) as [string, unknown, string];
+            await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
+            await settle();
+            return call;
+        };
+        const [, ref1, name1] = await download('IMG.heic');
+        expect(ref1, 'no ref: the native save would fetch the original HEIC').toBeNull();
+        expect(name1).toBe('IMG.jpg');
+        // Control: an ordinary picture still saves from its ref (natively on Android).
+        const [, ref2, name2] = await download('shot.png');
+        expect(ref2).not.toBeNull();
+        expect(name2).toBe('shot.png');
     });
 
     it('any picture that fails to decode becomes the card (control: it was an <img> first)', async () => {

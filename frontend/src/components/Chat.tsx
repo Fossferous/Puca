@@ -204,6 +204,10 @@ import { repinOnGrowth } from './repinOnGrowth';
 import { isBlocked, loadBlockedUsers, useBlockedUsers } from './blockStore';
 import { searchChannel, searchDM, type SearchOutcome } from '../api/searchMessages';
 
+/** A file that may be a HEIC (its type or name says so, or it has no type:
+ *  what Windows gives a .heic); its first bytes decide (api/heif.ts). */
+const mayBeHeif = (file: File) => isHeifType(file.type) || hasHeifName(file.name) || file.type === '' || file.type === 'application/octet-stream';
+
 // Lazy + code-split, not a static import: DevicesView pulls in the whole
 // remote-control API surface (host agent bridge, grants/shares, WoL, device
 // identity keys). React.lazy's factory only runs when the component actually
@@ -1027,38 +1031,53 @@ export function Chat({ onLogout }: ChatProps) {
      *  A photo that may be a HEIC (a phone camera's; api/heif.ts) is made a
      *  JPEG first, so every reader's app can show it: its chip waits (no
      *  thumbnail: no engine but WebKit could draw one) until the JPEG is
-     *  ready, then shows the JPEG's thumbnail and name and uploads that. */
-    const enqueueUpload = useCallback((file: File, opts?: { spoiler?: boolean }) => {
-        const mayBeHeif = isHeifType(file.type) || hasHeifName(file.name) || file.type === '';
-        const chip = pendingAttachment(file, !mayBeHeif && file.type.startsWith('image/') ? URL.createObjectURL(file) : null, opts?.spoiler ?? false);
-        pendingFilesRef.current.set(chip.localId, file);
-        setPendingAttachments(prev => [...prev, chip]);
-        if (!mayBeHeif) {
-            settleUpload(chip.localId, file);
+     *  ready, then shows the JPEG's thumbnail and name and uploads that. One
+     *  it cannot convert goes as a HEIC with its metadata removed, or, when
+     *  even that cannot be done, fails its chip saying why (HeifNotSendableError):
+     *  never silently with the sender's location in it. */
+    const prepareAndSettle = useCallback((localId: string, file: File) => {
+        if (!mayBeHeif(file)) {
+            settleUpload(localId, file);
             return;
         }
         void convertHeifForUpload(file).then((sent) => {
             // Removed while it was converted: nothing was uploaded, so
             // nothing is waiting to be discarded either.
-            if (!pendingFilesRef.current.has(chip.localId)) {
-                abandonedUploadsRef.current.delete(chip.localId);
+            if (!pendingFilesRef.current.has(localId)) {
+                abandonedUploadsRef.current.delete(localId);
                 return;
             }
             if (sent !== file) {
-                pendingFilesRef.current.set(chip.localId, sent);
-                const preview = URL.createObjectURL(sent);
-                setPendingAttachments(prev => replaceFile(prev, chip.localId, sent, preview));
+                pendingFilesRef.current.set(localId, sent);
+                const preview = sent.type.startsWith('image/') && !isHeifType(sent.type) ? URL.createObjectURL(sent) : null;
+                setPendingAttachments((prev) => {
+                    const old = prev.find(a => a.localId === localId)?.previewUrl;
+                    if (old) URL.revokeObjectURL(old);
+                    return replaceFile(prev, localId, sent, preview);
+                });
             }
-            settleUpload(chip.localId, sent);
+            settleUpload(localId, sent);
+        }, (err: unknown) => {
+            if (abandonedUploadsRef.current.delete(localId) || !pendingFilesRef.current.has(localId)) return;
+            setPendingAttachments(prev => markFailed(prev, localId, err instanceof Error ? err.message : `Couldn't send "${file.name}".`));
         });
     }, [settleUpload]);
+
+    const enqueueUpload = useCallback((file: File, opts?: { spoiler?: boolean }) => {
+        const chip = pendingAttachment(file, !mayBeHeif(file) && file.type.startsWith('image/') ? URL.createObjectURL(file) : null, opts?.spoiler ?? false);
+        pendingFilesRef.current.set(chip.localId, file);
+        setPendingAttachments(prev => [...prev, chip]);
+        prepareAndSettle(chip.localId, file);
+    }, [prepareAndSettle]);
 
     const retryUpload = useCallback((localId: string) => {
         const file = pendingFilesRef.current.get(localId);
         if (!file) return;
         setPendingAttachments(prev => markUploading(prev, localId));
-        settleUpload(localId, file);
-    }, [settleUpload]);
+        // Through the conversion again: a HEIC refused the first time is
+        // still the original here.
+        prepareAndSettle(localId, file);
+    }, [prepareAndSettle]);
 
     const removePendingAttachment = useCallback((localId: string) => {
         const chip = pendingAttachmentsRef.current.find(a => a.localId === localId);

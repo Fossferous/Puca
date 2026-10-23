@@ -145,9 +145,10 @@ A photo in **HEIC** (what most phone cameras save) is turned into a JPEG on your
 everyone can see it: in the Android app (Android 9 or newer), in the desktop app when Windows has the HEIF Image
 Extensions and HEVC Video Extensions from the Microsoft Store, and in Safari. Its chip shows the JPEG and its name
 ends in .jpg. The JPEG keeps only the picture: not the location, camera or time the phone stored with it. Where
-your device cannot convert it (a browser other than Safari, a PC without those extensions), the HEIC is sent as
-it is. A HEIC picture someone sent is shown in the Android app; elsewhere it is a card with its name, size and a
-**Download** button that saves the original file. In the desktop app the card also has **Show photo**, which opens
+your device cannot convert it (a browser other than Safari, a PC without those extensions), the HEIC is sent with
+its location, camera and time removed; if they cannot be removed, it is not sent and its chip says why. A HEIC
+picture someone sent is shown in the Android app (and **Download** in its picture viewer saves the JPEG you see);
+elsewhere it is a card with its name, size and a **Download** button that saves the file. In the desktop app the card also has **Show photo**, which opens
 it with Windows' own decoder (it needs those two extensions). It waits for you because that decoder runs inside the
 app, without the protection the app gives every other picture.
 

@@ -645,18 +645,22 @@ export async function readMobileClipboard(): Promise<{ text: string } | { unsupp
 }
 
 /**
- * A HEIC photo as JPEG bytes, decoded by the phone (api/heif.ts). null where
- * this is not Púca's Android app, on an APK without the method, on Android
- * before 9, or on any failure: the caller then does without.
+ * A HEIC photo as JPEG bytes (base64), decoded by the phone (api/heif.ts).
+ * `never`: this phone or this installed app never will (not Púca's Android
+ * app, an APK without the method, Android before 9), so the caller stops
+ * asking; `failed`: this photo could not be converted (any other failure,
+ * including one the app caught running out of memory).
  */
-export async function heifToJpegNatively(b64: string, maxEdge: number, quality: number): Promise<string | null> {
-    if (!android() || !Capacitor.isNativePlatform() || !Capacitor.isPluginAvailable('SovereignApp')) return null;
+export async function heifToJpegNatively(b64: string, maxEdge: number, quality: number): Promise<{ data: string } | { never: true } | { failed: true }> {
+    if (!android() || !Capacitor.isNativePlatform() || !Capacitor.isPluginAvailable('SovereignApp')) return { never: true };
     try {
         const r = await App.heifToJpeg({ data: b64, maxEdge, quality });
-        return typeof r?.data === 'string' && r.data ? r.data : null;
+        return typeof r?.data === 'string' && r.data ? { data: r.data } : { failed: true };
     } catch (err) {
-        console.warn('[heif] the app could not convert it:', err instanceof Error ? err.message : err);
-        return null;
+        const code = (err as { code?: unknown } | null)?.code;
+        console.warn('[heif] the app could not convert it:', code ?? '', err instanceof Error ? err.message : err);
+        // UNIMPLEMENTED: Capacitor's answer for a method the installed APK lacks.
+        return code === 'UNIMPLEMENTED' || code === 'unsupported' ? { never: true } : { failed: true };
     }
 }
 
