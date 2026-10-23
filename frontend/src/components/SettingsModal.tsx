@@ -2313,7 +2313,7 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                             onChange={(e) => updateSetting('messageToasts', e.target.checked)}
                                         />
                                     </div>
-                                    {(isTauri() || isAndroidApp()) && (
+                                    {(isTauri() || isAndroidApp() || hostShowsNotifications()) && (
                                         <div className="settings-option">
                                             <div className="option-info">
                                                 <label>Test notification</label>

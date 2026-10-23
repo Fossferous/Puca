@@ -5,12 +5,12 @@
  */
 import {
     ButtonItem, DialogButton, DropdownItem, Field, Focusable, PanelSection, PanelSectionRow, SteamSpinner,
-    TextField, ToggleField,
+    TextField, ToggleField, useQuickAccessVisible,
 } from '@decky/ui';
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { Fragment, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { controller, type Snapshot } from '../controller';
-import type { EmbedCall, EmbedState, EmbedVoiceChannel } from '../protocol';
-import type { PushToTalkButton } from '../settings';
+import type { EmbedCall, EmbedState, EmbedVoiceChannel, LiveChannel } from '../protocol';
+import { BUTTON_JOBS, type ButtonChoice, type ButtonJob, type PushToTalkButton } from '../settings';
 import {
     HeadphonesIcon, HeadphonesOffIcon, LeaveIcon, MicIcon, MicOffIcon, NoMicIcon, SpeakingDot,
 } from './icons';
@@ -29,18 +29,26 @@ const BUTTON_LABELS: Record<PushToTalkButton, string> = {
     R5: 'R5 (lower right back button)',
 };
 
+const JOB_NAMES: Record<ButtonJob, string> = {
+    pushToTalk: 'Push to talk',
+    muteButton: 'Mute',
+    deafenButton: 'Deafen',
+};
+
 /** Why the Deck's controls cannot be read, in plain words. */
 function controllerProblem(problem: string): string {
-    if (problem === 'no-controller') return "Can't find the Deck's controller. Push to talk works with a Steam Deck's own back buttons.";
+    if (problem === 'no-controller') return "Can't find the Deck's controller. The back buttons work on a Steam Deck's own controls.";
     if (problem === 'no-access') return "Can't read the Deck's controller on this system.";
     return `The Deck's controller can't be read: ${problem}`;
 }
 
-/** What Settings says under Push to talk: the choice, or why it is not working. */
-function pushToTalkNote(button: PushToTalkButton, problem: string | null): string {
-    if (button === 'off') return 'Off: Púca listens for your voice.';
+/** What a back button's row says: what it does, or why it is not working. */
+function jobNote(job: ButtonJob, button: ButtonChoice, problem: string | null): string {
+    if (button === 'off') return job === 'pushToTalk' ? 'Off: Púca listens for your voice.' : 'Off';
     if (problem) return controllerProblem(problem);
-    return `Hold ${BUTTON_LABELS[button]} to talk, in games too.`;
+    if (job === 'pushToTalk') return `Hold ${BUTTON_LABELS[button]} to talk, in games too.`;
+    if (job === 'muteButton') return `Press ${BUTTON_LABELS[button]} to mute or unmute, in games too.`;
+    return `Press ${BUTTON_LABELS[button]} to deafen or undeafen, in games too.`;
 }
 
 const row: CSSProperties = { display: 'flex', alignItems: 'center', gap: 8 };
@@ -152,6 +160,7 @@ function Ready({ snap }: { snap: Snapshot }) {
     const state = snap.state;
     if (!state) return null;
     if (!state.signedIn) {
+        if (state.features.includes('signIn')) return <SignIn />;
         return (
             <PanelSection>
                 <Note title="Sign in to Púca">
@@ -163,13 +172,36 @@ function Ready({ snap }: { snap: Snapshot }) {
     }
     return (
         <>
+            {state.keys && <KeysNote keys={state.keys} />}
             {state.call && <Call call={state.call} snap={snap} />}
+            <LiveNow state={state} />
             <Channels state={state} />
             <PanelSection>
                 <OpenButton label="Open Púca (messages)" />
                 <Note title={`Signed in as ${state.user?.username ?? ''}`} />
             </PanelSection>
         </>
+    );
+}
+
+/** The full app's key banner, for the panel: the account's encryption keys
+ *  did not come back on this Deck, and only Púca itself can put that right. */
+function KeysNote({ keys }: { keys: 'refused' | 'unavailable' }) {
+    return (
+        <PanelSection>
+            {keys === 'refused' ? (
+                <Note title="Your encryption key is not the one this server publishes for you">
+                    Púca did not use it: messages can't be sent or read here, and calls may not be end-to-end
+                    encrypted. Open Púca, and tell the server's owner.
+                </Note>
+            ) : (
+                <Note title="Encryption keys unavailable">
+                    Messages can't be sent or read here, and calls may not be end-to-end encrypted, until they are
+                    restored. Open Púca to restore them.
+                </Note>
+            )}
+            <OpenButton />
+        </PanelSection>
     );
 }
 
@@ -189,6 +221,11 @@ function Call({ call, snap }: { call: EmbedCall; snap: Snapshot }) {
     return (
         <PanelSection title={call.channelName || 'Voice call'}>
             <Note title={callStatus(call, snap)} />
+            {snap.micSwitchedOn && !snap.micSilent && (
+                <Note title="Microphone on for this call">
+                    Your Deck's microphone was muted. Púca mutes it again when you leave.
+                </Note>
+            )}
             {snap.micSilent && !call.noMicrophone && (
                 <Note title="Your Deck's microphone is muted">
                     Nobody can hear you. Turn the microphone up in Steam's Settings, Audio.
@@ -239,26 +276,83 @@ function Call({ call, snap }: { call: EmbedCall; snap: Snapshot }) {
     );
 }
 
+/** Who is talking where right now, on every server the person is in: one
+ *  tap joins them. Out of the way when nobody is in a voice channel. */
+function LiveNow({ state }: { state: EmbedState }) {
+    const [live, setLive] = useState<LiveChannel[] | null>(null);
+    const [joining, setJoining] = useState<string | null>(null);
+    const [error, setError] = useState<string | null>(null);
+    const here = state.call ? `${state.call.serverId}:${state.call.channelId}` : null;
+    const servers = state.servers.map(s => s.id).join(',');
+    const shown = useQuickAccessVisible();
+
+    useEffect(() => {
+        // The panel stays mounted while the menu is closed: one look per
+        // server is too many to keep making for nobody.
+        if (!shown) return;
+        let alive = true;
+        const load = () => { void controller.listLiveChannels().then(l => { if (alive) setLive(l); }); };
+        load();
+        // Who is in which channel changes while the panel is open.
+        const t = setInterval(load, 10000);
+        return () => { alive = false; clearInterval(t); };
+    }, [here, servers, shown]);
+
+    if (!live || live.length === 0) return null;
+
+    const join = async (l: LiveChannel, key: string) => {
+        setError(null);
+        setJoining(key);
+        const err = await controller.join(l.serverId, l.channel.id);
+        setJoining(null);
+        if (err) setError(`Could not join ${l.channel.name}: ${err}`);
+    };
+
+    return (
+        <PanelSection title="Live now">
+            {live.map(l => {
+                const key = `${l.serverId}:${l.channel.id}`;
+                const who = l.channel.members.map(m => m.username).join(', ');
+                return (
+                    <PanelSectionRow key={key}>
+                        <ButtonItem
+                            layout="below"
+                            label={state.servers.length > 1 ? l.serverName : undefined}
+                            disabled={key === here || !l.channel.canConnect || joining !== null}
+                            description={<span style={muted}>{who}</span>}
+                            onClick={() => { void join(l, key); }}
+                        >
+                            {key === here ? `${l.channel.name}: you are here` : joining === key ? `Joining ${l.channel.name}…` : l.channel.name}
+                        </ButtonItem>
+                    </PanelSectionRow>
+                );
+            })}
+            {error && <Note title={error} />}
+        </PanelSection>
+    );
+}
+
 function Channels({ state }: { state: EmbedState }) {
     const [serverId, setServerId] = useState<string | null>(state.call?.serverId ?? state.currentServerId ?? state.servers[0]?.id ?? null);
     const [channels, setChannels] = useState<EmbedVoiceChannel[] | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [joining, setJoining] = useState<number | null>(null);
     const callChannel = state.call?.channelId ?? null;
+    const shown = useQuickAccessVisible();
 
     useEffect(() => {
         if (!serverId && state.servers[0]) setServerId(state.servers[0].id);
     }, [serverId, state.servers]);
 
     useEffect(() => {
-        if (!serverId) return;
+        if (!serverId || !shown) return;
         let live = true;
         const load = () => { void controller.listVoiceChannels(serverId).then(c => { if (live) setChannels(c); }); };
         load();
         // Who is in which channel changes while the panel is open.
         const t = setInterval(load, 10000);
         return () => { live = false; clearInterval(t); };
-    }, [serverId, callChannel]);
+    }, [serverId, callChannel, shown]);
 
     if (state.servers.length === 0) {
         return (
@@ -312,6 +406,50 @@ function Channels({ state }: { state: EmbedState }) {
     );
 }
 
+/** Signing in from the panel, through Púca's own sign-in form in the page.
+ *  Creating an account, or a forgotten password, still happen in Púca. */
+function SignIn() {
+    const [username, setUsername] = useState('');
+    const [password, setPassword] = useState('');
+    const [stay, setStay] = useState(true);
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const submit = async () => {
+        setBusy(true);
+        setError(null);
+        const err = await controller.signIn(username.trim(), password, stay);
+        setPassword('');
+        setBusy(false);
+        setError(err);
+    };
+    return (
+        <PanelSection title="Sign in to Púca">
+            <PanelSectionRow>
+                <TextField label="Username" value={username} disabled={busy} onChange={e => setUsername(e.target.value)} />
+            </PanelSectionRow>
+            <PanelSectionRow>
+                <TextField label="Password" bIsPassword value={password} disabled={busy} onChange={e => setPassword(e.target.value)} />
+            </PanelSectionRow>
+            <PanelSectionRow>
+                <ToggleField
+                    label="Stay signed in"
+                    description="Up to a year on this Deck, as long as Púca is opened once a month."
+                    checked={stay}
+                    disabled={busy}
+                    onChange={setStay}
+                />
+            </PanelSectionRow>
+            {error && <Note title={error} />}
+            <PanelSectionRow>
+                <ButtonItem layout="below" disabled={busy || !username.trim() || !password} onClick={() => { void submit(); }}>
+                    {busy ? 'Signing in…' : 'Sign in'}
+                </ButtonItem>
+            </PanelSectionRow>
+            <OpenButton label="New account or forgotten password: open Púca" />
+        </PanelSection>
+    );
+}
+
 function AddressForm({ initial, onDone }: { initial: string; onDone?: () => void }) {
     const [value, setValue] = useState(initial);
     const [error, setError] = useState<string | null>(null);
@@ -339,53 +477,74 @@ function AddressForm({ initial, onDone }: { initial: string; onDone?: () => void
 }
 
 /**
- * Push to talk is chosen by pressing the button, not by its name: R4 and R5
- * are easy to mix up (in testing, "R4" was R5 every time).
+ * The back buttons: push to talk (hold), mute and deafen (press). Each is
+ * chosen by pressing the button, not by its name: R4 and R5 are easy to mix
+ * up (in testing, "R4" was R5 every time). A button does one job; giving it
+ * another moves it, and the panel says which job lost it.
  */
-function PushToTalk({ snap }: { snap: Snapshot }) {
-    const choice = snap.settings.pushToTalk;
-    const [learning, setLearning] = useState(false);
-    const [message, setMessage] = useState<string | null>(null);
-    const learningRef = useRef(false);
-    // Closing the panel stops listening: a press later must not change the button.
+function BackButtons({ snap }: { snap: Snapshot }) {
+    const [learning, setLearning] = useState<ButtonJob | null>(null);
+    const [message, setMessage] = useState<{ job: ButtonJob; text: string } | null>(null);
+    const learningRef = useRef<ButtonJob | null>(null);
+    // Cancelled or turned off by hand: no "nothing was pressed" afterwards.
+    const quietRef = useRef(false);
+    // Closing the panel stops listening: a press later must not change a button.
     useEffect(() => () => { if (learningRef.current) controller.cancelLearn(); }, []);
 
-    const choose = async () => {
+    const choose = async (job: ButtonJob) => {
+        if (learningRef.current) return;
         setMessage(null);
-        setLearning(true);
-        learningRef.current = true;
-        const r = await controller.learnButton();
-        learningRef.current = false;
-        setLearning(false);
-        if ('error' in r) setMessage(controllerProblem(r.error));
-        else if (r.button === null) setMessage('No back button was pressed.');
+        setLearning(job);
+        learningRef.current = job;
+        quietRef.current = false;
+        const r = await controller.learnButton(job);
+        learningRef.current = null;
+        setLearning(null);
+        if (quietRef.current) return;
+        if ('error' in r) setMessage({ job, text: controllerProblem(r.error) });
+        else if (r.button === null) setMessage({ job, text: 'No back button was pressed.' });
+        else if (r.took) setMessage({ job, text: `${r.button} now does this. ${JOB_NAMES[r.took]} is off.` });
     };
 
     return (
         <>
-            <PanelSectionRow>
-                <Field
-                    label="Push to talk"
-                    description={learning ? 'Press the back button you want to use…' : (message ?? pushToTalkNote(choice, snap.pttError))}
-                    focusable={false}
-                />
-            </PanelSectionRow>
-            <PanelSectionRow>
-                {learning ? (
-                    <ButtonItem layout="below" onClick={() => controller.cancelLearn()}>Cancel</ButtonItem>
-                ) : (
-                    <ButtonItem layout="below" onClick={() => { void choose(); }}>
-                        {choice === 'off' ? 'Choose a back button' : 'Choose another back button'}
-                    </ButtonItem>
-                )}
-            </PanelSectionRow>
-            {choice !== 'off' && !learning && (
-                <PanelSectionRow>
-                    <ButtonItem layout="below" onClick={() => { setMessage(null); void controller.saveSettings({ pushToTalk: 'off' }); }}>
-                        Turn off push to talk
-                    </ButtonItem>
-                </PanelSectionRow>
-            )}
+            {BUTTON_JOBS.map(job => {
+                const button = snap.settings[job];
+                const isLearning = learning === job;
+                const note = isLearning
+                    ? `Press the back button for ${JOB_NAMES[job].toLowerCase()}…`
+                    : (message?.job === job ? message.text : jobNote(job, button, snap.pttError));
+                return (
+                    <Fragment key={job}>
+                        <PanelSectionRow>
+                            <ButtonItem
+                                layout="inline"
+                                label={JOB_NAMES[job]}
+                                description={note}
+                                disabled={learning !== null && !isLearning}
+                                onClick={() => {
+                                    if (!isLearning) { void choose(job); return; }
+                                    quietRef.current = true;
+                                    controller.cancelLearn();
+                                }}
+                            >
+                                {isLearning ? 'Cancel' : button === 'off' ? 'Choose' : 'Change'}
+                            </ButtonItem>
+                        </PanelSectionRow>
+                        {isLearning && button !== 'off' && (
+                            <PanelSectionRow>
+                                <ButtonItem layout="below" onClick={() => {
+                                    quietRef.current = true;
+                                    controller.cancelLearn();
+                                    controller.clearButton(job);
+                                }}>
+                                    Turn {JOB_NAMES[job].toLowerCase()} off
+                                </ButtonItem>
+                            </PanelSectionRow>
+                        )}
+                    </Fragment>
+                );
+            })}
         </>
     );
 }
@@ -396,7 +555,15 @@ function Settings({ snap }: { snap: Snapshot }) {
     if (snap.phase === 'no-address') return null;
     return (
         <PanelSection title="Settings">
-            <PushToTalk snap={snap} />
+            <BackButtons snap={snap} />
+            <PanelSectionRow>
+                <ToggleField
+                    label="Turn the microphone on for calls"
+                    description="If the Deck's microphone is muted, Púca switches it on for a call and mutes it again after."
+                    checked={s.micForCalls}
+                    onChange={v => { void controller.saveSettings({ micForCalls: v }); }}
+                />
+            </PanelSectionRow>
             <PanelSectionRow>
                 <ToggleField
                     label="Notifications"

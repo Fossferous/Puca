@@ -15,19 +15,29 @@ from urllib.parse import urlsplit
 DEFAULTS = {
     "appUrl": "",
     "pushToTalk": "off",
+    "muteButton": "off",
+    "deafenButton": "off",
+    "micForCalls": True,
     "notifications": True,
     "notificationSound": True,
 }
 
 PUSH_TO_TALK = ("off", "L4", "R4", "L5", "R5")
+# Each back grip does one job; when two claim the same grip, the first here keeps it.
+BUTTON_JOBS = ("pushToTalk", "muteButton", "deafenButton")
 
 # What the frontend may ask the page to do: window.pucaEmbed's commands
 # (docs/EMBEDDING.md). Anything else is refused before it reaches the page.
 PAGE_METHODS = frozenset({
     "getState", "listVoiceChannels", "joinVoice", "leaveVoice", "setMuted",
     "setDeafened", "setInputMode", "holdPushToTalk", "activateNotification",
-    "downloadSite",
+    "downloadSite", "signIn",
 })
+
+# What a page_call runs in Púca's page. The method and its arguments go over
+# as values (puca_cdp.call_function), never as script text: signIn's
+# arguments carry a password.
+PAGE_CALL = "function (method, args) { return window.__pucaDeckyShim.call(method, args); }"
 
 REQUEST_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 MARKER = re.compile(r"^puca-decky-[0-9a-f]{24}$")
@@ -77,12 +87,17 @@ def read_settings(raw: Any) -> dict:
     """Settings as stored, with anything missing or malformed at its default."""
     o = raw if isinstance(raw, dict) else {}
     url = normalize_app_url(o.get("appUrl"))
-    return {
-        "appUrl": url[0] if url else "",
-        "pushToTalk": o.get("pushToTalk") if o.get("pushToTalk") in PUSH_TO_TALK else "off",
-        "notifications": o["notifications"] if isinstance(o.get("notifications"), bool) else DEFAULTS["notifications"],
-        "notificationSound": o["notificationSound"] if isinstance(o.get("notificationSound"), bool) else DEFAULTS["notificationSound"],
-    }
+    out = {"appUrl": url[0] if url else ""}
+    taken = set()
+    for job in BUTTON_JOBS:
+        grip = o.get(job) if o.get(job) in PUSH_TO_TALK else "off"
+        if grip != "off" and grip in taken:
+            grip = "off"
+        taken.add(grip)
+        out[job] = grip
+    for flag in ("micForCalls", "notifications", "notificationSound"):
+        out[flag] = o[flag] if isinstance(o.get(flag), bool) else DEFAULTS[flag]
+    return out
 
 
 def load_settings(path: str) -> dict:

@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NOTICE_EVERY_MS, SilenceVerdict, SilentNotice, SILENT_AFTER_S } from '../src/micSilence';
-import { HoldFollower } from '../src/ptt';
-import { readPageMessage, readState, readVoiceChannels } from '../src/protocol';
-import { normalizeAppUrl, readSettings } from '../src/settings';
+import { HoldFollower, PressFollower } from '../src/ptt';
+import { liveChannels, readPageMessage, readState, readVoiceChannels } from '../src/protocol';
+import { assignButton, DEFAULT_SETTINGS, jobOf, normalizeAppUrl, readSettings, watchedButtons } from '../src/settings';
 
 describe('the Púca address', () => {
     it('takes what a person types and makes it an https address', () => {
@@ -27,11 +27,69 @@ describe('the Púca address', () => {
     });
 
     it('reads stored settings defensively', () => {
-        expect(readSettings(null)).toEqual({ appUrl: '', pushToTalk: 'off', notifications: true, notificationSound: true });
-        expect(readSettings({ appUrl: 'http://x.example', pushToTalk: 'R9', notifications: 'yes' }))
-            .toEqual({ appUrl: '', pushToTalk: 'off', notifications: true, notificationSound: true });
+        const none = { pushToTalk: 'off', muteButton: 'off', deafenButton: 'off', micForCalls: true };
+        expect(readSettings(null)).toEqual({ appUrl: '', ...none, notifications: true, notificationSound: true });
+        expect(readSettings({ appUrl: 'http://x.example', pushToTalk: 'R9', notifications: 'yes', micForCalls: 'no' }))
+            .toEqual({ appUrl: '', ...none, notifications: true, notificationSound: true });
         expect(readSettings({ appUrl: 'chat.example.com', pushToTalk: 'R4', notifications: false, notificationSound: false }))
-            .toEqual({ appUrl: 'https://chat.example.com/', pushToTalk: 'R4', notifications: false, notificationSound: false });
+            .toEqual({ appUrl: 'https://chat.example.com/', ...none, pushToTalk: 'R4', notifications: false, notificationSound: false });
+        expect(readSettings({ micForCalls: false }).micForCalls).toBe(false);
+    });
+});
+
+describe('the back buttons: one job each', () => {
+    const with_ = (o: object) => readSettings({ ...DEFAULT_SETTINGS, ...o });
+
+    it('a stored grip claimed twice keeps the first job and loses the rest', () => {
+        const s = with_({ pushToTalk: 'R5', muteButton: 'R5', deafenButton: 'R5' });
+        expect([s.pushToTalk, s.muteButton, s.deafenButton]).toEqual(['R5', 'off', 'off']);
+        const t = with_({ muteButton: 'L4', deafenButton: 'L4' });
+        expect([t.muteButton, t.deafenButton]).toEqual(['L4', 'off']);
+    });
+
+    it('says which job a grip has, and which grips to follow in a call', () => {
+        const s = with_({ pushToTalk: 'R5', muteButton: 'L4', deafenButton: 'L5' });
+        expect(jobOf(s, 'R5')).toBe('pushToTalk');
+        expect(jobOf(s, 'L4')).toBe('muteButton');
+        expect(jobOf(s, 'L5')).toBe('deafenButton');
+        expect(jobOf(s, 'R4')).toBeNull();
+        expect(jobOf(s, 'off')).toBeNull();
+        expect(jobOf(s, 42)).toBeNull();
+        expect(watchedButtons(s)).toEqual(['R5', 'L4', 'L5']);
+        expect(watchedButtons(DEFAULT_SETTINGS)).toEqual([]);
+    });
+
+    it('giving a grip a new job takes it from the old one, and says so', () => {
+        const s = with_({ pushToTalk: 'R5', muteButton: 'L4' });
+        const moved = assignButton(s, 'muteButton', 'R5');
+        expect([moved.settings.pushToTalk, moved.settings.muteButton]).toEqual(['off', 'R5']);
+        expect(moved.took).toBe('pushToTalk');
+        const fresh = assignButton(s, 'deafenButton', 'R4');
+        expect(fresh.took).toBeNull();
+        expect(fresh.settings.deafenButton).toBe('R4');
+        const same = assignButton(s, 'pushToTalk', 'R5');
+        expect(same.took).toBeNull();
+        expect(assignButton(s, 'muteButton', 'off').took).toBeNull();
+    });
+});
+
+describe('mute and deafen on a back button', () => {
+    it('one press, one toggle, however long it is held', () => {
+        const f = new PressFollower();
+        expect(f.signal('L4', true)).toBe(true);
+        expect(f.signal('L4', true)).toBe(false); // the half-second "still held"
+        expect(f.signal('L4', true)).toBe(false);
+        expect(f.signal('L4', false)).toBe(false);
+        expect(f.signal('L4', true)).toBe(true); // pressed again
+    });
+
+    it('each button on its own, and a reset forgets what was down', () => {
+        const f = new PressFollower();
+        expect(f.signal('L4', true)).toBe(true);
+        expect(f.signal('L5', true)).toBe(true);
+        expect(f.signal('L4', true)).toBe(false);
+        f.reset();
+        expect(f.signal('L4', true)).toBe(true);
     });
 });
 
@@ -177,6 +235,35 @@ describe("a muted Deck microphone is noticed", () => {
     });
 });
 
+describe('live now: who is talking where, on every server', () => {
+    const ch = (id: number, name: string, n: number) => ({
+        id, name, canConnect: true, members: Array.from({ length: n }, (_, i) => ({ id: id * 100 + i, username: `u${id}${i}` })),
+    });
+
+    it('keeps the channels with people in them, busiest first, then by server and channel', () => {
+        const servers = [{ id: 'b', name: 'Beta' }, { id: 'a', name: 'Alpha' }];
+        const live = liveChannels(servers, new Map([
+            ['a', [ch(1, 'Lounge', 2), ch(2, 'Empty', 0), ch(3, 'Games', 2)]],
+            ['b', [ch(4, 'Raid', 3), ch(5, 'Chill', 0)]],
+        ]));
+        expect(live.map(l => `${l.serverName}/${l.channel.name}`)).toEqual(['Beta/Raid', 'Alpha/Games', 'Alpha/Lounge']);
+        expect(live[0].serverId).toBe('b');
+    });
+
+    it('a tie goes by server name before channel name', () => {
+        const live = liveChannels([{ id: 'b', name: 'Beta' }, { id: 'a', name: 'Alpha' }], new Map([
+            ['b', [ch(1, 'Arena', 2)]],
+            ['a', [ch(2, 'Lounge', 2)]],
+        ]));
+        expect(live.map(l => `${l.serverName}/${l.channel.name}`)).toEqual(['Alpha/Lounge', 'Beta/Arena']);
+    });
+
+    it('a server with nothing listed, or not known, adds nothing', () => {
+        expect(liveChannels([{ id: 'x', name: 'X' }], new Map())).toEqual([]);
+        expect(liveChannels([], new Map([['a', [ch(1, 'Lounge', 2)]]]))).toEqual([]);
+    });
+});
+
 describe('what the page sends', () => {
     const state = {
         apiVersion: 1, appVersion: '0.9.845', signedIn: true,
@@ -204,12 +291,31 @@ describe('what the page sends', () => {
         expect(s.servers[0].name.length).toBe(200);
     });
 
+    it("reads the page's optional calls, so an older page is told apart", () => {
+        expect(readState(state)!.features).toEqual([]);
+        expect(readState({ ...state, features: ['signIn', 'downloadSite', 7, '', 'x'.repeat(60)] })!.features)
+            .toEqual(['signIn', 'downloadSite', 'x'.repeat(40)]);
+        expect(readState({ ...state, features: 'signIn' })!.features).toEqual([]);
+        expect(readState({ ...state, features: Array.from({ length: 80 }, (_, i) => `f${i}`) })!.features).toHaveLength(50);
+    });
+
+    it('reads keys that did not come back, and only the two answers that say so', () => {
+        expect(readState(state)!.keys, 'an older page sends none').toBeNull();
+        expect(readState({ ...state, keys: 'refused' })!.keys).toBe('refused');
+        expect(readState({ ...state, keys: 'unavailable' })!.keys).toBe('unavailable');
+        for (const v of ['ok', null, 'REFUSED', 1, {}]) expect(readState({ ...state, keys: v })!.keys, JSON.stringify(v)).toBeNull();
+    });
+
     it('accepts each message type, and nothing else', () => {
         expect(readPageMessage({ type: 'ready', apiVersion: 1 })).toEqual({ type: 'ready', apiVersion: 1, appVersion: '' });
         expect(readPageMessage({ type: 'ready', apiVersion: null })).toEqual({ type: 'ready', apiVersion: null, appVersion: '' });
         expect(readPageMessage({ type: 'state', state })).toMatchObject({ type: 'state' });
         expect(readPageMessage({ type: 'notify', notification: { id: 'n1', title: 'alice sent a message', body: 'New message', key: 'chan:s1', kind: 'message' } }))
             .toEqual({ type: 'notify', notification: { id: 'n1', title: 'alice sent a message', body: 'New message', key: 'chan:s1', kind: 'message' } });
+        expect(readPageMessage({ type: 'notify', notification: { id: 'n2', title: 'Approval needed', body: 'Open Púca to approve or decline', key: 'clip:9', kind: 'clip' } }))
+            .toMatchObject({ notification: { key: 'clip:9', kind: 'clip' } });
+        expect(readPageMessage({ type: 'notify', notification: { id: 'n3', title: 'x', kind: 'shout' } }))
+            .toMatchObject({ notification: { kind: 'message' } });
         expect(readPageMessage({ type: 'mic-release', id: 'm1' })).toEqual({ type: 'mic-release', id: 'm1' });
         expect(readPageMessage({ type: 'eval', code: 'x' })).toBeNull();
         expect(readPageMessage('state')).toBeNull();

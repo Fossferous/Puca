@@ -1,6 +1,8 @@
-import { useState, useEffect, type FormEvent } from 'react';
+import { useState, useEffect, useRef, type FormEvent } from 'react';
 import { useLocation } from 'react-router-dom';
 import { login, register, resetPasswordMigration, REMEMBER_ME_KEY } from '../api/auth';
+import { embedKeys, registerEmbedSignIn } from '../api/embedSignIn';
+import { embedHost } from '../api/embedHost';
 import { wsClient } from '../api/websocket';
 import { isTauri, isMobile } from '../api/platform';
 import { fetchPublicConfig } from '../api/publicConfig';
@@ -13,8 +15,10 @@ import { readStaySignedIn, writeStaySignedIn } from '../api/staySignedIn';
  *  ordinary session ends after a single day without opening the app - and
  *  CLEAR in a browser, which is what gets shared or borrowed, so a long
  *  session there is asked for, never walked into. Same rule as Púca Notes
- *  (NotesLogin STAY_DEFAULT); the stored answer is shared with it. */
-const STAY_DEFAULT = isTauri() || isMobile();
+ *  (NotesLogin STAY_DEFAULT); the stored answer is shared with it. An
+ *  embedding host (Púca for Steam Deck) is an installed app on one person's
+ *  device too. */
+const STAY_DEFAULT = isTauri() || isMobile() || !!embedHost();
 const STAY_HINT = 'This device then stays signed in for up to a year instead of a day, as long as Púca is opened at least once a month. Sign out to end it early.';
 
 interface LoginProps {
@@ -74,6 +78,47 @@ export function Login({ onLoginSuccess }: LoginProps) {
         setStay(next);
         writeStaySignedIn(next);
     };
+    // One account operation at a time: this form's sign-in, reset or
+    // recovery, or a host's sign-in from its panel. Two would interleave
+    // inside login(): the first session token orphaned, or with two accounts
+    // one restore clearing the other's keys and raising a false mismatch.
+    const busy = useRef(false);
+    // An embedding host (Púca for Steam Deck) signs in from its own panel
+    // through exactly this form's path (docs/EMBEDDING.md, signIn): the same
+    // SRP exchange, socket and success hand-off, and the same answers.
+    useEffect(() => registerEmbedSignIn(async (name, pass, stayIn) => {
+        if (busy.current) return { ok: false, error: 'busy' };
+        busy.current = true;
+        setLoading(true);
+        try {
+            const token = await login(name, pass, { staySignedIn: stayIn });
+            // Remembered once it worked: a wrong password chose nothing.
+            setStay(stayIn);
+            writeStaySignedIn(stayIn);
+            localStorage.removeItem(CREDENTIALS_KEY);
+            await wsClient.connect(token);
+            // Signed in either way. A panel cannot show the full app's banner
+            // about keys that did not come back, so the answer says it.
+            const keys = embedKeys();
+            onLoginSuccess();
+            return keys === 'ok' ? { ok: true } : { ok: true, keys };
+        } catch (err) {
+            const status = (err as { status?: number } | null)?.status;
+            if (status === 403) {
+                // The security update this form shows; it is finished in the
+                // full app, where the person types a new password.
+                setUsername(name);
+                setShowResetForm(true);
+                setError('Security Update: Please set a new password for your account.');
+                return { ok: false, error: 'reset-required' };
+            }
+            if (status === 401) return { ok: false, error: 'invalid' };
+            return { ok: false, error: err instanceof Error && err.message ? err.message : 'failed' };
+        } finally {
+            busy.current = false;
+            setLoading(false);
+        }
+    }), [onLoginSuccess]);
     const [autoLoginAttempted, setAutoLoginAttempted] = useState(false);
     // Does THIS server gate sign-up behind an invite code? From GET /config.
     // null = not known yet, or the probe failed (an older server): then the
@@ -112,6 +157,8 @@ export function Login({ onLoginSuccess }: LoginProps) {
         setSuccessMessage('');
         if (newPassword !== confirmPassword) { setError('Passwords do not match'); return; }
         if (newPassword.length < 8) { setError('Password must be at least 8 characters'); return; }
+        if (busy.current) return;
+        busy.current = true;
         setLoading(true);
         try {
             const { recoverWithCode } = await import('../api/auth');
@@ -124,6 +171,7 @@ export function Login({ onLoginSuccess }: LoginProps) {
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Recovery failed. Check the username and recovery code.');
         } finally {
+            busy.current = false;
             setLoading(false);
         }
     };
@@ -164,6 +212,8 @@ export function Login({ onLoginSuccess }: LoginProps) {
             return;
         }
 
+        if (busy.current) return;
+        busy.current = true;
         setLoading(true);
         try {
             await resetPasswordMigration(username, newPassword);
@@ -179,12 +229,15 @@ export function Login({ onLoginSuccess }: LoginProps) {
                 setError('Password reset failed');
             }
         } finally {
+            busy.current = false;
             setLoading(false);
         }
     };
 
     const handleSubmit = async (e: FormEvent) => {
         e.preventDefault();
+        if (busy.current) return;
+        busy.current = true;
         setError('');
         setSuccessMessage('');
         setLoading(true);
@@ -248,6 +301,7 @@ export function Login({ onLoginSuccess }: LoginProps) {
                 setError(isRegistering ? 'Registration failed' : 'Login failed');
             }
         } finally {
+            busy.current = false;
             setLoading(false);
         }
     };

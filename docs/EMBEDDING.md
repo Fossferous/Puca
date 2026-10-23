@@ -83,7 +83,10 @@ browser's Notification API. That covers:
 
 - message notifications;
 - due-task reminders;
-- the Settings test notification.
+- a clip that needs the person's approval (docs/CLIPS.md), content-free,
+  and not while the app is on screen, where the prompt already shows;
+- the Settings test notification, whose button shows when a host takes
+  notifications.
 
 The app judges each one with the same rules as everywhere else:
 
@@ -95,9 +98,9 @@ The app judges each one with the same rules as everywhere else:
 There is no browser permission to ask. The setting's switch needs none with a
 host.
 
-- `kind`: `'message' | 'tasks' | 'test'`.
+- `kind`: `'message' | 'tasks' | 'test' | 'clip'`.
 - `key`: collapses repeats from one conversation: `dm:<id>`,
-  `chan:<serverId>`, `tasks-due`, `test`.
+  `chan:<serverId>`, `tasks-due`, `test`, `clip:<id>`.
 - `body`: **content-free** ("New message"), as on every platform: messages
   are end-to-end encrypted, and a notification survives where people can see
   it.
@@ -116,8 +119,9 @@ answer (missing, or throwing) falls back to the page's own focus.
 ### `idleSeconds() → number | null` (may return a Promise)
 
 This answers "how many seconds since the person last used the device?" for
-input the page itself never receives. The app's move to the AFK channel uses
-it where the desktop app uses the system's idle time. Rules:
+input the page itself never receives. Two things use it where the desktop app
+uses the system's idle time: the move to the AFK channel, and the person's
+idle and away status (the presence others see). Rules:
 
 - **Who is idle.** By Discord's rules: someone who has neither spoken nor
   touched anything for the server's AFK time is moved. Someone playing a game
@@ -129,10 +133,14 @@ it where the desktop app uses the system's idle time. Rules:
 - **Page input still counts.** Input inside the page (typing in the full view)
   counts as well; the more recent of the two decides.
 - **No answer.** `null` means "cannot tell right now": the app falls back to
-  input inside the page alone, as in a browser tab.
+  input inside the page alone, as in a browser tab (a hidden page then counts
+  as idle at once). Púca for Steam Deck reads the Deck's controls only during
+  a call, so outside one it answers `null`.
 - **Errors.** A function that throws, or answers anything but a finite
   number ≥ 0, is treated like a failed desktop probe. The app waits a whole
   window again rather than move someone who may be there.
+- **Fractions are fine.** The app reports whole seconds to the server, so a
+  host need not round.
 - **Desktop.** The desktop app's own probe is used instead whenever it has
   one.
 
@@ -165,6 +173,7 @@ Every command goes through the same code as the app's own controls:
 | `setInputMode('open' \| 'pushToTalk' \| 'pushToMute')` | `boolean` | Saves **Settings → Voice & Video → Input mode** for this device. |
 | `holdPushToTalk(held)` | `boolean` (an action was held) | The host's push-to-talk button. See below. |
 | `activateNotification(id)` | `boolean` | The person tapped notification `id`. |
+| `signIn(username, password, staySignedIn?)` | `Promise<{ ok: true, keys? } \| { ok: false, error }>` | Signs in through the sign-in form's own code, while the form is on screen: the same exchange, socket and success hand-off. `keys` is there when the account's encryption keys did not come back with the sign-in (`'refused'` or `'unavailable'`, as in the state below): the person is signed in all the same. `error`: `'invalid'` (wrong username or password), `'reset-required'` (the account needs the security update the form then shows, finished in the full view), `'unavailable'` (no form on screen: signed in, or loading), `'busy'` (a sign-in, reset or recovery already running, from the host or the form itself), `'missing'`, `'signed-in'`, or a message. `staySignedIn` is yes when it is `true` or left out, and no for anything else; it is remembered like the form's box once the sign-in worked. A host that offers this handles a password: it should pass it straight through and never keep it. |
 | `downloadSite()` | `Promise<string \| null>` | The server's download site: the origin of `download_url` in its `/app-version`, read fresh, or `null` when it publishes none. https only, or plain http on the device's own loopback (a local test server). A host looks for its own updates there, so the address comes from the server the person uses. |
 
 ### Push-to-talk is a lease
@@ -189,7 +198,9 @@ lose.
 interface EmbedState {
   apiVersion: 1;
   appVersion: string;             // the web client's version
+  features: string[];             // optional calls this page has: 'downloadSite', 'signIn'
   signedIn: boolean;
+  keys: 'ok' | 'refused' | 'unavailable' | null; // the account's encryption keys here; null signed out
   user: { id: number; username: string } | null;
   servers: { id: string; name: string }[];
   currentServerId: string | null; // open in the full app: a default for a picker
@@ -213,6 +224,22 @@ interface EmbedState {
   };
 }
 ```
+
+`features` lets a host tell an older page apart: a call that is not listed
+is not on `window.pucaEmbed`. A page from before the list sends no
+`features` at all.
+
+`keys` is what the full app's banner says about the account's encryption
+keys on this device, for a host that shows the person only a panel:
+
+- `'ok'`: in use.
+- `'refused'`: they unlocked, but they are not the keys this server publishes
+  for the account, so Púca did not use them.
+- `'unavailable'`: they were not restored here.
+
+Until they are put right in the full view, messages cannot be sent or read on
+this device, and calls may not be end-to-end encrypted: say so, and offer the
+full view. A page from before it sends no `keys`.
 
 ## What embedding does not change
 

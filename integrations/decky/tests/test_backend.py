@@ -52,7 +52,16 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(ps.read_settings(None), ps.DEFAULTS)
         self.assertEqual(ps.read_settings({"appUrl": "http://x.example", "pushToTalk": "R9", "notifications": "yes"}), ps.DEFAULTS)
         self.assertEqual(ps.read_settings({"appUrl": "chat.example.com", "pushToTalk": "R4", "notifications": False}),
-                         {"appUrl": "https://chat.example.com/", "pushToTalk": "R4", "notifications": False, "notificationSound": True})
+                         {"appUrl": "https://chat.example.com/", "pushToTalk": "R4", "muteButton": "off", "deafenButton": "off",
+                          "micForCalls": True, "notifications": False, "notificationSound": True})
+
+    def test_a_back_grip_has_one_job(self):
+        s = ps.read_settings({"pushToTalk": "R5", "muteButton": "R5", "deafenButton": "L4", "micForCalls": False})
+        self.assertEqual((s["pushToTalk"], s["muteButton"], s["deafenButton"], s["micForCalls"]), ("R5", "off", "L4", False))
+        s = ps.read_settings({"muteButton": "L5", "deafenButton": "L5"})
+        self.assertEqual((s["muteButton"], s["deafenButton"]), ("L5", "off"))
+        s = ps.read_settings({"pushToTalk": "off", "muteButton": "off", "deafenButton": "R4"})
+        self.assertEqual(s["deafenButton"], "R4", "two jobs switched off do not count as sharing a grip")
 
     def test_round_trip_through_the_file(self):
         with tempfile.TemporaryDirectory() as d:
@@ -89,6 +98,7 @@ class MessageTests(unittest.TestCase):
 
     def test_page_methods_are_the_embedding_commands_only(self):
         self.assertIn("joinVoice", ps.PAGE_METHODS)
+        self.assertIn("signIn", ps.PAGE_METHODS)
         self.assertNotIn("eval", ps.PAGE_METHODS)
         self.assertNotIn("constructor", ps.PAGE_METHODS)
 
@@ -154,6 +164,33 @@ class BindingFilterTests(unittest.TestCase):
         self.context(9, "MAIN", "https://evil.example")
         with self.assertRaises(Exception):
             self.loop.run_until_complete(self.page.evaluate("1"))
+
+    def test_a_page_call_hands_its_arguments_over_as_values_never_as_script(self):
+        sent = []
+
+        async def send(method, params=None, timeout=10.0):
+            sent.append((method, params))
+            return {"result": {"value": {"ok": True}}}
+
+        self.page._conn = types.SimpleNamespace(closed=False, send=send)
+        self.context(5, "MAIN", "https://chat.example.com")
+        args = ["signIn", ["ash", "correct horse battery", True]]
+        self.assertEqual(self.loop.run_until_complete(self.page.call_function(ps.PAGE_CALL, args)), {"ok": True})
+        method, params = sent[-1]
+        self.assertEqual(method, "Runtime.callFunctionOn")
+        self.assertEqual(params["executionContextId"], 5, "Púca's own page world")
+        self.assertEqual(params["functionDeclaration"], ps.PAGE_CALL)
+        self.assertNotIn("correct horse", params["functionDeclaration"])
+        self.assertEqual(params["arguments"], [{"value": "signIn"}, {"value": ["ash", "correct horse battery", True]}])
+        self.assertTrue(params["userGesture"] and params["awaitPromise"] and params["returnByValue"])
+
+    def test_a_page_call_refuses_before_puca_has_loaded(self):
+        self.page._conn = types.SimpleNamespace(closed=False)
+        with self.assertRaises(Exception):
+            self.loop.run_until_complete(self.page.call_function(ps.PAGE_CALL, ["getState", []]))
+        self.context(9, "MAIN", "https://evil.example")
+        with self.assertRaises(Exception):
+            self.loop.run_until_complete(self.page.call_function(ps.PAGE_CALL, ["getState", []]))
 
 
 if __name__ == "__main__":

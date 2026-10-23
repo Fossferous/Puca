@@ -11,8 +11,10 @@
  * push-to-talk is the registered hold action. Nothing here decides anything
  * the app would decide differently.
  */
+import { onIdentityRestoreChange } from './auth';
 import { API_BASE_URL } from './config';
 import { EMBED_API_VERSION, activateHostNotification, embedHost } from './embedHost';
+import { embedKeys, signInFromHost, type EmbedKeys, type EmbedSignInResult } from './embedSignIn';
 import { holdFromHost } from './hotkeys';
 import {
     globalVoiceUsers, isUserSpeaking, subscribeSelfInVoice, subscribeToSpeaking, subscribeToVoiceUsers,
@@ -54,10 +56,19 @@ export interface EmbedCall {
     members: EmbedMember[];
 }
 
+/** The calls this page has beyond apiVersion 1's first set, so a host can
+ *  offer what the server's Púca supports and fall back where it does not. */
+export const EMBED_FEATURES = ['downloadSite', 'signIn'] as const;
+
 export interface EmbedState {
     apiVersion: number;
     appVersion: string;
+    /** EMBED_FEATURES, on a page that has them. */
+    features: string[];
     signedIn: boolean;
+    /** The account's encryption keys here (embedSignIn.ts, EmbedKeys); null
+     *  while signed out. A page from before it sends none. */
+    keys: EmbedKeys | null;
     user: { id: number; username: string } | null;
     servers: { id: string; name: string }[];
     /** The server open in the full app: a default for a host's picker. */
@@ -74,6 +85,7 @@ export interface EmbedVoiceChannel {
 }
 
 export type EmbedResult = { ok: true } | { ok: false; error: string };
+export type { EmbedKeys, EmbedSignInResult } from './embedSignIn';
 
 /** What Chat knows: the account, its servers, which voice channel is open. */
 export interface EmbedSession {
@@ -161,10 +173,13 @@ export function getEmbedState(): EmbedState {
             members: readMembers(roomId, user?.id ?? null),
         };
     }
+    const signedIn = !!session && !!user;
     return {
         apiVersion: EMBED_API_VERSION,
         appVersion: typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '',
-        signedIn: !!session && !!user,
+        features: [...EMBED_FEATURES],
+        signedIn,
+        keys: signedIn ? embedKeys() : null,
         user,
         servers: session?.servers() ?? [],
         currentServerId: session?.currentServerId() ?? null,
@@ -266,6 +281,7 @@ export interface PucaEmbedApi {
     holdPushToTalk(held: boolean): boolean;
     activateNotification(id: string): boolean;
     downloadSite(): Promise<string | null>;
+    signIn(username: string, password: string, staySignedIn?: boolean): Promise<EmbedSignInResult>;
 }
 
 /** How long downloadSite waits for the server. */
@@ -342,6 +358,9 @@ export function createEmbedApi(): PucaEmbedApi {
         holdPushToTalk: (held: boolean) => holdFromEmbedHost(held === true),
         activateNotification: (id: string) => (typeof id === 'string' ? activateHostNotification(id) : false),
         downloadSite: () => downloadSite(),
+        signIn: async (username: string, password: string, staySignedIn?: boolean): Promise<EmbedSignInResult> => (
+            session?.user() ? { ok: false, error: 'signed-in' } : signInFromHost(username, password, staySignedIn)
+        ),
     });
 }
 
@@ -356,6 +375,8 @@ export function installEmbedApi(): boolean {
     subscribeToVoiceUsers(notifyEmbedChanged);
     subscribeSelfInVoice(() => notifyEmbedChanged());
     window.addEventListener('settingsChanged', notifyEmbedChanged);
+    // Keys refused or restored: the panel's note follows the banner.
+    onIdentityRestoreChange(notifyEmbedChanged);
     notifyEmbedChanged();
     return true;
 }

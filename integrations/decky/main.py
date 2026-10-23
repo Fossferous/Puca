@@ -11,19 +11,24 @@ own scripts, opens the configured Púca address, and relays between the two
 
 The Deck's controls are read here too (puca_buttons.py), because Steam's own
 button feed cannot be counted on while a game is in front. During a call this
-side sends "puca_button" events for the push-to-talk button, and tells the
-page when any control is in use, never which, so Púca's AFK move does not take
-a player out of the call. In Settings it reports which back button the person
-presses, to choose push to talk by pressing it.
+side sends "puca_button" events for the back grips the person gave a job (push
+to talk, mute, deafen), and tells the page when any control is in use, never
+which, so Púca's AFK move does not take a player out of the call. In Settings
+it reports which back button the person presses, to choose one by pressing it.
+
+With "Turn the microphone on for calls" it also switches the Deck's own
+microphone on for a call when it is muted, and back after (puca_mic.py).
 
 And it fetches the plugin's own updates from the download site the person's
 Púca server names (puca_update.py). Whether one may be installed is decided
 by its signature, in the frontend (src/update.ts), before Decky is asked.
 
-It keeps the plugin's four settings and nothing else. No account data, no
-message content and no audio pass through here: the microphone goes from one
-Steam page to the other over WebRTC, and only its connection setup (SDP)
-crosses this process.
+It keeps the plugin's settings and nothing else. No message content and no
+audio pass through here: the microphone goes from one Steam page to the other
+over WebRTC, and only its connection setup (SDP) crosses this process. The
+one piece of account data that does is a password typed into the panel's
+"Sign in" (page_call signIn): it passes through once, in memory, on its way
+to Púca's own sign-in in the page, and is never stored or logged.
 """
 from __future__ import annotations
 
@@ -37,7 +42,8 @@ import decky
 
 from puca_buttons import BUTTONS, GripLearner, InputWatch
 from puca_cdp import CdpError, PucaPage, find_target
-from puca_settings import (MARKER, PAGE_METHODS, check_mic_answer, load_settings,
+from puca_mic import MicForCalls
+from puca_settings import (MARKER, PAGE_CALL, PAGE_METHODS, check_mic_answer, load_settings,
                            normalize_app_url, save_settings)
 from puca_update import (MAX_MANIFEST_BYTES, MAX_ZIP_BYTES, clear_updates, download_origin, manifest_url,
                          read_key, read_manifest, save_update, sha256_hex, ssl_context, zip_url)
@@ -86,20 +92,31 @@ class Plugin:
     page: PucaPage | None = None
     controls: InputWatch | None = None
     learning: asyncio.Future | None = None
+    mic: MicForCalls | None = None
 
     async def _main(self):
         decky.logger.info("Púca for Steam Deck %s backend started", decky.DECKY_PLUGIN_VERSION)
         # An update downloaded last time was installed (this is it) or abandoned.
         clear_updates(decky.DECKY_PLUGIN_RUNTIME_DIR)
+        # A microphone this switched on for a call the plugin did not live to
+        # see the end of: no call is running now, so put it back.
+        self.mic = MicForCalls(decky.DECKY_PLUGIN_RUNTIME_DIR)
+        try:
+            if await self.mic.put_back():
+                decky.logger.info("put the Deck's microphone back after an unfinished call")
+        except Exception as e:
+            decky.logger.warning("could not check the Deck's microphone: %s", e)
 
     async def _unload(self):
         await self.cancel_learn()
         await self.unwatch_input()
+        await self.mic_for_call(False)
         await self.detach()
 
     async def _uninstall(self):
         await self.cancel_learn()
         await self.unwatch_input()
+        await self.mic_for_call(False)
         await self.detach()
 
     # ---- Settings ---------------------------------------------------------
@@ -156,9 +173,10 @@ class Plugin:
             return {"ok": False, "error": "bad arguments"}
         if self.page is None:
             return {"ok": False, "error": "Púca is not running"}
-        expression = f"window.__pucaDeckyShim.call({json.dumps(method)}, {json.dumps(args)})"
         try:
-            result = await self.page.evaluate(expression)
+            # Handed over as values, never written into script text: one of
+            # them can be a password (signIn).
+            result = await self.page.call_function(PAGE_CALL, [method, args])
         except CdpError as e:
             return {"ok": False, "error": str(e)}
         except Exception as e:
@@ -188,21 +206,24 @@ class Plugin:
 
     # ---- The Deck's controls -------------------------------------------------
 
-    async def watch_input(self, button: Any = None) -> dict:
+    async def watch_input(self, buttons: Any = None) -> dict:
         """Follow the Deck's controls during a call, until unwatch_input.
 
-        - `button` (or None): the push-to-talk grip. "puca_button" events say
-          True when it goes down and again every half second while it stays
-          down, and False when it comes up.
+        - `buttons`: the back grips with a job (a list, one name, or None).
+          "puca_button" events, {"button": name, "held": bool}, say held when
+          one goes down and again every half second while it stays down, and
+          released when it comes up.
         - Presence, always: the page hears when any control is in use, for
           Púca's AFK move.
 
         The value is why the controller cannot be read yet ("no-controller",
         "no-access"), or None; it keeps looking either way."""
         await self.unwatch_input()
-        if button is not None and button not in BUTTONS:
+        names = [buttons] if isinstance(buttons, str) else list(buttons or [])
+        if any(name not in BUTTONS for name in names):
             return {"ok": False, "error": "unknown button"}
-        watch = InputWatch(button, lambda held: decky.emit("puca_button", held), self._controls_in_use)
+        watch = InputWatch(names, lambda name, held: decky.emit("puca_button", {"button": name, "held": held}),
+                           self._controls_in_use)
         self.controls = watch
         problem = watch.start()
         if problem is None:
@@ -261,6 +282,28 @@ class Plugin:
         got, self.learning = self.learning, None
         if got is not None and not got.done():
             got.set_result(None)
+
+    # ---- The Deck's own microphone, for calls ------------------------------------
+
+    async def mic_for_call(self, on: Any) -> dict:
+        """on=True when a call starts: switch the Deck's microphone on if it
+        is muted. on=False when it ends: put back what that changed.
+        {"ok": True, "value": {"changed": bool, ...}}"""
+        if self.mic is None:
+            self.mic = MicForCalls(decky.DECKY_PLUGIN_RUNTIME_DIR)
+        try:
+            if on is True:
+                value = await self.mic.turn_on()
+                if value.get("changed"):
+                    decky.logger.info("switched the Deck's microphone on for a call")
+                return {"ok": True, "value": value}
+            undone = await self.mic.put_back()
+            if undone:
+                decky.logger.info("muted the Deck's microphone again after the call")
+            return {"ok": True, "value": {"changed": undone}}
+        except Exception as e:
+            decky.logger.warning("the Deck's microphone: %s", e)
+            return {"ok": False, "error": str(e)[:200]}
 
     # ---- Updates for the plugin itself ---------------------------------------------
 

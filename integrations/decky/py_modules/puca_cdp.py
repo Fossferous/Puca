@@ -220,13 +220,26 @@ class PucaPage:
 
     async def evaluate(self, expression: str, timeout: float = 15.0) -> Any:
         """Evaluate in Púca's own page world and return the value, as a person's action."""
+        return await self._run("Runtime.evaluate", {"expression": expression}, "contextId", timeout)
+
+    async def call_function(self, declaration: str, args: list, timeout: float = 15.0) -> Any:
+        """Call `declaration` in Púca's own page world with `args` handed over
+        as values, as a person's action. Unlike evaluate, nothing passed ends
+        up in a script's source text, which the page keeps: a password on its
+        way to the page's sign-in is only ever an argument."""
+        return await self._run("Runtime.callFunctionOn", {
+            "functionDeclaration": declaration,
+            "arguments": [{"value": a} for a in args],
+        }, "executionContextId", timeout)
+
+    async def _run(self, method: str, params: dict, context_key: str, timeout: float) -> Any:
         if not self.attached:
             raise CdpError("not attached")
         if self._main_context is None or self._main_context_origin != self.origin:
             raise CdpError("Púca is not loaded")
-        res = await self._conn.send("Runtime.evaluate", {
-            "expression": expression,
-            "contextId": self._main_context,
+        res = await self._conn.send(method, {
+            **params,
+            context_key: self._main_context,
             "awaitPromise": True,
             "returnByValue": True,
             # Joining a call starts audio: Chromium allows that only after a

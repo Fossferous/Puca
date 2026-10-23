@@ -36,7 +36,14 @@ export interface EmbedCall {
 export interface EmbedState {
     apiVersion: number;
     appVersion: string;
+    /** The optional calls the page has (docs/EMBEDDING.md): e.g. 'signIn'.
+     *  Empty on a page that predates the list. */
+    features: string[];
     signedIn: boolean;
+    /** The account's encryption keys did not come back on this Deck
+     *  (docs/EMBEDDING.md, keys): 'refused' or 'unavailable'. Null when they
+     *  are in use, while signed out, and from a page that predates it. */
+    keys: 'refused' | 'unavailable' | null;
     user: { id: number; username: string } | null;
     servers: { id: string; name: string }[];
     currentServerId: string | null;
@@ -50,6 +57,25 @@ export interface EmbedVoiceChannel {
     members: { id: number; username: string }[];
 }
 
+/** A voice channel with people in it, on any of the person's servers. */
+export interface LiveChannel {
+    serverId: string;
+    serverName: string;
+    channel: EmbedVoiceChannel;
+}
+
+/** The channels with people in them, busiest first, then by server and
+ *  channel name: the panel's "Live now". */
+export function liveChannels(servers: { id: string; name: string }[], channels: Map<string, EmbedVoiceChannel[]>): LiveChannel[] {
+    return servers
+        .flatMap(s => (channels.get(s.id) ?? [])
+            .filter(c => c.members.length > 0)
+            .map(c => ({ serverId: s.id, serverName: s.name, channel: c })))
+        .sort((a, b) => b.channel.members.length - a.channel.members.length
+            || a.serverName.localeCompare(b.serverName)
+            || a.channel.name.localeCompare(b.channel.name));
+}
+
 export interface MicConstraints {
     echoCancellation?: boolean;
     noiseSuppression?: boolean;
@@ -61,7 +87,7 @@ export interface PageNotification {
     title: string;
     body: string;
     key: string;
-    kind: 'message' | 'tasks' | 'test';
+    kind: 'message' | 'tasks' | 'test' | 'clip';
 }
 
 export type PageMessage =
@@ -128,7 +154,12 @@ export function readState(v: unknown): EmbedState | null {
     return {
         apiVersion,
         appVersion: str(o.appVersion, 40) ?? '',
+        features: (Array.isArray(o.features) ? o.features.slice(0, 50) : []).flatMap(f => {
+            const name = str(f, 40);
+            return name ? [name] : [];
+        }),
         signedIn: bool(o.signedIn),
+        keys: o.keys === 'refused' || o.keys === 'unavailable' ? o.keys : null,
         user: userId !== null && username !== null ? { id: userId, username } : null,
         servers: (Array.isArray(o.servers) ? o.servers.slice(0, 500) : []).flatMap(s => {
             const so = obj(s);
@@ -191,7 +222,7 @@ export function readPageMessage(raw: unknown): PageMessage | null {
             const id = str(n?.id, 40);
             const title = str(n?.title);
             if (!n || !id || title === null) return null;
-            const kind = n.kind === 'tasks' || n.kind === 'test' ? n.kind : 'message';
+            const kind = n.kind === 'tasks' || n.kind === 'test' || n.kind === 'clip' ? n.kind : 'message';
             return { type: 'notify', notification: { id, title, body: str(n.body) ?? '', key: str(n.key, 120) ?? '', kind } };
         }
         case 'mic-request': {

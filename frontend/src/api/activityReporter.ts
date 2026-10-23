@@ -24,6 +24,8 @@
  */
 import { wsClient } from './websocket';
 import { isTauri } from './platform';
+import { hostIdleSeconds, hostReportsIdle } from './embedHost';
+import { combineHostIdle } from '../utils/afkIdle';
 import { globalSpeakingUsers, subscribeToSpeaking } from '../components/voiceState';
 
 /** Quiet this long before a device says it is inactive. Well under the
@@ -55,11 +57,15 @@ export interface ActivityInputs {
  * not — Púca minimised to the tray with a game in front is a busy person.
  * Without one, a hidden page is inactive at once (nothing in it can see the
  * person any more), a shown one after REPORT_AFTER_SECS without input.
+ *
+ * Always whole seconds: the server reads `inactive_secs` as an integer and
+ * answers anything else with an Error frame, which Chat shows as an alert.
+ * An embedding host's idle time comes with fractions.
  */
 export function decideReport(i: ActivityInputs): number | null {
     const sinceLocal = Math.max(0, Math.floor((i.nowMs - i.lastLocalActivityMs) / 1000));
     if (i.osIdleSecs !== null) {
-        const secs = Math.min(i.osIdleSecs, sinceLocal);
+        const secs = Math.floor(Math.min(i.osIdleSecs, sinceLocal));
         return secs >= REPORT_AFTER_SECS ? secs : null;
     }
     if (i.hidden) {
@@ -92,8 +98,17 @@ const INPUT_EVENTS = ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchst
 
 /** Start reporting; returns the stop function. One per signed-in session. */
 export function startActivityReporter(opts: ReporterOptions): () => void {
-    const probe = opts.probe ?? osIdleProbe;
     let lastInApp = Date.now(); // opening the app is activity
+    // An embedding host sees input this page never does (Púca for Steam Deck:
+    // the Deck's controls, during a call; docs/EMBEDDING.md, idleSeconds), so
+    // it stands where the desktop's OS probe does. Input in the page still
+    // counts, the more recent of the two deciding, as for the AFK move; a
+    // host that cannot tell (null) leaves the page's own rules.
+    const probe = opts.probe ?? (async () => (
+        !isTauri() && hostReportsIdle()
+            ? combineHostIdle(await hostIdleSeconds(), lastInApp, Date.now())
+            : osIdleProbe()
+    ));
     let lastSpeaking = 0;
     // What THIS socket's server was last told; null = nothing yet.
     let told: 'active' | 'inactive' | null = null;

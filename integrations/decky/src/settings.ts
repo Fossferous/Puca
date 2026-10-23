@@ -5,12 +5,26 @@
  */
 
 export type PushToTalkButton = 'off' | 'L4' | 'R4' | 'L5' | 'R5';
+/** A back grip, or 'off'. */
+export type ButtonChoice = PushToTalkButton;
+
+/** What a back grip can do. Each grip does at most one; when two settings
+ *  claim one, the earlier job here keeps it. */
+export type ButtonJob = 'pushToTalk' | 'muteButton' | 'deafenButton';
+export const BUTTON_JOBS: readonly ButtonJob[] = ['pushToTalk', 'muteButton', 'deafenButton'];
 
 export interface PluginSettings {
     /** The Púca web client's address, '' until someone sets it. */
     appUrl: string;
     /** The back button that talks while held; 'off' leaves Púca's own input mode alone. */
-    pushToTalk: PushToTalkButton;
+    pushToTalk: ButtonChoice;
+    /** The back button that mutes and unmutes in a call. */
+    muteButton: ButtonChoice;
+    /** The back button that deafens and undeafens in a call. */
+    deafenButton: ButtonChoice;
+    /** Switch the Deck's own microphone on for a call when it is muted, and
+     *  back after (py_modules/puca_mic.py). */
+    micForCalls: boolean;
     /** Show Púca's notifications as Steam toasts. */
     notifications: boolean;
     /** Play Steam's notification sound with them. */
@@ -20,21 +34,64 @@ export interface PluginSettings {
 export const DEFAULT_SETTINGS: PluginSettings = {
     appUrl: '',
     pushToTalk: 'off',
+    muteButton: 'off',
+    deafenButton: 'off',
+    micForCalls: true,
     notifications: true,
     notificationSound: true,
 };
 
 export const PUSH_TO_TALK_BUTTONS: readonly PushToTalkButton[] = ['off', 'L4', 'R4', 'L5', 'R5'];
 
+/** The job a back grip has in these settings, if any. */
+export function jobOf(settings: PluginSettings, button: unknown): ButtonJob | null {
+    if (typeof button !== 'string' || button === 'off') return null;
+    return BUTTON_JOBS.find(job => settings[job] === button) ?? null;
+}
+
+/** The grips with a job, for the backend to follow during a call. */
+export function watchedButtons(settings: PluginSettings): Exclude<ButtonChoice, 'off'>[] {
+    return BUTTON_JOBS.map(job => settings[job]).filter((b): b is Exclude<ButtonChoice, 'off'> => b !== 'off');
+}
+
+/**
+ * Give `job` the grip `button`. A grip has one job, so if another job had it,
+ * that one is switched off; the answer says which, so the panel can say so.
+ */
+export function assignButton(settings: PluginSettings, job: ButtonJob, button: ButtonChoice): { settings: PluginSettings; took: ButtonJob | null } {
+    const next = { ...settings, [job]: button };
+    let took: ButtonJob | null = null;
+    if (button !== 'off') {
+        for (const other of BUTTON_JOBS) {
+            if (other !== job && next[other] === button) {
+                next[other] = 'off';
+                took = other;
+            }
+        }
+    }
+    return { settings: next, took };
+}
+
 /** Settings as stored, with anything missing or malformed back at its default. */
 export function readSettings(raw: unknown): PluginSettings {
     const o = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
     const url = typeof o.appUrl === 'string' ? normalizeAppUrl(o.appUrl) : null;
+    const grips = {} as Record<ButtonJob, ButtonChoice>;
+    const taken = new Set<ButtonChoice>();
+    for (const job of BUTTON_JOBS) {
+        let grip = PUSH_TO_TALK_BUTTONS.includes(o[job] as ButtonChoice) ? o[job] as ButtonChoice : 'off';
+        if (grip !== 'off' && taken.has(grip)) grip = 'off';
+        taken.add(grip);
+        grips[job] = grip;
+    }
+    const flag = (k: 'micForCalls' | 'notifications' | 'notificationSound') =>
+        typeof o[k] === 'boolean' ? o[k] as boolean : DEFAULT_SETTINGS[k];
     return {
         appUrl: url && url.ok ? url.url : '',
-        pushToTalk: PUSH_TO_TALK_BUTTONS.includes(o.pushToTalk as PushToTalkButton) ? o.pushToTalk as PushToTalkButton : 'off',
-        notifications: typeof o.notifications === 'boolean' ? o.notifications : DEFAULT_SETTINGS.notifications,
-        notificationSound: typeof o.notificationSound === 'boolean' ? o.notificationSound : DEFAULT_SETTINGS.notificationSound,
+        ...grips,
+        micForCalls: flag('micForCalls'),
+        notifications: flag('notifications'),
+        notificationSound: flag('notificationSound'),
     };
 }
 

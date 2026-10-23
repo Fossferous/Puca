@@ -14,11 +14,18 @@ plugin's own.
 
 - **`src/` (frontend, Steam's own page).**
   - Creates the view (`browserView.ts`).
-  - Draws the Quick Access panel and the `/puca` full view (`components/`).
+  - Draws the Quick Access panel and the `/puca` full view (`components/`):
+    the call, **Live now** (voice channels with people in them, on every
+    server, from the page's `listVoiceChannels`), the server's channels, a
+    sign-in form that uses the page's own sign-in (`signIn`, when the page
+    lists it in `features`), the full app's key banner as a note (`keys`),
+    and Settings. Both channel lists ask the page again every 10 s, only
+    while the menu is open.
   - Opens the microphone (`micBridge.ts`), and notices when it delivers only
     digital silence: a muted or zeroed system microphone (`micSilence.ts`).
-  - Turns the backend's back-button signal into Púca's push-to-talk hold
-    (`ptt.ts`).
+  - Turns the backend's back-button signals into Púca's push-to-talk hold,
+    and into mute and deafen toggles with a short notice over the game
+    (`ptt.ts`, `controller.ts`).
   - Turns notifications into Steam toasts (`controller.ts`).
 - **`main.py` + `py_modules/` (backend, Python inside Decky).**
   - Attaches to that one view over Steam's DevTools endpoint on 127.0.0.1:8080.
@@ -26,13 +33,16 @@ plugin's own.
     address.
   - Relays between page and frontend. Only messages from Púca's own main-frame
     page are accepted (`puca_cdp.PucaPage`).
-  - Reads the Deck's controls during a call (`puca_buttons.py`): the
-    push-to-talk button, and whether any control is in use, which it tells
-    the page so Púca's AFK move does not take a player out of the call
-    (`idleSeconds`, docs/EMBEDDING.md). In Settings, it reports which back
-    button is pressed, so push to talk is chosen by pressing it.
+  - Reads the Deck's controls during a call (`puca_buttons.py`): the back
+    buttons with a job (push to talk, mute, deafen), and whether any control
+    is in use, which it tells the page so Púca's AFK move does not take a
+    player out of the call (`idleSeconds`, docs/EMBEDDING.md). In Settings,
+    it reports which back button is pressed, so each is chosen by pressing it.
+  - Switches the Deck's muted microphone on for a call and back after
+    (`puca_mic.py`, through `wpctl`), keeping a note in its runtime folder so
+    a plugin that dies mid-call puts it back on its next start.
   - Fetches the plugin's own updates (`puca_update.py`): see *Updates*.
-  - Stores the plugin's four settings.
+  - Stores the plugin's settings.
 - **`src/shim/pageShim.ts` (inside the Púca page).** Built separately into
   `dist/page-shim.js`.
   - Declares the plugin as Púca's embedding host.
@@ -74,14 +84,16 @@ the signed-in user read; no root is needed.
 - **Stream.** The controller sends that state 250 times a second whether
   anything is held or not (measured: one of its three nodes, with a frame
   counter stepping by 1).
-- **Scope.** Only the chosen bit is looked at, and only while a button is
-  chosen and Púca is in a call.
-- **Signal.** The backend sends `puca_button`: `true` when the button goes
-  down and every 500 ms while it stays down, and `false` when it comes up,
-  when the controller goes quiet for a second, and when the watch stops.
-- **Safety.** The frontend renews Púca's 1.5 s hold lease with each
-  heartbeat, so a lost release, or a backend that dies mid-hold, cannot leave
-  the microphone transmitting.
+- **Scope.** Only the bits of buttons with a job are looked at, and only
+  while Púca is in a call.
+- **Signal.** The backend sends `puca_button`, `{"button": "R5", "held":
+  true}`, when a button goes down and every 500 ms while it stays down, and
+  `held: false` when it comes up, when the controller goes quiet for a
+  second, and when the watch stops. Each button on its own.
+- **Safety.** For push to talk, the frontend renews Púca's 1.5 s hold lease
+  with each heartbeat, so a lost release, or a backend that dies mid-hold,
+  cannot leave the microphone transmitting. Mute and deafen toggle once per
+  press, however long the button stays down.
 - **In games.** hidraw gives every reader its own copy of each message, so
   this takes nothing from Steam and keeps working while a game has focus.
 
