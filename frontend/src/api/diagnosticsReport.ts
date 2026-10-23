@@ -23,16 +23,10 @@ import { currentAppVersion } from './appVersion';
 import { h264SendProfilesLine } from './rtc/h264Profiles';
 import { recentRcConnectLines } from './devices/connectLog';
 import { QUICK_TIMEOUT_MS, withTimeout } from './withTimeout';
+import { ENCODER_CODECS, ENCODER_SIZES, STEP_TIMEOUT_MS, WINDOW_MS } from './diagnosticsBudget';
 
-/** Milliseconds of measurement. Rates and delays are meaningless as
- *  point-in-time counters, so the diagnostics take two samples this far apart —
- *  long enough to be stable, short enough that nobody gives up waiting. */
-const WINDOW_MS = 4000;
-
-/** How long any one step may take before the report gives up on it and says
- *  so. The windowed stats sections need WINDOW_MS plus the getStats calls on
- *  either side; nothing else should take more than a moment. */
-export const STEP_TIMEOUT_MS = WINDOW_MS + 8000;
+// The timing constants live in diagnosticsBudget.ts, beside the budget derived from them.
+export { STEP_TIMEOUT_MS };
 export { QUICK_TIMEOUT_MS, withTimeout };
 
 /** `undefined` rather than a throw: a diagnostics report that fails because one
@@ -137,14 +131,8 @@ export async function encodingSupportLines(): Promise<string[]> {
     // Windows machine and says nothing about the card — the High row is the
     // one that answers "is there a hardware H.264 encoder". Kept because a
     // High=false/Base=false pair is what "no encoder at all" looks like.
-    for (const [label, codec] of [
-        ['H.264 High', 'avc1.640028'],
-        ['H.264 Base', 'avc1.42E01F'],
-        ['VP8', 'vp8'],
-        ['VP9', 'vp09.00.10.08'],
-        ['AV1', 'av01.0.04M.08'],
-    ]) {
-        for (const [w, h] of [[1920, 1080], [2560, 1440]]) {
+    for (const [label, codec] of ENCODER_CODECS) {
+        for (const [w, h] of ENCODER_SIZES) {
             try {
                 const r = await withTimeout(VE.isConfigSupported({
                     codec, width: w, height: h, bitrate: 4_500_000, framerate: 30,
