@@ -500,8 +500,9 @@ add about 1.5-2.5 Mbps to your upload; if your upload is already the limit,
 that comes out of the full-size picture, which stays as large and as smooth
 but less detailed in fast motion, so on a slow upload **Never** keeps the
 most detail for the viewers who can take it. A viewer on a slow connection
-may start on 360p and move up to the middle size within about half a
-minute.
+may start on 360p and move up to the middle size once their connection has
+shown it can carry it, which took from ten seconds to a minute and a half in
+testing.
 Someone watching one or two streams gets the full picture whenever their
 connection carries it. Someone on an older version of Púca gets the middle
 size in the grid view until they update (Focus view still shows them the full
