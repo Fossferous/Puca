@@ -148,16 +148,18 @@ console.log('\n--- the web app, as Safari (a tab) ---');
             overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
         };
     });
-    check('manifest linked', head.manifest === '/manifest.webmanifest', JSON.stringify(head));
+    check('manifest linked', head.manifest === '/manifest.json', JSON.stringify(head));
     check('apple-touch-icon is the 180x180 file', head.touch === '/apple-touch-icon.png' && head.touchSizes === '180x180');
     check('apple-mobile-web-app-capable, title, status-bar style', head.capable === 'yes' && head.title === 'Púca' && head.bar === 'black', JSON.stringify(head));
     check('mobile-web-app-capable and theme-color', head.capableGeneric === 'yes' && /^#[0-9a-f]{6}$/i.test(head.theme ?? ''));
     check('a Safari TAB gets no viewport-fit (control: the standalone case below does)', !/viewport-fit/.test(head.viewport ?? ''), head.viewport);
     check('no horizontal overflow at 390 px (clientWidth, not innerWidth)', head.overflow <= 0, String(head.overflow));
+    await page.waitForSelector('#stay-signed-in', { timeout: 10000 }).catch(() => {});
+    check('the sign-in form is there and "Stay signed in" is CLEAR in a Safari tab', await page.evaluate(() => document.querySelector('#stay-signed-in')?.checked === false));
 
     // The manifest and every icon, fetched and DECODED by WebKit.
     const m = await page.evaluate(async () => {
-        const r = await fetch('/manifest.webmanifest');
+        const r = await fetch('/manifest.json');
         const json = await r.json();
         const icons = [];
         for (const icon of json.icons) {
@@ -189,31 +191,44 @@ console.log('\n--- the web app, as Safari (a tab) ---');
     // place (this WebKit's fixed boxes end a few px short of the window).
     const coarse = await page.evaluate(() => matchMedia('(pointer: coarse) and (max-width: 1024px)').matches);
     check('precondition: WebKit as an iPhone matches the phone layout rule (pointer: coarse)', coarse);
-    const bar = async (extraCss) => page.evaluate((css) => {
+    const bar = async (extraCss, inset = '34px') => page.evaluate(([css, inset]) => {
         document.querySelectorAll('.zz-bar, .zz-css').forEach((n) => n.remove());
-        document.documentElement.style.setProperty('--safe-area-bottom', '34px');
+        document.documentElement.style.setProperty('--safe-area-bottom', inset);
         const style = document.createElement('style');
         style.className = 'zz-css';
         style.textContent = css;
         document.head.appendChild(style);
         const wrap = document.createElement('div');
         wrap.className = 'chat-container zz-bar';
-        wrap.innerHTML = '<div class="zz-ref" style="position:fixed;left:0;bottom:0;width:1px;height:1px"></div><nav class="mobile-bottom-nav">' + ['Servers', 'Channels', 'Chat', 'Members', 'Devices', 'Tasks']
+        wrap.innerHTML = '<div class="zz-ref" style="position:fixed;left:0;bottom:0;width:1px;height:1px"></div>'
+            + '<div class="file-transfers-tray" style="height:40px"></div><div class="device-downloads" style="height:40px"></div>'
+            + '<nav class="mobile-bottom-nav">' + ['Servers', 'Channels', 'Chat', 'Members', 'Devices', 'Tasks']
             .map((l) => `<button class="mobile-nav-btn"><span class="nav-icon">o</span><span class="nav-label">${l}</span></button>`).join('') + '</nav>';
         document.body.appendChild(wrap);
         const nav = wrap.querySelector('.mobile-bottom-nav').getBoundingClientRect();
         const btns = [...wrap.querySelectorAll('.mobile-nav-btn')].map((b) => b.getBoundingClientRect());
         const labels = [...wrap.querySelectorAll('.nav-label')].map((b) => b.getBoundingClientRect());
-        return { h: Math.round(wrap.querySelector('.zz-ref').getBoundingClientRect().bottom), navTop: nav.top, navBottom: nav.bottom, navH: nav.height, btnBottoms: btns.map((b) => Math.round(b.bottom)), labelBottoms: labels.map((b) => Math.round(b.bottom)), btnH: Math.round(Math.min(...btns.map((b) => b.height))) };
-    }, extraCss);
+        const tray = (sel) => Math.round(wrap.querySelector(sel).getBoundingClientRect().bottom);
+        return { trayBottoms: [tray('.file-transfers-tray'), tray('.device-downloads')], h: Math.round(wrap.querySelector('.zz-ref').getBoundingClientRect().bottom), navTop: nav.top, navBottom: nav.bottom, navH: nav.height, btnBottoms: btns.map((b) => Math.round(b.bottom)), labelBottoms: labels.map((b) => Math.round(b.bottom)), btnH: Math.round(Math.min(...btns.map((b) => b.height))) };
+    }, [extraCss, inset]);
     const good = await bar('');
     check('with a 34 px inset the bar is 94 px tall, flush to the bottom', Math.round(good.navH) === 94 && Math.round(good.navBottom) === good.h, JSON.stringify(good));
     // The LABELS, not the 63 px button boxes: those overflow the 59 px content box by
     // 2 px a side on every surface (pre-existing, the same with no inset at all).
     check('and no tab label (nor its icon above it) reaches into the home-indicator band', good.labelBottoms.every((b) => b <= good.h - 34), JSON.stringify(good));
     check('and every tab keeps at least a 44 px touch height', good.btnH >= 44, JSON.stringify(good));
+    // The trays that sit above the bar (file transfers, device downloads) used to
+    // hard-code bottom: 60px, which in a Home Screen app left the bar's top 34 px
+    // under them, taking its taps.
+    check('with the inset, the file-transfer and device-download trays end at or above the bar', good.trayBottoms.every((b) => b <= good.navTop + 1), JSON.stringify(good));
     await page.screenshot({ path: path.join(outDir, 'app-390x844-bottom-bar-inset-34.png') });
     const old = await bar('.mobile-bottom-nav { height: var(--mobile-nav-height) !important; }');
+    // Where the inset is 0 (Android, desktop, a Safari tab) nothing moved: the bar is
+    // the 60 px it always was, and the trays sit on it as they always did.
+    const flat = await bar('', '0px');
+    check('with NO inset the bar is 60 px and the trays still end at the bar (nothing changed there)', Math.round(flat.navH) === 60 && flat.trayBottoms.every((b) => Math.abs(b - (flat.h - 60)) <= 1), JSON.stringify(flat));
+    const oldTray = await bar('.file-transfers-tray, .device-downloads { bottom: 60px !important; }');
+    check('CONTROL: the old bottom: 60px trays FAIL the tray check (they overlap the bar)', !oldTray.trayBottoms.every((b) => b <= oldTray.navTop + 1), JSON.stringify(oldTray));
     check('CONTROL: the old fixed 60 px bar FAILS that check (labels spill into the band)', !old.labelBottoms.every((b) => b <= old.h - 34), JSON.stringify(old));
     await context.close();
 }
@@ -223,6 +238,8 @@ console.log('\n--- the web app, as a Home Screen app (navigator.standalone faked
     const standalone = () => Object.defineProperty(Navigator.prototype, 'standalone', { get: () => true, configurable: true });
     const { context, page } = await open(app.url, iphone, { init: standalone });
     await page.waitForFunction(() => document.documentElement.dataset.iosStandalone === 'true', null, { timeout: 20000 }).catch(() => {});
+    await page.waitForSelector('#stay-signed-in', { timeout: 10000 }).catch(() => {});
+    check('"Stay signed in" starts TICKED in a Home Screen app (the page promises "sign in once")', await page.evaluate(() => document.querySelector('#stay-signed-in')?.checked === true));
     check('the module saw standalone', await page.evaluate(() => document.documentElement.dataset.iosStandalone) === 'true');
     check('portrait: viewport-fit=cover is on, the other keys kept', /width=device-width/.test(await viewportContent(page)) && /viewport-fit=cover/.test(await viewportContent(page)), String(await viewportContent(page)));
     await page.setViewportSize({ width: 844, height: 390 });

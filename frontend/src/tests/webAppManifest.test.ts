@@ -18,7 +18,7 @@ const FRONTEND = path.resolve(__dirname, '..', '..');
 const REPO = path.resolve(FRONTEND, '..');
 const PUBLIC = path.join(FRONTEND, 'public');
 const html = fs.readFileSync(path.join(FRONTEND, 'index.html'), 'utf8');
-const manifest = JSON.parse(fs.readFileSync(path.join(PUBLIC, 'manifest.webmanifest'), 'utf8')) as {
+const manifest = JSON.parse(fs.readFileSync(path.join(PUBLIC, 'manifest.json'), 'utf8')) as {
     name?: string; short_name?: string; start_url?: string; scope?: string; display?: string;
     background_color?: string; theme_color?: string;
     icons?: { src: string; sizes: string; type: string; purpose?: string }[];
@@ -40,7 +40,7 @@ function tags(name: 'meta' | 'link'): Record<string, string>[] {
 }
 const meta = (n: string) => tags('meta').find((t) => t.name === n)?.content;
 
-describe('manifest.webmanifest', () => {
+describe('manifest.json', () => {
     it('has the fields a Home Screen app needs', () => {
         expect(manifest.name).toBe('Púca');
         expect(manifest.short_name).toBeTruthy();
@@ -84,7 +84,7 @@ describe('manifest.webmanifest', () => {
 describe('index.html', () => {
     it('links the manifest and an opaque 180 px apple-touch-icon that exists', () => {
         const links = tags('link');
-        expect(links.find((l) => l.rel === 'manifest')?.href).toBe('/manifest.webmanifest');
+        expect(links.find((l) => l.rel === 'manifest')?.href).toBe('/manifest.json');
         const touch = links.find((l) => l.rel === 'apple-touch-icon')!;
         expect(touch.sizes).toBe('180x180');
         const info = pngInfo(path.join(PUBLIC, touch.href.slice(1)));

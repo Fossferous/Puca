@@ -18,6 +18,10 @@
  * scanner (the hand-over note says what was and was not tried).
  */
 import { describe, it, expect } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { qrMatrix, qrSvg, rsRemainder, MAX_BYTES } from '../../../deploy/ops/make-qr-svg.mjs';
 
 // --- an independent reader ---------------------------------------------------
@@ -198,5 +202,37 @@ describe('make-qr-svg', () => {
 
     it('keeps markup characters out of the label', () => {
         expect(qrSvg('x', '"><script>&')).toContain('aria-label="QR code for script"');
+    });
+});
+
+describe('the command line', () => {
+    const script = path.resolve(__dirname, '..', '..', '..', 'deploy', 'ops', 'make-qr-svg.mjs');
+    const run = (file: string) => spawnSync(process.execPath, [file, 'https://app.example.org', 'app.example.org'], { encoding: 'utf8' });
+
+    it('prints the SVG when run directly', () => {
+        const r = run(script);
+        expect(r.status).toBe(0);
+        expect(r.stdout.startsWith('<svg xmlns=')).toBe(true);
+    });
+
+    it('prints it through a directory link too (it once printed nothing and exited 0, and dual-ship.sh blamed node)', () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qr-link-'));
+        const link = path.join(dir, 'ops');
+        try {
+            // A junction needs no privilege on Windows; on Linux it is a plain symlink.
+            fs.symlinkSync(path.dirname(script), link, 'junction');
+            const r = run(path.join(link, 'make-qr-svg.mjs'));
+            expect(r.status).toBe(0);
+            expect(r.stdout.startsWith('<svg xmlns=')).toBe(true);
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('exits non-zero with a message for a text that does not fit', () => {
+        const r = spawnSync(process.execPath, [script, 'x'.repeat(MAX_BYTES + 1)], { encoding: 'utf8' });
+        expect(r.status).toBe(1);
+        expect(r.stderr).toMatch(/at most/);
+        expect(r.stdout).toBe('');
     });
 });

@@ -21,7 +21,8 @@
  * by decoding the finished matrix with a reader that shares none of the
  * encoder's tables.
  */
-import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 /** [ec codewords per block, [[blocks, data codewords per block], ...]] at level M. */
 const BLOCKS_M = {
@@ -312,7 +313,18 @@ export function qrSvg(text, label = text) {
     );
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+/** Was this file run directly (not imported)? Compared by real path: through a
+ *  symlink or a junction `argv[1]` and `import.meta.url` name the same file by
+ *  different paths, and a string comparison of them silently runs nothing. */
+function isMain() {
+    try {
+        return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+    } catch {
+        return false;
+    }
+}
+
+if (isMain()) {
     const [text, label] = process.argv.slice(2);
     if (!text) {
         console.error('usage: make-qr-svg.mjs <text> [label]');

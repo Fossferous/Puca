@@ -113,10 +113,10 @@ const INVENTORY: Covered[] = [
     // "Get the desktop app", under the web invite page's app offer, which
     // offersDesktopAppLink() gives only to a desktop browser (never a shell).
     { file: 'components/InviteLanding.tsx', count: 1, how: 'web', guard: 'const appLink = offersDesktopAppLink() ? appInviteLink(code, window.location.hostname) : null;' },
-    { file: 'components/TasksView.tsx', count: 1, how: 'web', guard: "if (typeof window === 'undefined' || isTauri() || isMobile()) return null;" },
-    { file: 'notes/components/AccountMenu.tsx', count: 1, how: 'web', guard: '{!NATIVE && !inPuca && <a' },
-    { file: 'notes/components/NotesRail.tsx', count: 1, how: 'web', guard: '{!NATIVE && !inPuca && (' },
-    { file: 'notes/components/NoteEditor.tsx', count: 1, how: 'web', guard: 'const pucaHref = isMobile() || isEmbedded ? null :', guardFile: 'notes/components/NotesShell.tsx' },
+    { file: 'components/TasksView.tsx', count: 1, how: 'web', guard: "if (typeof window === 'undefined' || isTauri() || isMobile() || isIosStandalone()) return null;", guardFile: 'api/notesLink.ts' },
+    { file: 'notes/components/AccountMenu.tsx', count: 1, how: 'web', guard: '{!NATIVE && !inPuca && !isIosStandalone() && <a' },
+    { file: 'notes/components/NotesRail.tsx', count: 1, how: 'web', guard: '{!NATIVE && !inPuca && !isIosStandalone() && (' },
+    { file: 'notes/components/NoteEditor.tsx', count: 1, how: 'web', guard: 'const pucaHref = isMobile() || isEmbedded || isIosStandalone() ? null :', guardFile: 'notes/components/NotesShell.tsx' },
 ];
 
 const files = sources();

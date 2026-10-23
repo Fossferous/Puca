@@ -138,10 +138,12 @@ render_download_page() {
 	# long and a replacement string is special to both. A page without the token
 	# (an operator's own index.local.html) skips all of this.
 	if grep -q '__APP_QR_SVG__' "$PAGE"; then
-		local qr
-		if ! qr="$(node "$HERE/make-qr-svg.mjs" "https://$APP_HOST" "$APP_HOST")" || [ -z "$qr" ]; then
+		local qr qr_rc=0
+		qr="$(node "$HERE/make-qr-svg.mjs" "https://$APP_HOST" "$APP_HOST")" || qr_rc=$?
+		if [ "$qr_rc" -ne 0 ] || [ -z "$qr" ]; then
 			echo "REFUSING: $PAGE_SOURCE wants a QR code of https://$APP_HOST and deploy/ops/make-qr-svg.mjs could not make one"
-			echo "(needs node on PATH; the address must fit in 106 bytes). Remove __APP_QR_SVG__ from the page to ship without it."
+			echo "(node exited $qr_rc and printed ${#qr} bytes; it needs node on PATH and an address of at most 106 bytes)."
+			echo "Remove __APP_QR_SVG__ from the page to ship without it."
 			exit 1
 		fi
 		QR_SVG="$qr" awk '{ i = index($0, "__APP_QR_SVG__"); if (i) $0 = substr($0, 1, i - 1) ENVIRON["QR_SVG"] substr($0, i + 14); print }' "$PAGE" > "$PAGE.qr" 			&& mv "$PAGE.qr" "$PAGE"

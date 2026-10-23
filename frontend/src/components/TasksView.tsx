@@ -69,7 +69,8 @@ import { useTaskFeature } from '../api/taskFeatures';
 import { useScheduleSetter, useSnoozeSetter } from './schedule/useScheduleSetter';
 import { listChannels, type Channel, type MemberWithRoles, type Server } from '../api/servers';
 import { getToken } from '../api/auth';
-import { isMobile, isTauri } from '../api/platform';
+import { isMobile } from '../api/platform';
+import { notesUrl } from '../api/notesLink';
 import { TaskTree } from './TaskTree';
 import { ChecklistBody } from './ChecklistBody';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
@@ -142,27 +143,6 @@ function withoutSeenHeadings(lists: TaskList[], seen: ReadonlyMap<number, SeenRo
         if (!h || (h.rows && (l.total_tasks !== h.rows.total || l.completed_tasks !== h.rows.completed))) return l;
         return { ...l, total_tasks: Math.max(0, l.total_tasks - h.headings.total), completed_tasks: Math.max(0, l.completed_tasks - h.headings.completed) };
     });
-}
-
-/**
- * Where Púca Notes lives, or null where the link would be wrong. WEB ONLY:
- * Notes is a second page on the web app's origin, and it is signed in there
- * because the two pages share the origin's storage. The link names the FILE
- * (`/notes/index.html`), not the folder: a vhost whose `try_files` still reads
- * `{path} /index.html` answers both `/notes` and `/notes/` with THIS app
- * (measured on production the day Notes shipped — the folder only works once
- * the operator adds `{path}/`, deploy/webapp/README.md), while a real file is
- * served by every configuration. Notes' own routes are hash routes, so the
- * file name stays in the address bar and nothing else changes. The desktop shell runs at tauri://localhost and the phone at
- * https://localhost, where nothing is shared: a link from either would open
- * a signed-out, default-themed page in the system browser, so they get none.
- * The desktop app needs none anyway — Notes is inside it, on the rail's
- * "Tasks & notes" (NotesDesktopView.tsx; Chat's `notesInApp`), already signed
- * in.
- */
-function notesUrl(): string | null {
-    if (typeof window === 'undefined' || isTauri() || isMobile()) return null;
-    return `${window.location.origin}/notes/index.html`;
 }
 
 // Decode the JWT for the caller's user id (same lightweight client-side decode

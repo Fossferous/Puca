@@ -7,6 +7,8 @@
  * away in landscape, and leaves the page's other viewport keys alone.
  */
 import { describe, it, expect, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { installIosStandalone, isIosStandalone, viewportContent } from '../api/iosStandalone';
 
 const BASE = 'width=device-width, initial-scale=1.0';
@@ -38,6 +40,15 @@ function fakeWindow(standalone: boolean | undefined) {
         listeners,
     };
 }
+
+describe('main.tsx', () => {
+    it('installs it at top level, as desktopFileDrop.test.ts pins for the drop guard', () => {
+        const main = readFileSync(join(__dirname, '..', 'main.tsx'), 'utf8');
+        expect(main).toMatch(/^installIosStandalone\(\)$/m);
+        // Positive control: the same matcher does not accept a commented-out call.
+        expect('// installIosStandalone()').not.toMatch(/^installIosStandalone\(\)$/m);
+    });
+});
 
 describe('viewportContent', () => {
     it('adds and removes viewport-fit, keeping the other keys', () => {

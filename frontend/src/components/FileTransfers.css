@@ -240,12 +240,14 @@
     .file-transfers-tray {
         left: 0;
         right: 0;
-        /* Clear of the bottom nav, which owns the very bottom of the screen. */
-        bottom: 60px;
+        /* Clear of the bottom nav, which owns the very bottom of the screen:
+           60px plus the home-indicator inset it also covers (mobile.css). The
+           tray sits ABOVE the bar now, so its own bottom padding carries no inset. */
+        bottom: calc(var(--mobile-nav-height, 60px) + var(--safe-area-bottom, 0px));
         width: auto;
         max-height: 45vh;
         border-radius: 12px 12px 0 0;
-        padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px));
+        padding: 10px 12px;
     }
 
     /* §5 touch rule: Accept/Decline must be comfortable targets. */

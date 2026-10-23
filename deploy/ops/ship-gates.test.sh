@@ -375,6 +375,57 @@ out="$(versions)"
 check "an older webapp (SPA fallback HTML) is INFO, not FAIL" "$([ "$(has "$out" 'INFO  notes worker cache')" = 1 ] && [ "$(has "$out" 'notes-sw-cache')" = 0 ] && echo 1 || echo 0)" "$out"
 
 echo
+echo "--- check-versions.sh: the iPhone web app's manifest and icon ---"
+# try_files answers a MISSING file with the page and a 200, so a manifest that did
+# not deploy passes a status check; the probe reads the body, the type and the
+# icon's first bytes. The stub answers those paths per case.
+serve_mf() { # <manifest response, printf %b> <icon bytes as od prints them>
+	# The response goes through a file: its JSON quotes would end a quoted
+	# string inside the unquoted heredoc below.
+	printf '%b' "$1" > "$TMP/mf.resp"
+	cat > "$TMP/bin/ssh" <<STUB
+#!/usr/bin/env bash
+cmd="\$*"
+case "\$cmd" in
+	*manifest.json*) cat "$TMP/mf.resp" ;;
+	*icon-192.png*) printf '%s\n' "$2" ;;
+	*notes/sw.js*) printf 'HTTP/2 200\ncontent-type: text/javascript\ncache-control: no-cache\n' ;;
+	*app.invalid*) echo '<script src="/assets/index-abc123.js"></script>'
+	                echo 'content-security-policy: default-src self' ;;
+	*latest-lite.json*) ;;
+	*latest.json*) echo '{"version":"9.9.9"}' ;;
+	*app-version*) echo '{"version":"9.9.9"}' ;;
+	*mobile-updates/check*) echo '{"version":"9.9.9"}' ;;
+	*http_code*) echo 200 ;;
+	*dl.invalid*) echo '<a href="/mobile/Puca-9.9.9.apk">a</a>'
+	              echo '<a href="/mobile/Puca-Lite-9.9.9.apk">b</a>'
+	              echo '<a href="/mobile/Puca-Notes-9.9.9.apk">c</a>'
+	              echo '<div class="meta">v9.9.9 &middot; Windows</div>' ;;
+esac
+exit 0
+STUB
+	chmod +x "$TMP/bin/ssh"
+}
+GOODMF='HTTP/2 200\ncontent-type: application/json\n\n{"name":"Púca","start_url":"/"}\n'
+PNG=' 89 50 4e 47'
+serve_mf "$GOODMF" "$PNG"
+out="$(versions)"
+check "PASSES JSON named Púca with a PNG icon" "$(has "$out" 'PASS  web app manifest')" "$out"
+serve_mf 'HTTP/2 200\ncontent-type: text/plain; charset=utf-8\n\n{"name":"Púca","start_url":"/"}\n' "$PNG"
+out="$(versions)"
+check "FAILS a manifest served as text/plain" "$([ "$(has "$out" 'FAIL  web app manifest')" = 1 ] && [ "$(has "$out" 'content-type JSON=NO')" = 1 ] && echo 1 || echo 0)" "$out"
+check "and counts it in the verdict" "$([ "$(has "$out" 'sandbox/web-app-manifest')" = 1 ] && [ "$(has "$out" 'ALL SURFACES AGREE')" = 0 ] && echo 1 || echo 0)" "$out"
+serve_mf 'HTTP/2 200\ncontent-type: application/json\n\n{"name":"Somebody Else","start_url":"/"}\n' "$PNG"
+out="$(versions)"
+check "FAILS a manifest with the wrong name" "$([ "$(has "$out" 'FAIL  web app manifest')" = 1 ] && [ "$(has "$out" 'name Púca=NO')" = 1 ] && echo 1 || echo 0)" "$out"
+serve_mf "$GOODMF" ' 3c 21 64 6f'
+out="$(versions)"
+check "FAILS an icon that is the page (the SPA fallback), not a PNG" "$([ "$(has "$out" 'FAIL  web app manifest')" = 1 ] && [ "$(has "$out" 'PNG=NO')" = 1 ] && echo 1 || echo 0)" "$out"
+serve_mf '<!doctype html><title>the page</title>\n' ' 3c 21 64 6f'
+out="$(versions)"
+check "only says INFO for a webapp that predates it (the page answers the path)" "$([ "$(has "$out" 'INFO  web app manifest')" = 1 ] && [ "$(has "$out" 'FAIL  web app manifest')" = 0 ] && echo 1 || echo 0)" "$out"
+
+echo
 echo "--- check-versions.sh: a page with NO version label at all ---"
 # Under `set -e` + pipefail an empty grep result aborts the script before the
 # FAIL branch can print, so a page with no label would report NOTHING rather

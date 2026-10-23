@@ -12,6 +12,7 @@ one-line summary; this file is the full story. Versions follow
 
 ### Fixed
 
+- **In the iPhone Home Screen app, you stay signed in, and nothing replaces the app under you.** "Stay signed in on this device" now starts ticked there (as in the Android and desktop apps), as the download page and the User Guide already said: you sign in once, not every day. **Open in Púca Notes** (Tasks view) and Púca Notes' **Open Púca** links are not shown inside a Home Screen app, because following one there replaces the app, its connection and any call. The file-transfer and device-download trays now sit above the bottom bar with the home-indicator space included, instead of covering its top. The web app's manifest is served as `/manifest.json`, which every web server sends as JSON, and `check-versions.sh` now checks that it, and the icon it names, are really served.
 - **On an iPhone the bottom bar no longer squeezes its buttons or leaves a gap.** The bar was a fixed 60 px with the space for the home indicator taken out of that, so on a phone with an indicator the buttons were cramped and a strip showed above the bar. It is now 60 px plus the indicator's height. Nothing changes on Android or in the desktop app.
 
 ## 0.9.847 — 2026-10-23
