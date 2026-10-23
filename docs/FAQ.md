@@ -284,9 +284,11 @@ encrypted in transit, just not end-to-end.
 
 No, and there is unlikely to be one soon. Publishing to iPhones requires a paid
 Apple Developer account; without one, nothing built can be installed on anyone
-else's device. The browser works well — add it to your home screen — but iOS
-gives web apps no way to notify you while closed, so you will not get message
-alerts.
+else's device. The browser works well: add it to your Home Screen from Safari
+(Share, then **Add to Home Screen**; the steps are in the User Guide under
+*iPhone and iPad*, and on your server's download page). iPhone can send
+notifications to a web app that is closed, but Púca does not use that yet, so
+you will not get message alerts.
 
 ## Why does Windows warn me when I install it?
 

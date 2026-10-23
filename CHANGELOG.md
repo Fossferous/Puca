@@ -4,6 +4,16 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Added
+
+- **Púca on an iPhone or iPad, from the Home Screen.** There is still no App Store app, but the web app now installs properly from Safari: **Share**, **Add to Home Screen**, **Add**. It gets Púca's own icon (a real one, not the browser's black square), the name Púca, and opens full screen. The download page has a new **iPhone & iPad** section with those steps, an **Open Púca** button and a QR code to scan from a computer; on an iPhone or iPad it comes first. It says plainly what is different there: no notifications while Púca is closed, calls held back by default because Safari cannot encrypt them frame by frame (Settings → Privacy & Safety has the switch), no remote control of the phone, and that iPhone photos work. The User Guide has an *iPhone and iPad* section. Comes with the web app update; the download page changes with the next ship.
+
+### Fixed
+
+- **On an iPhone the bottom bar no longer squeezes its buttons or leaves a gap.** The bar was a fixed 60 px with the space for the home indicator taken out of that, so on a phone with an indicator the buttons were cramped and a strip showed above the bar. It is now 60 px plus the indicator's height. Nothing changes on Android or in the desktop app.
+
 ## 0.9.847 — 2026-10-23
 
 Desktop remote control catches up with the phone; phone photos show, without their location; tighter encryption checks

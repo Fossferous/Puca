@@ -113,7 +113,8 @@ label_of() { echo "${1%%:*}"; }
 # index.local.html). Otherwise the TRACKED template is used — it is generic,
 # so its deployment-specific text carries tokens filled in from hosts.conf
 # here: __API_HOST__ ("The app connects to ..."), __APP_HOST__ and
-# __DOWNLOAD_HOST__ (the address typed into Decky to install the plugin). Either way
+# __DOWNLOAD_HOST__ (the address typed into Decky to install the plugin); the
+# one token that is not a host, __APP_QR_SVG__, is made below. Either way
 # the result is RENDERED into $PAGE_DIR and then checked for a leftover
 # placeholder domain (require_no_placeholder_domain) before it goes anywhere:
 # this is the one artefact whose content end users actually read, and the
@@ -130,6 +131,21 @@ render_download_page() {
 	fi
 	PAGE="$PAGE_DIR/index.html"
 	sed -e "s|__API_HOST__|$API_HOST|g" -e "s|__APP_HOST__|$APP_HOST|g" -e "s|__DOWNLOAD_HOST__|$DOWNLOAD_HOST|g" "$PAGE_SOURCE" > "$PAGE"
+	# __APP_QR_SVG__ (the "iPhone & iPad" section's QR code of the web app's
+	# address) is a whole inline SVG, not a host, so it is made rather than
+	# substituted: deploy/ops/make-qr-svg.mjs, no library, no network, nothing
+	# for the page to fetch. awk's index/substr, not sed or gsub: the SVG is
+	# long and a replacement string is special to both. A page without the token
+	# (an operator's own index.local.html) skips all of this.
+	if grep -q '__APP_QR_SVG__' "$PAGE"; then
+		local qr
+		if ! qr="$(node "$HERE/make-qr-svg.mjs" "https://$APP_HOST" "$APP_HOST")" || [ -z "$qr" ]; then
+			echo "REFUSING: $PAGE_SOURCE wants a QR code of https://$APP_HOST and deploy/ops/make-qr-svg.mjs could not make one"
+			echo "(needs node on PATH; the address must fit in 106 bytes). Remove __APP_QR_SVG__ from the page to ship without it."
+			exit 1
+		fi
+		QR_SVG="$qr" awk '{ i = index($0, "__APP_QR_SVG__"); if (i) $0 = substr($0, 1, i - 1) ENVIRON["QR_SVG"] substr($0, i + 14); print }' "$PAGE" > "$PAGE.qr" 			&& mv "$PAGE.qr" "$PAGE"
+	fi
 }
 
 # Refuse to publish a page that still names a placeholder domain. The same

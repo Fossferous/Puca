@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Download Púca</title>
-<meta name="description" content="Download Púca — self-hosted, end-to-end encrypted chat, voice and video — for Windows and Android. Full and Lite builds.">
+<meta name="description" content="Download Púca — self-hosted, end-to-end encrypted chat, voice and video — for Windows, Android, iPhone and iPad. Full and Lite builds.">
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -59,6 +59,19 @@
   a.link { color: #7fb8ff; }
   .notes-app { margin: 1.25rem 0 0; padding-top: 1rem; border-top: 1px solid rgba(255,255,255,.12); }
   .notes-app .downloads { margin-top: .6rem; }
+  /* "iPhone & iPad": shares .notes-app's rule above. An iPhone or iPad visitor
+     gets it moved to the top and boxed (script below); everyone else sees it in
+     place, and with JavaScript off it is simply in place for everyone. */
+  .iphone-steps { margin: .7rem 0 0; padding-left: 1.4em; color: #b7b2cf; font-size: 14px; line-height: 1.7; text-align: left; }
+  .iphone-steps b { color: #e8e6f0; }
+  .iphone-limits { margin: 0 auto; padding-left: 1.2em; }
+  .iphone-limits li { margin: 0 0 .35em; }
+  .qr { margin: 1.1rem auto 0; text-align: center; }
+  .qr[hidden] { display: none; }
+  .qr svg { display: block; width: 168px; height: 168px; margin: 0 auto; border-radius: 8px; }
+  .qr figcaption { margin-top: .5rem; color: #7d7897; font-size: 13px; }
+  .notes-app.first { margin: 0 0 1.4rem; padding: 1.1rem 1rem 1rem; border: 1px solid rgba(127,184,255,.45);
+    border-radius: 14px; background: rgba(127,184,255,.07); text-align: left; }
   [data-variant-panel] { display: none; }
   [data-variant-panel].shown { display: block; }
 </style>
@@ -105,10 +118,11 @@
       </div>
       <div class="meta">v0.9.847 &middot; Windows 10/11 (64-bit) &middot; Android 7+ &middot; or any modern browser</div>
       <p class="apk-note">
-        <b>On iPhone, iPad or Mac, use the browser app</b> &mdash; there is no Apple
-        build yet. Everything works there except screen control of another machine,
-        which is Windows-only. Calls in Safari cannot be encrypted frame by frame:
-        Púca tells you before you join rather than quietly downgrading you.
+        <b>On iPhone or iPad,</b> add the web app to your Home Screen &mdash; there is no
+        App Store app. Steps and limits are <a class="link" href="#iphone">just below</a>.
+        On a Mac, use <b>Open in your browser</b>; calls in Safari cannot be encrypted
+        frame by frame, and Púca tells you before you join rather than quietly
+        downgrading you.
       </p>
       <p class="apk-note">
         The Android app keeps itself up to date: each time it starts it fetches the
@@ -132,6 +146,53 @@
         <a class="btn secondary" href="/mobile/Puca-Lite-0.9.847.apk" download>Download for Android (.apk)</a>
       </div>
       <div class="meta">v0.9.847 &middot; Windows 10/11 (64-bit) &middot; Android 7+</div>
+    </div>
+
+    <!-- id="iphone" is a stable anchor for links from the docs. There is no
+         iPhone build: the web app is added to the Home Screen from Safari
+         (frontend/public/manifest.webmanifest and the apple-mobile-web-app tags in
+         frontend/index.html make it open as an app). __APP_HOST__ is the same web
+         app address the "Open in your browser" button uses. The QR placeholder token
+         inside the figure below is replaced by dual-ship.sh, at render time, with an
+         inline SVG of https://__APP_HOST__ made by deploy/ops/make-qr-svg.mjs: no
+         external service, nothing to load, and it shows with JavaScript off. Name
+         that token nowhere else on this page: it is replaced wherever it appears. -->
+    <div class="notes-app" id="iphone">
+      <b>Púca on iPhone &amp; iPad</b> &mdash; there is no App Store app. Instead you add Púca's
+      web app to your Home Screen from Safari: it gets its own icon and opens full screen, like an app.
+      <ol class="iphone-steps">
+        <li>Open <a class="link" href="https://__APP_HOST__">__APP_HOST__</a> in <b>Safari</b>.</li>
+        <li>Tap <b>Share</b> (the square with an arrow pointing up).</li>
+        <li>Tap <b>Add to Home Screen</b> (scroll down the list if you do not see it).</li>
+        <li>Tap <b>Add</b>. Open <b>Púca</b> from your Home Screen and sign in there.</li>
+      </ol>
+      <div class="downloads">
+        <a class="btn secondary" href="https://__APP_HOST__">Open Púca</a>
+      </div>
+      <figure class="qr">
+        __APP_QR_SVG__
+        <figcaption>On a computer? Point your iPhone's camera at this code to open Púca.</figcaption>
+      </figure>
+      <div class="meta">Needs iOS 16 or newer &middot; added from Safari</div>
+      <p class="apk-note"><b>What is different from the Android and Windows apps:</b></p>
+      <ul class="apk-note iphone-limits">
+        <li><b>No notifications while Púca is closed.</b> iPhone can send them to a web app; Púca does
+        not use that yet, so new messages show up when you open it.</li>
+        <li><b>Calls are held back by default.</b> Safari cannot do the frame-by-frame encryption Púca
+        uses for ordinary calls. With <b>Require encryption for calls</b> on (the default), Púca tells you
+        before you join and keeps your microphone, camera and screen out of the call, so you would
+        neither hear nor be heard, rather than send them where your server could read them. You can turn
+        it off in <b>Settings &rarr; Privacy &amp; Safety</b> to take part with encryption in transit only.
+        Channels in SFU mode use a different encryption that Safari may support; that has not been
+        tried on an iPhone.</li>
+        <li><b>My Devices.</b> An iPhone cannot be controlled from elsewhere and cannot share its own
+        screen. Controlling a Windows PC from it uses the same code as on Android, which has not been
+        tried on an iPhone.</li>
+        <li><b>Photos work.</b> Safari reads iPhone photos (HEIC) itself: Púca turns one into a JPEG on
+        the phone before it is sent, without the location the camera saved with it.</li>
+        <li><b>It keeps its own sign-in,</b> separate from the one in Safari, so sign in once inside the
+        Home Screen app.</li>
+      </ul>
     </div>
 
     <!-- id="notes-app" is load-bearing: the Notes app's "install the new app" prompt
@@ -175,7 +236,8 @@
 
     <div class="steps">
       <b>Getting started</b><br>
-      1. Download and run the installer (Windows) or the .apk (Android).<br>
+      1. Download and run the installer (Windows) or the .apk (Android), or add the web app to your
+      Home Screen (iPhone and iPad).<br>
       2. Open <b>Púca</b>.<br>
       3. Click <b>Register</b>, enter your invite code, choose a username &amp; password, and you're in.<br>
       <br>
@@ -237,6 +299,22 @@
       url.searchParams.set('variant', v);
       history.replaceState(null, '', url);
     }
+    // An iPhone or iPad visitor gets the iPhone & iPad section first and boxed:
+    // the page's other downloads do not run on their device. (An iPad that asks
+    // for desktop sites says "Macintosh", told apart by its touch screen.) The QR
+    // code is for people on a computer, so it goes. Without JavaScript the
+    // section stays where the markup puts it, which still works.
+    (function () {
+      var ua = navigator.userAgent || '';
+      var ios = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+      var sec = document.getElementById('iphone');
+      var picker = document.querySelector('.variant-picker');
+      if (!ios || !sec || !picker) return;
+      sec.classList.add('first');
+      picker.parentNode.insertBefore(sec, picker);
+      var qr = sec.querySelector('.qr');
+      if (qr) qr.hidden = true;
+    })();
     (function () {
       var fromQuery = new URLSearchParams(window.location.search).get('variant');
       var fromSession = null;

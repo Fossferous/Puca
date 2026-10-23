@@ -153,7 +153,14 @@
         left: 0;
         right: 0;
         bottom: 0;
-        height: var(--mobile-nav-height);
+        /* The panels above stop at nav height + the bottom inset (top/bottom
+           below), so the bar is that tall too: the buttons keep their 60px and
+           the inset is padding under them. A bare 60px (box-sizing is
+           border-box) left the buttons the 60px minus the inset, and a gap of
+           the inset's height above the bar, on a phone with a home indicator;
+           the inset is 0 on every surface that does not ask for it (Android,
+           desktop, a Safari tab), so nothing there changes. */
+        height: calc(var(--mobile-nav-height) + var(--safe-area-bottom));
         padding-bottom: var(--safe-area-bottom);
         background: linear-gradient(180deg, rgba(22, 33, 62, 0.98), rgba(15, 15, 26, 1));
         border-top: 1px solid rgba(255, 255, 255, 0.1);

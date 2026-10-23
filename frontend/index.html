@@ -3,7 +3,24 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
-    <link rel="apple-touch-icon" href="/favicon.png" />
+    <!-- Home-screen app (Safari > Share > Add to Home Screen; docs/USER_GUIDE.md,
+         "iPhone and iPad"). The icons are OPAQUE squares: iPhone fills any
+         transparency with black. Regenerate them with
+         scripts/make-home-screen-icons.py; src/tests/webAppManifest.test.ts
+         holds this file, the manifest and the PNGs to one another. -->
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#18191c" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Púca" />
+    <!-- "black", not "black-translucent": translucent draws the page UNDER the
+         status bar in white text, unreadable on the light themes. -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+    <!-- NO viewport-fit=cover here, on purpose: this file is also the Android
+         app's and the desktop app's, and cover turns on real
+         env(safe-area-inset-*) app-wide there (api/keyboardInset.ts). A
+         home-screen iPhone app gets it from api/iosStandalone.ts instead. -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Púca</title>
   </head>

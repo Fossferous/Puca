@@ -645,6 +645,12 @@ the crowd. Three checks, cheapest first:
     plugins install an update only when it verifies under the key they carry,
     so this refuses a release that the one published now would not accept, or
     that is not newer than it.
+- `make-qr-svg.mjs` — the QR code on the download page's "iPhone & iPad"
+  section: `node make-qr-svg.mjs https://<web app host>` prints an inline SVG.
+  No library, no network. `dual-ship.sh` runs it while rendering the page and
+  puts the result where the template says `__APP_QR_SVG__`; it refuses to ship
+  if the template asks for a code and this cannot make one. A page you wrote
+  yourself (`index.local.html`) without that token is untouched.
 - `scan-installers.sh` — asks Windows Defender about the two installers BEFORE
   they ship, and exits non-zero if it objects. 0.9.806 shipped and immediately
   tripped `Trojan:Win32/Bearfoos.B!ml` on every desktop that auto-updated,
