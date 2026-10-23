@@ -685,7 +685,7 @@ Bundled into the zip that `integrations/decky` builds, which carries their licen
 | rustls-pki-types@1.15.1 | MIT OR Apache-2.0 | backend, desktop, puca-agent, puca-rtc, puca-service, puca-spike-fswap, puca-waker | https://github.com/rustls/pki-types |
 | rustls-platform-verifier-android@0.1.1 | MIT OR Apache-2.0 | desktop | https://github.com/rustls/rustls-platform-verifier |
 | rustls-platform-verifier@0.7.0 | MIT OR Apache-2.0 | desktop | https://github.com/rustls/rustls-platform-verifier |
-| rustls-webpki@0.103.14 | ISC | desktop | https://github.com/rustls/webpki |
+| rustls-webpki@0.103.16 | ISC | desktop | https://github.com/rustls/webpki |
 | rustls@0.23.46 | Apache-2.0 OR ISC OR MIT | desktop | https://github.com/rustls/rustls |
 | rustversion@1.0.23 | MIT OR Apache-2.0 | backend, desktop, puca-service, puca-waker, wasm | https://github.com/dtolnay/rustversion |
 | ryu@1.0.23 | Apache-2.0 OR BSL-1.0 | backend, desktop, puca-service, puca-waker | https://github.com/dtolnay/ryu |
@@ -898,7 +898,7 @@ Bundled into the zip that `integrations/decky` builds, which carries their licen
 | web-sys@0.3.104 | MIT OR Apache-2.0 | backend, desktop, puca-service, puca-waker | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/web-sys |
 | webkit2gtk-sys@2.0.2 | MIT | desktop | https://github.com/tauri-apps/webkit2gtk-rs |
 | webkit2gtk@2.0.2 | MIT | desktop | https://github.com/tauri-apps/webkit2gtk-rs |
-| webpki-root-certs@1.0.9 | CDLA-Permissive-2.0 | desktop | https://github.com/rustls/webpki-roots |
+| webpki-root-certs@1.0.10 | CDLA-Permissive-2.0 | desktop | https://github.com/rustls/webpki-roots |
 | webview2-com-macros@0.8.1 | MIT | desktop | https://github.com/wravery/webview2-rs |
 | webview2-com-sys@0.38.2 | MIT | desktop | https://github.com/wravery/webview2-rs |
 | webview2-com@0.38.2 | MIT | desktop | https://github.com/wravery/webview2-rs |

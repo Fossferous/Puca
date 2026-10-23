@@ -6,6 +6,10 @@ one-line summary; this file is the full story. Versions follow
 
 ## Unreleased
 
+### Security
+
+- **The desktop app's updater picks up two more TLS certificate fixes.** It moves to rustls-webpki 0.103.16 and webpki-root-certs 1.0.10 (RUSTSEC-2026-0382 and 0383), which stop it trusting certificate intermediates that certificate authorities have since distrusted. No change to how updates look or behave. With the next desktop update.
+
 ### Improved
 
 - **Púca for Steam Deck: push to talk is chosen by pressing the button.** In the panel's Settings, choose **Choose a back button** and press the one you want. The four back buttons are easy to mix up by name, and in testing the one called "R4" was R5 every time.
