@@ -120,9 +120,9 @@
       <p class="apk-note">
         <b>On iPhone or iPad,</b> add the web app to your Home Screen &mdash; there is no
         App Store app. Steps and limits are <a class="link" href="#iphone">just below</a>.
-        On a Mac, use <b>Open in your browser</b>; calls in Safari cannot be encrypted
-        frame by frame, and Púca tells you before you join rather than quietly
-        downgrading you.
+        On a Mac, use <b>Open in your browser</b>; current Safari, Chrome and Firefox all
+        encrypt calls frame by frame, and a browser too old to do it is told so before
+        you join rather than quietly downgraded.
       </p>
       <p class="apk-note">
         The Android app keeps itself up to date: each time it starts it fetches the
@@ -178,13 +178,13 @@
       <ul class="apk-note iphone-limits">
         <li><b>No notifications while Púca is closed.</b> iPhone can send them to a web app; Púca does
         not use that yet, so new messages show up when you open it.</li>
-        <li><b>Calls are held back by default.</b> Safari cannot do the frame-by-frame encryption Púca
-        uses for ordinary calls. With <b>Require encryption for calls</b> on (the default), Púca tells you
-        before you join and keeps your microphone, camera and screen out of the call, so you would
-        neither hear nor be heard, rather than send them where your server could read them. You can turn
-        it off in <b>Settings &rarr; Privacy &amp; Safety</b> to take part with encryption in transit only.
-        Channels in SFU mode use a different encryption that Safari may support; that has not been
-        tried on an iPhone.</li>
+        <li><b>Calls are encrypted end to end.</b> Safari encrypts a call's sound and video frame by frame
+        through the standard browser feature Firefox uses too, so with <b>Require encryption for calls</b>
+        on (the default) you hear and are heard as on the other apps. Firefox runs the same code and has
+        been tested; an iPhone has not been tried yet. If a call there shows that the browser cannot
+        encrypt, Púca says so before you join and keeps your microphone, camera and screen out of the
+        call rather than send them where your server could read them. Channels in SFU mode use a
+        different encryption that Safari may support; that has not been tried on an iPhone either.</li>
         <li><b>My Devices.</b> An iPhone cannot be controlled from elsewhere and cannot share its own
         screen. Controlling a Windows PC from it uses the same code as on Android, which has not been
         tried on an iPhone.</li>

@@ -136,9 +136,14 @@ describe('the download page', () => {
 
     it('holds a QR placeholder that the ship script fills, and says what the limits are', () => {
         expect(section).toContain('__APP_QR_SVG__');
-        for (const limit of ['No notifications while Púca is closed', 'Calls are held back', 'My Devices', 'Photos work']) {
+        for (const limit of ['No notifications while Púca is closed', 'Calls are encrypted end to end', 'My Devices', 'Photos work']) {
             expect(section).toContain(limit);
         }
+        // Safari encrypts mesh calls through RTCRtpScriptTransform now: the page
+        // must not say otherwise, and must say an iPhone has not been tried yet.
+        expect(section).not.toContain('Calls are held back');
+        expect(section).not.toMatch(/Safari cannot do the frame-by-frame encryption/);
+        expect(section).toMatch(/an iPhone has not been tried yet/);
     });
 
     it('keeps the gates the ship scripts read: variant panels, APK links, version label, Notes, Steam Deck', () => {

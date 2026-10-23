@@ -806,14 +806,16 @@ What is different from the Android and Windows apps:
 
 - **No notifications while Púca is closed.** iPhone can send them to a web app;
   Púca does not use that yet, so new messages show up when you open it.
-- **Calls.** Safari cannot do the frame-by-frame encryption Púca uses for
-  ordinary calls. With **Require encryption for calls** on (the default), Púca
-  tells you before you join and keeps your microphone, camera and screen out of
-  the call, so you would neither hear nor be heard, rather than send them where
-  your server could read them. Turn it off in **Settings → Privacy & Safety** to
-  take part with encryption in transit only. In channels that use SFU mode the
-  call is encrypted by a different layer that Safari may support; that has not
-  been tried on an iPhone.
+- **Calls.** Safari encrypts a call's sound and video frame by frame through
+  the standard browser feature Firefox uses too, so with **Require encryption for
+  calls** on (the default) you hear and are heard as on the other apps. Firefox
+  runs the same code and has been tested; an iPhone has not been tried yet. If a
+  call there shows that this browser cannot encrypt, Púca says so before you join
+  and keeps your microphone, camera and screen out of the call rather than send
+  them where your server could read them; turning the setting off in
+  **Settings → Privacy & Safety** lets you take part with encryption in transit
+  only. In channels that use SFU mode the call is encrypted by a different layer
+  that Safari may support; that has not been tried on an iPhone either.
 - **My Devices.** An iPhone cannot be controlled from elsewhere and cannot share
   its own screen. Controlling a Windows PC from it uses the same code as on
   Android; that has not been tried on an iPhone.

@@ -70,13 +70,18 @@ means someone has actually run it, not that the code exists.
 |---|---|---|---|---|---|
 | Chat, DMs, files (E2EE) | native app | browser | browser | native app | browser |
 | Voice & video calls | yes | yes | yes | yes | yes |
-| **Encrypted** call media | yes | Chromium browsers | Chromium browsers | yes | **no** |
+| **Encrypted** call media | yes | browsers¹ | browsers¹ | yes | **built, not yet tried** |
 | Watching a shared screen | yes | yes | yes | yes | yes |
 | Sharing *your* screen | yes | browser | browser | — | — |
 | **Controlling** another machine | yes | **yes, in a browser** | **yes, in a browser** | yes | yes |
 | **Being** controlled | **yes** | in progress (below) | no | no | no |
 | Native desktop app | **shipped** | builds, unreleased | builds, unreleased | n/a | n/a |
 | Notifications while closed | yes | no | no | yes | no |
+
+¹ Chrome, Edge and Brave run Chromium's frame encryption, which has been run on
+these platforms. Firefox and Safari run the standard WebRTC Encoded Transform
+instead: Firefox has been run against Chrome on Windows; Safari (and so iPhone
+and iPad) runs the same code but has not yet been tried on a device.
 
 ### The short version for non-Windows users
 
