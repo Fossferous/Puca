@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { getActiveIdentity, computeSafetyNumber } from '../api/e2ee';
 import { getCachedPublicKey } from '../api/dms';
-import { getVerificationState, markVerified, clearVerified, type VerificationState } from '../api/keyVerification';
+import { getVerificationState, markVerified, clearVerified, identityPinConflicts, type VerificationState } from '../api/keyVerification';
 import { ShieldCheckIcon, CheckIcon, CloseIcon, WarningIcon } from './Icons';
 import './SafetyNumberModal.css';
 
@@ -20,6 +20,13 @@ export function SafetyNumberModal({ userId, username, onClose }: SafetyNumberMod
     const [safetyNumber, setSafetyNumber] = useState<string | null>(null);
     const [theirKey, setTheirKey] = useState<string | null>(null);
     const [state, setState] = useState<VerificationState>('unverified');
+    // The served key is not the one this device pinned for them on first
+    // contact (audit 2026-10, F-5). DMs and channel keys already refuse it
+    // and send the person HERE to "verify their safety number", and this
+    // screen used to show the new key's number with no word that it was
+    // new — one click on "mark verified" would then have moved the pin to
+    // it. `changed` only ever covered a key the person had VERIFIED.
+    const [pinConflict, setPinConflict] = useState(false);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
@@ -38,6 +45,7 @@ export function SafetyNumberModal({ userId, username, onClose }: SafetyNumberMod
             setTheirKey(their);
             setSafetyNumber(computeSafetyNumber(me.publicKeyEncoded, their));
             setState(getVerificationState(userId, their));
+            setPinConflict(identityPinConflicts(userId, their));
             setLoading(false);
         })();
         return () => { cancelled = true; };
@@ -47,6 +55,7 @@ export function SafetyNumberModal({ userId, username, onClose }: SafetyNumberMod
         if (!theirKey) return;
         markVerified(userId, theirKey);
         setState('verified');
+        setPinConflict(false); // markVerified moved the pin to this key
     };
     const handleUnverify = () => {
         clearVerified(userId);
@@ -77,6 +86,14 @@ export function SafetyNumberModal({ userId, username, onClose }: SafetyNumberMod
                                 reinstalled — otherwise it may be an impostor.
                             </div>
                         )}
+                        {state !== 'changed' && pinConflict && (
+                            <div className="safety-badge changed" data-testid="safety-pin-conflict">
+                                <WarningIcon /> This is not the key this device has been using for {username}. Either
+                                they reset their account or reinstalled, or the server swapped their key. Messages and
+                                screen control stay blocked until you confirm it: compare this number with {username}
+                                first, and only trust it if it matches theirs.
+                            </div>
+                        )}
 
                         <p className="safety-intro">
                             Compare this number with {username} over a channel you trust (say it aloud on a call, or
@@ -95,7 +112,7 @@ export function SafetyNumberModal({ userId, username, onClose }: SafetyNumberMod
                                 <button className="safety-btn ghost" onClick={handleUnverify}>Remove verification</button>
                             ) : (
                                 <button className="safety-btn primary" onClick={handleVerify} disabled={!safetyNumber}>
-                                    {state === 'changed' ? 'They match — trust this new key' : 'They match — mark verified'}
+                                    {state === 'changed' || pinConflict ? 'They match — trust this new key' : 'They match — mark verified'}
                                 </button>
                             )}
                             <button className="safety-btn ghost" onClick={onClose}>Close</button>
