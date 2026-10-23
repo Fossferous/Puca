@@ -5,7 +5,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { stageShortcut } from '../api/devices/stageShortcuts';
-import { textChunks, typeTextEvents, TEXT_CHUNK } from '../api/devices/typeText';
+import { textChunks, typeTextEvents, typeTextPlan, TEXT_CHUNK } from '../api/devices/typeText';
 import { liveStatsFrom } from '../api/devices/liveStats';
 import type { DeviceStatsSample } from '../api/devices/session';
 
@@ -75,6 +75,24 @@ describe('typing text on the remote machine', () => {
     it('nothing to type is nothing', () => {
         expect(typeTextEvents('')).toEqual([]);
         expect(typeTextEvents('\u0007')).toEqual([]);
+    });
+
+    it('the C1 controls go too — the host refuses a frame holding any — and what goes is counted', () => {
+        // U+0085 and U+009D, as mojibake leaves them.
+        expect(typeTextEvents('caf\u0085e\u009d!')).toEqual([{ t: 'text', text: 'cafe!' }]);
+        expect(typeTextEvents('\u0080\u009f')).toEqual([]);
+        // a b, Enter, c d, Tab, e: seven typed (a tap is one), two left out.
+        const plan = typeTextPlan('ab\u0085\ncd\te\u0007');
+        expect(plan.typed).toBe(7);
+        expect(plan.dropped).toBe(2);
+        // Not every character past ASCII: é, ß and emoji are text.
+        expect(typeTextPlan('éß\u{1F600}')).toMatchObject({ typed: 3, dropped: 0 });
+    });
+
+    it('a 200-character run holding one C1 control still goes, without it', () => {
+        const text = 'x'.repeat(199) + '\u0085' + 'y';
+        const frames = typeTextEvents(text) as Array<{ t: string; text: string }>;
+        expect(frames.map(f => f.text).join(''), 'the whole frame used to vanish').toBe('x'.repeat(199) + 'y');
     });
 });
 

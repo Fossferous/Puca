@@ -75,7 +75,7 @@ import { KeyboardOverlay } from './DeviceStageMobileKeyboard';
 import { DeviceStageVirtualMouse } from './DeviceStageVirtualMouse';
 import { virtualStartingMessage } from '../api/devices/noScreen';
 import { inputBlockedMessage } from '../api/devices/inputReach';
-import { MAX_TYPED_CHARS, typeTextEvents } from '../api/devices/typeText';
+import { MAX_TYPED_CHARS, typeTextPlan } from '../api/devices/typeText';
 import { QUICK_TIMEOUT_MS, withTimeout } from '../api/withTimeout';
 import { readLocalClipboardDetailed } from '../api/devices/clipboard';
 import { useDeviceLiveStats } from '../api/devices/useDeviceLiveStats';
@@ -2701,9 +2701,14 @@ export function DeviceStage() {
             setClipboardNote('Control is paused — nothing was typed');
             return;
         }
-        const events = typeTextEvents(text);
-        for (const ev of events) send(ev);
-        if (events.length) setClipboardNote(`Typed ${Array.from(text).length} characters`);
+        // What actually goes, not what was pasted: characters a text frame
+        // may not carry are left out (typeText.ts), and the note says so.
+        const plan = typeTextPlan(text);
+        for (const ev of plan.events) send(ev);
+        if (plan.events.length || plan.dropped) {
+            setClipboardNote(`Typed ${plan.typed} character${plan.typed === 1 ? '' : 's'}`
+                + (plan.dropped ? `; ${plan.dropped} that cannot be typed ${plan.dropped === 1 ? 'was' : 'were'} left out` : ''));
+        }
     }, [send, controlEnabled]);
 
     /** "Type this computer's clipboard": shown in the Type text box first, so

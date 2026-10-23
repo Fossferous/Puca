@@ -312,6 +312,21 @@ describe('the menus reach the session layer as the phone\'s do', () => {
         expect(host!.querySelector('.device-stage-typetext'), 'and closes').toBeNull();
     });
 
+    it("Type text's note counts what went, and says what was left out", async () => {
+        await mount();
+        await openMenu('Keyboard');
+        await click(menuItem('Type text…'));
+        const area = host!.querySelector<HTMLTextAreaElement>('.device-stage-typetext textarea')!;
+        await act(async () => {
+            const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
+            setter.call(area, 'caf\u0085e');
+            area.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        await click(byText('Type it'));
+        expect(frames()).toEqual([{ t: 'text', text: 'cafe' }]);
+        expect(host!.textContent).toContain('Typed 4 characters; 1 that cannot be typed was left out');
+    });
+
     it("while Type text is open the keyboard is the dialog's: its buttons, Esc, and keys after its padding took a click", async () => {
         await mount();
         await openMenu('Keyboard');

@@ -2864,6 +2864,14 @@ function handleCaretMessage(s: Internal, raw: unknown): void {
         s.probes?.answered(answer.p, answer.ts, answer.host);
         return;
     }
+    // And the agent saying it refused typed text: the direct channel has no
+    // other way back, and a frame dropped in silence is text that vanished.
+    const refused = parseInputRefused(raw);
+    if (refused) {
+        s.error = `Some typed text did not go over: ${refused}`;
+        emit();
+        return;
+    }
     // So does the host's pointer shape, for a viewer drawing the pointer.
     const shape = parseCursorShape(raw);
     if (shape) {
@@ -3786,6 +3794,21 @@ const CURSOR_KEYWORDS = new Set([
 ]);
 
 /** The agent's `{"k":"cursor","css":"text"}` on the caret channel, or null. */
+/** `{"k":"refused","t":"text","why":"..."}` on the caret channel: the agent
+ *  refused a typed-text frame. The reason, shortened and made printable, or
+ *  null for anything else. */
+export function parseInputRefused(raw: unknown): string | null {
+    if (typeof raw !== 'string' || !raw.includes('"refused"')) return null;
+    let v: unknown;
+    try { v = JSON.parse(raw); } catch { return null; }
+    const o = v as { k?: unknown; t?: unknown; why?: unknown } | null;
+    if (!o || o.k !== 'refused' || o.t !== 'text') return null;
+    const why = typeof o.why === 'string' ? o.why : '';
+    // eslint-disable-next-line no-control-regex
+    const clean = why.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').trim().slice(0, MAX_REASON_LEN);
+    return clean || 'the other computer refused it';
+}
+
 export function parseCursorShape(raw: unknown): string | null {
     if (typeof raw !== 'string' || !raw.includes('"cursor"')) return null;
     let v: unknown;
@@ -4950,10 +4973,15 @@ export function installDeviceSessions(): void {
                             // set") must reach the controller — silently
                             // dropping it is how this control shipped for
                             // months as a no-op that reported success.
-                            if ((ev as { t?: unknown })?.t === 'sas') {
+                            //
+                            // And typed TEXT: a refused text frame is a whole
+                            // run of characters that vanished while the
+                            // controller's note said they were typed.
+                            const kind = (ev as { t?: unknown })?.t;
+                            if (kind === 'sas' || kind === 'text') {
                                 void sendSignal(s, {
                                     kind: 'input-failed',
-                                    t: 'sas',
+                                    t: kind,
                                     reason: msg.slice(0, MAX_REASON_LEN),
                                 }).catch(() => undefined);
                             }
@@ -6409,9 +6437,9 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
         }
         if (data.kind === 'input-failed') {
             if (s.role !== 'controller') return;
-            if (data.t !== 'sas') return; // only the one input that asks for an answer
+            if (data.t !== 'sas' && data.t !== 'text') return; // the inputs that ask for an answer
             const why = typeof data.reason === 'string' ? data.reason.slice(0, MAX_REASON_LEN) : 'the host refused';
-            s.error = `Ctrl+Alt+Del could not be sent: ${why}`;
+            s.error = data.t === 'sas' ? `Ctrl+Alt+Del could not be sent: ${why}` : `Some typed text did not go over: ${why}`;
             emit();
             return;
         }

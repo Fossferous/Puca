@@ -1311,6 +1311,8 @@ fn run(
     let mut watching_until: Option<Instant> = None;
     let mut last_frame_at: Option<Instant> = None;
     let mut probe: Option<crate::latency::Probe> = None;
+    // When the viewer was last told that a typed-text frame was refused.
+    let mut last_refusal_report: Option<Instant> = None;
     let mut want_keyframe = true;
     let mut rx_count: u64 = 0;
     let mut tx_count: u64 = 0;
@@ -2128,9 +2130,19 @@ fn run(
                                                 &event_json,
                                             ) {
                                                 Ok(ev) => {
+                                                    let is_text = matches!(ev, puca_input::ControlInput::Text { .. });
                                                     if let Err(e) = crate::session::dispatch_input_counted(
                                                         &mut input_tally, ev,
                                                     ) {
+                                                        // A REFUSED TEXT FRAME is a run of typed characters
+                                                        // that vanished while the viewer's note said they
+                                                        // were typed: say so on the caret channel, this
+                                                        // agent's one way back (at most twice a second).
+                                                        if is_text && refusal_report_due(&mut last_refusal_report, Instant::now()) {
+                                                            if let Some(mut c) = caret_channel.and_then(|cid| sender.rtc_mut().channel(cid)) {
+                                                                let _ = c.write(false, &refused_text_line(&e));
+                                                            }
+                                                        }
                                                         if let Some(line) = crate::session::inject_failure_line(
                                                             &mut inject_error_log,
                                                             "[stream] input inject failed:",
@@ -3403,6 +3415,24 @@ fn should_report_secure_desktop(
     }
 }
 
+/// The caret-channel line that tells the viewer a typed-text frame was
+/// refused: `{"k":"refused","t":"text","why":"..."}`, the reason cut to 160
+/// characters. JSON-escaped by serde, so a reason can never break the line.
+fn refused_text_line(why: &str) -> Vec<u8> {
+    let why: String = why.chars().take(160).collect();
+    serde_json::json!({ "k": "refused", "t": "text", "why": why }).to_string().into_bytes()
+}
+
+/// At most one refusal report every half second: a long paste refused frame
+/// after frame is one fact for the viewer, not fifty lines.
+fn refusal_report_due(last: &mut Option<Instant>, now: Instant) -> bool {
+    if last.is_some_and(|t| now.duration_since(t) < Duration::from_millis(500)) {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
+
 /// What a pump is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PumpFor {
@@ -3734,6 +3764,26 @@ mod tests {
         assert!(pumped_ends_blockage(false, &mut blocked, t0 + Duration::from_secs(7)));
         assert_eq!(blocked, None);
         assert!(!pumped_ends_blockage(false, &mut blocked, t0 + Duration::from_secs(8)));
+    }
+
+    #[test]
+    fn a_refused_text_frame_is_reported_on_the_caret_channel_at_most_twice_a_second() {
+        use super::{refusal_report_due, refused_text_line};
+        use std::time::{Duration, Instant};
+        let line = String::from_utf8(refused_text_line("text contains the control character '\u{85}'")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).expect("one JSON line");
+        assert_eq!(v["k"], "refused");
+        assert_eq!(v["t"], "text");
+        assert!(v["why"].as_str().unwrap().contains("control character"));
+        let long = "x".repeat(1000);
+        let v: serde_json::Value = serde_json::from_slice(&refused_text_line(&long)).unwrap();
+        assert_eq!(v["why"].as_str().unwrap().chars().count(), 160, "cut short");
+        let t0 = Instant::now();
+        let mut last = None;
+        assert!(refusal_report_due(&mut last, t0));
+        assert!(!refusal_report_due(&mut last, t0 + Duration::from_millis(100)));
+        assert!(!refusal_report_due(&mut last, t0 + Duration::from_millis(499)));
+        assert!(refusal_report_due(&mut last, t0 + Duration::from_millis(500)));
     }
 
     #[test]
