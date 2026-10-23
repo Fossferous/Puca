@@ -455,9 +455,9 @@ export function ServerSettingsModal({
                                 </label>
                                 <span className="setting-help">
                                     Voice, video and screen share in this server are only exchanged between people
-                                    whose media is end-to-end encrypted. Anyone who can’t be encrypted (Safari, iOS
-                                    or Firefox) is muted rather than relayed through the server. The desktop app
-                                    supports this.
+                                    whose media is end-to-end encrypted. Anyone who can’t be encrypted (an older
+                                    browser) is muted rather than relayed through the server. Current Chrome, Edge,
+                                    Firefox and Safari and the Windows and Android apps support this.
                                 </span>
                             </div>
 

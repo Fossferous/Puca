@@ -1,21 +1,23 @@
 import { sdpFingerprints } from '../dtlsFingerprint';
 import { dtlsPinTag } from '../e2ee';
+import { inboundDropLogger, openIncoming, sealOutgoing, type EncodedFrameLike, type MediaCryptoState } from './frameCrypto';
 /**
  * End-to-end encryption for WebRTC media (voice + screen share).
  *
  * Mesh WebRTC is pairwise, so each peer connection encrypts frames under a key
  * derived from the two users' identity keys (see e2ee.deriveMediaKey). Frames
- * are encrypted with AES-256-GCM via the Insertable Streams API
- * (`RTCRtpSender/Receiver.createEncodedStreams`), so the media never reaches the
- * server (or a TURN relay) in a form it could decrypt — closing the SDP-MITM gap
- * that plain DTLS-SRTP leaves against a malicious signalling server.
+ * are encrypted with AES-256-GCM (the format: frameCrypto.ts) by a transform
+ * on every sender and receiver, so the media never reaches the server (or a
+ * TURN relay) in a form it could decrypt — closing the SDP-MITM gap that plain
+ * DTLS-SRTP leaves against a malicious signalling server.
  *
- * Frame wire format (encrypted):
- *   [ codec header (unencrypted) | AES-GCM ciphertext | iv(12) | magic(4) ]
- * The codec header (a few leading bytes) is left in the clear so the RTP
- * packetizer and keyframe detection keep working. The trailing magic lets the
- * receiver tell encrypted frames from plaintext ones (mixed-version / pre-cap
- * window), so this is always safe: an unmarked frame passes through untouched.
+ * Two APIs carry those transforms, ONE per engine (mediaTransformApi):
+ *  - Chromium's `createEncodedStreams` (Chrome, Edge, the Windows app's
+ *    WebView2, the Android WebView): the transforms below, on the page.
+ *  - The standard WebRTC Encoded Transform, `RTCRtpScriptTransform`, on every
+ *    engine without the first (Firefox, Safari, the iPhone and iPad
+ *    home-screen app): the same transforms in a worker (scriptTransform.ts).
+ * Both run frameCrypto.ts's functions, so a call can mix the two.
  *
  * Safe rollout: `enabled` is turned on for a peer only once BOTH sides have
  * advertised support (via an SDP attribute), so a new client never sends
@@ -23,184 +25,191 @@ import { dtlsPinTag } from '../e2ee';
  * unsupported/unavailable it stays plaintext (transport-only) — never broken.
  */
 
-// Leading bytes left unencrypted, per the WebRTC insertable-streams E2EE
-// reference: video keyframe=10, delta=3, audio=1. Preserves packetization.
-//
-// NAME THE CODEC, because the numbers are not generic: these are the **VP8**
-// uncompressed data chunk sizes (RFC 6386 §9.1 — 3-byte frame tag + 3-byte
-// start code 9d 01 2a + 2-byte width + 2-byte height for a keyframe; the frame
-// tag alone for an interframe) and the **Opus** TOC byte (RFC 6716 §3.1). They
-// are where the entropy-coded partition begins.
-//
-// They are NOT correct for H.264, whose Annex-B NAL layout is unrelated. Today
-// only browser-produced mesh media passes through here and Chrome offers VP8
-// first, so this holds — but anything that starts sealing H.264 needs a
-// codec-aware header length (a slice-NAL walk), not a tweaked constant.
-const CLEAR_HEADER = { key: 10, delta: 3, audio: 1 } as const;
-// 4-byte trailing tag marking an encrypted frame ("SVRN").
-const MAGIC = new Uint8Array([0x53, 0x56, 0x52, 0x4e]);
-const IV_LEN = 12;
-const TRAILER = IV_LEN + MAGIC.length; // iv + magic
-const GCM_TAG_LEN = 16; // AES-GCM authentication tag, always appended to the ciphertext
-// Smallest frame we could possibly have produced: empty body (tag only) + trailer.
-const MIN_ENCRYPTED_LEN = GCM_TAG_LEN + TRAILER;
+export { encryptFrame, decryptFrame, type MediaCryptoState, type EncodedFrameLike } from './frameCrypto';
 
-/** Per-peer, mutable crypto state shared with the attached transforms. */
-export interface MediaCryptoState {
-    key: CryptoKey | null;
-    enabled: boolean; // only true once both peers advertised support
-    /** Fail-closed mode: when true, media is exchanged ONLY while `enabled`.
-     *  Outgoing frames to an unencrypted peer are dropped (never sent as
-     *  plaintext) and incoming plaintext frames are dropped (never rendered),
-     *  so the server never sees or relays media it could access. */
-    requireE2ee: boolean;
+/** Which API runs this engine's frame transforms (see the header). */
+export type MediaTransformApi = 'encoded-streams' | 'script-transform';
+
+/** Set once the RTCRtpScriptTransform worker is known not to work here
+ *  (scriptTransform.ts): from then on this engine cannot encrypt. */
+let scriptTransformUnavailable = false;
+
+/** The worker the standard path needs would not start, or stopped taking
+ *  state (scriptTransform.ts calls this; never undone for this page). */
+export function noteScriptTransformUnavailable(): void {
+    scriptTransformUnavailable = true;
 }
 
+/**
+ * The frame-transform API this engine uses, or null when it has none.
+ *
+ * Chromium-family engines that have BOTH keep `createEncodedStreams`: it is
+ * the path every Chromium client has always used, and choosing per engine
+ * (never per sender) is what guarantees no sender or receiver is handed both.
+ * The standard path needs all of it — the constructor, a `transform` slot on
+ * senders AND receivers, and workers — or a call would seal one direction and
+ * not the other.
+ */
+export function mediaTransformApi(): MediaTransformApi | null {
+    if (typeof RTCRtpSender === 'undefined') return null;
+    if ('createEncodedStreams' in RTCRtpSender.prototype) return 'encoded-streams';
+    if (!scriptTransformUnavailable
+        && typeof RTCRtpScriptTransform === 'function'
+        && typeof Worker === 'function'
+        && 'transform' in RTCRtpSender.prototype
+        && typeof RTCRtpReceiver !== 'undefined' && 'transform' in RTCRtpReceiver.prototype) {
+        return 'script-transform';
+    }
+    return null;
+}
+
+/** Can this engine end-to-end encrypt mesh media at all? */
 export function isMediaE2eeSupported(): boolean {
-    return typeof RTCRtpSender !== 'undefined' &&
-        'createEncodedStreams' in RTCRtpSender.prototype;
+    return mediaTransformApi() !== null;
+}
+
+/** Tests only: forget that the standard path was found not to work. */
+export function __resetScriptTransformAvailability(): void {
+    scriptTransformUnavailable = false;
 }
 
 export async function importMediaKey(rawKey: Uint8Array): Promise<CryptoKey> {
     return crypto.subtle.importKey('raw', rawKey as BufferSource, 'AES-GCM', false, ['encrypt', 'decrypt']);
 }
 
-export interface EncodedFrameLike {
-    data: ArrayBuffer;
-    type?: 'key' | 'delta'; // present for video; absent for audio
-}
-
-function clearHeaderLen(frame: EncodedFrameLike): number {
-    if (frame.type === 'key') return CLEAR_HEADER.key;
-    if (frame.type === 'delta') return CLEAR_HEADER.delta;
-    return CLEAR_HEADER.audio;
-}
-
-function endsWithMagic(data: Uint8Array): boolean {
-    if (data.length < TRAILER) return false;
-    const off = data.length - MAGIC.length;
-    for (let i = 0; i < MAGIC.length; i++) if (data[off + i] !== MAGIC[i]) return false;
-    return true;
-}
-
-/** Returns false when the outgoing frame should be DROPPED (require-E2EE is on
- *  but encryption isn't active for this peer — never emit plaintext media). */
-export async function encryptFrame(frame: EncodedFrameLike, state: MediaCryptoState): Promise<boolean> {
-    if (!state.enabled || !state.key) {
-        // Fail-closed: drop rather than transmit plaintext to an unencrypted peer.
-        return !state.requireE2ee; // passthrough (true) unless enforcement is on
-    }
-    const data = new Uint8Array(frame.data);
-    const n = Math.min(clearHeaderLen(frame), data.length);
-    const header = data.subarray(0, n);
-    const body = data.subarray(n);
-    const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
-    // Bind the clear codec header as AAD so the server can't tamper with it undetected.
-    const ct = new Uint8Array(await crypto.subtle.encrypt(
-        { name: 'AES-GCM', iv: iv as BufferSource, additionalData: header as BufferSource },
-        state.key, body as BufferSource,
-    ));
-    const out = new Uint8Array(n + ct.length + TRAILER);
-    out.set(header, 0);
-    out.set(ct, n);
-    out.set(iv, n + ct.length);
-    out.set(MAGIC, n + ct.length + IV_LEN);
-    frame.data = out.buffer;
-    return true;
-}
-
-/** Returns false when the frame should be DROPPED (marked but undecryptable,
- *  or plaintext arriving while require-E2EE is on). */
-export async function decryptFrame(frame: EncodedFrameLike, state: MediaCryptoState): Promise<boolean> {
-    const data = new Uint8Array(frame.data);
-    // Not (or not yet) an encrypted frame. Normally pass through; under
-    // enforcement, drop it so no plaintext media from the server is ever
-    // rendered.
-    if (!state.enabled || !state.key || !endsWithMagic(data)) return !state.requireE2ee;
-    // Too short to be something WE produced (our smallest output is an empty
-    // body: tag + trailer), so it is plaintext that merely happens to end in the
-    // magic. Treat it exactly like any other unmarked frame — which means
-    // enforcement still drops it rather than rendering plaintext.
-    if (data.length < MIN_ENCRYPTED_LEN) return !state.requireE2ee;
-    // Recover the header length the SENDER used. encryptFrame clamps it by the
-    // PLAINTEXT length (`Math.min(headerLen, data.length)`), so a frame shorter
-    // than its own clear header keeps a shorter header. Clamping by the
-    // CIPHERTEXT length here instead would pick the full headerLen, mis-split
-    // header/ciphertext, and fail authentication — such frames encrypted fine
-    // and could never be decrypted. Plaintext length is exactly
-    // `data.length - GCM_TAG_LEN - TRAILER`.
-    const plaintextLen = data.length - GCM_TAG_LEN - TRAILER;
-    const n = Math.min(clearHeaderLen(frame), plaintextLen);
-    const header = data.subarray(0, n);
-    const ivStart = data.length - TRAILER;
-    const iv = data.subarray(ivStart, ivStart + IV_LEN);
-    const ct = data.subarray(n, ivStart);
-    try {
-        const body = new Uint8Array(await crypto.subtle.decrypt(
-            { name: 'AES-GCM', iv: iv as BufferSource, additionalData: header as BufferSource },
-            state.key, ct as BufferSource,
-        ));
-        const out = new Uint8Array(n + body.length);
-        out.set(header, 0);
-        out.set(body, n);
-        frame.data = out.buffer;
-        return true;
-    } catch {
-        return false; // authentication failed → drop (never feed garbage to the decoder)
-    }
-}
-
 type Streams = { readable: ReadableStream<EncodedFrameLike>; writable: WritableStream<EncodedFrameLike> };
 type WithStreams = { createEncodedStreams(): Streams };
 
-/** Attach the encrypt transform to a sender (once). No-op if unsupported. */
-export function attachSenderTransform(sender: RTCRtpSender, state: MediaCryptoState): void {
-    if (!('createEncodedStreams' in sender)) return;
+/** Attach the encrypt transform to a sender (once), through
+ *  `createEncodedStreams`. False when it could not be attached. */
+export function attachSenderTransform(sender: RTCRtpSender, state: MediaCryptoState): boolean {
+    if (!('createEncodedStreams' in sender)) return false;
     try {
         const { readable, writable } = (sender as unknown as WithStreams).createEncodedStreams();
         readable
             .pipeThrough(new TransformStream<EncodedFrameLike, EncodedFrameLike>({
                 async transform(frame, controller) {
-                    let keep = true;
-                    // On error, keep the frame UNLESS enforcement is on — a
-                    // crypto failure must never fall back to sending plaintext
-                    // when the user required E2EE.
-                    try { keep = await encryptFrame(frame, state); } catch { keep = !state.requireE2ee; }
-                    if (keep) controller.enqueue(frame);
+                    if (await sealOutgoing(frame, state)) controller.enqueue(frame);
                 },
             }))
             .pipeTo(writable)
             .catch(() => { /* stream closed */ });
+        return true;
     } catch (e) {
         console.warn('[media-e2ee] sender transform attach failed:', e);
+        return false;
     }
 }
 
-/** Attach the decrypt transform to a receiver (once). No-op if unsupported. */
-export function attachReceiverTransform(receiver: RTCRtpReceiver, state: MediaCryptoState): void {
-    if (!('createEncodedStreams' in receiver)) return;
+/** Attach the decrypt transform to a receiver (once), through
+ *  `createEncodedStreams`. False when it could not be attached. */
+export function attachReceiverTransform(receiver: RTCRtpReceiver, state: MediaCryptoState): boolean {
+    if (!('createEncodedStreams' in receiver)) return false;
     try {
         const { readable, writable } = (receiver as unknown as WithStreams).createEncodedStreams();
-        // Dropped-frame counter: a decrypt failure (or enforced-plaintext block)
-        // used to be 100% silent, which made "arrives but plays as silence"
-        // undiagnosable from the console. Counts only — no key material.
-        let drops = 0;
+        const dropped = inboundDropLogger();
         readable
             .pipeThrough(new TransformStream<EncodedFrameLike, EncodedFrameLike>({
                 async transform(frame, controller) {
-                    let keep = true;
-                    try { keep = await decryptFrame(frame, state); } catch { keep = !state.requireE2ee; }
-                    if (keep) {
-                        controller.enqueue(frame);
-                    } else if (++drops === 1 || drops % 250 === 0) {
-                        console.warn(`[media-e2ee] dropped ${drops} inbound frame(s) (undecryptable or plaintext while E2EE required)`);
-                    }
+                    if (await openIncoming(frame, state)) controller.enqueue(frame);
+                    else dropped();
                 },
             }))
             .pipeTo(writable)
             .catch(() => { /* stream closed */ });
+        return true;
     } catch (e) {
         console.warn('[media-e2ee] receiver transform attach failed:', e);
+        return false;
+    }
+}
+
+/** Video transceivers preferSealableVideoCodecs has already set. */
+const vp8First = new WeakSet<RTCRtpTransceiver>();
+
+/**
+ * Put VP8 first in this connection's video codec preferences, so the next
+ * offer or answer it makes lists VP8 first.
+ *
+ * The clear header frameCrypto.ts leaves on a video frame is VP8's. Chromium
+ * and Firefox offer VP8 first anyway; Safari offers H.264 first, and an H.264
+ * link would carry sealed frames the H.264 packetizer cannot split — no video
+ * (never plaintext video, but no video).
+ *
+ * WHO SENDS WHAT, measured (Edge 155 and Firefox 155, an H.264-first offer):
+ * the OFFERER sends the first codec of the answer, and the ANSWERER sends the
+ * first codec of the OFFER — whatever its own answer says, even an answer
+ * listing VP8 alone. So this runs before every offer (the peer, answering,
+ * then sends VP8) AND every answer (the peer, offering, then sends VP8), and
+ * what WE send as the answerer of an offer that put another codec first (a
+ * Safari whose own call to this failed) is settled by sendSealableVideoCodec.
+ *
+ * Reordered, never filtered: rtx, red and FEC stay, and a peer without VP8
+ * (none of the engines Púca runs on) still finds a codec in common. Once per
+ * transceiver: the preferences stay set, and setting them again is a change
+ * an engine may answer with another round of negotiation.
+ */
+export function preferSealableVideoCodecs(pc: RTCPeerConnection): void {
+    if (typeof RTCRtpReceiver === 'undefined' || typeof RTCRtpReceiver.getCapabilities !== 'function') return;
+    let codecs: RTCRtpCodec[] | undefined;
+    try {
+        codecs = RTCRtpReceiver.getCapabilities('video')?.codecs;
+    } catch {
+        return;
+    }
+    if (!codecs?.length) return;
+    const isVp8 = (c: RTCRtpCodec) => c.mimeType.toLowerCase() === 'video/vp8';
+    if (!codecs.some(isVp8)) return;
+    const ordered = [...codecs.filter(isVp8), ...codecs.filter(c => !isVp8(c))];
+    for (const t of pc.getTransceivers()) {
+        if (vp8First.has(t)) continue;
+        if (t.receiver.track?.kind !== 'video' || typeof t.setCodecPreferences !== 'function') continue;
+        try {
+            t.setCodecPreferences(ordered);
+            vp8First.add(t);
+        } catch (e) {
+            // A stopped transceiver refuses; one that is about to go needs none.
+            console.warn('[media-e2ee] could not put VP8 first on a video transceiver:', e);
+        }
+    }
+}
+
+type EncodingWithCodec = RTCRtpEncodingParameters & { codec?: RTCRtpCodec };
+
+/**
+ * After a negotiation: make every video sender on this connection SEND VP8
+ * where VP8 was negotiated but is not what it would send by default — the
+ * case of an answerer whose offer put another codec first (see
+ * preferSealableVideoCodecs: an answer cannot change what its own side
+ * sends). Choosing the encoding's codec can: measured in Edge 155 and
+ * Firefox 155, an answerer to an H.264-first offer sends VP8 after this.
+ * An engine without `encodings[].codec` ignores the member; one whose sender
+ * refuses it keeps the default, logged.
+ *
+ * Nothing to do, and no setParameters, on an ordinary call: there VP8 is
+ * already the first codec negotiated.
+ */
+export async function sendSealableVideoCodec(pc: RTCPeerConnection): Promise<void> {
+    for (const sender of pc.getSenders()) {
+        if (sender.track?.kind !== 'video') continue;
+        let params: RTCRtpSendParameters;
+        try {
+            params = sender.getParameters();
+        } catch {
+            continue;
+        }
+        const isVp8 = (c: { mimeType: string } | undefined) => c?.mimeType.toLowerCase() === 'video/vp8';
+        const vp8 = params.codecs?.find(isVp8);
+        const encodings = params.encodings as EncodingWithCodec[] | undefined;
+        if (!vp8 || !encodings?.length) continue;
+        const chosen = (e: EncodingWithCodec) => e.codec ?? params.codecs[0];
+        if (encodings.every((e) => isVp8(chosen(e)))) continue;
+        for (const e of encodings) e.codec = vp8;
+        try {
+            await sender.setParameters(params);
+        } catch (e) {
+            console.warn('[media-e2ee] could not make a video sender use VP8:', e);
+        }
     }
 }
 

@@ -262,12 +262,12 @@ document is actually trying to make.
   decrypted, so it covers the conversation you have open; the server cannot
   search ciphertext on your behalf.
 - 🎙️ **Voice & video** — WebRTC voice channels with native noise
-  suppression; frames encrypted end-to-end over Insertable Streams on both
-  the mesh and the opt-in SFU (LiveKit) path. Insertable Streams is
-  Chromium-only, so Firefox, Safari and iOS cannot encrypt call media
-  frame-by-frame. They are not quietly downgraded: "Require encryption for
-  calls" defaults on, so the app says so before you join and blocks the
-  media instead.
+  suppression; frames encrypted end-to-end on both the mesh and the opt-in
+  SFU (LiveKit) path, through Chromium's Insertable Streams or the standard
+  WebRTC Encoded Transform that Firefox and Safari (iPhone and iPad
+  included) implement. A browser with neither is not quietly downgraded:
+  "Require encryption for calls" defaults on, so the app says so before you
+  join and blocks the media instead.
 - 📺 **Screen sharing** — including giving a trusted friend control of your
   shared screen, with an explicit per-request consent prompt.
 - 🗒️ **Púca Notes** — a Google-Keep-style notes app at `/notes/` on the web
@@ -449,7 +449,7 @@ before trusting either version.
 - **Transport**: TLS terminated at your reverse proxy (Caddy/nginx — the
   backend process itself never speaks TLS by design, see
   [`deploy/README.md`](deploy/README.md)); WebRTC media over DTLS-SRTP, with
-  an additional end-to-end AEAD layer over Insertable Streams so the server
+  an additional end-to-end AEAD layer over the WebRTC Encoded Transform APIs so the server
   and any TURN relay hold only ciphertext they cannot decrypt.
 - **Session tokens**: JWT (HS256), with a server-side `token_version` check
   so logout/password-change/recovery can revoke outstanding tokens.

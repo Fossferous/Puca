@@ -2,9 +2,22 @@ import { describe, it, expect } from 'vitest';
 import { mediaE2eeExplanation, localMediaBlockNotice, localMediaNotice } from '../api/rtc/e2eeStatus';
 
 /**
+ * Why THIS engine cannot encrypt: the first parenthesis of a local notice.
+ * Firefox and Safari (iOS included) encrypt mesh calls through
+ * RTCRtpScriptTransform now, so the cause must never name them — they belong
+ * in the REMEDY, as browsers that work.
+ */
+function causeOf(text: string): string {
+    const m = /\(([^)]*)\)/.exec(text);
+    expect(m, `no cause in: ${text}`).not.toBeNull();
+    return m![1];
+}
+
+/**
  * The PRE-JOIN notice. The badge tooltip only exists once a peer is present
- * and only on hover; this is the visible line that stops a Firefox/Safari
- * user from pressing Join into a call where nobody can hear them.
+ * and only on hover; this is the visible line that stops a user on an engine
+ * that cannot encrypt from pressing Join into a call where nobody can hear
+ * them.
  */
 describe('localMediaBlockNotice', () => {
     const base = { supported: false, required: true, serverRequired: false, sfuMode: false };
@@ -25,13 +38,15 @@ describe('localMediaBlockNotice', () => {
         expect(s).toMatch(/nobody’s voice or video plays/i);
         expect(s).toContain('Require encryption for calls');
         expect(s).toContain('Settings → Privacy & Safety');
-        expect(s).toMatch(/Firefox|Safari|iOS/);
+        expect(causeOf(s)).toMatch(/older browser/i);
+        expect(causeOf(s), 'Firefox, Safari and iOS encrypt calls now').not.toMatch(/Firefox|Safari|iOS/);
     });
 
-    it('under a SERVER policy, offers only the native apps', () => {
+    it('under a SERVER policy, offers only another client, not a setting', () => {
         const s = localMediaBlockNotice({ ...base, serverRequired: true })!;
         expect(s).not.toContain('Settings → Privacy & Safety');
         expect(s).toMatch(/Windows or Android app/i);
+        expect(s).toMatch(/up-to-date Chrome, Edge, Firefox or Safari/);
     });
 
     it('on an SFU channel, warns regardless of the setting because the join itself refuses', () => {
@@ -72,11 +87,15 @@ describe('localMediaNotice (the same notice, with its severity)', () => {
         expect(localMediaNotice({ ...base, required: false, sfuMode: true })!.level).toBe('blocked');
     });
 
-    it('the remedy names a Chromium browser before the native apps: the API is Chromium’s, not Windows’s', () => {
-        // A Linux or macOS user has Chrome available; sending them only to
+    it('the remedy names the current browsers before the native apps — Firefox and Safari among them', () => {
+        // A Linux or macOS user has a browser available; sending them only to
         // "the Windows or Android app" sends them somewhere they may not be.
+        // And since the RTCRtpScriptTransform path, Firefox and Safari (iPhone
+        // included) are where an encrypted call CAN be made, not the cause.
         for (const i of [base, { ...base, serverRequired: true }, { ...base, required: false }, { ...base, sfuMode: true }]) {
-            expect(localMediaNotice(i)!.text).toMatch(/Chromium-based browser \(Chrome, Edge or Brave\)/);
+            const text = localMediaNotice(i)!.text;
+            expect(text).toMatch(/an up-to-date Chrome, Edge, Firefox or Safari, or the Windows or Android app/);
+            expect(causeOf(text)).not.toMatch(/Firefox|Safari|iOS/);
         }
     });
 });
@@ -95,17 +114,20 @@ describe('mediaE2eeExplanation', () => {
     it('explains a local device limitation without blaming a peer', () => {
         const s = mediaE2eeExplanation('local-unsupported', '')!;
         expect(s.toLowerCase()).toContain('this device');
-        // Names concrete unsupported engines so the user understands the cause.
-        expect(s).toMatch(/Safari|iOS|Firefox/);
+        // Names the kind of engine that cannot, so the user understands the
+        // cause — and not Firefox, Safari or iOS, which can.
+        expect(causeOf(s)).toMatch(/older browser/i);
+        expect(causeOf(s)).not.toMatch(/Safari|iOS|Firefox/);
         // Reassures that transit encryption still applies.
         expect(s).toContain('DTLS-SRTP');
     });
 
     /**
-     * requireMediaE2ee defaults to ON, so a first-time Firefox/Safari web user
-     * has media blocked BOTH ways with no setting ever touched. The enforced
-     * wording must say exactly that, and exactly what changes it — including
-     * the cost of the change, so nobody flips it believing it is harmless.
+     * requireMediaE2ee defaults to ON, so a first-time user of an engine that
+     * cannot encrypt has media blocked BOTH ways with no setting ever
+     * touched. The enforced wording must say exactly that, and exactly what
+     * changes it — including the cost of the change, so nobody flips it
+     * believing it is harmless.
      */
     it('under enforcement, the local-unsupported wording says media is blocked both ways and names the setting that changes it', () => {
         const s = mediaE2eeExplanation('local-unsupported', '', true)!;
@@ -115,7 +137,7 @@ describe('mediaE2eeExplanation', () => {
         expect(s).toContain('Settings → Privacy & Safety');
         // The cost of turning it off is stated in the same breath.
         expect(s).toMatch(/server in a form it can access/i);
-        expect(s).toMatch(/Firefox|Safari|iOS/);
+        expect(causeOf(s)).not.toMatch(/Firefox|Safari|iOS/);
     });
 
     it('when the SERVER requires encryption, the remedy does not offer a setting the user cannot change', () => {
@@ -140,6 +162,10 @@ describe('mediaE2eeExplanation', () => {
         // Source-neutral wording works for both the user setting and a server policy.
         expect(s.toLowerCase()).toContain('required for this call');
         expect(s.toLowerCase()).not.toContain('you require');
+        // Not "use the desktop app": on macOS and Linux that is a WebKit shell,
+        // and an up-to-date browser of any of the four kinds encrypts.
+        expect(s).not.toMatch(/desktop app/i);
+        expect(s).toMatch(/update/i);
     });
 
     it('shows a transient message while negotiating', () => {

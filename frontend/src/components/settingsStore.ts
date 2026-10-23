@@ -108,9 +108,10 @@ export const defaultSettings = {
     // When true, voice/video/screen media is only exchanged with peers where
     // end-to-end encryption is active — a peer that can't do media E2EE (or a
     // connection that fails verification) is muted rather than carried over the
-    // server in a form it could access. Fail-closed. Safe default for the
-    // desktop app (Chromium/WebView2 supports media E2EE); may block calls with
-    // Safari/iOS/Firefox participants.
+    // server in a form it could access. Fail-closed. Safe default wherever
+    // media E2EE runs — Chromium/WebView2 through createEncodedStreams, Firefox
+    // and Safari (iOS included) through RTCRtpScriptTransform; blocks calls
+    // with participants on an older browser that has neither.
     // DEFAULT ON since the 0.8.130 security pass. The frame-encryption layer
     // itself was already correct and tamper-evident (the capability tag is MAC'd
     // under the static pairwise key, so a server that strips or rewrites the
@@ -119,10 +120,11 @@ export const defaultSettings = {
     // and transport-only means the server decrypts and re-encrypts every frame.
     // A server that wanted to listen simply had to break the handshake it was
     // already relaying. Off-by-default made that the shipped behaviour.
-    // The cost is real and deliberate: a peer whose browser has no Insertable
-    // Streams (iOS/Safari, Firefox) is now MUTED rather than carried in the
-    // clear, and the per-peer indicator names the reason. Users who would rather
-    // connect than encrypt can turn this off.
+    // The cost is real and deliberate: a peer whose browser has no Encoded
+    // Transform API (then iOS/Safari and Firefox too; since the
+    // RTCRtpScriptTransform path, an older browser) is now MUTED rather than
+    // carried in the clear, and the per-peer indicator names the reason. Users
+    // who would rather connect than encrypt can turn this off.
     requireMediaE2ee: true,
     // When true, force all call media through the server's TURN relay
     // (iceTransportPolicy: 'relay') so other participants never see your real IP.
@@ -545,12 +547,15 @@ function migrateRequireMediaE2ee(parsed: Partial<Settings> | null): Partial<Sett
     const next = { ...(parsed ?? {}) };
     // CAPABILITY TERM. This is the one migration of the four that arms a
     // FAIL-CLOSED setting, and an engine without WebRTC Encoded Transform
-    // (Safari and Firefox on the web, the WebKit/WebKitGTK Tauri shells on
-    // macOS and Linux) cannot satisfy it: with it on, the manager publishes no
-    // local media and drops inbound tracks, so voice is dead in both directions.
-    // Flipping it blind would have taken working calls away from those users on
-    // upgrade, for a setting they never touched — and re-armed anyone who had
-    // already turned it off after their calls broke.
+    // cannot satisfy it: with it on, the manager publishes no local media and
+    // drops inbound tracks, so voice is dead in both directions. When this
+    // migration was written that meant Safari and Firefox on the web and the
+    // WebKit/WebKitGTK Tauri shells (mesh encryption was Chromium-only); since
+    // the standard RTCRtpScriptTransform path it means an older browser or a
+    // web view with neither API. Flipping it blind would have taken working
+    // calls away from those users on upgrade, for a setting they never
+    // touched — and re-armed anyone who had already turned it off after their
+    // calls broke.
     //
     // The marker below is still written UNCONDITIONALLY, which is what keeps the
     // disarm contract: a user who later turns this off deliberately is not

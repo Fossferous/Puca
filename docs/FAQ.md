@@ -271,14 +271,18 @@ than assumed:
 Neither affects a plain X11 session. Proper Wayland support means the PipeWire
 and RemoteDesktop portals, which is a separate project.
 
-## Why can't Firefox or Safari do encrypted calls?
+## Are calls end-to-end encrypted in Firefox and Safari?
 
-Frame-level media encryption needs **Insertable Streams**, which only
-Chromium-based browsers implement. Púca does not quietly downgrade you:
-"Require encryption for calls" defaults on, so it tells you before you join and
-blocks the media instead. You can turn that setting off in **Settings → Privacy
-& Safety** to proceed with transport encryption only — the call is still
-encrypted in transit, just not end-to-end.
+Yes, in current versions: Firefox 117 or later, and Safari 15.4 or later,
+including on iPhone and iPad. Púca encrypts each audio and video frame through
+whichever WebRTC Encoded Transform API the browser has — Chromium's own (Chrome,
+Edge, Brave and the Windows and Android apps), or the standard one Firefox and
+Safari implement — and both kinds can be in one encrypted call. An older
+browser with neither is not quietly downgraded: "Require encryption for calls"
+defaults on, so Púca tells you before you join and blocks the media instead.
+You can turn that setting off in **Settings → Privacy & Safety** to proceed
+with transport encryption only — the call is still encrypted in transit, just
+not end-to-end.
 
 ## Is there an iPhone app?
 

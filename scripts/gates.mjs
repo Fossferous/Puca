@@ -244,6 +244,7 @@ const GATES = [
         // Needs WebKit installed once per machine (npx playwright install webkit); it
         // fails, saying so, when it is not. Screenshots go to the ignored e2e-artifacts.
         ['e2e-ios-web-app', 'ios-web-app-real-browser.mjs e2e-artifacts/ios-web-app-shots'],
+        ['e2e-mesh-e2ee-interop', 'mesh-e2ee-interop-real-browser.mjs'],
     ].map(([id, file]) => ({
         id, title: `e2e/${file.split(' ')[0]} (real browser, no server)`,
         inputs: ALL, ignoreVersion: true, fingerprint: ['node', 'fe-deps'],

@@ -1043,7 +1043,7 @@ Keybinds**. Push to talk and push to mute only do anything once you switch
 ### Voice not working
 - Check the microphone permission for the app or site
 - Open **Settings → Voice & Video** and check the input device
-- Calls are encrypted end to end by default, and a browser that cannot do that (Firefox, Safari, iOS) is muted rather than carried in the clear — the indicator beside the peer names the reason. Use the desktop app, or Chrome or Edge
+- Calls are encrypted end to end by default, and a browser that cannot do that (an older version, or a web view inside another app) is muted rather than carried in the clear — the indicator beside the peer names the reason. Update the browser — current Chrome, Edge, Firefox and Safari all encrypt calls — or use the Windows or Android app
 
 ### Screen share black screen
 - Use the desktop app, or Chrome or Edge

@@ -1744,8 +1744,9 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                                 muted rather than relayed through the server in a form it can read.
                                                 Turning this off does not just relax a check — it lets the server
                                                 downgrade a call to server-readable simply by disrupting the handshake.
-                                                The desktop app supports encryption; Safari, iOS and Firefox
-                                                participants are muted while this is on.
+                                                Current Chrome, Edge, Firefox and Safari (iPhone and iPad
+                                                included) and the Windows and Android apps all encrypt calls;
+                                                anyone on an older browser is muted while this is on.
                                             </span>
                                         </div>
                                         <input

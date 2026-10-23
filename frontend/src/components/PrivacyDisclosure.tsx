@@ -74,7 +74,7 @@ const SERVER: Row[] = [
     },
     {
         label: 'What it cannot read',
-        text: 'The text of messages and DMs, attachment contents, task lists, your saved places, remote-control input, or voice, video and screen share in an encrypted call — which is every call from the Windows and Android apps and from Chromium browsers. Firefox, Safari and iOS cannot encrypt live media at all: there, a call is encrypted in transit but readable by the server, unless “Require encryption for calls” is on, which blocks the media instead. New installs have that on; an existing one keeps whatever it had, and Privacy & Safety shows which.',
+        text: 'The text of messages and DMs, attachment contents, task lists, your saved places, remote-control input, or voice, video and screen share in an encrypted call — which is every call from the Windows and Android apps and from current Chrome, Edge, Firefox and Safari, iPhone and iPad included. An older browser cannot encrypt live media: there, a call is encrypted in transit but readable by the server, unless “Require encryption for calls” is on, which blocks the media instead. New installs have that on; an existing one keeps whatever it had, and Privacy & Safety shows which.',
     },
     {
         label: 'Logs and retention',

@@ -3,7 +3,9 @@
  * S4 — cross-language known-answer tests for the media frame AEAD.
  *
  * WHY THIS EXISTS: the native host agent (Phase 6) must produce and consume
- * byte-identical frames to `mediaCrypto.ts`, or the webview host and the agent
+ * byte-identical frames to `frameCrypto.ts` (which both browser paths run —
+ * mediaCryptoScriptTransform.test.ts holds them to these same vectors), or the
+ * webview host and the agent
  * host silently diverge and it presents as "video is broken" rather than "the
  * crypto disagrees". This fixture is the contract, asserted from BOTH sides:
  * this file (vitest) and `tests/media_aead_kat.rs` (cargo test).

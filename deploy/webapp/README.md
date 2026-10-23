@@ -14,8 +14,11 @@ shells, served directly to a browser. No separate build — it's the production
   back to RNNoise if the wasm can't start, and rides out CPU spikes on an
   RNNoise bridge built beside it (settling on it for the call if it keeps
   falling behind).
-- **Media E2EE** — full frame encryption in Chromium (Insertable Streams);
-  Firefox/Safari fall back to transport-only, and the indicator shows it.
+- **Media E2EE** — full frame encryption in Chromium (Insertable Streams) and
+  in Firefox and Safari (the standard RTCRtpScriptTransform, run in a worker the
+  page loads from its own origin — keep `worker-src 'self'` in the CSP); an
+  older browser with neither falls back to transport-only or is blocked, and the
+  indicator shows it.
 Everything else works: SRP login, E2EE messaging/DMs/channels, voice, screen
 share (`getDisplayMedia`), attachments, reactions, tasks.
 
