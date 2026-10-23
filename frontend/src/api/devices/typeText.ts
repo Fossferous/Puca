@@ -11,8 +11,24 @@
  * pasted newline must not submit a form behind the user's back), so a line
  * break here is an Enter KEY between lines and a tab a Tab key — sent because
  * the person asked for multi-line text, as visibly as typing it would be.
- * Other control characters are dropped.
+ * Other control characters are dropped, and counted, so the note can say so.
  */
+
+/** What a text frame may not carry. The host refuses a frame holding ANY of
+ *  these whole (`validate_text` asks Rust's `char::is_control`): the C0
+ *  controls, DEL, and the C1 controls U+0080–U+009F — the ones mojibake is
+ *  full of. Missing those cost a whole 200-character frame, silently, while
+ *  the note said everything was typed. */
+// eslint-disable-next-line no-control-regex
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/g;
+
+/** What one "Type" will do: the frames, the characters they type (an Enter or
+ *  Tab tap counts as one) and those left out as untypable. */
+export interface TypePlan {
+    events: unknown[];
+    typed: number;
+    dropped: number;
+}
 
 /** Code points per text frame: under the host's 256-character limit, and the
  *  phone keyboard's chunk. */
@@ -37,21 +53,30 @@ const tap = (code: string): unknown[] => [
 ];
 
 /**
- * The frames that type `text`, in order. Lines are joined by an Enter tap,
- * tabs become a Tab tap; CRLF and lone CR count as one line break. Empty for
- * empty text.
+ * The frames that type `text`, in order, and what they amount to. Lines are
+ * joined by an Enter tap, tabs become a Tab tap; CRLF and lone CR count as one
+ * line break. No frames for empty text.
  */
-export function typeTextEvents(text: string): unknown[] {
-    const out: unknown[] = [];
+export function typeTextPlan(text: string): TypePlan {
+    const events: unknown[] = [];
+    let typed = 0;
+    let dropped = 0;
     const lines = text.replace(/\r\n?/g, '\n').split('\n');
     lines.forEach((line, i) => {
-        if (i > 0) out.push(...tap('Enter'));
+        if (i > 0) { events.push(...tap('Enter')); typed++; }
         line.split('\t').forEach((cell, j) => {
-            if (j > 0) out.push(...tap('Tab'));
-            // eslint-disable-next-line no-control-regex
-            const clean = cell.replace(/[\u0000-\u001f\u007f]/g, '');
-            for (const part of textChunks(clean)) out.push({ t: 'text', text: part });
+            if (j > 0) { events.push(...tap('Tab')); typed++; }
+            const clean = cell.replace(CONTROL, '');
+            const kept = Array.from(clean).length;
+            typed += kept;
+            dropped += Array.from(cell).length - kept;
+            for (const part of textChunks(clean)) events.push({ t: 'text', text: part });
         });
     });
-    return out;
+    return { events, typed, dropped };
+}
+
+/** The frames alone (typeTextPlan). */
+export function typeTextEvents(text: string): unknown[] {
+    return typeTextPlan(text).events;
 }

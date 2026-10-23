@@ -13,7 +13,7 @@ vi.mock('../api/websocket', () => ({
     wsClient: { isConnected: true, on: () => {}, send: () => {} },
 }));
 
-import { parseCursorShape, parseProbeAnswer } from '../api/devices/session';
+import { parseCursorShape, parseInputRefused, parseProbeAnswer } from '../api/devices/session';
 
 describe('the probe answer', () => {
     it('reads the line latency.rs writes', () => {
@@ -28,6 +28,28 @@ describe('the probe answer', () => {
         expect(parseProbeAnswer('{"k":"cursor","css":"text"}')).toBeNull();
         expect(parseProbeAnswer('not json "probe"')).toBeNull();
         expect(parseProbeAnswer(42)).toBeNull();
+    });
+});
+
+describe('a refused text frame', () => {
+    it('reads the line stream.rs writes', () => {
+        expect(parseInputRefused('{"k":"refused","t":"text","why":"text contains the control character"}'))
+            .toBe('text contains the control character');
+    });
+
+    it('the reason is made printable and short; a missing one still says something', () => {
+        const odd = parseInputRefused('{"k":"refused","t":"text","why":"bad\\u0085here\\u0007"}');
+        expect(odd).toBe('bad here');
+        const long = parseInputRefused(JSON.stringify({ k: 'refused', t: 'text', why: 'w'.repeat(1000) }));
+        expect(long!.length).toBeLessThanOrEqual(200);
+        expect(parseInputRefused('{"k":"refused","t":"text"}')).toBe('the other computer refused it');
+    });
+
+    it('anything else is not a refusal', () => {
+        expect(parseInputRefused('{"k":"refused","t":"key","why":"x"}')).toBeNull();
+        expect(parseInputRefused('{"k":"cursor","css":"text"}')).toBeNull();
+        expect(parseInputRefused('{"k":"probe","p":1,"ts":2}')).toBeNull();
+        expect(parseInputRefused('not json "refused"')).toBeNull();
     });
 });
 

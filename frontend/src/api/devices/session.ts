@@ -54,6 +54,7 @@ import { buildClipboardEvent, isClipboardEvent, readLocalClipboardDetailed, writ
 import { getHostBackend } from './hostBackend';
 import { blockedAppName } from './inputReach';
 import { ProbeMatcher, type ProbeResult } from './latencyProbe';
+import { isLanPair } from './lanPath';
 import { attachTunnelChannel, closeTunnels } from './tunnel';
 import { SerialQueue } from '../serialQueue';
 import { InputCoalescer, MOVE_INTERVAL_DIRECT_MS, MOVE_INTERVAL_MS } from './inputCoalescer';
@@ -2863,6 +2864,14 @@ function handleCaretMessage(s: Internal, raw: unknown): void {
         s.probes?.answered(answer.p, answer.ts, answer.host);
         return;
     }
+    // And the agent saying it refused typed text: the direct channel has no
+    // other way back, and a frame dropped in silence is text that vanished.
+    const refused = parseInputRefused(raw);
+    if (refused) {
+        s.error = `Some typed text did not go over: ${refused}`;
+        emit();
+        return;
+    }
     // So does the host's pointer shape, for a viewer drawing the pointer.
     const shape = parseCursorShape(raw);
     if (shape) {
@@ -3274,6 +3283,9 @@ export interface DeviceStatsSample {
     rttMs: number | null;
     /** 'relay' when either end of the selected pair is a TURN relay. */
     path: 'direct' | 'relay' | null;
+    /** The selected pair is the local network itself (lanPath.ts): 'direct'
+     *  alone includes a path punched across the internet. Null with no pair. */
+    lan: boolean | null;
     /** The selected pair's transport: 'udp' or 'tcp'. */
     protocol: string | null;
     decoder: string | null;
@@ -3294,7 +3306,7 @@ export async function deviceStatsSample(sessionId: string): Promise<DeviceStatsS
     const out: DeviceStatsSample = {
         at: Date.now(), framesDecoded: 0, bytesReceived: 0, freezeCount: 0, totalDecodeTime: 0,
         jitterBufferDelay: 0, jitterBufferEmittedCount: 0, packetsLost: 0, packetsReceived: 0,
-        frameWidth: null, frameHeight: null, rttMs: null, path: null, protocol: null,
+        frameWidth: null, frameHeight: null, rttMs: null, path: null, lan: null, protocol: null,
         decoder: null, hardwareDecode: null, inputLane: s.inputRate.lane ?? null,
     };
     let sawVideo = false;
@@ -3305,6 +3317,7 @@ export async function deviceStatsSample(sessionId: string): Promise<DeviceStatsS
             const local = stats.get(pair.localCandidateId as string);
             const remote = stats.get(pair.remoteCandidateId as string);
             out.path = local?.candidateType === 'relay' || remote?.candidateType === 'relay' ? 'relay' : 'direct';
+            out.lan = isLanPair(local, remote);
             out.protocol = typeof local?.protocol === 'string' ? local.protocol : null;
             out.rttMs = typeof pair.currentRoundTripTime === 'number'
                 ? Math.round(pair.currentRoundTripTime * 1000)
@@ -3781,6 +3794,21 @@ const CURSOR_KEYWORDS = new Set([
 ]);
 
 /** The agent's `{"k":"cursor","css":"text"}` on the caret channel, or null. */
+/** `{"k":"refused","t":"text","why":"..."}` on the caret channel: the agent
+ *  refused a typed-text frame. The reason, shortened and made printable, or
+ *  null for anything else. */
+export function parseInputRefused(raw: unknown): string | null {
+    if (typeof raw !== 'string' || !raw.includes('"refused"')) return null;
+    let v: unknown;
+    try { v = JSON.parse(raw); } catch { return null; }
+    const o = v as { k?: unknown; t?: unknown; why?: unknown } | null;
+    if (!o || o.k !== 'refused' || o.t !== 'text') return null;
+    const why = typeof o.why === 'string' ? o.why : '';
+    // eslint-disable-next-line no-control-regex
+    const clean = why.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').trim().slice(0, MAX_REASON_LEN);
+    return clean || 'the other computer refused it';
+}
+
 export function parseCursorShape(raw: unknown): string | null {
     if (typeof raw !== 'string' || !raw.includes('"cursor"')) return null;
     let v: unknown;
@@ -4945,10 +4973,15 @@ export function installDeviceSessions(): void {
                             // set") must reach the controller — silently
                             // dropping it is how this control shipped for
                             // months as a no-op that reported success.
-                            if ((ev as { t?: unknown })?.t === 'sas') {
+                            //
+                            // And typed TEXT: a refused text frame is a whole
+                            // run of characters that vanished while the
+                            // controller's note said they were typed.
+                            const kind = (ev as { t?: unknown })?.t;
+                            if (kind === 'sas' || kind === 'text') {
                                 void sendSignal(s, {
                                     kind: 'input-failed',
-                                    t: 'sas',
+                                    t: kind,
                                     reason: msg.slice(0, MAX_REASON_LEN),
                                 }).catch(() => undefined);
                             }
@@ -6404,9 +6437,9 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
         }
         if (data.kind === 'input-failed') {
             if (s.role !== 'controller') return;
-            if (data.t !== 'sas') return; // only the one input that asks for an answer
+            if (data.t !== 'sas' && data.t !== 'text') return; // the inputs that ask for an answer
             const why = typeof data.reason === 'string' ? data.reason.slice(0, MAX_REASON_LEN) : 'the host refused';
-            s.error = `Ctrl+Alt+Del could not be sent: ${why}`;
+            s.error = data.t === 'sas' ? `Ctrl+Alt+Del could not be sent: ${why}` : `Some typed text did not go over: ${why}`;
             emit();
             return;
         }

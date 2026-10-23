@@ -429,7 +429,9 @@ the next capture → encode → network → jitter buffer → decode → the sta
   leaves the clock alone, and no frame is ever taken sooner than a whole frame
   interval after the last one sent, so the session's frame rate — and with it
   the encoder's bitrate, spent as bitrate/fps per frame — is never exceeded.
-  The gain is on a screen that was still, most of what a pointer and keyboard
+  Nothing is watched while a security screen blocks the capture: each look
+  would ask DXGI to rebuild the lost duplication, and input kept re-arming
+  the watch. The gain is on a screen that was still, most of what a pointer and keyboard
   do on a desktop: a menu, a typed letter or a highlight is captured within
   about 2 ms of being drawn. A screen that changes every frame by itself (a
   game, a video) is captured at the frame rate as before; only a higher frame
@@ -440,9 +442,16 @@ the next capture → encode → network → jitter buffer → decode → the sta
   doubled the frames and the bitrate. Measured in `latency.rs`'s tests: input
   every 8 ms on a picture that changes every frame stays at 30 frames a second
   at 30 fps.
-- **60 fps on your own network.** A desktop stage whose picture comes
-  directly over UDP with a round trip under 15 ms, still on the default
-  quality, steps up once to 60 fps / 10 Mbps and says so.
+- **60 fps on your own network.** A desktop stage whose picture comes over
+  the local network itself — both ends of the selected ICE pair host
+  candidates, the far one on a private or link-local address
+  (`frontend/src/api/devices/lanPath.ts`; the stats' "direct" alone means
+  "not relayed", which includes a NAT-traversed path across the internet) —
+  over UDP with a round trip under 15 ms, still on the default quality, steps
+  up once to 60 fps / 10 Mbps and says so. It steps back down once, and says
+  why, if the path stops being the local network or two readings in a row
+  lose 2% of their packets (the agent has no congestion control to do it);
+  a quality somebody picked since is left alone.
 - **8 ms move coalescing on the direct channel** (`MOVE_INTERVAL_DIRECT_MS`):
   the relay's 16 ms exists for the relay's per-event cost, which the direct
   channel does not pay.
@@ -458,7 +467,11 @@ the next capture → encode → network → jitter buffer → decode → the sta
   not drawing one). **Mouse › Draw the pointer here (no delay)** turns it off;
   Game mode hands the pointer back, because pointer lock hides this one, and
   so does pausing control: watching, the host's own pointer is the one to
-  see.
+  see. An agent too old to report shapes (it still gives the pointer up when
+  asked) is found by its silence: no shape within 3 s of the hand-over, and
+  the pointer goes back to the host for the rest of the session. Such an
+  agent reports no captured pointer either, so the Game mode hint never
+  appears for it; the Mouse menu's Game mode still works.
 
 ## Testing note
 

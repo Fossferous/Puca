@@ -1311,6 +1311,8 @@ fn run(
     let mut watching_until: Option<Instant> = None;
     let mut last_frame_at: Option<Instant> = None;
     let mut probe: Option<crate::latency::Probe> = None;
+    // When the viewer was last told that a typed-text frame was refused.
+    let mut last_refusal_report: Option<Instant> = None;
     let mut want_keyframe = true;
     let mut rx_count: u64 = 0;
     let mut tx_count: u64 = 0;
@@ -2128,9 +2130,19 @@ fn run(
                                                 &event_json,
                                             ) {
                                                 Ok(ev) => {
+                                                    let is_text = matches!(ev, puca_input::ControlInput::Text { .. });
                                                     if let Err(e) = crate::session::dispatch_input_counted(
                                                         &mut input_tally, ev,
                                                     ) {
+                                                        // A REFUSED TEXT FRAME is a run of typed characters
+                                                        // that vanished while the viewer's note said they
+                                                        // were typed: say so on the caret channel, this
+                                                        // agent's one way back (at most twice a second).
+                                                        if is_text && refusal_report_due(&mut last_refusal_report, Instant::now()) {
+                                                            if let Some(mut c) = caret_channel.and_then(|cid| sender.rtc_mut().channel(cid)) {
+                                                                let _ = c.write(false, &refused_text_line(&e));
+                                                            }
+                                                        }
                                                         if let Some(line) = crate::session::inject_failure_line(
                                                             &mut inject_error_log,
                                                             "[stream] input inject failed:",
@@ -2382,7 +2394,7 @@ fn run(
         // re-sent, and the clock is touched only if it found one.
         let due = now >= next_frame;
         let early = !due
-            && crate::latency::may_capture_early(now, watching_until, next_frame, last_frame_at, frame_interval);
+            && early_look_allowed(now, watching_until, next_frame, last_frame_at, frame_interval, blocked_since);
         if capture.is_some() && (due || early) {
             if due {
                 next_frame += frame_interval;
@@ -2487,7 +2499,12 @@ fn run(
                 // An early look that found nothing new: the clock keeps its
                 // schedule, and the still-screen and security-screen
                 // bookkeeping below is the tick's business.
-                Err(PumpError::NoChange | PumpError::SecureDesktop) if early => {}
+                Err(PumpError::NoChange) if early => {}
+                // A look that finds the capture BLOCKED records it at once, so
+                // no further look comes before the tick takes it from here.
+                Err(PumpError::SecureDesktop) if early => {
+                    blocked_since.get_or_insert(now);
+                }
                 Err(PumpError::NoChange) => {
                     skipped += 1;
                     if skipped == 30 || skipped == 150 {
@@ -2708,7 +2725,7 @@ fn run(
         // of milliseconds rather than at the next tick — once the floor under
         // early frames has passed; before that a look would only be refused.
         let wait = match (capture.as_ref(), watching_until) {
-            (Some(_), Some(until)) if Instant::now() < until => {
+            (Some(_), Some(_)) if watching_for_change(Instant::now(), watching_until, blocked_since) => {
                 let floor_ends = last_frame_at.map_or_else(Instant::now, |t| t + frame_interval);
                 wait.min(floor_ends.saturating_duration_since(Instant::now()).max(crate::latency::WATCH_POLL))
             }
@@ -3398,6 +3415,24 @@ fn should_report_secure_desktop(
     }
 }
 
+/// The caret-channel line that tells the viewer a typed-text frame was
+/// refused: `{"k":"refused","t":"text","why":"..."}`, the reason cut to 160
+/// characters. JSON-escaped by serde, so a reason can never break the line.
+fn refused_text_line(why: &str) -> Vec<u8> {
+    let why: String = why.chars().take(160).collect();
+    serde_json::json!({ "k": "refused", "t": "text", "why": why }).to_string().into_bytes()
+}
+
+/// At most one refusal report every half second: a long paste refused frame
+/// after frame is one fact for the viewer, not fifty lines.
+fn refusal_report_due(last: &mut Option<Instant>, now: Instant) -> bool {
+    if last.is_some_and(|t| now.duration_since(t) < Duration::from_millis(500)) {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
+
 /// What a pump is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PumpFor {
@@ -3440,6 +3475,30 @@ fn needs_picture(why: PumpFor, want_keyframe: bool, fit_needs: bool) -> bool {
 /// clock on every probe (once a second), so the 5 s rebuild — the only
 /// recovery for a lost D3D device — never came, and the secure-desktop notice
 /// flipped off and on. True when this frame ends one.
+/// Is the loop watching for an input's change (latency.rs) right now? Never
+/// while a security screen blocks the capture: there is nothing to catch, and
+/// every look asks DXGI to rebuild the lost duplication — two factories, an
+/// adapter and output walk and a DuplicateOutput, per screen of a composite —
+/// which input re-arming the watch made some 500 times a second, the loop
+/// waking every 2 ms to do it. The same answer gates the look and the wake.
+fn watching_for_change(now: Instant, watching_until: Option<Instant>, blocked_since: Option<Instant>) -> bool {
+    blocked_since.is_none() && watching_until.is_some_and(|w| now < w)
+}
+
+/// May the loop take an early look now? Watching (above), and the floor and
+/// clock rules of `latency::may_capture_early`.
+fn early_look_allowed(
+    now: Instant,
+    watching_until: Option<Instant>,
+    next_frame: Instant,
+    last_frame_at: Option<Instant>,
+    frame_interval: Duration,
+    blocked_since: Option<Instant>,
+) -> bool {
+    watching_for_change(now, watching_until, blocked_since)
+        && crate::latency::may_capture_early(now, watching_until, next_frame, last_frame_at, frame_interval)
+}
+
 fn pumped_ends_blockage(still_blocked: bool, blocked_since: &mut Option<Instant>, now: Instant) -> bool {
     if still_blocked {
         blocked_since.get_or_insert(now);
@@ -3705,6 +3764,68 @@ mod tests {
         assert!(pumped_ends_blockage(false, &mut blocked, t0 + Duration::from_secs(7)));
         assert_eq!(blocked, None);
         assert!(!pumped_ends_blockage(false, &mut blocked, t0 + Duration::from_secs(8)));
+    }
+
+    #[test]
+    fn a_refused_text_frame_is_reported_on_the_caret_channel_at_most_twice_a_second() {
+        use super::{refusal_report_due, refused_text_line};
+        use std::time::{Duration, Instant};
+        let line = String::from_utf8(refused_text_line("text contains the control character '\u{85}'")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).expect("one JSON line");
+        assert_eq!(v["k"], "refused");
+        assert_eq!(v["t"], "text");
+        assert!(v["why"].as_str().unwrap().contains("control character"));
+        let long = "x".repeat(1000);
+        let v: serde_json::Value = serde_json::from_slice(&refused_text_line(&long)).unwrap();
+        assert_eq!(v["why"].as_str().unwrap().chars().count(), 160, "cut short");
+        let t0 = Instant::now();
+        let mut last = None;
+        assert!(refusal_report_due(&mut last, t0));
+        assert!(!refusal_report_due(&mut last, t0 + Duration::from_millis(100)));
+        assert!(!refusal_report_due(&mut last, t0 + Duration::from_millis(499)));
+        assert!(refusal_report_due(&mut last, t0 + Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn a_blocked_capture_is_looked_at_once_not_hundreds_of_times_a_second() {
+        // The loop's own decisions over a simulated second: input every 8 ms
+        // re-arms the watch, and the capture answers AccessLost (a security
+        // screen is up). The first early look meets the blockage and records
+        // it, as the loop's SecureDesktop arm for a look does; the tick's arm
+        // keeps it; after that nothing but the tick touches the capture.
+        use super::{early_look_allowed, watching_for_change};
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let interval = Duration::from_millis(33);
+        let mut next_frame = t0 + interval;
+        let mut watching: Option<Instant> = None;
+        let mut blocked: Option<Instant> = None;
+        let last_frame_at = t0.checked_sub(Duration::from_secs(5));
+        let (mut looks, mut wakes) = (0, 0);
+        for ms in 0..1000u64 {
+            let now = t0 + Duration::from_millis(ms);
+            if ms % 8 == 0 {
+                watching = Some(now + crate::latency::WATCH_FOR);
+            }
+            if now >= next_frame {
+                next_frame += interval;
+                blocked.get_or_insert(now);
+                continue;
+            }
+            if watching_for_change(now, watching, blocked) {
+                wakes += 1;
+            }
+            if early_look_allowed(now, watching, next_frame, last_frame_at, interval, blocked) {
+                looks += 1;
+                blocked.get_or_insert(now);
+            }
+        }
+        assert!(looks <= 1, "{looks} looks at a blocked capture");
+        assert!(wakes <= 1, "the loop kept waking to look: {wakes}");
+        // CONTROL: unblocked, the same input does keep the watch (and its looks) going.
+        let watching = Some(t0 + crate::latency::WATCH_FOR);
+        assert!(watching_for_change(t0, watching, None));
+        assert!(early_look_allowed(t0, watching, t0 + interval, last_frame_at, interval, None));
     }
 
     #[test]

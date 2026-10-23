@@ -85,6 +85,10 @@ const knobs = {
     confirmMs: 250,
     /** The host acks cursor ownership (false = an armed host that dropped it). */
     ackCursor: true,
+    /** The agent reports its pointer's shape once it hands the pointer over,
+     *  as a current one does (false = one too old to, which the stage then
+     *  hands the pointer back to). */
+    sendsShapes: true,
     /** Follow the agent's viewer fit at all (false = always native). */
     fit: true,
 };
@@ -221,7 +225,12 @@ export function setCaretTracking(_sessionId: string, on: boolean): void { log.pu
 export function setCursorOwned(_sessionId: string, owned: boolean): void {
     log.push({ at: now(), ev: 'set-cursor-owner', owned });
     if (!knobs.ackCursor) return;
-    setTimeout(() => { state.cursorOwned = owned; emit(); }, 80);
+    setTimeout(() => {
+        state.cursorOwned = owned;
+        // A current agent reports the shape at its next look (30 ms).
+        if (owned && knobs.sendsShapes && state.remoteCursor === null) state.remoteCursor = 'default';
+        emit();
+    }, 80);
 }
 export function sendInput(_sessionId: string, event: unknown): boolean {
     inputs.push(event);
@@ -271,7 +280,7 @@ export async function deviceStatsSample(): Promise<Record<string, unknown>> {
         at: Date.now(), framesDecoded: Math.floor(t * 60), bytesReceived: Math.floor(t * 1_500_000),
         freezeCount: 0, totalDecodeTime: t * 60 * 0.002, jitterBufferDelay: t * 60 * 0.012,
         jitterBufferEmittedCount: Math.floor(t * 60), packetsLost: 0, packetsReceived: Math.floor(t * 1200),
-        frameWidth: 1920, frameHeight: 1080, rttMs: 3, path: 'direct', protocol: 'udp',
+        frameWidth: 1920, frameHeight: 1080, rttMs: 3, path: 'direct', lan: true, protocol: 'udp',
         decoder: 'D3D11VideoDecoder', hardwareDecode: true, inputLane: 'channel',
     };
 }

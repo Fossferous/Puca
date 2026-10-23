@@ -519,6 +519,45 @@ describe('what the direct channel must NOT carry', () => {
     });
 });
 
+describe('typed text the other end refused is said, not lost', () => {
+    const errorOf = async (id: string) => {
+        const { activeSessions } = await import('../api/devices/session');
+        return activeSessions().find(x => x.id === id)?.error ?? null;
+    };
+
+    it("the agent's refusal on the caret channel reaches the stage", async () => {
+        const id = await controllerSession();
+        expect(await errorOf(id)).toBeNull();
+        channels.get('caret')!.deliver('{"k":"refused","t":"text","why":"text contains the control character"}');
+        await settle();
+        expect(await errorOf(id)).toBe('Some typed text did not go over: text contains the control character');
+    });
+
+    it("the host app's refusal over the relay reaches the stage too", async () => {
+        const id = await controllerSession();
+        handlers.get('DeviceSignalled')!({
+            payload: {
+                session_id: id,
+                payload: `sealed:${JSON.stringify({ sid: id, n: 1_000_000, kind: 'input-failed', t: 'text', reason: 'empty text' })}`,
+            },
+        });
+        await settle();
+        expect(await errorOf(id)).toBe('Some typed text did not go over: empty text');
+    });
+
+    it('CONTROL: a refusal of any other input kind over the relay changes nothing', async () => {
+        const id = await controllerSession();
+        handlers.get('DeviceSignalled')!({
+            payload: {
+                session_id: id,
+                payload: `sealed:${JSON.stringify({ sid: id, n: 1_000_001, kind: 'input-failed', t: 'key', reason: 'x' })}`,
+            },
+        });
+        await settle();
+        expect(await errorOf(id)).toBeNull();
+    });
+});
+
 describe("the stage's diagnostics reading", () => {
     it('a getStats that never answers costs that session its numbers, never the reading', async () => {
         // The stage hands in diagnosticsReport's withTimeout; this stand-in

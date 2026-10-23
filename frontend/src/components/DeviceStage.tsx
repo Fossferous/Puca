@@ -75,7 +75,8 @@ import { KeyboardOverlay } from './DeviceStageMobileKeyboard';
 import { DeviceStageVirtualMouse } from './DeviceStageVirtualMouse';
 import { virtualStartingMessage } from '../api/devices/noScreen';
 import { inputBlockedMessage } from '../api/devices/inputReach';
-import { MAX_TYPED_CHARS, typeTextEvents } from '../api/devices/typeText';
+import { MAX_TYPED_CHARS, typeTextPlan } from '../api/devices/typeText';
+import { QUICK_TIMEOUT_MS, withTimeout } from '../api/withTimeout';
 import { readLocalClipboardDetailed } from '../api/devices/clipboard';
 import { useDeviceLiveStats } from '../api/devices/useDeviceLiveStats';
 import { useLatencyProbe } from '../api/devices/useLatencyProbe';
@@ -389,6 +390,10 @@ function barKeyForTheRemote(e: KeyboardEvent): boolean {
 /** How long a mobile notice ("Clipboard sent", "Locking…") stays up. */
 const NOTE_LIFETIME_MS = 6000;
 
+/** How long after the host hands the pointer over its first shape report may
+ *  take before the agent is taken to be one that sends none (see below). */
+const SHAPE_WAIT_MS = 3000;
+
 /** How long "Copy diagnostics" measures for, while you keep driving. */
 const DIAG_WINDOW_MS = 5_000;
 
@@ -412,16 +417,15 @@ function diagFailedNote(e: unknown, step: 'the measurement' | 'the clipboard'): 
  * the note to show; never rejects and never hangs.
  *
  * EVERY STEP IS BOUNDED, with the bound "Send diagnostics" uses
- * (diagnosticsReport's withTimeout), loaded on use as Settings loads it. Each
- * step has hung or can: a getStats that never answers, and — 0.9.819, the
- * desktop app — a clipboard permission prompt nobody could see, which held
- * writeText open for good. Out here, not in the component, because the React
- * Compiler's lint gives up on a component holding a try/finally or a dynamic
- * import, silencing its other checks.
+ * (`withTimeout`, the leaf module, so nothing of the call stack loads here).
+ * Each step has hung or can: a getStats that never answers, and — 0.9.819,
+ * the desktop app — a clipboard permission prompt nobody could see, which
+ * held writeText open for good. Out here, not in the component, because the
+ * React Compiler's lint gives up on a component holding a try/finally,
+ * silencing its other checks.
  */
 async function measureAndCopyDiagnostics(): Promise<string> {
     try {
-        const { withTimeout, QUICK_TIMEOUT_MS } = await import('../api/diagnosticsReport');
         const bound: DiagStepBound = (step, label) => withTimeout(step, QUICK_TIMEOUT_MS, label);
         let rows: Record<string, unknown>[];
         try {
@@ -1347,8 +1351,23 @@ export function DeviceStage() {
     // paused: watching, the host's own pointer — wherever it is, whoever is
     // moving it — is the one to see, and this one would only wear whatever
     // shape the host's had when the pause began.
+    //
+    // AN OLDER AGENT SENDS NO SHAPES. It gives the pointer up when asked (the
+    // phone trackpad's handshake predates this), so drawing it here would put
+    // an arrow over every text field and link — and over a game's mouse-look —
+    // for good. So the shape decides: no report within SHAPE_WAIT_MS of the
+    // host handing the pointer over, and it goes back to the host for the
+    // rest of the session, which draws its own as before.
     const cursorOwned = session?.cursorOwned === true;
-    const desktopPointer = !isMobile && instantPointer && !fpsMode && controlEnabled;
+    const [noShapesFor, setNoShapesFor] = useState<string | null>(null);
+    const desktopPointer = !isMobile && instantPointer && !fpsMode && controlEnabled
+        && noShapesFor !== sessionActiveId;
+    const shapeReported = session?.remoteCursor != null;
+    useEffect(() => {
+        if (!sessionActiveId || !desktopPointer || !cursorOwned || shapeReported) return;
+        const t = setTimeout(() => setNoShapesFor(sessionActiveId), SHAPE_WAIT_MS);
+        return () => clearTimeout(t);
+    }, [sessionActiveId, desktopPointer, cursorOwned, shapeReported]);
     useEffect(() => {
         if (!sessionActiveId) return;
         const want = (isMobile && isMouseMode) || desktopPointer;
@@ -2682,9 +2701,14 @@ export function DeviceStage() {
             setClipboardNote('Control is paused — nothing was typed');
             return;
         }
-        const events = typeTextEvents(text);
-        for (const ev of events) send(ev);
-        if (events.length) setClipboardNote(`Typed ${Array.from(text).length} characters`);
+        // What actually goes, not what was pasted: characters a text frame
+        // may not carry are left out (typeText.ts), and the note says so.
+        const plan = typeTextPlan(text);
+        for (const ev of plan.events) send(ev);
+        if (plan.events.length || plan.dropped) {
+            setClipboardNote(`Typed ${plan.typed} character${plan.typed === 1 ? '' : 's'}`
+                + (plan.dropped ? `; ${plan.dropped} that cannot be typed ${plan.dropped === 1 ? 'was' : 'were'} left out` : ''));
+        }
     }, [send, controlEnabled]);
 
     /** "Type this computer's clipboard": shown in the Type text box first, so
@@ -2766,9 +2790,15 @@ export function DeviceStage() {
         setFullscreen(false);
         void leaveStageFullscreen();
     }), []);
-    /** Back to the app with the session kept (the phone's Chat button), out of
-     *  fullscreen first: a fullscreen window showing the chat is no use. */
+    /** Back to the app with the session kept (the phone's Chat button, the
+     *  desktop's "Back to Púca"). From here the keyboard is the app's again —
+     *  the key listener forwards nothing while minimised — so LET GO FIRST,
+     *  the pause rule: a key or button held at this moment is released over
+     *  there now, a captured mouse is let go, and fullscreen ends (a
+     *  fullscreen window showing the chat is no use). */
     const minimizeStage = useCallback(() => {
+        releaseAllRef.current();
+        if (document.pointerLockElement) document.exitPointerLock();
         if (fullscreenRef.current) {
             fullscreenRef.current = false;
             setFullscreen(false);
@@ -2795,25 +2825,62 @@ export function DeviceStage() {
     const qualityValue = shown ? `${shown.bitrate},${shown.fps}` : '6000,30';
 
     // 60 FPS ON YOUR OWN NETWORK. A session starts at 30 fps / 6 Mbps, which
-    // suits a link across the internet; across a room it only costs time: the
-    // host captures on a fixed clock, so whatever you did waits up to a whole
-    // frame (33 ms, 17 on average) before it is even captured, and the stream
-    // has bandwidth to spare. Once the picture is coming directly over UDP with
-    // a round trip under 15 ms, and nobody has picked a quality yet, step up
-    // ONCE to 60 fps / 10 Mbps (the Ultra preset) and say so. Desktop only — a
-    // phone pays for decoding twice the frames in battery.
+    // suits a link across the internet; across a room it only costs time: a
+    // change waits for the next frame to be captured, and the stream has
+    // bandwidth to spare. Once the picture comes over the local network ITSELF
+    // (`lan`: both ends of the selected pair host candidates, the far one on a
+    // private address — the stats' 'direct' only means "not relayed", which
+    // includes a path punched across the internet), over UDP with a round trip
+    // under 15 ms, and nobody has picked a quality yet, step up ONCE to 60 fps
+    // / 10 Mbps (the Ultra preset) and say so. Desktop only — a phone pays for
+    // decoding twice the frames in battery.
+    //
+    // AND BACK DOWN, once: the agent has no congestion control to do it. If
+    // the path stops being the local network (a reconnect through a relay, a
+    // laptop that roamed) or two readings in a row lose 2% of the packets,
+    // the stage returns to the default and says why — unless somebody has
+    // picked a quality since, which is theirs.
     const autoQualityRef = useRef<string | null>(null);
-    const lanDirect = !!liveStats && liveStats.path === 'direct' && liveStats.protocol === 'udp'
+    /** The session this stage stepped up itself, while that still stands. */
+    const autoSteppedRef = useRef<string | null>(null);
+    /** ...and once the host has confirmed it: until then a different quality
+     *  is only this render not having caught up yet, not somebody's choice. */
+    const autoConfirmedRef = useRef<string | null>(null);
+    /** Readings in a row that lost packets, while stepped up. */
+    const lossRunRef = useRef(0);
+    const onLan = !!liveStats && liveStats.lan === true && liveStats.protocol === 'udp'
         && liveStats.rttMs !== null && liveStats.rttMs < 15;
     useEffect(() => {
-        if (isMobile || !sessionId || !lanDirect) return;
+        if (isMobile || !sessionId || !onLan) return;
         if (autoQualityRef.current === sessionId) return;
         autoQualityRef.current = sessionId;
         if (qualityPending || qualityValue !== '6000,30') return;   // somebody chose
+        autoSteppedRef.current = sessionId;
+        autoConfirmedRef.current = null;
+        lossRunRef.current = 0;
         sendStreamQuality(sessionId, 60, 10_000);
         // eslint-disable-next-line react-hooks/set-state-in-effect
         setClipboardNote('On your own network: streaming at 60 fps for less delay (Quality to change)');
-    }, [isMobile, sessionId, lanDirect, qualityPending, qualityValue]);
+    }, [isMobile, sessionId, onLan, qualityPending, qualityValue]);
+    useEffect(() => {
+        if (isMobile || !sessionId || !liveStats || autoSteppedRef.current !== sessionId) return;
+        if (qualityPending) return;                    // a change is on its way
+        if (qualityValue === '10000,60') autoConfirmedRef.current = sessionId;
+        if (autoConfirmedRef.current !== sessionId) return;   // ours not confirmed yet
+        if (qualityValue !== '10000,60') {             // somebody chose since: theirs
+            autoSteppedRef.current = null;
+            return;
+        }
+        lossRunRef.current = liveStats.lossPct !== null && liveStats.lossPct >= 2 ? lossRunRef.current + 1 : 0;
+        const leftLan = liveStats.lan === false;
+        if (!leftLan && lossRunRef.current < 2) return;
+        autoSteppedRef.current = null;
+        sendStreamQuality(sessionId, 30, 6000);
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setClipboardNote(leftLan
+            ? 'No longer on your own network: back to 30 fps'
+            : 'Packets are being lost: back to 30 fps');
+    }, [isMobile, sessionId, liveStats, qualityPending, qualityValue]);
     useEffect(() => {
         if (!sessionId) return;
         let clearTimer: ReturnType<typeof setTimeout> | null = null;
@@ -3208,6 +3275,22 @@ export function DeviceStage() {
                 sendInput(session.id, { t: 'key', code: e.code, down: false });
                 return;
             }
+            // MINIMISED: the stage is out of sight and the keys are the app's
+            // again — the chat, the composer, Púca's own shortcuts. Nothing
+            // goes over, not even the stage's chords (Ctrl+Alt+End would send
+            // Ctrl+Alt+Del from the chat, Ctrl+Alt+Home toggle a pause nobody
+            // can see). Only the releases above still run, and minimising let
+            // go of everything held already.
+            if (isMinimized) return;
+            // ESC LETS GO OF A CAPTURED MOUSE (Game mode), everywhere. In a
+            // window the browser does it; in fullscreen under the keyboard
+            // lock it hands Esc to the page and lets go only on a LONG press,
+            // which meanwhile repeats Esc into the game — so "Esc releases
+            // it" was untrue there. The key still goes over, as in a window.
+            if (e.code === 'Escape' && !e.repeat && document.pointerLockElement
+                && document.pointerLockElement === surfaceRef.current) {
+                document.exitPointerLock();
+            }
             // THE STAGE'S OWN CHORDS (stageShortcuts.ts), never forwarded.
             // Esc is not one any more: it used to pause control, which made
             // it the one key the desktop could never send.
@@ -3256,7 +3339,7 @@ export function DeviceStage() {
             window.removeEventListener('keydown', onKey, true);
             window.removeEventListener('keyup', onKey, true);
         };
-    }, [session, controlEnabled, setControl, toggleFullscreen, isMobile, typeTextOpen]);
+    }, [session, controlEnabled, setControl, toggleFullscreen, isMobile, typeTextOpen, isMinimized]);
 
 
     if (!session) {
@@ -3724,7 +3807,7 @@ export function DeviceStage() {
                     setActiveMenu={setActiveMobileMenu}
                     onKeyboard={onKeyboardButton}
                     onCollapse={() => setToolbarCollapsed(true)}
-                    onMinimize={() => setIsMinimized(true)}
+                    onMinimize={minimizeStage}
                     onHeight={setToolbarH}
                 />
             )}
