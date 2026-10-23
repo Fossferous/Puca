@@ -20,6 +20,7 @@ import {
     identityRestoreReason,
     onIdentityRestoreChange,
     retryIdentityRestore,
+    settleOwedOwnKeyCheck,
 } from '../api/auth';
 import { KeyIcon, CloseIcon } from './Icons';
 import './IdentityBanner.css';
@@ -43,6 +44,11 @@ export function IdentityBanner({ onSignOut }: IdentityBannerProps) {
         setReason(identityRestoreReason());
         setDismissed(false);
     }), []);
+
+    // Once per start: a sign-in that could not read the key this server
+    // publishes for us checks it now (auth.ts settleOwedOwnKeyCheck). This is
+    // mounted in the app and in standalone Púca Notes, never twice at once.
+    useEffect(() => { void settleOwedOwnKeyCheck(); }, []);
 
     if (!failed || dismissed) return null;
 

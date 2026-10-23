@@ -7,7 +7,7 @@
  * (no leading zeros). All hash inputs must use minimal byte representation.
  */
 
-import { apiClient } from './client';
+import { apiClient, ApiError } from './client';
 import { argon2id } from '@noble/hashes/argon2.js';
 
 // SRP-2048 group parameters from RFC 5054
@@ -363,7 +363,7 @@ async function computeM2(A: bigint, M1: Uint8Array, K: Uint8Array): Promise<Uint
 }
 
 import {
-    setActiveIdentity, clearActiveIdentity,
+    setActiveIdentity, clearActiveIdentity, getActiveIdentity,
     generateIdentitySeed, makeIdentity, buildWrapMaterial,
     unwrapSeedWithPassword, unwrapSeedWithRecovery, rewrapForNewPassword,
     passwordWrapNeedsUpgrade, upgradePasswordWrap,
@@ -776,35 +776,64 @@ export async function retryIdentityRestore(password: string): Promise<void> {
  * The sign-in sanity check docs/E2EE_RECOVERY.md §8 describes: the identity a
  * seed unlocks must be the one the server publishes for this account. It was
  * described and never done (audit 2026-10, F-3), so a device could not tell
- * when the key the server hands EVERYONE ELSE for this account was not its
+ * when the key the server hands everyone else for this account was not its
  * own — new contacts would pin the substitute, and only this account's own
  * devices could have noticed.
  *
- * The published key is read from GET /users/<me>/public-key: the answer every
- * other client encrypts to, not a field of /keys/wrap that only we read.
+ * The published key is read from GET /users/<me>/public-key: the key other
+ * clients encrypt DMs and mesh calls to. Channel keys are wrapped to the key
+ * GET /channels/:id/member-keys lists, an answer the server can fill
+ * differently, so channelKeys.ts holds our own entry there to our key each
+ * time it mints or trusts a wrapper (second review, finding 2).
  *
- * - `match`: adopt.
- * - `mismatch`: a well-formed identity key that is not ours. Never adopted.
- * - `unpublished`: nothing usable is published (null, or a pre-X25519 value
- *   no client can encrypt to), so nobody can be encrypting to a key that is
- *   not ours. Adopted, so no older account is locked out.
- * - `unchecked`: the lookup failed (offline, or a server too old to answer
- *   it for yourself). Not evidence of anything; adopted, and said in the log.
+ * Only an account with a v3 seed gets here, and an honest server always
+ * publishes that seed's key for it: registration sends the key with the
+ * wraps, the retired v2 migration published the key it then wrapped, and
+ * PATCH /keys/public refuses to change it. And the server can answer this
+ * request differently from the one other clients make. So every definite
+ * answer that is not our key is a mismatch:
+ *
+ * - `match`: our key. Adopt.
+ * - `mismatch`: another key, no key, a value that is not a well-formed X25519
+ *   key, or "not found" twice. Never adopted. (The endpoint also answers 404
+ *   when its own lookup fails, so a first 404 is read again before it counts.)
+ * - `unchecked`: no answer from the endpoint: offline, a 5xx, a refusal of
+ *   the request itself (401, 403, 429), a body that is not its JSON. Not
+ *   evidence of anything: adopted, and the check is OWED — run again at the
+ *   next start and before the next channel-key mint (settleOwedOwnKeyCheck)
+ *   until it gets an answer.
  */
-type OwnKeyCheck = 'match' | 'mismatch' | 'unpublished' | 'unchecked';
+type OwnKeyCheck = 'match' | 'mismatch' | 'unchecked';
+
+/** How long a first 404 waits before it is read again. */
+const OWN_KEY_NOT_FOUND_RETRY_MS = 1500;
+
+type OwnKeyRead = { kind: 'served'; value: unknown } | { kind: 'not-found' } | { kind: 'no-answer' };
+
+async function readPublishedOwnKey(me: number): Promise<OwnKeyRead> {
+    try {
+        const r: unknown = await apiClient.get(`/users/${me}/public-key`);
+        // The endpoint's answer is {user_id, public_key}. Anything else (an
+        // empty body, a proxy's page) is not an answer from it at all.
+        if (!r || typeof r !== 'object' || !('public_key' in r)) return { kind: 'no-answer' };
+        return { kind: 'served', value: (r as { public_key: unknown }).public_key };
+    } catch (e) {
+        return e instanceof ApiError && e.status === 404 ? { kind: 'not-found' } : { kind: 'no-answer' };
+    }
+}
 
 async function checkPublishedOwnKey(identity: Identity): Promise<OwnKeyCheck> {
     const me = currentUserIdFromToken();
     if (me === null) return 'unchecked';
-    let served: string | null | undefined;
-    try {
-        const r: { public_key?: string | null } = await apiClient.get(`/users/${me}/public-key`);
-        served = r?.public_key;
-    } catch {
-        return 'unchecked';
+    let read = await readPublishedOwnKey(me);
+    if (read.kind === 'not-found') {
+        await new Promise((r) => setTimeout(r, OWN_KEY_NOT_FOUND_RETRY_MS));
+        read = await readPublishedOwnKey(me);
     }
-    const raw = decodePublicKey(served);
-    if (!raw || raw.length !== 32) return 'unpublished';
+    if (read.kind === 'no-answer') return 'unchecked';
+    if (read.kind === 'not-found') return 'mismatch';
+    const raw = typeof read.value === 'string' ? decodePublicKey(read.value) : null;
+    if (!raw || raw.length !== 32) return 'mismatch';
     for (let i = 0; i < raw.length; i++) if (raw[i] !== identity.publicKey[i]) return 'mismatch';
     return 'match';
 }
@@ -812,22 +841,87 @@ async function checkPublishedOwnKey(identity: Identity): Promise<OwnKeyCheck> {
 const KEY_MISMATCH_RETRY_MESSAGE =
     "Your password unlocked a key that is not the one this server publishes for you, so Púca did not use it. Tell the server's owner.";
 
-/** Run the check; on a mismatch STOP the restore (nothing adopted, nothing
- *  cached left in use) and leave the reason for IdentityBanner. True when it
- *  refused. */
+/** The account an own-key check could not get an answer for (`unchecked`), as
+ *  its user id. Persisted, so "not checked this time" is checked the next
+ *  time instead of never. */
+const OWN_KEY_CHECK_OWED_KEY = 'e2ee_own_key_check_owed_v1';
+
+function setOwnKeyCheckOwed(me: number | null): void {
+    try {
+        if (me === null) localStorage.removeItem(OWN_KEY_CHECK_OWED_KEY);
+        else localStorage.setItem(OWN_KEY_CHECK_OWED_KEY, String(me));
+    } catch { /* private mode */ }
+}
+
+/** Refuse an identity this account is published under a different key for:
+ *  nothing adopted, nothing cached left in use, and the reason left for
+ *  IdentityBanner. */
+function refuseIdentity(username: string, why: string): void {
+    console.error(`[e2ee] ${why} — not using it`);
+    // A seed cached by an earlier session must not stand in for the one
+    // just refused: the next getActiveIdentity() would bring it back.
+    clearActiveIdentity();
+    markIdentityRestoreFailed(username, 'key-mismatch');
+}
+
+/** Run the check; on a mismatch STOP the restore. True when it refused. */
 async function refusedForMismatch(identity: Identity, username: string): Promise<boolean> {
     const own = await checkPublishedOwnKey(identity);
     if (own === 'mismatch') {
-        console.error('[e2ee] the identity your password unlocks is not the one this server publishes for your account — not using it');
-        // A seed cached by an earlier session must not stand in for the one
-        // just refused: the next getActiveIdentity() would bring it back.
-        clearActiveIdentity();
-        markIdentityRestoreFailed(username, 'key-mismatch');
+        setOwnKeyCheckOwed(null);
+        refuseIdentity(username, 'the identity your password unlocks is not the one this server publishes for your account');
         return true;
     }
-    if (own === 'unpublished') console.warn('[e2ee] this server publishes no usable identity key for your account; using the one your password unlocks');
-    if (own === 'unchecked') console.warn('[e2ee] could not read the identity key this server publishes for your account; not checked this time');
+    if (own === 'unchecked') {
+        console.warn('[e2ee] could not read the identity key this server publishes for your account; checking again at the next start or channel-key mint');
+        setOwnKeyCheckOwed(currentUserIdFromToken());
+    } else {
+        setOwnKeyCheckOwed(null);
+    }
     return false;
+}
+
+function usernameFromToken(): string {
+    const t = getToken();
+    const claims = t ? decodeJwtPayload(t) : null;
+    return typeof claims?.username === 'string' ? claims.username : '';
+}
+
+let owedCheck: Promise<boolean> | null = null;
+
+/**
+ * Finish an own-key check an earlier sign-in could not get an answer for
+ * (`unchecked` above), if one is owed for the account signed in now. Runs at
+ * start (IdentityBanner mounts once per app) and before every channel-key
+ * mint; nothing is sent when nothing is owed. One at a time. False when it
+ * found a mismatch and put the identity away.
+ */
+export function settleOwedOwnKeyCheck(): Promise<boolean> {
+    owedCheck ??= (async () => {
+        let owed: string | null = null;
+        try { owed = localStorage.getItem(OWN_KEY_CHECK_OWED_KEY); } catch { /* private mode */ }
+        if (!owed) return true;
+        const me = currentUserIdFromToken();
+        if (me === null || owed !== String(me)) {
+            // Owed by an account that is not signed in here now.
+            setOwnKeyCheckOwed(null);
+            return true;
+        }
+        const identity = getActiveIdentity();
+        if (!identity) return true; // nothing adopted to check; the next restore checks
+        return !(await refusedForMismatch(identity, usernameFromToken()));
+    })().finally(() => { owedCheck = null; });
+    return owedCheck;
+}
+
+/**
+ * The server lists THIS account under a key that is not ours where channel
+ * keys are concerned (channelKeys.ts: our member-keys entry, or a key row it
+ * says we wrapped). The same refusal as a mismatch at sign-in: a server that
+ * substitutes our key in one answer is substituting it.
+ */
+export function refuseOwnKeyMismatch(where: string): void {
+    refuseIdentity(usernameFromToken(), `${where} lists this account under a key that is not its own`);
 }
 
 /**
@@ -1339,6 +1433,7 @@ export function logout(): void {
     clearActiveIdentity(); // Clear E2EE identity on logout
     clearDmKeys(); // session and history keys must not outlive the session on a shared machine
     clearIdentityRestoreFailure(); // a missing identity is not missing once signed out
+    setOwnKeyCheckOwed(null); // owed to this account's sign-in, which just ended
     clearChannelKeyCache();
     // Secrets and personal data that outlived a sign-out. Everything below is
     // either a private key or a real-world location, and none of it belongs to

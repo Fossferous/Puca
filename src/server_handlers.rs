@@ -1042,7 +1042,11 @@ pub async fn update_server_settings(
     // the tables (after the commit, so a GameCreate that re-reads the switch
     // after opening sees it off and closes its own table too) BEFORE the
     // push, so nobody sees the launcher go while their table is still up.
+    // "Require encryption for calls" rides the same task: a member already in
+    // a call must not go on sending what the policy now forbids because the
+    // owner's request was dropped after its commit.
     let games_switch = payload.games_enabled;
+    let media_policy_saved = payload.require_media_e2ee.is_some();
     let committed = {
         let state = Arc::clone(&state);
         let server_id = server_id.clone();
@@ -1050,6 +1054,9 @@ pub async fn update_server_settings(
             tx.commit().await?;
             if let Some(asked) = games_switch {
                 crate::games::settle_switch(&state, &server_id, asked).await;
+            }
+            if media_policy_saved {
+                push_media_e2ee_policy(&state, &server_id).await;
             }
             Ok::<(), sqlx::Error>(())
         })
@@ -1083,6 +1090,52 @@ pub async fn update_server_settings(
             (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save settings").into_response()
         }
     }
+}
+
+/// "Require encryption for calls" was saved for `server_id`: tell every
+/// online member at once (`ServerMessage::MediaE2eeRequired`), with the value
+/// STORED, so a call already running applies it (audit 2026-10, second
+/// review). Until this existed only the owner's own client refetched the
+/// setting; every other member's call went on under whatever their server
+/// list said when it was fetched, and on an engine that cannot encrypt that
+/// meant sending and playing media the policy had just forbidden. Called
+/// after the change committed. A read that fails pushes nothing: members then
+/// see the setting on their next server-list fetch, as before. Answers how
+/// many members at least one frame reached.
+pub(crate) async fn push_media_e2ee_policy(state: &AppState, server_id: &str) -> usize {
+    let stored = match sqlx::query_scalar::<_, bool>("SELECT require_media_e2ee FROM servers WHERE id = $1")
+        .bind(server_id)
+        .fetch_one(&state.pool)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("media e2ee policy: read for server {} failed: {}", server_id, e);
+            return 0;
+        }
+    };
+    let members = match sqlx::query_as::<_, (i32,)>("SELECT user_id FROM server_members WHERE server_id = $1")
+        .bind(server_id)
+        .fetch_all(&state.pool)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!("media e2ee policy: member fetch for server {} failed: {}", server_id, e);
+            return 0;
+        }
+    };
+    let mut reached = 0;
+    for (user,) in members {
+        let msg = crate::protocol::ServerMessage::MediaE2eeRequired {
+            server_id: server_id.to_string(),
+            require_media_e2ee: stored,
+        };
+        if state.send_to_user(user as i64, msg) {
+            reached += 1;
+        }
+    }
+    reached
 }
 
 // --- Server Nickname Handlers ---

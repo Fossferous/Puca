@@ -27,7 +27,7 @@ const fake = vi.hoisted(() => ({
 // importOriginal on both sides is a cycle that hands channelKeys the real
 // apiClient (observed: a real fetch to localhost). The three names are all
 // the rig needs.
-vi.mock('../api/auth', () => ({ currentUserIdFromToken: () => 1, getToken: () => null, storeRenewedToken: () => {} }));
+vi.mock('../api/auth', () => ({ currentUserIdFromToken: () => 1, getToken: () => null, storeRenewedToken: () => {}, settleOwedOwnKeyCheck: async () => true, refuseOwnKeyMismatch: () => {} }));
 vi.mock('../api/client', async (orig) => {
     const real = await orig<typeof import('../api/client')>();
     return {

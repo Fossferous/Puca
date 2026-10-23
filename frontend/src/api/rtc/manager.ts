@@ -808,12 +808,19 @@ export class WebRTCManager {
         const localStream = this.media.getLocalStreamSync();
 
         if (newTrack && localStream) {
-            if (this.publishBlockedByEnforcement()) return localStream;
             // Never grab the screen-share video sender: while sharing with the
             // camera on, "first video sender" IS the screen share — replacing
             // its track would swap the outgoing stream for the camera feed.
             const screenVideo = new Set<MediaStreamTrack>(this.media.getScreenShareStreamSync()?.getVideoTracks() ?? []);
-            for (const [userId, peer] of this.peers) {
+            // The guard is read before EVERY peer, over a snapshot: this loop
+            // awaits, and "Require encryption" switched on meanwhile rebuilds
+            // the peers into this.peers, where a live iteration would reach
+            // the new ones and add the camera to them (second review, finding
+            // 5). A peer rebuilt meanwhile got its media from the join-time
+            // guard, so it is left alone.
+            for (const [userId, peer] of [...this.peers]) {
+                if (this.publishBlockedByEnforcement()) return localStream;
+                if (this.peers.get(userId) !== peer) continue;
                 if (!this.sendsTo(userId)) continue;
                 const senders = peer.connection.getSenders();
                 const videoSender = senders.find(s =>
@@ -952,12 +959,16 @@ export class WebRTCManager {
     async addScreenShareToPeers(): Promise<void> {
         const stream = this.media.getScreenShareStreamSync();
         if (!stream) return;
-        if (this.publishBlockedByEnforcement()) return;
 
         // addScreenShareTracks' addTrack calls fire onnegotiationneeded on each
         // peer → a glare-safe offer. This is the path that must reach a late
         // joiner and the peer we're answering when a share starts mid-call.
-        for (const [userId, peer] of this.peers) {
+        // The guard is read before EVERY peer, over a snapshot, as in
+        // switchCamera: each peer is awaited, and peers rebuilt meanwhile by
+        // "Require encryption" switching on must not be handed the share.
+        for (const [userId, peer] of [...this.peers]) {
+            if (this.publishBlockedByEnforcement()) return;
+            if (this.peers.get(userId) !== peer) continue;
             if (!this.sendsTo(userId)) continue;
             await this.addScreenShareTracks(userId, peer.connection, stream);
         }

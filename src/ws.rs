@@ -10543,6 +10543,72 @@ mod games_join_db_tests {
         assert!(stored, "the switch-on committed");
         assert_eq!(after, vec![true], "the switch-on still reached A");
     }
+
+    /// "Require encryption for calls" reaches every member's running call
+    /// (audit 2026-10, second review). The handler saved the column and
+    /// pushed nothing, so only the owner's own client ever refetched it: a
+    /// member in a call on an engine that cannot encrypt went on sending
+    /// after the owner switched it on. The push says what is STORED, reaches a
+    /// socket that announced no capability at all (any client may be in a
+    /// call, not only one that plays games), and a save that does not touch
+    /// the setting sends nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_media_e2ee_policy_reaches_every_member_with_the_stored_value() {
+        use axum::extract::{Json, Path, State};
+        use axum::response::IntoResponse;
+        use axum::Extension;
+        let Some(pool) = crate::migrator::test_pool(8).await else { return };
+        let f = setup(&pool).await;
+        let state = AppState::new(pool.clone(), "test-secret".into(), None, Arc::new(crate::wake::NullWake));
+        let (tx, mut rx) = mpsc::channel::<ServerMessage>(64);
+        let (_conn, _, _) = state.register_session(f.users[2] as UserId, "b".into(), tx, false, None, String::new());
+        let owner = crate::auth::Claims {
+            sub: f.users[0] as i64,
+            username: "o".into(),
+            exp: 0,
+            tv: 0,
+            sst: 0,
+            sid: String::new(),
+            ls: false,
+        };
+        let save = |body: serde_json::Value| {
+            let req: crate::server_handlers::UpdateServerRequest = serde_json::from_value(body).unwrap();
+            crate::server_handlers::update_server_settings(
+                State(Arc::clone(&state)),
+                Path(f.sid.clone()),
+                Extension(owner.clone()),
+                Json(req),
+            )
+        };
+        let mut policy = || {
+            let mut out = Vec::new();
+            while let Ok(m) = rx.try_recv() {
+                if let ServerMessage::MediaE2eeRequired { server_id, require_media_e2ee } = m {
+                    out.push((server_id, require_media_e2ee));
+                }
+            }
+            out
+        };
+
+        let on_status = save(serde_json::json!({ "require_media_e2ee": true })).await.into_response().status();
+        let on = policy();
+        let other_status = save(serde_json::json!({ "description": "not the policy" })).await.into_response().status();
+        let untouched = policy();
+        let _ = save(serde_json::json!({ "require_media_e2ee": false })).await.into_response();
+        let off = policy();
+        let (stored,): (bool,) = sqlx::query_as("SELECT require_media_e2ee FROM servers WHERE id = $1")
+            .bind(&f.sid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        teardown(&pool, &f).await;
+
+        assert!(on_status.is_success() && other_status.is_success(), "the saves were accepted: {on_status} {other_status}");
+        assert_eq!(on, vec![(f.sid.clone(), true)], "switching it on reached B's socket");
+        assert!(untouched.is_empty(), "a save that does not name the setting pushes nothing: {untouched:?}");
+        assert_eq!(off, vec![(f.sid.clone(), false)], "switching it off reached B too");
+        assert!(!stored, "and the push said what was stored");
+    }
 }
 
 #[cfg(test)]

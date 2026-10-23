@@ -65,7 +65,7 @@ const fake = {
 // partial mock is still being built - that cycle handed channelKeys the REAL
 // http client (401s from whatever listens on :3000). channelKeys409.test.ts has
 // the same shape for the same reason.
-vi.mock('../api/auth', () => ({ currentUserIdFromToken: () => 1, getToken: () => null, storeRenewedToken: () => {} }));
+vi.mock('../api/auth', () => ({ currentUserIdFromToken: () => 1, getToken: () => null, storeRenewedToken: () => {}, settleOwedOwnKeyCheck: async () => true, refuseOwnKeyMismatch: () => {} }));
 // Keep the real module's exports (mintEpoch reads `statusOf` to recognise the
 // 409); replace only the transport.
 vi.mock('../api/client', async (orig) => {

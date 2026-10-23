@@ -205,13 +205,22 @@ today.
 **Login (v3):** SRP → JWT → `GET /keys/wrap` → `pwKEK = PBKDF2(password, wrap_salt)`
 → `seed = dec(seedWrappedPw)` → check → `setActiveIdentity`. Sanity:
 `X25519.getPublicKey(seed)` must equal the key the server publishes for the
-account (`GET /users/<me>/public-key`, the answer every other client encrypts
-to). A different, well-formed key stops the restore: the seed is not adopted,
-and the app says the key is not the one the server publishes. Nothing usable
-published, or a lookup that fails, is not a mismatch and does not lock the
-account out. The same check runs when the keys are restored from the banner
-with the password. (Described here from the start, done since 0.9.847: audit
-2026-10, F-3.)
+account at `GET /users/<me>/public-key`, which is the key other clients
+encrypt DMs and mesh calls to. The server can answer that request
+differently from the one other clients make, and an honest server always
+publishes a v3 account's key, so any definite answer that is not that key
+stops the restore: another key, no key, a malformed value, or "not found"
+twice (a first 404 is read again, because the endpoint also answers 404 when
+its own lookup fails). The seed is not adopted, and the app says the key is
+not the one the server publishes. No answer at all (offline, a 5xx, a body
+that is not the endpoint's) is not a mismatch and does not lock the account
+out: the check is owed, and runs again at the next start and before the next
+channel-key mint. Channel keys are wrapped to the key
+`GET /channels/:id/member-keys` lists, a separate answer, so the client holds
+its own entry there to its key at every mint, and refuses a key row that
+names it as the wrapper under any other key. The same check runs when the
+keys are restored from the banner with the password. (Described here from the
+start, done since 0.9.847: audit 2026-10, F-3, and its second review.)
 
 **Migration (v2 → v3), transparent:** on login, if `key_version < 3`, the client
 already holds the plaintext seed (derived the old way) **and** the password — the

@@ -181,6 +181,7 @@ import { useCallActivity } from '../api/games/callActivity';
 import { gamesGate, gamesRowContradictedBy } from '../api/games/gamesGate';
 import { parseGamesEnabled } from '../api/games/protocol';
 import { applyGamesEnabled } from '../api/games/activities';
+import { applyMediaE2eeRequired, parseMediaE2eeRequired } from '../api/serverMediaPolicy';
 import { useOpenWhile } from './games/useOpenWhile';
 import { GAME_NAMES } from '../api/games/gameWords';
 import { ActivityPicker } from './games/ActivityPicker';
@@ -4056,6 +4057,17 @@ export function Chat({ onLogout }: ChatProps) {
         };
         wsClient.on('GamesEnabled', onGamesEnabled);
         return () => wsClient.off('GamesEnabled', onGamesEnabled);
+    }, [queryClient]);
+    // The owner saved "Require encryption for calls": the voice channel's
+    // server row is what VoicePanel's serverRequireMediaE2ee reads, so a call
+    // already running applies it now (api/serverMediaPolicy.ts).
+    useEffect(() => {
+        const onMediaE2eeRequired = (msg: ServerMessage) => {
+            const f = parseMediaE2eeRequired(msg as { type: string; payload?: unknown });
+            if (f) queryClient.setQueryData(keys.servers, (old: Server[] | undefined) => applyMediaE2eeRequired(old, f));
+        };
+        wsClient.on('MediaE2eeRequired', onMediaE2eeRequired);
+        return () => wsClient.off('MediaE2eeRequired', onMediaE2eeRequired);
     }, [queryClient]);
     const voiceGamesGate = gamesGate({
         feature: callActivity.feature,

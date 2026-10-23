@@ -43,7 +43,12 @@ const fake = {
     /** The rows the server received on POST /keys. */
     posted: [] as { recipient_id: number; wrapped_key: string; sender_public_key: string }[],
     visibleListRequests: 0,
+    /** How many member-keys requests fail before they answer again. */
+    memberKeysFailures: 0,
+    /** What GET /users/1/public-key answers for us; null fails the request. */
+    ownKey: null as string | null,
     reset() {
+        this.ownKey = null;
         this.currentEpoch = 0;
         this.rows = [];
         this.memberKeys = [];
@@ -51,6 +56,7 @@ const fake = {
         this.channelsOfS1 = [{ id: 42, name: 'general' }];
         this.posted = [];
         this.visibleListRequests = 0;
+        this.memberKeysFailures = 0;
     },
 };
 
@@ -61,7 +67,13 @@ vi.mock('../api/client', () => ({
             if (url.endsWith('/keys')) {
                 return { current_epoch: fake.currentEpoch, max_epoch: fake.currentEpoch, current_generation: 0, epoch_generation: 0, keys: fake.rows };
             }
-            if (url.endsWith('/member-keys')) return fake.memberKeys;
+            if (url.endsWith('/member-keys')) {
+                if (fake.memberKeysFailures > 0) {
+                    fake.memberKeysFailures--;
+                    throw new Error('member-keys: 503');
+                }
+                return fake.memberKeys;
+            }
             if (url.endsWith('/members-with-roles')) {
                 fake.visibleListRequests++;
                 const answer = fake.visibleAnswers.length > 1 ? fake.visibleAnswers.shift()! : (fake.visibleAnswers[0] ?? []);
@@ -70,6 +82,10 @@ vi.mock('../api/client', () => ({
             }
             if (url === '/servers') return [{ id: 's1', name: 'Home' }];
             if (url === '/servers/s1/channels') return fake.channelsOfS1;
+            if (url === '/users/1/public-key') {
+                if (fake.ownKey === null) throw new Error('502 from the proxy');
+                return { user_id: 1, public_key: fake.ownKey };
+            }
             throw new Error('unexpected GET ' + url);
         }),
         post: vi.fn(async (url: string, body: { epoch: number; keys: typeof fake.posted }) => {
@@ -83,9 +99,13 @@ vi.mock('../api/client', () => ({
     },
 }));
 
-import { setActiveIdentity, generateChannelKey, wrapChannelKeyForMembers } from '../api/e2ee';
-import { ensureChannelKey, clearChannelKeyCache, hiddenRecipientNotices } from '../api/channelKeys';
+import { QueryClient } from '@tanstack/react-query';
+import { setActiveIdentity, getActiveIdentity, generateChannelKey, wrapChannelKeyForMembers } from '../api/e2ee';
+import { ensureChannelKey, clearChannelKeyCache, hiddenRecipientNotices, setVisibleMembersSource } from '../api/channelKeys';
 import { noteServers } from '../api/channelDirectory';
+import { visibleMembersFromQueries } from '../api/visibleMembersQuery';
+import { identityRestoreReason } from '../api/auth';
+import { pinServedIdentityKey } from '../api/keyVerification';
 import { testIdentity, warmIdentities, WARM_TIMEOUT_MS } from './fixtures/identities';
 
 beforeAll(() => warmIdentities([ME, STRANGER, NEWCOMER]), WARM_TIMEOUT_MS);
@@ -107,6 +127,114 @@ Object.defineProperty(window, 'localStorage', {
 });
 
 const recipients = () => fake.posted.map((k) => k.recipient_id).sort((a, b) => a - b);
+
+/** An unsigned token naming account `sub`: what auth.ts decodes for its own
+ *  reads of who is signed in (the server verifies tokens; the client only decodes). */
+function tokenFor(sub: number): string {
+    const b64url = (s: string) => btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    return `${b64url('{"alg":"HS256","typ":"JWT"}')}.${b64url(JSON.stringify({ sub, username: 'me' }))}.sig`;
+}
+const OWED = 'e2ee_own_key_check_owed_v1';
+
+// FIRST in the file, on purpose: pins live in memory for the whole file, and
+// every mint below pins user 1 (us). These run with no self-pin, which is
+// the device the forged row was trusted on.
+describe('our own entry: the server may not list US under a key of its own (second review, finding 2)', () => {
+    beforeEach(async () => {
+        fake.reset();
+        clearChannelKeyCache();
+        localStorage.clear();
+        setActiveIdentity(await testIdentity(...ME));
+        fake.visibleAnswers = [[{ id: 1 }]];
+    });
+
+    it('SECURITY: member-keys listing us under another key mints nothing, wraps nothing, and puts the identity away', async () => {
+        const substitute = await testIdentity(...STRANGER);
+        fake.memberKeys = [{ user_id: 1, public_key: substitute.publicKeyEncoded }];
+
+        const got = await ensureChannelKey(42);
+
+        expect(got).toBeNull();
+        expect(fake.posted, 'the channel key was wrapped to a key the server chose for us').toEqual([]);
+        expect(getActiveIdentity()).toBeNull();
+        expect(identityRestoreReason()).toBe('key-mismatch');
+    });
+
+    it('SECURITY: a row that names US as its wrapper, under another key, is not taken as the channel key', async () => {
+        const me = await testIdentity(...ME);
+        const forger = await testIdentity(...STRANGER);
+        const chosen = generateChannelKey();
+        // A key of the server's choosing, wrapped to us under a key it holds,
+        // and said to be from us; member-keys agrees, so every first-contact
+        // step would pass.
+        const [row] = await wrapChannelKeyForMembers(forger, chosen, [{ userId: 1, publicKey: me.publicKeyEncoded }], { channelId: 42, epoch: 1 });
+        fake.currentEpoch = 1;
+        fake.rows = [{ epoch: 1, wrapped_key: row.wrappedKey, sender_public_key: row.senderPublicKey, sender_user_id: 1 }];
+        fake.memberKeys = [{ user_id: 1, public_key: forger.publicKeyEncoded }];
+
+        const got = await ensureChannelKey(42);
+
+        expect(got === null || !Buffer.from(got.key).equals(Buffer.from(chosen)), 'encrypting under a key the server chose').toBe(true);
+        expect(getActiveIdentity()).toBeNull();
+        expect(identityRestoreReason()).toBe('key-mismatch');
+    });
+
+    it('SECURITY: an own-key check a sign-in could not finish is done before the next mint, and a key that is not ours stops it', async () => {
+        const me = await testIdentity(...ME);
+        localStorage.setItem('auth_token', tokenFor(1));
+        localStorage.setItem(OWED, '1');
+        fake.ownKey = (await testIdentity(...STRANGER)).publicKeyEncoded;
+        fake.memberKeys = [{ user_id: 1, public_key: me.publicKeyEncoded }];
+
+        const got = await ensureChannelKey(42);
+
+        expect(got).toBeNull();
+        expect(fake.posted, 'a key handed out before the owed check was done').toEqual([]);
+        expect(getActiveIdentity()).toBeNull();
+        expect(identityRestoreReason()).toBe('key-mismatch');
+    });
+
+    it('CONTROL: a row we really wrapped, under our key, is ours — adopted, nothing refused', async () => {
+        const me = await testIdentity(...ME);
+        const real = generateChannelKey();
+        const [row] = await wrapChannelKeyForMembers(me, real, [{ userId: 1, publicKey: me.publicKeyEncoded }], { channelId: 42, epoch: 1 });
+        fake.currentEpoch = 1;
+        fake.rows = [{ epoch: 1, wrapped_key: row.wrappedKey, sender_public_key: row.senderPublicKey, sender_user_id: 1 }];
+        fake.memberKeys = [{ user_id: 1, public_key: me.publicKeyEncoded }];
+
+        const got = await ensureChannelKey(42);
+
+        expect(got!.epoch).toBe(1);
+        expect(Buffer.from(got!.key).equals(Buffer.from(real))).toBe(true);
+        expect(getActiveIdentity()).not.toBeNull();
+        expect(identityRestoreReason()).toBeNull();
+    });
+
+    it('CONTROL: member-keys listing us under OUR key mints as before', async () => {
+        const me = await testIdentity(...ME);
+        fake.memberKeys = [{ user_id: 1, public_key: me.publicKeyEncoded }];
+
+        const got = await ensureChannelKey(42);
+
+        expect(got!.epoch).toBe(1);
+        expect(recipients()).toEqual([1]);
+        expect(identityRestoreReason()).toBeNull();
+    });
+
+    it('CONTROL: the owed check meets our key — the mint goes ahead, and nothing is owed any more', async () => {
+        const me = await testIdentity(...ME);
+        localStorage.setItem('auth_token', tokenFor(1));
+        localStorage.setItem(OWED, '1');
+        fake.ownKey = me.publicKeyEncoded;
+        fake.memberKeys = [{ user_id: 1, public_key: me.publicKeyEncoded }];
+
+        const got = await ensureChannelKey(42);
+
+        expect(got!.epoch).toBe(1);
+        expect(recipients()).toEqual([1]);
+        expect(localStorage.getItem(OWED)).toBeNull();
+    });
+});
 
 describe('the wrap set versus the member list a person sees', () => {
     beforeEach(async () => {
@@ -247,5 +375,67 @@ describe('the wrap set versus the member list a person sees', () => {
         const got = await ensureChannelKey(42);
         expect(got).toBeNull();
         expect(fake.posted).toEqual([]);
+    });
+
+    it('CONTROL: with member-keys failing, a pinned wrapper who has since LEFT is not reported (second review, finding 4)', async () => {
+        const me = await testIdentity(...ME);
+        const former = await testIdentity(...NEWCOMER);
+        // They were a member once, and we pinned them; their row outlived
+        // their membership (only rows addressed TO a leaver are deleted).
+        pinServedIdentityKey(2, former.publicKeyEncoded);
+        const [row] = await wrapChannelKeyForMembers(former, generateChannelKey(), [{ userId: 1, publicKey: me.publicKeyEncoded }], { channelId: 42, epoch: 1 });
+        fake.currentEpoch = 1;
+        fake.rows = [{ epoch: 1, wrapped_key: row.wrappedKey, sender_public_key: row.senderPublicKey, sender_user_id: 2 }];
+        fake.memberKeys = [{ user_id: 1, public_key: me.publicKeyEncoded }];
+        fake.memberKeysFailures = 1; // the load's lookup fails; the rotation's answers
+        fake.visibleAnswers = [[{ id: 1 }]]; // they left
+
+        await ensureChannelKey(42);
+
+        expect(hiddenRecipientNotices(), 'a former member reported as someone the server listed').toEqual([]);
+        expect(recipients(), 'and the rotation off their key went ahead').toEqual([1]);
+    });
+
+    it('CONTROL: through the sidebar query, a poll in flight from before the join does not answer the read past the cache (second review, finding 3)', async () => {
+        const me = await testIdentity(...ME);
+        const newcomer = await testIdentity(...NEWCOMER);
+        fake.memberKeys = [
+            { user_id: 1, public_key: me.publicKeyEncoded },
+            { user_id: 2, public_key: newcomer.publicKeyEncoded },
+        ];
+        const qc = new QueryClient();
+        const key = (s: string) => ['servers', s, 'members'] as const;
+        // The list the sidebar fetched before the newcomer joined, and its
+        // next poll, in flight, whose query ran before the join as well.
+        qc.setQueryData(key('s1'), [{ id: 1 }]);
+        // Set inside the poll's executor, which control-flow narrowing cannot see.
+        let answerPoll = null as ((rows: { id: number }[]) => void) | null;
+        const poll = qc.fetchQuery({
+            queryKey: key('s1'),
+            queryFn: () => new Promise<{ id: number }[]>((resolve) => { answerPoll = resolve; }),
+            staleTime: 0,
+        }).catch(() => 'cancelled');
+        const fetchMembers = vi.fn(async () => [{ id: 1 }, { id: 2 }]);
+        const source = visibleMembersFromQueries(qc, key, fetchMembers);
+        setVisibleMembersSource((serverId, fresh) => {
+            const answer = source(serverId, fresh);
+            // That poll answers only now, after the read past the cache was
+            // asked for. Joined, it would hand that read the old list.
+            if (fresh) setTimeout(() => answerPoll?.([{ id: 1 }]), 0);
+            return answer;
+        });
+        try {
+            await ensureChannelKey(42);
+
+            expect(recipients(), 'a real new member refused on a list from before they joined').toEqual([1, 2]);
+            expect(hiddenRecipientNotices()).toEqual([]);
+            expect(fetchMembers, 'the read past the cache was a request of its own').toHaveBeenCalledTimes(1);
+            expect(qc.getQueryData(key('s1')), 'and the sidebar now shows what the check read').toEqual([{ id: 1 }, { id: 2 }]);
+        } finally {
+            setVisibleMembersSource(null);
+            answerPoll?.([{ id: 1 }]);
+            await poll;
+            qc.clear();
+        }
     });
 });

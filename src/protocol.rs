@@ -778,6 +778,16 @@ pub enum ServerMessage {
     /// (`GameEnded { disabled }`) by the time this is sent.
     GamesEnabled { server_id: String, games_enabled: bool },
 
+    /// The owner changed "Require encryption for calls" for `server_id`
+    /// (`servers.require_media_e2ee`): a call already running applies it at
+    /// once - on an engine that cannot encrypt, media stops in both
+    /// directions - with no member refetching anything. Sent after the change
+    /// committed, with the value STORED, to every connection of every member
+    /// of that server: any client may be in a call, so no capability gates
+    /// it. An older client registers no handler for it and drops it, as it
+    /// drops every frame type it does not know; so does a delivery socket.
+    MediaE2eeRequired { server_id: String, require_media_e2ee: bool },
+
     // --- Remote control (host receives these; see ClientMessage above) ---
     /// A viewer is asking to control this (host) user's shared screen. Username
     /// included so the host's approval prompt can name the requester. `eph` is
