@@ -19,6 +19,7 @@ one-line summary; this file is the full story. Versions follow
 ### Fixed
 
 - **Playing on a Steam Deck no longer moves you to the AFK channel.** Púca for Steam Deck now tells Púca when the Deck's controls are in use, never which, so someone who plays while they listen to a call stays in it. The desktop app already did this with the keyboard and mouse. Until now, the hidden page the plugin runs saw no input at all, and after the server's AFK time a listening player was moved out mid-game. Other programs that embed Púca can do the same through `idleSeconds` (docs/EMBEDDING.md). Nothing changes anywhere else.
+- **Send diagnostics can no longer trap you in its dialog.** While a report was being sent, Close was switched off, so one step that never answered (the log read, the upload, the server) left you stuck there until you quit the app. Every step now has its own time limit, sized to its job (an upload gets longer the bigger your log is), and a step that runs out fails the send with a plain sentence naming it. Close and clicking outside the dialog always work, and closing it cancels the send, so nothing is posted to the owner after you have gone.
 
 ## 0.9.846 — 2026-10-22
 

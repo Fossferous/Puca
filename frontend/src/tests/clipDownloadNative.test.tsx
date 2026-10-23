@@ -28,7 +28,7 @@ interface SaveCall { method: 'saveClip' | 'saveAttachment'; opts: Record<string,
 const h = vi.hoisted(() => ({
     fs: null as ReturnType<typeof import('./fixtures/fakeCapacitorFs').fakeCapacitorFs> | null,
     nativePlugin: true,
-    status: { version: 1, supported: true, apiBase: 'http://localhost:3000' as string | null },
+    status: { version: 1, supported: true, apiBase: null as string | null /* set to BASE in beforeEach */ },
     statusCalls: 0,
     saves: [] as SaveCall[],
     cancels: [] as string[],
@@ -75,11 +75,19 @@ vi.mock('../api/platform', async (importOriginal) => ({
 import { ClipAttachment } from '../components/ClipAttachment';
 import { encodeClipRef, type ClipManifest } from '../api/clips/clipRef';
 import { newClipSecrets, sealPart } from '../api/clips/clipCrypto';
-import { resetNativeDownloadsForTests } from '../api/nativeDownloads';
+import { normalizeApiBase, resetNativeDownloadsForTests } from '../api/nativeDownloads';
+import { API_BASE_URL } from '../api/config';
 import { saveEncryptedAttachment, saveFailureNote } from '../api/saveAttachment';
 import { NOTES_FOLDER } from '../api/saveToDevice';
 import { ImageLightbox } from '../components/ImageLightbox';
 import type { ClipConsent } from '../api/servers';
+
+/** The base this build talks to, as the page hands it to the plugin and as the
+ *  plugin must report it. Never a literal: VITE_API_URL (a process env var
+ *  wins over .env files in Vite's loadEnv, and gates.mjs forwards the caller's
+ *  environment) changes what API_BASE_URL is, and a hard-coded localhost made
+ *  nine of these tests depend on it being unset. */
+const BASE = normalizeApiBase(API_BASE_URL);
 
 const CLIP_ID = '0000abcd-0000-4000-8000-000000000001';
 
@@ -134,7 +142,7 @@ beforeEach(() => {
     disk = fakeCapacitorFs();
     h.fs = disk;
     h.nativePlugin = true;
-    h.status = { version: 1, supported: true, apiBase: 'http://localhost:3000' };
+    h.status = { version: 1, supported: true, apiBase: BASE };
     h.statusCalls = 0;
     h.saves.length = 0;
     h.cancels.length = 0;
@@ -180,7 +188,7 @@ describe('Android with the native download plugin', () => {
         expect(b64ToBytes(o.key as string)).toEqual(m.key);
         expect(b64ToBytes(o.noncePrefix as string)).toEqual(m.noncePrefix);
         expect(o.token).toBe('the-bearer');
-        expect(o.apiBase).toBe('http://localhost:3000');
+        expect(o.apiBase).toBe(BASE);
         expect(o.totalBytes).toBe(m.totalCipherBytes);
         expect(o.durationMs).toBe(120_000);
         expect(o.name).toBe('puca-clip-0000abcd.mp4');
@@ -273,7 +281,7 @@ describe('Android with the native download plugin', () => {
         await waitFor(() => h.saves.length === 1, 'saveAttachment called');
         const o = h.saves[0].opts;
         expect(h.saves[0].method).toBe('saveAttachment');
-        expect(o).toMatchObject({ fileId: '5f243cae-0b1d-4c2e-9a7f-30e62651d0f5', key: 'KEY_url-safe', cap: 'the-cap', mime: 'video/mp4', name: 'holiday.mp4', token: 'the-bearer', apiBase: 'http://localhost:3000' });
+        expect(o).toMatchObject({ fileId: '5f243cae-0b1d-4c2e-9a7f-30e62651d0f5', key: 'KEY_url-safe', cap: 'the-cap', mime: 'video/mp4', name: 'holiday.mp4', token: 'the-bearer', apiBase: BASE });
         h.saves[0].resolve({ where: 'Movies/Puca/holiday.mp4', uri: 'content://media/y', bytes: 1, container: 'video' });
         await expect(p).resolves.toEqual({ where: 'Movies/Puca/holiday.mp4', onDisk: true });
         expect(disk.calls).toEqual([]);
@@ -402,7 +410,7 @@ describe('Android WITHOUT a usable native plugin keeps the old path', () => {
     });
 
     it('Android 9 and older', async () => {
-        h.status = { version: 1, supported: false, apiBase: 'http://localhost:3000' };
+        h.status = { version: 1, supported: false, apiBase: BASE };
         await oldPathSaves();
     });
 

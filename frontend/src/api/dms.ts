@@ -58,8 +58,8 @@ export function listDMConversations(): Promise<DMConversation[]> {
 /**
  * Start a new DM conversation with a user, or get existing one
  */
-export function startDMConversation(userId: number): Promise<DMConversation> {
-    return apiClient.post('/dms', { user_id: userId });
+export function startDMConversation(userId: number, opts?: { signal?: AbortSignal }): Promise<DMConversation> {
+    return apiClient.post('/dms', { user_id: userId }, opts?.signal ? { signal: opts.signal } : undefined);
 }
 
 /**
@@ -87,8 +87,8 @@ export function getDMMessages(conversationId: string, limit: number = 50): Promi
  * Do not import api/websocket into this module — dms.ts's only non-crypto
  * import is ./client, and Notes' bundle depends on that staying true.
  */
-export function sendDMMessageRest(conversationId: string, wire: string): Promise<DMMessage> {
-    return apiClient.post(`/dms/${conversationId}/messages`, { content: wire });
+export function sendDMMessageRest(conversationId: string, wire: string, opts?: { signal?: AbortSignal }): Promise<DMMessage> {
+    return apiClient.post(`/dms/${conversationId}/messages`, { content: wire }, opts?.signal ? { signal: opts.signal } : undefined);
 }
 
 // --- E2EE Support (pairwise) ---
