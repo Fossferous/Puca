@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NOTICE_EVERY_MS, SilenceVerdict, SilentNotice, SILENT_AFTER_S } from '../src/micSilence';
-import { HoldFollower } from '../src/ptt';
+import { HoldFollower, PressFollower } from '../src/ptt';
 import { readPageMessage, readState, readVoiceChannels } from '../src/protocol';
-import { normalizeAppUrl, readSettings } from '../src/settings';
+import { assignButton, DEFAULT_SETTINGS, jobOf, normalizeAppUrl, readSettings, watchedButtons } from '../src/settings';
 
 describe('the Púca address', () => {
     it('takes what a person types and makes it an https address', () => {
@@ -27,11 +27,69 @@ describe('the Púca address', () => {
     });
 
     it('reads stored settings defensively', () => {
-        expect(readSettings(null)).toEqual({ appUrl: '', pushToTalk: 'off', notifications: true, notificationSound: true });
-        expect(readSettings({ appUrl: 'http://x.example', pushToTalk: 'R9', notifications: 'yes' }))
-            .toEqual({ appUrl: '', pushToTalk: 'off', notifications: true, notificationSound: true });
+        const none = { pushToTalk: 'off', muteButton: 'off', deafenButton: 'off', micForCalls: true };
+        expect(readSettings(null)).toEqual({ appUrl: '', ...none, notifications: true, notificationSound: true });
+        expect(readSettings({ appUrl: 'http://x.example', pushToTalk: 'R9', notifications: 'yes', micForCalls: 'no' }))
+            .toEqual({ appUrl: '', ...none, notifications: true, notificationSound: true });
         expect(readSettings({ appUrl: 'chat.example.com', pushToTalk: 'R4', notifications: false, notificationSound: false }))
-            .toEqual({ appUrl: 'https://chat.example.com/', pushToTalk: 'R4', notifications: false, notificationSound: false });
+            .toEqual({ appUrl: 'https://chat.example.com/', ...none, pushToTalk: 'R4', notifications: false, notificationSound: false });
+        expect(readSettings({ micForCalls: false }).micForCalls).toBe(false);
+    });
+});
+
+describe('the back buttons: one job each', () => {
+    const with_ = (o: object) => readSettings({ ...DEFAULT_SETTINGS, ...o });
+
+    it('a stored grip claimed twice keeps the first job and loses the rest', () => {
+        const s = with_({ pushToTalk: 'R5', muteButton: 'R5', deafenButton: 'R5' });
+        expect([s.pushToTalk, s.muteButton, s.deafenButton]).toEqual(['R5', 'off', 'off']);
+        const t = with_({ muteButton: 'L4', deafenButton: 'L4' });
+        expect([t.muteButton, t.deafenButton]).toEqual(['L4', 'off']);
+    });
+
+    it('says which job a grip has, and which grips to follow in a call', () => {
+        const s = with_({ pushToTalk: 'R5', muteButton: 'L4', deafenButton: 'L5' });
+        expect(jobOf(s, 'R5')).toBe('pushToTalk');
+        expect(jobOf(s, 'L4')).toBe('muteButton');
+        expect(jobOf(s, 'L5')).toBe('deafenButton');
+        expect(jobOf(s, 'R4')).toBeNull();
+        expect(jobOf(s, 'off')).toBeNull();
+        expect(jobOf(s, 42)).toBeNull();
+        expect(watchedButtons(s)).toEqual(['R5', 'L4', 'L5']);
+        expect(watchedButtons(DEFAULT_SETTINGS)).toEqual([]);
+    });
+
+    it('giving a grip a new job takes it from the old one, and says so', () => {
+        const s = with_({ pushToTalk: 'R5', muteButton: 'L4' });
+        const moved = assignButton(s, 'muteButton', 'R5');
+        expect([moved.settings.pushToTalk, moved.settings.muteButton]).toEqual(['off', 'R5']);
+        expect(moved.took).toBe('pushToTalk');
+        const fresh = assignButton(s, 'deafenButton', 'R4');
+        expect(fresh.took).toBeNull();
+        expect(fresh.settings.deafenButton).toBe('R4');
+        const same = assignButton(s, 'pushToTalk', 'R5');
+        expect(same.took).toBeNull();
+        expect(assignButton(s, 'muteButton', 'off').took).toBeNull();
+    });
+});
+
+describe('mute and deafen on a back button', () => {
+    it('one press, one toggle, however long it is held', () => {
+        const f = new PressFollower();
+        expect(f.signal('L4', true)).toBe(true);
+        expect(f.signal('L4', true)).toBe(false); // the half-second "still held"
+        expect(f.signal('L4', true)).toBe(false);
+        expect(f.signal('L4', false)).toBe(false);
+        expect(f.signal('L4', true)).toBe(true); // pressed again
+    });
+
+    it('each button on its own, and a reset forgets what was down', () => {
+        const f = new PressFollower();
+        expect(f.signal('L4', true)).toBe(true);
+        expect(f.signal('L5', true)).toBe(true);
+        expect(f.signal('L4', true)).toBe(false);
+        f.reset();
+        expect(f.signal('L4', true)).toBe(true);
     });
 });
 

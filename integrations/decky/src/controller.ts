@@ -12,10 +12,11 @@ import { PucaBrowserView } from './browserView';
 import { PucaIcon } from './components/icons';
 import { MicBridge, type MicAnswer } from './micBridge';
 import { SilentNotice } from './micSilence';
-import { HoldFollower } from './ptt';
+import { HoldFollower, PressFollower } from './ptt';
 import { readPageMessage, readState, readVoiceChannels, type EmbedState, type EmbedVoiceChannel, type PageNotification } from './protocol';
 import {
-    DEFAULT_SETTINGS, normalizeAppUrl, PUSH_TO_TALK_BUTTONS, readSettings, type PluginSettings, type PushToTalkButton,
+    assignButton, DEFAULT_SETTINGS, jobOf, normalizeAppUrl, PUSH_TO_TALK_BUTTONS, readSettings, watchedButtons,
+    type ButtonJob, type PluginSettings, type PushToTalkButton,
 } from './settings';
 import { isNewer, readKey, readOffer, verifyOffer, type UpdateKey, type UpdateOffer } from './update';
 
@@ -50,6 +51,9 @@ export interface Snapshot {
     micSilent: boolean;
     /** The push-to-talk button is held. */
     talking: boolean;
+    /** The plugin switched the Deck's muted microphone on for this call, and
+     *  mutes it again when the call ends (settings.micForCalls). */
+    micSwitchedOn: boolean;
     /** Why the Deck's controls cannot be read ("no-controller", "no-access",
      *  or the backend's error), while a call is trying to. */
     pttError: string | null;
@@ -69,9 +73,13 @@ export interface UpdateState {
     error: string | null;
 }
 
-/** What learnButton found: the back button pressed, none in time, or why
- *  the controller cannot be read. */
-export type LearnResult = { button: PushToTalkButton } | { button: null } | { error: string };
+/** What learnButton found: the back button pressed (and the job it was taken
+ *  from, if another had it), none in time, or why the controller cannot be
+ *  read. */
+export type LearnResult =
+    | { button: Exclude<PushToTalkButton, 'off'>; took: ButtonJob | null }
+    | { button: null }
+    | { error: string };
 
 type CallResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
@@ -100,7 +108,7 @@ const randomId = (): string => {
 class Controller {
     private snap: Snapshot = {
         phase: 'starting', error: null, settings: DEFAULT_SETTINGS, state: null,
-        micOn: false, micSilent: false, talking: false, pttError: null, viewOpen: false,
+        micOn: false, micSilent: false, talking: false, micSwitchedOn: false, pttError: null, viewOpen: false,
         pluginVersion: null, update: null,
     };
     private listeners = new Set<() => void>();
@@ -119,11 +127,27 @@ class Controller {
         renew: () => { void this.pageCall('holdPushToTalk', [true]); },
         up: () => { this.update({ talking: false }); void this.pageCall('holdPushToTalk', [false]); },
     });
-    /** What the backend is following during a call: the push-to-talk button,
-     *  or 'none' (presence only); null outside a call. */
-    private watching: PushToTalkButton | 'none' | null = null;
+    /** Mute and deafen on their back buttons: one toggle per press. */
+    private presses = new PressFollower();
+    /** What the backend follows during a call: the grips with a job, joined
+     *  ('' for presence only); null outside a call. */
+    private watching: string | null = null;
     private watchSeq = 0;
-    private onButton = (held: unknown) => { if (this.watching && this.watching !== 'none') this.hold.signal(held); };
+    private onButton = (payload: unknown) => {
+        if (this.watching === null) return;
+        const p = payload && typeof payload === 'object' ? payload as { button?: unknown; held?: unknown } : null;
+        if (!p || typeof p.held !== 'boolean') return;
+        const job = jobOf(this.snap.settings, p.button);
+        if (job === 'pushToTalk') {
+            this.hold.signal(p.held);
+        } else if (job && this.presses.signal(String(p.button), p.held)) {
+            void (job === 'muteButton' ? this.toggleMute() : this.toggleDeafen());
+        }
+    };
+    /** The Deck's own microphone for the call: 'on' from the start of a call
+     *  the plugin asked about it until the call ends. */
+    private micCall: 'idle' | 'on' = 'idle';
+    private buttonToast: { dismiss(): void } | null = null;
     private retryTimer: ReturnType<typeof setTimeout> | null = null;
     private loadTimer: ReturnType<typeof setTimeout> | null = null;
     private bootSeq = 0;
@@ -149,6 +173,7 @@ class Controller {
         this.snap = { ...this.snap, ...patch };
         this.listeners.forEach(fn => fn());
         this.syncInputWatch();
+        this.syncMicForCall();
         this.syncSilentNotice();
     }
 
@@ -478,32 +503,93 @@ class Controller {
     // ---- The Deck's controls: push-to-talk, presence ------------------------------------
 
     /**
-     * The backend reads the controls only during a call: the push-to-talk
-     * button when one is chosen, and always whether they are in use, which
-     * keeps a player out of Púca's AFK move. Runs on every snapshot change;
-     * does nothing unless the answer changed.
+     * The backend reads the controls only during a call: the back grips with
+     * a job (push to talk, mute, deafen), and always whether they are in use,
+     * which keeps a player out of Púca's AFK move. Runs on every snapshot
+     * change; does nothing unless the answer changed.
      */
     private syncInputWatch(): void {
-        const choice = this.snap.settings.pushToTalk;
-        const want = this.started && this.snap.state?.call ? (choice === 'off' ? 'none' : choice) : null;
+        const buttons = watchedButtons(this.snap.settings);
+        const want = this.started && this.snap.state?.call ? buttons.join(',') : null;
         if (want === this.watching) return;
         this.watching = want;
         this.hold.reset();
+        this.presses.reset();
         const seq = ++this.watchSeq;
         if (want === null) {
             void call('unwatch_input').catch(() => {});
             if (this.snap.pttError !== null) this.update({ pttError: null });
             return;
         }
-        void call<[string | null], CallResult<string | null>>('watch_input', want === 'none' ? null : want).then(
+        void call<[string[]], CallResult<string | null>>('watch_input', buttons).then(
             r => { if (seq === this.watchSeq) this.update({ pttError: r.ok ? r.value : r.error }); },
             err => { if (seq === this.watchSeq) this.update({ pttError: String((err as Error)?.message ?? err) }); },
         );
     }
 
-    /** Settings: the back button the person presses next becomes push to
-     *  talk. Choosing by pressing, because R4 and R5 are easy to mix up. */
-    async learnButton(): Promise<LearnResult> {
+    /** Mute or unmute from a back button, and say so over the game. */
+    private async toggleMute(): Promise<void> {
+        const c = this.snap.state?.call;
+        if (!c) return;
+        if (c.noMicrophone) {
+            this.sayButton('No microphone in this call', 'Join again with a microphone to talk.');
+            return;
+        }
+        const want = !c.muted;
+        const r = await this.pageCall<boolean>('setMuted', [want]);
+        if (r.ok && r.value === true) this.sayButton(want ? 'Muted' : 'Unmuted', c.channelName);
+        else this.sayButton(want ? "Couldn't mute" : "Couldn't unmute", c.deafened ? 'You are deafened.' : 'Púca does not allow it in this channel.');
+    }
+
+    /** Deafen or undeafen from a back button, and say so over the game. */
+    private async toggleDeafen(): Promise<void> {
+        const c = this.snap.state?.call;
+        if (!c) return;
+        const want = !c.deafened;
+        const r = await this.pageCall<boolean>('setDeafened', [want]);
+        if (r.ok && r.value === true) this.sayButton(want ? 'Deafened' : 'Undeafened', c.channelName);
+        else this.sayButton(want ? "Couldn't deafen" : "Couldn't undeafen", c.channelName);
+    }
+
+    /** A short, silent toast for a back button: the panel is not on screen
+     *  in a game. A new one replaces the last instead of stacking up. */
+    private sayButton(title: string, body: string): void {
+        this.buttonToast?.dismiss();
+        this.buttonToast = toaster.toast({
+            title, body, logo: createElement(PucaIcon, { size: 40 }), playSound: false, duration: 2000,
+        });
+    }
+
+    /**
+     * The Deck's own microphone: switched on when a call starts and it is
+     * muted (settings.micForCalls), muted again when the call ends. The
+     * setting is read when the call starts, so changing it mid-call never
+     * mutes someone who is talking.
+     */
+    private syncMicForCall(): void {
+        const c = this.snap.state?.call;
+        const inCall = this.started && !!c && !c.noMicrophone;
+        if (inCall && this.micCall === 'idle' && this.snap.settings.micForCalls) {
+            this.micCall = 'on';
+            void call<[boolean], CallResult<{ changed?: boolean }>>('mic_for_call', true).then(r => {
+                if (!r.ok) {
+                    console.warn(`[Púca] could not switch the Deck's microphone on: ${r.error}`);
+                } else if (r.value.changed && this.micCall === 'on') {
+                    this.update({ micSwitchedOn: true });
+                    this.sayButton('Microphone on for the call', "Your Deck's microphone was muted. Púca mutes it again when you leave.");
+                }
+            }, err => console.warn('[Púca] mic_for_call:', err));
+        } else if (!inCall && this.micCall === 'on') {
+            this.micCall = 'idle';
+            if (this.snap.micSwitchedOn) this.update({ micSwitchedOn: false });
+            void call<[boolean], unknown>('mic_for_call', false).catch(err => console.warn('[Púca] mic_for_call:', err));
+        }
+    }
+
+    /** Settings: the back button the person presses next gets `job`.
+     *  Choosing by pressing, because R4 and R5 are easy to mix up. A grip has
+     *  one job: if another job had it, that one is switched off. */
+    async learnButton(job: ButtonJob): Promise<LearnResult> {
         let r: CallResult<string | null>;
         try {
             r = await call<[number], CallResult<string | null>>('learn_button', LEARN_TIMEOUT_S);
@@ -513,8 +599,14 @@ class Controller {
         if (!r.ok) return { error: r.error };
         const button = PUSH_TO_TALK_BUTTONS.find(b => b !== 'off' && b === r.value);
         if (!button || button === 'off') return { button: null };
-        await this.saveSettings({ pushToTalk: button });
-        return { button };
+        const { settings, took } = assignButton(this.snap.settings, job, button);
+        await this.saveSettings({ pushToTalk: settings.pushToTalk, muteButton: settings.muteButton, deafenButton: settings.deafenButton });
+        return { button, took };
+    }
+
+    /** Settings: take `job`'s back button away. */
+    clearButton(job: ButtonJob): void {
+        void this.saveSettings({ [job]: 'off' });
     }
 
     cancelLearn(): void {

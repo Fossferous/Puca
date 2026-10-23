@@ -13,14 +13,15 @@ So the backend reads the controller itself, from /dev/hidraw, which SteamOS
 lets the signed-in user read (the seat's ACL; no root). It reads only while
 the frontend asks:
 
-- in a call: the chosen push-to-talk grip, held or not; and whether ANY
-  control is being touched or pressed, never which, so that Púca's AFK move
-  does not take a player out of the call mid-game (docs/EMBEDDING.md,
-  idleSeconds);
+- in a call: the back grips the person gave a job (push to talk, mute,
+  deafen), held or not; and whether ANY control is being touched or pressed,
+  never which, so that Púca's AFK move does not take a player out of the
+  call mid-game (docs/EMBEDDING.md, idleSeconds);
 - while the person chooses a push-to-talk button: which back grip they press
   next.
 
-Nothing leaves this module but "held", "released", "in use" and a grip's name.
+Nothing leaves this module but a grip's name with "held" or "released",
+"in use", and a grip's name.
 
 The layout is the Linux driver's (drivers/hid/hid-steam.c,
 steam_deck_button_mappings). Every message is 64 bytes and starts 01 00, with
@@ -156,38 +157,42 @@ class InputWatch:
     """The Deck's controls during a call, followed on every node of its
     controller.
 
-    - Push to talk (`button`, or None for none): emit_button(True) when it
-      goes down and every HEARTBEAT_S while it stays down; emit_button(False)
-      when it comes up, when the controller stops reporting, and on stop().
-      The frontend lets go by itself when the heartbeat stops, so no failure
-      here can leave a microphone transmitting.
+    - The back grips with a job (`buttons`: names, one name, or None for
+      none), each on its own: emit_button(name, True) when it goes down and
+      every HEARTBEAT_S while it stays down; emit_button(name, False) when it
+      comes up, when the controller stops reporting, and on stop(). For push
+      to talk the frontend lets go by itself when the heartbeat stops, so no
+      failure here can leave a microphone transmitting.
     - Presence: emit_presence() when any control is in use, at once and then
       at most every PRESENCE_S while it goes on.
     """
 
-    def __init__(self, button: str | None, emit_button: Callable[[bool], Any],
+    def __init__(self, buttons: Any, emit_button: Callable[[str, bool], Any],
                  emit_presence: Callable[[], Any] | None = None, io: Any = None,
                  heartbeat_s: float = HEARTBEAT_S, stale_s: float = STALE_S,
                  rescan_s: float = RESCAN_S, presence_s: float = PRESENCE_S) -> None:
-        if button is not None and button not in BUTTON_BITS:
-            raise ValueError(f"unknown button {button!r}")
-        self.button = button
+        names = (buttons,) if isinstance(buttons, str) else tuple(buttons or ())
+        for name in names:
+            if name not in BUTTON_BITS:
+                raise ValueError(f"unknown button {name!r}")
+        self.buttons = tuple(dict.fromkeys(names))
         self._emit = emit_button
         self._emit_presence = emit_presence
         self.io = io if io is not None else HidrawIO()
         self.heartbeat_s, self.stale_s = heartbeat_s, stale_s
         self.rescan_s, self.presence_s = rescan_s, presence_s
         self._fds: dict[str, Any] = {}
-        self._held: set[str] = set()
+        # Per grip, the nodes that last reported it down.
+        self._held: dict[str, set[str]] = {name: set() for name in self.buttons}
+        self._beats: dict[str, Any] = {}
         self._last_state = 0.0
         self._presence_at: float | None = None
-        self._beat: Any = None
         self._rescan: Any = None
         self.running = False
 
     @property
     def held(self) -> bool:
-        return bool(self._held)
+        return any(self._held.values())
 
     def start(self) -> str | None:
         """Open the controller. Returns what the panel can say when it could
@@ -198,12 +203,14 @@ class InputWatch:
 
     def stop(self) -> None:
         self.running = False
-        for handle in (self._beat, self._rescan):
-            if handle is not None:
-                handle.cancel()
-        self._beat = self._rescan = None
+        if self._rescan is not None:
+            self._rescan.cancel()
+        self._rescan = None
         for path in list(self._fds):
             self._drop(path)
+        for beat in self._beats.values():
+            beat.cancel()
+        self._beats.clear()
 
     # ---- Nodes -----------------------------------------------------------------
 
@@ -244,14 +251,15 @@ class InputWatch:
                 self.io.close(fd)
             except OSError:
                 pass
-        self._set(path, False)
+        for name in self.buttons:
+            self._set(path, name, False)
 
     def _readable(self, path: str) -> None:
         fd = self._fds.get(path)
         if fd is None:
             return
         seen = False
-        state = None
+        states: dict[str, bool] = {}
         in_use = False
         while True:
             try:
@@ -267,47 +275,48 @@ class InputWatch:
             if not deck_state(report):
                 continue
             seen = True
-            if self.button is not None:
-                state = button_held(report, self.button)
+            for name in self.buttons:
+                states[name] = bool(button_held(report, name))
             if controls_in_use(report):
                 in_use = True
         if not seen:
             return
         self._last_state = self.io.now()
-        if state is not None:
-            self._set(path, state)
+        for name, held in states.items():
+            self._set(path, name, held)
         if in_use:
             self._presence()
 
     # ---- Held / released, in use -------------------------------------------------
 
-    def _set(self, path: str, held: bool) -> None:
-        was = bool(self._held)
+    def _set(self, path: str, name: str, held: bool) -> None:
+        paths = self._held[name]
+        was = bool(paths)
         if held:
-            self._held.add(path)
+            paths.add(path)
         else:
-            self._held.discard(path)
-        if self._held and not was:
-            _deliver(self._emit, True)
-            self._beat = self.io.later(self.heartbeat_s, self._tick)
-        elif was and not self._held:
-            if self._beat is not None:
-                self._beat.cancel()
-                self._beat = None
-            _deliver(self._emit, False)
+            paths.discard(path)
+        if paths and not was:
+            _deliver(self._emit, name, True)
+            self._beats[name] = self.io.later(self.heartbeat_s, lambda: self._tick(name))
+        elif was and not paths:
+            beat = self._beats.pop(name, None)
+            if beat is not None:
+                beat.cancel()
+            _deliver(self._emit, name, False)
 
-    def _tick(self) -> None:
-        self._beat = None
-        if not self._held or not self.running:
+    def _tick(self, name: str) -> None:
+        self._beats.pop(name, None)
+        if not self._held[name] or not self.running:
             return
         if self.io.now() - self._last_state > self.stale_s:
             # Held, then silence: a controller that stopped reporting is not
             # a button still held.
-            for path in list(self._held):
-                self._set(path, False)
+            for path in list(self._held[name]):
+                self._set(path, name, False)
             return
-        _deliver(self._emit, True)
-        self._beat = self.io.later(self.heartbeat_s, self._tick)
+        _deliver(self._emit, name, True)
+        self._beats[name] = self.io.later(self.heartbeat_s, lambda: self._tick(name))
 
     def _presence(self) -> None:
         if self._emit_presence is None:

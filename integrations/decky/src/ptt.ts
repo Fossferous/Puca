@@ -76,3 +76,27 @@ export class HoldFollower {
         }, this.staleMs);
     }
 }
+
+/**
+ * Mute and deafen on a back button: one press, one toggle, however long the
+ * button stays down (the backend repeats "held" every half second while it
+ * does).
+ */
+export class PressFollower {
+    private down = new Set<string>();
+
+    /** One "puca_button" event for a toggle's button: true for a new press. */
+    signal(button: string, held: boolean): boolean {
+        if (!held) {
+            this.down.delete(button);
+            return false;
+        }
+        if (this.down.has(button)) return false;
+        this.down.add(button);
+        return true;
+    }
+
+    reset(): void {
+        this.down.clear();
+    }
+}

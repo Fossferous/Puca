@@ -52,7 +52,16 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(ps.read_settings(None), ps.DEFAULTS)
         self.assertEqual(ps.read_settings({"appUrl": "http://x.example", "pushToTalk": "R9", "notifications": "yes"}), ps.DEFAULTS)
         self.assertEqual(ps.read_settings({"appUrl": "chat.example.com", "pushToTalk": "R4", "notifications": False}),
-                         {"appUrl": "https://chat.example.com/", "pushToTalk": "R4", "notifications": False, "notificationSound": True})
+                         {"appUrl": "https://chat.example.com/", "pushToTalk": "R4", "muteButton": "off", "deafenButton": "off",
+                          "micForCalls": True, "notifications": False, "notificationSound": True})
+
+    def test_a_back_grip_has_one_job(self):
+        s = ps.read_settings({"pushToTalk": "R5", "muteButton": "R5", "deafenButton": "L4", "micForCalls": False})
+        self.assertEqual((s["pushToTalk"], s["muteButton"], s["deafenButton"], s["micForCalls"]), ("R5", "off", "L4", False))
+        s = ps.read_settings({"muteButton": "L5", "deafenButton": "L5"})
+        self.assertEqual((s["muteButton"], s["deafenButton"]), ("L5", "off"))
+        s = ps.read_settings({"pushToTalk": "off", "muteButton": "off", "deafenButton": "R4"})
+        self.assertEqual(s["deafenButton"], "R4", "two jobs switched off do not count as sharing a grip")
 
     def test_round_trip_through_the_file(self):
         with tempfile.TemporaryDirectory() as d:

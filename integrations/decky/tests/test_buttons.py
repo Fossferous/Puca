@@ -74,7 +74,7 @@ class ReportTests(unittest.TestCase):
 
     def test_an_unknown_button_is_refused(self):
         with self.assertRaises(ValueError):
-            pb.InputWatch("A", lambda held: None, io=FakeIO())
+            pb.InputWatch("A", lambda name, held: None, io=FakeIO())
 
 
 class FakeHandle:
@@ -165,7 +165,7 @@ class WatchTests(unittest.TestCase):
     def make(self, button="R4", **kw):
         io = FakeIO(**kw)
         got = []
-        return io, got, pb.InputWatch(button, got.append, io=io)
+        return io, got, pb.InputWatch(button, lambda name, held: got.append(held), io=io)
 
     def test_down_then_a_heartbeat_every_half_second_then_up(self):
         io, got, w = self.make()
@@ -267,6 +267,57 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(got, [True])
 
 
+class SeveralGripsTests(unittest.TestCase):
+    """Push to talk, mute and deafen can each have a back grip: each is
+    followed on its own, and says its own name."""
+
+    def make(self, buttons=("R5", "L4")):
+        io = FakeIO()
+        got = []
+        return io, got, pb.InputWatch(buttons, lambda name, held: got.append((name, held)), io=io)
+
+    def test_each_grip_on_its_own(self):
+        io, got, w = self.make()
+        w.start()
+        io.deliver("/dev/hidraw2", deck_report("R5"))
+        self.assertEqual(got, [("R5", True)])
+        io.deliver("/dev/hidraw2", deck_report("R5", "L4"))
+        self.assertEqual(got, [("R5", True), ("L4", True)])
+        io.advance(0.5)  # a heartbeat each, while both stay down
+        io.deliver("/dev/hidraw2", deck_report("R5", "L4"))
+        self.assertEqual(sorted(got[2:]), [("L4", True), ("R5", True)])
+        del got[:]
+        io.deliver("/dev/hidraw2", deck_report("L4"))
+        self.assertEqual(got, [("R5", False)], "R5 let go; L4 still down says nothing new")
+        io.deliver("/dev/hidraw2", deck_report())
+        self.assertEqual(got, [("R5", False), ("L4", False)])
+
+    def test_a_grip_without_a_job_says_nothing(self):
+        io, got, w = self.make(("R5",))
+        w.start()
+        io.deliver("/dev/hidraw2", deck_report("L4"), deck_report("R4"), deck_report("L5"))
+        self.assertEqual(got, [])
+
+    def test_silence_and_stop_let_every_held_grip_go(self):
+        io, got, w = self.make()
+        w.start()
+        io.deliver("/dev/hidraw2", deck_report("R5", "L4"))
+        io.advance(1.5)  # the controller stopped reporting
+        self.assertIn(("R5", False), got)
+        self.assertIn(("L4", False), got)
+        del got[:]
+        io.deliver("/dev/hidraw2", deck_report("R5"))
+        w.stop()
+        self.assertEqual(got, [("R5", True), ("R5", False)])
+        self.assertEqual(io.pending(), [])
+
+    def test_a_name_twice_is_one_grip_and_an_unknown_one_is_refused(self):
+        io, got, w = self.make(("R5", "R5"))
+        self.assertEqual(w.buttons, ("R5",))
+        with self.assertRaises(ValueError):
+            pb.InputWatch(("R5", "X9"), lambda name, held: None, io=FakeIO())
+
+
 N2 = "/dev/hidraw2"
 
 
@@ -293,7 +344,7 @@ class PresenceTests(unittest.TestCase):
     def make(self, button=None):
         io = FakeIO()
         got, seen = [], []
-        return io, got, seen, pb.InputWatch(button, got.append, lambda: seen.append(io.t), io=io)
+        return io, got, seen, pb.InputWatch(button, lambda name, held: got.append(held), lambda: seen.append(io.t), io=io)
 
     def test_in_use_is_said_at_once_then_at_most_every_ten_seconds(self):
         io, got, seen, w = self.make()
@@ -346,7 +397,7 @@ class PresenceTests(unittest.TestCase):
     def test_a_watch_with_no_presence_callback_is_fine(self):
         io = FakeIO()
         got = []
-        w = pb.InputWatch("R5", got.append, io=io)
+        w = pb.InputWatch("R5", lambda name, held: got.append(held), io=io)
         w.start()
         io.deliver(N2, deck_report("R5", extra=[(13, 6)]))
         self.assertEqual(got, [True])
@@ -426,7 +477,7 @@ class RunningLoopTests(unittest.TestCase):
                     return r
 
             got = []
-            watch = pb.InputWatch("R4", got.append, io=PipeIO(), heartbeat_s=0.05)
+            watch = pb.InputWatch("R4", lambda name, held: got.append(held), io=PipeIO(), heartbeat_s=0.05)
             self.assertIsNone(watch.start())
             os.write(w, deck_report("R4"))
             await asyncio.sleep(0.3)
