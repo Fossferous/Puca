@@ -486,15 +486,17 @@ describe('sending a share at several sizes when it helps (shareLadder.ts)', () =
         await flush();
         expect(lastLayers()).toEqual([360]);
         expect(senders.at(-1)!.params.encodings.length).toBe(2);
-        // 540 -> 500 lines: still two encodings, re-sized in place.
+        // 540p60 -> 500p30: still two encodings, re-sized in place, and the
+        // full picture's cap moves with the frame rate (6 -> 4 Mbps).
         cap.height = 500;
+        cap.fps = 30;
         await m.retuneShare();
         expect(published.length, 'in place').toBe(1);
         const two = senders.at(-1)!.params.encodings as Array<{ rid: string; scaleResolutionDownBy: number; maxBitrate: number }>;
         expect(two.map(e => e.rid)).toEqual(['q', 'h']);
         expect(500 / two[0].scaleResolutionDownBy).toBeCloseTo(360);
         expect(two[1].scaleResolutionDownBy, 'the full picture stays full').toBe(1);
-        expect(two[1].maxBitrate, 'at the top bitrate').toBe(SHARE_KBPS_TABLE[720][60] * 1000);
+        expect(two[1].maxBitrate, 'at the new top bitrate, not a middle rung\'s').toBe(SHARE_KBPS_TABLE[720][30] * 1000);
         // 500 -> 1080 lines: a middle rung now fits, so three encodings: a re-publish.
         cap.height = 1080;
         await m.retuneShare();
