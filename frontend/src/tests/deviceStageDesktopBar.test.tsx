@@ -231,6 +231,34 @@ describe('keys on the desktop stage', () => {
     });
 });
 
+describe("minimised to the chat (Back to Púca), the keyboard is the app's", () => {
+    it('lets go of a held key on the way out, sends nothing while minimised (chords included), and drives again once back', async () => {
+        await mount();
+        await key('keydown', 'KeyW');
+        expect(keyFrames(), 'held on the remote machine').toEqual(['KeyW↓']);
+        await openMenu('More');
+        await click(menuItem('Back to Púca (keep the session)'));
+        expect(host!.querySelector('.device-stage-minimized'), 'the pill is up').toBeTruthy();
+        expect(keyFrames(), 'the held key was let go over there').toEqual(['KeyW↓', 'KeyW↑']);
+        h.sendInput.mockClear();
+        // Typing in the chat with the focus off the composer: the window is
+        // the target, as it is for any key nothing local claims.
+        await key('keydown', 'KeyO');
+        await key('keydown', 'KeyK');
+        await key('keydown', 'Enter');
+        await key('keydown', 'Delete');
+        await key('keydown', 'KeyA', { ctrlKey: true });
+        await key('keydown', 'End', { ctrlKey: true, altKey: true });
+        await key('keydown', 'Home', { ctrlKey: true, altKey: true });
+        expect(frames(), 'not a key, not a Ctrl+Alt+Del').toEqual([]);
+        // Back: the stage drives again, and Ctrl+Alt+Home did not pause it.
+        await click(host!.querySelector('.device-stage-minimized'));
+        expect(host!.textContent).not.toContain('Control paused');
+        await key('keydown', 'KeyB');
+        expect(keyFrames()).toEqual(['KeyB↓']);
+    });
+});
+
 describe('the menus reach the session layer as the phone\'s do', () => {
     it('Keyboard: Ctrl+Alt+Del is one sas frame; Alt+Tab and Alt+F4 are chords', async () => {
         await mount();

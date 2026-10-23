@@ -6,11 +6,11 @@
  * see ("tauri.localhost wants to see clipboard") held exactly such a
  * `writeText` open for good, and the note's own six-second lifetime took the
  * "Measuring…" away meanwhile, so the button simply looked dead. Each step is
- * now bounded with the bound "Send diagnostics" uses (diagnosticsReport's
+ * now bounded with the bound "Send diagnostics" uses (the leaf module's
  * `withTimeout`), the note stays up until the copy ends, and a step that gave
  * no answer is named.
  */
-import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
@@ -65,18 +65,8 @@ vi.mock('../api/keyboardInset', () => ({
     currentKeyboardInset: () => ({ visible: false, top: null, source: 'none' }),
     watchKeyboardInset: () => () => { /* unsubscribe */ },
 }));
-// The real bound, without the call stack it reports on (as its own test does).
-vi.mock('../api/rtc/sfuManager', () => ({ sfuManager: {} }));
-vi.mock('../api/webrtc', () => ({ webrtcManager: {} }));
-
 const { DeviceStage } = await import('../components/DeviceStage');
-const { QUICK_TIMEOUT_MS } = await import('../api/diagnosticsReport');
-
-beforeAll(async () => {
-    // The stage loads the bound on use; loaded here, that is a cache hit
-    // under the fake clock below.
-    await import('../api/diagnosticsReport');
-});
+const { QUICK_TIMEOUT_MS } = await import('../api/withTimeout');
 
 const BOX = { left: 0, top: 0, width: 1280, height: 720 };
 beforeEach(() => {

@@ -76,6 +76,7 @@ import { DeviceStageVirtualMouse } from './DeviceStageVirtualMouse';
 import { virtualStartingMessage } from '../api/devices/noScreen';
 import { inputBlockedMessage } from '../api/devices/inputReach';
 import { MAX_TYPED_CHARS, typeTextEvents } from '../api/devices/typeText';
+import { QUICK_TIMEOUT_MS, withTimeout } from '../api/withTimeout';
 import { readLocalClipboardDetailed } from '../api/devices/clipboard';
 import { useDeviceLiveStats } from '../api/devices/useDeviceLiveStats';
 import { useLatencyProbe } from '../api/devices/useLatencyProbe';
@@ -412,16 +413,15 @@ function diagFailedNote(e: unknown, step: 'the measurement' | 'the clipboard'): 
  * the note to show; never rejects and never hangs.
  *
  * EVERY STEP IS BOUNDED, with the bound "Send diagnostics" uses
- * (diagnosticsReport's withTimeout), loaded on use as Settings loads it. Each
- * step has hung or can: a getStats that never answers, and — 0.9.819, the
- * desktop app — a clipboard permission prompt nobody could see, which held
- * writeText open for good. Out here, not in the component, because the React
- * Compiler's lint gives up on a component holding a try/finally or a dynamic
- * import, silencing its other checks.
+ * (`withTimeout`, the leaf module, so nothing of the call stack loads here).
+ * Each step has hung or can: a getStats that never answers, and — 0.9.819,
+ * the desktop app — a clipboard permission prompt nobody could see, which
+ * held writeText open for good. Out here, not in the component, because the
+ * React Compiler's lint gives up on a component holding a try/finally,
+ * silencing its other checks.
  */
 async function measureAndCopyDiagnostics(): Promise<string> {
     try {
-        const { withTimeout, QUICK_TIMEOUT_MS } = await import('../api/diagnosticsReport');
         const bound: DiagStepBound = (step, label) => withTimeout(step, QUICK_TIMEOUT_MS, label);
         let rows: Record<string, unknown>[];
         try {
@@ -2766,9 +2766,15 @@ export function DeviceStage() {
         setFullscreen(false);
         void leaveStageFullscreen();
     }), []);
-    /** Back to the app with the session kept (the phone's Chat button), out of
-     *  fullscreen first: a fullscreen window showing the chat is no use. */
+    /** Back to the app with the session kept (the phone's Chat button, the
+     *  desktop's "Back to Púca"). From here the keyboard is the app's again —
+     *  the key listener forwards nothing while minimised — so LET GO FIRST,
+     *  the pause rule: a key or button held at this moment is released over
+     *  there now, a captured mouse is let go, and fullscreen ends (a
+     *  fullscreen window showing the chat is no use). */
     const minimizeStage = useCallback(() => {
+        releaseAllRef.current();
+        if (document.pointerLockElement) document.exitPointerLock();
         if (fullscreenRef.current) {
             fullscreenRef.current = false;
             setFullscreen(false);
@@ -3208,6 +3214,13 @@ export function DeviceStage() {
                 sendInput(session.id, { t: 'key', code: e.code, down: false });
                 return;
             }
+            // MINIMISED: the stage is out of sight and the keys are the app's
+            // again — the chat, the composer, Púca's own shortcuts. Nothing
+            // goes over, not even the stage's chords (Ctrl+Alt+End would send
+            // Ctrl+Alt+Del from the chat, Ctrl+Alt+Home toggle a pause nobody
+            // can see). Only the releases above still run, and minimising let
+            // go of everything held already.
+            if (isMinimized) return;
             // THE STAGE'S OWN CHORDS (stageShortcuts.ts), never forwarded.
             // Esc is not one any more: it used to pause control, which made
             // it the one key the desktop could never send.
@@ -3256,7 +3269,7 @@ export function DeviceStage() {
             window.removeEventListener('keydown', onKey, true);
             window.removeEventListener('keyup', onKey, true);
         };
-    }, [session, controlEnabled, setControl, toggleFullscreen, isMobile, typeTextOpen]);
+    }, [session, controlEnabled, setControl, toggleFullscreen, isMobile, typeTextOpen, isMinimized]);
 
 
     if (!session) {
@@ -3724,7 +3737,7 @@ export function DeviceStage() {
                     setActiveMenu={setActiveMobileMenu}
                     onKeyboard={onKeyboardButton}
                     onCollapse={() => setToolbarCollapsed(true)}
-                    onMinimize={() => setIsMinimized(true)}
+                    onMinimize={minimizeStage}
                     onHeight={setToolbarH}
                 />
             )}
