@@ -42,6 +42,8 @@ mod file_transfer;
 mod input_wire;
 // Per-lane input counts for the log; ungated so every CI leg tests it.
 mod input_tally;
+// Whether the window that would receive input is above this agent (UIPI).
+mod input_reach;
 mod file_log;
 
 #[cfg(windows)]

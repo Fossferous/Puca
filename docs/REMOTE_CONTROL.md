@@ -106,6 +106,34 @@ cross, so nobody ships or markets it beyond what it actually guarantees.
   around it would be software rather than the OS's own ceiling. What ships instead
   is honesty: the viewer is told a Windows security screen is up, rather than
   being left looking at a frozen picture.
+- **An elevated window swallows My Devices input, and the viewer is told.**
+  The same UIPI rule applies to the My Devices agent the desktop app starts
+  (`crates/puca-agent`, medium integrity): a window whose program runs as
+  administrator — a game started by an elevated launcher, Task Manager on an
+  administrator account, an installer — silently drops every injected click
+  and key while the picture keeps updating. Windows says nothing: `SendInput`
+  answers as if it worked (Microsoft's documentation: neither the return value
+  nor `GetLastError` reveals a UIPI block), so the agent's own input tallies
+  read `failed=0`. The agent now asks, on the 1 Hz status poll, whether the
+  window in front (keys) or the one under the pointer (clicks) belongs to a
+  process above it (`crates/puca-agent/src/input_reach.rs`: the process's
+  integrity level, or a token it cannot even open), logs each change once
+  (`[input] Windows is dropping this agent's input to valheim.exe …`), and the
+  host relays the program's file name to the viewer (`input-blocked`), which
+  shows a banner naming it and what to do: close it, or start it again without
+  administrator rights. Found on 2026-10-23: a scheduled task started Steam
+  with highest privileges, so every game it launched was elevated. The
+  sign-in-screen (SYSTEM) agent sits above every application and never
+  reports it. Controlling an elevated window from an ordinary session is still
+  out of scope (see the bridge paragraph above for why the SYSTEM service
+  stays absent during an ordinary session).
+- **A game holding the pointer for mouse-look.** A game that hides the
+  pointer AND confines it (`ClipCursor`) re-centres it every frame and reads
+  raw motion, so absolute moves cannot turn its camera. The agent reports that
+  pair (`pointer_captured`; either alone is ordinary — a video player hides
+  the pointer, a windowed game confines it in its menus) and the desktop viewer
+  offers **Use Game mode**: relative moves under pointer lock, engaged by the
+  same click.
 - **No "anti-cheat safe" promise.** The process-name blocklist
   (`detect_anticheat`) is **risk reduction, not a guarantee**. It denies control
   by default when a known protected title is running, but:

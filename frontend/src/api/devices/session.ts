@@ -52,6 +52,7 @@ import {
 import { deviceKeyDh } from './deviceKeyRc';
 import { buildClipboardEvent, isClipboardEvent, readLocalClipboardDetailed, writeLocalClipboard, MAX_CLIPBOARD_BYTES } from './clipboard';
 import { getHostBackend } from './hostBackend';
+import { blockedAppName } from './inputReach';
 import { attachTunnelChannel, closeTunnels } from './tunnel';
 import { SerialQueue } from '../serialQueue';
 import { InputCoalescer } from './inputCoalescer';
@@ -400,6 +401,17 @@ export interface DeviceControlSession {
      *  `cursor-clipped` notice, never guessed. Absent machinery (webview host,
      *  old agent) leaves it false — the pre-feature behaviour. */
     cursorClipped: boolean;
+    /** The program (`valheim.exe`) whose window would get this session's input
+     *  and that runs ABOVE the host's agent — as administrator — so Windows
+     *  drops every injected click and key aimed at it without a word (UIPI;
+     *  the agent's input_reach.rs, wording in inputReach.ts). Null while input
+     *  lands. Same trust rule as `secureDesktop`: HOST polled from the agent,
+     *  CONTROLLER only ever told by the host's `input-blocked` notice. */
+    inputBlocked: string | null;
+    /** A program on the host has hidden AND confined the pointer — a game in
+     *  mouse-look, which absolute moves cannot steer and Game mode can.
+     *  Host-asserted like `cursorClipped` (`pointer-captured` notice). */
+    pointerCaptured: boolean;
     /** CONTROLLER: transient display-power outcome line ("Turned off 2 of
      *  3; ...", the no-response timeout, a DDC refusal). Auto-clears; never
      *  a session error. */
@@ -574,6 +586,11 @@ interface Internal extends DeviceControlSession {
      *  clip — the exact `secureDesktopSent` pattern, for the exact same
      *  one-way-latch reason. Reset to `null` on any relay interruption. */
     cursorClippedSent: boolean | null;
+    /** HOST: what the controller was last TOLD about `inputBlocked` and
+     *  `pointerCaptured` — the `secureDesktopSent` pattern again, for the same
+     *  one-way-latch reason. `undefined` = not told, or may have missed it. */
+    inputBlockedSent?: string | null;
+    pointerCapturedSent?: boolean;
     /** CONTROLLER: when `secureDesktop` last became true (Date.now()), null
      *  while it is false. The locked-follow poller needs an AGE, not a flag:
      *  it deliberately waits out the host-side unsolicited-lock handover
@@ -861,6 +878,8 @@ function emit(): void {
         mediaRestarting: s.mediaRestarting,
         secureDesktop: s.secureDesktop,
         cursorClipped: s.cursorClipped,
+        inputBlocked: s.inputBlocked,
+        pointerCaptured: s.pointerCaptured,
         powerNotice: s.powerNotice,
         peerName: s.peerName,
         hostScreen: s.hostScreen,
@@ -2234,10 +2253,14 @@ export async function pollSecureDesktop(): Promise<void> {
             if (s.transportDown || s.peerReconnecting) {
                 s.secureDesktopSent = null;
                 s.cursorClippedSent = null;
+                s.inputBlockedSent = undefined;
+                s.pointerCapturedSent = undefined;
                 continue;
             }
             let up = false;
             let clipped = false;
+            let blocked: string | null = null;
+            let captured = false;
             // Captured BEFORE the await: which stream this poll is asking
             // about. See the stream-died check below.
             const gen = s.agentStreamGen;
@@ -2248,6 +2271,8 @@ export async function pollSecureDesktop(): Promise<void> {
                 const status = await backend.sessionStatus(s.id);
                 up = status.secureDesktop;
                 clipped = status.cursorClipped === true;
+                blocked = blockedAppName(status.inputBlocked);
+                captured = status.pointerCaptured === true;
                 streamLive = status.streamLive;
                 streamEnd = status.streamEnd;
             } catch {
@@ -2343,6 +2368,23 @@ export async function pollSecureDesktop(): Promise<void> {
             if (clipped !== s.cursorClippedSent) {
                 s.cursorClippedSent = clipped;
                 void sendSignal(s, { kind: 'cursor-clipped', clipped }).catch(() => undefined);
+            }
+            // CAN THE VIEWER'S INPUT LAND? An elevated window swallows it all
+            // (UIPI), a game in mouse-look swallows absolute moves; the agent
+            // sees both and nobody else can. Same edge-against-what-was-told
+            // rule as the two notices above.
+            if (blocked !== s.inputBlocked || captured !== s.pointerCaptured) {
+                s.inputBlocked = blocked;
+                s.pointerCaptured = captured;
+                emit();
+            }
+            if (blocked !== s.inputBlockedSent) {
+                s.inputBlockedSent = blocked;
+                void sendSignal(s, { kind: 'input-blocked', app: blocked }).catch(() => undefined);
+            }
+            if (captured !== s.pointerCapturedSent) {
+                s.pointerCapturedSent = captured;
+                void sendSignal(s, { kind: 'pointer-captured', captured }).catch(() => undefined);
             }
         }
     } finally {
@@ -3432,6 +3474,8 @@ export async function connectToDevice(
         secureDesktopSent: null,
         cursorClipped: false,
         cursorClippedSent: null,
+        inputBlocked: null,
+        pointerCaptured: false,
         powerNotice: null, pendingPowerAckTimer: null, powerNoticeTimer: null,
         peerName: opts?.peerName?.trim() || null,
         hostScreen: null,
@@ -4043,6 +4087,8 @@ export function installDeviceSessions(): void {
                 secureDesktopSent: null,
                 cursorClipped: false,
                 cursorClippedSent: null,
+                inputBlocked: null,
+                pointerCaptured: false,
                 powerNotice: null, pendingPowerAckTimer: null, powerNoticeTimer: null,
                 peerName: null,
                 hostScreen: null,
@@ -5412,6 +5458,13 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
         /** screen-state: what the host says about its screen. Only
          *  'virtual-starting' means anything today (noScreen.ts). */
         state?: string;
+        /** input-blocked: the program whose window swallows the controller's
+         *  input (it runs as administrator), or null when input lands again.
+         *  Validated by `blockedAppName` at the handler. */
+        app?: unknown;
+        /** pointer-captured: a game hid and confined the host's pointer.
+         *  Validated with typeof at the handler. */
+        captured?: unknown;
     } | null;
     if (!data) return;
 
@@ -6039,6 +6092,25 @@ async function handleSignalFrame(s: Internal, blob: string): Promise<void> {
             // banner over a working session.
             if (typeof data.clipped !== 'boolean') return;
             s.cursorClipped = data.clipped;
+            emit();
+            return;
+        }
+        if (data.kind === 'input-blocked') {
+            if (s.role !== 'controller') return;
+            // A program name or null, and nothing else: anything malformed
+            // reads as "input lands" (inputReach.ts) — this only ever adds a
+            // banner, and a garbled frame must not paste one over a session.
+            const app = blockedAppName(data.app);
+            if (app === s.inputBlocked) return;
+            s.inputBlocked = app;
+            emit();
+            return;
+        }
+        if (data.kind === 'pointer-captured') {
+            if (s.role !== 'controller') return;
+            if (typeof data.captured !== 'boolean') return;
+            if (data.captured === s.pointerCaptured) return;
+            s.pointerCaptured = data.captured;
             emit();
             return;
         }

@@ -12,6 +12,11 @@
  * touch never hovers; a phone's trackpad stays relative even with a mouse
  * plugged in; and the existing gates (paused control, the letterbox, Game
  * mode without its lock) still hold for hover.
+ *
+ * The same report's other halves live here too, as the stage shows them: the
+ * banner naming an elevated program that swallows every event (UIPI), and the
+ * hint that a game has taken the pointer, whose button turns Game mode on and
+ * captures the mouse without clicking the remote game underneath it.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
@@ -120,8 +125,8 @@ const flush = () => act(async () => {
     for (let i = 0; i < 4; i++) await new Promise(r => setTimeout(r, 0));
 });
 
-async function mount() {
-    h.snapshot = [session()];
+async function mount(over: Snapshot = {}) {
+    h.snapshot = [session(over)];
     host = document.createElement('div');
     document.body.appendChild(host);
     root = createRoot(host);
@@ -206,6 +211,22 @@ describe('a hovering desktop mouse', () => {
     });
 });
 
+describe('the desktop wheel', () => {
+    it('scrolls the way the mouse does: a notch DOWN is -120 on the wire (the host counts positive as UP)', async () => {
+        await mount();
+        await act(async () => {
+            surface().dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 100, deltaMode: 0 }));
+            surface().dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -100, deltaMode: 0 }));
+        });
+        await flush();
+        const wheels = h.sendInput.mock.calls
+            .map(c => c[1] as { t?: string; dy?: number })
+            .filter(e => e.t === 'wheel')
+            .map(e => e.dy);
+        expect(wheels).toEqual([-120, 120]);
+    });
+});
+
 describe('a phone', () => {
     beforeEach(() => { h.phone = true; });
 
@@ -221,5 +242,84 @@ describe('a phone', () => {
         await mount();
         await fire(pe('pointermove', 320, 180));
         expect(sent('move')).toHaveLength(1);
+    });
+});
+
+const text = () => host!.textContent ?? '';
+
+describe('an elevated program swallowing the input (UIPI)', () => {
+    it('POSITIVE CONTROL: the stage names it and says what to do', async () => {
+        await mount({ inputBlocked: 'valheim.exe', peerName: 'Work Laptop' });
+        expect(text()).toContain('valheim.exe on Work Laptop is running as administrator');
+    });
+
+    it('no banner while input lands', async () => {
+        await mount({ inputBlocked: null });
+        expect(text()).not.toContain('running as administrator');
+    });
+
+    it('a security screen is the bigger story and wins', async () => {
+        await mount({ inputBlocked: 'valheim.exe', secureDesktop: true });
+        expect(text()).toContain('Windows security screen');
+        expect(text()).not.toContain('running as administrator');
+    });
+
+    it('it wins over the clip banner, the smaller story while nothing lands', async () => {
+        await mount({ inputBlocked: 'valheim.exe', cursorClipped: true });
+        expect(text()).toContain('running as administrator');
+        expect(text()).not.toContain('holding that computer');
+    });
+
+    it('a view-only session sends no input, so there is nothing to explain', async () => {
+        await mount({ inputBlocked: 'valheim.exe', viewOnly: true });
+        expect(text()).not.toContain('running as administrator');
+    });
+});
+
+describe('a game that has taken the pointer', () => {
+    let lock: ReturnType<typeof vi.fn>;
+    beforeEach(() => {
+        lock = vi.fn();
+        (HTMLElement.prototype as unknown as { requestPointerLock: unknown }).requestPointerLock = lock;
+    });
+    afterEach(() => {
+        delete (HTMLElement.prototype as unknown as { requestPointerLock?: unknown }).requestPointerLock;
+    });
+
+    const useGameMode = () => Array.from(host!.querySelectorAll('button'))
+        .find(b => b.textContent?.trim() === 'Use Game mode');
+
+    it('POSITIVE CONTROL: the hint offers Game mode, and its button captures the mouse on the stage', async () => {
+        await mount({ pointerCaptured: true, peerName: 'Work Laptop' });
+        expect(text()).toContain('A game on Work Laptop has taken the mouse pointer');
+        const btn = useGameMode();
+        expect(btn, 'the hint carries its button').toBeTruthy();
+        h.sendInput.mockClear();
+        // The real sequence a mouse produces on the button: it sits inside the
+        // input surface, so none of it may reach the remote game.
+        await act(async () => {
+            btn!.dispatchEvent(pe('pointerdown', 640, 600));
+            btn!.dispatchEvent(pe('pointerup', 640, 600));
+            btn!.click();
+        });
+        await flush();
+        expect(h.sendInput.mock.calls, 'pressing the hint clicks nothing over there').toEqual([]);
+        expect(lock, 'the click is the gesture pointer lock needs').toHaveBeenCalledTimes(1);
+        expect(lock.mock.contexts[0], 'locked on the surface, where relative moves are read')
+            .toBe(host!.querySelector('.device-stage-surface'));
+        const game = Array.from(host!.querySelectorAll('button')).find(b => /Game mode/.test(b.textContent ?? '') && b !== btn);
+        expect(game?.getAttribute('aria-pressed'), 'Game mode is on').toBe('true');
+        expect(h.storage.get('sovereign-fps-mode'), 'and remembered like the toolbar toggle').toBe('on');
+        expect(text(), 'the hint goes once Game mode is on').not.toContain('has taken the mouse pointer');
+    });
+
+    it('no hint when the pointer is the user\'s, or once Game mode is already on', async () => {
+        await mount({ pointerCaptured: false });
+        expect(useGameMode()).toBeUndefined();
+        if (root) await act(async () => root!.unmount());
+        host?.remove();
+        h.storage.set('sovereign-fps-mode', 'on');
+        await mount({ pointerCaptured: true });
+        expect(useGameMode()).toBeUndefined();
     });
 });

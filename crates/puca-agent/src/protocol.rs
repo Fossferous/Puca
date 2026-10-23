@@ -562,6 +562,15 @@ pub enum Response {
     /// Both ADDITIVE and skew safe, like `cursor_clipped`: an old app never
     /// reads them, and an old agent never writes them — the app reads absence
     /// as "cannot tell" and does nothing (pinned in secureDesktopStatus.test.ts).
+    ///
+    /// `input_blocked` names the program (`valheim.exe`, never a path) whose
+    /// window would receive this session's input and that Windows will not
+    /// let this agent reach: it runs at a higher integrity level, typically
+    /// as administrator, and UIPI drops injected input aimed at it without
+    /// a word from `SendInput` (input_reach.rs). `pointer_captured` says a
+    /// program has hidden AND confined the pointer — a game in mouse-look,
+    /// which absolute moves cannot steer. Both ADDITIVE and absent in the
+    /// ordinary case, so the bytes above stay exactly as they were.
     SessionState {
         secure_desktop: bool,
         cursor_clipped: bool,
@@ -569,6 +578,10 @@ pub enum Response {
         stream_live: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stream_end: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_blocked: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        pointer_captured: bool,
     },
     /// Answer to `PrepareScreen`. `state` is `ready` (answer the offer now),
     /// `waking` / `starting` (ask again shortly; `starting` means the virtual
@@ -601,6 +614,11 @@ impl Response {
     pub fn error(message: impl Into<String>) -> Self {
         Response::Error { message: message.into() }
     }
+}
+
+/// `skip_serializing_if` for a flag that is absent unless set.
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[cfg(test)]
@@ -698,6 +716,8 @@ mod tests {
                 cursor_clipped: false,
                 stream_live: None,
                 stream_end: None,
+                input_blocked: None,
+                pointer_captured: false,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":true,"cursor_clipped":false}"#,
@@ -708,6 +728,8 @@ mod tests {
                 cursor_clipped: true,
                 stream_live: None,
                 stream_end: None,
+                input_blocked: None,
+                pointer_captured: false,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":true}"#,
@@ -721,6 +743,8 @@ mod tests {
                 cursor_clipped: false,
                 stream_live: Some(false),
                 stream_end: None,
+                input_blocked: None,
+                pointer_captured: false,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":false}"#,
@@ -731,9 +755,27 @@ mod tests {
                 cursor_clipped: false,
                 stream_live: Some(false),
                 stream_end: Some(STREAM_END_NO_FRAME.to_string()),
+                input_blocked: None,
+                pointer_captured: false,
             })
             .unwrap(),
             r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":false,"stream_end":"no_frame"}"#,
+        );
+        // The names hostAgent.ts reads for the input-reach answer
+        // (`reply.input_blocked`, `reply.pointer_captured`). Absent unless set:
+        // a rename would leave the viewer silent about an elevated window,
+        // which is exactly the silence they exist to end.
+        assert_eq!(
+            serde_json::to_string(&Response::SessionState {
+                secure_desktop: false,
+                cursor_clipped: false,
+                stream_live: Some(true),
+                stream_end: None,
+                input_blocked: Some("valheim.exe".into()),
+                pointer_captured: true,
+            })
+            .unwrap(),
+            r#"{"ok":"session_state","secure_desktop":false,"cursor_clipped":false,"stream_live":true,"input_blocked":"valheim.exe","pointer_captured":true}"#,
         );
         // The skew direction this side cannot test: an OLD agent omitting
         // `cursor_clipped` entirely. Response is Serialize-only here — the one

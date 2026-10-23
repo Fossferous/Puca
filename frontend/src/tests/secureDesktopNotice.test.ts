@@ -231,6 +231,50 @@ describe('the controller is told a cursor clip took the pointer', () => {
     });
 });
 
+describe('the controller is told its input is not landing', () => {
+    // An elevated window on the host swallows every injected event (UIPI) and
+    // a game in mouse-look swallows absolute moves; only the host's agent can
+    // see either. Same safety property as the two notices above: true only
+    // because a host said so, and malformed means "input lands".
+    it('POSITIVE CONTROL: the host names the elevated program, then says it is gone', async () => {
+        const { id, key } = await activeController();
+        const { activeSessions } = await import('../api/devices/session');
+
+        expect(sessionById(activeSessions(), id)?.inputBlocked, 'a fresh session lands its input').toBeNull();
+        await hostSignal(id, key, { kind: 'input-blocked', app: 'valheim.exe' });
+        expect(sessionById(activeSessions(), id)?.inputBlocked).toBe('valheim.exe');
+        // The down transition is the control: a value pinned on would leave
+        // the banner up after the game closed.
+        await hostSignal(id, key, { kind: 'input-blocked', app: null });
+        expect(sessionById(activeSessions(), id)?.inputBlocked).toBeNull();
+    });
+
+    it('a malformed program name reads as "input lands"', async () => {
+        const { id, key } = await activeController();
+        const { activeSessions } = await import('../api/devices/session');
+
+        // A path, a control character, a non-string (the full table is
+        // inputReach.test.ts; each frame here costs a seal and a settle).
+        for (const app of ['C:\\Games\\x.exe', 'a\nb', 42]) {
+            await hostSignal(id, key, { kind: 'input-blocked', app });
+            expect(sessionById(activeSessions(), id)?.inputBlocked, String(app)).toBeNull();
+        }
+    });
+
+    it('POSITIVE CONTROL: a captured pointer is raised and lowered; a non-boolean changes nothing', async () => {
+        const { id, key } = await activeController();
+        const { activeSessions } = await import('../api/devices/session');
+
+        expect(sessionById(activeSessions(), id)?.pointerCaptured).toBe(false);
+        await hostSignal(id, key, { kind: 'pointer-captured', captured: true });
+        expect(sessionById(activeSessions(), id)?.pointerCaptured).toBe(true);
+        await hostSignal(id, key, { kind: 'pointer-captured', captured: 'no' });
+        expect(sessionById(activeSessions(), id)?.pointerCaptured, 'a malformed frame changes nothing').toBe(true);
+        await hostSignal(id, key, { kind: 'pointer-captured', captured: false });
+        expect(sessionById(activeSessions(), id)?.pointerCaptured).toBe(false);
+    });
+});
+
 /**
  * DISPLAY POWER, controller side (W4): the outcome line. An ack's DETAIL
  * beats the generic copy; a display refusal is a notice, never a session

@@ -42,7 +42,7 @@ import { STREAM_QUALITY_PRESETS, parsePresetValue, presetValue } from '../api/de
 import { readFitResolutionPreference, viewSizeFor, FIT_RESOLUTION_KEY, type FitResolution } from '../api/devices/viewSize';
 import { tunnelStatus, type TunnelStatus } from '../api/devices/tunnel';
 import { getStreamQualityErrorMessage } from '../api/devices/streamQualityMessages';
-import { isInjectableKey, normalizedOverVideo, pictureBox } from '../api/devices/pointerMapping';
+import { isInjectableKey, normalizedOverVideo, pictureBox, wheelDy } from '../api/devices/pointerMapping';
 import {
     ZOOM_FOLLOW_IN, ZOOM_FOLLOW_OUT_AT, aspectMatches, aspectsDistinguish, availableEdgeHops,
     captureSurfaceSize, caretBandFrom, caretFollowTransform, carryPointer, clampPanTo,
@@ -73,6 +73,7 @@ import { MoreMenu, MonitorMenu, MouseMenu } from './DeviceStageMobileMenus';
 import { KeyboardOverlay } from './DeviceStageMobileKeyboard';
 import { DeviceStageVirtualMouse } from './DeviceStageVirtualMouse';
 import { virtualStartingMessage } from '../api/devices/noScreen';
+import { inputBlockedMessage } from '../api/devices/inputReach';
 import {
     MonitorIcon, CopyIcon, CrosshairIcon, ForwardIcon, LiveDotIcon,
     ChevronRightIcon, ChevronUpIcon, ChevronDownIcon } from './Icons';
@@ -129,6 +130,29 @@ const COARSE_POINTER_QUERY = '(pointer: coarse)';
 function releaseRecordedPresses(pressed: Map<number, number>, send: (event: unknown) => void): void {
     for (const button of new Set(pressed.values())) send({ t: 'up', button });
     pressed.clear();
+}
+
+/**
+ * Capture the mouse for Game mode on `el` (the stage surface — the move
+ * handler only accepts relative motion while THAT element holds the lock).
+ *
+ * Prefers RAW (unaccelerated) deltas and retries without the option if the
+ * engine rejects it. May be denied — the just-exited-lock cooldown, or no user
+ * gesture behind the call — in which case the "click the screen" hint stays up
+ * via pointerlockerror and the next click on the picture tries again.
+ */
+function requestStageLock(el: HTMLElement): void {
+    const lockEl = el as unknown as {
+        requestPointerLock?: (options?: { unadjustedMovement?: boolean }) => void | Promise<void>;
+    };
+    try {
+        const r = lockEl.requestPointerLock?.({ unadjustedMovement: true });
+        void Promise.resolve(r).catch(() => {
+            try {
+                void Promise.resolve(lockEl.requestPointerLock?.()).catch(() => { /* hint stays up */ });
+            } catch { /* hint stays up */ }
+        });
+    } catch { /* unsupported — hint stays up */ }
 }
 
 function detectCoarsePointer(): boolean {
@@ -772,6 +796,23 @@ export function DeviceStage() {
             return next;
         });
     };
+
+    /** Game mode on or off. LET GO FIRST — same rule as the touch/trackpad
+     *  switch: each mode tracks its own pressed state and will not release the
+     *  other's, so toggling mid-hold stranded a button down on the host. */
+    const setGameMode = useCallback((on: boolean) => {
+        for (const button of fpsPressedRef.current) send({ t: 'up', button });
+        fpsPressedRef.current.clear();
+        releaseRecordedPresses(touchDownSent.current, send);
+        saveFpsMode(on);
+        setFpsMode(on);
+    }, [send]);
+    /** The captured-pointer hint's button: Game mode on AND the mouse captured,
+     *  in the one click that pointer lock needs as its gesture. */
+    const enterGameMode = useCallback(() => {
+        setGameMode(true);
+        if (surfaceRef.current) requestStageLock(surfaceRef.current);
+    }, [setGameMode]);
 
 
     // FOLLOW THE CURSOR while zoomed in (trackpad mode): solve, on EVERY move,
@@ -2626,21 +2667,8 @@ export function DeviceStage() {
             e.preventDefault();
             const el = e.currentTarget as HTMLElement;
             if (document.pointerLockElement !== el) {
-                // First click engages the lock; no click is sent. Prefer RAW
-                // (unaccelerated) deltas; retry without the option if the
-                // engine rejects it. May be denied (just-exited-lock
-                // cooldown) — the hint overlay stays up via pointerlockerror.
-                const lockEl = el as unknown as {
-                    requestPointerLock?: (options?: { unadjustedMovement?: boolean }) => void | Promise<void>;
-                };
-                try {
-                    const r = lockEl.requestPointerLock?.({ unadjustedMovement: true });
-                    void Promise.resolve(r).catch(() => {
-                        try {
-                            void Promise.resolve(lockEl.requestPointerLock?.()).catch(() => { /* hint stays up */ });
-                        } catch { /* hint stays up */ }
-                    });
-                } catch { /* unsupported — hint stays up */ }
+                // First click engages the lock; no click is sent.
+                requestStageLock(el);
                 return;
             }
             fpsPressedRef.current.add(e.button);
@@ -2969,16 +2997,7 @@ export function DeviceStage() {
                     <button
                         className="device-stage-btn"
                         aria-pressed={fpsMode}
-                        onClick={() => {
-                            // LET GO FIRST — same rule as the touch/trackpad
-                            // switch: each mode tracks its own pressed state
-                            // and will not release the other's, so toggling
-                            // mid-hold stranded a button down on the host.
-                            for (const button of fpsPressedRef.current) send({ t: 'up', button });
-                            fpsPressedRef.current.clear();
-                            releaseRecordedPresses(touchDownSent.current, send);
-                            setFpsMode(f => { saveFpsMode(!f); return !f; });
-                        }}
+                        onClick={() => setGameMode(!fpsMode)}
                         title="Game mode: relative mouse (pointer lock) for games that read raw input"
                     >
                         <CrosshairIcon /> {fpsMode ? 'Game mode on' : 'Game mode'}
@@ -3171,7 +3190,10 @@ export function DeviceStage() {
                             };
                         });
                     } else {
-                        send({ t: 'wheel', dy: e.deltaY });
+                        // The DOM's sign is the reverse of the host's, and its
+                        // notch is 100 where the host counts 120 (wheelDy).
+                        const dy = wheelDy(e);
+                        if (dy) send({ t: 'wheel', dy });
                     }
                 }}
                 onContextMenu={e => e.preventDefault()}
@@ -3281,7 +3303,22 @@ export function DeviceStage() {
                     a security screen is the bigger story and the clip usually
                     dies with it. Same parked-at-top styling — the centre of
                     the stage is the picture the viewer is trying to use. */}
-                {session.cursorClipped && !session.secureDesktop && !session.reconnecting && (
+                {/* AN ELEVATED WINDOW SWALLOWS EVERY CLICK AND KEY. Windows
+                    drops injected input aimed at a program running above the
+                    host's agent — as administrator — and SendInput says
+                    nothing (UIPI; the agent's input_reach.rs). Before this the
+                    viewer clicked into a game that never reacted, with the
+                    picture perfectly live: the 2026-10-23 report. Host-asserted
+                    only, like the two banners either side; yields to the
+                    security screen and wins over the clip, which is the
+                    smaller story while nothing lands at all. View-only
+                    sessions send no input, so there is nothing to explain. */}
+                {session.inputBlocked && !session.secureDesktop && !session.reconnecting && !session.viewOnly && (
+                    <div className="device-stage-secure" role="status">
+                        {inputBlockedMessage(session.inputBlocked, session.peerName)}
+                    </div>
+                )}
+                {session.cursorClipped && !session.inputBlocked && !session.secureDesktop && !session.reconnecting && (
                     <div className="device-stage-secure">
                         {/* On All Displays the app's own screen is IN the
                             picture and still clickable; it is the others
@@ -3328,6 +3365,34 @@ export function DeviceStage() {
                 {!isMobile && fpsMode && !pointerLocked && controlEnabled && (
                     <div className="device-stage-fps-hint">
                         <CrosshairIcon /> Click the screen to capture your mouse · Esc releases it
+                    </div>
+                )}
+                {/* A GAME HAS TAKEN THE POINTER (hidden and confined — the
+                    agent's `pointer_captured`): it re-centres the pointer every
+                    frame and reads raw motion, so the ordinary absolute moves
+                    cannot turn its camera. Game mode can, and the button
+                    switches it on AND captures the mouse in one click — the
+                    click is the gesture pointer lock needs. Inside the input
+                    surface, so its pointer events stop here (the hop chips'
+                    rule): pressing it must not also click the remote game. */}
+                {!isMobile && session.pointerCaptured && !fpsMode && controlEnabled
+                    && !session.inputBlocked && !session.secureDesktop && !session.reconnecting && !session.viewOnly && (
+                    <div className="device-stage-capture-hint" role="status">
+                        <CrosshairIcon />
+                        <span>
+                            A game on {session.peerName?.trim() || 'that computer'} has taken the
+                            mouse pointer. Game mode sends your mouse&rsquo;s movement so you can look around.
+                        </span>
+                        <button
+                            type="button"
+                            className="device-stage-btn"
+                            onPointerDown={e => e.stopPropagation()}
+                            onPointerUp={e => e.stopPropagation()}
+                            onPointerMove={e => e.stopPropagation()}
+                            onClick={enterGameMode}
+                        >
+                            Use Game mode
+                        </button>
                     </div>
                 )}
                 {/* MONITOR-HOP: you have panned to the end of this screen and

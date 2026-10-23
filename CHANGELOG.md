@@ -4,6 +4,15 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+
+- **Controlling a PC from the desktop app: the mouse follows you again.** Since July, moving the mouse over the picture in the desktop app did nothing on the other computer: its pointer stayed put and jumped only when you clicked or dragged, so hover menus, tooltips and a game's cursor never followed. It now moves as you move, like the phone's. The phone was not affected.
+- **Scrolling in the desktop app goes the right way.** Turning the wheel down scrolled the controlled computer up, and one notch scrolled a little less than a notch. Down is down again, one notch is one notch, and Shift+wheel scrolls sideways where the app on that computer does.
+- **When a program on the controlled PC is running as administrator, you are told.** Windows silently ignores remote clicks and keys aimed at a window that runs as administrator — a game started by a launcher run as administrator, Task Manager, an installer — while the picture keeps updating, so it looked as if the mouse had simply stopped working. The picture now says which program it is and what to do about it ("valheim.exe on Work Laptop is running as administrator… start it again without administrator rights"). Needs the desktop update on the controlled PC.
+- **A game that takes the mouse offers Game mode.** When a game on the controlled PC hides and holds the pointer for looking around, the desktop app now says so and offers **Use Game mode**, which captures your mouse in one click and sends its movement, which is what such games read. Needs the desktop update on the controlled PC.
+
 ## 0.9.846 — 2026-10-22
 
 Ready for Púca on the Steam Deck

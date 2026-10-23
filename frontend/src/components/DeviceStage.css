@@ -405,3 +405,23 @@
 /* The bottom chip and the "paused" banner both want the bottom centre; the
    banner is the more urgent message, so the chip steps up out of its way. */
 .device-stage-paused ~ .device-stage-hop-down { bottom: 60px; }
+
+/* A game has taken the host's pointer: offer Game mode. Interactive (its
+   button), unlike the click-to-capture hint, and parked above it. */
+.device-stage-capture-hint {
+    position: absolute;
+    left: 50%;
+    bottom: 56px;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px 8px 14px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.78);
+    color: #fff;
+    font-size: 13px;
+    max-width: min(90%, 640px);
+}
+.device-stage-capture-hint > svg { flex: none; }
+.device-stage-capture-hint > .device-stage-btn { flex: none; }
