@@ -7,7 +7,9 @@
  *  - a profile that had turned the old on/off switch ON reads Always, so
  *    nobody who opted in loses the ladder (rememberedShareLadder);
  *  - a choice is saved in both fields, so the old flag never contradicts it;
- *  - it is not offered on a phone, which cannot share a screen.
+ *  - it is offered exactly where Share Screen is (screenShareOffered): not on
+ *    a phone, which cannot share a screen, but on a 2-in-1 in tablet mode,
+ *    which can, even though its pointer is coarse.
  *
  * Mounted with raw `react-dom/client` + `act`, as the repo's other component
  * tests are.
@@ -17,10 +19,11 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
-const touch = vi.hoisted(() => ({ on: false }));
+const touch = vi.hoisted(() => ({ on: false, canShare: true }));
 vi.mock('../components/settingsModal.utils', async (importOriginal) => ({
     ...(await importOriginal<typeof import('../components/settingsModal.utils')>()),
     isTouchDevice: () => touch.on,
+    screenShareOffered: () => touch.canShare,
 }));
 vi.mock('../api/profile', async (importOriginal) => ({
     ...(await importOriginal<typeof import('../api/profile')>()),
@@ -51,6 +54,7 @@ const stored = () => JSON.parse(store.get(SETTINGS_KEY) ?? '{}') as Record<strin
 
 beforeEach(() => {
     touch.on = false;
+    touch.canShare = true;
     store.clear();
     (localStorage.getItem as Mock).mockImplementation((k: string) => store.get(k) ?? null);
     (localStorage.setItem as Mock).mockImplementation((k: string, v: string) => { store.set(k, String(v)); });
@@ -140,10 +144,28 @@ describe('"Send my screen at several sizes"', () => {
 
     it('is not offered on a phone, which cannot share a screen', async () => {
         touch.on = true;
+        touch.canShare = false;
         const control = await openSection('Voice & Video');
         // Positive control: the section itself rendered.
         expect(container.textContent).toContain('Voice Settings');
         expect(control()).toBeNull();
         expect(container.textContent).not.toContain('Screen Sharing');
+    });
+});
+
+describe('where it is offered', () => {
+    it('a 2-in-1 in tablet mode (a coarse pointer) that can share keeps the setting', async () => {
+        touch.on = true;
+        touch.canShare = true;
+        const control = await openSection('Voice & Video');
+        expect(control(), 'shown wherever Share Screen is').not.toBeNull();
+    });
+
+    it('follows the voice panel\'s own answer: phones and tablets by user agent, any desktop', async () => {
+        const real = await vi.importActual<typeof import('../components/settingsModal.utils')>('../components/settingsModal.utils');
+        expect(real.screenShareOffered('Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/141.0 Mobile Safari/537.36')).toBe(false);
+        expect(real.screenShareOffered('Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1')).toBe(false);
+        expect(real.screenShareOffered('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/141.0 Safari/537.36 Edg/141.0')).toBe(true);
+        expect(real.screenShareOffered('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15')).toBe(true);
     });
 });

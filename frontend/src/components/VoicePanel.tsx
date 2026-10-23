@@ -70,7 +70,7 @@ import { shouldTakeOver } from '../api/ownVoice';
 import { pressMute, pressDeafen, imposeMute, micBack, micOpen, UNMUTED, type SelfMute, type MuteConstraints } from '../api/rtc/selfMute';
 import { setVoiceKeepAlive, openMobileAppSettings } from '../api/mobileApp';
 import { phonePanelQuery } from '../utils/phonePanel';
-import { isTouchDevice } from './settingsModal.utils';
+import { isTouchDevice, screenShareOffered } from './settingsModal.utils';
 import { buildVoiceStatus, parseVoiceStatus } from '../utils/voiceStatus';
 import { onArmedChange as onClipArmedChange, disarm as disarmClipBuffer, getReplayState } from '../api/clips/replayBuffer';
 import { DeclaredParticipants } from '../api/clips/clipParticipants';
@@ -288,8 +288,9 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     const pendingJoinsRef = useRef(new PendingJoins());
     const pendingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-    // Detect mobile for hiding screen share option
-    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    // Detect mobile for hiding screen share option (the same answer the
+    // sharing settings follow: settingsModal.utils screenShareOffered)
+    const isMobile = !screenShareOffered();
 
     // The PANEL-LAYOUT gate — DESIGN_PHILOSOPHY §2: it IS mobile.css's media
     // query (utils/phonePanel.ts), and nothing else. This decides whether the
@@ -3258,9 +3259,16 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     useEffect(() => {
         registerStopScreenShareCallback(stopMyScreenShare);
         webrtcManager.setOnScreenShareEnded(stopMyScreenShare);
+        // An SFU share that a failed re-publish could not put back ends the
+        // same way, and says why (sfuManager.restoreShare).
+        sfuManager.setOnShareLost((message) => {
+            setError(message);
+            stopMyScreenShare();
+        });
         return () => {
             registerStopScreenShareCallback(() => { });
             webrtcManager.setOnScreenShareEnded(null);
+            sfuManager.setOnShareLost(null);
         };
     }, [stopMyScreenShare]);
 

@@ -34,7 +34,7 @@ import type { EncodeSample } from './shareHealth';
 import { ShareAdapter, SHARE_ADAPT_INTERVAL_MS } from './shareAdapt';
 import { LEGACY_SHARE_KBPS, shareBitrateKbps } from './shareBitrate';
 import {
-    isSoftwareEncoder, ladderEncodings, ladderRungs, rememberedShareLadder, shareWantsLadder,
+    encoderKind, ladderEncodings, ladderRungs, rememberedShareLadder, shareWantsLadder,
     type LadderRung, type ShareLadderMode,
 } from './shareLadder';
 import type { RtpEndpoint } from './streamStats';
@@ -210,13 +210,24 @@ export function machineHasHardwareH264(): boolean {
     }
 }
 
-/** How often an Automatic ladder's encoder is checked after it starts, how
- *  many software readings drop the ladder, how many hardware readings end the
- *  watch, and when it gives up waiting for a name at all. */
+/** The Automatic ladder's encoder check (startSoftwareWatch): every 3 s for
+ *  the first minute, then every 15 s for the rest of the share; two software
+ *  readings in a row drop the ladder. */
 const SOFTWARE_WATCH_MS = 3000;
+const SOFTWARE_WATCH_SLOW_MS = 15_000;
+const SOFTWARE_WATCH_FAST_FOR_MS = 60_000;
 const SOFTWARE_READS = 2;
-const HARDWARE_READS = 3;
-const SOFTWARE_WATCH_MAX_MS = 60_000;
+/** How often a running share's capture is compared with the shape it was
+ *  published or last re-sized for (followShareTick), and how many readings
+ *  of a new size it waits for: a window being dragged is not a new size yet. */
+const SHARE_FOLLOW_MS = SHARE_ADAPT_INTERVAL_MS;
+const SHARE_FOLLOW_READS = 2;
+/** Putting a share back after a re-publish failed part-way (restoreShare):
+ *  tries, the pause before each retry, and how long each waits for LiveKit
+ *  to be connected again. */
+const RESTORE_ATTEMPTS = 3;
+const RESTORE_RETRY_MS = 1500;
+const RESTORE_WAIT_MS = 10_000;
 
 /**
  * Everything about how a screen share is published, as a value.
@@ -820,8 +831,10 @@ export class SfuManager {
 
     async disconnect(): Promise<void> {
         this.shareGen++;
+        this.shareActive = false;
         this.stopShareAdapt();
         this.stopSoftwareWatch();
+        this.stopShareFollow();
         if (this.epochTimer) {
             clearInterval(this.epochTimer);
             this.epochTimer = null;
@@ -963,6 +976,7 @@ export class SfuManager {
             throw new Error(`Share limit reached (${this.maxScreenShares} concurrent screen shares)`);
         }
         const gen = ++this.shareGen;
+        this.shareActive = true;
         // Read at publish time, so changing it takes effect on the next share
         // rather than the next launch (and on a running one through
         // followLadderSetting).
@@ -980,6 +994,9 @@ export class SfuManager {
      *  Automatic ladder was dropped because its encoder was software. */
     private shareLadderMode: ShareLadderMode = 'auto';
     private shareLadderFellBack = false;
+    /** A share was started and not stopped: what a reconnect or a changed
+     *  setting must bring back in line, even while its publish is in flight. */
+    private shareActive = false;
     /**
      * Which share the work under way belongs to. Every start, stop and leave
      * moves it on, so a re-publish or an encoder check that outlived its share
@@ -992,6 +1009,11 @@ export class SfuManager {
      *  unpublish and publish (two live changes clicked quickly, or a stop
      *  in the middle of a switch). */
     private shareOp: Promise<unknown> = Promise.resolve();
+    /** Told when a share could not be put back after a failed re-publish and
+     *  was ended (restoreShare): the UI runs its own stop and says why. */
+    private onShareLost: ((message: string) => void) | null = null;
+
+    setOnShareLost(cb: ((message: string) => void) | null) { this.onShareLost = cb; }
 
     private queueShareOp<T>(op: () => Promise<T>): Promise<T> {
         const run = this.shareOp.then(op);
@@ -1011,21 +1033,35 @@ export class SfuManager {
         return ladderRungs(set.width ?? 0, set.height ?? 0, top);
     }
 
+    /** What a ladder's rungs are sized for: the capture and the cap. */
+    private ladderShapeKey(video: MediaStreamTrack): string {
+        const set = video.getSettings();
+        return `${set.width ?? 0}x${set.height ?? 0}@${this.shareBitrateFor(video)}`;
+    }
+
     /**
-     * THE ONE PLACE A SHARE'S PICTURE IS PUBLISHED: the first publish and
-     * every re-publish (republishShare) come through here, and its sound
-     * through publishShareAudio, so whatever a share publish must honour is
-     * honoured by all of them. Today that is the room's encryption: an SFU
-     * room exists only with insertable streams and a channel key (doConnect
-     * fails closed), and livekit-client attaches the frame encryptor to every
-     * track published in it. A new rule for publishing a share belongs in
-     * these two methods, not at a call site.
+     * Every publish of a share's picture that PÚCA makes: the first one and
+     * every re-publish (republishShareNow, restoreShare) come through here,
+     * and its sound through publishShareAudio, so whatever a share publish
+     * must honour is honoured by all of them. Today that is the room's
+     * encryption: an SFU room exists only with insertable streams and a
+     * channel key (doConnect fails closed), and livekit-client attaches the
+     * frame encryptor to every track published in it. A new rule for
+     * publishing a share belongs in these two methods, not at a call site.
+     *
+     * ONE PUBLISH IS NOT PÚCA'S: after a full reconnect livekit-client
+     * re-publishes every local track itself (republishAllTracks), in the same
+     * encrypted room but with the options this share was FIRST published
+     * with. afterReconnect puts the shape back.
+     *
+     * `oneSize` publishes one size whatever the setting says: restoreShare's
+     * later tries, the publish most likely to go through.
      */
-    private async publishShareVideo(video: MediaStreamTrack, gen: number): Promise<void> {
+    private async publishShareVideo(video: MediaStreamTrack, gen: number, oneSize = false): Promise<void> {
         const room = this.room;
         if (!room || gen !== this.shareGen || video.readyState !== 'live') return;
         const set = video.getSettings();
-        const opts = screenSharePublishOptions(this.wantedRungs(video).length > 0, this.shareBitrateFor(video) * 1000, {
+        const opts = screenSharePublishOptions(!oneSize && this.wantedRungs(video).length > 0, this.shareBitrateFor(video) * 1000, {
             width: set.width ?? 0,
             height: set.height ?? 0,
         });
@@ -1033,8 +1069,10 @@ export class SfuManager {
         // Stopped while this was publishing: stopScreenShare's second pass
         // takes it down, and nothing may start watching it meanwhile.
         if (gen !== this.shareGen) return;
+        this.ladderShapedFor = opts.simulcast ? this.ladderShapeKey(video) : null;
         if (!opts.simulcast) this.startShareAdapt();
         else if (this.shareLadderMode === 'auto') this.startSoftwareWatch(gen);
+        this.startShareFollow(gen);
     }
 
     private async publishShareAudio(audio: MediaStreamTrack, gen: number): Promise<void> {
@@ -1059,6 +1097,10 @@ export class SfuManager {
      * re-publish would leave every viewer — this version and older ones —
      * with the picture back and the sound gone. Publishing the audio again
      * re-adds it to the rebuilt stream on any client.
+     *
+     * NEVER HALF A SHARE. Any step can fail — livekit-client's unpublish
+     * renegotiates, and a negotiation that times out rejects — and whatever
+     * failed, restoreShare puts a whole share back or ends it.
      */
     private async republishShareNow(gen: number): Promise<void> {
         const room = this.room;
@@ -1072,19 +1114,102 @@ export class SfuManager {
         if (!video || video.readyState !== 'live') return;
         this.stopShareAdapt();
         this.stopSoftwareWatch();
-        for (const t of [video, audio]) {
-            if (t) await room.localParticipant.unpublishTrack(t, false);
-        }
-        if (this.room !== room) return;
+        this.stopShareFollow();
         try {
+            for (const t of [video, audio]) {
+                if (t) await room.localParticipant.unpublishTrack(t, false);
+            }
+            if (this.room !== room || gen !== this.shareGen) return;
             await this.publishShareVideo(video, gen);
             if (audio) await this.publishShareAudio(audio, gen);
+            return;
         } catch (e) {
-            // Said plainly: the person still sees themselves sharing, and
-            // nobody is receiving it any more.
-            console.warn('[share] publishing the share again failed; viewers no longer receive it', e);
-            throw e;
+            console.warn('[share] publishing the share again failed part-way; putting it back', e);
         }
+        await this.restoreShare(room, gen, video, audio);
+    }
+
+    /**
+     * After a re-publish failed part-way: put back a WHOLE share, or end it.
+     *
+     * livekit-client takes a publication out of its own books BEFORE it
+     * renegotiates (LocalParticipant.unpublishTrack), and a negotiation that
+     * times out rejects and starts a reconnect. So a failure can leave the
+     * picture unpublished while the sound is still out — and the reconnect's
+     * own re-publish (republishAllTracks) puts back only what is still in the
+     * books: the sound. Viewers would hear the share and see nothing while the
+     * sharer believes they are sharing. A failed publish leaves nothing out at
+     * all. So: wait for the room, publish what is missing (the shape it was
+     * going to first, then one size, the publish most likely to go through),
+     * and if that fails too, take down what is left and end the share through
+     * the UI's own stop, saying why.
+     */
+    private async restoreShare(room: Room, gen: number, video: MediaStreamTrack, audio: MediaStreamTrack | undefined): Promise<void> {
+        const out = (t: MediaStreamTrack) => this.localSharePubs().some(p => p.track?.mediaStreamTrack === t);
+        for (let attempt = 0; attempt < RESTORE_ATTEMPTS; attempt++) {
+            if (attempt > 0) await new Promise((r) => setTimeout(r, RESTORE_RETRY_MS));
+            if (!await this.waitForRoom(room, RESTORE_WAIT_MS)) break;
+            if (gen !== this.shareGen) return; // stopped or shared anew meanwhile: nothing to restore
+            if (video.readyState !== 'live') break; // the capture ended, and with it the share
+            try {
+                if (!out(video)) await this.publishShareVideo(video, gen, attempt > 0);
+                if (audio && audio.readyState === 'live' && !out(audio)) await this.publishShareAudio(audio, gen);
+                if (gen !== this.shareGen) return;
+                if (out(video) && (!audio || audio.readyState !== 'live' || out(audio))) {
+                    console.info(`[share] the share is whole again (try ${attempt + 1})`);
+                    this.ensureShareMonitors(gen);
+                    return;
+                }
+            } catch (e) {
+                console.warn(`[share] putting the share back failed (try ${attempt + 1} of ${RESTORE_ATTEMPTS})`, e);
+            }
+        }
+        if (gen !== this.shareGen) return;
+        console.warn('[share] the share could not be put back after a failed re-publish; ending it');
+        this.stopShareAdapt();
+        this.stopSoftwareWatch();
+        this.stopShareFollow();
+        for (const pub of this.localSharePubs()) {
+            if (pub.track) await room.localParticipant.unpublishTrack(pub.track.mediaStreamTrack, false).catch(() => { /* already gone */ });
+        }
+        this.onShareLost?.('Your screen share stopped: changing how it is sent failed, and it could not be put back. Share again to continue.');
+    }
+
+    /**
+     * The running share's picker (one size), encoder check (an Automatic
+     * ladder) and follow check, each started if it is not running. A share
+     * that LiveKit's own reconnect put back while restoreShare waited was
+     * published outside publishShareVideo, which is what starts them.
+     */
+    private ensureShareMonitors(gen: number): void {
+        if (gen !== this.shareGen) return;
+        const sender = this.localSharePubs().find(p => p.kind === Track.Kind.Video)?.track?.sender;
+        if (!sender) return;
+        let layers = 1;
+        try { layers = Math.max(1, sender.getParameters().encodings?.length ?? 1); } catch { return; }
+        if (layers === 1 && !this.shareAdapt) this.startShareAdapt();
+        if (layers > 1 && this.shareLadderMode === 'auto' && !this.softwareWatch) this.startSoftwareWatch(gen);
+        if (!this.shareFollow) this.startShareFollow(gen);
+    }
+
+    /** Resolves true once `room` is connected (at once if it is), false if it
+     *  is not within `ms`, disconnects, or is no longer this manager's room. */
+    private waitForRoom(room: Room, ms: number): Promise<boolean> {
+        if (this.room !== room) return Promise.resolve(false);
+        if (room.state === ConnectionState.Connected) return Promise.resolve(true);
+        return new Promise((resolve) => {
+            const done = (ok: boolean) => {
+                clearTimeout(timer);
+                room.off(RoomEvent.ConnectionStateChanged, onState);
+                resolve(ok && this.room === room);
+            };
+            const onState = (state: ConnectionState) => {
+                if (state === ConnectionState.Connected) done(true);
+                else if (state === ConnectionState.Disconnected) done(false);
+            };
+            const timer = setTimeout(() => done(false), ms);
+            room.on(RoomEvent.ConnectionStateChanged, onState);
+        });
     }
 
     private republishShare(gen: number): Promise<void> {
@@ -1093,9 +1218,10 @@ export class SfuManager {
 
     /**
      * Bring the running share in line with its capture and the ladder setting
-     * (after a live quality change, shareHealthLive.ts, or a changed setting,
-     * followLadderSetting): what it may spend, how many sizes it sends, and
-     * the size of each.
+     * (after a live quality change, shareHealthLive.ts; a changed setting,
+     * followLadderSetting; a resized window, followShareTick; a reconnect,
+     * afterReconnect): what it may spend, how many sizes it sends, and the
+     * size of each.
      *
      * The same number of sizes is re-sized IN PLACE: the rungs are ratios of
      * the capture fixed at publish (`scaleResolutionDownBy`), and setting new
@@ -1159,6 +1285,7 @@ export class SfuManager {
             });
             try {
                 await sender.setParameters(params);
+                this.ladderShapedFor = this.ladderShapeKey(video);
                 return;
             } catch (e) {
                 if (attempt >= 1) throw e;
@@ -1166,56 +1293,138 @@ export class SfuManager {
         }
     }
 
-    /** The Automatic ladder's encoder check (SOFTWARE_WATCH_MS above). */
-    private softwareWatch: ReturnType<typeof setInterval> | null = null;
+    /**
+     * After LiveKit reconnects (RoomEvent.Reconnected). A FULL reconnect
+     * re-publishes every local track inside livekit-client
+     * (handleSignalRestarted → republishAllTracks), with the options the
+     * share was FIRST published with: its rungs and its cap from before any
+     * live change, on new encoders nobody has checked. retuneShare compares
+     * and re-sizes or re-publishes, and re-arms the software check; the
+     * one-size picker finds the new sender by itself.
+     */
+    private afterReconnect(): void {
+        if (!this.shareActive) return;
+        void this.retuneShare().catch((e) => {
+            console.warn('[share] could not bring the share back in line after a reconnect', e);
+        });
+    }
+
+    /** What the running ladder was last published or re-sized for
+     *  (ladderShapeKey); null for one size. */
+    private ladderShapedFor: string | null = null;
+    /** The running share's follow check (followShareTick). */
+    private shareFollow: {
+        gen: number;
+        timer: ReturnType<typeof setInterval>;
+        seen: string | null;
+        reads: number;
+        busy: boolean;
+    } | null = null;
+
+    private startShareFollow(gen: number): void {
+        this.stopShareFollow();
+        const st = { gen, timer: setInterval(() => { this.followShareTick(st); }, SHARE_FOLLOW_MS), seen: null, reads: 0, busy: false };
+        this.shareFollow = st;
+    }
+
+    private stopShareFollow(): void {
+        if (this.shareFollow) clearInterval(this.shareFollow.timer);
+        this.shareFollow = null;
+    }
 
     /**
-     * Watch an AUTOMATIC ladder's encoder for its first readings, and drop the
-     * ladder if it turns out to be software.
+     * Follow a capture that changes under the share by itself: a shared
+     * WINDOW resized. A one-size share's picker re-reads the size every tick,
+     * but a ladder's rungs keep the ratios they were set to, so a 1080-line
+     * window shrunk to 720 lines would send 240/480/720 lines — the bottom
+     * rung under Chromium's 360-line hardware floor, encoded in software. And
+     * the new size can change how many sizes the share should send at all
+     * (a window grown past the old cap, or shrunk to 360 lines). The same
+     * size seen twice in a row (a window being dragged is not a size yet)
+     * re-tunes it.
+     */
+    private followShareTick(st: NonNullable<SfuManager['shareFollow']>): void {
+        if (this.shareFollow !== st || st.gen !== this.shareGen || st.busy) return;
+        const pub = this.localSharePubs().find(p => p.kind === Track.Kind.Video);
+        const video = pub?.track?.mediaStreamTrack;
+        const sender = pub?.track?.sender;
+        if (!video || !sender || video.readyState !== 'live') return;
+        let published = 1;
+        try { published = Math.max(1, sender.getParameters().encodings?.length ?? 1); } catch { return; }
+        const want = this.wantedRungs(video).length + 1;
+        const key = want !== published ? `sizes:${want}`
+            : published > 1 ? this.ladderShapeKey(video)
+                : null;
+        if (key === null || key === this.ladderShapedFor) {
+            st.seen = null;
+            st.reads = 0;
+            return;
+        }
+        if (key !== st.seen) {
+            st.seen = key;
+            st.reads = 1;
+            return;
+        }
+        if (++st.reads < SHARE_FOLLOW_READS) return;
+        st.seen = null;
+        st.reads = 0;
+        st.busy = true;
+        void this.retuneShare()
+            .catch((e) => console.warn('[share] could not follow the capture\'s new size', e))
+            .finally(() => { st.busy = false; });
+    }
+
+    /** The Automatic ladder's encoder check (SOFTWARE_WATCH_MS above). */
+    private softwareWatch: { soft: number; started: number; timer: ReturnType<typeof setTimeout> | null } | null = null;
+
+    /**
+     * Watch an AUTOMATIC ladder's encoders for as long as it runs, and drop
+     * the ladder if they turn out to be software.
      *
      * Automatic decides on the machine's capabilities (a High-profile entry
      * means a hardware encoder is installed), and that can still end in
      * OpenH264: a driver that fails to open, an encoder already busy with a
-     * recording, or more encoder sessions than the card allows. Three software
-     * encodes are what Automatic exists to avoid, so the share goes back to
-     * one size for the rest of its life. ANY rung in software counts: the
-     * rungs are encoded by the same machine, and one 720p60 rung in software
-     * costs a game what the whole share used to. Always is the person's own
-     * choice and is not second-guessed.
+     * recording, or more encoder sessions than the card allows. And not only
+     * at the start: a rung that dynacast turned off and on again gets a new
+     * encoder, and Clips or another recorder can take the card's sessions in
+     * the middle of a share. So every 3 s for the first minute, then every
+     * 15 s. Three software encodes are what Automatic exists to avoid, so the
+     * share goes back to one size for the rest of its life. ANY rung in
+     * software counts: the rungs are encoded by the same machine, and one
+     * 720p60 rung in software costs a game what the whole share used to. A
+     * name this does not know is no evidence either way (encoderKind). Always
+     * is the person's own choice and is not second-guessed.
      */
     private startSoftwareWatch(gen: number): void {
         this.stopSoftwareWatch();
-        let soft = 0;
-        let hard = 0;
-        const started = Date.now();
-        const timer = setInterval(() => {
-            void (async () => {
-                if (this.softwareWatch !== timer) return;
-                if (Date.now() - started > SOFTWARE_WATCH_MAX_MS) { this.stopSoftwareWatch(); return; }
-                const names = await this.shareEncoderNames();
-                if (this.softwareWatch !== timer || names.length === 0) return;
-                if (names.some(isSoftwareEncoder)) {
-                    soft++;
-                    hard = 0;
-                } else {
-                    hard++;
-                    soft = 0;
-                }
-                if (hard >= HARDWARE_READS) { this.stopSoftwareWatch(); return; }
-                if (soft >= SOFTWARE_READS) {
-                    this.stopSoftwareWatch();
-                    if (gen !== this.shareGen) return;
-                    this.shareLadderFellBack = true;
-                    console.warn(`[share] the automatic ladder is encoding in software (${names.join(' | ')}); sending one size instead`);
-                    try { await this.republishShare(gen); } catch { /* the share ended meanwhile */ }
-                }
-            })();
-        }, SOFTWARE_WATCH_MS);
-        this.softwareWatch = timer;
+        const watch: NonNullable<SfuManager['softwareWatch']> = { soft: 0, started: Date.now(), timer: null };
+        const schedule = () => {
+            const fast = Date.now() - watch.started < SOFTWARE_WATCH_FAST_FOR_MS;
+            watch.timer = setTimeout(() => { void tick(); }, fast ? SOFTWARE_WATCH_MS : SOFTWARE_WATCH_SLOW_MS);
+        };
+        const tick = async () => {
+            if (this.softwareWatch !== watch) return;
+            const names = await this.shareEncoderNames();
+            if (this.softwareWatch !== watch) return;
+            const kinds = names.map(encoderKind);
+            if (kinds.includes('software')) watch.soft++;
+            else if (kinds.length > 0 && kinds.every(k => k === 'hardware')) watch.soft = 0;
+            if (watch.soft >= SOFTWARE_READS) {
+                this.stopSoftwareWatch();
+                if (gen !== this.shareGen) return;
+                this.shareLadderFellBack = true;
+                console.warn(`[share] the automatic ladder is encoding in software (${names.join(' | ')}); sending one size instead`);
+                try { await this.republishShare(gen); } catch { /* the share ended meanwhile */ }
+                return;
+            }
+            schedule();
+        };
+        this.softwareWatch = watch;
+        schedule();
     }
 
     private stopSoftwareWatch(): void {
-        if (this.softwareWatch) clearInterval(this.softwareWatch);
+        if (this.softwareWatch?.timer) clearTimeout(this.softwareWatch.timer);
         this.softwareWatch = null;
     }
 
@@ -1301,6 +1510,12 @@ export class SfuManager {
     private stopShareAdapt(): void {
         if (this.shareAdapt) clearInterval(this.shareAdapt.timer);
         this.shareAdapt = null;
+        // The picker's probe ('detail', shareAdapt.ts) is the picker's own.
+        // Whatever carries the share next — a ladder after a re-publish, a new
+        // picker, nothing — gets the share's 'motion' back (media.ts sets it
+        // at capture); a ladder left on 'detail' is encoded as a document.
+        const mst = this.localSharePubs().find(p => p.kind === Track.Kind.Video)?.track?.mediaStreamTrack;
+        if (mst?.contentHint === 'detail') { try { mst.contentHint = 'motion'; } catch { /* not supported */ } }
     }
 
     /**
@@ -1376,8 +1591,10 @@ export class SfuManager {
 
     async stopScreenShare(): Promise<void> {
         this.shareGen++;
+        this.shareActive = false;
         this.stopShareAdapt();
         this.stopSoftwareWatch();
+        this.stopShareFollow();
         if (!this.room) return;
         const unpublishAll = async () => {
             const room = this.room;
@@ -1407,12 +1624,17 @@ export class SfuManager {
      * freezing, is asking for it now. Viewers see the last frame for about a
      * second if the number of sizes changes (retuneShare). Called on every
      * settings save, so it does nothing unless that setting moved.
+     *
+     * A share whose publish is still in flight counts as running: the
+     * re-tune queues behind that publish (queueShareOp) and compares once it
+     * has landed, where reading the publications now would find none and
+     * lose the change.
      */
     async followLadderSetting(): Promise<void> {
         if (!this.room) return;
         const mode = rememberedShareLadder(loadSettings());
         if (mode === this.shareLadderMode) return;
-        if (!this.localSharePubs().some(p => p.kind === Track.Kind.Video)) {
+        if (!this.shareActive) {
             this.shareLadderMode = mode;
             return;
         }
@@ -2054,6 +2276,8 @@ export class SfuManager {
             .on(RoomEvent.TrackPublished, () => this.syncSubscriptions())
             .on(RoomEvent.ParticipantConnected, () => this.syncSubscriptions())
             .on(RoomEvent.Reconnected, () => this.syncSubscriptions())
+            // A full reconnect re-published the share with its first options.
+            .on(RoomEvent.Reconnected, () => this.afterReconnect())
             // The perms sweep can flip NO_RECEIVE mid-call (UpdateParticipant).
             .on(RoomEvent.ParticipantPermissionsChanged, () => this.syncSubscriptions())
             // Who can hear us (dfPause.ts). ConnectionStateChanged covers the
