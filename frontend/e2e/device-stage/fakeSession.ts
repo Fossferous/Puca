@@ -105,6 +105,10 @@ const state = {
     hostScreen: null as 'virtual-starting' | null,
     peerName: null as string | null,
     endedWith: null as string | null,
+    // The desktop walk (device-stage-desktop-real-browser.mjs): the host's
+    // pointer shape while this end draws the pointer, and an elevated window.
+    remoteCursor: null as string | null,
+    inputBlocked: null as string | null,
 };
 
 const log: Array<Record<string, unknown>> = [];
@@ -127,6 +131,7 @@ function session(): DeviceControlSession {
         filesChannel: null, fileRoot: null, fileScopeKind: null, filesOnly: false, audioHub: false,
         privacyActive: false, cursorOwned: state.cursorOwned, reconnecting: false,
         awaitingMedia: state.awaitingMedia, mediaRestarting: false, secureDesktop: false, cursorClipped: false,
+        remoteCursor: state.remoteCursor, inputBlocked: state.inputBlocked, pointerCaptured: false,
         shareUser: null, viewOnly: false, powerNotice: null,
     } as unknown as DeviceControlSession;
 }
