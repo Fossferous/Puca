@@ -65,7 +65,12 @@ describe('PrivacyDisclosure', () => {
         // it on for an existing profile on such an engine (it would have
         // killed working calls). Saying "blocked by default" there was a
         // promise the app does not keep.
-        expect(text).toMatch(/Firefox, Safari and iOS cannot encrypt live media/);
+        // Such an engine is an OLDER browser now: Firefox and Safari (iPhone
+        // and iPad included) encrypt mesh calls through RTCRtpScriptTransform,
+        // so they are named among the browsers that do, never as unable to.
+        expect(text).toMatch(/current Chrome, Edge, Firefox and Safari, iPhone and iPad included/);
+        expect(text, 'Firefox, Safari and iOS encrypt calls now').not.toMatch(/Firefox, Safari and iOS cannot/);
+        expect(text).toMatch(/An older browser cannot encrypt live media/);
         expect(text).toMatch(/readable by the server, unless “Require encryption for calls” is on/);
         expect(text).toMatch(/New installs have that on; an existing one keeps whatever it had/);
         expect(text, 'the retracted claim must not come back').not.toMatch(/media is blocked by default/);

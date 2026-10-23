@@ -4,6 +4,12 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Security
+
+- **Calls in Firefox and Safari are now end-to-end encrypted, iPhone and iPad included.** In a channel that is not in SFU mode, Púca encrypted a call's sound and video frame by frame only in Chrome, Edge, Brave and the Windows and Android apps. In Firefox and Safari, "Require encryption for calls" — on unless you turned it off — therefore kept your microphone, camera and screen share out of the call and played nobody's voice, so from an iPhone you could not take part in such a call at all. Firefox 117 and later and Safari 15.4 and later now encrypt these calls too, through the browser's standard WebRTC Encoded Transform, and one call can mix them with Chrome and the apps. An older browser that cannot is still told so before it joins, and the setting still keeps its media out. If you turned "Require encryption for calls" off so that calls would work in Firefox or Safari, you can turn it back on in **Settings → Privacy & Safety**. Comes with the web app update. Server operators: the web app now runs this in a small worker loaded from its own origin, which the Content-Security-Policy that `deploy/ops/add-webapp-csp.py` writes already allows (`worker-src 'self' blob:`); a policy without it leaves those browsers unable to encrypt, and the app says so.
+
 ## 0.9.848 — 2026-10-23
 
 Púca on your iPhone or iPad, from the Home Screen

@@ -70,13 +70,18 @@ means someone has actually run it, not that the code exists.
 |---|---|---|---|---|---|
 | Chat, DMs, files (E2EE) | native app | browser | browser | native app | browser |
 | Voice & video calls | yes | yes | yes | yes | yes |
-| **Encrypted** call media | yes | Chromium browsers | Chromium browsers | yes | **no** |
+| **Encrypted** call media | yes | browsers¹ | browsers¹ | yes | **built, not yet tried** |
 | Watching a shared screen | yes | yes | yes | yes | yes |
 | Sharing *your* screen | yes | browser | browser | — | — |
 | **Controlling** another machine | yes | **yes, in a browser** | **yes, in a browser** | yes | yes |
 | **Being** controlled | **yes** | in progress (below) | no | no | no |
 | Native desktop app | **shipped** | builds, unreleased | builds, unreleased | n/a | n/a |
 | Notifications while closed | yes | no | no | yes | no |
+
+¹ Chrome, Edge and Brave run Chromium's frame encryption, which has been run on
+these platforms. Firefox and Safari run the standard WebRTC Encoded Transform
+instead: Firefox has been run against Chrome on Windows; Safari (and so iPhone
+and iPad) runs the same code but has not yet been tried on a device.
 
 ### The short version for non-Windows users
 
@@ -271,14 +276,18 @@ than assumed:
 Neither affects a plain X11 session. Proper Wayland support means the PipeWire
 and RemoteDesktop portals, which is a separate project.
 
-## Why can't Firefox or Safari do encrypted calls?
+## Are calls end-to-end encrypted in Firefox and Safari?
 
-Frame-level media encryption needs **Insertable Streams**, which only
-Chromium-based browsers implement. Púca does not quietly downgrade you:
-"Require encryption for calls" defaults on, so it tells you before you join and
-blocks the media instead. You can turn that setting off in **Settings → Privacy
-& Safety** to proceed with transport encryption only — the call is still
-encrypted in transit, just not end-to-end.
+Yes, in current versions: Firefox 117 or later, and Safari 15.4 or later,
+including on iPhone and iPad. Púca encrypts each audio and video frame through
+whichever WebRTC Encoded Transform API the browser has — Chromium's own (Chrome,
+Edge, Brave and the Windows and Android apps), or the standard one Firefox and
+Safari implement — and both kinds can be in one encrypted call. An older
+browser with neither is not quietly downgraded: "Require encryption for calls"
+defaults on, so Púca tells you before you join and blocks the media instead.
+You can turn that setting off in **Settings → Privacy & Safety** to proceed
+with transport encryption only — the call is still encrypted in transit, just
+not end-to-end.
 
 ## Is there an iPhone app?
 

@@ -81,9 +81,13 @@ const PC_REGISTRY = `(() => {
     window.RTCPeerConnection = Patched;
 })();`;
 
+// Both Encoded Transform APIs: with only createEncodedStreams gone, Chromium
+// seals frames through RTCRtpScriptTransform instead (mediaCrypto.ts
+// mediaTransformApi) and the run measures encryption after all.
 const E2EE_OFF_SCRIPT = `(() => {
     delete RTCRtpSender.prototype.createEncodedStreams;
     delete RTCRtpReceiver.prototype.createEncodedStreams;
+    delete window.RTCRtpScriptTransform;
 })();`;
 
 const DC_OFF_SCRIPT = `(() => {

@@ -551,32 +551,57 @@ you are running.
 
 Yes — and this is the one place where **you should change a setting**.
 
-Voice and screen share are mesh peer-to-peer WebRTC by default, with frames encrypted
-AES-256-GCM over Insertable Streams
-([`mediaCrypto.ts`](../frontend/src/api/rtc/mediaCrypto.ts)). The server and any TURN relay
-see ciphertext they have no key for. The LiveKit SFU is opt-in per channel (`sfu_mode`
-defaults `false`) and is fail-closed when used — no Insertable Streams support means no
-call, never a plaintext one (`doConnect` in [`sfuManager.ts`](../frontend/src/api/rtc/sfuManager.ts)).
+Voice and screen share are mesh peer-to-peer WebRTC by default, with every frame
+encrypted AES-256-GCM by a transform on each sender and receiver (the format:
+[`frameCrypto.ts`](../frontend/src/api/rtc/frameCrypto.ts)). Two APIs carry those
+transforms, one per engine (`mediaTransformApi` in
+[`mediaCrypto.ts`](../frontend/src/api/rtc/mediaCrypto.ts)): Chromium's
+`createEncodedStreams` (WebView2 on Windows, the Android WebView, Chrome and Edge), and
+the standard WebRTC Encoded Transform, `RTCRtpScriptTransform`, in a worker (Firefox 117+
+and Safari 15.4+, iPhone and iPad included —
+[`scriptTransform.ts`](../frontend/src/api/rtc/scriptTransform.ts)). Both run the same
+frame functions, so the two kinds of client share one encrypted call. The server and any
+TURN relay see ciphertext they have no key for. The LiveKit SFU is opt-in per channel
+(`sfu_mode` defaults `false`) and is fail-closed when used — no Encoded Transform support
+means no call, never a plaintext one (`doConnect` in
+[`sfuManager.ts`](../frontend/src/api/rtc/sfuManager.ts)).
 
 The mesh sealer leaves a few leading bytes of each frame in the clear so the RTP
 packetizer can still see the codec header — 10 on a keyframe, 3 on a delta, 1 on audio,
 bound into the AEAD so they cannot be altered undetected. Those numbers are the **VP8**
 payload descriptor and the **Opus** TOC byte; they are not correct for H.264 or VP9.
-The sealer only ever runs where the WebRTC Encoded Transform API exists — the sender and
-receiver wiring in `manager.ts` return early without it, and `mediaCrypto.enabled` only
-goes true once both ends have advertised support — so every link these constants are
-applied to is Chromium-family at both ends (WebView2 on Windows, the Android WebView,
-Chrome and Edge on the web), which offers VP8 and Opus first and is what such a call
-negotiates today. Firefox, Safari, iOS and the WebKit desktop shells also ship as call
-clients but never run this code: they lack the API and stay on transport-only
-encryption, which the badge shows (see "The gap" below). If a sealer-capable peer ever
-negotiated H.264 the failure is availability, not confidentiality:
-Chromium's H.264 packetizer finds no NAL units in ciphertext and emits nothing, so the
-call shows no video rather than plaintext video, and the handful of clear bytes would be
-a start code plus the SPS profile and level — no resolution, no picture. The SFU path is
-unaffected: LiveKit's frame cryptor is codec-aware and walks H.264 NAL units. Pinning the
-mesh codec preference and refusing frames of any other codec is tracked as hardening;
-it is not needed to keep the guarantee on the supported matrix.
+Chromium and Firefox offer VP8 first, Safari offers H.264 first, so a client that seals
+frames makes VP8 the video codec of every link: VP8 first in its codec preferences
+before it offers a new video transceiver, VP8 first in its answer to an offer that did
+not already list it first, and, once negotiated, VP8 chosen for its own video senders
+(`preferSealableVideoCodecs` and `sendSealableVideoCodec` in `mediaCrypto.ts`). The last
+step is needed because, measured in Edge and Firefox, an answerer sends the first codec
+of the OFFER whatever its own answer lists — even an answer listing VP8 alone. The
+preferences go no further than that because Firefox, given preferences on a transceiver
+whose codecs were negotiated in the other side's payload numbers, writes its next offer
+for it with feedback lines Chromium refuses ("Failed to parse codecs correctly") — the
+call then stalls into a rebuild the moment that peer turns a camera on. If a sealed link
+ever carried H.264 anyway the failure is availability, not
+confidentiality: Chromium's H.264 packetizer finds no NAL units in ciphertext and emits
+nothing, so the call shows no video rather than plaintext video, and the handful of clear
+bytes would be a start code plus the SPS profile and level — no resolution, no picture.
+The SFU path is unaffected: LiveKit's frame cryptor is codec-aware and walks H.264 NAL
+units. Refusing to seal frames of any other codec is not built.
+
+What this rests on is checked in real browsers by
+`frontend/e2e/mesh-e2ee-interop-real-browser.mjs`, a release gate: Edge on
+`createEncodedStreams` against Firefox on `RTCRtpScriptTransform`, each side's
+microphone a tone the other must hear — only under the right key, never from frames
+passed through unopened, again after a new key mid-call — plus Safari-shaped H.264-first
+offers, an engine with neither API, and the worker under every Content-Security-Policy
+the app ships. **Safari itself runs the same standard API but had not been exercised on a
+device when this was written** (Playwright's Windows WebKit has no WebRTC). Two engine
+behaviours the code handles: Chromium ignores an `RTCRtpScriptTransform` set on the
+OFFERING side's receiver in `ontrack` — it reports the transform attached and decodes
+what arrives unopened — so on that path a receiver of one's own is wrapped before
+negotiation; and a worker that cannot start (a policy without `worker-src 'self'`) makes
+the engine report that it cannot encrypt, and every connection is rebuilt as on an
+engine without the API — blocked under enforcement, labelled transport-only without it.
 
 ### The gap
 
@@ -584,11 +609,14 @@ it is not needed to keep the guarantee on the supported matrix.
 (`defaultSettings` in [`settingsStore.ts`](../frontend/src/components/settingsStore.ts)), and a
 one-time migration armed it for existing installs
 ([`settingsStore.ts` `migrateRequireMediaE2ee`](../frontend/src/components/settingsStore.ts)).
-Read that migration before quoting the default at anyone: it deliberately does NOT arm
-the setting on an engine that cannot satisfy it (Firefox, Safari, iOS, the WebKit desktop
-shells), because doing so would have taken working calls away from those users for a
-setting they never touched. So on those engines an upgraded profile keeps whatever it
-had, while a fresh install gets the fail-closed default and is told before it joins.
+Read that migration before quoting the default at anyone: it deliberately did NOT arm
+the setting on an engine that could not satisfy it, because doing so would have taken
+working calls away from those users for a setting they never touched. When it ran, that
+meant Firefox, Safari, iOS and the WebKit desktop shells; Firefox and Safari can satisfy
+it now, but a profile the migration already passed over keeps whatever it had — often
+off, so check Settings → Privacy & Safety there — while a fresh install gets the
+fail-closed default. An engine that still cannot (an older browser) is told before it
+joins.
 
 The capability is advertised as a line in the SDP, which the server relays. If someone who
 can terminate TLS *substitutes* that line, the tag check catches it and the call stays
@@ -630,6 +658,12 @@ server-wide before you join a call.
 > setting mid-call rebuilds every connection under it, and the server pushes the owner's
 > change to every member at once, which needs the server update as well as the app (audit
 > 2026-10, F-1 and its second review: [`docs/AUDIT_2026-10.md`](AUDIT_2026-10.md)).
+>
+> **Update (2026-10-23).** Firefox and Safari (iPhone and iPad included) now encrypt mesh
+> calls end to end through the standard `RTCRtpScriptTransform`, so on them the setting
+> no longer holds media back: the call is encrypted like a Chromium one. The two
+> corrections above still describe an engine with neither API — an older browser, or a
+> web view without one — and their guards still hold there.
 
 ---
 

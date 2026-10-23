@@ -12,7 +12,7 @@ import type { ControlEphemeral } from '../e2ee';
 export type MediaE2eeReason =
     | 'encrypted'          // active: frames are E2E encrypted with a verified peer
     | 'negotiating'        // handshake in flight; not yet decided
-    | 'local-unsupported'  // THIS device/browser lacks insertable streams (e.g. iOS/Safari/Firefox)
+    | 'local-unsupported'  // THIS device/browser runs no Encoded Transform API (an older browser; see mediaCrypto.mediaTransformApi)
     | 'peer-unsupported'   // the other peer didn't advertise media-E2EE capability
     | 'peer-unencrypted'   // SFU: participant PUBLISHED media not flagged E2EE (modified/foreign client) — refused, not rendered
     | 'verification-failed'  // peer advertised, but the tag didn't verify (possible tampering)
@@ -59,8 +59,10 @@ export interface PeerConnection {
     /** Perfect-negotiation: true when we (impolite) dropped the peer's colliding
      *  offer — its ICE candidates are then expected to fail and are swallowed. */
     ignoreOffer: boolean;
-    /** Media-E2EE: mutable state shared with the frame transforms. The `key` is
-     *  the forward-secret SESSION key, set only after a verified peer ephemeral. */
+    /** Media-E2EE: mutable state the frame transforms read — on the page, or
+     *  in their worker, which every write updates (scriptTransform.ts
+     *  PeerMediaCrypto). The `key` is the forward-secret SESSION key, set only
+     *  after a verified peer ephemeral. */
     mediaCrypto: MediaCryptoState;
     /** Peer's pinned (TOFU) identity public key — one half of the session-key DH. */
     mediaStaticPub: string | null;

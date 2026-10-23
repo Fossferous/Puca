@@ -35,7 +35,8 @@ const glareErr = { a: [], b: [] };
 const isGlare = (t) => /m-lines|InvalidAccessError/i.test(t);
 
 const browser = await chromium.launch({
-    args: ['--use-fake-ui-for-media-stream',
+    // --mute-audio first: each peer plays the other's fake (beeping) microphone.
+    args: ['--mute-audio', '--use-fake-ui-for-media-stream',
         // Real-address host candidates: same-machine ICE must not coin-flip
         // on headless mDNS resolution (see voice-camera-2peer.mjs).
         '--disable-features=WebRtcHideLocalIpsWithMdns', '--use-fake-device-for-media-stream',
@@ -49,7 +50,8 @@ async function reg(ctx, u, bucket) {
     });
     await p.goto(APP + '/login');
     await p.waitForSelector('#username', { timeout: 10000 });
-    await p.click('.toggle-mode'); await p.waitForSelector('#inviteCode', { timeout: 5000 });
+    // The invite-code field exists only on a server that asks for one: wait for the form, not for it.
+    await p.click('.toggle-mode'); await p.waitForSelector('#password', { timeout: 5000 });
     await p.fill('#username', u); await p.fill('#password', PASS); await p.click('button[type="submit"]');
     await p.waitForURL('**/chat', { timeout: 30000 }); await p.waitForTimeout(1200);
     try { await p.check('.recovery-confirm input[type=checkbox]', { timeout: 4000 }); await p.click('.recovery-done-btn'); } catch { /* older */ }

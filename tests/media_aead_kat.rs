@@ -1,7 +1,7 @@
 //! S4 — the Rust half of the media frame AEAD cross-language contract.
 //!
 //! WHY: the native host agent (Phase 6 of the "My Devices" plan) must produce
-//! and consume frames byte-identically to `frontend/src/api/rtc/mediaCrypto.ts`.
+//! and consume frames byte-identically to `frontend/src/api/rtc/frameCrypto.ts`.
 //! If the two drift, it presents as "video is broken", not "the crypto
 //! disagrees" — a genuinely awful debugging session. This test pins the format
 //! against the SAME fixture vitest asserts, so a change to either side that
@@ -24,7 +24,7 @@ const TRAILER: usize = IV_LEN + MAGIC.len();
 const GCM_TAG_LEN: usize = 16;
 const MIN_ENCRYPTED_LEN: usize = GCM_TAG_LEN + TRAILER;
 
-/// Mirrors CLEAR_HEADER in mediaCrypto.ts: video keyframe=10, delta=3, audio=1.
+/// Mirrors CLEAR_HEADER in frameCrypto.ts: video keyframe=10, delta=3, audio=1.
 fn clear_header_len(frame_type: Option<&str>) -> usize {
     match frame_type {
         Some("key") => 10,
@@ -155,7 +155,7 @@ fn rust_encrypt_matches_typescript_bytes() {
         assert_eq!(
             hex::encode(&got),
             v.ciphertext_hex,
-            "vector `{}`: Rust encrypt diverged from mediaCrypto.ts",
+            "vector `{}`: Rust encrypt diverged from frameCrypto.ts",
             v.name
         );
     }
@@ -196,7 +196,7 @@ fn tampered_clear_header_is_rejected() {
 }
 
 /// A frame shorter than its own clear header round-trips. This is the exact
-/// asymmetry the KAT caught in mediaCrypto.ts: such frames encrypted fine and
+/// asymmetry the KAT caught in the TypeScript sealer: such frames encrypted fine and
 /// could never be decrypted, because decrypt clamped by ciphertext length.
 #[test]
 fn frame_shorter_than_its_clear_header_round_trips() {

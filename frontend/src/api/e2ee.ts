@@ -980,7 +980,7 @@ export function deriveDeviceControlKey(
 // Mesh WebRTC is pairwise, so each peer connection encrypts frames under a key
 // derived from the two users' identity keys — X25519 + HKDF, domain-separated
 // from DM/control/etc. Both peers derive the same 32-byte key. (Per-frame
-// AES-GCM lives in api/rtc/mediaCrypto; this is just the key.)
+// AES-GCM lives in api/rtc/frameCrypto; this is just the key.)
 const HKDF_MEDIA_INFO = utf8('sovereign-media-v1');
 
 /** Derive the pairwise media key from my identity + the peer's identity pubkey. */

@@ -689,9 +689,10 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
     }, [serverRequireMediaE2ee]);
 
     // Can THIS engine encrypt live media on the transport this channel uses?
-    // Both probes are static feature detection — mesh is Chromium's
-    // createEncodedStreams, SFU is livekit's (which also accepts the standard
-    // RTCRtpScriptTransform) — so the answer is known on the FIRST render.
+    // Both probes are static feature detection — mesh is mediaCrypto's
+    // (Chromium's createEncodedStreams, or the standard RTCRtpScriptTransform
+    // on Firefox and Safari), SFU is livekit's (which accepts the same two) —
+    // so the answer is known on the FIRST render.
     // The polled `mediaSecure.supported` carries the same value but starts
     // optimistic, and the mount-time auto-join ran before the first poll
     // landed: a Firefox user under the default enforcement was auto-joined
@@ -3751,7 +3752,8 @@ export function VoicePanel({ roomId, channelName, currentUserId, currentUsername
                 without encryption: say so in plain sight, before Join and for
                 as long as it holds. The E2EE badge's tooltip explains the same
                 thing, but it only mounts once a peer is present and only on
-                hover — a Firefox/Safari user under the default enforcement
+                hover — a user on an engine that cannot encrypt (once every
+                Firefox and Safari user) under the default enforcement
                 otherwise joined a call where nobody could hear them and nothing
                 on screen said why. Static probe, not the polled summary: see
                 `engineSupported`. */}

@@ -31,7 +31,8 @@
   "include": [
     "src",
     "e2e/av-emulation/main.ts",
-    "e2e/device-stage"
+    "e2e/device-stage",
+    "e2e/mesh-e2ee"
   ],
   "exclude": [
     "src/**/*.test.ts",
