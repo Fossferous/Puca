@@ -663,7 +663,9 @@ the crowd. Three checks, cheapest first:
 - `check-versions.sh` — every surface (desktop `latest.json`, `/app-version`,
   the mobile OTA manifest, the download page, the web bundle, the CSP header)
   must agree on one version on every host; `--preflight` says whether the
-  version you are about to build is still free.
+  version you are about to build is still free. Púca for Steam Deck has its
+  own version, so it is held to a different rule: every host must offer the
+  same release, and the zip its manifest names must be there.
 - `ship-waker.sh` — builds and installs the LAN waker on exactly one host
   (never a fleet artifact — see its header). It records the source it shipped
   in `/opt/<unit>/SOURCE_SHA`, which is what lets `check-versions.sh` tell a
