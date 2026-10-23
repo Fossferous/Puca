@@ -17,6 +17,7 @@
 import { useEffect, useState } from 'react';
 import {
     identityRestoreFailed,
+    identityRestoreReason,
     onIdentityRestoreChange,
     retryIdentityRestore,
 } from '../api/auth';
@@ -30,6 +31,7 @@ interface IdentityBannerProps {
 
 export function IdentityBanner({ onSignOut }: IdentityBannerProps) {
     const [failed, setFailed] = useState(identityRestoreFailed);
+    const [reason, setReason] = useState(identityRestoreReason);
     const [dismissed, setDismissed] = useState(false);
     const [asking, setAsking] = useState(false);
     const [password, setPassword] = useState('');
@@ -38,6 +40,7 @@ export function IdentityBanner({ onSignOut }: IdentityBannerProps) {
 
     useEffect(() => onIdentityRestoreChange(() => {
         setFailed(identityRestoreFailed());
+        setReason(identityRestoreReason());
         setDismissed(false);
     }), []);
 
@@ -62,10 +65,20 @@ export function IdentityBanner({ onSignOut }: IdentityBannerProps) {
         <div className="identity-banner" role="alert">
             <div className="identity-banner-main">
                 <span className="identity-banner-icon"><KeyIcon /></span>
-                <div className="identity-banner-text">
-                    <strong>Encryption keys unavailable.</strong>
-                    <span> Messages can't be sent or read until they are restored.</span>
-                </div>
+                {reason === 'key-mismatch' ? (
+                    // The sign-in check (auth.ts checkPublishedOwnKey) refused
+                    // the key: the server publishes a different one for this
+                    // account, and that is what others encrypt to.
+                    <div className="identity-banner-text">
+                        <strong>Your encryption key is not the one this server publishes for you.</strong>
+                        <span> Púca did not use it, so messages can't be sent or read here. People who start a conversation with you may be encrypting to a key that isn't yours: tell the server's owner.</span>
+                    </div>
+                ) : (
+                    <div className="identity-banner-text">
+                        <strong>Encryption keys unavailable.</strong>
+                        <span> Messages can't be sent or read until they are restored.</span>
+                    </div>
+                )}
                 <div className="identity-banner-actions">
                     {!asking && (
                         <button className="identity-banner-btn primary" onClick={() => setAsking(true)}>Retry</button>

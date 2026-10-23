@@ -1,0 +1,49 @@
+/* Same placement as the identity banner (fixed, top, pushes nothing); one
+   step ABOVE it in z-order: a server listing a stranger for a channel's key
+   is the one to read first if both show. */
+.hidden-recipient-banner {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 9991;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--color-warning, #e8a33d);
+    color: #1b1b1b;
+    padding: 10px 16px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    font-size: 14px;
+}
+
+.hidden-recipient-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+}
+
+.hidden-recipient-text {
+    flex: 1 1 240px;
+    min-width: 0;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
+.hidden-recipient-dismiss {
+    width: 44px;
+    height: 44px;
+    flex-shrink: 0;
+    margin-left: auto;
+    display: grid;
+    place-items: center;
+    background: transparent;
+    border: none;
+    color: inherit;
+    cursor: pointer;
+    border-radius: 6px;
+}
+
+.hidden-recipient-dismiss:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: 2px;
+}

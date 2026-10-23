@@ -1,4 +1,5 @@
 import { apiClient } from './client';
+import { noteChannels, noteServers } from './channelDirectory';
 
 // --- Types ---
 
@@ -107,8 +108,11 @@ export function createServer(name: string): Promise<{ id: string; name: string }
     return apiClient.post('/servers', { name });
 }
 
-export function listServers(): Promise<Server[]> {
-    return apiClient.get('/servers');
+export async function listServers(): Promise<Server[]> {
+    const list = await apiClient.get<Server[]>('/servers');
+    // The names the channel-key notice uses (channelDirectory.ts).
+    if (Array.isArray(list)) noteServers(list);
+    return list;
 }
 
 export function joinServer(serverId: string): Promise<void> {
@@ -125,8 +129,12 @@ export function deleteServer(serverId: string): Promise<void> {
 
 // --- Channel API ---
 
-export function listChannels(serverId: string): Promise<Channel[]> {
-    return apiClient.get(`/servers/${serverId}/channels`);
+export async function listChannels(serverId: string): Promise<Channel[]> {
+    const list = await apiClient.get<Channel[]>(`/servers/${serverId}/channels`);
+    // Where each channel appears: the server whose member list its key may be
+    // wrapped for (channelDirectory.ts, channelKeys.ts).
+    if (Array.isArray(list)) noteChannels(serverId, list);
+    return list;
 }
 
 export function createChannel(serverId: string, name: string, channelType: number = 0, parentId?: number, isAfk?: boolean, hasChecklist?: boolean): Promise<Channel> {

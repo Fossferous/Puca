@@ -367,8 +367,8 @@ import {
     generateIdentitySeed, makeIdentity, buildWrapMaterial,
     unwrapSeedWithPassword, unwrapSeedWithRecovery, rewrapForNewPassword,
     passwordWrapNeedsUpgrade, upgradePasswordWrap,
-    computeRecoveryProof,
-    type PwKdf,
+    computeRecoveryProof, decodePublicKey,
+    type Identity, type PwKdf,
 } from './e2ee';
 import { setPendingRecoveryCode, markRecoveryCodeUnacknowledged } from './recoveryPrompt';
 import { newHistoryKeyMaterial, rewrapHistoryKey, getHistoryKey, storeHistoryKey, storePendingHistoryKey, adoptPendingHistoryKey, clearDmKeys, accountSignPubFor } from './dmKeys';
@@ -643,7 +643,9 @@ export async function restoreIdentityAfterLogin(username: string, password: stri
                 wrap.pw_kdf_iterations ?? undefined, wrap.pw_kdf ?? undefined,
             );
             if (!seed) throw new Error('seed unwrap failed (password/key mismatch)');
-            setActiveIdentity(makeIdentity(seed));
+            const identity = makeIdentity(seed);
+            if (await refusedForMismatch(identity, username)) return;
+            setActiveIdentity(identity);
             clearIdentityRestoreFailure();
             // Transparently upgrade the password wrap to the current KDF
             // (Argon2id) if it isn't already. Best-effort — login already
@@ -685,10 +687,20 @@ export async function restoreIdentityAfterLogin(username: string, password: stri
 // --- "signed in, but the keys never came back" -----------------------------
 
 const IDENTITY_MISSING_KEY = 'e2ee_identity_missing_v1';
+/** Why, when it is more than "could not restore" (absent otherwise). */
+const IDENTITY_REASON_KEY = 'e2ee_identity_missing_reason_v1';
 const IDENTITY_EVENT = 'identity-restore-changed';
 
-function markIdentityRestoreFailed(username: string): void {
-    try { localStorage.setItem(IDENTITY_MISSING_KEY, username); } catch { /* private mode */ }
+/** `key-mismatch`: the seed unlocked, but its key is not the one the server
+ *  publishes for this account (see checkPublishedOwnKey). */
+export type IdentityRestoreReason = 'key-mismatch';
+
+function markIdentityRestoreFailed(username: string, reason?: IdentityRestoreReason): void {
+    try {
+        localStorage.setItem(IDENTITY_MISSING_KEY, username);
+        if (reason) localStorage.setItem(IDENTITY_REASON_KEY, reason);
+        else localStorage.removeItem(IDENTITY_REASON_KEY);
+    } catch { /* private mode */ }
     try { window.dispatchEvent(new CustomEvent(IDENTITY_EVENT)); } catch { /* non-DOM */ }
 }
 
@@ -697,6 +709,7 @@ function clearIdentityRestoreFailure(): void {
     try {
         had = localStorage.getItem(IDENTITY_MISSING_KEY) !== null;
         localStorage.removeItem(IDENTITY_MISSING_KEY);
+        localStorage.removeItem(IDENTITY_REASON_KEY);
     } catch { /* private mode */ }
     if (had) {
         try { window.dispatchEvent(new CustomEvent(IDENTITY_EVENT)); } catch { /* non-DOM */ }
@@ -706,6 +719,15 @@ function clearIdentityRestoreFailure(): void {
 /** True while this device is signed in without a restored E2EE identity. */
 export function identityRestoreFailed(): boolean {
     try { return localStorage.getItem(IDENTITY_MISSING_KEY) !== null; } catch { return false; }
+}
+
+/** Why the restore failed, when there is more to say than "it did not". */
+export function identityRestoreReason(): IdentityRestoreReason | null {
+    try {
+        return localStorage.getItem(IDENTITY_REASON_KEY) === 'key-mismatch' ? 'key-mismatch' : null;
+    } catch {
+        return null;
+    }
 }
 
 /** Subscribe to the flag changing; returns the unsubscribe. */
@@ -744,8 +766,68 @@ export async function retryIdentityRestore(password: string): Promise<void> {
         wrap.pw_kdf_iterations ?? undefined, wrap.pw_kdf ?? undefined,
     );
     if (!seed) throw new Error('That password did not unlock the keys. Check it and try again.');
-    setActiveIdentity(makeIdentity(seed));
+    const identity = makeIdentity(seed);
+    if (await refusedForMismatch(identity, username)) throw new Error(KEY_MISMATCH_RETRY_MESSAGE);
+    setActiveIdentity(identity);
     clearIdentityRestoreFailure();
+}
+
+/**
+ * The sign-in sanity check docs/E2EE_RECOVERY.md §8 describes: the identity a
+ * seed unlocks must be the one the server publishes for this account. It was
+ * described and never done (audit 2026-10, F-3), so a device could not tell
+ * when the key the server hands EVERYONE ELSE for this account was not its
+ * own — new contacts would pin the substitute, and only this account's own
+ * devices could have noticed.
+ *
+ * The published key is read from GET /users/<me>/public-key: the answer every
+ * other client encrypts to, not a field of /keys/wrap that only we read.
+ *
+ * - `match`: adopt.
+ * - `mismatch`: a well-formed identity key that is not ours. Never adopted.
+ * - `unpublished`: nothing usable is published (null, or a pre-X25519 value
+ *   no client can encrypt to), so nobody can be encrypting to a key that is
+ *   not ours. Adopted, so no older account is locked out.
+ * - `unchecked`: the lookup failed (offline, or a server too old to answer
+ *   it for yourself). Not evidence of anything; adopted, and said in the log.
+ */
+type OwnKeyCheck = 'match' | 'mismatch' | 'unpublished' | 'unchecked';
+
+async function checkPublishedOwnKey(identity: Identity): Promise<OwnKeyCheck> {
+    const me = currentUserIdFromToken();
+    if (me === null) return 'unchecked';
+    let served: string | null | undefined;
+    try {
+        const r: { public_key?: string | null } = await apiClient.get(`/users/${me}/public-key`);
+        served = r?.public_key;
+    } catch {
+        return 'unchecked';
+    }
+    const raw = decodePublicKey(served);
+    if (!raw || raw.length !== 32) return 'unpublished';
+    for (let i = 0; i < raw.length; i++) if (raw[i] !== identity.publicKey[i]) return 'mismatch';
+    return 'match';
+}
+
+const KEY_MISMATCH_RETRY_MESSAGE =
+    "Your password unlocked a key that is not the one this server publishes for you, so Púca did not use it. Tell the server's owner.";
+
+/** Run the check; on a mismatch STOP the restore (nothing adopted, nothing
+ *  cached left in use) and leave the reason for IdentityBanner. True when it
+ *  refused. */
+async function refusedForMismatch(identity: Identity, username: string): Promise<boolean> {
+    const own = await checkPublishedOwnKey(identity);
+    if (own === 'mismatch') {
+        console.error('[e2ee] the identity your password unlocks is not the one this server publishes for your account — not using it');
+        // A seed cached by an earlier session must not stand in for the one
+        // just refused: the next getActiveIdentity() would bring it back.
+        clearActiveIdentity();
+        markIdentityRestoreFailed(username, 'key-mismatch');
+        return true;
+    }
+    if (own === 'unpublished') console.warn('[e2ee] this server publishes no usable identity key for your account; using the one your password unlocks');
+    if (own === 'unchecked') console.warn('[e2ee] could not read the identity key this server publishes for your account; not checked this time');
+    return false;
 }
 
 /**

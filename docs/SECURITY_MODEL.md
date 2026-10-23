@@ -2,8 +2,9 @@
 
 You have read access to this repository. This document exists so you can use it.
 
-Every claim below carries a `file:line` reference and, where possible, a command you can
-run yourself. Where the answer is unflattering, it is written down as plainly as the
+Every claim below names the file and, where it matters, the function or constant that
+enforces it — search for the name: line numbers drift with every release, names do not —
+and, where possible, a command you can run yourself. Where the answer is unflattering, it is written down as plainly as the
 answers that aren't — because you can check, and anything omitted here would read as
 concealment when you found it.
 
@@ -91,7 +92,10 @@ whether the tool fits your threat model.
   30 days and renews on use, up to a year from the sign-in, and on the Notes phone app the
   background reminder check is use. In a browser Notes and Púca share one token, so the web
   app gets the same session. A copied token is therefore good for up to 30 days, renewable
-  until the year is up, unless the session is ended. A renewal never extends a token past
+  until the year is up, unless the session is ended. It also reads this account's
+  password-wrapped seed (`GET /keys/wrap`): the same offline target a database thief
+  gets (§7), for one account, crackable only as far as the password is weak; it cannot
+  rewrite it without a fresh password proof. A renewal never extends a token past
   the year: its expiry is clamped to it. (The one exception is transitional: a token that a
   server from before that clamp renewed in the session's last month keeps the expiry it was
   given, at most 30 days past the year.) From another device, ending the session takes *Sign
@@ -337,9 +341,10 @@ members. Who is playing is shown only to the people in that call.
 
 **Mint a valid session token for any user, at any time.** The JWT is a symmetric HMAC; the
 party that verifies is the party that can sign, and the operator holds the secret
-([`src/ws.rs:50`](../src/ws.rs#L50), secret loaded at `src/main.rs:184`). The only
+(`validate_token` in [`src/auth.rs`](../src/auth.rs), which the socket uses too; the
+secret is `JWT_SECRET`, read at startup in `main`, [`src/main.rs`](../src/main.rs)). The only
 additional check is `token_version`, a plain integer in their own database
-([`src/auth.rs:157`](../src/auth.rs#L157)).
+(`token_session_live` in [`src/auth.rs`](../src/auth.rs)).
 
 This does not give them your keys — the identity seed is stored only wrapped
 (§7) — but it does mean **any username you see could have been chosen by the operator**.
@@ -382,8 +387,8 @@ Yes, and the send path fails closed rather than falling back to plaintext.
 - **Attachments:** separately AES-256-GCM encrypted under a per-file key carried inside the
   already-encrypted message, and decrypted on your device only while they are shown (below).
 - **Fail-closed:** if the key isn't available the client throws rather than sending
-  ([`servers.ts:420`](../frontend/src/api/servers.ts#L420),
-  [`dms.ts:150`](../frontend/src/api/dms.ts#L150)). Edits go through the same path.
+  (`sendChannelMessageEncrypted` in [`servers.ts`](../frontend/src/api/servers.ts),
+  `encryptDMContent` in [`dms.ts`](../frontend/src/api/dms.ts)). Edits go through the same path.
 
 Cryptographic primitives come from `@noble/curves`, `@noble/hashes`, `@scure/bip39` and the
 browser's WebCrypto — not home-made.
@@ -455,8 +460,9 @@ which can sit there for a few minutes after the save.
 
 **The server does not enforce this; the client is what tells you.**
 
-All three write paths bind the client's string verbatim (`src/message_handlers.rs:200`,
-`src/dm_handlers.rs:493`, `src/ws.rs:2612`) with no envelope validation, and `key_epoch`
+All three write paths bind the client's string verbatim (`send_message` in `src/message_handlers.rs`,
+`send_message` in `src/dm_handlers.rs`, and the `ClientMessage::DirectMessage` arm of
+`handle_message` in `src/ws.rs`) with no envelope validation, and `key_epoch`
 is a client-supplied nullable integer documented as "None = plaintext". That is not a gap
 the server could close: the attacker in this section *is* the server, and a server
 validating its own writes proves nothing to you.
@@ -482,8 +488,11 @@ you are running.
 > server also publishes as a member of that channel under the same key. What is NOT fixed,
 > because it cannot be without out-of-band verification, is an operator who forges the
 > membership list itself — that still yields the group key, but it now requires putting a
-> stranger in the member list where you can see them. Compare safety numbers if that
-> matters to you. This is the kind of thing this document exists to tell you about.
+> stranger in the member list where you can see them: since 0.9.847 the client wraps the
+> key only for, and trusts a first-contact wrapper only from, an id that is ALSO in the
+> server's member list it shows, and names the channel when the server lists anyone else
+> (audit 2026-10, F-2; until then an id listed only for the channel's key, a list no
+> screen shows, got the key unseen). Compare safety numbers if that matters to you. This is the kind of thing this document exists to tell you about.
 
 ---
 
@@ -496,7 +505,7 @@ AES-256-GCM over Insertable Streams
 ([`mediaCrypto.ts`](../frontend/src/api/rtc/mediaCrypto.ts)). The server and any TURN relay
 see ciphertext they have no key for. The LiveKit SFU is opt-in per channel (`sfu_mode`
 defaults `false`) and is fail-closed when used — no Insertable Streams support means no
-call, never a plaintext one ([`sfuManager.ts:192`](../frontend/src/api/rtc/sfuManager.ts#L192)).
+call, never a plaintext one (`doConnect` in [`sfuManager.ts`](../frontend/src/api/rtc/sfuManager.ts)).
 
 The mesh sealer leaves a few leading bytes of each frame in the clear so the RTP
 packetizer can still see the codec header — 10 on a keyframe, 3 on a delta, 1 on audio,
@@ -521,7 +530,7 @@ it is not needed to keep the guarantee on the supported matrix.
 ### The gap
 
 **Enforcement is ON by default** since 0.8.130 — `requireMediaE2ee = true`
-([`settingsStore.ts:120`](../frontend/src/components/settingsStore.ts#L120)), and a
+(`defaultSettings` in [`settingsStore.ts`](../frontend/src/components/settingsStore.ts)), and a
 one-time migration armed it for existing installs
 ([`settingsStore.ts` `migrateRequireMediaE2ee`](../frontend/src/components/settingsStore.ts)).
 Read that migration before quoting the default at anyone: it deliberately does NOT arm
@@ -533,18 +542,19 @@ had, while a fresh install gets the fail-closed default and is told before it jo
 The capability is advertised as a line in the SDP, which the server relays. If someone who
 can terminate TLS *substitutes* that line, the tag check catches it and the call stays
 transport-only with reason `verification-failed`. If they simply **delete** it, the code
-takes the `!remote` branch ([`manager.ts:263`](../frontend/src/api/rtc/manager.ts#L263)) and
+takes the `!remote` branch of `enableMediaWithRemote` ([`manager.ts`](../frontend/src/api/rtc/manager.ts)) and
 both ends fall back to plain DTLS-SRTP — at which point the same attacker can substitute
 DTLS fingerprints and read the media.
 
 **This is not silent.** The reason is surfaced in the voice panel
-([`VoicePanel.tsx:2179`](../frontend/src/components/VoicePanel.tsx#L2179) via
+([`VoicePanel.tsx`](../frontend/src/components/VoicePanel.tsx) via
 `mediaE2eeExplanation`), so a downgraded call is visible if you look. But it is not
 *refused*.
 
 **Fix:** turn on **"Require encryption for calls"** — per-user in Settings, or server-wide
 in Server Settings, where it is owner-only
-([`ServerSettingsModal.tsx:311`](../frontend/src/components/ServerSettingsModal.tsx#L311)).
+([`ServerSettingsModal.tsx`](../frontend/src/components/ServerSettingsModal.tsx); the server's
+`update_server_settings` refuses anyone else).
 With it on, a peer that can't do E2EE is refused instead of downgraded. Ask for it to be on
 server-wide before you join a call.
 
@@ -559,6 +569,13 @@ server-wide before you join a call.
 > — "use the desktop app" — is **wrong on macOS and Linux**, whose builds use WKWebView and
 > WebKitGTK and hit exactly the same gap. On those platforms, and on any browser other than
 > a Chromium one, verify the call reports *Encrypted* rather than assuming the setting did it.
+>
+> **Correction (2026-10).** That fix covered the tracks present when a call connection was
+> built, and inbound media. On the same engines, a camera turned on or a screen shared
+> *during* the call still went out encrypted only in transit, and turning the setting on in
+> the middle of a call changed only what the panel said. Fixed in 0.9.847: the camera and
+> share paths refuse to publish there, and a change of the setting mid-call rebuilds every
+> connection under it (audit 2026-10, F-1: [`docs/AUDIT_2026-10.md`](AUDIT_2026-10.md)).
 
 ---
 
@@ -567,7 +584,7 @@ server-wide before you join a call.
 This is the real question, so it gets the most space.
 
 **Yes, the installer ships a remote-control agent.** `puca-agent.exe` is a Tauri
-sidecar ([`tauri.conf.json:49`](../frontend/src-tauri/tauri.conf.json#L49)) installed next
+sidecar (`bundle.externalBin` in [`tauri.conf.json`](../frontend/src-tauri/tauri.conf.json)) installed next
 to the app. There is no opt-out at install time. Windows only — on macOS/Linux it is inert.
 
 Now, what it can and cannot do.
@@ -643,7 +660,7 @@ serving push-to-talk and the remote-control kill switch.)
   names, no stream contents.
 - **No listening TCP socket.** `rg -c TcpListener crates/puca-agent/src/` → 0. Its only
   endpoint is a Windows named pipe with SDDL `D:(A;;GA;;;OW)(A;;GA;;;SY)` — owner and SYSTEM
-  only, not "everyone" ([`pipe.rs:34`](../crates/puca-agent/src/pipe.rs#L34)) — gated by
+  only, not "everyone" (`PIPE_SDDL` in [`pipe.rs`](../crates/puca-agent/src/pipe.rs)) — gated by
   a 24-byte random per-launch token.
 - **It dies with the app**, both by explicit kill on exit and by a parent-process watchdog.
   (The one exception is the separate SYSTEM-flavour agent the lock-screen service starts if
@@ -677,8 +694,8 @@ It starts when you open the Devices tab, or when a connect request arrives from 
   own keypair, and pass every server-side gate — and then your machine refuses them, because
   a controller's key is only accepted from an enrolment record whose signature verifies
   under an account key your client derives from *its own* seed, which the server never holds
-  ([`peerKeys.ts:78`](../frontend/src/api/devices/peerKeys.ts#L78),
-  [`session.ts:1428`](../frontend/src/api/devices/session.ts#L1428)).
+  (`deviceStaticPubFor` in [`peerKeys.ts`](../frontend/src/api/devices/peerKeys.ts),
+  whose answer `establishKey` in [`session.ts`](../frontend/src/api/devices/session.ts) keys the session from).
   Flipping the `host_enabled` database column doesn't help them either — the client reads
   armed state from a local file, not from the server.
 - **The signalling is sealed**, so the operator cannot MITM the WebRTC handshake to watch
@@ -711,13 +728,13 @@ mouse/keyboard control.
   hook that works even when a game has focus, partner disconnect, and a 90s inactivity
   timeout. Teardown releases every held key so nothing sticks down.
 - **The server cannot read the input.** It relays an opaque AES-256-GCM blob it has no key
-  for — [`src/ws.rs:2774`](../src/ws.rs#L2774) moves `event` through untouched, and the
-  header above it calls itself a dumb pipe. Forged frames fail GCM and are dropped.
+  for — the `ClientMessage::ControlInput` arm in [`src/ws.rs`](../src/ws.rs) moves `event` through
+  untouched, and the section header above it calls itself a dumb pipe. Forged frames fail GCM and are dropped.
 
 ### What is genuinely against you here
 
 1. **The name in the consent prompt is not trustworthy.** `from_username` is stamped by the
-   server from the authenticated connection ([`src/ws.rs:2512`](../src/ws.rs#L2512)) — so
+   server from the authenticated connection (the `ClientMessage::ControlRequest` arm in [`src/ws.rs`](../src/ws.rs)) — so
    another *user* cannot spoof it, but the *operator* can mint a token bearing any username
    (§2). The cryptographic gates hold; the human one becomes a judgement call about a name
    the server chose.
@@ -727,7 +744,7 @@ mouse/keyboard control.
    Windows UIPI (no elevated windows, no UAC prompt, no lock screen) and by your revoking
    it. Revoke-on-any-physical-input exists but is **off by default**.
 3. **Unattended access, if you ever turn it on, has no password-distinctness check.** The
-   only rule is 8 characters ([`unattendedHost.ts:53`](../frontend/src/api/devices/unattendedHost.ts#L53)).
+   only rule is 8 characters (`armUnattended` in [`unattendedHost.ts`](../frontend/src/api/devices/unattendedHost.ts)).
    If you reuse your account password there, someone who phishes that password gets silent
    unattended control — and an armed host deliberately does not prompt, with only a tray
    tooltip as indicator. **Default is off; if you arm it, use a different passphrase.**
@@ -766,7 +783,7 @@ they're what make the rest credible.
 | Ordinary user | Ask nicely, then alt-tab out of the game once granted | **Reachable** — social, not technical. See §5 |
 | Network attacker on a relay/TURN hop | Read your screen or keystrokes | **Blocked** — DTLS-SRTP / sealed signalling |
 | Network attacker who can terminate TLS | Strip the media-E2EE line and MITM voice | **Blocked by default** (enforcement is ON since 0.8.130); reachable only if the user turned it off — see §4 |
-| Network attacker who can terminate TLS | Substitute an identity key on *first contact* | **Reachable once per peer** (trust-on-first-use); fails closed after |
+| Network attacker who can terminate TLS | Substitute an identity key on *first contact* | **Reachable once per peer** (trust-on-first-use); fails closed after, and since 0.9.847 the safety-number screen says the key is not the one this device has been using |
 | Someone with your password | Enrol a new device on your account | **Reachable** — no second factor on enrolment |
 | Someone with your password | Control your machine from that device | **Blocked** — needs your click at the keyboard, or the separate unattended passphrase |
 
