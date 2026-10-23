@@ -34,6 +34,11 @@ PAGE_METHODS = frozenset({
     "downloadSite", "signIn",
 })
 
+# What a page_call runs in Púca's page. The method and its arguments go over
+# as values (puca_cdp.call_function), never as script text: signIn's
+# arguments carry a password.
+PAGE_CALL = "function (method, args) { return window.__pucaDeckyShim.call(method, args); }"
+
 REQUEST_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 MARKER = re.compile(r"^puca-decky-[0-9a-f]{24}$")
 MAX_SDP = 64 * 1024

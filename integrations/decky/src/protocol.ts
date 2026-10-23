@@ -40,6 +40,10 @@ export interface EmbedState {
      *  Empty on a page that predates the list. */
     features: string[];
     signedIn: boolean;
+    /** The account's encryption keys did not come back on this Deck
+     *  (docs/EMBEDDING.md, keys): 'refused' or 'unavailable'. Null when they
+     *  are in use, while signed out, and from a page that predates it. */
+    keys: 'refused' | 'unavailable' | null;
     user: { id: number; username: string } | null;
     servers: { id: string; name: string }[];
     currentServerId: string | null;
@@ -155,6 +159,7 @@ export function readState(v: unknown): EmbedState | null {
             return name ? [name] : [];
         }),
         signedIn: bool(o.signedIn),
+        keys: o.keys === 'refused' || o.keys === 'unavailable' ? o.keys : null,
         user: userId !== null && username !== null ? { id: userId, username } : null,
         servers: (Array.isArray(o.servers) ? o.servers.slice(0, 500) : []).flatMap(s => {
             const so = obj(s);

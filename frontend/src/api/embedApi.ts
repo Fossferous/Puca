@@ -11,9 +11,10 @@
  * push-to-talk is the registered hold action. Nothing here decides anything
  * the app would decide differently.
  */
+import { onIdentityRestoreChange } from './auth';
 import { API_BASE_URL } from './config';
 import { EMBED_API_VERSION, activateHostNotification, embedHost } from './embedHost';
-import { signInFromHost, type EmbedSignInResult } from './embedSignIn';
+import { embedKeys, signInFromHost, type EmbedKeys, type EmbedSignInResult } from './embedSignIn';
 import { holdFromHost } from './hotkeys';
 import {
     globalVoiceUsers, isUserSpeaking, subscribeSelfInVoice, subscribeToSpeaking, subscribeToVoiceUsers,
@@ -65,6 +66,9 @@ export interface EmbedState {
     /** EMBED_FEATURES, on a page that has them. */
     features: string[];
     signedIn: boolean;
+    /** The account's encryption keys here (embedSignIn.ts, EmbedKeys); null
+     *  while signed out. A page from before it sends none. */
+    keys: EmbedKeys | null;
     user: { id: number; username: string } | null;
     servers: { id: string; name: string }[];
     /** The server open in the full app: a default for a host's picker. */
@@ -81,7 +85,7 @@ export interface EmbedVoiceChannel {
 }
 
 export type EmbedResult = { ok: true } | { ok: false; error: string };
-export type { EmbedSignInResult } from './embedSignIn';
+export type { EmbedKeys, EmbedSignInResult } from './embedSignIn';
 
 /** What Chat knows: the account, its servers, which voice channel is open. */
 export interface EmbedSession {
@@ -169,11 +173,13 @@ export function getEmbedState(): EmbedState {
             members: readMembers(roomId, user?.id ?? null),
         };
     }
+    const signedIn = !!session && !!user;
     return {
         apiVersion: EMBED_API_VERSION,
         appVersion: typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '',
         features: [...EMBED_FEATURES],
-        signedIn: !!session && !!user,
+        signedIn,
+        keys: signedIn ? embedKeys() : null,
         user,
         servers: session?.servers() ?? [],
         currentServerId: session?.currentServerId() ?? null,
@@ -369,6 +375,8 @@ export function installEmbedApi(): boolean {
     subscribeToVoiceUsers(notifyEmbedChanged);
     subscribeSelfInVoice(() => notifyEmbedChanged());
     window.addEventListener('settingsChanged', notifyEmbedChanged);
+    // Keys refused or restored: the panel's note follows the banner.
+    onIdentityRestoreChange(notifyEmbedChanged);
     notifyEmbedChanged();
     return true;
 }

@@ -18,7 +18,9 @@ plugin's own.
     the call, **Live now** (voice channels with people in them, on every
     server, from the page's `listVoiceChannels`), the server's channels, a
     sign-in form that uses the page's own sign-in (`signIn`, when the page
-    lists it in `features`), and Settings.
+    lists it in `features`), the full app's key banner as a note (`keys`),
+    and Settings. Both channel lists ask the page again every 10 s, only
+    while the menu is open.
   - Opens the microphone (`micBridge.ts`), and notices when it delivers only
     digital silence: a muted or zeroed system microphone (`micSilence.ts`).
   - Turns the backend's back-button signals into Púca's push-to-talk hold,

@@ -172,6 +172,7 @@ function Ready({ snap }: { snap: Snapshot }) {
     }
     return (
         <>
+            {state.keys && <KeysNote keys={state.keys} />}
             {state.call && <Call call={state.call} snap={snap} />}
             <LiveNow state={state} />
             <Channels state={state} />
@@ -180,6 +181,27 @@ function Ready({ snap }: { snap: Snapshot }) {
                 <Note title={`Signed in as ${state.user?.username ?? ''}`} />
             </PanelSection>
         </>
+    );
+}
+
+/** The full app's key banner, for the panel: the account's encryption keys
+ *  did not come back on this Deck, and only Púca itself can put that right. */
+function KeysNote({ keys }: { keys: 'refused' | 'unavailable' }) {
+    return (
+        <PanelSection>
+            {keys === 'refused' ? (
+                <Note title="Your encryption key is not the one this server publishes for you">
+                    Púca did not use it: messages can't be sent or read here, and calls may not be end-to-end
+                    encrypted. Open Púca, and tell the server's owner.
+                </Note>
+            ) : (
+                <Note title="Encryption keys unavailable">
+                    Messages can't be sent or read here, and calls may not be end-to-end encrypted, until they are
+                    restored. Open Púca to restore them.
+                </Note>
+            )}
+            <OpenButton />
+        </PanelSection>
     );
 }
 

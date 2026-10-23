@@ -87,6 +87,11 @@ describe('decideReport (the pure rule)', () => {
     it('local activity (speech) newer than the OS probe wins', () => {
         expect(decideReport({ osIdleSecs: 900, lastLocalActivityMs: now - 2_000, hidden: false, nowMs: now })).toBeNull();
     });
+    it('whole seconds only: the server refuses a fraction (an embedding host reports them)', () => {
+        expect(decideReport({ osIdleSecs: 63.217, lastLocalActivityMs: 0, hidden: false, nowMs: now })).toBe(63);
+        expect(decideReport({ osIdleSecs: 700.999, lastLocalActivityMs: 0, hidden: true, nowMs: now })).toBe(700);
+        expect(decideReport({ osIdleSecs: REPORT_AFTER_SECS - 0.5, lastLocalActivityMs: 0, hidden: false, nowMs: now })).toBeNull();
+    });
     it('without a probe: a hidden page is inactive at once, a visible one after the report delay', () => {
         expect(decideReport({ osIdleSecs: null, lastLocalActivityMs: now - 1_000, hidden: true, nowMs: now })).toBe(1);
         expect(decideReport({ osIdleSecs: null, lastLocalActivityMs: now - 1_000, hidden: false, nowMs: now })).toBeNull();
@@ -224,16 +229,18 @@ describe('an embedding host that reports idle (Púca for Steam Deck)', () => {
 
     it('a hidden page whose person is using the device stays active', async () => {
         declare();
-        hostIdle = 2; // the Deck's controls in use
+        hostIdle = 2.75; // the Deck's controls in use (the plugin's answer has fractions)
         await openSocket(true);
         stop = startActivityReporter({ userId: 1, pollMs: 15_000 }); // the default probe
         setHidden(true);
         await vi.advanceTimersByTimeAsync(11 * 60_000);
         expect(activity().filter(x => x !== null)).toEqual([]);
-        // ...and idle once the host says so, judged like the desktop's probe.
-        hostIdle = 700;
+        // ...and idle once the host says so, judged like the desktop's probe:
+        // the host's 100.6 s is the more recent input, and it goes out in whole
+        // seconds (the server refuses 100.6 with an Error frame, an alert).
+        hostIdle = 100.6;
         await vi.advanceTimersByTimeAsync(16_000);
-        expect(activity().at(-1)).toBeGreaterThanOrEqual(REPORT_AFTER_SECS);
+        expect(activity().at(-1)).toBe(100);
     });
 
     it('typing in the page counts beside the host: the more recent input decides', async () => {

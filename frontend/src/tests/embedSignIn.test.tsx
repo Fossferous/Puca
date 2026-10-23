@@ -6,10 +6,13 @@
  * Pinned here: the SAME code as the form (login() with the stay choice, the
  * socket, the success hand-off); the answers a host can act on (invalid,
  * reset-required with the form switched to the security update, unavailable
- * once the form is gone, busy for a second try at once); arguments checked
- * before anything runs; "Stay signed in" ticked by default on an embedded
- * page, as in the desktop and phone apps; and the feature advertised in the
- * state, so an older page is told apart.
+ * once the form is gone, busy for a second try at once, from the panel or
+ * the form); keys that did not come back with the sign-in, said in the
+ * answer and in the state (a panel has no banner); arguments checked before
+ * anything runs; "Stay signed in" ticked by default on an embedded page, as
+ * in the desktop and phone apps, a yes only for `true`, and saved only once a
+ * sign-in worked; and the feature advertised in the state, so an older page
+ * is told apart.
  *
  * Positive control: `login` is a spy and the success callback is counted, so
  * a signIn that answered ok without signing in fails the first test.
@@ -23,9 +26,14 @@ import type { PucaEmbedApi } from '../api/embedApi';
 const STAY_KEY = 'pucaStaySignedIn';
 
 const loginSpy = vi.hoisted(() => vi.fn(async (_u: string, _p: string, _o?: unknown) => 'tok'));
+// What auth.ts's restore left behind (IdentityBanner reads the same two).
+const keysLeft = vi.hoisted(() => ({ failed: false, reason: null as 'key-mismatch' | null }));
 vi.mock('../api/auth', () => ({
     login: loginSpy, register: vi.fn(async () => undefined), resetPasswordMigration: vi.fn(),
     REMEMBER_ME_KEY: 'sovereign_remember', STAY_SIGNED_IN_KEY: STAY_KEY,
+    identityRestoreFailed: () => keysLeft.failed,
+    identityRestoreReason: () => keysLeft.reason,
+    onIdentityRestoreChange: () => () => {},
 }));
 vi.mock('../api/publicConfig', () => ({
     fetchPublicConfig: vi.fn(async () => ({ invite_required: false })),
@@ -42,10 +50,21 @@ let store: Map<string, string>;
 let container: HTMLDivElement;
 let root: Root | null = null;
 let api: PucaEmbedApi;
-let getState: () => { features: string[] };
+let getState: (typeof import('../api/embedApi'))['getEmbedState'];
 let embed: typeof import('../api/embedApi');
 const success = vi.fn();
 const settle = async () => { await act(async () => { await new Promise(r => setTimeout(r, 0)); }); };
+/** Type into the form the way React hears it, and submit it. */
+const typeInto = (selector: string, value: string) => {
+    const el = container.querySelector<HTMLInputElement>(selector)!;
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(el, value);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+};
+const submitForm = () => container.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+const signedInSession = () => embed.registerEmbedSession({
+    user: () => ({ id: 1, username: 'ash' }), servers: () => [], currentServerId: () => null,
+    voiceChannel: () => null, listVoiceChannels: async () => [], joinVoice: async () => ({ ok: true }),
+});
 
 async function mount(withHost = true) {
     vi.resetModules();
@@ -76,6 +95,8 @@ beforeEach(() => {
     loginSpy.mockImplementation(async () => 'tok');
     connectSpy.mockClear();
     success.mockClear();
+    keysLeft.failed = false;
+    keysLeft.reason = null;
 });
 afterEach(async () => {
     await unmount();
@@ -111,6 +132,41 @@ describe('pucaEmbed.signIn', () => {
         expect(await api.signIn('ash', 'wrong', true)).toEqual({ ok: false, error: 'invalid' });
         expect(connectSpy).not.toHaveBeenCalled();
         expect(success).not.toHaveBeenCalled();
+        // A wrong password chose nothing: the stay answer is not saved.
+        expect(store.has(STAY_KEY)).toBe(false);
+    });
+
+    it('"stay signed in" is yes only for true, or when left out', async () => {
+        await mount();
+        const cases: [unknown, boolean][] = [[true, true], [undefined, true], [false, false], [0, false], ['false', false], [null, false], ['true', false]];
+        for (const [given, wanted] of cases) {
+            loginSpy.mockClear();
+            await api.signIn('ash', 'Password123!', given as boolean);
+            expect(loginSpy.mock.calls[0]?.[2], JSON.stringify(given)).toEqual({ staySignedIn: wanted });
+        }
+    });
+
+    it('signed in, but the keys did not come back: it says which', async () => {
+        await mount();
+        keysLeft.failed = true;
+        keysLeft.reason = 'key-mismatch';
+        expect(await api.signIn('ash', 'Password123!', true)).toEqual({ ok: true, keys: 'refused' });
+        keysLeft.reason = null;
+        expect(await api.signIn('ash', 'Password123!', true)).toEqual({ ok: true, keys: 'unavailable' });
+        // Signed in all the same, both times.
+        expect(success).toHaveBeenCalledTimes(2);
+    });
+
+    it('the state carries the keys: none signed out, then what the banner would say', async () => {
+        await mount();
+        expect(getState().keys).toBeNull();
+        signedInSession();
+        expect(getState().keys).toBe('ok');
+        keysLeft.failed = true;
+        keysLeft.reason = 'key-mismatch';
+        expect(getState().keys).toBe('refused');
+        keysLeft.reason = null;
+        expect(getState().keys).toBe('unavailable');
     });
 
     it('an account that needs the security update says so, and the form shows it', async () => {
@@ -134,6 +190,33 @@ describe('pucaEmbed.signIn', () => {
         expect(await first).toEqual({ ok: true });
     });
 
+    it('one at a time with the form too: a panel sign-in while the form signs in is "busy"', async () => {
+        await mount();
+        let release!: (t: string) => void;
+        loginSpy.mockImplementationOnce(() => new Promise<string>(r => { release = r; }));
+        await act(async () => { typeInto('#username', 'ash'); typeInto('#password', 'Password123!'); });
+        await act(async () => { submitForm(); });
+        expect(loginSpy).toHaveBeenCalledTimes(1);
+        expect(await api.signIn('bo', 'Password123!', true)).toEqual({ ok: false, error: 'busy' });
+        await act(async () => { release('tok'); });
+        await settle();
+        expect(loginSpy).toHaveBeenCalledTimes(1);
+        expect(success).toHaveBeenCalledTimes(1);
+    });
+
+    it('...and the form waits while a panel sign-in runs', async () => {
+        await mount();
+        let release!: (t: string) => void;
+        loginSpy.mockImplementationOnce(() => new Promise<string>(r => { release = r; }));
+        const panel = api.signIn('ash', 'Password123!', true);
+        await settle();
+        expect(container.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled, 'the form shows it is busy').toBe(true);
+        await act(async () => { typeInto('#username', 'bo'); typeInto('#password', 'Password123!'); submitForm(); });
+        expect(loginSpy).toHaveBeenCalledTimes(1);
+        release('tok');
+        expect(await panel).toEqual({ ok: true });
+    });
+
     it('checks its arguments before anything runs', async () => {
         await mount();
         for (const [u, p] of [['', 'x'], ['   ', 'x'], ['ash', ''], [1, 2], ['a'.repeat(1025), 'x'], ['ash', 'p'.repeat(1025)]] as const) {
@@ -151,10 +234,7 @@ describe('pucaEmbed.signIn', () => {
 
     it('a page that is already signed in does not sign in again', async () => {
         await mount();
-        embed.registerEmbedSession({
-            user: () => ({ id: 1, username: 'ash' }), servers: () => [], currentServerId: () => null,
-            voiceChannel: () => null, listVoiceChannels: async () => [], joinVoice: async () => ({ ok: true }),
-        });
+        signedInSession();
         expect(await api.signIn('ash', 'Password123!', true)).toEqual({ ok: false, error: 'signed-in' });
         expect(loginSpy).not.toHaveBeenCalled();
     });

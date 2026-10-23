@@ -57,11 +57,15 @@ export interface ActivityInputs {
  * not — Púca minimised to the tray with a game in front is a busy person.
  * Without one, a hidden page is inactive at once (nothing in it can see the
  * person any more), a shown one after REPORT_AFTER_SECS without input.
+ *
+ * Always whole seconds: the server reads `inactive_secs` as an integer and
+ * answers anything else with an Error frame, which Chat shows as an alert.
+ * An embedding host's idle time comes with fractions.
  */
 export function decideReport(i: ActivityInputs): number | null {
     const sinceLocal = Math.max(0, Math.floor((i.nowMs - i.lastLocalActivityMs) / 1000));
     if (i.osIdleSecs !== null) {
-        const secs = Math.min(i.osIdleSecs, sinceLocal);
+        const secs = Math.floor(Math.min(i.osIdleSecs, sinceLocal));
         return secs >= REPORT_AFTER_SECS ? secs : null;
     }
     if (i.hidden) {

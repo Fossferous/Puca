@@ -299,6 +299,13 @@ describe('what the page sends', () => {
         expect(readState({ ...state, features: Array.from({ length: 80 }, (_, i) => `f${i}`) })!.features).toHaveLength(50);
     });
 
+    it('reads keys that did not come back, and only the two answers that say so', () => {
+        expect(readState(state)!.keys, 'an older page sends none').toBeNull();
+        expect(readState({ ...state, keys: 'refused' })!.keys).toBe('refused');
+        expect(readState({ ...state, keys: 'unavailable' })!.keys).toBe('unavailable');
+        for (const v of ['ok', null, 'REFUSED', 1, {}]) expect(readState({ ...state, keys: v })!.keys, JSON.stringify(v)).toBeNull();
+    });
+
     it('accepts each message type, and nothing else', () => {
         expect(readPageMessage({ type: 'ready', apiVersion: 1 })).toEqual({ type: 'ready', apiVersion: 1, appVersion: '' });
         expect(readPageMessage({ type: 'ready', apiVersion: null })).toEqual({ type: 'ready', apiVersion: null, appVersion: '' });

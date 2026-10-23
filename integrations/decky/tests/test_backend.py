@@ -165,6 +165,33 @@ class BindingFilterTests(unittest.TestCase):
         with self.assertRaises(Exception):
             self.loop.run_until_complete(self.page.evaluate("1"))
 
+    def test_a_page_call_hands_its_arguments_over_as_values_never_as_script(self):
+        sent = []
+
+        async def send(method, params=None, timeout=10.0):
+            sent.append((method, params))
+            return {"result": {"value": {"ok": True}}}
+
+        self.page._conn = types.SimpleNamespace(closed=False, send=send)
+        self.context(5, "MAIN", "https://chat.example.com")
+        args = ["signIn", ["ash", "correct horse battery", True]]
+        self.assertEqual(self.loop.run_until_complete(self.page.call_function(ps.PAGE_CALL, args)), {"ok": True})
+        method, params = sent[-1]
+        self.assertEqual(method, "Runtime.callFunctionOn")
+        self.assertEqual(params["executionContextId"], 5, "Púca's own page world")
+        self.assertEqual(params["functionDeclaration"], ps.PAGE_CALL)
+        self.assertNotIn("correct horse", params["functionDeclaration"])
+        self.assertEqual(params["arguments"], [{"value": "signIn"}, {"value": ["ash", "correct horse battery", True]}])
+        self.assertTrue(params["userGesture"] and params["awaitPromise"] and params["returnByValue"])
+
+    def test_a_page_call_refuses_before_puca_has_loaded(self):
+        self.page._conn = types.SimpleNamespace(closed=False)
+        with self.assertRaises(Exception):
+            self.loop.run_until_complete(self.page.call_function(ps.PAGE_CALL, ["getState", []]))
+        self.context(9, "MAIN", "https://evil.example")
+        with self.assertRaises(Exception):
+            self.loop.run_until_complete(self.page.call_function(ps.PAGE_CALL, ["getState", []]))
+
 
 if __name__ == "__main__":
     unittest.main()

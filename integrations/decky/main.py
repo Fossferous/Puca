@@ -43,7 +43,7 @@ import decky
 from puca_buttons import BUTTONS, GripLearner, InputWatch
 from puca_cdp import CdpError, PucaPage, find_target
 from puca_mic import MicForCalls
-from puca_settings import (MARKER, PAGE_METHODS, check_mic_answer, load_settings,
+from puca_settings import (MARKER, PAGE_CALL, PAGE_METHODS, check_mic_answer, load_settings,
                            normalize_app_url, save_settings)
 from puca_update import (MAX_MANIFEST_BYTES, MAX_ZIP_BYTES, clear_updates, download_origin, manifest_url,
                          read_key, read_manifest, save_update, sha256_hex, ssl_context, zip_url)
@@ -173,9 +173,10 @@ class Plugin:
             return {"ok": False, "error": "bad arguments"}
         if self.page is None:
             return {"ok": False, "error": "Púca is not running"}
-        expression = f"window.__pucaDeckyShim.call({json.dumps(method)}, {json.dumps(args)})"
         try:
-            result = await self.page.evaluate(expression)
+            # Handed over as values, never written into script text: one of
+            # them can be a password (signIn).
+            result = await self.page.call_function(PAGE_CALL, [method, args])
         except CdpError as e:
             return {"ok": False, "error": str(e)}
         except Exception as e:

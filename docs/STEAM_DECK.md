@@ -141,8 +141,13 @@ Press **···** → the plug icon → **Púca**.
   controls, so while Púca is hidden you show as idle.
 - **Signing in from the panel.** Your password goes from the panel to Púca
   inside the Deck, through the plugin, once. It is never stored or written to
-  a log. Púca's own sign-in then works as it always does: it sends the server
-  a proof of the password, never the password itself.
+  a log, and it is handed to Púca as a value, never as part of a script. Púca's
+  own sign-in then works as it always does: it sends the server a proof of
+  the password, never the password itself.
+- **If your encryption keys did not unlock.** The panel says so at the top,
+  as the full app's banner does: messages can't be read on the Deck, and calls
+  may not be end-to-end encrypted, until you put it right in Púca. Choose
+  **Open Púca** to do that.
 - **Nothing is opened to your network.** The plugin talks to Steam through a
   connection that exists only inside the Deck. Decky Loader turns that
   connection on, and the plugin needs nothing else.
