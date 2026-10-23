@@ -18,7 +18,8 @@
 //! is applied by WIC's HEIF decoder itself — measured with a HEIC stored
 //! 64x48 with a 90-degree `irot`: the frame came back 48x64, the right way
 //! up, and `/heifProps/Orientation` then read 1 — so nothing here rotates it
-//! again.
+//! again. A frame with an ICC profile (an iPhone's Display P3) is converted to
+//! sRGB, which is how the untagged JPEG is read (`to_srgb`).
 
 use tauri::ipc::{InvokeBody, Request, Response};
 
@@ -38,6 +39,43 @@ pub(crate) fn fit_within(w: u32, h: u32, max_edge: u32) -> (u32, u32) {
     }
     let k = max_edge as f64 / long as f64;
     (((w as f64 * k).round() as u32).max(1), ((h as f64 * k).round() as u32).max(1))
+}
+
+/// The ICC profile a HEIF's `colr` property carries (`prof`, or `rICC`), if
+/// any: meta > iprp > ipco > colr. The first one; a photo has one picture.
+pub(crate) fn icc_profile(file: &[u8]) -> Option<&[u8]> {
+    fn boxes(b: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {
+        let mut at = 0usize;
+        std::iter::from_fn(move || {
+            if at + 8 > b.len() {
+                return None;
+            }
+            let size = u32::from_be_bytes(b[at..at + 4].try_into().ok()?) as usize;
+            let (head, size) = match size {
+                1 => {
+                    if at + 16 > b.len() {
+                        return None;
+                    }
+                    (16, u64::from_be_bytes(b[at + 8..at + 16].try_into().ok()?) as usize)
+                }
+                0 => (8, b.len() - at),
+                n => (8, n),
+            };
+            if size < head || at.checked_add(size)? > b.len() {
+                return None;
+            }
+            let kind = &b[at + 4..at + 8];
+            let body = &b[at + head..at + size];
+            at += size;
+            Some((kind, body))
+        })
+    }
+    let meta = boxes(file).find(|(k, _)| *k == b"meta")?.1.get(4..)?;
+    let iprp = boxes(meta).find(|(k, _)| *k == b"iprp")?.1;
+    let ipco = boxes(iprp).find(|(k, _)| *k == b"ipco")?.1;
+    boxes(ipco)
+        .filter(|(k, _)| *k == b"colr")
+        .find_map(|(_, body)| (body.len() > 4 && (&body[..4] == b"prof" || &body[..4] == b"rICC")).then(|| &body[4..]))
 }
 
 /// JPEG bytes for a HEIC/HEIF photo. Raw IPC body in, raw bytes out; headers
@@ -86,15 +124,54 @@ mod wic {
     /// The WIC container GUID of HEIF (GUID_ContainerFormatHeif).
     const CONTAINER_HEIF: windows::core::GUID = GUID_ContainerFormatHeif;
 
+    /// The frame in sRGB, the colour space the JPEG is read in (it carries no
+    /// profile). An iPhone HEIC is Display P3 with an ICC profile: its pixels
+    /// as they are would come out duller than Safari or Android show them.
+    /// Converted only when the photo has an ICC profile; one described by
+    /// nclx alone (what Android cameras write) or by nothing is taken as sRGB,
+    /// as every engine here takes an untagged picture. WIC's HEIF decoder
+    /// reports NO colour context even for a frame with a `colr` profile
+    /// (measured: GetColorContexts gives 0, the only metadata is
+    /// /heifProps), so the profile is read from the file (`icc_profile`). Any
+    /// failure keeps the frame as it is: a duller picture beats none.
+    fn to_srgb(factory: &IWICImagingFactory, frame: &IWICBitmapFrameDecode, file: &[u8]) -> IWICBitmapSource {
+        let source: IWICBitmapSource = frame.clone().into();
+        let Some(icc) = super::icc_profile(file) else {
+            return source;
+        };
+        unsafe {
+            let converted = (|| -> Result<Option<IWICBitmapSource>> {
+                let profile = factory.CreateColorContext()?;
+                profile.InitializeFromMemory(icc)?;
+                let srgb = factory.CreateColorContext()?;
+                srgb.InitializeFromExifColorSpace(1)?;
+                let transform = factory.CreateColorTransformer()?;
+                transform.Initialize(frame, &profile, &srgb, &GUID_WICPixelFormat24bppBGR)?;
+                Ok(Some(transform.into()))
+            })();
+            match converted {
+                Ok(Some(s)) => s,
+                Ok(None) => source,
+                Err(e) => {
+                    eprintln!("[heif] colour profile not applied: {e}");
+                    source
+                }
+            }
+        }
+    }
+
     pub(super) fn convert(bytes: &[u8], max_edge: u32, quality: f32) -> Result<Vec<u8>> {
         unsafe {
             let factory: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
             let input = factory.CreateStream()?;
             input.InitializeFromMemory(bytes)?;
-            // Fails with WINCODEC_ERR_COMPONENTNOTFOUND when the HEIF/HEVC
-            // extensions are not installed: the page falls back.
-            let decoder = factory.CreateDecoderFromStream(&input, std::ptr::null(), WICDecodeMetadataCacheOnDemand)?;
-            // Only a HEIF: this is not a general image converter.
+            // The HEIF decoder itself, never whichever installed codec claims
+            // these bytes: this is not a general image converter. Fails with
+            // WINCODEC_ERR_COMPONENTNOTFOUND when the HEIF/HEVC extensions are
+            // not installed (the page falls back), and in Initialize for bytes
+            // that are not a HEIF.
+            let decoder = factory.CreateDecoder(&CONTAINER_HEIF, std::ptr::null())?;
+            decoder.Initialize(&input, WICDecodeMetadataCacheOnDemand)?;
             if decoder.GetContainerFormat()? != CONTAINER_HEIF {
                 return Err(Error::new(E_INVALIDARG, "not a HEIF image"));
             }
@@ -104,13 +181,14 @@ mod wic {
             if w == 0 || h == 0 || (w as u64) * (h as u64) > MAX_PIXELS {
                 return Err(Error::new(E_INVALIDARG, "picture too large"));
             }
+            let source = to_srgb(&factory, &frame, bytes);
             let (tw, th) = fit_within(w, h, max_edge);
             let source: IWICBitmapSource = if (tw, th) != (w, h) {
                 let scaler = factory.CreateBitmapScaler()?;
-                scaler.Initialize(&frame, tw, th, WICBitmapInterpolationModeHighQualityCubic)?;
+                scaler.Initialize(&source, tw, th, WICBitmapInterpolationModeHighQualityCubic)?;
                 scaler.into()
             } else {
-                frame.into()
+                source
             };
             let pixels = factory.CreateFormatConverter()?;
             pixels.Initialize(&source, &GUID_WICPixelFormat24bppBGR, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom)?;
@@ -259,6 +337,67 @@ mod tests {
         }
         let ((w, h), _) = corners(&convert(FIXTURE, 32, 0.9).unwrap());
         assert_eq!((w, h), (24, 32));
+    }
+
+    /// 32x24 of Display P3 (40, 160, 120), tagged with a Display P3 ICC
+    /// profile written for this test (D50 primaries, gamma 2.2), and no nclx.
+    /// WIC decodes its YCbCr to (30, 147, 120) (libheif: (40, 161, 120); the
+    /// two assume different matrices for a picture with no nclx), which
+    /// LittleCMS (Pillow's ImageCms) takes from that profile to sRGB as
+    /// (0, 151, 119).
+    #[cfg(windows)]
+    const P3: &[u8] = include_bytes!("../../src/tests/fixtures/heic/display-p3.heic");
+
+    /// The frame's pixel at (4, 4) as WIC decodes it, with no colour transform.
+    #[cfg(windows)]
+    fn stored_pixel(heic: &[u8]) -> (u8, u8, u8) {
+        use windows::Win32::Graphics::Imaging::*;
+        use windows::Win32::System::Com::*;
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let f: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).unwrap();
+            let s = f.CreateStream().unwrap();
+            s.InitializeFromMemory(heic).unwrap();
+            let d = f.CreateDecoderFromStream(&s, std::ptr::null(), WICDecodeMetadataCacheOnDemand).unwrap();
+            let c = f.CreateFormatConverter().unwrap();
+            c.Initialize(&d.GetFrame(0).unwrap(), &GUID_WICPixelFormat24bppBGR, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom).unwrap();
+            let mut px = [0u8; 3];
+            let rect = WICRect { X: 4, Y: 4, Width: 1, Height: 1 };
+            c.CopyPixels(&rect, 3, &mut px).unwrap();
+            (px[2], px[1], px[0])
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_display_p3_photo_comes_out_in_srgb() {
+        if !heif_decoder_installed() {
+            return;
+        }
+        // Control: the pixels as decoded are P3 values, so a JPEG of them as
+        // they are would carry red that the colour has not in sRGB.
+        let raw = stored_pixel(P3);
+        assert!(raw.0 >= 20 && raw.1 > 130, "stored {raw:?}");
+        let ((w, h), [tl, _, _, br]) = corners(&convert(P3, 4096, 0.95).unwrap());
+        assert_eq!((w, h), (32, 24));
+        for c in [tl, br] {
+            assert!(c.0 < 10 && (c.1 as i32 - 151).abs() < 10 && (c.2 as i32 - 119).abs() < 10, "{raw:?} in P3 is near (0,151,119) in sRGB, got {c:?}");
+        }
+    }
+
+    #[test]
+    fn finds_the_icc_profile_in_a_heif() {
+        let p3: &[u8] = include_bytes!("../../src/tests/fixtures/heic/display-p3.heic");
+        let plain: &[u8] = include_bytes!("../../src/tests/fixtures/heic/rotated-gps.heic");
+        let icc = icc_profile(p3).expect("the P3 fixture carries a profile");
+        assert_eq!(icc.len(), 510);
+        assert_eq!(&icc[36..40], b"acsp");
+        assert!(icc_profile(plain).is_none());
+        assert!(icc_profile(b"not a heif at all").is_none());
+        // A box claiming more bytes than there are is not followed.
+        let mut cut = p3.to_vec();
+        cut.truncate(200);
+        assert!(icc_profile(&cut).is_none());
     }
 
     #[cfg(windows)]

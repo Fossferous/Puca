@@ -26,7 +26,7 @@ import { createPriorityLimiter, abortError, isAbortError } from './priorityLimit
 import { readVideoDims, type VideoDims } from './videoDims';
 import { hostPlaintext, dropAllPlaintext, freeNow, type PlainLease } from './plaintextHost';
 import { keepCipher, dropAllCiphertext, type CipherCopy } from './cipherStore';
-import { engineDecodesHeif, forgetHeifRequests, heifToJpegForDisplay, isHeifType } from './heif';
+import { engineDecodesHeif, forgetHeifRequests, heifToJpegForDisplay, isHeifType, sniffImageType } from './heif';
 
 const PREFIX = 'sovereign-enc:';
 
@@ -687,7 +687,16 @@ function openPlain(e: CacheEntry): Promise<PlainLease> {
         // hosted like any plaintext, in place of the original, and goes with
         // it; nowhere else does it exist.
         let type = e.type;
-        if (isHeifType(e.type) && !(await engineDecodesHeif())) {
+        // HEIC or not is the BYTES' answer, not the ref's (whatever the
+        // sender's device said): a JPEG labelled image/heic is shown as the
+        // JPEG it is (Chromium would sniff it, but AttachmentImg never hands a
+        // HEIC type to an <img> it cannot decode), and a HEIC labelled
+        // another picture type gets what a HEIC gets.
+        if (type.startsWith('image/')) {
+            const real = sniffImageType(new Uint8Array(pt, 0, Math.min(64, pt.byteLength)));
+            if (real && real !== type && (isHeifType(type) || real === 'image/heic')) type = real;
+        }
+        if (isHeifType(type) && !(await engineDecodesHeif())) {
             const jpeg = await heifToJpegForDisplay(e.fileId, new Uint8Array(pt));
             if (generation !== cacheGeneration) throw abortError();
             if (jpeg) {

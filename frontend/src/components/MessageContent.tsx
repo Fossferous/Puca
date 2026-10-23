@@ -10,7 +10,7 @@ import { parseMessage, isSafeUrl, type Node } from '../utils/messageParser';
 import { isImageUrl } from '../api/linkPreview';
 import { attachmentsAwake, subscribeAttachmentsAwake, useAttachmentsAwake } from '../api/attachmentAwake';
 import { isEncAttachment, parseEncAttachment, acquireAttachmentUrl, prefetchAttachmentUrl, noteAttachmentInterest, attachmentPictureSize, noteAttachmentPictureSize, attachmentPlainBytes, videoMimeFor, audioMimeFor, isPlaylistBlobUrl, type AttachmentHold } from '../api/attachments';
-import { askToShowHeif, canShowHeifOnRequest, isHeifType, jpegName } from '../api/heif';
+import { askToShowHeif, canShowHeifOnRequest, hasHeifName, isHeifType, jpegName } from '../api/heif';
 import { AttachmentImg } from './AttachmentImg';
 import { isAbortError } from '../api/priorityLimiter';
 import { useAttachmentZone, usePlayerGrant, loadUrgency, scrollRootOf, type ShownSize } from './attachmentZone';
@@ -205,9 +205,14 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
     // video player. Same name fallback (an old `.mp3` ref says octet-stream),
     // and only types the engines can play — an .amr keeps its chip.
     const audioMime = info && !videoMime ? audioMimeFor(name, info.mime) : null;
+    // The same for a HEIC sent before its type was recorded (Windows gives a
+    // .heic no type, so it went up as octet-stream): a picture by its NAME,
+    // and the cache then asks its bytes (api/attachments.ts openPlain).
+    const heifByName = !!info && !videoMime && !audioMime && hasHeifName(name)
+        && (info.mime === 'application/octet-stream' || info.mime === '');
     // Type the blob with the resolved media MIME so the player gets a
     // media-typed source even when the ref said octet-stream.
-    const fileMime = info ? (videoMime ?? audioMime ?? info.mime) : '';
+    const fileMime = info ? (videoMime ?? audioMime ?? (heifByName ? 'image/heic' : info.mime)) : '';
     // Its place in the fetch queue: on screen first (the ones that will stay
     // in view first), then the closest; asked each time a fetch slot frees,
     // not when it asked (the reader may have scrolled since).
@@ -299,7 +304,7 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
             </span>
         );
     }
-    const isImage = info.mime.startsWith('image/');
+    const isImage = info.mime.startsWith('image/') || heifByName;
     const asVideo = !!videoMime && !embedFailed && !audioOnly;
     const asAudio = (!!audioMime || (!!videoMime && audioOnly)) && !embedFailed;
     // A video's picture size when it is known before its player has the
@@ -394,12 +399,18 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
         // with its name, kind and size and the Download button: never a
         // broken image (AttachmentImg). A HEIC the device decoded for display
         // is a JPEG (heldType), and a save from the lightbox is that JPEG.
-        const heif = isHeifType(info.mime);
+        // What the bytes are (heldType, from the cache's sniff), not the
+        // ref's label: a JPEG labelled HEIC is shown, a HEIC labelled
+        // anything gets the HEIC card.
+        const heif = isHeifType(heldType ?? fileMime);
+        // A HEIC this device decoded for display: what is shown (and what
+        // Save from the lightbox saves) is a JPEG.
+        const decodedHeif = isHeifType(fileMime) && heldType === 'image/jpeg';
         const bytes = attachmentPlainBytes(info.id, info.key, fileMime);
         // The desktop app decodes a received HEIC only when asked (its codec
         // runs in the app's own process); asked and still a HEIC: Windows
         // could not (no HEIF/HEVC extensions).
-        const offerShow = heif && heldType !== 'image/jpeg' && canShowHeifOnRequest();
+        const offerShow = heif && canShowHeifOnRequest();
         const card = (
             // stopPropagation: the same spoiler-toggle reason as the video.
             <span className="message-audio message-picture-file" ref={bindSlot} onClick={(e) => e.stopPropagation()}>
@@ -448,7 +459,11 @@ function EncryptedAttachment({ href, name }: { href: string; name: string }) {
                         {/* Enlarge in-app. openAttachmentBlob's window.open of a blob:
                             URL is a no-op in the Tauri and Capacitor shells. */}
                         {img}
-                        {zoomed && <ImageLightbox url={shown} name={heif && heldType === 'image/jpeg' ? jpegName(name) : name} encRef={info} onClose={() => setZoomed(false)} />}
+                        {/* Save from the lightbox saves what is shown. With the
+                            ref, the Android app would save natively from the
+                            ciphertext: the ORIGINAL HEIC, location and all,
+                            named IMG.jpg.heic (review finding 2026-10-23). */}
+                        {zoomed && <ImageLightbox url={shown} name={decodedHeif ? jpegName(name) : name} encRef={decodedHeif ? null : info} onClose={() => setZoomed(false)} />}
                     </span>
                 )}
             />

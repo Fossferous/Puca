@@ -377,6 +377,12 @@ public class SovereignAppPlugin extends Plugin {
             call.reject("no picture", "bad-input");
             return;
         }
+        // The page never sends more (api/heif.ts); a call that does is
+        // refused before anything else is copied out of it.
+        if (!HeifImages.inputFits(data.length())) {
+            call.reject("too large to convert here", "too-large");
+            return;
+        }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
             call.reject("needs Android 9 or newer", "unsupported");
             return;
@@ -391,9 +397,13 @@ public class SovereignAppPlugin extends Plugin {
                 android.graphics.ImageDecoder.Source src =
                         android.graphics.ImageDecoder.createSource(java.nio.ByteBuffer.wrap(in));
                 Bitmap bmp = android.graphics.ImageDecoder.decodeBitmap(src, (decoder, info, source) -> {
+                    int w = info.getSize().getWidth();
+                    int h = info.getSize().getHeight();
+                    // Read from the header, before a pixel is decoded: a HEIC
+                    // claiming more than a phone photo has is refused here.
+                    if (!HeifImages.pixelsFit(w, h)) throw new IllegalArgumentException("too many pixels: " + w + "x" + h);
                     decoder.setAllocator(android.graphics.ImageDecoder.ALLOCATOR_SOFTWARE);
-                    decoder.setTargetSampleSize(HeifImages.sampleSizeFor(
-                            info.getSize().getWidth(), info.getSize().getHeight(), maxEdge));
+                    decoder.setTargetSampleSize(HeifImages.sampleSizeFor(w, h, maxEdge));
                 });
                 java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
                 boolean ok = bmp.compress(Bitmap.CompressFormat.JPEG,

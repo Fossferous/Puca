@@ -14,7 +14,8 @@
 //
 //   1. the engine itself: Edge refuses the fixture in an <img> and in
 //      createImageBitmap (the bug's root cause), and the app's probe says so;
-//   2. the web app (no native decoder): a HEIC goes up as it is; in a channel,
+//   2. the web app (no native decoder): a HEIC goes up as a HEIC with its
+//      Exif blanked (no camera, no location; api/heifMetadata.ts); in a channel,
 //      in a Task and in the composer it is a FILE CARD (name, "HEIC photo",
 //      size, Download) and never an <img>; the Download button is on screen
 //      and is what a pointer at its centre hits; nothing on the page is a
@@ -280,18 +281,27 @@ async function webApp(name, ctxOpts, coarse) {
         const heic = window.__rig.heic();
         const out = await window.__rig.convert(heic);
         const ref = await window.__rig.send(out);
-        const png = await window.__rig.send(await window.__rig.png());
-        return { same: out === heic, ref, png };
+        const pngFile = await window.__rig.png();
+        const png = await window.__rig.send(pngFile);
+        // A ref an older sender made: PNG bytes, labelled image/heic.
+        const liar = await window.__rig.send(new File([pngFile], 'liar.heic', { type: 'image/heic' }));
+        const bytes = new Uint8Array(await out.arrayBuffer());
+        return { ref, png, liar, sentB64: btoa(String.fromCharCode(...bytes)), size: bytes.length, camera: new TextDecoder('latin1').decode(bytes).includes('PucaTestCam') };
     });
-    ck(sent.same && sent.ref.mime === 'image/heic' && sent.ref.name.endsWith('.heic'), `[${name}] with no decoder anywhere, the HEIC is sent as it is`, JSON.stringify({ mime: sent.ref.mime, name: sent.ref.name }));
+    const sentBytes = Buffer.from(sent.sentB64, 'base64');
+    ck(sent.ref.mime === 'image/heic' && sent.ref.name.endsWith('.heic') && sent.size === HEIC.length, `[${name}] with no decoder anywhere, it is sent as a HEIC`, JSON.stringify({ mime: sent.ref.mime, name: sent.ref.name, size: sent.size }));
+    ck(!sent.camera && HEIC.includes('PucaTestCam'), `[${name}] ... with its metadata blanked: the camera and location are not in what was sent (control: the fixture has them)`);
     await page.evaluate((s) => {
         const chip = window.__rig.chip(window.__rig.heic());
         window.__rig.show([
             { id: 'm-heic', content: `![${s.ref.name}](${s.ref.href})` },
             { id: 'm-png', content: `![shot.png](${s.png.href})` },
+            { id: 'm-liar', content: `![liar.heic](${s.liar.href})` },
         ], [{ href: s.ref.href, name: s.ref.name }], [chip]);
     }, sent);
     ck(await waitShown(page, '[data-msg="m-png"] .message-image img'), `[${name}] positive control: the PNG beside it decodes into an <img>`);
+    ck(sent.liar.mime === 'image/heic', `[${name}] (the liar ref really says image/heic)`);
+    ck(await waitShown(page, '[data-msg="m-liar"] .message-image img'), `[${name}] a PNG labelled image/heic is shown as the picture it is, by its bytes`);
     ck(await waitShown(page, '[data-msg="m-heic"] .message-picture-file'), `[${name}] the HEIC message is a file card`);
     const card = await cardOf(page, 'm-heic');
     ck(!!card && /IMG20261023012318\.heic/.test(card.text) && /HEIC photo, \d+ KB/.test(card.text) && /can't show it/.test(card.text), `[${name}] the card names it, says what it is and its size`, JSON.stringify(card?.text));
@@ -313,7 +323,7 @@ async function webApp(name, ctxOpts, coarse) {
             page.click('[data-msg="m-heic"] .message-picture-file button.message-attachment'),
         ]);
         const saved = dl ? fs.readFileSync(await dl.path()) : null;
-        ck(!!dl && dl.suggestedFilename() === 'IMG20261023012318.heic' && saved?.equals(HEIC), `[${name}] Download saves the original HEIC, byte for byte`, dl ? dl.suggestedFilename() : 'no download');
+        ck(!!dl && dl.suggestedFilename() === 'IMG20261023012318.heic' && saved?.equals(sentBytes), `[${name}] Download saves the HEIC that was sent, byte for byte`, dl ? dl.suggestedFilename() : 'no download');
     }
     await page.evaluate(() => window.__rig.clear());
     await sleep(2500);

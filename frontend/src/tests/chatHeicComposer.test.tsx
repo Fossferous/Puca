@@ -16,7 +16,7 @@ const ME = 1;
 
 const h = vi.hoisted(() => ({
     channel: {} as Record<string, unknown>,
-    uploads: [] as Array<{ name: string; type: string; head: number[] }>,
+    uploads: [] as Array<{ name: string; type: string; head: number[]; camera?: boolean }>,
     invoke: null as null | ((cmd: string, body: unknown) => Promise<unknown>),
 }));
 
@@ -24,7 +24,8 @@ vi.mock('../api/attachments', async importOriginal => ({
     ...(await importOriginal<typeof import('../api/attachments')>()),
     // Never resolves: the test only cares whether an upload STARTED.
     encryptAndUploadRef: async (file: File) => {
-        h.uploads.push({ name: file.name, type: file.type, head: [...new Uint8Array(await file.arrayBuffer()).subarray(0, 2)] });
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        h.uploads.push({ name: file.name, type: file.type, head: [...bytes.subarray(0, 2)], camera: Buffer.from(bytes).includes('PucaTestCam') });
         return new Promise(() => {});
     },
 }));
@@ -153,26 +154,51 @@ describe('a HEIC in the chat composer', () => {
         (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
         h.invoke = async (cmd) => (cmd === 'heif_to_jpeg' ? JPEG.slice().buffer : undefined);
         await drop(new File([HEIC as BlobPart], 'IMG20261023012318.heic', { type: 'image/heic' }));
-        expect(h.uploads).toEqual([{ name: 'IMG20261023012318.jpg', type: 'image/jpeg', head: [0xff, 0xd8] }]);
+        expect(h.uploads).toEqual([{ name: 'IMG20261023012318.jpg', type: 'image/jpeg', head: [0xff, 0xd8], camera: false }]);
         expect(chip()?.textContent).toContain('IMG20261023012318.jpg');
         const img = chip()?.querySelector('img');
         expect(img, 'the chip previews the converted picture').toBeTruthy();
         expect(thumbs.get(img!.getAttribute('src')!)).toBe('image/jpeg');
     });
 
-    it('positive control: where nothing can convert it, the original HEIC goes and the chip is a file icon', async () => {
+    it('where nothing can convert it, the HEIC goes with its metadata blanked, and the chip is a file icon', async () => {
         __setEngineDecodesHeif(false);
         await mountChat();
         await drop(new File([HEIC as BlobPart], 'IMG20261023012318.heic', { type: 'image/heic' }));
         expect(h.uploads.map(u => [u.name, u.type])).toEqual([['IMG20261023012318.heic', 'image/heic']]);
+        expect(h.uploads[0].camera, 'the camera and location left the upload').toBe(false);
         expect(chip()?.textContent).toContain('IMG20261023012318.heic');
         expect(chip()?.querySelector('img'), 'a HEIC thumbnail no engine here can draw').toBeNull();
+    });
+
+    it('one that can be neither converted nor stripped is not sent: its chip says why, and Retry tries again', async () => {
+        __setEngineDecodesHeif(false);
+        await mountChat();
+        const broken = new Uint8Array(200);
+        broken.set(HEIC.subarray(0, 28));
+        broken.set([0, 0, 0, 0xff, 0x6d, 0x65, 0x74, 0x61], 28);
+        const zone = document.querySelector('.messages-container');
+        const dt = { types: ['Files'], files: [new File([broken as BlobPart], 'odd.heic', { type: 'image/heic' })], dropEffect: 'copy' };
+        for (const type of ['dragover', 'drop']) {
+            const ev = new Event(type, { bubbles: true, cancelable: true });
+            Object.defineProperty(ev, 'dataTransfer', { value: dt });
+            await act(async () => { zone!.dispatchEvent(ev); });
+        }
+        for (let i = 0; i < 20 && !chip()?.classList.contains('composer-chip-failed'); i++) await settle();
+        expect(h.uploads).toEqual([]);
+        expect(chip()?.classList.contains('composer-chip-failed')).toBe(true);
+        expect(chip()?.textContent).toContain('location');
+        const retry = chip()?.querySelector('button[aria-label^="Retry"]') as HTMLButtonElement;
+        await act(async () => { retry.click(); });
+        await settle(60);
+        expect(h.uploads, 'Retry went through the conversion again, not straight to the upload').toEqual([]);
+        expect(chip()?.classList.contains('composer-chip-failed')).toBe(true);
     });
 
     it('positive control: a JPEG is uploaded as it is, with its thumbnail at once', async () => {
         await mountChat();
         await drop(new File([JPEG as BlobPart], 'photo.jpg', { type: 'image/jpeg' }));
-        expect(h.uploads).toEqual([{ name: 'photo.jpg', type: 'image/jpeg', head: [0xff, 0xd8] }]);
+        expect(h.uploads).toEqual([{ name: 'photo.jpg', type: 'image/jpeg', head: [0xff, 0xd8], camera: false }]);
         expect(chip()?.querySelector('img')).toBeTruthy();
     });
 });

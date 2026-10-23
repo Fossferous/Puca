@@ -108,6 +108,26 @@ public class HeifImagesTest {
     }
 
     @Test
+    public void inputCapMatchesThePage() {
+        // 16 MB of photo is 22369624 base64 characters (the page's cap).
+        assertTrue(HeifImages.inputFits(22_369_624));
+        assertFalse(HeifImages.inputFits(22_369_628));
+        assertFalse(HeifImages.inputFits(0));
+        assertTrue(HeifImages.inputFits(4_000_000)); // a 3 MB phone photo
+    }
+
+    @Test
+    public void pixelCapLetsPhonePhotosThrough() {
+        assertTrue(HeifImages.pixelsFit(4000, 3000));
+        assertTrue(HeifImages.pixelsFit(8160, 6120));   // 50 MP
+        assertTrue(HeifImages.pixelsFit(10000, 10000));  // the cap itself
+        assertFalse(HeifImages.pixelsFit(16320, 12240)); // 200 MP
+        assertFalse(HeifImages.pixelsFit(20000, 20000));
+        assertFalse(HeifImages.pixelsFit(65535, 65535));
+        assertFalse(HeifImages.pixelsFit(0, 100));
+    }
+
+    @Test
     public void jpegQualityFromThePage() {
         assertEquals(90, HeifImages.jpegQuality(0.9));
         assertEquals(100, HeifImages.jpegQuality(3));

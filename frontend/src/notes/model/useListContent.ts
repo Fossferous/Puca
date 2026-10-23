@@ -138,7 +138,7 @@ export function useTrashedLists() {
 /** What to tell the user when uploading a note's media failed. The size and
  *  slot errors say the real numbers; anything else is a connection. */
 function mediaFailureText(err: unknown): string {
-    if (err instanceof Error && (err.name === 'TooManyAttachmentsError' || err.name === 'ClipTooLargeError' || err.name === 'FileTooLargeError')) return err.message;
+    if (err instanceof Error && (err.name === 'TooManyAttachmentsError' || err.name === 'ClipTooLargeError' || err.name === 'FileTooLargeError' || err.name === 'HeifNotSendableError')) return err.message;
     return 'Couldn’t upload that — check your connection';
 }
 
@@ -165,7 +165,7 @@ function reportDeleteFailure(err: unknown, many: boolean): void {
 /** What to tell the user when a picture could not even be kept. */
 function mediaFailureMessage(err: unknown): string {
     if (err instanceof ParkedMediaFullError) return err.message;
-    if (err instanceof Error && err.name === 'TooManyAttachmentsError') return err.message;
+    if (err instanceof Error && (err.name === 'TooManyAttachmentsError' || err.name === 'HeifNotSendableError')) return err.message;
     return 'Couldn’t add the picture';
 }
 

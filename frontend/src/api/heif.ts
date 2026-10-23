@@ -18,7 +18,9 @@
  *    the app's native layer: Windows Imaging Component in the desktop app
  *    (needs the HEIF and HEVC extensions from the Microsoft Store, which many
  *    PCs have), Android's ImageDecoder (Android 9 and newer) in the phone app.
- *    Where nothing can, the original goes up as it is.
+ *    Where nothing can, the original goes up with its metadata blanked
+ *    (api/heifMetadata.ts) — never with the location in it, and not at all
+ *    when even that cannot be done (HeifNotSendableError).
  *  - SHOWING (heifToJpegForDisplay): a HEIC someone already sent is decoded
  *    the same native way for display only (api/attachments.ts); the browser
  *    has no such way, and there it is shown as a file to download instead of
@@ -35,12 +37,23 @@
  */
 import { Capacitor } from '@capacitor/core';
 import { isTauri } from './platform';
+import { stripHeifMetadata } from './heifMetadata';
 
 /** The long edge a converted photo keeps at most: a 12 MP phone photo
  *  (4000x3000) goes through at full size; a 50 MP one is brought down to it. */
 export const MAX_HEIF_EDGE = 4096;
 /** JPEG quality of a converted photo (0..1). */
 export const HEIF_JPEG_QUALITY = 0.9;
+/**
+ * The largest HEIC handed to the native layer. The desktop app takes it as a
+ * raw IPC body, and src-tauri/src/heif.rs refuses more than 64 MB itself.
+ * The Android app takes it as base64 inside Capacitor's JSON message, which
+ * the WebView and Java each copy (as UTF-16) before ImageDecoder sees a byte:
+ * 16 MB is ~21 MB of base64 and roughly 100 MB of Java heap at the peak, one
+ * at a time (oneAtATime). A phone photo is 1-10 MB.
+ */
+export const MAX_NATIVE_HEIF_BYTES_DESKTOP = 64 * 1024 * 1024;
+export const MAX_NATIVE_HEIF_BYTES_ANDROID = 16 * 1024 * 1024;
 
 const HEIF_TYPES = new Set(['image/heic', 'image/heif', 'image/heic-sequence', 'image/heif-sequence']);
 /** ISO-BMFF brands of HEIF stills and sequences coded in HEVC (ISO/IEC
@@ -76,6 +89,23 @@ export function sniffHeif(head: Uint8Array): boolean {
     if (brands.some(b => AV1_BRANDS.has(b))) return false;
     if (HEVC_BRANDS.has(brands[0])) return true;
     return GENERIC_BRANDS.has(brands[0]) && brands.some(b => HEVC_BRANDS.has(b));
+}
+
+/**
+ * What kind of picture these bytes are, from their first bytes: a HEIC
+ * ('image/heic'), or one every engine here shows (JPEG, PNG, GIF, WebP, AVIF).
+ * null for anything else. A file's type and a ref's `m=` are whatever the
+ * sender's device said; the bytes are what a decoder will see.
+ */
+export function sniffImageType(head: Uint8Array): string | null {
+    const at = (i: number, ...v: number[]) => v.every((x, k) => head[i + k] === x);
+    if (at(0, 0xff, 0xd8, 0xff)) return 'image/jpeg';
+    if (at(0, 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return 'image/png';
+    if (at(0, 0x47, 0x49, 0x46, 0x38)) return 'image/gif';
+    if (at(0, 0x52, 0x49, 0x46, 0x46) && at(8, 0x57, 0x45, 0x42, 0x50)) return 'image/webp';
+    if (sniffHeif(head)) return 'image/heic';
+    if (head.length >= 12 && at(4, 0x66, 0x74, 0x79, 0x70) && (at(8, 0x61, 0x76, 0x69, 0x66) || at(8, 0x61, 0x76, 0x69, 0x73))) return 'image/avif';
+    return null;
 }
 
 /**
@@ -173,6 +203,27 @@ async function engineToJpeg(blob: Blob): Promise<Blob | null> {
     }
 }
 
+/** One native conversion at a time: each holds a whole photo (and, on
+ *  Android, its base64 and Java's copies of it) until it is done, and a
+ *  channel scrolled past would otherwise start one per picture at once. The
+ *  next one's base64 is made only when its turn comes. */
+let nativeQueue: Promise<unknown> = Promise.resolve();
+function oneAtATime<T>(job: () => Promise<T>): Promise<T> {
+    const run = nativeQueue.then(job, job);
+    nativeQueue = run.catch(() => undefined);
+    return run;
+}
+
+/** The native layer said it never will (an installed Android app older than
+ *  the method, Android before 9): not asked again this session. */
+let nativeNever = false;
+
+/** For tests: forget that the native layer said never. */
+export function __resetNativeHeif(): void {
+    nativeNever = false;
+    nativeQueue = Promise.resolve();
+}
+
 function bytesToB64(bytes: Uint8Array): string {
     let s = '';
     for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
@@ -187,28 +238,40 @@ function bytesToB64(bytes: Uint8Array): string {
  * does what it does without a converter.
  */
 async function nativeToJpeg(bytes: Uint8Array): Promise<Uint8Array | null> {
-    try {
-        if (isTauri()) {
-            const { invoke } = await import('@tauri-apps/api/core');
-            const out = await invoke<ArrayBuffer>('heif_to_jpeg', bytes, {
-                headers: { 'x-max-edge': String(MAX_HEIF_EDGE), 'x-quality': String(HEIF_JPEG_QUALITY) },
-            });
-            return out && out.byteLength > 0 ? new Uint8Array(out) : null;
-        }
-        // The Púca Notes app is a different native app with no such method:
-        // only Púca's own registers SovereignApp (heifToJpegNatively checks).
-        // Loaded only here: api/mobileApp registers Púca's Android plugin when
-        // it loads, which every bundle that shows an attachment (Púca Notes'
-        // too) would otherwise do.
-        if (hasNativeHeifConverter()) {
-            const { heifToJpegNatively } = await import('./mobileApp');
-            const out = await heifToJpegNatively(bytesToB64(bytes), MAX_HEIF_EDGE, HEIF_JPEG_QUALITY);
-            return out ? Uint8Array.from(atob(out), c => c.charCodeAt(0)) : null;
-        }
-    } catch (err) {
-        console.warn('[heif] native conversion unavailable:', err instanceof Error ? err.message : err);
+    if (nativeNever) return null;
+    const desktop = isTauri();
+    if (!desktop && !androidApp()) return null;
+    if (bytes.byteLength > (desktop ? MAX_NATIVE_HEIF_BYTES_DESKTOP : MAX_NATIVE_HEIF_BYTES_ANDROID)) {
+        console.warn('[heif] too large to hand to the native decoder:', bytes.byteLength, 'bytes');
+        return null;
     }
-    return null;
+    return oneAtATime(async () => {
+        if (nativeNever) return null;
+        try {
+            if (desktop) {
+                const { invoke } = await import('@tauri-apps/api/core');
+                const out = await invoke<ArrayBuffer>('heif_to_jpeg', bytes, {
+                    headers: { 'x-max-edge': String(MAX_HEIF_EDGE), 'x-quality': String(HEIF_JPEG_QUALITY) },
+                });
+                return out && out.byteLength > 0 ? new Uint8Array(out) : null;
+            }
+            // The Púca Notes app is a different native app with no such method:
+            // only Púca's own registers SovereignApp (androidApp checks).
+            // Loaded only here: api/mobileApp registers Púca's Android plugin
+            // when it loads, which every bundle that shows an attachment (Púca
+            // Notes' too) would otherwise do.
+            const { heifToJpegNatively } = await import('./mobileApp');
+            const r = await heifToJpegNatively(bytesToB64(bytes), MAX_HEIF_EDGE, HEIF_JPEG_QUALITY);
+            if ('never' in r) {
+                nativeNever = true;
+                return null;
+            }
+            return 'data' in r ? Uint8Array.from(atob(r.data), c => c.charCodeAt(0)) : null;
+        } catch (err) {
+            console.warn('[heif] native conversion unavailable:', err instanceof Error ? err.message : err);
+            return null;
+        }
+    });
 }
 
 /** Is there a native converter here at all (before trying one)? */
@@ -264,30 +327,65 @@ export function jpegName(name: string | null | undefined): string {
     return `${stem || 'photo'}.jpg`;
 }
 
+/** A HEIC that can be neither converted nor sent without its location. */
+export class HeifNotSendableError extends Error {
+    constructor(name: string) {
+        super(`"${name}" wasn't sent: this device can't convert this HEIC photo, and couldn't remove the location and other details stored in it. Convert it to JPEG first, or send it from Púca's Android app.`);
+        this.name = 'HeifNotSendableError';
+    }
+}
+
 /**
- * A HEIC about to be sent, as a JPEG, or the file itself when it is not a
- * HEIC or nothing here can decode it (then it goes up as it is, and readers
- * whose app cannot show it get it as a file: MessageContent).
+ * A picture about to be sent, made safe and showable:
+ *  - a HEIC becomes a JPEG where this device can make one;
+ *  - a HEIC it cannot convert goes as a HEIC with its metadata blanked
+ *    (api/heifMetadata.ts), typed image/heic whatever the device called it, so
+ *    readers get its card (and Android readers the picture). When even the
+ *    metadata cannot be removed it is refused (HeifNotSendableError) rather
+ *    than sent with the sender's location in it, without a word: refusing says
+ *    what happened and what to do; asking "send it with your location?" for
+ *    a file this rarely seen would teach people to click yes;
+ *  - a file that SAYS it is a HEIC but is a JPEG, PNG, GIF, WebP or AVIF goes
+ *    under its real type, so every reader's app shows it.
+ * Anything else is returned as it is.
  */
 export async function convertHeifForUpload(file: File): Promise<File> {
-    if (!(await fileIsHeif(file))) return file;
+    const t = (file.type || '').toLowerCase();
+    const saysHeif = isHeifType(t) || hasHeifName(file.name);
+    if (!saysHeif && t !== '' && t !== 'application/octet-stream') return file;
+    let head: Uint8Array;
+    try {
+        head = new Uint8Array(await file.slice(0, 64).arrayBuffer());
+    } catch {
+        return file; // could not even be read: the upload fails on it in its own words
+    }
+    const real = sniffImageType(head);
+    if (real !== 'image/heic') {
+        // Labelled a HEIC, but another picture: sent under what it is.
+        return real && saysHeif ? new File([file], file.name, { type: real, lastModified: file.lastModified }) : file;
+    }
     let jpeg: Blob | null = null;
+    let bytes: Uint8Array | null = null;
     try {
         if (await engineDecodesHeif()) jpeg = await engineToJpeg(file);
-        if (!jpeg && hasNativeHeifConverter()) {
-            const out = await nativeToJpeg(new Uint8Array(await file.arrayBuffer()));
+        if (!jpeg) {
+            bytes = new Uint8Array(await file.arrayBuffer());
+            const out = await nativeToJpeg(bytes);
             if (out) jpeg = new Blob([out as BlobPart], { type: 'image/jpeg' });
         }
     } catch (err) {
-        // The file could not even be read (gone from the disk meanwhile): the
-        // upload then fails on it in its own words.
-        console.warn('[heif] could not read', file.name, err instanceof Error ? err.message : err);
+        console.warn('[heif] could not convert', file.name, err instanceof Error ? err.message : err);
     }
-    if (!jpeg) {
-        console.warn('[heif] could not convert', file.name, '- sending it as it is');
+    if (jpeg) return new File([jpeg], jpegName(file.name), { type: 'image/jpeg', lastModified: file.lastModified });
+    try {
+        bytes ??= new Uint8Array(await file.arrayBuffer());
+    } catch {
         return file;
     }
-    return new File([jpeg], jpegName(file.name), { type: 'image/jpeg', lastModified: file.lastModified });
+    const stripped = stripHeifMetadata(bytes);
+    if (!stripped) throw new HeifNotSendableError(file.name || 'photo');
+    console.info('[heif] could not convert', file.name, '- sending it as a HEIC with its metadata removed');
+    return new File([stripped as BlobPart], file.name || 'photo.heic', { type: 'image/heic', lastModified: file.lastModified });
 }
 
 /**

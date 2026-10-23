@@ -440,7 +440,12 @@ What Púca does about it, since 0.9.834:
   place of the plaintext, under the same worker, and goes when it would have gone
   (`frontend/src/api/heif.ts`, `frontend/e2e/heic-real-browser.mjs`). Sending one, the
   device makes the JPEG before it is encrypted, and the JPEG carries no metadata: the
-  location, camera and time stored in the HEIC are not sent. A HEIC someone ELSE sent is
+  location, camera and time stored in the HEIC are not sent. A HEIC that cannot be
+  converted is sent with its Exif and XMP items overwritten in place (an empty EXIF block,
+  an empty XMP packet; `frontend/src/api/heifMetadata.ts`), and one whose structure that
+  code cannot read with certainty is not sent at all, with the reason on its chip. A
+  received HEIC is sniffed by its bytes, not the ref's type, and the Android app hands at
+  most 16 MB to its decoder, one at a time. A HEIC someone ELSE sent is
   decoded by the Android app by itself (the OS parses and decodes it in its own sandboxed
   media processes), but by the desktop app only when the reader presses **Show photo**:
   WIC loads the HEIF and HEVC codecs into the app's own process, which has none of the

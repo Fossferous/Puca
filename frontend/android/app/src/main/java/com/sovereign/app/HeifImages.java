@@ -17,6 +17,27 @@ final class HeifImages {
 
     private HeifImages() {}
 
+    /** The largest HEIC the page hands over (api/heif.ts
+     *  MAX_NATIVE_HEIF_BYTES_ANDROID): it arrives as base64 inside Capacitor's
+     *  JSON message, copied by the WebView and by Java before a byte is
+     *  decoded, so it is kept to what a phone photo is. */
+    static final long MAX_INPUT_BYTES = 16L * 1024 * 1024;
+    /** The most pixels decoded: what src-tauri/src/heif.rs allows too. A
+     *  50 MP phone photo is half of it (a 200 MP one is not converted here; it
+     *  is past the size cap long before). */
+    static final long MAX_PIXELS = 100_000_000L;
+
+    /** May base64 of this many characters be decoded? */
+    static boolean inputFits(long base64Chars) {
+        return base64Chars > 0 && base64Chars <= (MAX_INPUT_BYTES + 2) / 3 * 4;
+    }
+
+    /** May a picture of this size be decoded? (Before the sample size: the
+     *  decoder reads the whole picture to make even a sampled one.) */
+    static boolean pixelsFit(int width, int height) {
+        return width > 0 && height > 0 && (long) width * height <= MAX_PIXELS;
+    }
+
     /** ISO-BMFF brands of HEIF coded in HEVC (ISO/IEC 23008-12). */
     private static final String[] HEVC_BRANDS = {"heic", "heix", "heim", "heis", "hevc", "hevx", "hevm", "hevs"};
     /** The generic HEIF brands, which AVIF uses too: a HEIC only with an
