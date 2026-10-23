@@ -25,7 +25,9 @@
 //   F  Settings -> Never         expect one encoding at once (a re-publish),
 //      then Automatic again      and the ladder back (another re-publish),
 //                                through the real Settings > Voice & Video
-// After each, the viewer's decoded frame rate over a few seconds.
+// After each, the viewer's decoded frame rate over a few seconds; across each
+// RE-publish (C, D, F) also the longest stretch with no new frame on the
+// viewer, sampled every 100 ms: what "the picture holds" costs.
 //
 // Everything is headless and muted: nothing opens on the desktop, nothing plays.
 //
@@ -215,6 +217,32 @@ const readDecoded = async () => {
     return { frames, sizes };
 };
 
+/** Run `act` while sampling the viewer's decoded frames every 100 ms, and
+ *  return the longest stretch (ms) in which none arrived. */
+async function frameGap(viewer, act, ms = 9000) {
+    await viewer.evaluate(() => {
+        const g = { samples: [] };
+        window.__gap = g;
+        g.timer = setInterval(async () => {
+            let frames = 0;
+            for (const pc of window.__pcs) {
+                (await pc.getStats()).forEach(r => { if (r.type === 'inbound-rtp' && r.kind === 'video' && r.framesDecoded) frames += r.framesDecoded; });
+            }
+            g.samples.push([performance.now(), frames]);
+        }, 100);
+    });
+    const out = await act();
+    await sleep(ms);
+    const samples = await viewer.evaluate(() => { clearInterval(window.__gap.timer); return window.__gap.samples; });
+    let longest = 0;
+    let since = samples[0]?.[0] ?? 0;
+    for (let i = 1; i < samples.length; i++) {
+        if (samples[i][1] > samples[i - 1][1]) since = samples[i][0];
+        else longest = Math.max(longest, samples[i][0] - since);
+    }
+    return { out, gapMs: Math.round(longest), samples: samples.length };
+}
+
 async function viewerRate(viewer, ms = 6000) {
     const a = await viewer.evaluate(readDecoded);
     await sleep(ms);
@@ -303,8 +331,9 @@ try {
     check('B: still full size, now 1080p', result.phases.B.viewer.sizes.includes('1920x1080'), result.phases.B.viewer.sizes);
 
     // C: -> 720p30: 4 Mbps, one size.
-    result.phases.C = { change: await liveQuality(sharer, '720p', 30) };
-    await sleep(5000);
+    const cGap = await frameGap(viewer, () => liveQuality(sharer, '720p', 30));
+    result.phases.C = { change: cGap.out, gapMs: cGap.gapMs };
+    console.log(`C: longest stretch without a new frame on the viewer: ${cGap.gapMs} ms`);
     const c = await sharer.evaluate(readShareSenders);
     result.phases.C.senders = c;
     result.phases.C.viewer = await viewerRate(viewer);
@@ -314,8 +343,9 @@ try {
     check('C: the viewer kept watching after the switch', result.phases.C.viewer.fps > 10, result.phases.C.viewer);
 
     // D: -> 1080p60: a ladder again.
-    result.phases.D = { change: await liveQuality(sharer, '1080p', 60) };
-    await sleep(5000);
+    const dGap = await frameGap(viewer, () => liveQuality(sharer, '1080p', 60));
+    result.phases.D = { change: dGap.out, gapMs: dGap.gapMs };
+    console.log(`D: longest stretch without a new frame on the viewer: ${dGap.gapMs} ms`);
     const d = await sharer.evaluate(readShareSenders);
     result.phases.D.senders = d;
     result.phases.D.viewer = await viewerRate(viewer);
@@ -342,16 +372,19 @@ try {
     check('E: full size, now 720p', result.phases.E.viewer.sizes.includes('1280x720'), result.phases.E.viewer.sizes);
 
     // F: the setting itself, changed while sharing.
-    result.phases.F = { never: await setLadderSetting(sharer, 'never') };
-    await sleep(4000);
+    const fGap1 = await frameGap(viewer, () => setLadderSetting(sharer, 'never'));
+    result.phases.F = { never: fGap1.out, neverGapMs: fGap1.gapMs };
+    console.log(`F: Never: longest stretch without a new frame on the viewer: ${fGap1.gapMs} ms`);
     const f1 = await sharer.evaluate(readShareSenders);
     const f1Sender = f1.find(s => s.capture.startsWith('1280x720')) ?? f1[0];
     result.phases.F.afterNever = { senders: f1, viewer: await viewerRate(viewer) };
     check('F: Never sends one size at once', (f1Sender?.encodings.length ?? 0) === 1, f1Sender?.encodings);
     if (laddered(eSender)) check('F: ...by publishing again (a new sender)', f1Sender?.id !== eSender.id, { before: eSender.id, after: f1Sender?.id });
     check('F: the viewer kept watching after Never', result.phases.F.afterNever.viewer.fps > 10, result.phases.F.afterNever.viewer);
-    result.phases.F.auto = await setLadderSetting(sharer, 'auto');
-    await sleep(4000);
+    const fGap2 = await frameGap(viewer, () => setLadderSetting(sharer, 'auto'));
+    result.phases.F.auto = fGap2.out;
+    result.phases.F.autoGapMs = fGap2.gapMs;
+    console.log(`F: Automatic: longest stretch without a new frame on the viewer: ${fGap2.gapMs} ms`);
     const f2 = await sharer.evaluate(readShareSenders);
     const f2Sender = f2.find(s => s.capture.startsWith('1280x720')) ?? f2[0];
     result.phases.F.afterAuto = { senders: f2, viewer: await viewerRate(viewer) };
@@ -361,6 +394,9 @@ try {
     }
     check('F: the viewer kept watching after Automatic', result.phases.F.afterAuto.viewer.fps > 10, result.phases.F.afterAuto.viewer);
     check('F: ...at full size', result.phases.F.afterAuto.viewer.sizes.includes('1280x720'), result.phases.F.afterAuto.viewer.sizes);
+    for (const [name, ms] of [['C', cGap.gapMs], ['D', dGap.gapMs], ['F Never', fGap1.gapMs], ['F Automatic', fGap2.gapMs]]) {
+        check(`${name}: the picture held for under 3 s across the re-publish`, ms < 3000, { gapMs: ms });
+    }
 } catch (e) {
     result.error = String(e?.message || e);
     console.log('ERROR', result.error);
