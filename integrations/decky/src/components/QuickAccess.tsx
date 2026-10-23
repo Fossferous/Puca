@@ -173,7 +173,7 @@ function Ready({ snap }: { snap: Snapshot }) {
     return (
         <>
             {state.keys && <KeysNote keys={state.keys} />}
-            {state.call && <Call call={state.call} snap={snap} />}
+            {state.call && <Call call={state.call} snap={snap} canShare={state.features.includes('share')} />}
             <LiveNow state={state} />
             <Channels state={state} />
             <PanelSection>
@@ -217,7 +217,7 @@ function callStatus(call: EmbedCall, snap: Snapshot): string {
     return snap.micOn ? 'Microphone on' : 'In the call';
 }
 
-function Call({ call, snap }: { call: EmbedCall; snap: Snapshot }) {
+function Call({ call, snap, canShare }: { call: EmbedCall; snap: Snapshot; canShare: boolean }) {
     return (
         <PanelSection title={call.channelName || 'Voice call'}>
             <Note title={callStatus(call, snap)} />
@@ -258,6 +258,7 @@ function Call({ call, snap }: { call: EmbedCall; snap: Snapshot }) {
                     </DialogButton>
                 </Focusable>
             </PanelSectionRow>
+            {canShare && <ShareScreen call={call} snap={snap} />}
             <PanelSectionRow>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '4px 0' }}>
                     {call.members.map(m => (
@@ -273,6 +274,63 @@ function Call({ call, snap }: { call: EmbedCall; snap: Snapshot }) {
                 </div>
             </PanelSectionRow>
         </PanelSection>
+    );
+}
+
+const SHARE_NOTE = "Your friends see your game. While a menu, the keyboard, a notification, Púca or Steam itself is on screen, they see a paused picture.";
+
+/**
+ * Sharing the Deck's screen into the call (share.ts). It starts only from a
+ * press here: Share screen, or the answer to Púca's own request (its Share
+ * button in the full view). While this panel is open the picture is paused:
+ * it is on screen.
+ */
+function ShareScreen({ call, snap }: { call: EmbedCall; snap: Snapshot }) {
+    const [error, setError] = useState<string | null>(null);
+    if (snap.shareAsk) {
+        return (
+            <>
+                <Note title="Púca asks to share your screen">{SHARE_NOTE}</Note>
+                <PanelSectionRow>
+                    <Focusable style={{ display: 'flex', gap: 6 }} flow-children="horizontal">
+                        <DialogButton
+                            style={{ ...row, minWidth: 0, flex: 1, justifyContent: 'center', padding: '8px 4px' }}
+                            onClick={() => { void controller.answerShareAsk(true).then(setError); }}
+                        >
+                            Share screen
+                        </DialogButton>
+                        <DialogButton
+                            style={{ ...row, minWidth: 0, flex: 1, justifyContent: 'center', padding: '8px 4px' }}
+                            onClick={() => { void controller.answerShareAsk(false); }}
+                        >
+                            Not now
+                        </DialogButton>
+                    </Focusable>
+                </PanelSectionRow>
+            </>
+        );
+    }
+    const sharing = call.sharing || snap.shareActive;
+    const shown = error ?? snap.shareError;
+    return (
+        <>
+            {sharing && <Note title="You're sharing your screen">{SHARE_NOTE}</Note>}
+            {!sharing && shown && <Note title={shown} />}
+            <PanelSectionRow>
+                <ButtonItem
+                    layout="below"
+                    disabled={!call.connected || snap.shareBusy}
+                    description={sharing ? undefined : <span style={muted}>{SHARE_NOTE}</span>}
+                    onClick={() => {
+                        // What went wrong comes back in the snapshot (shareError).
+                        setError(null);
+                        void (sharing ? controller.stopShare() : controller.startShare());
+                    }}
+                >
+                    {sharing ? 'Stop sharing' : snap.shareBusy ? 'Starting…' : 'Share screen'}
+                </ButtonItem>
+            </PanelSectionRow>
+        </>
     );
 }
 

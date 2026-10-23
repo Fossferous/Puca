@@ -19,20 +19,29 @@ it reports which back button the person presses, to choose one by pressing it.
 With "Turn the microphone on for calls" it also switches the Deck's own
 microphone on for a call when it is muted, and back after (puca_mic.py).
 
+When the person presses Share screen in the panel, it shares the Deck's screen
+into the call (puca_share.py): gamescope's feed, encoded by the Deck's own
+video engine, handed to the page, which decodes it and shares it as Púca
+shares any screen, end-to-end encrypted. The picture goes only while the
+frontend's looks at the screen say the game alone is on it: never while
+Steam's menus, the keyboard, a notification or Púca itself is.
+
 And it fetches the plugin's own updates from the download site the person's
 Púca server names (puca_update.py). Whether one may be installed is decided
 by its signature, in the frontend (src/update.ts), before Decky is asked.
 
 It keeps the plugin's settings and nothing else. No message content and no
 audio pass through here: the microphone goes from one Steam page to the other
-over WebRTC, and only its connection setup (SDP) crosses this process. The
-one piece of account data that does is a password typed into the panel's
-"Sign in" (page_call signIn): it passes through once, in memory, on its way
-to Púca's own sign-in in the page, and is never stored or logged.
+over WebRTC, and only its connection setup (SDP) crosses this process. A
+shared screen's picture does, in memory, on its way to the page; it is never
+stored. The one piece of account data that passes through is a password typed
+into the panel's "Sign in" (page_call signIn): once, in memory, on its way to
+Púca's own sign-in in the page, and it is never stored or logged.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import secrets
@@ -43,8 +52,9 @@ import decky
 from puca_buttons import BUTTONS, GripLearner, InputWatch
 from puca_cdp import CdpError, PucaPage, find_target
 from puca_mic import MicForCalls
-from puca_settings import (MARKER, PAGE_CALL, PAGE_METHODS, check_mic_answer, load_settings,
-                           normalize_app_url, save_settings)
+from puca_settings import (MARKER, PAGE_CALL, PAGE_METHODS, check_mic_answer, check_request_id,
+                           check_share_error, load_settings, normalize_app_url, save_settings)
+from puca_share import SHARE_ANSWER, SHARE_CHUNK, SHARE_ENDED, SHARE_PAUSED, ScreenCapture
 from puca_update import (MAX_MANIFEST_BYTES, MAX_ZIP_BYTES, clear_updates, download_origin, manifest_url,
                          read_key, read_manifest, save_update, sha256_hex, ssl_context, zip_url)
 
@@ -93,6 +103,9 @@ class Plugin:
     controls: InputWatch | None = None
     learning: asyncio.Future | None = None
     mic: MicForCalls | None = None
+    share: ScreenCapture | None = None
+    share_id: str | None = None
+    share_lock: asyncio.Lock | None = None
 
     async def _main(self):
         decky.logger.info("Púca for Steam Deck %s backend started", decky.DECKY_PLUGIN_VERSION)
@@ -159,6 +172,10 @@ class Plugin:
         return {"ok": True, "value": None}
 
     async def detach(self) -> None:
+        # The page is going: so is anything it was sharing, once a share that
+        # is still starting has started (share_start checks the page after).
+        async with self._lock():
+            await self._end_share(tell_page=False)
         page, self.page = self.page, None
         if page is not None:
             await page.detach()
@@ -304,6 +321,121 @@ class Plugin:
         except Exception as e:
             decky.logger.warning("the Deck's microphone: %s", e)
             return {"ok": False, "error": str(e)[:200]}
+
+    # ---- Sharing the Deck's screen --------------------------------------------------
+
+    def _lock(self) -> asyncio.Lock:
+        if self.share_lock is None:
+            self.share_lock = asyncio.Lock()
+        return self.share_lock
+
+    async def share_start(self, request_id: Any) -> dict:
+        """Give the page's share request `request_id` the Deck's screen. The
+        frontend calls this only after a press in its own panel; the page is
+        answered here either way. The share starts paused, and shows the game
+        once the frontend's looks say it alone is on screen (share_seen)."""
+        rid = check_request_id(request_id)
+        if rid is None:
+            return {"ok": False, "error": "bad request"}
+        async with self._lock():
+            page = self.page
+            if page is None:
+                return {"ok": False, "error": "Púca is not running"}
+            await self._end_share(tell_page=True)
+            capture: ScreenCapture | None = None
+
+            async def deliver(au: bytes, key: bool) -> None:
+                taken = await page.call_function(
+                    SHARE_CHUNK, [rid, base64.b64encode(au).decode("ascii"), key], timeout=5, user_gesture=False)
+                if taken is None:
+                    raise CdpError("the page has no such share")
+
+            capture = ScreenCapture(deliver, lambda why: self._share_ended(capture, rid, why))
+            problem = await capture.start()
+            if problem is None and self.page is not page:
+                await capture.stop()
+                problem = "Púca restarted"
+            if problem is not None:
+                decky.logger.warning("the screen share did not start: %s", problem)
+                await self._share_answer(page, rid, False, problem, refused=False)
+                return {"ok": False, "error": problem}
+            if not await self._share_answer(page, rid, True, None, refused=False):
+                await capture.stop()
+                return {"ok": False, "error": "Púca's page did not answer"}
+            self.share, self.share_id = capture, rid
+            capture.begin()
+        decky.logger.info("sharing the screen")
+        return {"ok": True, "value": None}
+
+    async def share_refuse(self, request_id: Any, error: Any = None) -> None:
+        """The person said no, or never answered: the page's request fails with `error`."""
+        rid = check_request_id(request_id)
+        if rid is not None and self.page is not None:
+            await self._share_answer(self.page, rid, False, check_share_error(error), refused=True)
+
+    async def share_seen(self, showing: Any, at: Any) -> None:
+        """What the frontend saw when it looked at the screen at `at` (its
+        Date.now(), in ms): the game alone (showing=True), or something else
+        as well. It looks every 100 ms while sharing, and only what lies
+        between two "showing" looks is shown (puca_share.ShowGate)."""
+        capture, rid, page = self.share, self.share_id, self.page
+        if capture is None or rid is None:
+            return
+        # Before any await: looks are judged in the order they came.
+        changed = capture.look_now(showing is True, at)
+        if changed and page is not None:
+            try:
+                await page.call_function(SHARE_PAUSED, [rid, not capture.showing], timeout=5, user_gesture=False)
+            except Exception:
+                pass  # a page that is going ends the share anyway
+
+    async def share_stop(self, request_id: Any = None) -> None:
+        """Stop the picture: the page let go of share `request_id`, or, with
+        no id, the frontend ends whatever is shared (Stop, a reload). Waits
+        for a share that is still starting: the page may let go of it then."""
+        async with self._lock():
+            if request_id is not None and check_request_id(request_id) != self.share_id:
+                return
+            await self._end_share(tell_page=request_id is None)
+
+    async def _end_share(self, tell_page: bool, why: str = "stopped") -> None:
+        capture, rid = self.share, self.share_id
+        self.share = self.share_id = None
+        if capture is None:
+            return
+        await capture.stop()
+        decky.logger.info("stopped sharing the screen")
+        if tell_page and rid is not None and self.page is not None:
+            try:
+                await self.page.call_function(SHARE_ENDED, [rid, why], timeout=5, user_gesture=False)
+            except Exception:
+                pass
+
+    def _share_ended(self, capture: ScreenCapture | None, rid: str, why: str) -> None:
+        """The picture stopped by itself (the feed went, or the page did)."""
+        if capture is None or self.share is not capture:
+            return
+        decky.logger.info("the screen share ended: %s", why)
+
+        async def finish() -> None:
+            async with self._lock():
+                if self.share is not capture:
+                    return
+                await self._end_share(tell_page=True, why=why)
+            await decky.emit("puca_share", {"type": "ended", "id": rid, "why": why})
+
+        asyncio.ensure_future(finish())
+
+    async def _share_answer(self, page: PucaPage, rid: str, ok: bool, error: str | None, refused: bool) -> bool:
+        """ok, or why not: `refused` (the person said no) or a share that
+        could not start, which the page tells apart (NotAllowedError, or
+        NotReadableError with the reason)."""
+        try:
+            await page.call_function(SHARE_ANSWER, [rid, ok, error, refused], timeout=5, user_gesture=False)
+            return True
+        except Exception as e:
+            decky.logger.info("share answer not delivered: %s", e)
+            return False
 
     # ---- Updates for the plugin itself ---------------------------------------------
 

@@ -222,17 +222,20 @@ class PucaPage:
         """Evaluate in Púca's own page world and return the value, as a person's action."""
         return await self._run("Runtime.evaluate", {"expression": expression}, "contextId", timeout)
 
-    async def call_function(self, declaration: str, args: list, timeout: float = 15.0) -> Any:
+    async def call_function(self, declaration: str, args: list, timeout: float = 15.0,
+                            user_gesture: bool = True) -> Any:
         """Call `declaration` in Púca's own page world with `args` handed over
-        as values, as a person's action. Unlike evaluate, nothing passed ends
-        up in a script's source text, which the page keeps: a password on its
-        way to the page's sign-in is only ever an argument."""
+        as values, as a person's action unless `user_gesture` is False. Unlike
+        evaluate, nothing passed ends up in a script's source text, which the
+        page keeps: a password on its way to the page's sign-in is only ever
+        an argument."""
         return await self._run("Runtime.callFunctionOn", {
             "functionDeclaration": declaration,
             "arguments": [{"value": a} for a in args],
-        }, "executionContextId", timeout)
+        }, "executionContextId", timeout, user_gesture)
 
-    async def _run(self, method: str, params: dict, context_key: str, timeout: float) -> Any:
+    async def _run(self, method: str, params: dict, context_key: str, timeout: float,
+                   user_gesture: bool = True) -> Any:
         if not self.attached:
             raise CdpError("not attached")
         if self._main_context is None or self._main_context_origin != self.origin:
@@ -244,7 +247,9 @@ class PucaPage:
             "returnByValue": True,
             # Joining a call starts audio: Chromium allows that only after a
             # user action, and this is one, relayed from the Quick Access panel.
-            "userGesture": True,
+            # A shared screen's picture is not: thirty calls a second must not
+            # keep the page free to open windows or play sound.
+            "userGesture": user_gesture,
         }, timeout=timeout)
         if res.get("exceptionDetails"):
             text = res["exceptionDetails"].get("exception", {}).get("description") or res["exceptionDetails"].get("text")

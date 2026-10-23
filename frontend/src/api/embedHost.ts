@@ -13,8 +13,8 @@
  * on first use, and its functions are copied out, so a script that runs later
  * can neither opt the page in nor swap a host function.
  *
- * This file holds what the rest of the app asks of a host: the microphone,
- * notifications and presence. Steam's browser refuses getUserMedia to every
+ * This file holds what the rest of the app asks of a host: the microphone, a
+ * screen share's picture, notifications and presence. Steam's browser refuses getUserMedia to every
  * site that is not Steam's own (measured on a Deck, 2026-10-22:
  * NotAllowedError in a browser view, in an iframe, and with a DevTools
  * permission grant), so the plugin opens the microphone in Steam's own
@@ -45,6 +45,8 @@ export interface EmbedHost {
     name: string;
     /** Supplies the microphone: called instead of navigator.mediaDevices.getUserMedia for audio. */
     getUserMedia?: (constraints: MediaStreamConstraints) => Promise<MediaStream>;
+    /** Supplies a screen share's video: called instead of navigator.mediaDevices.getDisplayMedia. */
+    getDisplayMedia?: (options: DisplayMediaStreamOptions) => Promise<MediaStream>;
     notify?: (n: EmbedNotification) => void;
     /** Receives the state snapshot (embedApi.ts) whenever it changes. */
     onStateChange?: (state: unknown) => void;
@@ -87,6 +89,7 @@ function readDeclaration(): EmbedHost | null {
         apiVersion: EMBED_API_VERSION,
         name: typeof o.name === 'string' && o.name.trim() ? o.name.trim().slice(0, 60) : 'an embedding host',
         getUserMedia: bound<EmbedHost['getUserMedia']>(o.getUserMedia),
+        getDisplayMedia: bound<EmbedHost['getDisplayMedia']>(o.getDisplayMedia),
         notify: bound<EmbedHost['notify']>(o.notify),
         onStateChange: bound<EmbedHost['onStateChange']>(o.onStateChange),
         isForeground: bound<EmbedHost['isForeground']>(o.isForeground),
@@ -143,6 +146,46 @@ export async function getUserMediaForMic(constraints: MediaStreamConstraints): P
         stream.getTracks().forEach(t => t.stop());
         throw err;
     }
+}
+
+// ---- Screen sharing --------------------------------------------------------
+
+/**
+ * Whether a screen share can start here. Everywhere but inside a host this is
+ * whatever the platform could always do; a host shares only if it supplies the
+ * picture itself (Steam's browser refuses capture to every site that is not
+ * Steam's own, so its Share button could only ever fail).
+ */
+export function screenShareAvailable(): boolean {
+    const h = embedHost();
+    return !h || !!h.getDisplayMedia;
+}
+
+/** The host's name when it supplies a share's picture, else null. */
+export function hostScreenShare(): string | null {
+    const h = embedHost();
+    return h?.getDisplayMedia ? h.name : null;
+}
+
+/**
+ * navigator.mediaDevices.getDisplayMedia for a screen share. With a host that
+ * supplies it, the picture comes from the host (Púca for Steam Deck: the
+ * Deck's own screen, encoded by its hardware); anywhere else this is the
+ * browser's own call, unchanged. A host is handed the app's options as they
+ * are and decides what it can honour. It should refuse with the browser's
+ * names (NotAllowedError when the person did not ask for the share). One that
+ * answers with no video track is reported as NotReadableError.
+ */
+export async function getDisplayMediaForShare(options: DisplayMediaStreamOptions): Promise<MediaStream> {
+    const host = embedHost();
+    if (!host) return navigator.mediaDevices.getDisplayMedia(options);
+    if (!host.getDisplayMedia) throw new DOMException(`${host.name} cannot share a screen`, 'NotSupportedError');
+    const stream = await host.getDisplayMedia(options);
+    if (!stream || typeof stream.getVideoTracks !== 'function' || stream.getVideoTracks().length === 0) {
+        try { stream?.getTracks?.().forEach(t => t.stop()); } catch { /* nothing to stop */ }
+        throw new DOMException(`${host.name} supplied no picture`, 'NotReadableError');
+    }
+    return stream;
 }
 
 // ---- Notifications ---------------------------------------------------------

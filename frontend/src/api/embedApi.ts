@@ -13,7 +13,7 @@
  */
 import { onIdentityRestoreChange } from './auth';
 import { API_BASE_URL } from './config';
-import { EMBED_API_VERSION, activateHostNotification, embedHost } from './embedHost';
+import { EMBED_API_VERSION, activateHostNotification, embedHost, hostScreenShare } from './embedHost';
 import { embedKeys, signInFromHost, type EmbedKeys, type EmbedSignInResult } from './embedSignIn';
 import { holdFromHost } from './hotkeys';
 import {
@@ -53,12 +53,16 @@ export interface EmbedCall {
     inputMode: EmbedInputMode;
     /** Push-to-talk (or push-to-mute) is held right now. */
     holdDown: boolean;
+    /** This device is sharing its screen in the call. */
+    sharing: boolean;
     members: EmbedMember[];
 }
 
 /** The calls this page has beyond apiVersion 1's first set, so a host can
- *  offer what the server's Púca supports and fall back where it does not. */
-export const EMBED_FEATURES = ['downloadSite', 'signIn'] as const;
+ *  offer what the server's Púca supports and fall back where it does not.
+ *  'share' is listed only where the host supplies the picture (its
+ *  getDisplayMedia): anywhere else startShare could only fail. */
+export const EMBED_FEATURES = ['downloadSite', 'signIn', 'share'] as const;
 
 export interface EmbedState {
     apiVersion: number;
@@ -104,6 +108,11 @@ export interface EmbedCallControls {
     setMuted(muted: boolean): boolean;
     setDeafened(deafened: boolean): boolean;
     leave(): void;
+    /** Share this device's screen, the way Share Screen and Go Live do, with
+     *  the picture the host supplies (embedHost.ts, getDisplayMediaForShare). */
+    startShare(): Promise<EmbedResult>;
+    /** Stop this device's share; false when it was not sharing. */
+    stopShare(): boolean;
 }
 
 let session: EmbedSession | null = null;
@@ -170,6 +179,7 @@ export function getEmbedState(): EmbedState {
             noMicrophone: live?.noMicrophone ?? false,
             inputMode: live?.inputMode ?? loadSettings().voiceInputMode ?? 'open',
             holdDown: live?.holdDown ?? false,
+            sharing: live?.sharing ?? false,
             members: readMembers(roomId, user?.id ?? null),
         };
     }
@@ -177,7 +187,7 @@ export function getEmbedState(): EmbedState {
     return {
         apiVersion: EMBED_API_VERSION,
         appVersion: typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '',
-        features: [...EMBED_FEATURES],
+        features: EMBED_FEATURES.filter(f => f !== 'share' || hostScreenShare() !== null),
         signedIn,
         keys: signedIn ? embedKeys() : null,
         user,
@@ -282,6 +292,8 @@ export interface PucaEmbedApi {
     activateNotification(id: string): boolean;
     downloadSite(): Promise<string | null>;
     signIn(username: string, password: string, staySignedIn?: boolean): Promise<EmbedSignInResult>;
+    startShare(): Promise<EmbedResult>;
+    stopShare(): boolean;
 }
 
 /** How long downloadSite waits for the server. */
@@ -361,6 +373,12 @@ export function createEmbedApi(): PucaEmbedApi {
         signIn: async (username: string, password: string, staySignedIn?: boolean): Promise<EmbedSignInResult> => (
             session?.user() ? { ok: false, error: 'signed-in' } : signInFromHost(username, password, staySignedIn)
         ),
+        startShare: async (): Promise<EmbedResult> => {
+            if (!call) return { ok: false, error: 'not in a call' };
+            if (!hostScreenShare()) return { ok: false, error: 'this host supplies no picture' };
+            return call.startShare();
+        },
+        stopShare: () => (call ? call.stopShare() : false),
     });
 }
 

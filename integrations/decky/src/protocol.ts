@@ -30,6 +30,9 @@ export interface EmbedCall {
     noMicrophone: boolean;
     inputMode: 'open' | 'pushToTalk' | 'pushToMute';
     holdDown: boolean;
+    /** This device is sharing its screen into the call. False from a page
+     *  that predates it. */
+    sharing: boolean;
     members: EmbedMember[];
 }
 
@@ -97,7 +100,12 @@ export type PageMessage =
     | { type: 'notify'; notification: PageNotification }
     /** The page wants the microphone: answer the offer with the Deck's mic. */
     | { type: 'mic-request'; id: string; constraints: MicConstraints; offer: { type: 'offer'; sdp: string } }
-    | { type: 'mic-release'; id: string };
+    | { type: 'mic-release'; id: string }
+    /** The page wants the screen for a share (its getDisplayMedia): allowed
+     *  only after a press in the panel (share.ts). */
+    | { type: 'share-request'; id: string }
+    /** The page let go of that share, or gave up waiting for it. */
+    | { type: 'share-release'; id: string };
 
 const MAX_TEXT = 200;
 const MAX_SDP = 64 * 1024;
@@ -139,6 +147,7 @@ function readCall(v: unknown): EmbedCall | null {
         noMicrophone: bool(o.noMicrophone),
         inputMode: mode,
         holdDown: bool(o.holdDown),
+        sharing: bool(o.sharing),
         members: (Array.isArray(o.members) ? o.members.slice(0, 200) : [])
             .map(readMember).filter((m): m is EmbedMember => m !== null),
     };
@@ -234,6 +243,9 @@ export function readPageMessage(raw: unknown): PageMessage | null {
         }
         case 'mic-release':
             return isRequestId(o.id) ? { type: 'mic-release', id: o.id } : null;
+        case 'share-request':
+        case 'share-release':
+            return isRequestId(o.id) ? { type: o.type, id: o.id } : null;
         default:
             return null;
     }
