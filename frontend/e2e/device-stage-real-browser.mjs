@@ -273,6 +273,53 @@ const clientOnComposite = (page, dx, dy) => page.evaluate(({ dx, dy }) => {
     await ctx.close();
 }
 
+// THE PAUSED BANNER'S RESUME, on the phone (it had no way to resume before
+// 2026-10-23). A hardware keyboard's Ctrl+Alt+Home pauses; Resume must be a
+// 44 px target inside the window that a tap reaches, with its word inside it
+// and beside its icon — under the coarse pointer's flex rule the text squeezed
+// the button until the icon stacked above the word and the word ran out past
+// the button's edge. The tap resumes and presses nothing on the remote machine.
+{
+    const { ctx, page } = await open();
+    await page.keyboard.down('Control'); await page.keyboard.down('Alt');
+    await page.keyboard.press('Home');
+    await page.keyboard.up('Alt'); await page.keyboard.up('Control');
+    await page.waitForTimeout(200);
+    const r = await page.evaluate(() => {
+        const b = document.querySelector('.device-stage-paused button');
+        if (!b) return null;
+        const rect = b.getBoundingClientRect();
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        const icon = b.querySelector('svg')?.getBoundingClientRect();
+        const word = [...b.childNodes].find(n => n.nodeType === Node.TEXT_NODE && n.textContent.trim());
+        const range = document.createRange();
+        if (word) range.selectNodeContents(word);
+        const wr = word ? range.getBoundingClientRect() : null;
+        return {
+            w: Math.round(rect.width), h: Math.round(rect.height), left: rect.left, right: rect.right, bottom: rect.bottom,
+            hit: !!hit && !!hit.closest('.device-stage-paused button'),
+            wordInside: !!wr && wr.left >= rect.left - 0.5 && wr.right <= rect.right + 0.5,
+            besideIcon: !!wr && !!icon && Math.abs((icon.top + icon.bottom) / 2 - (wr.top + wr.bottom) / 2) < 6,
+        };
+    });
+    ck('a hardware keyboard\'s Ctrl+Alt+Home pauses the phone stage, with a Resume', !!r);
+    if (r) {
+        ck('Resume is a 44 px target inside the window, and what a tap hits',
+            r.w >= 44 && r.h >= 44 && r.left >= 0 && r.right <= 390 && r.bottom <= 844 && r.hit, `${r.w}x${r.h}`);
+        ck('…its word inside it, beside its icon (not stacked, not spilling out)', r.wordInside && r.besideIcon,
+            `word inside ${r.wordInside}, beside the icon ${r.besideIcon}`);
+        await page.screenshot({ path: join(outdir, 'phone-paused-resume.png') });
+        const b = await page.locator('.device-stage-paused button').boundingBox();
+        await page.evaluate(() => { window.__stage.inputs.length = 0; });
+        await page.touchscreen.tap(b.x + b.width / 2, b.y + b.height / 2);
+        await page.waitForTimeout(300);
+        const pressed = await page.evaluate(() => window.__stage.inputs.filter(e => e.t === 'down' || e.t === 'tap').length);
+        ck('a tap on Resume resumes, and presses nothing over there',
+            !(await page.locator('.device-stage-paused').count()) && pressed === 0, `${pressed} presses`);
+    }
+    await ctx.close();
+}
+
 await browser.close();
 server.close();
 console.log(fail === 0 ? '\nALL PASS' : `\n${fail} FAILED`);

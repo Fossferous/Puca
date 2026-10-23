@@ -557,11 +557,27 @@
 .device-stage-stats th { padding-right: 10px; text-align: left; font-weight: 600; color: #c8cacc; white-space: nowrap; vertical-align: top; }
 .device-stage-stats td { color: #fff; }
 
-/* The paused banner carries its own Resume (the phone had none). */
+/* The paused banner carries its own Resume (the phone had none). The button
+   keeps its natural width, icon and word on one line: under a coarse pointer
+   .device-stage-btn grows and shrinks (flex 1 1 auto), and at 390 px the text
+   beside it squeezed it until the icon sat above the word and the word ran
+   out past the button's edge. The text takes what is left and wraps. And
+   max-content wide (within its 90%): centred by left 50% and a translate, a
+   shrink-to-fit box may only use the right half of the stage, which folded
+   the sentence into a column a word wide. */
 .device-stage-paused {
     display: flex;
     align-items: center;
     gap: 10px;
+    width: max-content;
+}
+.device-stage-paused > span { flex: 1 1 auto; min-width: 0; }
+.device-stage-paused .device-stage-btn {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
 }
 
 /* "Type text…" — a small dialog over the stage, above its bar's menus. */
