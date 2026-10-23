@@ -43,7 +43,7 @@ in this file is not registered there, so what IS listed is real.
 | GET | `/servers` | ✅ | List user's servers. `clip_channel_id` is `null` unless the caller can VIEW the pinned clips channel; the owner's pin itself is unchanged. `games_enabled` is the owner's switch for card games in calls (default `true`: games are available on every server until its owner turns them off; see *Games* under the WebSocket protocol). |
 | POST | `/servers` | ✅ | Create new server (the answer is the new row, `games_enabled: true` included) |
 | POST | `/servers/:id/join` | ✅ | Join server by ID |
-| PATCH | `/servers/:id/settings` | ✅ | Update server settings (owner only). `games_enabled: false` ends every open card table of the server at once (`GameEnded`, reason `disabled`); either value is then pushed to every online member (`GamesEnabled`, WebSocket *Games*). |
+| PATCH | `/servers/:id/settings` | ✅ | Update server settings (owner only). `games_enabled: false` ends every open card table of the server at once (`GameEnded`, reason `disabled`); either value is then pushed to every online member (`GamesEnabled`, WebSocket *Games*). A save that names `require_media_e2ee` pushes the stored value to every connection of every member (`MediaE2eeRequired {server_id, require_media_e2ee}`), so a call already running applies it; an older client has no handler for the frame and drops it. |
 | POST | `/servers/:id/read` | ✅ | Mark the whole server read — every channel the caller can VIEW, that is: a hidden channel gets no read-state row (until 0.9.5 it did, so restoring VIEW later hid what had been posted meanwhile). Bare 200 either way; no channel ids in the answer. |
 
 ---

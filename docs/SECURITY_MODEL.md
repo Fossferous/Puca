@@ -573,9 +573,12 @@ server-wide before you join a call.
 > **Correction (2026-10).** That fix covered the tracks present when a call connection was
 > built, and inbound media. On the same engines, a camera turned on or a screen shared
 > *during* the call still went out encrypted only in transit, and turning the setting on in
-> the middle of a call changed only what the panel said. Fixed in 0.9.847: the camera and
-> share paths refuse to publish there, and a change of the setting mid-call rebuilds every
-> connection under it (audit 2026-10, F-1: [`docs/AUDIT_2026-10.md`](AUDIT_2026-10.md)).
+> the middle of a call changed only what the panel said. The server-wide setting, besides,
+> reached no member's call but the owner's until their app fetched its server list again.
+> Fixed in 0.9.847: the camera and share paths refuse to publish there, a change of the
+> setting mid-call rebuilds every connection under it, and the server pushes the owner's
+> change to every member at once, which needs the server update as well as the app (audit
+> 2026-10, F-1 and its second review: [`docs/AUDIT_2026-10.md`](AUDIT_2026-10.md)).
 
 ---
 
