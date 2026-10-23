@@ -212,9 +212,9 @@ async function pair({ a, b, csp = POLICIES.caddy, initA, initB, rewriteOffer }) 
 
 /** Both in the channel first, then the call: as in the app, nobody's offer
  *  reaches a page that has no manager to take it. */
-async function enterCall(p, { required = true } = {}) {
-    await p.pages[1].evaluate((o) => window.harness.join(1, 2, o), { required, tone: TONE[1] });
-    await p.pages[2].evaluate((o) => window.harness.join(2, 1, o), { required, tone: TONE[2] });
+async function enterCall(p, { required = true, camera = true } = {}) {
+    await p.pages[1].evaluate((o) => window.harness.join(1, 2, o), { required, tone: TONE[1], camera });
+    await p.pages[2].evaluate((o) => window.harness.join(2, 1, o), { required, tone: TONE[2], camera });
     await p.pages[1].evaluate(() => window.harness.call(2));
     await p.pages[2].evaluate(() => window.harness.call(1));
 }
@@ -372,6 +372,39 @@ await run('safari-shaped-offer', async () => {
         const [s1, s2] = await until(p, statusOf, (x, y) => x?.encrypted && y?.encrypted);
         ck(s1?.encrypted && s2?.encrypted, `${tag} encrypted both ways`, JSON.stringify([s1?.reason, s2?.reason]));
         await sleep(1500);
+        await videoFlows(p, tag);
+        await bothHear(p, tag);
+    } finally {
+        dumpLogs(p, tag);
+        await p.close();
+    }
+});
+
+await run('camera-mid-call', async () => {
+    // Firefox, once a video transceiver's codecs were negotiated in the OTHER
+    // side's payload numbers, writes its next offer for it with feedback lines
+    // for those numbers if it was given codec preferences, and Chromium
+    // refuses the whole offer (preferSealableVideoCodecs). This order shows
+    // it: Edge's camera first (Edge's offer makes Firefox's video
+    // transceiver), then Firefox's, on that same transceiver.
+    const tag = `[${cr.name} <-> ${ff.name}, cameras turned on mid-call]`;
+    const p = await pair({ a: cr, b: ff });
+    try {
+        await enterCall(p, { camera: false });
+        const [s1, s2] = await until(p, statusOf, (x, y) => x?.encrypted && y?.encrypted);
+        ck(s1?.encrypted && s2?.encrypted, `${tag} encrypted both ways`, JSON.stringify([s1?.reason, s2?.reason]));
+        const decodes = async (page, peerId) => {
+            const deadline = Date.now() + 20_000;
+            let x = await inbound(page, peerId);
+            while (Date.now() < deadline && x.framesDecoded <= 10) { await sleep(250); x = await inbound(page, peerId); }
+            return x.framesDecoded;
+        };
+        await p.pages[1].evaluate(() => window.harness.cameraOn());
+        ck(await decodes(p.pages[2], 1) > 10, `${tag} Firefox decodes the camera Edge turned on`);
+        await p.pages[2].evaluate(() => window.harness.cameraOn());
+        ck(await decodes(p.pages[1], 2) > 10, `${tag} Edge decodes the camera Firefox turned on`);
+        const refused = [1, 2].flatMap((uid) => p.logs[uid].filter((l) => /setRemoteDescription\(|Failed to parse|rejects the offer|rebuilding/i.test(l)));
+        ck(refused.length === 0, `${tag} no description was refused and nothing was rebuilt`, refused.slice(0, 2).join(' / '));
         await videoFlows(p, tag);
         await bothHear(p, tag);
     } finally {

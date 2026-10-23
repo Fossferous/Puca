@@ -54,6 +54,8 @@ class FakeSender {
 let receiverPipe: (() => unknown) | null = null;
 
 class FakeTransceiver {
+    /** null until a description names it (the fake gives the video one the offer's mid). */
+    mid: string | null = null;
     sender: { track: unknown };
     receiver: { track: { kind: string }; transform: unknown; createEncodedStreams?: () => unknown };
     constructor(kind: string, sender?: FakeSender) {
@@ -97,8 +99,10 @@ class FakeRTCPeerConnection {
         return t;
     }
     createDataChannel() { return { close: () => {}, addEventListener: () => {} }; }
-    async setRemoteDescription(d: { type: string }) {
+    async setRemoteDescription(d: { type: string; sdp?: string }) {
         events.push(`srd:${d.type}`);
+        const mid = /a=mid:(\S+)/.exec(d.sdp ?? '')?.[1];
+        if (mid) this.transceivers[0].mid = mid;
         this.remoteDescription = d;
         this.signalingState = d.type === 'offer' ? 'have-remote-offer' : 'stable';
     }
@@ -425,15 +429,34 @@ describe('VP8 first, before every offer and answer, where frames are sealed', ()
         expect(sent.filter(s => s.type === 'offer')).toHaveLength(1);
     });
 
-    it('the answer is made after the offer\'s transceivers were reordered', async () => {
+    const answerTo = async (sdp: string) => {
         scriptEngine();
         const mgr = manager();
         mgr.setLocalUserId(1);
         mgr.setRequireMediaE2ee(true);
-        const offer = JSON.stringify({ type: 'offer', sdp: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 102 96\r\n', connId: 'remote-1' });
+        const offer = JSON.stringify({ type: 'offer', sdp, connId: 'remote-1' });
         await (mgr as unknown as { handleIncomingDescription: (u: number, s: string) => Promise<void> }).handleIncomingDescription(2, offer);
+    };
+
+    it('an offer that put H.264 first is answered after VP8 was put first', async () => {
+        await answerTo('v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 102 96\r\na=mid:0\r\na=rtpmap:102 H264/90000\r\na=rtpmap:96 VP8/90000\r\n');
         expect(events).toEqual(['srd:offer', 'prefs:video/VP8', 'sld:answer']);
         expect(sent.filter(s => s.type === 'answer')).toHaveLength(1);
+    });
+
+    it('CONTROL: an offer that already put VP8 first is answered as it is (Firefox must not be given preferences there)', async () => {
+        await answerTo('v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96 102\r\na=mid:0\r\na=rtpmap:96 VP8/90000\r\na=rtpmap:102 H264/90000\r\n');
+        expect(events).toEqual(['srd:offer', 'sld:answer']);
+    });
+
+    it('before a later offer, a transceiver the peer\'s offer created is left alone', async () => {
+        await answerTo('v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96 102\r\na=mid:0\r\na=rtpmap:96 VP8/90000\r\na=rtpmap:102 H264/90000\r\n');
+        const mgr = managers[managers.length - 1];
+        const pc = pcs[pcs.length - 1];
+        events.length = 0;
+        pc.signalingState = 'stable';
+        await (mgr as unknown as { makeOffer: (u: number, p: unknown) => Promise<void> }).makeOffer(2, pc);
+        expect(events, 'a negotiated transceiver was given preferences before our offer').toEqual(['sld:offer']);
     });
 
     it('once the answer is made, our own video is sent as VP8 even though the offer put H.264 first', async () => {

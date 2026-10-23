@@ -128,8 +128,25 @@ export function attachReceiverTransform(receiver: RTCRtpReceiver, state: MediaCr
 const vp8First = new WeakSet<RTCRtpTransceiver>();
 
 /**
- * Put VP8 first in this connection's video codec preferences, so the next
- * offer or answer it makes lists VP8 first.
+ * The first codec each video section of an SDP lists, by its mid (null when
+ * its first payload type has no rtpmap here).
+ */
+export function firstVideoCodecByMid(sdp: string): Map<string, string | null> {
+    const out = new Map<string, string | null>();
+    for (const section of sdp.split(/\r?\nm=/).slice(1)) {
+        if (!section.startsWith('video')) continue;
+        const mid = /\r?\na=mid:(\S+)/.exec(section)?.[1];
+        if (!mid) continue;
+        const pt = section.split(/\r?\n/)[0].trim().split(' ')[3];
+        const name = pt ? new RegExp(`\\r?\\na=rtpmap:${pt} ([^/\\s]+)`).exec(section)?.[1] ?? null : null;
+        out.set(mid, name);
+    }
+    return out;
+}
+
+/**
+ * Put VP8 first in a video transceiver's codec preferences, so the next
+ * offer or answer this connection makes lists VP8 first there.
  *
  * The clear header frameCrypto.ts leaves on a video frame is VP8's. Chromium
  * and Firefox offer VP8 first anyway; Safari offers H.264 first, and an H.264
@@ -139,17 +156,30 @@ const vp8First = new WeakSet<RTCRtpTransceiver>();
  * WHO SENDS WHAT, measured (Edge 155 and Firefox 155, an H.264-first offer):
  * the OFFERER sends the first codec of the answer, and the ANSWERER sends the
  * first codec of the OFFER — whatever its own answer says, even an answer
- * listing VP8 alone. So this runs before every offer (the peer, answering,
- * then sends VP8) AND every answer (the peer, offering, then sends VP8), and
- * what WE send as the answerer of an offer that put another codec first (a
- * Safari whose own call to this failed) is settled by sendSealableVideoCodec.
+ * listing VP8 alone. So VP8 goes first in our offers (the peer, answering,
+ * then sends VP8) and in an answer to an offer that put another codec first
+ * (the peer, offering, then sends VP8); what WE send as such an answerer is
+ * settled by sendSealableVideoCodec.
+ *
+ * WHICH TRANSCEIVERS, also measured: Firefox 155, once a transceiver's codecs
+ * were negotiated in the OTHER side's payload numbers, writes its next offer
+ * for it with feedback lines for those old numbers beside its own new ones
+ * after ANY setCodecPreferences — and Chromium refuses that offer whole
+ * ("Failed to parse codecs correctly"), so the call stalls into a rebuild
+ * the moment the Firefox peer turns on a camera. Preferences on a transceiver
+ * that was never negotiated (no mid yet) are kept consistent. Hence:
+ *  - before an OFFER (`{ offer: true }`), only transceivers without a mid;
+ *  - before an ANSWER (`{ answerTo: offerSdp }`), only those whose section of
+ *    the offer does not already list VP8 first — never, between Púca
+ *    clients, so a Firefox answerer meets that case only from a peer whose
+ *    own pin failed.
  *
  * Reordered, never filtered: rtx, red and FEC stay, and a peer without VP8
  * (none of the engines Púca runs on) still finds a codec in common. Once per
  * transceiver: the preferences stay set, and setting them again is a change
  * an engine may answer with another round of negotiation.
  */
-export function preferSealableVideoCodecs(pc: RTCPeerConnection): void {
+export function preferSealableVideoCodecs(pc: RTCPeerConnection, when: { offer: true } | { answerTo: string }): void {
     if (typeof RTCRtpReceiver === 'undefined' || typeof RTCRtpReceiver.getCapabilities !== 'function') return;
     let codecs: RTCRtpCodec[] | undefined;
     try {
@@ -161,9 +191,16 @@ export function preferSealableVideoCodecs(pc: RTCPeerConnection): void {
     const isVp8 = (c: RTCRtpCodec) => c.mimeType.toLowerCase() === 'video/vp8';
     if (!codecs.some(isVp8)) return;
     const ordered = [...codecs.filter(isVp8), ...codecs.filter(c => !isVp8(c))];
+    const offered = 'answerTo' in when ? firstVideoCodecByMid(when.answerTo) : null;
     for (const t of pc.getTransceivers()) {
         if (vp8First.has(t)) continue;
         if (t.receiver.track?.kind !== 'video' || typeof t.setCodecPreferences !== 'function') continue;
+        if (offered) {
+            const first = t.mid ? offered.get(t.mid) : undefined;
+            if (!first || first.toLowerCase() === 'vp8') continue;
+        } else if (t.mid !== null) {
+            continue;
+        }
         try {
             t.setCodecPreferences(ordered);
             vp8First.add(t);

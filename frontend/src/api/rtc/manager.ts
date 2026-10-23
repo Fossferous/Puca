@@ -528,7 +528,7 @@ export class WebRTCManager {
         try {
             await this.setupMediaKey(userId); // the DTLS pin (and media tag) ride the offer
             // Sealed video frames are VP8's (frameCrypto.ts): offer it first.
-            if (isMediaE2eeSupported()) preferSealableVideoCodecs(pc);
+            if (isMediaE2eeSupported()) preferSealableVideoCodecs(pc, { offer: true });
             peer.makingOffer = true;
             await pc.setLocalDescription(); // implicit offer; safe under glare
             // The peer may have been REPLACED while we awaited (connId rebuild,
@@ -1880,9 +1880,9 @@ export class WebRTCManager {
 
         if (description.type === 'offer') {
             await this.setupMediaKey(fromUser); // tag ready to advertise in the answer
-            // The offer's transceivers exist now: answer VP8 first even to an
+            // The offer's transceivers exist now: answer VP8 first to an
             // offer that put another codec first (preferSealableVideoCodecs).
-            if (isMediaE2eeSupported()) preferSealableVideoCodecs(pc);
+            if (isMediaE2eeSupported()) preferSealableVideoCodecs(pc, { answerTo: description.sdp || '' });
             await pc.setLocalDescription(); // implicit answer
             const local = pc.localDescription;
             if (local) {
@@ -1957,7 +1957,7 @@ export class WebRTCManager {
         await this.flushPendingCandidates(fromUser, pc);
         this.scheduleIceStartCheck(fromUser);
         await this.setupMediaKey(fromUser);
-        if (isMediaE2eeSupported()) preferSealableVideoCodecs(pc);
+        if (isMediaE2eeSupported()) preferSealableVideoCodecs(pc, { answerTo: envelope.sdp || '' });
         await pc.setLocalDescription(); // implicit answer
         const local = pc.localDescription;
         if (local) {

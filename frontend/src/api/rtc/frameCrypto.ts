@@ -32,8 +32,10 @@
 //
 // They are NOT correct for H.264, whose Annex-B NAL layout is unrelated. Only
 // browser-produced mesh media passes through here, and a client that seals
-// frames puts VP8 first in every offer and answer it makes
-// (mediaCrypto.ts preferSealableVideoCodecs) — Safari's own default is H.264.
+// frames makes VP8 the codec of every link: first in what it offers, first in
+// an answer to an offer that did not list it first, and chosen for what it
+// sends (mediaCrypto.ts preferSealableVideoCodecs, sendSealableVideoCodec) —
+// Safari's own default is H.264.
 // Anything that starts sealing H.264 needs a codec-aware header length (a
 // slice-NAL walk), not a tweaked constant.
 const CLEAR_HEADER = { key: 10, delta: 3, audio: 1 } as const;

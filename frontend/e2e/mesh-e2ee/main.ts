@@ -91,12 +91,13 @@ const harness = {
         (window as unknown as { __peerKeys: Record<number, string> }).__peerKeys = keys;
     },
 
-    /** In the voice channel, mic and camera on, ready for signalling (no call yet). */
-    async join(self: number, peerId: number, opts: { required: boolean; tone: number }): Promise<void> {
+    /** In the voice channel, mic (and camera, unless `camera: false`) on,
+     *  ready for signalling (no call yet). */
+    async join(self: number, peerId: number, opts: { required: boolean; tone: number; camera?: boolean }): Promise<void> {
         mgr = new WebRTCManager();
         mgr.setLocalUserId(self);
         mgr.setRequireMediaE2ee(opts.required);
-        await (mgr.media as unknown as MediaManager).startTone(opts.tone);
+        await (mgr.media as unknown as MediaManager).startTone(opts.tone, opts.camera !== false);
         mgr.setOnRemoteStream((uid, s) => { voices.set(uid, s); sink(s, 'audio'); });
         mgr.setOnCameraStream((_uid, s) => { sink(s, 'video'); });
         mgr.setPeerCamera(peerId, true); // the server's announcement (B7)
@@ -104,6 +105,11 @@ const harness = {
 
     async call(peerId: number): Promise<void> {
         await mgr!.callUser(peerId);
+    },
+
+    /** Turn the camera on mid-call, the way the app's camera button does. */
+    cameraOn(): void {
+        mgr!.publishCameraTrack((mgr!.media as unknown as MediaManager).addCamera());
     },
 
     status: (id: number) => mgr?.mediaE2eeStatus(id) ?? null,

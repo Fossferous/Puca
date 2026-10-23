@@ -30,7 +30,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
     attachReceiverTransform, attachSenderTransform, importMediaKey, mediaTransformApi,
-    noteScriptTransformUnavailable, __resetScriptTransformAvailability, preferSealableVideoCodecs,
+    noteScriptTransformUnavailable, __resetScriptTransformAvailability, preferSealableVideoCodecs, firstVideoCodecByMid,
     sendSealableVideoCodec, type EncodedFrameLike, type MediaCryptoState,
 } from '../api/rtc/mediaCrypto';
 import { serveScriptTransforms, type ScriptTransformScope, type ScriptTransformCommand, type ScriptTransformReport } from '../api/rtc/scriptTransformWorker';
@@ -590,28 +590,57 @@ describe('preferSealableVideoCodecs', () => {
         { mimeType: 'video/VP8', clockRate: 90000 },
         { mimeType: 'video/red', clockRate: 90000 },
     ];
-    function transceiver(kind: 'audio' | 'video') {
-        return { receiver: { track: { kind } }, setCodecPreferences: vi.fn() };
+    function transceiver(kind: 'audio' | 'video', mid: string | null = null) {
+        return { mid, receiver: { track: { kind } }, setCodecPreferences: vi.fn() };
     }
+    /** An offer whose video sections list these codecs first, by mid. */
+    const offerSdp = (sections: Array<[string, 'H264' | 'VP8']>) => 'v=0\r\ns=-\r\n' + sections.map(([mid, first]) =>
+        `m=video 9 UDP/TLS/RTP/SAVPF ${first === 'H264' ? '102 96' : '96 102'}\r\na=mid:${mid}\r\na=rtpmap:96 VP8/90000\r\na=rtpmap:102 H264/90000\r\n`).join('');
     afterEach(() => vi.unstubAllGlobals());
 
-    it('puts VP8 first on video transceivers only, keeping every other codec in order, once each', () => {
+    it('before an offer: VP8 first on video transceivers never negotiated, every other codec kept in order, once each', () => {
         vi.stubGlobal('RTCRtpReceiver', { getCapabilities: (k: string) => (k === 'video' ? { codecs: caps, headerExtensions: [] } : null) });
         const video = transceiver('video');
         const audio = transceiver('audio');
         const pc = { getTransceivers: () => [audio, video] } as unknown as RTCPeerConnection;
-        preferSealableVideoCodecs(pc);
-        preferSealableVideoCodecs(pc);
+        preferSealableVideoCodecs(pc, { offer: true });
+        preferSealableVideoCodecs(pc, { offer: true });
         expect(audio.setCodecPreferences).not.toHaveBeenCalled();
         expect(video.setCodecPreferences).toHaveBeenCalledTimes(1);
         expect(video.setCodecPreferences.mock.calls[0][0].map((c: { mimeType: string }) => c.mimeType))
             .toEqual(['video/VP8', 'video/H264', 'video/rtx', 'video/VP9', 'video/red']);
     });
 
+    it('before an offer: leaves a transceiver already negotiated alone (Firefox would write it an offer Chromium refuses)', () => {
+        vi.stubGlobal('RTCRtpReceiver', { getCapabilities: () => ({ codecs: caps, headerExtensions: [] }) });
+        const negotiated = transceiver('video', '2');
+        const fresh = transceiver('video', null);
+        preferSealableVideoCodecs({ getTransceivers: () => [negotiated, fresh] } as unknown as RTCPeerConnection, { offer: true });
+        expect(negotiated.setCodecPreferences, 'a negotiated transceiver was given preferences').not.toHaveBeenCalled();
+        expect(fresh.setCodecPreferences, 'control: the fresh one is').toHaveBeenCalledTimes(1);
+    });
+
+    it('before an answer: only where the offer did not already put VP8 first', () => {
+        vi.stubGlobal('RTCRtpReceiver', { getCapabilities: () => ({ codecs: caps, headerExtensions: [] }) });
+        const h264First = transceiver('video', '0');
+        const vp8First = transceiver('video', '1');
+        const notOffered = transceiver('video', '7');
+        const sdp = offerSdp([['0', 'H264'], ['1', 'VP8']]);
+        preferSealableVideoCodecs({ getTransceivers: () => [h264First, vp8First, notOffered] } as unknown as RTCPeerConnection, { answerTo: sdp });
+        expect(h264First.setCodecPreferences, 'an H.264-first offer was answered in its own order').toHaveBeenCalledTimes(1);
+        expect(vp8First.setCodecPreferences, 'a VP8-first offer needs nothing (and Firefox must not be given it)').not.toHaveBeenCalled();
+        expect(notOffered.setCodecPreferences).not.toHaveBeenCalled();
+    });
+
+    it('reads the first codec of each video section by mid', () => {
+        expect([...firstVideoCodecByMid(offerSdp([['0', 'H264'], ['x', 'VP8']]))]).toEqual([['0', 'H264'], ['x', 'VP8']]);
+        expect(firstVideoCodecByMid('v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\na=rtpmap:111 opus/48000/2\r\n').size).toBe(0);
+    });
+
     it('leaves the order alone when there is no VP8 to prefer, and survives a transceiver that refuses', () => {
         vi.stubGlobal('RTCRtpReceiver', { getCapabilities: () => ({ codecs: caps.filter(c => c.mimeType !== 'video/VP8'), headerExtensions: [] }) });
         const t = transceiver('video');
-        preferSealableVideoCodecs({ getTransceivers: () => [t] } as unknown as RTCPeerConnection);
+        preferSealableVideoCodecs({ getTransceivers: () => [t] } as unknown as RTCPeerConnection, { offer: true });
         expect(t.setCodecPreferences).not.toHaveBeenCalled();
 
         vi.stubGlobal('RTCRtpReceiver', { getCapabilities: () => ({ codecs: caps, headerExtensions: [] }) });
@@ -619,7 +648,7 @@ describe('preferSealableVideoCodecs', () => {
         refuses.setCodecPreferences.mockImplementation(() => { throw new DOMException('stopped', 'InvalidStateError'); });
         const next = transceiver('video');
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-        preferSealableVideoCodecs({ getTransceivers: () => [refuses, next] } as unknown as RTCPeerConnection);
+        preferSealableVideoCodecs({ getTransceivers: () => [refuses, next] } as unknown as RTCPeerConnection, { offer: true });
         expect(next.setCodecPreferences).toHaveBeenCalledTimes(1);
         warn.mockRestore();
     });

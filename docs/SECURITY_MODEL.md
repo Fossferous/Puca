@@ -572,11 +572,16 @@ bound into the AEAD so they cannot be altered undetected. Those numbers are the 
 payload descriptor and the **Opus** TOC byte; they are not correct for H.264 or VP9.
 Chromium and Firefox offer VP8 first, Safari offers H.264 first, so a client that seals
 frames makes VP8 the video codec of every link: VP8 first in its codec preferences
-before every offer and every answer, and, once negotiated, VP8 chosen for its own video
-senders (`preferSealableVideoCodecs` and `sendSealableVideoCodec` in `mediaCrypto.ts`).
-The last step is needed because, measured in Edge and Firefox, an answerer sends the
-first codec of the OFFER whatever its own answer lists — even an answer listing VP8
-alone. If a sealed link ever carried H.264 anyway the failure is availability, not
+before it offers a new video transceiver, VP8 first in its answer to an offer that did
+not already list it first, and, once negotiated, VP8 chosen for its own video senders
+(`preferSealableVideoCodecs` and `sendSealableVideoCodec` in `mediaCrypto.ts`). The last
+step is needed because, measured in Edge and Firefox, an answerer sends the first codec
+of the OFFER whatever its own answer lists — even an answer listing VP8 alone. The
+preferences go no further than that because Firefox, given preferences on a transceiver
+whose codecs were negotiated in the other side's payload numbers, writes its next offer
+for it with feedback lines Chromium refuses ("Failed to parse codecs correctly") — the
+call then stalls into a rebuild the moment that peer turns a camera on. If a sealed link
+ever carried H.264 anyway the failure is availability, not
 confidentiality: Chromium's H.264 packetizer finds no NAL units in ciphertext and emits
 nothing, so the call shows no video rather than plaintext video, and the handful of clear
 bytes would be a start code plus the SPS profile and level — no resolution, no picture.

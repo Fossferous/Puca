@@ -9,8 +9,9 @@ export type MicReacquireOptions = Record<string, unknown>;
 export class MediaManager {
     private local: MediaStream | null = null;
 
-    /** The local stream the manager publishes: a tone and a moving picture. */
-    async startTone(frequency: number): Promise<MediaStream> {
+    /** The local stream the manager publishes: a tone, and a moving picture
+     *  unless the camera starts off. */
+    async startTone(frequency: number, camera = true): Promise<MediaStream> {
         const ctx = new AudioContext();
         await ctx.resume().catch(() => { /* an autoplay policy: the runner allows it */ });
         const osc = new OscillatorNode(ctx, { type: 'sine', frequency });
@@ -18,6 +19,13 @@ export class MediaManager {
         const dest = new MediaStreamAudioDestinationNode(ctx, { channelCount: 1 });
         osc.connect(gain).connect(dest);
         osc.start();
+        this.local = new MediaStream(dest.stream.getAudioTracks());
+        if (camera) this.addCamera();
+        return this.local;
+    }
+
+    /** A drawn "camera", added to the local stream; the track is returned. */
+    addCamera(): MediaStreamTrack {
         const canvas = document.createElement('canvas');
         canvas.width = 320; canvas.height = 240;
         const g = canvas.getContext('2d')!;
@@ -30,8 +38,8 @@ export class MediaManager {
             g.fillRect((n * 5) % 300, 100, 20, 40);
         }, 33);
         const video = (canvas as HTMLCanvasElement & { captureStream(fps?: number): MediaStream }).captureStream(30).getVideoTracks()[0];
-        this.local = new MediaStream([...dest.stream.getAudioTracks(), video]);
-        return this.local;
+        this.local!.addTrack(video);
+        return video;
     }
 
     getLocalStreamSync(): MediaStream | null { return this.local; }
