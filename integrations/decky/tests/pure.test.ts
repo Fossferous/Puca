@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NOTICE_EVERY_MS, SilenceVerdict, SilentNotice, SILENT_AFTER_S } from '../src/micSilence';
 import { HoldFollower, PressFollower } from '../src/ptt';
@@ -232,6 +233,17 @@ describe("a muted Deck microphone is noticed", () => {
             expect(n.update(false, live, 3000)).toBe(false);
             expect(n.update(true, live, NOTICE_EVERY_MS)).toBe(true);
         });
+    });
+});
+
+describe('the sign-in panel', () => {
+    // Steam's TextField renders { type: "text", ...props it does not know }, and the build tested
+    // never reads bIsPassword: on the Deck the password showed as it was typed. Only the spread
+    // type hides it (checked there: type="password", -webkit-text-security: disc).
+    it('masks the password by the spread input type, not bIsPassword alone', () => {
+        const src = readFileSync(new URL('../src/components/QuickAccess.tsx', import.meta.url), 'utf8');
+        expect(src).toContain("const PASSWORD_INPUT = { type: 'password' } as object;");
+        expect(src).toMatch(/<TextField label="Password"[^>]*\{\.\.\.PASSWORD_INPUT\}/);
     });
 });
 
