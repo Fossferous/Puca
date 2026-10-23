@@ -8,7 +8,7 @@
  * never raise — and if one section cannot be gathered, say which and keep the
  * rest, because a partial report still names the encoder.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const { voiceDiagnostics, meshDiagnostics, currentAppVersion, writeText } = vi.hoisted(() => ({
     voiceDiagnostics: vi.fn(),
@@ -21,6 +21,7 @@ vi.mock('../api/rtc/sfuManager', () => ({ sfuManager: { voiceDiagnostics } }));
 vi.mock('../api/webrtc', () => ({ webrtcManager: { meshDiagnostics } }));
 vi.mock('../api/appVersion', () => ({ currentAppVersion }));
 
+import { REPORT_BUDGET_MS, REPORT_WORST_CASE_MS } from '../api/diagnosticsBudget';
 import { buildDiagnosticsReport, copyDiagnostics, environmentLines, encodingSupportLines, QUICK_TIMEOUT_MS, STEP_TIMEOUT_MS } from '../api/diagnosticsReport';
 
 beforeEach(() => {
@@ -227,5 +228,43 @@ describe('the diagnostics report', () => {
                 vi.useRealTimers();
             }
         });
+    });
+});
+
+describe('the time the whole report may take', () => {
+    afterEach(() => { vi.useRealTimers(); delete (globalThis as { VideoEncoder?: unknown }).VideoEncoder; });
+
+    it('ends inside REPORT_BUDGET_MS when every step runs to its own cap, and not much sooner', async () => {
+        // THE DRIFT GUARD. Send diagnostics waits REPORT_BUDGET_MS for this
+        // report (diagnosticsBudget.ts). The report is its sections one after
+        // another, each under its own cap, so a section added with a cap of
+        // its own, or a cap raised, makes the budget too short and the send
+        // throws away a report that was still on schedule. Every step here
+        // hangs until its cap fires, which is the slowest the report can be.
+        vi.useFakeTimers();
+        const never = () => new Promise<never>(() => {});
+        const isConfigSupported = vi.fn(never);
+        Object.defineProperty(globalThis, 'VideoEncoder', { value: { isConfigSupported }, configurable: true });
+        currentAppVersion.mockImplementation(never);
+        voiceDiagnostics.mockImplementation(never);
+        meshDiagnostics.mockImplementation(never);
+
+        let text = '';
+        const done = buildDiagnosticsReport().then(t => { text = t; });
+        const t0 = Date.now();
+        let elapsed = 0;
+        while (!text && elapsed <= REPORT_BUDGET_MS + 10_000) {
+            await vi.advanceTimersByTimeAsync(100);
+            elapsed = Date.now() - t0;
+        }
+        await done;
+        expect(text).toContain('version unavailable');
+        expect(text).toContain('sfu unavailable');
+        expect(text).toContain('mesh unavailable');
+        expect(isConfigSupported).toHaveBeenCalledTimes(10);
+        expect(elapsed).toBeLessThanOrEqual(REPORT_BUDGET_MS);
+        // The worst case is what the budget is built from: if the report ends
+        // well before it, the formula no longer describes the report.
+        expect(elapsed).toBeGreaterThanOrEqual(REPORT_WORST_CASE_MS - 1000);
     });
 });

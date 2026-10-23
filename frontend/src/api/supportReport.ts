@@ -21,6 +21,7 @@
  */
 import type { Server } from './servers';
 import { QUICK_TIMEOUT_MS, withTimeout } from './withTimeout';
+import { REPORT_BUDGET_MS } from './diagnosticsBudget';
 
 /** A server owner the report can go to. One entry per owner: someone in two
  *  servers run by the same person is not asked to choose between them. */
@@ -108,10 +109,7 @@ const UPLOAD_BASE_MS = 60_000;
 /** Slowest uplink the upload is still waited for: 64 KB/s on top of the base,
  *  so a multi-megabyte puca.log on a poor link gets its time. */
 const UPLOAD_FLOOR_BYTES_PER_S = 64 * 1024;
-/** The measurement (diagnosticsReport.ts's STEP_TIMEOUT_MS: its 4 s window plus
- *  the stats calls either side) and a whole puca.log read off disk through the
- *  shell. */
-const MEASURE_MS = 12_000;
+/** A whole puca.log read off disk through the shell. */
 const READ_LOG_MS = 12_000;
 
 export const uploadTimeoutMs = (bytes: number): number =>
@@ -196,7 +194,7 @@ export async function sendSupportReport(
                 if (signal.aborted) throw e;
                 return 'unknown';
             }),
-            step(signal, 'The measurement', MEASURE_MS, () => d.diagnostics()).catch(e => {
+            step(signal, 'The measurement', REPORT_BUDGET_MS, () => d.diagnostics()).catch(e => {
                 if (signal.aborted) throw e;
                 return `(diagnostics unavailable: ${e instanceof Error ? e.message : String(e)})`;
             }),

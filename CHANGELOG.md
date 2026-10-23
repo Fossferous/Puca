@@ -8,7 +8,7 @@ one-line summary; this file is the full story. Versions follow
 
 ### Fixed
 
-- **Send diagnostics can no longer trap you in its dialog.** While a report was being sent, Close was switched off, so one step that never answered (the log read, the upload, the server) left you stuck there until you quit the app. Every step now has its own time limit, sized to its job (an upload gets longer the bigger your log is), and a step that runs out fails the send with a plain sentence naming it. Close and clicking outside the dialog always work, and closing it cancels the send, so nothing is posted to the owner after you have gone.
+- **Send diagnostics can no longer trap you in its dialog.** While a report was being sent, Close was switched off, so one step that never answered (the log read, the upload, the server) left you stuck there until you quit the app. Every step now has its own time limit, sized to its job (the measurement gets as long as its own parts can take together, and an upload gets longer the bigger your log is). If the upload, the connection to the owner or the final message runs out of time, the send fails with a plain sentence naming that step; if the measurement or the log read runs out of time, the report is still sent and says which part is missing. Close and clicking outside the dialog always work, and closing it cancels the send. A message already on its way to the server when you close can still arrive, so if you closed while it was sending, look in your direct messages with the owner before sending again.
 
 ## 0.9.846 — 2026-10-22
 

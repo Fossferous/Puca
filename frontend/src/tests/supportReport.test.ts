@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
     ownerChoices, reportFileName, reportMessage, reportText, sendSupportReport, uploadTimeoutMs, type SendDeps,
 } from '../api/supportReport';
+import { REPORT_BUDGET_MS, REPORT_WORST_CASE_MS } from '../api/diagnosticsBudget';
 import type { Server } from '../api/servers';
 
 const srv = (id: string, name: string, owner_id: number): Server =>
@@ -173,12 +174,28 @@ describe('sendSupportReport', () => {
 
         it('the log read, the measurement and the version degrade into the report instead of failing it', async () => {
             const f = fakeDeps({ version: never, diagnostics: never, readLog: never });
-            expect(await outcome(f, 15_000)).toBe('sent');
+            expect(await outcome(f, REPORT_BUDGET_MS + 1000)).toBe('sent');
             vi.useRealTimers(); // FileReader below runs on real timers
             const text = await readText(f.uploaded!);
-            expect(text).toContain('diagnostics unavailable: The measurement gave no answer within 12 s');
+            expect(text).toContain('diagnostics unavailable: The measurement gave no answer within ' + REPORT_BUDGET_MS / 1000 + ' s');
             expect(text).toContain('the app log could not be read: Reading the app log gave no answer within 12 s');
             expect(f.uploaded!.name).toMatch(/^puca-report-unknown-/);
+        });
+
+        it('a measurement whose sections each take their whole cap is NOT cut off', async () => {
+            // buildDiagnosticsReport runs its sections one after another, so the
+            // slowest honest report takes the SUM of their caps. One section's
+            // cap (12 s) as the whole measurement's bound threw away a report
+            // every section had answered in time.
+            const f = fakeDeps({
+                diagnostics: () => new Promise<string>(r => setTimeout(() => r('DIAG-AT-THE-WORST-CASE'), REPORT_WORST_CASE_MS)),
+            });
+            expect(REPORT_WORST_CASE_MS).toBeGreaterThan(12_000);
+            expect(await outcome(f, REPORT_WORST_CASE_MS + 100)).toBe('sent');
+            vi.useRealTimers();
+            const text = await readText(f.uploaded!);
+            expect(text).toContain('DIAG-AT-THE-WORST-CASE');
+            expect(text).not.toContain('diagnostics unavailable');
         });
 
         it('closing the dialog (outer signal) stops the send at once and posts nothing', async () => {
