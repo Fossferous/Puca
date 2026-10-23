@@ -154,8 +154,8 @@ stand behind.
 Two things you don't have to take on faith, because you can rerun them:
 
 - **A real vulnerability, found and fixed in this project's own audit
-  process, is documented rather than quietly patched.** The most recent
-  security pass found and fixed a genuine E2EE flaw — a malicious server
+  process, is documented rather than quietly patched.** A security pass
+  (2026-08-20) found and fixed a genuine E2EE flaw — a malicious server
   could pick a channel's encryption key by attributing a key-wrap to a
   fabricated user id, because the client trusted the wrapper's identity on
   first contact with no membership check. The fix is in this tree
@@ -172,14 +172,21 @@ Two things you don't have to take on faith, because you can rerun them:
   is the one place where publishing everything immediately would make users less
   safe rather than more.
 
-  **Status, 2026-09-02:** still withheld, and there is no file to link yet — on
-  purpose, rather than a promise left hanging. Withheld: the exploitation detail
-  (how a fabricated key-wrap was attributed) and the residual limitation of the
-  fix. Published already, and enough to audit the fix: the paragraph above, and
-  `frontend/src/api/channelKeys.ts` with the tests that pin the read/write
-  distinction. Why it is still withheld: this is self-hosted software, so
-  "everyone has the fix" is not a fact any release can establish — a server
-  running a build from before it is a third party's machine, not this project's.
+  **Status, 2026-10-23:** the residual limitation is published now, because it
+  is fixed. The October audit found that the membership check above could be
+  met by an id the server listed only for the channel's key — a list no screen
+  shows — so such an id got the key unseen; 0.9.847 wraps the key only for
+  people in the member list the app shows, and names the channel when the
+  server lists anyone else. That audit, with each finding, its fix and what the
+  fix does not close, is [`docs/AUDIT_2026-10.md`](docs/AUDIT_2026-10.md),
+  published in the release that fixes everything it found. Still withheld: the
+  2026-08-20 write-up's exploitation detail (how a fabricated key-wrap was
+  attributed). Published already, and enough to audit the fix: the paragraph
+  above, and `frontend/src/api/channelKeys.ts` with the tests that pin the
+  read/write distinction. Why that part is still withheld: this is self-hosted
+  software, so "everyone has the fix" is not a fact any release can establish —
+  a server running a build from before it is a third party's machine, not this
+  project's.
   Revisit: at the 1.0 release, or sooner if the deployment it was found on is
   confirmed past the fix. The actionable part is not withheld and is the whole
   of it: run a current release.

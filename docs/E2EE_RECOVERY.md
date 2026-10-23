@@ -189,6 +189,7 @@ is retained for genuinely-lost-code accounts but demoted to a clearly-labelled
 | **User forgets password, has recovery code** | Recovers seed via `seedWrappedRc`, re-wraps under new password. History intact. ✅ (the goal) |
 | **Attacker hits reset endpoint without the code** | Cannot forge the DH proof (no seed) → reset rejected. No takeover. ✅ |
 | **DB theft** | Gets `seedWrappedPw` (crackable only as far as the password is weak — *no worse than today's SRP verifier, which is already offline-brute-forceable*) and `seedWrappedRc` (128-bit code ⇒ 2¹²⁸ ⇒ infeasible). Server still can't read messages. ✅ |
+| **Stolen session token** | `GET /keys/wrap` answers a bare bearer token with `seedWrappedPw` and its salt (and the recovery salt and the recovery-wrapped history key): the same offline target as **DB theft** above, for one account, crackable only as far as the password is weak. It cannot rewrite custody (every custody write needs a fresh password proof), and it ends with the session: *Sign out of every device*, or a password change. |
 | **Recovery blob served to anonymous caller** | Safe **only because** the code is 128-bit system-generated. This is why user-chosen recovery codes are forbidden. Rate-limit `/recovery/challenge` to blunt username enumeration. |
 | **Replay of a captured proof** | Bound to a one-shot ephemeral `E` + random challenge with 2-min TTL. ✅ |
 | **Lost password AND lost code** | Unrecoverable by design. Only lossy `/reset-password-migration` remains (mints a new identity). Documented, not hidden. |
@@ -202,8 +203,15 @@ gated behind an "I've saved this" confirmation. Persist seed to localStorage as
 today.
 
 **Login (v3):** SRP → JWT → `GET /keys/wrap` → `pwKEK = PBKDF2(password, wrap_salt)`
-→ `seed = dec(seedWrappedPw)` → `setActiveIdentity`. Sanity: `X25519.getPublicKey(seed)`
-must equal the stored `public_key`.
+→ `seed = dec(seedWrappedPw)` → check → `setActiveIdentity`. Sanity:
+`X25519.getPublicKey(seed)` must equal the key the server publishes for the
+account (`GET /users/<me>/public-key`, the answer every other client encrypts
+to). A different, well-formed key stops the restore: the seed is not adopted,
+and the app says the key is not the one the server publishes. Nothing usable
+published, or a lookup that fails, is not a mismatch and does not lock the
+account out. The same check runs when the keys are restored from the banner
+with the password. (Described here from the start, done since 0.9.847: audit
+2026-10, F-3.)
 
 **Migration (v2 → v3), transparent:** on login, if `key_version < 3`, the client
 already holds the plaintext seed (derived the old way) **and** the password — the

@@ -59,7 +59,9 @@ or a documented trade-off:
 - Prior audit write-ups are not published in this repository (they were
   written against the maintainer's own deployment and cite it); their
   conclusions, including the refuted findings, are folded into the security
-  model above.
+  model above. The 2026-10 E2EE audit is the exception:
+  [`docs/AUDIT_2026-10.md`](docs/AUDIT_2026-10.md), published with the release
+  that fixes everything it found.
 - [`docs/PRIVACY.md`](docs/PRIVACY.md) — what is collected (nothing beyond
   the server you join) and which third parties the apps contact.
 
