@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
-import { BACK_BUTTON_IDS, PushToTalkTracker, readButtonEvents } from '../src/ptt';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { HoldFollower } from '../src/ptt';
 import { readPageMessage, readState, readVoiceChannels } from '../src/protocol';
 import { normalizeAppUrl, readSettings } from '../src/settings';
 
@@ -34,48 +34,67 @@ describe('the Púca address', () => {
     });
 });
 
-describe('push-to-talk on a back button', () => {
-    it("reads Steam's current shape (controller, button, pressed, x, y)", () => {
-        expect(readButtonEvents([0, 45, true, 0, 0])).toEqual([{ controller: 0, button: 45, pressed: true }]);
-        expect(readButtonEvents([1, 33, false])).toEqual([{ controller: 1, button: 33, pressed: false }]);
+describe('push-to-talk follows the backend', () => {
+    // The backend (py_modules/puca_buttons.py) sends true when the button goes
+    // down and every 500 ms while it stays down, false when it comes up.
+    const follow = (staleMs = 1500) => {
+        const calls: string[] = [];
+        const f = new HoldFollower({ down: () => calls.push('down'), renew: () => calls.push('renew'), up: () => calls.push('up') }, staleMs);
+        return { f, calls };
+    };
+
+    beforeEach(() => { vi.useFakeTimers(); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    it('talks from the first "held", renews on each heartbeat, stops on the release', () => {
+        const { f, calls } = follow();
+        f.signal(true);
+        expect(f.held).toBe(true);
+        vi.advanceTimersByTime(500);
+        f.signal(true);
+        vi.advanceTimersByTime(500);
+        f.signal(true);
+        f.signal(false);
+        f.signal(false);
+        expect(calls).toEqual(['down', 'renew', 'renew', 'up']);
+        expect(f.held).toBe(false);
     });
 
-    it("reads the older array of { nA, bS } too, and ignores anything else", () => {
-        expect(readButtonEvents([[{ nA: 33, bS: true }, { nA: 2, bS: false }, null, { bS: true }]])).toEqual([
-            { controller: 0, button: 33, pressed: true },
-            { controller: 0, button: 2, pressed: false },
-        ]);
-        expect(readButtonEvents(['x'])).toEqual([]);
-        expect(readButtonEvents([])).toEqual([]);
+    it('lets go by itself when the heartbeat stops: a lost release never leaves the microphone on', () => {
+        const { f, calls } = follow(1500);
+        f.signal(true);
+        vi.advanceTimersByTime(1000);
+        f.signal(true); // renewed: the 1.5 s start over from here
+        vi.advanceTimersByTime(1499);
+        expect(calls).toEqual(['down', 'renew']);
+        vi.advanceTimersByTime(1);
+        expect(calls).toEqual(['down', 'renew', 'up']);
+        expect(f.held).toBe(false);
+        f.signal(true); // a later press is a new hold
+        expect(calls).toEqual(['down', 'renew', 'up', 'down']);
     });
 
-    it("maps the Deck's names to Steam's button ids", () => {
-        expect(BACK_BUTTON_IDS).toEqual({ L5: 32, R5: 33, L4: 44, R4: 45 });
+    it('lets go once on reset, and only when holding, with no timer left behind', () => {
+        const { f, calls } = follow();
+        f.reset();
+        expect(calls).toEqual([]);
+        f.signal(true);
+        f.reset();
+        f.reset();
+        expect(calls).toEqual(['down', 'up']);
+        vi.advanceTimersByTime(10000);
+        expect(calls).toEqual(['down', 'up']);
     });
 
-    it('reports edges of the chosen button only, across controllers', () => {
-        const changes: boolean[] = [];
-        const t = new PushToTalkTracker(BACK_BUTTON_IDS.R4, held => changes.push(held));
-        t.feed([{ controller: 2, button: 33, pressed: true }]); // R5: not ours
-        t.feed([{ controller: 2, button: 44, pressed: true }]); // L4: not ours
-        expect(changes).toEqual([]);
-        expect(t.held).toBe(false);
-        t.feed([{ controller: 0, button: 45, pressed: true }]);
-        t.feed([{ controller: 0, button: 45, pressed: true }]); // repeat
-        t.feed([{ controller: 1, button: 45, pressed: true }]); // a second pad, same button
-        t.feed([{ controller: 0, button: 45, pressed: false }]); // one let go: still held
-        expect(changes).toEqual([true]);
-        t.feed([{ controller: 1, button: 45, pressed: false }]);
-        expect(changes).toEqual([true, false]);
-    });
-
-    it('lets go on reset, so changing the button never leaves the microphone open', () => {
-        const onChange = vi.fn();
-        const t = new PushToTalkTracker(BACK_BUTTON_IDS.L4, onChange);
-        t.feed([{ controller: 0, button: 44, pressed: true }]);
-        t.reset();
-        expect(onChange).toHaveBeenLastCalledWith(false);
-        expect(t.held).toBe(false);
+    it('ignores anything but a boolean, held or not', () => {
+        const { f, calls } = follow();
+        for (const x of [1, 'true', null, undefined, {}, [true]]) f.signal(x);
+        expect(calls).toEqual([]);
+        expect(f.held).toBe(false);
+        f.signal(true);
+        for (const x of [0, 'false', null, undefined, {}, [false]]) f.signal(x);
+        expect(calls).toEqual(['down']);
+        expect(f.held).toBe(true);
     });
 });
 

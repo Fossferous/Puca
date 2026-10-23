@@ -12,6 +12,7 @@ published.
 import hashlib
 import json
 import os
+import re
 import sys
 import zipfile
 
@@ -46,6 +47,25 @@ def read(*parts: str) -> bytes:
         return f.read()
 
 
+def zip_package_json(pkg: dict) -> bytes:
+    """The package.json inside the zip: only what Decky reads from it.
+
+    Decky shows "version" in its plugin list, and it imports dist/index.js as
+    an ES module only when "type" is "module" (decky_loader/plugin/plugin.py,
+    3.2.8 to 3.3.0). Otherwise it evaluates the bundle as a legacy script, the
+    first `export` is a SyntaxError, and the plugin never starts.
+    """
+    if pkg.get("type") != "module":
+        raise ValueError('package.json needs "type": "module": Decky imports dist/index.js as an ES module only then')
+    slim = {"name": pkg["name"], "version": pkg["version"], "license": pkg["license"], "type": "module"}
+    return json.dumps(slim, indent=2).encode() + b"\n"
+
+
+def is_es_module(bundle: bytes) -> bool:
+    """Rollup's ES module output has a top-level export; a plain script has none."""
+    return re.search(rb"(?m)^export\s", bundle) is not None
+
+
 def main() -> int:
     pkg = json.loads(read(PLUGIN, "package.json"))
     version = pkg["version"]
@@ -53,12 +73,19 @@ def main() -> int:
         if not os.path.isfile(os.path.join(PLUGIN, "dist", needed)):
             print(f"dist/{needed} is missing: run npm run build first", file=sys.stderr)
             return 1
+    if not is_es_module(read(PLUGIN, "dist", "index.js")):
+        print("dist/index.js is not an ES module, yet the zip tells Decky to import it as one", file=sys.stderr)
+        return 1
+    try:
+        manifest = zip_package_json(pkg)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 1
     api_version = json.loads(read(PLUGIN, "node_modules", "@decky", "api", "package.json"))["version"]
 
     files = {
         "plugin.json": read(PLUGIN, "plugin.json"),
-        # Decky reads the version shown in its plugin list from package.json.
-        "package.json": json.dumps({"name": pkg["name"], "version": version, "license": pkg["license"]}, indent=2).encode() + b"\n",
+        "package.json": manifest,
         "main.py": read(PLUGIN, "main.py"),
         "dist/index.js": read(PLUGIN, "dist", "index.js"),
         "dist/page-shim.js": read(PLUGIN, "dist", "page-shim.js"),

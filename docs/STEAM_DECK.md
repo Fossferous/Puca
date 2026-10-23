@@ -16,6 +16,9 @@ Everyone uses their own Púca account on their own Deck.
 
 - A Steam Deck, or another SteamOS device, that you can switch to Desktop Mode
   once for the install.
+- Decky Loader **3.2.8 or newer**. Older versions do not start on the current
+  Steam client, so no Decky plugin appears at all. Step 1 installs the current
+  version.
 - Your Púca account, and your Púca address: the one you open Púca at in a
   web browser, for example `chat.example.com`.
 - A Púca server running version **0.9.846 or newer**. The plugin tells you if
@@ -28,7 +31,9 @@ Everyone uses their own Púca account on their own Deck.
 ### 1. Install Decky Loader
 
 Skip this step if your Deck already has Decky. Check by pressing **···**:
-Decky shows a plug icon at the bottom of the list.
+Decky shows a plug icon at the bottom of the list. If you installed Decky
+before but the plug icon is missing, your Decky is too old for the current
+Steam: do this step again. Your plugins and their settings are kept.
 
 1. Press the **Steam** button, then **Power** → **Switch to Desktop**.
 2. Open a web browser, go to **decky.xyz**, and download the installer.
@@ -75,7 +80,8 @@ Press **···** → the plug icon → **Púca**.
 - **Push to talk.** In the panel's **Settings**, set **Push to talk** to a back
   button. Hold it to talk, in games too. Set it back to **Off** and Púca listens
   for your voice again. Some games use the back buttons too: pick one your game
-  does not.
+  does not. It works with the Deck's own back buttons, not with a controller
+  you plug in.
 - **Messages.** Choose **Open Púca (messages)** to show the whole app. Tap
   where you want to type and the keyboard appears. Press **B** to go back to
   your game. A call keeps going while the app is hidden.
@@ -91,6 +97,11 @@ Press **···** → the plug icon → **Púca**.
   microphone, so the plugin opens it in Steam and hands it to Púca inside the
   Deck. Púca encrypts your voice before it leaves the Deck, exactly as it does
   on a computer.
+- **Push to talk reads the Deck's button itself.** Steam does not reliably
+  tell plugins about the back buttons, least of all while a game is in front.
+  So the plugin reads the one you picked straight from the Deck's controller,
+  on the Deck, and only while you are in a call. Nothing about your controller
+  leaves the Deck.
 - **Nothing is opened to your network.** The plugin talks to Steam through a
   connection that exists only inside the Deck. Decky Loader turns that
   connection on, and the plugin needs nothing else.
@@ -103,10 +114,12 @@ Press **···** → the plug icon → **Púca**.
 
 | You see | What to do |
 |---|---|
+| No plug icon under **···** | Decky Loader is missing, or older than 3.2.8 and unable to start on the current Steam. Do step 1 of the install again; your plugins and their settings are kept. |
 | **This Púca server needs an update** | Your server's Púca is older than 0.9.846. Ask whoever runs it to update. You can still open Púca from the panel. |
 | **Could not reach …** | Check the address under **Settings → Change Púca address**, and that the Deck is online. |
 | **Waiting for Game Mode** | The plugin runs in Game Mode only. Switch back to Game Mode. |
-| Nobody hears you | Check that **Push to talk** is set the way you want, and that the call does not say **Muted**. In Steam's **Settings → Audio**, check the microphone. |
+| Nobody hears you | Check that **Push to talk** is set the way you want, and that the call does not say **Muted**. In Steam's **Settings → Audio**, check the microphone: with its volume at zero the Deck's microphone is muted, and Púca can only send silence. |
+| Push to talk does nothing | While you are in a call, the line under **Push to talk** in the panel's **Settings** says if the plugin cannot read the Deck's controller. It works with the Deck's own back buttons, not with a controller you plug in. |
 | Asked to sign in again | Steam sometimes clears the data of web pages it hosts. Sign in again, with **Stay signed in** ticked. |
 | Anything else | **Settings → Reload Púca** in the panel starts Púca again. |
 
@@ -115,8 +128,8 @@ Press **···** → the plug icon → **Púca**.
 ## Installing for someone else, over SSH
 
 This is for whoever looks after the Decks. It is the same as step 3, done from
-a computer. It needs the Deck's `sudo` password, and Decky Loader already
-installed (steps 1 and 2 still happen on the Deck).
+a computer. It needs the Deck's `sudo` password, and Decky Loader 3.2.8 or
+newer already installed (steps 1 and 2 still happen on the Deck).
 
 ```bash
 scp puca-decky-<version>.zip deck@<deck-address>:/tmp/

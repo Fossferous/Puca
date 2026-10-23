@@ -16,7 +16,8 @@ plugin's own.
   - Creates the view (`browserView.ts`).
   - Draws the Quick Access panel and the `/puca` full view (`components/`).
   - Opens the microphone (`micBridge.ts`).
-  - Turns a back button into push-to-talk (`ptt.ts`).
+  - Turns the backend's back-button signal into Púca's push-to-talk hold
+    (`ptt.ts`).
   - Turns notifications into Steam toasts (`controller.ts`).
 - **`main.py` + `py_modules/` (backend, Python inside Decky).**
   - Attaches to that one view over Steam's DevTools endpoint on 127.0.0.1:8080.
@@ -24,6 +25,8 @@ plugin's own.
     address.
   - Relays between page and frontend. Only messages from Púca's own main-frame
     page are accepted (`puca_cdp.PucaPage`).
+  - Reads the push-to-talk button from the Deck's controller
+    (`puca_buttons.py`).
   - Stores the plugin's four settings.
 - **`src/shim/pageShim.ts` (inside the Púca page).** Built separately into
   `dist/page-shim.js`.
@@ -45,17 +48,53 @@ Two measured details:
 - the bridge adds about 40 ms (a 1 ms round trip, plus Chromium's jitter
   buffer).
 
+**Why push-to-talk reads the controller itself.** Steam's button feed for its
+own interface, `SteamClient.Input.RegisterForControllerInputMessages`, cannot
+be counted on for this. Tests on a Deck in Game Mode, 2026-10-22/23:
+
+- it reported the lower right grip (its button 33) in most rounds;
+- in one round, while another app was in front, it reported nothing at all
+  for the same button, and push to talk matters most while a game is in
+  front;
+- the backend's own reader caught every hold in every round.
+
+The backend reads the Deck's controller from `/dev/hidraw`, which SteamOS lets
+the signed-in user read; no root is needed.
+
+- **Layout.** The Linux driver's (`drivers/hid/hid-steam.c`,
+  `steam_deck_button_mappings`):
+  - message type `0x09` is the input state;
+  - L4 and R4 are byte 13 bits 1 and 2;
+  - L5 is byte 9 bit 7, and R5 is byte 10 bit 0.
+- **Stream.** The controller sends that state 250 times a second whether
+  anything is held or not (measured: one of its three nodes, with a frame
+  counter stepping by 1).
+- **Scope.** Only the chosen bit is looked at, and only while a button is
+  chosen and Púca is in a call.
+- **Signal.** The backend sends `puca_button`: `true` when the button goes
+  down and every 500 ms while it stays down, and `false` when it comes up,
+  when the controller goes quiet for a second, and when the watch stops.
+- **Safety.** The frontend renews Púca's 1.5 s hold lease with each
+  heartbeat, so a lost release, or a backend that dies mid-hold, cannot leave
+  the microphone transmitting.
+- **In games.** hidraw gives every reader its own copy of each message, so
+  this takes nothing from Steam and keeps working while a game has focus.
+
 ## Build and test
 
 ```bash
 npm ci
 npm run typecheck
 npm test                 # vitest: settings, push-to-talk, the page protocol
-npm run test:py          # unittest: the backend's checks (aiohttp not needed)
+npm run test:py          # unittest: the backend's checks, the back-button reader (aiohttp not needed)
 npm run package          # build + out/puca-decky-<version>.zip (+ .sha256)
 ```
 
-The zip is deterministic: the same sources give the same bytes.
+The zip is deterministic: the same sources give the same bytes. Its
+`package.json` must keep `"type": "module"`: Decky imports `dist/index.js` as
+an ES module only then, and otherwise evaluates it as a legacy script, which
+fails at the first `export`. `scripts/package.py` refuses to build a zip
+without it, and `tests/test_package.py` checks it against Decky's own rule.
 `@decky/ui`, React and Steam's own globals are provided by Decky at run time
 and are not bundled. `@decky/api` (LGPL-2.1) is bundled, with its licence in
 the zip.

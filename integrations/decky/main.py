@@ -9,6 +9,11 @@ own scripts, opens the configured Púca address, and relays between the two
                      from Púca's own main-frame page (puca_cdp.PucaPage);
   frontend -> page   page_call / mic_answer / set_foreground below.
 
+Push-to-talk lives here too: Steam's interface never hears the back grips, so
+while the frontend asks (a button is chosen and Púca is in a call) this side
+reads that one button from the Deck's controller and sends "puca_button"
+events (puca_buttons.py).
+
 It keeps the plugin's four settings and nothing else. No account data, no
 message content and no audio pass through here: the microphone goes from one
 Steam page to the other over WebRTC, and only its connection setup (SDP)
@@ -23,6 +28,7 @@ from typing import Any
 
 import decky
 
+from puca_buttons import BUTTONS, ButtonWatch
 from puca_cdp import CdpError, PucaPage, find_target
 from puca_settings import (MARKER, PAGE_METHODS, check_mic_answer, load_settings,
                            normalize_app_url, save_settings)
@@ -39,14 +45,17 @@ def _shim_source() -> str:
 
 class Plugin:
     page: PucaPage | None = None
+    buttons: ButtonWatch | None = None
 
     async def _main(self):
         decky.logger.info("Púca for Steam Deck backend started")
 
     async def _unload(self):
+        await self.unwatch_button()
         await self.detach()
 
     async def _uninstall(self):
+        await self.unwatch_button()
         await self.detach()
 
     # ---- Settings ---------------------------------------------------------
@@ -132,3 +141,22 @@ class Plugin:
             await self.page.evaluate(f"window.__pucaDeckyShim.setForeground({json.dumps(on is True)})")
         except Exception:
             pass
+
+    # ---- Push-to-talk -----------------------------------------------------
+
+    async def watch_button(self, button: Any) -> dict:
+        """Follow one back button until unwatch_button: "puca_button" events,
+        True when it goes down and again every half second while it stays
+        down, False when it comes up. The value is why it cannot yet
+        ("no-controller", "no-access"), or None; it keeps looking either way."""
+        await self.unwatch_button()
+        if button not in BUTTONS:
+            return {"ok": False, "error": "unknown button"}
+        watch = ButtonWatch(button, lambda held: decky.emit("puca_button", held))
+        self.buttons = watch
+        return {"ok": True, "value": watch.start()}
+
+    async def unwatch_button(self) -> None:
+        watch, self.buttons = self.buttons, None
+        if watch is not None:
+            watch.stop()

@@ -1,8 +1,9 @@
 /**
  * The plugin's core, outside React: it owns the hidden Púca view, talks to the
  * backend (main.py), answers the page's microphone requests, turns a back
- * button into push-to-talk and Púca's notifications into Steam toasts. The
- * Quick Access panel and the full view only read its snapshot and call it.
+ * button (which the backend reads) into push-to-talk and Púca's notifications
+ * into Steam toasts. The Quick Access panel and the full view only read its
+ * snapshot and call it.
  */
 import { addEventListener, call, removeEventListener, toaster } from '@decky/api';
 import { Navigation } from '@decky/ui';
@@ -10,9 +11,9 @@ import { createElement } from 'react';
 import { PucaBrowserView } from './browserView';
 import { PucaIcon } from './components/icons';
 import { MicBridge, type MicAnswer } from './micBridge';
-import { BACK_BUTTON_IDS, PushToTalkTracker, readButtonEvents } from './ptt';
+import { HoldFollower } from './ptt';
 import { readPageMessage, readState, readVoiceChannels, type EmbedState, type EmbedVoiceChannel, type PageNotification } from './protocol';
-import { DEFAULT_SETTINGS, normalizeAppUrl, readSettings, type PluginSettings } from './settings';
+import { DEFAULT_SETTINGS, normalizeAppUrl, readSettings, type PluginSettings, type PushToTalkButton } from './settings';
 
 export const FULL_VIEW_ROUTE = '/puca';
 
@@ -42,14 +43,14 @@ export interface Snapshot {
     micOn: boolean;
     /** The push-to-talk button is held. */
     talking: boolean;
+    /** Why push-to-talk cannot read the controller ("no-controller",
+     *  "no-access", or the backend's error), while it is trying to. */
+    pttError: string | null;
     viewOpen: boolean;
 }
 
 type CallResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
-/** A push-to-talk hold is renewed this often while the button is down; Púca
- *  lets go by itself 1.5 s after the last renewal (docs/EMBEDDING.md). */
-const HOLD_RENEW_MS = 500;
 /** After a failure, try again this long after, doubling to RETRY_MAX_MS:
  *  a Deck often wakes before its Wi-Fi does, and Púca must come back by
  *  itself once it can. Reset when Púca is up. */
@@ -68,7 +69,7 @@ const randomId = (): string => {
 class Controller {
     private snap: Snapshot = {
         phase: 'starting', error: null, settings: DEFAULT_SETTINGS, state: null,
-        micOn: false, talking: false, viewOpen: false,
+        micOn: false, talking: false, pttError: null, viewOpen: false,
     };
     private listeners = new Set<() => void>();
     private view = new PucaBrowserView();
@@ -77,9 +78,16 @@ class Controller {
         count => this.update({ micOn: count > 0 }),
         line => console.log(`[Púca] ${line}`),
     );
-    private ptt: PushToTalkTracker | null = null;
-    private inputRegistration: { unregister(): void } | null = null;
-    private holdTimer: ReturnType<typeof setInterval> | null = null;
+    // Push-to-talk: Púca's hold follows the backend's "puca_button" signal.
+    private hold = new HoldFollower({
+        down: () => { this.update({ talking: true }); void this.pageCall('holdPushToTalk', [true]); },
+        renew: () => { void this.pageCall('holdPushToTalk', [true]); },
+        up: () => { this.update({ talking: false }); void this.pageCall('holdPushToTalk', [false]); },
+    });
+    /** The button the backend is following now, if any. */
+    private watching: PushToTalkButton | null = null;
+    private watchSeq = 0;
+    private onButton = (held: unknown) => { if (this.watching) this.hold.signal(held); };
     private retryTimer: ReturnType<typeof setTimeout> | null = null;
     private loadTimer: ReturnType<typeof setTimeout> | null = null;
     private bootSeq = 0;
@@ -100,6 +108,7 @@ class Controller {
     private update(patch: Partial<Snapshot>): void {
         this.snap = { ...this.snap, ...patch };
         this.listeners.forEach(fn => fn());
+        this.syncButtonWatch();
     }
 
     // ---- Life cycle ------------------------------------------------------------
@@ -109,6 +118,7 @@ class Controller {
         this.started = true;
         addEventListener('puca_page', this.onPage);
         addEventListener('puca_status', this.onStatus);
+        addEventListener('puca_button', this.onButton);
         let settings = DEFAULT_SETTINGS;
         try {
             settings = readSettings(await call<[], unknown>('get_settings'));
@@ -116,7 +126,6 @@ class Controller {
             console.warn('[Púca] could not read settings:', err);
         }
         this.update({ settings });
-        this.configurePushToTalk();
         await this.boot();
     }
 
@@ -126,11 +135,15 @@ class Controller {
         this.bootSeq++;
         removeEventListener('puca_page', this.onPage);
         removeEventListener('puca_status', this.onStatus);
+        removeEventListener('puca_button', this.onButton);
         if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
         this.clearLoadTimer();
-        this.endHold();
-        this.inputRegistration?.unregister();
-        this.inputRegistration = null;
+        this.hold.reset();
+        if (this.watching) {
+            this.watching = null;
+            this.watchSeq++;
+            void call('unwatch_button').catch(() => {});
+        }
         this.bridge.releaseAll();
         this.view.destroy();
         void call('detach').catch(() => {});
@@ -223,7 +236,6 @@ class Controller {
         }
         const now = this.snap.settings;
         if (now.pushToTalk !== before.pushToTalk) {
-            this.configurePushToTalk();
             // The back button is how the Deck talks: switch Púca's input mode
             // with it, both ways. Púca keeps it per device, like Settings does.
             void this.pageCall('setInputMode', [now.pushToTalk === 'off' ? 'open' : 'pushToTalk']);
@@ -351,7 +363,7 @@ class Controller {
             case 'crashed':
             case 'detached':
                 this.bridge.releaseAll();
-                this.endHold();
+                this.hold.reset();
                 if (!this.started) return;
                 this.update({ phase: 'error', error: 'Púca stopped. Restarting…', state: null });
                 this.retryLater();
@@ -384,38 +396,27 @@ class Controller {
 
     // ---- Push-to-talk on a back button ------------------------------------------------
 
-    private configurePushToTalk(): void {
-        this.endHold();
-        this.ptt?.reset();
-        this.ptt = null;
-        this.inputRegistration?.unregister();
-        this.inputRegistration = null;
+    /**
+     * The backend reads the controller only while push-to-talk can matter: a
+     * button is chosen and Púca is in (or joining) a call. Runs on every
+     * snapshot change; does nothing unless the answer changed.
+     */
+    private syncButtonWatch(): void {
         const choice = this.snap.settings.pushToTalk;
-        if (choice === 'off') return;
-        const input = (globalThis as unknown as { SteamClient?: { Input?: { RegisterForControllerInputMessages?: (cb: (...a: unknown[]) => void) => { unregister(): void } } } })
-            .SteamClient?.Input;
-        if (!input?.RegisterForControllerInputMessages) {
-            console.warn('[Púca] this Steam client has no controller input messages: push-to-talk is unavailable');
+        const want = this.started && choice !== 'off' && this.snap.state?.call ? choice : null;
+        if (want === this.watching) return;
+        this.watching = want;
+        this.hold.reset();
+        const seq = ++this.watchSeq;
+        if (want === null) {
+            void call('unwatch_button').catch(() => {});
+            if (this.snap.pttError !== null) this.update({ pttError: null });
             return;
         }
-        const tracker = new PushToTalkTracker(BACK_BUTTON_IDS[choice], held => (held ? this.beginHold() : this.endHold()));
-        this.ptt = tracker;
-        this.inputRegistration = input.RegisterForControllerInputMessages((...args: unknown[]) => tracker.feed(readButtonEvents(args)));
-    }
-
-    private beginHold(): void {
-        if (this.holdTimer) return;
-        this.update({ talking: true });
-        void this.pageCall('holdPushToTalk', [true]);
-        this.holdTimer = setInterval(() => { void this.pageCall('holdPushToTalk', [true]); }, HOLD_RENEW_MS);
-    }
-
-    private endHold(): void {
-        if (!this.holdTimer) return;
-        clearInterval(this.holdTimer);
-        this.holdTimer = null;
-        this.update({ talking: false });
-        void this.pageCall('holdPushToTalk', [false]);
+        void call<[string], CallResult<string | null>>('watch_button', want).then(
+            r => { if (seq === this.watchSeq) this.update({ pttError: r.ok ? r.value : r.error }); },
+            err => { if (seq === this.watchSeq) this.update({ pttError: String((err as Error)?.message ?? err) }); },
+        );
     }
 }
 

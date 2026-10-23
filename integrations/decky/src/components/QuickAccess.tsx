@@ -29,6 +29,15 @@ const BUTTON_LABELS: Record<PushToTalkButton, string> = {
     R5: 'R5 (lower right back button)',
 };
 
+/** What Settings says under Push to talk: the choice, or why it is not working. */
+function pushToTalkNote(button: PushToTalkButton, problem: string | null): string {
+    if (button === 'off') return 'Off: Púca listens for your voice.';
+    if (problem === 'no-controller') return "Push to talk can't find the Deck's controller. It works with a Steam Deck's own back buttons.";
+    if (problem === 'no-access') return "Push to talk can't read the Deck's controller on this system.";
+    if (problem) return `Push to talk is not working: ${problem}`;
+    return `Hold ${button} to talk, in games too.`;
+}
+
 const row: CSSProperties = { display: 'flex', alignItems: 'center', gap: 8 };
 const muted: CSSProperties = { opacity: 0.7, fontSize: '0.9em' };
 
@@ -301,7 +310,7 @@ function Settings({ snap }: { snap: Snapshot }) {
             <PanelSectionRow>
                 <DropdownItem
                     label="Push to talk"
-                    description={s.pushToTalk === 'off' ? 'Off: Púca listens for your voice.' : `Hold ${s.pushToTalk} to talk, in games too.`}
+                    description={pushToTalkNote(s.pushToTalk, snap.pttError)}
                     rgOptions={PUSH_TO_TALK_BUTTONS.map(b => ({ data: b, label: BUTTON_LABELS[b] }))}
                     selectedOption={s.pushToTalk}
                     onChange={o => { void controller.saveSettings({ pushToTalk: o.data as PushToTalkButton }); }}
