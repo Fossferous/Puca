@@ -4,6 +4,13 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+Desktop updater picks up two certificate-trust fixes
+### Security
+
+- **The desktop app's updater picks up two more TLS certificate fixes.** It moves to rustls-webpki 0.103.16 and webpki-root-certs 1.0.10 (RUSTSEC-2026-0382 and 0383), which stop it trusting certificate intermediates that certificate authorities have since distrusted. No change to how updates look or behave. With the next desktop update.
+
 ## 0.9.846 — 2026-10-22
 
 Ready for Púca on the Steam Deck
