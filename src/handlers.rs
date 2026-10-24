@@ -902,6 +902,13 @@ pub async fn logout_session(
     {
         Ok(done) => {
             state.kill_sid_sessions(claims.sub, &claims.sid);
+            // And this session's browser stops being rung. The sender would
+            // skip the row anyway (its session is revoked); deleting it now
+            // means nothing about this browser outlives its sign-out.
+            let _ = sqlx::query("DELETE FROM web_push_subscriptions WHERE sid = $1")
+                .bind(&claims.sid)
+                .execute(&state.pool)
+                .await;
             Json(serde_json::json!({ "revoked": done.rows_affected() > 0 })).into_response()
         }
         Err(e) => {
@@ -2183,6 +2190,11 @@ pub(crate) fn upload_grace_days() -> i32 {
 
 const ACCOUNT_DELETE_CLEANUP: &[&str] = &[
     "DELETE FROM device_tokens WHERE user_id = $1",
+    // The web app's push subscriptions (migration 074): the browser endpoints,
+    // their keys and this account's mirrored mutes and blocks. The sessions
+    // they hang off are only REVOKED below (the tombstone is an UPDATE, so no
+    // cascade fires), which already stops every push; this removes the rows.
+    "DELETE FROM web_push_subscriptions WHERE user_id = $1",
     // Enrolled MACHINES, as distinct from the push tokens above. The tombstone
     // is an UPDATE so the devices FK cascade never fires, and /devices/token
     // re-reads token_version at mint time — so the bump in the anonymising
@@ -2717,6 +2729,7 @@ mod account_deletion_residue_tests {
     fn the_cleanup_list_is_exactly_what_we_decided() {
         let expected: &[&str] = &[
             "DELETE FROM device_tokens WHERE user_id = $1",
+            "DELETE FROM web_push_subscriptions WHERE user_id = $1",
             "UPDATE devices SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
             "DELETE FROM notification_preferences WHERE user_id = $1",
             "DELETE FROM friends WHERE user1_id = $1 OR user2_id = $1",

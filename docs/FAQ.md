@@ -76,12 +76,17 @@ means someone has actually run it, not that the code exists.
 | **Controlling** another machine | yes | **yes, in a browser** | **yes, in a browser** | yes | yes |
 | **Being** controlled | **yes** | in progress (below) | no | no | no |
 | Native desktop app | **shipped** | builds, unreleased | builds, unreleased | n/a | n/a |
-| Notifications while closed | yes | no | no | yes | no |
+| Notifications while closed | yes | browser² | browser² | yes | **built, not yet tried**² |
 
 ¹ Chrome, Edge and Brave run Chromium's frame encryption, which has been run on
 these platforms. Firefox and Safari run the standard WebRTC Encoded Transform
 instead: Firefox has been run against Chrome on Windows; Safari (and so iPhone
 and iPad) runs the same code but has not yet been tried on a device.
+
+² Web Push, once you turn it on in Settings → Notifications and if your server
+has a VAPID key: on iPhone and iPad only in the Home Screen app, iOS 16.4 or
+newer. It has been run in Chromium against a stand-in push service; Safari and the
+real push services have not yet been tried.
 
 ### The short version for non-Windows users
 

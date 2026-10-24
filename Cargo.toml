@@ -88,6 +88,12 @@ ed25519-dalek = "2"
 # promoted because we call it ourselves (same as ed25519-dalek above).
 async-trait = "0.1"
 hkdf = "0.12"
+# Web Push (src/wake/webpush.rs): the VAPID signature (ES256, RFC 8292) and the
+# aes128gcm encryption every push service requires of a payload (RFC 8291:
+# P-256 ECDH, HKDF, AES-128-GCM). Both already in the lockfile through
+# jsonwebtoken's rust_crypto; promoted because we call them ourselves.
+p256 = { version = "0.13", features = ["ecdh", "ecdsa"] }
+aes-gcm = "0.10"
 # For email sending
 lettre = { version = "0.11", features = ["tokio1-native-tls", "builder", "smtp-transport"] }
 # The server's outbound HTTP: Google's OAuth + FCM endpoints (src/wake/fcm.rs)

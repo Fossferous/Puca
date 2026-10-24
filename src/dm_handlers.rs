@@ -839,12 +839,20 @@ pub async fn send_message(
             };
             // A note to self is its own recipient: deliver it once (the echo
             // below), never park-and-wake the sender for their own message.
-            if !state.send_to_user(recipient_id, dm.clone()) && recipient_id != claims.sub {
-                state.enqueue_undelivered(recipient_id, dm.clone());
-                crate::wake::sender::wake_user_kind(
+            // The web app's Web Push is decided per browser whatever the send
+            // did (wake/sender.rs).
+            let delivered = state.send_to_user(recipient_id, dm.clone());
+            if recipient_id != claims.sub {
+                if !delivered {
+                    state.enqueue_undelivered(recipient_id, dm.clone());
+                }
+                crate::wake::sender::wake_user_scoped(
                     &state,
                     recipient_id,
                     crate::wake::sender::WakeKind::DirectMessage,
+                    crate::wake::sender::WakeScope::dm(claims.sub),
+                    &dm,
+                    delivered,
                 );
             }
             // Echo to the sender's OTHER sessions — the phone, and the Púca

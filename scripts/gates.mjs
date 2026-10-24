@@ -247,6 +247,8 @@ const GATES = [
         ['e2e-mesh-e2ee-interop', 'mesh-e2ee-interop-real-browser.mjs'],
         // Chromium and WebKit (installed once, as above).
         ['e2e-iphone-stream', 'iphone-stream-real-browser.mjs e2e-artifacts/iphone-stream-shots'],
+        // Full Chromium headless (the headless shell refuses notifications).
+        ['e2e-web-push', 'web-push-real-browser.mjs'],
     ].map(([id, file]) => ({
         id, title: `e2e/${file.split(' ')[0]} (real browser, no server)`,
         inputs: ALL, ignoreVersion: true, fingerprint: ['node', 'fe-deps'],

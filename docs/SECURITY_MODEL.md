@@ -547,6 +547,73 @@ you are running.
 
 ---
 
+### Notifications while the web app is closed (Web Push)
+
+The desktop app notifies from its own connection, and the Android app from its own
+socket with an optional Google doorbell that carries a constant (§2's wake signal). A
+web page that is closed has neither, so the web app — the iPhone and iPad Home Screen
+app above all — uses the browser's standard push service, which Púca does not run and
+cannot choose: Apple's for Safari, Google's for Chrome, Mozilla's for Firefox,
+Microsoft's for Edge. It is off until you turn on **Notifications while Púca is
+closed** (Settings → Notifications), and absent unless the operator configured a VAPID
+key.
+
+**What the push service learns: that a wake happened, and when.** Every push is the
+constant `{"w":"1"}`, encrypted to your browser (RFC 8291), so it is the same 112 bytes
+for every user and every reason; its headers (`TTL`, `Urgency`, `Topic`) are constants
+too. There is no way for the server's code to put anything else in one — the sending
+functions take a subscription and nothing more (`src/wake/webpush.rs`, with tests
+that decrypt a real push and pin the constant). The service also sees your operator's
+server's address (it makes the request) and the push address it issued to your browser,
+which it already knew. It never learns a sender, a conversation, a channel or a byte of
+a message. It does learn the timing: someone who can read the push service's logs can
+tell when your server had something for you while Púca was closed — at most one wake
+per 30 seconds, since a burst is coalesced.
+
+**What your device shows, and why it is not the message.** Woken, the browser's worker
+(`frontend/public/sw.js`) asks YOUR SERVER, directly over TLS, what arrived, and shows
+what the Android app shows: "alice sent you a message" or "bob sent a message", with
+the body "New message". The sender's name is something your server knows anyway (§2);
+the message is not fetched, not decrypted and not shown. Decrypting it in the worker
+would mean giving the worker your private keys in storage it can read with the app
+closed, and would put plaintext on a lock screen and in the operating system's
+notification history, which survive Púca and sign-out alike. If the server cannot be
+asked (offline, too slow, signed out), the notification says only "New activity in
+Púca": iOS cancels a web app's notifications if a push shows nothing, so something is
+always shown.
+
+**What it asks with.** The worker cannot read the page's sign-in, so it holds its own
+credential: a random secret made when you turned notifications on, kept in the
+browser's IndexedDB and stored on the server only as a SHA-256. It can read the titles
+of what is waiting for you and nothing else — it is not a session — and it dies with
+the subscription. Nothing else is written to disk for this: no message, no cache
+(the worker has no fetch handler and caches nothing), and the notification text itself
+is held by the operating system like any notification's.
+
+**When pushes stop.** Each subscription belongs to the session that turned it on, and
+a push is sent only while that session is live. Signing out (the server row is deleted
+and the browser unsubscribes), signing that session out from another device, revoking
+the device, **Sign out everywhere**, a password change or a recovery reset, deleting the
+account, and the session's own maximum lifetime each stop it, and the row is deleted
+when next looked at. A push service that answers that a subscription is gone (404 or
+410) deletes it too.
+
+**Mutes are applied before anything is sent.** Your muted servers and channels and
+the people you blocked on that device are copied to its subscription (they otherwise
+live only on the device), and the server skips the push when the event concerns one
+of them, because the browser could not then stay silent. A server set to **Only
+@mentions** counts as muted for a push: the server cannot see a mention inside an
+encrypted message. Your notification preferences apply as on Android. A clip approval
+prompt is never silenced by a mute or a block: it asks whether YOU may be recorded.
+
+**When a push is sent at all.** When something you would be notified about arrives while
+THAT browser has no connection to your server — whatever your other devices are doing,
+just as the Android app is notified while the desktop app is open. A browser that is
+open is told directly and notifies by itself, so it is not pushed to as well. One gap:
+an iPhone app that has just gone to the background can keep its connection for up to
+about 75 seconds before the server sees that it stopped answering, and what arrives in
+that time is not pushed (it is there when you open Púca).
+
 ## 4. Is voice (and screen share) encrypted?
 
 Yes — and this is the one place where **you should change a setting**.
@@ -1202,7 +1269,8 @@ database copy taken afterwards holds nothing to replay; the SRP salt and verifie
 `token_version` is bumped, which revokes every outstanding JWT. Every live
 socket for the account is hung up after the commit.
 
-**Deleted outright.** Push/device tokens, notification preferences, friends,
+**Deleted outright.** Push/device tokens, the web app's push subscriptions
+(each browser's push address and the mutes mirrored with it), notification preferences, friends,
 friend requests, blocks, role assignments, server memberships, per-server
 nicknames, email-verification and password-reset tokens, cross-user device
 shares in both directions, your wrapped channel keys, and every invite you

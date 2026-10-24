@@ -1153,6 +1153,30 @@ pub struct AppState {
     pub wake: std::sync::Arc<dyn crate::wake::WakeTransport>,
     /// Per-user wake rate limit: one doorbell per burst, not one per message.
     pub wake_recent: DashMap<UserId, Instant>,
+    /// Web Push transport (the web app's doorbell; src/wake/webpush.rs).
+    /// `NullWebPush` when no VAPID key is configured. Same contract as `wake`:
+    /// the push carries a constant, never data.
+    pub web_push: std::sync::Arc<dyn crate::wake::webpush::WebPushTransport>,
+    /// Per-user Web Push rate limit, kept apart from `wake_recent` so an
+    /// Android doorbell and a browser's never starve each other.
+    pub web_push_recent: DashMap<UserId, Instant>,
+    /// Users with at least one Web Push subscription: loaded at boot, kept by
+    /// push_web_handlers. Everyone else costs the sender one lookup, and has
+    /// nothing logged below.
+    pub web_push_users: DashMap<UserId, ()>,
+    /// Per watched user, the recent notification frames a woken browser may be
+    /// told about (bounded, TTL'd). Separate from `undelivered`, which holds
+    /// frames only while NOBODY is home: a browser is judged on its own, so it
+    /// can be away while the desktop app is open.
+    pub web_push_log: DashMap<UserId, std::collections::VecDeque<(u64, Instant, ServerMessage)>>,
+    /// Orders `web_push_log`. Starts at the boot time in microseconds, so it
+    /// keeps rising across restarts.
+    pub web_push_seq: AtomicU64,
+    /// Per subscription: the newest logged frame its worker has been told of.
+    pub web_push_cursor: DashMap<i64, (u64, Instant)>,
+    /// Per session id: `web_push_seq` when its last connection closed. What
+    /// came before it, that browser saw while it was open.
+    pub web_push_away: DashMap<String, (u64, Instant)>,
     /// Notification frames that found no live session, awaiting the delivery
     /// socket the wake signal summons. Bounded + TTL'd; see enqueue/drain.
     pub undelivered: DashMap<UserId, std::collections::VecDeque<(Instant, ServerMessage)>>,
@@ -1473,6 +1497,25 @@ impl AppState {
         email_service: Option<EmailService>,
         wake: std::sync::Arc<dyn crate::wake::WakeTransport>,
     ) -> Arc<Self> {
+        Self::new_with_web_push(
+            pool,
+            jwt_secret,
+            email_service,
+            wake,
+            std::sync::Arc::new(crate::wake::webpush::NullWebPush),
+        )
+    }
+
+    /// `new` plus the Web Push transport. main.rs builds the state through
+    /// this one, so a configured VAPID key cannot be dropped on the floor;
+    /// the test suites, which mostly have no use for Web Push, keep `new`.
+    pub fn new_with_web_push(
+        pool: PgPool,
+        jwt_secret: String,
+        email_service: Option<EmailService>,
+        wake: std::sync::Arc<dyn crate::wake::WakeTransport>,
+        web_push: std::sync::Arc<dyn crate::wake::webpush::WebPushTransport>,
+    ) -> Arc<Self> {
         // Cyclic: the games layer's timers reach the state through a weak
         // reference to it (they must not keep it alive, and a table's timers
         // hold only a weak reference to the table).
@@ -1481,6 +1524,18 @@ impl AppState {
             pool,
             wake,
             wake_recent: DashMap::new(),
+            web_push,
+            web_push_recent: DashMap::new(),
+            web_push_users: DashMap::new(),
+            web_push_log: DashMap::new(),
+            web_push_seq: AtomicU64::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_micros() as u64)
+                    .unwrap_or(0),
+            ),
+            web_push_cursor: DashMap::new(),
+            web_push_away: DashMap::new(),
             undelivered: DashMap::new(),
             orphan_presence_logs: DashMap::new(),
             clip_proposals: DashMap::new(),
@@ -2653,6 +2708,10 @@ impl AppState {
         // eviction handed it over (`evicted_sids`). Always consumed here.
         let handed_over = self.evicted_sids.remove(&conn_id).map(|(_, sid)| sid);
         let dropped_sid = dropped_sid.or(handed_over);
+        // Web Push: a browser whose last connection this was is now "away".
+        if let Some(sid) = &dropped_sid {
+            self.note_sid_away(user_id, sid);
+        }
         let fully_offline = last_visible_gone;
 
         // A user who vanishes mid-transfer must not stay counted against the
@@ -3123,6 +3182,100 @@ impl AppState {
             q.back()
                 .is_some_and(|(at, _)| now.duration_since(*at) < Self::UNDELIVERED_TTL)
         });
+    }
+
+    // --- Web Push bookkeeping (src/wake/sender.rs, push_web_handlers.rs) ----
+    //
+    // What a woken browser's worker is told about: the notification frames
+    // logged for its user since that browser was last open, and since its
+    // worker last asked. In memory and bounded, like the parked frames; a
+    // restart forgets it, and the worker then shows the generic text.
+
+    /// How many frames are logged per watched user.
+    const WEB_PUSH_LOG_CAP: usize = 32;
+    /// Above this many entries, the cursor and away maps drop what is stale.
+    const WEB_PUSH_PRUNE_ABOVE: usize = 4096;
+
+    pub fn web_push_watch(&self, user_id: UserId) {
+        self.web_push_users.insert(user_id, ());
+    }
+
+    /// The user's last subscription went: stop logging for them.
+    pub fn web_push_unwatch(&self, user_id: UserId) {
+        self.web_push_users.remove(&user_id);
+        self.web_push_log.remove(&user_id);
+    }
+
+    pub fn web_push_watched(&self, user_id: UserId) -> bool {
+        self.web_push_users.contains_key(&user_id)
+    }
+
+    /// Log a notification frame for a watched user. A no-op for anyone else.
+    pub fn web_push_record(&self, user_id: UserId, msg: ServerMessage) {
+        if !self.web_push_watched(user_id) {
+            return;
+        }
+        let seq = self.web_push_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut q = self.web_push_log.entry(user_id).or_default();
+        while q.front().is_some_and(|(_, at, _)| at.elapsed() >= Self::UNDELIVERED_TTL) {
+            q.pop_front();
+        }
+        if q.len() >= Self::WEB_PUSH_LOG_CAP {
+            q.pop_front();
+        }
+        q.push_back((seq, Instant::now(), msg));
+    }
+
+    /// Is the browser that holds session `sid` connected right now? A
+    /// delivery socket is the Android app, never a browser.
+    pub fn sid_is_live(&self, user_id: UserId, sid: &str) -> bool {
+        !sid.is_empty()
+            && self
+                .sessions
+                .get(&user_id)
+                .is_some_and(|v| v.iter().any(|s| s.sid == sid && !s.delivery))
+    }
+
+    /// A connection of session `sid` closed: if it was that browser's last,
+    /// note where the log stood. Everything before it, the open app showed.
+    fn note_sid_away(&self, user_id: UserId, sid: &str) {
+        if sid.is_empty() || !self.web_push_watched(user_id) || self.sid_is_live(user_id, sid) {
+            return;
+        }
+        if self.web_push_away.len() > Self::WEB_PUSH_PRUNE_ABOVE {
+            self.web_push_away.retain(|_, (_, at)| at.elapsed() < Self::UNDELIVERED_TTL);
+        }
+        self.web_push_away
+            .insert(sid.to_string(), (self.web_push_seq.load(Ordering::Relaxed), Instant::now()));
+    }
+
+    /// What subscription `sub_id` (the browser holding session `sid`) has not
+    /// been told about yet, oldest first, and mark it told. Nothing while that
+    /// browser is open: the app on screen has it already.
+    pub fn web_push_unseen(&self, user_id: UserId, sub_id: i64, sid: &str) -> Vec<ServerMessage> {
+        let (newest, frames) = match self.web_push_log.get(&user_id) {
+            Some(q) => (
+                q.back().map(|(s, _, _)| *s).unwrap_or(0),
+                q.iter()
+                    .filter(|(_, at, _)| at.elapsed() < Self::UNDELIVERED_TTL)
+                    .map(|(s, _, m)| (*s, m.clone()))
+                    .collect::<Vec<_>>(),
+            ),
+            None => (0, Vec::new()),
+        };
+        let told = self.web_push_cursor.get(&sub_id).map(|c| c.0).unwrap_or(0);
+        let away = self.web_push_away.get(sid).map(|a| a.0).unwrap_or(0);
+        let floor = told.max(away);
+        let out = if self.sid_is_live(user_id, sid) {
+            Vec::new()
+        } else {
+            frames.into_iter().filter(|(s, _)| *s > floor).map(|(_, m)| m).collect()
+        };
+        if self.web_push_cursor.len() > Self::WEB_PUSH_PRUNE_ABOVE {
+            self.web_push_cursor.retain(|_, (_, at)| at.elapsed() < Self::UNDELIVERED_TTL);
+        }
+        self.web_push_cursor.insert(sub_id, (newest.max(told), Instant::now()));
+        out
     }
 
     /// Take every still-fresh parked frame for `user_id`.

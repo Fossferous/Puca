@@ -43,6 +43,9 @@ mod presence;
 mod protocol;
 mod public_config;
 mod push_handlers;
+mod push_web_handlers;
+#[cfg(test)]
+mod push_web_db_tests;
 mod reaction_handlers;
 mod recovery_handlers;
 mod retention;
@@ -208,6 +211,13 @@ mod jwt_secret_tests {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // `puca generate-vapid-key`: the one-time setup step for Web Push
+    // (.env.example, VAPID_PRIVATE_KEY). Before dotenv and the database, so an operator
+    // can run it anywhere the binary is, with nothing configured.
+    if std::env::args().nth(1).as_deref() == Some("generate-vapid-key") {
+        println!("VAPID_PRIVATE_KEY={}", wake::webpush::generate_private_key());
+        return Ok(());
+    }
     dotenv::dotenv().ok();
 
     tracing_subscriber::registry()
@@ -347,7 +357,48 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
-    let app_state = AppState::new(pool.clone(), jwt_secret, email_service, wake);
+    // Web Push for the web app (src/wake/webpush.rs): same contract as the FCM
+    // wake — a constant, encrypted to the browser, and nothing else. Unset =
+    // the web app gets no notifications while it is closed, and its settings
+    // say so. Set-but-broken ABORTS the boot, the same rule as above.
+    let web_push: std::sync::Arc<dyn wake::webpush::WebPushTransport> = match getenv("VAPID_PRIVATE_KEY") {
+        Some(key) => {
+            let subject = wake::webpush::subject_from(getenv("VAPID_SUBJECT"), getenv("APP_URL")).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "VAPID_PRIVATE_KEY is set but there is no usable VAPID_SUBJECT: set it to a mailto: or \
+                     https: contact (or set APP_URL to the web app's https address)"
+                )
+            })?;
+            let t = wake::webpush::VapidPush::new(&key, subject)?;
+            tracing::info!("Web Push enabled (constant payload)");
+            std::sync::Arc::new(t)
+        }
+        None => {
+            tracing::info!(
+                "Web Push not configured. Run `puca generate-vapid-key` and set VAPID_PRIVATE_KEY \
+                 to let the web app notify while it is closed."
+            );
+            std::sync::Arc::new(wake::webpush::NullWebPush)
+        }
+    };
+
+    let app_state = AppState::new_with_web_push(pool.clone(), jwt_secret, email_service, wake, web_push);
+    // Who has a Web Push subscription: the sender skips everyone else with one
+    // map lookup (wake/sender.rs). A failed load is loud, not fatal — those
+    // users are rung again from their next app start (its PATCH re-watches).
+    if app_state.web_push.enabled() {
+        match sqlx::query_as::<_, (i32,)>("SELECT DISTINCT user_id FROM web_push_subscriptions")
+            .fetch_all(&pool)
+            .await
+        {
+            Ok(rows) => {
+                for (user_id,) in rows {
+                    app_state.web_push_watch(user_id as i64);
+                }
+            }
+            Err(e) => tracing::error!("Web Push: could not load the subscribed users: {e}"),
+        }
+    }
     // Live task events for Púca Notes (src/task_events.rs): one dedicated
     // LISTEN connection whose receive loop never awaits anything but itself.
     task_events::spawn_pipeline(db_url.clone(), app_state.task_events.clone(), pool.clone());
@@ -980,6 +1031,11 @@ async fn main() -> anyhow::Result<()> {
             "/notifications/test",
             post(push_handlers::send_test_notification),
         )
+        // Web Push for the web app (push_web_handlers.rs)
+        .route("/push/web/subscription", post(push_web_handlers::subscribe))
+        .route("/push/web/subscription", patch(push_web_handlers::update_gates))
+        .route("/push/web/subscription", delete(push_web_handlers::unsubscribe))
+        .route("/push/web/test", post(push_web_handlers::send_test))
         .layer(axum_middleware::from_fn_with_state(
             app_state.clone(),
             auth::jwt_auth_middleware,
@@ -990,6 +1046,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/invites/:code", get(invite_handlers::get_invite_info))
         .route("/discover", get(server_handlers::list_public_servers))
         .route("/config", get(public_config::get_public_config))
+        // The web app's service worker: no session, its subscription's own
+        // secret instead (push_web_handlers.rs says why).
+        .route("/push/web/key", get(push_web_handlers::public_key))
+        .route("/push/web/pending", post(push_web_handlers::pending))
         .with_state(app_state.clone());
 
     // Create rate limit layers and spawn a periodic GC that prunes each limiter's

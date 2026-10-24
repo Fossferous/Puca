@@ -18,6 +18,7 @@ import { mobileBatteryStatus, requestIgnoreBatteryOptimizations, setNotifyKeepAl
 import { setPlacesAuthed } from './api/taskPlaces';
 import { resetReconnectCatchup } from './api/reconnectCatchup';
 import { initPushRegistration, teardownPushRegistration } from './api/pushRegistration';
+import { initWebPush, teardownWebPush } from './api/webPush';
 import { installSessionSync } from './api/sessionSync';
 
 // Module-level: the battery ask spans an async gap, and StrictMode runs the
@@ -97,6 +98,13 @@ function App() {
     // it. Fire-and-forget — the synchronous prefix captures the token, and the
     // server's FCM UNREGISTERED pruning is the backstop if the request loses.
     void teardownPushRegistration();
+    // The web app's push subscription: AWAITED, unlike the line above, because
+    // finding the subscription is itself async and the server row's DELETE
+    // must still carry the token. Bounded, so a dead network never holds a
+    // sign-out hostage: the browser's own unsubscribe is local, and
+    // logout()'s /auth/logout-session deletes the row server-side anyway.
+    // No-op in the desktop and Android apps.
+    await Promise.race([teardownWebPush(), new Promise<void>(resolve => setTimeout(resolve, 3000))]);
     // Deliberately LOCAL only. /auth/logout bumps users.token_version, which is
     // a per-USER counter — there is no per-session claim — so calling it here
     // would sign the user out on every other device too. Signing out of the
@@ -220,6 +228,9 @@ function App() {
     // register this device's FCM token with the server. Idempotent; degrades
     // to a no-op on old APKs, builds without Firebase, and non-Android.
     if (loggedIn) void initPushRegistration();
+    // The web app's Web Push subscription (api/webPush.ts): restored at sign-in
+    // and app start, never asked for here — permission needs a tap.
+    if (loggedIn) void initWebPush();
     // One-time battery-exemption ask, once signed in with delivery wanted:
     // Doze pauses a non-exempt app's network regardless of the foreground
     // service, so without this exemption screen-off delivery mostly fails —

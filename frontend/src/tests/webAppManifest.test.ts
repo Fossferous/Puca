@@ -106,9 +106,17 @@ describe('index.html', () => {
         expect(viewport).not.toMatch(/viewport-fit/);
     });
 
-    it('registers no service worker for the main app', () => {
+    it('registers no service worker from the page itself, and the push worker caches nothing', () => {
+        // The one worker for "/" is public/sw.js, and it is registered only
+        // when someone turns on "Notifications while Púca is closed"
+        // (api/webPush.ts) — never by index.html for everyone.
         expect(html).not.toMatch(/serviceWorker/);
-        expect(fs.existsSync(path.join(PUBLIC, 'sw.js'))).toBe(false);
+        const sw = fs.readFileSync(path.join(PUBLIC, 'sw.js'), 'utf8');
+        // No fetch listener: it never sees a request, so it cannot serve a
+        // stale app or keep anything the app shows on disk.
+        expect(sw).not.toMatch(/addEventListener\(\s*['"]fetch['"]/);
+        expect(sw).not.toMatch(/\bcaches\s*\./); // the Cache API, not the word
+        expect(sw).toMatch(/addEventListener\(\s*'push'/);
     });
 });
 
@@ -138,7 +146,7 @@ describe('the download page', () => {
 
     it('holds a QR placeholder that the ship script fills, and says what the limits are', () => {
         expect(section).toContain('__APP_QR_SVG__');
-        for (const limit of ['No notifications while Púca is closed', 'Calls are encrypted end to end', 'My Devices', 'Photos work']) {
+        for (const limit of ['Notifications while Púca is closed', 'Calls are encrypted end to end', 'My Devices', 'Photos work']) {
             expect(section).toContain(limit);
         }
         // Safari encrypts mesh calls through RTCRtpScriptTransform now: the page
