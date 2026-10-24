@@ -10,11 +10,14 @@
 #   - Puca-macOS-dmg    : universal (Intel+Apple Silicon) .dmg, ad-hoc
 #                              signed — first launch needs right-click → Open.
 #   - Puca-macOS-app    : the .app bundle, tar'd to preserve permissions.
-#   - Puca-iOS-unsigned : unsigned .ipa. Not installable as it is: SideStore
-#                              or AltStore re-signs it on the phone with that
-#                              person's own free Apple ID (7-day signature,
-#                              refreshed from the phone). Built against the
-#                              placeholder host unless `api_url` is given.
+#   - Puca-iOS-unsigned : unsigned .ipa for the server named in `api_url`.
+#                              Not installable as it is: SideStore or AltStore
+#                              re-signs it on the phone with that person's own
+#                              free Apple ID (7-day signature, refreshed from
+#                              the phone).
+#   - Puca-iOS-COMPILE-ONLY : the same build with no `api_url` (or from a tag):
+#                              baked against a host that does not exist. A
+#                              build check, never something to hand anyone.
 name: Apple builds
 
 permissions:
@@ -41,13 +44,6 @@ concurrency:
   group: apple-builds-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  # The placeholder unless the dispatch named a server. A build against it
-  # talks to a host that does not exist: build-verification only, never to be
-  # handed to a user. The real host is typed into the dispatch form, never
-  # written here (this repository is public; hosts live in hosts.conf).
-  VITE_API_URL: ${{ inputs.api_url || 'https://chat.example.com' }}
-
 jobs:
   macos-desktop:
     name: macOS desktop (.dmg, universal)
@@ -55,6 +51,11 @@ jobs:
     if: ${{ !inputs.ios_only }}
     runs-on: macos-latest
     timeout-minutes: 45
+    env:
+      # Always the placeholder: a build-verification artifact. The server
+      # named in `api_url` is the iOS job's alone, so it never reaches these
+      # artifacts or this job's logs.
+      VITE_API_URL: https://chat.example.com
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -99,18 +100,55 @@ jobs:
           name: Puca-macOS-dmg
           path: frontend/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
           if-no-files-found: error
+          retention-days: 14
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Puca-macOS-app
           path: frontend/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
           if-no-files-found: error
+          retention-days: 14
 
   ios-unsigned:
-    name: iOS (unsigned compile-proof)
+    name: iOS (unsigned .ipa)
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
+      # Before anything is built: an address the app cannot use costs a full
+      # macOS build and a re-sign on someone's phone to discover otherwise,
+      # because under CI the build's own guards (check-api-url.mjs,
+      # check-dist-entries.mjs) only warn. The input reaches the shell through
+      # env, never spliced into the script.
+      - name: Check the server address
+        id: server
+        env:
+          API_URL_INPUT: ${{ inputs.api_url }}
+        run: |
+          if [ -z "$API_URL_INPUT" ]; then
+            echo "::warning::No api_url: a COMPILE-ONLY build against a host that does not exist (artifact Puca-iOS-COMPILE-ONLY). Never hand it to anyone."
+            url=https://chat.example.com
+            { echo "kind=compile-only"; echo "artifact=Puca-iOS-COMPILE-ONLY"; echo "ipa=Puca-COMPILE-ONLY-no-server.ipa"; echo "ci=true"; } >> "$GITHUB_OUTPUT"
+          else
+            # Whole-string match ([[ =~ ]] is not line-based like grep): one
+            # https origin, nothing before or after it, no path or slash.
+            shape='^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?$'
+            if ! [[ "$API_URL_INPUT" =~ $shape ]]; then
+              echo "::error::api_url must be exactly https://<host>[:port] (no path, no trailing slash, no spaces, not http); got '$API_URL_INPUT'"
+              exit 1
+            fi
+            case "$API_URL_INPUT" in
+              *://localhost*|*://127.*|*://0.0.0.0*|*://example.com*|*.example.com|*.example.com:*|*://example.org*|*.example.org|*.example.org:*)
+                echo "::error::api_url '$API_URL_INPUT' is not a server an iPhone can reach"
+                exit 1 ;;
+            esac
+            url=$API_URL_INPUT
+            # ci is empty: the build runs with CI unset, so check-api-url.mjs
+            # and check-dist-entries.mjs enforce instead of warning.
+            { echo "kind=server"; echo "artifact=Puca-iOS-unsigned"; echo "ipa=Puca-unsigned.ipa"; echo "ci="; } >> "$GITHUB_OUTPUT"
+          fi
+          echo "VITE_API_URL=$url" >> "$GITHUB_ENV"
+          echo "iOS build against: $url"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -124,10 +162,13 @@ jobs:
         working-directory: frontend
 
       # cap:build:ios, not a bare build + sync: it also strips Púca Notes'
-      # pages out of the synced bundle, as every native build does.
+      # pages out of the synced bundle and writes the Content-Security-Policy
+      # meta (scripts/cap-index-csp.mjs), as every native build does.
       - name: Build web assets + sync iOS project
         run: npm run cap:build:ios
         working-directory: frontend
+        env:
+          CI: ${{ steps.server.outputs.ci }}
 
       # cap sync regenerates CapApp-SPM/Package.swift with Capacitor's default
       # iOS 15.0 floor, but @capgo/capacitor-updater requires 15.5 — so this
@@ -156,24 +197,55 @@ jobs:
       - name: Built app keeps a call alive in the background
         run: |
           plist=App.app/Info.plist
-          plutil -extract UIBackgroundModes json -o - "$plist" | grep -q '"audio"' \
+          modes=$(plutil -extract UIBackgroundModes json -o - "$plist" || true)
+          [[ "$modes" == *'"audio"'* ]] \
             || { echo "::error::UIBackgroundModes has no audio: the microphone goes silent when the phone locks"; exit 1; }
           for key in NSMicrophoneUsageDescription NSCameraUsageDescription; do
             plutil -extract "$key" raw -o - "$plist" >/dev/null \
               || { echo "::error::$key missing: getUserMedia crashes the app"; exit 1; }
           done
-          echo "API base baked in: $VITE_API_URL"
         working-directory: frontend/ios/App/build/Build/Products/Release-iphoneos
+
+      # The product, not the build log: the app inside the .ipa names the
+      # server it was built for, and its page carries exactly one policy
+      # naming that server, ahead of the app's own script.
+      - name: Built app names its server and carries the policy
+        run: |
+          host=${VITE_API_URL#https://}
+          web=App.app/public
+          # The runner's bash is -e -o pipefail: no `grep | head` (SIGPIPE
+          # fails a pipe that matched) and no bare grep in a $( ) (a miss
+          # exits before the message below is printed).
+          grep -rqF --include='*.js' "$host" "$web/assets" \
+            || { echo "::error::no script in $web/assets names $host: the app would talk to some other server"; exit 1; }
+          metas=$( (grep -o 'http-equiv="Content-Security-Policy"' "$web/index.html" || true) | wc -l | tr -d ' ')
+          [ "$metas" = 1 ] || { echo "::error::$web/index.html has $metas Content-Security-Policy metas, want 1"; exit 1; }
+          for want in "connect-src 'self' https://$host wss://$host" "worker-src 'self' blob:" "script-src 'self' 'wasm-unsafe-eval'"; do
+            grep -qF "$want" "$web/index.html" || { echo "::error::the policy lacks: $want"; exit 1; }
+          done
+          meta_at=$( (grep -bo 'http-equiv="Content-Security-Policy"' "$web/index.html" || true) | sed -n 1p | cut -d: -f1)
+          script_at=$( (grep -bo '<script' "$web/index.html" || true) | sed -n 1p | cut -d: -f1)
+          [ -n "$script_at" ] && [ "$meta_at" -lt "$script_at" ] \
+            || { echo "::error::the policy must come before the app's script (meta at $meta_at, script at ${script_at:-none})"; exit 1; }
+          echo "$KIND build: names $host; one policy, ahead of the script"
+        working-directory: frontend/ios/App/build/Build/Products/Release-iphoneos
+        env:
+          KIND: ${{ steps.server.outputs.kind }}
 
       - name: Package unsigned .ipa
         run: |
           mkdir Payload
           cp -R App.app Payload/
-          zip -qry Puca-unsigned.ipa Payload
+          zip -qry "$IPA" Payload
         working-directory: frontend/ios/App/build/Build/Products/Release-iphoneos
+        env:
+          IPA: ${{ steps.server.outputs.ipa }}
 
+      # 14 days: long enough to fetch and hand on, not three months of a
+      # build that names a server sitting on a public run page.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: Puca-iOS-unsigned
-          path: frontend/ios/App/build/Build/Products/Release-iphoneos/Puca-unsigned.ipa
+          name: ${{ steps.server.outputs.artifact }}
+          path: frontend/ios/App/build/Build/Products/Release-iphoneos/${{ steps.server.outputs.ipa }}
           if-no-files-found: error
+          retention-days: 14

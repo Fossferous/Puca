@@ -1,6 +1,6 @@
 /**
- * scripts/cap-index-csp.mjs — the Content-Security-Policy the Android
- * WebView gets by a <meta> in the SYNCED index.html.
+ * scripts/cap-index-csp.mjs — the Content-Security-Policy the Android and
+ * iOS WebViews get by a <meta> in the SYNCED index.html.
  *
  * What these tests pin, and why each could go red:
  *  - the tag is inserted ONCE, directly after the literal `<head>`, ahead of
@@ -13,13 +13,18 @@
  *    policy for the browser app;
  *  - the policy names the API origin the build was made against, and refuses
  *    to guess when there is none — a stale or wrong origin would silently
- *    block every login on the handset.
+ *    block every login on the handset;
+ *  - `--platform ios` writes the synced iOS copy with the SAME policy as
+ *    Android (one OTA bundle carries one policy to both shells), and an
+ *    unknown platform is refused rather than given a guess.
  */
 import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { buildPolicy, injectCsp, metaTag, applyToFile } from '../../scripts/cap-index-csp.mjs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { buildPolicy, injectCsp, metaTag, applyToFile, indexForPlatform, ANDROID_INDEX, IOS_INDEX } from '../../scripts/cap-index-csp.mjs';
 
 const POLICY = buildPolicy({ apiUrl: 'https://chat.example.org' });
 
@@ -172,5 +177,42 @@ describe('applyToFile', () => {
         } finally {
             fs.rmSync(r.root, { recursive: true, force: true });
         }
+    });
+});
+
+describe('--platform', () => {
+    const FRONTEND = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+    const SCRIPT = path.join(FRONTEND, 'scripts', 'cap-index-csp.mjs');
+    function cli(...args: string[]) {
+        const r = spawnSync(process.execPath, [SCRIPT, ...args, '--dry-run'], {
+            cwd: FRONTEND,
+            encoding: 'utf8',
+            env: { ...process.env, VITE_API_URL: 'https://chat.example.org', VITE_UPDATE_FALLBACK_API: '' },
+        });
+        return { status: r.status, out: `${r.stdout}${r.stderr}` };
+    }
+
+    it('maps each shell to the index.html its `cap sync` writes, and nothing else', () => {
+        expect(path.relative(FRONTEND, indexForPlatform('android')!).split(path.sep).join('/')).toBe('android/app/src/main/assets/public/index.html');
+        expect(path.relative(FRONTEND, indexForPlatform('ios')!).split(path.sep).join('/')).toBe('ios/App/App/public/index.html');
+        expect(indexForPlatform('android')).toBe(ANDROID_INDEX);
+        expect(indexForPlatform('ios')).toBe(IOS_INDEX);
+        for (const p of ['windows', 'electron', '', undefined]) expect(indexForPlatform(p as string)).toBeNull();
+    });
+    it('accepts ios: it either writes the synced copy or asks for `cap sync ios`, never "not supported"', () => {
+        const { status, out } = cli('--platform', 'ios');
+        expect(out).not.toMatch(/not supported/);
+        if (fs.existsSync(IOS_INDEX)) {
+            expect(status).toBe(0);
+            expect(out).toContain(POLICY);
+        } else {
+            expect(status).toBe(1);
+            expect(out).toContain('npx cap sync ios');
+        }
+    });
+    it('refuses a platform it does not know (control: the same call with ios is accepted above)', () => {
+        const { status, out } = cli('--platform', 'windows');
+        expect(status).toBe(2);
+        expect(out).toMatch(/--platform windows is not supported \(android \| ios\)/);
     });
 });
