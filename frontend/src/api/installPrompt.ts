@@ -9,9 +9,11 @@
  * tap, in the browser's own dialog.
  *
  * WHEN THE BANNER SHOWS. Only after an explicit ask: the marker in the URL, which
- * is remembered (`puca-install-requested`) until the banner is dismissed or the app
- * installed, because a sign-in or a reload drops the query string and the browser
- * may fire `beforeinstallprompt` a moment later. `beforeinstallprompt` is
+ * is remembered (`puca-install-requested`, with the time of the ask) for ten minutes,
+ * or until the banner is dismissed or the app installed, because a sign-in or a
+ * reload drops the query string and the browser may fire `beforeinstallprompt` a
+ * moment later. An ask that never got its event (a browser that cannot install)
+ * expires, so an ordinary visit months later is left alone. `beforeinstallprompt` is
  * captured, and the browser's own prompt suppressed, ONLY while an ask is open: an
  * ordinary visit to the web app is left exactly as the browser would treat it.
  *
@@ -35,9 +37,19 @@ export interface BeforeInstallPromptEvent extends Event {
 const REQUESTED_KEY = 'puca-install-requested';
 const DISMISSED_KEY = 'puca-install-dismissed';
 
+/** How long an ask from the download page stays open. */
+export const ASK_TTL_MS = 10 * 60 * 1000;
+
 function read(win: Window, key: string): boolean {
     try {
-        return win.localStorage.getItem(key) === '1';
+        const v = win.localStorage.getItem(key);
+        if (key !== REQUESTED_KEY) return v === '1';
+        // The ask is stored as the time it was made. A value that is not a recent
+        // time (an expired ask, or the plain "1" an older build wrote) is no ask.
+        const at = Number(v);
+        if (v && Number.isFinite(at) && at > 1e12 && Date.now() - at >= 0 && Date.now() - at < ASK_TTL_MS) return true;
+        if (v) win.localStorage.removeItem(key);
+        return false;
     } catch {
         return false;
     }
@@ -45,7 +57,7 @@ function read(win: Window, key: string): boolean {
 
 function write(win: Window, key: string, on: boolean): void {
     try {
-        if (on) win.localStorage.setItem(key, '1');
+        if (on) win.localStorage.setItem(key, key === REQUESTED_KEY ? String(Date.now()) : '1');
         else win.localStorage.removeItem(key);
     } catch {
         /* storage blocked: the ask then lasts for this page load only */

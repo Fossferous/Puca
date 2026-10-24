@@ -192,8 +192,11 @@
            address (src/update_routes.rs). The page may not ship if it cannot be made. -->
       <div class="onetap" id="onetap">
         <b>Install with one tap</b>
+        <p id="onetap-safari" hidden>iPhone installs a profile only from <b>Safari</b>. Open this page in
+        Safari to use one tap, or follow the Share steps below.</p>
+        <div id="onetap-body">
         <div class="downloads">
-          <a class="btn" href="https://__API_HOST__/api/ios-web-clip">Install with one tap</a>
+          <a class="btn" id="onetap-btn" href="https://__API_HOST__/api/ios-web-clip">Install with one tap</a>
         </div>
         <ol class="iphone-steps">
           <li>Tap the button, then <b>Allow</b> when Safari asks to download a configuration profile.</li>
@@ -202,6 +205,7 @@
           <li>Tap <b>Install</b> in the corner, enter your passcode, then tap <b>Install</b> again and <b>Done</b>.</li>
           <li>Open <b>Púca</b> from your Home Screen and sign in there.</li>
         </ol>
+        </div>
         <p><b>What the file contains, and nothing else:</b> one Home Screen icon named Púca that opens
         <code>https://__APP_HOST__</code> full screen. No certificates, no restrictions, no other
         settings &mdash; nothing that lets anyone manage or watch your phone. You can remove it any time
@@ -386,6 +390,18 @@
       var chromium = /Chrome\/|Chromium\/|Edg\/|EdgA\/|OPR\/|SamsungBrowser\//.test(ua) && !/CriOS|FxiOS/.test(ua);
       var tap = document.getElementById('onetap');
       if (tap && !ios) tap.hidden = true;
+      // iOS installs a profile from Safari only. Chrome, Firefox, Edge and Opera on
+      // iOS, and an app's own web view (Instagram, Facebook, Gmail, Line...), say so
+      // in the user agent or lack the "Safari/" token a real Safari carries.
+      var safari = /Safari\//.test(ua) && !/CriOS|FxiOS|EdgiOS|OPiOS|OPT\/|GSA\/|FBAN|FBAV|Instagram|Line\/|MicroMessenger|Snapchat|Twitter|; wv\)/.test(ua);
+      if (ios && !safari) {
+        var body = document.getElementById('onetap-body'), note = document.getElementById('onetap-safari');
+        if (body) body.hidden = true;
+        if (note) note.hidden = false;
+      }
+      // The install button is a plain link to another origin; say that something is happening.
+      var installLink = document.getElementById('install-web');
+      if (installLink) installLink.addEventListener('click', function () { installLink.textContent = 'Opening Púca\u2026'; });
       if (ios || !chromium) {
         var b = document.getElementById('install-web'), n = document.getElementById('install-web-note');
         if (b) b.hidden = true;

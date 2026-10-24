@@ -110,24 +110,198 @@ const IOS_WEB_CLIP_FILE: &str = "ios-web-clip.mobileconfig";
 /// `application/x-apple-aspen-config`: what makes iOS Safari offer the profile.
 const IOS_PROFILE_TYPE: &str = "application/x-apple-aspen-config";
 
-/// Is this plausibly the profile dual-ship rendered, and nothing else? The file
-/// is operator-pushed, so a half-written upload or a stray file must not be
-/// handed to a phone as a profile. It must be a property list holding exactly
-/// one payload, a Web Clip (`com.apple.webClip.managed`): a profile that
-/// carried a certificate, a restriction or a VPN would be an entirely different
-/// thing to install, and this route refuses to be the way one gets served.
-fn is_web_clip_only_profile(body: &str) -> bool {
-    let payload_types = body.matches("<key>PayloadType</key>").count();
-    body.starts_with("<?xml")
-        && body.contains("<plist")
-        && body.contains("</plist>")
-        && payload_types == 2 // the profile's own, and the one Web Clip
-        && body.contains("<string>Configuration</string>")
-        && body.contains("<string>com.apple.webClip.managed</string>")
+/// The few property-list shapes a profile uses, and nothing else.
+#[derive(Debug)]
+enum Pl {
+    Dict(Vec<(String, Pl)>),
+    Array(Vec<Pl>),
+    Str(String),
+    Other,
 }
 
-async fn ios_web_clip() -> impl IntoResponse {
-    match tokio::fs::read_to_string(IOS_WEB_CLIP_FILE).await {
+/// A strict reader for the property list `make-web-clip-profile.mjs` writes. It reads the
+/// real structure (so a payload type quoted inside a description, or a key
+/// spelled with an entity, is what it is, not a string match) and fails closed on
+/// anything it does not know: an unknown element, a comment, a duplicate key,
+/// trailing text, nesting past 8.
+struct PlReader<'a> {
+    s: &'a str,
+    i: usize,
+}
+
+impl<'a> PlReader<'a> {
+    fn rest(&self) -> &'a str {
+        &self.s[self.i..]
+    }
+    fn ws(&mut self) {
+        let t = self.rest().trim_start();
+        self.i = self.s.len() - t.len();
+    }
+    fn eat(&mut self, lit: &str) -> bool {
+        if self.rest().starts_with(lit) {
+            self.i += lit.len();
+            true
+        } else {
+            false
+        }
+    }
+    /// Text up to the given closing tag, entities decoded; `<` or an unknown entity fails.
+    fn text_until(&mut self, close: &str) -> Option<String> {
+        let end = self.rest().find(close)?;
+        let raw = &self.rest()[..end];
+        self.i += end + close.len();
+        if raw.contains('<') {
+            return None;
+        }
+        let mut out = String::new();
+        let mut it = raw;
+        while let Some(p) = it.find('&') {
+            out.push_str(&it[..p]);
+            let semi = it[p..].find(';')? + p;
+            let ent = &it[p + 1..semi];
+            match ent {
+                "amp" => out.push('&'),
+                "lt" => out.push('<'),
+                "gt" => out.push('>'),
+                "quot" => out.push('"'),
+                "apos" => out.push('\''),
+                _ => {
+                    let num = ent.strip_prefix('#')?;
+                    let cp = match num.strip_prefix('x') {
+                        Some(h) => u32::from_str_radix(h, 16).ok()?,
+                        None => num.parse().ok()?,
+                    };
+                    out.push(char::from_u32(cp)?);
+                }
+            }
+            it = &it[semi + 1..];
+        }
+        out.push_str(it);
+        Some(out)
+    }
+    fn value(&mut self, depth: u8) -> Option<Pl> {
+        if depth > 8 {
+            return None;
+        }
+        self.ws();
+        if self.eat("<true/>") || self.eat("<false/>") {
+            return Some(Pl::Other);
+        }
+        if self.eat("<string/>") {
+            return Some(Pl::Str(String::new()));
+        }
+        if self.eat("<string>") {
+            return self.text_until("</string>").map(Pl::Str);
+        }
+        if self.eat("<integer>") || self.eat("<data>") {
+            self.text_until(if self.s[..self.i].ends_with("<integer>") { "</integer>" } else { "</data>" })?;
+            return Some(Pl::Other);
+        }
+        if self.eat("<array>") {
+            let mut items = Vec::new();
+            loop {
+                self.ws();
+                if self.eat("</array>") {
+                    return Some(Pl::Array(items));
+                }
+                items.push(self.value(depth + 1)?);
+            }
+        }
+        if self.eat("<dict>") {
+            let mut entries: Vec<(String, Pl)> = Vec::new();
+            loop {
+                self.ws();
+                if self.eat("</dict>") {
+                    return Some(Pl::Dict(entries));
+                }
+                if !self.eat("<key>") {
+                    return None;
+                }
+                let key = self.text_until("</key>")?;
+                if entries.iter().any(|(k, _)| *k == key) {
+                    return None;
+                }
+                entries.push((key, self.value(depth + 1)?));
+            }
+        }
+        None
+    }
+    fn document(body: &'a str) -> Option<Pl> {
+        let mut r = PlReader { s: body.trim_start_matches('\u{feff}'), i: 0 };
+        r.ws();
+        if !r.eat("<?xml") {
+            return None;
+        }
+        r.i += r.rest().find("?>")? + 2;
+        r.ws();
+        if r.rest().starts_with("<!DOCTYPE plist") {
+            r.i += r.rest().find('>')? + 1;
+            r.ws();
+        }
+        if !r.eat("<plist") {
+            return None;
+        }
+        r.i += r.rest().find('>')? + 1;
+        let v = r.value(0)?;
+        r.ws();
+        if !r.eat("</plist>") {
+            return None;
+        }
+        r.ws();
+        if r.i != r.s.len() {
+            return None;
+        }
+        Some(v)
+    }
+}
+
+fn dict_entry<'a>(d: &'a [(String, Pl)], key: &str) -> Option<&'a Pl> {
+    d.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+}
+
+fn str_entry<'a>(d: &'a [(String, Pl)], key: &str) -> Option<&'a str> {
+    match dict_entry(d, key)? {
+        Pl::Str(s) => Some(s),
+        _ => None,
+    }
+}
+
+/// Every key of `d` is in `allowed` and every `required` one is present.
+fn keys_within(d: &[(String, Pl)], required: &[&str], allowed: &[&str]) -> bool {
+    d.iter().all(|(k, _)| allowed.contains(&k.as_str())) && required.iter().all(|k| dict_entry(d, k).is_some())
+}
+
+/// Is this the profile dual-ship rendered, and nothing else? The file is
+/// operator-pushed, so a half-written upload or a stray file must not be handed
+/// to a phone as a profile, and neither may a profile that does more than the page
+/// promises. It must read as a property list with ONE outer dict whose only
+/// payload is ONE dict of type `com.apple.webClip.managed`, with exactly the keys
+/// make-web-clip-profile.mjs writes (no certificate, restriction, VPN or any other
+/// key) and an https address.
+fn is_web_clip_only_profile(body: &str) -> bool {
+    const OUTER: &[&str] = &[
+        "PayloadContent", "PayloadDescription", "PayloadDisplayName", "PayloadIdentifier",
+        "PayloadRemovalDisallowed", "PayloadType", "PayloadUUID", "PayloadVersion",
+    ];
+    const INNER: &[&str] = &[
+        "FullScreen", "Icon", "IsRemovable", "Label", "PayloadDescription", "PayloadDisplayName",
+        "PayloadIdentifier", "PayloadType", "PayloadUUID", "PayloadVersion", "URL",
+    ];
+    let Some(Pl::Dict(outer)) = PlReader::document(body) else { return false };
+    if !keys_within(&outer, &["PayloadContent", "PayloadIdentifier", "PayloadType", "PayloadUUID", "PayloadVersion"], OUTER)
+        || str_entry(&outer, "PayloadType") != Some("Configuration")
+    {
+        return false;
+    }
+    let Some(Pl::Array(content)) = dict_entry(&outer, "PayloadContent") else { return false };
+    let [Pl::Dict(clip)] = content.as_slice() else { return false };
+    keys_within(clip, &["Label", "PayloadIdentifier", "PayloadType", "PayloadUUID", "PayloadVersion", "URL"], INNER)
+        && str_entry(clip, "PayloadType") == Some("com.apple.webClip.managed")
+        && str_entry(clip, "URL").is_some_and(|u| u.starts_with("https://"))
+}
+
+async fn ios_web_clip(path: String) -> axum::response::Response {
+    match tokio::fs::read_to_string(&path).await {
         Ok(body) if is_web_clip_only_profile(&body) => (
             [
                 ("content-type", IOS_PROFILE_TYPE),
@@ -139,7 +313,7 @@ async fn ios_web_clip() -> impl IntoResponse {
         )
             .into_response(),
         Ok(_) => {
-            tracing::warn!("[Update] {IOS_WEB_CLIP_FILE} is not a single Web Clip profile; not serving it");
+            tracing::warn!("[Update] {path} is not a single Web Clip profile; not serving it");
             StatusCode::NOT_FOUND.into_response()
         }
         Err(_) => StatusCode::NOT_FOUND.into_response(),
@@ -166,41 +340,150 @@ pub fn update_routes<S>() -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {
+    update_routes_with(IOS_WEB_CLIP_FILE.to_string())
+}
+
+/// The same router with the iPhone profile's file path given, so a test can point
+/// it at a file of its own and send real requests through the real route table.
+fn update_routes_with<S>(web_clip_file: String) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
     Router::new()
         .route("/app-version", get(app_version))
         // Path matches what frontend UpdateGate.tsx fetches on mobile launch.
         .route("/api/mobile-updates/check", get(mobile_update_check))
+        // The iPhone/iPad one-tap install profile (see the module docs).
+        .route(
+            "/api/ios-web-clip",
+            get(move || {
+                let path = web_clip_file.clone();
+                async move { ios_web_clip(path).await }
+            }),
+        )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_web_clip_only_profile, mobile_update_file_path};
+    use super::{is_web_clip_only_profile, mobile_update_file_path, update_routes_with};
+    use axum::{body::Body, http::Request, Router};
+    use tower::ServiceExt;
 
-    fn profile(inner_type: &str) -> String {
+    /// What dual-ship renders (deploy/ops/make-web-clip-profile.mjs), byte for
+    /// byte: webClipProfile.test.ts fails if the generator stops producing this.
+    const REAL: &str = include_str!("../deploy/ops/fixtures/web-clip-profile.example.mobileconfig");
+
+    fn profile(inner: &str) -> String {
         format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\n\
-             <key>PayloadContent</key><array><dict><key>PayloadType</key><string>{inner_type}</string></dict></array>\n\
-             <key>PayloadType</key><string>Configuration</string>\n</dict></plist>\n"
+             <key>PayloadContent</key><array>{inner}</array>\n\
+             <key>PayloadIdentifier</key><string>a.b</string>\n\
+             <key>PayloadType</key><string>Configuration</string>\n\
+             <key>PayloadUUID</key><string>U</string>\n\
+             <key>PayloadVersion</key><integer>1</integer>\n</dict></plist>\n"
         )
     }
 
-    /// The route serves the Web Clip profile (positive control) and refuses
-    /// everything that is not exactly that: another payload type, a second
-    /// payload, a truncated upload, not a property list at all.
+    fn clip(extra: &str, payload_type: &str, url: &str) -> String {
+        format!(
+            "<dict><key>Label</key><string>P</string><key>PayloadIdentifier</key><string>a.b.c</string>\
+             <key>PayloadType</key><string>{payload_type}</string><key>PayloadUUID</key><string>V</string>\
+             <key>PayloadVersion</key><integer>1</integer><key>URL</key><string>{url}</string>{extra}</dict>"
+        )
+    }
+
+    const WC: &str = "com.apple.webClip.managed";
+
+    /// The profile the generator really writes is accepted (positive control for
+    /// everything below), and a minimal hand-written one too.
     #[test]
-    fn only_a_lone_web_clip_profile_is_served() {
-        assert!(is_web_clip_only_profile(&profile("com.apple.webClip.managed")));
-        assert!(!is_web_clip_only_profile(&profile("com.apple.security.root")));
-        assert!(!is_web_clip_only_profile(&profile("com.apple.vpn.managed")));
-        let two = profile("com.apple.webClip.managed").replace(
-            "</array>",
-            "<dict><key>PayloadType</key><string>com.apple.security.root</string></dict></array>",
-        );
-        assert!(!is_web_clip_only_profile(&two), "a second payload rides along");
-        let cut = profile("com.apple.webClip.managed").replace("</plist>", "");
-        assert!(!is_web_clip_only_profile(&cut), "a half-written file");
+    fn the_generated_profile_is_accepted() {
+        assert!(is_web_clip_only_profile(REAL), "the fixture the generator is pinned to");
+        assert!(is_web_clip_only_profile(&profile(&clip("", WC, "https://app.invalid/"))));
+    }
+
+    /// Everything that is not exactly one Web Clip is refused: by reading the
+    /// structure, not by looking for strings.
+    #[test]
+    fn nothing_but_a_lone_web_clip_profile_is_served() {
+        let good = clip("", WC, "https://app.invalid/");
+        // another payload type, alone and beside the clip
+        assert!(!is_web_clip_only_profile(&profile(&clip("", "com.apple.security.root", "https://app.invalid/"))));
+        assert!(!is_web_clip_only_profile(&profile(&format!("{good}{}", clip("", "com.apple.vpn.managed", "https://app.invalid/")))));
+        assert!(!is_web_clip_only_profile(&profile(&format!("{good}{good}"))), "two clips");
+        assert!(!is_web_clip_only_profile(&profile("")), "no payload");
+        // a root-certificate payload that merely QUOTES the web clip type
+        let quoted = clip("<key>PayloadDescription</key><string>com.apple.webClip.managed</string>", "com.apple.security.root", "https://app.invalid/");
+        assert!(!is_web_clip_only_profile(&profile(&quoted)));
+        // a key written with an entity is the key it decodes to: a duplicate here
+        let entity = good.replace("<key>URL</key>", "<key>Payload&#84;ype</key><string>x</string><key>URL</key>");
+        assert!(!is_web_clip_only_profile(&profile(&entity)), "Payload&#84;ype is PayloadType, twice");
+        // any key the page does not promise
+        for extra in ["<key>PayloadCertificateFileName</key><string>x</string>", "<key>IgnoreManifestScope</key><true/>", "<key>Restrictions</key><dict></dict>"] {
+            assert!(!is_web_clip_only_profile(&profile(&clip(extra, WC, "https://app.invalid/"))), "{extra}");
+        }
+        // an address that is not https, and one missing
+        assert!(!is_web_clip_only_profile(&profile(&clip("", WC, "http://app.invalid/"))));
+        assert!(!is_web_clip_only_profile(&profile(&clip("", WC, "javascript:alert(1)"))));
+        // the outer profile: a different type, an extra key
+        assert!(!is_web_clip_only_profile(&profile(&good).replace("<string>Configuration</string>", "<string>Other</string>")));
+        assert!(!is_web_clip_only_profile(&profile(&good).replace("<key>PayloadVersion</key><integer>1</integer>\n</dict>", "<key>PayloadVersion</key><integer>1</integer><key>ConsentText</key><dict></dict>\n</dict>")));
+        // not a property list, cut off, trailing text, an unknown element, a comment
+        assert!(!is_web_clip_only_profile(&profile(&good).replace("</plist>", "")));
+        assert!(!is_web_clip_only_profile(&format!("{}x", profile(&good))));
+        assert!(!is_web_clip_only_profile(&profile(&good).replace("<integer>1</integer>", "<real>1</real>")));
+        assert!(!is_web_clip_only_profile(&profile(&good).replace("<array>", "<array><!-- c -->")));
         assert!(!is_web_clip_only_profile("<html>not a profile</html>"));
         assert!(!is_web_clip_only_profile(""));
+    }
+
+    fn scratch(name: &str, body: Option<&str>) -> String {
+        let p = std::env::temp_dir().join(format!(
+            "puca-clip-{}-{}-{name}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        if let Some(b) = body {
+            std::fs::write(&p, b).unwrap();
+        }
+        p.to_string_lossy().into_owned()
+    }
+
+    async fn get_clip(file: &str) -> (u16, Option<String>, Vec<u8>) {
+        let app: Router = update_routes_with(file.to_string());
+        let res = app
+            .oneshot(Request::get("/api/ios-web-clip").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = res.status().as_u16();
+        let ctype = res.headers().get("content-type").map(|v| v.to_str().unwrap().to_string());
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap().to_vec();
+        (status, ctype, bytes)
+    }
+
+    /// A REAL request through the REAL route table: the route is registered, the
+    /// type is the one iOS needs, the bytes are the file's. Remove the
+    /// `.route("/api/ios-web-clip", ...)` line and this is a 404.
+    #[tokio::test]
+    async fn the_route_serves_the_profile_as_ios_needs_it() {
+        let file = scratch("ok.mobileconfig", Some(REAL));
+        let (status, ctype, bytes) = get_clip(&file).await;
+        assert_eq!(status, 200);
+        assert_eq!(ctype.as_deref(), Some("application/x-apple-aspen-config"));
+        assert_eq!(bytes, REAL.as_bytes());
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
+    async fn the_route_is_a_404_for_a_missing_file_and_for_a_profile_that_does_more() {
+        let (status, _, _) = get_clip(&scratch("missing.mobileconfig", None)).await;
+        assert_eq!(status, 404, "no file yet (a host before the first ship)");
+        let wrong = profile(&clip("", "com.apple.security.root", "https://app.invalid/"));
+        let file = scratch("wrong.mobileconfig", Some(&wrong));
+        let (status, ctype, _) = get_clip(&file).await;
+        assert_eq!(status, 404, "a root-certificate profile is never served from here");
+        assert_ne!(ctype.as_deref(), Some("application/x-apple-aspen-config"));
+        let _ = std::fs::remove_file(&file);
     }
 
     // Deliberately does NOT set MOBILE_UPDATE_FILE{,_LITE,_NOTES}:

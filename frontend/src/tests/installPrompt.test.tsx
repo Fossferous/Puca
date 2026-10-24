@@ -14,6 +14,7 @@ import { InstallBanner } from '../components/InstallBanner';
 import {
     installInstallPrompt,
     getInstallState,
+    ASK_TTL_MS,
     isInstalledWindow,
     isIosDevice,
     type BeforeInstallPromptEvent,
@@ -150,6 +151,34 @@ describe('the marker asks; nothing else does', () => {
         render(<InstallBanner />);
         fire(installEvent().ev);
         expect(screen.getByTestId('install-banner-install')).toBeTruthy();
+    });
+
+    it('an ask older than ten minutes is no ask: quiet, and the browser prompt is left alone', () => {
+        store.set('puca-install-requested', String(Date.now() - ASK_TTL_MS - 1000));
+        start();
+        const { ev } = installEvent();
+        fire(ev);
+        expect(ev.defaultPrevented).toBe(false);
+        expect(getInstallState().visible).toBe(false);
+        expect(store.has('puca-install-requested')).toBe(false);
+    });
+
+    it('the plain "1" an older build wrote is not a live ask either', () => {
+        store.set('puca-install-requested', '1');
+        start();
+        const { ev } = installEvent();
+        fire(ev);
+        expect(ev.defaultPrevented).toBe(false);
+        expect(getInstallState().visible).toBe(false);
+    });
+
+    it('positive control: an ask a few minutes old still counts', () => {
+        store.set('puca-install-requested', String(Date.now() - 5 * 60 * 1000));
+        start();
+        const { ev } = installEvent();
+        fire(ev);
+        expect(ev.defaultPrevented).toBe(true);
+        expect(getInstallState().visible).toBe(true);
     });
 
     it('a browser that never fires the event never shows a banner', () => {
