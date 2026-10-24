@@ -297,6 +297,30 @@ for entry in "${HOSTS[@]}"; do
 		FAILED+=("$label/notes-sw-cache")
 	fi
 
+	# The web app's own service worker (/sw.js: Web Push, frontend/public/sw.js)
+	# needs the same no-cache, for the same reason: a browser fetches a worker
+	# past its own cache but not past the CDN's, so a fix to what a notification
+	# shows or opens would wait out the edge's copy. Same probe, same INFO for a
+	# webapp that predates the worker (the path is then the SPA fallback).
+	psw_hdrs="$(ssh_to "$entry" "curl -s $CURL_TLS -I --resolve '$APP_HOST:443:127.0.0.1' 'https://$APP_HOST/sw.js' --max-time 25" 2>/dev/null || true)"
+	psw_js="$(printf '%s\n' "$psw_hdrs" | grep -ci '^content-type:.*javascript' || true)"
+	psw_nc="$(printf '%s\n' "$psw_hdrs" | grep -ciE '^cache-control:.*(no-cache|no-store|max-age=0)' || true)"
+	if [ "${psw_js:-0}" -eq 0 ]; then
+		printf 'INFO  %-22s %s serves no /sw.js (a webapp older than the push worker)\n' "push worker cache" "$APP_HOST"
+	elif [ "${psw_nc:-0}" -gt 0 ]; then
+		printf 'PASS  %-22s /sw.js is no-cache on %s\n' "push worker cache" "$APP_HOST"
+	else
+		printf 'FAIL  %-22s /sw.js on %s is cacheable. Fix, on EVERY host: add these two lines inside\n' \
+			"push worker cache" "$APP_HOST"
+		printf '      the %s { ... } block of /etc/caddy/Caddyfile (next to file_server):\n' "$APP_HOST"
+		printf '          @pushSw path /sw.js\n'
+		printf '          header @pushSw Cache-Control "no-cache"\n'
+		printf '      then: caddy validate --config /etc/caddy/Caddyfile && systemctl reload caddy\n'
+		printf '      and purge https://%s/sw.js from the CDN cache (Cloudflare: Caching > Purge by URL);\n' "$APP_HOST"
+		printf '      a copy the edge already holds is served until it expires otherwise.\n'
+		FAILED+=("$label/push-sw-cache")
+	fi
+
 	# The iPhone Home Screen app's manifest (/manifest.json) must come back as
 	# JSON with the right name, and the icon it names as a PNG. It is probed because
 	# the SPA fallback (`try_files ... /index.html`) answers a MISSING file with the

@@ -407,6 +407,65 @@ out="$(versions)"
 check "an older webapp (SPA fallback HTML) is INFO, not FAIL" "$([ "$(has "$out" 'INFO  notes worker cache')" = 1 ] && [ "$(has "$out" 'notes-sw-cache')" = 0 ] && echo 1 || echo 0)" "$out"
 
 echo
+echo "--- check-versions.sh: the web app's push worker must not be cacheable ---"
+# /sw.js (Web Push) gets the same rule as Notes' worker. Its pattern comes
+# first: "app.invalid/sw.js" is not a substring of ".../notes/sw.js", so each
+# probe gets its own answer, and Notes' is a passing one throughout.
+serve_psw() { # <header lines for /sw.js>
+	cat > "$TMP/bin/ssh" <<STUB
+#!/usr/bin/env bash
+cmd="\$*"
+case "\$cmd" in
+	*app.invalid/sw.js*) printf '%b' "$1" ;;
+	*notes/sw.js*) printf 'HTTP/2 200\ncontent-type: text/javascript\ncache-control: no-cache\n' ;;
+	*app.invalid*) echo '<script src="/assets/index-abc123.js"></script>'
+	                echo 'content-security-policy: default-src self' ;;
+	*latest-lite.json*) ;;
+	*latest.json*) echo '{"version":"9.9.9"}' ;;
+	*app-version*) echo '{"version":"9.9.9"}' ;;
+	*mobile-updates/check*) echo '{"version":"9.9.9"}' ;;
+	*http_code*) echo 200 ;;
+	*dl.invalid*) echo '<a href="/mobile/Puca-9.9.9.apk">a</a>'
+	              echo '<a href="/mobile/Puca-Lite-9.9.9.apk">b</a>'
+	              echo '<a href="/mobile/Puca-Notes-9.9.9.apk">c</a>'
+	              echo '<div class="meta">v9.9.9 &middot; Windows</div>' ;;
+esac
+exit 0
+STUB
+	chmod +x "$TMP/bin/ssh"
+}
+serve_psw 'HTTP/2 200\ncontent-type: text/javascript; charset=utf-8\ncache-control: no-cache\n'
+out="$(versions)"
+check "PASSES a no-cache push worker" "$(has "$out" 'PASS  push worker cache')" "$out"
+check "and Notes' probe still reads its own path" "$(has "$out" 'PASS  notes worker cache')" "$out"
+serve_psw 'HTTP/2 200\ncontent-type: text/javascript; charset=utf-8\ncache-control: max-age=14400\n'
+out="$(versions)"
+check "FAILS a cacheable push worker" "$(has "$out" 'FAIL  push worker cache')" "$out"
+check "and counts it in the verdict" "$([ "$(has "$out" 'sandbox/push-sw-cache')" = 1 ] && [ "$(has "$out" 'ALL SURFACES AGREE')" = 0 ] && echo 1 || echo 0)" "$out"
+check "and the FAIL carries the exact Caddy lines, the reload and the CDN purge" "$([ "$(has "$out" '@pushSw path /sw.js')" = 1 ] && [ "$(has "$out" 'header @pushSw Cache-Control "no-cache"')" = 1 ] && [ "$(has "$out" 'systemctl reload caddy')" = 1 ] && [ "$(has "$out" 'purge https://app.invalid/sw.js')" = 1 ] && echo 1 || echo 0)" "$out"
+# The same three-way agreement as Notes' lines: the FAIL output, the example
+# Caddyfile and the README's upgrade note must say the same two lines.
+psw_lines="$(printf '%s
+' "$out" | grep -oE '@pushSw path /sw\.js|header @pushSw Cache-Control "no-cache"' | sort -u)"
+check "the FAIL names exactly the two @pushSw lines" "$([ "$(printf '%s
+' "$psw_lines" | grep -c .)" = 2 ] && echo 1 || echo 0)" "$psw_lines"
+for psw_f in deploy/Caddyfile.example.com deploy/webapp/README.md; do
+	psw_missing=""
+	[ "$(grep -c . <<< "$psw_lines")" = 2 ] || psw_missing="fewer than two lines to check; "
+	while IFS= read -r psw_line; do
+		[ -n "$psw_line" ] || continue
+		grep -qF "$psw_line" "$REPO/$psw_f" || psw_missing="$psw_missing$psw_line; "
+	done <<< "$psw_lines"
+	check "$psw_f carries both @pushSw lines verbatim" "$([ -z "$psw_missing" ] && echo 1 || echo 0)" "missing: $psw_missing"
+done
+serve_psw 'HTTP/2 200\ncontent-type: text/javascript; charset=utf-8\n'
+out="$(versions)"
+check "FAILS a push worker with no Cache-Control at all" "$(has "$out" 'FAIL  push worker cache')" "$out"
+serve_psw 'HTTP/2 200\ncontent-type: text/html; charset=utf-8\n'
+out="$(versions)"
+check "a webapp older than the push worker (SPA fallback HTML) is INFO, not FAIL" "$([ "$(has "$out" 'INFO  push worker cache')" = 1 ] && [ "$(has "$out" 'push-sw-cache')" = 0 ] && echo 1 || echo 0)" "$out"
+
+echo
 echo "--- check-versions.sh: the iPhone web app's manifest and icon ---"
 # try_files answers a MISSING file with the page and a 200, so a manifest that did
 # not deploy passes a status check; the probe reads the body, the type and the

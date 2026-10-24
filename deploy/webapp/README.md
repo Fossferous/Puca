@@ -48,6 +48,12 @@ Two things the operator must know:
   app and its updater are untouched. It must be served with
   `Cache-Control: no-cache` (step 3) — a copy cached at the CDN edge would pin
   every installed Notes page to an old build.
+- The web app's own service worker, `/sw.js`, carries Web Push (notifications
+  while Púca is closed; `VAPID_PRIVATE_KEY` in `.env.example`). It handles only
+  `push` and `notificationclick` — no `fetch` handler, so it caches nothing and
+  the app still loads from the network. It needs the same
+  `Cache-Control: no-cache` (step 3): browsers fetch a worker past their own
+  cache, but not past the CDN's, so a fix to it would wait out the edge's copy.
 
 ## Deploy (on the server)
 1. On your machine: `cd frontend && npm run build`, then
@@ -67,6 +73,8 @@ Two things the operator must know:
        file_server
        @notesSw path /notes/sw.js
        header @notesSw Cache-Control "no-cache"   # Notes' service worker: never cached at the edge
+       @pushSw path /sw.js
+       header @pushSw Cache-Control "no-cache"    # the web app's push worker: the same
        header {
            Strict-Transport-Security "max-age=31536000; includeSubDomains"
            X-Content-Type-Options "nosniff"
@@ -115,4 +123,12 @@ and purge `https://app.example.com/notes/sw.js` from the CDN cache (Cloudflare:
 Caching > Purge by URL), or a copy the edge already holds is served until it
 expires. `check-versions.sh` fails on `notes-sw-cache` until they are live, and
 its FAIL line prints these same steps (it reports INFO while the deployed
-webapp has no worker yet).
+webapp has no worker yet). The release that introduced Web Push (0.9.849)
+needs the two `@pushSw` lines added the same way, next to those:
+```
+    @pushSw path /sw.js
+    header @pushSw Cache-Control "no-cache"
+```
+then the same validate and reload, and purge `https://app.example.com/sw.js`.
+`check-versions.sh` fails on `push-sw-cache` until they are live (INFO while
+the deployed webapp has no `/sw.js` yet).
