@@ -197,6 +197,7 @@ serve_page_version() { # <version-on-the-live-page> [an-older-version-mentioned-
 #!/usr/bin/env bash
 cmd="\$*"
 case "\$cmd" in
+	*ios-web-clip*) cat "$TMP/clip-answer" 2>/dev/null ;;
 	*app.invalid*) echo '<script src="/assets/index-abc123.js"></script>'
 	                echo 'content-security-policy: default-src self' ;;
 	*latest-lite.json*) ;;
@@ -205,7 +206,8 @@ case "\$cmd" in
 	*variant=notes*) cat "$TMP/notes-ota.json" 2>/dev/null ;;
 	*mobile-updates/check*) echo '{"version":"9.9.9"}' ;;
 	*http_code*) echo 200 ;;
-	*dl.invalid*) echo '<a href="/mobile/Puca-9.9.9.apk">a</a>'
+	*dl.invalid*) ${CLIP_LINK:+echo '<a href="https://api.invalid/api/ios-web-clip">one tap</a>'}
+	              echo '<a href="/mobile/Puca-9.9.9.apk">a</a>'
 	              echo '<a href="/mobile/Puca-Lite-9.9.9.apk">b</a>'
 	              echo '<a href="/mobile/Puca-Notes-${NOTES_APK_VER:-9.9.9}.apk">c</a>'
 	              echo '<div class="meta">v$1 &middot; Windows</div>'
@@ -226,6 +228,36 @@ check "and says what it expected"                      "$(has "$out" 'expected 9
 serve_page_version 9.9.9
 out="$(versions)"
 check "PASSES once the label is bumped" "$(has "$out" 'PASS  download-page version')" "$out"
+
+# The iPhone one-tap profile, as the live page and the backend answer it. Only a page
+# that LINKS it is held to it; the probe reads the type, the address and the payload
+# count out of what the API host really answers.
+node "$REPO/deploy/ops/make-web-clip-profile.mjs" https://app.invalid/ "$REPO/frontend/public/apple-touch-icon.png" > "$TMP/clip.good"
+clip_answer() { # <status> <content-type or ""> <body file>
+	{ printf 'HTTP/2 %s\r\n' "$1"; [ -n "$2" ] && printf 'content-type: %s\r\n' "$2"; printf '\r\n'; cat "$3"; } > "$TMP/clip-answer"
+}
+out="$(versions)"
+check "a page that does not link the iPhone profile is INFO, not held to it" "$([ "$(has "$out" 'INFO  iPhone profile')" = 1 ] && [ "$(has "$out" 'ios-profile')" = 0 ] && echo 1 || echo 0)" "$out"
+CLIP_LINK=1 serve_page_version 9.9.9
+clip_answer 200 application/x-apple-aspen-config "$TMP/clip.good"
+out="$(versions)"
+check "a linked profile the backend serves right PASSES" "$([ "$(has "$out" 'PASS  iPhone profile')" = 1 ] && [ "$(has "$out" 'ios-profile')" = 0 ] && echo 1 || echo 0)" "$out"
+clip_answer 200 text/xml "$TMP/clip.good"
+out="$(versions)"
+check "FAILS when it is served as the wrong type" "$([ "$(has "$out" 'FAIL  iPhone profile')" = 1 ] && [ "$(has "$out" 'aspen-config=NO')" = 1 ] && [ "$(has "$out" 'sandbox/ios-profile')" = 1 ] && [ "$(has "$out" 'ALL SURFACES AGREE')" = 0 ] && echo 1 || echo 0)" "$out"
+clip_answer 404 "" /dev/null
+out="$(versions)"
+check "FAILS on a 404 (a backend older than the route), saying to ship the backend" "$([ "$(has "$out" 'FAIL  iPhone profile')" = 1 ] && [ "$(has "$out" 'dual-ship.sh backend')" = 1 ] && echo 1 || echo 0)" "$out"
+node "$REPO/deploy/ops/make-web-clip-profile.mjs" https://other.invalid/ "$REPO/frontend/public/apple-touch-icon.png" > "$TMP/clip.other"
+clip_answer 200 application/x-apple-aspen-config "$TMP/clip.other"
+out="$(versions)"
+check "FAILS when the profile opens another address than the web app" "$([ "$(has "$out" 'FAIL  iPhone profile')" = 1 ] && [ "$(has "$out" 'opens https://app.invalid/=NO')" = 1 ] && echo 1 || echo 0)" "$out"
+sed 's|<key>PayloadVersion</key>|<key>PayloadType</key><string>com.apple.security.root</string><key>PayloadVersion</key>|' "$TMP/clip.good" > "$TMP/clip.two"
+clip_answer 200 application/x-apple-aspen-config "$TMP/clip.two"
+out="$(versions)"
+check "FAILS when a payload beyond the one Web Clip rides along" "$([ "$(has "$out" 'FAIL  iPhone profile')" = 1 ] && [ "$(has "$out" 'payload types=')" = 1 ] && echo 1 || echo 0)" "$out"
+rm -f "$TMP/clip-answer"
+serve_page_version 9.9.9
 
 # Púca Notes' Android app has NO OTA. The other two APKs may trail after an
 # OTA-only release because their web layer updates itself; a trailing Notes APK

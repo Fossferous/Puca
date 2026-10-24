@@ -119,6 +119,14 @@ describe('identifiers are per deployment and stable', () => {
     });
 });
 
+describe('the Rust route validator is pinned to this generator', () => {
+    it('writes exactly the fixture src/update_routes.rs accepts (regenerate it if this changes)', () => {
+        const fixture = fs.readFileSync(path.resolve(__dirname, '../../../deploy/ops/fixtures/web-clip-profile.example.mobileconfig'), 'utf8');
+        expect(webClipProfile({ url: 'https://app.fixture.invalid/', iconPng: icon }))
+            .toBe(fixture.replace(/\r\n/g, '\n'));
+    });
+});
+
 describe('what it refuses', () => {
     const png = (w: number, h: number) => {
         const b = Buffer.from(icon);

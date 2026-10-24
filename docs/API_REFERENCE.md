@@ -32,6 +32,7 @@ in this file is not registered there, so what IS listed is real.
 |--------|----------|------|-------------|
 | GET | `/config` | ❌ | What a client needs before signing in: `app_url` (the web app, so invite links are `<app_url>/invite/<code>`; null when the operator has not set `APP_URL`) and `registration_invite_required` (boolean — whether the sign-up form must ask for an invite code; the code itself is never exposed). |
 | GET | `/source` | ❌ | `repository` (the operator's `SOURCE_URL`), `commit` (what the binary was built from) and `license` — the AGPL §13 offer of source to the people using this server. A fork must set `SOURCE_URL` to its own repository. |
+| GET | `/api/ios-web-clip` | ❌ | The iPhone/iPad "Install with one tap" configuration profile the download page links: one Web Clip payload (this deployment's web app address, label, icon, FullScreen, IsRemovable) and nothing else, rendered at ship time by `dual-ship.sh` into `ios-web-clip.mobileconfig` next to the binary. Answers `application/x-apple-aspen-config` (the type iOS needs to offer the install), `404` while the file is absent or is anything other than exactly that one payload. |
 | GET | `/ice-config` | ❌ (TURN credentials only with a bearer token) | STUN servers, and for a signed-in caller 4-hour credentials for the operator's TURN relay. |
 
 ---

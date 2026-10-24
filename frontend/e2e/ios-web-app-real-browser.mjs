@@ -265,7 +265,8 @@ console.log('\n--- the web app "Install Púca" banner (components/InstallBanner.
 {
     const fireInstallEvent = (page) => page.evaluate(() => {
         const e = new Event('beforeinstallprompt', { cancelable: true });
-        e.prompt = () => Promise.resolve();
+        window.__prompts = window.__prompts || 0;
+        e.prompt = () => { window.__prompts++; return Promise.resolve(); };
         e.userChoice = Promise.resolve({ outcome: 'dismissed' });
         window.dispatchEvent(e);
         return e.defaultPrevented;
@@ -277,7 +278,9 @@ console.log('\n--- the web app "Install Púca" banner (components/InstallBanner.
         const r = b.getBoundingClientRect();
         const btn = document.querySelector('[data-testid="install-banner-install"]').getBoundingClientRect();
         const hit = document.elementFromPoint(btn.left + btn.width / 2, btn.top + btn.height / 2);
-        return { top: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height), overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth, btnHit: hit?.getAttribute('data-testid') ?? hit?.tagName, btnH: Math.round(btn.height) };
+        const x = document.querySelector('[data-testid="install-banner-dismiss"]').getBoundingClientRect();
+        const xHit = document.elementFromPoint(x.left + x.width / 2, x.top + x.height / 2);
+        return { top: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height), overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth, btnHit: hit?.getAttribute('data-testid') ?? hit?.tagName, btnH: Math.round(btn.height), xH: Math.round(x.height), xW: Math.round(x.width), xHit: xHit?.closest('[data-testid]')?.getAttribute('data-testid') ?? xHit?.tagName, right: Math.round(x.right) };
     });
     const CHROME = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
 
@@ -303,6 +306,33 @@ console.log('\n--- the web app "Install Púca" banner (components/InstallBanner.
         await fireInstallEvent(page);
         await page.waitForSelector('.install-banner', { timeout: 5000 }).catch(() => {});
         check('but asking again from the download page is a fresh ask', (await banner(page)) !== null);
+        await context.close();
+    }
+    // The phone the banner is FOR: Chrome on Android, 390x844, coarse pointer, real taps.
+    {
+        const ANDROID = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36';
+        const { context, page } = await open(`${app.url}/?install=1`, { viewport: { width: 390, height: 844 }, userAgent: ANDROID, hasTouch: true, isMobile: true, deviceScaleFactor: 3 });
+        await mounted(page);
+        check('precondition: a coarse pointer at phone width', await page.evaluate(() => matchMedia('(pointer: coarse)').matches && innerWidth <= 400));
+        await fireInstallEvent(page);
+        await page.waitForSelector('.install-banner', { timeout: 5000 }).catch(() => {});
+        const b = await banner(page);
+        check('Chrome on Android 390x844: the banner is on screen, inside the width, no horizontal overflow', b !== null && b.top === 0 && b.w <= 390 && b.right <= 390 && b.overflow <= 0, JSON.stringify(b));
+        check('its Install and dismiss buttons are 44 px touch targets, and what a tap point hits', b !== null && b.btnH >= 44 && b.xH >= 44 && b.xW >= 44 && b.btnHit === 'install-banner-install' && b.xHit === 'install-banner-dismiss', JSON.stringify(b));
+        await page.screenshot({ path: path.join(outDir, 'app-390x844-android-install-banner.png') });
+        await page.tap('[data-testid="install-banner-install"]');
+        await page.waitForTimeout(300);
+        check('a TAP on Install calls the browser prompt, once', (await page.evaluate(() => window.__prompts)) === 1);
+        await context.close();
+    }
+    {
+        const ANDROID = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36';
+        const { context, page } = await open(`${app.url}/?install=1`, { viewport: { width: 390, height: 844 }, userAgent: ANDROID, hasTouch: true, isMobile: true });
+        await mounted(page);
+        await fireInstallEvent(page);
+        await page.waitForSelector('.install-banner', { timeout: 5000 }).catch(() => {});
+        await page.tap('[data-testid="install-banner-dismiss"]');
+        check('a TAP on the X dismisses it', (await banner(page)) === null);
         await context.close();
     }
     // An ordinary visit: nothing, and the browser's prompt is not taken from it.
@@ -422,6 +452,27 @@ console.log('\n--- the download page on an iPhone ---');
     const { context, page } = await open(site.url, { viewport: { width: 1280, height: 800 }, userAgent: DESKTOP_UA.replace('Windows NT 10.0; Win64; x64', 'Macintosh; Intel Mac OS X 10_15_7') },
         { init: () => Object.defineProperty(Navigator.prototype, 'maxTouchPoints', { get: () => 0, configurable: true }) });
     check('CONTROL: a Mac without a touch screen is not moved', !(await sectionState(page)).first);
+    await context.close();
+}
+
+console.log('\n--- the download page in an iPhone browser that cannot install a profile ---');
+for (const [name, ua] of [
+    ['Chrome on iOS', 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/130.0.0.0 Mobile/15E148 Safari/604.1'],
+    ['Firefox on iOS', 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/130.0 Mobile/15E148 Safari/605.1.15'],
+    ['Edge on iOS', 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 EdgiOS/130.0.0.0 Mobile/15E148 Safari/605.1.15'],
+    ['an in-app web view (no Safari token)', 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 300.0.0.0'],
+]) {
+    const { context, page } = await open(site.url, { ...iphone, userAgent: ua });
+    const s = await sectionState(page);
+    const note = await page.evaluate(() => { const n = document.getElementById('onetap-safari'); return n ? { shown: n.getBoundingClientRect().height > 0, text: n.textContent.replace(/\s+/g, ' ').trim() } : null; });
+    check(`${name}: the one-tap button and its steps are hidden, and the page says to open it in Safari`, !s.tapBtnVisible && s.tapSteps.length === 4 && note?.shown === true && /Safari/.test(note.text), JSON.stringify({ btn: s.tapBtnVisible, note }));
+    check(`${name}: the Share steps are still there`, s.steps.length === 4 && s.first, JSON.stringify(s.steps));
+    await context.close();
+}
+{
+    const { context, page } = await open(site.url, iphone);
+    const note = await page.evaluate(() => document.getElementById('onetap-safari').getBoundingClientRect().height);
+    check('CONTROL: Safari on iPhone keeps the button and does not show the Safari note', (await sectionState(page)).tapBtnVisible && note === 0);
     await context.close();
 }
 
