@@ -50,8 +50,14 @@
     transition: color 0.2s;
 }
 
-.stream-modal-close:hover {
+.stream-modal-close:hover:not(:disabled) {
     color: #f2f3f5;
+}
+
+/* While the share starts, like the dialog's Cancel. */
+.stream-modal-close:disabled {
+    cursor: default;
+    opacity: 0.4;
 }
 
 .stream-modal-content {

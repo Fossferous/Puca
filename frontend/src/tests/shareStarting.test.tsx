@@ -107,12 +107,12 @@ describe('VoicePanel wiring (VoicePanel is not mountable under vitest)', () => {
     it('starts BEFORE the picker is awaited, and ends on a cancelled picker', () => {
         const begin = capture.indexOf('shareStarting.begin()');
         expect(begin).toBeGreaterThan(-1);
-        expect(begin).toBeLessThan(capture.indexOf('await webrtcManager.getScreenShareStream('));
+        expect(begin).toBeLessThan(capture.indexOf('await captureFor(start, () => webrtcManager.getScreenShareStream('));
         expect(capture).toMatch(/goLiveEnd\('cancelled'\);\s*shareStarting\.end\(\);/);
     });
 
     it('ends when the dialog closes (every go-live outcome closes it) and on a cancel after capture', () => {
-        expect(vp).toMatch(/onClose=\{\(\) => \{ setShowStreamSettings\(false\); shareStarting\.end\(\); endDialogStart\(\); \}\}/);
+        expect(vp).toMatch(/onClose=\{\(\) => \{ setShowStreamSettings\(false\); shareStarting\.end\(\); \}\}/);
         expect(vp).toMatch(/onCancelAfterCapture=\{\(\) => \{[^}]*shareStarting\.end\(\);/);
     });
 

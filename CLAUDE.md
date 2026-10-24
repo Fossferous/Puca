@@ -327,6 +327,20 @@ migration.
   backend" line closed the owner's running app on every harness run. Stop a
   test backend by its PATH (`Where-Object { $_.Path -like '*target*puca.exe' }`)
   or by the PID you started.
+- **Every desktop-app update kills a debug backend.** This is the reverse of the
+  trap above. Before it installs, Tauri's per-user installer runs
+  `KillProcessCurrentUser "Puca.exe"`. That call matches image names
+  case-insensitively, checks only the owner's user SID and calls
+  `TerminateProcess(…, 1)`. So `target\debug\puca.exe` dies whenever the
+  owner's desktop app takes an update, which is every release. It exits with
+  code 1 and writes nothing to its log.
+  - A Deck rig's backend died this way on 2026-10-24, ten seconds after the
+    owner left a call and the pending 0.9.848 install ran.
+  - It was first blamed on PID reuse. That cannot happen here: a living child
+    keeps its dead parent's PID reserved.
+  - Run a throwaway backend from a copy under another name
+    (`cp target/debug/puca.exe <scratch>/puca-rig-backend.exe`), with the repo
+    root as its working directory.
 - **The backend tarball must carry `SOURCE_COMMIT`.** `GET /source` (AGPL §13)
   reports the commit `build.rs` embeds; a tarball has no `.git`, so write it
   first: `git rev-parse HEAD > SOURCE_COMMIT` and include the file in
@@ -359,7 +373,7 @@ cd frontend && node e2e/games-live.mjs          # card games as ACTIVITIES, BOTH
 cd frontend && node e2e/games-walk.mjs          # the activities and the card table's layout: 1280x800 + 390x844 coarse pointer, the launcher's sheet, the notice and the tile, keyboard-open raise sheet, 44 px targets, 460 px overflow controls, all eight themes with and without high contrast for the table AND the activity surfaces (picker, notice, tile, sidebar marks; one screenshot each); same env
 cd frontend && node e2e/own-voice-2device.mjs   # Leave / Move here: ONE account on a desktop and a 390x844 phone context plus a second account in the call, mesh and (with LK_*) SFU; needs APP= / API= against a throwaway backend (header of the file)
 cd frontend && node e2e/voice-firefox-2peer.mjs   # a mesh call between Chromium and FIREFOX in the REAL app (rtc/scriptTransform.ts, the iPhone's path, against createEncodedStreams) through a real backend, "Require encryption for calls" at its default: both panels say Encrypted, Firefox wraps every sender and receiver in an RTCRtpScriptTransform and Chromium none, each hears the other (audio energy arriving under enforcement = decrypted; CONTROL: one side muted, the other measures none), each camera renders on the other side, and no description is refused or connection rebuilt; needs APP= PGPORT= PGDB= against a throwaway stack, and Firefox (npx playwright install firefox); silent (--mute-audio, media.volume_scale 0)
-cd frontend && node e2e/host-share-start-live.mjs   # an embedding host's screen share (docs/EMBEDDING.md, startShare) through the REAL voice panel while it is still starting: a Stop while the host supplies the picture (nothing announced, the picture let go of), a Stop while the server answers and the picture ending then (not live, the announcement taken back, the panel says why), two starts at once (the second refused), and the control: left alone it goes live, and a Stop in the very next step is taken (components/shareStarts.ts; against the unfixed panel 14 of its checks fail); needs APP= / API= against a throwaway backend (header of the file)
+cd frontend && node e2e/host-share-start-live.mjs   # an embedding host's screen share (docs/EMBEDDING.md, startShare) through the REAL voice panel while it is still starting: a Stop while the host supplies the picture (nothing announced, the picture let go of), a Stop while the server answers and the picture ending then the way it does in production, the source closing and the browser firing `ended` (not live, the announcement taken back, the answer and the panel say the picture ended), two starts at once (the second refused), and the control: left alone it goes live, and a Stop in the very next step is taken; then the Share DIALOG's own start through the real dialog: its X disabled and a host's start refused while it works, a host's Stop during it, the dialog left open over a live share capturing nothing over it, and a hang-up while the server answers being a quiet 'left the call' (components/shareStarts.ts); needs APP= / API= against a throwaway backend (header of the file)
 cd frontend && node e2e/stream-only-live.mjs   # an automated streaming account (docs/STREAM_ONLY.md) set up in the REAL role editor (1280x800 and 390x844 touch) and driven by the docs/AUTOMATION.md data-testids alone on a mesh call: only its opened voice channel listed, text refused, no microphone ever asked for, "No microphone" in the owner's roster, its share received, No receive stopping the owner's audio to it (control: received before), no silent-mic warning after 26 s; its join/leave never SPOKEN (speechSynthesis replaced by a recorder; a person's is, the control) and its share auto-watched (owner's small player with the chat kept, a person joining while live, a 390x844 docked player; a person's share not; closed stays closed); needs APP= / API= against a throwaway backend (header of the file)
 cd frontend && npm run check:installer-hooks # NSIS hook macros compile and every migrate call names the OLD binary (needs makensis; Tauri caches one under LOCALAPPDATA/tauri/NSIS)
 node scripts/gen-third-party-notices.mjs      # regenerates THIRD_PARTY_NOTICES.md; exits 1 on a dependency with no licence — commit the result before a release
@@ -664,7 +678,9 @@ production one. See the header of `frontend/e2e/e2ee-live-verify.mjs`.
 **Throwaway stack recipe (used for every 0.9.0 gate):** a second Postgres
 cluster on **5433** (`pg_ctl -D <scratch>/pgdata -o "-p 5433" start`), a
 fresh database per run, the debug backend on :3000 with `DATABASE_URL`
-pointing at it (migrations apply at startup), then the harness with its env:
+pointing at it (migrations apply at startup; run it as a renamed copy, see
+*Deploy traps*: the desktop app's updater kills every `Puca.exe`), then the
+harness with its env:
 
 - `frontend/e2e/e2ee-live-verify.mjs` — `PGDB=<db> PGPORT=5433 API=http://127.0.0.1:3000`
   (real SRP; covers E2EE, the password-proof/session binding and per-session

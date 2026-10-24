@@ -261,7 +261,9 @@ const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ isOpen, launch = 's
             <div className="stream-modal">
                 <div className="stream-modal-header">
                     <h3>Screen Share</h3>
-                    <button className="stream-modal-close" onClick={handleCancel} aria-label="Close"><CloseIcon size={18} /></button>
+                    {/* Not while it works, like Cancel: closing then would leave the
+                        share starting with nothing on screen to show it (VoicePanel). */}
+                    <button className="stream-modal-close" onClick={handleCancel} disabled={busy} aria-label="Close"><CloseIcon size={18} /></button>
                 </div>
 
                 {mixerApps ? (
