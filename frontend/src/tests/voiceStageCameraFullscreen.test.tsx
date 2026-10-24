@@ -96,4 +96,40 @@ describe('fullscreening a camera tile', () => {
         act(() => { btn.click(); });
         expect(requestFullscreen).toHaveBeenCalledTimes(1);
     });
+
+    it('where nothing can go fullscreen (an iPhone without its player for this video), the tile fills the app and leaves again', () => {
+        Object.defineProperty(document, 'fullscreenEnabled', { configurable: true, value: false });
+        try {
+            globalCameraUsers.set(7, 'them');
+            globalCameraStreams.set(7, new MediaStream());
+            render();
+            const btn = () => container.querySelector('.vs-fullscreen-btn') as HTMLButtonElement;
+            act(() => { btn().click(); });
+            expect(container.querySelector('.voice-stage-tile.is-app-fullscreen')).not.toBeNull();
+            expect(document.documentElement.dataset.mediaFullscreen).toBe('on');
+            expect(btn().getAttribute('aria-label')).toBe('Exit fullscreen');
+            act(() => { btn().click(); });
+            expect(container.querySelector('.is-app-fullscreen')).toBeNull();
+            expect(document.documentElement.dataset.mediaFullscreen).toBeUndefined();
+        } finally {
+            delete (document as { fullscreenEnabled?: boolean }).fullscreenEnabled;
+        }
+    });
+
+    it('the camera going away ends the in-app fullscreen: nothing is left holding the page', () => {
+        Object.defineProperty(document, 'fullscreenEnabled', { configurable: true, value: false });
+        try {
+            globalCameraUsers.set(7, 'them');
+            globalCameraStreams.set(7, new MediaStream());
+            render();
+            act(() => { (container.querySelector('.vs-fullscreen-btn') as HTMLButtonElement).click(); });
+            expect(document.documentElement.dataset.mediaFullscreen).toBe('on');
+            globalCameraStreams.delete(7);
+            globalCameraUsers.delete(7);
+            render();
+            expect(document.documentElement.dataset.mediaFullscreen).toBeUndefined();
+        } finally {
+            delete (document as { fullscreenEnabled?: boolean }).fullscreenEnabled;
+        }
+    });
 });

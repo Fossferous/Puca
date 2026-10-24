@@ -21,7 +21,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { CameraVideo } from './CameraVideo';
-import { FullscreenIcon } from './Icons';
+import { FullscreenExitIcon, FullscreenIcon } from './Icons';
+import { enterMediaFullscreen, useAppMediaFullscreen } from './mediaFullscreen';
 import {
     getAllVoiceUsers,
     globalCameraStreams,
@@ -77,16 +78,25 @@ export function CameraRail({ currentUserId }: { currentUserId: number }) {
         };
     }, [release]);
 
+    // Where nothing can go fullscreen, the tile fills the app instead
+    // (mediaFullscreen.ts); leaving it releases the pin like any other exit.
+    const [appFullscreen, setAppFullscreen] = useAppMediaFullscreen((id) => globalCameraStreams.has(id), release);
+
     const enlarge = useCallback((userId: number, tile: HTMLElement | null) => {
-        if (!tile?.requestFullscreen) return;
+        if (!tile) return;
+        if (appFullscreen === userId) { setAppFullscreen(null); return; }
         // Ask for the good picture BEFORE the element fills the screen, so the
         // switch has the round trip to land rather than resolving visibly.
         if (userId !== currentUserId) {
             pinnedRef.current = userId;
             try { sfuManager.setCameraQuality(userId, HIGH); } catch { /* mesh call, or not connected */ }
         }
-        void tile.requestFullscreen().catch(() => { release(); });
-    }, [currentUserId, release]);
+        enterMediaFullscreen(tile, tile.querySelector('video'), {
+            // An iPhone: the system player. Its exit is not a fullscreenchange.
+            onVideoExit: release,
+            fallback: () => setAppFullscreen(userId),
+        });
+    }, [currentUserId, release, appFullscreen, setAppFullscreen]);
 
     const cameras = [...globalCameraStreams.entries()];
     if (cameras.length === 0) return null;
@@ -101,15 +111,15 @@ export function CameraRail({ currentUserId }: { currentUserId: number }) {
                 const name = names.get(userId) ?? `User ${userId}`;
                 const isMe = userId === currentUserId;
                 return (
-                    <div className="camera-rail-tile" key={userId}>
+                    <div className={`camera-rail-tile${appFullscreen === userId ? ' is-app-fullscreen' : ''}`} key={userId}>
                         <CameraVideo stream={stream} mirrored={isMe} className="camera-rail-video" />
                         <button
                             className="camera-rail-fullscreen"
-                            title={`Fullscreen ${isMe ? 'your' : `${name}'s`} camera`}
-                            aria-label={`Fullscreen ${isMe ? 'your' : `${name}'s`} camera`}
+                            title={appFullscreen === userId ? 'Exit fullscreen' : `Fullscreen ${isMe ? 'your' : `${name}'s`} camera`}
+                            aria-label={appFullscreen === userId ? 'Exit fullscreen' : `Fullscreen ${isMe ? 'your' : `${name}'s`} camera`}
                             onClick={(e) => enlarge(userId, e.currentTarget.parentElement)}
                         >
-                            <FullscreenIcon />
+                            {appFullscreen === userId ? <FullscreenExitIcon /> : <FullscreenIcon />}
                         </button>
                         <span className="camera-rail-name">{isMe ? 'You' : name}</span>
                     </div>

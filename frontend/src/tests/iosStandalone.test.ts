@@ -9,7 +9,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { installIosStandalone, isIosStandalone, viewportContent } from '../api/iosStandalone';
+import { COVER_QUERY, installIosStandalone, isIosStandalone, viewportContent } from '../api/iosStandalone';
 
 const BASE = 'width=device-width, initial-scale=1.0';
 
@@ -31,7 +31,7 @@ function fakeWindow(standalone: boolean | undefined) {
     const win = {
         document,
         navigator: { standalone },
-        matchMedia: (q: string) => { expect(q).toBe('(orientation: portrait)'); return mq; },
+        matchMedia: (q: string) => { expect(q).toBe(COVER_QUERY); return mq; },
     } as unknown as Window;
     return {
         win,
@@ -64,6 +64,14 @@ describe('isIosStandalone', () => {
         expect(isIosStandalone({ standalone: true })).toBe(true);
         expect(isIosStandalone({ standalone: false })).toBe(false); // Safari tab
         expect(isIosStandalone({})).toBe(false); // Android, desktop, Tauri: the property does not exist
+    });
+});
+
+describe('COVER_QUERY', () => {
+    it('is portrait inside the gate of mobile.css, so the desktop layout (a 13-inch iPad) never gets cover', () => {
+        const mobile = readFileSync(join(__dirname, '..', 'mobile.css'), 'utf8');
+        expect(mobile).toContain('@media (pointer: coarse) and (max-width: 1024px)');
+        expect(COVER_QUERY).toBe('(orientation: portrait) and (pointer: coarse) and (max-width: 1024px)');
     });
 });
 

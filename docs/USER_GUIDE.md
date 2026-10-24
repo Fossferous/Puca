@@ -819,6 +819,16 @@ What is different from the Android and Windows apps:
 - **My Devices.** An iPhone cannot be controlled from elsewhere and cannot share
   its own screen. Controlling a Windows PC from it uses the same code as on
   Android; that has not been tried on an iPhone.
+- **Watching a stream.** Turn the phone sideways and the stream fills the
+  screen. Tap it to show or hide its buttons and the call's (mute, deafen,
+  hang up); they hide by themselves after a few seconds. **Chat** goes back to
+  the chat with the stream beside it. **Fullscreen** hands the stream to the
+  iPhone's own video player, which also covers Safari's toolbars; **Done**
+  brings it back. The stream's sound keeps playing at the volume you set in
+  Púca, whatever that player's own speaker button shows.
+- **Saving a file** from the Home Screen app opens the Share sheet: choose
+  **Save to Files** (or **Save Image** for a photo). In a Safari tab it
+  downloads as usual.
 - **Photos work.** Safari reads iPhone photos (HEIC) itself, so Púca turns one
   into a JPEG on the phone before sending it, without the location the camera
   saved with it.

@@ -32,7 +32,8 @@
     "src",
     "e2e/av-emulation/main.ts",
     "e2e/device-stage",
-    "e2e/mesh-e2ee"
+    "e2e/mesh-e2ee",
+    "e2e/iphone-stream"
   ],
   "exclude": [
     "src/**/*.test.ts",

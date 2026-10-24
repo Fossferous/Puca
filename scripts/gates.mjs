@@ -245,6 +245,8 @@ const GATES = [
         // fails, saying so, when it is not. Screenshots go to the ignored e2e-artifacts.
         ['e2e-ios-web-app', 'ios-web-app-real-browser.mjs e2e-artifacts/ios-web-app-shots'],
         ['e2e-mesh-e2ee-interop', 'mesh-e2ee-interop-real-browser.mjs'],
+        // Chromium and WebKit (installed once, as above).
+        ['e2e-iphone-stream', 'iphone-stream-real-browser.mjs e2e-artifacts/iphone-stream-shots'],
     ].map(([id, file]) => ({
         id, title: `e2e/${file.split(' ')[0]} (real browser, no server)`,
         inputs: ALL, ignoreVersion: true, fingerprint: ['node', 'fe-deps'],
@@ -257,7 +259,7 @@ const GATES = [
 // Never run by this script; printed in every summary.
 const NOT_RUN_HERE = [
     'connectedDebugAndroidTest (notes-app, headless emulator)',
-    'e2e/feature-flows.mjs, games-live, games-walk, own-voice-2device, host-share-start-live, notes-walk, notes-desktop-embed, member-popup-scroll (throwaway backend)',
+    'e2e/feature-flows.mjs, games-live, games-walk, own-voice-2device, host-share-start-live, iphone-stream-live, notes-walk, notes-desktop-embed, member-popup-scroll (throwaway backend)',
     'e2e/poker-table-real-browser.mjs, user-context-menu-reach.mjs (vite dev server)',
     'e2e-live-verify, batch7-permbits-live, the two-peer voice suites (throwaway stack)',
 ];

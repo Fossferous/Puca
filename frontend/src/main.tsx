@@ -208,6 +208,7 @@ window.addEventListener('settingsChanged', e => {
     void syncTaskPlacesToNative()
 })
 import './mobile.css'
+import './phoneLandscape.css'
 import App from './App.tsx'
 import { UpdateGate } from './components/UpdateGate.tsx'
 import { ErrorBoundary } from './components/ErrorBoundary.tsx'
