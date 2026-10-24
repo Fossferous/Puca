@@ -33,6 +33,7 @@ import { IdentityBanner } from './components/IdentityBanner';
 import { HiddenRecipientBanner } from './components/HiddenRecipientBanner';
 import { wireSessionDmKeyPublish } from './api/dmKeys';
 import { HotkeyBlockedBanner } from './components/HotkeyBlockedBanner';
+import { CallEncryptionNotice } from './components/CallEncryptionNotice';
 import { InviteLanding } from './components/InviteLanding';
 import { DeepLinkNotice } from './components/DeepLinkNotice';
 import { discardSeal, onArmedChange as onClipArmedChange, wireSystemSuspendHook } from './api/clips/replayBuffer';
@@ -470,6 +471,7 @@ function App() {
             <IdentityBanner onSignOut={handleLogout} />
             <HiddenRecipientBanner />
             <HotkeyBlockedBanner />
+            <CallEncryptionNotice />
             <RecoveryCodeModal />
             <ClipApprovalPrompt />
             <RcGlobals />

@@ -1,5 +1,5 @@
 import { isTauri } from '../api/platform';
-import { isMediaE2eeSupported } from '../api/rtc/mediaCrypto';
+import { mediaTransformApi } from '../api/rtc/mediaCrypto';
 import { setIconStyle, type IconStyle } from './iconStyle';
 import type { ShareLadderMode } from '../api/rtc/shareLadder';
 // App settings persisted in localStorage. Extracted from SettingsModal so that
@@ -550,18 +550,20 @@ function migrateRequireMediaE2ee(parsed: Partial<Settings> | null): Partial<Sett
     // cannot satisfy it: with it on, the manager publishes no local media and
     // drops inbound tracks, so voice is dead in both directions. When this
     // migration was written that meant Safari and Firefox on the web and the
-    // WebKit/WebKitGTK Tauri shells (mesh encryption was Chromium-only); since
-    // the standard RTCRtpScriptTransform path it means an older browser or a
-    // web view with neither API. Flipping it blind would have taken working
-    // calls away from those users on upgrade, for a setting they never
-    // touched — and re-armed anyone who had already turned it off after their
-    // calls broke.
+    // WebKit/WebKitGTK Tauri shells (mesh encryption was Chromium-only).
+    // Flipping it blind would have taken working calls away from those users
+    // on upgrade, for a setting they never touched — and re-armed anyone who
+    // had already turned it off after their calls broke.
+    //
+    // Chromium's API only, then and now: an engine on the standard
+    // RTCRtpScriptTransform path is the next migration's, which says so to
+    // the user when it switches this on (migrateRequireMediaE2eeStandardPath).
     //
     // The marker below is still written UNCONDITIONALLY, which is what keeps the
     // disarm contract: a user who later turns this off deliberately is not
     // re-armed on the next launch, on any engine.
     const changed =
-        parsed != null && next.requireMediaE2ee === false && isMediaE2eeSupported();
+        parsed != null && next.requireMediaE2ee === false && mediaTransformApi() === 'encoded-streams';
     if (changed) next.requireMediaE2ee = true;
     try {
         // Marked done even with nothing stored, so a user who later turns this
@@ -573,6 +575,71 @@ function migrateRequireMediaE2ee(parsed: Partial<Settings> | null): Partial<Sett
         }
     } catch { /* storage full or blocked — the in-memory value below still applies */ }
     return next;
+}
+
+/**
+ * One-time: "Require encryption for calls" on, with a notice, in the browsers
+ * the first migration had to pass over.
+ *
+ * When migrateRequireMediaE2ee ran, Firefox and Safari — the iPhone and iPad
+ * Home Screen app and the WebKit desktop shells included — could not encrypt
+ * a mesh call, so it left their stored `false` alone: on, there, meant no
+ * voice at all, and many turned it off for exactly that reason. They encrypt
+ * now (the standard RTCRtpScriptTransform path, mediaCrypto.mediaTransformApi),
+ * so that reason is gone and the `false` is its leftover. The owner's decision
+ * (2026-10-24): turn it on, and say so — CallEncryptionNotice tells them once
+ * that calls on this device are now end-to-end encrypted, that the setting
+ * is therefore on, and where to change it.
+ *
+ * ONLY those engines: RTCRtpScriptTransform and no createEncodedStreams. A
+ * Chromium profile is the first migration's and a `false` there is a choice;
+ * an engine with neither API still cannot satisfy the setting.
+ *
+ * Same contract as the others: the marker is written unconditionally, so a
+ * deliberate off after this sticks.
+ */
+const MEDIA_E2EE_STANDARD_PATH_MIGRATION_KEY = 'requireMediaE2eeDefaultOn_v2';
+/** 'pending' from the migration that switched it on until the notice is dismissed ('seen'). */
+const CALL_ENCRYPTION_NOTICE_KEY = 'requireMediaE2eeTurnedOnNotice_v2';
+/** The notice's state for this page, beside storage (which may refuse writes). */
+let callEncryptionNotice: 'unknown' | 'pending' | 'dismissed' = 'unknown';
+
+function migrateRequireMediaE2eeStandardPath(parsed: Partial<Settings> | null): Partial<Settings> {
+    if (localStorage.getItem(MEDIA_E2EE_STANDARD_PATH_MIGRATION_KEY)) return parsed ?? {};
+    const next = { ...(parsed ?? {}) };
+    const changed =
+        parsed != null && next.requireMediaE2ee === false && mediaTransformApi() === 'script-transform';
+    if (changed) {
+        next.requireMediaE2ee = true;
+        if (callEncryptionNotice === 'unknown') callEncryptionNotice = 'pending';
+    }
+    try {
+        // Marked done even with nothing stored, as with the others.
+        localStorage.setItem(MEDIA_E2EE_STANDARD_PATH_MIGRATION_KEY, '1');
+        if (changed) {
+            localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...defaultSettings, ...next }));
+            localStorage.setItem(CALL_ENCRYPTION_NOTICE_KEY, 'pending');
+            console.log('[Settings] Require-encryption-for-calls turned on: calls in this browser are now end-to-end encrypted');
+        }
+    } catch { /* storage full or blocked — the in-memory value below still applies */ }
+    return next;
+}
+
+/** Whether to tell the user that the migration above switched "Require
+ *  encryption for calls" on (CallEncryptionNotice). */
+export function callEncryptionNoticePending(): boolean {
+    if (callEncryptionNotice !== 'unknown') return callEncryptionNotice === 'pending';
+    try {
+        return localStorage.getItem(CALL_ENCRYPTION_NOTICE_KEY) === 'pending';
+    } catch {
+        return false;
+    }
+}
+
+/** The user has read it: never again. */
+export function dismissCallEncryptionNotice(): void {
+    callEncryptionNotice = 'dismissed';
+    try { localStorage.setItem(CALL_ENCRYPTION_NOTICE_KEY, 'seen'); } catch { /* shown no more on this page either way */ }
 }
 
 function migrateBackgroundDelivery(parsed: Partial<Settings> | null): Partial<Settings> {
@@ -715,9 +782,9 @@ export function loadSettings(): Settings {
         // Called even for `null` so the migration disarms itself on a fresh
         // profile — see the note inside.
         const migrated = migrateAutoOpenStreams(migrateVoiceBindProvenance(migrateDefaultVoiceKeybinds(
-            migrateRequireMediaE2ee(
+            migrateRequireMediaE2eeStandardPath(migrateRequireMediaE2ee(
                 migrateBackgroundDelivery(migrateMicProcessingToggles(migrateClipArmOnJoin(parsed)) as Partial<Settings>),
-            ),
+            )),
         )) as Partial<Settings>);
         if (parsed) return { ...defaultSettings, ...migrated };
     } catch (e) {

@@ -1,6 +1,9 @@
 import { sdpFingerprints } from '../dtlsFingerprint';
 import { dtlsPinTag } from '../e2ee';
-import { inboundDropLogger, openIncoming, sealOutgoing, type EncodedFrameLike, type MediaCryptoState } from './frameCrypto';
+import {
+    countFrame, inboundDropLogger, newFrameCounts, openIncoming, sealOutgoing,
+    type EncodedFrameLike, type FrameCounts, type MediaCryptoState,
+} from './frameCrypto';
 /**
  * End-to-end encryption for WebRTC media (voice + screen share).
  *
@@ -25,7 +28,10 @@ import { inboundDropLogger, openIncoming, sealOutgoing, type EncodedFrameLike, t
  * unsupported/unavailable it stays plaintext (transport-only) — never broken.
  */
 
-export { encryptFrame, decryptFrame, type MediaCryptoState, type EncodedFrameLike } from './frameCrypto';
+export {
+    encryptFrame, decryptFrame, newFrameCounts,
+    type MediaCryptoState, type EncodedFrameLike, type FrameCounts, type FrameOutcome,
+} from './frameCrypto';
 
 /** Which API runs this engine's frame transforms (see the header). */
 export type MediaTransformApi = 'encoded-streams' | 'script-transform';
@@ -81,15 +87,18 @@ type Streams = { readable: ReadableStream<EncodedFrameLike>; writable: WritableS
 type WithStreams = { createEncodedStreams(): Streams };
 
 /** Attach the encrypt transform to a sender (once), through
- *  `createEncodedStreams`. False when it could not be attached. */
-export function attachSenderTransform(sender: RTCRtpSender, state: MediaCryptoState): boolean {
+ *  `createEncodedStreams`, counting each frame into `counts`. False when it
+ *  could not be attached. */
+export function attachSenderTransform(sender: RTCRtpSender, state: MediaCryptoState, counts: FrameCounts = newFrameCounts()): boolean {
     if (!('createEncodedStreams' in sender)) return false;
     try {
         const { readable, writable } = (sender as unknown as WithStreams).createEncodedStreams();
         readable
             .pipeThrough(new TransformStream<EncodedFrameLike, EncodedFrameLike>({
                 async transform(frame, controller) {
-                    if (await sealOutgoing(frame, state)) controller.enqueue(frame);
+                    const outcome = await sealOutgoing(frame, state);
+                    countFrame(counts, outcome);
+                    if (outcome !== 'dropped') controller.enqueue(frame);
                 },
             }))
             .pipeTo(writable)
@@ -102,8 +111,9 @@ export function attachSenderTransform(sender: RTCRtpSender, state: MediaCryptoSt
 }
 
 /** Attach the decrypt transform to a receiver (once), through
- *  `createEncodedStreams`. False when it could not be attached. */
-export function attachReceiverTransform(receiver: RTCRtpReceiver, state: MediaCryptoState): boolean {
+ *  `createEncodedStreams`, counting each frame into `counts`. False when it
+ *  could not be attached. */
+export function attachReceiverTransform(receiver: RTCRtpReceiver, state: MediaCryptoState, counts: FrameCounts = newFrameCounts()): boolean {
     if (!('createEncodedStreams' in receiver)) return false;
     try {
         const { readable, writable } = (receiver as unknown as WithStreams).createEncodedStreams();
@@ -111,7 +121,9 @@ export function attachReceiverTransform(receiver: RTCRtpReceiver, state: MediaCr
         readable
             .pipeThrough(new TransformStream<EncodedFrameLike, EncodedFrameLike>({
                 async transform(frame, controller) {
-                    if (await openIncoming(frame, state)) controller.enqueue(frame);
+                    const outcome = await openIncoming(frame, state);
+                    countFrame(counts, outcome);
+                    if (outcome !== 'dropped') controller.enqueue(frame);
                     else dropped();
                 },
             }))
@@ -167,8 +179,15 @@ export function firstVideoCodecByMid(sdp: string): Map<string, string | null> {
  * after ANY setCodecPreferences — and Chromium refuses that offer whole
  * ("Failed to parse codecs correctly"), so the call stalls into a rebuild
  * the moment the Firefox peer turns on a camera. Preferences on a transceiver
- * that was never negotiated (no mid yet) are kept consistent. Hence:
- *  - before an OFFER (`{ offer: true }`), only transceivers without a mid;
+ * that was never negotiated (no mid yet) are kept consistent — until GLARE
+ * makes it one: a polite Firefox rolls its own offer back and applies the
+ * other side's, which takes over that fresh transceiver, numbered by the
+ * other side and carrying the preferences, and the next offer Firefox makes
+ * (a screen share, an ICE restart) is refused. Hence:
+ *  - before an OFFER (`{ offer: true }`), nothing at all on an engine whose
+ *    own order already puts VP8 first (Chromium and Firefox, measured: the
+ *    preferences would change nothing in the offer, and Firefox's are what
+ *    breaks), and otherwise (Safari) only transceivers without a mid;
  *  - before an ANSWER (`{ answerTo: offerSdp }`), only those whose section of
  *    the offer does not already list VP8 first — never, between Púca
  *    clients, so a Firefox answerer meets that case only from a peer whose
@@ -190,6 +209,9 @@ export function preferSealableVideoCodecs(pc: RTCPeerConnection, when: { offer: 
     if (!codecs?.length) return;
     const isVp8 = (c: RTCRtpCodec) => c.mimeType.toLowerCase() === 'video/vp8';
     if (!codecs.some(isVp8)) return;
+    // The first codec that is a codec, not retransmission, redundancy or FEC.
+    const firstReal = codecs.find((c) => !/^video\/(rtx|red|ulpfec|flexfec)/i.test(c.mimeType));
+    if ('offer' in when && firstReal && isVp8(firstReal)) return;
     const ordered = [...codecs.filter(isVp8), ...codecs.filter(c => !isVp8(c))];
     const offered = 'answerTo' in when ? firstVideoCodecByMid(when.answerTo) : null;
     for (const t of pc.getTransceivers()) {

@@ -54,6 +54,7 @@ bottom: calc(var(--mobile-nav-height) + var(--safe-area-bottom)); /* nav  */
 | 2090 | `.clip-approval-backdrop` | clip approval prompt (Phase 2) — above the composer, below the 2100 prompts, which block a live connection on a 45 s deadline |
 | 1100 | `.activity-scrim` | the Activities picker (docs/GAMES.md, *Activities*) — portaled to `<body>`; a centred panel on a desktop, a bottom sheet on a phone; same band as the table's sheets, which it never coexists with |
 | 1100 | `.games-sheet-scrim` | the card table's amount sheet and first-sit disclosure (docs/GAMES.md) — portaled to `<body>`; above the voice bar and bottom nav, below Settings. The sheet rides the bottom of `window.visualViewport`, so it stays above the soft keyboard |
+| 9988–9991 | `.call-encryption-notice` 9988, `.hotkey-blocked-banner` 9989, `.identity-banner` 9990, `.hidden-recipient-banner` 9991 | the fixed full-width strips at the top of the signed-in app (App.tsx), each dismissible or self-clearing; they push nothing, so when two show at once the higher — the graver — is the one read first. The call-encryption notice only informs, so it is lowest |
 
 ### The integration contract for any NEW top-level surface
 

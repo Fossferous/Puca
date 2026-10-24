@@ -184,8 +184,18 @@ describe('mediaE2eeExplanation', () => {
         }
     });
 
+    it('a substituted connection: nothing is sent or played over it, with or without enforcement (manager.ts holdMediaWith)', () => {
+        for (const enforced of [false, true]) {
+            const s = mediaE2eeExplanation('fingerprint-mismatch', 'Mallory', enforced)!;
+            expect(s).toContain('Mallory');
+            expect(s).toMatch(/substituted/);
+            expect(s, 'the old wording: media went on flowing over it').not.toMatch(/flowing|not private/i);
+            expect(s).toContain('Nothing is sent to them or played from them over it');
+        }
+    });
+
     it('covers every reason variant (no silent undefined)', () => {
-        const reasons = ['encrypted', 'negotiating', 'local-unsupported', 'peer-unsupported', 'peer-unencrypted', 'verification-failed'] as const;
+        const reasons = ['encrypted', 'negotiating', 'local-unsupported', 'peer-unsupported', 'peer-unencrypted', 'verification-failed', 'fingerprint-mismatch'] as const;
         for (const r of reasons) {
             const out = mediaE2eeExplanation(r, 'X');
             expect(out === null || typeof out === 'string').toBe(true);

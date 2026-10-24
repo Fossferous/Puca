@@ -1,0 +1,59 @@
+/* Same placement as the other top banners (fixed, top, pushes nothing), and
+   below all of them in z-order: they warn, this only informs, so any of
+   them showing at once is the one to read first. Theme colours, not a
+   warning's: nothing here needs doing. */
+.call-encryption-notice {
+    position: fixed;
+    top: var(--safe-area-top, 0px);
+    left: 0;
+    right: 0;
+    z-index: 9988;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--bg-tertiary);
+    color: var(--text-normal);
+    border-bottom: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+    padding: 10px 16px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    font-size: 14px;
+}
+
+.call-encryption-notice-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+    color: var(--color-success);
+}
+
+.call-encryption-notice-text {
+    flex: 1 1 240px;
+    min-width: 0;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
+.call-encryption-notice-dismiss {
+    width: 36px;
+    height: 36px;
+    flex-shrink: 0;
+    margin-left: auto;
+    display: grid;
+    place-items: center;
+    background: transparent;
+    border: none;
+    color: inherit;
+    cursor: pointer;
+    border-radius: 6px;
+}
+
+.call-encryption-notice-dismiss:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: 2px;
+}
+
+@media (pointer: coarse) {
+    .call-encryption-notice-dismiss {
+        width: 44px;
+        height: 44px;
+    }
+}

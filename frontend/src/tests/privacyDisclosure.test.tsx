@@ -72,7 +72,10 @@ describe('PrivacyDisclosure', () => {
         expect(text, 'Firefox, Safari and iOS encrypt calls now').not.toMatch(/Firefox, Safari and iOS cannot/);
         expect(text).toMatch(/An older browser cannot encrypt live media/);
         expect(text).toMatch(/readable by the server, unless “Require encryption for calls” is on/);
-        expect(text).toMatch(/New installs have that on; an existing one keeps whatever it had/);
+        // settingsStore's migrateRequireMediaE2eeStandardPath switched it on
+        // once in Firefox and Safari, with a notice; nowhere else.
+        expect(text).toMatch(/New installs have that on, and Firefox and Safari had it switched on once, with a notice/);
+        expect(text).toMatch(/otherwise an existing install keeps whatever it had/);
         expect(text, 'the retracted claim must not come back').not.toMatch(/media is blocked by default/);
         // And the platform list must not promise the macOS/Linux shells,
         // whose WebKit lacks the same API.

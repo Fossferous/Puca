@@ -593,15 +593,39 @@ What this rests on is checked in real browsers by
 `createEncodedStreams` against Firefox on `RTCRtpScriptTransform`, each side's
 microphone a tone the other must hear — only under the right key, never from frames
 passed through unopened, again after a new key mid-call — plus Safari-shaped H.264-first
-offers, an engine with neither API, and the worker under every Content-Security-Policy
-the app ships. **Safari itself runs the same standard API but had not been exercised on a
+offers, glare followed by renegotiation, plaintext refused inside Firefox's worker, a
+spoiled DTLS pin held both ways, the audit below catching a transform frames go by, an
+engine with neither API, and the worker under every Content-Security-Policy the app
+ships. **Safari itself runs the same standard API but had not been exercised on a
 device when this was written** (Playwright's Windows WebKit has no WebRTC). Two engine
 behaviours the code handles: Chromium ignores an `RTCRtpScriptTransform` set on the
 OFFERING side's receiver in `ontrack` — it reports the transform attached and decodes
-what arrives unopened — so on that path a receiver of one's own is wrapped before
-negotiation; and a worker that cannot start (a policy without `worker-src 'self'`) makes
-the engine report that it cannot encrypt, and every connection is rebuilt as on an
+what arrives unopened — so on that path every receiver is wrapped before negotiation
+(its own transceivers when they are made, and each one a remote offer creates as soon as
+it is applied); and a worker that cannot start (a policy without `worker-src 'self'`)
+makes the engine report that it cannot encrypt, and every connection is rebuilt as on an
 engine without the API — blocked under enforcement, labelled transport-only without it.
+
+Because the first of those shows that an attached `RTCRtpScriptTransform` is no proof
+that frames go through it, nothing on that path is taken on trust
+([`scriptTransform.ts`](../frontend/src/api/rtc/scriptTransform.ts), the audit). The
+worker counts what each transform did with every frame; every two seconds the page asks
+for the counts and reads the connection's own counters for the same sender or receiver.
+A peer is reported **encrypted** only once a window shows every transform that carried
+frames sealing or opening them. Under enforcement a receiver's track is silent until its
+transform has opened a frame. And the path is given up — every connection rebuilt as on an
+engine without the API — when frames go by a transform for two windows, when a transform
+passes frames on unsealed while none may pass, when a sender's frames are not sealed
+although encryption is on, when the worker reports an error after starting, or when it
+stops answering while the page itself is awake.
+
+A connection whose DTLS fingerprint does not match the pin the peer made under the
+pairwise key (`a=sovereign-dtls`, on every engine) is held both ways
+([`manager.ts`](../frontend/src/api/rtc/manager.ts) `holdMediaWith`): our tracks come off
+its senders and nothing is put back, every frame either way is dropped where a transform
+runs, and its receivers are silenced — with enforcement on or off. Before, with
+enforcement off, such a call went on, its frames unsealed, over a connection whoever
+substituted it could read.
 
 ### The gap
 
@@ -612,11 +636,14 @@ one-time migration armed it for existing installs
 Read that migration before quoting the default at anyone: it deliberately did NOT arm
 the setting on an engine that could not satisfy it, because doing so would have taken
 working calls away from those users for a setting they never touched. When it ran, that
-meant Firefox, Safari, iOS and the WebKit desktop shells; Firefox and Safari can satisfy
-it now, but a profile the migration already passed over keeps whatever it had — often
-off, so check Settings → Privacy & Safety there — while a fresh install gets the
-fail-closed default. An engine that still cannot (an older browser) is told before it
-joins.
+meant Firefox, Safari, iOS and the WebKit desktop shells. Firefox and Safari can satisfy
+it now, so a second one-time migration
+([`settingsStore.ts` `migrateRequireMediaE2eeStandardPath`](../frontend/src/components/settingsStore.ts))
+switches a stored off back on in exactly those engines (`RTCRtpScriptTransform` and no
+`createEncodedStreams`), and a notice at the top of the app says so and where to change it
+(`CallEncryptionNotice.tsx`); a Chromium profile is never touched by it, and an off chosen
+after it sticks. A fresh install gets the fail-closed default. An engine that still
+cannot (an older browser) is told before it joins.
 
 The capability is advertised as a line in the SDP, which the server relays. If someone who
 can terminate TLS *substitutes* that line, the tag check catches it and the call stays

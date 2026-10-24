@@ -31,8 +31,23 @@
 //     then sent.
 //   - Key rotation: both sides moved to a new key mid-call keep hearing each
 //     other (the worker takes the new key; nothing rebuilds).
+//   - Video is judged OPENED by each receiver's own transform counts (the
+//     worker's on Firefox, the page's on Chromium), never by framesDecoded:
+//     a VP8 decoder "decodes" a sealed frame, whose header is clear.
 //   - Firefox <-> Firefox, and Chromium forced onto the standard path <->
 //     Chromium on createEncodedStreams.
+//   - Glare, then renegotiation: both offer at once with cameras on, Firefox
+//     the polite one, then Firefox offers again (an ICE restart): Edge must
+//     apply it, with nothing refused and nothing rebuilt.
+//   - The worker's half of enforcement: Edge sending plaintext, Firefox
+//     requiring encryption plays none of it (its worker drops every frame);
+//     not requiring it, the control, it plays them.
+//   - A spoiled DTLS pin, enforcement off, found by either side: nothing
+//     sent toward the substitution, nothing played from it.
+//   - The audit catching a transform frames go by: Chromium on the standard
+//     path with its early wraps switched off (its ontrack transform then
+//     ignored), fed plaintext — nothing heard while unproven, then the path
+//     given up; with the early wraps on, the control, the path is kept.
 //   - A Safari-shaped offer (H.264 first, as Safari's default is): the answer
 //     still picks VP8, the codec whose header the frame format leaves clear.
 //   - Fail-closed: Firefox with NEITHER API, under enforcement, sends and
@@ -174,13 +189,19 @@ const TONE = { 1: 600, 2: 900 };
 
 /**
  * Two participants, ids 1 and 2, on engines `a` and `b`, each signed in
- * with a real identity, signalling relayed through here (and rewritten by
- * `rewriteOffer` on the way, as a server could).
+ * with a real identity, signalling relayed through here — and rewritten on
+ * the way, as a server could: `rewriteOffer(sdp)` for every offer, or
+ * `rewrite(type, fromUid, sdp)` for every offer and answer. With `glare`,
+ * the first offer from each side is held until both have sent one, then
+ * both are delivered at once: each side receives the other's while its own
+ * is outstanding.
  */
-async function pair({ a, b, csp = POLICIES.caddy, initA, initB, rewriteOffer }) {
+async function pair({ a, b, csp = POLICIES.caddy, initA, initB, rewriteOffer, rewrite, glare = false }) {
     const origin = await serve(csp);
     const pages = {};
     const logs = { 1: [], 2: [] };
+    const heldOffers = [];
+    let glareDone = !glare;
     for (const [uid, eng, init] of [[1, a, initA], [2, b, initB]]) {
         const ctx = await eng.browser.newContext();
         const page = await ctx.newPage();
@@ -191,13 +212,22 @@ async function pair({ a, b, csp = POLICIES.caddy, initA, initB, rewriteOffer }) 
             const target = pages[to];
             if (!target) return;
             let body = data;
-            if (type === 'Offer' && rewriteOffer) {
+            if ((type === 'Offer' && rewriteOffer) || ((type === 'Offer' || type === 'Answer') && rewrite)) {
                 const env = JSON.parse(data);
-                env.sdp = rewriteOffer(env.sdp);
+                if (type === 'Offer' && rewriteOffer) env.sdp = rewriteOffer(env.sdp);
+                if (rewrite) env.sdp = rewrite(type, uid, env.sdp);
                 body = JSON.stringify(env);
             }
             const payload = type === 'IceCandidate' ? { from_user: uid, candidate: body } : { from_user: uid, sdp: body };
-            await target.evaluate(([t, p]) => window.__deliver(t, p), [type, payload]).catch(() => {});
+            const send = () => target.evaluate(([t, p]) => window.__deliver(t, p), [type, payload]).catch(() => {});
+            if (!glareDone && type === 'Offer') {
+                heldOffers.push(send);
+                if (heldOffers.length < 2) return;
+                glareDone = true;
+                await Promise.all(heldOffers.map((f) => f()));
+                return;
+            }
+            await send();
         });
         await page.goto(origin);
         await page.waitForFunction(() => !!window.harness, null, { timeout: 15_000 });
@@ -233,6 +263,17 @@ async function until(p, read, pred, ms = 20_000) {
 const statusOf = (page, peerId) => page.evaluate((id) => window.harness.status(id), peerId);
 const hears = (page, peerId) => page.evaluate(([id, f]) => window.harness.tone(id, f), [peerId, TONE[peerId]]);
 const inbound = (page, peerId) => page.evaluate((id) => window.harness.inbound(id), peerId);
+const countsOf = (page, peerId) => page.evaluate((id) => window.harness.frameCounts(id), peerId);
+/** One direction and kind of a page's frame transforms, summed. */
+const tally = (counts, op, kind) => counts.filter((c) => c.op === op && c.kind === kind)
+    .reduce((t, c) => ({ seen: t.seen + c.seen, done: t.done + c.done, clear: t.clear + c.clear, dropped: t.dropped + c.dropped }), { seen: 0, done: 0, clear: 0, dropped: 0 });
+const delta = (after, before) => Object.fromEntries(Object.keys(after).map((k) => [k, after[k] - before[k]]));
+/** How the counts of one direction and kind moved over `ms`. */
+async function moved(page, peerId, op, kind, ms = 2000) {
+    const before = tally(await countsOf(page, peerId), op, kind);
+    await sleep(ms);
+    return delta(tally(await countsOf(page, peerId), op, kind), before);
+}
 const PRESENT = (t) => t.present >= 9;
 const ABSENT = (t) => t.present <= 2;
 const fmt = (t) => `${t.present}/${t.of} margins=${t.marginDb.join(',')}`;
@@ -242,12 +283,17 @@ async function bothHear(p, tag, label = 'each hears the other') {
     ck(PRESENT(h1) && PRESENT(h2), `${tag} ${label}`, `1 hears 2: ${fmt(h1)} | 2 hears 1: ${fmt(h2)}`);
 }
 
+/**
+ * Video OPENED both ways — counted by the receivers' own transforms (the
+ * worker's counts on Firefox, the page's on Chromium). Not framesDecoded: the
+ * VP8 header stays clear, so a decoder fed sealed frames still "decodes"
+ * them, into garbage, and the count rises either way.
+ */
 async function videoFlows(p, tag) {
-    const before = [await inbound(p.pages[1], 2), await inbound(p.pages[2], 1)];
-    await sleep(2000);
+    const [o1, o2] = await Promise.all([moved(p.pages[1], 2, 'open', 'video'), moved(p.pages[2], 1, 'open', 'video')]);
     const after = [await inbound(p.pages[1], 2), await inbound(p.pages[2], 1)];
-    const d1 = after[0].framesDecoded - before[0].framesDecoded, d2 = after[1].framesDecoded - before[1].framesDecoded;
-    const decodes = ck(d1 > 10 && d2 > 10, `${tag} video decodes both ways`, `frames in 2 s: 1<-2 ${d1}, 2<-1 ${d2}`);
+    const decodes = ck(o1.done > 10 && o2.done > 10 && o1.dropped === 0 && o2.dropped === 0, `${tag} video OPENED both ways (each receiver's transform decrypted it)`,
+        `video frames opened in 2 s: 1<-2 ${o1.done} (dropped ${o1.dropped}), 2<-1 ${o2.done} (dropped ${o2.dropped})`);
     const codecs = after.map((x) => `stats ${x.videoCodec}, answer ${x.answeredVideoCodecs.join('+')}`);
     const vp8 = ck(after.every((x) => x.answeredVideoCodecs.length > 0 && x.answeredVideoCodecs.every((c) => /^vp8$/i.test(c))
         && (x.videoCodec === null || /vp8/i.test(x.videoCodec))), `${tag} VP8 on every video section`, codecs.join(' | '));
@@ -296,8 +342,13 @@ await run('chromium-firefox', async () => {
         const wrong1 = await hears(p.pages[1], 2), wrong2 = await hears(p.pages[2], 1);
         ck(ABSENT(wrong2), `${tag} WRONG-KEY CONTROL: Firefox under another key hears nothing (its worker opens with the new key)`, fmt(wrong2));
         ck(ABSENT(wrong1), `${tag} WRONG-KEY CONTROL: and Chromium cannot open what Firefox now seals`, fmt(wrong1));
+        const [wv2, wv1] = await Promise.all([moved(p.pages[2], 1, 'open', 'video', 1500), moved(p.pages[1], 2, 'open', 'video', 1500)]);
+        ck(wv2.done === 0 && wv2.dropped > 5, `${tag} WRONG-KEY CONTROL: Firefox's worker opens no video under the wrong key, and drops it`, JSON.stringify(wv2));
+        ck(wv1.done === 0 && wv1.dropped > 5, `${tag} WRONG-KEY CONTROL: nor does Chromium open the video Firefox seals under it`, JSON.stringify(wv1));
         const vBefore = await inbound(p.pages[2], 1); await sleep(1500); const vAfter = await inbound(p.pages[2], 1);
         ck(vAfter.framesDecoded - vBefore.framesDecoded <= 2, `${tag} WRONG-KEY CONTROL: no video decodes under the wrong key`, `${vAfter.framesDecoded - vBefore.framesDecoded} frames in 1.5 s`);
+        const unproven = await statusOf(p.pages[2], 1);
+        ck(!unproven?.encrypted, `${tag} WRONG-KEY CONTROL: Firefox no longer calls it encrypted (its frames are not opening)`, JSON.stringify(unproven));
         await p.pages[2].evaluate(() => window.harness.restoreKey(1));
         await sleep(2500);
         await bothHear(p, tag, 'the right key put back: each hears the other again');
@@ -410,6 +461,176 @@ await run('camera-mid-call', async () => {
     } finally {
         dumpLogs(p, tag);
         await p.close();
+    }
+});
+
+await run('glare-then-renegotiate', async () => {
+    // Both offer at once, cameras on, and Firefox is the polite one (user 2):
+    // it rolls its own offer back and applies Edge's, which takes over the
+    // video transceiver Firefox had just made. Firefox, given codec
+    // preferences on that transceiver, then writes its NEXT offer (here an
+    // ICE restart) with feedback lines Chromium refuses whole, and the call
+    // stalls into a rebuild (preferSealableVideoCodecs).
+    const tag = `[${cr.name} <-> ${ff.name}, glare, then Firefox renegotiates]`;
+    const p = await pair({ a: cr, b: ff, glare: true });
+    try {
+        await p.pages[1].evaluate((o) => window.harness.join(1, 2, o), { required: true, tone: TONE[1], camera: true });
+        await p.pages[2].evaluate((o) => window.harness.join(2, 1, o), { required: true, tone: TONE[2], camera: true });
+        await Promise.all([p.pages[1].evaluate(() => window.harness.call(2)), p.pages[2].evaluate(() => window.harness.call(1))]);
+        const [s1, s2] = await until(p, statusOf, (x, y) => x?.encrypted && y?.encrypted);
+        ck(p.logs[1].some((l) => /Ignoring colliding offer from 2 \(impolite\)/.test(l)),
+            `${tag} precondition: the offers collided, and Firefox (polite) gave way`, p.logs[1].filter((l) => /collid|offer ->/i.test(l)).slice(0, 3).join(' / '));
+        ck(s1?.encrypted && s2?.encrypted, `${tag} encrypted both ways after the glare`, JSON.stringify([s1?.reason, s2?.reason]));
+        const before = p.logs[1].length;
+        const offersBefore = p.logs[2].filter((l) => /offer -> 1/.test(l)).length;
+        await p.pages[2].evaluate(() => window.harness.restartIce(1));
+        const deadline = Date.now() + 15_000;
+        while (Date.now() < deadline && p.logs[2].filter((l) => /offer -> 1/.test(l)).length <= offersBefore) await sleep(250);
+        ck(p.logs[2].filter((l) => /offer -> 1/.test(l)).length > offersBefore, `${tag} precondition: Firefox sent another offer`);
+        await sleep(4000);
+        const refused = p.logs[1].slice(before).filter((l) => /setRemoteDescription\(|Failed to parse|rejects the offer|rebuilding|Incompatible offer/i.test(l));
+        ck(refused.length === 0, `${tag} Edge applies Firefox's next offer: nothing refused, nothing rebuilt`, refused.slice(0, 2).join(' / '));
+        await videoFlows(p, tag);
+        await bothHear(p, tag);
+    } finally {
+        dumpLogs(p, tag);
+        await p.close();
+    }
+});
+
+await run('plaintext-refused-in-worker', async () => {
+    // The worker's half of enforcement, in a real Firefox: Edge made to send
+    // its frames PLAIN (as a modified client, or one whose own transform is
+    // passed by, would). Firefox, requiring encryption, must drop them in its
+    // worker — and its CONTROL, not requiring it, plays them, which shows the
+    // plaintext really was on the wire.
+    const tag = `[${cr.name} sends plaintext -> ${ff.name}]`;
+    const p = await pair({ a: cr, b: ff });
+    try {
+        await enterCall(p);
+        await until(p, statusOf, (x, y) => x?.encrypted && y?.encrypted);
+        await p.pages[1].evaluate(() => window.harness.setCrypto(2, { enabled: false, requireE2ee: false }));
+        await sleep(2500);
+        const heard = await hears(p.pages[2], 1);
+        ck(ABSENT(heard), `${tag} SECURITY: Firefox, requiring encryption, plays none of it`, fmt(heard));
+        const a = await moved(p.pages[2], 1, 'open', 'audio');
+        ck(a.seen > 20 && a.done === 0 && a.clear === 0 && a.dropped === a.seen, `${tag} SECURITY: its worker saw every frame and dropped every one`, JSON.stringify(a));
+        const v = await moved(p.pages[2], 1, 'open', 'video');
+        ck(v.seen > 5 && v.done === 0 && v.clear === 0, `${tag} SECURITY: video too`, JSON.stringify(v));
+        const st = await statusOf(p.pages[2], 1);
+        ck(!st?.encrypted, `${tag} Firefox does not call it encrypted`, JSON.stringify(st));
+        ck(await p.pages[2].evaluate(() => window.harness.api()) === 'script-transform', `${tag} and refusing a peer's plaintext is not taken for its own transforms failing`);
+        await p.pages[2].evaluate(() => window.harness.setCrypto(1, { requireE2ee: false }));
+        await sleep(2500);
+        const control = await hears(p.pages[2], 1);
+        ck(PRESENT(control), `${tag} CONTROL: not requiring it, Firefox plays the same frames (they were plaintext)`, fmt(control));
+    } finally {
+        dumpLogs(p, tag);
+        await p.close();
+    }
+});
+
+/** Spoil the DTLS pin of every description `fromUid` sends, as a relay that
+ *  put its own connection in the middle would have to. */
+const spoilPinFrom = (fromUid) => (_type, uid, sdp) => uid !== fromUid ? sdp
+    : sdp.replace(/a=sovereign-dtls:([A-Za-z0-9+/=]+)/, (_m, t) => `a=sovereign-dtls:${t[0] === 'A' ? 'B' : 'A'}${t.slice(1)}`);
+
+await run('pin-mismatch-holds', async () => {
+    // Enforcement OFF on both sides: what used to carry on unencrypted over
+    // the substituted connection must now carry nothing at all, either way,
+    // whichever side finds the mismatch (Edge on the page, Firefox in the
+    // worker). CONTROL first: the same pair, unspoiled, hears each other.
+    const control = await pair({ a: cr, b: ff });
+    try {
+        await enterCall(control, { required: false });
+        await until(control, statusOf, (x, y) => x?.encrypted && y?.encrypted);
+        await bothHear(control, `[pin CONTROL, enforcement off]`, 'an honest pin: each hears the other');
+    } finally {
+        await control.close();
+    }
+    for (const [finder, other] of [[1, 2], [2, 1]]) {
+        const tag = `[${finder === 1 ? cr.name : ff.name} finds the pin spoiled, enforcement off]`;
+        const p = await pair({ a: cr, b: ff, rewrite: spoilPinFrom(other) });
+        try {
+            await enterCall(p, { required: false });
+            const st = await (async () => {
+                const deadline = Date.now() + 20_000;
+                let s = null;
+                while (Date.now() < deadline) {
+                    s = await statusOf(p.pages[finder], other);
+                    if (s?.reason === 'fingerprint-mismatch') return s;
+                    await sleep(250);
+                }
+                return s;
+            })();
+            ck(st?.reason === 'fingerprint-mismatch' && st.dtls === 'mismatch' && !st.encrypted, `${tag} the mismatch is found`, JSON.stringify(st));
+            await sleep(2500);
+            const sending = await p.pages[finder].evaluate((id) => window.harness.sending(id), other);
+            ck(sending.length === 0, `${tag} SECURITY: no track of ours left on that connection`, JSON.stringify(sending));
+            const playing = await p.pages[finder].evaluate((id) => window.harness.receiving(id), other);
+            ck(playing.every((r) => !r.enabled), `${tag} SECURITY: nothing from it plays`, JSON.stringify(playing));
+            const heardBy = await hears(p.pages[other], finder);
+            ck(ABSENT(heardBy), `${tag} SECURITY: the other side hears nothing of us (no plaintext sent toward the substitution)`, fmt(heardBy));
+            const heard = await hears(p.pages[finder], other);
+            ck(ABSENT(heard), `${tag} SECURITY: and we hear nothing over it`, fmt(heard));
+        } finally {
+            dumpLogs(p, tag);
+            await p.close();
+        }
+    }
+});
+
+await run('bypass-caught', async () => {
+    // Chromium on the standard path IS the engine that passes frames by: a
+    // transform set in the OFFERER's ontrack is ignored. The early wraps keep
+    // it from happening; here they are switched off, so it does, and the
+    // other side sends PLAINTEXT (an engine with neither API, not requiring
+    // encryption). Requiring encryption, the offerer must play nothing of it
+    // while its receivers are unproven, and give the path up once its audit
+    // sees frames going by. CONTROL: the same with the early wraps on.
+    const NONE = () => { delete RTCRtpSender.prototype.createEncodedStreams; delete RTCRtpReceiver.prototype.createEncodedStreams; delete window.RTCRtpScriptTransform; };
+    const probe = await (await cr.browser.newPage()).evaluate(() => typeof RTCRtpScriptTransform);
+    if (probe !== 'function') { sk('[bypass-caught]', `this ${cr.name} has no RTCRtpScriptTransform (${probe})`); return; }
+    for (const early of [false, true]) {
+        const tag = `[${cr.name} on the standard path${early ? ', CONTROL: early wraps on' : ', early wraps OFF'} <- plaintext]`;
+        const p = await pair({ a: cr, b: cr, initA: HIDE_ENCODED_STREAMS, initB: NONE });
+        try {
+            if (!early) await p.pages[1].evaluate(() => window.harness.disableEarlyWraps());
+            await p.pages[1].evaluate((o) => window.harness.join(1, 2, o), { required: true, tone: TONE[1], camera: true });
+            await p.pages[2].evaluate((o) => window.harness.join(2, 1, o), { required: false, tone: TONE[2], camera: true });
+            await p.pages[1].evaluate(() => window.harness.call(2)); // page 1 offers: its ontrack is the offerer's
+            const deadline = Date.now() + 15_000;
+            while (Date.now() < deadline && !(await p.pages[1].evaluate(() => window.harness.hasVoice(2)))) await sleep(100);
+            ck(await p.pages[1].evaluate(() => window.harness.hasVoice(2)), `${tag} precondition: the plaintext track arrived`);
+            const heard = await hears(p.pages[1], 2);
+            ck(ABSENT(heard), `${tag} SECURITY: none of it is heard while nothing shows it went through a transform`, fmt(heard));
+            if (!early) {
+                const lost = await (async () => {
+                    const until2 = Date.now() + 20_000;
+                    while (Date.now() < until2) {
+                        if (p.logs[1].some((l) => /never went through its transform/.test(l))) return true;
+                        await sleep(250);
+                    }
+                    return false;
+                })();
+                ck(lost, `${tag} SECURITY: the audit sees the frames going by, and gives the path up`, p.logs[1].filter((l) => /media-e2ee/.test(l)).slice(-3).join(' / '));
+                await sleep(1500);
+                const s = await statusOf(p.pages[1], 2);
+                ck(s?.reason === 'local-unsupported' && s.enforced && !s.encrypted && await p.pages[1].evaluate(() => window.harness.api()) === null,
+                    `${tag} rebuilt as an engine that cannot encrypt: blocked`, JSON.stringify(s));
+                const after = await hears(p.pages[1], 2);
+                ck(ABSENT(after), `${tag} SECURITY: and still nothing is heard`, fmt(after));
+            } else {
+                await sleep(8000);
+                const gone = p.logs[1].some((l) => /frame-transform worker is unavailable/.test(l));
+                ck(!gone && await p.pages[1].evaluate(() => window.harness.api()) === 'script-transform', `${tag} the path is kept: frames go through the transforms`, p.logs[1].filter((l) => /media-e2ee/.test(l)).slice(-2).join(' / '));
+                const a = await moved(p.pages[1], 2, 'open', 'audio');
+                ck(a.seen > 20 && a.dropped === a.seen, `${tag} and the worker drops the plaintext it sees`, JSON.stringify(a));
+            }
+        } finally {
+            dumpLogs(p, tag);
+            await p.close();
+        }
     }
 });
 
