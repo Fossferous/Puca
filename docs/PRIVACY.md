@@ -26,7 +26,8 @@ The server is run by whoever invited you, and it necessarily sees:
   attachment, presence (online/offline), voice-channel joins and leaves,
   typing indicators;
 - your IP address, at the reverse proxy and at the backend (used for rate
-  limiting), and the identifiers of any phone registered for wake signals;
+  limiting), and the identifiers of any phone registered for wake signals
+  and the push address of any browser you turned web notifications on in;
 - the ciphertext of everything below — which it cannot read.
 
 ## What the people you send a photo to can read
@@ -82,6 +83,21 @@ that limit — but cannot read content.
   the server's test suite — so Google learns that *a* wake was sent to *a*
   device and when, never a sender, a channel or content. Delivery itself
   happens over the app's own socket to your operator's server.
+- **Your browser's push service, only if you turn on "Notifications while
+  Púca is closed" in the web app** (Settings → Notifications; the iPhone and
+  iPad Home Screen app, Android Chrome, desktop Chrome, Edge and Firefox) **and
+  your operator set it up.** That is Apple for Safari and the Home Screen app,
+  Google for Chrome, Mozilla for Firefox, Microsoft for Edge — whichever your
+  browser uses; Púca cannot choose. Every push is the constant `{"w":"1"}`,
+  encrypted to your browser, the same 112 bytes for every user and every
+  reason (pinned by the server's tests), and its headers are constants too.
+  So the push service learns that your operator's server woke your browser,
+  and when — never who wrote, in which conversation, or what. It already knew
+  your browser; it is the browser's own service. Your browser then asks your
+  operator's server, directly, what arrived, and shows the sender's name
+  ("alice sent you a message"), never the message. Turning the setting off,
+  or signing out, removes the push address from the server and from the
+  browser.
 - **Sites you paste links to.** An image or GIF URL in a message is loaded by
   your device directly from that site, which then sees your IP like any web
   page would. Nothing else is fetched from outside your operator's hosts:

@@ -419,14 +419,22 @@ pub async fn send_message(
                 // The wake signal carries a constant; THIS frame — with its
                 // author and channel ids — waits server-side for the delivery
                 // socket the signal summons. Google never carries it.
-                if !state.send_to_user(member_id, notif.clone()) {
+                //
+                // The web app's Web Push is decided per browser whatever
+                // happened here (wake/sender.rs): a phone's Home Screen app is
+                // away even while the desktop app took this frame.
+                let delivered = state.send_to_user(member_id, notif.clone());
+                if !delivered {
                     state.enqueue_undelivered(member_id, notif.clone());
-                    crate::wake::sender::wake_user_kind(
-                        &state,
-                        member_id,
-                        crate::wake::sender::WakeKind::ChannelMessage,
-                    );
                 }
+                crate::wake::sender::wake_user_scoped(
+                    &state,
+                    member_id,
+                    crate::wake::sender::WakeKind::ChannelMessage,
+                    crate::wake::sender::WakeScope::channel(&server_id, channel_id, claims.sub),
+                    &notif,
+                    delivered,
+                );
             }
 
             let mut body = serde_json::json!({

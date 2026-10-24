@@ -804,8 +804,10 @@ link either.
 
 What is different from the Android and Windows apps:
 
-- **No notifications while Púca is closed.** iPhone can send them to a web app;
-  Púca does not use that yet, so new messages show up when you open it.
+- **Notifications while Púca is closed** need iOS 16.4 or newer, and only the
+  Home Screen app can have them (Safari tabs cannot): open Púca from its icon and
+  turn them on in **Settings → Notifications**. See *Notifications while Púca is
+  closed* below. Your server has to have them set up too.
 - **Calls.** Safari encrypts a call's sound and video frame by frame through
   the standard browser feature Firefox uses too, so with **Require encryption for
   calls** on (the default) you hear and are heard as on the other apps. Firefox
@@ -964,6 +966,35 @@ A game controller on its own is not seen as activity on the PC.
 turns this off for you: you then show as plain online while connected.
 **Show online status** off hides all of it — you appear offline. Voice
 channels' AFK move (**Server Settings**) is separate and unchanged.
+
+### Notifications while Púca is closed
+In the **web app** — Púca on your iPhone or iPad's Home Screen, or Púca in
+Chrome, Edge, Firefox or Safari on a computer or an Android phone —
+**Settings → Notifications → Notifications while Púca is closed** lets this
+device show a notification when a message or a clip approval arrives while
+Púca is not open. Tap the switch and allow notifications when the browser asks.
+**Send a test** then sends one to this device.
+
+- It names who wrote ("alice sent you a message"), never what they wrote.
+  If Púca cannot reach your server at that moment, it says only **New activity
+  in Púca**. Tapping a notification opens that conversation.
+- Mutes and blocks on this device apply: a muted server (including one set to
+  **Only @mentions**), a muted channel, or someone you blocked does not
+  notify.
+- A device where Púca is open is not sent one: it notifies by itself. Púca
+  open somewhere else (the desktop app in the tray, say) does not stop this
+  device being notified. A burst of messages is one notification.
+- On an iPhone, a message in the first minute or so after you leave Púca may
+  not notify; it is there when you open Púca.
+- On an **iPhone or iPad** it needs iOS 16.4 or newer and works only in Púca
+  added to your Home Screen. In a Safari tab the setting says so.
+- The **desktop app** and the **Android app** have their own notifications
+  and do not show this setting.
+- If your server has not set it up, the setting says so; its operator needs
+  a VAPID key (`.env.example`).
+- Signing out turns it off on this device. Your browser's push service
+  (Apple, Google, Mozilla or Microsoft) learns only that something arrived
+  and when; `docs/PRIVACY.md` has the details.
 
 ---
 

@@ -216,10 +216,22 @@ async fn notify_proposed(state: &Arc<AppState>, p: &ClipProposal) {
             continue;
         }
         let live = ServerMessage::ClipProposed { clip_id: p.clip_id.clone(), expires_in_ms };
-        if !state.send_to_user(v.user_id, live) {
-            state.enqueue_undelivered(v.user_id, ServerMessage::ClipPending { clip_id: p.clip_id.clone() });
-            crate::wake::sender::wake_user(state, v.user_id);
+        let pending = ServerMessage::ClipPending { clip_id: p.clip_id.clone() };
+        let delivered = state.send_to_user(v.user_id, live);
+        if !delivered {
+            state.enqueue_undelivered(v.user_id, pending.clone());
         }
+        // An empty scope: the prompt names no author and no channel, and no
+        // mute or block may answer a consent question by silence. Web Push is
+        // decided per browser whatever the send did (wake/sender.rs).
+        crate::wake::sender::wake_user_scoped(
+            state,
+            v.user_id,
+            crate::wake::sender::WakeKind::ChannelMessage,
+            crate::wake::sender::WakeScope::default(),
+            &pending,
+            delivered,
+        );
     }
 }
 

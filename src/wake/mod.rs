@@ -21,9 +21,20 @@
 //! session to accept it (`send_to_user` returned false). A healthy native
 //! socket means no wakes at all: the doorbell rings only for a house that
 //! stopped answering.
+//!
+//! THE WEB APP'S DOORBELL (webpush.rs) is the same contract over standard Web
+//! Push: the push service — Apple's, Google's, Mozilla's or Microsoft's,
+//! whichever the user's browser uses — relays the constant `{"w":"1"}`,
+//! encrypted to the browser, and learns that a wake happened and when. The
+//! service worker that wakes asks THIS server what knocked, over TLS, and
+//! shows the same content-free title the Android app would. It is judged PER
+//! BROWSER, not per user: a browser has no delivery socket of its own, so
+//! "nobody home" would let the desktop app in the tray silence the phone for
+//! good (sender.rs).
 
 pub mod fcm;
 pub mod sender;
+pub mod webpush;
 
 /// Why a wake failed, in the only categories a caller treats differently.
 #[derive(Debug, Clone, PartialEq, Eq)]

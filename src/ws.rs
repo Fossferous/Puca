@@ -5245,13 +5245,21 @@ async fn handle_message(
                 content: content.clone(),
                 timestamp,
             };
-            if !state.send_to_user(to_user_id, dm.clone()) && to_user_id != user_id {
-                state.enqueue_undelivered(to_user_id, dm);
-                crate::wake::sender::wake_user_kind(
+            // The web app's Web Push is decided per browser whatever the send
+            // did (wake/sender.rs).
+            let delivered = state.send_to_user(to_user_id, dm.clone());
+            if to_user_id != user_id {
+                crate::wake::sender::wake_user_scoped(
                     &state,
                     to_user_id,
                     crate::wake::sender::WakeKind::DirectMessage,
+                    crate::wake::sender::WakeScope::dm(user_id),
+                    &dm,
+                    delivered,
                 );
+                if !delivered {
+                    state.enqueue_undelivered(to_user_id, dm);
+                }
             }
 
             // Also echo back to sender for confirmation

@@ -4,6 +4,27 @@
 //! recipient whose `send_to_user` returned false — no live session at all, the
 //! phone's delivery socket included. A healthy socket means this module never
 //! runs.
+//!
+//! Two doorbells: the Android app's FCM wake (`state.wake`) and the web app's
+//! Web Push (`state.web_push`, webpush.rs). Both carry only a constant. They
+//! differ in two ways that matter here.
+//!
+//! WHOSE SOCKET. The FCM wake rings only when the USER has no session at all:
+//! the phone's own delivery socket is one of those sessions, so a healthy
+//! phone is told directly whoever else is online. A browser has no such
+//! socket, so a Web Push is decided PER BROWSER: a subscription is rung when
+//! the session that made it (its `sid`) has no live connection, whatever the
+//! user's other devices are doing. Otherwise the desktop app sitting in the
+//! tray would silence the user's iPhone for good — the Android phone in the
+//! same position is notified.
+//!
+//! WHO DECIDES WHAT SHOWS. The Android app decides on the DEVICE whether a
+//! woken frame becomes a notification (PushGate), but a browser woken by a
+//! push MUST show one — iOS revokes subscriptions whose pushes show nothing.
+//! So for Web Push the device's mutes and blocks, which the client mirrors
+//! into its subscription row, are applied HERE, before the push is sent, from
+//! a `WakeScope` that says what the event concerns. The scope is a gate input
+//! only: no transport ever sees it.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -125,13 +146,6 @@ async fn prefs_allow_wake(state: &Arc<AppState>, user_id: i64, kind: WakeKind) -
     prefs_permit(prefs.as_ref(), kind, chrono::Utc::now().time())
 }
 
-/// Ring `user_id`'s registered Android devices for a channel message. Kept so
-/// the existing fan-outs compile unchanged; new call sites say what they are
-/// waking for via `wake_user_kind`.
-pub fn wake_user(state: &Arc<AppState>, user_id: i64) {
-    wake_user_kind(state, user_id, WakeKind::ChannelMessage)
-}
-
 /// Ring `user_id`'s registered Android devices, unless their preferences for
 /// `kind` say not to. Fire-and-forget: message-send paths must never wait on
 /// Google. Dead tokens are pruned from the response — FCM's answer is the only
@@ -187,6 +201,253 @@ pub fn wake_user_kind(state: &Arc<AppState>, user_id: i64, kind: WakeKind) {
             }
         }
     });
+}
+
+/// What an event concerns, for the Web Push mute and block gate. Ids only, and
+/// they never leave this module: the transports take a target and nothing else.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WakeScope {
+    pub server_id: Option<String>,
+    pub channel_id: Option<i64>,
+    pub author_id: Option<i64>,
+}
+
+impl WakeScope {
+    pub fn channel(server_id: &str, channel_id: i64, author_id: i64) -> Self {
+        Self { server_id: Some(server_id.to_string()), channel_id: Some(channel_id), author_id: Some(author_id) }
+    }
+    pub fn dm(author_id: i64) -> Self {
+        Self { author_id: Some(author_id), ..Self::default() }
+    }
+}
+
+/// One browser's mirror of its device's mutes and blocks (the client's
+/// mutedServersStore / mutedChannelsStore / blockStore).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WebGates {
+    pub muted_servers: Vec<String>,
+    pub muted_channels: Vec<i64>,
+    pub blocked_ids: Vec<i64>,
+}
+
+/// Would THIS browser show a notification for an event of this scope? The
+/// Android gate's rules (PushGate.java), minus the ones the server cannot know
+/// better than the device: a muted server (any level but "all" — the server
+/// cannot see an @mention inside ciphertext, so "mentions only" is silence for
+/// a push, exactly as on Android), a muted channel, a blocked author. A scope
+/// with no author (a clip consent prompt) is never blocked: a block must not
+/// answer a consent question by silence.
+pub fn web_gates_permit(scope: &WakeScope, gates: &WebGates) -> bool {
+    if let Some(author) = scope.author_id {
+        if gates.blocked_ids.contains(&author) {
+            return false;
+        }
+    }
+    if let Some(server) = &scope.server_id {
+        if gates.muted_servers.iter().any(|s| s == server) {
+            return false;
+        }
+    }
+    if let Some(channel) = scope.channel_id {
+        if gates.muted_channels.contains(&channel) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Ring every doorbell `user_id` has, for a notification-worthy `frame` of
+/// this kind and scope. Called for EVERY recipient of such a frame, with
+/// `delivered` = what `send_to_user` said: the Android wake still needs nobody
+/// home at all, while each subscribed browser is judged on its own (see the
+/// header). Fire-and-forget; a user with no subscription costs one map lookup.
+pub fn wake_user_scoped(
+    state: &Arc<AppState>,
+    user_id: i64,
+    kind: WakeKind,
+    scope: WakeScope,
+    frame: &crate::protocol::ServerMessage,
+    delivered: bool,
+) {
+    if !delivered {
+        wake_user_kind(state, user_id, kind);
+    }
+    ring_web(state, user_id, kind, scope, frame);
+}
+
+/// A live subscription as the sender needs it.
+pub struct LiveSubscription {
+    pub id: i64,
+    /// The session that made it: its browser.
+    pub sid: String,
+    pub target: super::webpush::WebPushTarget,
+    pub gates: WebGates,
+}
+
+/// `user_id`'s subscriptions whose SESSION is still live, with the dead ones
+/// deleted on the way. "Live" is `auth::token_session_live`'s rule for that
+/// session (not revoked, its device not revoked, the account's token_version
+/// unchanged) plus the session's absolute cap: every way of signing a device
+/// out also stops its pushes, with no hook needed in each of them.
+/// `only_sid` narrows to one session (the test button).
+pub async fn live_subscriptions(
+    pool: &sqlx::PgPool,
+    user_id: i64,
+    only_sid: Option<&str>,
+) -> Vec<LiveSubscription> {
+    type Row = (i64, String, String, String, String, Vec<String>, Vec<i64>, Vec<i64>, bool);
+    let rows: Vec<Row> = match sqlx::query_as(LIVE_SUBSCRIPTIONS_SQL)
+        .bind(user_id as i32)
+        .bind(only_sid)
+        .fetch_all(pool)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("web push: subscription lookup failed for user {user_id}: {e}");
+            return Vec::new();
+        }
+    };
+    let mut live = Vec::new();
+    let mut dead: Vec<i64> = Vec::new();
+    for (id, sid, endpoint, p256dh, auth, muted_servers, muted_channels, blocked_ids, is_live) in rows {
+        if !is_live {
+            dead.push(id);
+            continue;
+        }
+        match super::webpush::WebPushTarget::from_b64(&endpoint, &p256dh, &auth) {
+            Ok(target) => live.push(LiveSubscription {
+                id,
+                sid,
+                target,
+                gates: WebGates { muted_servers, muted_channels, blocked_ids },
+            }),
+            Err(e) => {
+                tracing::warn!("web push: subscription {id} is malformed ({e}), deleting");
+                dead.push(id);
+            }
+        }
+    }
+    if !dead.is_empty() {
+        let _ = sqlx::query("DELETE FROM web_push_subscriptions WHERE id = ANY($1)")
+            .bind(&dead)
+            .execute(pool)
+            .await;
+    }
+    live
+}
+
+/// One query for the sender and the test button. The liveness expression is
+/// `auth::token_session_live`'s, per row.
+pub const LIVE_SUBSCRIPTIONS_SQL: &str = "\
+    SELECT w.id, w.sid, w.endpoint, w.p256dh, w.auth, \
+           w.muted_servers, w.muted_channels, w.blocked_ids, \
+           (s.revoked_at IS NULL \
+            AND (s.device_id IS NULL OR (d.id IS NOT NULL AND d.revoked_at IS NULL)) \
+            AND u.token_version = w.token_version \
+            AND w.expires_at > NOW()) AS live \
+    FROM web_push_subscriptions w \
+    JOIN users u ON u.id = w.user_id \
+    JOIN token_sessions s ON s.sid = w.sid \
+    LEFT JOIN devices d ON d.id = s.device_id \
+    WHERE w.user_id = $1 AND ($2::TEXT IS NULL OR w.sid = $2::TEXT)";
+
+/// Push one wake to one subscription; prunes it on a 404/410.
+pub async fn push_one(state: &Arc<AppState>, sub: &LiveSubscription) -> Result<(), super::WakeError> {
+    match state.web_push.push(&sub.target).await {
+        Ok(()) => {
+            let _ = sqlx::query("UPDATE web_push_subscriptions SET last_push_at = NOW() WHERE id = $1")
+                .bind(sub.id)
+                .execute(&state.pool)
+                .await;
+            Ok(())
+        }
+        Err(e) => {
+            if e.is_token_dead() {
+                let _ = sqlx::query("DELETE FROM web_push_subscriptions WHERE id = $1")
+                    .bind(sub.id)
+                    .execute(&state.pool)
+                    .await;
+                tracing::info!("web push: pruned gone subscription {} ({e})", sub.id);
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Ring `user_id`'s subscribed browsers. Same shape as the Android path: the
+/// per-user rate limit is taken BEFORE spawning, so a burst costs one task.
+/// Unlike it, the slot is handed back when nothing was sent (every browser
+/// muted this conversation, the user's settings said no, a push service was
+/// down): a muted channel's chatter must not swallow the DM that follows it.
+fn ring_web(
+    state: &Arc<AppState>,
+    user_id: i64,
+    kind: WakeKind,
+    scope: WakeScope,
+    frame: &crate::protocol::ServerMessage,
+) {
+    if !state.web_push.enabled() || !state.web_push_watched(user_id) {
+        return;
+    }
+    // Logged BEFORE the rate limit: a frame inside a burst's 30 seconds is
+    // still what the next wake's notification should name.
+    state.web_push_record(user_id, frame.clone());
+    let now = Instant::now();
+    let previous = {
+        if state.web_push_recent.len() > 1024 {
+            state
+                .web_push_recent
+                .retain(|_, at| at.elapsed() < Duration::from_secs(3600));
+        }
+        let mut entry = state.web_push_recent.entry(user_id).or_insert(now - MIN_WAKE_INTERVAL * 2);
+        if now.duration_since(*entry) < MIN_WAKE_INTERVAL {
+            return;
+        }
+        let previous = *entry;
+        *entry = now;
+        previous
+    };
+    let state = Arc::clone(state);
+    tokio::spawn(async move {
+        let rung = ring_web_now(&state, user_id, kind, &scope).await;
+        if rung == 0 {
+            // Only if nobody has taken the slot since: a later ring that DID
+            // send owns it now.
+            if let Some(mut at) = state.web_push_recent.get_mut(&user_id) {
+                if *at == now {
+                    *at = previous;
+                }
+            }
+        }
+    });
+}
+
+/// The awaited half of `ring_web`: how many browsers a wake was handed to.
+pub async fn ring_web_now(state: &Arc<AppState>, user_id: i64, kind: WakeKind, scope: &WakeScope) -> usize {
+    if !prefs_allow_wake(state, user_id, kind).await {
+        return 0;
+    }
+    let mut rung = 0;
+    for sub in live_subscriptions(&state.pool, user_id, None).await {
+        if !web_gates_permit(scope, &sub.gates) {
+            continue;
+        }
+        // That browser is open: it has the frame already, and shows its own
+        // notification if it is not on screen. A push would be a second one.
+        if state.sid_is_live(user_id, &sub.sid) {
+            continue;
+        }
+        match push_one(state, &sub).await {
+            Ok(()) => rung += 1,
+            Err(e) => {
+                if !e.is_token_dead() {
+                    tracing::warn!("web push: wake failed for user {user_id}: {e}");
+                }
+            }
+        }
+    }
+    rung
 }
 
 /// The `/notifications/test` probe: ring the caller's own devices, awaited so
@@ -285,9 +546,10 @@ mod tests {
     }
 
     #[test]
-    fn the_legacy_entry_point_is_the_channel_message_kind() {
-        // wake_user delegates to ChannelMessage, so it must answer to
-        // push_messages and nothing else category-wise.
+    fn the_clip_doorbell_kind_answers_to_push_messages_alone() {
+        // The clip prompt rings as ChannelMessage (clip_handlers.rs; it was the
+        // removed wake_user's kind), so it must answer to push_messages and
+        // nothing else category-wise.
         let p = WakePrefs { push_dms: false, push_friend_requests: false, ..all_on() };
         assert!(prefs_permit(Some(&p), WakeKind::ChannelMessage, t(12, 0)));
         let p = WakePrefs { push_messages: false, ..all_on() };
@@ -320,6 +582,44 @@ mod tests {
         assert!(!prefs_permit(Some(&p), WakeKind::DirectMessage, t(3, 0)));
         assert!(prefs_permit(Some(&p), WakeKind::DirectMessage, t(7, 0)));
         assert!(prefs_permit(Some(&p), WakeKind::DirectMessage, t(12, 0)));
+    }
+
+    fn gates() -> WebGates {
+        WebGates {
+            muted_servers: vec!["srv-muted".into()],
+            muted_channels: vec![77],
+            blocked_ids: vec![13],
+        }
+    }
+
+    #[test]
+    fn web_gates_apply_this_devices_mutes_and_blocks() {
+        let g = gates();
+        // Controls: an ordinary channel message and DM ring.
+        assert!(web_gates_permit(&WakeScope::channel("srv-1", 5, 2), &g));
+        assert!(web_gates_permit(&WakeScope::dm(2), &g));
+        // Each gate, alone.
+        assert!(!web_gates_permit(&WakeScope::channel("srv-muted", 5, 2), &g), "muted server");
+        assert!(!web_gates_permit(&WakeScope::channel("srv-1", 77, 2), &g), "muted channel");
+        assert!(!web_gates_permit(&WakeScope::channel("srv-1", 5, 13), &g), "blocked author in a channel");
+        assert!(!web_gates_permit(&WakeScope::dm(13), &g), "blocked author in a DM");
+    }
+
+    #[test]
+    fn a_clip_consent_prompt_is_never_silenced_by_a_block_or_a_mute() {
+        // The clip doorbell names nobody and no channel (clip_handlers.rs), so
+        // its scope is empty — and an empty scope passes every gate.
+        let everything = WebGates {
+            muted_servers: vec!["a".into(), "b".into()],
+            muted_channels: vec![1, 2, 3],
+            blocked_ids: vec![1, 2, 3],
+        };
+        assert!(web_gates_permit(&WakeScope::default(), &everything));
+    }
+
+    #[test]
+    fn no_gates_means_everything_rings() {
+        assert!(web_gates_permit(&WakeScope::channel("s", 1, 2), &WebGates::default()));
     }
 
     #[test]

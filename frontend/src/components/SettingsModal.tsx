@@ -68,6 +68,7 @@ import { BIND_FIELDS, KEYBIND_TAB_ROWS, type BindField } from './keybindFields';
 // The scope predicate is shared with the desktop-global feed: what a row says
 // about where a hotkey works is computed by the code that decides it.
 import { sameCombo, markVoiceBindProvenance, voiceBindScope, isVoiceBindField } from '../api/hotkeyScope';
+import WebPushSetting from './WebPushSetting';
 
 /**
  * Selectable themes. The colour themes (styles/theme.css) tint every surface
@@ -2109,6 +2110,11 @@ export function SettingsModal({ isOpen, onClose, onLogout }: SettingsModalProps)
                                         />
                                     </div>
                                     )}
+                                    {/* The web app's notifications while it is
+                                        CLOSED (Web Push). Renders nothing in the
+                                        desktop and Android apps, which notify their
+                                        own way. */}
+                                    <WebPushSetting />
                                     {isAndroidApp() && (
                                     <div className="settings-option">
                                         <div className="option-info">

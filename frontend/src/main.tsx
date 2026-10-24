@@ -175,6 +175,11 @@ import { syncTaskPlacesToNative } from './api/taskPlaces'
 import { installReconnectCatchup } from './api/reconnectCatchup'
 import { restoreSystemBarsAtBoot } from './api/systemBars'
 installMobileNav()
+// The web app: a tap on a push notification (public/sw.js) arrives as
+// `?nav=` on a fresh window or as a message to an open one, and joins the
+// same pending-nav slot. No-op in the desktop and Android apps.
+import { installWebPushNav } from './api/webPush'
+installWebPushNav()
 // Android: an in-app update that applied (a WebView reload) while a video was
 // full screen left the status and navigation bars hidden with nothing on this
 // page holding them: give them back. No-op elsewhere (api/systemBars.ts).
