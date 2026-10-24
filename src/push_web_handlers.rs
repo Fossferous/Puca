@@ -10,8 +10,9 @@
 //!   device's mutes and blocks, and the hash of a fresh random secret that
 //!   only that browser's service worker keeps.
 //! - `PATCH /push/web/subscription`: the device's mutes or blocks changed (and
-//!   at every app start, which also rebinds the row to the current session:
-//!   signing in again mints a new one).
+//!   at every app start). Only for a row of the CALLING session: a browser
+//!   that signed in again holds a new session, gets a 404, and registers
+//!   afresh — with a new secret, so one copied from its storage before dies.
 //! - `DELETE /push/web/subscription`: turned off, or signing out.
 //! - `POST /push/web/test`: push to THIS session's browser, now.
 //! - `GET /push/web/key` (public): the VAPID public key, or null.
@@ -108,6 +109,12 @@ pub struct SubscribeRequest {
     pub auth: String,
     #[serde(default)]
     pub gates: GatesBody,
+    /// The user tapped the switch on THIS account. Only then may a browser
+    /// whose push address belongs to another account move it here; a
+    /// re-registration at app start never does (409 instead), so whoever
+    /// signs in next on a shared browser is not opted in by someone else.
+    #[serde(default)]
+    pub takeover: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -267,21 +274,27 @@ pub async fn subscribe(
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut raw);
     let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
 
-    // ON CONFLICT (endpoint): one browser profile is one subscription. A
-    // browser that signed into another account takes its row with it — the
-    // old account must not keep being rung on someone else's browser.
-    let row: Result<(i64,), sqlx::Error> = sqlx::query_as(
+    // ON CONFLICT (endpoint): one browser profile is one subscription, and a
+    // registration always mints a NEW secret. The row moves to another
+    // account only on an explicit `takeover` (the switch tapped there): then
+    // the old account must not keep being rung on someone else's browser.
+    // Without one, the WHERE leaves the other account's row alone and nothing
+    // is returned.
+    let row: Result<Option<(i64,)>, sqlx::Error> = sqlx::query_as(
         "INSERT INTO web_push_subscriptions \
              (user_id, sid, token_version, expires_at, endpoint, p256dh, auth, \
-              fetch_secret_sha256, muted_servers, muted_channels, blocked_ids) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
+              fetch_secret_sha256, muted_servers, muted_channels, blocked_ids, token_ttl_secs) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
          ON CONFLICT (endpoint) DO UPDATE SET \
              user_id = EXCLUDED.user_id, sid = EXCLUDED.sid, \
              token_version = EXCLUDED.token_version, expires_at = EXCLUDED.expires_at, \
              p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth, \
              fetch_secret_sha256 = EXCLUDED.fetch_secret_sha256, \
              muted_servers = EXCLUDED.muted_servers, muted_channels = EXCLUDED.muted_channels, \
-             blocked_ids = EXCLUDED.blocked_ids, created_at = NOW(), last_push_at = NULL \
+             blocked_ids = EXCLUDED.blocked_ids, token_ttl_secs = EXCLUDED.token_ttl_secs, \
+             created_at = NOW(), last_push_at = NULL, \
+             failures = 0, failing_since = NULL, last_failure_at = NULL \
+         WHERE web_push_subscriptions.user_id = EXCLUDED.user_id OR $13 \
          RETURNING id",
     )
     .bind(claims.sub as i32)
@@ -295,10 +308,18 @@ pub async fn subscribe(
     .bind(&gates.muted_servers)
     .bind(&gates.muted_channels)
     .bind(&gates.blocked_ids)
-    .fetch_one(&state.pool)
+    .bind(crate::auth::token_ttl_secs(claims.ls) as i32)
+    .bind(req.takeover)
+    .fetch_optional(&state.pool)
     .await;
     let id = match row {
-        Ok((id,)) => id,
+        Ok(Some((id,))) => id,
+        Ok(None) => {
+            return bad(
+                StatusCode::CONFLICT,
+                "This browser gets notifications for another account. Turn them on here to move them to this one.",
+            );
+        }
         Err(sqlx::Error::Database(db)) if db.is_foreign_key_violation() => {
             // The session row is missing (a legacy sid, or one written by a
             // mint that failed): nothing could revoke this subscription.
@@ -322,9 +343,12 @@ pub async fn subscribe(
 }
 
 /// PATCH /push/web/subscription — this device's mutes or blocks changed, or
-/// the app started. Also rebinds the row to the CALLING session: a browser
-/// that signed in again (its session expired) holds a new one, and both the
-/// "is that browser open" check and revocation follow the session.
+/// the app started. Only a row the CALLING session made: the caller's session
+/// is live (the middleware checked), so such a row is live too. Any other —
+/// another session's, a dead one's, another account's — is a 404, and the
+/// client registers afresh, which mints a new secret. This never moves a row
+/// to a new session: that would revive a subscription whose session was
+/// signed out, with a secret that may have been copied off the device.
 pub async fn update_gates(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
@@ -337,26 +361,16 @@ pub async fn update_gates(
     if claims.sid.is_empty() {
         return bad(StatusCode::NOT_FOUND, "No such subscription");
     }
-    let now = chrono::Utc::now().timestamp();
-    let start = if claims.sst > 0 { claims.sst } else { now };
-    let Some(expires_at) =
-        chrono::DateTime::<chrono::Utc>::from_timestamp(start + crate::auth::session_cap_secs(claims.ls), 0)
-    else {
-        return bad(StatusCode::BAD_REQUEST, "bad session start");
-    };
     match sqlx::query(
-        "UPDATE web_push_subscriptions SET muted_servers = $3, muted_channels = $4, blocked_ids = $5, \
-             sid = $6, token_version = $7, expires_at = $8 \
-         WHERE id = $1 AND user_id = $2",
+        "UPDATE web_push_subscriptions SET muted_servers = $4, muted_channels = $5, blocked_ids = $6 \
+         WHERE id = $1 AND user_id = $2 AND sid = $3",
     )
     .bind(req.id)
     .bind(claims.sub as i32)
+    .bind(&claims.sid)
     .bind(&gates.muted_servers)
     .bind(&gates.muted_channels)
     .bind(&gates.blocked_ids)
-    .bind(&claims.sid)
-    .bind(claims.tv)
-    .bind(expires_at)
     .execute(&state.pool)
     .await
     {
@@ -364,12 +378,8 @@ pub async fn update_gates(
             state.web_push_watch(claims.sub);
             Json(serde_json::json!({ "updated": true })).into_response()
         }
-        // Gone (pruned, taken over, signed out): the client subscribes again.
+        // Gone, or not this session's: the client registers again.
         Ok(_) => bad(StatusCode::NOT_FOUND, "No such subscription"),
-        // No session row behind the caller's sid: as for subscribe.
-        Err(sqlx::Error::Database(db)) if db.is_foreign_key_violation() => {
-            bad(StatusCode::NOT_FOUND, "No such subscription")
-        }
         Err(e) => {
             tracing::error!("web push: gate update failed for user {}: {e}", claims.sub);
             bad(StatusCode::INTERNAL_SERVER_ERROR, "Could not update the subscription")
@@ -441,19 +451,17 @@ pub async fn send_test(State(state): State<Arc<AppState>>, Extension(claims): Ex
 }
 
 /// The pending route's one query: the row, its secret's hash, its gates, and
-/// the same liveness `sender::LIVE_SUBSCRIPTIONS_SQL` computes.
-pub const PENDING_SQL: &str = "\
-    SELECT w.user_id, w.sid, w.fetch_secret_sha256, \
-           w.muted_servers, w.muted_channels, w.blocked_ids, \
-           (s.revoked_at IS NULL \
-            AND (s.device_id IS NULL OR (d.id IS NOT NULL AND d.revoked_at IS NULL)) \
-            AND u.token_version = w.token_version \
-            AND w.expires_at > NOW()) AS live \
-    FROM web_push_subscriptions w \
-    JOIN users u ON u.id = w.user_id \
-    JOIN token_sessions s ON s.sid = w.sid \
-    LEFT JOIN devices d ON d.id = s.device_id \
-    WHERE w.id = $1";
+/// the sender's own liveness test (`sender::WEB_PUSH_LIVE_SQL`, verbatim), so a
+/// session that has lapsed or ended can no longer be read through its
+/// worker's secret either.
+pub const PENDING_SQL: &str = "SELECT w.user_id, w.sid, w.fetch_secret_sha256, \
+     w.muted_servers, w.muted_channels, w.blocked_ids, \
+     (s.revoked_at IS NULL AND (s.device_id IS NULL OR (d.id IS NOT NULL AND d.revoked_at IS NULL)) AND u.token_version = w.token_version AND w.expires_at > NOW() AND s.last_seen_at + (w.token_ttl_secs + 60) * INTERVAL '1 second' > NOW()) AS live \
+     FROM web_push_subscriptions w \
+     JOIN users u ON u.id = w.user_id \
+     JOIN token_sessions s ON s.sid = w.sid \
+     LEFT JOIN devices d ON d.id = s.device_id \
+     WHERE w.id = $1";
 
 /// POST /push/web/pending — the service worker, woken, asks what knocked.
 /// 404 for an unknown id AND for a wrong secret (one answer, so neither can

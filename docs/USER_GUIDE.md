@@ -1051,9 +1051,13 @@ Púca is not open. Tap the switch and allow notifications when the browser asks.
   and do not show this setting.
 - If your server has not set it up, the setting says so; its operator needs
   a VAPID key (`.env.example`).
-- Signing out turns it off on this device. Your browser's push service
-  (Apple, Google, Mozilla or Microsoft) learns only that something arrived
-  and when; `docs/PRIVACY.md` has the details.
+- It is your account's choice on this device: someone else signing in on the
+  same browser has it off until they turn it on. Signing out turns it off;
+  it also stops if your sign-in lapses (a day without **Stay signed in**).
+- Your browser's push service (Apple, Google, Mozilla or Microsoft) learns
+  that something arrived, when, and from which server, never who wrote or
+  what; it may be able to guess that people woken together share a channel.
+  `docs/PRIVACY.md` has the details.
 
 ---
 

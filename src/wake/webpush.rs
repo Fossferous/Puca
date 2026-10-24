@@ -12,12 +12,16 @@
 //! and nothing more — so a caller cannot attach a name, an id or a byte of
 //! content even by mistake.
 //!
-//! WHAT THE PUSH SERVICE LEARNS. That this server holds a subscription for
-//! this browser (it issued the endpoint), and when a wake happened. The
-//! encrypted body is 9 bytes of plaintext that are the same for every push to
-//! every user, so even the push service's own decryption key (it has none)
-//! would learn nothing from it. The headers are constants too: `TTL`,
-//! `Urgency: high`, `Topic: pucawake`.
+//! WHAT THE PUSH SERVICE LEARNS. That this deployment woke this browser, and
+//! when. "This deployment": every request carries the VAPID public key (`k=`)
+//! and the signed `sub` contact, as RFC 8292 requires. "This browser": it
+//! issued the endpoint, and Apple and Google can usually tie that to an
+//! account. Wakes of several people close together let it guess they share a
+//! channel; sender.rs delays each ring task at random to blur that, which is
+//! all a relay we do not run allows (docs/PRIVACY.md says so). The encrypted
+//! body is 9 bytes of plaintext that are the same for every push to every
+//! user, and the other headers are constants: `TTL`, `Urgency: high`,
+//! `Topic: pucawake`.
 //!
 //! WHAT THE NOTIFICATION SAYS is decided on the device. The service worker
 //! (frontend/public/sw.js) wakes, asks THIS server — over TLS, with a

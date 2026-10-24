@@ -25,6 +25,7 @@ Object.defineProperty(window, 'localStorage', {
 });
 
 const wp = vi.hoisted(() => ({
+    on: false,
     env: 'ok' as string,
     key: 'KEY' as string | null,
     enable: vi.fn(),
@@ -37,10 +38,11 @@ vi.mock('../api/webPush', () => ({
     enableWebPush: wp.enable,
     disableWebPush: wp.disable,
     sendTestPush: wp.test,
+    webPushEnabledHere: () => wp.on,
+    OPT_IN_EVENT: 'webPushOptInChanged',
 }));
 
 const { default: WebPushSetting } = await import('../components/WebPushSetting');
-const { saveSettings, loadSettings } = await import('../components/settingsStore');
 
 const notification = { permission: 'default' as NotificationPermission };
 let host: HTMLDivElement;
@@ -58,6 +60,7 @@ const checkbox = () => host.querySelector<HTMLInputElement>('input[type="checkbo
 const button = (name: string) => [...host.querySelectorAll('button')].find((b) => b.textContent === name);
 
 beforeEach(() => {
+    wp.on = false;
     wp.env = 'ok';
     wp.key = 'KEY';
     wp.enable.mockReset().mockResolvedValue({ ok: true });
@@ -101,17 +104,26 @@ describe('WebPushSetting', () => {
         expect(checkbox()).toBeNull();
     });
 
+    it('shows the SIGNED-IN account’s own choice, and follows a change to it', async () => {
+        wp.on = true;
+        await mount();
+        expect(checkbox()!.checked).toBe(true);
+        wp.on = false;
+        await act(async () => { window.dispatchEvent(new CustomEvent('webPushOptInChanged')); });
+        expect(checkbox()!.checked).toBe(false);
+    });
+
     it('says what the push service learns, next to the switch', async () => {
         await mount();
         expect(checkbox()).not.toBeNull();
-        expect(host.textContent).toMatch(/learns only that something arrived and when/);
+        expect(host.textContent).toMatch(/learns that something arrived, when, and from which server/);
     });
 
     it('the switch turns it on (the tap is what asks), and then offers a test', async () => {
         await mount();
         expect(wp.enable).not.toHaveBeenCalled(); // nothing asks before the tap
         wp.enable.mockImplementation(async () => {
-            saveSettings({ ...loadSettings(), webPushEnabled: true });
+            wp.on = true;   // what enableWebPush records, for THIS account
             return { ok: true };
         });
         await act(async () => { checkbox()!.click(); });
@@ -123,7 +135,6 @@ describe('WebPushSetting', () => {
         // And off again.
         await act(async () => { checkbox()!.click(); });
         expect(wp.disable).toHaveBeenCalledTimes(1);
-        saveSettings({ ...loadSettings(), webPushEnabled: false });
     });
 
     it('a refusal is reported in words', async () => {

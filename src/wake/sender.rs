@@ -282,23 +282,56 @@ pub struct LiveSubscription {
     pub sid: String,
     pub target: super::webpush::WebPushTarget,
     pub gates: WebGates,
+    /// Seconds since the last push it accepted; None if it never has.
+    pub since_push_secs: Option<i64>,
+    /// Consecutive failed pushes, and seconds since the last of them.
+    pub failures: i32,
+    pub since_failure_secs: Option<i64>,
 }
 
-/// `user_id`'s subscriptions whose SESSION is still live, with the dead ones
-/// deleted on the way. "Live" is `auth::token_session_live`'s rule for that
-/// session (not revoked, its device not revoked, the account's token_version
-/// unchanged) plus the session's absolute cap: every way of signing a device
-/// out also stops its pushes, with no hook needed in each of them.
-/// `only_sid` narrows to one session (the test button).
+/// The ONE liveness test for a subscription row `w`, joined to its session
+/// `s`, that session's device `d` and its user `u`: `auth::token_session_live`
+/// for that session (not revoked, its device not revoked, the account's
+/// token_version unchanged), the session's absolute cap, AND its last token
+/// not lapsed. A token is minted only where `s.last_seen_at` is written, so
+/// none of the session's tokens outlives `last_seen_at + token_ttl_secs` (plus
+/// jsonwebtoken's 60 s leeway): past that, nothing can renew it and signing in
+/// again makes a new session. The sender, the test button and
+/// `/push/web/pending` (push_web_handlers.rs) each spell it out in full, so
+/// scripts/check-sql-bind-types.py can read their SQL; a test pins that every
+/// one of them contains exactly this text, so they cannot disagree.
+pub const WEB_PUSH_LIVE_SQL: &str = "(s.revoked_at IS NULL AND (s.device_id IS NULL OR (d.id IS NOT NULL AND d.revoked_at IS NULL)) AND u.token_version = w.token_version AND w.expires_at > NOW() AND s.last_seen_at + (w.token_ttl_secs + 60) * INTERVAL '1 second' > NOW())";
+
+/// A push service that keeps failing is given up on after this many failures
+/// in a row spanning at least `GIVE_UP_AFTER`: a rotated VAPID key answers 403
+/// forever, and a subscription nobody can deliver to is only a timing signal.
+/// The browser re-subscribes by itself the next time Púca is opened.
+pub const GIVE_UP_FAILURES: i32 = 5;
+pub const GIVE_UP_AFTER_SECS: i64 = 24 * 3600;
+
+/// After `n` failures in a row, wait 30 s · 2^(n-1) before trying again, at
+/// most this long.
+const MAX_BACKOFF_SECS: i64 = 6 * 3600;
+
+/// `user_id`'s subscriptions whose SESSION is still live, with the dead and
+/// the given-up ones deleted on the way: every way of signing a device out
+/// also stops its pushes, with no hook needed in each of them. `only_sid`
+/// narrows to one session (the test button).
 pub async fn live_subscriptions(
     pool: &sqlx::PgPool,
     user_id: i64,
     only_sid: Option<&str>,
 ) -> Vec<LiveSubscription> {
-    type Row = (i64, String, String, String, String, Vec<String>, Vec<i64>, Vec<i64>, bool);
+    #[allow(clippy::type_complexity)]
+    type Row = (
+        i64, String, String, String, String, Vec<String>, Vec<i64>, Vec<i64>,
+        Option<i64>, i32, Option<i64>, bool, bool,
+    );
     let rows: Vec<Row> = match sqlx::query_as(LIVE_SUBSCRIPTIONS_SQL)
         .bind(user_id as i32)
         .bind(only_sid)
+        .bind(GIVE_UP_FAILURES)
+        .bind(GIVE_UP_AFTER_SECS)
         .fetch_all(pool)
         .await
     {
@@ -310,8 +343,13 @@ pub async fn live_subscriptions(
     };
     let mut live = Vec::new();
     let mut dead: Vec<i64> = Vec::new();
-    for (id, sid, endpoint, p256dh, auth, muted_servers, muted_channels, blocked_ids, is_live) in rows {
+    for (id, sid, endpoint, p256dh, auth, muted_servers, muted_channels, blocked_ids, since_push_secs, failures, since_failure_secs, is_live, given_up) in rows {
         if !is_live {
+            dead.push(id);
+            continue;
+        }
+        if given_up {
+            tracing::info!("web push: giving up on subscription {id} after {failures} failures over a day");
             dead.push(id);
             continue;
         }
@@ -321,6 +359,9 @@ pub async fn live_subscriptions(
                 sid,
                 target,
                 gates: WebGates { muted_servers, muted_channels, blocked_ids },
+                since_push_secs,
+                failures,
+                since_failure_secs,
             }),
             Err(e) => {
                 tracing::warn!("web push: subscription {id} is malformed ({e}), deleting");
@@ -337,29 +378,50 @@ pub async fn live_subscriptions(
     live
 }
 
-/// One query for the sender and the test button. The liveness expression is
-/// `auth::token_session_live`'s, per row.
-pub const LIVE_SUBSCRIPTIONS_SQL: &str = "\
-    SELECT w.id, w.sid, w.endpoint, w.p256dh, w.auth, \
-           w.muted_servers, w.muted_channels, w.blocked_ids, \
-           (s.revoked_at IS NULL \
-            AND (s.device_id IS NULL OR (d.id IS NOT NULL AND d.revoked_at IS NULL)) \
-            AND u.token_version = w.token_version \
-            AND w.expires_at > NOW()) AS live \
-    FROM web_push_subscriptions w \
-    JOIN users u ON u.id = w.user_id \
-    JOIN token_sessions s ON s.sid = w.sid \
-    LEFT JOIN devices d ON d.id = s.device_id \
-    WHERE w.user_id = $1 AND ($2::TEXT IS NULL OR w.sid = $2::TEXT)";
+/// One query for the sender and the test button.
+pub const LIVE_SUBSCRIPTIONS_SQL: &str = "SELECT w.id, w.sid, w.endpoint, w.p256dh, w.auth, \
+     w.muted_servers, w.muted_channels, w.blocked_ids, \
+     EXTRACT(EPOCH FROM NOW() - w.last_push_at)::BIGINT, \
+     w.failures, \
+     EXTRACT(EPOCH FROM NOW() - w.last_failure_at)::BIGINT, \
+     (s.revoked_at IS NULL AND (s.device_id IS NULL OR (d.id IS NOT NULL AND d.revoked_at IS NULL)) AND u.token_version = w.token_version AND w.expires_at > NOW() AND s.last_seen_at + (w.token_ttl_secs + 60) * INTERVAL '1 second' > NOW()) AS live, \
+     (w.failures >= $3 AND w.failing_since < NOW() - $4::BIGINT * INTERVAL '1 second') AS given_up \
+     FROM web_push_subscriptions w \
+     JOIN users u ON u.id = w.user_id \
+     JOIN token_sessions s ON s.sid = w.sid \
+     LEFT JOIN devices d ON d.id = s.device_id \
+     WHERE w.user_id = $1 AND ($2::TEXT IS NULL OR w.sid = $2::TEXT)";
 
-/// Push one wake to one subscription; prunes it on a 404/410.
+/// May this subscription be pushed to now? Not within `MIN_WAKE_INTERVAL` of
+/// the last push it accepted — one wake per burst, PER BROWSER, so a push to
+/// one browser never holds back another's — and not while it is backing off
+/// after failures. Pure, so the whole table is testable.
+pub fn push_due(since_push_secs: Option<i64>, failures: i32, since_failure_secs: Option<i64>) -> bool {
+    if since_push_secs.is_some_and(|s| s < MIN_WAKE_INTERVAL.as_secs() as i64) {
+        return false;
+    }
+    if failures > 0 {
+        let backoff = (30i64 << (failures - 1).clamp(0, 20)).min(MAX_BACKOFF_SECS);
+        if since_failure_secs.is_some_and(|s| s < backoff) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Push one wake to one subscription, now, and record the outcome: a success
+/// clears its failures, a 404/410 deletes it, anything else counts towards
+/// the backoff and, after a day of nothing but failures, giving up.
 pub async fn push_one(state: &Arc<AppState>, sub: &LiveSubscription) -> Result<(), super::WakeError> {
     match state.web_push.push(&sub.target).await {
         Ok(()) => {
-            let _ = sqlx::query("UPDATE web_push_subscriptions SET last_push_at = NOW() WHERE id = $1")
-                .bind(sub.id)
-                .execute(&state.pool)
-                .await;
+            let _ = sqlx::query(
+                "UPDATE web_push_subscriptions SET last_push_at = NOW(), failures = 0, \
+                 failing_since = NULL, last_failure_at = NULL WHERE id = $1",
+            )
+            .bind(sub.id)
+            .execute(&state.pool)
+            .await;
             Ok(())
         }
         Err(e) => {
@@ -369,17 +431,37 @@ pub async fn push_one(state: &Arc<AppState>, sub: &LiveSubscription) -> Result<(
                     .execute(&state.pool)
                     .await;
                 tracing::info!("web push: pruned gone subscription {} ({e})", sub.id);
+            } else {
+                let _ = sqlx::query(
+                    "UPDATE web_push_subscriptions SET failures = failures + 1, \
+                     failing_since = COALESCE(failing_since, NOW()), last_failure_at = NOW() WHERE id = $1",
+                )
+                .bind(sub.id)
+                .execute(&state.pool)
+                .await;
             }
             Err(e)
         }
     }
 }
 
-/// Ring `user_id`'s subscribed browsers. Same shape as the Android path: the
-/// per-user rate limit is taken BEFORE spawning, so a burst costs one task.
-/// Unlike it, the slot is handed back when nothing was sent (every browser
-/// muted this conversation, the user's settings said no, a push service was
-/// down): a muted channel's chatter must not swallow the DM that follows it.
+/// The events waiting for a user's ring task. The entry exists exactly while
+/// that task runs.
+#[derive(Default)]
+pub struct WebPushQueue {
+    events: Vec<(WakeKind, WakeScope)>,
+}
+
+/// At most this many distinct events wait per user; a burst beyond it is
+/// already a reason to ring.
+const MAX_QUEUED_EVENTS: usize = 64;
+
+/// Ring `user_id`'s subscribed browsers for this event. The event is queued
+/// and ONE task per user drains the queue, so a burst costs one task and one
+/// lookup per round instead of one per message — and, unlike a per-user
+/// rate limit, no event is dropped: a muted channel's message cannot use up
+/// the turn of the DM that follows it, because coalescing is per browser
+/// (`push_due`) and every queued event is weighed against every browser.
 fn ring_web(
     state: &Arc<AppState>,
     user_id: i64,
@@ -390,52 +472,79 @@ fn ring_web(
     if !state.web_push.enabled() || !state.web_push_watched(user_id) {
         return;
     }
-    // Logged BEFORE the rate limit: a frame inside a burst's 30 seconds is
-    // still what the next wake's notification should name.
+    // Logged first: a frame that arrives while a browser is coalescing is
+    // still what that browser's next notification should name.
     state.web_push_record(user_id, frame.clone());
-    let now = Instant::now();
-    let previous = {
-        if state.web_push_recent.len() > 1024 {
-            state
-                .web_push_recent
-                .retain(|_, at| at.elapsed() < Duration::from_secs(3600));
+    let start = {
+        let mut fresh = false;
+        let mut q = state.web_push_queue.entry(user_id).or_insert_with(|| {
+            fresh = true;
+            WebPushQueue::default()
+        });
+        let ev = (kind, scope);
+        if q.events.len() < MAX_QUEUED_EVENTS && !q.events.contains(&ev) {
+            q.events.push(ev);
         }
-        let mut entry = state.web_push_recent.entry(user_id).or_insert(now - MIN_WAKE_INTERVAL * 2);
-        if now.duration_since(*entry) < MIN_WAKE_INTERVAL {
-            return;
-        }
-        let previous = *entry;
-        *entry = now;
-        previous
+        fresh
     };
+    if !start {
+        return; // the running task will see it
+    }
     let state = Arc::clone(state);
     tokio::spawn(async move {
-        let rung = ring_web_now(&state, user_id, kind, &scope).await;
-        if rung == 0 {
-            // Only if nobody has taken the slot since: a later ring that DID
-            // send owns it now.
-            if let Some(mut at) = state.web_push_recent.get_mut(&user_id) {
-                if *at == now {
-                    *at = previous;
+        // A random delay before ringing, so the push services do not see
+        // every member of a channel woken in the same millisecond: alternating
+        // wakes between two accounts are a who-talks-to-whom signal
+        // (docs/PRIVACY.md). Weakens the correlation; does not remove it.
+        let jitter = state.web_push_jitter_ms.load(std::sync::atomic::Ordering::Relaxed);
+        if jitter > 0 {
+            let ms = rand::Rng::gen_range(&mut rand::thread_rng(), 0..=jitter);
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+        }
+        loop {
+            let events = match state.web_push_queue.get_mut(&user_id) {
+                Some(mut q) => std::mem::take(&mut q.events),
+                None => break,
+            };
+            if events.is_empty() {
+                // Nothing came in meanwhile: done. Removed under the shard
+                // lock, so an event racing this either lands before (and is
+                // seen next round) or creates a fresh entry and a fresh task.
+                if state.web_push_queue.remove_if(&user_id, |_, q| q.events.is_empty()).is_some() {
+                    break;
                 }
+                continue;
             }
+            ring_web_events(&state, user_id, &events).await;
         }
     });
 }
 
-/// The awaited half of `ring_web`: how many browsers a wake was handed to.
-pub async fn ring_web_now(state: &Arc<AppState>, user_id: i64, kind: WakeKind, scope: &WakeScope) -> usize {
-    if !prefs_allow_wake(state, user_id, kind).await {
+/// One round: weigh `events` against every live subscription of the user and
+/// push once to each browser that is away, wants at least one of them, and is
+/// due. Returns how many browsers a wake was handed to.
+pub async fn ring_web_events(state: &Arc<AppState>, user_id: i64, events: &[(WakeKind, WakeScope)]) -> usize {
+    let mut kinds_allowed: Vec<(WakeKind, bool)> = Vec::new();
+    for (kind, _) in events {
+        if !kinds_allowed.iter().any(|(k, _)| k == kind) {
+            kinds_allowed.push((*kind, prefs_allow_wake(state, user_id, *kind).await));
+        }
+    }
+    let allowed = |kind: &WakeKind| kinds_allowed.iter().any(|(k, ok)| k == kind && *ok);
+    if !events.iter().any(|(k, _)| allowed(k)) {
         return 0;
     }
     let mut rung = 0;
     for sub in live_subscriptions(&state.pool, user_id, None).await {
-        if !web_gates_permit(scope, &sub.gates) {
-            continue;
-        }
         // That browser is open: it has the frame already, and shows its own
         // notification if it is not on screen. A push would be a second one.
         if state.sid_is_live(user_id, &sub.sid) {
+            continue;
+        }
+        if !events.iter().any(|(k, scope)| allowed(k) && web_gates_permit(scope, &sub.gates)) {
+            continue;
+        }
+        if !push_due(sub.since_push_secs, sub.failures, sub.since_failure_secs) {
             continue;
         }
         match push_one(state, &sub).await {
@@ -448,6 +557,11 @@ pub async fn ring_web_now(state: &Arc<AppState>, user_id: i64, kind: WakeKind, s
         }
     }
     rung
+}
+
+/// `ring_web_events` for one event — what a single message does, awaited.
+pub async fn ring_web_now(state: &Arc<AppState>, user_id: i64, kind: WakeKind, scope: &WakeScope) -> usize {
+    ring_web_events(state, user_id, &[(kind, scope.clone())]).await
 }
 
 /// The `/notifications/test` probe: ring the caller's own devices, awaited so
@@ -615,6 +729,37 @@ mod tests {
             blocked_ids: vec![1, 2, 3],
         };
         assert!(web_gates_permit(&WakeScope::default(), &everything));
+    }
+
+    /// Every query that decides whether a subscription is live uses the ONE
+    /// test, verbatim: including its lapse clause, the easiest to drop from
+    /// a copy.
+    #[test]
+    fn every_web_push_query_uses_the_one_liveness_test() {
+        assert!(WEB_PUSH_LIVE_SQL.contains("s.last_seen_at + (w.token_ttl_secs + 60)"));
+        for (name, sql) in [
+            ("LIVE_SUBSCRIPTIONS_SQL", LIVE_SUBSCRIPTIONS_SQL),
+            ("PENDING_SQL", crate::push_web_handlers::PENDING_SQL),
+        ] {
+            assert!(sql.contains(WEB_PUSH_LIVE_SQL), "{name} must contain WEB_PUSH_LIVE_SQL verbatim");
+        }
+    }
+
+    #[test]
+    fn a_browser_is_due_after_its_coalescing_and_its_backoff() {
+        assert!(push_due(None, 0, None), "never pushed, never failed");
+        assert!(!push_due(Some(10), 0, None), "inside the 30 s coalescing");
+        assert!(push_due(Some(30), 0, None));
+        // 30 s · 2^(n-1) after the n-th failure in a row...
+        assert!(!push_due(None, 1, Some(29)));
+        assert!(push_due(None, 1, Some(30)));
+        assert!(!push_due(None, 3, Some(119)));
+        assert!(push_due(None, 3, Some(120)));
+        // ...capped at six hours, however many.
+        assert!(!push_due(None, 40, Some(6 * 3600 - 1)));
+        assert!(push_due(None, 40, Some(6 * 3600)));
+        // Coalescing and backoff both apply.
+        assert!(!push_due(Some(5), 1, Some(3600)));
     }
 
     #[test]

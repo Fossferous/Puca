@@ -12,19 +12,20 @@
  */
 import { useEffect, useState, type ReactNode } from 'react';
 import {
+    OPT_IN_EVENT,
     disableWebPush,
     enableWebPush,
     fetchServerKey,
     sendTestPush,
+    webPushEnabledHere,
     webPushEnvironment,
     type WebPushEnvironment,
 } from '../api/webPush';
-import { loadSettings } from './settingsStore';
 
 const LABEL = 'Notifications while Púca is closed';
 const PRIVACY =
-    'Your browser’s push service (Apple, Google, Mozilla or Microsoft) learns only that something ' +
-    'arrived and when — never who or what. A notification names the sender, never the message.';
+    'Your browser’s push service (Apple, Google, Mozilla or Microsoft) learns that something arrived, ' +
+    'when, and from which server — never who or what. A notification names the sender, never the message.';
 
 function permissionNow(): NotificationPermission | null {
     try {
@@ -38,7 +39,9 @@ export default function WebPushSetting() {
     const [env] = useState<WebPushEnvironment>(() => webPushEnvironment());
     // undefined = still asking the server; null = it has no key.
     const [serverKey, setServerKey] = useState<string | null | undefined>(undefined);
-    const [enabled, setEnabled] = useState(() => loadSettings().webPushEnabled);
+    // This ACCOUNT's choice on this browser (api/webPushLocal.ts), never the
+    // previous person's.
+    const [enabled, setEnabled] = useState(() => webPushEnabledHere());
     const [permission, setPermission] = useState(permissionNow);
     const [busy, setBusy] = useState(false);
     const [message, setMessage] = useState<string | null>(null);
@@ -47,11 +50,11 @@ export default function WebPushSetting() {
         if (env !== 'ok') return;
         let live = true;
         void fetchServerKey().then((k) => { if (live) setServerKey(k); });
-        const onSettings = () => setEnabled(loadSettings().webPushEnabled);
-        window.addEventListener('settingsChanged', onSettings);
+        const onOptIn = () => setEnabled(webPushEnabledHere());
+        window.addEventListener(OPT_IN_EVENT, onOptIn);
         return () => {
             live = false;
-            window.removeEventListener('settingsChanged', onSettings);
+            window.removeEventListener(OPT_IN_EVENT, onOptIn);
         };
     }, [env]);
 
@@ -100,7 +103,7 @@ export default function WebPushSetting() {
             setBusy(false);
             setMessage(msg);
             setPermission(permissionNow());
-            setEnabled(loadSettings().webPushEnabled);
+            setEnabled(webPushEnabledHere());
         };
         if (!want) {
             void disableWebPush().then(() => done(null), () => done(null));
@@ -121,7 +124,7 @@ export default function WebPushSetting() {
     return (
         <>
             {row(
-                `Get a notification when something arrives while Púca is closed on this device. ${PRIVACY}`,
+                `Get a notification when something arrives for this account while Púca is closed on this device. ${PRIVACY}`,
                 <input
                     type="checkbox"
                     aria-label={LABEL}

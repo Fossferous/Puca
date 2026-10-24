@@ -27,6 +27,7 @@ import { flushNotesPrefs, prefsUnsynced } from './model/notesPrefsSync';
 import { settlePendingDeviceRevoke } from '../api/deviceIdentity/pendingRevoke';
 import { deleteNotesCaches, notesCacheDbName, notesSignOutWarning } from '../api/notesCacheScrub';
 import { currentUserIdFromToken } from '../api/auth';
+import { signOutWebPush } from '../api/webPushLocal';
 
 export function NotesApp() {
     return (
@@ -180,6 +181,12 @@ function SessionGate() {
         // the web key, so no socket is needed, and the key is dropped only
         // once the server confirms (api/auth.ts revokeWebDeviceAndScrubKey).
         // The revoke runs on after this page moves on (keepalive fetch).
+        // The web app's push notifications on this browser end with this
+        // sign-out too (api/webPushLocal.ts): Púca and Notes share the
+        // browser, so a Notes sign-out left them on for the next person.
+        // Local and fire-and-forget; logout()'s session revoke has the
+        // server delete the subscription itself.
+        void signOutWebPush(currentUserIdFromToken());
         logout();
         clearSharedSessionCaches();
         qc.clear();

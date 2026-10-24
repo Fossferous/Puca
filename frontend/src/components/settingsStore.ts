@@ -80,12 +80,6 @@ export const defaultSettings = {
      *  storage); nothing is uploaded, and the notification is content-free.
      *  Gated behind mobileNotifications like everything that posts. */
     locationReminders: false,
-    /** Web app only (api/webPush.ts): notifications on this device while
-     *  Púca is CLOSED, through the browser's push service. OFF until the user
-     *  turns it on with a tap (the browser's permission prompt needs one, and
-     *  on iPhone only a Home Screen app has Web Push at all). Turned off again
-     *  at sign-out, so the next person on this browser chooses for themselves. */
-    webPushEnabled: false,
     /** In-app toast stack for messages arriving while the window IS focused
      *  but the conversation is not on screen (the OS notification's
      *  complement — desktopNotify fires only unfocused). */

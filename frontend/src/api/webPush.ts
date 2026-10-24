@@ -16,7 +16,12 @@
  * and shows the Android app's content-free titles ("alice sent you a
  * message" / "New message"). Message content is never shown and never
  * fetched: it is encrypted end to end, and a notification survives on a lock
- * screen. docs/SECURITY_MODEL.md, "Web Push".
+ * screen. docs/SECURITY_MODEL.md, "Notifications while the web app is closed".
+ *
+ * PER ACCOUNT. The opt-in belongs to the account that tapped the switch
+ * (api/webPushLocal.ts), never to the browser: whoever signs in next on a
+ * shared browser is not opted in by someone else, and the server moves a
+ * browser's push address to another account only on that account's own tap.
  *
  * MUTES AND BLOCKS travel with the subscription (the server applies them
  * BEFORE sending), because the worker cannot stay silent: iOS revokes a
@@ -33,30 +38,26 @@ import { API_BASE_URL } from './config';
 import { isMobile, isTauri } from './platform';
 import { hostShowsNotifications } from './embedHost';
 import { deferNav } from './mobileApp';
-import { loadSettings, saveSettings } from '../components/settingsStore';
+import { currentUserIdFromToken } from './auth';
 import { getMutedServers, getServerNotifyLevel } from '../components/mutedServersStore';
 import { getMutedChannels } from '../components/mutedChannelsStore';
 import { getBlockedIds } from '../components/blockStore';
+import {
+    SW_SCOPE,
+    dropLocalWebPush,
+    readWorkerConfig,
+    setWebPushOptIn,
+    signOutWebPush,
+    webPushOptedIn,
+    writeWorkerConfig,
+} from './webPushLocal';
 
-/** Shared with public/sw.js, which reads the same store. */
-export const PUSH_DB = 'puca-push';
-export const PUSH_STORE = 'cfg';
-export const PUSH_KEY = 'subscription';
+export { readWorkerConfig, type WorkerConfig } from './webPushLocal';
+export { PUSH_DB, PUSH_STORE, PUSH_KEY, SW_SCOPE, OPT_IN_EVENT } from './webPushLocal';
 export const SW_URL = '/sw.js';
-export const SW_SCOPE = '/';
 
 /** Chat.tsx's notification-tap targets; the same pattern as sw.js. */
 export const NAV_RE = /^(dm|server|clip):[A-Za-z0-9_-]{1,80}$/;
-
-/** What the worker needs, in IndexedDB. `endpoint` and `key` let a later
- *  start notice that the browser's subscription or the server's key changed. */
-export interface WorkerConfig {
-    api: string;
-    id: number;
-    secret: string;
-    endpoint: string;
-    key: string;
-}
 
 export type WebPushEnvironment =
     /** The desktop or Android app: they notify their own way. */
@@ -112,6 +113,11 @@ export function webPushEnvironment(p: EnvProbe = probeEnvironment()): WebPushEnv
     return 'ok';
 }
 
+/** Has the signed-in account turned on notifications on this browser? */
+export function webPushEnabledHere(): boolean {
+    return webPushOptedIn(currentUserIdFromToken());
+}
+
 /** This device's mutes and blocks, in the shape the server stores. A server
  *  set to anything but "all" is muted for a push: the server cannot see an
  *  @mention inside ciphertext, so "mentions only" is silence here, exactly as
@@ -124,53 +130,6 @@ export function currentGates(): { muted_servers: string[]; muted_channels: numbe
         .filter((n) => Number.isSafeInteger(n));
     const blocked_ids = [...getBlockedIds()].filter((n) => Number.isSafeInteger(n));
     return { muted_servers, muted_channels, blocked_ids };
-}
-
-// ---- IndexedDB (the worker's half lives in public/sw.js) -------------------
-
-function openDb(): Promise<IDBDatabase> {
-    return new Promise((resolve, reject) => {
-        const req = indexedDB.open(PUSH_DB, 1);
-        req.onupgradeneeded = () => req.result.createObjectStore(PUSH_STORE);
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error);
-    });
-}
-
-export async function readWorkerConfig(): Promise<WorkerConfig | null> {
-    try {
-        const db = await openDb();
-        try {
-            return await new Promise((resolve) => {
-                const get = db.transaction(PUSH_STORE, 'readonly').objectStore(PUSH_STORE).get(PUSH_KEY);
-                get.onsuccess = () => resolve((get.result as WorkerConfig | undefined) ?? null);
-                get.onerror = () => resolve(null);
-            });
-        } finally {
-            db.close();
-        }
-    } catch {
-        return null;
-    }
-}
-
-async function writeWorkerConfig(cfg: WorkerConfig | null): Promise<void> {
-    try {
-        const db = await openDb();
-        try {
-            await new Promise<void>((resolve, reject) => {
-                const tx = db.transaction(PUSH_STORE, 'readwrite');
-                if (cfg) tx.objectStore(PUSH_STORE).put(cfg, PUSH_KEY);
-                else tx.objectStore(PUSH_STORE).delete(PUSH_KEY);
-                tx.oncomplete = () => resolve();
-                tx.onerror = () => reject(tx.error);
-            });
-        } finally {
-            db.close();
-        }
-    } catch {
-        /* a browser with storage off: the worker shows the generic text */
-    }
 }
 
 // ---- server ----------------------------------------------------------------
@@ -215,15 +174,30 @@ async function registration(): Promise<ServiceWorkerRegistration> {
     return navigator.serviceWorker.ready;
 }
 
+/** The browser's subscription for `key`, made if missing or made with an old
+ *  key. With permission already granted no tap is needed. */
+async function browserSubscription(key: string): Promise<PushSubscription> {
+    const reg = await registration();
+    let sub = await reg.pushManager.getSubscription();
+    if (sub && !subscribedWithKey(sub, key)) {
+        await sub.unsubscribe().catch(() => false);
+        sub = null;
+    }
+    return sub ?? reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64urlToBytes(key) });
+}
+
 /** Hand the server this browser's subscription and keep what the worker
- *  needs. */
-async function registerWithServer(sub: PushSubscription, key: string): Promise<void> {
+ *  needs. `takeover` only from a tap: without it the server refuses (409) to
+ *  move a push address that belongs to another account. Every registration
+ *  mints a new secret. */
+async function registerWithServer(sub: PushSubscription, key: string, takeover: boolean): Promise<void> {
     const json = sub.toJSON() as { endpoint?: string; keys?: { p256dh?: string; auth?: string } };
     const res = await apiClient.post<{ id: number; secret: string }>('/push/web/subscription', {
         endpoint: sub.endpoint,
         p256dh: json.keys?.p256dh ?? '',
         auth: json.keys?.auth ?? '',
         gates: currentGates(),
+        takeover,
     });
     await writeWorkerConfig({ api: API_BASE_URL, id: res.id, secret: res.secret, endpoint: sub.endpoint, key });
 }
@@ -233,9 +207,11 @@ export type EnableResult =
     | { ok: false; reason: 'environment' | 'not-configured' | 'denied' | 'failed'; detail?: string };
 
 /**
- * Turn notifications on for this device. CALL ONLY FROM A TAP: the permission
- * request is the first thing it does, before any await, because iOS ties the
- * prompt to the gesture and a fetch first would lose it.
+ * Turn notifications on for this device and the signed-in account. CALL ONLY
+ * FROM A TAP: the permission request is the first thing it does, before any
+ * await, because iOS ties the prompt to the gesture and a fetch first would
+ * lose it. The tap is also what entitles it to take this browser's push
+ * address over from another account.
  */
 export async function enableWebPush(): Promise<EnableResult> {
     if (webPushEnvironment() !== 'ok') return { ok: false, reason: 'environment' };
@@ -243,82 +219,71 @@ export async function enableWebPush(): Promise<EnableResult> {
     if (permission !== 'granted') return { ok: false, reason: 'denied' };
     const key = await fetchServerKey();
     if (!key) return { ok: false, reason: 'not-configured' };
+    const uid = currentUserIdFromToken();
     try {
-        const reg = await registration();
-        let sub = await reg.pushManager.getSubscription();
-        if (sub && !subscribedWithKey(sub, key)) {
-            await sub.unsubscribe().catch(() => false);
-            sub = null;
-        }
-        sub ??= await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64urlToBytes(key) });
-        await registerWithServer(sub, key);
-        saveSettings({ ...loadSettings(), webPushEnabled: true });
+        const sub = await browserSubscription(key);
+        await registerWithServer(sub, key, true);
+        setWebPushOptIn(uid, true);
         return { ok: true };
     } catch (err) {
         return { ok: false, reason: 'failed', detail: err instanceof Error ? err.message : String(err) };
     }
 }
 
-/** Stop being addressable: the server row, the browser's subscription, the
- *  worker's secret. Each step is attempted whatever the others do. */
+/** Stop being addressable: the server row (while the session can still say
+ *  so), then the browser's subscription and the worker's secret. */
 async function dropSubscription(): Promise<void> {
-    let sub: PushSubscription | null = null;
-    try {
-        const reg = await navigator.serviceWorker.getRegistration(SW_SCOPE);
-        sub = (await reg?.pushManager.getSubscription()) ?? null;
-    } catch { /* no worker: nothing subscribed */ }
-    const cfg = await readWorkerConfig();
-    const endpoint = sub?.endpoint ?? cfg?.endpoint;
+    const endpoint = await dropLocalWebPush();
     if (endpoint) {
         try {
             await apiClient.delete('/push/web/subscription', { body: JSON.stringify({ endpoint }) });
         } catch { /* the worker's 410/404 and the session check are the backstop */ }
     }
-    try { await sub?.unsubscribe(); } catch { /* best effort */ }
-    await writeWorkerConfig(null);
 }
 
-/** Turn notifications off for this device. */
+/** Turn notifications off for this device and the signed-in account. */
 export async function disableWebPush(): Promise<void> {
-    saveSettings({ ...loadSettings(), webPushEnabled: false });
+    setWebPushOptIn(currentUserIdFromToken(), false);
     if (webPushEnvironment() !== 'ok') return;
     await dropSubscription();
 }
 
 /**
- * Make this browser agree with the setting, at sign-in and app start. Never
- * asks for permission (no tap here): with it already granted, a subscription
- * that went missing or was made with an old server key is replaced; with it
- * revoked in the browser, the setting is left on and Settings says why.
+ * Make this browser agree with the signed-in account's choice, at sign-in and
+ * app start. Never asks for permission and never takes a push address over
+ * from another account (no tap here). A row this session did not make — the
+ * user signed in again, so the old session's row is dead — is replaced by a
+ * fresh registration with a new secret; one another account holds means that
+ * account tapped the switch since, so this one's opt-in is cleared.
  */
 export async function reconcileWebPush(): Promise<void> {
     if (webPushEnvironment() !== 'ok') return;
-    if (!loadSettings().webPushEnabled) return;
+    const uid = currentUserIdFromToken();
+    if (!webPushOptedIn(uid)) return;
     if (Notification.permission !== 'granted') return;
     const key = await fetchServerKey();
     if (!key) return;
     try {
-        const reg = await registration();
-        let sub = await reg.pushManager.getSubscription();
-        if (sub && !subscribedWithKey(sub, key)) {
-            await sub.unsubscribe().catch(() => false);
-            sub = null;
-        }
-        sub ??= await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64urlToBytes(key) });
+        const sub = await browserSubscription(key);
         const cfg = await readWorkerConfig();
         if (cfg && cfg.endpoint === sub.endpoint && cfg.key === key && cfg.api === API_BASE_URL) {
-            // Known: refresh the mutes, which also proves the row still exists.
+            // Known: refresh the mutes, which also proves the row is this
+            // session's and still exists.
             if (await patchGates(cfg)) return;
         }
-        await registerWithServer(sub, key);
+        await registerWithServer(sub, key, false);
     } catch (err) {
+        if (err instanceof ApiError && err.status === 409) {
+            setWebPushOptIn(uid, false);
+            return;
+        }
         console.warn('[web-push] could not restore the subscription:', err);
     }
 }
 
-/** Re-send this device's mutes and blocks. False when the server no longer
- *  has the row (then the caller subscribes again). */
-async function patchGates(cfg: WorkerConfig): Promise<boolean> {
+/** Re-send this device's mutes and blocks. False when the server has no such
+ *  row for THIS session (then the caller registers afresh). */
+async function patchGates(cfg: { id: number }): Promise<boolean> {
     try {
         await apiClient.patch('/push/web/subscription', { id: cfg.id, gates: currentGates() });
         return true;
@@ -338,7 +303,7 @@ export async function initWebPush(): Promise<void> {
     if (teardownListeners) return;
     const onGates = () => {
         void (async () => {
-            if (!loadSettings().webPushEnabled) return;
+            if (!webPushEnabledHere()) return;
             const cfg = await readWorkerConfig();
             if (cfg && !(await patchGates(cfg))) await reconcileWebPush();
         })();
@@ -354,17 +319,22 @@ export async function initWebPush(): Promise<void> {
 }
 
 /**
- * Sign-out, BEFORE the session token is dropped (deleting the server row
- * needs it). The setting goes off too: whoever signs in next on this browser
- * chooses for themselves. The server also deletes the row when the session is
- * signed out, and stops pushing to any session that has ended.
+ * Explicit sign-out, BEFORE the session token is dropped (deleting the server
+ * row needs it): this account is opted out on this browser and the browser
+ * stops being addressable. The server also deletes the signed-out session's
+ * row, and stops pushing to any session that has ended or lapsed.
  */
 export async function teardownWebPush(): Promise<void> {
     teardownListeners?.();
     teardownListeners = null;
     if (webPushEnvironment() !== 'ok') return;
-    if (loadSettings().webPushEnabled) saveSettings({ ...loadSettings(), webPushEnabled: false });
-    await dropSubscription();
+    const uid = currentUserIdFromToken();
+    const endpoint = await signOutWebPush(uid);
+    if (endpoint) {
+        try {
+            await apiClient.delete('/push/web/subscription', { body: JSON.stringify({ endpoint }) });
+        } catch { /* /auth/logout-session deletes it too */ }
+    }
 }
 
 /** Ask the server to push to this browser now. */
