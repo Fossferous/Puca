@@ -42,6 +42,9 @@ function hasPicture(stream: StreamLike): boolean {
 
 export class ShareStarts {
     private current: ShareStart | null = null;
+    /** The start the Share dialog's own capture began, until its Go Live or
+     *  its Cancel takes it (takeDialog). */
+    private dialog: ShareStart | null = null;
     private readonly now: () => number;
 
     constructor(now: () => number = Date.now) {
@@ -56,7 +59,19 @@ export class ShareStarts {
         if (cur && (now - cur.startedAt < SHARE_START_STALE_MS || cur.capturing || hasPicture(cur.picture))) return null;
         if (cur) cur.cancelled = true;
         this.current = { by, startedAt: now, cancelled: false, capturing: false, picture: null };
+        if (by === 'dialog') this.dialog = this.current;
         return this.current;
+    }
+
+    /** The dialog's Go Live, or its Cancel, takes the start its own capture
+     *  began: never whichever start runs NOW, which may be a host's that
+     *  replaced it as stale, and then it must find its own (cancelled) start
+     *  and stop at the next step, not run on beside the new one. Null when
+     *  the dialog has none. Taking clears it. */
+    takeDialog(): ShareStart | null {
+        const start = this.dialog;
+        this.dialog = null;
+        return start;
     }
 
     /** Stop the start that is running, if one is: it will not go live. True when one was. */
@@ -69,6 +84,7 @@ export class ShareStarts {
     /** That start is over, however it ended. Another's is left alone. */
     end(start: ShareStart | null | undefined): void {
         if (start && this.current === start) this.current = null;
+        if (start && this.dialog === start) this.dialog = null;
     }
 
     get active(): ShareStart | null {

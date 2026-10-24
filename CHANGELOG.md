@@ -4,6 +4,12 @@ User-facing changes per release, newest first. The desktop updater shows the
 one-line summary; this file is the full story. Versions follow
 `frontend/src-tauri/tauri.conf.json`.
 
+## Unreleased
+
+### Fixed
+
+- **Pressing Share while the Share dialog is already open no longer leaves a share half-started.** The dialog covers the Share button, but a key can still press it. That used to start a second capture on the open dialog and then close the dialog while the first share was still held, with its picture and the tray's "sharing" badge, so Share did nothing afterwards until you reloaded. Share and the arrow beside it now do nothing while the dialog is open.
+
 ## 0.9.849 — 2026-10-24
 
 Notifications for the web app and iPhone; calls encrypted in Safari and Firefox; one-tap iPhone install
