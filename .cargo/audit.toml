@@ -35,4 +35,28 @@ ignore = [
     # against a newer DeepFilterNet (the fix comes for free), or if the model
     # is ever loaded from anywhere but the bundle.
     "RUSTSEC-2026-0217",
+
+    # RUSTSEC-2026-0387 - timing variability in crypto-bigint 0.5.5 operations meant
+    # to be constant-time (subtraction, zero counting, division, Montgomery
+    # multiplication), published 2026-10-23; fixed only in 0.7.6+, which the
+    # elliptic-curve 0.13 line cannot take. ACCEPTED TEMPORARILY, with the fix named:
+    #
+    # It is reached only through elliptic-curve 0.13 (p256, p384, ecdsa): from
+    # `jsonwebtoken`'s rust_crypto backend, whose ES256/ES384 paths nothing here uses
+    # (user tokens are HS256), and from src/wake/webpush.rs, which signs a VAPID
+    # ES256 token with the long-lived VAPID_PRIVATE_KEY for every Web Push and does
+    # one ephemeral ECDH per push. A network peer can TRIGGER signings (a message to
+    # a subscribed user; per-user rate limited) but cannot TIME them: pushes are
+    # queued and sent by a background task, off the sender's request path, and the
+    # signature goes only to the browser's push service. What is left is a
+    # co-located observer of the host's microarchitecture. A leaked VAPID key lets
+    # its holder wake a browser only if they also hold that browser's push endpoint
+    # (kept in this server's database and the browser), and the payload is a
+    # constant either way (src/wake/mod.rs).
+    #
+    # The fix: move webpush.rs, and jsonwebtoken's backend, onto aws-lc-rs (already
+    # in this lock, constant-time); crypto-bigint then leaves the lock and this entry
+    # goes with it. Re-evaluate at once if a client can ever drive or time one of
+    # these crates' secret-key operations.
+    "RUSTSEC-2026-0387",
 ]
