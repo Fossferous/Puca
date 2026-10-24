@@ -26,7 +26,7 @@ export const RECORD_FULLSCREEN = () => {
 
 /** Delete every rule this change added: what the page looked like before it. */
 export const OLD_LAYOUT = () => {
-    const marks = ['data-stream-takeover', 'data-stream-chrome', 'data-media-fullscreen', '(max-height: 500px)', 'watch-streams'];
+    const marks = ['data-stream-takeover', 'data-stream-chrome', 'data-stream-controlling', 'data-media-fullscreen', 'data-phone-sideways', 'watch-streams'];
     const strip = (list) => {
         for (let i = list.cssRules.length - 1; i >= 0; i--) {
             const r = list.cssRules[i];
@@ -45,6 +45,28 @@ export const OLD_LAYOUT = () => {
         delete document.documentElement.dataset.streamChrome;
     }).observe(document.documentElement, { attributes: true });
     delete document.documentElement.dataset.streamTakeover;
+};
+
+/**
+ * The device's orientation follows its emulated screen. Chromium's emulation
+ * does this itself; Playwright's WebKit reports landscape-primary whatever
+ * the screen, so a WebKit "iPhone" upright would read as sideways.
+ */
+export const ORIENTATION_FOLLOWS_SCREEN = () => {
+    try {
+        Object.defineProperty(ScreenOrientation.prototype, 'type', {
+            configurable: true,
+            get: () => (screen.width > screen.height ? 'landscape-primary' : 'portrait-primary'),
+        });
+    } catch { /* no ScreenOrientation: window.orientation / the screen decide */ }
+};
+
+/** A phone held UPRIGHT whatever its viewport does (the soft keyboard). */
+export const ORIENTATION_UPRIGHT = () => {
+    try {
+        Object.defineProperty(ScreenOrientation.prototype, 'type', { configurable: true, get: () => 'portrait-primary' });
+    } catch { /* see above */ }
+    try { Object.defineProperty(window, 'orientation', { configurable: true, get: () => 0 }); } catch { /* engine-specific */ }
 };
 
 /** Everything a check needs, measured in the page. */

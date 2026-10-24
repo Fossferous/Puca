@@ -128,6 +128,12 @@ describe('fullscreening a camera tile', () => {
             globalCameraUsers.delete(7);
             render();
             expect(document.documentElement.dataset.mediaFullscreen).toBeUndefined();
+            // ...and the same camera coming back does not reopen it unasked.
+            globalCameraUsers.set(7, 'them');
+            globalCameraStreams.set(7, new MediaStream());
+            render();
+            expect(document.documentElement.dataset.mediaFullscreen).toBeUndefined();
+            expect(container.querySelector('.is-app-fullscreen')).toBeNull();
         } finally {
             delete (document as { fullscreenEnabled?: boolean }).fullscreenEnabled;
         }

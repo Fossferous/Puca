@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { PHONE_LAYOUT_QUERY, installPhoneSideways } from '../api/phoneSideways';
 
 /**
  * The stream stage TAKING OVER a phone's screen (components/streamTakeover.ts,
@@ -13,6 +14,11 @@ import { createRoot, type Root } from 'react-dom/client';
  * keys on: <html data-stream-takeover> while a phone is sideways or a stream
  * is in the in-app fullscreen, the tap that hides and shows the controls,
  * their hiding by themselves, and that nothing is published on a desktop.
+ *
+ * "Sideways" comes from the REAL store (api/phoneSideways.ts) on a fake
+ * window that answers only the real phone-layout query and turns by its
+ * screen orientation; what counts as sideways is pinned in
+ * phoneSideways.test.ts.
  */
 
 const STREAMS = new Map<number, { username: string; stream: MediaStream }>();
@@ -75,7 +81,8 @@ import { useStreamStore } from '../stores/streamStore';
 let container: HTMLDivElement;
 let root: Root;
 let landscape = false;
-const mqListeners = new Set<() => void>();
+let sidewaysWin: EventTarget;
+let undoSideways: () => void = () => {};
 
 function render() {
     act(() => {
@@ -96,13 +103,19 @@ beforeEach(() => {
     selected = [1];
     streamers = [{ userId: 1, username: 'alice' }];
     landscape = false;
-    mqListeners.clear();
-    window.matchMedia = ((q: string) => ({
-        get matches() { return q.includes('orientation: landscape') ? landscape : false; },
-        media: q,
-        addEventListener: (_: string, fn: () => void) => mqListeners.add(fn),
-        removeEventListener: (_: string, fn: () => void) => mqListeners.delete(fn),
-    })) as unknown as typeof window.matchMedia;
+    // An iPhone: coarse pointer, the phone layout, a 390x844 screen that does
+    // not rotate, and a screen orientation that does.
+    const orientation = new EventTarget();
+    Object.defineProperty(orientation, 'type', { get: () => (landscape ? 'landscape-primary' : 'portrait-primary') });
+    sidewaysWin = Object.assign(new EventTarget(), {
+        document,
+        screen: { width: 390, height: 844, orientation },
+        matchMedia: (q: string) => {
+            if (q !== PHONE_LAYOUT_QUERY) throw new Error(`unexpected query: ${q}`);
+            return { matches: true, addEventListener() {}, removeEventListener() {} };
+        },
+    });
+    undoSideways = installPhoneSideways(sidewaysWin as unknown as Window);
     vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(() => Promise.resolve());
     container = document.createElement('div');
     document.body.appendChild(container);
@@ -111,7 +124,8 @@ beforeEach(() => {
 afterEach(() => {
     act(() => root?.unmount());
     container.remove();
-    delete (window as { matchMedia?: unknown }).matchMedia;
+    undoSideways();
+    document.querySelectorAll('.voice-panel-compact').forEach(n => n.remove());
     delete (document as { fullscreenEnabled?: boolean }).fullscreenEnabled;
     vi.useRealTimers();
     vi.restoreAllMocks();
@@ -119,7 +133,7 @@ afterEach(() => {
 
 function rotate(toLandscape: boolean) {
     landscape = toLandscape;
-    act(() => { mqListeners.forEach(f => f()); });
+    act(() => { sidewaysWin.dispatchEvent(new Event('orientationchange')); });
 }
 
 describe('the phone-landscape takeover', () => {
@@ -139,7 +153,7 @@ describe('the phone-landscape takeover', () => {
     });
 
     it('starts sideways already taken over, and unmounting clears it', () => {
-        landscape = true;
+        rotate(true);
         render();
         expect(html().streamTakeover).toBe('landscape');
         act(() => { vi.advanceTimersByTime(5000); });
@@ -151,7 +165,7 @@ describe('the phone-landscape takeover', () => {
     });
 
     it('a tap on the picture hides the controls and another shows them; a tap on a button does not', () => {
-        landscape = true;
+        rotate(true);
         render();
         expect(html().streamChrome).toBeUndefined();
         tap(container.querySelector('video')!);
@@ -169,7 +183,7 @@ describe('the phone-landscape takeover', () => {
     });
 
     it('the controls hide by themselves after a few idle seconds, and a touch restarts the clock', () => {
-        landscape = true;
+        rotate(true);
         render();
         act(() => { vi.advanceTimersByTime(3000); });
         act(() => { container.querySelector('.stream-stage')!.dispatchEvent(new Event('pointerdown', { bubbles: true })); });
@@ -179,16 +193,63 @@ describe('the phone-landscape takeover', () => {
         expect(html().streamChrome).toBe('hidden');
     });
 
-    it('never hide while a control session needs its Stop button', () => {
-        landscape = true;
+    it('a control session: published for the layout (controls beside the picture), never hidden, by time or by a tap anywhere', () => {
+        rotate(true);
         controlState = { controlling: { userId: 1, username: 'alice', status: 'active' }, hosting: null };
         render();
+        expect(html().streamControlling).toBe('true');
         act(() => { vi.advanceTimersByTime(10000); });
+        expect(html().streamChrome).toBeUndefined();
+        // The review's lock-out: one tap on the header's blank area hid
+        // everything, and every later tap was a click on the other computer.
+        tap(container.querySelector('.stream-stage-header')!);
+        tap(container.querySelector('.stream-stage-title')!);
+        tap(container.querySelector('video')!);
+        expect(html().streamChrome).toBeUndefined();
+        expect(container.querySelector('.stop-controlling-btn')).not.toBeNull();
+    });
+
+    it('interaction in the voice bar (portaled OUTSIDE the stage) keeps the controls up', () => {
+        const bar = document.createElement('div');
+        bar.className = 'voice-panel-compact';
+        bar.innerHTML = '<button title="Mute">m</button>';
+        document.body.appendChild(bar);
+        rotate(true);
+        render();
+        act(() => { vi.advanceTimersByTime(3000); });
+        act(() => { bar.querySelector('button')!.dispatchEvent(new Event('pointerdown', { bubbles: true })); });
+        act(() => { vi.advanceTimersByTime(1700); });
+        expect(html().streamChrome).toBeUndefined();
+        act(() => { vi.advanceTimersByTime(2400); });
+        expect(html().streamChrome).toBe('hidden');
+    });
+
+    it('a key brings hidden controls back (keyboard, switch access, a screen reader)', () => {
+        rotate(true);
+        render();
+        tap(container.querySelector('video')!);
+        expect(html().streamChrome).toBe('hidden');
+        const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+        act(() => { document.body.dispatchEvent(tab); });
+        expect(html().streamChrome).toBeUndefined();
+        // Hidden controls cannot take focus, so Tab's own move would skip
+        // them: it is taken over and lands on the first control instead.
+        expect(tab.defaultPrevented).toBe(true);
+        act(() => { vi.advanceTimersByTime(1); });
+        expect(container.querySelector('.stream-stage')!.contains(document.activeElement)).toBe(true);
+    });
+
+    it('focus arriving on one of the controls shows them', () => {
+        rotate(true);
+        render();
+        tap(container.querySelector('video')!);
+        expect(html().streamChrome).toBe('hidden');
+        act(() => { (container.querySelector('.stream-tile-header button') as HTMLButtonElement).focus(); });
         expect(html().streamChrome).toBeUndefined();
     });
 
     it('the controls are back each time the phone turns sideways again', () => {
-        landscape = true;
+        rotate(true);
         render();
         act(() => { vi.advanceTimersByTime(5000); });
         expect(html().streamChrome).toBe('hidden');
@@ -225,6 +286,34 @@ describe('Fullscreen where nothing can go fullscreen (in-app)', () => {
         expect(html().streamTakeover).toBeUndefined();
     });
 
+    it('the same person sharing again later does NOT reopen it fullscreen unasked', () => {
+        noFullscreenAnywhere();
+        STREAMS.set(2, { username: 'bob', stream: new MediaStream() });
+        selected = [1, 2];
+        streamers.push({ userId: 2, username: 'bob' });
+        render();
+        tap(fullscreenBtn());
+        expect(html().streamTakeover).toBe('fullscreen');
+        selected = [2];
+        act(() => notify());
+        selected = [2, 1];
+        act(() => notify());
+        expect(html().streamTakeover).toBeUndefined();
+        expect(container.querySelector('.is-app-fullscreen')).toBeNull();
+    });
+
+    it('every stream ending, then the same person sharing again, does not reopen it either', () => {
+        noFullscreenAnywhere();
+        render();
+        tap(fullscreenBtn());
+        expect(html().streamTakeover).toBe('fullscreen');
+        selected = [];
+        act(() => notify());
+        selected = [1];
+        act(() => notify());
+        expect(html().streamTakeover).toBeUndefined();
+    });
+
     it('ends with its stream: no black screen left over the app', () => {
         noFullscreenAnywhere();
         STREAMS.set(2, { username: 'bob', stream: new MediaStream() });
@@ -247,6 +336,27 @@ describe('Fullscreen where nothing can go fullscreen (in-app)', () => {
             tap(fullscreenBtn());
             expect(enter).toHaveBeenCalledTimes(1);
             expect(html().streamTakeover).toBeUndefined();
+        } finally {
+            delete (HTMLVideoElement.prototype as { webkitEnterFullscreen?: unknown }).webkitEnterFullscreen;
+        }
+    });
+
+    it('the iPhone player\'s speaker button unmutes a stream muted AFTER Fullscreen was tapped (no stale state)', () => {
+        noFullscreenAnywhere();
+        const enter = vi.fn();
+        Object.defineProperty(HTMLVideoElement.prototype, 'webkitEnterFullscreen', { configurable: true, value: enter });
+        try {
+            render();
+            tap(fullscreenBtn());
+            const video = container.querySelector('video')!;
+            act(() => { video.dispatchEvent(new Event('webkitbeginfullscreen')); });
+            const mute = () => container.querySelector<HTMLButtonElement>('.stream-tile-header button[title$="stream"]')!;
+            expect(mute().title).toBe('Mute stream');
+            tap(mute());
+            expect(mute().title).toBe('Unmute stream');
+            act(() => { video.muted = false; video.dispatchEvent(new Event('volumechange')); });
+            expect(mute().title).toBe('Mute stream');
+            expect(video.muted).toBe(true);
         } finally {
             delete (HTMLVideoElement.prototype as { webkitEnterFullscreen?: unknown }).webkitEnterFullscreen;
         }

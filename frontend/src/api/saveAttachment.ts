@@ -28,7 +28,6 @@ import { loadSettings } from '../components/settingsStore';
 import { chooseSavePath } from './savePath';
 import { PUCA_FOLDER, deviceWriteFailedMessage, saveBytesToDevice, timestampedName } from './saveToDevice';
 import { nativeDownloadsAvailable, saveAttachmentNatively, type EncRef } from './nativeDownloads';
-import { isIosStandalone } from './iosStandalone';
 
 /** Where a saved file ended up, for the "Saved to …" line. */
 export interface SaveResult {
@@ -92,19 +91,6 @@ export async function saveAttachment(blobUrl: string, name: string, folder: stri
         }
     }
 
-    // An iPhone or iPad Home Screen app: the share sheet, whose "Save to Files"
-    // and "Save Image" are the saves iOS offers there. A download from a Home
-    // Screen app has no Safari around it to show or open it, so the anchor
-    // below is the fallback, not the first choice. Cancelling the sheet is a
-    // cancel; anything else (an iOS without file sharing, the tap's
-    // permission spent) falls through to the anchor, which is no worse than
-    // before.
-    if (isIosStandalone()) {
-        const shared = await shareFile(blobUrl, safeName);
-        if (shared === 'shared') return { where: safeName, onDisk: false };
-        if (shared === 'cancelled') return { where: '', onDisk: false, cancelled: true };
-    }
-
     // Web: a transient anchor. Created, clicked and removed synchronously so it
     // is never present in the document to be middle-clicked or copied.
     const a = document.createElement('a');
@@ -115,26 +101,6 @@ export async function saveAttachment(blobUrl: string, name: string, folder: stri
     a.click();
     a.remove();
     return { where: safeName, onDisk: false };
-}
-
-type ShareNavigator = Navigator & {
-    canShare?: (data: { files: File[] }) => boolean;
-    share?: (data: { files: File[] }) => Promise<void>;
-};
-
-/** Hand the file to the system share sheet. 'unavailable' means "use the anchor". */
-async function shareFile(blobUrl: string, name: string): Promise<'shared' | 'cancelled' | 'unavailable'> {
-    const nav = navigator as ShareNavigator;
-    if (typeof nav.share !== 'function' || typeof nav.canShare !== 'function') return 'unavailable';
-    try {
-        const blob = await (await fetch(blobUrl)).blob();
-        const file = new File([blob], name, { type: blob.type || 'application/octet-stream' });
-        if (!nav.canShare({ files: [file] })) return 'unavailable';
-        await nav.share({ files: [file] });
-        return 'shared';
-    } catch (e) {
-        return (e as { name?: string } | null)?.name === 'AbortError' ? 'cancelled' : 'unavailable';
-    }
 }
 
 /**

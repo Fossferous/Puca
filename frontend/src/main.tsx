@@ -63,6 +63,10 @@ installFileDropGuard(window)
 // (api/iosStandalone.ts). Nothing anywhere else.
 import { installIosStandalone } from './api/iosStandalone'
 installIosStandalone()
+// <html data-phone-sideways>: the device turned, not the viewport's shape
+// (phoneLandscape.css, the stream takeover).
+import { installPhoneSideways } from './api/phoneSideways'
+installPhoneSideways()
 
 // The download page's "Install Púca as an app" opens the web app with ?install=1 and
 // the browser's install event can fire before React mounts: wire both now

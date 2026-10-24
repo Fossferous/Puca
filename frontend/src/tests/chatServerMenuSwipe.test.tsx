@@ -126,6 +126,23 @@ describe('phone: the server icon menu and the panel swipe', () => {
         expect(panel()).not.toBe(before);
     });
 
+    // A stream (or camera) holding the whole screen switches the panel slide
+    // off (phoneLandscape.css), so a swipe would change the panel UNSEEN and
+    // Chat would come back to members or channels (iPhone polish review #4).
+    it('with a stream taking over the screen, a swipe leaves the panel where it is', async () => {
+        await mountChat();
+        const before = panel();
+        for (const attr of ['streamTakeover', 'mediaFullscreen'] as const) {
+            document.documentElement.dataset[attr] = attr === 'streamTakeover' ? 'landscape' : 'on';
+            try {
+                await swipeLeft();
+                expect(panel()).toBe(before);
+            } finally {
+                delete document.documentElement.dataset[attr];
+            }
+        }
+    });
+
     it('with the server menu open, a swipe leaves the panel (and the menu) where they are', async () => {
         await mountChat();
         const icon = host!.querySelector('.server-icon[title="Alpha"]');

@@ -28,6 +28,7 @@
  * require the gesture.
  */
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { interceptBack } from '../api/mobileApp';
 
 type FsDocument = Document & {
     webkitFullscreenEnabled?: boolean;
@@ -47,6 +48,8 @@ export type MediaFullscreenRoute = 'element' | 'video' | 'app';
 export interface MediaFullscreenOptions {
     /** Show the caller's in-app fullscreen. Called at most once per request. */
     fallback: () => void;
+    /** The system player is up (route 2 only). */
+    onVideoBegin?: () => void;
     /** The video left the system player (route 2 only). */
     onVideoExit?: () => void;
     /** The system player tried to unmute a video that must stay muted
@@ -132,7 +135,7 @@ function watchSystemPlayer(video: IosVideo, opts: MediaFullscreenOptions, fallba
     const keepMuted = video.muted;
     let began = false;
 
-    const onBegin = () => { began = true; };
+    const onBegin = () => { began = true; opts.onVideoBegin?.(); };
     const onVolume = () => {
         if (!keepMuted || video.muted) return;
         video.muted = true;
@@ -165,15 +168,18 @@ function watchSystemPlayer(video: IosVideo, opts: MediaFullscreenOptions, fallba
 /**
  * The in-app fullscreen for a camera tile (route 3), keyed by whose camera.
  * Published on <html data-media-fullscreen> so the phone layout lets a fixed
- * tile reach the viewport (phoneLandscape.css); Escape leaves it, and so does
- * the camera going away (`isLive` false): a key left behind would keep the
- * page in that state with no tile on screen.
+ * tile reach the viewport (phoneLandscape.css); Escape and Android's BACK
+ * leave it, and so does the camera going away (`isLive` false): a key left
+ * behind would keep the page in that state with no tile on screen.
  */
 export function useAppMediaFullscreen(
     isLive: (key: number) => boolean,
     onLeave?: () => void,
 ): [number | null, (key: number | null) => void] {
     const [raw, setKey] = useState<number | null>(null);
+    // Cleared, not just ignored, when its camera goes: the same person's
+    // camera coming back later must not reopen fullscreen unasked.
+    if (raw !== null && !isLive(raw)) setKey(null);
     const key = raw !== null && isLive(raw) ? raw : null;
     const leaveRef = useRef(onLeave);
     useEffect(() => { leaveRef.current = onLeave; });
@@ -183,9 +189,12 @@ export function useAppMediaFullscreen(
         root.dataset.mediaFullscreen = 'on';
         const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setKey(null); };
         window.addEventListener('keydown', onKey);
+        // Android's BACK leaves it first, as it leaves a video's.
+        const releaseBack = interceptBack(() => setKey(null));
         return () => {
             delete root.dataset.mediaFullscreen;
             window.removeEventListener('keydown', onKey);
+            releaseBack();
             leaveRef.current?.();
         };
     }, [key]);
