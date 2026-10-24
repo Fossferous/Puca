@@ -1157,9 +1157,13 @@ pub struct AppState {
     /// `NullWebPush` when no VAPID key is configured. Same contract as `wake`:
     /// the push carries a constant, never data.
     pub web_push: std::sync::Arc<dyn crate::wake::webpush::WebPushTransport>,
-    /// Per-user Web Push rate limit, kept apart from `wake_recent` so an
-    /// Android doorbell and a browser's never starve each other.
-    pub web_push_recent: DashMap<UserId, Instant>,
+    /// Per user: the Web Push events waiting for that user's one ring task
+    /// (wake/sender.rs `ring_web`). Present only while a task runs.
+    pub web_push_queue: DashMap<UserId, crate::wake::sender::WebPushQueue>,
+    /// Up to how many milliseconds a ring task waits before it rings, at
+    /// random, so a channel's members are not all woken in one instant
+    /// (docs/PRIVACY.md). Tests set it to 0.
+    pub web_push_jitter_ms: AtomicU64,
     /// Users with at least one Web Push subscription: loaded at boot, kept by
     /// push_web_handlers. Everyone else costs the sender one lookup, and has
     /// nothing logged below.
@@ -1525,7 +1529,8 @@ impl AppState {
             wake,
             wake_recent: DashMap::new(),
             web_push,
-            web_push_recent: DashMap::new(),
+            web_push_queue: DashMap::new(),
+            web_push_jitter_ms: AtomicU64::new(3000),
             web_push_users: DashMap::new(),
             web_push_log: DashMap::new(),
             web_push_seq: AtomicU64::new(

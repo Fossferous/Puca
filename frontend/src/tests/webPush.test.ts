@@ -3,17 +3,19 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { makeFakeIndexedDb } from './fakeIndexedDb';
 
 /**
- * api/webPush.ts — the web app's half of Web Push.
+ * api/webPush.ts (and its leaf, api/webPushLocal.ts) — the web app's half of
+ * Web Push.
  *
  * The duties pinned here are the ones that fail SILENTLY: a second
  * notification path switched on inside the desktop or Android app (everyone
  * notified twice), a permission prompt that is not the first thing a tap
  * does (iOS drops it), mutes that never reach the server (a muted channel
- * still rings the phone), and a sign-out that leaves this browser addressable.
+ * still rings the phone), a sign-out that leaves this browser addressable,
+ * and one person's opt-in carried to the next account on a shared browser.
  */
 
 // A real localStorage: the shared setup installs stubs that store nothing,
-// and the settings and mute stores live there.
+// and the opt-in and the mute stores live there.
 const backing = new Map<string, string>();
 Object.defineProperty(window, 'localStorage', {
     configurable: true,
@@ -34,6 +36,7 @@ const api = vi.hoisted(() => ({
 const platform = vi.hoisted(() => ({ tauri: false, mobile: false, embedded: false }));
 const nav = vi.hoisted(() => ({ deferNav: vi.fn() }));
 const blocks = vi.hoisted(() => ({ ids: new Set<number>() }));
+const who = vi.hoisted(() => ({ uid: 7 as number | null }));
 
 vi.mock('../api/client', () => {
     class ApiError extends Error {
@@ -57,11 +60,12 @@ vi.mock('../api/config', () => ({ API_BASE_URL: 'https://chat.example.com' }));
 vi.mock('../api/platform', () => ({ isTauri: () => platform.tauri, isMobile: () => platform.mobile }));
 vi.mock('../api/embedHost', () => ({ hostShowsNotifications: () => platform.embedded }));
 vi.mock('../api/mobileApp', () => ({ deferNav: nav.deferNav }));
+vi.mock('../api/auth', () => ({ currentUserIdFromToken: () => who.uid }));
 vi.mock('../components/blockStore', () => ({ getBlockedIds: () => blocks.ids }));
 
 import * as webPush from '../api/webPush';
+import { signOutWebPush, webPushOptedIn, setWebPushOptIn } from '../api/webPushLocal';
 import { ApiError } from '../api/client';
-import { loadSettings, saveSettings } from '../components/settingsStore';
 
 const KEY = 'BKEY' + 'A'.repeat(83);   // 87 chars = 65 bytes, as a real key
 const OTHER_KEY = 'BOLD' + 'B'.repeat(83);
@@ -126,6 +130,7 @@ beforeEach(() => {
     backing.clear();
     order.length = 0;
     current = null;
+    who.uid = 7;
     Object.assign(platform, { tauri: false, mobile: false, embedded: false });
     blocks.ids = new Set();
     vi.clearAllMocks();
@@ -167,7 +172,7 @@ describe('where Web Push applies', () => {
 });
 
 describe('turning it on', () => {
-    it('asks for permission FIRST, then subscribes with the server key and hands the server its mutes', async () => {
+    it('asks for permission FIRST, then subscribes with the server key, takes the browser over, and hands the server its mutes', async () => {
         backing.set('sovereign_muted_servers', JSON.stringify({ 'srv-all': 'all', 'srv-off': true, 'srv-mentions': 'mentions' }));
         backing.set('sovereign_muted_channels', JSON.stringify({ '77': true, '78': false }));
         blocks.ids = new Set([13]);
@@ -187,13 +192,15 @@ describe('turning it on', () => {
             p256dh: 'P256DH',
             auth: 'AUTH',
             gates: { muted_servers: ['srv-off', 'srv-mentions'], muted_channels: [77], blocked_ids: [13] },
+            takeover: true,   // a tap may move the browser to this account
         });
         // What the worker will read.
         expect(await webPush.readWorkerConfig()).toEqual({
             api: 'https://chat.example.com', id: 7, secret: 'the-secret',
             endpoint: 'https://fcm.googleapis.com/fcm/send/new', key: KEY,
         });
-        expect(loadSettings().webPushEnabled).toBe(true);
+        expect(webPushOptedIn(7)).toBe(true);
+        expect(webPushOptedIn(8)).toBe(false);
     });
 
     it.each([
@@ -209,11 +216,11 @@ describe('turning it on', () => {
         expect(api.post).not.toHaveBeenCalled();
     });
 
-    it('a refused permission subscribes nothing and leaves the setting off', async () => {
+    it('a refused permission subscribes nothing and opts nobody in', async () => {
         notification.answer = 'denied';
         expect(await webPush.enableWebPush()).toEqual({ ok: false, reason: 'denied' });
         expect(serviceWorker.register).not.toHaveBeenCalled();
-        expect(loadSettings().webPushEnabled).toBe(false);
+        expect(webPushOptedIn(7)).toBe(false);
     });
 
     it('a server with no VAPID key subscribes nothing', async () => {
@@ -225,7 +232,7 @@ describe('turning it on', () => {
 });
 
 describe('signing out', () => {
-    it('deletes the server row with the token still held, unsubscribes, forgets the secret, and turns the setting off', async () => {
+    it('deletes the server row with the token still held, unsubscribes, forgets the secret, and opts this account out', async () => {
         await webPush.enableWebPush();
         order.length = 0;
         await webPush.teardownWebPush();
@@ -234,21 +241,33 @@ describe('signing out', () => {
         });
         expect(order).toContain('unsubscribe https://fcm.googleapis.com/fcm/send/new');
         expect(await webPush.readWorkerConfig()).toBeNull();
-        expect(loadSettings().webPushEnabled).toBe(false);
+        expect(webPushOptedIn(7)).toBe(false);
     });
 
     it('still unsubscribes the browser when the server cannot be reached', async () => {
         await webPush.enableWebPush();
+        const sub = current!;
         api.delete.mockRejectedValue(new Error('offline'));
         await webPush.teardownWebPush();
-        expect(current!.unsubscribe).toHaveBeenCalled();
+        expect(sub.unsubscribe).toHaveBeenCalled();
         expect(await webPush.readWorkerConfig()).toBeNull();
+    });
+
+    it('Púca Notes’ sign-out (the leaf alone) opts out and unsubscribes too, and only that account', async () => {
+        await webPush.enableWebPush();
+        setWebPushOptIn(9, true);   // another account opted in on this browser earlier
+        const sub = current!;
+        await signOutWebPush(7);
+        expect(sub.unsubscribe).toHaveBeenCalled();
+        expect(await webPush.readWorkerConfig()).toBeNull();
+        expect(webPushOptedIn(7)).toBe(false);
+        expect(webPushOptedIn(9)).toBe(true);
     });
 });
 
 describe('restoring at sign-in and app start', () => {
     it('never prompts', async () => {
-        saveSettings({ ...loadSettings(), webPushEnabled: true });
+        setWebPushOptIn(7, true);
         notification.permission = 'default';
         await webPush.reconcileWebPush();
         expect(notification.requestPermission).not.toHaveBeenCalled();
@@ -263,16 +282,39 @@ describe('restoring at sign-in and app start', () => {
         expect(api.post).not.toHaveBeenCalled();
     });
 
-    it('a row the server no longer has is registered again', async () => {
+    it('a row this session did not make is registered afresh — never taken over', async () => {
         await webPush.enableWebPush();
         api.post.mockClear();
         api.patch.mockRejectedValue(new ApiError('No such subscription', 404));
         await webPush.reconcileWebPush();
-        expect(api.post).toHaveBeenCalledWith('/push/web/subscription', expect.anything());
+        expect(api.post).toHaveBeenCalledWith('/push/web/subscription', expect.objectContaining({ takeover: false }));
+    });
+
+    it('a browser another account took over clears this account’s opt-in', async () => {
+        await webPush.enableWebPush();
+        api.patch.mockRejectedValue(new ApiError('No such subscription', 404));
+        api.post.mockRejectedValue(new ApiError('another account', 409));
+        await webPush.reconcileWebPush();
+        expect(webPushOptedIn(7)).toBe(false);
+    });
+
+    it('SHARED BROWSER: the next account is not opted in by the previous one', async () => {
+        await webPush.enableWebPush();     // account 7 taps the switch
+        api.post.mockClear();
+        api.patch.mockClear();
+        who.uid = 8;                       // account 8 signs in on the same browser
+        await webPush.reconcileWebPush();
+        await webPush.initWebPush();
+        expect(api.post).not.toHaveBeenCalled();
+        expect(api.patch).not.toHaveBeenCalled();
+        expect(webPush.webPushEnabledHere()).toBe(false);
+        // Control: account 7 back, its own choice stands.
+        who.uid = 7;
+        expect(webPush.webPushEnabledHere()).toBe(true);
     });
 
     it('a subscription made with an old server key is replaced', async () => {
-        saveSettings({ ...loadSettings(), webPushEnabled: true });
+        setWebPushOptIn(7, true);
         notification.permission = 'granted';
         const old = subscription('https://fcm.googleapis.com/fcm/send/old', OTHER_KEY);
         current = old;
@@ -281,6 +323,7 @@ describe('restoring at sign-in and app start', () => {
         expect(pushManager.subscribe).toHaveBeenCalled();
         expect(api.post).toHaveBeenCalledWith('/push/web/subscription', expect.objectContaining({
             endpoint: 'https://fcm.googleapis.com/fcm/send/new',
+            takeover: false,
         }));
     });
 

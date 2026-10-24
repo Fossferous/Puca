@@ -563,12 +563,25 @@ constant `{"w":"1"}`, encrypted to your browser (RFC 8291), so it is the same 11
 for every user and every reason; its headers (`TTL`, `Urgency`, `Topic`) are constants
 too. There is no way for the server's code to put anything else in one — the sending
 functions take a subscription and nothing more (`src/wake/webpush.rs`, with tests
-that decrypt a real push and pin the constant). The service also sees your operator's
-server's address (it makes the request) and the push address it issued to your browser,
-which it already knew. It never learns a sender, a conversation, a channel or a byte of
-a message. It does learn the timing: someone who can read the push service's logs can
-tell when your server had something for you while Púca was closed — at most one wake
-per 30 seconds, since a burst is coalesced.
+that decrypt a real push and pin the constant). It never learns a sender, a
+conversation, a channel or a byte of a message. Exactly what it does see:
+
+- **The deployment.** The server's own address (it makes the request), and on every
+  push the VAPID authorization the standard requires: the deployment's public key
+  (`k=`) and a signed token naming a contact (`sub`: `VAPID_SUBJECT`, or the web
+  app's address). So every wake says which Púca server sent it.
+- **The browser, and through it often a person.** The push address is one the
+  service issued to your browser; Apple and Google can usually tie it to the account
+  signed into the phone or browser.
+- **The timing.** When your server had something for you while Púca was closed: at
+  most one wake per browser per 30 seconds, a burst being coalesced.
+- **Correlations between people.** A channel message wakes every away, subscribed
+  member, each after a random delay of up to 3 seconds (`web_push_jitter_ms`). A
+  service that serves several members of one server sees them woken by the same
+  deployment close together and can infer a shared channel; wakes that alternate
+  between two accounts suggest who talks to whom. The delay blurs this; it does not
+  hide it. Notifications while Púca is open, and the Android app's own socket, involve
+  no push service at all.
 
 **What your device shows, and why it is not the message.** Woken, the browser's worker
 (`frontend/public/sw.js`) asks YOUR SERVER, directly over TLS, what arrived, and shows
@@ -591,12 +604,22 @@ the subscription. Nothing else is written to disk for this: no message, no cache
 is held by the operating system like any notification's.
 
 **When pushes stop.** Each subscription belongs to the session that turned it on, and
-a push is sent only while that session is live. Signing out (the server row is deleted
-and the browser unsubscribes), signing that session out from another device, revoking
-the device, **Sign out everywhere**, a password change or a recovery reset, deleting the
-account, and the session's own maximum lifetime each stop it, and the row is deleted
-when next looked at. A push service that answers that a subscription is gone (404 or
-410) deletes it too.
+a push is sent — and its worker's secret honoured — only while that session is live.
+Signing out (the server row is deleted and the browser unsubscribes), signing that
+session out from another device, revoking the device, **Sign out everywhere**, a
+password change or a recovery reset, deleting the account, the session's maximum
+lifetime, and **its sign-in lapsing** each stop it: a sign-in lapses 24 hours after the
+browser last used it (30 days with **Stay signed in**), and signing in again is a new
+session, which makes a new subscription with a new secret rather than reviving the old
+one. The row is deleted when next looked at. A push service that answers that a
+subscription is gone (404 or 410) deletes it at once; other failures back off (30
+seconds, doubling, at most 6 hours), and a subscription that has failed for a day is
+given up on.
+
+**One account at a time, by choice.** The switch is remembered per account on that
+browser, not per browser: whoever signs in next on a shared browser is not opted in by
+the previous person, and the server moves a browser's push address to another account
+only when that account turns the switch on itself.
 
 **Mutes are applied before anything is sent.** Your muted servers and channels and
 the people you blocked on that device are copied to its subscription (they otherwise

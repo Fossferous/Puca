@@ -90,14 +90,29 @@ that limit — but cannot read content.
   Google for Chrome, Mozilla for Firefox, Microsoft for Edge — whichever your
   browser uses; Púca cannot choose. Every push is the constant `{"w":"1"}`,
   encrypted to your browser, the same 112 bytes for every user and every
-  reason (pinned by the server's tests), and its headers are constants too.
-  So the push service learns that your operator's server woke your browser,
-  and when — never who wrote, in which conversation, or what. It already knew
-  your browser; it is the browser's own service. Your browser then asks your
-  operator's server, directly, what arrived, and shows the sender's name
-  ("alice sent you a message"), never the message. Turning the setting off,
-  or signing out, removes the push address from the server and from the
-  browser.
+  reason (pinned by the server's tests). It never learns who wrote, in which
+  conversation, or what. What it DOES learn, exactly:
+  - **Which Púca server woke your browser.** Every push is signed with your
+    operator's key, and carries its public half and a contact the operator
+    chose (an e-mail address or the web app's address), as the Web Push
+    standard requires. The push service also knows your browser — it issued
+    its push address — and, for Apple and Google, usually the account signed
+    into the phone or browser.
+  - **When.** Each wake is a timestamped request. At most one per browser
+    every 30 seconds: a burst is one wake.
+  - **Who else that server wakes at the same time.** A channel message wakes
+    every member who is away and turned this on, within a few seconds (each
+    is delayed at random by up to 3 seconds, to blur this). A push service
+    that serves several of you can therefore guess that you share a
+    channel, and, from wakes that alternate between two people, that you
+    are talking to each other. The delay weakens that guess; it does not
+    remove it. If it matters to you, leave this setting off: notifications
+    while Púca is open never involve the push service.
+  Your browser then asks your operator's server, directly, what arrived, and
+  shows the sender's name ("alice sent you a message"), never the message.
+  Turning the setting off, or signing out, removes the push address from the
+  server and from the browser; it also stops once your sign-in on that
+  browser lapses.
 - **Sites you paste links to.** An image or GIF URL in a message is loaded by
   your device directly from that site, which then sees your IP like any web
   page would. Nothing else is fetched from outside your operator's hosts:
