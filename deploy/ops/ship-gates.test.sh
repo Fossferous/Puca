@@ -626,6 +626,94 @@ check "before touching any host"                             "$([ ! -s "$LOG" ] 
 page_with 9.9.9 Puca-Setup.exe Puca-Lite-Setup.exe
 
 echo
+echo "--- the iPhone one-tap profile: rendered at ship time, served by the backend, proved on every host ---"
+# The page links https://__API_HOST__/api/ios-web-clip. dual-ship.sh renders the
+# profile (deploy/ops/make-web-clip-profile.mjs) from APP_HOST and the 180 px icon,
+# puts it on every host, and demands that host's backend answers it as
+# application/x-apple-aspen-config with the bytes it rendered, BEFORE any artifact
+# or the page goes up. A page without the link is not touched by any of it.
+cp "$REPO/deploy/ops/make-web-clip-profile.mjs" "$TMP/deploy/ops/"
+mkdir -p "$TMP/frontend/public"
+cp "$REPO/frontend/public/apple-touch-icon.png" "$TMP/frontend/public/"
+page_with_clip() {
+	page_with 9.9.9 Puca-Setup.exe Puca-Lite-Setup.exe
+	echo '<a href="https://__API_HOST__/api/ios-web-clip">Install with one tap</a>' >> "$TMP/deploy/download-site/index.html"
+}
+node "$TMP/deploy/ops/make-web-clip-profile.mjs" https://app.invalid/ "$TMP/frontend/public/apple-touch-icon.png" > "$TMP/expected.mobileconfig"
+# What the host's backend answers. The probe asks three things of it, each by its own
+# curl: the status, the headers, the body. Anything else goes to the recording stub.
+mv "$TMP/bin/ssh" "$TMP/bin/ssh.orig"
+cat > "$TMP/bin/ssh" <<STUB
+#!/usr/bin/env bash
+case "\$*" in
+	*"-D -"*ios-web-clip*) echo "ssh \$*" >> "$LOG"; printf 'HTTP/2 %s\r\ncontent-type: %s\r\nx-other: 1\r\n\r\n' "\$(cat "$TMP/clip_code")" "\$(cat "$TMP/clip_type")"; exit 0 ;;
+	*http_code*ios-web-clip*) echo "ssh \$*" >> "$LOG"; cat "$TMP/clip_code"; exit 0 ;;
+	*ios-web-clip.mobileconfig*) ;;
+	*ios-web-clip*) echo "ssh \$*" >> "$LOG"; cat "$TMP/clip_body"; exit 0 ;;
+esac
+exec "$TMP/bin/ssh.orig" "\$@"
+STUB
+chmod +x "$TMP/bin/ssh"
+serve_clip() { echo "$1" > "$TMP/clip_code"; echo "$2" > "$TMP/clip_type"; cp "$3" "$TMP/clip_body"; }
+
+page_with_clip
+rm -f "$TMP/deploy/ops/make-web-clip-profile.mjs"
+out="$(ship installer "$TMP/setup.exe" "$TMP/setup.exe.sig" 9.9.9 "notes")"; rc=$?
+check "REFUSES when the profile maker is missing"            "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING')" = 1 ] && [ "$(has "$out" 'could not render the profile')" = 1 ] && echo 1 || echo 0)" "$out"
+check "before touching any host"                             "$([ ! -s "$LOG" ] && echo 1 || echo 0)" "$(cat "$LOG")"
+cp "$REPO/deploy/ops/make-web-clip-profile.mjs" "$TMP/deploy/ops/"
+
+cp "$TMP/frontend/public/apple-touch-icon.png" "$TMP/icon-180.png"
+cp "$REPO/frontend/public/icon-192.png" "$TMP/frontend/public/apple-touch-icon.png"
+out="$(ship installer "$TMP/setup.exe" "$TMP/setup.exe.sig" 9.9.9 "notes")"; rc=$?
+check "REFUSES an icon that is not 180x180, saying so"       "$([ $rc -ne 0 ] && [ "$(has "$out" 'REFUSING')" = 1 ] && [ "$(has "$out" 'must be 180x180')" = 1 ] && echo 1 || echo 0)" "$out"
+check "before touching any host"                             "$([ ! -s "$LOG" ] && echo 1 || echo 0)" "$(cat "$LOG")"
+cp "$TMP/icon-180.png" "$TMP/frontend/public/apple-touch-icon.png"
+
+# POSITIVE CONTROL: the backend serves it as iOS needs.
+serve_clip 200 application/x-apple-aspen-config "$TMP/expected.mobileconfig"
+rm -f "$TMP/uploaded/ios-web-clip.mobileconfig" "$TMP/uploaded/index.html"
+out="$(ship installer "$TMP/setup.exe" "$TMP/setup.exe.sig" 9.9.9 "notes")"
+check "a backend that serves it right is NOT refused"        "$([ "$(has "$out" 'REFUSING')" = 0 ] && [ "$(has "$out" 'FAIL  sandbox: api.invalid/api/ios-web-clip')" = 0 ] && echo 1 || echo 0)" "$out"
+check "and each host is reported as serving the profile"     "$(has "$out" 'PASS  sandbox serves the iPhone profile at /api/ios-web-clip as application/x-apple-aspen-config')" "$out"
+check "the profile went up beside the binary"                "$(grep -q 'ios-web-clip.mobileconfig' "$LOG" && echo 1 || echo 0)" "$(cat "$LOG")"
+check "and it is the one rendered for the WEB APP host"      "$([ -f "$TMP/uploaded/ios-web-clip.mobileconfig" ] && cmp -s "$TMP/uploaded/ios-web-clip.mobileconfig" "$TMP/expected.mobileconfig" && grep -q '<string>https://app.invalid/</string>' "$TMP/uploaded/ios-web-clip.mobileconfig" && echo 1 || echo 0)"
+check "before the first artifact"                            "$([ "$(grep -n 'ios-web-clip.mobileconfig' "$LOG" | head -1 | cut -d: -f1)" -lt "$(grep -n 'Puca-Setup-dual.exe' "$LOG" | head -1 | cut -d: -f1)" ] && echo 1 || echo 0)" "$(cat "$LOG")"
+check "and the page link is rendered, no token left"         "$([ -f "$TMP/uploaded/index.html" ] && grep -q 'href="https://api.invalid/api/ios-web-clip"' "$TMP/uploaded/index.html" && ! grep -qE '__[A-Z_]+__' "$TMP/uploaded/index.html" && echo 1 || echo 0)" "$(tail -3 "$TMP/uploaded/index.html" 2>/dev/null)"
+
+# NEGATIVE CONTROLS: each of the three facts, wrong in turn. All stop the run
+# before any artifact leaves, and say what to do.
+serve_clip 200 text/xml "$TMP/expected.mobileconfig"
+out="$(ship installer "$TMP/setup.exe" "$TMP/setup.exe.sig" 9.9.9 "notes")"; rc=$?
+check "FAILS when the type is not application/x-apple-aspen-config" "$([ $rc -ne 0 ] && [ "$(has "$out" "type 'text/xml'")" = 1 ] && echo 1 || echo 0)" "$out"
+check "uploading no installer"                                      "$(grep -q 'Puca-Setup-dual.exe' "$LOG" && echo 0 || echo 1)" "$(cat "$LOG")"
+serve_clip 404 "" "$TMP/expected.mobileconfig"
+out="$(ship installer "$TMP/setup.exe" "$TMP/setup.exe.sig" 9.9.9 "notes")"; rc=$?
+check "FAILS on a 404 (a backend older than the route), saying to ship the backend first" "$([ $rc -ne 0 ] && [ "$(has "$out" "status '404'")" = 1 ] && [ "$(has "$out" 'ship the backend')" = 1 ] && echo 1 || echo 0)" "$out"
+check "uploading no installer"                                      "$(grep -q 'Puca-Setup-dual.exe' "$LOG" && echo 0 || echo 1)" "$(cat "$LOG")"
+printf 'something else\n' > "$TMP/other.mobileconfig"
+serve_clip 200 application/x-apple-aspen-config "$TMP/other.mobileconfig"
+out="$(ship installer "$TMP/setup.exe" "$TMP/setup.exe.sig" 9.9.9 "notes")"; rc=$?
+check "FAILS when the host serves different bytes than were rendered" "$([ $rc -ne 0 ] && [ "$(has "$out" 'hash match: NO')" = 1 ] && echo 1 || echo 0)" "$out"
+check "uploading no installer"                                      "$(grep -q 'Puca-Setup-dual.exe' "$LOG" && echo 0 || echo 1)" "$(cat "$LOG")"
+serve_clip 200 application/x-apple-aspen-config "$TMP/expected.mobileconfig"
+out="$(ship apk "$TMP/app.apk" 9.9.9)"
+check "the APK path proves it too"                                  "$(has "$out" 'PASS  sandbox serves the iPhone profile')" "$out"
+serve_clip 404 "" "$TMP/expected.mobileconfig"
+out="$(ship apk "$TMP/app.apk" 9.9.9)"; rc=$?
+check "and refuses on a 404 the same way"                           "$([ $rc -ne 0 ] && [ "$(has "$out" "status '404'")" = 1 ] && echo 1 || echo 0)" "$out"
+
+# A page without the link (an operator's own, or the template before this feature)
+# neither renders nor uploads a profile, and so never depends on the route.
+page_with 9.9.9 Puca-Setup.exe Puca-Lite-Setup.exe
+out="$(ship installer "$TMP/setup.exe" "$TMP/setup.exe.sig" 9.9.9 "notes")"
+check "a page that does not link the profile ships as before"       "$([ "$(has "$out" 'REFUSING')" = 0 ] && [ "$(has "$out" 'iPhone profile')" = 0 ] && [ "$(has "$out" '=== installer 9.9.9 -> sandbox ===')" = 1 ] && echo 1 || echo 0)" "$out"
+check "and no profile is uploaded or probed"                        "$(grep -q 'ios-web-clip' "$LOG" && echo 0 || echo 1)" "$(grep ios-web-clip "$LOG")"
+mv -f "$TMP/bin/ssh.orig" "$TMP/bin/ssh"
+rm -f "$TMP/deploy/ops/make-web-clip-profile.mjs"
+page_with 9.9.9 Puca-Setup.exe Puca-Lite-Setup.exe
+
+echo
 echo "--- dual-ship.sh mobile: the manifest version must match the bundle's own .version sidecar ---"
 # encrypt-bundle.mjs writes <bundle>.version from the build's version.json; a
 # manifest that disagrees with it is the one-slip lockout 0.9.811 closes.

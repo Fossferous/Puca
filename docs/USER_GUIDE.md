@@ -796,6 +796,55 @@ It needs iOS 16 or newer. The Home Screen app keeps its own sign-in, separate
 from Safari's, so you sign in once inside it, and **Stay signed in on this
 device** starts ticked there (it is clear in a Safari tab).
 
+### Install with one tap instead
+
+The download page's iPhone section also has an **Install with one tap** button
+(shown first to an iPhone or iPad). It hands your phone a small configuration
+profile, and installing that puts the same Púca icon on your Home Screen without
+the Share steps:
+
+1. Tap **Install with one tap**, then **Allow** when Safari asks to download a
+   configuration profile.
+2. Open **Settings** and tap **Profile Downloaded** near the top (if it is not
+   there: **General** → **VPN & Device Management** → **Púca**).
+3. Tap **Install**, enter your passcode, tap **Install** again, then **Done**.
+4. Open **Púca** from your Home Screen and sign in there.
+
+**What the file contains, and nothing else:** one Home Screen icon named Púca
+that opens your server's web app address full screen (Apple's *Web Clip*
+payload, with the icon, **FullScreen** and **IsRemovable** on). No certificates,
+no restrictions, no VPN, no second payload, nothing that lets anyone manage or
+watch your phone. To remove it, press and hold the icon and choose **Remove App**,
+or delete the profile under **VPN & Device Management**. The server makes the file
+from its own address when the download page is published, so it points at that
+server and nowhere else.
+
+**Not Verified.** iPhone shows "Not Verified" for any profile that is not signed
+with a certificate Apple trusts. This one is not signed: that needs a paid
+certificate, and the operator's web certificate is the wrong kind and is replaced
+every couple of months, so a signature on it would expire. Here it only means the
+file cannot be vouched for by a third party, and the file can only add this one icon.
+
+**Which to use.** The Share steps stay the recommended route. Apple's documentation
+says a Web Clip with FullScreen on launches as a full-screen web app, but it
+does not say that such an icon is the same as one added with Share, and it says
+nothing about notifications for it. We have not been able to confirm on a real iPhone that the
+one-tap icon has its own sign-in and storage, that Púca sees it as a Home Screen
+app (the Home Screen behaviours above depend on that), or that it can receive
+notifications. If something is off after the one-tap install, remove it and add
+Púca with Share.
+
+### Install as an app in Chrome or Edge
+
+On a computer or an Android phone, the download page's **Install Púca as an app**
+button (shown in Chrome, Edge and other Chromium browsers) opens Púca and shows a
+small **Install Púca** banner at the top. Tap **Install** there and your browser
+asks to install Púca as its own window with an icon; nothing is installed before
+you tap. The **X** dismisses the banner and it stays away until you press the
+download page's button again. It never appears in the Windows or Android app, in a
+window that is already an installed app, on an iPhone or iPad, or in a browser that
+cannot install web apps (Firefox, Safari).
+
 Púca Notes: inside the Home Screen app there is no **Open in Púca Notes** button
 in the Tasks view, because a window with no second window would replace Púca
 (and drop a call you are in). Open `/notes/` on your server in Safari, or add Púca

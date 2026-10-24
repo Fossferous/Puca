@@ -66,6 +66,19 @@
   .iphone-steps b { color: #e8e6f0; }
   .iphone-limits { margin: 0 auto; padding-left: 1.2em; }
   .iphone-limits li { margin: 0 0 .35em; }
+  /* "Install with one tap" (iPhone profile): shown to iPhone and iPad visitors only
+     (script below); with JavaScript off it is simply there for everyone. */
+  .onetap { margin: 1rem 0 0; padding: .9rem 1rem 1rem; border: 1px solid rgba(255,255,255,.14); border-radius: 12px;
+    background: rgba(255,255,255,.04); text-align: left; }
+  .onetap[hidden] { display: none; }
+  /* The attribute alone loses to the display these rules set: without this the script
+     below could not hide the install button (caught by e2e/ios-web-app-real-browser.mjs). */
+  .btn[hidden], .apk-note[hidden] { display: none; }
+  .onetap .downloads { margin: .6rem 0 .4rem; }
+  .onetap p { margin: .6rem 0 0; color: #b7b2cf; font-size: 13px; line-height: 1.6; }
+  .onetap p b { color: #e8e6f0; }
+  .onetap .iphone-steps { margin-top: .5rem; }
+  .or-share { margin: 1.1rem 0 0; color: #e8e6f0; font-size: 14px; }
   .qr { margin: 1.1rem auto 0; text-align: center; }
   .qr[hidden] { display: none; }
   .qr svg { display: block; width: 168px; height: 168px; margin: 0 auto; border-radius: 8px; }
@@ -115,8 +128,21 @@
              which runs, and never mentioned that the same deployment already
              serves a browser app they can use right now. -->
         <a class="btn secondary" href="https://__APP_HOST__">Open in your browser</a>
+        <!-- The web app lives on a different origin from this page, so this cannot
+             install it from here: it opens the web app with ?install=1, which makes
+             the app show its own "Install Púca" banner (components/InstallBanner.tsx),
+             and the install happens on the tap in THAT banner. Hidden by the script
+             below for browsers that cannot install a web app (Firefox, Safari) and for
+             iPhone and iPad (the section below); without JavaScript it shows for all
+             and just opens Púca. -->
+        <a class="btn secondary" id="install-web" href="https://__APP_HOST__/?install=1">Install Púca as an app</a>
       </div>
       <div class="meta">v0.9.848 &middot; Windows 10/11 (64-bit) &middot; Android 7+ &middot; or any modern browser</div>
+      <p class="apk-note" id="install-web-note">
+        <b>Install Púca as an app</b> opens Púca in Chrome, Edge or another Chromium browser and
+        offers to install it as its own window, with an icon in your Start menu or app drawer
+        &mdash; no download from this page. Púca asks first; nothing is installed until you tap.
+      </p>
       <p class="apk-note">
         <b>On iPhone or iPad,</b> add the web app to your Home Screen &mdash; there is no
         App Store app. Steps and limits are <a class="link" href="#iphone">just below</a>.
@@ -160,6 +186,39 @@
     <div class="notes-app" id="iphone">
       <b>Púca on iPhone &amp; iPad</b> &mdash; there is no App Store app. Instead you add Púca's
       web app to your Home Screen from Safari: it gets its own icon and opens full screen, like an app.
+      There are two ways: one tap (a small settings file), or the Share steps.
+      <!-- The href is rendered by dual-ship.sh: the backend serves the profile that
+           deploy/ops/make-web-clip-profile.mjs made from this deployment's web app
+           address (src/update_routes.rs). The page may not ship if it cannot be made. -->
+      <div class="onetap" id="onetap">
+        <b>Install with one tap</b>
+        <div class="downloads">
+          <a class="btn" href="https://__API_HOST__/api/ios-web-clip">Install with one tap</a>
+        </div>
+        <ol class="iphone-steps">
+          <li>Tap the button, then <b>Allow</b> when Safari asks to download a configuration profile.</li>
+          <li>Open <b>Settings</b> and tap <b>Profile Downloaded</b> near the top. (Not there? Go to
+          <b>General</b> &rarr; <b>VPN &amp; Device Management</b> and tap <b>Púca</b>.)</li>
+          <li>Tap <b>Install</b> in the corner, enter your passcode, then tap <b>Install</b> again and <b>Done</b>.</li>
+          <li>Open <b>Púca</b> from your Home Screen and sign in there.</li>
+        </ol>
+        <p><b>What the file contains, and nothing else:</b> one Home Screen icon named Púca that opens
+        <code>https://__APP_HOST__</code> full screen. No certificates, no restrictions, no other
+        settings &mdash; nothing that lets anyone manage or watch your phone. You can remove it any time
+        (press and hold the icon and choose <b>Remove App</b>, or delete the profile in
+        <b>VPN &amp; Device Management</b>).</p>
+        <p><b>&ldquo;Not Verified&rdquo;</b> is what iPhone shows for any profile that is not signed with a
+        certificate Apple trusts. This one is not signed: that needs a paid certificate, and it would add
+        nothing here, because the file can only add this one icon. It is generated from this server's
+        own address, so it points at this server and nowhere else.</p>
+        <p><b>Which should you pick?</b> The Share steps below are the route Apple documents for Home
+        Screen web apps, so they stay the recommended one. The one-tap icon opens the same web app full
+        screen, but we have not been able to confirm on a real iPhone that it behaves identically
+        &mdash; in particular, Apple documents notifications for web apps added with Share and says
+        nothing about this route. If something does not work after the one-tap install, remove it and
+        use the Share steps.</p>
+      </div>
+      <p class="or-share"><b>Or add it yourself with Share</b> (recommended):</p>
       <ol class="iphone-steps">
         <li>Open <a class="link" href="https://__APP_HOST__">__APP_HOST__</a> in <b>Safari</b>.</li>
         <li>Tap <b>Share</b> (the square with an arrow pointing up).</li>
@@ -314,6 +373,24 @@
       picker.parentNode.insertBefore(sec, picker);
       var qr = sec.querySelector('.qr');
       if (qr) qr.hidden = true;
+    })();
+    // The one-tap profile is for iPhone and iPad only (a computer would just
+    // download a file it cannot use), and "Install Púca as an app" is for a
+    // browser that can install a web app: Chromium on a computer or Android. Safari
+    // and Firefox cannot, and an iPhone is told about the profile instead. Without
+    // JavaScript both stay visible, which is harmless: the first downloads a file,
+    // the second opens Púca.
+    (function () {
+      var ua = navigator.userAgent || '';
+      var ios = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+      var chromium = /Chrome\/|Chromium\/|Edg\/|EdgA\/|OPR\/|SamsungBrowser\//.test(ua) && !/CriOS|FxiOS/.test(ua);
+      var tap = document.getElementById('onetap');
+      if (tap && !ios) tap.hidden = true;
+      if (ios || !chromium) {
+        var b = document.getElementById('install-web'), n = document.getElementById('install-web-note');
+        if (b) b.hidden = true;
+        if (n) n.hidden = true;
+      }
     })();
     (function () {
       var fromQuery = new URLSearchParams(window.location.search).get('variant');

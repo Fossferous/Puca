@@ -129,8 +129,10 @@ describe('the download page', () => {
         for (const step of ['Safari', 'Share', 'Add to Home Screen', 'Add']) expect(section).toContain(`<b>${step}</b>`);
         expect(section).toContain('href="https://__APP_HOST__"');
         expect(section).toContain('>Open Púca<');
-        // no domain typed in, and nothing fetched from anywhere else
-        expect(section).not.toMatch(/https?:\/\/(?!__APP_HOST__)/);
+        // no domain typed in, and nothing fetched from anywhere else: the one other
+        // address is the one-tap profile on the API host, by token (dual-ship renders it)
+        expect(section).not.toMatch(/https?:\/\/(?!__APP_HOST__|__API_HOST__\/api\/ios-web-clip")/);
+        expect(section.match(/https?:\/\/__API_HOST__[^"<\s]*/g)).toEqual(['https://__API_HOST__/api/ios-web-clip']);
         expect(section).not.toMatch(/<script|<img|<iframe/i);
     });
 

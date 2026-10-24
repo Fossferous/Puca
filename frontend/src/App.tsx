@@ -36,6 +36,7 @@ import { HotkeyBlockedBanner } from './components/HotkeyBlockedBanner';
 import { CallEncryptionNotice } from './components/CallEncryptionNotice';
 import { InviteLanding } from './components/InviteLanding';
 import { DeepLinkNotice } from './components/DeepLinkNotice';
+import { InstallBanner } from './components/InstallBanner';
 import { discardSeal, onArmedChange as onClipArmedChange, wireSystemSuspendHook } from './api/clips/replayBuffer';
 import { cancelClip, getClipProposalState, setClipDiscardHandler, wireClipProposals } from './api/clips/clipProposals';
 import { API_BASE_URL } from './api/config';
@@ -488,6 +489,8 @@ function App() {
         web app (api/deepLink.ts). Beside the routes, so it shows over the
         sign-in screen and over Chat alike. */}
     <DeepLinkNotice />
+    {/* The download page's "Install Púca as an app" lands here (api/installPrompt.ts). */}
+    <InstallBanner />
     </>
   );
 }

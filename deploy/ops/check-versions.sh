@@ -327,6 +327,31 @@ for entry in "${HOSTS[@]}"; do
 		fi
 	fi
 
+	# The iPhone "Install with one tap" profile. Only when the LIVE download page
+	# links it: the button is useless, and worse, a dead link, unless the backend
+	# answers /api/ios-web-clip as application/x-apple-aspen-config (iOS offers
+	# to install a profile on that type alone) and the profile is the one rendered
+	# for THIS deployment's web app, with exactly one payload. A page that does not
+	# link it is INFO: an older release, or an operator's own page.
+	if [ "$(body "$entry" "$DOWNLOAD_HOST" / | grep -cF '/api/ios-web-clip' || true)" -gt 0 ]; then
+		clip="$(ssh_to "$entry" "curl -s $CURL_TLS -i --resolve '$API_HOST:443:127.0.0.1' 'https://$API_HOST/api/ios-web-clip' --max-time 25" 2>/dev/null | tr -d '\015' || true)"
+		clip_type="$(printf '%s\n' "$clip" | grep -ci '^content-type: *application/x-apple-aspen-config' || true)"
+		clip_url="$(printf '%s\n' "$clip" | grep -cF "<string>https://$APP_HOST/</string>" || true)"
+		clip_payloads="$(printf '%s\n' "$clip" | grep -cF '<key>PayloadType</key>' || true)"
+		if [ "${clip_type:-0}" -gt 0 ] && [ "${clip_url:-0}" -gt 0 ] && [ "${clip_payloads:-0}" -eq 2 ]; then
+			printf 'PASS  %-22s /api/ios-web-clip is the aspen-config type, one Web Clip for %s, on %s\n' "iPhone profile" "$APP_HOST" "$API_HOST"
+		else
+			printf 'FAIL  %-22s on %s: type aspen-config=%s, opens https://%s/=%s, payload types=%s (want 2: the profile and one clip)\n' \
+				"iPhone profile" "$API_HOST" "$([ "${clip_type:-0}" -gt 0 ] && echo yes || echo NO)" "$APP_HOST" \
+				"$([ "${clip_url:-0}" -gt 0 ] && echo yes || echo NO)" "${clip_payloads:-0}"
+			printf '      The download page offers "Install with one tap" and a phone would be handed nothing it can install.\n'
+			printf '      404 = a backend older than the route: dual-ship.sh backend to EVERY host, then re-ship the page.\n'
+			FAILED+=("$label/ios-profile")
+		fi
+	else
+		printf 'INFO  %-22s the download page on %s does not link the iPhone profile\n' "iPhone profile" "$DOWNLOAD_HOST"
+	fi
+
 	# --- LITE surfaces (the build with no remote control) -------------------
 	# A deployment that never shipped lite is legitimate: absence of EVERY
 	# lite surface is INFO, not FAIL. But once lite IS deployed, the
